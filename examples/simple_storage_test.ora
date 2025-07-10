@@ -1,0 +1,13 @@
+contract SimpleTest {
+    storage const name: string;
+    storage var balance: u256;
+    
+    pub fn init() {
+        name = "TestToken";
+        balance = 1000;
+    }
+    
+    pub fn getName() -> string {
+        return name;
+    }
+} 

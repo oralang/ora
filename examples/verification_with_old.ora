@@ -1,0 +1,43 @@
+contract BankAccount {
+    storage var balance: u256;
+    
+    log Deposit(amount: u256);
+    log Withdrawal(amount: u256);
+    
+    pub fn init(initial_balance: u256) {
+        balance = initial_balance;
+    }
+    
+    pub fn deposit(amount: u256) {
+        requires(amount > 0);
+        ensures(balance == old(balance) + amount);
+        
+        balance += amount;
+        log Deposit(amount);
+    }
+    
+    pub fn withdraw(amount: u256) {
+        requires(amount > 0);
+        requires(amount <= balance);
+        ensures(balance == old(balance) - amount);
+        
+        balance -= amount;
+        log Withdrawal(amount);
+    }
+    
+    pub fn transfer(to: address, amount: u256) {
+        requires(amount > 0);
+        requires(amount <= balance);
+        ensures(balance == old(balance) - amount);
+        
+        balance -= amount;
+        // In real implementation, would transfer to 'to' address
+        log Withdrawal(amount);
+    }
+    
+    pub fn getBalance() -> u256 {
+        ensures(balance == old(balance));  // Balance unchanged
+        
+        return balance;
+    }
+} 

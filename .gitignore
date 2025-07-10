@@ -1,1 +1,4 @@
-.zig_cache/*
+DS_Store
+.zig-cache/
+zig-out/
+doc.md
