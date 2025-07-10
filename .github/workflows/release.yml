@@ -24,8 +24,8 @@ jobs:
     name: Create Release
     runs-on: ubuntu-latest
     outputs:
-      upload_url: ${{ steps.create_release.outputs.upload_url }}
-      release_id: ${{ steps.create_release.outputs.id }}
+      version: ${{ steps.version.outputs.version }}
+      prerelease: ${{ steps.version.outputs.prerelease }}
     
     steps:
       - name: Checkout code
@@ -117,15 +117,24 @@ jobs:
 
       - name: Create Release
         id: create_release
-        uses: actions/create-release@v1
+        run: |
+          echo "🚀 Creating release ${{ steps.version.outputs.version }}..."
+          
+          # Create release using gh CLI
+          if [ "${{ steps.version.outputs.prerelease }}" = "true" ]; then
+            gh release create ${{ steps.version.outputs.version }} \
+              --title "Ora Compiler ${{ steps.version.outputs.version }}" \
+              --notes-file CHANGELOG.md \
+              --prerelease
+          else
+            gh release create ${{ steps.version.outputs.version }} \
+              --title "Ora Compiler ${{ steps.version.outputs.version }}" \
+              --notes-file CHANGELOG.md
+          fi
+          
+          echo "✅ Release created successfully"
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          tag_name: ${{ steps.version.outputs.version }}
-          release_name: Ora Compiler ${{ steps.version.outputs.version }}
-          body_path: CHANGELOG.md
-          draft: false
-          prerelease: ${{ steps.version.outputs.prerelease }}
 
   build-binaries:
     name: Build ${{ matrix.platform }}
@@ -252,24 +261,44 @@ jobs:
           cat checksums.txt
 
       - name: Upload binary to release
-        uses: actions/upload-release-asset@v1
+        run: |
+          echo "📤 Uploading binary to release..."
+          
+          # Get version from tag or input
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            version="${{ github.event.inputs.version }}"
+          else
+            version="${GITHUB_REF#refs/tags/}"
+          fi
+          
+          # Upload binary
+          gh release upload "$version" \
+            "release-package/ora-${{ matrix.platform }}${{ matrix.extension }}" \
+            --clobber
+          
+          echo "✅ Binary uploaded"
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          upload_url: ${{ needs.create-release.outputs.upload_url }}
-          asset_path: release-package/ora-${{ matrix.platform }}${{ matrix.extension }}
-          asset_name: ora-${{ matrix.platform }}${{ matrix.extension }}
-          asset_content_type: application/octet-stream
 
       - name: Upload checksums to release
-        uses: actions/upload-release-asset@v1
+        run: |
+          echo "📤 Uploading checksums to release..."
+          
+          # Get version from tag or input
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            version="${{ github.event.inputs.version }}"
+          else
+            version="${GITHUB_REF#refs/tags/}"
+          fi
+          
+          # Upload checksums
+          gh release upload "$version" \
+            "release-package/checksums.txt#checksums-${{ matrix.platform }}.txt" \
+            --clobber
+          
+          echo "✅ Checksums uploaded"
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          upload_url: ${{ needs.create-release.outputs.upload_url }}
-          asset_path: release-package/checksums.txt
-          asset_name: checksums-${{ matrix.platform }}.txt
-          asset_content_type: text/plain
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v3
