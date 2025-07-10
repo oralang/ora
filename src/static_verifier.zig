@@ -482,7 +482,7 @@ pub const StaticVerifier = struct {
                         const large_threshold = "340282366920938463463374607431768211456"; // 2^128
                         return int.value.len > large_threshold.len or
                             (int.value.len == large_threshold.len and
-                            std.mem.order(u8, int.value, large_threshold) == .gt);
+                                std.mem.order(u8, int.value, large_threshold) == .gt);
                     },
                     .Hex => |*hex| {
                         // Consider hex values with many bytes as large
