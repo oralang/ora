@@ -173,7 +173,7 @@ jobs:
           version: ${{ env.ZIG_VERSION }}
 
       - name: Cache Zig artifacts
-        uses: actions/cache@v3
+        uses: actions/cache@v4
         with:
           path: |
             ~/.cache/zig
@@ -301,7 +301,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Upload build artifacts
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: ora-${{ matrix.platform }}
           path: release-package/
