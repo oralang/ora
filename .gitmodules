@@ -1,0 +1,3 @@
+[submodule "vendor/solidity"]
+	path = vendor/solidity
+	url = https://github.com/ethereum/solidity.git
