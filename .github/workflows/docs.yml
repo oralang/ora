@@ -1,0 +1,406 @@
+name: Documentation
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - 'doc.md'
+      - 'src/**/*.zig'
+      - '.github/workflows/docs.yml'
+  pull_request:
+    branches: [ main ]
+    paths:
+      - 'doc.md'
+      - 'src/**/*.zig'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Allow one concurrent deployment
+concurrency:
+  group: "pages"
+  cancel-in-progress: true
+
+jobs:
+  build-docs:
+    name: Build Documentation
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Setup Zig
+        uses: goto-bus-stop/setup-zig@v2
+        with:
+          version: 0.12.0
+
+      - name: Setup Node.js for documentation tools
+        uses: actions/setup-node@v3
+        with:
+          node-version: '18'
+
+      - name: Install documentation tools
+        run: |
+          echo "📚 Setting up documentation tools..."
+          npm install -g @mermaid-js/mermaid-cli 2>/dev/null || echo "⚠️  Mermaid CLI installation skipped"
+
+      - name: Create documentation structure
+        run: |
+          echo "📁 Creating documentation structure..."
+          mkdir -p docs/{api,guides,examples}
+          
+          # Copy existing documentation
+          if [ -f "doc.md" ]; then
+            cp doc.md docs/README.md
+            echo "✅ Copied main documentation"
+          fi
+          
+          # Copy LICENSE if it exists
+          if [ -f "LICENSE" ]; then
+            cp LICENSE docs/
+            echo "✅ Copied license"
+          fi
+
+      - name: Generate API documentation
+        run: |
+          echo "📖 Generating API documentation..."
+          
+          # Create API documentation from source files
+          {
+            echo "# Ora Compiler API Documentation"
+            echo ""
+            echo "This documentation is automatically generated from the Ora compiler source code."
+            echo ""
+            echo "## Table of Contents"
+            echo ""
+            echo "- [Lexer](lexer.html) - Tokenization and lexical analysis"
+            echo "- [Parser](parser.html) - Syntax analysis and AST generation"
+            echo "- [Semantics](semantics.html) - Semantic analysis and validation"
+            echo "- [Type System](typer.html) - Type checking and inference"
+            echo "- [Compile-time Evaluation](comptime_eval.html) - Constant folding and evaluation"
+            echo "- [Intermediate Representation](ir.html) - HIR generation and optimization"
+            echo "- [Code Generation](codegen_yul.html) - Yul code generation"
+            echo "- [Formal Verification](formal_verifier.html) - Static analysis and verification"
+            echo ""
+            echo "## Architecture Overview"
+            echo ""
+            echo "The Ora compiler follows a traditional multi-pass architecture:"
+            echo ""
+            echo "\`\`\`"
+            echo "Source Code → Lexer → Parser → Semantics → Type Checker → HIR → Codegen → Bytecode"
+            echo "\`\`\`"
+            echo ""
+            echo "## Module Documentation"
+            echo ""
+          } > docs/api/README.md
+          
+          # Generate documentation for each source file
+          for file in src/*.zig; do
+            module=$(basename "$file" .zig)
+            echo "📄 Processing $module..."
+            
+            {
+              echo "# $module"
+              echo ""
+              echo "**Source**: \`$file\`"
+              echo ""
+              echo "## Overview"
+              echo ""
+              
+              # Extract doc comments and public declarations
+              if grep -q "//!" "$file"; then
+                echo "### Module Description"
+                echo ""
+                grep "//!" "$file" | sed 's/\/\/! //' | head -10
+                echo ""
+              fi
+              
+              echo "### Public Functions"
+              echo ""
+              
+              # Extract public function signatures
+              grep -n "pub fn" "$file" | head -20 | while read -r line; do
+                line_num=$(echo "$line" | cut -d: -f1)
+                func_sig=$(echo "$line" | cut -d: -f2- | sed 's/^ *//')
+                echo "- Line $line_num: \`$func_sig\`"
+              done
+              
+              echo ""
+              echo "### Public Types"
+              echo ""
+              
+              # Extract public type definitions
+              grep -n "pub const.*=" "$file" | head -10 | while read -r line; do
+                line_num=$(echo "$line" | cut -d: -f1)
+                type_def=$(echo "$line" | cut -d: -f2- | sed 's/^ *//')
+                echo "- Line $line_num: \`$type_def\`"
+              done
+              
+              echo ""
+              echo "---"
+              echo "*Generated from $file*"
+              
+            } > "docs/api/$module.md"
+          done
+          
+          echo "✅ API documentation generated"
+
+      - name: Create user guides
+        run: |
+          echo "📖 Creating user guides..."
+          
+          # Installation guide
+          {
+            echo "# Installation Guide"
+            echo ""
+            echo "## Prerequisites"
+            echo ""
+            echo "- Zig 0.12.0 or later"
+            echo "- Git (for cloning the repository)"
+            echo ""
+            echo "## Building from Source"
+            echo ""
+            echo "1. Clone the repository:"
+            echo "   \`\`\`bash"
+            echo "   git clone https://github.com/your-username/Ora.git"
+            echo "   cd Ora"
+            echo "   \`\`\`"
+            echo ""
+            echo "2. Initialize submodules:"
+            echo "   \`\`\`bash"
+            echo "   git submodule update --init --recursive"
+            echo "   \`\`\`"
+            echo ""
+            echo "3. Build the compiler:"
+            echo "   \`\`\`bash"
+            echo "   zig build"
+            echo "   \`\`\`"
+            echo ""
+            echo "4. The binary will be available at \`zig-out/bin/ora\`"
+            echo ""
+            echo "## Pre-built Binaries"
+            echo ""
+            echo "Download pre-built binaries from the [releases page](https://github.com/your-username/Ora/releases)."
+            echo ""
+          } > docs/guides/installation.md
+          
+          # Usage guide
+          {
+            echo "# Usage Guide"
+            echo ""
+            echo "## Basic Usage"
+            echo ""
+            echo "Compile an Ora source file:"
+            echo ""
+            echo "\`\`\`bash"
+            echo "ora my_contract.ora"
+            echo "\`\`\`"
+            echo ""
+            echo "## Command Line Options"
+            echo ""
+            echo "- \`--help\` - Show help information"
+            echo "- \`--version\` - Show version information"
+            echo "- \`--output <file>\` - Specify output file"
+            echo "- \`--optimize\` - Enable optimizations"
+            echo ""
+            echo "## Language Syntax"
+            echo ""
+            echo "Ora uses a Rust-like syntax with blockchain-specific features:"
+            echo ""
+            echo "\`\`\`ora"
+            echo "contract MyContract {"
+            echo "    storage {"
+            echo "        balance: u256 = 0;"
+            echo "    }"
+            echo ""
+            echo "    pub fn deposit(amount: u256) -> Result<(), Error> {"
+            echo "        require(amount > 0, \"Amount must be positive\");"
+            echo "        storage.balance += amount;"
+            echo "        Ok(())"
+            echo "    }"
+            echo "}"
+            echo "\`\`\`"
+            echo ""
+          } > docs/guides/usage.md
+          
+          echo "✅ User guides created"
+
+      - name: Generate examples documentation
+        run: |
+          echo "📚 Generating examples documentation..."
+          
+          {
+            echo "# Examples"
+            echo ""
+            echo "This section contains various examples demonstrating Ora language features."
+            echo ""
+            
+            if [ -d "examples" ]; then
+              echo "## Available Examples"
+              echo ""
+              find examples/ -name "*.ora" | sort | while read -r example; do
+                name=$(basename "$example" .ora)
+                echo "- [$name]($example) - $(head -1 "$example" | grep -o '//.*' | sed 's|^// *||' || echo 'Example file')"
+              done
+            else
+              echo "## Basic Examples"
+              echo ""
+              echo "### Hello World Contract"
+              echo ""
+              echo "\`\`\`ora"
+              echo "contract HelloWorld {"
+              echo "    pub fn greet() -> string {"
+              echo "        \"Hello, World!\""
+              echo "    }"
+              echo "}"
+              echo "\`\`\`"
+              echo ""
+              echo "### Simple Token Contract"
+              echo ""
+              echo "\`\`\`ora"
+              echo "contract SimpleToken {"
+              echo "    storage {"
+              echo "        balances: mapping(address => u256);"
+              echo "        total_supply: u256 = 1000000;"
+              echo "    }"
+              echo ""
+              echo "    pub fn balance_of(account: address) -> u256 {"
+              echo "        storage.balances[account]"
+              echo "    }"
+              echo ""
+              echo "    pub fn transfer(to: address, amount: u256) -> Result<(), Error> {"
+              echo "        require(storage.balances[msg.sender] >= amount, \"Insufficient balance\");"
+              echo "        storage.balances[msg.sender] -= amount;"
+              echo "        storage.balances[to] += amount;"
+              echo "        Ok(())"
+              echo "    }"
+              echo "}"
+              echo "\`\`\`"
+            fi
+            echo ""
+          } > docs/examples/README.md
+          
+          echo "✅ Examples documentation generated"
+
+      - name: Create main index page
+        run: |
+          echo "🏠 Creating main index page..."
+          
+          {
+            echo "# Ora Compiler Documentation"
+            echo ""
+            echo "Welcome to the Ora compiler documentation!"
+            echo ""
+            echo "Ora is a modern, type-safe language for Ethereum smart contracts with formal verification capabilities."
+            echo ""
+            echo "## Quick Links"
+            echo ""
+            echo "- [📖 User Guides](guides/)"
+            echo "  - [Installation](guides/installation.html)"
+            echo "  - [Usage](guides/usage.html)"
+            echo "- [📚 API Reference](api/)"
+            echo "- [💡 Examples](examples/)"
+            echo ""
+            echo "## Features"
+            echo ""
+            echo "- **Type Safety**: Strong static typing with inference"
+            echo "- **Memory Safety**: Automatic memory management"
+            echo "- **Formal Verification**: Built-in static analysis"
+            echo "- **Gas Optimization**: Automatic gas usage optimization"
+            echo "- **Yul Generation**: Direct compilation to optimized Yul code"
+            echo ""
+            echo "## Architecture"
+            echo ""
+            echo "The Ora compiler consists of several phases:"
+            echo ""
+            echo "1. **Lexical Analysis** - Tokenization of source code"
+            echo "2. **Parsing** - AST generation from tokens"
+            echo "3. **Semantic Analysis** - Validation and enrichment"
+            echo "4. **Type Checking** - Type inference and verification"
+            echo "5. **HIR Generation** - High-level intermediate representation"
+            echo "6. **Optimization** - Various optimization passes"
+            echo "7. **Code Generation** - Yul code generation"
+            echo "8. **Bytecode Generation** - Final EVM bytecode"
+            echo ""
+            echo "## Contributing"
+            echo ""
+            echo "See our [contributing guidelines](../CONTRIBUTING.md) for information on how to contribute to Ora."
+            echo ""
+            echo "## License"
+            echo ""
+            echo "This project is licensed under the terms described in the [LICENSE](LICENSE) file."
+            echo ""
+            echo "---"
+            echo ""
+            echo "*Documentation generated on $(date)*"
+          } > docs/index.md
+          
+          echo "✅ Main index page created"
+
+      - name: Setup Pages
+        if: github.ref == 'refs/heads/main'
+        uses: actions/configure-pages@v3
+
+      - name: Build with Jekyll
+        if: github.ref == 'refs/heads/main'
+        run: |
+          echo "🏗️  Building site with Jekyll..."
+          
+          # Create Jekyll configuration
+          cat > docs/_config.yml << EOF
+          title: Ora Compiler Documentation
+          description: Documentation for the Ora smart contract compiler
+          baseurl: ""
+          url: "https://your-username.github.io/Ora"
+          
+          markdown: kramdown
+          highlighter: rouge
+          theme: minima
+          
+          plugins:
+            - jekyll-feed
+            - jekyll-sitemap
+          
+          navigation:
+            - title: Home
+              url: /
+            - title: Guides
+              url: /guides/
+            - title: API Reference
+              url: /api/
+            - title: Examples
+              url: /examples/
+          EOF
+          
+          # Convert markdown extensions for Jekyll
+          find docs/ -name "*.md" -exec sh -c 'mv "$1" "${1%.md}.md"' _ {} \;
+          
+          echo "✅ Jekyll site prepared"
+
+      - name: Upload Pages artifact
+        if: github.ref == 'refs/heads/main'
+        uses: actions/upload-pages-artifact@v2
+        with:
+          path: ./docs
+
+  deploy-docs:
+    name: Deploy Documentation
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    needs: build-docs
+    
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v2
+
+      - name: Notify deployment success
+        run: |
+          echo "🚀 Documentation deployed successfully!"
+          echo "📖 Available at: ${{ steps.deployment.outputs.page_url }}" 
