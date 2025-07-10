@@ -364,8 +364,8 @@ fn buildYulWrapper(b: *std.Build, target: std.Build.ResolvedTarget, optimize: st
     yul_wrapper.addIncludePath(b.path("vendor/solidity/deps/range-v3/include"));
     yul_wrapper.addIncludePath(b.path("vendor/solidity/deps/nlohmann-json/include"));
 
-    // Add Boost include path (installed via Homebrew)
-    yul_wrapper.addSystemIncludePath(.{ .cwd_relative = "/opt/homebrew/include" });
+    // Add platform-specific Boost paths
+    addBoostPaths(b, yul_wrapper, target);
 
     // Link C++ standard library
     yul_wrapper.linkLibCpp();
@@ -491,5 +491,71 @@ fn runExampleTests(step: *std.Build.Step, options: std.Build.Step.MakeOptions) a
     if (failed_count > 0) {
         std.log.err("{} example files failed compilation", .{failed_count});
         return error.ExampleTestsFailed;
+    }
+}
+
+/// Add platform-specific Boost include and library paths
+fn addBoostPaths(b: *std.Build, compile_step: *std.Build.Step.Compile, target: std.Build.ResolvedTarget) void {
+    const target_info = target.result;
+
+    switch (target_info.os.tag) {
+        .macos => {
+            // Check if Apple Silicon or Intel Mac
+            if (target_info.cpu.arch == .aarch64) {
+                // Apple Silicon - Homebrew installs to /opt/homebrew
+                std.log.info("Adding Boost paths for Apple Silicon Mac", .{});
+                compile_step.addSystemIncludePath(.{ .cwd_relative = "/opt/homebrew/include" });
+                compile_step.addLibraryPath(.{ .cwd_relative = "/opt/homebrew/lib" });
+            } else {
+                // Intel Mac - Homebrew installs to /usr/local
+                std.log.info("Adding Boost paths for Intel Mac", .{});
+                compile_step.addSystemIncludePath(.{ .cwd_relative = "/usr/local/include" });
+                compile_step.addLibraryPath(.{ .cwd_relative = "/usr/local/lib" });
+            }
+        },
+        .linux => {
+            // Linux - check common package manager locations
+            std.log.info("Adding Boost paths for Linux", .{});
+            compile_step.addSystemIncludePath(.{ .cwd_relative = "/usr/include" });
+            compile_step.addSystemIncludePath(.{ .cwd_relative = "/usr/local/include" });
+            compile_step.addLibraryPath(.{ .cwd_relative = "/usr/lib" });
+            compile_step.addLibraryPath(.{ .cwd_relative = "/usr/local/lib" });
+
+            // Also check for x86_64-linux-gnu paths (common on Ubuntu)
+            if (target_info.cpu.arch == .x86_64) {
+                compile_step.addLibraryPath(.{ .cwd_relative = "/usr/lib/x86_64-linux-gnu" });
+            }
+        },
+        .windows => {
+            // Windows - typically vcpkg or manual installation
+            std.log.info("Adding Boost paths for Windows", .{});
+            // Check for vcpkg installation
+            if (std.process.hasEnvVarConstant("VCPKG_ROOT")) {
+                compile_step.addSystemIncludePath(.{ .cwd_relative = "C:/vcpkg/installed/x64-windows/include" });
+                compile_step.addLibraryPath(.{ .cwd_relative = "C:/vcpkg/installed/x64-windows/lib" });
+            } else {
+                // Default paths for manual installation
+                compile_step.addSystemIncludePath(.{ .cwd_relative = "C:/boost/include" });
+                compile_step.addLibraryPath(.{ .cwd_relative = "C:/boost/lib" });
+            }
+        },
+        else => {
+            // Fallback for other platforms
+            std.log.warn("Unknown platform for Boost paths - using default system paths", .{});
+            compile_step.addSystemIncludePath(.{ .cwd_relative = "/usr/include" });
+            compile_step.addSystemIncludePath(.{ .cwd_relative = "/usr/local/include" });
+            compile_step.addLibraryPath(.{ .cwd_relative = "/usr/lib" });
+            compile_step.addLibraryPath(.{ .cwd_relative = "/usr/local/lib" });
+        },
+    }
+
+    // Try to check if Boost is available via environment variable
+    const boost_root = std.process.getEnvVarOwned(b.allocator, "BOOST_ROOT") catch null;
+    if (boost_root) |root| {
+        std.log.info("Using BOOST_ROOT environment variable: {s}", .{root});
+        const include_path = std.fmt.allocPrint(b.allocator, "{s}/include", .{root}) catch @panic("OOM");
+        const lib_path = std.fmt.allocPrint(b.allocator, "{s}/lib", .{root}) catch @panic("OOM");
+        compile_step.addSystemIncludePath(.{ .cwd_relative = include_path });
+        compile_step.addLibraryPath(.{ .cwd_relative = lib_path });
     }
 }

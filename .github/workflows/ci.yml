@@ -28,6 +28,32 @@ jobs:
         with:
           version: ${{ env.ZIG_VERSION }}
 
+      - name: Install system dependencies
+        run: |
+          echo "🔧 Installing system dependencies for ${{ runner.os }}..."
+          case "${{ runner.os }}" in
+            Linux)
+              sudo apt-get update -qq
+              sudo apt-get install -y \
+                build-essential \
+                cmake \
+                libboost-all-dev \
+                libssl-dev \
+                pkg-config \
+                git
+              echo "✅ Linux dependencies installed"
+              ;;
+            macOS)
+              brew update
+              brew install boost openssl cmake
+              echo "✅ macOS dependencies installed"
+              ;;
+            Windows)
+              choco install boost-msvc-14.3 cmake openssl
+              echo "✅ Windows dependencies installed"
+              ;;
+          esac
+
       - name: Cache Zig artifacts
         uses: actions/cache@v4
         with:
@@ -75,6 +101,32 @@ jobs:
         uses: goto-bus-stop/setup-zig@v2
         with:
           version: ${{ matrix.zig-version }}
+
+      - name: Install system dependencies
+        run: |
+          echo "🔧 Installing system dependencies for ${{ runner.os }}..."
+          case "${{ runner.os }}" in
+            Linux)
+              sudo apt-get update -qq
+              sudo apt-get install -y \
+                build-essential \
+                cmake \
+                libboost-all-dev \
+                libssl-dev \
+                pkg-config \
+                git
+              echo "✅ Linux dependencies installed"
+              ;;
+            macOS)
+              brew update
+              brew install boost openssl cmake
+              echo "✅ macOS dependencies installed"
+              ;;
+            Windows)
+              choco install boost-msvc-14.3 cmake openssl
+              echo "✅ Windows dependencies installed"
+              ;;
+          esac
 
       - name: Cache Zig artifacts
         uses: actions/cache@v4
@@ -136,6 +188,32 @@ jobs:
         uses: goto-bus-stop/setup-zig@v2
         with:
           version: ${{ env.ZIG_VERSION }}
+
+      - name: Install system dependencies
+        run: |
+          echo "🔧 Installing system dependencies for ${{ runner.os }}..."
+          case "${{ runner.os }}" in
+            Linux)
+              sudo apt-get update -qq
+              sudo apt-get install -y \
+                build-essential \
+                cmake \
+                libboost-all-dev \
+                libssl-dev \
+                pkg-config \
+                git
+              echo "✅ Linux dependencies installed"
+              ;;
+            macOS)
+              brew update
+              brew install boost openssl cmake
+              echo "✅ macOS dependencies installed"
+              ;;
+            Windows)
+              choco install boost-msvc-14.3 cmake openssl
+              echo "✅ Windows dependencies installed"
+              ;;
+          esac
 
       - name: Cache Zig artifacts
         uses: actions/cache@v4
@@ -233,6 +311,32 @@ jobs:
         with:
           version: ${{ env.ZIG_VERSION }}
 
+      - name: Install system dependencies
+        run: |
+          echo "🔧 Installing system dependencies for ${{ runner.os }}..."
+          case "${{ runner.os }}" in
+            Linux)
+              sudo apt-get update -qq
+              sudo apt-get install -y \
+                build-essential \
+                cmake \
+                libboost-all-dev \
+                libssl-dev \
+                pkg-config \
+                git
+              echo "✅ Linux dependencies installed"
+              ;;
+            macOS)
+              brew update
+              brew install boost openssl cmake
+              echo "✅ macOS dependencies installed"
+              ;;
+            Windows)
+              choco install boost-msvc-14.3 cmake openssl
+              echo "✅ Windows dependencies installed"
+              ;;
+          esac
+
       - name: Cache Zig artifacts
         uses: actions/cache@v4
         with:
@@ -280,6 +384,32 @@ jobs:
         uses: goto-bus-stop/setup-zig@v2
         with:
           version: ${{ env.ZIG_VERSION }}
+
+      - name: Install system dependencies
+        run: |
+          echo "🔧 Installing system dependencies for ${{ runner.os }}..."
+          case "${{ runner.os }}" in
+            Linux)
+              sudo apt-get update -qq
+              sudo apt-get install -y \
+                build-essential \
+                cmake \
+                libboost-all-dev \
+                libssl-dev \
+                pkg-config \
+                git
+              echo "✅ Linux dependencies installed"
+              ;;
+            macOS)
+              brew update
+              brew install boost openssl cmake
+              echo "✅ macOS dependencies installed"
+              ;;
+            Windows)
+              choco install boost-msvc-14.3 cmake openssl
+              echo "✅ Windows dependencies installed"
+              ;;
+          esac
 
       - name: Build release version
         run: |
