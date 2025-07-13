@@ -103,6 +103,8 @@ pub const Typer = struct {
     current_scope: *SymbolTable,
     current_function: ?[]const u8,
     type_arena: std.heap.ArenaAllocator,
+    /// Track allocated function parameter arrays for cleanup
+    function_params: std.ArrayList([]OraType),
 
     pub fn init(allocator: std.mem.Allocator) Typer {
         return Typer{
@@ -111,18 +113,56 @@ pub const Typer = struct {
             .current_scope = undefined, // Will be fixed in fixSelfReferences
             .current_function = null,
             .type_arena = std.heap.ArenaAllocator.init(allocator),
+            .function_params = std.ArrayList([]OraType).init(allocator),
         };
     }
 
     /// Fix self-references after struct initialization
     pub fn fixSelfReferences(self: *Typer) void {
         self.current_scope = &self.global_scope;
+        // Initialize standard library symbols after self-references are fixed
+        self.initStandardLibrary() catch {};
+    }
+
+    /// Initialize standard library symbols in global scope
+    fn initStandardLibrary(self: *Typer) TyperError!void {
+        // Add 'std' as a module identifier
+        const std_symbol = Symbol{
+            .name = "std",
+            .typ = OraType.Unknown, // Module type - will be refined later
+            .region = .Stack,
+            .mutable = false,
+            .span = ast.SourceSpan{ .line = 0, .column = 0, .length = 3 },
+        };
+        try self.current_scope.declare(std_symbol);
+
+        // Add built-in functions
+        const require_params = try self.allocator.alloc(OraType, 1);
+        require_params[0] = OraType.Bool;
+        try self.function_params.append(require_params); // Track for cleanup
+
+        const require_symbol = Symbol{
+            .name = "require",
+            .typ = OraType{ .Function = .{
+                .params = require_params,
+                .return_type = null,
+            } },
+            .region = .Stack,
+            .mutable = false,
+            .span = ast.SourceSpan{ .line = 0, .column = 0, .length = 7 },
+        };
+        try self.current_scope.declare(require_symbol);
     }
 
     pub fn deinit(self: *Typer) void {
         // Free all types at once with arena
         self.type_arena.deinit();
         self.global_scope.deinit();
+        // Clean up function parameter arrays
+        for (self.function_params.items) |params| {
+            self.allocator.free(params);
+        }
+        self.function_params.deinit();
     }
 
     /// Type check a list of top-level AST nodes
@@ -634,7 +674,7 @@ pub const Typer = struct {
     }
 
     /// Convert AST type reference to ZigOra type
-    fn convertAstTypeToOraType(self: *Typer, ast_type: *ast.TypeRef) TyperError!OraType {
+    pub fn convertAstTypeToOraType(self: *Typer, ast_type: *ast.TypeRef) TyperError!OraType {
         return switch (ast_type.*) {
             .Bool => OraType.Bool,
             .Address => OraType.Address,

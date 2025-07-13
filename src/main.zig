@@ -429,22 +429,11 @@ fn runFullCompilation(allocator: std.mem.Allocator, file_path: []const u8) !void
     // Phase 6: Yul Code Generation
     try stdout.print("Phase 6: Yul Code Generation\n", .{});
 
-    // TODO: Convert HIR to SimpleHIR for testing
-    // For now, create a simple test HIR
-    var simple_hir = lib.codegen_yul.SimpleHIR.init(allocator);
-    defer simple_hir.deinit();
-
-    try simple_hir.instructions.append(.{ .push = 42 });
-    try simple_hir.instructions.append(.{ .push = 1 });
-    try simple_hir.instructions.append(.add);
-    try simple_hir.instructions.append(.{ .store = 0 });
-    try simple_hir.instructions.append(.ret);
-
-    // Generate Yul code
+    // Generate Yul code from actual HIR program
     var yul_codegen = lib.YulCodegen.init(allocator);
     defer yul_codegen.deinit();
 
-    const yul_code = yul_codegen.generateYulSimple(&simple_hir) catch |err| {
+    const yul_code = yul_codegen.generateYulFromProgram(hir_program) catch |err| {
         try stdout.print("Yul generation failed: {}\n", .{err});
         return;
     };
@@ -455,7 +444,7 @@ fn runFullCompilation(allocator: std.mem.Allocator, file_path: []const u8) !void
     // Phase 7: EVM Bytecode Generation
     try stdout.print("Phase 7: EVM Bytecode Generation\n", .{});
 
-    var result = yul_codegen.generateBytecodeSimple(&simple_hir) catch |err| {
+    var result = yul_codegen.compileYulToBytecode(yul_code) catch |err| {
         try stdout.print("Bytecode generation failed: {}\n", .{err});
         return;
     };
@@ -699,22 +688,11 @@ fn runYulGeneration(allocator: std.mem.Allocator, file_path: []const u8) !void {
     const hir_program = ir_builder.getProgramPtr();
     try stdout.print("HIR program created with {} contracts\n", .{hir_program.contracts.len});
 
-    // TODO: Convert HIR to SimpleHIR for testing
-    // For now, create a simple test HIR
-    var simple_hir = lib.codegen_yul.SimpleHIR.init(allocator);
-    defer simple_hir.deinit();
-
-    try simple_hir.instructions.append(.{ .push = 42 });
-    try simple_hir.instructions.append(.{ .push = 1 });
-    try simple_hir.instructions.append(.add);
-    try simple_hir.instructions.append(.{ .store = 0 });
-    try simple_hir.instructions.append(.ret);
-
-    // Generate Yul code
+    // Generate Yul code from actual HIR program
     var yul_codegen = lib.YulCodegen.init(allocator);
     defer yul_codegen.deinit();
 
-    const yul_code = yul_codegen.generateYulSimple(&simple_hir) catch |err| {
+    const yul_code = yul_codegen.generateYulFromProgram(hir_program) catch |err| {
         try stdout.print("Yul generation failed: {}\n", .{err});
         return;
     };
@@ -780,22 +758,17 @@ fn runBytecodeGeneration(allocator: std.mem.Allocator, file_path: []const u8) !v
     const hir_program = ir_builder.getProgramPtr();
     try stdout.print("HIR program created with {} contracts\n", .{hir_program.contracts.len});
 
-    // TODO: Convert HIR to SimpleHIR for testing
-    // For now, create a simple test HIR
-    var simple_hir = lib.codegen_yul.SimpleHIR.init(allocator);
-    defer simple_hir.deinit();
-
-    try simple_hir.instructions.append(.{ .push = 42 });
-    try simple_hir.instructions.append(.{ .push = 1 });
-    try simple_hir.instructions.append(.add);
-    try simple_hir.instructions.append(.{ .store = 0 });
-    try simple_hir.instructions.append(.ret);
-
-    // Generate bytecode
+    // Generate bytecode from actual HIR program
     var yul_codegen = lib.YulCodegen.init(allocator);
     defer yul_codegen.deinit();
 
-    var result = yul_codegen.generateBytecodeSimple(&simple_hir) catch |err| {
+    const yul_code = yul_codegen.generateYulFromProgram(hir_program) catch |err| {
+        try stdout.print("Yul generation failed: {}\n", .{err});
+        return;
+    };
+    defer allocator.free(yul_code);
+
+    var result = yul_codegen.compileYulToBytecode(yul_code) catch |err| {
         try stdout.print("Bytecode generation failed: {}\n", .{err});
         return;
     };

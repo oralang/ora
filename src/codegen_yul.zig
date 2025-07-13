@@ -46,6 +46,8 @@ pub const YulCodegen = struct {
     current_function: ?*const Function,
     /// Storage slot counter for contract variables
     storage_counter: u32,
+    /// Mapping from storage variable names to their slot numbers
+    storage_slots: std.HashMap([]const u8, u32, std.hash_map.StringContext, std.hash_map.default_max_load_percentage),
 
     const Self = @This();
 
@@ -63,6 +65,7 @@ pub const YulCodegen = struct {
             .var_counter = 0,
             .current_function = null,
             .storage_counter = 0,
+            .storage_slots = std.HashMap([]const u8, u32, std.hash_map.StringContext, std.hash_map.default_max_load_percentage).init(allocator),
         };
     }
 
@@ -75,13 +78,14 @@ pub const YulCodegen = struct {
             self.allocator.free(var_name);
         }
         self.variable_stack.deinit();
+        self.storage_slots.deinit();
     }
 
     /// Push a variable name onto the stack (takes ownership)
     ///
     /// Args:
     ///     name: Variable name to push (must be allocated)
-    fn pushVariable(self: *Self, name: []const u8) !void {
+    fn pushVariable(self: *Self, name: []const u8) YulCodegenError!void {
         try self.variable_stack.append(name);
     }
 
@@ -171,9 +175,16 @@ pub const YulCodegen = struct {
     /// Args:
     ///     yul_code: Output buffer
     ///     contract: Contract to compile
-    fn generateContract(self: *Self, yul_code: *std.ArrayList(u8), contract: *const Contract) !void {
+    fn generateContract(self: *Self, yul_code: *std.ArrayList(u8), contract: *const Contract) YulCodegenError!void {
         try yul_code.writer().print("  // Contract: {s}\n", .{contract.name});
         try yul_code.appendSlice("  code {\n");
+
+        // Initialize storage slot mapping
+        self.storage_counter = 0;
+        for (contract.storage) |*storage_var| {
+            try self.storage_slots.put(storage_var.name, self.storage_counter);
+            self.storage_counter += 1;
+        }
 
         // Generate constructor code
         try self.generateConstructor(yul_code, contract);
@@ -204,7 +215,7 @@ pub const YulCodegen = struct {
     /// Args:
     ///     yul_code: Output buffer
     ///     contract: Contract with storage variables
-    fn generateConstructor(self: *Self, yul_code: *std.ArrayList(u8), contract: *const Contract) !void {
+    fn generateConstructor(self: *Self, yul_code: *std.ArrayList(u8), contract: *const Contract) YulCodegenError!void {
         try yul_code.appendSlice("    // Constructor - initialize storage\n");
 
         for (contract.storage) |*storage_var| {
@@ -225,7 +236,7 @@ pub const YulCodegen = struct {
     /// Args:
     ///     yul_code: Output buffer
     ///     contract: Contract with functions
-    fn generateDispatcher(self: *Self, yul_code: *std.ArrayList(u8), contract: *const Contract) !void {
+    fn generateDispatcher(self: *Self, yul_code: *std.ArrayList(u8), contract: *const Contract) YulCodegenError!void {
         try yul_code.appendSlice("    // Function dispatcher\n");
         try yul_code.appendSlice("    let selector := shr(224, calldataload(0))\n");
         try yul_code.appendSlice("    switch selector\n");
@@ -233,7 +244,45 @@ pub const YulCodegen = struct {
         for (contract.functions) |*function| {
             if (function.visibility == .public) {
                 const selector = try self.calculateFunctionSelector(function);
-                try yul_code.writer().print("    case 0x{x:0>8} {{ {s}() }}\n", .{ selector, function.name });
+
+                // Generate function call with proper parameters
+                try yul_code.writer().print("    case 0x{x:0>8} {{\n", .{selector});
+
+                if (function.parameters.len > 0) {
+                    // Extract parameters from calldata
+                    for (function.parameters, 0..) |*param, i| {
+                        const offset = 4 + (i * 32); // 4 bytes for selector + 32 bytes per param
+                        try yul_code.writer().print("      let {s} := calldataload({})\n", .{ param.name, offset });
+                    }
+
+                    // Call function with parameters and handle return value
+                    if (function.return_type != null) {
+                        try yul_code.writer().print("      let result := {s}(", .{function.name});
+                        for (function.parameters, 0..) |*param, i| {
+                            if (i > 0) try yul_code.appendSlice(", ");
+                            try yul_code.appendSlice(param.name);
+                        }
+                        try yul_code.appendSlice(")\n");
+                        try yul_code.appendSlice("      return(result, 0x20)\n"); // Return 32 bytes
+                    } else {
+                        try yul_code.writer().print("      {s}(", .{function.name});
+                        for (function.parameters, 0..) |*param, i| {
+                            if (i > 0) try yul_code.appendSlice(", ");
+                            try yul_code.appendSlice(param.name);
+                        }
+                        try yul_code.appendSlice(")\n");
+                    }
+                } else {
+                    // Call function with no parameters and handle return value
+                    if (function.return_type != null) {
+                        try yul_code.writer().print("      let result := {s}()\n", .{function.name});
+                        try yul_code.appendSlice("      return(result, 0x20)\n"); // Return 32 bytes
+                    } else {
+                        try yul_code.writer().print("      {s}()\n", .{function.name});
+                    }
+                }
+
+                try yul_code.appendSlice("    }\n");
             }
         }
 
@@ -263,7 +312,7 @@ pub const YulCodegen = struct {
     /// Args:
     ///     yul_code: Output buffer
     ///     function: Function to compile
-    fn generateFunction(self: *Self, yul_code: *std.ArrayList(u8), function: *const Function) !void {
+    fn generateFunction(self: *Self, yul_code: *std.ArrayList(u8), function: *const Function) YulCodegenError!void {
         self.current_function = function;
         defer self.current_function = null;
 
@@ -294,7 +343,7 @@ pub const YulCodegen = struct {
     /// Args:
     ///     yul_code: Output buffer
     ///     block: Block to compile
-    fn generateBlock(self: *Self, yul_code: *std.ArrayList(u8), block: *const Block) !void {
+    fn generateBlock(self: *Self, yul_code: *std.ArrayList(u8), block: *const Block) YulCodegenError!void {
         for (block.statements) |*stmt| {
             try self.generateStatement(yul_code, stmt);
         }
@@ -305,7 +354,7 @@ pub const YulCodegen = struct {
     /// Args:
     ///     yul_code: Output buffer
     ///     stmt: Statement to compile
-    fn generateStatement(self: *Self, yul_code: *std.ArrayList(u8), stmt: *const Statement) !void {
+    fn generateStatement(self: *Self, yul_code: *std.ArrayList(u8), stmt: *const Statement) YulCodegenError!void {
         switch (stmt.*) {
             .variable_decl => |*var_decl| {
                 try self.generateVariableDecl(yul_code, var_decl);
@@ -349,7 +398,7 @@ pub const YulCodegen = struct {
     }
 
     /// Generate variable declaration
-    fn generateVariableDecl(self: *Self, yul_code: *std.ArrayList(u8), var_decl: *const ir.VariableDecl) !void {
+    fn generateVariableDecl(self: *Self, yul_code: *std.ArrayList(u8), var_decl: *const ir.VariableDecl) YulCodegenError!void {
         try yul_code.writer().print("      // Variable: {s}\n", .{var_decl.name});
 
         if (var_decl.value) |value| {
@@ -364,7 +413,7 @@ pub const YulCodegen = struct {
     }
 
     /// Generate assignment statement
-    fn generateAssignment(self: *Self, yul_code: *std.ArrayList(u8), assignment: *const ir.Assignment) !void {
+    fn generateAssignment(self: *Self, yul_code: *std.ArrayList(u8), assignment: *const ir.Assignment) YulCodegenError!void {
         try yul_code.appendSlice("      // Assignment\n");
 
         const value_var = try self.generateExpression(yul_code, assignment.value);
@@ -378,7 +427,7 @@ pub const YulCodegen = struct {
     }
 
     /// Generate compound assignment statement
-    fn generateCompoundAssignment(self: *Self, yul_code: *std.ArrayList(u8), comp_assign: *const ir.CompoundAssignment) !void {
+    fn generateCompoundAssignment(self: *Self, yul_code: *std.ArrayList(u8), comp_assign: *const ir.CompoundAssignment) YulCodegenError!void {
         try yul_code.appendSlice("      // Compound Assignment\n");
 
         const value_var = try self.generateExpression(yul_code, comp_assign.value);
@@ -399,7 +448,7 @@ pub const YulCodegen = struct {
     }
 
     /// Generate if statement
-    fn generateIfStatement(self: *Self, yul_code: *std.ArrayList(u8), if_stmt: *const ir.IfStatement) !void {
+    fn generateIfStatement(self: *Self, yul_code: *std.ArrayList(u8), if_stmt: *const ir.IfStatement) YulCodegenError!void {
         try yul_code.appendSlice("      // If statement\n");
 
         const condition_var = try self.generateExpression(yul_code, if_stmt.condition);
@@ -419,7 +468,7 @@ pub const YulCodegen = struct {
     }
 
     /// Generate while statement
-    fn generateWhileStatement(self: *Self, yul_code: *std.ArrayList(u8), while_stmt: *const ir.WhileStatement) !void {
+    fn generateWhileStatement(self: *Self, yul_code: *std.ArrayList(u8), while_stmt: *const ir.WhileStatement) YulCodegenError!void {
         try yul_code.appendSlice("      // While loop\n");
 
         const loop_label = try std.fmt.allocPrint(self.allocator, "loop_{}", .{self.var_counter});
@@ -437,7 +486,7 @@ pub const YulCodegen = struct {
     }
 
     /// Generate return statement
-    fn generateReturnStatement(self: *Self, yul_code: *std.ArrayList(u8), ret_stmt: *const ir.ReturnStatement) !void {
+    fn generateReturnStatement(self: *Self, yul_code: *std.ArrayList(u8), ret_stmt: *const ir.ReturnStatement) YulCodegenError!void {
         try yul_code.appendSlice("      // Return\n");
 
         if (ret_stmt.value) |value| {
@@ -448,7 +497,7 @@ pub const YulCodegen = struct {
     }
 
     /// Generate lock statement (blockchain synchronization)
-    fn generateLockStatement(self: *Self, yul_code: *std.ArrayList(u8), lock_stmt: *const ir.LockStatement) !void {
+    fn generateLockStatement(self: *Self, yul_code: *std.ArrayList(u8), lock_stmt: *const ir.LockStatement) YulCodegenError!void {
         _ = self;
         _ = lock_stmt;
         try yul_code.appendSlice("      // Lock (placeholder)\n");
@@ -456,7 +505,7 @@ pub const YulCodegen = struct {
     }
 
     /// Generate unlock statement
-    fn generateUnlockStatement(self: *Self, yul_code: *std.ArrayList(u8), unlock_stmt: *const ir.UnlockStatement) !void {
+    fn generateUnlockStatement(self: *Self, yul_code: *std.ArrayList(u8), unlock_stmt: *const ir.UnlockStatement) YulCodegenError!void {
         _ = self;
         _ = unlock_stmt;
         try yul_code.appendSlice("      // Unlock (placeholder)\n");
@@ -464,14 +513,14 @@ pub const YulCodegen = struct {
     }
 
     /// Generate error declaration
-    fn generateErrorDecl(self: *Self, yul_code: *std.ArrayList(u8), error_decl: *const ir.ErrorDecl) !void {
+    fn generateErrorDecl(self: *Self, yul_code: *std.ArrayList(u8), error_decl: *const ir.ErrorDecl) YulCodegenError!void {
         _ = self;
         try yul_code.writer().print("      // Error: {s}\n", .{error_decl.name});
         // Error declarations don't generate runtime code
     }
 
     /// Generate try statement
-    fn generateTryStatement(self: *Self, yul_code: *std.ArrayList(u8), try_stmt: *const ir.TryStatement) !void {
+    fn generateTryStatement(self: *Self, yul_code: *std.ArrayList(u8), try_stmt: *const ir.TryStatement) YulCodegenError!void {
         try yul_code.appendSlice("      // Try-catch\n");
 
         // Generate try block
@@ -484,7 +533,7 @@ pub const YulCodegen = struct {
     }
 
     /// Generate error return
-    fn generateErrorReturn(self: *Self, yul_code: *std.ArrayList(u8), error_ret: *const ir.ErrorReturn) !void {
+    fn generateErrorReturn(self: *Self, yul_code: *std.ArrayList(u8), error_ret: *const ir.ErrorReturn) YulCodegenError!void {
         _ = self;
         try yul_code.writer().print("      // Error return: {s}\n", .{error_ret.error_name});
         // TODO: Look up error code and return proper error union
@@ -492,12 +541,17 @@ pub const YulCodegen = struct {
     }
 
     /// Generate expression and return variable name
-    fn generateExpression(self: *Self, yul_code: *std.ArrayList(u8), expr: *const Expression) ![]const u8 {
+    fn generateExpression(self: *Self, yul_code: *std.ArrayList(u8), expr: *const Expression) YulCodegenError![]const u8 {
         switch (expr.*) {
             .literal => |*literal| {
                 return try self.generateLiteral(yul_code, literal);
             },
             .identifier => |*ident| {
+                // Check if this is a storage variable
+                if (self.storage_slots.get(ident.name)) |slot| {
+                    return try std.fmt.allocPrint(self.allocator, "{}", .{slot});
+                }
+                // Regular identifier (parameter, local variable, etc.)
                 return try self.allocator.dupe(u8, ident.name);
             },
             .binary => |*binary| {
@@ -535,7 +589,7 @@ pub const YulCodegen = struct {
     }
 
     /// Generate literal value
-    fn generateLiteral(self: *Self, yul_code: *std.ArrayList(u8), literal: *const ir.Literal) ![]const u8 {
+    fn generateLiteral(self: *Self, yul_code: *std.ArrayList(u8), literal: *const ir.Literal) YulCodegenError![]const u8 {
         _ = yul_code;
 
         return switch (literal.*) {
@@ -556,7 +610,7 @@ pub const YulCodegen = struct {
     }
 
     /// Generate binary expression
-    fn generateBinaryExpression(self: *Self, yul_code: *std.ArrayList(u8), binary: *const ir.BinaryExpression) ![]const u8 {
+    fn generateBinaryExpression(self: *Self, yul_code: *std.ArrayList(u8), binary: *const ir.BinaryExpression) YulCodegenError![]const u8 {
         const left_var = try self.generateExpression(yul_code, binary.left);
         defer self.allocator.free(left_var);
 
@@ -598,7 +652,7 @@ pub const YulCodegen = struct {
     }
 
     /// Generate unary expression
-    fn generateUnaryExpression(self: *Self, yul_code: *std.ArrayList(u8), unary: *const ir.UnaryExpression) ![]const u8 {
+    fn generateUnaryExpression(self: *Self, yul_code: *std.ArrayList(u8), unary: *const ir.UnaryExpression) YulCodegenError![]const u8 {
         const operand_var = try self.generateExpression(yul_code, unary.operand);
         defer self.allocator.free(operand_var);
 
@@ -615,7 +669,7 @@ pub const YulCodegen = struct {
     }
 
     /// Generate call expression
-    fn generateCallExpression(self: *Self, yul_code: *std.ArrayList(u8), call: *const ir.CallExpression) ![]const u8 {
+    fn generateCallExpression(self: *Self, yul_code: *std.ArrayList(u8), call: *const ir.CallExpression) YulCodegenError![]const u8 {
         // Generate arguments
         var arg_vars = std.ArrayList([]const u8).init(self.allocator);
         defer {
@@ -649,7 +703,7 @@ pub const YulCodegen = struct {
     }
 
     /// Generate index expression (array/mapping access)
-    fn generateIndexExpression(self: *Self, yul_code: *std.ArrayList(u8), index: *const ir.IndexExpression) ![]const u8 {
+    fn generateIndexExpression(self: *Self, yul_code: *std.ArrayList(u8), index: *const ir.IndexExpression) YulCodegenError![]const u8 {
         const target_var = try self.generateExpression(yul_code, index.target);
         defer self.allocator.free(target_var);
 
@@ -659,14 +713,20 @@ pub const YulCodegen = struct {
         const result_var = try std.fmt.allocPrint(self.allocator, "temp_{}", .{self.var_counter});
         self.var_counter += 1;
 
-        // Simple mapping access using keccak256(key . slot)
-        try yul_code.writer().print("      let {s} := sload(keccak256({s}, {s}))\n", .{ result_var, index_var, target_var });
+        // Check if target is a storage variable (target_var should be a slot number)
+        if (std.fmt.parseInt(u32, target_var, 10)) |slot| {
+            // Mapping access: hash(key, slot) for storage location
+            try yul_code.writer().print("      let {s} := sload(keccak256({s}, {}))\n", .{ result_var, index_var, slot });
+        } else |_| {
+            // Fallback: treat as regular array access
+            try yul_code.writer().print("      let {s} := sload(add({s}, {s}))\n", .{ result_var, target_var, index_var });
+        }
 
         return result_var;
     }
 
     /// Generate field expression (struct field access)
-    fn generateFieldExpression(self: *Self, yul_code: *std.ArrayList(u8), field: *const ir.FieldExpression) ![]const u8 {
+    fn generateFieldExpression(self: *Self, yul_code: *std.ArrayList(u8), field: *const ir.FieldExpression) YulCodegenError![]const u8 {
         const target_var = try self.generateExpression(yul_code, field.target);
         defer self.allocator.free(target_var);
 
@@ -680,7 +740,7 @@ pub const YulCodegen = struct {
     }
 
     /// Generate transfer expression (blockchain transfer)
-    fn generateTransferExpression(self: *Self, yul_code: *std.ArrayList(u8), transfer: *const ir.TransferExpression) ![]const u8 {
+    fn generateTransferExpression(self: *Self, yul_code: *std.ArrayList(u8), transfer: *const ir.TransferExpression) YulCodegenError![]const u8 {
         const to_var = try self.generateExpression(yul_code, transfer.to);
         defer self.allocator.free(to_var);
 
@@ -697,20 +757,20 @@ pub const YulCodegen = struct {
     }
 
     /// Generate try expression
-    fn generateTryExpression(self: *Self, yul_code: *std.ArrayList(u8), try_expr: *const ir.TryExpression) ![]const u8 {
+    fn generateTryExpression(self: *Self, yul_code: *std.ArrayList(u8), try_expr: *const ir.TryExpression) YulCodegenError![]const u8 {
         // For now, just evaluate the expression normally
         return try self.generateExpression(yul_code, try_expr.expression);
     }
 
     /// Generate error value
-    fn generateErrorValue(self: *Self, yul_code: *std.ArrayList(u8), error_val: *const ir.ErrorValue) ![]const u8 {
+    fn generateErrorValue(self: *Self, yul_code: *std.ArrayList(u8), error_val: *const ir.ErrorValue) YulCodegenError![]const u8 {
         _ = yul_code;
         // TODO: Look up error code by name
         return try std.fmt.allocPrint(self.allocator, "0xFF // error: {s}", .{error_val.error_name});
     }
 
     /// Generate error cast
-    fn generateErrorCast(self: *Self, yul_code: *std.ArrayList(u8), error_cast: *const ir.ErrorCast) ![]const u8 {
+    fn generateErrorCast(self: *Self, yul_code: *std.ArrayList(u8), error_cast: *const ir.ErrorCast) YulCodegenError![]const u8 {
         // For now, just evaluate the operand
         return try self.generateExpression(yul_code, error_cast.operand);
     }

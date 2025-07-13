@@ -179,7 +179,51 @@ pub const SemanticAnalyzer = struct {
         // Ensure cleanup on error - this guarantees memory is freed even if analysis fails
         defer contract_ctx.deinit();
 
-        // Analyze contract members
+        // First pass: declare storage variables and events in symbol table
+        for (contract.body) |*member| {
+            switch (member.*) {
+                .VariableDecl => |*var_decl| {
+                    // Add storage variables to type checker symbol table
+                    if (var_decl.region == .Storage) {
+                        try contract_ctx.storage_variables.append(var_decl.name);
+
+                        // Add to type checker's global scope
+                        const ora_type = self.type_checker.convertAstTypeToOraType(&var_decl.typ) catch |err| {
+                            switch (err) {
+                                typer.TyperError.TypeMismatch => return SemanticError.TypeMismatch,
+                                typer.TyperError.OutOfMemory => return SemanticError.OutOfMemory,
+                                else => return SemanticError.TypeMismatch,
+                            }
+                        };
+
+                        const storage_symbol = typer.Symbol{
+                            .name = var_decl.name,
+                            .typ = ora_type,
+                            .region = ast.MemoryRegion.Storage,
+                            .mutable = var_decl.mutable,
+                            .span = var_decl.span,
+                        };
+                        try self.type_checker.current_scope.declare(storage_symbol);
+                    }
+                },
+                .LogDecl => |*log_decl| {
+                    try contract_ctx.events.append(log_decl.name);
+
+                    // Add event to symbol table
+                    const event_symbol = typer.Symbol{
+                        .name = log_decl.name,
+                        .typ = typer.OraType.Unknown, // Event type
+                        .region = ast.MemoryRegion.Stack,
+                        .mutable = false,
+                        .span = log_decl.span,
+                    };
+                    try self.type_checker.current_scope.declare(event_symbol);
+                },
+                else => {},
+            }
+        }
+
+        // Second pass: analyze contract members
         for (contract.body) |*member| {
             switch (member.*) {
                 .Function => |*function| {
@@ -197,14 +241,9 @@ pub const SemanticAnalyzer = struct {
                     try self.analyzeFunction(function);
                 },
                 .VariableDecl => |*var_decl| {
-                    // Track storage variables
-                    if (var_decl.region == .Storage) {
-                        try contract_ctx.storage_variables.append(var_decl.name);
-                    }
                     try self.analyzeVariableDecl(var_decl);
                 },
                 .LogDecl => |*log_decl| {
-                    try contract_ctx.events.append(log_decl.name);
                     try self.analyzeLogDecl(log_decl);
                 },
                 else => {
@@ -504,13 +543,47 @@ pub const SemanticAnalyzer = struct {
                 // Validate std library field access
                 if (std.mem.eql(u8, field.field, "transaction") or
                     std.mem.eql(u8, field.field, "block") or
-                    std.mem.eql(u8, field.field, "msg"))
+                    std.mem.eql(u8, field.field, "msg") or
+                    std.mem.eql(u8, field.field, "constants"))
                 {
                     // Valid std library modules
                     return;
                 } else {
                     try self.addError("Invalid std library module", field.span);
                 }
+            }
+        }
+
+        // Handle nested field access like std.transaction.sender
+        if (field.target.* == .FieldAccess) {
+            const nested_field = field.target.FieldAccess;
+            if (nested_field.target.* == .Identifier and
+                std.mem.eql(u8, nested_field.target.Identifier.name, "std"))
+            {
+                if (std.mem.eql(u8, nested_field.field, "transaction")) {
+                    // std.transaction.* fields
+                    if (std.mem.eql(u8, field.field, "sender") or
+                        std.mem.eql(u8, field.field, "value") or
+                        std.mem.eql(u8, field.field, "origin"))
+                    {
+                        return; // Valid transaction field
+                    }
+                } else if (std.mem.eql(u8, nested_field.field, "block")) {
+                    // std.block.* fields
+                    if (std.mem.eql(u8, field.field, "timestamp") or
+                        std.mem.eql(u8, field.field, "number") or
+                        std.mem.eql(u8, field.field, "coinbase"))
+                    {
+                        return; // Valid block field
+                    }
+                } else if (std.mem.eql(u8, nested_field.field, "constants")) {
+                    // std.constants.* fields
+                    if (std.mem.eql(u8, field.field, "ZERO_ADDRESS")) {
+                        return; // Valid constant
+                    }
+                }
+                try self.addError("Invalid std library field", field.span);
+                return;
             }
         }
 
