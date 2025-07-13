@@ -48,6 +48,8 @@ pub const YulCodegen = struct {
     storage_counter: u32,
     /// Mapping from storage variable names to their slot numbers
     storage_slots: std.HashMap([]const u8, u32, std.hash_map.StringContext, std.hash_map.default_max_load_percentage),
+    /// Current contract context for event lookup
+    current_contract: ?*const Contract,
 
     const Self = @This();
 
@@ -66,6 +68,7 @@ pub const YulCodegen = struct {
             .current_function = null,
             .storage_counter = 0,
             .storage_slots = std.HashMap([]const u8, u32, std.hash_map.StringContext, std.hash_map.default_max_load_percentage).init(allocator),
+            .current_contract = null,
         };
     }
 
@@ -148,7 +151,7 @@ pub const YulCodegen = struct {
     ///
     /// Returns:
     ///     Generated Yul code as owned string
-    pub fn generateYulFromProgram(self: *Self, program: *const HIRProgram) ![]u8 {
+    pub fn generateYulFromProgram(self: *Self, program: *const HIRProgram) YulCodegenError![]u8 {
         var yul_code = std.ArrayList(u8).init(self.allocator);
         defer yul_code.deinit();
 
@@ -176,15 +179,18 @@ pub const YulCodegen = struct {
     ///     yul_code: Output buffer
     ///     contract: Contract to compile
     fn generateContract(self: *Self, yul_code: *std.ArrayList(u8), contract: *const Contract) YulCodegenError!void {
-        try yul_code.writer().print("  // Contract: {s}\n", .{contract.name});
-        try yul_code.appendSlice("  code {\n");
+        // Store current contract for event lookup
+        self.current_contract = contract;
 
         // Initialize storage slot mapping
-        self.storage_counter = 0;
+        var slot_counter: u32 = 0;
         for (contract.storage) |*storage_var| {
-            try self.storage_slots.put(storage_var.name, self.storage_counter);
-            self.storage_counter += 1;
+            try self.storage_slots.put(storage_var.name, slot_counter);
+            slot_counter += 1;
         }
+
+        try yul_code.writer().print("  // Contract: {s}\n", .{contract.name});
+        try yul_code.appendSlice("  code {\n");
 
         // Generate constructor code
         try self.generateConstructor(yul_code, contract);
@@ -297,14 +303,60 @@ pub const YulCodegen = struct {
     /// Returns:
     ///     32-bit function selector
     fn calculateFunctionSelector(self: *Self, function: *const Function) !u32 {
-        _ = self;
-        // Simplified selector calculation - in real implementation would use keccak256
-        // For now, use a simple hash of the function name
-        var hash: u32 = 0;
-        for (function.name) |byte| {
-            hash = hash *% 31 +% byte;
+        // Build canonical function signature: functionName(type1,type2,...)
+        var signature = std.ArrayList(u8).init(self.allocator);
+        defer signature.deinit();
+
+        try signature.appendSlice(function.name);
+        try signature.appendSlice("(");
+
+        for (function.parameters, 0..) |*param, i| {
+            if (i > 0) {
+                try signature.appendSlice(",");
+            }
+
+            // Convert Ora types to canonical EVM types
+            const evm_type = convertToEVMType(param.type);
+            try signature.appendSlice(evm_type);
         }
-        return hash;
+
+        try signature.appendSlice(")");
+
+        // Calculate hash of signature (simplified until we add proper keccak256)
+        const signature_bytes = signature.items;
+        var hash: u64 = 0;
+
+        // Use a better hash function (FNV-1a variant)
+        for (signature_bytes) |byte| {
+            hash = hash ^ byte;
+            hash = hash *% 0x100000001b3; // FNV-1a prime
+        }
+
+        // Take first 4 bytes as selector
+        return @truncate(hash);
+    }
+
+    /// Convert Ora types to canonical EVM types for function signatures
+    ///
+    /// Args:
+    ///     ora_type: Ora type to convert
+    ///
+    /// Returns:
+    ///     Canonical EVM type string
+    fn convertToEVMType(ora_type: Type) []const u8 {
+        return switch (ora_type) {
+            .primitive => |prim| switch (prim) {
+                .u8, .u16, .u32, .u64, .u128, .u256 => "uint256",
+                .bool => "bool",
+                .address => "address",
+                .string => "string",
+            },
+            .slice => |_| "uint256[]", // Simplified - slices become uint256[]
+            .mapping => |_| "mapping", // Mappings don't appear in function signatures
+            .custom => |_| "uint256", // Custom types default to uint256
+            .error_union => |_| "uint256", // Error unions default to uint256
+            .result => |_| "uint256", // Results default to uint256
+        };
     }
 
     /// Generate Yul code for a function
@@ -313,23 +365,28 @@ pub const YulCodegen = struct {
     ///     yul_code: Output buffer
     ///     function: Function to compile
     fn generateFunction(self: *Self, yul_code: *std.ArrayList(u8), function: *const Function) YulCodegenError!void {
+        // Store current function for context
+        const prev_function = self.current_function;
         self.current_function = function;
-        defer self.current_function = null;
+        defer self.current_function = prev_function;
 
+        // Write function signature
         try yul_code.writer().print("    // Function: {s}\n", .{function.name});
         try yul_code.writer().print("    function {s}(", .{function.name});
 
-        // Generate parameter list
+        // Write parameters
         for (function.parameters, 0..) |*param, i| {
             if (i > 0) try yul_code.appendSlice(", ");
-            try yul_code.writer().print("{s}", .{param.name});
+            try yul_code.appendSlice(param.name);
         }
 
-        // Generate return type
-        try yul_code.appendSlice(")");
-        if (function.return_type != null) {
-            try yul_code.appendSlice(" -> result");
+        // Write return type
+        if (function.return_type) |_| {
+            try yul_code.appendSlice(") -> result");
+        } else {
+            try yul_code.appendSlice(")");
         }
+
         try yul_code.appendSlice(" {\n");
 
         // Generate function body
@@ -670,6 +727,21 @@ pub const YulCodegen = struct {
 
     /// Generate call expression
     fn generateCallExpression(self: *Self, yul_code: *std.ArrayList(u8), call: *const ir.CallExpression) YulCodegenError![]const u8 {
+        // Check if this is an event logging call
+        if (call.callee.* == .identifier) {
+            const func_name = call.callee.identifier.name;
+
+            // Check if this is a known event (events are stored in the contract)
+            if (self.current_contract) |contract| {
+                for (contract.events) |*event| {
+                    if (std.mem.eql(u8, event.name, func_name)) {
+                        // This is an event logging call
+                        return try self.generateEventLog(yul_code, event, call.arguments);
+                    }
+                }
+            }
+        }
+
         // Generate arguments
         var arg_vars = std.ArrayList([]const u8).init(self.allocator);
         defer {
@@ -702,6 +774,60 @@ pub const YulCodegen = struct {
         return result_var;
     }
 
+    /// Generate event logging
+    fn generateEventLog(self: *Self, yul_code: *std.ArrayList(u8), event: *const ir.Event, arguments: []const ir.Expression) YulCodegenError![]const u8 {
+        // Generate argument variables
+        var arg_vars = std.ArrayList([]const u8).init(self.allocator);
+        defer {
+            for (arg_vars.items) |arg_var| {
+                self.allocator.free(arg_var);
+            }
+            arg_vars.deinit();
+        }
+
+        for (arguments) |*arg| {
+            const arg_var = try self.generateExpression(yul_code, arg);
+            try arg_vars.append(arg_var);
+        }
+
+        // Calculate event signature hash (simplified)
+        const event_hash = try self.calculateEventSignatureHash(event);
+
+        // Store event data in memory
+        const data_ptr = try std.fmt.allocPrint(self.allocator, "temp_{}", .{self.var_counter});
+        defer self.allocator.free(data_ptr);
+        self.var_counter += 1;
+
+        try yul_code.writer().print("      let {s} := mload(0x40)\n", .{data_ptr});
+
+        // Store arguments in memory
+        for (arg_vars.items, 0..) |arg_var, i| {
+            try yul_code.writer().print("      mstore(add({s}, {}), {s})\n", .{ data_ptr, i * 32, arg_var });
+        }
+
+        // Emit log (using log1 with topic for now)
+        const data_size = arg_vars.items.len * 32;
+        try yul_code.writer().print("      log1({s}, {}, 0x{x:0>64})\n", .{ data_ptr, data_size, event_hash });
+
+        // Return a dummy result
+        const result_var = try std.fmt.allocPrint(self.allocator, "temp_{}", .{self.var_counter});
+        self.var_counter += 1;
+        try yul_code.writer().print("      let {s} := 1\n", .{result_var});
+
+        return result_var;
+    }
+
+    /// Calculate event signature hash (simplified)
+    fn calculateEventSignatureHash(self: *Self, event: *const ir.Event) !u64 {
+        _ = self;
+        // Simplified event signature hash - in real implementation would use keccak256
+        var hash: u64 = 0;
+        for (event.name) |byte| {
+            hash = hash *% 31 +% byte;
+        }
+        return hash;
+    }
+
     /// Generate index expression (array/mapping access)
     fn generateIndexExpression(self: *Self, yul_code: *std.ArrayList(u8), index: *const ir.IndexExpression) YulCodegenError![]const u8 {
         const target_var = try self.generateExpression(yul_code, index.target);
@@ -732,6 +858,70 @@ pub const YulCodegen = struct {
 
         const result_var = try std.fmt.allocPrint(self.allocator, "temp_{}", .{self.var_counter});
         self.var_counter += 1;
+
+        // Check for standard library field access
+        if (field.target.* == .identifier) {
+            const target_name = field.target.identifier.name;
+
+            if (std.mem.eql(u8, target_name, "std")) {
+                // Handle std library modules
+                if (std.mem.eql(u8, field.field, "transaction")) {
+                    // Return a marker for transaction module
+                    try yul_code.writer().print("      let {s} := 0x01 // std.transaction\n", .{result_var});
+                    return result_var;
+                } else if (std.mem.eql(u8, field.field, "constants")) {
+                    // Return a marker for constants module
+                    try yul_code.writer().print("      let {s} := 0x02 // std.constants\n", .{result_var});
+                    return result_var;
+                } else if (std.mem.eql(u8, field.field, "block")) {
+                    // Return a marker for block module
+                    try yul_code.writer().print("      let {s} := 0x03 // std.block\n", .{result_var});
+                    return result_var;
+                }
+            }
+        }
+
+        // Check for nested field access like std.transaction.sender
+        if (field.target.* == .field) {
+            const nested_field = field.target.field;
+            if (nested_field.target.* == .identifier) {
+                const base_name = nested_field.target.identifier.name;
+
+                if (std.mem.eql(u8, base_name, "std")) {
+                    if (std.mem.eql(u8, nested_field.field, "transaction")) {
+                        // Handle std.transaction.* fields
+                        if (std.mem.eql(u8, field.field, "sender")) {
+                            try yul_code.writer().print("      let {s} := caller()\n", .{result_var});
+                            return result_var;
+                        } else if (std.mem.eql(u8, field.field, "value")) {
+                            try yul_code.writer().print("      let {s} := callvalue()\n", .{result_var});
+                            return result_var;
+                        } else if (std.mem.eql(u8, field.field, "origin")) {
+                            try yul_code.writer().print("      let {s} := origin()\n", .{result_var});
+                            return result_var;
+                        }
+                    } else if (std.mem.eql(u8, nested_field.field, "constants")) {
+                        // Handle std.constants.* fields
+                        if (std.mem.eql(u8, field.field, "ZERO_ADDRESS")) {
+                            try yul_code.writer().print("      let {s} := 0x0\n", .{result_var});
+                            return result_var;
+                        }
+                    } else if (std.mem.eql(u8, nested_field.field, "block")) {
+                        // Handle std.block.* fields
+                        if (std.mem.eql(u8, field.field, "timestamp")) {
+                            try yul_code.writer().print("      let {s} := timestamp()\n", .{result_var});
+                            return result_var;
+                        } else if (std.mem.eql(u8, field.field, "number")) {
+                            try yul_code.writer().print("      let {s} := number()\n", .{result_var});
+                            return result_var;
+                        } else if (std.mem.eql(u8, field.field, "coinbase")) {
+                            try yul_code.writer().print("      let {s} := coinbase()\n", .{result_var});
+                            return result_var;
+                        }
+                    }
+                }
+            }
+        }
 
         // Simple field access - in real implementation would need struct layout
         try yul_code.writer().print("      let {s} := {s} // field: {s}\n", .{ result_var, target_var, field.field });
@@ -794,7 +984,7 @@ pub const YulCodegen = struct {
     /// Args:
     ///     yul_code: Output buffer for generated code
     ///     instruction: HIR instruction to convert
-    fn generateInstruction(self: *Self, yul_code: *std.ArrayList(u8), instruction: ir.HIRInstruction) !void {
+    fn generateInstruction(self: *Self, yul_code: *std.ArrayList(u8), instruction: HIRInstruction) !void {
         _ = self;
 
         switch (instruction) {

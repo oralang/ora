@@ -125,7 +125,7 @@ pub const Typer = struct {
     }
 
     /// Initialize standard library symbols in global scope
-    fn initStandardLibrary(self: *Typer) TyperError!void {
+    pub fn initStandardLibrary(self: *Typer) TyperError!void {
         // Add 'std' as a module identifier
         const std_symbol = Symbol{
             .name = "std",

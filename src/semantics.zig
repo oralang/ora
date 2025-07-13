@@ -97,6 +97,7 @@ pub const SemanticAnalyzer = struct {
     diagnostics: std.ArrayList(Diagnostic),
     current_function: ?[]const u8,
     in_loop: bool,
+    in_assignment_target: bool, // Flag to indicate if we are currently analyzing an assignment target
 
     pub fn init(allocator: std.mem.Allocator) SemanticAnalyzer {
         return SemanticAnalyzer{
@@ -109,6 +110,7 @@ pub const SemanticAnalyzer = struct {
             .diagnostics = std.ArrayList(Diagnostic).init(allocator),
             .current_function = null,
             .in_loop = false,
+            .in_assignment_target = false,
         };
     }
 
@@ -128,6 +130,14 @@ pub const SemanticAnalyzer = struct {
 
     /// Perform complete semantic analysis on AST nodes
     pub fn analyze(self: *SemanticAnalyzer, nodes: []ast.AstNode) SemanticError![]Diagnostic {
+        // Phase 0: Pre-initialize type checker with contract symbols
+        // This must happen before type checking so symbols are available
+        for (nodes) |*node| {
+            if (node.* == .Contract) {
+                try self.preInitializeContractSymbols(&node.Contract);
+            }
+        }
+
         // Phase 1: Type checking
         self.type_checker.typeCheck(nodes) catch |err| {
             switch (err) {
@@ -149,6 +159,59 @@ pub const SemanticAnalyzer = struct {
         // Phase 3: Contract-level validation is now handled within analyzeContract
 
         return try self.diagnostics.toOwnedSlice();
+    }
+
+    /// Pre-initialize contract symbols in type checker before type checking runs
+    fn preInitializeContractSymbols(self: *SemanticAnalyzer, contract: *ast.ContractNode) SemanticError!void {
+        // Initialize standard library in the current scope before processing contract
+        self.type_checker.initStandardLibrary() catch |err| {
+            switch (err) {
+                typer.TyperError.OutOfMemory => return SemanticError.OutOfMemory,
+                else => {
+                    // Log the error but continue - standard library initialization is not critical
+                    try self.addWarning("Failed to initialize standard library", ast.SourceSpan{ .line = 0, .column = 0, .length = 0 });
+                },
+            }
+        };
+
+        // Add storage variables and events to type checker symbol table
+        for (contract.body) |*member| {
+            switch (member.*) {
+                .VariableDecl => |*var_decl| {
+                    if (var_decl.region == .Storage or var_decl.region == .Immutable) {
+                        // Add to type checker's global scope
+                        const ora_type = self.type_checker.convertAstTypeToOraType(&var_decl.typ) catch |err| {
+                            switch (err) {
+                                typer.TyperError.TypeMismatch => return SemanticError.TypeMismatch,
+                                typer.TyperError.OutOfMemory => return SemanticError.OutOfMemory,
+                                else => return SemanticError.TypeMismatch,
+                            }
+                        };
+
+                        const symbol = typer.Symbol{
+                            .name = var_decl.name,
+                            .typ = ora_type,
+                            .region = var_decl.region,
+                            .mutable = var_decl.mutable,
+                            .span = var_decl.span,
+                        };
+                        try self.type_checker.current_scope.declare(symbol);
+                    }
+                },
+                .LogDecl => |*log_decl| {
+                    // Add event to symbol table
+                    const event_symbol = typer.Symbol{
+                        .name = log_decl.name,
+                        .typ = typer.OraType.Unknown, // Event type
+                        .region = ast.MemoryRegion.Stack,
+                        .mutable = false,
+                        .span = log_decl.span,
+                    };
+                    try self.type_checker.current_scope.declare(event_symbol);
+                },
+                else => {},
+            }
+        }
     }
 
     /// Analyze a single AST node
@@ -179,45 +242,16 @@ pub const SemanticAnalyzer = struct {
         // Ensure cleanup on error - this guarantees memory is freed even if analysis fails
         defer contract_ctx.deinit();
 
-        // First pass: declare storage variables and events in symbol table
+        // First pass: collect contract member names for context (symbols already in type checker)
         for (contract.body) |*member| {
             switch (member.*) {
                 .VariableDecl => |*var_decl| {
-                    // Add storage variables to type checker symbol table
-                    if (var_decl.region == .Storage) {
+                    if (var_decl.region == .Storage or var_decl.region == .Immutable) {
                         try contract_ctx.storage_variables.append(var_decl.name);
-
-                        // Add to type checker's global scope
-                        const ora_type = self.type_checker.convertAstTypeToOraType(&var_decl.typ) catch |err| {
-                            switch (err) {
-                                typer.TyperError.TypeMismatch => return SemanticError.TypeMismatch,
-                                typer.TyperError.OutOfMemory => return SemanticError.OutOfMemory,
-                                else => return SemanticError.TypeMismatch,
-                            }
-                        };
-
-                        const storage_symbol = typer.Symbol{
-                            .name = var_decl.name,
-                            .typ = ora_type,
-                            .region = ast.MemoryRegion.Storage,
-                            .mutable = var_decl.mutable,
-                            .span = var_decl.span,
-                        };
-                        try self.type_checker.current_scope.declare(storage_symbol);
                     }
                 },
                 .LogDecl => |*log_decl| {
                     try contract_ctx.events.append(log_decl.name);
-
-                    // Add event to symbol table
-                    const event_symbol = typer.Symbol{
-                        .name = log_decl.name,
-                        .typ = typer.OraType.Unknown, // Event type
-                        .region = ast.MemoryRegion.Stack,
-                        .mutable = false,
-                        .span = log_decl.span,
-                    };
-                    try self.type_checker.current_scope.declare(event_symbol);
                 },
                 else => {},
             }
@@ -262,6 +296,36 @@ pub const SemanticAnalyzer = struct {
         self.current_function = function.name;
         defer self.current_function = prev_function;
 
+        // Create function scope for semantic analysis that inherits from global scope
+        // This ensures storage variables declared at contract level are visible in functions
+        var func_scope = typer.SymbolTable.init(self.allocator, &self.type_checker.global_scope);
+        defer func_scope.deinit();
+
+        // Temporarily switch to function scope for identifier lookup
+        const prev_scope = self.type_checker.current_scope;
+        self.type_checker.current_scope = &func_scope;
+        defer self.type_checker.current_scope = prev_scope;
+
+        // Add function parameters to the function scope
+        for (function.parameters) |*param| {
+            const param_type = self.type_checker.convertAstTypeToOraType(&param.typ) catch |err| {
+                switch (err) {
+                    typer.TyperError.TypeMismatch => return SemanticError.TypeMismatch,
+                    typer.TyperError.OutOfMemory => return SemanticError.OutOfMemory,
+                    else => return SemanticError.TypeMismatch,
+                }
+            };
+
+            const param_symbol = typer.Symbol{
+                .name = param.name,
+                .typ = param_type,
+                .region = .Stack,
+                .mutable = false, // Parameters are immutable by default
+                .span = param.span,
+            };
+            try func_scope.declare(param_symbol);
+        }
+
         // Validate init function requirements
         if (std.mem.eql(u8, function.name, "init")) {
             try self.validateInitFunction(function);
@@ -280,7 +344,7 @@ pub const SemanticAnalyzer = struct {
         // Perform static verification on requires/ensures clauses
         try self.performStaticVerification(function);
 
-        // Analyze function body
+        // Analyze function body with proper scope context
         try self.analyzeBlock(&function.body);
 
         // Validate return statements if function has return type
@@ -460,7 +524,12 @@ pub const SemanticAnalyzer = struct {
             },
             .Identifier => |*ident| {
                 // Validate identifier exists in scope
-                if (self.type_checker.current_scope.lookup(ident.name) == null) {
+                if (self.type_checker.current_scope.lookup(ident.name)) |symbol| {
+                    // Check for immutable variable assignment attempts
+                    if (symbol.region == .Immutable and self.in_assignment_target) {
+                        try self.addError("Cannot assign to immutable variable", ident.span);
+                    }
+                } else {
                     try self.addError("Undeclared identifier", ident.span);
                 }
             },
@@ -486,17 +555,25 @@ pub const SemanticAnalyzer = struct {
         }
     }
 
-    /// Analyze assignment for mutability constraints
+    /// Analyze assignment expression
     fn analyzeAssignment(self: *SemanticAnalyzer, assign: *ast.AssignmentExpr) SemanticError!void {
+        // Set flag to indicate we're analyzing assignment target
+        const prev_in_assignment_target = self.in_assignment_target;
+        self.in_assignment_target = true;
+        defer self.in_assignment_target = prev_in_assignment_target;
+
         try self.analyzeExpression(assign.target);
+
+        // Reset flag for analyzing value
+        self.in_assignment_target = false;
         try self.analyzeExpression(assign.value);
 
-        // Validate target is mutable using type checker's symbol table
+        // Check if target is an immutable variable at the top level
         if (assign.target.* == .Identifier) {
-            const identifier = assign.target.Identifier;
-            if (self.type_checker.current_scope.lookup(identifier.name)) |symbol| {
-                if (!symbol.mutable) {
-                    try self.addError("Cannot assign to immutable variable", assign.span);
+            const ident = assign.target.Identifier;
+            if (self.type_checker.current_scope.lookup(ident.name)) |symbol| {
+                if (symbol.region == .Immutable) {
+                    try self.addError("Cannot assign to immutable variable", ident.span);
                 }
             }
         }
@@ -533,6 +610,7 @@ pub const SemanticAnalyzer = struct {
     }
 
     /// Analyze field access (for std.transaction.sender, etc.)
+    /// TODO: This is a hack to get the compiler to work, we need to fix it, the library is not yet implemented
     fn analyzeFieldAccess(self: *SemanticAnalyzer, field: *ast.FieldAccessExpr) SemanticError!void {
         try self.analyzeExpression(field.target);
 
