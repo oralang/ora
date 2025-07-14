@@ -6,7 +6,10 @@
 //! optimized EVM bytecode from Ora language constructs
 
 const std = @import("std");
+const ArrayList = std.ArrayList;
+const Allocator = std.mem.Allocator;
 const print = std.debug.print;
+const keccak256 = std.crypto.hash.sha3.Keccak256;
 const ir = @import("ir.zig");
 const yul_bindings = @import("yul_bindings.zig");
 
@@ -295,7 +298,7 @@ pub const YulCodegen = struct {
         try yul_code.appendSlice("    default { revert(0, 0) }\n");
     }
 
-    /// Calculate 4-byte function selector
+    /// Calculate 4-byte function selector using proper keccak256
     ///
     /// Args:
     ///     function: Function to calculate selector for
@@ -322,18 +325,11 @@ pub const YulCodegen = struct {
 
         try signature.appendSlice(")");
 
-        // Calculate hash of signature (simplified until we add proper keccak256)
-        const signature_bytes = signature.items;
-        var hash: u64 = 0;
+        // Calculate keccak256 hash of signature
+        const hash = try self.keccak256Hash(signature.items);
 
-        // Use a better hash function (FNV-1a variant)
-        for (signature_bytes) |byte| {
-            hash = hash ^ byte;
-            hash = hash *% 0x100000001b3; // FNV-1a prime
-        }
-
-        // Take first 4 bytes as selector
-        return @truncate(hash);
+        // Function selector is first 4 bytes of keccak256 hash
+        return std.mem.readInt(u32, hash[0..4], .big);
     }
 
     /// Convert Ora types to canonical EVM types for function signatures
@@ -790,7 +786,7 @@ pub const YulCodegen = struct {
             try arg_vars.append(arg_var);
         }
 
-        // Calculate event signature hash (simplified)
+        // Calculate event signature hash using proper keccak256
         const event_hash = try self.calculateEventSignatureHash(event);
 
         // Store event data in memory
@@ -807,7 +803,10 @@ pub const YulCodegen = struct {
 
         // Emit log (using log1 with topic for now)
         const data_size = arg_vars.items.len * 32;
-        try yul_code.writer().print("      log1({s}, {}, 0x{x:0>64})\n", .{ data_ptr, data_size, event_hash });
+        // Convert hash bytes to hex string for log1 topic
+        var hex_hash: [64]u8 = undefined;
+        _ = std.fmt.bufPrint(&hex_hash, "{}", .{std.fmt.fmtSliceHexLower(&event_hash)}) catch unreachable;
+        try yul_code.writer().print("      log1({s}, {}, 0x{s})\n", .{ data_ptr, data_size, hex_hash });
 
         // Return a dummy result
         const result_var = try std.fmt.allocPrint(self.allocator, "temp_{}", .{self.var_counter});
@@ -817,15 +816,36 @@ pub const YulCodegen = struct {
         return result_var;
     }
 
-    /// Calculate event signature hash (simplified)
-    fn calculateEventSignatureHash(self: *Self, event: *const ir.Event) !u64 {
-        _ = self;
-        // Simplified event signature hash - in real implementation would use keccak256
-        var hash: u64 = 0;
-        for (event.name) |byte| {
-            hash = hash *% 31 +% byte;
+    /// Calculate event signature hash using proper keccak256
+    fn calculateEventSignatureHash(self: *Self, event: *const ir.Event) ![32]u8 {
+        var signature = ArrayList(u8).init(self.allocator);
+        defer signature.deinit();
+
+        // Build canonical signature: "EventName(type1,type2,...)"
+        try signature.appendSlice(event.name);
+        try signature.appendSlice("(");
+
+        for (event.fields, 0..) |field, i| {
+            if (i > 0) try signature.appendSlice(",");
+
+            // Convert field type to EVM canonical form
+            const evm_type = switch (field.type) {
+                .primitive => |prim| switch (prim) {
+                    .u256 => "uint256",
+                    .bool => "bool",
+                    .address => "address",
+                    .string => "string",
+                    else => "uint256", // Default fallback for other primitive types
+                },
+                else => "uint256", // Default fallback for complex types
+            };
+            try signature.appendSlice(evm_type);
         }
-        return hash;
+
+        try signature.appendSlice(")");
+
+        // Calculate full keccak256 hash for event signature
+        return try self.keccak256Hash(signature.items);
     }
 
     /// Generate index expression (array/mapping access)
@@ -841,8 +861,16 @@ pub const YulCodegen = struct {
 
         // Check if target is a storage variable (target_var should be a slot number)
         if (std.fmt.parseInt(u32, target_var, 10)) |slot| {
-            // Mapping access: hash(key, slot) for storage location
-            try yul_code.writer().print("      let {s} := sload(keccak256({s}, {}))\n", .{ result_var, index_var, slot });
+            // Mapping access: proper EVM mapping slot calculation
+            // Store key and slot in memory, then calculate keccak256
+            const temp_ptr = try std.fmt.allocPrint(self.allocator, "temp_ptr_{}", .{self.var_counter});
+            defer self.allocator.free(temp_ptr);
+            self.var_counter += 1;
+
+            try yul_code.writer().print("      let {s} := mload(0x40)\n", .{temp_ptr});
+            try yul_code.writer().print("      mstore({s}, {s})\n", .{ temp_ptr, index_var });
+            try yul_code.writer().print("      mstore(add({s}, 0x20), {})\n", .{ temp_ptr, slot });
+            try yul_code.writer().print("      let {s} := sload(keccak256({s}, 0x40))\n", .{ result_var, temp_ptr });
         } else |_| {
             // Fallback: treat as regular array access
             try yul_code.writer().print("      let {s} := sload(add({s}, {s}))\n", .{ result_var, target_var, index_var });
@@ -1466,6 +1494,40 @@ pub const YulCodegen = struct {
         }
 
         return line;
+    }
+
+    /// Calculate proper keccak256 hash
+    fn keccak256Hash(self: *Self, data: []const u8) ![32]u8 {
+        _ = self;
+        var hasher = keccak256.init(.{});
+        hasher.update(data);
+        var hash: [32]u8 = undefined;
+        hasher.final(&hash);
+        return hash;
+    }
+
+    /// Calculate storage slot for mapping using proper keccak256
+    fn calculateMappingSlot(self: *Self, key_data: []const u8, slot: u32) ![32]u8 {
+        var input = ArrayList(u8).init(self.allocator);
+        defer input.deinit();
+
+        // Append key data (32 bytes, padded if needed)
+        if (key_data.len >= 32) {
+            try input.appendSlice(key_data[0..32]);
+        } else {
+            // Pad with zeros to 32 bytes
+            var padded_key: [32]u8 = std.mem.zeroes([32]u8);
+            std.mem.copy(u8, padded_key[32 - key_data.len ..], key_data);
+            try input.appendSlice(&padded_key);
+        }
+
+        // Append slot number (32 bytes, big-endian)
+        var slot_bytes: [32]u8 = std.mem.zeroes([32]u8);
+        std.mem.writeInt(u32, slot_bytes[28..32], slot, .big);
+        try input.appendSlice(&slot_bytes);
+
+        // Calculate keccak256(key || slot)
+        return try self.keccak256Hash(input.items);
     }
 };
 
