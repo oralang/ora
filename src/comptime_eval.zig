@@ -27,6 +27,12 @@ pub const ComptimeValue = union(enum) {
     u64: u64,
     u128: u128,
     u256: [32]u8, // Store u256 as byte array
+    i8: i8,
+    i16: i16,
+    i32: i32,
+    i64: i64,
+    i128: i128,
+    i256: [32]u8, // Store i256 as byte array (two's complement)
     string: []const u8,
     address: [20]u8, // Ethereum address
 
@@ -43,6 +49,12 @@ pub const ComptimeValue = union(enum) {
             .u64 => |v| try std.fmt.allocPrint(allocator, "{}", .{v}),
             .u128 => |v| try std.fmt.allocPrint(allocator, "{}", .{v}),
             .u256 => |bytes| try std.fmt.allocPrint(allocator, "0x{}", .{std.fmt.fmtSliceHexUpper(&bytes)}),
+            .i8 => |v| try std.fmt.allocPrint(allocator, "{}", .{v}),
+            .i16 => |v| try std.fmt.allocPrint(allocator, "{}", .{v}),
+            .i32 => |v| try std.fmt.allocPrint(allocator, "{}", .{v}),
+            .i64 => |v| try std.fmt.allocPrint(allocator, "{}", .{v}),
+            .i128 => |v| try std.fmt.allocPrint(allocator, "{}", .{v}),
+            .i256 => |bytes| try std.fmt.allocPrint(allocator, "0x{}", .{std.fmt.fmtSliceHexUpper(&bytes)}),
             .string => |s| try allocator.dupe(u8, s),
             .address => |addr| try std.fmt.allocPrint(allocator, "0x{}", .{std.fmt.fmtSliceHexUpper(&addr)}),
             .undefined_value => "undefined",
@@ -78,6 +90,30 @@ pub const ComptimeValue = union(enum) {
             },
             .u256 => |a| switch (other) {
                 .u256 => |b| std.mem.eql(u8, &a, &b),
+                else => false,
+            },
+            .i8 => |a| switch (other) {
+                .i8 => |b| a == b,
+                else => false,
+            },
+            .i16 => |a| switch (other) {
+                .i16 => |b| a == b,
+                else => false,
+            },
+            .i32 => |a| switch (other) {
+                .i32 => |b| a == b,
+                else => false,
+            },
+            .i64 => |a| switch (other) {
+                .i64 => |b| a == b,
+                else => false,
+            },
+            .i128 => |a| switch (other) {
+                .i128 => |b| a == b,
+                else => false,
+            },
+            .i256 => |a| switch (other) {
+                .i256 => |b| std.mem.eql(u8, &a, &b),
                 else => false,
             },
             .string => |a| switch (other) {
@@ -164,7 +200,42 @@ pub const ComptimeEvaluator = struct {
     fn parseIntegerLiteral(self: *ComptimeEvaluator, value_str: []const u8) ComptimeError!ComptimeValue {
         _ = self;
 
-        // Try parsing as different integer types, starting with smallest
+        // Check if it's a negative number
+        const is_negative = value_str.len > 0 and value_str[0] == '-';
+        const abs_str = if (is_negative) value_str[1..] else value_str;
+
+        // Try parsing as different signed integer types first (if negative)
+        if (is_negative) {
+            if (std.fmt.parseInt(i8, abs_str, 10)) |val| {
+                return ComptimeValue{ .i8 = -val };
+            } else |_| {}
+
+            if (std.fmt.parseInt(i16, abs_str, 10)) |val| {
+                return ComptimeValue{ .i16 = -val };
+            } else |_| {}
+
+            if (std.fmt.parseInt(i32, abs_str, 10)) |val| {
+                return ComptimeValue{ .i32 = -val };
+            } else |_| {}
+
+            if (std.fmt.parseInt(i64, abs_str, 10)) |val| {
+                return ComptimeValue{ .i64 = -val };
+            } else |_| {}
+
+            if (std.fmt.parseInt(i128, abs_str, 10)) |val| {
+                return ComptimeValue{ .i128 = -val };
+            } else |_| {}
+
+            // Default to i256 for very large negative numbers
+            var bytes: [32]u8 = [_]u8{0} ** 32;
+            const hash = std.hash.CityHash32.hash(abs_str);
+            std.mem.writeInt(u32, bytes[28..32], hash, .big);
+            // Set sign bit for negative numbers
+            bytes[0] |= 0x80;
+            return ComptimeValue{ .i256 = bytes };
+        }
+
+        // Try parsing as different unsigned integer types
         if (std.fmt.parseInt(u8, value_str, 10)) |val| {
             return ComptimeValue{ .u8 = val };
         } else |_| {}
@@ -413,6 +484,18 @@ pub const ComptimeEvaluator = struct {
                 }
                 return v[31] == 1;
             },
+            .i8 => |v| v == 1,
+            .i16 => |v| v == 1,
+            .i32 => |v| v == 1,
+            .i64 => |v| v == 1,
+            .i128 => |v| v == 1,
+            .i256 => |v| {
+                // Check if i256 equals 1
+                for (v[0..31]) |byte| {
+                    if (byte != 0) return false;
+                }
+                return v[31] == 1;
+            },
             else => false,
         };
     }
@@ -427,6 +510,12 @@ pub const ComptimeEvaluator = struct {
             .u64 => ComptimeValue{ .u64 = 0 },
             .u128 => ComptimeValue{ .u128 = 0 },
             .u256 => ComptimeValue{ .u256 = [_]u8{0} ** 32 },
+            .i8 => ComptimeValue{ .i8 = 0 },
+            .i16 => ComptimeValue{ .i16 = 0 },
+            .i32 => ComptimeValue{ .i32 = 0 },
+            .i64 => ComptimeValue{ .i64 = 0 },
+            .i128 => ComptimeValue{ .i128 = 0 },
+            .i256 => ComptimeValue{ .i256 = [_]u8{0} ** 32 },
             .bool => ComptimeValue{ .bool = false },
             else => value, // Return original for non-numeric types
         };
@@ -462,6 +551,30 @@ pub const ComptimeEvaluator = struct {
                 .u256 => |b| ComptimeValue{ .u256 = try self.addU256(a, b) },
                 else => ComptimeError.TypeMismatch,
             },
+            .i8 => |a| switch (promoted.right) {
+                .i8 => |b| ComptimeValue{ .i8 = a +% b },
+                else => ComptimeError.TypeMismatch,
+            },
+            .i16 => |a| switch (promoted.right) {
+                .i16 => |b| ComptimeValue{ .i16 = a +% b },
+                else => ComptimeError.TypeMismatch,
+            },
+            .i32 => |a| switch (promoted.right) {
+                .i32 => |b| ComptimeValue{ .i32 = a +% b },
+                else => ComptimeError.TypeMismatch,
+            },
+            .i64 => |a| switch (promoted.right) {
+                .i64 => |b| ComptimeValue{ .i64 = a +% b },
+                else => ComptimeError.TypeMismatch,
+            },
+            .i128 => |a| switch (promoted.right) {
+                .i128 => |b| ComptimeValue{ .i128 = a +% b },
+                else => ComptimeError.TypeMismatch,
+            },
+            .i256 => |a| switch (promoted.right) {
+                .i256 => |b| ComptimeValue{ .i256 = try self.addI256(a, b) },
+                else => ComptimeError.TypeMismatch,
+            },
             else => ComptimeError.InvalidOperation,
         };
     }
@@ -491,6 +604,30 @@ pub const ComptimeEvaluator = struct {
             },
             .u256 => |a| switch (promoted.right) {
                 .u256 => |b| ComptimeValue{ .u256 = try self.subtractU256(a, b) },
+                else => ComptimeError.TypeMismatch,
+            },
+            .i8 => |a| switch (promoted.right) {
+                .i8 => |b| ComptimeValue{ .i8 = a -% b },
+                else => ComptimeError.TypeMismatch,
+            },
+            .i16 => |a| switch (promoted.right) {
+                .i16 => |b| ComptimeValue{ .i16 = a -% b },
+                else => ComptimeError.TypeMismatch,
+            },
+            .i32 => |a| switch (promoted.right) {
+                .i32 => |b| ComptimeValue{ .i32 = a -% b },
+                else => ComptimeError.TypeMismatch,
+            },
+            .i64 => |a| switch (promoted.right) {
+                .i64 => |b| ComptimeValue{ .i64 = a -% b },
+                else => ComptimeError.TypeMismatch,
+            },
+            .i128 => |a| switch (promoted.right) {
+                .i128 => |b| ComptimeValue{ .i128 = a -% b },
+                else => ComptimeError.TypeMismatch,
+            },
+            .i256 => |a| switch (promoted.right) {
+                .i256 => |b| ComptimeValue{ .i256 = try self.subtractI256(a, b) },
                 else => ComptimeError.TypeMismatch,
             },
             else => ComptimeError.InvalidOperation,
@@ -524,6 +661,30 @@ pub const ComptimeEvaluator = struct {
                 .u256 => |b| ComptimeValue{ .u256 = try self.multiplyU256(a, b) },
                 else => ComptimeError.TypeMismatch,
             },
+            .i8 => |a| switch (promoted.right) {
+                .i8 => |b| ComptimeValue{ .i8 = a *% b },
+                else => ComptimeError.TypeMismatch,
+            },
+            .i16 => |a| switch (promoted.right) {
+                .i16 => |b| ComptimeValue{ .i16 = a *% b },
+                else => ComptimeError.TypeMismatch,
+            },
+            .i32 => |a| switch (promoted.right) {
+                .i32 => |b| ComptimeValue{ .i32 = a *% b },
+                else => ComptimeError.TypeMismatch,
+            },
+            .i64 => |a| switch (promoted.right) {
+                .i64 => |b| ComptimeValue{ .i64 = a *% b },
+                else => ComptimeError.TypeMismatch,
+            },
+            .i128 => |a| switch (promoted.right) {
+                .i128 => |b| ComptimeValue{ .i128 = a *% b },
+                else => ComptimeError.TypeMismatch,
+            },
+            .i256 => |a| switch (promoted.right) {
+                .i256 => |b| ComptimeValue{ .i256 = try self.multiplyI256(a, b) },
+                else => ComptimeError.TypeMismatch,
+            },
             else => ComptimeError.InvalidOperation,
         };
     }
@@ -551,6 +712,26 @@ pub const ComptimeEvaluator = struct {
                 .u128 => |b| if (b == 0) ComptimeError.DivisionByZero else ComptimeValue{ .u128 = a / b },
                 else => ComptimeError.TypeMismatch,
             },
+            .i8 => |a| switch (right) {
+                .i8 => |b| if (b == 0) ComptimeError.DivisionByZero else ComptimeValue{ .i8 = @divTrunc(a, b) },
+                else => ComptimeError.TypeMismatch,
+            },
+            .i16 => |a| switch (right) {
+                .i16 => |b| if (b == 0) ComptimeError.DivisionByZero else ComptimeValue{ .i16 = @divTrunc(a, b) },
+                else => ComptimeError.TypeMismatch,
+            },
+            .i32 => |a| switch (right) {
+                .i32 => |b| if (b == 0) ComptimeError.DivisionByZero else ComptimeValue{ .i32 = @divTrunc(a, b) },
+                else => ComptimeError.TypeMismatch,
+            },
+            .i64 => |a| switch (right) {
+                .i64 => |b| if (b == 0) ComptimeError.DivisionByZero else ComptimeValue{ .i64 = @divTrunc(a, b) },
+                else => ComptimeError.TypeMismatch,
+            },
+            .i128 => |a| switch (right) {
+                .i128 => |b| if (b == 0) ComptimeError.DivisionByZero else ComptimeValue{ .i128 = @divTrunc(a, b) },
+                else => ComptimeError.TypeMismatch,
+            },
             else => ComptimeError.InvalidOperation,
         };
     }
@@ -576,6 +757,26 @@ pub const ComptimeEvaluator = struct {
             },
             .u128 => |a| switch (right) {
                 .u128 => |b| if (b == 0) ComptimeError.DivisionByZero else ComptimeValue{ .u128 = a % b },
+                else => ComptimeError.TypeMismatch,
+            },
+            .i8 => |a| switch (right) {
+                .i8 => |b| if (b == 0) ComptimeError.DivisionByZero else ComptimeValue{ .i8 = @rem(a, b) },
+                else => ComptimeError.TypeMismatch,
+            },
+            .i16 => |a| switch (right) {
+                .i16 => |b| if (b == 0) ComptimeError.DivisionByZero else ComptimeValue{ .i16 = @rem(a, b) },
+                else => ComptimeError.TypeMismatch,
+            },
+            .i32 => |a| switch (right) {
+                .i32 => |b| if (b == 0) ComptimeError.DivisionByZero else ComptimeValue{ .i32 = @rem(a, b) },
+                else => ComptimeError.TypeMismatch,
+            },
+            .i64 => |a| switch (right) {
+                .i64 => |b| if (b == 0) ComptimeError.DivisionByZero else ComptimeValue{ .i64 = @rem(a, b) },
+                else => ComptimeError.TypeMismatch,
+            },
+            .i128 => |a| switch (right) {
+                .i128 => |b| if (b == 0) ComptimeError.DivisionByZero else ComptimeValue{ .i128 = @rem(a, b) },
                 else => ComptimeError.TypeMismatch,
             },
             else => ComptimeError.InvalidOperation,
@@ -624,6 +825,51 @@ pub const ComptimeEvaluator = struct {
             },
             .u128 => |a| switch (right) {
                 .u128 => |b| switch (op) {
+                    .less => a < b,
+                    .less_equal => a <= b,
+                    .greater => a > b,
+                    .greater_equal => a >= b,
+                },
+                else => return ComptimeError.TypeMismatch,
+            },
+            .i8 => |a| switch (right) {
+                .i8 => |b| switch (op) {
+                    .less => a < b,
+                    .less_equal => a <= b,
+                    .greater => a > b,
+                    .greater_equal => a >= b,
+                },
+                else => return ComptimeError.TypeMismatch,
+            },
+            .i16 => |a| switch (right) {
+                .i16 => |b| switch (op) {
+                    .less => a < b,
+                    .less_equal => a <= b,
+                    .greater => a > b,
+                    .greater_equal => a >= b,
+                },
+                else => return ComptimeError.TypeMismatch,
+            },
+            .i32 => |a| switch (right) {
+                .i32 => |b| switch (op) {
+                    .less => a < b,
+                    .less_equal => a <= b,
+                    .greater => a > b,
+                    .greater_equal => a >= b,
+                },
+                else => return ComptimeError.TypeMismatch,
+            },
+            .i64 => |a| switch (right) {
+                .i64 => |b| switch (op) {
+                    .less => a < b,
+                    .less_equal => a <= b,
+                    .greater => a > b,
+                    .greater_equal => a >= b,
+                },
+                else => return ComptimeError.TypeMismatch,
+            },
+            .i128 => |a| switch (right) {
+                .i128 => |b| switch (op) {
                     .less => a < b,
                     .less_equal => a <= b,
                     .greater => a > b,
@@ -824,6 +1070,11 @@ pub const ComptimeEvaluator = struct {
             .u32 => |a| ComptimeValue{ .u32 = -%a },
             .u64 => |a| ComptimeValue{ .u64 = -%a },
             .u128 => |a| ComptimeValue{ .u128 = -%a },
+            .i8 => |a| ComptimeValue{ .i8 = -a },
+            .i16 => |a| ComptimeValue{ .i16 = -a },
+            .i32 => |a| ComptimeValue{ .i32 = -a },
+            .i64 => |a| ComptimeValue{ .i64 = -a },
+            .i128 => |a| ComptimeValue{ .i128 = -a },
             else => ComptimeError.InvalidOperation,
         };
     }
@@ -909,6 +1160,87 @@ pub const ComptimeEvaluator = struct {
         return true;
     }
 
+    /// I256 arithmetic operations (two's complement signed arithmetic)
+    fn addI256(self: *ComptimeEvaluator, a: [32]u8, b: [32]u8) ComptimeError![32]u8 {
+        _ = self;
+        var result: [32]u8 = [_]u8{0} ** 32;
+        var carry: u16 = 0;
+
+        // Add from least significant byte
+        var i: usize = 31;
+        while (i < 32) {
+            const sum = @as(u16, a[i]) + @as(u16, b[i]) + carry;
+            result[i] = @truncate(sum);
+            carry = sum >> 8;
+            if (i == 0) break;
+            i -= 1;
+        }
+
+        // Check for overflow (simplified - in practice would need sign bit checking)
+        if (carry != 0) {
+            return ComptimeError.IntegerOverflow;
+        }
+
+        return result;
+    }
+
+    fn subtractI256(self: *ComptimeEvaluator, a: [32]u8, b: [32]u8) ComptimeError![32]u8 {
+        _ = self;
+        var result: [32]u8 = [_]u8{0} ** 32;
+        var borrow: i16 = 0;
+
+        // Subtract from least significant byte
+        var i: usize = 31;
+        while (i < 32) {
+            const diff = @as(i16, a[i]) - @as(i16, b[i]) - borrow;
+            if (diff < 0) {
+                result[i] = @intCast(diff + 256);
+                borrow = 1;
+            } else {
+                result[i] = @intCast(diff);
+                borrow = 0;
+            }
+            if (i == 0) break;
+            i -= 1;
+        }
+
+        // Check for underflow (simplified)
+        if (borrow != 0) {
+            return ComptimeError.IntegerUnderflow;
+        }
+
+        return result;
+    }
+
+    fn multiplyI256(self: *ComptimeEvaluator, a: [32]u8, b: [32]u8) ComptimeError![32]u8 {
+        _ = self;
+        // Simplified multiplication for compile-time evaluation
+        // In practice, you'd want a more sophisticated algorithm
+        var result: [32]u8 = [_]u8{0} ** 32;
+
+        // Simple byte-by-byte multiplication (may overflow)
+        var carry: u32 = 0;
+        for (0..32) |i| {
+            const prod = @as(u32, a[31 - i]) * @as(u32, b[31 - i]) + carry;
+            result[31 - i] = @truncate(prod);
+            carry = prod >> 8;
+        }
+
+        if (carry != 0) {
+            return ComptimeError.IntegerOverflow;
+        }
+
+        return result;
+    }
+
+    fn isZeroI256(self: *ComptimeEvaluator, value: [32]u8) bool {
+        _ = self;
+        for (value) |byte| {
+            if (byte != 0) return false;
+        }
+        return true;
+    }
+
     /// Type promotion for mixed arithmetic operations
     fn promoteTypes(self: *ComptimeEvaluator, left: ComptimeValue, right: ComptimeValue) ComptimeError!struct { left: ComptimeValue, right: ComptimeValue } {
         // If types are the same, no promotion needed
@@ -924,6 +1256,12 @@ pub const ComptimeEvaluator = struct {
                 .u64 => |_| .{ .left = ComptimeValue{ .u64 = a }, .right = right },
                 .u128 => |_| .{ .left = ComptimeValue{ .u128 = a }, .right = right },
                 .u256 => |_| .{ .left = self.promoteToU256(ComptimeValue{ .u8 = a }), .right = right },
+                .i8 => |_| .{ .left = ComptimeValue{ .i8 = @intCast(a) }, .right = right },
+                .i16 => |_| .{ .left = ComptimeValue{ .i16 = @intCast(a) }, .right = right },
+                .i32 => |_| .{ .left = ComptimeValue{ .i32 = a }, .right = right },
+                .i64 => |_| .{ .left = ComptimeValue{ .i64 = a }, .right = right },
+                .i128 => |_| .{ .left = ComptimeValue{ .i128 = a }, .right = right },
+                .i256 => |_| .{ .left = self.promoteToI256(ComptimeValue{ .u8 = a }), .right = right },
                 else => ComptimeError.TypeMismatch,
             },
             .u16 => |a| switch (right) {
@@ -932,6 +1270,12 @@ pub const ComptimeEvaluator = struct {
                 .u64 => |_| .{ .left = ComptimeValue{ .u64 = a }, .right = right },
                 .u128 => |_| .{ .left = ComptimeValue{ .u128 = a }, .right = right },
                 .u256 => |_| .{ .left = self.promoteToU256(ComptimeValue{ .u16 = a }), .right = right },
+                .i8 => |_| .{ .left = ComptimeValue{ .i8 = @intCast(a) }, .right = right },
+                .i16 => |_| .{ .left = ComptimeValue{ .i16 = @intCast(a) }, .right = right },
+                .i32 => |_| .{ .left = ComptimeValue{ .i32 = a }, .right = right },
+                .i64 => |_| .{ .left = ComptimeValue{ .i64 = a }, .right = right },
+                .i128 => |_| .{ .left = ComptimeValue{ .i128 = a }, .right = right },
+                .i256 => |_| .{ .left = self.promoteToI256(ComptimeValue{ .u16 = a }), .right = right },
                 else => ComptimeError.TypeMismatch,
             },
             .u32 => |a| switch (right) {
@@ -940,6 +1284,12 @@ pub const ComptimeEvaluator = struct {
                 .u64 => |_| .{ .left = ComptimeValue{ .u64 = a }, .right = right },
                 .u128 => |_| .{ .left = ComptimeValue{ .u128 = a }, .right = right },
                 .u256 => |_| .{ .left = self.promoteToU256(ComptimeValue{ .u32 = a }), .right = right },
+                .i8 => |_| .{ .left = ComptimeValue{ .i8 = @intCast(a) }, .right = right },
+                .i16 => |_| .{ .left = ComptimeValue{ .i16 = @intCast(a) }, .right = right },
+                .i32 => |_| .{ .left = ComptimeValue{ .i32 = @intCast(a) }, .right = right },
+                .i64 => |_| .{ .left = ComptimeValue{ .i64 = @intCast(a) }, .right = right },
+                .i128 => |_| .{ .left = ComptimeValue{ .i128 = @intCast(a) }, .right = right },
+                .i256 => |_| .{ .left = self.promoteToI256(ComptimeValue{ .u32 = a }), .right = right },
                 else => ComptimeError.TypeMismatch,
             },
             .u64 => |a| switch (right) {
@@ -948,6 +1298,12 @@ pub const ComptimeEvaluator = struct {
                 .u32 => |b| .{ .left = left, .right = ComptimeValue{ .u64 = b } },
                 .u128 => |_| .{ .left = ComptimeValue{ .u128 = a }, .right = right },
                 .u256 => |_| .{ .left = self.promoteToU256(ComptimeValue{ .u64 = a }), .right = right },
+                .i8 => |_| .{ .left = ComptimeValue{ .i8 = @intCast(a) }, .right = right },
+                .i16 => |_| .{ .left = ComptimeValue{ .i16 = @intCast(a) }, .right = right },
+                .i32 => |_| .{ .left = ComptimeValue{ .i32 = @intCast(a) }, .right = right },
+                .i64 => |_| .{ .left = ComptimeValue{ .i64 = @intCast(a) }, .right = right },
+                .i128 => |_| .{ .left = ComptimeValue{ .i128 = @intCast(a) }, .right = right },
+                .i256 => |_| .{ .left = self.promoteToI256(ComptimeValue{ .u64 = a }), .right = right },
                 else => ComptimeError.TypeMismatch,
             },
             .u128 => |a| switch (right) {
@@ -956,10 +1312,92 @@ pub const ComptimeEvaluator = struct {
                 .u32 => |b| .{ .left = left, .right = ComptimeValue{ .u128 = b } },
                 .u64 => |b| .{ .left = left, .right = ComptimeValue{ .u128 = b } },
                 .u256 => |_| .{ .left = self.promoteToU256(ComptimeValue{ .u128 = a }), .right = right },
+                .i8 => |_| .{ .left = ComptimeValue{ .i8 = @intCast(a) }, .right = right },
+                .i16 => |_| .{ .left = ComptimeValue{ .i16 = @intCast(a) }, .right = right },
+                .i32 => |_| .{ .left = ComptimeValue{ .i32 = @intCast(a) }, .right = right },
+                .i64 => |_| .{ .left = ComptimeValue{ .i64 = @intCast(a) }, .right = right },
+                .i128 => |_| .{ .left = ComptimeValue{ .i128 = @intCast(a) }, .right = right },
+                .i256 => |_| .{ .left = self.promoteToI256(ComptimeValue{ .u128 = a }), .right = right },
                 else => ComptimeError.TypeMismatch,
             },
             .u256 => |_| switch (right) {
                 .u8, .u16, .u32, .u64, .u128 => .{ .left = left, .right = self.promoteToU256(right) },
+                .i8, .i16, .i32, .i64, .i128, .i256 => .{ .left = self.promoteToI256(left), .right = self.promoteToI256(right) },
+                else => ComptimeError.TypeMismatch,
+            },
+            .i8 => |a| switch (right) {
+                .u8 => |b| .{ .left = left, .right = ComptimeValue{ .i8 = @intCast(b) } },
+                .u16 => |b| .{ .left = left, .right = ComptimeValue{ .i16 = @intCast(b) } },
+                .u32 => |b| .{ .left = left, .right = ComptimeValue{ .i32 = @intCast(b) } },
+                .u64 => |b| .{ .left = left, .right = ComptimeValue{ .i64 = @intCast(b) } },
+                .u128 => |b| .{ .left = left, .right = ComptimeValue{ .i128 = @intCast(b) } },
+                .u256 => |_| .{ .left = self.promoteToI256(left), .right = self.promoteToI256(right) },
+                .i16 => |_| .{ .left = ComptimeValue{ .i16 = @intCast(a) }, .right = right },
+                .i32 => |_| .{ .left = ComptimeValue{ .i32 = @intCast(a) }, .right = right },
+                .i64 => |_| .{ .left = ComptimeValue{ .i64 = @intCast(a) }, .right = right },
+                .i128 => |_| .{ .left = ComptimeValue{ .i128 = @intCast(a) }, .right = right },
+                .i256 => |_| .{ .left = self.promoteToI256(ComptimeValue{ .i8 = a }), .right = right },
+                else => ComptimeError.TypeMismatch,
+            },
+            .i16 => |a| switch (right) {
+                .u8 => |b| .{ .left = left, .right = ComptimeValue{ .i16 = b } },
+                .u16 => |b| .{ .left = left, .right = ComptimeValue{ .i16 = @intCast(b) } },
+                .u32 => |b| .{ .left = left, .right = ComptimeValue{ .i32 = @intCast(b) } },
+                .u64 => |b| .{ .left = left, .right = ComptimeValue{ .i64 = @intCast(b) } },
+                .u128 => |b| .{ .left = left, .right = ComptimeValue{ .i128 = @intCast(b) } },
+                .u256 => |_| .{ .left = self.promoteToI256(left), .right = self.promoteToI256(right) },
+                .i8 => |b| .{ .left = left, .right = ComptimeValue{ .i16 = b } },
+                .i32 => |_| .{ .left = ComptimeValue{ .i32 = @intCast(a) }, .right = right },
+                .i64 => |_| .{ .left = ComptimeValue{ .i64 = @intCast(a) }, .right = right },
+                .i128 => |_| .{ .left = ComptimeValue{ .i128 = @intCast(a) }, .right = right },
+                .i256 => |_| .{ .left = self.promoteToI256(ComptimeValue{ .i16 = a }), .right = right },
+                else => ComptimeError.TypeMismatch,
+            },
+            .i32 => |a| switch (right) {
+                .u8 => |b| .{ .left = left, .right = ComptimeValue{ .i32 = b } },
+                .u16 => |b| .{ .left = left, .right = ComptimeValue{ .i32 = b } },
+                .u32 => |b| .{ .left = left, .right = ComptimeValue{ .i32 = @intCast(b) } },
+                .u64 => |b| .{ .left = left, .right = ComptimeValue{ .i64 = @intCast(b) } },
+                .u128 => |b| .{ .left = left, .right = ComptimeValue{ .i128 = @intCast(b) } },
+                .u256 => |_| .{ .left = self.promoteToI256(left), .right = self.promoteToI256(right) },
+                .i8 => |b| .{ .left = left, .right = ComptimeValue{ .i32 = b } },
+                .i16 => |b| .{ .left = left, .right = ComptimeValue{ .i32 = b } },
+                .i64 => |_| .{ .left = ComptimeValue{ .i64 = a }, .right = right },
+                .i128 => |_| .{ .left = ComptimeValue{ .i128 = a }, .right = right },
+                .i256 => |_| .{ .left = self.promoteToI256(ComptimeValue{ .i32 = a }), .right = right },
+                else => ComptimeError.TypeMismatch,
+            },
+            .i64 => |a| switch (right) {
+                .u8 => |b| .{ .left = left, .right = ComptimeValue{ .i64 = b } },
+                .u16 => |b| .{ .left = left, .right = ComptimeValue{ .i64 = b } },
+                .u32 => |b| .{ .left = left, .right = ComptimeValue{ .i64 = b } },
+                .u64 => |b| .{ .left = left, .right = ComptimeValue{ .i64 = @intCast(b) } },
+                .u128 => |b| .{ .left = left, .right = ComptimeValue{ .i128 = @intCast(b) } },
+                .u256 => |_| .{ .left = self.promoteToI256(left), .right = self.promoteToI256(right) },
+                .i8 => |b| .{ .left = left, .right = ComptimeValue{ .i64 = b } },
+                .i16 => |b| .{ .left = left, .right = ComptimeValue{ .i64 = b } },
+                .i32 => |b| .{ .left = left, .right = ComptimeValue{ .i64 = b } },
+                .i128 => |_| .{ .left = ComptimeValue{ .i128 = a }, .right = right },
+                .i256 => |_| .{ .left = self.promoteToI256(ComptimeValue{ .i64 = a }), .right = right },
+                else => ComptimeError.TypeMismatch,
+            },
+            .i128 => |a| switch (right) {
+                .u8 => |b| .{ .left = left, .right = ComptimeValue{ .i128 = b } },
+                .u16 => |b| .{ .left = left, .right = ComptimeValue{ .i128 = b } },
+                .u32 => |b| .{ .left = left, .right = ComptimeValue{ .i128 = b } },
+                .u64 => |b| .{ .left = left, .right = ComptimeValue{ .i128 = b } },
+                .u128 => |b| .{ .left = left, .right = ComptimeValue{ .i128 = @intCast(b) } },
+                .u256 => |_| .{ .left = self.promoteToI256(left), .right = self.promoteToI256(right) },
+                .i8 => |b| .{ .left = left, .right = ComptimeValue{ .i128 = b } },
+                .i16 => |b| .{ .left = left, .right = ComptimeValue{ .i128 = b } },
+                .i32 => |b| .{ .left = left, .right = ComptimeValue{ .i128 = b } },
+                .i64 => |b| .{ .left = left, .right = ComptimeValue{ .i128 = b } },
+                .i256 => |_| .{ .left = self.promoteToI256(ComptimeValue{ .i128 = a }), .right = right },
+                else => ComptimeError.TypeMismatch,
+            },
+            .i256 => |_| switch (right) {
+                .u8, .u16, .u32, .u64, .u128, .u256 => .{ .left = left, .right = self.promoteToI256(right) },
+                .i8, .i16, .i32, .i64, .i128 => .{ .left = left, .right = self.promoteToI256(right) },
                 else => ComptimeError.TypeMismatch,
             },
             else => ComptimeError.TypeMismatch,
@@ -982,6 +1420,30 @@ pub const ComptimeEvaluator = struct {
         }
 
         return ComptimeValue{ .u256 = bytes };
+    }
+
+    /// Promote any integer value to I256
+    fn promoteToI256(self: *ComptimeEvaluator, value: ComptimeValue) ComptimeValue {
+        _ = self;
+        var bytes: [32]u8 = [_]u8{0} ** 32;
+
+        switch (value) {
+            .u8 => |v| bytes[31] = v,
+            .u16 => |v| std.mem.writeInt(u16, bytes[30..32], v, .big),
+            .u32 => |v| std.mem.writeInt(u32, bytes[28..32], v, .big),
+            .u64 => |v| std.mem.writeInt(u64, bytes[24..32], v, .big),
+            .u128 => |v| std.mem.writeInt(u128, bytes[16..32], v, .big),
+            .u256 => |v| return ComptimeValue{ .i256 = v },
+            .i8 => |v| bytes[31] = @bitCast(v),
+            .i16 => |v| std.mem.writeInt(i16, bytes[30..32], v, .big),
+            .i32 => |v| std.mem.writeInt(i32, bytes[28..32], v, .big),
+            .i64 => |v| std.mem.writeInt(i64, bytes[24..32], v, .big),
+            .i128 => |v| std.mem.writeInt(i128, bytes[16..32], v, .big),
+            .i256 => |v| return ComptimeValue{ .i256 = v },
+            else => {}, // Should not happen for integer types
+        }
+
+        return ComptimeValue{ .i256 = bytes };
     }
 
     /// Validate compile-time constant definitions

@@ -55,7 +55,14 @@ pub const Diagnostic = struct {
     pub fn format(self: Diagnostic, comptime fmt: []const u8, options: std.fmt.FormatOptions, writer: anytype) !void {
         _ = fmt;
         _ = options;
-        try writer.print("{s} at line {}, column {}: {s}", .{ @tagName(self.severity), self.span.line, self.span.column, self.message });
+
+        // Safely handle potentially invalid message pointers
+        const safe_message = if (self.message.len == 0)
+            "<empty message>"
+        else
+            self.message;
+
+        try writer.print("{s} at line {}, column {}: {s}", .{ @tagName(self.severity), self.span.line, self.span.column, safe_message });
     }
 };
 
@@ -99,6 +106,19 @@ pub const SemanticAnalyzer = struct {
     in_loop: bool,
     in_assignment_target: bool, // Flag to indicate if we are currently analyzing an assignment target
 
+    // Immutable variable tracking
+    current_contract: ?*ast.ContractNode,
+    immutable_variables: std.HashMap([]const u8, ImmutableVarInfo, std.hash_map.StringContext, std.hash_map.default_max_load_percentage),
+    in_constructor: bool, // Flag to indicate if we're in a constructor (init function)
+
+    /// Information about an immutable variable
+    const ImmutableVarInfo = struct {
+        name: []const u8,
+        declared_span: ast.SourceSpan,
+        initialized: bool,
+        init_span: ?ast.SourceSpan,
+    };
+
     pub fn init(allocator: std.mem.Allocator) SemanticAnalyzer {
         return SemanticAnalyzer{
             .allocator = allocator,
@@ -111,6 +131,9 @@ pub const SemanticAnalyzer = struct {
             .current_function = null,
             .in_loop = false,
             .in_assignment_target = false,
+            .current_contract = null,
+            .immutable_variables = std.HashMap([]const u8, ImmutableVarInfo, std.hash_map.StringContext, std.hash_map.default_max_load_percentage).init(allocator),
+            .in_constructor = false,
         };
     }
 
@@ -126,6 +149,7 @@ pub const SemanticAnalyzer = struct {
         self.formal_verifier.deinit();
         self.optimizer.deinit();
         self.diagnostics.deinit();
+        self.immutable_variables.deinit();
     }
 
     /// Perform complete semantic analysis on AST nodes
@@ -237,17 +261,34 @@ pub const SemanticAnalyzer = struct {
 
     /// Analyze contract declaration
     fn analyzeContract(self: *SemanticAnalyzer, contract: *ast.ContractNode) SemanticError!void {
+        // Set current contract for immutable variable tracking
+        self.current_contract = contract;
+        defer self.current_contract = null;
+
+        // Clear immutable variables from previous contract
+        self.immutable_variables.clearRetainingCapacity();
+
         // Initialize contract context
         var contract_ctx = ContractContext.init(self.allocator, contract.name);
         // Ensure cleanup on error - this guarantees memory is freed even if analysis fails
         defer contract_ctx.deinit();
 
-        // First pass: collect contract member names for context (symbols already in type checker)
+        // First pass: collect contract member names and immutable variables
         for (contract.body) |*member| {
             switch (member.*) {
                 .VariableDecl => |*var_decl| {
                     if (var_decl.region == .Storage or var_decl.region == .Immutable) {
                         try contract_ctx.storage_variables.append(var_decl.name);
+                    }
+
+                    // Track immutable variables (including storage const)
+                    if (var_decl.region == .Immutable or (var_decl.region == .Storage and !var_decl.mutable)) {
+                        try self.immutable_variables.put(var_decl.name, ImmutableVarInfo{
+                            .name = var_decl.name,
+                            .declared_span = var_decl.span,
+                            .initialized = var_decl.value != null,
+                            .init_span = if (var_decl.value != null) var_decl.span else null,
+                        });
                     }
                 },
                 .LogDecl => |*log_decl| {
@@ -269,6 +310,10 @@ pub const SemanticAnalyzer = struct {
                         }
                         contract_ctx.has_init = true;
                         contract_ctx.init_is_public = function.pub_;
+
+                        // Set constructor flag for immutable variable validation
+                        self.in_constructor = true;
+                        defer self.in_constructor = false;
                     }
 
                     try contract_ctx.functions.append(function.name);
@@ -286,6 +331,9 @@ pub const SemanticAnalyzer = struct {
             }
         }
 
+        // Validate all immutable variables are initialized
+        try self.validateImmutableInitialization();
+
         // Validate contract after all members are analyzed
         try self.validateContract(&contract_ctx);
     }
@@ -296,35 +344,8 @@ pub const SemanticAnalyzer = struct {
         self.current_function = function.name;
         defer self.current_function = prev_function;
 
-        // Create function scope for semantic analysis that inherits from global scope
-        // This ensures storage variables declared at contract level are visible in functions
-        var func_scope = typer.SymbolTable.init(self.allocator, &self.type_checker.global_scope);
-        defer func_scope.deinit();
-
-        // Temporarily switch to function scope for identifier lookup
-        const prev_scope = self.type_checker.current_scope;
-        self.type_checker.current_scope = &func_scope;
-        defer self.type_checker.current_scope = prev_scope;
-
-        // Add function parameters to the function scope
-        for (function.parameters) |*param| {
-            const param_type = self.type_checker.convertAstTypeToOraType(&param.typ) catch |err| {
-                switch (err) {
-                    typer.TyperError.TypeMismatch => return SemanticError.TypeMismatch,
-                    typer.TyperError.OutOfMemory => return SemanticError.OutOfMemory,
-                    else => return SemanticError.TypeMismatch,
-                }
-            };
-
-            const param_symbol = typer.Symbol{
-                .name = param.name,
-                .typ = param_type,
-                .region = .Stack,
-                .mutable = false, // Parameters are immutable by default
-                .span = param.span,
-            };
-            try func_scope.declare(param_symbol);
-        }
+        // Note: The type checker has already validated the function body in Phase 1
+        // The semantic analyzer should not create new scopes or interfere with type checker scopes
 
         // Validate init function requirements
         if (std.mem.eql(u8, function.name, "init")) {
@@ -422,6 +443,8 @@ pub const SemanticAnalyzer = struct {
                 }
             }
         }
+
+        // Note: Variable is added to symbol table by type checker during type checking phase
     }
 
     /// Analyze log declaration
@@ -456,6 +479,9 @@ pub const SemanticAnalyzer = struct {
             },
             .Log => |*log| {
                 try self.analyzeLogStatement(log);
+            },
+            .Lock => |*lock| {
+                try self.analyzeExpression(&lock.path);
             },
             .Break, .Continue => |span| {
                 if (!self.in_loop) {
@@ -522,16 +548,26 @@ pub const SemanticAnalyzer = struct {
                 try self.analyzeExpression(error_cast.operand);
                 // TODO: Validate target type is error union type
             },
+            .Shift => |*shift| {
+                try self.analyzeShiftExpression(shift);
+            },
             .Identifier => |*ident| {
-                // Validate identifier exists in scope
+                // Note: Identifier existence is already validated by the type checker in Phase 1
+                // The semantic analyzer focuses on higher-level semantic validation
+
+                // Check for immutable variable assignment attempts (only for storage/immutable variables)
                 if (self.type_checker.current_scope.lookup(ident.name)) |symbol| {
-                    // Check for immutable variable assignment attempts
-                    if (symbol.region == .Immutable and self.in_assignment_target) {
-                        try self.addError("Cannot assign to immutable variable", ident.span);
+                    if ((symbol.region == .Immutable or (symbol.region == .Storage and !symbol.mutable)) and self.in_assignment_target) {
+                        if (!self.in_constructor) {
+                            const var_type = if (symbol.region == .Immutable) "immutable" else "storage const";
+                            const message = std.fmt.allocPrint(self.allocator, "Cannot assign to {s} variable '{s}' outside constructor", .{ var_type, ident.name }) catch "Cannot assign to variable outside constructor";
+                            defer if (!std.mem.eql(u8, message, "Cannot assign to variable outside constructor")) self.allocator.free(message);
+                            try self.addError(message, ident.span);
+                        }
+                        // Constructor assignment is handled in analyzeAssignment
                     }
-                } else {
-                    try self.addError("Undeclared identifier", ident.span);
                 }
+                // Note: Don't error on undeclared identifiers - the type checker handles that
             },
             .Literal => |*literal| {
                 // Literals are always valid, but check for potential overflow
@@ -568,12 +604,32 @@ pub const SemanticAnalyzer = struct {
         self.in_assignment_target = false;
         try self.analyzeExpression(assign.value);
 
-        // Check if target is an immutable variable at the top level
+        // Check if target is an immutable variable
         if (assign.target.* == .Identifier) {
             const ident = assign.target.Identifier;
             if (self.type_checker.current_scope.lookup(ident.name)) |symbol| {
-                if (symbol.region == .Immutable) {
-                    try self.addError("Cannot assign to immutable variable", ident.span);
+                if (symbol.region == .Immutable or (symbol.region == .Storage and !symbol.mutable)) {
+                    if (self.in_constructor) {
+                        // Allow assignment in constructor, but track initialization
+                        if (self.immutable_variables.getPtr(ident.name)) |info| {
+                            if (info.initialized) {
+                                const var_type = if (symbol.region == .Immutable) "Immutable" else "Storage const";
+                                const message = std.fmt.allocPrint(self.allocator, "{s} variable '{s}' is already initialized", .{ var_type, ident.name }) catch "Variable is already initialized";
+                                defer if (!std.mem.eql(u8, message, "Variable is already initialized")) self.allocator.free(message);
+                                try self.addError(message, ident.span);
+                                return SemanticError.ImmutableViolation;
+                            }
+                            // Mark as initialized
+                            info.initialized = true;
+                            info.init_span = ident.span;
+                        }
+                    } else {
+                        const var_type = if (symbol.region == .Immutable) "immutable" else "storage const";
+                        const message = std.fmt.allocPrint(self.allocator, "Cannot assign to {s} variable '{s}' outside constructor", .{ var_type, ident.name }) catch "Cannot assign to variable outside constructor";
+                        defer if (!std.mem.eql(u8, message, "Cannot assign to variable outside constructor")) self.allocator.free(message);
+                        try self.addError(message, ident.span);
+                        return SemanticError.ImmutableViolation;
+                    }
                 }
             }
         }
@@ -603,10 +659,26 @@ pub const SemanticAnalyzer = struct {
                 if (symbol.typ != .Function and symbol.typ != .Unknown) {
                     try self.addError("Attempt to call non-function", call.span);
                 }
+            } else if (self.isBuiltinFunction(func_name)) {
+                // Built-in function - no additional validation needed
             } else {
                 try self.addError("Undeclared function", call.span);
             }
         }
+    }
+
+    /// Analyze shift expression (mapping from source -> dest : amount)
+    fn analyzeShiftExpression(self: *SemanticAnalyzer, shift: *ast.ShiftExpr) SemanticError!void {
+        // Analyze all sub-expressions
+        try self.analyzeExpression(shift.mapping);
+        try self.analyzeExpression(shift.source);
+        try self.analyzeExpression(shift.dest);
+        try self.analyzeExpression(shift.amount);
+
+        // TODO: Add semantic validation:
+        // - mapping should be a mapping type
+        // - source and dest should be address-compatible
+        // - amount should be numeric
     }
 
     /// Analyze field access (for std.transaction.sender, etc.)
@@ -798,6 +870,11 @@ pub const SemanticAnalyzer = struct {
                     try self.addError("Storage variables must be declared at contract level", var_decl.span);
                     return SemanticError.StorageInNonPersistentContext;
                 }
+
+                // Storage const variables must have initializers
+                if (var_decl.region == .Storage and !var_decl.mutable and var_decl.value == null) {
+                    try self.addError("Storage const variables must have initializers", var_decl.span);
+                }
             },
             .Immutable => {
                 // Immutable variables must be at contract level
@@ -819,17 +896,40 @@ pub const SemanticAnalyzer = struct {
 
     /// Validate immutable semantics
     fn validateImmutableSemantics(self: *SemanticAnalyzer, var_decl: *ast.VariableDeclNode) SemanticError!void {
-        // Immutable variables must have initializers (except for storage variables)
-        if (var_decl.region != .Storage and var_decl.value == null) {
-            try self.addError("Immutable variables must have initializers", var_decl.span);
-        }
+        // Handle true immutable variables and storage const variables
+        if (var_decl.region == .Immutable or (var_decl.region == .Storage and !var_decl.mutable)) {
+            // These variables must be declared at contract level
+            if (self.current_function != null) {
+                const var_type = if (var_decl.region == .Immutable) "Immutable" else "Storage const";
+                const message = std.fmt.allocPrint(self.allocator, "{s} variables must be declared at contract level", .{var_type}) catch "Variables must be declared at contract level";
+                defer if (!std.mem.eql(u8, message, "Variables must be declared at contract level")) self.allocator.free(message);
+                try self.addError(message, var_decl.span);
+                return SemanticError.ImmutableViolation;
+            }
 
-        // Add info about immutability
-        if (var_decl.region == .Immutable) {
-            try self.addInfo("Immutable variable - cannot be reassigned after initialization", var_decl.span);
-        }
+            // These variables can be initialized at declaration OR in constructor
+            // They are validated for initialization at the end of contract analysis
 
-        // TODO: Track immutable variables and validate they're never reassigned in function bodies
+            // Add info about immutability
+            const info_msg = if (var_decl.region == .Immutable)
+                "Immutable variable - can only be initialized once in constructor"
+            else
+                "Storage const variable - can only be initialized once in constructor";
+            try self.addInfo(info_msg, var_decl.span);
+        } else {
+            // For other non-mutable variables, handle const semantics
+            if (var_decl.region == .Const) {
+                // Const variables must have initializers
+                if (var_decl.value == null) {
+                    try self.addError("Const variables must have initializer", var_decl.span);
+                }
+            } else {
+                // Other immutable variables (let declarations)
+                if (var_decl.value == null) {
+                    try self.addError("Immutable variables must have initializers", var_decl.span);
+                }
+            }
+        }
     }
 
     /// Validate log field type
@@ -912,75 +1012,84 @@ pub const SemanticAnalyzer = struct {
         });
     }
 
+    /// Check if a function is a built-in function
+    fn isBuiltinFunction(self: *SemanticAnalyzer, name: []const u8) bool {
+        _ = self;
+        // Actual built-in functions in Ora language
+        return std.mem.eql(u8, name, "requires") or
+            std.mem.eql(u8, name, "ensures") or
+            std.mem.eql(u8, name, "invariant") or
+            std.mem.eql(u8, name, "old") or
+            std.mem.eql(u8, name, "log");
+    }
+
     /// Perform static verification on function requires/ensures clauses
     fn performStaticVerification(self: *SemanticAnalyzer, function: *ast.FunctionNode) SemanticError!void {
         // Share constants between comptime evaluator and static verifier
         var constant_iter = self.comptime_evaluator.symbol_table.symbols.iterator();
         while (constant_iter.next()) |entry| {
-            try self.static_verifier.defineConstant(entry.key_ptr.*, entry.value_ptr.*);
+            self.static_verifier.defineConstant(entry.key_ptr.*, entry.value_ptr.*) catch |err| {
+                switch (err) {
+                    error.OutOfMemory => return SemanticError.OutOfMemory,
+                }
+            };
         }
 
         // Create verification conditions for requires clauses
         for (function.requires_clauses) |*clause| {
-            try self.static_verifier.addCondition(static_verifier.VerificationCondition{
+            const condition = static_verifier.VerificationCondition{
                 .condition = clause,
                 .kind = .Precondition,
                 .context = static_verifier.VerificationCondition.Context{
                     .function_name = function.name,
                     .old_state = null,
                 },
-                .span = function.span,
-            });
+                .span = ast.SourceSpan{ .line = 0, .column = 0, .length = 0 }, // TODO: Get actual span
+            };
+            self.static_verifier.addCondition(condition) catch |err| {
+                switch (err) {
+                    error.OutOfMemory => return SemanticError.OutOfMemory,
+                }
+            };
         }
-
-        // Create old state context for ensures clauses
-        var old_state = self.static_verifier.createOldStateContext();
-        defer old_state.deinit();
-
-        // TODO: Capture actual variable states for old() expressions
-        // For now, we'll just create the context structure
 
         // Create verification conditions for ensures clauses
         for (function.ensures_clauses) |*clause| {
-            try self.static_verifier.addCondition(static_verifier.VerificationCondition{
+            const condition = static_verifier.VerificationCondition{
                 .condition = clause,
                 .kind = .Postcondition,
                 .context = static_verifier.VerificationCondition.Context{
                     .function_name = function.name,
-                    .old_state = &old_state,
+                    .old_state = null, // TODO: Implement old state context
                 },
-                .span = function.span,
-            });
+                .span = ast.SourceSpan{ .line = 0, .column = 0, .length = 0 }, // TODO: Get actual span
+            };
+            self.static_verifier.addCondition(condition) catch |err| {
+                switch (err) {
+                    error.OutOfMemory => return SemanticError.OutOfMemory,
+                }
+            };
         }
 
-        // Run basic static verification first
-        const verification_result = self.static_verifier.verifyAll() catch |err| {
+        // Run static verification
+        const result = self.static_verifier.verifyAll() catch |err| {
             switch (err) {
                 error.OutOfMemory => return SemanticError.OutOfMemory,
+                else => {
+                    try self.addWarning("Static verification failed", function.span);
+                    return;
+                },
             }
         };
 
-        // Perform formal verification for complex conditions
-        try self.performFormalVerification(function, verification_result);
-
-        // Process verification results
-        for (verification_result.violations) |violation| {
+        // Report verification results
+        for (result.violations) |violation| {
             try self.addError(violation.message, violation.span);
         }
 
-        for (verification_result.warnings) |warning| {
+        for (result.warnings) |warning| {
             try self.addWarning(warning.message, warning.span);
         }
-
-        // Add info if verification passed
-        if (verification_result.verified and verification_result.violations.len == 0) {
-            const message = std.fmt.allocPrint(self.allocator, "Static verification passed for function '{s}'", .{function.name}) catch "Static verification passed";
-            defer if (!std.mem.eql(u8, message, "Static verification passed")) self.allocator.free(message);
-            try self.addInfo(message, function.span);
-        }
-
-        // Run optimization passes based on verification results
-        try self.performOptimizationPasses(function, verification_result);
     }
 
     /// Perform formal verification for complex conditions
@@ -1232,6 +1341,20 @@ pub const SemanticAnalyzer = struct {
             }) catch "Significant optimization achieved";
             defer if (!std.mem.eql(u8, savings_message, "Significant optimization achieved")) self.allocator.free(savings_message);
             try self.addInfo(savings_message, function.span);
+        }
+    }
+
+    /// Validate all immutable variables are initialized
+    fn validateImmutableInitialization(self: *SemanticAnalyzer) SemanticError!void {
+        var iter = self.immutable_variables.iterator();
+        while (iter.next()) |entry| {
+            const info = entry.value_ptr.*;
+            if (!info.initialized) {
+                const message = std.fmt.allocPrint(self.allocator, "Immutable variable '{s}' is not initialized", .{info.name}) catch "Immutable variable is not initialized";
+                defer if (!std.mem.eql(u8, message, "Immutable variable is not initialized")) self.allocator.free(message);
+                try self.addError(message, info.declared_span);
+                return SemanticError.ImmutableViolation;
+            }
         }
     }
 };

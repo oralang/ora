@@ -1,0 +1,13 @@
+contract ArithmeticSignedTest {
+    storage const a: i32 = -10;
+    storage const b: i32 = -5;
+    storage const c: i32 = 15;
+    
+    pub fn init() {
+        // Test arithmetic operations
+        var sum: i32 = a + b;        // -10 + (-5) = -15
+        var diff: i32 = a - b;       // -10 - (-5) = -5
+        var product: i32 = a * b;    // -10 * (-5) = 50
+        var quotient: i32 = c / b;   // 15 / (-5) = -3
+    }
+} 

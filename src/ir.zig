@@ -80,6 +80,12 @@ pub const Type = union(enum) {
         u64,
         u128,
         u256,
+        i8,
+        i16,
+        i32,
+        i64,
+        i128,
+        i256,
         bool,
         address,
         string,
@@ -92,6 +98,12 @@ pub const Type = union(enum) {
                 .u64 => "u64",
                 .u128 => "u128",
                 .u256 => "u256",
+                .i8 => "i8",
+                .i16 => "i16",
+                .i32 => "i32",
+                .i64 => "i64",
+                .i128 => "i128",
+                .i256 => "i256",
                 .bool => "bool",
                 .address => "address",
                 .string => "string",
@@ -194,19 +206,47 @@ pub const Type = union(enum) {
     /// Check if a numeric type can be promoted to another numeric type
     fn isNumericPromotion(self: *const Type, from: Type.PrimitiveType, to: Type.PrimitiveType) bool {
         _ = self;
-        // Define promotion hierarchy: u8 → u16 → u32 → u64 → u128 → u256
-        const promotion_order = [_]Type.PrimitiveType{ .u8, .u16, .u32, .u64, .u128, .u256 };
+        // Define promotion hierarchy:
+        // Unsigned: u8 → u16 → u32 → u64 → u128 → u256
+        // Signed: i8 → i16 → i32 → i64 → i128 → i256
+        // Mixed: unsigned can promote to signed of same or larger size
+        const unsigned_promotion = [_]Type.PrimitiveType{ .u8, .u16, .u32, .u64, .u128, .u256 };
+        const signed_promotion = [_]Type.PrimitiveType{ .i8, .i16, .i32, .i64, .i128, .i256 };
 
+        // Check unsigned promotion
         var from_idx: ?usize = null;
         var to_idx: ?usize = null;
 
-        for (promotion_order, 0..) |typ, i| {
+        for (unsigned_promotion, 0..) |typ, i| {
             if (typ == from) from_idx = i;
             if (typ == to) to_idx = i;
         }
 
-        if (from_idx == null or to_idx == null) return false;
-        return from_idx.? <= to_idx.?;
+        if (from_idx != null and to_idx != null) {
+            return from_idx.? <= to_idx.?;
+        }
+
+        // Check signed promotion
+        from_idx = null;
+        to_idx = null;
+
+        for (signed_promotion, 0..) |typ, i| {
+            if (typ == from) from_idx = i;
+            if (typ == to) to_idx = i;
+        }
+
+        if (from_idx != null and to_idx != null) {
+            return from_idx.? <= to_idx.?;
+        }
+
+        // Check unsigned to signed promotion (u8 -> i16, u16 -> i32, etc.)
+        if (from == .u8 and to == .i16) return true;
+        if (from == .u16 and to == .i32) return true;
+        if (from == .u32 and to == .i64) return true;
+        if (from == .u64 and to == .i128) return true;
+        if (from == .u128 and to == .i256) return true;
+
+        return false;
     }
 
     /// Get the common type for two types (used in binary operations)
@@ -234,29 +274,59 @@ pub const Type = union(enum) {
     pub fn inferLiteralType(literal: *const Literal) Type {
         return switch (literal.*) {
             .integer => |int_str| {
-                // Parse integer to determine smallest suitable type
-                if (std.fmt.parseInt(u8, int_str, 10)) |_| {
-                    return Type{ .primitive = .u8 };
-                } else |_| {}
+                // Check if it's a negative number
+                const is_negative = int_str.len > 0 and int_str[0] == '-';
+                const abs_str = if (is_negative) int_str[1..] else int_str;
 
-                if (std.fmt.parseInt(u16, int_str, 10)) |_| {
-                    return Type{ .primitive = .u16 };
-                } else |_| {}
+                if (is_negative) {
+                    // Try parsing as different signed integer types
+                    if (std.fmt.parseInt(i8, abs_str, 10)) |_| {
+                        return Type{ .primitive = .i8 };
+                    } else |_| {}
 
-                if (std.fmt.parseInt(u32, int_str, 10)) |_| {
-                    return Type{ .primitive = .u32 };
-                } else |_| {}
+                    if (std.fmt.parseInt(i16, abs_str, 10)) |_| {
+                        return Type{ .primitive = .i16 };
+                    } else |_| {}
 
-                if (std.fmt.parseInt(u64, int_str, 10)) |_| {
-                    return Type{ .primitive = .u64 };
-                } else |_| {}
+                    if (std.fmt.parseInt(i32, abs_str, 10)) |_| {
+                        return Type{ .primitive = .i32 };
+                    } else |_| {}
 
-                if (std.fmt.parseInt(u128, int_str, 10)) |_| {
-                    return Type{ .primitive = .u128 };
-                } else |_| {}
+                    if (std.fmt.parseInt(i64, abs_str, 10)) |_| {
+                        return Type{ .primitive = .i64 };
+                    } else |_| {}
 
-                // Default to u256 for very large numbers
-                return Type{ .primitive = .u256 };
+                    if (std.fmt.parseInt(i128, abs_str, 10)) |_| {
+                        return Type{ .primitive = .i128 };
+                    } else |_| {}
+
+                    // Default to i256 for very large negative numbers
+                    return Type{ .primitive = .i256 };
+                } else {
+                    // Parse integer to determine smallest suitable type
+                    if (std.fmt.parseInt(u8, int_str, 10)) |_| {
+                        return Type{ .primitive = .u8 };
+                    } else |_| {}
+
+                    if (std.fmt.parseInt(u16, int_str, 10)) |_| {
+                        return Type{ .primitive = .u16 };
+                    } else |_| {}
+
+                    if (std.fmt.parseInt(u32, int_str, 10)) |_| {
+                        return Type{ .primitive = .u32 };
+                    } else |_| {}
+
+                    if (std.fmt.parseInt(u64, int_str, 10)) |_| {
+                        return Type{ .primitive = .u64 };
+                    } else |_| {}
+
+                    if (std.fmt.parseInt(u128, int_str, 10)) |_| {
+                        return Type{ .primitive = .u128 };
+                    } else |_| {}
+
+                    // Default to u256 for very large numbers
+                    return Type{ .primitive = .u256 };
+                }
             },
             .string => Type{ .primitive = .string },
             .boolean => Type{ .primitive = .bool },
@@ -449,7 +519,6 @@ pub const Contract = struct {
     storage: []StorageVariable,
     functions: []Function,
     events: []Event,
-    modifiers: []Modifier,
     allocator: Allocator,
 
     pub fn init(allocator: Allocator, name: []const u8) Contract {
@@ -458,7 +527,6 @@ pub const Contract = struct {
             .storage = &[_]StorageVariable{},
             .functions = &[_]Function{},
             .events = &[_]Event{},
-            .modifiers = &[_]Modifier{},
             .allocator = allocator,
         };
     }
@@ -473,13 +541,9 @@ pub const Contract = struct {
         for (self.events) |*event| {
             event.deinit();
         }
-        for (self.modifiers) |*modifier| {
-            modifier.deinit();
-        }
         self.allocator.free(self.storage);
         self.allocator.free(self.functions);
         self.allocator.free(self.events);
-        self.allocator.free(self.modifiers);
     }
 };
 
@@ -502,6 +566,64 @@ pub const StorageVariable = struct {
     }
 };
 
+/// Function effect metadata for tooling
+pub const FunctionEffects = struct {
+    writes_storage: bool,
+    reads_storage: bool,
+    writes_transient: bool,
+    reads_transient: bool,
+    emits_logs: bool,
+    calls_other: bool,
+    modifies_state: bool,
+    is_pure: bool,
+
+    pub fn init() FunctionEffects {
+        return FunctionEffects{
+            .writes_storage = false,
+            .reads_storage = false,
+            .writes_transient = false,
+            .reads_transient = false,
+            .emits_logs = false,
+            .calls_other = false,
+            .modifies_state = false,
+            .is_pure = true,
+        };
+    }
+
+    pub fn markStorageWrite(self: *FunctionEffects) void {
+        self.writes_storage = true;
+        self.modifies_state = true;
+        self.is_pure = false;
+    }
+
+    pub fn markStorageRead(self: *FunctionEffects) void {
+        self.reads_storage = true;
+        self.is_pure = false;
+    }
+
+    pub fn markTransientWrite(self: *FunctionEffects) void {
+        self.writes_transient = true;
+        self.modifies_state = true;
+        self.is_pure = false;
+    }
+
+    pub fn markTransientRead(self: *FunctionEffects) void {
+        self.reads_transient = true;
+        self.is_pure = false;
+    }
+
+    pub fn markLogEmission(self: *FunctionEffects) void {
+        self.emits_logs = true;
+        self.modifies_state = true;
+        self.is_pure = false;
+    }
+
+    pub fn markExternalCall(self: *FunctionEffects) void {
+        self.calls_other = true;
+        self.is_pure = false;
+    }
+};
+
 pub const Function = struct {
     name: []const u8,
     visibility: Visibility,
@@ -512,6 +634,7 @@ pub const Function = struct {
     body: Block,
     state_effects: EffectSet,
     observable_effects: EffectSet,
+    effects: FunctionEffects,
     location: SourceLocation,
     allocator: Allocator,
 
@@ -571,21 +694,6 @@ pub const EventField = struct {
 
     pub fn deinit(self: *EventField, allocator: Allocator) void {
         self.type.deinit(allocator);
-    }
-};
-
-pub const Modifier = struct {
-    name: []const u8,
-    parameters: []Parameter,
-    body: Block,
-    location: SourceLocation,
-    allocator: Allocator,
-
-    pub fn deinit(self: *Modifier) void {
-        for (self.parameters) |*param| {
-            param.deinit(self.allocator);
-        }
-        self.body.deinit();
     }
 };
 
@@ -804,6 +912,7 @@ pub const Expression = union(enum) {
     index: IndexExpression,
     field: FieldExpression,
     transfer: TransferExpression,
+    shift: ShiftExpression,
     old: OldExpression,
     literal: Literal,
     identifier: Identifier,
@@ -821,6 +930,7 @@ pub const Expression = union(enum) {
             .index => |*ie| ie.deinit(),
             .field => |*fe| fe.deinit(),
             .transfer => |*te| te.deinit(),
+            .shift => |*se| se.deinit(),
             .old => |*oe| oe.deinit(),
             .literal => |*l| l.deinit(),
             .identifier => |*i| i.deinit(),
@@ -838,6 +948,7 @@ pub const Expression = union(enum) {
             .index => |*ie| ie.location,
             .field => |*fe| fe.location,
             .transfer => |*te| te.location,
+            .shift => |*se| se.location,
             .old => |*oe| oe.location,
             .literal => SourceLocation{ .line = 0, .column = 0, .length = 0 }, // Literals don't have location
             .identifier => |*i| i.location,
@@ -956,6 +1067,26 @@ pub const TransferExpression = struct {
         self.allocator.destroy(self.from);
         self.to.deinit();
         self.allocator.destroy(self.to);
+        self.amount.deinit();
+        self.allocator.destroy(self.amount);
+    }
+};
+
+pub const ShiftExpression = struct {
+    mapping: *Expression,
+    source: *Expression,
+    dest: *Expression,
+    amount: *Expression,
+    location: SourceLocation,
+    allocator: Allocator,
+
+    pub fn deinit(self: *ShiftExpression) void {
+        self.mapping.deinit();
+        self.allocator.destroy(self.mapping);
+        self.source.deinit();
+        self.allocator.destroy(self.source);
+        self.dest.deinit();
+        self.allocator.destroy(self.dest);
         self.amount.deinit();
         self.allocator.destroy(self.amount);
     }
@@ -1708,6 +1839,10 @@ pub const Validator = struct {
                 _ = transfer;
                 return Type{ .primitive = .bool }; // Transfer operations return success/failure
             },
+            .shift => |*shift| {
+                _ = shift;
+                return Type{ .primitive = .bool }; // Shift operations return success/failure
+            },
             .old => |*old| {
                 return self.getExpressionType(old.expression);
             },
@@ -2022,6 +2157,41 @@ pub const Validator = struct {
                     });
                 }
             },
+            .shift => |*se| {
+                try self.validateExpression(se.mapping);
+                try self.validateExpression(se.source);
+                try self.validateExpression(se.dest);
+                try self.validateExpression(se.amount);
+
+                // Check types
+                const source_type = self.getExpressionType(se.source);
+                const dest_type = self.getExpressionType(se.dest);
+                const amount_type = self.getExpressionType(se.amount);
+
+                if (source_type != null and !self.isAddressType(source_type.?)) {
+                    try self.context.addError(ValidationError{
+                        .message = "Shift source must be address type",
+                        .location = se.source.getLocation(),
+                        .kind = .type_error,
+                    });
+                }
+
+                if (dest_type != null and !self.isAddressType(dest_type.?)) {
+                    try self.context.addError(ValidationError{
+                        .message = "Shift destination must be address type",
+                        .location = se.dest.getLocation(),
+                        .kind = .type_error,
+                    });
+                }
+
+                if (amount_type != null and !self.isNumericType(amount_type.?)) {
+                    try self.context.addError(ValidationError{
+                        .message = "Shift amount must be numeric type",
+                        .location = se.amount.getLocation(),
+                        .kind = .type_error,
+                    });
+                }
+            },
             .old => |*oe| {
                 try self.validateExpression(oe.expression);
             },
@@ -2212,6 +2382,7 @@ pub const IRBuilder = struct {
     /// Build HIR from AST nodes
     pub fn buildFromAST(self: *IRBuilder, ast_nodes: []@import("ast.zig").AstNode) anyerror!void {
         var converter = ASTToHIRConverter.init(self.allocator, &self.program);
+        defer converter.deinit();
         try converter.convertAST(ast_nodes);
     }
 
@@ -2569,7 +2740,28 @@ pub const JSONSerializer = struct {
         try writer.print("\"state_effects_count\": {},\n", .{function.state_effects.effects.items.len});
 
         try writeIndent(writer, indent + 1);
-        try writer.print("\"observable_effects_count\": {}\n", .{function.observable_effects.effects.items.len});
+        try writer.print("\"observable_effects_count\": {},\n", .{function.observable_effects.effects.items.len});
+
+        try writeIndent(writer, indent + 1);
+        try writer.writeAll("\"effects\": {\n");
+        try writeIndent(writer, indent + 2);
+        try writer.print("\"writes_storage\": {},\n", .{function.effects.writes_storage});
+        try writeIndent(writer, indent + 2);
+        try writer.print("\"reads_storage\": {},\n", .{function.effects.reads_storage});
+        try writeIndent(writer, indent + 2);
+        try writer.print("\"writes_transient\": {},\n", .{function.effects.writes_transient});
+        try writeIndent(writer, indent + 2);
+        try writer.print("\"reads_transient\": {},\n", .{function.effects.reads_transient});
+        try writeIndent(writer, indent + 2);
+        try writer.print("\"emits_logs\": {},\n", .{function.effects.emits_logs});
+        try writeIndent(writer, indent + 2);
+        try writer.print("\"calls_other\": {},\n", .{function.effects.calls_other});
+        try writeIndent(writer, indent + 2);
+        try writer.print("\"modifies_state\": {},\n", .{function.effects.modifies_state});
+        try writeIndent(writer, indent + 2);
+        try writer.print("\"is_pure\": {}\n", .{function.effects.is_pure});
+        try writeIndent(writer, indent + 1);
+        try writer.writeAll("}\n");
 
         try writeIndent(writer, indent);
         try writer.writeAll("}");
@@ -2680,6 +2872,8 @@ pub const JSONSerializer = struct {
 pub const ASTToHIRConverter = struct {
     allocator: Allocator,
     program: *HIRProgram,
+    storage_variables: std.HashMap([]const u8, void, std.hash_map.StringContext, std.hash_map.default_max_load_percentage),
+    transient_variables: std.HashMap([]const u8, void, std.hash_map.StringContext, std.hash_map.default_max_load_percentage),
 
     // Import AST types
     const AstNode = @import("ast.zig").AstNode;
@@ -2698,7 +2892,14 @@ pub const ASTToHIRConverter = struct {
         return ASTToHIRConverter{
             .allocator = allocator,
             .program = program,
+            .storage_variables = std.HashMap([]const u8, void, std.hash_map.StringContext, std.hash_map.default_max_load_percentage).init(allocator),
+            .transient_variables = std.HashMap([]const u8, void, std.hash_map.StringContext, std.hash_map.default_max_load_percentage).init(allocator),
         };
+    }
+
+    pub fn deinit(self: *ASTToHIRConverter) void {
+        self.storage_variables.deinit();
+        self.transient_variables.deinit();
     }
 
     /// Convert a list of AST nodes to HIR
@@ -2724,6 +2925,10 @@ pub const ASTToHIRConverter = struct {
     fn convertContract(self: *ASTToHIRConverter, ast_contract: *ContractNode) anyerror!void {
         var hir_contract = Contract.init(self.allocator, ast_contract.name);
 
+        // Clear previous contract's variable tracking
+        self.storage_variables.clearRetainingCapacity();
+        self.transient_variables.clearRetainingCapacity();
+
         // Convert contract members
         var storage_vars = std.ArrayList(StorageVariable).init(self.allocator);
         defer storage_vars.deinit();
@@ -2740,6 +2945,11 @@ pub const ASTToHIRConverter = struct {
                     if (var_decl.region == .Storage) {
                         const storage_var = try self.convertStorageVariable(var_decl);
                         try storage_vars.append(storage_var);
+                        // Track storage variables
+                        try self.storage_variables.put(var_decl.name, {});
+                    } else if (var_decl.region == .TStore) {
+                        // Track transient variables
+                        try self.transient_variables.put(var_decl.name, {});
                     }
                 },
                 .Function => |*function| {
@@ -2760,7 +2970,6 @@ pub const ASTToHIRConverter = struct {
         hir_contract.storage = try self.allocator.dupe(StorageVariable, storage_vars.items);
         hir_contract.functions = try self.allocator.dupe(Function, functions.items);
         hir_contract.events = try self.allocator.dupe(Event, events.items);
-        hir_contract.modifiers = &[_]Modifier{}; // Empty for now
 
         // Add contract to program
         try self.program.addContract(hir_contract);
@@ -2828,6 +3037,7 @@ pub const ASTToHIRConverter = struct {
             .body = hir_body,
             .state_effects = try self.computeStateEffects(ast_func), // Compute state effects
             .observable_effects = try self.computeObservableEffects(ast_func), // Compute observable effects
+            .effects = try self.computeFunctionEffectMetadata(ast_func), // Compute effect metadata
             .location = self.convertSourceLocation(ast_func.span),
             .allocator = self.allocator,
         };
@@ -2851,6 +3061,183 @@ pub const ASTToHIRConverter = struct {
         try self.analyzeBlockForObservableEffects(&ast_func.body, &effects);
 
         return effects;
+    }
+
+    /// Compute function effect metadata for tooling
+    fn computeFunctionEffectMetadata(self: *ASTToHIRConverter, ast_func: *FunctionNode) anyerror!FunctionEffects {
+        var effects = FunctionEffects.init();
+
+        // Analyze function body to determine effects
+        try self.analyzeFunctionBodyForEffects(&ast_func.body, &effects);
+
+        return effects;
+    }
+
+    /// Analyze function body for effect metadata
+    fn analyzeFunctionBodyForEffects(self: *ASTToHIRConverter, block: *BlockNode, effects: *FunctionEffects) anyerror!void {
+        for (block.statements) |*stmt| {
+            try self.analyzeStatementForEffectMetadata(stmt, effects);
+        }
+    }
+
+    /// Analyze a statement for effect metadata
+    fn analyzeStatementForEffectMetadata(self: *ASTToHIRConverter, stmt: *StmtNode, effects: *FunctionEffects) anyerror!void {
+        switch (stmt.*) {
+            .VariableDecl => |*var_decl| {
+                if (var_decl.region == .Storage) {
+                    effects.markStorageWrite();
+                } else if (var_decl.region == .TStore) {
+                    effects.markTransientWrite();
+                }
+            },
+            .Expr => |*expr| {
+                try self.analyzeExpressionForEffectMetadata(expr, effects);
+            },
+            .If => |*if_stmt| {
+                try self.analyzeFunctionBodyForEffects(&if_stmt.then_branch, effects);
+                if (if_stmt.else_branch) |*else_branch| {
+                    try self.analyzeFunctionBodyForEffects(else_branch, effects);
+                }
+            },
+            .While => |*while_stmt| {
+                try self.analyzeFunctionBodyForEffects(&while_stmt.body, effects);
+            },
+            .Log => |_| {
+                effects.markLogEmission();
+            },
+            .Return => |*return_stmt| {
+                if (return_stmt.value) |*value| {
+                    try self.analyzeExpressionForEffectMetadata(value, effects);
+                }
+            },
+            else => {
+                // Other statement types don't affect our metadata
+            },
+        }
+    }
+
+    /// Analyze an expression for effect metadata
+    fn analyzeExpressionForEffectMetadata(self: *ASTToHIRConverter, expr: *ExprNode, effects: *FunctionEffects) anyerror!void {
+        switch (expr.*) {
+            .Assignment => |*assign| {
+                // Check if assignment target is storage or transient
+                try self.analyzeAssignmentTargetForEffects(assign.target, effects);
+                // Recursively analyze the value expression
+                try self.analyzeExpressionForEffectMetadata(assign.value, effects);
+            },
+            .CompoundAssignment => |*comp_assign| {
+                // Compound assignments read and write
+                try self.analyzeAssignmentTargetForEffects(comp_assign.target, effects);
+                try self.analyzeExpressionForEffectMetadata(comp_assign.value, effects);
+            },
+            .Call => |*call| {
+                // Function calls might call other functions
+                effects.markExternalCall();
+                // Recursively analyze arguments
+                for (call.arguments) |*arg| {
+                    try self.analyzeExpressionForEffectMetadata(arg, effects);
+                }
+            },
+            .Index => |*index| {
+                // Index access might be storage read
+                try self.analyzeStorageAccessForEffects(index.target, effects, false);
+                try self.analyzeExpressionForEffectMetadata(index.index, effects);
+            },
+            .FieldAccess => |*field| {
+                // Field access might be storage read
+                try self.analyzeStorageAccessForEffects(field.target, effects, false);
+            },
+            .Identifier => |*ident| {
+                // Check if this is a storage variable access
+                try self.analyzeIdentifierForEffects(ident, effects);
+            },
+            .Binary => |*binary| {
+                try self.analyzeExpressionForEffectMetadata(binary.lhs, effects);
+                try self.analyzeExpressionForEffectMetadata(binary.rhs, effects);
+            },
+            .Unary => |*unary| {
+                try self.analyzeExpressionForEffectMetadata(unary.operand, effects);
+            },
+            .Literal => |_| {
+                // Literals don't have effects
+            },
+            else => {
+                // Handle other expression types as needed
+            },
+        }
+    }
+
+    /// Analyze assignment target to determine if it's storage/transient write
+    fn analyzeAssignmentTargetForEffects(self: *ASTToHIRConverter, target: *ExprNode, effects: *FunctionEffects) anyerror!void {
+        switch (target.*) {
+            .Identifier => |*ident| {
+                // Check if this identifier refers to a storage variable
+                if (self.isStorageVariable(ident.name)) {
+                    effects.markStorageWrite();
+                } else if (self.isTransientVariable(ident.name)) {
+                    effects.markTransientWrite();
+                }
+            },
+            .Index => |*index| {
+                // Index into storage mapping/array
+                try self.analyzeStorageAccessForEffects(index.target, effects, true);
+            },
+            .FieldAccess => |*field| {
+                // Field access on storage
+                try self.analyzeStorageAccessForEffects(field.target, effects, true);
+            },
+            else => {
+                // Other assignment targets
+            },
+        }
+    }
+
+    /// Analyze storage access (read or write)
+    fn analyzeStorageAccessForEffects(self: *ASTToHIRConverter, expr: *ExprNode, effects: *FunctionEffects, is_write: bool) anyerror!void {
+        switch (expr.*) {
+            .Identifier => |*ident| {
+                if (self.isStorageVariable(ident.name)) {
+                    if (is_write) {
+                        effects.markStorageWrite();
+                    } else {
+                        effects.markStorageRead();
+                    }
+                } else if (self.isTransientVariable(ident.name)) {
+                    if (is_write) {
+                        effects.markTransientWrite();
+                    } else {
+                        effects.markTransientRead();
+                    }
+                }
+            },
+            else => {
+                // For complex expressions, assume storage access
+                if (is_write) {
+                    effects.markStorageWrite();
+                } else {
+                    effects.markStorageRead();
+                }
+            },
+        }
+    }
+
+    /// Analyze identifier for storage read effects
+    fn analyzeIdentifierForEffects(self: *ASTToHIRConverter, ident: *@import("ast.zig").IdentifierExpr, effects: *FunctionEffects) anyerror!void {
+        if (self.isStorageVariable(ident.name)) {
+            effects.markStorageRead();
+        } else if (self.isTransientVariable(ident.name)) {
+            effects.markTransientRead();
+        }
+    }
+
+    /// Check if an identifier refers to a storage variable
+    fn isStorageVariable(self: *ASTToHIRConverter, name: []const u8) bool {
+        return self.storage_variables.contains(name);
+    }
+
+    /// Check if an identifier refers to a transient variable
+    fn isTransientVariable(self: *ASTToHIRConverter, name: []const u8) bool {
+        return self.transient_variables.contains(name);
     }
 
     /// Analyze a block for state effects
@@ -3425,6 +3812,18 @@ pub const ASTToHIRConverter = struct {
                     },
                 };
             },
+            .Shift => |*shift| {
+                hir_expr.* = Expression{
+                    .shift = ShiftExpression{
+                        .mapping = try self.convertExpression(shift.mapping),
+                        .source = try self.convertExpression(shift.source),
+                        .dest = try self.convertExpression(shift.dest),
+                        .amount = try self.convertExpression(shift.amount),
+                        .location = self.convertSourceLocation(shift.span),
+                        .allocator = self.allocator,
+                    },
+                };
+            },
             else => {
                 // Create a placeholder literal for unsupported expressions
                 hir_expr.* = Expression{
@@ -3459,6 +3858,12 @@ pub const ASTToHIRConverter = struct {
             .U64 => Type{ .primitive = .u64 },
             .U128 => Type{ .primitive = .u128 },
             .U256 => Type{ .primitive = .u256 },
+            .I8 => Type{ .primitive = .i8 },
+            .I16 => Type{ .primitive = .i16 },
+            .I32 => Type{ .primitive = .i32 },
+            .I64 => Type{ .primitive = .i64 },
+            .I128 => Type{ .primitive = .i128 },
+            .I256 => Type{ .primitive = .i256 },
             .String => Type{ .primitive = .string },
             .Mapping => |*mapping| {
                 const key_type = try self.allocator.create(Type);

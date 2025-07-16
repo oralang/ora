@@ -490,7 +490,7 @@ pub const FormalVerifier = struct {
             _ = self;
             if (type_ref) |t| {
                 return switch (t.*) {
-                    .U8, .U16, .U32, .U64, .U128, .U256 => MathDomain.Integer,
+                    .U8, .U16, .U32, .U64, .U128, .U256, .I8, .I16, .I32, .I64, .I128, .I256 => MathDomain.Integer,
                     .Bool => MathDomain.BitVector,
                     .Address => MathDomain.BitVector,
                     .String => MathDomain.Array,

@@ -20,7 +20,7 @@ pub const ParserError = error{
     InvalidReturnType,
 };
 
-/// Parser for ZigOra DSL
+/// Parser for Ora
 pub const Parser = struct {
     tokens: []const Token,
     current: usize,
@@ -285,7 +285,7 @@ pub const Parser = struct {
 
     /// Parse function parameter
     fn parseParameter(self: *Parser) ParserError!ast.ParamNode {
-        const name_token = try self.consume(.Identifier, "Expected parameter name");
+        const name_token = try self.consumeIdentifierOrKeyword("Expected parameter name");
         _ = try self.consume(.Colon, "Expected ':' after parameter name");
         const param_type = try self.parseType();
 
@@ -314,6 +314,12 @@ pub const Parser = struct {
             if (std.mem.eql(u8, type_name, "u64")) return .U64;
             if (std.mem.eql(u8, type_name, "u128")) return .U128;
             if (std.mem.eql(u8, type_name, "u256")) return .U256;
+            if (std.mem.eql(u8, type_name, "i8")) return .I8;
+            if (std.mem.eql(u8, type_name, "i16")) return .I16;
+            if (std.mem.eql(u8, type_name, "i32")) return .I32;
+            if (std.mem.eql(u8, type_name, "i64")) return .I64;
+            if (std.mem.eql(u8, type_name, "i128")) return .I128;
+            if (std.mem.eql(u8, type_name, "i256")) return .I256;
             if (std.mem.eql(u8, type_name, "string")) return .String;
 
             // Check for complex types
@@ -449,8 +455,14 @@ pub const Parser = struct {
                     break :blk true;
                 }
             } else {
-                // For stack variables (default region), check for var
-                break :blk self.match(.Var);
+                // For stack variables (default region), check for var or let
+                if (self.match(.Var)) {
+                    break :blk true;
+                } else if (self.match(.Let)) {
+                    break :blk false;
+                } else {
+                    break :blk false; // Default to immutable
+                }
             }
         };
 
@@ -766,6 +778,33 @@ pub const Parser = struct {
     fn parseAssignment(self: *Parser) ParserError!ast.ExprNode {
         const expr = try self.parseLogicalOr();
 
+        // Check for shift syntax: mapping from source -> dest : amount
+        if (self.match(.From)) {
+            const from_token = self.previous();
+            const source = try self.parseLogicalOr();
+            _ = try self.consume(.Arrow, "Expected '->' in shift expression");
+            const dest = try self.parseLogicalOr();
+            _ = try self.consume(.Colon, "Expected ':' in shift expression");
+            const amount = try self.parseAssignment();
+
+            const mapping_ptr = try self.allocator.create(ast.ExprNode);
+            mapping_ptr.* = expr;
+            const source_ptr = try self.allocator.create(ast.ExprNode);
+            source_ptr.* = source;
+            const dest_ptr = try self.allocator.create(ast.ExprNode);
+            dest_ptr.* = dest;
+            const amount_ptr = try self.allocator.create(ast.ExprNode);
+            amount_ptr.* = amount;
+
+            return ast.ExprNode{ .Shift = ast.ShiftExpr{
+                .mapping = mapping_ptr,
+                .source = source_ptr,
+                .dest = dest_ptr,
+                .amount = amount_ptr,
+                .span = makeSpan(from_token),
+            } };
+        }
+
         if (self.match(.Equal)) {
             const value = try self.parseAssignment();
             const expr_ptr = try self.allocator.create(ast.ExprNode);
@@ -1028,18 +1067,48 @@ pub const Parser = struct {
                 } };
             } else if (self.match(.LeftBracket)) {
                 const index = try self.parseExpression();
-                _ = try self.consume(.RightBracket, "Expected ']' after array index");
 
-                const expr_ptr = try self.allocator.create(ast.ExprNode);
-                expr_ptr.* = expr;
-                const index_ptr = try self.allocator.create(ast.ExprNode);
-                index_ptr.* = index;
+                // Check for double mapping access: target[key1, key2]
+                if (self.match(.Comma)) {
+                    const second_index = try self.parseExpression();
+                    _ = try self.consume(.RightBracket, "Expected ']' after double mapping index");
 
-                expr = ast.ExprNode{ .Index = ast.IndexExpr{
-                    .target = expr_ptr,
-                    .index = index_ptr,
-                    .span = makeSpan(self.previous()),
-                } };
+                    const expr_ptr = try self.allocator.create(ast.ExprNode);
+                    expr_ptr.* = expr;
+                    const index_ptr = try self.allocator.create(ast.ExprNode);
+                    index_ptr.* = index;
+                    const second_index_ptr = try self.allocator.create(ast.ExprNode);
+                    second_index_ptr.* = second_index;
+
+                    // Create a nested index expression for double mapping: target[key1][key2]
+                    const first_index = ast.ExprNode{ .Index = ast.IndexExpr{
+                        .target = expr_ptr,
+                        .index = index_ptr,
+                        .span = makeSpan(self.previous()),
+                    } };
+
+                    const first_index_ptr = try self.allocator.create(ast.ExprNode);
+                    first_index_ptr.* = first_index;
+
+                    expr = ast.ExprNode{ .Index = ast.IndexExpr{
+                        .target = first_index_ptr,
+                        .index = second_index_ptr,
+                        .span = makeSpan(self.previous()),
+                    } };
+                } else {
+                    _ = try self.consume(.RightBracket, "Expected ']' after array index");
+
+                    const expr_ptr = try self.allocator.create(ast.ExprNode);
+                    expr_ptr.* = expr;
+                    const index_ptr = try self.allocator.create(ast.ExprNode);
+                    index_ptr.* = index;
+
+                    expr = ast.ExprNode{ .Index = ast.IndexExpr{
+                        .target = expr_ptr,
+                        .index = index_ptr,
+                        .span = makeSpan(self.previous()),
+                    } };
+                }
             } else {
                 break;
             }
@@ -1126,8 +1195,8 @@ pub const Parser = struct {
             } } };
         }
 
-        // Identifiers
-        if (self.match(.Identifier)) {
+        // Identifiers (including keywords that can be used as identifiers)
+        if (self.match(.Identifier) or self.matchKeywordAsIdentifier()) {
             const token = self.previous();
             return ast.ExprNode{ .Identifier = ast.IdentifierExpr{
                 .name = token.lexeme,
@@ -1254,7 +1323,7 @@ pub const Parser = struct {
 
         if (!self.check(.RightParen)) {
             repeat: while (true) {
-                const field_name = try self.consume(.Identifier, "Expected field name");
+                const field_name = try self.consumeIdentifierOrKeyword("Expected field name");
                 _ = try self.consume(.Colon, "Expected ':' after field name");
                 const field_type = try self.parseType();
 
@@ -1323,6 +1392,35 @@ pub const Parser = struct {
         const current_token = self.peek();
         std.debug.print("Parser error at line {}, column {}: {s}\n", .{ current_token.line, current_token.column, message });
         return ParserError.UnexpectedToken;
+    }
+
+    /// Consume an identifier or keyword that can be used as an identifier in certain contexts
+    fn consumeIdentifierOrKeyword(self: *Parser, message: []const u8) ParserError!Token {
+        const current_token = self.peek();
+        if (current_token.type == .Identifier or self.isKeywordThatCanBeIdentifier(current_token.type)) {
+            return self.advance();
+        }
+
+        std.debug.print("Parser error: {s} (got {s})\n", .{ message, @tagName(current_token.type) });
+        return ParserError.ExpectedToken;
+    }
+
+    /// Check if a keyword can be used as an identifier in certain contexts
+    fn isKeywordThatCanBeIdentifier(self: *Parser, token_type: TokenType) bool {
+        _ = self;
+        return switch (token_type) {
+            .From => true, // 'from' can be used as a parameter name in log declarations
+            else => false,
+        };
+    }
+
+    /// Match a keyword that can be used as an identifier
+    fn matchKeywordAsIdentifier(self: *Parser) bool {
+        if (self.isKeywordThatCanBeIdentifier(self.peek().type)) {
+            _ = self.advance();
+            return true;
+        }
+        return false;
     }
 };
 
