@@ -1,0 +1,362 @@
+# Ora Language Grammar (EBNF)
+# Version: 0.1.0
+# Description: Extended BNF grammar specification for the Ora smart contract language
+
+# ==========================================
+# PROGRAM STRUCTURE
+# ==========================================
+
+Program = { TopLevelDeclaration } ;
+
+TopLevelDeclaration = 
+    ContractDeclaration
+  | FunctionDeclaration
+  | VariableDeclaration
+  | StructDeclaration
+  | EnumDeclaration
+  | LogDeclaration
+  | ImportDeclaration ;
+
+# ==========================================
+# DECLARATIONS
+# ==========================================
+
+ImportDeclaration = "@" "import" "(" StringLiteral ")" ;
+
+ContractDeclaration = "contract" Identifier "{" { ContractMember } "}" ;
+
+ContractMember = 
+    VariableDeclaration
+  | FunctionDeclaration
+  | LogDeclaration
+  | StructDeclaration
+  | EnumDeclaration ;
+
+FunctionDeclaration = 
+    [ "pub" ] "fn" Identifier "(" [ ParameterList ] ")" [ ReturnType ]
+    { RequiresClause } { EnsuresClause } Block ;
+
+ParameterList = Parameter { "," Parameter } ;
+
+Parameter = Identifier ":" Type ;
+
+ReturnType = "->" Type ;
+
+RequiresClause = "requires" "(" Expression ")" [ ";" ] ;
+
+EnsuresClause = "ensures" "(" Expression ")" [ ";" ] ;
+
+VariableDeclaration = 
+    [ MemoryRegion ] VariableKind Identifier ":" Type [ "=" Expression ] ";" ;
+
+MemoryRegion = "storage" | "memory" | "tstore" ;
+
+VariableKind = "var" | "let" | "const" | "immutable" ;
+
+StructDeclaration = "struct" Identifier "{" { StructMember } "}" ;
+
+StructMember = Identifier ":" Type ";" ;
+
+EnumDeclaration = "enum" Identifier "{" EnumMemberList "}" ;
+
+EnumMemberList = EnumMember { "," EnumMember } ;
+
+EnumMember = Identifier [ "=" Expression ] ;
+
+LogDeclaration = "log" Identifier "(" [ ParameterList ] ")" ";" ;
+
+# ==========================================
+# TYPE SYSTEM
+# ==========================================
+
+Type = 
+    PrimitiveType
+  | MapType
+  | DoublemapType
+  | ArrayType
+  | OptionalType
+  | ErrorUnionType
+  | Identifier ;
+
+PrimitiveType = 
+    "u8" | "u16" | "u32" | "u64" | "u128" | "u256"
+  | "i8" | "i16" | "i32" | "i64" | "i128" | "i256"
+  | "bool" | "address" | "string" | "bytes" ;
+
+MapType = "map" "[" Type "," Type "]" ;
+
+DoublemapType = "doublemap" "[" Type "," Type "," Type "]" ;
+
+ArrayType = "[" Type [ ";" Expression ] "]" ;
+
+OptionalType = "?" Type ;
+
+ErrorUnionType = Type "|" Type ;
+
+# ==========================================
+# STATEMENTS
+# ==========================================
+
+Statement = 
+    VariableDeclaration
+  | AssignmentStatement
+  | CompoundAssignmentStatement
+  | TransferStatement
+  | ExpressionStatement
+  | IfStatement
+  | WhileStatement
+  | ReturnStatement
+  | BreakStatement
+  | ContinueStatement
+  | LogStatement
+  | LockStatement
+  | UnlockStatement
+  | TryStatement
+  | Block ;
+
+AssignmentStatement = Expression "=" Expression ";" ;
+
+CompoundAssignmentStatement = Expression CompoundOperator Expression ";" ;
+
+CompoundOperator = "+=" | "-=" | "*=" ;
+
+TransferStatement = Identifier "from" Expression "->" Expression ":" Expression ";" ;
+
+ExpressionStatement = Expression ";" ;
+
+IfStatement = "if" "(" Expression ")" Statement [ "else" Statement ] ;
+
+WhileStatement = "while" "(" Expression ")" Statement ;
+
+ReturnStatement = "return" [ Expression ] ";" ;
+
+BreakStatement = "break" ";" ;
+
+ContinueStatement = "continue" ";" ;
+
+LogStatement = "log" Identifier "(" [ ExpressionList ] ")" ";" ;
+
+LockStatement = "@" "lock" "(" Expression ")" ";" ;
+
+UnlockStatement = "@" "unlock" "(" Expression ")" ";" ;
+
+TryStatement = "try" Expression [ "catch" Identifier Block ] ;
+
+Block = "{" { Statement } "}" ;
+
+# ==========================================
+# EXPRESSIONS (with precedence)
+# ==========================================
+
+Expression = AssignmentExpression ;
+
+AssignmentExpression = LogicalOrExpression { AssignmentOperator LogicalOrExpression } ;
+
+AssignmentOperator = "=" | "+=" | "-=" | "*=" ;
+
+LogicalOrExpression = LogicalAndExpression { "|" LogicalAndExpression } ;
+
+LogicalAndExpression = EqualityExpression { "&" EqualityExpression } ;
+
+EqualityExpression = RelationalExpression { ( "==" | "!=" ) RelationalExpression } ;
+
+RelationalExpression = AdditiveExpression { ( "<" | "<=" | ">" | ">=" ) AdditiveExpression } ;
+
+AdditiveExpression = MultiplicativeExpression { ( "+" | "-" ) MultiplicativeExpression } ;
+
+MultiplicativeExpression = UnaryExpression { ( "*" | "/" | "%" ) UnaryExpression } ;
+
+UnaryExpression = { ( "!" | "-" | "+" ) } PostfixExpression ;
+
+PostfixExpression = PrimaryExpression { PostfixOperator } ;
+
+PostfixOperator = 
+    "." Identifier
+  | "[" Expression "]"
+  | "[" Expression "," Expression "]"
+  | "(" [ ExpressionList ] ")" ;
+
+PrimaryExpression = 
+    Literal
+  | Identifier
+  | "(" Expression ")"
+  | OldExpression
+  | ComptimeExpression
+  | CastExpression
+  | ErrorExpression ;
+
+OldExpression = "old" "(" Expression ")" ;
+
+ComptimeExpression = "comptime" Expression ;
+
+CastExpression = Expression "as" Type ;
+
+ErrorExpression = Identifier "!" Identifier ;
+
+ExpressionList = Expression { "," Expression } ;
+
+# ==========================================
+# LITERALS
+# ==========================================
+
+Literal = 
+    IntegerLiteral
+  | StringLiteral
+  | BooleanLiteral
+  | AddressLiteral
+  | HexLiteral ;
+
+IntegerLiteral = Digit { Digit } ;
+
+StringLiteral = '"' { Character - '"' } '"' ;
+
+BooleanLiteral = "true" | "false" ;
+
+AddressLiteral = "0x" HexDigit HexDigit HexDigit HexDigit HexDigit HexDigit HexDigit HexDigit
+                     HexDigit HexDigit HexDigit HexDigit HexDigit HexDigit HexDigit HexDigit
+                     HexDigit HexDigit HexDigit HexDigit HexDigit HexDigit HexDigit HexDigit
+                     HexDigit HexDigit HexDigit HexDigit HexDigit HexDigit HexDigit HexDigit
+                     HexDigit HexDigit HexDigit HexDigit HexDigit HexDigit HexDigit HexDigit ;
+
+HexLiteral = "0x" { HexDigit } ;
+
+# ==========================================
+# LEXICAL ELEMENTS
+# ==========================================
+
+Identifier = ( Letter | "_" ) { Letter | Digit | "_" } ;
+
+Letter = "a" | "b" | "c" | "d" | "e" | "f" | "g" | "h" | "i" | "j" | "k" | "l" | "m" |
+         "n" | "o" | "p" | "q" | "r" | "s" | "t" | "u" | "v" | "w" | "x" | "y" | "z" |
+         "A" | "B" | "C" | "D" | "E" | "F" | "G" | "H" | "I" | "J" | "K" | "L" | "M" |
+         "N" | "O" | "P" | "Q" | "R" | "S" | "T" | "U" | "V" | "W" | "X" | "Y" | "Z" ;
+
+Digit = "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" ;
+
+HexDigit = Digit | "a" | "b" | "c" | "d" | "e" | "f" | "A" | "B" | "C" | "D" | "E" | "F" ;
+
+Character = ? any Unicode character ? ;
+
+# ==========================================
+# COMMENTS AND WHITESPACE
+# ==========================================
+
+Comment = LineComment | BlockComment ;
+
+LineComment = "//" { Character - NewLine } NewLine ;
+
+BlockComment = "/*" { Character } "*/" ;
+
+NewLine = ? line feed character ? ;
+
+Whitespace = ? space, tab, newline, carriage return ? ;
+
+# ==========================================
+# RESERVED WORDS
+# ==========================================
+
+ReservedWord = 
+    "contract" | "pub" | "fn" | "let" | "var" | "const" | "immutable" |
+    "storage" | "memory" | "tstore" | "init" | "log" |
+    "if" | "else" | "while" | "break" | "continue" | "return" |
+    "requires" | "ensures" | "invariant" | "old" | "comptime" |
+    "as" | "import" | "struct" | "enum" | "true" | "false" |
+    "error" | "try" | "catch" | "from" |
+    "u8" | "u16" | "u32" | "u64" | "u128" | "u256" |
+    "i8" | "i16" | "i32" | "i64" | "i128" | "i256" |
+    "bool" | "address" | "string" | "bytes" | "map" | "doublemap" ;
+
+# ==========================================
+# GRAMMAR VALIDATION EXAMPLES
+# ==========================================
+
+# Example 1: Simple contract
+(*
+contract SimpleStorage {
+    storage var value: u256;
+    
+    pub fn init(initial_value: u256) {
+        value = initial_value;
+    }
+    
+    pub fn get() -> u256 {
+        return value;
+    }
+    
+    pub fn set(new_value: u256) {
+        value = new_value;
+    }
+}
+*)
+
+# Example 2: ERC20 Token with verification
+(*
+contract Token {
+    storage var totalSupply: u256;
+    storage var balances: map[address, u256];
+    
+    log Transfer(from: address, to: address, amount: u256);
+    
+    pub fn init(initial_supply: u256) {
+        totalSupply = initial_supply;
+        balances[msg.sender] = initial_supply;
+    }
+    
+    pub fn transfer(to: address, amount: u256) -> bool
+        requires(balances[msg.sender] >= amount)
+        requires(to != 0x0)
+        ensures(balances[msg.sender] + balances[to] == old(balances[msg.sender]) + old(balances[to]))
+    {
+        balances[msg.sender] -= amount;
+        balances[to] += amount;
+        log Transfer(msg.sender, to, amount);
+        return true;
+    }
+}
+*)
+
+# Example 3: Error handling
+(*
+contract SafeMath {
+    error DivisionByZero;
+    error Overflow;
+    
+    pub fn safe_divide(a: u256, b: u256) -> u256 | DivisionByZero {
+        if (b == 0) {
+            return DivisionByZero;
+        }
+        return a / b;
+    }
+    
+    pub fn safe_add(a: u256, b: u256) -> u256 | Overflow {
+        if (a + b < a) {
+            return Overflow;
+        }
+        return a + b;
+    }
+}
+*)
+
+# ==========================================
+# SEMANTIC NOTES
+# ==========================================
+
+# 1. Identifiers cannot be reserved words
+# 2. Memory region annotations have scoping rules
+# 3. Type compatibility must be checked during semantic analysis
+# 4. Function signatures must be unique within a contract
+# 5. Storage variables can only be declared at contract level
+# 6. Formal verification clauses have specific semantic requirements
+# 7. Error unions create sum types that must be handled
+# 8. Transfer statements are syntactic sugar for balance updates
+
+# ==========================================
+# AMBIGUITY RESOLUTION
+# ==========================================
+
+# 1. Dangling else: Associates with nearest if
+# 2. Operator precedence: As defined in expression hierarchy
+# 3. Assignment associativity: Right-associative
+# 4. Function calls vs array indexing: Disambiguated by context
+# 5. Type annotations: Required for variable declarations
+# 6. Block scoping: Lexical scoping rules apply 

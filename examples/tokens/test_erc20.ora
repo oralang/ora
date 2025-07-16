@@ -4,7 +4,7 @@ contract ERC20 {
     storage const decimals: u8;
     storage var total_supply: u256;
 
-    storage var balances: mapping[address, u256];
+    storage var balances: map[address, u256];
     storage var allowances: doublemap[address, address, u256];
 
     log Transfer(from: address, to: address, value: u256);

@@ -4,7 +4,7 @@ contract VerificationDemo {
     storage const MAX_TRANSFER: u256 = 1000000;
     
     // State variables
-    storage var balances: mapping[address, u256];
+    storage var balances: map[address, u256];
     storage var total_supply: u256;
     
     log Transfer(from: address, to: address, amount: u256);

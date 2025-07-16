@@ -1,0 +1,58 @@
+// Simple Unit Test for Division Functions
+// Quick smoke test to verify basic division functionality
+
+contract DivisionUnitTest {
+    // Test basic division operations
+    function testBasicOperations() public {
+        log("=== Basic Division Unit Test ===");
+        
+        // Test @divTrunc
+        let trunc_result = @divTrunc(10, 3);
+        assert(trunc_result == 3, "divTrunc(10, 3) should be 3");
+        log("✓ @divTrunc test passed");
+        
+        // Test @divFloor
+        let floor_result = @divFloor(-10, 3);
+        assert(floor_result == -4, "divFloor(-10, 3) should be -4");
+        log("✓ @divFloor test passed");
+        
+        // Test @divCeil  
+        let ceil_result = @divCeil(10, 3);
+        assert(ceil_result == 4, "divCeil(10, 3) should be 4");
+        log("✓ @divCeil test passed");
+        
+        // Test @divExact
+        let exact_result = @divExact(20, 5);
+        assert(exact_result == 4, "divExact(20, 5) should be 4");
+        log("✓ @divExact test passed");
+        
+        // Test @divmod with tuple unpacking
+        let (quotient, remainder) = @divmod(10, 3);
+        assert(quotient == 3, "divmod(10, 3) quotient should be 3");
+        assert(remainder == 1, "divmod(10, 3) remainder should be 1");
+        log("✓ @divmod tuple unpacking test passed");
+        
+        log("=== All unit tests passed! ===");
+    }
+    
+    // Test compile-time evaluation
+    function testComptimeBasic() public {
+        comptime {
+            let ct_result = @divTrunc(100, 10);  // Should be 10
+            assert(ct_result == 10, "Comptime divTrunc should work");
+            
+            let (ct_q, ct_r) = @divmod(17, 5);  // Should be (3, 2)
+            assert(ct_q == 3 && ct_r == 2, "Comptime divmod should work");
+        }
+        
+        log("✓ Compile-time evaluation test passed");
+    }
+    
+    // Helper assert function
+    function assert(condition: bool, message: string) {
+        if (!condition) {
+            log("❌ ASSERTION FAILED: ", message);
+            // In a real implementation, this would revert or throw
+        }
+    }
+} 

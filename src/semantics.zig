@@ -1020,7 +1020,13 @@ pub const SemanticAnalyzer = struct {
             std.mem.eql(u8, name, "ensures") or
             std.mem.eql(u8, name, "invariant") or
             std.mem.eql(u8, name, "old") or
-            std.mem.eql(u8, name, "log");
+            std.mem.eql(u8, name, "log") or
+            // Division functions (with @ prefix)
+            std.mem.eql(u8, name, "@divmod") or
+            std.mem.eql(u8, name, "@divTrunc") or
+            std.mem.eql(u8, name, "@divFloor") or
+            std.mem.eql(u8, name, "@divCeil") or
+            std.mem.eql(u8, name, "@divExact");
     }
 
     /// Perform static verification on function requires/ensures clauses
@@ -1075,10 +1081,6 @@ pub const SemanticAnalyzer = struct {
         const result = self.static_verifier.verifyAll() catch |err| {
             switch (err) {
                 error.OutOfMemory => return SemanticError.OutOfMemory,
-                else => {
-                    try self.addWarning("Static verification failed", function.span);
-                    return;
-                },
             }
         };
 

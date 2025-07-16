@@ -89,6 +89,7 @@ pub const Type = union(enum) {
         bool,
         address,
         string,
+        bytes,
 
         pub fn toString(self: PrimitiveType) []const u8 {
             return switch (self) {
@@ -107,6 +108,7 @@ pub const Type = union(enum) {
                 .bool => "bool",
                 .address => "address",
                 .string => "string",
+                .bytes => "bytes",
             };
         }
     };
@@ -3865,6 +3867,7 @@ pub const ASTToHIRConverter = struct {
             .I128 => Type{ .primitive = .i128 },
             .I256 => Type{ .primitive = .i256 },
             .String => Type{ .primitive = .string },
+            .Bytes => Type{ .primitive = .bytes },
             .Mapping => |*mapping| {
                 const key_type = try self.allocator.create(Type);
                 const value_type = try self.allocator.create(Type);

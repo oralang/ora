@@ -5,7 +5,7 @@ contract SimpleToken {
     
     // Storage state
     storage var totalSupply: u256;
-    storage var balances: mapping[address, u256];
+    storage var balances: map[address, u256];
     
     // Events
     log Transfer(from: address, to: address, amount: u256);

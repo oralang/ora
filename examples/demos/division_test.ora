@@ -1,0 +1,95 @@
+contract DivisionDemo {
+    // Error declarations for division operations
+    error DivisionByZero;
+    error InexactDivision;
+    error OverflowError;
+    
+    // Test the new Zig-inspired division functions
+    
+    function testDivisionFunctions() public {
+        let a: u32 = 10;
+        let b: u32 = 3;
+        
+        // Truncating division (toward zero) - EVM default
+        let trunc_result = @divTrunc(a, b);  // 3
+        
+        // Floor division (toward negative infinity)
+        let floor_result = @divFloor(a, b);  // 3
+        
+        // Ceiling division (toward positive infinity)
+        let ceil_result = @divCeil(a, b);    // 4
+        
+        // Exact division (errors if remainder != 0)
+        let exact_result = @divExact(12, 4); // 3
+        
+        // Division with remainder (returns tuple)
+        let divmod_result = @divmod(a, b);   // (3, 1) as tuple
+        
+        // Tuple unpacking syntax
+        let (quotient, remainder) = @divmod(a, b);  // quotient=3, remainder=1
+        
+        log("Truncating division: ", trunc_result);
+        log("Floor division: ", floor_result);
+        log("Ceiling division: ", ceil_result);
+        log("Exact division: ", exact_result);
+        log("Divmod result: ", divmod_result);
+    }
+    
+    function testSignedDivision() public {
+        let a: i32 = -7;
+        let b: i32 = 3;
+        
+        // Different rounding behaviors for negative numbers
+        let trunc_result = @divTrunc(a, b);  // -2 (toward zero)
+        let floor_result = @divFloor(a, b);  // -3 (toward -∞)
+        let ceil_result = @divCeil(a, b);    // -2 (toward +∞)
+        
+        log("Signed truncating: ", trunc_result);
+        log("Signed floor: ", floor_result);
+        log("Signed ceiling: ", ceil_result);
+    }
+    
+    function testCompileTimeEvaluation() public {
+        // These should be evaluated at compile time
+        comptime {
+            let compile_div = @divTrunc(20, 4);  // 5
+            let compile_mod = @divmod(13, 4);    // quotient=3, remainder=1
+            
+            // These values are computed at compile time
+            assert(compile_div == 5);
+        }
+    }
+    
+    function testTryCatchDivision() public {
+        let a: u32 = 10;
+        let b: u32 = 0;  // Will cause division by zero
+        
+        // Try-catch with division by zero
+        try {
+            let result = @divTrunc(a, b);
+            log("Division succeeded: ", result);
+        } catch(err) {
+            log("Division failed with error: ", err);
+        }
+        
+        // Try-catch with exact division
+        try {
+            let exact_result = @divExact(10, 3);  // Will fail - not exact
+            log("Exact division succeeded: ", exact_result);
+        } catch(err) {
+            log("Exact division failed with error: ", err);
+        }
+        
+        // Safe division with error handling
+        let safe_result = safeDivide(a, 3);
+        log("Safe division result: ", safe_result);
+    }
+    
+    function safeDivide(a: u32, b: u32) -> !u32 {
+        if (b == 0) {
+            return error.DivisionByZero;
+        }
+        
+        return @divTrunc(a, b);
+    }
+} 

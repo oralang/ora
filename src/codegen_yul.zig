@@ -373,6 +373,7 @@ pub const YulCodegen = struct {
                 .bool => "bool",
                 .address => "address",
                 .string => "string",
+                .bytes => "bytes",
             },
             .slice => |_| "uint256[]", // Simplified - slices become uint256[]
             .mapping => |_| "mapping", // Mappings don't appear in function signatures
@@ -792,6 +793,16 @@ pub const YulCodegen = struct {
                     }
                 }
             }
+
+            // Check if this is a builtin division function
+            if (std.mem.eql(u8, func_name, "@divTrunc") or
+                std.mem.eql(u8, func_name, "@divFloor") or
+                std.mem.eql(u8, func_name, "@divCeil") or
+                std.mem.eql(u8, func_name, "@divExact") or
+                std.mem.eql(u8, func_name, "@divmod"))
+            {
+                return try self.generateBuiltinDivision(yul_code, func_name, call.arguments);
+            }
         }
 
         // Generate arguments
@@ -821,6 +832,106 @@ pub const YulCodegen = struct {
                 try yul_code.appendSlice(arg_var);
             }
             try yul_code.appendSlice(")\n");
+        }
+
+        return result_var;
+    }
+
+    /// Generate builtin division functions with safety checks
+    fn generateBuiltinDivision(self: *Self, yul_code: *std.ArrayList(u8), function_name: []const u8, arguments: []const ir.Expression) YulCodegenError![]const u8 {
+        // All division functions require exactly 2 arguments
+        if (arguments.len != 2) {
+            return YulCodegenError.InvalidIR;
+        }
+
+        // Generate argument variables
+        const lhs_var = try self.generateExpression(yul_code, &arguments[0]);
+        defer self.allocator.free(lhs_var);
+        const rhs_var = try self.generateExpression(yul_code, &arguments[1]);
+        defer self.allocator.free(rhs_var);
+
+        const result_var = try std.fmt.allocPrint(self.allocator, "temp_{}", .{self.var_counter});
+        self.var_counter += 1;
+
+        // Add division by zero check for all division functions
+        try yul_code.writer().print("      // {s} with safety checks\n", .{function_name});
+        try yul_code.writer().print("      if iszero({s}) {{\n", .{rhs_var});
+        try yul_code.writer().print("        // Create error union for division by zero\n");
+        try yul_code.writer().print("        mstore(0, 0x01) // error tag\n");
+        try yul_code.writer().print("        mstore(0x20, 0x01) // DivisionByZero error code\n");
+        try yul_code.writer().print("        revert(0, 0x40) // Return error union\n");
+        try yul_code.writer().print("      }}\n");
+
+        if (std.mem.eql(u8, function_name, "@divTrunc")) {
+            // Truncating division (toward zero) - this is EVM's default division
+            try yul_code.writer().print("      let {s} := sdiv({s}, {s})\n", .{ result_var, lhs_var, rhs_var });
+        } else if (std.mem.eql(u8, function_name, "@divFloor")) {
+            // Floor division (toward negative infinity)
+            // For positive numbers, same as truncating division
+            // For negative numbers, if there's a remainder, subtract 1 from result
+            const temp_quotient = try std.fmt.allocPrint(self.allocator, "temp_quotient_{}", .{self.var_counter});
+            defer self.allocator.free(temp_quotient);
+            self.var_counter += 1;
+
+            const temp_remainder = try std.fmt.allocPrint(self.allocator, "temp_remainder_{}", .{self.var_counter});
+            defer self.allocator.free(temp_remainder);
+            self.var_counter += 1;
+
+            try yul_code.writer().print("      let {s} := sdiv({s}, {s})\n", .{ temp_quotient, lhs_var, rhs_var });
+            try yul_code.writer().print("      let {s} := smod({s}, {s})\n", .{ temp_remainder, lhs_var, rhs_var });
+            try yul_code.writer().print("      let {s} := {s}\n", .{ result_var, temp_quotient });
+            try yul_code.writer().print("      // Adjust for floor division\n");
+            try yul_code.writer().print("      if and(not(iszero({s})), xor(slt({s}, 0), slt({s}, 0))) {{\n", .{ temp_remainder, lhs_var, rhs_var });
+            try yul_code.writer().print("        {s} := sub({s}, 1)\n", .{ result_var, result_var });
+            try yul_code.writer().print("      }}\n");
+        } else if (std.mem.eql(u8, function_name, "@divCeil")) {
+            // Ceiling division (toward positive infinity)
+            // For positive numbers, if there's a remainder, add 1 to result
+            const temp_quotient = try std.fmt.allocPrint(self.allocator, "temp_quotient_{}", .{self.var_counter});
+            defer self.allocator.free(temp_quotient);
+            self.var_counter += 1;
+
+            const temp_remainder = try std.fmt.allocPrint(self.allocator, "temp_remainder_{}", .{self.var_counter});
+            defer self.allocator.free(temp_remainder);
+            self.var_counter += 1;
+
+            try yul_code.writer().print("      let {s} := sdiv({s}, {s})\n", .{ temp_quotient, lhs_var, rhs_var });
+            try yul_code.writer().print("      let {s} := smod({s}, {s})\n", .{ temp_remainder, lhs_var, rhs_var });
+            try yul_code.writer().print("      let {s} := {s}\n", .{ result_var, temp_quotient });
+            try yul_code.writer().print("      // Adjust for ceiling division\n");
+            try yul_code.writer().print("      if and(not(iszero({s})), not(xor(slt({s}, 0), slt({s}, 0)))) {{\n", .{ temp_remainder, lhs_var, rhs_var });
+            try yul_code.writer().print("        {s} := add({s}, 1)\n", .{ result_var, result_var });
+            try yul_code.writer().print("      }}\n");
+        } else if (std.mem.eql(u8, function_name, "@divExact")) {
+            // Exact division - return error if remainder is not zero
+            const temp_remainder = try std.fmt.allocPrint(self.allocator, "temp_remainder_{}", .{self.var_counter});
+            defer self.allocator.free(temp_remainder);
+            self.var_counter += 1;
+
+            try yul_code.writer().print("      let {s} := smod({s}, {s})\n", .{ temp_remainder, lhs_var, rhs_var });
+            try yul_code.writer().print("      if not(iszero({s})) {{\n", .{temp_remainder});
+            try yul_code.writer().print("        // Create error union for inexact division\n");
+            try yul_code.writer().print("        mstore(0, 0x01) // error tag\n");
+            try yul_code.writer().print("        mstore(0x20, 0x02) // InexactDivision error code\n");
+            try yul_code.writer().print("        revert(0, 0x40) // Return error union\n");
+            try yul_code.writer().print("      }}\n");
+            try yul_code.writer().print("      let {s} := sdiv({s}, {s})\n", .{ result_var, lhs_var, rhs_var });
+        } else if (std.mem.eql(u8, function_name, "@divmod")) {
+            // Division with remainder - returns both quotient and remainder
+            // For now, we'll pack them into a single value (high 128 bits = quotient, low 128 bits = remainder)
+            // In a full implementation, this would return a tuple
+            const temp_quotient = try std.fmt.allocPrint(self.allocator, "temp_quotient_{}", .{self.var_counter});
+            defer self.allocator.free(temp_quotient);
+            self.var_counter += 1;
+
+            const temp_remainder = try std.fmt.allocPrint(self.allocator, "temp_remainder_{}", .{self.var_counter});
+            defer self.allocator.free(temp_remainder);
+            self.var_counter += 1;
+
+            try yul_code.writer().print("      let {s} := sdiv({s}, {s})\n", .{ temp_quotient, lhs_var, rhs_var });
+            try yul_code.writer().print("      let {s} := smod({s}, {s})\n", .{ temp_remainder, lhs_var, rhs_var });
+            try yul_code.writer().print("      // Pack quotient and remainder into single value\n");
+            try yul_code.writer().print("      let {s} := or(shl(128, {s}), and({s}, 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF))\n", .{ result_var, temp_quotient, temp_remainder });
         }
 
         return result_var;
@@ -1133,6 +1244,7 @@ pub const YulCodegen = struct {
                 .bool => "false",
                 .address => "0",
                 .string => "0",
+                .bytes => "0",
             },
             else => "0",
         };

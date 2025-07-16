@@ -77,16 +77,21 @@ pub const TypeRef = union(enum) {
     I128: void,
     I256: void,
     String: void,
+    Bytes: void,
 
     // Complex types
     Slice: *TypeRef,
     Mapping: MappingType,
     DoubleMap: DoubleMapType,
     Identifier: []const u8, // For custom types (structs, enums)
+    Tuple: TupleType, // Tuple types
 
     // Error handling types
     ErrorUnion: ErrorUnionType, // !T syntax
     Result: ResultType, // Result[T, E] syntax
+
+    // Special types
+    Unknown: void, // For type inference
 };
 
 /// Error union type (!T)
@@ -98,6 +103,11 @@ pub const ErrorUnionType = struct {
 pub const ResultType = struct {
     ok_type: *TypeRef,
     error_type: *TypeRef,
+};
+
+/// Tuple type for multiple values
+pub const TupleType = struct {
+    types: []TypeRef,
 };
 
 pub const MappingType = struct {
@@ -120,6 +130,8 @@ pub const VariableDeclNode = struct {
     typ: TypeRef,
     value: ?ExprNode,
     span: SourceSpan,
+    // Tuple unpacking support
+    tuple_names: ?[][]const u8, // For tuple unpacking: let (a, b) = expr
 };
 
 /// Memory regions matching Ora specification
@@ -274,6 +286,7 @@ pub const ExprNode = union(enum) {
     Cast: CastExpr,
     Comptime: ComptimeExpr,
     Old: OldExpr, // old() expressions in ensures clauses
+    Tuple: TupleExpr, // tuple expressions (a, b, c)
 
     // Error handling expressions
     Try: TryExpr, // try expression
@@ -433,6 +446,12 @@ pub const ComptimeExpr = struct {
 /// old() expressions for postconditions
 pub const OldExpr = struct {
     expr: *ExprNode,
+    span: SourceSpan,
+};
+
+/// Tuple expressions (a, b, c)
+pub const TupleExpr = struct {
+    elements: []ExprNode,
     span: SourceSpan,
 };
 
@@ -1004,6 +1023,7 @@ pub const ASTSerializer = struct {
             .I128 => try writer.writeAll("\"i128\""),
             .I256 => try writer.writeAll("\"i256\""),
             .String => try writer.writeAll("\"string\""),
+            .Bytes => try writer.writeAll("\"bytes\""),
             .Slice => |slice_element_type| {
                 try writer.writeAll("{\"type\": \"slice\", \"element\": ");
                 try serializeTypeRef(slice_element_type, writer);

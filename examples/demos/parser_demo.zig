@@ -277,7 +277,7 @@ fn printTypeRef(type_ref: ast.TypeRef) void {
             std.debug.print("]", .{});
         },
         .Mapping => |mapping| {
-            std.debug.print("mapping[", .{});
+            std.debug.print("map[", .{});
             printTypeRef(mapping.key.*);
             std.debug.print(", ", .{});
             printTypeRef(mapping.value.*);

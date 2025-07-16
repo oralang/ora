@@ -4,8 +4,8 @@
 contract MathematicalProofs {
     // Storage for mathematical operations
     storage values: u256[];
-    storage prime_cache: mapping(u256 => bool);
-    storage factorial_cache: mapping(u256 => u256);
+    storage prime_cache: map[u256, bool];
+storage factorial_cache: map[u256, u256];
     
     // Complex mathematical invariant with quantifiers
     invariant forall i: u256 where i < values.length => values[i] > 0;
@@ -279,8 +279,8 @@ contract MathematicalProofs {
 
 // Contract demonstrating formal verification of complex business logic
 contract VotingSystem {
-    storage proposals: mapping(u256 => Proposal);
-    storage voters: mapping(address => Voter);
+    storage proposals: map[u256, Proposal];
+storage voters: map[address, Voter];
     storage proposal_count: u256;
     
     struct Proposal {
@@ -291,7 +291,7 @@ contract VotingSystem {
     }
     
     struct Voter {
-        has_voted: mapping(u256 => bool);
+        has_voted: map[u256, bool];
         voting_power: u256;
     }
     

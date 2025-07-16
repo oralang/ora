@@ -2,3 +2,8 @@ DS_Store
 .zig-cache/
 zig-out/
 doc.md
+
+# Build artifacts
+*.bin
+*.yul
+*.hir.json

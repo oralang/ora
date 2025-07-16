@@ -38,6 +38,7 @@ pub const ComptimeValue = union(enum) {
 
     // Special values
     undefined_value: void,
+    tuple: []ComptimeValue, // Tuple values
 
     /// Convert to string representation for debugging
     pub fn toString(self: ComptimeValue, allocator: Allocator) ![]const u8 {
@@ -58,6 +59,21 @@ pub const ComptimeValue = union(enum) {
             .string => |s| try allocator.dupe(u8, s),
             .address => |addr| try std.fmt.allocPrint(allocator, "0x{}", .{std.fmt.fmtSliceHexUpper(&addr)}),
             .undefined_value => "undefined",
+            .tuple => |elements| {
+                var result = std.ArrayList(u8).init(allocator);
+                defer result.deinit();
+
+                try result.appendSlice("(");
+                for (elements, 0..) |element, i| {
+                    if (i > 0) try result.appendSlice(", ");
+                    const elem_str = try element.toString(allocator);
+                    defer allocator.free(elem_str);
+                    try result.appendSlice(elem_str);
+                }
+                try result.appendSlice(")");
+
+                return result.toOwnedSlice();
+            },
         };
     }
 
@@ -128,6 +144,16 @@ pub const ComptimeValue = union(enum) {
                 .undefined_value => true,
                 else => false,
             },
+            .tuple => |a| switch (other) {
+                .tuple => |b| {
+                    if (a.len != b.len) return false;
+                    for (a, b) |a_elem, b_elem| {
+                        if (!a_elem.equals(b_elem)) return false;
+                    }
+                    return true;
+                },
+                else => false,
+            },
         };
     }
 };
@@ -181,6 +207,7 @@ pub const ComptimeEvaluator = struct {
             .Binary => |*bin| self.evaluateBinary(bin),
             .Unary => |*unary| self.evaluateUnary(unary),
             .Comptime => |*comp| self.evaluateComptimeBlock(comp),
+            .FunctionCall => |*call| self.evaluateFunctionCall(call),
             else => ComptimeError.NotCompileTimeEvaluable,
         };
     }
@@ -383,6 +410,328 @@ pub const ComptimeEvaluator = struct {
         }
 
         return ComptimeValue{ .undefined_value = {} };
+    }
+
+    /// Evaluate function call (builtin functions only)
+    fn evaluateFunctionCall(self: *ComptimeEvaluator, call: *ast.FunctionCallExpr) ComptimeError!ComptimeValue {
+        const func_name = call.name;
+
+        // Check if it's a builtin division function
+        if (std.mem.eql(u8, func_name, "@divTrunc") or
+            std.mem.eql(u8, func_name, "@divFloor") or
+            std.mem.eql(u8, func_name, "@divCeil") or
+            std.mem.eql(u8, func_name, "@divExact") or
+            std.mem.eql(u8, func_name, "@divmod"))
+        {
+
+            // All division functions require exactly 2 arguments
+            if (call.arguments.len != 2) {
+                return ComptimeError.InvalidOperation;
+            }
+
+            // Evaluate both arguments
+            const lhs = try self.evaluate(&call.arguments[0]);
+            const rhs = try self.evaluate(&call.arguments[1]);
+
+            // Perform the division operation
+            if (std.mem.eql(u8, func_name, "@divTrunc")) {
+                return try self.divTrunc(lhs, rhs);
+            } else if (std.mem.eql(u8, func_name, "@divFloor")) {
+                return try self.divFloor(lhs, rhs);
+            } else if (std.mem.eql(u8, func_name, "@divCeil")) {
+                return try self.divCeil(lhs, rhs);
+            } else if (std.mem.eql(u8, func_name, "@divExact")) {
+                return try self.divExact(lhs, rhs);
+            } else if (std.mem.eql(u8, func_name, "@divmod")) {
+                return try self.divMod(lhs, rhs);
+            }
+        }
+
+        // Not a recognized builtin function
+        return ComptimeError.NotCompileTimeEvaluable;
+    }
+
+    /// Truncating division (toward zero) - using Zig's @divTrunc
+    fn divTrunc(self: *ComptimeEvaluator, left: ComptimeValue, right: ComptimeValue) ComptimeError!ComptimeValue {
+        const promoted = try self.promoteTypes(left, right);
+        return switch (promoted.left) {
+            .u8 => |a| switch (promoted.right) {
+                .u8 => |b| if (b == 0) ComptimeError.DivisionByZero else ComptimeValue{ .u8 = a / b },
+                else => ComptimeError.TypeMismatch,
+            },
+            .u16 => |a| switch (promoted.right) {
+                .u16 => |b| if (b == 0) ComptimeError.DivisionByZero else ComptimeValue{ .u16 = a / b },
+                else => ComptimeError.TypeMismatch,
+            },
+            .u32 => |a| switch (promoted.right) {
+                .u32 => |b| if (b == 0) ComptimeError.DivisionByZero else ComptimeValue{ .u32 = a / b },
+                else => ComptimeError.TypeMismatch,
+            },
+            .u64 => |a| switch (promoted.right) {
+                .u64 => |b| if (b == 0) ComptimeError.DivisionByZero else ComptimeValue{ .u64 = a / b },
+                else => ComptimeError.TypeMismatch,
+            },
+            .u128 => |a| switch (promoted.right) {
+                .u128 => |b| if (b == 0) ComptimeError.DivisionByZero else ComptimeValue{ .u128 = a / b },
+                else => ComptimeError.TypeMismatch,
+            },
+            .i8 => |a| switch (promoted.right) {
+                .i8 => |b| if (b == 0) ComptimeError.DivisionByZero else ComptimeValue{ .i8 = @divTrunc(a, b) },
+                else => ComptimeError.TypeMismatch,
+            },
+            .i16 => |a| switch (promoted.right) {
+                .i16 => |b| if (b == 0) ComptimeError.DivisionByZero else ComptimeValue{ .i16 = @divTrunc(a, b) },
+                else => ComptimeError.TypeMismatch,
+            },
+            .i32 => |a| switch (promoted.right) {
+                .i32 => |b| if (b == 0) ComptimeError.DivisionByZero else ComptimeValue{ .i32 = @divTrunc(a, b) },
+                else => ComptimeError.TypeMismatch,
+            },
+            .i64 => |a| switch (promoted.right) {
+                .i64 => |b| if (b == 0) ComptimeError.DivisionByZero else ComptimeValue{ .i64 = @divTrunc(a, b) },
+                else => ComptimeError.TypeMismatch,
+            },
+            .i128 => |a| switch (promoted.right) {
+                .i128 => |b| if (b == 0) ComptimeError.DivisionByZero else ComptimeValue{ .i128 = @divTrunc(a, b) },
+                else => ComptimeError.TypeMismatch,
+            },
+            else => ComptimeError.InvalidOperation,
+        };
+    }
+
+    /// Floor division (toward negative infinity) - using Zig's @divFloor
+    fn divFloor(self: *ComptimeEvaluator, left: ComptimeValue, right: ComptimeValue) ComptimeError!ComptimeValue {
+        const promoted = try self.promoteTypes(left, right);
+        return switch (promoted.left) {
+            .u8 => |a| switch (promoted.right) {
+                .u8 => |b| if (b == 0) ComptimeError.DivisionByZero else ComptimeValue{ .u8 = a / b },
+                else => ComptimeError.TypeMismatch,
+            },
+            .u16 => |a| switch (promoted.right) {
+                .u16 => |b| if (b == 0) ComptimeError.DivisionByZero else ComptimeValue{ .u16 = a / b },
+                else => ComptimeError.TypeMismatch,
+            },
+            .u32 => |a| switch (promoted.right) {
+                .u32 => |b| if (b == 0) ComptimeError.DivisionByZero else ComptimeValue{ .u32 = a / b },
+                else => ComptimeError.TypeMismatch,
+            },
+            .u64 => |a| switch (promoted.right) {
+                .u64 => |b| if (b == 0) ComptimeError.DivisionByZero else ComptimeValue{ .u64 = a / b },
+                else => ComptimeError.TypeMismatch,
+            },
+            .u128 => |a| switch (promoted.right) {
+                .u128 => |b| if (b == 0) ComptimeError.DivisionByZero else ComptimeValue{ .u128 = a / b },
+                else => ComptimeError.TypeMismatch,
+            },
+            .i8 => |a| switch (promoted.right) {
+                .i8 => |b| if (b == 0) ComptimeError.DivisionByZero else ComptimeValue{ .i8 = @divFloor(a, b) },
+                else => ComptimeError.TypeMismatch,
+            },
+            .i16 => |a| switch (promoted.right) {
+                .i16 => |b| if (b == 0) ComptimeError.DivisionByZero else ComptimeValue{ .i16 = @divFloor(a, b) },
+                else => ComptimeError.TypeMismatch,
+            },
+            .i32 => |a| switch (promoted.right) {
+                .i32 => |b| if (b == 0) ComptimeError.DivisionByZero else ComptimeValue{ .i32 = @divFloor(a, b) },
+                else => ComptimeError.TypeMismatch,
+            },
+            .i64 => |a| switch (promoted.right) {
+                .i64 => |b| if (b == 0) ComptimeError.DivisionByZero else ComptimeValue{ .i64 = @divFloor(a, b) },
+                else => ComptimeError.TypeMismatch,
+            },
+            .i128 => |a| switch (promoted.right) {
+                .i128 => |b| if (b == 0) ComptimeError.DivisionByZero else ComptimeValue{ .i128 = @divFloor(a, b) },
+                else => ComptimeError.TypeMismatch,
+            },
+            else => ComptimeError.InvalidOperation,
+        };
+    }
+
+    /// Ceiling division (toward positive infinity) - custom implementation
+    fn divCeil(self: *ComptimeEvaluator, left: ComptimeValue, right: ComptimeValue) ComptimeError!ComptimeValue {
+        const promoted = try self.promoteTypes(left, right);
+        return switch (promoted.left) {
+            .u8 => |a| switch (promoted.right) {
+                .u8 => |b| if (b == 0) ComptimeError.DivisionByZero else ComptimeValue{ .u8 = (a + b - 1) / b },
+                else => ComptimeError.TypeMismatch,
+            },
+            .u16 => |a| switch (promoted.right) {
+                .u16 => |b| if (b == 0) ComptimeError.DivisionByZero else ComptimeValue{ .u16 = (a + b - 1) / b },
+                else => ComptimeError.TypeMismatch,
+            },
+            .u32 => |a| switch (promoted.right) {
+                .u32 => |b| if (b == 0) ComptimeError.DivisionByZero else ComptimeValue{ .u32 = (a + b - 1) / b },
+                else => ComptimeError.TypeMismatch,
+            },
+            .u64 => |a| switch (promoted.right) {
+                .u64 => |b| if (b == 0) ComptimeError.DivisionByZero else ComptimeValue{ .u64 = (a + b - 1) / b },
+                else => ComptimeError.TypeMismatch,
+            },
+            .u128 => |a| switch (promoted.right) {
+                .u128 => |b| if (b == 0) ComptimeError.DivisionByZero else ComptimeValue{ .u128 = (a + b - 1) / b },
+                else => ComptimeError.TypeMismatch,
+            },
+            .i8 => |a| switch (promoted.right) {
+                .i8 => |b| if (b == 0) ComptimeError.DivisionByZero else blk: {
+                    const quot = @divTrunc(a, b);
+                    const rem = a - quot * b;
+                    if (rem != 0 and ((a > 0) == (b > 0))) {
+                        break :blk ComptimeValue{ .i8 = quot + 1 };
+                    } else {
+                        break :blk ComptimeValue{ .i8 = quot };
+                    }
+                },
+                else => ComptimeError.TypeMismatch,
+            },
+            .i16 => |a| switch (promoted.right) {
+                .i16 => |b| if (b == 0) ComptimeError.DivisionByZero else blk: {
+                    const quot = @divTrunc(a, b);
+                    const rem = a - quot * b;
+                    if (rem != 0 and ((a > 0) == (b > 0))) {
+                        break :blk ComptimeValue{ .i16 = quot + 1 };
+                    } else {
+                        break :blk ComptimeValue{ .i16 = quot };
+                    }
+                },
+                else => ComptimeError.TypeMismatch,
+            },
+            .i32 => |a| switch (promoted.right) {
+                .i32 => |b| if (b == 0) ComptimeError.DivisionByZero else blk: {
+                    const quot = @divTrunc(a, b);
+                    const rem = a - quot * b;
+                    if (rem != 0 and ((a > 0) == (b > 0))) {
+                        break :blk ComptimeValue{ .i32 = quot + 1 };
+                    } else {
+                        break :blk ComptimeValue{ .i32 = quot };
+                    }
+                },
+                else => ComptimeError.TypeMismatch,
+            },
+            .i64 => |a| switch (promoted.right) {
+                .i64 => |b| if (b == 0) ComptimeError.DivisionByZero else blk: {
+                    const quot = @divTrunc(a, b);
+                    const rem = a - quot * b;
+                    if (rem != 0 and ((a > 0) == (b > 0))) {
+                        break :blk ComptimeValue{ .i64 = quot + 1 };
+                    } else {
+                        break :blk ComptimeValue{ .i64 = quot };
+                    }
+                },
+                else => ComptimeError.TypeMismatch,
+            },
+            .i128 => |a| switch (promoted.right) {
+                .i128 => |b| if (b == 0) ComptimeError.DivisionByZero else blk: {
+                    const quot = @divTrunc(a, b);
+                    const rem = a - quot * b;
+                    if (rem != 0 and ((a > 0) == (b > 0))) {
+                        break :blk ComptimeValue{ .i128 = quot + 1 };
+                    } else {
+                        break :blk ComptimeValue{ .i128 = quot };
+                    }
+                },
+                else => ComptimeError.TypeMismatch,
+            },
+            else => ComptimeError.InvalidOperation,
+        };
+    }
+
+    /// Exact division - using Zig's @divExact
+    fn divExact(self: *ComptimeEvaluator, left: ComptimeValue, right: ComptimeValue) ComptimeError!ComptimeValue {
+        const promoted = try self.promoteTypes(left, right);
+        return switch (promoted.left) {
+            .u8 => |a| switch (promoted.right) {
+                .u8 => |b| if (b == 0) ComptimeError.DivisionByZero else if (a % b != 0) ComptimeError.InvalidOperation else ComptimeValue{ .u8 = a / b },
+                else => ComptimeError.TypeMismatch,
+            },
+            .u16 => |a| switch (promoted.right) {
+                .u16 => |b| if (b == 0) ComptimeError.DivisionByZero else if (a % b != 0) ComptimeError.InvalidOperation else ComptimeValue{ .u16 = a / b },
+                else => ComptimeError.TypeMismatch,
+            },
+            .u32 => |a| switch (promoted.right) {
+                .u32 => |b| if (b == 0) ComptimeError.DivisionByZero else if (a % b != 0) ComptimeError.InvalidOperation else ComptimeValue{ .u32 = a / b },
+                else => ComptimeError.TypeMismatch,
+            },
+            .u64 => |a| switch (promoted.right) {
+                .u64 => |b| if (b == 0) ComptimeError.DivisionByZero else if (a % b != 0) ComptimeError.InvalidOperation else ComptimeValue{ .u64 = a / b },
+                else => ComptimeError.TypeMismatch,
+            },
+            .u128 => |a| switch (promoted.right) {
+                .u128 => |b| if (b == 0) ComptimeError.DivisionByZero else if (a % b != 0) ComptimeError.InvalidOperation else ComptimeValue{ .u128 = a / b },
+                else => ComptimeError.TypeMismatch,
+            },
+            .i8 => |a| switch (promoted.right) {
+                .i8 => |b| if (b == 0) ComptimeError.DivisionByZero else if (@rem(a, b) != 0) ComptimeError.InvalidOperation else ComptimeValue{ .i8 = @divTrunc(a, b) },
+                else => ComptimeError.TypeMismatch,
+            },
+            .i16 => |a| switch (promoted.right) {
+                .i16 => |b| if (b == 0) ComptimeError.DivisionByZero else if (@rem(a, b) != 0) ComptimeError.InvalidOperation else ComptimeValue{ .i16 = @divTrunc(a, b) },
+                else => ComptimeError.TypeMismatch,
+            },
+            .i32 => |a| switch (promoted.right) {
+                .i32 => |b| if (b == 0) ComptimeError.DivisionByZero else if (@rem(a, b) != 0) ComptimeError.InvalidOperation else ComptimeValue{ .i32 = @divTrunc(a, b) },
+                else => ComptimeError.TypeMismatch,
+            },
+            .i64 => |a| switch (promoted.right) {
+                .i64 => |b| if (b == 0) ComptimeError.DivisionByZero else if (@rem(a, b) != 0) ComptimeError.InvalidOperation else ComptimeValue{ .i64 = @divTrunc(a, b) },
+                else => ComptimeError.TypeMismatch,
+            },
+            .i128 => |a| switch (promoted.right) {
+                .i128 => |b| if (b == 0) ComptimeError.DivisionByZero else if (@rem(a, b) != 0) ComptimeError.InvalidOperation else ComptimeValue{ .i128 = @divTrunc(a, b) },
+                else => ComptimeError.TypeMismatch,
+            },
+            else => ComptimeError.InvalidOperation,
+        };
+    }
+
+    /// Division with remainder - returns a tuple value
+    fn divMod(self: *ComptimeEvaluator, left: ComptimeValue, right: ComptimeValue) ComptimeError!ComptimeValue {
+        const promoted = try self.promoteTypes(left, right);
+
+        // Create tuple with quotient and remainder
+        var tuple_elements = std.ArrayList(ComptimeValue).init(self.allocator);
+        defer tuple_elements.deinit();
+
+        switch (promoted.left) {
+            .u32 => |a| switch (promoted.right) {
+                .u32 => |b| if (b == 0) ComptimeError.DivisionByZero else {
+                    const quot = a / b;
+                    const rem = a % b;
+                    try tuple_elements.append(ComptimeValue{ .u32 = quot });
+                    try tuple_elements.append(ComptimeValue{ .u32 = rem });
+                },
+                else => return ComptimeError.TypeMismatch,
+            },
+            .u64 => |a| switch (promoted.right) {
+                .u64 => |b| if (b == 0) ComptimeError.DivisionByZero else {
+                    const quot = a / b;
+                    const rem = a % b;
+                    try tuple_elements.append(ComptimeValue{ .u64 = quot });
+                    try tuple_elements.append(ComptimeValue{ .u64 = rem });
+                },
+                else => return ComptimeError.TypeMismatch,
+            },
+            .i32 => |a| switch (promoted.right) {
+                .i32 => |b| if (b == 0) ComptimeError.DivisionByZero else {
+                    const quot = @divTrunc(a, b);
+                    const rem = @rem(a, b);
+                    try tuple_elements.append(ComptimeValue{ .i32 = quot });
+                    try tuple_elements.append(ComptimeValue{ .i32 = rem });
+                },
+                else => return ComptimeError.TypeMismatch,
+            },
+            .i64 => |a| switch (promoted.right) {
+                .i64 => |b| if (b == 0) ComptimeError.DivisionByZero else {
+                    const quot = @divTrunc(a, b);
+                    const rem = @rem(a, b);
+                    try tuple_elements.append(ComptimeValue{ .i64 = quot });
+                    try tuple_elements.append(ComptimeValue{ .i64 = rem });
+                },
+                else => return ComptimeError.TypeMismatch,
+            },
+            else => return ComptimeError.InvalidOperation,
+        }
+
+        return ComptimeValue{ .tuple = try tuple_elements.toOwnedSlice() };
     }
 
     /// Define a compile-time constant

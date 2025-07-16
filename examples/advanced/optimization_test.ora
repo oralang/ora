@@ -6,7 +6,7 @@ contract OptimizationDemo {
     storage const ALWAYS_FALSE: bool = false;
     
     // State variables
-    storage var balances: mapping[address, u256];
+    storage var balances: map[address, u256];
     storage var total_supply: u256;
     storage var is_paused: bool;
     

@@ -10,7 +10,7 @@ contract ErrorUnionDemo {
     error AmountTooLarge;
 
     // Storage variables
-    storage balances: mapping[address, u256];
+    storage balances: map[address, u256];
     storage owner: address;
 
     // Initialize contract
