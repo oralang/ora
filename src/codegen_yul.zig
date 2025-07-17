@@ -51,6 +51,8 @@ pub const YulCodegen = struct {
     storage_counter: u32,
     /// Mapping from storage variable names to their slot numbers
     storage_slots: std.HashMap([]const u8, u32, std.hash_map.StringContext, std.hash_map.default_max_load_percentage),
+    /// Mapping from immutable variable names to their identifiers
+    immutable_vars: std.HashMap([]const u8, []const u8, std.hash_map.StringContext, std.hash_map.default_max_load_percentage),
     /// Current contract context for event lookup
     current_contract: ?*const Contract,
 
@@ -71,6 +73,7 @@ pub const YulCodegen = struct {
             .current_function = null,
             .storage_counter = 0,
             .storage_slots = std.HashMap([]const u8, u32, std.hash_map.StringContext, std.hash_map.default_max_load_percentage).init(allocator),
+            .immutable_vars = std.HashMap([]const u8, []const u8, std.hash_map.StringContext, std.hash_map.default_max_load_percentage).init(allocator),
             .current_contract = null,
         };
     }
@@ -85,6 +88,13 @@ pub const YulCodegen = struct {
         }
         self.variable_stack.deinit();
         self.storage_slots.deinit();
+
+        // Free immutable variable identifiers
+        var iter = self.immutable_vars.iterator();
+        while (iter.next()) |entry| {
+            self.allocator.free(entry.value_ptr.*);
+        }
+        self.immutable_vars.deinit();
     }
 
     /// Push a variable name onto the stack (takes ownership)
@@ -185,11 +195,18 @@ pub const YulCodegen = struct {
         // Store current contract for event lookup
         self.current_contract = contract;
 
-        // Initialize storage slot mapping
+        // Initialize storage slot mapping and immutable variable tracking
         var slot_counter: u32 = 0;
         for (contract.storage) |*storage_var| {
-            try self.storage_slots.put(storage_var.name, slot_counter);
-            slot_counter += 1;
+            if (storage_var.region == .immutable) {
+                // Track immutable variables with unique identifiers
+                const immutable_id = try std.fmt.allocPrint(self.allocator, "immutable_{s}", .{storage_var.name});
+                try self.immutable_vars.put(storage_var.name, immutable_id);
+            } else {
+                // Regular storage variables get slot numbers
+                try self.storage_slots.put(storage_var.name, slot_counter);
+                slot_counter += 1;
+            }
         }
 
         try yul_code.writer().print("  // Contract: {s}\n", .{contract.name});
@@ -225,17 +242,26 @@ pub const YulCodegen = struct {
     ///     yul_code: Output buffer
     ///     contract: Contract with storage variables
     fn generateConstructor(self: *Self, yul_code: *std.ArrayList(u8), contract: *const Contract) YulCodegenError!void {
-        try yul_code.appendSlice("    // Constructor - initialize storage\n");
+        try yul_code.appendSlice("    // Constructor - initialize storage and immutable variables\n");
 
         for (contract.storage) |*storage_var| {
             if (storage_var.value) |value| {
-                const slot = self.storage_counter;
-                self.storage_counter += 1;
-
-                try yul_code.writer().print("    // Initialize {s}\n", .{storage_var.name});
                 const value_code = try self.generateExpression(yul_code, value);
                 defer self.allocator.free(value_code);
-                try yul_code.writer().print("    sstore({}, {s})\n", .{ slot, value_code });
+
+                if (storage_var.region == .immutable) {
+                    // Use setimmutable for immutable variables
+                    if (self.immutable_vars.get(storage_var.name)) |immutable_id| {
+                        try yul_code.writer().print("    // Initialize immutable {s}\n", .{storage_var.name});
+                        try yul_code.writer().print("    setimmutable(\"{s}\", {s})\n", .{ immutable_id, value_code });
+                    }
+                } else {
+                    // Use sstore for regular storage variables
+                    const slot = self.storage_counter;
+                    self.storage_counter += 1;
+                    try yul_code.writer().print("    // Initialize storage {s}\n", .{storage_var.name});
+                    try yul_code.writer().print("    sstore({}, {s})\n", .{ slot, value_code });
+                }
             }
         }
     }
@@ -343,9 +369,11 @@ pub const YulCodegen = struct {
         return switch (ora_type) {
             .primitive => |prim| switch (prim) {
                 .u8, .u16, .u32, .u64, .u128, .u256 => "uint256",
+                .i8, .i16, .i32, .i64, .i128, .i256 => "int256",
                 .bool => "bool",
                 .address => "address",
                 .string => "string",
+                .bytes => "bytes",
             },
             .slice => |_| "uint256[]", // Simplified - slices become uint256[]
             .mapping => |_| "mapping", // Mappings don't appear in function signatures
@@ -467,15 +495,29 @@ pub const YulCodegen = struct {
 
     /// Generate assignment statement
     fn generateAssignment(self: *Self, yul_code: *std.ArrayList(u8), assignment: *const ir.Assignment) YulCodegenError!void {
-        try yul_code.appendSlice("      // Assignment\n");
-
         const value_var = try self.generateExpression(yul_code, assignment.value);
         defer self.allocator.free(value_var);
 
-        // For simplicity, assume target is an identifier
+        // Handle different assignment targets
         if (assignment.target.* == .identifier) {
             const target_name = assignment.target.identifier.name;
-            try yul_code.writer().print("      {s} := {s}\n", .{ target_name, value_var });
+
+            // Check if this is an immutable variable
+            if (self.immutable_vars.get(target_name)) |immutable_id| {
+                try yul_code.writer().print("      // Assign to immutable {s}\n", .{target_name});
+                try yul_code.writer().print("      setimmutable(\"{s}\", {s})\n", .{ immutable_id, value_var });
+            } else if (self.storage_slots.get(target_name)) |slot| {
+                // Storage variable assignment
+                try yul_code.writer().print("      // Assign to storage {s}\n", .{target_name});
+                try yul_code.writer().print("      sstore({}, {s})\n", .{ slot, value_var });
+            } else {
+                // Regular variable assignment
+                try yul_code.writer().print("      // Assign to {s}\n", .{target_name});
+                try yul_code.writer().print("      {s} := {s}\n", .{ target_name, value_var });
+            }
+        } else {
+            // TODO: Handle complex assignment targets (index, field access, etc.)
+            try yul_code.writer().print("      // Complex assignment (TODO)\n", .{});
         }
     }
 
@@ -600,10 +642,22 @@ pub const YulCodegen = struct {
                 return try self.generateLiteral(yul_code, literal);
             },
             .identifier => |*ident| {
+                // Check if this is an immutable variable
+                if (self.immutable_vars.get(ident.name)) |immutable_id| {
+                    const result_var = try std.fmt.allocPrint(self.allocator, "temp_{}", .{self.var_counter});
+                    self.var_counter += 1;
+                    try yul_code.writer().print("      let {s} := loadimmutable(\"{s}\")\n", .{ result_var, immutable_id });
+                    return result_var;
+                }
+
                 // Check if this is a storage variable
                 if (self.storage_slots.get(ident.name)) |slot| {
-                    return try std.fmt.allocPrint(self.allocator, "{}", .{slot});
+                    const result_var = try std.fmt.allocPrint(self.allocator, "temp_{}", .{self.var_counter});
+                    self.var_counter += 1;
+                    try yul_code.writer().print("      let {s} := sload({})\n", .{ result_var, slot });
+                    return result_var;
                 }
+
                 // Regular identifier (parameter, local variable, etc.)
                 return try self.allocator.dupe(u8, ident.name);
             },
@@ -624,6 +678,9 @@ pub const YulCodegen = struct {
             },
             .transfer => |*transfer| {
                 return try self.generateTransferExpression(yul_code, transfer);
+            },
+            .shift => |*shift| {
+                return try self.generateShiftExpression(yul_code, shift);
             },
             .old => |*old| {
                 // Old expressions are used in formal verification - for now just evaluate the inner expression
@@ -736,6 +793,16 @@ pub const YulCodegen = struct {
                     }
                 }
             }
+
+            // Check if this is a builtin division function
+            if (std.mem.eql(u8, func_name, "@divTrunc") or
+                std.mem.eql(u8, func_name, "@divFloor") or
+                std.mem.eql(u8, func_name, "@divCeil") or
+                std.mem.eql(u8, func_name, "@divExact") or
+                std.mem.eql(u8, func_name, "@divmod"))
+            {
+                return try self.generateBuiltinDivision(yul_code, func_name, call.arguments);
+            }
         }
 
         // Generate arguments
@@ -765,6 +832,106 @@ pub const YulCodegen = struct {
                 try yul_code.appendSlice(arg_var);
             }
             try yul_code.appendSlice(")\n");
+        }
+
+        return result_var;
+    }
+
+    /// Generate builtin division functions with safety checks
+    fn generateBuiltinDivision(self: *Self, yul_code: *std.ArrayList(u8), function_name: []const u8, arguments: []const ir.Expression) YulCodegenError![]const u8 {
+        // All division functions require exactly 2 arguments
+        if (arguments.len != 2) {
+            return YulCodegenError.InvalidIR;
+        }
+
+        // Generate argument variables
+        const lhs_var = try self.generateExpression(yul_code, &arguments[0]);
+        defer self.allocator.free(lhs_var);
+        const rhs_var = try self.generateExpression(yul_code, &arguments[1]);
+        defer self.allocator.free(rhs_var);
+
+        const result_var = try std.fmt.allocPrint(self.allocator, "temp_{}", .{self.var_counter});
+        self.var_counter += 1;
+
+        // Add division by zero check for all division functions
+        try yul_code.writer().print("      // {s} with safety checks\n", .{function_name});
+        try yul_code.writer().print("      if iszero({s}) {{\n", .{rhs_var});
+        try yul_code.writer().print("        // Create error union for division by zero\n");
+        try yul_code.writer().print("        mstore(0, 0x01) // error tag\n");
+        try yul_code.writer().print("        mstore(0x20, 0x01) // DivisionByZero error code\n");
+        try yul_code.writer().print("        revert(0, 0x40) // Return error union\n");
+        try yul_code.writer().print("      }}\n");
+
+        if (std.mem.eql(u8, function_name, "@divTrunc")) {
+            // Truncating division (toward zero) - this is EVM's default division
+            try yul_code.writer().print("      let {s} := sdiv({s}, {s})\n", .{ result_var, lhs_var, rhs_var });
+        } else if (std.mem.eql(u8, function_name, "@divFloor")) {
+            // Floor division (toward negative infinity)
+            // For positive numbers, same as truncating division
+            // For negative numbers, if there's a remainder, subtract 1 from result
+            const temp_quotient = try std.fmt.allocPrint(self.allocator, "temp_quotient_{}", .{self.var_counter});
+            defer self.allocator.free(temp_quotient);
+            self.var_counter += 1;
+
+            const temp_remainder = try std.fmt.allocPrint(self.allocator, "temp_remainder_{}", .{self.var_counter});
+            defer self.allocator.free(temp_remainder);
+            self.var_counter += 1;
+
+            try yul_code.writer().print("      let {s} := sdiv({s}, {s})\n", .{ temp_quotient, lhs_var, rhs_var });
+            try yul_code.writer().print("      let {s} := smod({s}, {s})\n", .{ temp_remainder, lhs_var, rhs_var });
+            try yul_code.writer().print("      let {s} := {s}\n", .{ result_var, temp_quotient });
+            try yul_code.writer().print("      // Adjust for floor division\n");
+            try yul_code.writer().print("      if and(not(iszero({s})), xor(slt({s}, 0), slt({s}, 0))) {{\n", .{ temp_remainder, lhs_var, rhs_var });
+            try yul_code.writer().print("        {s} := sub({s}, 1)\n", .{ result_var, result_var });
+            try yul_code.writer().print("      }}\n");
+        } else if (std.mem.eql(u8, function_name, "@divCeil")) {
+            // Ceiling division (toward positive infinity)
+            // For positive numbers, if there's a remainder, add 1 to result
+            const temp_quotient = try std.fmt.allocPrint(self.allocator, "temp_quotient_{}", .{self.var_counter});
+            defer self.allocator.free(temp_quotient);
+            self.var_counter += 1;
+
+            const temp_remainder = try std.fmt.allocPrint(self.allocator, "temp_remainder_{}", .{self.var_counter});
+            defer self.allocator.free(temp_remainder);
+            self.var_counter += 1;
+
+            try yul_code.writer().print("      let {s} := sdiv({s}, {s})\n", .{ temp_quotient, lhs_var, rhs_var });
+            try yul_code.writer().print("      let {s} := smod({s}, {s})\n", .{ temp_remainder, lhs_var, rhs_var });
+            try yul_code.writer().print("      let {s} := {s}\n", .{ result_var, temp_quotient });
+            try yul_code.writer().print("      // Adjust for ceiling division\n");
+            try yul_code.writer().print("      if and(not(iszero({s})), not(xor(slt({s}, 0), slt({s}, 0)))) {{\n", .{ temp_remainder, lhs_var, rhs_var });
+            try yul_code.writer().print("        {s} := add({s}, 1)\n", .{ result_var, result_var });
+            try yul_code.writer().print("      }}\n");
+        } else if (std.mem.eql(u8, function_name, "@divExact")) {
+            // Exact division - return error if remainder is not zero
+            const temp_remainder = try std.fmt.allocPrint(self.allocator, "temp_remainder_{}", .{self.var_counter});
+            defer self.allocator.free(temp_remainder);
+            self.var_counter += 1;
+
+            try yul_code.writer().print("      let {s} := smod({s}, {s})\n", .{ temp_remainder, lhs_var, rhs_var });
+            try yul_code.writer().print("      if not(iszero({s})) {{\n", .{temp_remainder});
+            try yul_code.writer().print("        // Create error union for inexact division\n");
+            try yul_code.writer().print("        mstore(0, 0x01) // error tag\n");
+            try yul_code.writer().print("        mstore(0x20, 0x02) // InexactDivision error code\n");
+            try yul_code.writer().print("        revert(0, 0x40) // Return error union\n");
+            try yul_code.writer().print("      }}\n");
+            try yul_code.writer().print("      let {s} := sdiv({s}, {s})\n", .{ result_var, lhs_var, rhs_var });
+        } else if (std.mem.eql(u8, function_name, "@divmod")) {
+            // Division with remainder - returns both quotient and remainder
+            // For now, we'll pack them into a single value (high 128 bits = quotient, low 128 bits = remainder)
+            // In a full implementation, this would return a tuple
+            const temp_quotient = try std.fmt.allocPrint(self.allocator, "temp_quotient_{}", .{self.var_counter});
+            defer self.allocator.free(temp_quotient);
+            self.var_counter += 1;
+
+            const temp_remainder = try std.fmt.allocPrint(self.allocator, "temp_remainder_{}", .{self.var_counter});
+            defer self.allocator.free(temp_remainder);
+            self.var_counter += 1;
+
+            try yul_code.writer().print("      let {s} := sdiv({s}, {s})\n", .{ temp_quotient, lhs_var, rhs_var });
+            try yul_code.writer().print("      let {s} := smod({s}, {s})\n", .{ temp_remainder, lhs_var, rhs_var });
+            try yul_code.writer().print("      // Pack quotient and remainder into single value\n");
+            try yul_code.writer().print("      let {s} := or(shl(128, {s}), and({s}, 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF))\n", .{ result_var, temp_quotient, temp_remainder });
         }
 
         return result_var;
@@ -974,6 +1141,81 @@ pub const YulCodegen = struct {
         return result_var;
     }
 
+    /// Generate shift expression (mapping balance transfer with safety checks)
+    fn generateShiftExpression(self: *Self, yul_code: *std.ArrayList(u8), shift: *const ir.ShiftExpression) YulCodegenError![]const u8 {
+        const mapping_var = try self.generateExpression(yul_code, shift.mapping);
+        const source_var = try self.generateExpression(yul_code, shift.source);
+        const dest_var = try self.generateExpression(yul_code, shift.dest);
+        const amount_var = try self.generateExpression(yul_code, shift.amount);
+        defer self.allocator.free(mapping_var);
+        defer self.allocator.free(source_var);
+        defer self.allocator.free(dest_var);
+        defer self.allocator.free(amount_var);
+
+        // Check if mapping is a storage variable (mapping_var should be a slot number)
+        if (std.fmt.parseInt(u32, mapping_var, 10)) |slot| {
+            // Generate safe balance transfer with checks
+
+            // 1. Get sender balance
+            const sender_ptr = try std.fmt.allocPrint(self.allocator, "sender_ptr_{}", .{self.var_counter});
+            const sender_balance = try std.fmt.allocPrint(self.allocator, "sender_balance_{}", .{self.var_counter});
+            self.var_counter += 1;
+
+            try yul_code.writer().print("      let {s} := mload(0x40)\n", .{sender_ptr});
+            try yul_code.writer().print("      mstore({s}, {s})\n", .{ sender_ptr, source_var });
+            try yul_code.writer().print("      mstore(add({s}, 0x20), {})\n", .{ sender_ptr, slot });
+            try yul_code.writer().print("      let {s} := sload(keccak256({s}, 0x40))\n", .{ sender_balance, sender_ptr });
+
+            // 2. CRITICAL CHECK: Ensure sender has sufficient balance
+            try yul_code.writer().print("      if lt({s}, {s}) {{ revert(0, 0) }}\n", .{ sender_balance, amount_var });
+
+            // 3. Get recipient balance
+            const recipient_ptr = try std.fmt.allocPrint(self.allocator, "recipient_ptr_{}", .{self.var_counter});
+            const recipient_balance = try std.fmt.allocPrint(self.allocator, "recipient_balance_{}", .{self.var_counter});
+            self.var_counter += 1;
+
+            try yul_code.writer().print("      let {s} := mload(0x40)\n", .{recipient_ptr});
+            try yul_code.writer().print("      mstore({s}, {s})\n", .{ recipient_ptr, dest_var });
+            try yul_code.writer().print("      mstore(add({s}, 0x20), {})\n", .{ recipient_ptr, slot });
+            try yul_code.writer().print("      let {s} := sload(keccak256({s}, 0x40))\n", .{ recipient_balance, recipient_ptr });
+
+            // 4. CRITICAL CHECK: Ensure no overflow on addition
+            const new_recipient_balance = try std.fmt.allocPrint(self.allocator, "new_recipient_balance_{}", .{self.var_counter});
+            self.var_counter += 1;
+
+            try yul_code.writer().print("      let {s} := add({s}, {s})\n", .{ new_recipient_balance, recipient_balance, amount_var });
+            try yul_code.writer().print("      if lt({s}, {s}) {{ revert(0, 0) }}\n", .{ new_recipient_balance, recipient_balance });
+
+            // 5. Perform the atomic state changes
+            const new_sender_balance = try std.fmt.allocPrint(self.allocator, "new_sender_balance_{}", .{self.var_counter});
+            self.var_counter += 1;
+
+            try yul_code.writer().print("      let {s} := sub({s}, {s})\n", .{ new_sender_balance, sender_balance, amount_var });
+            try yul_code.writer().print("      sstore(keccak256({s}, 0x40), {s})\n", .{ sender_ptr, new_sender_balance });
+            try yul_code.writer().print("      sstore(keccak256({s}, 0x40), {s})\n", .{ recipient_ptr, new_recipient_balance });
+
+            // Clean up memory pointers
+            self.allocator.free(sender_ptr);
+            self.allocator.free(sender_balance);
+            self.allocator.free(recipient_ptr);
+            self.allocator.free(recipient_balance);
+            self.allocator.free(new_recipient_balance);
+            self.allocator.free(new_sender_balance);
+
+            // Return success (1 for boolean true)
+            const result_var = try std.fmt.allocPrint(self.allocator, "shift_result_{}", .{self.var_counter});
+            self.var_counter += 1;
+            try yul_code.writer().print("      let {s} := 1\n", .{result_var});
+            return result_var;
+        } else |_| {
+            // Fallback: not a storage mapping, just return false
+            const result_var = try std.fmt.allocPrint(self.allocator, "shift_result_{}", .{self.var_counter});
+            self.var_counter += 1;
+            try yul_code.writer().print("      let {s} := 0\n", .{result_var});
+            return result_var;
+        }
+    }
+
     /// Generate try expression
     fn generateTryExpression(self: *Self, yul_code: *std.ArrayList(u8), try_expr: *const ir.TryExpression) YulCodegenError![]const u8 {
         // For now, just evaluate the expression normally
@@ -998,10 +1240,11 @@ pub const YulCodegen = struct {
         _ = self;
         return switch (typ) {
             .primitive => |prim| switch (prim) {
-                .u8, .u16, .u32, .u64, .u128, .u256 => "0",
+                .u8, .u16, .u32, .u64, .u128, .u256, .i8, .i16, .i32, .i64, .i128, .i256 => "0",
                 .bool => "false",
                 .address => "0",
                 .string => "0",
+                .bytes => "0",
             },
             else => "0",
         };

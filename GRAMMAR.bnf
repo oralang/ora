@@ -1,0 +1,358 @@
+# Ora Language Grammar (BNF)
+# Version: 0.1.0
+# Description: Formal grammar specification for the Ora smart contract language
+
+# ==========================================
+# TOP-LEVEL PROGRAM STRUCTURE
+# ==========================================
+
+program ::= top_level_declaration*
+
+top_level_declaration ::=
+    | contract_declaration
+    | function_declaration
+    | variable_declaration
+    | struct_declaration
+    | enum_declaration
+    | log_declaration
+    | import_declaration
+
+# ==========================================
+# IMPORT DECLARATIONS
+# ==========================================
+
+import_declaration ::= "@" "import" "(" string_literal ")"
+
+# ==========================================
+# CONTRACT DECLARATIONS
+# ==========================================
+
+contract_declaration ::= "contract" identifier "{" contract_member* "}"
+
+contract_member ::=
+    | variable_declaration
+    | function_declaration
+    | log_declaration
+    | struct_declaration
+    | enum_declaration
+
+# ==========================================
+# FUNCTION DECLARATIONS
+# ==========================================
+
+function_declaration ::= visibility? "fn" identifier "(" parameter_list? ")" return_type? requires_clause* ensures_clause* block
+
+visibility ::= "pub"
+
+parameter_list ::= parameter ("," parameter)*
+
+parameter ::= identifier ":" type
+
+return_type ::= "->" type
+
+requires_clause ::= "requires" "(" expression ")" ";"?
+
+ensures_clause ::= "ensures" "(" expression ")" ";"?
+
+# ==========================================
+# VARIABLE DECLARATIONS
+# ==========================================
+
+variable_declaration ::= memory_region? variable_kind identifier ":" type ("=" expression)? ";"
+
+memory_region ::= "storage" | "memory" | "tstore"
+
+variable_kind ::= "var" | "let" | "const" | "immutable"
+
+# ==========================================
+# STRUCT DECLARATIONS
+# ==========================================
+
+struct_declaration ::= "struct" identifier "{" struct_member* "}"
+
+struct_member ::= identifier ":" type ";"
+
+# ==========================================
+# ENUM DECLARATIONS
+# ==========================================
+
+enum_declaration ::= "enum" identifier "{" enum_member_list "}"
+
+enum_member_list ::= enum_member ("," enum_member)*
+
+enum_member ::= identifier ("=" expression)?
+
+# ==========================================
+# LOG DECLARATIONS (EVENTS)
+# ==========================================
+
+log_declaration ::= "log" identifier "(" parameter_list? ")" ";"
+
+# ==========================================
+# TYPE SYSTEM
+# ==========================================
+
+type ::=
+    | primitive_type
+    | map_type
+    | doublemap_type
+    | array_type
+    | optional_type
+    | error_union_type
+    | identifier
+
+primitive_type ::=
+    | "u8" | "u16" | "u32" | "u64" | "u128" | "u256"
+    | "i8" | "i16" | "i32" | "i64" | "i128" | "i256"
+    | "bool"
+    | "address"
+    | "string"
+    | "bytes"
+
+map_type ::= "map" "[" type "," type "]"
+
+doublemap_type ::= "doublemap" "[" type "," type "," type "]"
+
+array_type ::= "[" type (";" expression)? "]"
+
+# Array types in Ora:
+# [T; N] - Fixed-size array (N elements of type T)
+# [T]    - Dynamic-size array (variable number of elements)
+
+optional_type ::= "?" type
+
+error_union_type ::= type "|" type
+
+# ==========================================
+# STATEMENTS
+# ==========================================
+
+statement ::=
+    | variable_declaration
+    | assignment_statement
+    | compound_assignment_statement
+    | transfer_statement
+    | expression_statement
+    | if_statement
+    | while_statement
+    | return_statement
+    | break_statement
+    | continue_statement
+    | log_statement
+    | lock_statement
+    | unlock_statement
+    | try_statement
+    | block
+
+assignment_statement ::= expression "=" expression ";"
+
+compound_assignment_statement ::= expression compound_operator expression ";"
+
+compound_operator ::= "+=" | "-=" | "*="
+
+transfer_statement ::= identifier "from" expression "->" expression ":" expression ";"
+
+expression_statement ::= expression ";"
+
+if_statement ::= "if" "(" expression ")" statement ("else" statement)?
+
+while_statement ::= "while" "(" expression ")" statement
+
+return_statement ::= "return" expression? ";"
+
+break_statement ::= "break" ";"
+
+continue_statement ::= "continue" ";"
+
+log_statement ::= "log" identifier "(" expression_list? ")" ";"
+
+lock_statement ::= "@" "lock" "(" expression ")" ";"
+
+unlock_statement ::= "@" "unlock" "(" expression ")" ";"
+
+try_statement ::= "try" expression ("catch" identifier block)?
+
+block ::= "{" statement* "}"
+
+# ==========================================
+# EXPRESSIONS
+# ==========================================
+
+expression ::= assignment_expression
+
+assignment_expression ::= logical_or_expression assignment_operator*
+
+assignment_operator ::= "=" | "+=" | "-=" | "*="
+
+logical_or_expression ::= logical_and_expression ("|" logical_and_expression)*
+
+logical_and_expression ::= equality_expression ("&" equality_expression)*
+
+equality_expression ::= relational_expression (("==" | "!=") relational_expression)*
+
+relational_expression ::= additive_expression (("<" | "<=" | ">" | ">=") additive_expression)*
+
+additive_expression ::= multiplicative_expression (("+" | "-") multiplicative_expression)*
+
+multiplicative_expression ::= unary_expression (("*" | "/" | "%") unary_expression)*
+
+unary_expression ::= ("!" | "-" | "+")* postfix_expression
+
+postfix_expression ::= primary_expression postfix_operator*
+
+postfix_operator ::=
+    | "." identifier
+    | "[" expression "]"
+    | "[" expression "," expression "]"
+    | "(" expression_list? ")"
+
+primary_expression ::=
+    | literal
+    | identifier
+    | "(" expression ")"
+    | old_expression
+    | comptime_expression
+    | cast_expression
+    | error_expression
+
+old_expression ::= "old" "(" expression ")"
+
+comptime_expression ::= "comptime" expression
+
+cast_expression ::= expression "as" type
+
+error_expression ::= identifier "!" identifier
+
+expression_list ::= expression ("," expression)*
+
+# ==========================================
+# LITERALS
+# ==========================================
+
+literal ::=
+    | integer_literal
+    | string_literal
+    | boolean_literal
+    | address_literal
+    | hex_literal
+
+integer_literal ::= [0-9]+
+
+string_literal ::= "\"" [^"]* "\""
+
+boolean_literal ::= "true" | "false"
+
+address_literal ::= "0x" [0-9a-fA-F]{40}
+
+hex_literal ::= "0x" [0-9a-fA-F]+
+
+# ==========================================
+# IDENTIFIERS AND KEYWORDS
+# ==========================================
+
+identifier ::= [a-zA-Z_][a-zA-Z0-9_]*
+
+# Reserved keywords (cannot be used as identifiers)
+keyword ::=
+    | "contract" | "pub" | "fn" | "let" | "var" | "const" | "immutable"
+    | "storage" | "memory" | "tstore" | "init" | "log"
+    | "if" | "else" | "while" | "break" | "continue" | "return"
+    | "requires" | "ensures" | "invariant" | "old" | "comptime"
+    | "as" | "import" | "struct" | "enum" | "true" | "false"
+    | "error" | "try" | "catch" | "from"
+    | "u8" | "u16" | "u32" | "u64" | "u128" | "u256"
+    | "i8" | "i16" | "i32" | "i64" | "i128" | "i256"
+    | "bool" | "address" | "string" | "bytes"
+    | "map" | "doublemap"
+
+# ==========================================
+# OPERATORS AND PUNCTUATION
+# ==========================================
+
+operator ::=
+    | "+" | "-" | "*" | "/" | "%"
+    | "=" | "==" | "!=" | "<" | "<=" | ">" | ">="
+    | "!" | "&" | "|" | "^" | "<<" | ">>"
+    | "+=" | "-=" | "*="
+    | "->"
+
+punctuation ::=
+    | "(" | ")" | "{" | "}" | "[" | "]"
+    | "," | ";" | ":" | "." | "@"
+
+# ==========================================
+# WHITESPACE AND COMMENTS
+# ==========================================
+
+whitespace ::= [ \t\n\r]+
+
+comment ::= "//" [^\n]* | "/*" .* "*/"
+
+# ==========================================
+# LEXICAL RULES
+# ==========================================
+
+# Tokens are matched in order of precedence:
+# 1. Keywords (exact matches)
+# 2. Identifiers (alphanumeric + underscore)  
+# 3. Literals (numbers, strings, addresses, hex)
+# 4. Operators (multi-character first, then single-character)
+# 5. Punctuation
+# 6. Whitespace and comments (ignored)
+
+# ==========================================
+# SEMANTIC CONSTRAINTS (not enforced by grammar)
+# ==========================================
+
+# - Contract must have exactly one 'init' function
+# - Storage variables can only be declared at contract level
+# - Memory regions have specific scoping rules
+# - Type compatibility rules for assignments and operations
+# - Function visibility rules
+# - Error handling flow control
+# - Formal verification clause semantics
+
+# ==========================================
+# PRECEDENCE AND ASSOCIATIVITY
+# ==========================================
+
+# Operator precedence (highest to lowest):
+# 1. Postfix operators (., [], ())
+# 2. Unary operators (!, -, +)
+# 3. Multiplicative (*, /, %)
+# 4. Additive (+, -)
+# 5. Relational (<, <=, >, >=)
+# 6. Equality (==, !=)
+# 7. Logical AND (&)
+# 8. Logical OR (|)
+# 9. Assignment (=, +=, -=, *=)
+
+# All binary operators are left-associative
+# Assignment operators are right-associative
+
+# ==========================================
+# EXAMPLE PRODUCTIONS
+# ==========================================
+
+# Example contract:
+# contract Token {
+#     storage var balance: u256;
+#     immutable owner: address;
+#     
+#     log Transfer(from: address, to: address, amount: u256);
+#     
+#     pub fn init(initial_balance: u256) {
+#         balance = initial_balance;
+#         owner = msg.sender;
+#     }
+#     
+#     pub fn transfer(to: address, amount: u256) -> bool
+#         requires(balance >= amount)
+#         ensures(balance + to.balance == old(balance) + old(to.balance))
+#     {
+#         balance -= amount;
+#         balance[to] += amount;
+#         log Transfer(msg.sender, to, amount);
+#         return true;
+#     }
+# } 

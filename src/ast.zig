@@ -70,17 +70,28 @@ pub const TypeRef = union(enum) {
     U64: void,
     U128: void,
     U256: void,
+    I8: void,
+    I16: void,
+    I32: void,
+    I64: void,
+    I128: void,
+    I256: void,
     String: void,
+    Bytes: void,
 
     // Complex types
     Slice: *TypeRef,
     Mapping: MappingType,
     DoubleMap: DoubleMapType,
     Identifier: []const u8, // For custom types (structs, enums)
+    Tuple: TupleType, // Tuple types
 
     // Error handling types
     ErrorUnion: ErrorUnionType, // !T syntax
     Result: ResultType, // Result[T, E] syntax
+
+    // Special types
+    Unknown: void, // For type inference
 };
 
 /// Error union type (!T)
@@ -92,6 +103,11 @@ pub const ErrorUnionType = struct {
 pub const ResultType = struct {
     ok_type: *TypeRef,
     error_type: *TypeRef,
+};
+
+/// Tuple type for multiple values
+pub const TupleType = struct {
+    types: []TypeRef,
 };
 
 pub const MappingType = struct {
@@ -114,6 +130,8 @@ pub const VariableDeclNode = struct {
     typ: TypeRef,
     value: ?ExprNode,
     span: SourceSpan,
+    // Tuple unpacking support
+    tuple_names: ?[][]const u8, // For tuple unpacking: let (a, b) = expr
 };
 
 /// Memory regions matching Ora specification
@@ -180,6 +198,7 @@ pub const StmtNode = union(enum) {
     Break: SourceSpan,
     Continue: SourceSpan,
     Log: LogNode,
+    Lock: LockNode, // @lock annotations
     Invariant: InvariantNode, // Loop invariants
     Requires: RequiresNode,
     Ensures: EnsuresNode,
@@ -248,6 +267,11 @@ pub const CatchBlock = struct {
     span: SourceSpan,
 };
 
+pub const LockNode = struct {
+    path: ExprNode, // e.g., balances[to]
+    span: SourceSpan,
+};
+
 /// Expression
 pub const ExprNode = union(enum) {
     Identifier: IdentifierExpr,
@@ -262,11 +286,15 @@ pub const ExprNode = union(enum) {
     Cast: CastExpr,
     Comptime: ComptimeExpr,
     Old: OldExpr, // old() expressions in ensures clauses
+    Tuple: TupleExpr, // tuple expressions (a, b, c)
 
     // Error handling expressions
     Try: TryExpr, // try expression
     ErrorReturn: ErrorReturnExpr, // error.SomeError
     ErrorCast: ErrorCastExpr, // value as !T
+
+    // Shift operations
+    Shift: ShiftExpr, // mapping from source -> dest : amount
 };
 
 pub const IdentifierExpr = struct {
@@ -421,6 +449,12 @@ pub const OldExpr = struct {
     span: SourceSpan,
 };
 
+/// Tuple expressions (a, b, c)
+pub const TupleExpr = struct {
+    elements: []ExprNode,
+    span: SourceSpan,
+};
+
 /// Try expression
 pub const TryExpr = struct {
     expr: *ExprNode,
@@ -437,6 +471,15 @@ pub const ErrorReturnExpr = struct {
 pub const ErrorCastExpr = struct {
     operand: *ExprNode,
     target_type: TypeRef,
+    span: SourceSpan,
+};
+
+/// Shift expression (mapping from source -> dest : amount)
+pub const ShiftExpr = struct {
+    mapping: *ExprNode, // The mapping being modified (e.g., balances)
+    source: *ExprNode, // Source expression (e.g., std.transaction.sender)
+    dest: *ExprNode, // Destination expression (e.g., to)
+    amount: *ExprNode, // Amount expression (e.g., amount)
     span: SourceSpan,
 };
 
@@ -704,6 +747,16 @@ pub fn deinitExprNode(allocator: std.mem.Allocator, expr: *ExprNode) void {
             allocator.destroy(error_cast.operand);
             deinitTypeRef(allocator, &error_cast.target_type);
         },
+        .Shift => |*shift| {
+            deinitExprNode(allocator, shift.mapping);
+            deinitExprNode(allocator, shift.source);
+            deinitExprNode(allocator, shift.dest);
+            deinitExprNode(allocator, shift.amount);
+            allocator.destroy(shift.mapping);
+            allocator.destroy(shift.source);
+            allocator.destroy(shift.dest);
+            allocator.destroy(shift.amount);
+        },
         else => {
             // Literals and identifiers don't need cleanup
         },
@@ -747,6 +800,9 @@ pub fn deinitStmtNode(allocator: std.mem.Allocator, stmt: *StmtNode) void {
                 deinitExprNode(allocator, arg);
             }
             allocator.free(log.args);
+        },
+        .Lock => |*lock| {
+            deinitExprNode(allocator, &lock.path);
         },
         .Invariant => |*inv| {
             deinitExprNode(allocator, &inv.condition);
@@ -960,7 +1016,14 @@ pub const ASTSerializer = struct {
             .U64 => try writer.writeAll("\"u64\""),
             .U128 => try writer.writeAll("\"u128\""),
             .U256 => try writer.writeAll("\"u256\""),
+            .I8 => try writer.writeAll("\"i8\""),
+            .I16 => try writer.writeAll("\"i16\""),
+            .I32 => try writer.writeAll("\"i32\""),
+            .I64 => try writer.writeAll("\"i64\""),
+            .I128 => try writer.writeAll("\"i128\""),
+            .I256 => try writer.writeAll("\"i256\""),
             .String => try writer.writeAll("\"string\""),
+            .Bytes => try writer.writeAll("\"bytes\""),
             .Slice => |slice_element_type| {
                 try writer.writeAll("{\"type\": \"slice\", \"element\": ");
                 try serializeTypeRef(slice_element_type, writer);
@@ -1146,6 +1209,14 @@ pub const ASTSerializer = struct {
                 try writer.writeAll("\n");
                 try writeIndent(writer, indent + 1);
                 try writer.writeAll("],\n");
+            },
+            .Lock => |*lock| {
+                try writeIndent(writer, indent + 1);
+                try writer.writeAll("\"type\": \"Lock\",\n");
+                try writeIndent(writer, indent + 1);
+                try writer.writeAll("\"path\": ");
+                try serializeExprNode(&lock.path, writer, indent + 2);
+                try writer.writeAll("\n");
             },
             .Invariant => |*inv| {
                 try writeIndent(writer, indent + 1);
@@ -1389,6 +1460,30 @@ pub const ASTSerializer = struct {
                 try writeIndent(writer, indent + 1);
                 try writer.writeAll("\"span\": ");
                 try serializeSourceSpan(error_cast.span, writer);
+                try writer.writeAll("\n");
+            },
+            .Shift => |*shift| {
+                try writeIndent(writer, indent + 1);
+                try writer.writeAll("\"type\": \"Shift\",\n");
+                try writeIndent(writer, indent + 1);
+                try writer.writeAll("\"mapping\": ");
+                try serializeExprNode(shift.mapping, writer, indent + 2);
+                try writer.writeAll(",\n");
+                try writeIndent(writer, indent + 1);
+                try writer.writeAll("\"source\": ");
+                try serializeExprNode(shift.source, writer, indent + 2);
+                try writer.writeAll(",\n");
+                try writeIndent(writer, indent + 1);
+                try writer.writeAll("\"dest\": ");
+                try serializeExprNode(shift.dest, writer, indent + 2);
+                try writer.writeAll(",\n");
+                try writeIndent(writer, indent + 1);
+                try writer.writeAll("\"amount\": ");
+                try serializeExprNode(shift.amount, writer, indent + 2);
+                try writer.writeAll(",\n");
+                try writeIndent(writer, indent + 1);
+                try writer.writeAll("\"span\": ");
+                try serializeSourceSpan(shift.span, writer);
                 try writer.writeAll("\n");
             },
             .Identifier => |*ident| {

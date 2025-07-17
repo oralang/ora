@@ -1,0 +1,349 @@
+// Complex formal verification examples for Ora
+// This demonstrates formal verification capabilities for sophisticated conditions
+
+contract MathematicalProofs {
+    // Storage for mathematical operations
+    storage values: u256[];
+    storage prime_cache: map[u256, bool];
+storage factorial_cache: map[u256, u256];
+    
+    // Complex mathematical invariant with quantifiers
+    invariant forall i: u256 where i < values.length => values[i] > 0;
+    invariant exists j: u256 where j < values.length && values[j] % 2 == 0;
+    
+    // Function demonstrating complex preconditions and postconditions
+    function fibonacci(n: u256) -> u256 
+        requires n >= 0 && n < 100  // Prevent overflow
+        requires n == 0 || n == 1 || exists k: u256 where k < n && fibonacci(k) + fibonacci(k+1) == fibonacci(k+2)
+        ensures result >= 0
+        ensures n <= 1 || result == fibonacci(n-1) + fibonacci(n-2)
+        ensures n >= 2 => result > fibonacci(n-1) && result > fibonacci(n-2)
+    {
+        if (n <= 1) {
+            return n;
+        }
+        
+        let prev1 = fibonacci(n - 1);
+        let prev2 = fibonacci(n - 2);
+        
+        invariant prev1 >= 0 && prev2 >= 0;
+        invariant prev1 + prev2 >= prev1 && prev1 + prev2 >= prev2;
+        
+        return prev1 + prev2;
+    }
+    
+    // Function with complex mathematical conditions
+    function gcd(a: u256, b: u256) -> u256
+        requires a > 0 && b > 0
+        ensures result > 0
+        ensures a % result == 0 && b % result == 0
+        ensures forall d: u256 where d > 0 && a % d == 0 && b % d == 0 => d <= result
+    {
+        if (b == 0) {
+            return a;
+        }
+        
+        invariant a > 0 && b > 0;
+        invariant gcd(a, b) == gcd(b, a % b);
+        
+        return gcd(b, a % b);
+    }
+    
+    // Function demonstrating array bounds verification
+    function array_sum(arr: u256[], start: u256, end: u256) -> u256
+        requires start <= end
+        requires end <= arr.length
+        requires forall i: u256 where start <= i && i < end => arr[i] < (2^256 - 1) / (end - start)
+        ensures result >= 0
+        ensures start == end => result == 0
+        ensures start < end => result >= arr[start]
+    {
+        if (start >= end) {
+            return 0;
+        }
+        
+        let sum: u256 = 0;
+        let i: u256 = start;
+        
+        while (i < end) {
+            invariant start <= i && i <= end;
+            invariant sum >= 0;
+            invariant forall j: u256 where start <= j && j < i => sum >= arr[j];
+            invariant sum <= (i - start) * (2^256 - 1) / (end - start);
+            
+            sum += arr[i];
+            i += 1;
+        }
+        
+        return sum;
+    }
+    
+    // Function demonstrating complex logical conditions
+    function is_prime(n: u256) -> bool
+        requires n >= 2
+        ensures result == true => forall d: u256 where d > 1 && d < n => n % d != 0
+        ensures result == false => exists d: u256 where d > 1 && d < n && n % d == 0
+    {
+        if (n <= 1) {
+            return false;
+        }
+        
+        if (n <= 3) {
+            return true;
+        }
+        
+        if (n % 2 == 0 || n % 3 == 0) {
+            return false;
+        }
+        
+        let i: u256 = 5;
+        while (i * i <= n) {
+            invariant i >= 5;
+            invariant i % 2 == 1 && i % 3 != 0;
+            invariant forall d: u256 where d > 1 && d < i => n % d != 0;
+            
+            if (n % i == 0 || n % (i + 2) == 0) {
+                return false;
+            }
+            i += 6;
+        }
+        
+        return true;
+    }
+    
+    // Function demonstrating state-dependent verification
+    function transfer_safe(from: address, to: address, amount: u256) -> bool
+        requires from != address(0) && to != address(0)
+        requires amount > 0
+        requires balanceOf(from) >= amount
+        ensures result == true => balanceOf(from) == old(balanceOf(from)) - amount
+        ensures result == true => balanceOf(to) == old(balanceOf(to)) + amount
+        ensures result == true => totalSupply() == old(totalSupply())
+        ensures result == false => balanceOf(from) == old(balanceOf(from))
+        ensures result == false => balanceOf(to) == old(balanceOf(to))
+    {
+        if (from == to) {
+            return true; // No-op transfer
+        }
+        
+        let from_balance = balanceOf(from);
+        let to_balance = balanceOf(to);
+        
+        if (from_balance < amount) {
+            return false;
+        }
+        
+        // Check for overflow
+        if (to_balance + amount < to_balance) {
+            return false;
+        }
+        
+        invariant from_balance >= amount;
+        invariant to_balance + amount >= to_balance;
+        invariant from_balance + to_balance == old(balanceOf(from)) + old(balanceOf(to));
+        
+        setBalance(from, from_balance - amount);
+        setBalance(to, to_balance + amount);
+        
+        return true;
+    }
+    
+    // Function demonstrating complex data structure verification
+    function binary_search(arr: u256[], target: u256) -> u256
+        requires arr.length > 0
+        requires forall i: u256 where i + 1 < arr.length => arr[i] <= arr[i + 1]
+        ensures result == arr.length || arr[result] == target
+        ensures result < arr.length => forall i: u256 where i < result => arr[i] < target
+        ensures result < arr.length => forall i: u256 where i > result => arr[i] > target
+    {
+        let left: u256 = 0;
+        let right: u256 = arr.length;
+        
+        while (left < right) {
+            invariant left <= right && right <= arr.length;
+            invariant forall i: u256 where i < left => arr[i] < target;
+            invariant forall i: u256 where i >= right => arr[i] > target;
+            
+            let mid = left + (right - left) / 2;
+            
+            if (arr[mid] == target) {
+                return mid;
+            } else if (arr[mid] < target) {
+                left = mid + 1;
+            } else {
+                right = mid;
+            }
+        }
+        
+        return arr.length; // Not found
+    }
+    
+    // Function demonstrating complex mathematical properties
+    function factorial(n: u256) -> u256
+        requires n <= 170  // Prevent overflow
+        ensures result > 0
+        ensures n == 0 => result == 1
+        ensures n > 0 => result == n * factorial(n - 1)
+        ensures n > 1 => result > n
+    {
+        if (n == 0) {
+            return 1;
+        }
+        
+        let result: u256 = 1;
+        let i: u256 = 1;
+        
+        while (i <= n) {
+            invariant i >= 1 && i <= n + 1;
+            invariant result > 0;
+            invariant result == factorial(i - 1);
+            invariant i > 1 => result >= i - 1;
+            
+            result *= i;
+            i += 1;
+        }
+        
+        return result;
+    }
+    
+    // Function demonstrating quantified conditions over collections
+    function all_positive(arr: u256[]) -> bool
+        ensures result == true => forall i: u256 where i < arr.length => arr[i] > 0
+        ensures result == false => exists i: u256 where i < arr.length && arr[i] == 0
+    {
+        let i: u256 = 0;
+        
+        while (i < arr.length) {
+            invariant i <= arr.length;
+            invariant forall j: u256 where j < i => arr[j] > 0;
+            
+            if (arr[i] == 0) {
+                return false;
+            }
+            i += 1;
+        }
+        
+        return true;
+    }
+    
+    // Function demonstrating complex temporal logic
+    function secure_withdrawal(amount: u256) -> bool
+        requires amount > 0
+        requires msg.sender != address(0)
+        requires balanceOf(msg.sender) >= amount
+        ensures result == true => balanceOf(msg.sender) == old(balanceOf(msg.sender)) - amount
+        ensures result == true => totalSupply() == old(totalSupply()) - amount
+        ensures result == false => balanceOf(msg.sender) == old(balanceOf(msg.sender))
+        ensures result == false => totalSupply() == old(totalSupply())
+    {
+        let caller_balance = balanceOf(msg.sender);
+        let total = totalSupply();
+        
+        if (caller_balance < amount) {
+            return false;
+        }
+        
+        if (total < amount) {
+            return false;
+        }
+        
+        invariant caller_balance >= amount;
+        invariant total >= amount;
+        invariant caller_balance + (total - old(totalSupply())) == old(balanceOf(msg.sender));
+        
+        setBalance(msg.sender, caller_balance - amount);
+        setTotalSupply(total - amount);
+        
+        return true;
+    }
+    
+    // Helper functions for demonstration
+    function balanceOf(account: address) -> u256 {
+        // Implementation would access storage
+        return 1000; // Placeholder
+    }
+    
+    function setBalance(account: address, balance: u256) {
+        // Implementation would update storage
+    }
+    
+    function totalSupply() -> u256 {
+        // Implementation would access storage
+        return 1000000; // Placeholder
+    }
+    
+    function setTotalSupply(supply: u256) {
+        // Implementation would update storage
+    }
+}
+
+// Contract demonstrating formal verification of complex business logic
+contract VotingSystem {
+    storage proposals: map[u256, Proposal];
+storage voters: map[address, Voter];
+    storage proposal_count: u256;
+    
+    struct Proposal {
+        description: string;
+        vote_count: u256;
+        deadline: u256;
+        executed: bool;
+    }
+    
+    struct Voter {
+        has_voted: map[u256, bool];
+        voting_power: u256;
+    }
+    
+    // Complex invariants for voting system
+    invariant forall p: u256 where p < proposal_count => 
+        proposals[p].vote_count <= totalVotingPower();
+    invariant forall p: u256 where p < proposal_count => 
+        proposals[p].executed => proposals[p].vote_count > totalVotingPower() / 2;
+    
+    // Function demonstrating complex voting logic verification
+    function vote(proposal_id: u256, support: bool) -> bool
+        requires proposal_id < proposal_count
+        requires !voters[msg.sender].has_voted[proposal_id]
+        requires block.timestamp < proposals[proposal_id].deadline
+        requires !proposals[proposal_id].executed
+        requires voters[msg.sender].voting_power > 0
+        ensures result == true => voters[msg.sender].has_voted[proposal_id]
+        ensures result == true => 
+            support => proposals[proposal_id].vote_count == old(proposals[proposal_id].vote_count) + voters[msg.sender].voting_power
+        ensures result == false => proposals[proposal_id].vote_count == old(proposals[proposal_id].vote_count)
+        ensures result == false => voters[msg.sender].has_voted[proposal_id] == old(voters[msg.sender].has_voted[proposal_id])
+    {
+        let proposal = proposals[proposal_id];
+        let voter = voters[msg.sender];
+        
+        if (voter.has_voted[proposal_id]) {
+            return false;
+        }
+        
+        if (block.timestamp >= proposal.deadline) {
+            return false;
+        }
+        
+        if (proposal.executed) {
+            return false;
+        }
+        
+        invariant voter.voting_power > 0;
+        invariant !voter.has_voted[proposal_id];
+        invariant proposal.vote_count <= totalVotingPower();
+        
+        voters[msg.sender].has_voted[proposal_id] = true;
+        
+        if (support) {
+            proposals[proposal_id].vote_count += voter.voting_power;
+        }
+        
+        return true;
+    }
+    
+    // Helper function
+    function totalVotingPower() -> u256 {
+        return 10000; // Placeholder implementation
+    }
+} 

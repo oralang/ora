@@ -1,0 +1,173 @@
+contract VerificationDemo {
+    // Constants for verification
+    storage const MIN_BALANCE: u256 = 100;
+    storage const MAX_TRANSFER: u256 = 1000000;
+    
+    // State variables
+    storage var balances: map[address, u256];
+    storage var total_supply: u256;
+    
+    log Transfer(from: address, to: address, amount: u256);
+    log BalanceUpdated(account: address, old_balance: u256, new_balance: u256);
+    
+    pub fn init(initial_supply: u256) {
+        requires(initial_supply > 0);
+        ensures(total_supply == initial_supply);
+        
+        total_supply = initial_supply;
+        balances[std.transaction.sender] = initial_supply;
+    }
+    
+    pub fn transfer(to: address, amount: u256) -> bool {
+        // Preconditions
+        requires(to != std.transaction.sender);
+        requires(amount > 0);
+        requires(amount <= MAX_TRANSFER);
+        requires(balances[std.transaction.sender] >= amount);
+        
+        // Postconditions with old() expressions
+        ensures(balances[std.transaction.sender] == old(balances[std.transaction.sender]) - amount);
+        ensures(balances[to] == old(balances[to]) + amount);
+        ensures(total_supply == old(total_supply)); // Total supply unchanged
+        
+        // Perform the transfer
+        balances[std.transaction.sender] -= amount;
+        balances[to] += amount;
+        
+        log Transfer(std.transaction.sender, to, amount);
+        return true;
+    }
+    
+    pub fn withdraw(amount: u256) -> bool {
+        // Preconditions
+        requires(amount > 0);
+        requires(balances[std.transaction.sender] >= amount);
+        requires(balances[std.transaction.sender] - amount >= MIN_BALANCE);
+        
+        // Postconditions
+        ensures(balances[std.transaction.sender] == old(balances[std.transaction.sender]) - amount);
+        ensures(total_supply == old(total_supply) - amount);
+        
+        let old_balance: u256 = balances[std.transaction.sender];
+        balances[std.transaction.sender] -= amount;
+        total_supply -= amount;
+        
+        log BalanceUpdated(std.transaction.sender, old_balance, balances[std.transaction.sender]);
+        return true;
+    }
+    
+    pub fn getBalance(account: address) -> u256 {
+        // Simple postcondition
+        ensures(result >= 0); // result is implicit return value
+        
+        return balances[account];
+    }
+    
+    pub fn safeAdd(a: u256, b: u256) -> u256 {
+        // Overflow protection
+        requires(a + b >= a); // Overflow check
+        requires(a + b >= b); // Overflow check
+        
+        // Postcondition
+        ensures(result == a + b);
+        
+        return a + b;
+    }
+    
+    pub fn safeSub(a: u256, b: u256) -> u256 {
+        // Underflow protection
+        requires(a >= b);
+        
+        // Postcondition
+        ensures(result == a - b);
+        ensures(result <= a);
+        
+        return a - b;
+    }
+    
+    pub fn validateTransfer(from: address, to: address, amount: u256) -> bool {
+        // Complex verification with multiple conditions
+        requires(from != to);
+        requires(amount > 0);
+        requires(amount <= MAX_TRANSFER);
+        requires(balances[from] >= amount);
+        requires(balances[from] - amount >= MIN_BALANCE);
+        
+        // This function doesn't modify state, so no old() needed
+        ensures(result == true); // Always returns true if preconditions pass
+        
+        return true;
+    }
+    
+    pub fn batchTransfer(recipients: slice[address], amounts: slice[u256]) -> bool {
+        // Array validation
+        requires(recipients.length == amounts.length);
+        requires(recipients.length > 0);
+        requires(recipients.length <= 10); // Limit batch size
+        
+        // Ensure sender has enough balance for all transfers
+        let total_amount: u256 = 0;
+        for (amounts) |amount| {
+            total_amount += amount;
+        }
+        requires(balances[std.transaction.sender] >= total_amount);
+        
+        // Postcondition: sender's balance reduced by total amount
+        ensures(balances[std.transaction.sender] == old(balances[std.transaction.sender]) - total_amount);
+        
+        // Perform transfers
+        for (recipients) |recipient, i| {
+            let amount: u256 = amounts[i];
+            balances[std.transaction.sender] -= amount;
+            balances[recipient] += amount;
+            log Transfer(std.transaction.sender, recipient, amount);
+        }
+        
+        return true;
+    }
+    
+    pub fn emergencyStop() -> bool {
+        // Only owner can call (simplified for demo)
+        requires(std.transaction.sender == std.constants.ZERO_ADDRESS); // Placeholder
+        
+        // Postcondition: all balances should be frozen
+        ensures(total_supply == old(total_supply));
+        
+        // This would freeze the contract (simplified)
+        return true;
+    }
+    
+    // Function with intentional verification issues for testing
+    pub fn badFunction(amount: u256) -> bool {
+        // This should trigger verification warnings/errors
+        requires(amount > 0);
+        requires(amount < 0); // Contradiction!
+        
+        // Impossible postcondition
+        ensures(amount == amount + 1);
+        
+        return true;
+    }
+    
+    // Function with tautology
+    pub fn tautologyFunction() -> bool {
+        requires(true); // Always true - should warn
+        ensures(1 == 1); // Tautology - should warn
+        
+        return true;
+    }
+    
+    // Function demonstrating complex old() expressions
+    pub fn complexOldDemo(multiplier: u256) -> u256 {
+        requires(multiplier > 0);
+        requires(multiplier <= 10);
+        
+        let sender_balance: u256 = balances[std.transaction.sender];
+        
+        // Complex old() expression
+        ensures(result == old(balances[std.transaction.sender]) * multiplier);
+        ensures(balances[std.transaction.sender] == old(balances[std.transaction.sender])); // Unchanged
+        
+        return sender_balance * multiplier;
+    }
+} 

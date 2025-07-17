@@ -20,7 +20,7 @@ pub const ParserError = error{
     InvalidReturnType,
 };
 
-/// Parser for ZigOra DSL
+/// Parser for Ora
 pub const Parser = struct {
     tokens: []const Token,
     current: usize,
@@ -285,7 +285,7 @@ pub const Parser = struct {
 
     /// Parse function parameter
     fn parseParameter(self: *Parser) ParserError!ast.ParamNode {
-        const name_token = try self.consume(.Identifier, "Expected parameter name");
+        const name_token = try self.consumeIdentifierOrKeyword("Expected parameter name");
         _ = try self.consume(.Colon, "Expected ':' after parameter name");
         const param_type = try self.parseType();
 
@@ -302,6 +302,51 @@ pub const Parser = struct {
 
     /// Parse type reference
     fn parseType(self: *Parser) ParserError!ast.TypeRef {
+        // Handle map type directly
+        if (self.match(.Map)) {
+            _ = try self.consume(.LeftBracket, "Expected '[' after 'map'");
+            const key_type = try self.allocator.create(ast.TypeRef);
+            errdefer self.allocator.destroy(key_type);
+            key_type.* = try self.parseType();
+            _ = try self.consume(.Comma, "Expected ',' after map key type");
+            const value_type = try self.allocator.create(ast.TypeRef);
+            errdefer {
+                ast.deinitTypeRef(self.allocator, key_type);
+                self.allocator.destroy(key_type);
+                self.allocator.destroy(value_type);
+            }
+            value_type.* = try self.parseType();
+            _ = try self.consume(.RightBracket, "Expected ']' after map value type");
+
+            return ast.TypeRef{ .Mapping = ast.MappingType{
+                .key = key_type,
+                .value = value_type,
+            } };
+        }
+
+        // Handle bytes type directly
+        if (self.match(.Bytes)) {
+            return .Bytes;
+        }
+
+        // Handle array types [T; N] and [T]
+        if (self.match(.LeftBracket)) {
+            const elem_type = try self.allocator.create(ast.TypeRef);
+            errdefer self.allocator.destroy(elem_type);
+            elem_type.* = try self.parseType();
+
+            if (self.match(.Semicolon)) {
+                // Fixed array: [T; N]
+                _ = try self.consume(.IntegerLiteral, "Expected array size after ';'");
+                _ = try self.consume(.RightBracket, "Expected ']' after array size");
+                return ast.TypeRef{ .Slice = elem_type }; // For now, treat as slice
+            } else {
+                // Dynamic array: [T]
+                _ = try self.consume(.RightBracket, "Expected ']' after array element type");
+                return ast.TypeRef{ .Slice = elem_type };
+            }
+        }
+
         if (self.match(.Identifier)) {
             const type_name = self.previous().lexeme;
 
@@ -314,6 +359,12 @@ pub const Parser = struct {
             if (std.mem.eql(u8, type_name, "u64")) return .U64;
             if (std.mem.eql(u8, type_name, "u128")) return .U128;
             if (std.mem.eql(u8, type_name, "u256")) return .U256;
+            if (std.mem.eql(u8, type_name, "i8")) return .I8;
+            if (std.mem.eql(u8, type_name, "i16")) return .I16;
+            if (std.mem.eql(u8, type_name, "i32")) return .I32;
+            if (std.mem.eql(u8, type_name, "i64")) return .I64;
+            if (std.mem.eql(u8, type_name, "i128")) return .I128;
+            if (std.mem.eql(u8, type_name, "i256")) return .I256;
             if (std.mem.eql(u8, type_name, "string")) return .String;
 
             // Check for complex types
@@ -324,27 +375,6 @@ pub const Parser = struct {
                 elem_type.* = try self.parseType();
                 _ = try self.consume(.RightBracket, "Expected ']' after slice element type");
                 return ast.TypeRef{ .Slice = elem_type };
-            }
-
-            if (std.mem.eql(u8, type_name, "mapping")) {
-                _ = try self.consume(.LeftBracket, "Expected '[' after 'mapping'");
-                const key_type = try self.allocator.create(ast.TypeRef);
-                errdefer self.allocator.destroy(key_type);
-                key_type.* = try self.parseType();
-                _ = try self.consume(.Comma, "Expected ',' after mapping key type");
-                const value_type = try self.allocator.create(ast.TypeRef);
-                errdefer {
-                    ast.deinitTypeRef(self.allocator, key_type);
-                    self.allocator.destroy(key_type);
-                    self.allocator.destroy(value_type);
-                }
-                value_type.* = try self.parseType();
-                _ = try self.consume(.RightBracket, "Expected ']' after mapping value type");
-
-                return ast.TypeRef{ .Mapping = ast.MappingType{
-                    .key = key_type,
-                    .value = value_type,
-                } };
             }
 
             if (std.mem.eql(u8, type_name, "doublemap")) {
@@ -449,14 +479,53 @@ pub const Parser = struct {
                     break :blk true;
                 }
             } else {
-                // For stack variables (default region), check for var
-                break :blk self.match(.Var);
+                // For stack variables (default region), check for var or let
+                if (self.match(.Var)) {
+                    break :blk true;
+                } else if (self.match(.Let)) {
+                    break :blk false;
+                } else {
+                    break :blk false; // Default to immutable
+                }
             }
         };
 
-        const name_token = try self.consume(.Identifier, "Expected variable name");
-        _ = try self.consume(.Colon, "Expected ':' after variable name");
-        const var_type = try self.parseType();
+        // Check for tuple unpacking: let (a, b) = expr
+        var tuple_names: ?[][]const u8 = null;
+        var name_token: lexer.Token = undefined;
+        var var_type: ast.TypeRef = undefined;
+
+        if (self.check(.LeftParen)) {
+            // Tuple unpacking
+            _ = self.advance(); // consume '('
+
+            var names = std.ArrayList([]const u8).init(self.allocator);
+            defer names.deinit();
+
+            // Parse tuple variable names
+            if (!self.check(.RightParen)) {
+                repeat: while (true) {
+                    const tuple_name = try self.consume(.Identifier, "Expected variable name in tuple");
+                    try names.append(tuple_name.lexeme);
+
+                    if (!self.match(.Comma)) break :repeat;
+                }
+            }
+
+            _ = try self.consume(.RightParen, "Expected ')' after tuple variables");
+
+            // For tuple unpacking, we don't specify explicit type yet (inferred from RHS)
+            _ = try self.consume(.Equal, "Expected '=' after tuple variables");
+
+            tuple_names = try names.toOwnedSlice();
+            name_token = self.previous(); // Use ')' token for span
+            var_type = ast.TypeRef.Unknown; // Will be inferred
+        } else {
+            // Regular variable declaration
+            name_token = try self.consume(.Identifier, "Expected variable name");
+            _ = try self.consume(.Colon, "Expected ':' after variable name");
+            var_type = try self.parseType();
+        }
 
         // Parse optional initializer
         var initializer: ?ast.ExprNode = null;
@@ -467,7 +536,7 @@ pub const Parser = struct {
         _ = self.match(.Semicolon); // Optional semicolon
 
         return ast.VariableDeclNode{
-            .name = name_token.lexeme,
+            .name = if (tuple_names) |_| "" else name_token.lexeme, // Empty name for tuple unpacking
             .region = region,
             .mutable = is_mutable,
             .locked = is_locked,
@@ -478,6 +547,7 @@ pub const Parser = struct {
                 .column = name_token.column,
                 .length = @intCast(name_token.lexeme.len),
             },
+            .tuple_names = tuple_names,
         };
     }
 
@@ -766,6 +836,33 @@ pub const Parser = struct {
     fn parseAssignment(self: *Parser) ParserError!ast.ExprNode {
         const expr = try self.parseLogicalOr();
 
+        // Check for shift syntax: mapping from source -> dest : amount
+        if (self.match(.From)) {
+            const from_token = self.previous();
+            const source = try self.parseLogicalOr();
+            _ = try self.consume(.Arrow, "Expected '->' in shift expression");
+            const dest = try self.parseLogicalOr();
+            _ = try self.consume(.Colon, "Expected ':' in shift expression");
+            const amount = try self.parseAssignment();
+
+            const mapping_ptr = try self.allocator.create(ast.ExprNode);
+            mapping_ptr.* = expr;
+            const source_ptr = try self.allocator.create(ast.ExprNode);
+            source_ptr.* = source;
+            const dest_ptr = try self.allocator.create(ast.ExprNode);
+            dest_ptr.* = dest;
+            const amount_ptr = try self.allocator.create(ast.ExprNode);
+            amount_ptr.* = amount;
+
+            return ast.ExprNode{ .Shift = ast.ShiftExpr{
+                .mapping = mapping_ptr,
+                .source = source_ptr,
+                .dest = dest_ptr,
+                .amount = amount_ptr,
+                .span = makeSpan(from_token),
+            } };
+        }
+
         if (self.match(.Equal)) {
             const value = try self.parseAssignment();
             const expr_ptr = try self.allocator.create(ast.ExprNode);
@@ -1028,18 +1125,48 @@ pub const Parser = struct {
                 } };
             } else if (self.match(.LeftBracket)) {
                 const index = try self.parseExpression();
-                _ = try self.consume(.RightBracket, "Expected ']' after array index");
 
-                const expr_ptr = try self.allocator.create(ast.ExprNode);
-                expr_ptr.* = expr;
-                const index_ptr = try self.allocator.create(ast.ExprNode);
-                index_ptr.* = index;
+                // Check for double mapping access: target[key1, key2]
+                if (self.match(.Comma)) {
+                    const second_index = try self.parseExpression();
+                    _ = try self.consume(.RightBracket, "Expected ']' after double mapping index");
 
-                expr = ast.ExprNode{ .Index = ast.IndexExpr{
-                    .target = expr_ptr,
-                    .index = index_ptr,
-                    .span = makeSpan(self.previous()),
-                } };
+                    const expr_ptr = try self.allocator.create(ast.ExprNode);
+                    expr_ptr.* = expr;
+                    const index_ptr = try self.allocator.create(ast.ExprNode);
+                    index_ptr.* = index;
+                    const second_index_ptr = try self.allocator.create(ast.ExprNode);
+                    second_index_ptr.* = second_index;
+
+                    // Create a nested index expression for double mapping: target[key1][key2]
+                    const first_index = ast.ExprNode{ .Index = ast.IndexExpr{
+                        .target = expr_ptr,
+                        .index = index_ptr,
+                        .span = makeSpan(self.previous()),
+                    } };
+
+                    const first_index_ptr = try self.allocator.create(ast.ExprNode);
+                    first_index_ptr.* = first_index;
+
+                    expr = ast.ExprNode{ .Index = ast.IndexExpr{
+                        .target = first_index_ptr,
+                        .index = second_index_ptr,
+                        .span = makeSpan(self.previous()),
+                    } };
+                } else {
+                    _ = try self.consume(.RightBracket, "Expected ']' after array index");
+
+                    const expr_ptr = try self.allocator.create(ast.ExprNode);
+                    expr_ptr.* = expr;
+                    const index_ptr = try self.allocator.create(ast.ExprNode);
+                    index_ptr.* = index;
+
+                    expr = ast.ExprNode{ .Index = ast.IndexExpr{
+                        .target = expr_ptr,
+                        .index = index_ptr,
+                        .span = makeSpan(self.previous()),
+                    } };
+                }
             } else {
                 break;
             }
@@ -1126,8 +1253,8 @@ pub const Parser = struct {
             } } };
         }
 
-        // Identifiers
-        if (self.match(.Identifier)) {
+        // Identifiers (including keywords that can be used as identifiers)
+        if (self.match(.Identifier) or self.matchKeywordAsIdentifier()) {
             const token = self.previous();
             return ast.ExprNode{ .Identifier = ast.IdentifierExpr{
                 .name = token.lexeme,
@@ -1177,11 +1304,96 @@ pub const Parser = struct {
             } };
         }
 
-        // Parenthesized expressions
+        // Builtin functions starting with @
+        if (self.match(.At)) {
+            const at_token = self.previous();
+            const name_token = try self.consume(.Identifier, "Expected builtin function name after '@'");
+
+            // Check if it's a valid builtin function
+            const builtin_name = name_token.lexeme;
+            if (std.mem.eql(u8, builtin_name, "divTrunc") or
+                std.mem.eql(u8, builtin_name, "divFloor") or
+                std.mem.eql(u8, builtin_name, "divCeil") or
+                std.mem.eql(u8, builtin_name, "divExact") or
+                std.mem.eql(u8, builtin_name, "divmod"))
+            {
+                _ = try self.consume(.LeftParen, "Expected '(' after builtin function name");
+
+                var args = std.ArrayList(ast.ExprNode).init(self.allocator);
+                defer args.deinit();
+
+                if (!self.check(.RightParen)) {
+                    const first_arg = try self.parseExpression();
+                    try args.append(first_arg);
+
+                    while (self.match(.Comma)) {
+                        const arg = try self.parseExpression();
+                        try args.append(arg);
+                    }
+                }
+
+                _ = try self.consume(.RightParen, "Expected ')' after arguments");
+
+                // Create the builtin function call
+                const full_name = try std.fmt.allocPrint(self.allocator, "@{s}", .{builtin_name});
+
+                return ast.ExprNode{ .FunctionCall = ast.FunctionCallExpr{
+                    .name = full_name,
+                    .arguments = try args.toOwnedSlice(),
+                    .span = makeSpan(at_token),
+                } };
+            } else {
+                return self.errorAtCurrent("Unknown builtin function");
+            }
+        }
+
+        // Parenthesized expressions or tuples
         if (self.match(.LeftParen)) {
-            const expr = try self.parseExpression();
-            _ = try self.consume(.RightParen, "Expected ')' after expression");
-            return expr;
+            const paren_token = self.previous();
+
+            // Check for empty tuple
+            if (self.check(.RightParen)) {
+                _ = self.advance();
+                var empty_elements = std.ArrayList(ast.ExprNode).init(self.allocator);
+                defer empty_elements.deinit();
+
+                return ast.ExprNode{ .Tuple = ast.TupleExpr{
+                    .elements = try empty_elements.toOwnedSlice(),
+                    .span = makeSpan(paren_token),
+                } };
+            }
+
+            const first_expr = try self.parseExpression();
+
+            // Check if it's a tuple (has comma)
+            if (self.match(.Comma)) {
+                var elements = std.ArrayList(ast.ExprNode).init(self.allocator);
+                defer elements.deinit();
+
+                try elements.append(first_expr);
+
+                // Handle trailing comma case: (a,)
+                if (!self.check(.RightParen)) {
+                    repeat: while (true) {
+                        const element = try self.parseExpression();
+                        try elements.append(element);
+
+                        if (!self.match(.Comma)) break :repeat;
+                        if (self.check(.RightParen)) break :repeat; // Trailing comma
+                    }
+                }
+
+                _ = try self.consume(.RightParen, "Expected ')' after tuple elements");
+
+                return ast.ExprNode{ .Tuple = ast.TupleExpr{
+                    .elements = try elements.toOwnedSlice(),
+                    .span = makeSpan(paren_token),
+                } };
+            } else {
+                // Single parenthesized expression
+                _ = try self.consume(.RightParen, "Expected ')' after expression");
+                return first_expr;
+            }
         }
 
         return self.errorAtCurrent("Expected expression");
@@ -1254,7 +1466,7 @@ pub const Parser = struct {
 
         if (!self.check(.RightParen)) {
             repeat: while (true) {
-                const field_name = try self.consume(.Identifier, "Expected field name");
+                const field_name = try self.consumeIdentifierOrKeyword("Expected field name");
                 _ = try self.consume(.Colon, "Expected ':' after field name");
                 const field_type = try self.parseType();
 
@@ -1323,6 +1535,35 @@ pub const Parser = struct {
         const current_token = self.peek();
         std.debug.print("Parser error at line {}, column {}: {s}\n", .{ current_token.line, current_token.column, message });
         return ParserError.UnexpectedToken;
+    }
+
+    /// Consume an identifier or keyword that can be used as an identifier in certain contexts
+    fn consumeIdentifierOrKeyword(self: *Parser, message: []const u8) ParserError!Token {
+        const current_token = self.peek();
+        if (current_token.type == .Identifier or self.isKeywordThatCanBeIdentifier(current_token.type)) {
+            return self.advance();
+        }
+
+        std.debug.print("Parser error: {s} (got {s})\n", .{ message, @tagName(current_token.type) });
+        return ParserError.ExpectedToken;
+    }
+
+    /// Check if a keyword can be used as an identifier in certain contexts
+    fn isKeywordThatCanBeIdentifier(self: *Parser, token_type: TokenType) bool {
+        _ = self;
+        return switch (token_type) {
+            .From => true, // 'from' can be used as a parameter name in log declarations
+            else => false,
+        };
+    }
+
+    /// Match a keyword that can be used as an identifier
+    fn matchKeywordAsIdentifier(self: *Parser) bool {
+        if (self.isKeywordThatCanBeIdentifier(self.peek().type)) {
+            _ = self.advance();
+            return true;
+        }
+        return false;
     }
 };
 

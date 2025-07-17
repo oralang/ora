@@ -51,6 +51,13 @@ pub const TokenType = enum {
     Try,
     Catch,
 
+    // Transfer/shift keywords
+    From,
+
+    // Type keywords
+    Map,
+    Bytes,
+
     // Identifiers and literals
     Identifier,
     StringLiteral,
@@ -164,6 +171,9 @@ pub const Lexer = struct {
         .{ "error", .Error },
         .{ "try", .Try },
         .{ "catch", .Catch },
+        .{ "from", .From },
+        .{ "map", .Map },
+        .{ "bytes", .Bytes },
     });
 
     pub fn init(allocator: Allocator, source: []const u8) Lexer {

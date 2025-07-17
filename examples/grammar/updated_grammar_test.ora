@@ -1,0 +1,46 @@
+// Updated Grammar Test - Testing our improvements
+contract UpdatedTest {
+    // Testing new 'map' syntax instead of 'mapping'
+    storage var balances: map[address, u256];
+    storage var allowances: doublemap[address, address, u256];
+    
+    // Testing new 'bytes' type
+    storage var contract_code: bytes;
+    storage var signature_data: bytes;
+    
+    // Testing arrays (no vectors for smart contracts)
+    storage var fixed_array: [u256; 10];    // Fixed-size array
+    storage var dynamic_array: [u8];        // Dynamic array
+    
+    log Transfer(from: address, to: address, amount: u256);
+    log DataStored(data: bytes);
+    
+    pub fn init() {
+        balances[msg.sender] = 1000;
+        contract_code = 0x608060405234801561001057600080fd5b50;
+        signature_data = 0x1234abcd;
+    }
+    
+    pub fn store_data(data: bytes) {
+        contract_code = data;
+        log DataStored(data);
+    }
+    
+    pub fn get_balance(account: address) -> u256 {
+        return balances[account];
+    }
+    
+    pub fn process_bytes(input: bytes) -> bytes {
+        return input;
+    }
+    
+    pub fn array_operations() {
+        // Fixed array operations
+        fixed_array[0] = 100;
+        fixed_array[1] = 200;
+        
+        // Dynamic array operations (with care for gas)
+        // Note: These would need proper gas management in real contracts
+        let temp_array: [u8] = dynamic_array;
+    }
+} 

@@ -1,0 +1,6 @@
+contract MinimalSignedTest {
+    storage const value: u32 = 1;
+    
+    pub fn init() {
+    }
+} 

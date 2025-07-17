@@ -479,8 +479,9 @@ fn formatTypeRef(typ: lib.TypeRef) []const u8 {
         .U128 => "u128",
         .U256 => "u256",
         .String => "string",
+        .Bytes => "bytes",
         .Slice => "slice[T]",
-        .Mapping => "mapping[K,V]",
+        .Mapping => "map[K,V]",
         .DoubleMap => "doublemap[K1,K2,V]",
         .Identifier => |name| name,
     };

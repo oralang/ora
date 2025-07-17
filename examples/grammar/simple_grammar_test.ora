@@ -1,0 +1,24 @@
+// Simple Grammar Test
+// Testing basic language features
+
+contract SimpleTest {
+    storage var balance: u256;
+    immutable owner: address;
+    
+    log Transfer(from: address, to: address, amount: u256);
+    
+    pub fn init(initial_balance: u256) {
+        balance = initial_balance;
+        owner = msg.sender;
+    }
+    
+    pub fn get_balance() -> u256 {
+        return balance;
+    }
+    
+    pub fn transfer(to: address, amount: u256) -> bool {
+        balance -= amount;
+        log Transfer(msg.sender, to, amount);
+        return true;
+    }
+} 

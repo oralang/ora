@@ -1,22 +1,32 @@
-# Ora
+# Ora Development Notebook
 
-A domain-specific language for smart contract development with formal verification capabilities.
+An experimental smart contract language with formal verification capabilities.
 
-> **⚠️ Development Status**: This project is under active development. Many features are still being implemented and the API may change.
+> **🚧 EXPERIMENTAL PROJECT**: Ora is NOT ready for production use. This repository serves as an open notebook documenting language design and implementation progress. Features, syntax, and APIs are subject to change without notice.
 
 ## Overview
 
-Ora is a modern smart contract language that compiles to Yul (Ethereum's intermediate language) and EVM bytecode. Built with Zig, it provides safety guarantees through formal verification while maintaining high performance and developer productivity.
+Ora is an experimental smart contract language that compiles to Yul (Ethereum's intermediate language) and EVM bytecode. Built with Zig, it aims to provide safety guarantees through formal verification while maintaining high performance and developer productivity.
 
-## Key Features
+## Development Status
 
-- **Formal Verification**: Built-in mathematical proof capabilities for complex conditions and quantifiers *(in development)*
-- **Multi-Phase Compilation**: Lexical analysis → Syntax analysis → Semantic analysis → HIR → Yul → Bytecode
-- **Safe by Design**: Memory safety, type safety, and overflow protection *(in development)*
-- **Ethereum Integration**: Direct compilation to EVM bytecode via Yul intermediate representation
-- **Modern Syntax**: Clean, readable syntax inspired by Rust and Zig
+### ✅ Currently Functional
+- Core compilation pipeline: Lexical analysis → Syntax analysis → Semantic analysis → HIR → Yul → Bytecode
+- Basic smart contract syntax and compilation
+- Yul code generation and EVM bytecode output
+- Error handling foundations
 
-> **🚧 Implementation Status**: Core compilation pipeline is functional. Advanced features like formal verification and comprehensive safety checks are being actively developed.
+### 🚧 In Active Development
+- **Formal Verification**: Mathematical proof capabilities for complex conditions and quantifiers
+- **Advanced Safety**: Memory safety, type safety, and overflow protection
+- **Comprehensive Error Handling**: Full `!T` error union implementation
+- **Standard Library**: Core utilities and common patterns
+
+### 📋 Planned Features
+- Compile-time evaluation optimizations
+- Advanced type system features
+- IDE integration and tooling
+- Comprehensive testing frameworks
 
 ## Quick Start
 
@@ -43,13 +53,13 @@ zig build
 zig build test
 ```
 
-### Your First Contract
+### Try Current Implementation
 
-Create a simple storage contract (`storage.ora`):
+Create a simple storage contract (`test.ora`):
 
 ```ora
 contract SimpleStorage {
-    var value: u256;
+    storage var value: u256;
     
     pub fn set(new_value: u256) {
         value = new_value;
@@ -61,28 +71,46 @@ contract SimpleStorage {
 }
 ```
 
-Compile to bytecode:
+Compile it:
 
 ```bash
-./zig-out/bin/ora compile storage.ora
+./zig-out/bin/ora test.ora
 ```
 
-## Language Features
+## Language Features (Current)
 
-### Storage and State Management
-
+### Basic Contract Structure
 ```ora
-contract Token {
-    let name: string;
-    var total_supply: u256;
-    var balances: mapping[address, u256];
+contract MyContract {
+    storage var balance: u256;
+    immutable owner: address;
+    storage const MAX_SUPPLY: u256 = 1000000;
+    
+    pub fn transfer(to: address, amount: u256) -> bool {
+        // Implementation
+        return true;
+    }
 }
 ```
 
-### Formal Verification
-
+### Error Handling (In Development)
 ```ora
-function transfer(to: address, amount: u256) -> bool
+error InsufficientBalance;
+error InvalidAddress;
+
+fn transfer(to: address, amount: u256) -> !u256 {
+    if (balance < amount) {
+        return error.InsufficientBalance;
+    }
+    
+    balance -= amount;
+    return balance;
+}
+```
+
+### Formal Verification (Planned)
+```ora
+fn transfer(to: address, amount: u256) -> bool
     requires balances[sender] >= amount
     ensures balances[sender] + balances[to] == old(balances[sender]) + old(balances[to])
 {
@@ -92,106 +120,79 @@ function transfer(to: address, amount: u256) -> bool
 }
 ```
 
-> **⚠️ Note**: Formal verification syntax is still being finalized and may not be fully functional yet.
-
-### Error Handling
-
-```ora
-function safe_divide(a: u256, b: u256) -> u256 | DivisionError {
-    if (b == 0) {
-        return DivisionError.DivisionByZero;
-    }
-    return a / b;
-}
-```
-
-## CLI Usage
-
-```bash
-# Full compilation pipeline
-ora compile contract.ora
-
-# Individual phases
-ora lex contract.ora          # Tokenization
-ora parse contract.ora        # AST generation
-ora analyze contract.ora      # Semantic analysis
-ora hir contract.ora          # HIR generation
-ora yul contract.ora          # Yul generation
-ora bytecode contract.ora     # Bytecode generation
-```
-
-## Examples
-
-The `examples/` directory contains various contract examples:
-
-- **Simple Storage**: Basic state management
-- **ERC20 Token**: Standard token implementation
-- **Formal Verification**: Advanced proof examples
-- **Error Handling**: Comprehensive error management
-- **Optimization**: Performance optimization patterns
-
-## Architecture
-
-### Compilation Pipeline
-
-1. **Lexer** (`src/lexer.zig`) - Tokenizes source code
-2. **Parser** (`src/parser.zig`) - Generates Abstract Syntax Tree
-3. **Semantic Analyzer** (`src/semantics.zig`) - Type checking and validation
-4. **HIR Builder** (`src/ir.zig`) - High-level Intermediate Representation
-5. **Yul Codegen** (`src/codegen_yul.zig`) - Yul code generation
-6. **Bytecode Generation** - EVM bytecode via Solidity integration
-
-### Formal Verification
-
-The formal verification system supports:
-- **Proof Strategies**: Direct proof, contradiction, induction, case analysis
-- **Mathematical Domains**: Integer, real, bit-vector, array, set operations
-- **Quantifiers**: Universal (∀) and existential (∃) quantification
-- **SMT Integration**: Z3, CVC4, Yices solver support
-
-## Development
-
-### Project Structure
+## Project Structure
 
 ```
-oralang/
-├── src/                    # Compiler source code
-├── examples/              # Example contracts
-├── vendor/solidity/       # Solidity libraries (submodule)
-├── build.zig             # Zig build configuration
-└── README.md             # This file
+Ora/
+├── src/                    # Compiler implementation (Zig)
+│   ├── ast.zig            # Abstract Syntax Tree
+│   ├── parser.zig         # Syntax analysis
+│   ├── semantic.zig       # Semantic analysis
+│   ├── hir.zig            # High-level IR
+│   └── codegen_yul.zig    # Yul code generation
+├── examples/              # Working code examples
+│   ├── core/              # Basic functionality
+│   ├── advanced/          # Advanced features (experimental)
+│   └── tokens/            # Token contract patterns
+├── docs/                  # Technical specifications
+│   ├── GRAMMAR.bnf        # Language grammar
+│   ├── HIR_SPEC.md        # IR specification
+│   └── formal-verification.md
+├── website/               # Documentation site
+└── vendor/solidity/       # Solidity integration
 ```
-
-### Building with Debug Info
-
-```bash
-zig build -Doptimize=Debug
-```
-
-### Running Examples
-
-```bash
-# Parser demo
-zig build parser-demo
-
-# Yul integration test
-zig build yul-test
-
-# Optimization demo
-zig build optimization-demo
-
-# Formal verification demo
-zig build formal-verification-demo
-```
-
-## License
-
-This project is licensed under the GPL-3.0 License - see the [LICENSE](LICENSE) file for details.
 
 ## Documentation
 
-- [API Documentation](API.md)
-- [Formal Verification Guide](formal-verification.md)
-- [Syntax Guide](syntax-guide.md)
+- **Website**: [ora-lang.org](https://ora-lang.org) - Development notebook and documentation
+- **Examples**: Browse `examples/` directory for working code patterns
+- **Grammar**: See `GRAMMAR.bnf` for current syntax specification
+- **API**: Check `API.md` for compiler interface
 
-> **📝 Note**: Some documentation is still being written.
+## Development Notes
+
+### Technical Decisions
+
+- **Zig as Implementation Language**: Leverages compile-time capabilities for meta-programming
+- **Yul Backend**: Compiles to Ethereum's intermediate language for optimal bytecode generation
+- **Multi-Phase Compilation**: Separate lexical, syntax, semantic, and code generation phases
+- **Formal Verification Focus**: Designing for mathematical proof capabilities from the ground up
+
+### Current Limitations
+
+- No standard library implementation yet
+- Limited error messages and debugging information
+- Incomplete type system (basic types only)
+- No formal verification execution (syntax defined but not implemented)
+- Minimal testing framework
+
+### Not Suitable For
+
+- Production smart contracts
+- Financial applications
+- Critical infrastructure
+- Projects requiring stable APIs
+- Applications needing comprehensive tooling
+
+## Contributing
+
+This is an experimental research project. Ways to contribute:
+
+1. **Report Issues**: File bugs for unexpected behavior
+2. **Suggest Improvements**: Discuss language design decisions
+3. **Submit Examples**: Share interesting contract patterns
+4. **Improve Documentation**: Help expand this development notebook
+
+## Community
+
+- **Source Code**: [GitHub Repository](https://github.com/oralang/Ora)
+- **Issues**: [Bug Reports & Feature Requests](https://github.com/oralang/Ora/issues)
+- **Discussions**: [GitHub Discussions](https://github.com/oralang/Ora/discussions)
+
+## License
+
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+
+---
+
+*Last updated: December 2024 - Reflects current development status*

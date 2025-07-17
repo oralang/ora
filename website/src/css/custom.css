@@ -1,0 +1,221 @@
+/**
+ * Any CSS included here will be global. The classic template
+ * bundles Infima by default. Infima is a CSS framework designed to
+ * work well for content-centric websites.
+ */
+
+/* You can override the default Infima variables here. */
+:root {
+  /* Ora Brand Colors - Professional Blue-Purple Theme */
+  --ifm-color-primary: #4c6ef5;
+  --ifm-color-primary-dark: #3b5df0;
+  --ifm-color-primary-darker: #2f4ceb;
+  --ifm-color-primary-darkest: #1e3ae6;
+  --ifm-color-primary-light: #5d7ffa;
+  --ifm-color-primary-lighter: #6e90ff;
+  --ifm-color-primary-lightest: #8fa2ff;
+
+  /* Enhanced code styling for Ora */
+  --ifm-code-font-size: 95%;
+  --ifm-code-background: rgba(76, 110, 245, 0.1);
+  --ifm-code-color: #4c6ef5;
+  --docusaurus-highlighted-code-line-bg: rgba(76, 110, 245, 0.1);
+
+  /* Custom Ora accent colors */
+  --ora-accent-purple: #7c3aed;
+  --ora-accent-blue: #2563eb;
+  --ora-accent-cyan: #06b6d4;
+  --ora-success: #10b981;
+  --ora-warning: #f59e0b;
+  --ora-error: #ef4444;
+
+  /* Typography improvements */
+  --ifm-font-family-base: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  --ifm-font-family-monospace: 'JetBrains Mono', 'Fira Code', Monaco, 'Cascadia Code', 'Roboto Mono', monospace;
+  --ifm-h1-font-size: 2.5rem;
+  --ifm-h2-font-size: 2rem;
+  --ifm-h3-font-size: 1.5rem;
+}
+
+/* For readability concerns, you should choose a lighter palette in dark mode. */
+[data-theme='dark'] {
+  --ifm-color-primary: #6e90ff;
+  --ifm-color-primary-dark: #4c6ef5;
+  --ifm-color-primary-darker: #3b5df0;
+  --ifm-color-primary-darkest: #2f4ceb;
+  --ifm-color-primary-light: #8fa2ff;
+  --ifm-color-primary-lighter: #a0b4ff;
+  --ifm-color-primary-lightest: #b1c5ff;
+
+  --ifm-code-background: rgba(110, 144, 255, 0.15);
+  --ifm-code-color: #a0b4ff;
+  --docusaurus-highlighted-code-line-bg: rgba(110, 144, 255, 0.2);
+
+  /* Dark mode background adjustments */
+  --ifm-background-color: #0f172a;
+  --ifm-background-surface-color: #1e293b;
+}
+
+/* Enhanced code block styling */
+.prism-code {
+  font-family: var(--ifm-font-family-monospace);
+  font-size: 0.9rem;
+  line-height: 1.6;
+}
+
+/* Ora language syntax highlighting */
+.token.keyword {
+  color: var(--ora-accent-purple);
+  font-weight: 600;
+}
+
+.token.type {
+  color: var(--ora-accent-blue);
+  font-weight: 500;
+}
+
+.token.builtin {
+  color: var(--ora-accent-cyan);
+  font-weight: 500;
+}
+
+.token.stdlib {
+  color: var(--ora-success);
+  font-weight: 500;
+}
+
+.token.function {
+  color: var(--ifm-color-primary);
+  font-weight: 500;
+}
+
+.token.string {
+  color: var(--ora-success);
+}
+
+.token.number {
+  color: var(--ora-warning);
+}
+
+.token.comment {
+  color: #64748b;
+  font-style: italic;
+}
+
+.token.operator {
+  color: var(--ora-accent-purple);
+}
+
+.token.punctuation {
+  color: #64748b;
+}
+
+.token.annotation {
+  color: var(--ora-accent-cyan);
+  font-weight: 500;
+}
+
+.token.error-type {
+  color: var(--ora-error);
+  font-weight: 500;
+}
+
+.token.attribute {
+  color: var(--ora-accent-purple);
+  font-style: italic;
+}
+
+/* Dark mode syntax highlighting adjustments */
+[data-theme='dark'] .token.comment {
+  color: #94a3b8;
+}
+
+[data-theme='dark'] .token.punctuation {
+  color: #94a3b8;
+}
+
+[data-theme='dark'] .token.string {
+  color: #34d399;
+}
+
+[data-theme='dark'] .token.number {
+  color: #fbbf24;
+}
+
+[data-theme='dark'] .token.stdlib {
+  color: #10b981;
+}
+
+[data-theme='dark'] .token.error-type {
+  color: #f87171;
+}
+
+/* Hero section enhancements */
+.hero {
+  background: linear-gradient(135deg, var(--ifm-color-primary) 0%, var(--ora-accent-purple) 100%);
+  color: white;
+}
+
+.hero .hero__title {
+  font-size: 3.5rem;
+  font-weight: 700;
+}
+
+.hero .hero__subtitle {
+  font-size: 1.25rem;
+  opacity: 0.9;
+}
+
+/* Button enhancements */
+.button--primary {
+  background: linear-gradient(135deg, var(--ifm-color-primary) 0%, var(--ora-accent-purple) 100%);
+  border: none;
+  font-weight: 600;
+  transition: all 0.3s ease;
+}
+
+.button--primary:hover {
+  background: linear-gradient(135deg, var(--ifm-color-primary-dark) 0%, var(--ora-accent-purple) 100%);
+  transform: translateY(-2px);
+  box-shadow: 0 8px 25px rgba(76, 110, 245, 0.3);
+}
+
+/* Card enhancements */
+.card {
+  border-radius: 12px;
+  border: 1px solid rgba(76, 110, 245, 0.1);
+  transition: all 0.3s ease;
+}
+
+.card:hover {
+  transform: translateY(-4px);
+  box-shadow: 0 12px 40px rgba(76, 110, 245, 0.15);
+}
+
+/* Navigation improvements */
+.navbar {
+  backdrop-filter: blur(10px);
+  background: rgba(255, 255, 255, 0.95);
+  border-bottom: 1px solid rgba(76, 110, 245, 0.1);
+}
+
+[data-theme='dark'] .navbar {
+  background: rgba(15, 23, 42, 0.95);
+  border-bottom: 1px solid rgba(110, 144, 255, 0.2);
+}
+
+/* Footer styling */
+.footer {
+  background: linear-gradient(135deg, #1e293b 0%, #0f172a 100%);
+}
+
+/* Responsive design improvements */
+@media (max-width: 768px) {
+  .hero .hero__title {
+    font-size: 2.5rem;
+  }
+
+  .hero .hero__subtitle {
+    font-size: 1.1rem;
+  }
+}

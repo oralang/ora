@@ -1,0 +1,10 @@
+// Testing imports first
+@import("std/crypto")
+
+contract TestContract {
+    storage var value: u256;
+    
+    pub fn init() {
+        value = 0;
+    }
+} 

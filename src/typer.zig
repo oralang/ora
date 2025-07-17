@@ -12,7 +12,14 @@ pub const OraType = union(enum) {
     U64: void,
     U128: void,
     U256: void,
+    I8: void,
+    I16: void,
+    I32: void,
+    I64: void,
+    I128: void,
+    I256: void,
     String: void,
+    Bytes: void,
 
     // Complex types
     Slice: *OraType,
@@ -36,6 +43,9 @@ pub const OraType = union(enum) {
     Void: void,
     Unknown: void,
     Error: void,
+    Tuple: struct {
+        types: []OraType,
+    },
 };
 
 /// Type checking errors
@@ -277,18 +287,65 @@ pub const Typer = struct {
 
     /// Type check a variable declaration
     fn typeCheckVariableDecl(self: *Typer, var_decl: *ast.VariableDeclNode) TyperError!void {
-        const var_type = try self.convertAstTypeToOraType(&var_decl.typ);
+        // Handle tuple unpacking
+        if (var_decl.tuple_names) |tuple_names| {
+            // Tuple unpacking: let (a, b) = expr
+            if (var_decl.value) |*init_expr| {
+                const init_type = try self.typeCheckExpression(init_expr);
 
-        // Type check initializer if present
-        if (var_decl.value) |*init_expr| {
-            const init_type = try self.typeCheckExpression(init_expr);
-            if (!self.typesCompatible(var_type, init_type)) {
-                return TyperError.TypeMismatch;
+                // Ensure initializer is a tuple type
+                if (init_type != .Tuple) {
+                    return TyperError.TypeMismatch;
+                }
+
+                const tuple_type = init_type.Tuple;
+
+                // Ensure tuple arity matches
+                if (tuple_names.len != tuple_type.types.len) {
+                    return TyperError.TypeMismatch;
+                }
+
+                // Declare each tuple variable
+                for (tuple_names, tuple_type.types) |name, typ| {
+                    const symbol = Symbol{
+                        .name = name,
+                        .typ = typ,
+                        .region = var_decl.region,
+                        .mutable = var_decl.mutable,
+                        .span = var_decl.span,
+                    };
+
+                    try self.current_scope.declare(symbol);
+                }
+            } else {
+                return TyperError.TypeMismatch; // Tuple unpacking requires initializer
             }
-        }
+        } else {
+            // Regular variable declaration
+            const var_type = try self.convertAstTypeToOraType(&var_decl.typ);
 
-        // Validate memory region constraints
-        try self.validateMemoryRegion(var_decl.region, var_type);
+            // Type check initializer if present
+            if (var_decl.value) |*init_expr| {
+                const init_type = try self.typeCheckExpression(init_expr);
+                if (!self.typesCompatible(var_type, init_type)) {
+                    return TyperError.TypeMismatch;
+                }
+            }
+
+            // Validate memory region constraints
+            try self.validateMemoryRegion(var_decl.region, var_type);
+
+            // Add the variable to the symbol table
+            const symbol = Symbol{
+                .name = var_decl.name,
+                .typ = var_type,
+                .region = var_decl.region,
+                .mutable = var_decl.mutable,
+                .span = var_decl.span,
+            };
+
+            try self.current_scope.declare(symbol);
+        }
     }
 
     /// Type check a block of statements
@@ -318,6 +375,10 @@ pub const Typer = struct {
                 for (log.args) |*arg| {
                     _ = try self.typeCheckExpression(arg);
                 }
+            },
+            .Lock => |*lock| {
+                // Type check lock path
+                _ = try self.typeCheckExpression(&lock.path);
             },
             .ErrorDecl => |*error_decl| {
                 // Error declarations don't need type checking
@@ -432,6 +493,29 @@ pub const Typer = struct {
                 _ = try self.typeCheckExpression(error_cast.operand);
                 return try self.convertAstTypeToOraType(&error_cast.target_type);
             },
+            .Shift => |*shift| {
+                // Type check shift expression components
+                _ = try self.typeCheckExpression(shift.mapping);
+                _ = try self.typeCheckExpression(shift.source);
+                _ = try self.typeCheckExpression(shift.dest);
+                _ = try self.typeCheckExpression(shift.amount);
+                // Shift operations return void
+                return OraType.Void;
+            },
+            .Tuple => |*tuple| {
+                // Type check tuple expressions
+                var tuple_types = std.ArrayList(OraType).init(self.allocator);
+                defer tuple_types.deinit();
+
+                for (tuple.elements) |*element| {
+                    const element_type = try self.typeCheckExpression(element);
+                    try tuple_types.append(element_type);
+                }
+
+                return OraType{ .Tuple = .{
+                    .types = try tuple_types.toOwnedSlice(),
+                } };
+            },
             .Unary => |*unary| {
                 const operand_type = try self.typeCheckExpression(unary.operand);
                 return try self.typeCheckUnaryOp(unary.operator, operand_type);
@@ -483,7 +567,64 @@ pub const Typer = struct {
     fn getLiteralType(self: *Typer, literal: *ast.LiteralNode) TyperError!OraType {
         _ = self;
         return switch (literal.*) {
-            .Integer => OraType.U256, // Default integer type
+            .Integer => |*int_lit| {
+                // Infer the smallest suitable integer type
+                const value_str = int_lit.value;
+
+                // Check if it's a negative number
+                const is_negative = value_str.len > 0 and value_str[0] == '-';
+                const abs_str = if (is_negative) value_str[1..] else value_str;
+
+                if (is_negative) {
+                    // Try parsing as different signed integer types
+                    if (std.fmt.parseInt(i8, abs_str, 10)) |_| {
+                        return OraType.I8;
+                    } else |_| {}
+
+                    if (std.fmt.parseInt(i16, abs_str, 10)) |_| {
+                        return OraType.I16;
+                    } else |_| {}
+
+                    if (std.fmt.parseInt(i32, abs_str, 10)) |_| {
+                        return OraType.I32;
+                    } else |_| {}
+
+                    if (std.fmt.parseInt(i64, abs_str, 10)) |_| {
+                        return OraType.I64;
+                    } else |_| {}
+
+                    if (std.fmt.parseInt(i128, abs_str, 10)) |_| {
+                        return OraType.I128;
+                    } else |_| {}
+
+                    // Default to i256 for very large negative numbers
+                    return OraType.I256;
+                } else {
+                    // Try parsing as different unsigned integer types
+                    if (std.fmt.parseInt(u8, value_str, 10)) |_| {
+                        return OraType.U8;
+                    } else |_| {}
+
+                    if (std.fmt.parseInt(u16, value_str, 10)) |_| {
+                        return OraType.U16;
+                    } else |_| {}
+
+                    if (std.fmt.parseInt(u32, value_str, 10)) |_| {
+                        return OraType.U32;
+                    } else |_| {}
+
+                    if (std.fmt.parseInt(u64, value_str, 10)) |_| {
+                        return OraType.U64;
+                    } else |_| {}
+
+                    if (std.fmt.parseInt(u128, value_str, 10)) |_| {
+                        return OraType.U128;
+                    } else |_| {}
+
+                    // Default to u256 for very large numbers
+                    return OraType.U256;
+                }
+            },
             .String => OraType.String,
             .Bool => OraType.Bool,
             .Address => OraType.Address,
@@ -583,16 +724,18 @@ pub const Typer = struct {
     /// Check if a function is a built-in function
     fn isBuiltinFunction(self: *Typer, name: []const u8) bool {
         _ = self;
-        // Common built-in functions in smart contract languages
-        return std.mem.eql(u8, name, "require") or
-            std.mem.eql(u8, name, "assert") or
-            std.mem.eql(u8, name, "revert") or
-            std.mem.eql(u8, name, "keccak256") or
-            std.mem.eql(u8, name, "sha256") or
-            std.mem.eql(u8, name, "ripemd160") or
-            std.mem.eql(u8, name, "ecrecover") or
-            std.mem.eql(u8, name, "addmod") or
-            std.mem.eql(u8, name, "mulmod");
+        // Actual built-in functions in Ora language
+        return std.mem.eql(u8, name, "requires") or
+            std.mem.eql(u8, name, "ensures") or
+            std.mem.eql(u8, name, "invariant") or
+            std.mem.eql(u8, name, "old") or
+            std.mem.eql(u8, name, "log") or
+            // Division functions (with @ prefix)
+            std.mem.eql(u8, name, "@divmod") or
+            std.mem.eql(u8, name, "@divTrunc") or
+            std.mem.eql(u8, name, "@divFloor") or
+            std.mem.eql(u8, name, "@divCeil") or
+            std.mem.eql(u8, name, "@divExact");
     }
 
     /// Type check built-in function calls
@@ -603,8 +746,8 @@ pub const Typer = struct {
             else => return TyperError.InvalidOperation,
         };
 
-        if (std.mem.eql(u8, function_name, "require")) {
-            // require(condition, [message]) -> void
+        if (std.mem.eql(u8, function_name, "requires")) {
+            // requires(condition, [message]) -> void
             if (call.arguments.len < 1 or call.arguments.len > 2) {
                 return TyperError.ArgumentCountMismatch;
             }
@@ -624,9 +767,9 @@ pub const Typer = struct {
             return OraType.Void;
         }
 
-        if (std.mem.eql(u8, function_name, "assert")) {
-            // assert(condition) -> void
-            if (call.arguments.len != 1) {
+        if (std.mem.eql(u8, function_name, "ensures")) {
+            // ensures(condition, [message]) -> void
+            if (call.arguments.len < 1 or call.arguments.len > 2) {
                 return TyperError.ArgumentCountMismatch;
             }
 
@@ -635,38 +778,99 @@ pub const Typer = struct {
                 return TyperError.TypeMismatch;
             }
 
-            return OraType.Void;
-        }
-
-        if (std.mem.eql(u8, function_name, "keccak256") or
-            std.mem.eql(u8, function_name, "sha256") or
-            std.mem.eql(u8, function_name, "ripemd160"))
-        {
-            // Hash functions: hash(bytes) -> bytes32 (U256)
-            if (call.arguments.len != 1) {
-                return TyperError.ArgumentCountMismatch;
-            }
-
-            _ = try self.typeCheckExpression(&call.arguments[0]);
-            return OraType.U256;
-        }
-
-        if (std.mem.eql(u8, function_name, "addmod") or
-            std.mem.eql(u8, function_name, "mulmod"))
-        {
-            // addmod(x, y, k) -> uint256, mulmod(x, y, k) -> uint256
-            if (call.arguments.len != 3) {
-                return TyperError.ArgumentCountMismatch;
-            }
-
-            for (call.arguments) |*arg| {
-                const arg_type = try self.typeCheckExpression(arg);
-                if (!self.isNumericType(arg_type)) {
+            if (call.arguments.len == 2) {
+                const message_type = try self.typeCheckExpression(&call.arguments[1]);
+                if (!std.meta.eql(message_type, OraType.String)) {
                     return TyperError.TypeMismatch;
                 }
             }
 
-            return OraType.U256;
+            return OraType.Void;
+        }
+
+        if (std.mem.eql(u8, function_name, "invariant")) {
+            // invariant(condition, [message]) -> void
+            if (call.arguments.len < 1 or call.arguments.len > 2) {
+                return TyperError.ArgumentCountMismatch;
+            }
+
+            const condition_type = try self.typeCheckExpression(&call.arguments[0]);
+            if (!std.meta.eql(condition_type, OraType.Bool)) {
+                return TyperError.TypeMismatch;
+            }
+
+            if (call.arguments.len == 2) {
+                const message_type = try self.typeCheckExpression(&call.arguments[1]);
+                if (!std.meta.eql(message_type, OraType.String)) {
+                    return TyperError.TypeMismatch;
+                }
+            }
+
+            return OraType.Void;
+        }
+
+        if (std.mem.eql(u8, function_name, "old")) {
+            // old(expression) -> same type as expression
+            if (call.arguments.len != 1) {
+                return TyperError.ArgumentCountMismatch;
+            }
+
+            // Return the same type as the argument
+            return try self.typeCheckExpression(&call.arguments[0]);
+        }
+
+        if (std.mem.eql(u8, function_name, "log")) {
+            // log is handled differently as it's a statement, not a function call
+            // But if it appears in expression context, it returns void
+            return OraType.Void;
+        }
+
+        // Division functions (Zig-inspired, with @ prefix)
+        if (std.mem.eql(u8, function_name, "@divTrunc") or
+            std.mem.eql(u8, function_name, "@divFloor") or
+            std.mem.eql(u8, function_name, "@divCeil") or
+            std.mem.eql(u8, function_name, "@divExact"))
+        {
+            // @divTrunc(a, b) -> same type as a and b (must be compatible)
+            if (call.arguments.len != 2) {
+                return TyperError.ArgumentCountMismatch;
+            }
+
+            const lhs_type = try self.typeCheckExpression(&call.arguments[0]);
+            const rhs_type = try self.typeCheckExpression(&call.arguments[1]);
+
+            if (!self.isNumericType(lhs_type) or !self.isNumericType(rhs_type)) {
+                return TyperError.TypeMismatch;
+            }
+
+            return self.commonNumericType(lhs_type, rhs_type);
+        }
+
+        if (std.mem.eql(u8, function_name, "@divmod")) {
+            // @divmod(a, b) -> (quotient, remainder) tuple
+            if (call.arguments.len != 2) {
+                return TyperError.ArgumentCountMismatch;
+            }
+
+            const lhs_type = try self.typeCheckExpression(&call.arguments[0]);
+            const rhs_type = try self.typeCheckExpression(&call.arguments[1]);
+
+            if (!self.isNumericType(lhs_type) or !self.isNumericType(rhs_type)) {
+                return TyperError.TypeMismatch;
+            }
+
+            const common_type = self.commonNumericType(lhs_type, rhs_type);
+
+            // Return tuple type (quotient, remainder) both same type
+            var tuple_types = std.ArrayList(OraType).init(self.allocator);
+            defer tuple_types.deinit();
+
+            try tuple_types.append(common_type); // quotient
+            try tuple_types.append(common_type); // remainder
+
+            return OraType{ .Tuple = .{
+                .types = try tuple_types.toOwnedSlice(),
+            } };
         }
 
         // Default for other built-ins
@@ -684,7 +888,14 @@ pub const Typer = struct {
             .U64 => OraType.U64,
             .U128 => OraType.U128,
             .U256 => OraType.U256,
+            .I8 => OraType.I8,
+            .I16 => OraType.I16,
+            .I32 => OraType.I32,
+            .I64 => OraType.I64,
+            .I128 => OraType.I128,
+            .I256 => OraType.I256,
             .String => OraType.String,
+            .Bytes => OraType.Bytes,
             .Slice => |slice_element_type| {
                 // Use arena allocator for type lifetime management
                 const element_type = try self.type_arena.allocator().create(OraType);
@@ -742,7 +953,77 @@ pub const Typer = struct {
 
     /// Check if two types are compatible
     fn typesCompatible(self: *Typer, lhs: OraType, rhs: OraType) bool {
-        return self.typeEquals(lhs, rhs);
+        // Exact type match
+        if (self.typeEquals(lhs, rhs)) {
+            return true;
+        }
+
+        // Allow compatible numeric conversions
+        return self.isNumericConversionValid(rhs, lhs);
+    }
+
+    /// Check if a numeric conversion is valid (from -> to)
+    fn isNumericConversionValid(self: *Typer, from: OraType, to: OraType) bool {
+        // Allow promotion within unsigned types
+        const unsigned_hierarchy = [_]OraType{ .U8, .U16, .U32, .U64, .U128, .U256 };
+        if (self.isTypeInHierarchy(from, &unsigned_hierarchy) and self.isTypeInHierarchy(to, &unsigned_hierarchy)) {
+            return self.getTypeHierarchyIndex(from, &unsigned_hierarchy) <= self.getTypeHierarchyIndex(to, &unsigned_hierarchy);
+        }
+
+        // Allow promotion within signed types
+        const signed_hierarchy = [_]OraType{ .I8, .I16, .I32, .I64, .I128, .I256 };
+        if (self.isTypeInHierarchy(from, &signed_hierarchy) and self.isTypeInHierarchy(to, &signed_hierarchy)) {
+            return self.getTypeHierarchyIndex(from, &signed_hierarchy) <= self.getTypeHierarchyIndex(to, &signed_hierarchy);
+        }
+
+        // Allow unsigned to signed conversion if the signed type is larger or equal
+        switch (from) {
+            .U8 => switch (to) {
+                .I8, .I16, .I32, .I64, .I128, .I256 => return true,
+                else => return false,
+            },
+            .U16 => switch (to) {
+                .I16, .I32, .I64, .I128, .I256 => return true,
+                else => return false,
+            },
+            .U32 => switch (to) {
+                .I32, .I64, .I128, .I256 => return true,
+                else => return false,
+            },
+            .U64 => switch (to) {
+                .I64, .I128, .I256 => return true,
+                else => return false,
+            },
+            .U128 => switch (to) {
+                .I128, .I256 => return true,
+                else => return false,
+            },
+            .U256 => switch (to) {
+                .I256 => return true,
+                else => return false,
+            },
+            else => return false,
+        }
+    }
+
+    /// Check if a type is in a hierarchy
+    fn isTypeInHierarchy(self: *Typer, typ: OraType, hierarchy: []const OraType) bool {
+        for (hierarchy) |h_type| {
+            if (self.typeEquals(typ, h_type)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /// Get the index of a type in a hierarchy
+    fn getTypeHierarchyIndex(self: *Typer, typ: OraType, hierarchy: []const OraType) usize {
+        for (hierarchy, 0..) |h_type, i| {
+            if (self.typeEquals(typ, h_type)) {
+                return i;
+            }
+        }
+        return hierarchy.len; // Not found
     }
 
     /// Check if two types are structurally equal
@@ -780,8 +1061,36 @@ pub const Typer = struct {
                 .U256 => true,
                 else => false,
             },
+            .I8 => switch (rhs) {
+                .I8 => true,
+                else => false,
+            },
+            .I16 => switch (rhs) {
+                .I16 => true,
+                else => false,
+            },
+            .I32 => switch (rhs) {
+                .I32 => true,
+                else => false,
+            },
+            .I64 => switch (rhs) {
+                .I64 => true,
+                else => false,
+            },
+            .I128 => switch (rhs) {
+                .I128 => true,
+                else => false,
+            },
+            .I256 => switch (rhs) {
+                .I256 => true,
+                else => false,
+            },
             .String => switch (rhs) {
                 .String => true,
+                else => false,
+            },
+            .Bytes => switch (rhs) {
+                .Bytes => true,
                 else => false,
             },
             .Void => switch (rhs) {
@@ -836,18 +1145,49 @@ pub const Typer = struct {
     fn isNumericType(self: *Typer, typ: OraType) bool {
         _ = self;
         return switch (typ) {
-            .U8, .U16, .U32, .U64, .U128, .U256 => true,
+            .U8, .U16, .U32, .U64, .U128, .U256, .I8, .I16, .I32, .I64, .I128, .I256 => true,
             else => false,
         };
     }
 
     /// Get common numeric type for operations
     fn commonNumericType(self: *Typer, lhs: OraType, rhs: OraType) OraType {
-        _ = self;
-        // For now, always promote to U256
-        _ = lhs;
-        _ = rhs;
-        return OraType.U256;
+        // If both types are the same, return that type
+        if (self.typeEquals(lhs, rhs)) {
+            return lhs;
+        }
+
+        // Mixed signed/unsigned arithmetic: promote to the larger signed type
+        const signed_hierarchy = [_]OraType{ .I8, .I16, .I32, .I64, .I128, .I256 };
+        const unsigned_hierarchy = [_]OraType{ .U8, .U16, .U32, .U64, .U128, .U256 };
+
+        const lhs_is_signed = self.isTypeInHierarchy(lhs, &signed_hierarchy);
+        const rhs_is_signed = self.isTypeInHierarchy(rhs, &signed_hierarchy);
+
+        // If both are signed, promote to the larger one
+        if (lhs_is_signed and rhs_is_signed) {
+            const lhs_idx = self.getTypeHierarchyIndex(lhs, &signed_hierarchy);
+            const rhs_idx = self.getTypeHierarchyIndex(rhs, &signed_hierarchy);
+            return signed_hierarchy[@max(lhs_idx, rhs_idx)];
+        }
+
+        // If both are unsigned, promote to the larger one
+        if (!lhs_is_signed and !rhs_is_signed) {
+            const lhs_idx = self.getTypeHierarchyIndex(lhs, &unsigned_hierarchy);
+            const rhs_idx = self.getTypeHierarchyIndex(rhs, &unsigned_hierarchy);
+            return unsigned_hierarchy[@max(lhs_idx, rhs_idx)];
+        }
+
+        // Mixed signed/unsigned: promote to a signed type that can hold both
+        const signed_type = if (lhs_is_signed) lhs else rhs;
+        const unsigned_type = if (lhs_is_signed) rhs else lhs;
+
+        const signed_idx = self.getTypeHierarchyIndex(signed_type, &signed_hierarchy);
+        const unsigned_idx = self.getTypeHierarchyIndex(unsigned_type, &unsigned_hierarchy);
+
+        // Use the signed type if it's large enough, otherwise promote to a larger signed type
+        const min_signed_idx = @max(signed_idx, unsigned_idx);
+        return signed_hierarchy[@min(min_signed_idx, signed_hierarchy.len - 1)];
     }
 
     /// Validate memory region constraints
@@ -859,7 +1199,7 @@ pub const Typer = struct {
                 // Only certain types can be stored in storage
                 switch (typ) {
                     .Mapping, .DoubleMap => {}, // OK
-                    .Bool, .Address, .U8, .U16, .U32, .U64, .U128, .U256, .String => {}, // OK
+                    .Bool, .Address, .U8, .U16, .U32, .U64, .U128, .U256, .I8, .I16, .I32, .I64, .I128, .I256, .String => {}, // OK
                     else => return TyperError.InvalidMemoryRegion,
                 }
             },
@@ -967,7 +1307,7 @@ pub const Typer = struct {
     fn isIntegerType(self: *Typer, typ: OraType) bool {
         _ = self;
         return switch (typ) {
-            .U8, .U16, .U32, .U64, .U128, .U256 => true,
+            .U8, .U16, .U32, .U64, .U128, .U256, .I8, .I16, .I32, .I64, .I128, .I256 => true,
             else => false,
         };
     }

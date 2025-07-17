@@ -1,0 +1,58 @@
+contract ERC20 {
+    storage const name: string;
+    storage const symbol: string;
+    storage const decimals: u8;
+    storage var total_supply: u256;
+
+    storage var balances: map[address, u256];
+    storage var allowances: doublemap[address, address, u256];
+
+    log Transfer(from: address, to: address, value: u256);
+    log Approval(owner: address, spender: address, value: u256);
+
+    pub fn init(token_name: string, token_symbol: string, token_decimals: u8, initial_supply: u256, owner: address) {
+        name = token_name;
+        symbol = token_symbol;
+        decimals = token_decimals;
+        total_supply = initial_supply;
+        balances[owner] = initial_supply;
+
+        log Transfer(std.constants.ZERO_ADDRESS, owner, initial_supply);
+    }
+
+    pub fn transfer(to: address, amount: u256) -> bool
+    {
+        @lock(balances[to]);
+
+        balances from std.transaction.sender -> to : amount;
+
+        log Transfer(std.transaction.sender, to, amount);
+        return true;
+    }
+
+    pub fn approve(spender: address, amount: u256) -> bool
+    {
+        allowances[std.transaction.sender, spender] = amount;
+        log Approval(std.transaction.sender, spender, amount);
+        return true;
+    }
+
+    pub fn transfer_from(from: address, to: address, amount: u256) -> bool
+    {
+        @lock(balances[to]);
+
+        balances from from -> to : amount;
+        allowances[from, std.transaction.sender] -= amount;
+
+        log Transfer(from, to, amount);
+        return true;
+    }
+
+    pub fn balance_of(account: address) -> u256 {
+        return balances[account];
+    }
+
+    pub fn allowance(owner: address, spender: address) -> u256 {
+        return allowances[owner, spender];
+    }
+}
