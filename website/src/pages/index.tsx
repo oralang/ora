@@ -125,7 +125,7 @@ export default function Home(): ReactNode {
   const { siteConfig } = useDocusaurusContext();
   return (
     <Layout
-      title={`${siteConfig.title} - Development Notebook`}
+      title={`${siteConfig.title}`}
       description="Ora development notebook: An experimental smart contract language with formal verification capabilities. Documentation of language design and implementation progress.">
       <HomepageHeader />
       <main>
