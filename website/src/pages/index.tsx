@@ -14,7 +14,7 @@ function HomepageHeader() {
     <header className={clsx('hero hero--primary', styles.heroBanner)}>
       <div className="container">
         <Heading as="h1" className="hero__title">
-          {siteConfig.title} Development Notebook
+          {siteConfig.title}
         </Heading>
         <p className="hero__subtitle">An experimental smart contract language with formal verification capabilities</p>
 
