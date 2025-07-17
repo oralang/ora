@@ -148,6 +148,82 @@ contract Math {
 - `pub`: Public, callable from outside the contract
 - (no modifier): Private, internal use only
 
+## Mathematical Operations
+
+### Division Operations
+
+Ora provides multiple division operations with explicit rounding behavior:
+
+```ora
+contract MathOperations {
+    function demonstrateDivision() public {
+        let a: u32 = 10;
+        let b: u32 = 3;
+        
+        // Truncating division (toward zero)
+        let trunc_result = @divTrunc(a, b);  // 3
+        
+        // Floor division (toward negative infinity)
+        let floor_result = @divFloor(a, b);  // 3
+        
+        // Ceiling division (toward positive infinity)
+        let ceil_result = @divCeil(a, b);    // 4
+        
+        // Exact division (errors if remainder != 0)
+        let exact_result = @divExact(12, 4); // 3
+        
+        // Division with remainder (returns tuple)
+        let (quotient, remainder) = @divmod(a, b);  // (3, 1)
+    }
+}
+```
+
+### Signed Division Behavior
+
+Different division operations handle negative numbers differently:
+
+```ora
+function signedDivision() public {
+    let a: i32 = -7;
+    let b: i32 = 3;
+    
+    let trunc_result = @divTrunc(a, b);  // -2 (toward zero)
+    let floor_result = @divFloor(a, b);  // -3 (toward -∞)
+    let ceil_result = @divCeil(a, b);    // -2 (toward +∞)
+}
+```
+
+### Division Error Handling
+
+All division operations include safety checks:
+
+```ora
+function safeDivision() public {
+    try {
+        let result = @divExact(10, 3);  // Will error - not exact
+    } catch (error.InexactDivision) {
+        log("Division is not exact");
+    }
+    
+    try {
+        let result = @divTrunc(10, 0);  // Will error - division by zero
+    } catch (error.DivisionByZero) {
+        log("Cannot divide by zero");
+    }
+}
+```
+
+### Compile-Time Evaluation
+
+Division operations are evaluated at compile time when operands are known:
+
+```ora
+comptime {
+    let compile_result = @divTrunc(100, 4);  // Computed at compile time
+    let (q, r) = @divmod(17, 5);            // (3, 2) at compile time
+}
+```
+
 ## Control Flow
 
 ### Conditional Statements
@@ -395,6 +471,8 @@ fn remove_user(user: address) -> !bool {
     return true;
 }
 ```
+
+
 
 ## Current Limitations
 

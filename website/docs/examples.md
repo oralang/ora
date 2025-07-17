@@ -188,6 +188,68 @@ contract ErrorUnionDemo {
 }
 ```
 
+## Mathematical Operations
+
+From `examples/demos/division_test.ora`:
+
+```ora
+contract DivisionDemo {
+    error DivisionByZero;
+    error InexactDivision;
+    
+    function demonstrateDivision() public {
+        let a: u32 = 10;
+        let b: u32 = 3;
+        
+        // Truncating division (toward zero)
+        let trunc_result = @divTrunc(a, b);  // 3
+        
+        // Floor division (toward negative infinity)
+        let floor_result = @divFloor(a, b);  // 3
+        
+        // Ceiling division (toward positive infinity)
+        let ceil_result = @divCeil(a, b);    // 4
+        
+        // Exact division (errors if remainder != 0)
+        let exact_result = @divExact(12, 4); // 3
+        
+        // Division with remainder (returns tuple)
+        let (quotient, remainder) = @divmod(a, b);  // (3, 1)
+    }
+    
+    function testSignedDivision() public {
+        let a: i32 = -7;
+        let b: i32 = 3;
+        
+        // Different rounding behaviors for negative numbers
+        let trunc_result = @divTrunc(a, b);  // -2 (toward zero)
+        let floor_result = @divFloor(a, b);  // -3 (toward -∞)
+        let ceil_result = @divCeil(a, b);    // -2 (toward +∞)
+    }
+    
+    function testErrorHandling() public {
+        try {
+            let result = @divExact(10, 3);  // Will error - not exact
+        } catch (error.InexactDivision) {
+            log("Division is not exact");
+        }
+        
+        try {
+            let result = @divTrunc(10, 0);  // Will error - division by zero
+        } catch (error.DivisionByZero) {
+            log("Cannot divide by zero");
+        }
+    }
+    
+    function safeDivide(a: u32, b: u32) -> !u32 {
+        if (b == 0) {
+            return error.DivisionByZero;
+        }
+        return @divTrunc(a, b);
+    }
+}
+```
+
 ## Formal Verification
 
 From `examples/advanced/formal_verification_test.ora`:

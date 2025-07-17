@@ -37,12 +37,34 @@ This includes:
 - **`std.constants`**: Common constants (`ZERO_ADDRESS`, etc.)
 - **`std.crypto`**: Cryptographic functions
 - **`std.math`**: Mathematical operations with overflow checking
+- **Division Operations**: `@divTrunc`, `@divFloor`, `@divCeil`, `@divExact`, `@divmod` with comprehensive error handling
 
 ### Formal Verification
 
 - **`static_verifier.zig`**: Formal verification engine
 - **`proof_engine.zig`**: Mathematical proof generation
 - **`smt_interface.zig`**: SMT solver integration
+
+## Mathematical Operations
+
+### Division Functions
+
+All division operations support comprehensive error handling and compile-time evaluation:
+
+- **`@divTrunc(a, b)`**: Truncating division toward zero
+- **`@divFloor(a, b)`**: Floor division toward negative infinity  
+- **`@divCeil(a, b)`**: Ceiling division toward positive infinity
+- **`@divExact(a, b)`**: Exact division, errors if remainder is non-zero
+- **`@divmod(a, b)`**: Returns quotient and remainder as tuple
+
+#### Error Types
+
+- `DivisionByZero`: Raised when divisor is zero
+- `InexactDivision`: Raised by `@divExact` when division has remainder
+
+#### Type Support
+
+All division operations work with signed and unsigned integers: `u8`, `u16`, `u32`, `u64`, `u128`, `i8`, `i16`, `i32`, `i64`, `i128`.
 
 ## Using the API Documentation
 
