@@ -224,14 +224,17 @@ pub fn build(b: *std.Build) void {
     docs_step.dependOn(&install_docs.step);
 
     // Add formal verification test
-    const formal_test = b.addExecutable(.{
-        .name = "formal_test",
+    const formal_test_mod = b.createModule(.{
         .root_source_file = b.path("examples/demos/formal_test.zig"),
         .target = target,
         .optimize = optimize,
     });
+    formal_test_mod.addImport("ora_lib", lib_mod);
 
-    formal_test.root_module.addImport("ora_lib", lib_mod);
+    const formal_test = b.addExecutable(.{
+        .name = "formal_test",
+        .root_module = formal_test_mod,
+    });
     // Don't install by default - only run when requested
 
     const formal_test_step = b.step("formal-test", "Run formal verification test");
@@ -333,10 +336,14 @@ fn buildSolidityLibrariesImpl(step: *std.Build.Step, options: std.Build.Step.Mak
 
 /// Build the Yul wrapper C++ library
 fn buildYulWrapper(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, cmake_step: *std.Build.Step) *std.Build.Step.Compile {
-    const yul_wrapper = b.addObject(.{
-        .name = "yul_wrapper",
+    const yul_wrapper_mod = b.createModule(.{
         .target = target,
         .optimize = optimize,
+    });
+
+    const yul_wrapper = b.addObject(.{
+        .name = "yul_wrapper",
+        .root_module = yul_wrapper_mod,
     });
 
     // Depend on CMake build
