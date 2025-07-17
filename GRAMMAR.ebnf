@@ -74,7 +74,6 @@ Type =
   | MapType
   | DoublemapType
   | ArrayType
-  | OptionalType
   | ErrorUnionType
   | Identifier ;
 
@@ -88,8 +87,6 @@ MapType = "map" "[" Type "," Type "]" ;
 DoublemapType = "doublemap" "[" Type "," Type "," Type "]" ;
 
 ArrayType = "[" Type [ ";" Expression ] "]" ;
-
-OptionalType = "?" Type ;
 
 ErrorUnionType = Type "|" Type ;
 

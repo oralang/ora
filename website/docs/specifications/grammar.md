@@ -108,7 +108,6 @@ type ::=
     | map_type
     | doublemap_type
     | array_type
-    | optional_type
     | error_union_type
     | identifier
 
@@ -129,8 +128,6 @@ array_type ::= "[" type (";" expression)? "]"
 # Array types in Ora:
 # [T; N] - Fixed-size array (N elements of type T)
 # [T]    - Dynamic-size array (variable number of elements)
-
-optional_type ::= "?" type
 
 error_union_type ::= type "|" type
 
@@ -359,7 +356,6 @@ Type =
   | MapType
   | DoublemapType
   | ArrayType
-  | OptionalType
   | ErrorUnionType
   | Identifier ;
 
@@ -373,8 +369,6 @@ MapType = "map" "[" Type "," Type "]" ;
 DoublemapType = "doublemap" "[" Type "," Type "," Type "]" ;
 
 ArrayType = "[" Type [ ";" Expression ] "]" ;
-
-OptionalType = "?" Type ;
 
 ErrorUnionType = Type "|" Type ;
 

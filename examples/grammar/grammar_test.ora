@@ -301,9 +301,6 @@ contract GrammarTest {
         let simple_mapping: map[address, u256];
         let double_mapping: doublemap[address, address, u256];
         
-        // Optional types
-        let maybe_value: ?u256;
-        
         // Error union types
         let result: u256 | ErrorCode;
         
@@ -362,7 +359,7 @@ contract EdgeCases {
     pub fn complex_params(
         a: u256, 
         b: map[address, u256], 
-        c: ?bool, 
+        c: bool, 
         d: u256 | ErrorCode
     ) -> bool {
         return true;
