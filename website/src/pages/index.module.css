@@ -1,0 +1,235 @@
+/**
+ * CSS files with the .module.css suffix will be treated as CSS modules
+ * and scoped locally.
+ */
+
+.heroBanner {
+  padding: 6rem 0;
+  text-align: center;
+  position: relative;
+  overflow: hidden;
+}
+
+@media screen and (max-width: 996px) {
+  .heroBanner {
+    padding: 4rem 2rem;
+  }
+}
+
+.buttons {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 1rem;
+  margin: 2rem 0;
+  flex-wrap: wrap;
+}
+
+@media screen and (max-width: 768px) {
+  .buttons {
+    flex-direction: column;
+    gap: 0.8rem;
+  }
+}
+
+/* Experimental Status Banner */
+.statusBanner {
+  max-width: 800px;
+  margin: 2rem auto;
+}
+
+.experimentalWarning {
+  background: rgba(239, 68, 68, 0.1);
+  border: 2px solid rgba(239, 68, 68, 0.3);
+  border-radius: 12px;
+  padding: 1.5rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  backdrop-filter: blur(10px);
+}
+
+.experimentalWarning strong {
+  color: #fca5a5;
+  font-size: 1.1rem;
+  font-weight: 600;
+}
+
+.experimentalWarning span {
+  color: rgba(255, 255, 255, 0.9);
+  font-size: 0.95rem;
+  line-height: 1.5;
+}
+
+/* Implementation Status */
+.implementationStatus {
+  max-width: 700px;
+  margin: 3rem auto;
+}
+
+.statusGrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 1.5rem;
+  margin-top: 1rem;
+}
+
+.statusItem {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  gap: 0.5rem;
+  padding: 1rem;
+  background: rgba(255, 255, 255, 0.1);
+  border-radius: 8px;
+  backdrop-filter: blur(5px);
+}
+
+.statusIcon {
+  font-size: 1.5rem;
+  margin-bottom: 0.5rem;
+}
+
+.statusItem strong {
+  color: rgba(255, 255, 255, 0.95);
+  font-size: 1rem;
+  font-weight: 600;
+}
+
+.statusItem span:last-child {
+  color: rgba(255, 255, 255, 0.7);
+  font-size: 0.85rem;
+  line-height: 1.3;
+}
+
+/* Code Example Styling */
+.codeExample {
+  max-width: 600px;
+  margin: 3rem auto;
+  text-align: left;
+}
+
+.codeHeader {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 0.5rem;
+  padding: 0 0.5rem;
+}
+
+.codeHeader span {
+  color: rgba(255, 255, 255, 0.9);
+  font-weight: 600;
+  font-size: 0.9rem;
+}
+
+.codeHeader small {
+  color: rgba(255, 255, 255, 0.6);
+  font-size: 0.8rem;
+  font-style: italic;
+}
+
+.codeBlock {
+  background: rgba(255, 255, 255, 0.1);
+  border-radius: 12px;
+  padding: 1.5rem;
+  backdrop-filter: blur(10px);
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  font-family: 'JetBrains Mono', 'Fira Code', Monaco, monospace;
+  font-size: 0.9rem;
+  line-height: 1.6;
+  color: rgba(255, 255, 255, 0.9);
+  overflow-x: auto;
+}
+
+.codeBlock code {
+  background: none;
+  color: inherit;
+  padding: 0;
+  font-size: inherit;
+}
+
+/* Progress Section */
+.progressSection {
+  max-width: 800px;
+  margin: 4rem auto 2rem;
+  text-align: center;
+}
+
+.progressSection h3 {
+  color: rgba(255, 255, 255, 0.95);
+  font-size: 1.5rem;
+  margin-bottom: 2rem;
+  font-weight: 600;
+}
+
+.progressGrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+  gap: 2rem;
+  margin-top: 2rem;
+}
+
+.progressItem {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  gap: 0.5rem;
+  padding: 1.5rem;
+  background: rgba(255, 255, 255, 0.05);
+  border-radius: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  backdrop-filter: blur(5px);
+}
+
+.progressItem strong {
+  color: rgba(255, 255, 255, 0.95);
+  font-size: 1.1rem;
+  font-weight: 600;
+  margin-bottom: 0.5rem;
+}
+
+.progressItem span {
+  color: rgba(255, 255, 255, 0.8);
+  font-size: 0.9rem;
+  line-height: 1.4;
+}
+
+@media screen and (max-width: 768px) {
+  .codeExample {
+    margin: 2rem auto;
+  }
+
+  .codeBlock {
+    padding: 1rem;
+    font-size: 0.8rem;
+  }
+
+  .statusGrid {
+    grid-template-columns: 1fr;
+    gap: 1rem;
+  }
+
+  .progressGrid {
+    grid-template-columns: 1fr;
+    gap: 1.5rem;
+  }
+
+  .progressItem {
+    padding: 1rem;
+  }
+
+  .experimentalWarning {
+    padding: 1rem;
+  }
+
+  .experimentalWarning strong {
+    font-size: 1rem;
+  }
+
+  .experimentalWarning span {
+    font-size: 0.9rem;
+  }
+}
