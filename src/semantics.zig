@@ -32,6 +32,13 @@ pub const SemanticError = error{
     OldExpressionInRequires,
     InvalidInvariant,
 
+    // Error union semantic errors
+    DuplicateErrorDeclaration,
+    UndeclaredError,
+    InvalidErrorType,
+    InvalidErrorUnionCast,
+    InvalidErrorUnionTarget,
+
     // General semantic errors
     UndeclaredIdentifier,
     TypeMismatch,
@@ -106,6 +113,10 @@ pub const SemanticAnalyzer = struct {
     in_loop: bool,
     in_assignment_target: bool, // Flag to indicate if we are currently analyzing an assignment target
 
+    // Error propagation tracking
+    in_error_propagation_context: bool, // Track if we're in a context where errors can propagate
+    current_function_returns_error_union: bool, // Track if current function returns error union
+
     // Immutable variable tracking
     current_contract: ?*ast.ContractNode,
     immutable_variables: std.HashMap([]const u8, ImmutableVarInfo, std.hash_map.StringContext, std.hash_map.default_max_load_percentage),
@@ -131,6 +142,8 @@ pub const SemanticAnalyzer = struct {
             .current_function = null,
             .in_loop = false,
             .in_assignment_target = false,
+            .in_error_propagation_context = false,
+            .current_function_returns_error_union = false,
             .current_contract = null,
             .immutable_variables = std.HashMap([]const u8, ImmutableVarInfo, std.hash_map.StringContext, std.hash_map.default_max_load_percentage).init(allocator),
             .in_constructor = false,
@@ -344,6 +357,11 @@ pub const SemanticAnalyzer = struct {
         self.current_function = function.name;
         defer self.current_function = prev_function;
 
+        // Check if function returns error union
+        const prev_returns_error_union = self.current_function_returns_error_union;
+        self.current_function_returns_error_union = self.functionReturnsErrorUnion(function);
+        defer self.current_function_returns_error_union = prev_returns_error_union;
+
         // Note: The type checker has already validated the function body in Phase 1
         // The semantic analyzer should not create new scopes or interfere with type checker scopes
 
@@ -539,14 +557,47 @@ pub const SemanticAnalyzer = struct {
             },
             .Try => |*try_expr| {
                 try self.analyzeExpression(try_expr.expr);
+
+                // Validate that the try expression is applied to an error union
+                const expr_type = self.type_checker.typeCheckExpression(try_expr.expr) catch {
+                    const message = try std.fmt.allocPrint(self.allocator, "Cannot determine type of try expression", .{});
+                    try self.addError(message, try_expr.span);
+                    return;
+                };
+
+                // Check if the expression can be used with try
+                if (!self.canUseTryWithType(expr_type)) {
+                    const message = try std.fmt.allocPrint(self.allocator, "try can only be used with error union types", .{});
+                    try self.addError(message, try_expr.span);
+                }
             },
             .ErrorReturn => |*error_return| {
-                // TODO: Validate error name exists in symbol table
-                _ = error_return;
+                // Validate error name exists in symbol table
+                if (self.type_checker.current_scope.lookup(error_return.error_name)) |symbol| {
+                    if (symbol.typ != typer.OraType.Error) {
+                        const message = try std.fmt.allocPrint(self.allocator, "'{s}' is not an error type", .{error_return.error_name});
+                        try self.addError(message, error_return.span);
+                    }
+                } else {
+                    const message = try std.fmt.allocPrint(self.allocator, "Undefined error '{s}'", .{error_return.error_name});
+                    try self.addError(message, error_return.span);
+                }
             },
             .ErrorCast => |*error_cast| {
                 try self.analyzeExpression(error_cast.operand);
-                // TODO: Validate target type is error union type
+
+                // Validate target type is error union type
+                const target_type = self.type_checker.convertAstTypeToOraType(&error_cast.target_type) catch {
+                    const message = try std.fmt.allocPrint(self.allocator, "Invalid target type in error cast", .{});
+                    try self.addError(message, error_cast.span);
+                    return;
+                };
+
+                // Check if target type is compatible with error union
+                if (!self.isErrorUnionCompatible(target_type)) {
+                    const message = try std.fmt.allocPrint(self.allocator, "Cannot cast to non-error-union type", .{});
+                    try self.addError(message, error_cast.span);
+                }
             },
             .Shift => |*shift| {
                 try self.analyzeShiftExpression(shift);
@@ -829,21 +880,119 @@ pub const SemanticAnalyzer = struct {
 
     /// Analyze error declaration
     fn analyzeErrorDecl(self: *SemanticAnalyzer, error_decl: *ast.ErrorDeclNode) SemanticError!void {
-        // TODO: Register error in symbol table
-        _ = self;
-        _ = error_decl;
-        // Error declarations don't need complex analysis
+        // Register error in symbol table
+        const error_symbol = typer.Symbol{
+            .name = error_decl.name,
+            .typ = typer.OraType.Error,
+            .region = ast.MemoryRegion.Const, // Errors are compile-time constants
+            .mutable = false,
+            .span = error_decl.span,
+        };
+
+        // Check if error already exists
+        if (self.type_checker.current_scope.lookup(error_decl.name)) |existing| {
+            if (existing.typ == typer.OraType.Error) {
+                const message = try std.fmt.allocPrint(self.allocator, "Error '{s}' already declared", .{error_decl.name});
+                try self.addError(message, error_decl.span);
+                return;
+            }
+        }
+
+        // Register the error
+        try self.type_checker.current_scope.declare(error_symbol);
+
+        // Add info diagnostic
+        const message = try std.fmt.allocPrint(self.allocator, "Error '{s}' registered", .{error_decl.name});
+        try self.addInfo(message, error_decl.span);
     }
 
     /// Analyze try-catch block
     fn analyzeTryBlock(self: *SemanticAnalyzer, try_block: *ast.TryBlockNode) SemanticError!void {
+        // Track error propagation from try block
+        const previous_error_context = self.in_error_propagation_context;
+        self.in_error_propagation_context = true;
+
         // Analyze try block
         try self.analyzeBlock(&try_block.try_block);
 
+        // Restore error context
+        self.in_error_propagation_context = previous_error_context;
+
         // Analyze catch block if present
         if (try_block.catch_block) |*catch_block| {
-            try self.analyzeBlock(&catch_block.block);
+            try self.analyzeCatchBlock(catch_block);
+        } else {
+            // No catch block means errors must be handled by caller
+            if (!self.current_function_returns_error_union) {
+                const message = try std.fmt.allocPrint(self.allocator, "try block without catch requires function to return error union", .{});
+                try self.addError(message, try_block.span);
+            }
         }
+    }
+
+    /// Analyze catch block with proper error variable scope management
+    fn analyzeCatchBlock(self: *SemanticAnalyzer, catch_block: *ast.CatchBlock) SemanticError!void {
+        // Note: Scope management is handled by the type checker
+        // For now, we'll register the error variable in the current scope
+        // TODO: Implement proper scope management for catch blocks
+
+        // If error variable is specified, add it to the scope
+        if (catch_block.error_variable) |error_var| {
+            const error_symbol = typer.Symbol{
+                .name = error_var,
+                .typ = typer.OraType.Error,
+                .region = ast.MemoryRegion.Stack,
+                .mutable = false,
+                .span = catch_block.span,
+            };
+
+            try self.type_checker.current_scope.declare(error_symbol);
+
+            const message = try std.fmt.allocPrint(self.allocator, "Error variable '{s}' available in catch block", .{error_var});
+            try self.addInfo(message, catch_block.span);
+        }
+
+        // Analyze catch block body
+        try self.analyzeBlock(&catch_block.block);
+    }
+
+    /// Check if a type is compatible with error union operations
+    fn isErrorUnionCompatible(self: *SemanticAnalyzer, ora_type: typer.OraType) bool {
+        _ = self;
+        return switch (ora_type) {
+            // Error unions are obviously compatible
+            .Error => true,
+            // Other types could potentially be wrapped in error unions
+            .Bool, .Address, .U8, .U16, .U32, .U64, .U128, .U256, .I8, .I16, .I32, .I64, .I128, .I256, .String, .Bytes, .Slice, .Mapping, .DoubleMap, .Function, .Tuple => true,
+            // Unknown and Void are not compatible
+            .Unknown, .Void => false,
+        };
+    }
+
+    /// Check if a type can be used with try expressions
+    fn canUseTryWithType(self: *SemanticAnalyzer, ora_type: typer.OraType) bool {
+        _ = self;
+        return switch (ora_type) {
+            // Error type can be used with try
+            .Error => true,
+            // Function calls that return error unions can be used with try
+            .Function => |func| func.return_type != null,
+            // Other types cannot be used with try directly
+            else => false,
+        };
+    }
+
+    /// Check if a function returns an error union type
+    fn functionReturnsErrorUnion(self: *SemanticAnalyzer, function: *ast.FunctionNode) bool {
+        _ = self;
+        if (function.return_type) |*return_type| {
+            return switch (return_type.*) {
+                .ErrorUnion => true,
+                .Result => true, // Result types are also error-like
+                else => false,
+            };
+        }
+        return false;
     }
 
     /// Check if expression contains old() calls

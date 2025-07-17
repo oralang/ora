@@ -14,6 +14,9 @@ pub const FormalVerificationError = error{
     InvalidQuantifier,
     UnboundedLoop,
     ComplexityTooHigh,
+    ErrorUnionVerificationFailed,
+    ErrorPropagationIncomplete,
+    TryWithoutErrorUnion,
 };
 
 /// SMT solver backend types
@@ -267,6 +270,7 @@ pub const FormalVerifier = struct {
     theory_db: MathTheoryDB,
     symbolic_executor: SymbolicExecutor,
     proof_cache: ProofCache,
+    error_union_verifier: ErrorUnionVerifier,
     verification_config: VerificationConfig,
 
     pub const VerificationConfig = struct {
@@ -498,8 +502,8 @@ pub const FormalVerifier = struct {
                     .Mapping => MathDomain.Function,
                     .DoubleMap => MathDomain.Function,
                     .Identifier => MathDomain.Integer, // Default for custom types
-                    .ErrorUnion => MathDomain.Integer, // Error unions are treated as integers
-                    .Result => MathDomain.Integer, // Result types are treated as integers
+                    .ErrorUnion => MathDomain.Algebraic, // Error unions use algebraic data types
+                    .Result => MathDomain.Algebraic, // Result types use algebraic data types
                 };
             }
             return MathDomain.Integer;
@@ -510,6 +514,70 @@ pub const FormalVerifier = struct {
         }
     };
 
+    /// Error union verification methods
+    pub const ErrorUnionVerifier = struct {
+        allocator: Allocator,
+
+        pub fn init(allocator: Allocator) ErrorUnionVerifier {
+            return ErrorUnionVerifier{
+                .allocator = allocator,
+            };
+        }
+
+        pub fn deinit(self: *ErrorUnionVerifier) void {
+            _ = self;
+        }
+
+        /// Verify that all error paths are handled in try-catch blocks
+        pub fn verifyErrorPropagation(self: *ErrorUnionVerifier, try_block: *ast.TryBlockNode) FormalVerificationError!bool {
+            _ = self;
+            // TODO: Implement error propagation verification
+            // - Check that all possible error conditions are handled
+            // - Verify that error variables are properly typed
+            // - Ensure no error paths are missed
+
+            if (try_block.catch_block == null) {
+                return FormalVerificationError.ErrorPropagationIncomplete;
+            }
+
+            return true;
+        }
+
+        /// Verify that try expressions are only used with error union types
+        pub fn verifyTryExpression(self: *ErrorUnionVerifier, try_expr: *ast.TryExpr) FormalVerificationError!bool {
+            _ = self;
+            _ = try_expr;
+            // TODO: Implement try expression verification
+            // - Check that the expression being tried returns an error union
+            // - Verify that error propagation is correct
+            // - Ensure proper error handling context
+
+            return true;
+        }
+
+        /// Generate SMT constraints for error union types
+        pub fn generateErrorUnionConstraints(self: *ErrorUnionVerifier, error_union_type: *ast.ErrorUnionType, variable_name: []const u8) FormalVerificationError![]const u8 {
+            _ = error_union_type;
+
+            // Generate SMT-LIB constraints for error union
+            const constraint = try std.fmt.allocPrint(self.allocator, "(assert (or (= (tag {s}) success) (= (tag {s}) error)))", .{ variable_name, variable_name });
+
+            return constraint;
+        }
+
+        /// Verify error union invariants
+        pub fn verifyErrorUnionInvariants(self: *ErrorUnionVerifier, function: *ast.FunctionNode) FormalVerificationError!bool {
+            _ = self;
+            _ = function;
+            // TODO: Implement error union invariant verification
+            // - Check that error union functions properly handle all error cases
+            // - Verify that success cases don't leak errors
+            // - Ensure error union consistency across function calls
+
+            return true;
+        }
+    };
+
     pub fn init(allocator: Allocator) FormalVerifier {
         return FormalVerifier{
             .allocator = allocator,
@@ -517,6 +585,7 @@ pub const FormalVerifier = struct {
             .theory_db = MathTheoryDB.init(allocator),
             .symbolic_executor = SymbolicExecutor.init(allocator),
             .proof_cache = ProofCache.init(allocator),
+            .error_union_verifier = ErrorUnionVerifier.init(allocator),
             .verification_config = VerificationConfig{},
         };
     }
@@ -525,6 +594,7 @@ pub const FormalVerifier = struct {
         self.theory_db.deinit();
         self.symbolic_executor.deinit();
         self.proof_cache.deinit();
+        self.error_union_verifier.deinit();
     }
 
     /// Verify a complex formal condition

@@ -448,7 +448,7 @@ pub const Typer = struct {
     }
 
     /// Type check an expression and return its type
-    fn typeCheckExpression(self: *Typer, expr: *ast.ExprNode) TyperError!OraType {
+    pub fn typeCheckExpression(self: *Typer, expr: *ast.ExprNode) TyperError!OraType {
         switch (expr.*) {
             .Identifier => |*ident| {
                 if (self.current_scope.lookup(ident.name)) |symbol| {

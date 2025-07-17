@@ -29,62 +29,58 @@ pub fn main() !void {
         return;
     }
 
-    const command = args[1];
+    // Parse arguments to find output directory option
+    var output_dir: ?[]const u8 = null;
+    var command: ?[]const u8 = null;
+    var input_file: ?[]const u8 = null;
+    var i: usize = 1;
 
-    if (std.mem.eql(u8, command, "lex")) {
-        if (args.len < 3) {
+    while (i < args.len) {
+        if (std.mem.eql(u8, args[i], "-o") or std.mem.eql(u8, args[i], "--output-dir")) {
+            if (i + 1 >= args.len) {
+                try printUsage();
+                return;
+            }
+            output_dir = args[i + 1];
+            i += 2;
+        } else if (command == null) {
+            command = args[i];
+            i += 1;
+        } else if (input_file == null) {
+            input_file = args[i];
+            i += 1;
+        } else {
             try printUsage();
             return;
         }
-        try runLexer(allocator, args[2]);
-    } else if (std.mem.eql(u8, command, "parse")) {
-        if (args.len < 3) {
-            try printUsage();
-            return;
-        }
-        try runParser(allocator, args[2]);
-    } else if (std.mem.eql(u8, command, "analyze")) {
-        if (args.len < 3) {
-            try printUsage();
-            return;
-        }
-        try runSemanticAnalysis(allocator, args[2]);
-    } else if (std.mem.eql(u8, command, "ir")) {
-        if (args.len < 3) {
-            try printUsage();
-            return;
-        }
-        try runIRGeneration(allocator, args[2]);
-    } else if (std.mem.eql(u8, command, "compile")) {
-        if (args.len < 3) {
-            try printUsage();
-            return;
-        }
-        try runFullCompilation(allocator, args[2]);
-    } else if (std.mem.eql(u8, command, "ast")) {
-        if (args.len < 3) {
-            try printUsage();
-            return;
-        }
-        try runASTGeneration(allocator, args[2]);
-    } else if (std.mem.eql(u8, command, "hir")) {
-        if (args.len < 3) {
-            try printUsage();
-            return;
-        }
-        try runHIRGeneration(allocator, args[2]);
-    } else if (std.mem.eql(u8, command, "yul")) {
-        if (args.len < 3) {
-            try printUsage();
-            return;
-        }
-        try runYulGeneration(allocator, args[2]);
-    } else if (std.mem.eql(u8, command, "bytecode")) {
-        if (args.len < 3) {
-            try printUsage();
-            return;
-        }
-        try runBytecodeGeneration(allocator, args[2]);
+    }
+
+    if (command == null or input_file == null) {
+        try printUsage();
+        return;
+    }
+
+    const cmd = command.?;
+    const file_path = input_file.?;
+
+    if (std.mem.eql(u8, cmd, "lex")) {
+        try runLexer(allocator, file_path);
+    } else if (std.mem.eql(u8, cmd, "parse")) {
+        try runParser(allocator, file_path);
+    } else if (std.mem.eql(u8, cmd, "analyze")) {
+        try runSemanticAnalysis(allocator, file_path);
+    } else if (std.mem.eql(u8, cmd, "ir")) {
+        try runIRGeneration(allocator, file_path);
+    } else if (std.mem.eql(u8, cmd, "compile")) {
+        try runFullCompilation(allocator, file_path);
+    } else if (std.mem.eql(u8, cmd, "ast")) {
+        try runASTGeneration(allocator, file_path, output_dir);
+    } else if (std.mem.eql(u8, cmd, "hir")) {
+        try runHIRGeneration(allocator, file_path, output_dir);
+    } else if (std.mem.eql(u8, cmd, "yul")) {
+        try runYulGeneration(allocator, file_path, output_dir);
+    } else if (std.mem.eql(u8, cmd, "bytecode")) {
+        try runBytecodeGeneration(allocator, file_path, output_dir);
     } else {
         try printUsage();
     }
@@ -93,7 +89,9 @@ pub fn main() !void {
 fn printUsage() !void {
     const stdout = std.io.getStdOut().writer();
     try stdout.print("Ora DSL Compiler v0.1\n", .{});
-    try stdout.print("Usage: ora <command> <file>\n", .{});
+    try stdout.print("Usage: ora [options] <command> <file>\n", .{});
+    try stdout.print("\nOptions:\n", .{});
+    try stdout.print("  -o, --output-dir <dir>  - Specify output directory for generated files\n", .{});
     try stdout.print("\nCommands:\n", .{});
     try stdout.print("  lex <file>     - Tokenize a .ora file\n", .{});
     try stdout.print("  parse <file>   - Parse a .ora file to AST\n", .{});
@@ -104,6 +102,8 @@ fn printUsage() !void {
     try stdout.print("  hir <file>     - Generate HIR and save to JSON file\n", .{});
     try stdout.print("  yul <file>     - Generate Yul code from HIR\n", .{});
     try stdout.print("  bytecode <file> - Generate EVM bytecode from HIR\n", .{});
+    try stdout.print("\nExample:\n", .{});
+    try stdout.print("  ora -o build ast example.ora\n", .{});
 }
 
 /// Run lexer on file and display tokens
@@ -517,7 +517,7 @@ fn printAstSummary(writer: anytype, node: *lib.AstNode, indent: u32) !void {
 }
 
 /// Generate AST and save to JSON file
-fn runASTGeneration(allocator: std.mem.Allocator, file_path: []const u8) !void {
+fn runASTGeneration(allocator: std.mem.Allocator, file_path: []const u8, output_dir: ?[]const u8) !void {
     const stdout = std.io.getStdOut().writer();
 
     // Read source file
@@ -550,7 +550,21 @@ fn runASTGeneration(allocator: std.mem.Allocator, file_path: []const u8) !void {
     try stdout.print("Generated {} AST nodes\n", .{ast_nodes.len});
 
     // Generate output filename
-    const output_file = try std.mem.concat(allocator, u8, &[_][]const u8{ std.fs.path.stem(file_path), ".ast.json" });
+    const output_file = if (output_dir) |dir| blk: {
+        // Create output directory if it doesn't exist
+        std.fs.cwd().makeDir(dir) catch |err| switch (err) {
+            error.PathAlreadyExists => {},
+            else => return err,
+        };
+
+        const basename = std.fs.path.stem(file_path);
+        const filename = try std.mem.concat(allocator, u8, &[_][]const u8{ basename, ".ast.json" });
+        defer allocator.free(filename);
+        break :blk try std.fs.path.join(allocator, &[_][]const u8{ dir, filename });
+    } else blk: {
+        const basename = std.fs.path.stem(file_path);
+        break :blk try std.mem.concat(allocator, u8, &[_][]const u8{ basename, ".ast.json" });
+    };
     defer allocator.free(output_file);
 
     // Save AST to JSON file
@@ -570,7 +584,7 @@ fn runASTGeneration(allocator: std.mem.Allocator, file_path: []const u8) !void {
 }
 
 /// Generate HIR and save to JSON file
-fn runHIRGeneration(allocator: std.mem.Allocator, file_path: []const u8) !void {
+fn runHIRGeneration(allocator: std.mem.Allocator, file_path: []const u8, output_dir: ?[]const u8) !void {
     const stdout = std.io.getStdOut().writer();
 
     // Read source file
@@ -627,7 +641,21 @@ fn runHIRGeneration(allocator: std.mem.Allocator, file_path: []const u8) !void {
     try stdout.print("  {} contracts converted to HIR\n", .{hir_program.contracts.len});
 
     // Generate output filename
-    const output_file = try std.mem.concat(allocator, u8, &[_][]const u8{ std.fs.path.stem(file_path), ".hir.json" });
+    const output_file = if (output_dir) |dir| blk: {
+        // Create output directory if it doesn't exist
+        std.fs.cwd().makeDir(dir) catch |err| switch (err) {
+            error.PathAlreadyExists => {},
+            else => return err,
+        };
+
+        const basename = std.fs.path.stem(file_path);
+        const filename = try std.mem.concat(allocator, u8, &[_][]const u8{ basename, ".hir.json" });
+        defer allocator.free(filename);
+        break :blk try std.fs.path.join(allocator, &[_][]const u8{ dir, filename });
+    } else blk: {
+        const basename = std.fs.path.stem(file_path);
+        break :blk try std.mem.concat(allocator, u8, &[_][]const u8{ basename, ".hir.json" });
+    };
     defer allocator.free(output_file);
 
     // Save HIR to JSON file
@@ -647,7 +675,7 @@ fn runHIRGeneration(allocator: std.mem.Allocator, file_path: []const u8) !void {
 }
 
 /// Generate Yul code from HIR
-fn runYulGeneration(allocator: std.mem.Allocator, file_path: []const u8) !void {
+fn runYulGeneration(allocator: std.mem.Allocator, file_path: []const u8, output_dir: ?[]const u8) !void {
     const stdout = std.io.getStdOut().writer();
 
     // Read source file
@@ -703,7 +731,21 @@ fn runYulGeneration(allocator: std.mem.Allocator, file_path: []const u8) !void {
     try stdout.print("{s}\n", .{yul_code});
 
     // Save to file
-    const output_file = try std.mem.concat(allocator, u8, &[_][]const u8{ std.fs.path.stem(file_path), ".yul" });
+    const output_file = if (output_dir) |dir| blk: {
+        // Create output directory if it doesn't exist
+        std.fs.cwd().makeDir(dir) catch |err| switch (err) {
+            error.PathAlreadyExists => {},
+            else => return err,
+        };
+
+        const basename = std.fs.path.stem(file_path);
+        const filename = try std.mem.concat(allocator, u8, &[_][]const u8{ basename, ".yul" });
+        defer allocator.free(filename);
+        break :blk try std.fs.path.join(allocator, &[_][]const u8{ dir, filename });
+    } else blk: {
+        const basename = std.fs.path.stem(file_path);
+        break :blk try std.mem.concat(allocator, u8, &[_][]const u8{ basename, ".yul" });
+    };
     defer allocator.free(output_file);
 
     const file = std.fs.cwd().createFile(output_file, .{}) catch |err| {
@@ -717,7 +759,7 @@ fn runYulGeneration(allocator: std.mem.Allocator, file_path: []const u8) !void {
 }
 
 /// Generate EVM bytecode from HIR
-fn runBytecodeGeneration(allocator: std.mem.Allocator, file_path: []const u8) !void {
+fn runBytecodeGeneration(allocator: std.mem.Allocator, file_path: []const u8, output_dir: ?[]const u8) !void {
     const stdout = std.io.getStdOut().writer();
 
     // Read source file
@@ -781,7 +823,21 @@ fn runBytecodeGeneration(allocator: std.mem.Allocator, file_path: []const u8) !v
             try stdout.print("Bytecode: {s}\n", .{bytecode});
 
             // Save to file
-            const output_file = try std.mem.concat(allocator, u8, &[_][]const u8{ std.fs.path.stem(file_path), ".bin" });
+            const output_file = if (output_dir) |dir| blk: {
+                // Create output directory if it doesn't exist
+                std.fs.cwd().makeDir(dir) catch |err| switch (err) {
+                    error.PathAlreadyExists => {},
+                    else => return err,
+                };
+
+                const basename = std.fs.path.stem(file_path);
+                const filename = try std.mem.concat(allocator, u8, &[_][]const u8{ basename, ".bin" });
+                defer allocator.free(filename);
+                break :blk try std.fs.path.join(allocator, &[_][]const u8{ dir, filename });
+            } else blk: {
+                const basename = std.fs.path.stem(file_path);
+                break :blk try std.mem.concat(allocator, u8, &[_][]const u8{ basename, ".bin" });
+            };
             defer allocator.free(output_file);
 
             const file = std.fs.cwd().createFile(output_file, .{}) catch |err| {
