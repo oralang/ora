@@ -1,0 +1,112 @@
+name: Documentation
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - 'src/**'
+      - 'website/**'
+      - 'build.zig'
+      - '.github/workflows/docs.yml'
+  pull_request:
+    branches: [ main ]
+    paths:
+      - 'src/**'
+      - 'website/**'
+      - 'build.zig'
+
+env:
+  ZIG_VERSION: 0.14.1
+  NODE_VERSION: 18
+
+jobs:
+  generate-docs:
+    name: Generate API Documentation
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Setup Zig
+        uses: goto-bus-stop/setup-zig@v2
+        with:
+          version: ${{ env.ZIG_VERSION }}
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y \
+            build-essential \
+            cmake \
+            libboost-all-dev \
+            libssl-dev \
+            pkg-config
+
+      - name: Generate Zig documentation
+        run: |
+          echo "🔨 Generating Zig documentation..."
+          zig build docs
+          echo "✅ Documentation generated"
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: latest
+
+      - name: Install website dependencies
+        run: |
+          cd website
+          pnpm install
+
+      - name: Copy API docs to website
+        run: |
+          echo "📁 Copying API documentation to website..."
+          mkdir -p website/static/api-docs
+          cp -r zig-out/docs/* website/static/api-docs/
+          echo "✅ API docs copied"
+
+      - name: Build website
+        run: |
+          cd website
+          pnpm build
+
+      - name: Upload documentation artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: documentation
+          path: |
+            zig-out/docs/
+            website/build/
+
+  deploy-docs:
+    name: Deploy Documentation
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    needs: generate-docs
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    steps:
+      - name: Download documentation artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: documentation
+
+      - name: Setup Pages
+        uses: actions/configure-pages@v4
+
+      - name: Upload to GitHub Pages
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: website/build
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4 
