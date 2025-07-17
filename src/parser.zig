@@ -1337,8 +1337,15 @@ pub const Parser = struct {
                 // Create the builtin function call
                 const full_name = try std.fmt.allocPrint(self.allocator, "@{s}", .{builtin_name});
 
-                return ast.ExprNode{ .FunctionCall = ast.FunctionCallExpr{
+                // Create identifier for the function name
+                const name_expr = try self.allocator.create(ast.ExprNode);
+                name_expr.* = ast.ExprNode{ .Identifier = ast.IdentifierExpr{
                     .name = full_name,
+                    .span = makeSpan(at_token),
+                } };
+
+                return ast.ExprNode{ .Call = ast.CallExpr{
+                    .callee = name_expr,
                     .arguments = try args.toOwnedSlice(),
                     .span = makeSpan(at_token),
                 } };

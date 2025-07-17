@@ -191,7 +191,7 @@ This is an experimental research project. Ways to contribute:
 
 ## License
 
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+This project is licensed under the GNU License - see the [LICENSE](LICENSE) file for details.
 
 ---
 

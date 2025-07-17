@@ -207,7 +207,7 @@ pub const ComptimeEvaluator = struct {
             .Binary => |*bin| self.evaluateBinary(bin),
             .Unary => |*unary| self.evaluateUnary(unary),
             .Comptime => |*comp| self.evaluateComptimeBlock(comp),
-            .FunctionCall => |*call| self.evaluateFunctionCall(call),
+            .Call => |*call| self.evaluateFunctionCall(call),
             else => ComptimeError.NotCompileTimeEvaluable,
         };
     }
@@ -413,8 +413,12 @@ pub const ComptimeEvaluator = struct {
     }
 
     /// Evaluate function call (builtin functions only)
-    fn evaluateFunctionCall(self: *ComptimeEvaluator, call: *ast.FunctionCallExpr) ComptimeError!ComptimeValue {
-        const func_name = call.name;
+    fn evaluateFunctionCall(self: *ComptimeEvaluator, call: *ast.CallExpr) ComptimeError!ComptimeValue {
+        // Get function name from callee (should be an Identifier)
+        const func_name = switch (call.callee.*) {
+            .Identifier => |*ident| ident.name,
+            else => return ComptimeError.NotCompileTimeEvaluable,
+        };
 
         // Check if it's a builtin division function
         if (std.mem.eql(u8, func_name, "@divTrunc") or
@@ -693,7 +697,7 @@ pub const ComptimeEvaluator = struct {
 
         switch (promoted.left) {
             .u32 => |a| switch (promoted.right) {
-                .u32 => |b| if (b == 0) ComptimeError.DivisionByZero else {
+                .u32 => |b| if (b == 0) return ComptimeError.DivisionByZero else {
                     const quot = a / b;
                     const rem = a % b;
                     try tuple_elements.append(ComptimeValue{ .u32 = quot });
@@ -702,7 +706,7 @@ pub const ComptimeEvaluator = struct {
                 else => return ComptimeError.TypeMismatch,
             },
             .u64 => |a| switch (promoted.right) {
-                .u64 => |b| if (b == 0) ComptimeError.DivisionByZero else {
+                .u64 => |b| if (b == 0) return ComptimeError.DivisionByZero else {
                     const quot = a / b;
                     const rem = a % b;
                     try tuple_elements.append(ComptimeValue{ .u64 = quot });
@@ -711,7 +715,7 @@ pub const ComptimeEvaluator = struct {
                 else => return ComptimeError.TypeMismatch,
             },
             .i32 => |a| switch (promoted.right) {
-                .i32 => |b| if (b == 0) ComptimeError.DivisionByZero else {
+                .i32 => |b| if (b == 0) return ComptimeError.DivisionByZero else {
                     const quot = @divTrunc(a, b);
                     const rem = @rem(a, b);
                     try tuple_elements.append(ComptimeValue{ .i32 = quot });
@@ -720,7 +724,7 @@ pub const ComptimeEvaluator = struct {
                 else => return ComptimeError.TypeMismatch,
             },
             .i64 => |a| switch (promoted.right) {
-                .i64 => |b| if (b == 0) ComptimeError.DivisionByZero else {
+                .i64 => |b| if (b == 0) return ComptimeError.DivisionByZero else {
                     const quot = @divTrunc(a, b);
                     const rem = @rem(a, b);
                     try tuple_elements.append(ComptimeValue{ .i64 = quot });

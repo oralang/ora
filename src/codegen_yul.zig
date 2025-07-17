@@ -856,11 +856,11 @@ pub const YulCodegen = struct {
         // Add division by zero check for all division functions
         try yul_code.writer().print("      // {s} with safety checks\n", .{function_name});
         try yul_code.writer().print("      if iszero({s}) {{\n", .{rhs_var});
-        try yul_code.writer().print("        // Create error union for division by zero\n");
-        try yul_code.writer().print("        mstore(0, 0x01) // error tag\n");
-        try yul_code.writer().print("        mstore(0x20, 0x01) // DivisionByZero error code\n");
-        try yul_code.writer().print("        revert(0, 0x40) // Return error union\n");
-        try yul_code.writer().print("      }}\n");
+        try yul_code.writer().print("        // Create error union for division by zero\n", .{});
+        try yul_code.writer().print("        mstore(0, 0x01) // error tag\n", .{});
+        try yul_code.writer().print("        mstore(0x20, 0x01) // DivisionByZero error code\n", .{});
+        try yul_code.writer().print("        revert(0, 0x40) // Return error union\n", .{});
+        try yul_code.writer().print("      }}\n", .{});
 
         if (std.mem.eql(u8, function_name, "@divTrunc")) {
             // Truncating division (toward zero) - this is EVM's default division
@@ -880,10 +880,10 @@ pub const YulCodegen = struct {
             try yul_code.writer().print("      let {s} := sdiv({s}, {s})\n", .{ temp_quotient, lhs_var, rhs_var });
             try yul_code.writer().print("      let {s} := smod({s}, {s})\n", .{ temp_remainder, lhs_var, rhs_var });
             try yul_code.writer().print("      let {s} := {s}\n", .{ result_var, temp_quotient });
-            try yul_code.writer().print("      // Adjust for floor division\n");
+            try yul_code.writer().print("      // Adjust for floor division\n", .{});
             try yul_code.writer().print("      if and(not(iszero({s})), xor(slt({s}, 0), slt({s}, 0))) {{\n", .{ temp_remainder, lhs_var, rhs_var });
             try yul_code.writer().print("        {s} := sub({s}, 1)\n", .{ result_var, result_var });
-            try yul_code.writer().print("      }}\n");
+            try yul_code.writer().print("      }}\n", .{});
         } else if (std.mem.eql(u8, function_name, "@divCeil")) {
             // Ceiling division (toward positive infinity)
             // For positive numbers, if there's a remainder, add 1 to result
@@ -898,10 +898,10 @@ pub const YulCodegen = struct {
             try yul_code.writer().print("      let {s} := sdiv({s}, {s})\n", .{ temp_quotient, lhs_var, rhs_var });
             try yul_code.writer().print("      let {s} := smod({s}, {s})\n", .{ temp_remainder, lhs_var, rhs_var });
             try yul_code.writer().print("      let {s} := {s}\n", .{ result_var, temp_quotient });
-            try yul_code.writer().print("      // Adjust for ceiling division\n");
+            try yul_code.writer().print("      // Adjust for ceiling division\n", .{});
             try yul_code.writer().print("      if and(not(iszero({s})), not(xor(slt({s}, 0), slt({s}, 0)))) {{\n", .{ temp_remainder, lhs_var, rhs_var });
             try yul_code.writer().print("        {s} := add({s}, 1)\n", .{ result_var, result_var });
-            try yul_code.writer().print("      }}\n");
+            try yul_code.writer().print("      }}\n", .{});
         } else if (std.mem.eql(u8, function_name, "@divExact")) {
             // Exact division - return error if remainder is not zero
             const temp_remainder = try std.fmt.allocPrint(self.allocator, "temp_remainder_{}", .{self.var_counter});
@@ -910,11 +910,11 @@ pub const YulCodegen = struct {
 
             try yul_code.writer().print("      let {s} := smod({s}, {s})\n", .{ temp_remainder, lhs_var, rhs_var });
             try yul_code.writer().print("      if not(iszero({s})) {{\n", .{temp_remainder});
-            try yul_code.writer().print("        // Create error union for inexact division\n");
-            try yul_code.writer().print("        mstore(0, 0x01) // error tag\n");
-            try yul_code.writer().print("        mstore(0x20, 0x02) // InexactDivision error code\n");
-            try yul_code.writer().print("        revert(0, 0x40) // Return error union\n");
-            try yul_code.writer().print("      }}\n");
+            try yul_code.writer().print("        // Create error union for inexact division\n", .{});
+            try yul_code.writer().print("        mstore(0, 0x01) // error tag\n", .{});
+            try yul_code.writer().print("        mstore(0x20, 0x02) // InexactDivision error code\n", .{});
+            try yul_code.writer().print("        revert(0, 0x40) // Return error union\n", .{});
+            try yul_code.writer().print("      }}\n", .{});
             try yul_code.writer().print("      let {s} := sdiv({s}, {s})\n", .{ result_var, lhs_var, rhs_var });
         } else if (std.mem.eql(u8, function_name, "@divmod")) {
             // Division with remainder - returns both quotient and remainder
@@ -930,7 +930,7 @@ pub const YulCodegen = struct {
 
             try yul_code.writer().print("      let {s} := sdiv({s}, {s})\n", .{ temp_quotient, lhs_var, rhs_var });
             try yul_code.writer().print("      let {s} := smod({s}, {s})\n", .{ temp_remainder, lhs_var, rhs_var });
-            try yul_code.writer().print("      // Pack quotient and remainder into single value\n");
+            try yul_code.writer().print("      // Pack quotient and remainder into single value\n", .{});
             try yul_code.writer().print("      let {s} := or(shl(128, {s}), and({s}, 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF))\n", .{ result_var, temp_quotient, temp_remainder });
         }
 

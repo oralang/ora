@@ -1062,6 +1062,15 @@ pub const ASTSerializer = struct {
                 try serializeTypeRef(result.error_type, writer);
                 try writer.writeAll("}");
             },
+            .Tuple => |*tuple| {
+                try writer.writeAll("{\"type\": \"tuple\", \"elements\": [");
+                for (tuple.types, 0..) |*element, i| {
+                    if (i > 0) try writer.writeAll(", ");
+                    try serializeTypeRef(element, writer);
+                }
+                try writer.writeAll("]}");
+            },
+            .Unknown => try writer.writeAll("\"unknown\""),
         }
     }
 
@@ -1295,6 +1304,23 @@ pub const ASTSerializer = struct {
         try writer.writeAll("{\n");
 
         switch (expr.*) {
+            .Tuple => |*tuple| {
+                try writeIndent(writer, indent + 1);
+                try writer.writeAll("\"type\": \"Tuple\",\n");
+                try writeIndent(writer, indent + 1);
+                try writer.writeAll("\"elements\": [\n");
+                for (tuple.elements, 0..) |*element, i| {
+                    if (i > 0) try writer.writeAll(",\n");
+                    try serializeExprNode(element, writer, indent + 2);
+                }
+                try writer.writeAll("\n");
+                try writeIndent(writer, indent + 1);
+                try writer.writeAll("],\n");
+                try writeIndent(writer, indent + 1);
+                try writer.writeAll("\"span\": ");
+                try serializeSourceSpan(tuple.span, writer);
+                try writer.writeAll("\n");
+            },
             .Binary => |*binary| {
                 try writeIndent(writer, indent + 1);
                 try writer.writeAll("\"type\": \"Binary\",\n");

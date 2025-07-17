@@ -109,7 +109,7 @@ pub fn build(b: *std.Build) void {
 
     // Create parser demo executable
     const parser_demo_mod = b.createModule(.{
-        .root_source_file = b.path("examples/parser_demo.zig"),
+        .root_source_file = b.path("examples/demos/parser_demo.zig"),
         .target = target,
         .optimize = optimize,
     });
@@ -128,7 +128,7 @@ pub fn build(b: *std.Build) void {
 
     // Create yul test executable
     const yul_test_mod = b.createModule(.{
-        .root_source_file = b.path("examples/yul_test.zig"),
+        .root_source_file = b.path("examples/demos/yul_test.zig"),
         .target = target,
         .optimize = optimize,
     });
@@ -156,7 +156,7 @@ pub fn build(b: *std.Build) void {
 
     // Create optimization demo executable
     const optimization_demo_mod = b.createModule(.{
-        .root_source_file = b.path("examples/optimization_demo.zig"),
+        .root_source_file = b.path("examples/demos/optimization_demo.zig"),
         .target = target,
         .optimize = optimize,
     });
@@ -175,7 +175,7 @@ pub fn build(b: *std.Build) void {
 
     // Create formal verification demo executable
     const formal_verification_demo_mod = b.createModule(.{
-        .root_source_file = b.path("examples/formal_verification_demo.zig"),
+        .root_source_file = b.path("examples/demos/formal_verification_demo.zig"),
         .target = target,
         .optimize = optimize,
     });
@@ -226,7 +226,7 @@ pub fn build(b: *std.Build) void {
     // Add formal verification test
     const formal_test = b.addExecutable(.{
         .name = "formal_test",
-        .root_source_file = b.path("examples/formal_test.zig"),
+        .root_source_file = b.path("examples/demos/formal_test.zig"),
         .target = target,
         .optimize = optimize,
     });

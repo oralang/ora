@@ -588,6 +588,12 @@ pub const SemanticAnalyzer = struct {
                 // Comptime blocks are valid if they parse correctly
                 try self.addInfo("Comptime block analyzed", comptime_expr.span);
             },
+            .Tuple => |*tuple| {
+                // Analyze all elements in the tuple
+                for (tuple.elements) |*element| {
+                    try self.analyzeExpression(element);
+                }
+            },
         }
     }
 

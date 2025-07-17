@@ -939,6 +939,17 @@ pub const Typer = struct {
                 // Result types use the ok type as the primary type
                 return try self.convertAstTypeToOraType(result.ok_type);
             },
+            .Tuple => |tuple| {
+                // Convert tuple elements to OraType
+                const element_types = try self.type_arena.allocator().alloc(OraType, tuple.types.len);
+                for (tuple.types, 0..) |*element_type, i| {
+                    element_types[i] = try self.convertAstTypeToOraType(element_type);
+                }
+                return OraType{ .Tuple = .{
+                    .types = element_types,
+                } };
+            },
+            .Unknown => OraType.Unknown,
         };
     }
 
@@ -1135,6 +1146,18 @@ pub const Typer = struct {
                     } else {
                         return rhs_func.return_type == null; // both should have no return type
                     }
+                },
+                else => false,
+            },
+            .Tuple => |lhs_tuple| switch (rhs) {
+                .Tuple => |rhs_tuple| {
+                    // Compare element count
+                    if (lhs_tuple.types.len != rhs_tuple.types.len) return false;
+                    // Compare each element type
+                    for (lhs_tuple.types, rhs_tuple.types) |lhs_elem, rhs_elem| {
+                        if (!self.typeEquals(lhs_elem, rhs_elem)) return false;
+                    }
+                    return true;
                 },
                 else => false,
             },

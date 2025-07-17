@@ -483,6 +483,7 @@ test "ast node construction" {
         .typ = .U256,
         .value = null,
         .span = span,
+        .tuple_names = null,
     };
 
     try testing.expectEqualStrings("balance", var_decl.name);
