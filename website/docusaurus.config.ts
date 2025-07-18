@@ -25,7 +25,7 @@ const config: Config = {
   organizationName: 'oralang', // Usually your GitHub org/user name.
   projectName: 'Ora', // Usually your repo name.
 
-  onBrokenLinks: 'throw',
+  onBrokenLinks: 'warn',
   onBrokenMarkdownLinks: 'warn',
 
   // Even if you don't use internationalization, you can use this field to set

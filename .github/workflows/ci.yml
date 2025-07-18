@@ -238,7 +238,15 @@ jobs:
             # Try to compile each .ora file (if we have a compiler binary)
             if [ -f "zig-out/bin/ora" ]; then
               echo "🚀 Testing compiler on examples..."
-              find examples/ -name "*.ora" -exec echo "Compiling: {}" \; -exec ./zig-out/bin/ora {} \; || echo "⚠️  Some examples failed to compile"
+              
+              # Run general examples test
+              if [ -f "scripts/test-examples.sh" ]; then
+                echo "📜 Running test-examples.sh script..."
+                ./scripts/test-examples.sh || echo "⚠️  Some examples failed via test script"
+              else
+                echo "ℹ️  No test-examples.sh script found, trying manual compilation..."
+                find examples/ -name "*.ora" -exec echo "Compiling: {}" \; -exec ./zig-out/bin/ora {} \; || echo "⚠️  Some examples failed to compile"
+              fi
             else
               echo "ℹ️  No compiler binary found, skipping example compilation"
             fi
@@ -247,6 +255,80 @@ jobs:
           fi
           
           echo "✅ Examples processing completed"
+
+  struct-tests:
+    name: Struct Implementation Tests
+    runs-on: ${{ matrix.os }}
+    needs: [lint, test]
+    
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Setup Zig
+        uses: goto-bus-stop/setup-zig@v2
+        with:
+          version: ${{ env.ZIG_VERSION }}
+
+      - name: Install system dependencies
+        run: |
+          echo "🔧 Installing system dependencies for ${{ runner.os }}..."
+          case "${{ runner.os }}" in
+            Linux)
+              sudo apt-get update -qq
+              sudo apt-get install -y \
+                build-essential \
+                cmake \
+                libboost-all-dev \
+                libssl-dev \
+                pkg-config \
+                git
+              echo "✅ Linux dependencies installed"
+              ;;
+            macOS)
+              brew update
+              brew install boost openssl cmake
+              echo "✅ macOS dependencies installed"
+              ;;
+            Windows)
+              choco install boost-msvc-14.3 cmake openssl
+              echo "✅ Windows dependencies installed"
+              ;;
+          esac
+
+      - name: Cache Zig artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/zig
+            .zig-cache
+          key: ${{ runner.os }}-zig-${{ env.ZIG_VERSION }}-${{ hashFiles('build.zig', 'build.zig.zon') }}
+          restore-keys: |
+            ${{ runner.os }}-zig-${{ env.ZIG_VERSION }}-
+
+      - name: Run struct tests
+        run: |
+          echo "🏗️  Running comprehensive struct tests..."
+          ./scripts/test-struct-examples.sh
+
+      - name: Run struct performance benchmarks
+        run: |
+          echo "⚡ Running struct performance benchmarks..."
+          ./scripts/test-struct-examples.sh --benchmark
+
+      - name: Upload test results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: struct-test-results-${{ matrix.os }}
+          path: test-results/
+          retention-days: 30
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
@@ -372,7 +454,7 @@ jobs:
     name: Release Check
     runs-on: ubuntu-latest
     if: github.ref == 'refs/heads/main'
-    needs: [lint, test, examples, security]
+    needs: [lint, test, examples, struct-tests, security]
     
     steps:
       - name: Checkout code
@@ -444,11 +526,11 @@ jobs:
     name: Notification
     runs-on: ubuntu-latest
     if: always()
-    needs: [lint, test, examples, security]
+    needs: [lint, test, examples, struct-tests, security]
     
     steps:
       - name: Notify on success
-        if: needs.lint.result == 'success' && needs.test.result == 'success' && needs.examples.result == 'success'
+        if: needs.lint.result == 'success' && needs.test.result == 'success' && needs.examples.result == 'success' && needs.struct-tests.result == 'success'
         run: |
           echo "✅ 🎉 All CI checks passed successfully!"
           echo "📊 Results:"
