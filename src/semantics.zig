@@ -645,6 +645,17 @@ pub const SemanticAnalyzer = struct {
                     try self.analyzeExpression(element);
                 }
             },
+            .StructInstantiation => |*struct_inst| {
+                // Analyze the struct name (should be an identifier)
+                try self.analyzeExpression(struct_inst.struct_name);
+
+                // Analyze all field initializers
+                for (struct_inst.fields) |*field| {
+                    try self.analyzeExpression(field.value);
+                }
+
+                // TODO: Validate struct exists and all required fields are provided
+            },
         }
     }
 
@@ -963,7 +974,7 @@ pub const SemanticAnalyzer = struct {
             // Error unions are obviously compatible
             .Error => true,
             // Other types could potentially be wrapped in error unions
-            .Bool, .Address, .U8, .U16, .U32, .U64, .U128, .U256, .I8, .I16, .I32, .I64, .I128, .I256, .String, .Bytes, .Slice, .Mapping, .DoubleMap, .Function, .Tuple => true,
+            .Bool, .Address, .U8, .U16, .U32, .U64, .U128, .U256, .I8, .I16, .I32, .I64, .I128, .I256, .String, .Bytes, .Slice, .Mapping, .DoubleMap, .Function, .Tuple, .Struct => true,
             // Unknown and Void are not compatible
             .Unknown, .Void => false,
         };

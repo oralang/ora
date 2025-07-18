@@ -1,0 +1,207 @@
+// Test advanced struct features: constructor/destructor, copy vs. reference semantics
+contract AdvancedStructTest {
+    // Resource management struct with constructor/destructor semantics
+    struct ResourceManager {
+        resource_id: u32,
+        allocated_size: u256,
+        is_active: bool,
+        cleanup_required: bool,
+    }
+
+    // Copy-only struct (shallow copy behavior)
+    struct CopyOnlyStruct {
+        value: u32,
+        timestamp: u256,
+    }
+
+    // Move-only struct (disabled copy behavior)
+    struct MoveOnlyStruct {
+        unique_id: u256,
+        owned_data: bytes,
+    }
+
+    // Reference struct (lifetime managed)
+    struct ReferenceStruct {
+        reference_id: u32,
+        target_address: address,
+    }
+
+    // Storage variables demonstrating different semantics
+    storage var resource_manager: ResourceManager;
+    storage var copy_only_data: CopyOnlyStruct;
+    storage var move_only_data: MoveOnlyStruct;
+    storage var reference_data: ReferenceStruct;
+
+    // Constructor function for ResourceManager
+    fn constructResourceManager(id: u32, size: u256) -> ResourceManager {
+        return ResourceManager {
+            resource_id: id,
+            allocated_size: size,
+            is_active: true,
+            cleanup_required: true,
+        };
+    }
+
+    // Destructor function for ResourceManager
+    fn destructResourceManager(resource: ResourceManager) {
+        // Cleanup logic would go here
+        // For now, just log the cleanup
+        if (resource.cleanup_required) {
+            // Perform cleanup operations
+        }
+    }
+
+    // Copy constructor for CopyOnlyStruct
+    fn copyStruct(original: CopyOnlyStruct) -> CopyOnlyStruct {
+        return CopyOnlyStruct {
+            value: original.value,
+            timestamp: original.timestamp,
+        };
+    }
+
+    // Move constructor for MoveOnlyStruct
+    fn moveStruct(original: MoveOnlyStruct) -> MoveOnlyStruct {
+        // Transfer ownership
+        let moved = MoveOnlyStruct {
+            unique_id: original.unique_id,
+            owned_data: original.owned_data,
+        };
+        
+        // Invalidate original (move semantics)
+        // original would be marked as moved-from
+        
+        return moved;
+    }
+
+    pub fn init() {
+        // Initialize with constructor semantics
+        resource_manager = constructResourceManager(1, 1000000);
+        
+        // Initialize copy-only struct
+        copy_only_data = CopyOnlyStruct {
+            value: 42,
+            timestamp: 1234567890,
+        };
+        
+        // Initialize move-only struct
+        move_only_data = MoveOnlyStruct {
+            unique_id: 0xdeadbeef,
+            owned_data: "unique_data",
+        };
+        
+        // Initialize reference struct
+        reference_data = ReferenceStruct {
+            reference_id: 100,
+            target_address: 0x1234567890123456789012345678901234567890,
+        };
+    }
+
+    // Test copy semantics
+    pub fn testCopySemantics() -> u32 {
+        // Copy operation (shallow copy)
+        let copied_data = copyStruct(copy_only_data);
+        
+        // Modify original
+        copy_only_data.value = 100;
+        
+        // Copied data should remain unchanged (shallow copy)
+        return copied_data.value; // Should return 42
+    }
+
+    // Test move semantics
+    pub fn testMoveSemantics() -> u256 {
+        // Move operation (transfers ownership)
+        let moved_data = moveStruct(move_only_data);
+        
+        // Original is now invalid (moved-from state)
+        // move_only_data is no longer accessible
+        
+        return moved_data.unique_id;
+    }
+
+    // Test reference semantics
+    pub fn testReferenceSemantics() -> u32 {
+        // Reference semantics - lifetime tied to original
+        let ref_copy = reference_data;
+        
+        // Modify original
+        reference_data.reference_id = 200;
+        
+        // Reference copy follows original's lifetime
+        return ref_copy.reference_id; // Should return 200 (reference semantics)
+    }
+
+    // Test automatic cleanup (destructor semantics)
+    pub fn testDestructorSemantics() {
+        // Local variable with automatic cleanup
+        let local_resource = constructResourceManager(2, 500000);
+        
+        // Modify resource
+        local_resource.is_active = false;
+        
+        // When local_resource goes out of scope, destructor is called
+        // destructResourceManager(local_resource) is called automatically
+    }
+
+    // Test manual cleanup
+    pub fn testManualCleanup() {
+        // Create resource that requires manual cleanup
+        let manual_resource = constructResourceManager(3, 2000000);
+        
+        // Use resource
+        manual_resource.is_active = true;
+        
+        // Manual cleanup required
+        destructResourceManager(manual_resource);
+    }
+
+    // Test field access control
+    pub fn testFieldAccess() -> bool {
+        // Public field access
+        let is_active = resource_manager.is_active;
+        
+        // Protected field access (within same contract)
+        let resource_id = resource_manager.resource_id;
+        
+        // Private field access (within same struct context)
+        let cleanup_required = resource_manager.cleanup_required;
+        
+        return is_active && resource_id > 0 && cleanup_required;
+    }
+
+    // Test struct composition and nested operations
+    pub fn testStructComposition() -> u256 {
+        // Create composite struct
+        let composite = ResourceManager {
+            resource_id: 999,
+            allocated_size: copy_only_data.value + reference_data.reference_id,
+            is_active: true,
+            cleanup_required: false,
+        };
+        
+        return composite.allocated_size;
+    }
+
+    // Test lifetime management
+    pub fn testLifetimeManagement() -> u32 {
+        // Owner lifetime - struct follows owner's lifetime
+        let owner_struct = CopyOnlyStruct {
+            value: 777,
+            timestamp: 9999999999,
+        };
+        
+        // Independent lifetime - struct has its own lifetime
+        storage var independent_struct: MoveOnlyStruct = MoveOnlyStruct {
+            unique_id: 0xcafebabe,
+            owned_data: "independent",
+        };
+        
+        // Static lifetime - struct lives for entire program duration
+        immutable static_struct: ReferenceStruct = ReferenceStruct {
+            reference_id: 888,
+            target_address: 0xabcdefabcdefabcdefabcdefabcdefabcdefabcd,
+        };
+        
+        return owner_struct.value + independent_struct.unique_id + static_struct.reference_id;
+    }
+} 

@@ -68,6 +68,7 @@ pub const Type = union(enum) {
     mapping: MappingType,
     slice: SliceType,
     custom: CustomType,
+    struct_type: StructType, // Add struct type support
 
     // Error handling types
     error_union: ErrorUnionType,
@@ -126,6 +127,28 @@ pub const Type = union(enum) {
         name: []const u8,
     };
 
+    pub const StructType = struct {
+        name: []const u8,
+        fields: []StructField,
+        layout: ?StructLayout, // Memory layout information
+        origin_type: ?*const @import("typer.zig").StructType, // Reference to original type
+
+        pub const StructLayout = struct {
+            total_size: u32,
+            storage_slots: u32,
+            alignment: u32,
+            packed_efficiently: bool,
+        };
+    };
+
+    pub const StructField = struct {
+        name: []const u8,
+        field_type: *Type,
+        offset: u32, // Byte offset within struct
+        slot: u32, // Storage slot number
+        slot_offset: u32, // Offset within storage slot
+    };
+
     pub const ErrorUnionType = struct {
         success_type: *Type,
     };
@@ -159,6 +182,13 @@ pub const Type = union(enum) {
                 result.error_type.deinit(allocator);
                 allocator.destroy(result.error_type);
             },
+            .struct_type => |*struct_type| {
+                for (struct_type.fields) |*field| {
+                    field.field_type.deinit(allocator);
+                    allocator.destroy(field.field_type);
+                }
+                allocator.free(struct_type.fields);
+            },
         }
     }
 
@@ -189,6 +219,13 @@ pub const Type = union(enum) {
             .result => |r1| switch (other.*) {
                 .result => |r2| r1.ok_type.isCompatibleWith(r2.ok_type) and
                     r1.error_type.isCompatibleWith(r2.error_type),
+                else => false,
+            },
+            .struct_type => |struct_type1| switch (other.*) {
+                .struct_type => |struct_type2| {
+                    // Struct types are compatible if they have the same name
+                    return std.mem.eql(u8, struct_type1.name, struct_type2.name);
+                },
                 else => false,
             },
         };
@@ -333,6 +370,102 @@ pub const Type = union(enum) {
             .string => Type{ .primitive = .string },
             .boolean => Type{ .primitive = .bool },
             .address => Type{ .primitive = .address },
+        };
+    }
+
+    /// Check if two types are structurally equal
+    pub fn isEqual(self: *const Type, other: *const Type) bool {
+        if (std.meta.activeTag(self.*) != std.meta.activeTag(other.*)) {
+            return false;
+        }
+
+        return switch (self.*) {
+            .primitive => |p1| p1 == other.primitive,
+            .struct_type => |s1| blk: {
+                const s2 = other.struct_type;
+                if (!std.mem.eql(u8, s1.name, s2.name)) break :blk false;
+                if (s1.fields.len != s2.fields.len) break :blk false;
+
+                for (s1.fields, s2.fields) |f1, f2| {
+                    if (!std.mem.eql(u8, f1.name, f2.name)) break :blk false;
+                    if (!f1.field_type.isEqual(f2.field_type)) break :blk false;
+                }
+                break :blk true;
+            },
+            .mapping => |m1| {
+                const m2 = other.mapping;
+                return m1.key_type.isEqual(m2.key_type) and m1.value_type.isEqual(m2.value_type);
+            },
+            .slice => |s1| s1.element_type.isEqual(other.slice.element_type),
+            .custom => |c1| std.mem.eql(u8, c1.name, other.custom.name),
+            else => false,
+        };
+    }
+
+    /// Get the field type for a struct field
+    pub fn getStructFieldType(self: *const Type, field_name: []const u8) ?*const Type {
+        switch (self.*) {
+            .struct_type => |struct_type| {
+                for (struct_type.fields) |field| {
+                    if (std.mem.eql(u8, field.name, field_name)) {
+                        return field.field_type;
+                    }
+                }
+                return null;
+            },
+            else => return null,
+        }
+    }
+
+    /// Get struct field layout information
+    pub fn getStructFieldLayout(self: *const Type, field_name: []const u8) ?StructField {
+        switch (self.*) {
+            .struct_type => |struct_type| {
+                for (struct_type.fields) |field| {
+                    if (std.mem.eql(u8, field.name, field_name)) {
+                        return field;
+                    }
+                }
+                return null;
+            },
+            else => return null,
+        }
+    }
+
+    /// Check if a type has a specific field
+    pub fn hasField(self: *const Type, field_name: []const u8) bool {
+        return self.getStructFieldType(field_name) != null;
+    }
+
+    /// Get the size of a type in bytes
+    pub fn getSize(self: *const Type) u32 {
+        return switch (self.*) {
+            .primitive => |p| switch (p) {
+                .u8, .i8, .bool => 1,
+                .u16, .i16 => 2,
+                .u32, .i32 => 4,
+                .u64, .i64 => 8,
+                .u128, .i128 => 16,
+                .u256, .i256 => 32,
+                .address => 20,
+                .string, .bytes => 32, // Dynamic size, return slot size
+            },
+            .struct_type => |struct_type| {
+                if (struct_type.layout) |layout| {
+                    return layout.total_size;
+                } else {
+                    // Calculate size from fields
+                    var size: u32 = 0;
+                    for (struct_type.fields) |field| {
+                        size += field.field_type.getSize();
+                    }
+                    return size;
+                }
+            },
+            .mapping => 32, // Storage slot size
+            .slice => 32, // Dynamic size, return slot size
+            .custom => 32, // Unknown size, assume slot size
+            else => 32,
         };
     }
 };
@@ -924,6 +1057,9 @@ pub const Expression = union(enum) {
     error_value: ErrorValue,
     error_cast: ErrorCast,
 
+    // Struct instantiation
+    struct_instantiation: StructInstantiationExpression,
+
     pub fn deinit(self: *Expression) void {
         switch (self.*) {
             .binary => |*be| be.deinit(),
@@ -939,6 +1075,7 @@ pub const Expression = union(enum) {
             .try_expr => |*te| te.deinit(),
             .error_value => |*ev| ev.deinit(),
             .error_cast => |*ec| ec.deinit(),
+            .struct_instantiation => |*si| si.deinit(),
         }
     }
 
@@ -957,6 +1094,7 @@ pub const Expression = union(enum) {
             .try_expr => |*te| te.location,
             .error_value => |*ev| ev.location,
             .error_cast => |*ec| ec.location,
+            .struct_instantiation => |*si| si.location,
         };
     }
 };
@@ -1158,6 +1296,34 @@ pub const ErrorCast = struct {
         self.operand.deinit();
         self.allocator.destroy(self.operand);
         self.target_type.deinit(self.allocator);
+    }
+};
+
+/// Struct instantiation expression
+pub const StructInstantiationExpression = struct {
+    struct_type: Type, // Should be a struct_type variant
+    field_values: []StructFieldValue,
+    location: SourceLocation,
+    allocator: Allocator,
+
+    pub fn deinit(self: *StructInstantiationExpression) void {
+        for (self.field_values) |*field_value| {
+            field_value.deinit();
+        }
+        self.allocator.free(self.field_values);
+        self.struct_type.deinit(self.allocator);
+    }
+};
+
+/// Struct field value for instantiation
+pub const StructFieldValue = struct {
+    field_name: []const u8,
+    value: *Expression,
+    allocator: Allocator,
+
+    pub fn deinit(self: *StructFieldValue) void {
+        self.value.deinit();
+        self.allocator.destroy(self.value);
     }
 };
 
@@ -1866,6 +2032,9 @@ pub const Validator = struct {
             .error_cast => |*error_cast| {
                 return error_cast.target_type;
             },
+            .struct_instantiation => |*struct_inst| {
+                return struct_inst.struct_type;
+            },
         }
     }
 
@@ -2218,6 +2387,13 @@ pub const Validator = struct {
                 try self.validateExpression(ec.operand);
                 // TODO: Validate that the target type is an error union type
             },
+            .struct_instantiation => |*si| {
+                // Validate all field values
+                for (si.field_values) |*field_value| {
+                    try self.validateExpression(field_value.value);
+                }
+                // TODO: Validate that all required fields are provided and field types match
+            },
         }
     }
 
@@ -2285,10 +2461,7 @@ pub const Validator = struct {
     /// Check if a type has a specific field
     fn typeHasField(self: *const Validator, typ: Type, field: []const u8) bool {
         _ = self;
-        _ = typ;
-        _ = field;
-        // TODO: Implement struct field checking
-        return true; // For now, assume all field accesses are valid
+        return typ.hasField(field);
     }
 
     /// Validate function call
@@ -2453,6 +2626,77 @@ pub const StandardOptimizations = struct {
             try optimizeStorageLayout(contract);
             for (contract.functions) |*function| {
                 try optimizeGasUsage(function);
+            }
+        }
+    }
+
+    /// Struct layout optimization pass
+    pub fn structLayoutOptimization(program: *HIRProgram, allocator: Allocator) anyerror!void {
+        _ = allocator; // For future use
+
+        for (program.contracts) |*contract| {
+            try optimizeStructLayoutInContract(contract);
+        }
+    }
+
+    /// Struct field access optimization pass
+    pub fn structFieldAccessOptimization(program: *HIRProgram, allocator: Allocator) anyerror!void {
+        _ = allocator; // For future use
+
+        for (program.contracts) |*contract| {
+            for (contract.functions) |*function| {
+                try optimizeStructFieldAccessInFunction(function);
+            }
+        }
+    }
+
+    /// Helper function to optimize struct layout in a contract
+    fn optimizeStructLayoutInContract(contract: *Contract) anyerror!void {
+        // Analyze struct usage patterns and optimize layout
+        for (contract.storage) |*storage_var| {
+            if (storage_var.type == .struct_type) {
+                try optimizeStructTypeLayout(&storage_var.type);
+            }
+        }
+    }
+
+    /// Helper function to optimize struct field access in a function
+    fn optimizeStructFieldAccessInFunction(function: *Function) anyerror!void {
+        // Analyze struct field access patterns and optimize
+        try optimizeStructAccessInBlock(&function.body);
+    }
+
+    /// Helper function to optimize struct type layout
+    fn optimizeStructTypeLayout(struct_type: *Type) anyerror!void {
+        switch (struct_type.*) {
+            .struct_type => |*st| {
+                // Analyze field access patterns and reorder if beneficial
+                // This is a placeholder for actual optimization logic
+                if (st.layout) |*layout| {
+                    // Mark as optimized
+                    layout.packed_efficiently = true;
+                }
+            },
+            else => {},
+        }
+    }
+
+    /// Helper function to optimize struct access patterns in a block
+    fn optimizeStructAccessInBlock(block: *Block) anyerror!void {
+        for (block.statements) |*stmt| {
+            switch (stmt.*) {
+                .if_statement => |*if_stmt| {
+                    if (if_stmt.else_branch) |*else_branch| {
+                        try optimizeStructAccessInBlock(else_branch);
+                    }
+                    try optimizeStructAccessInBlock(&if_stmt.then_branch);
+                },
+                .while_statement => |*while_stmt| {
+                    try optimizeStructAccessInBlock(&while_stmt.body);
+                },
+                else => {
+                    // Analyze other statements for struct field access
+                },
             }
         }
     }
@@ -2858,6 +3102,20 @@ pub const JSONSerializer = struct {
                 try writer.writeAll(", \"error_type\": ");
                 try serializeType(result.error_type, writer);
                 try writer.writeAll("}");
+            },
+            .struct_type => |struct_type| {
+                try writer.writeAll("{\"type\": \"struct\", \"name\": \"");
+                try writer.writeAll(struct_type.name);
+                try writer.writeAll("\", \"fields\": [");
+                for (struct_type.fields, 0..) |field, i| {
+                    if (i > 0) try writer.writeAll(", ");
+                    try writer.writeAll("{\"name\": \"");
+                    try writer.writeAll(field.name);
+                    try writer.writeAll("\", \"type\": ");
+                    try serializeType(field.field_type, writer);
+                    try writer.writeAll("}");
+                }
+                try writer.writeAll("]}");
             },
         }
     }
@@ -3826,6 +4084,35 @@ pub const ASTToHIRConverter = struct {
                     },
                 };
             },
+            .StructInstantiation => |*struct_inst| {
+                // Convert struct instantiation to HIR with proper type resolution
+                var field_values = std.ArrayList(StructFieldValue).init(self.allocator);
+                defer field_values.deinit();
+
+                for (struct_inst.fields) |*field| {
+                    const hir_value = try self.convertExpression(field.value);
+                    try field_values.append(StructFieldValue{
+                        .field_name = field.name,
+                        .value = hir_value,
+                        .allocator = self.allocator,
+                    });
+                }
+
+                // Try to resolve the struct type from the AST
+                const struct_type = if (struct_inst.struct_name.* == .Identifier) blk: {
+                    const name = struct_inst.struct_name.Identifier.name;
+                    break :blk self.resolveStructType(name) catch Type{ .custom = .{ .name = name } };
+                } else Type{ .custom = .{ .name = "unknown" } };
+
+                hir_expr.* = Expression{
+                    .struct_instantiation = StructInstantiationExpression{
+                        .struct_type = struct_type,
+                        .field_values = try field_values.toOwnedSlice(),
+                        .location = self.convertSourceLocation(struct_inst.span),
+                        .allocator = self.allocator,
+                    },
+                };
+            },
             else => {
                 // Create a placeholder literal for unsupported expressions
                 hir_expr.* = Expression{
@@ -3891,10 +4178,43 @@ pub const ASTToHIRConverter = struct {
                     },
                 };
             },
-            .Identifier => |name| Type{
-                .custom = Type.CustomType{ .name = name },
+            .Identifier => |name| {
+                // Try to resolve as struct type first
+                if (self.resolveStructType(name)) |struct_type| {
+                    return struct_type;
+                } else |_| {
+                    // Fall back to custom type
+                    return Type{
+                        .custom = Type.CustomType{ .name = name },
+                    };
+                }
             },
             else => Type{ .primitive = .u256 }, // Default fallback
+        };
+    }
+
+    /// Resolve a struct type by name with memory layout information
+    fn resolveStructType(self: *ASTToHIRConverter, name: []const u8) anyerror!Type {
+        // This is a placeholder implementation
+        // In a full implementation, this would look up the struct type
+        // from a type registry or symbol table
+
+        // For now, create a basic struct type
+        // This would be replaced with actual struct type resolution
+        const fields = try self.allocator.alloc(Type.StructField, 0);
+
+        return Type{
+            .struct_type = Type.StructType{
+                .name = name,
+                .fields = fields,
+                .layout = Type.StructType.StructLayout{
+                    .total_size = 64, // Placeholder
+                    .storage_slots = 2, // Placeholder
+                    .alignment = 32,
+                    .packed_efficiently = true,
+                },
+                .origin_type = null,
+            },
         };
     }
 

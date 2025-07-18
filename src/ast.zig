@@ -295,6 +295,9 @@ pub const ExprNode = union(enum) {
 
     // Shift operations
     Shift: ShiftExpr, // mapping from source -> dest : amount
+
+    // Struct instantiation
+    StructInstantiation: StructInstantiationExpr, // StructName { field1: value1, field2: value2 }
 };
 
 pub const IdentifierExpr = struct {
@@ -480,6 +483,20 @@ pub const ShiftExpr = struct {
     source: *ExprNode, // Source expression (e.g., std.transaction.sender)
     dest: *ExprNode, // Destination expression (e.g., to)
     amount: *ExprNode, // Amount expression (e.g., amount)
+    span: SourceSpan,
+};
+
+/// Struct instantiation expression (StructName { field1: value1, field2: value2 })
+pub const StructInstantiationExpr = struct {
+    struct_name: *ExprNode, // The struct type name (typically an Identifier)
+    fields: []StructInstantiationField, // Field initializers
+    span: SourceSpan,
+};
+
+/// Field initializer for struct instantiation
+pub const StructInstantiationField = struct {
+    name: []const u8, // Field name
+    value: *ExprNode, // Field value expression
     span: SourceSpan,
 };
 
@@ -756,6 +773,18 @@ pub fn deinitExprNode(allocator: std.mem.Allocator, expr: *ExprNode) void {
             allocator.destroy(shift.source);
             allocator.destroy(shift.dest);
             allocator.destroy(shift.amount);
+        },
+        .StructInstantiation => |*struct_inst| {
+            // Free the struct name identifier
+            deinitExprNode(allocator, struct_inst.struct_name);
+            allocator.destroy(struct_inst.struct_name);
+
+            // Free the field expressions
+            for (struct_inst.fields) |*field| {
+                deinitExprNode(allocator, field.value);
+                allocator.destroy(field.value);
+            }
+            allocator.free(struct_inst.fields);
         },
         else => {
             // Literals and identifiers don't need cleanup
@@ -1512,6 +1541,23 @@ pub const ASTSerializer = struct {
                 try serializeSourceSpan(shift.span, writer);
                 try writer.writeAll("\n");
             },
+            .StructInstantiation => |*struct_inst| {
+                try writeIndent(writer, indent + 1);
+                try writer.writeAll("\"type\": \"StructInstantiation\",\n");
+                try writeIndent(writer, indent + 1);
+                try writer.writeAll("\"struct_name\": ");
+                try serializeExprNode(struct_inst.struct_name, writer, indent + 2);
+                try writer.writeAll(",\n");
+                try writeIndent(writer, indent + 1);
+                try writer.writeAll("\"fields\": [\n");
+                for (struct_inst.fields, 0..) |*field, i| {
+                    if (i > 0) try writer.writeAll(",\n");
+                    try serializeStructInstantiationField(field, writer, indent + 2);
+                }
+                try writer.writeAll("\n");
+                try writeIndent(writer, indent + 1);
+                try writer.writeAll("]\n");
+            },
             .Identifier => |*ident| {
                 try writeIndent(writer, indent + 1);
                 try writer.writeAll("\"type\": \"Identifier\",\n");
@@ -1593,6 +1639,36 @@ pub const ASTSerializer = struct {
             },
         }
 
+        try writeIndent(writer, indent);
+        try writer.writeAll("}");
+    }
+
+    fn serializeStructField(field: *StructField, writer: anytype, indent: u32) SerializationError!void {
+        try writeIndent(writer, indent);
+        try writer.writeAll("{\n");
+        try writeIndent(writer, indent + 1);
+        try writer.writeAll("\"name\": \"");
+        try writer.writeAll(field.name);
+        try writer.writeAll("\",\n");
+        try writeIndent(writer, indent + 1);
+        try writer.writeAll("\"type\": ");
+        try serializeTypeRef(&field.typ, writer);
+        try writer.writeAll("\n");
+        try writeIndent(writer, indent);
+        try writer.writeAll("}");
+    }
+
+    fn serializeStructInstantiationField(field: *StructInstantiationField, writer: anytype, indent: u32) SerializationError!void {
+        try writeIndent(writer, indent);
+        try writer.writeAll("{\n");
+        try writeIndent(writer, indent + 1);
+        try writer.writeAll("\"name\": \"");
+        try writer.writeAll(field.name);
+        try writer.writeAll("\",\n");
+        try writeIndent(writer, indent + 1);
+        try writer.writeAll("\"value\": ");
+        try serializeExprNode(field.value, writer, indent + 2);
+        try writer.writeAll("\n");
         try writeIndent(writer, indent);
         try writer.writeAll("}");
     }

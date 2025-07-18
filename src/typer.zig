@@ -1,6 +1,459 @@
 const std = @import("std");
 const ast = @import("ast.zig");
 
+/// Advanced struct semantics and lifecycle management
+pub const StructSemantics = struct {
+    /// Constructor function (optional)
+    constructor: ?*const Function,
+    /// Destructor function (optional)
+    destructor: ?*const Function,
+    /// Copy behavior
+    copy_behavior: CopyBehavior,
+    /// Move behavior
+    move_behavior: MoveBehavior,
+    /// Drop behavior
+    drop_behavior: DropBehavior,
+    /// Lifetime management
+    lifetime_policy: LifetimePolicy,
+
+    pub const CopyBehavior = enum {
+        /// Shallow copy (copy pointers/references)
+        shallow,
+        /// Deep copy (copy all nested data)
+        deep,
+        /// Copy disabled (move-only type)
+        disabled,
+    };
+
+    pub const MoveBehavior = enum {
+        /// Move allowed (transfers ownership)
+        allowed,
+        /// Move disabled (copy-only type)
+        disabled,
+    };
+
+    pub const DropBehavior = enum {
+        /// Automatic cleanup when going out of scope
+        automatic,
+        /// Manual cleanup required
+        manual,
+        /// No cleanup needed
+        none,
+    };
+
+    pub const LifetimePolicy = enum {
+        /// Follows owner's lifetime
+        owner,
+        /// Independent lifetime
+        independent,
+        /// Static lifetime
+        static,
+    };
+
+    pub fn init() StructSemantics {
+        return StructSemantics{
+            .constructor = null,
+            .destructor = null,
+            .copy_behavior = .shallow,
+            .move_behavior = .allowed,
+            .drop_behavior = .automatic,
+            .lifetime_policy = .owner,
+        };
+    }
+
+    pub fn canCopy(self: *const StructSemantics) bool {
+        return self.copy_behavior != .disabled;
+    }
+
+    pub fn canMove(self: *const StructSemantics) bool {
+        return self.move_behavior == .allowed;
+    }
+
+    pub fn needsDestructor(self: *const StructSemantics) bool {
+        return self.destructor != null or self.drop_behavior == .manual;
+    }
+};
+
+/// Enhanced struct type definition with advanced semantics
+pub const StructType = struct {
+    name: []const u8,
+    fields: []StructField,
+    allocator: std.mem.Allocator,
+    layout: MemoryLayout,
+    semantics: StructSemantics,
+
+    pub const StructField = struct {
+        name: []const u8,
+        typ: OraType,
+        offset: u32, // Byte offset within the struct
+        slot: u32, // Storage slot number (for storage variables)
+        slot_offset: u32, // Byte offset within the storage slot
+        mutable: bool, // Field mutability
+        access_level: AccessLevel, // Field access control
+
+        pub const AccessLevel = enum {
+            public,
+            protected,
+            private,
+        };
+    };
+
+    /// Memory layout information for the struct
+    pub const MemoryLayout = struct {
+        total_size: u32, // Total size in bytes
+        storage_slots: u32, // Number of storage slots needed
+        alignment: u32, // Required alignment
+        packed_efficiently: bool, // Whether packing was successful
+    };
+
+    pub fn init(allocator: std.mem.Allocator, name: []const u8, fields: []StructField) StructType {
+        return StructType{
+            .name = name,
+            .fields = fields,
+            .allocator = allocator,
+            .layout = MemoryLayout{
+                .total_size = 0,
+                .storage_slots = 0,
+                .alignment = 32,
+                .packed_efficiently = false,
+            },
+            .semantics = StructSemantics.init(),
+        };
+    }
+
+    pub fn deinit(self: *StructType) void {
+        self.allocator.free(self.fields);
+    }
+
+    pub fn getField(self: *const StructType, field_name: []const u8) ?*const StructField {
+        for (self.fields) |*field| {
+            if (std.mem.eql(u8, field.name, field_name)) {
+                return field;
+            }
+        }
+        return null;
+    }
+
+    /// Set constructor function for the struct
+    pub fn setConstructor(self: *StructType, constructor: *const Function) void {
+        self.semantics.constructor = constructor;
+    }
+
+    /// Set destructor function for the struct
+    pub fn setDestructor(self: *StructType, destructor: *const Function) void {
+        self.semantics.destructor = destructor;
+    }
+
+    /// Configure copy behavior
+    pub fn setCopyBehavior(self: *StructType, behavior: StructSemantics.CopyBehavior) void {
+        self.semantics.copy_behavior = behavior;
+    }
+
+    /// Configure move behavior
+    pub fn setMoveBehavior(self: *StructType, behavior: StructSemantics.MoveBehavior) void {
+        self.semantics.move_behavior = behavior;
+    }
+
+    /// Configure drop behavior
+    pub fn setDropBehavior(self: *StructType, behavior: StructSemantics.DropBehavior) void {
+        self.semantics.drop_behavior = behavior;
+    }
+
+    /// Check if field is accessible in current context
+    pub fn isFieldAccessible(self: *const StructType, field_name: []const u8, context: AccessContext) bool {
+        if (self.getField(field_name)) |field| {
+            return switch (field.access_level) {
+                .public => true,
+                .protected => context == .same_module or context == .derived_class,
+                .private => context == .same_struct,
+            };
+        }
+        return false;
+    }
+
+    /// Generate copy operation for the struct
+    pub fn generateCopyOperation(self: *const StructType, dest: []const u8, src: []const u8) []const u8 {
+        _ = dest;
+        _ = src;
+        // This would generate the appropriate copy logic based on copy_behavior
+        // For now, return a placeholder
+        return switch (self.semantics.copy_behavior) {
+            .shallow => "shallow_copy",
+            .deep => "deep_copy",
+            .disabled => "copy_disabled",
+        };
+    }
+
+    /// Generate move operation for the struct
+    pub fn generateMoveOperation(self: *const StructType, dest: []const u8, src: []const u8) []const u8 {
+        _ = dest;
+        _ = src;
+        // This would generate the appropriate move logic
+        // For now, return a placeholder
+        return switch (self.semantics.move_behavior) {
+            .allowed => "move_operation",
+            .disabled => "move_disabled",
+        };
+    }
+
+    /// Generate drop operation for the struct
+    pub fn generateDropOperation(self: *const StructType, instance: []const u8) []const u8 {
+        _ = instance;
+        // This would generate the appropriate drop logic
+        // For now, return a placeholder
+        return switch (self.semantics.drop_behavior) {
+            .automatic => "auto_drop",
+            .manual => "manual_drop",
+            .none => "no_drop",
+        };
+    }
+
+    /// Calculate optimal memory layout with advanced packing strategies
+    pub fn optimizeLayout(self: *StructType, region: ast.MemoryRegion) void {
+        switch (region) {
+            .Storage => self.optimizeStorageLayout(),
+            .Memory => self.optimizeMemoryLayout(),
+            .Stack => self.optimizeStackLayout(),
+            else => self.optimizeDefaultLayout(),
+        }
+    }
+
+    /// Optimize layout for EVM storage (most critical for gas costs)
+    fn optimizeStorageLayout(self: *StructType) void {
+        // Sort fields by size for optimal packing (largest first, then pack smaller ones)
+        var field_list = std.ArrayList(StructField).init(self.allocator);
+        defer field_list.deinit();
+
+        // Copy fields and sort by size (descending)
+        for (self.fields) |field| {
+            field_list.append(field) catch return;
+        }
+
+        // Sort fields: largest first, then by type alignment requirements
+        std.sort.pdq(StructField, field_list.items, {}, compareFieldsForStorage);
+
+        var current_slot: u32 = 0;
+        var current_offset: u32 = 0;
+        var total_offset: u32 = 0;
+
+        for (field_list.items, 0..) |*field, i| {
+            const field_size = getTypeSize(field.typ);
+            const field_alignment = getTypeAlignment(field.typ);
+
+            // Try to pack into current slot
+            const aligned_offset = alignUp(current_offset, field_alignment);
+
+            if (aligned_offset + field_size <= 32) {
+                // Fits in current slot
+                field.slot = current_slot;
+                field.slot_offset = aligned_offset;
+                field.offset = total_offset + aligned_offset;
+                current_offset = aligned_offset + field_size;
+            } else {
+                // Need new slot
+                current_slot += 1;
+                total_offset += 32; // Move to next 32-byte slot
+                current_offset = 0;
+
+                const new_aligned_offset = alignUp(current_offset, field_alignment);
+                field.slot = current_slot;
+                field.slot_offset = new_aligned_offset;
+                field.offset = total_offset + new_aligned_offset;
+                current_offset = new_aligned_offset + field_size;
+            }
+
+            // Update the original field
+            self.fields[i] = field.*;
+        }
+
+        // Update layout information
+        self.layout = MemoryLayout{
+            .total_size = (current_slot + 1) * 32,
+            .storage_slots = current_slot + 1,
+            .alignment = 32,
+            .packed_efficiently = self.calculatePackingEfficiency() > 0.75,
+        };
+    }
+
+    /// Optimize layout for EVM memory (transaction-scoped)
+    fn optimizeMemoryLayout(self: *StructType) void {
+        // For memory, we prioritize access patterns over storage efficiency
+        var total_offset: u32 = 0;
+
+        for (self.fields, 0..) |*field, i| {
+            const field_size = getTypeSize(field.typ);
+            const field_alignment = getTypeAlignment(field.typ);
+
+            // Align to field requirements
+            total_offset = alignUp(total_offset, field_alignment);
+
+            field.offset = total_offset;
+            field.slot = total_offset / 32;
+            field.slot_offset = total_offset % 32;
+
+            total_offset += field_size;
+
+            self.fields[i] = field.*;
+        }
+
+        // Align total size to 32-byte boundary
+        total_offset = alignUp(total_offset, 32);
+
+        self.layout = MemoryLayout{
+            .total_size = total_offset,
+            .storage_slots = (total_offset + 31) / 32,
+            .alignment = 32,
+            .packed_efficiently = true, // Memory layout is always considered efficient
+        };
+    }
+
+    /// Optimize layout for stack variables (local variables)
+    fn optimizeStackLayout(self: *StructType) void {
+        // Stack variables can use tighter packing
+        var total_offset: u32 = 0;
+
+        // Sort by alignment requirements for better packing
+        var field_list = std.ArrayList(StructField).init(self.allocator);
+        defer field_list.deinit();
+
+        for (self.fields) |field| {
+            field_list.append(field) catch return;
+        }
+
+        std.sort.pdq(StructField, field_list.items, {}, compareFieldsForStack);
+
+        for (field_list.items, 0..) |*field, i| {
+            const field_size = getTypeSize(field.typ);
+            const field_alignment = getTypeAlignment(field.typ);
+
+            total_offset = alignUp(total_offset, field_alignment);
+
+            field.offset = total_offset;
+            field.slot = total_offset / 32;
+            field.slot_offset = total_offset % 32;
+
+            total_offset += field_size;
+            self.fields[i] = field.*;
+        }
+
+        self.layout = MemoryLayout{
+            .total_size = total_offset,
+            .storage_slots = (total_offset + 31) / 32,
+            .alignment = 1, // Stack can use byte alignment
+            .packed_efficiently = true,
+        };
+    }
+
+    /// Default layout optimization
+    fn optimizeDefaultLayout(self: *StructType) void {
+        self.optimizeMemoryLayout(); // Default to memory layout
+    }
+
+    /// Calculate packing efficiency (ratio of used bytes to total bytes)
+    fn calculatePackingEfficiency(self: *const StructType) f32 {
+        var used_bytes: u32 = 0;
+        for (self.fields) |field| {
+            used_bytes += getTypeSize(field.typ);
+        }
+
+        if (self.layout.total_size == 0) return 0.0;
+        return @as(f32, @floatFromInt(used_bytes)) / @as(f32, @floatFromInt(self.layout.total_size));
+    }
+
+    /// Get total size (for compatibility)
+    pub fn calculateSize(self: *const StructType) u32 {
+        return self.layout.total_size;
+    }
+
+    /// Get number of storage slots needed
+    pub fn getStorageSlots(self: *const StructType) u32 {
+        return self.layout.storage_slots;
+    }
+
+    /// Check if layout is efficiently packed
+    pub fn isEfficientlyPacked(self: *const StructType) bool {
+        return self.layout.packed_efficiently;
+    }
+};
+
+/// Access context for field access control
+pub const AccessContext = enum {
+    same_struct,
+    same_module,
+    derived_class,
+    external,
+};
+
+/// Function placeholder for constructor/destructor
+pub const Function = struct {
+    name: []const u8,
+    // Additional function metadata would go here
+};
+
+/// Compare fields for storage optimization (largest first, then by alignment)
+fn compareFieldsForStorage(context: void, a: StructType.StructField, b: StructType.StructField) bool {
+    _ = context;
+    const size_a = getTypeSize(a.typ);
+    const size_b = getTypeSize(b.typ);
+
+    if (size_a != size_b) {
+        return size_a > size_b; // Larger fields first
+    }
+
+    // Same size, sort by alignment requirements
+    const align_a = getTypeAlignment(a.typ);
+    const align_b = getTypeAlignment(b.typ);
+    return align_a > align_b;
+}
+
+/// Compare fields for stack optimization (by alignment, then size)
+fn compareFieldsForStack(context: void, a: StructType.StructField, b: StructType.StructField) bool {
+    _ = context;
+    const align_a = getTypeAlignment(a.typ);
+    const align_b = getTypeAlignment(b.typ);
+
+    if (align_a != align_b) {
+        return align_a > align_b; // Higher alignment first
+    }
+
+    const size_a = getTypeSize(a.typ);
+    const size_b = getTypeSize(b.typ);
+    return size_a > size_b;
+}
+
+/// Get alignment requirements for a type
+pub fn getTypeAlignment(ora_type: OraType) u32 {
+    return switch (ora_type) {
+        .Bool => 1,
+        .U8, .I8 => 1,
+        .U16, .I16 => 2,
+        .U32, .I32 => 4,
+        .U64, .I64 => 8,
+        .U128, .I128 => 16,
+        .U256, .I256 => 32,
+        .Address => 20, // Ethereum addresses are 20 bytes
+        .String, .Bytes => 32, // Dynamic types require 32-byte alignment
+        .Slice => 32,
+        .Mapping, .DoubleMap => 32,
+        .Struct => |struct_type| struct_type.layout.alignment,
+        .Function => 32,
+        .Void => 1,
+        .Unknown, .Error => 32,
+        .Tuple => |tuple| blk: {
+            var max_alignment: u32 = 1;
+            for (tuple.types) |typ| {
+                max_alignment = @max(max_alignment, getTypeAlignment(typ));
+            }
+            break :blk max_alignment;
+        },
+    };
+}
+
+/// Align a value up to the specified alignment
+fn alignUp(value: u32, alignment: u32) u32 {
+    return (value + alignment - 1) & ~(alignment - 1);
+}
+
 /// Type system for Ora
 pub const OraType = union(enum) {
     // Primitive types
@@ -33,6 +486,9 @@ pub const OraType = union(enum) {
         value: *OraType,
     },
 
+    // Custom types
+    Struct: *StructType,
+
     // Function type
     Function: struct {
         params: []OraType,
@@ -47,6 +503,34 @@ pub const OraType = union(enum) {
         types: []OraType,
     },
 };
+
+/// Get the size of a type in bytes
+pub fn getTypeSize(ora_type: OraType) u32 {
+    return switch (ora_type) {
+        .Bool => 1,
+        .Address => 20,
+        .U8, .I8 => 1,
+        .U16, .I16 => 2,
+        .U32, .I32 => 4,
+        .U64, .I64 => 8,
+        .U128, .I128 => 16,
+        .U256, .I256 => 32,
+        .String, .Bytes => 32, // Dynamic size, stored as pointer
+        .Slice => 32, // Dynamic size, stored as pointer
+        .Mapping, .DoubleMap => 32, // Storage slot reference
+        .Struct => |struct_type| struct_type.calculateSize(),
+        .Function => 32, // Function pointer
+        .Void => 0,
+        .Unknown, .Error => 32, // Default to 32 bytes
+        .Tuple => |tuple| blk: {
+            var size: u32 = 0;
+            for (tuple.types) |typ| {
+                size += getTypeSize(typ);
+            }
+            break :blk size;
+        },
+    };
+}
 
 /// Type checking errors
 pub const TyperError = error{
@@ -115,6 +599,8 @@ pub const Typer = struct {
     type_arena: std.heap.ArenaAllocator,
     /// Track allocated function parameter arrays for cleanup
     function_params: std.ArrayList([]OraType),
+    /// Registry for custom struct types
+    struct_types: std.ArrayList(StructType),
 
     pub fn init(allocator: std.mem.Allocator) Typer {
         return Typer{
@@ -124,6 +610,7 @@ pub const Typer = struct {
             .current_function = null,
             .type_arena = std.heap.ArenaAllocator.init(allocator),
             .function_params = std.ArrayList([]OraType).init(allocator),
+            .struct_types = std.ArrayList(StructType).init(allocator),
         };
     }
 
@@ -132,6 +619,44 @@ pub const Typer = struct {
         self.current_scope = &self.global_scope;
         // Initialize standard library symbols after self-references are fixed
         self.initStandardLibrary() catch {};
+    }
+
+    /// Register a custom struct type with memory layout optimization
+    pub fn registerStructType(self: *Typer, struct_decl: *ast.StructDeclNode) TyperError!void {
+        // Convert AST struct fields to StructType fields (initial layout)
+        var fields = try self.allocator.alloc(StructType.StructField, struct_decl.fields.len);
+
+        for (struct_decl.fields, 0..) |ast_field, i| {
+            const field_type = try self.convertAstTypeToOraType(&ast_field.typ);
+            fields[i] = StructType.StructField{
+                .name = ast_field.name,
+                .typ = field_type,
+                .offset = 0, // Will be calculated during optimization
+                .slot = 0, // Will be calculated during optimization
+                .slot_offset = 0, // Will be calculated during optimization
+                .mutable = false, // Default to immutable
+                .access_level = .public, // Default to public
+            };
+        }
+
+        // Create the struct type with initial fields
+        var struct_type = StructType.init(self.allocator, struct_decl.name, fields);
+
+        // Optimize layout for storage by default (most common use case)
+        // The actual memory region will be determined when the struct variable is declared
+        struct_type.optimizeLayout(.Storage);
+
+        try self.struct_types.append(struct_type);
+    }
+
+    /// Look up a struct type by name
+    pub fn getStructType(self: *const Typer, name: []const u8) ?*const StructType {
+        for (self.struct_types.items) |*struct_type| {
+            if (std.mem.eql(u8, struct_type.name, name)) {
+                return struct_type;
+            }
+        }
+        return null;
     }
 
     /// Initialize standard library symbols in global scope
@@ -173,6 +698,11 @@ pub const Typer = struct {
             self.allocator.free(params);
         }
         self.function_params.deinit();
+        // Clean up struct types
+        for (self.struct_types.items) |*struct_type| {
+            struct_type.deinit();
+        }
+        self.struct_types.deinit();
     }
 
     /// Type check a list of top-level AST nodes
@@ -240,8 +770,11 @@ pub const Typer = struct {
             .VariableDecl => |*var_decl| {
                 try self.typeCheckVariableDecl(var_decl);
             },
+            .StructDecl => |*struct_decl| {
+                try self.registerStructType(struct_decl);
+            },
             else => {
-                // TODO: Add type checking for: StructDecl, EnumDecl, LogDecl, Import, ErrorDecl (top-level), Block, Expression, Statement, TryBlock
+                // TODO: Add type checking for: EnumDecl, LogDecl, Import, ErrorDecl (top-level), Block, Expression, Statement, TryBlock
             },
         }
     }
@@ -559,6 +1092,29 @@ pub const Typer = struct {
                 // Comptime blocks return void (they're evaluated at compile time)
                 try self.typeCheckBlock(&comptime_block.block);
                 return OraType.Void;
+            },
+            .StructInstantiation => |*struct_inst| {
+                // The struct name should be an identifier
+                if (struct_inst.struct_name.* != .Identifier) {
+                    return TyperError.TypeMismatch;
+                }
+
+                const struct_name = struct_inst.struct_name.Identifier.name;
+                if (self.getStructType(struct_name)) |struct_type| {
+                    // Type check all field initializers
+                    for (struct_inst.fields) |*field| {
+                        _ = try self.typeCheckExpression(field.value);
+
+                        // TODO: Validate field exists and type matches
+                    }
+
+                    // Return the struct type
+                    const struct_type_ptr = try self.type_arena.allocator().create(StructType);
+                    struct_type_ptr.* = struct_type.*;
+                    return OraType{ .Struct = struct_type_ptr };
+                } else {
+                    return TyperError.UndeclaredVariable; // Struct type not found
+                }
             },
         }
     }
@@ -878,7 +1434,7 @@ pub const Typer = struct {
     }
 
     /// Convert AST type reference to ZigOra type
-    pub fn convertAstTypeToOraType(self: *Typer, ast_type: *ast.TypeRef) TyperError!OraType {
+    pub fn convertAstTypeToOraType(self: *Typer, ast_type: *const ast.TypeRef) TyperError!OraType {
         return switch (ast_type.*) {
             .Bool => OraType.Bool,
             .Address => OraType.Address,
@@ -927,8 +1483,14 @@ pub const Typer = struct {
                     .value = value_type,
                 } };
             },
-            .Identifier => |_| {
-                // TODO: Look up custom types (structs, enums)
+            .Identifier => |identifier| {
+                // Look up custom types (structs, enums)
+                if (self.getStructType(identifier)) |struct_type| {
+                    // Use arena allocator for type lifetime management
+                    const struct_type_ptr = try self.type_arena.allocator().create(StructType);
+                    struct_type_ptr.* = struct_type.*;
+                    return OraType{ .Struct = struct_type_ptr };
+                }
                 return OraType.Unknown;
             },
             .ErrorUnion => |error_union| {
@@ -1161,6 +1723,13 @@ pub const Typer = struct {
                 },
                 else => false,
             },
+            .Struct => |lhs_struct| switch (rhs) {
+                .Struct => |rhs_struct| {
+                    // Compare struct names (structs are equal if they have the same name)
+                    return std.mem.eql(u8, lhs_struct.name, rhs_struct.name);
+                },
+                else => false,
+            },
         };
     }
 
@@ -1284,7 +1853,15 @@ pub const Typer = struct {
     /// Type check field access
     fn typeCheckFieldAccess(self: *Typer, target_type: OraType, field_name: []const u8) TyperError!OraType {
         _ = self;
-        _ = target_type;
+
+        // Handle struct field access
+        if (target_type == .Struct) {
+            const struct_type = target_type.Struct;
+            if (struct_type.getField(field_name)) |field| {
+                return field.typ;
+            }
+            return TyperError.UndeclaredVariable; // Field doesn't exist
+        }
 
         // Special case for std library access
         if (std.mem.eql(u8, field_name, "transaction") or
@@ -1295,7 +1872,7 @@ pub const Typer = struct {
             return OraType.Unknown; // TODO: Define proper context types
         }
 
-        // TODO: Implement struct field access when structs are added
+        // TODO: Implement enum field access when enums are added
         return OraType.Unknown;
     }
 

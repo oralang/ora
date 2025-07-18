@@ -184,6 +184,16 @@ pub const Parser = struct {
             return self.parseLogDecl();
         }
 
+        // Struct declarations
+        if (self.match(.Struct)) {
+            return self.parseStruct();
+        }
+
+        // Enum declarations
+        if (self.match(.Enum)) {
+            return self.parseEnum();
+        }
+
         return self.errorAtCurrent("Expected contract member");
     }
 
@@ -1256,6 +1266,12 @@ pub const Parser = struct {
         // Identifiers (including keywords that can be used as identifiers)
         if (self.match(.Identifier) or self.matchKeywordAsIdentifier()) {
             const token = self.previous();
+
+            // Check if this is struct instantiation (identifier followed by {)
+            if (self.check(.LeftBrace)) {
+                return try self.parseStructInstantiation(token);
+            }
+
             return ast.ExprNode{ .Identifier = ast.IdentifierExpr{
                 .name = token.lexeme,
                 .span = makeSpan(token),
@@ -1571,6 +1587,52 @@ pub const Parser = struct {
             return true;
         }
         return false;
+    }
+
+    /// Parse a struct instantiation expression (e.g., `MyStruct { a: 1, b: 2 }`)
+    fn parseStructInstantiation(self: *Parser, name_token: Token) ParserError!ast.ExprNode {
+        _ = try self.consume(.LeftBrace, "Expected '{' after struct name");
+
+        var fields = std.ArrayList(ast.StructInstantiationField).init(self.allocator);
+        defer fields.deinit();
+
+        // Parse field initializers (field_name: value)
+        while (!self.check(.RightBrace) and !self.isAtEnd()) {
+            const field_name = try self.consumeIdentifierOrKeyword("Expected field name in struct instantiation");
+            _ = try self.consume(.Colon, "Expected ':' after field name in struct instantiation");
+
+            const field_value = try self.parseExpression();
+            const field_value_ptr = try self.allocator.create(ast.ExprNode);
+            field_value_ptr.* = field_value;
+
+            try fields.append(ast.StructInstantiationField{
+                .name = field_name.lexeme,
+                .value = field_value_ptr,
+                .span = makeSpan(field_name),
+            });
+
+            // Optional comma (but don't require it for last field)
+            if (!self.check(.RightBrace)) {
+                _ = try self.consume(.Comma, "Expected ',' after field in struct instantiation");
+            } else {
+                _ = self.match(.Comma); // Consume trailing comma if present
+            }
+        }
+
+        _ = try self.consume(.RightBrace, "Expected '}' after struct instantiation fields");
+
+        // Create the struct name identifier
+        const struct_name_ptr = try self.allocator.create(ast.ExprNode);
+        struct_name_ptr.* = ast.ExprNode{ .Identifier = ast.IdentifierExpr{
+            .name = name_token.lexeme,
+            .span = makeSpan(name_token),
+        } };
+
+        return ast.ExprNode{ .StructInstantiation = ast.StructInstantiationExpr{
+            .struct_name = struct_name_ptr,
+            .fields = try fields.toOwnedSlice(),
+            .span = makeSpan(name_token),
+        } };
     }
 };
 

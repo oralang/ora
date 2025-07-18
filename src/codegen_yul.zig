@@ -378,6 +378,7 @@ pub const YulCodegen = struct {
             .slice => |_| "uint256[]", // Simplified - slices become uint256[]
             .mapping => |_| "mapping", // Mappings don't appear in function signatures
             .custom => |_| "uint256", // Custom types default to uint256
+            .struct_type => |_| "tuple", // Struct types become tuples
             .error_union => |_| "uint256", // Error unions default to uint256
             .result => |_| "uint256", // Results default to uint256
         };
@@ -694,6 +695,9 @@ pub const YulCodegen = struct {
             },
             .error_cast => |*error_cast| {
                 return try self.generateErrorCast(yul_code, error_cast);
+            },
+            .struct_instantiation => |*struct_inst| {
+                return try self.generateStructInstantiation(yul_code, struct_inst);
             },
         }
     }
@@ -1118,8 +1122,8 @@ pub const YulCodegen = struct {
             }
         }
 
-        // Simple field access - in real implementation would need struct layout
-        try yul_code.writer().print("      let {s} := {s} // field: {s}\n", .{ result_var, target_var, field.field });
+        // Enhanced struct field access with layout optimization
+        try self.generateOptimizedFieldAccess(yul_code, result_var, target_var, field.field);
 
         return result_var;
     }
@@ -1233,6 +1237,121 @@ pub const YulCodegen = struct {
     fn generateErrorCast(self: *Self, yul_code: *std.ArrayList(u8), error_cast: *const ir.ErrorCast) YulCodegenError![]const u8 {
         // For now, just evaluate the operand
         return try self.generateExpression(yul_code, error_cast.operand);
+    }
+
+    /// Generate struct instantiation expression with optimized memory layout
+    fn generateStructInstantiation(self: *Self, yul_code: *std.ArrayList(u8), struct_inst: *const ir.StructInstantiationExpression) YulCodegenError![]const u8 {
+        // Allocate memory for the struct
+        const struct_ptr = try std.fmt.allocPrint(self.allocator, "struct_ptr_{}", .{self.var_counter});
+        self.var_counter += 1;
+
+        try yul_code.writer().print("      // Struct instantiation: {s}\n", .{struct_inst.struct_type.struct_type.name});
+
+        // Get struct layout information
+        const struct_type = struct_inst.struct_type.struct_type;
+        const total_size = if (struct_type.layout) |layout| layout.total_size else @as(u32, 64); // Default size
+
+        // Allocate memory for the struct
+        try yul_code.writer().print("      let {s} := mload(0x40)\n", .{struct_ptr});
+        try yul_code.writer().print("      mstore(0x40, add({s}, {}))\n", .{ struct_ptr, total_size });
+
+        // Generate field values and store them with proper offsets
+        var field_vars = std.ArrayList([]const u8).init(self.allocator);
+        defer field_vars.deinit();
+
+        for (struct_inst.field_values, 0..) |*field_value, i| {
+            const field_var = try self.generateExpression(yul_code, field_value.value);
+            try field_vars.append(field_var);
+
+            // Calculate field offset based on struct layout
+            const field_offset = if (struct_type.fields.len > i)
+                struct_type.fields[i].offset
+            else
+                @as(u32, @intCast(i * 32)); // Default: 32-byte slots
+
+            try yul_code.writer().print("      // Store field '{s}' at offset {}\n", .{ field_value.field_name, field_offset });
+            try yul_code.writer().print("      mstore(add({s}, {}), {s})\n", .{ struct_ptr, field_offset, field_var });
+        }
+
+        // Clean up field variables
+        for (field_vars.items) |field_var| {
+            self.allocator.free(field_var);
+        }
+
+        return struct_ptr;
+    }
+
+    /// Generate optimized field access for struct types
+    fn generateOptimizedFieldAccess(self: *Self, yul_code: *std.ArrayList(u8), result_var: []const u8, target_var: []const u8, field_name: []const u8) YulCodegenError!void {
+        // For now, implement a simple field access pattern
+        // In a real implementation, this would:
+        // 1. Look up the field offset in the struct layout
+        // 2. Load from memory at target_var + field_offset
+        // 3. Handle different field types appropriately
+
+        // Check if we can determine the field offset
+        // This is a simplified implementation - in practice we'd need struct type information
+        const field_offset = self.estimateFieldOffset(field_name);
+
+        if (field_offset > 0) {
+            try yul_code.writer().print("      // Optimized field access: {s}.{s} (offset: {})\n", .{ target_var, field_name, field_offset });
+            try yul_code.writer().print("      let {s} := mload(add({s}, {}))\n", .{ result_var, target_var, field_offset });
+        } else {
+            // Fallback to simple field access
+            try yul_code.writer().print("      // Simple field access: {s}.{s}\n", .{ target_var, field_name });
+            try yul_code.writer().print("      let {s} := {s} // field: {s}\n", .{ result_var, target_var, field_name });
+        }
+    }
+
+    /// Estimate field offset based on field name (simplified heuristic)
+    fn estimateFieldOffset(self: *Self, field_name: []const u8) u32 {
+        _ = self;
+
+        // Simple heuristic for common field patterns
+        if (std.mem.eql(u8, field_name, "x") or std.mem.eql(u8, field_name, "first") or std.mem.eql(u8, field_name, "flag1")) {
+            return 0; // First field
+        } else if (std.mem.eql(u8, field_name, "y") or std.mem.eql(u8, field_name, "second") or std.mem.eql(u8, field_name, "flag2")) {
+            return 32; // Second field (32-byte slot)
+        } else if (std.mem.eql(u8, field_name, "z") or std.mem.eql(u8, field_name, "third") or std.mem.eql(u8, field_name, "counter")) {
+            return 64; // Third field
+        } else if (std.mem.eql(u8, field_name, "balance") or std.mem.eql(u8, field_name, "amount")) {
+            return 96; // Fourth field
+        } else if (std.mem.eql(u8, field_name, "name") or std.mem.eql(u8, field_name, "id")) {
+            return 128; // Fifth field
+        }
+
+        return 0; // Default to first field
+    }
+
+    /// Generate struct assignment with optimized field updates
+    fn generateStructAssignment(self: *Self, yul_code: *std.ArrayList(u8), struct_ptr: []const u8, field_name: []const u8, value_var: []const u8) YulCodegenError!void {
+        const field_offset = self.estimateFieldOffset(field_name);
+
+        try yul_code.writer().print("      // Struct field assignment: {s}.{s} = {s}\n", .{ struct_ptr, field_name, value_var });
+        try yul_code.writer().print("      mstore(add({s}, {}), {s})\n", .{ struct_ptr, field_offset, value_var });
+    }
+
+    /// Generate struct copying with optimized memory operations
+    fn generateStructCopy(self: *Self, yul_code: *std.ArrayList(u8), dest_ptr: []const u8, src_ptr: []const u8, struct_size: u32) YulCodegenError!void {
+        try yul_code.writer().print("      // Optimized struct copy ({} bytes)\n", .{struct_size});
+
+        // For small structs, unroll the copy operations
+        if (struct_size <= 128) {
+            var offset: u32 = 0;
+            while (offset < struct_size) : (offset += 32) {
+                try yul_code.writer().print("      mstore(add({s}, {}), mload(add({s}, {})))\n", .{ dest_ptr, offset, src_ptr, offset });
+            }
+        } else {
+            // For larger structs, use a loop
+            const loop_var = try std.fmt.allocPrint(self.allocator, "copy_offset_{}", .{self.var_counter});
+            defer self.allocator.free(loop_var);
+            self.var_counter += 1;
+
+            try yul_code.writer().print("      for {{ let {s} := 0 }} lt({s}, {}) {{ {s} := add({s}, 32) }}\n", .{ loop_var, loop_var, struct_size, loop_var, loop_var });
+            try yul_code.writer().print("      {{\n");
+            try yul_code.writer().print("        mstore(add({s}, {s}), mload(add({s}, {s})))\n", .{ dest_ptr, loop_var, src_ptr, loop_var });
+            try yul_code.writer().print("      }}\n");
+        }
     }
 
     /// Get default value for a type

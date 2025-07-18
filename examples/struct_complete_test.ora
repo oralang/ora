@@ -1,0 +1,21 @@
+contract StructTest {
+    struct Point {
+        x: u32,
+        y: u32,
+    }
+
+    pub fn init() {
+        // Empty init function
+    }
+
+    pub fn createPoint(x: u32, y: u32) -> Point {
+        return Point {
+            x: x,
+            y: y,
+        };
+    }
+
+    pub fn getPointX(point: Point) -> u32 {
+        return point.x;
+    }
+} 

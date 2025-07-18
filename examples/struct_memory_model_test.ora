@@ -1,0 +1,77 @@
+contract StructMemoryModelTest {
+    struct Point {
+        x: u32,
+        y: u32,
+    }
+
+    struct Config {
+        enabled: bool,
+        threshold: u256,
+    }
+
+    // Storage variables (persistent)
+    storage var mutable_origin: Point;
+    storage let immutable_origin: Point;
+    
+    // Memory variables (transaction-scoped)
+    memory var temp_point: Point;
+    memory let readonly_point: Point;
+
+    // Immutable variable (deployment-time)
+    immutable default_config: Config;
+
+    pub fn init() {
+        // Initialize immutable variable during deployment
+        default_config = Config {
+            enabled: true,
+            threshold: 1000,
+        };
+
+        // Initialize storage variables
+        mutable_origin = Point { x: 0, y: 0 };
+        immutable_origin = Point { x: 100, y: 100 };
+
+        // Initialize memory variables
+        temp_point = Point { x: 50, y: 50 };
+        readonly_point = Point { x: 25, y: 25 };
+    }
+
+    pub fn testMutability() {
+        // This should work - mutable storage variable
+        mutable_origin.x = 10;
+        mutable_origin = Point { x: 20, y: 20 };
+
+        // This should work - mutable memory variable
+        temp_point.y = 75;
+        temp_point = Point { x: 80, y: 80 };
+
+        // These should fail - immutable variables
+        // immutable_origin.x = 5;  // Should be compile error
+        // readonly_point.y = 30;   // Should be compile error
+        // default_config.threshold = 2000; // Should be compile error
+    }
+
+    pub fn createLocalStructs() -> Point {
+        // Local struct variables
+        let immutable_local = Point { x: 1, y: 2 };
+        var mutable_local = Point { x: 3, y: 4 };
+
+        // This should work
+        mutable_local.x = 5;
+        mutable_local = Point { x: 6, y: 7 };
+
+        // This should fail
+        // immutable_local.x = 8; // Should be compile error
+
+        return mutable_local;
+    }
+
+    pub fn accessStructFields() -> u32 {
+        // Test field access on different memory regions
+        let storage_x = mutable_origin.x;
+        let memory_y = temp_point.y;
+        let immutable_enabled = default_config.enabled;
+        
+        return storage_x + memory_y;
+    }
+} 
