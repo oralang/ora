@@ -4,10 +4,15 @@ on:
   push:
     tags:
       - 'v*.*.*'
+    branches:
+      - main
+  schedule:
+    # Run nightly at 2 AM UTC
+    - cron: '0 2 * * *'
   workflow_dispatch:
     inputs:
       version:
-        description: 'Release version (e.g., v1.0.0)'
+        description: 'Release version (e.g., v1.0.0 or nightly-2025-07-20)'
         required: true
         type: string
       prerelease:
@@ -15,6 +20,14 @@ on:
         required: false
         type: boolean
         default: false
+      release_type:
+        description: 'Release type'
+        required: false
+        type: choice
+        options:
+          - stable
+          - nightly
+        default: stable
 
 env:
   ZIG_VERSION: 0.14.1
@@ -26,6 +39,7 @@ jobs:
     outputs:
       version: ${{ steps.version.outputs.version }}
       prerelease: ${{ steps.version.outputs.prerelease }}
+      is_nightly: ${{ steps.version.outputs.is_nightly }}
     
     steps:
       - name: Checkout code
@@ -34,83 +48,160 @@ jobs:
           submodules: recursive
           fetch-depth: 0
 
-      - name: Determine version
+      - name: Determine version and release type
         id: version
         run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+          # Determine if this is a nightly release
+          if [ "${{ github.event_name }}" = "schedule" ] || 
+             [ "${{ github.event_name }}" = "push" -a "${{ github.ref }}" = "refs/heads/main" ] ||
+             [ "${{ github.event.inputs.release_type }}" = "nightly" ]; then
+            
+            # Nightly release
+            DATE=$(date -u +%Y%m%d)
+            SHORT_SHA=$(git rev-parse --short HEAD)
+            VERSION="nightly-${DATE}-${SHORT_SHA}"
+            IS_PRERELEASE="true"
+            IS_NIGHTLY="true"
+            
+            echo "version=$VERSION" >> $GITHUB_OUTPUT
+            echo "prerelease=$IS_PRERELEASE" >> $GITHUB_OUTPUT
+            echo "is_nightly=$IS_NIGHTLY" >> $GITHUB_OUTPUT
+            
+            echo "🌙 Creating nightly release: $VERSION"
+            
+          elif [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            # Manual release
             echo "version=${{ github.event.inputs.version }}" >> $GITHUB_OUTPUT
             echo "prerelease=${{ github.event.inputs.prerelease }}" >> $GITHUB_OUTPUT
+            echo "is_nightly=false" >> $GITHUB_OUTPUT
+            
           else
+            # Tag-based release
             echo "version=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
             echo "prerelease=false" >> $GITHUB_OUTPUT
+            echo "is_nightly=false" >> $GITHUB_OUTPUT
           fi
+
+      - name: Cleanup old nightly releases
+        if: steps.version.outputs.is_nightly == 'true'
+        run: |
+          echo "🧹 Cleaning up old nightly releases..."
+          
+          # Keep only the last 7 nightly releases
+          gh release list --limit 50 | grep "nightly-" | tail -n +8 | while read line; do
+            tag=$(echo "$line" | awk '{print $1}')
+            echo "🗑️  Deleting old nightly release: $tag"
+            gh release delete "$tag" --yes || echo "⚠️  Failed to delete $tag"
+          done || echo "ℹ️  No old nightly releases to clean up"
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Generate changelog
         id: changelog
         run: |
-          echo "📝 Generating changelog..."
+          VERSION="${{ steps.version.outputs.version }}"
+          IS_NIGHTLY="${{ steps.version.outputs.is_nightly }}"
           
-          # Get the latest tag before this one
-          PREVIOUS_TAG=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo "")
+          echo "📝 Generating changelog for $VERSION..."
           
-          {
-            echo "# Release ${{ steps.version.outputs.version }}"
-            echo ""
-            echo "## 🚀 Features"
-            echo ""
-            if [ -n "$PREVIOUS_TAG" ]; then
-              echo "### Changes since $PREVIOUS_TAG"
+          if [ "$IS_NIGHTLY" = "true" ]; then
+            # Nightly release changelog
+            {
+              echo "# Nightly Build $VERSION"
               echo ""
-              git log --pretty=format:"- %s (%h)" $PREVIOUS_TAG..HEAD | grep -E "feat|add|new" | head -10 || echo "- No major feature changes"
-            else
-              echo "- Initial release of Ora compiler"
-              echo "- Complete Zig-based compilation pipeline"
-              echo "- HIR (High-level Intermediate Representation)"
-              echo "- Yul code generation with optimizations"
-              echo "- Formal verification capabilities"
-              echo "- Type checking and semantic analysis"
-            fi
-            echo ""
-            echo "## 🐛 Bug Fixes"
-            echo ""
-            if [ -n "$PREVIOUS_TAG" ]; then
-              git log --pretty=format:"- %s (%h)" $PREVIOUS_TAG..HEAD | grep -E "fix|bug|issue" | head -5 || echo "- No bug fixes in this release"
-            else
-              echo "- Initial stable release"
-            fi
-            echo ""
-            echo "## 📦 Download"
-            echo ""
-            echo "Choose the appropriate binary for your platform:"
-            echo "- **Linux (x86_64)**: \`ora-linux-x86_64\`"
-            echo "- **macOS (x86_64)**: \`ora-macos-x86_64\`"
-            echo "- **macOS (ARM64)**: \`ora-macos-arm64\`"
-            echo "- **Windows (x86_64)**: \`ora-windows-x86_64.exe\`"
-            echo ""
-            echo "## 🔧 Installation"
-            echo ""
-            echo "1. Download the binary for your platform"
-            echo "2. Make it executable: \`chmod +x ora-*\`"
-            echo "3. Add to your PATH or run directly"
-            echo ""
-            echo "## 📖 Usage"
-            echo ""
-            echo "\`\`\`bash"
-            echo "# Compile an Ora source file"
-            echo "./ora-linux-x86_64 my_contract.ora"
-            echo ""
-            echo "# Show help"
-            echo "./ora-linux-x86_64 --help"
-            echo "\`\`\`"
-            echo ""
-            echo "## 🔍 Verification"
-            echo ""
-            echo "You can verify the integrity of downloaded binaries using the provided checksums."
-            echo ""
-            echo "---"
-            echo ""
-            echo "**Full Changelog**: https://github.com/${{ github.repository }}/compare/${PREVIOUS_TAG:-initial}...${{ steps.version.outputs.version }}"
-          } > CHANGELOG.md
+              echo "🌙 **This is a nightly development build** - use at your own risk!"
+              echo ""
+              echo "## 📅 Build Information"
+              echo "- **Build Date**: $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+              echo "- **Commit**: \`$(git rev-parse HEAD)\`"
+              echo "- **Branch**: \`main\`"
+              echo ""
+              echo "## 🔄 Recent Changes"
+              echo ""
+              # Show last 10 commits
+              git log --pretty=format:"- %s (%h)" -10 | sed 's/^/  /'
+              echo ""
+              echo ""
+              echo "## ⚠️  Important Notes"
+              echo ""
+              echo "- This is an **unstable development build**"
+              echo "- Features may be incomplete or broken"
+              echo "- Use stable releases for production"
+              echo "- Report issues on [GitHub Issues](https://github.com/${{ github.repository }}/issues)"
+              echo ""
+              echo "## 📦 Download"
+              echo ""
+              echo "Choose the appropriate binary for your platform:"
+              echo "- **Linux (x86_64)**: \`ora-linux-x86_64\`"
+              echo "- **macOS (x86_64)**: \`ora-macos-x86_64\`"
+              echo "- **macOS (ARM64)**: \`ora-macos-arm64\`"
+              echo ""
+              echo "---"
+              echo ""
+              echo "**Next Stable Release**: Coming soon with v0.0.1"
+            } > CHANGELOG.md
+          else
+            # Stable release changelog (original logic)
+            PREVIOUS_TAG=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo "")
+            
+            {
+              echo "# Release $VERSION"
+              echo ""
+              echo "## 🚀 Features"
+              echo ""
+              if [ -n "$PREVIOUS_TAG" ]; then
+                echo "### Changes since $PREVIOUS_TAG"
+                echo ""
+                git log --pretty=format:"- %s (%h)" $PREVIOUS_TAG..HEAD | grep -E "feat|add|new" | head -10 || echo "- No major feature changes"
+              else
+                echo "- Initial release of Ora compiler"
+                echo "- Complete Zig-based compilation pipeline"
+                echo "- HIR (High-level Intermediate Representation)"
+                echo "- Yul code generation with optimizations"
+                echo "- Formal verification capabilities"
+                echo "- Type checking and semantic analysis"
+              fi
+              echo ""
+              echo "## 🐛 Bug Fixes"
+              echo ""
+              if [ -n "$PREVIOUS_TAG" ]; then
+                git log --pretty=format:"- %s (%h)" $PREVIOUS_TAG..HEAD | grep -E "fix|bug|issue" | head -5 || echo "- No bug fixes in this release"
+              else
+                echo "- Initial stable release"
+              fi
+              echo ""
+              echo "## 📦 Download"
+              echo ""
+              echo "Choose the appropriate binary for your platform:"
+              echo "- **Linux (x86_64)**: \`ora-linux-x86_64\`"
+              echo "- **macOS (x86_64)**: \`ora-macos-x86_64\`"
+              echo "- **macOS (ARM64)**: \`ora-macos-arm64\`"
+              echo ""
+              echo "## 🔧 Installation"
+              echo ""
+              echo "1. Download the binary for your platform"
+              echo "2. Make it executable: \`chmod +x ora-*\`"
+              echo "3. Add to your PATH or run directly"
+              echo ""
+              echo "## 📖 Usage"
+              echo ""
+              echo "\`\`\`bash"
+              echo "# Compile an Ora source file"
+              echo "./ora-linux-x86_64 my_contract.ora"
+              echo ""
+              echo "# Show help"
+              echo "./ora-linux-x86_64 --help"
+              echo "\`\`\`"
+              echo ""
+              echo "## 🔍 Verification"
+              echo ""
+              echo "You can verify the integrity of downloaded binaries using the provided checksums."
+              echo ""
+              echo "---"
+              echo ""
+              echo "**Full Changelog**: https://github.com/${{ github.repository }}/compare/${PREVIOUS_TAG:-initial}...$VERSION"
+            } > CHANGELOG.md
+          fi
           
           echo "📋 Changelog generated"
           cat CHANGELOG.md
@@ -118,17 +209,27 @@ jobs:
       - name: Create Release
         id: create_release
         run: |
-          echo "🚀 Creating release ${{ steps.version.outputs.version }}..."
+          VERSION="${{ steps.version.outputs.version }}"
+          IS_PRERELEASE="${{ steps.version.outputs.prerelease }}"
+          IS_NIGHTLY="${{ steps.version.outputs.is_nightly }}"
+          
+          if [ "$IS_NIGHTLY" = "true" ]; then
+            echo "🌙 Creating nightly release $VERSION..."
+            TITLE="Nightly Build $VERSION"
+          else
+            echo "🚀 Creating stable release $VERSION..."
+            TITLE="Ora Compiler $VERSION"
+          fi
           
           # Create release using gh CLI
-          if [ "${{ steps.version.outputs.prerelease }}" = "true" ]; then
-            gh release create ${{ steps.version.outputs.version }} \
-              --title "Ora Compiler ${{ steps.version.outputs.version }}" \
+          if [ "$IS_PRERELEASE" = "true" ]; then
+            gh release create "$VERSION" \
+              --title "$TITLE" \
               --notes-file CHANGELOG.md \
               --prerelease
           else
-            gh release create ${{ steps.version.outputs.version }} \
-              --title "Ora Compiler ${{ steps.version.outputs.version }}" \
+            gh release create "$VERSION" \
+              --title "$TITLE" \
               --notes-file CHANGELOG.md
           fi
           
@@ -147,19 +248,12 @@ jobs:
           - os: ubuntu-latest
             platform: linux-x86_64
             target: x86_64-linux
-            extension: ""
           - os: macos-latest
             platform: macos-x86_64
             target: x86_64-macos
-            extension: ""
           - os: macos-latest
             platform: macos-arm64
             target: aarch64-macos
-            extension: ""
-          - os: windows-latest
-            platform: windows-x86_64
-            target: x86_64-windows
-            extension: ".exe"
     
     steps:
       - name: Checkout code
@@ -192,10 +286,6 @@ jobs:
               brew install boost openssl cmake
               echo "✅ macOS dependencies installed"
               ;;
-            Windows)
-              choco install boost-msvc-14.3 cmake openssl
-              echo "✅ Windows dependencies installed"
-              ;;
           esac
 
       - name: Cache Zig artifacts
@@ -214,7 +304,7 @@ jobs:
           zig build -Doptimize=ReleaseFast -Dtarget=${{ matrix.target }}
           
           # Verify the binary was created
-          if [ -f "zig-out/bin/ora${{ matrix.extension }}" ]; then
+          if [ -f "zig-out/bin/ora" ]; then
             echo "✅ Binary built successfully"
             ls -la zig-out/bin/
           else
@@ -223,7 +313,6 @@ jobs:
           fi
 
       - name: Test binary
-        if: matrix.os != 'windows-latest'
         run: |
           echo "🧪 Testing binary..."
           
@@ -243,11 +332,7 @@ jobs:
           mkdir -p release-package
           
           # Copy binary with platform-specific name
-          if [ "${{ matrix.os }}" = "windows-latest" ]; then
-            cp zig-out/bin/ora.exe release-package/ora-${{ matrix.platform }}.exe
-          else
-            cp zig-out/bin/ora release-package/ora-${{ matrix.platform }}
-          fi
+          cp zig-out/bin/ora release-package/ora-${{ matrix.platform }}
           
           # Add documentation
           cp LICENSE release-package/ 2>/dev/null || echo "LICENSE not found"
@@ -277,11 +362,7 @@ jobs:
           echo "🔍 Generating checksums..."
           cd release-package
           
-          if [ "${{ matrix.os }}" = "windows-latest" ]; then
-            certutil -hashfile "ora-${{ matrix.platform }}.exe" SHA256 > checksums.txt
-          else
-            shasum -a 256 "ora-${{ matrix.platform }}" > checksums.txt
-          fi
+          shasum -a 256 "ora-${{ matrix.platform }}" > checksums.txt
           
           echo "📋 Checksums:"
           cat checksums.txt
@@ -299,7 +380,7 @@ jobs:
           
           # Upload binary
           gh release upload "$version" \
-            "release-package/ora-${{ matrix.platform }}${{ matrix.extension }}" \
+            "release-package/ora-${{ matrix.platform }}" \
             --clobber
           
           echo "✅ Binary uploaded"
@@ -343,18 +424,23 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Update release with final checksums
+      - name: Update release summary
         run: |
+          VERSION="${{ needs.create-release.outputs.version }}"
+          IS_NIGHTLY="${{ needs.create-release.outputs.is_nightly }}"
+          
+          if [ "$IS_NIGHTLY" = "true" ]; then
+            echo "🌙 Nightly build pipeline completed!"
+            echo "📦 Nightly Build: $VERSION"
+            echo "⚠️  This is a development build - use with caution"
+          else
+            echo "🚀 Release pipeline completed successfully!"
+            echo "📦 Release: $VERSION"
+          fi
+          
+          echo "🔗 URL: https://github.com/${{ github.repository }}/releases/tag/$VERSION"
+          echo ""
           echo "📊 Post-release tasks completed"
           echo "✅ Binaries built for all platforms"
           echo "✅ Checksums generated"
-          echo "✅ Release assets uploaded"
-          echo ""
-          echo "🎉 Release ${{ github.ref_name }} is now available!"
-          echo "👉 Visit: https://github.com/${{ github.repository }}/releases/latest"
-
-      - name: Notify success
-        run: |
-          echo "🚀 Release pipeline completed successfully!"
-          echo "📦 Release: ${{ github.ref_name }}"
-          echo "🔗 URL: https://github.com/${{ github.repository }}/releases/tag/${{ github.ref_name }}" 
+          echo "✅ Release assets uploaded" 
