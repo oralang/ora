@@ -112,13 +112,18 @@ var numbers: [10]u256;
 var balances: map[address, u256];
 var approved: map[address, map[address, u256]];
 
-// Structs (planned)
+// Custom struct types
 struct User {
     name: string,
     balance: u256,
     active: bool,
 }
+
+// Struct usage in storage
+storage user_data: User;
 ```
+
+> For detailed information about struct types, memory management, and optimization, see [Struct Types](struct-types.md).
 
 ## Functions
 

@@ -72,6 +72,87 @@ contract ControlFlowTest {
 }
 ```
 
+## Struct Examples
+
+### Basic Struct Usage
+
+From `examples/core/struct_basic_test.ora`:
+
+```ora
+struct Point {
+    x: u32,
+    y: u32,
+}
+
+struct User {
+    name: string,
+    age: u8,
+    balance: u256,
+    location: Point,
+}
+
+contract StructDemo {
+    storage data: Point;
+    
+    pub fn init() {
+        // Struct initialization with nested types
+        data = Point { x: 100, y: 200 };
+    }
+}
+```
+
+### Cross-Referenced Structs  
+
+From `examples/core/struct_cross_reference_test.ora`:
+
+```ora
+struct Point {
+    x: u32,
+}
+
+struct User {
+    location: Point,  // Cross-reference to another struct
+}
+
+contract Test {
+    storage user_data: User;
+    
+    pub fn init() {
+        user_data = User {
+            location: Point { x: 50 }
+        };
+    }
+}
+```
+
+### Advanced Struct Initialization
+
+From `examples/advanced/struct_complex_initialization_test.ora`:
+
+```ora
+struct User {
+    name: string,
+    age: u32, 
+    balance: u256,
+    active: bool,
+    metadata: map[string, string],
+}
+
+contract TestStruct {
+    storage users: User;
+    
+    pub fn init() {
+        users = User{
+            name: "Alice",
+            age: 25,
+            balance: 1000,
+            active: true,
+            metadata: {}
+        };
+    }
+}
+```
+
 ## Token Contract
 
 From `examples/tokens/simple_token_basic.ora`:

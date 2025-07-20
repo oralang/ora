@@ -18,6 +18,7 @@ const sidebars: SidebarsConfig = {
     'intro',
     'getting-started',
     'language-basics',
+    'struct-types',
     'examples',
     {
       type: 'category',
