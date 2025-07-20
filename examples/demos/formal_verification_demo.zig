@@ -55,7 +55,7 @@ fn demonstrateProofStrategies(formal_verifier: *ora.formal_verifier.FormalVerifi
         std.debug.print("Testing strategy: {s}\n", .{@tagName(strategy)});
 
         // Create a simple condition for testing
-        var true_literal = ora.ast.LiteralNode{ .Bool = ora.ast.BoolLiteral{ .value = true, .span = ora.ast.SourceSpan{ .line = 1, .column = 1, .length = 4 } } };
+        const true_literal = ora.ast.LiteralNode{ .Bool = ora.ast.BoolLiteral{ .value = true, .span = ora.ast.SourceSpan{ .line = 1, .column = 1, .length = 4 } } };
         var true_expr = ora.ast.ExprNode{ .Literal = true_literal };
 
         var condition = ora.formal_verifier.FormalCondition{
@@ -108,7 +108,7 @@ fn demonstrateMathematicalDomains(formal_verifier: *ora.formal_verifier.FormalVe
 
         // Create a domain-specific condition
         const true_literal = ora.ast.LiteralNode{ .Bool = ora.ast.BoolLiteral{ .value = true, .span = ora.ast.SourceSpan{ .line = 1, .column = 1, .length = 4 } } };
-        const true_expr = ora.ast.ExprNode{ .Literal = true_literal };
+        var true_expr = ora.ast.ExprNode{ .Literal = true_literal };
 
         var condition = ora.formal_verifier.FormalCondition{
             .expression = &true_expr,
@@ -161,7 +161,7 @@ fn demonstrateQuantifiedConditions(formal_verifier: *ora.formal_verifier.FormalV
 
         // Create a quantified condition
         const true_literal = ora.ast.LiteralNode{ .Bool = ora.ast.BoolLiteral{ .value = true, .span = ora.ast.SourceSpan{ .line = 1, .column = 1, .length = 4 } } };
-        const true_expr = ora.ast.ExprNode{ .Literal = true_literal };
+        var true_expr = ora.ast.ExprNode{ .Literal = true_literal };
 
         const quantifier = ora.formal_verifier.FormalCondition.Quantifier{
             .type = qtype,
@@ -170,7 +170,7 @@ fn demonstrateQuantifiedConditions(formal_verifier: *ora.formal_verifier.FormalV
             .range = null,
         };
 
-        const quantifiers = [_]ora.formal_verifier.FormalCondition.Quantifier{quantifier};
+        var quantifiers = [_]ora.formal_verifier.FormalCondition.Quantifier{quantifier};
 
         var condition = ora.formal_verifier.FormalCondition{
             .expression = &true_expr,
