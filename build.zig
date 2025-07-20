@@ -308,9 +308,19 @@ fn buildSolidityLibrariesImpl(step: *std.Build.Step, options: std.Build.Step.Mak
         try cmake_args.append("-DCMAKE_CXX_FLAGS=-stdlib=libc++");
     } else if (builtin.os.tag == .windows) {
         std.log.info("Adding Boost paths for Windows", .{});
-        // Windows: Use MSVC by default, but ensure release mode
+        // Windows: Use MSVC and configure Boost paths
         try cmake_args.append("-DCMAKE_CXX_FLAGS=/std:c++20");
-        try cmake_args.append("-DBOOST_ROOT=C:/tools/boost");
+
+        // Try multiple possible Boost locations for Windows
+        try cmake_args.append("-DCMAKE_PREFIX_PATH=C:/vcpkg/installed/x64-windows;C:/ProgramData/chocolatey/lib/boost-msvc-14.3/lib/native;C:/tools/boost");
+
+        // Set Boost-specific variables for older CMake compatibility
+        try cmake_args.append("-DBoost_USE_STATIC_LIBS=ON");
+        try cmake_args.append("-DBoost_USE_MULTITHREADED=ON");
+        try cmake_args.append("-DBoost_USE_STATIC_RUNTIME=OFF");
+
+        // Suppress CMake developer warnings
+        try cmake_args.append("-Wno-dev");
     }
 
     // Configure CMake

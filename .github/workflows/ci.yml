@@ -15,7 +15,7 @@ env:
 
 jobs:
   lint:
-    name: Lint and Format
+    name: Lint and Format  
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
@@ -27,6 +27,12 @@ jobs:
         uses: goto-bus-stop/setup-zig@v2
         with:
           version: ${{ env.ZIG_VERSION }}
+
+      - name: Setup vcpkg (Windows)
+        if: runner.os == 'Windows'
+        uses: lukka/run-vcpkg@v11
+        with:
+          vcpkgGitCommitId: 'a42af01b72c28a8e1d7b48107b33e4f286a55ef6'  # Latest stable
 
       - name: Install system dependencies
         shell: bash
@@ -53,7 +59,10 @@ jobs:
               echo "✅ macOS dependencies installed"
               ;;
             Windows)
-              choco install boost-msvc-14.3 cmake openssl
+              # Install basic dependencies
+              choco install cmake openssl
+              # Install Boost via vcpkg for better CMake integration
+              vcpkg install boost-system boost-filesystem boost-program-options --triplet x64-windows
               echo "✅ Windows dependencies installed"
               ;;
           esac
@@ -106,6 +115,12 @@ jobs:
         with:
           version: ${{ matrix.zig-version }}
 
+      - name: Setup vcpkg (Windows)
+        if: runner.os == 'Windows'
+        uses: lukka/run-vcpkg@v11
+        with:
+          vcpkgGitCommitId: 'a42af01b72c28a8e1d7b48107b33e4f286a55ef6'  # Latest stable
+          
       - name: Install system dependencies
         shell: bash
         run: |
@@ -131,7 +146,10 @@ jobs:
               echo "✅ macOS dependencies installed"
               ;;
             Windows)
-              choco install boost-msvc-14.3 cmake openssl
+              # Install basic dependencies
+              choco install cmake openssl
+              # Install Boost via vcpkg for better CMake integration
+              vcpkg install boost-system boost-filesystem boost-program-options --triplet x64-windows
               echo "✅ Windows dependencies installed"
               ;;
           esac
@@ -293,6 +311,12 @@ jobs:
         with:
           version: ${{ env.ZIG_VERSION }}
 
+      - name: Setup vcpkg (Windows)
+        if: runner.os == 'Windows'
+        uses: lukka/run-vcpkg@v11
+        with:
+          vcpkgGitCommitId: 'a42af01b72c28a8e1d7b48107b33e4f286a55ef6'  # Latest stable
+
       - name: Install system dependencies
         shell: bash
         run: |
@@ -318,7 +342,10 @@ jobs:
               echo "✅ macOS dependencies installed"
               ;;
             Windows)
-              choco install boost-msvc-14.3 cmake openssl
+              # Install basic dependencies
+              choco install cmake openssl
+              # Install Boost via vcpkg for better CMake integration
+              vcpkg install boost-system boost-filesystem boost-program-options --triplet x64-windows
               echo "✅ Windows dependencies installed"
               ;;
           esac
