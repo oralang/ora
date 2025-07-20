@@ -270,6 +270,9 @@ fn buildSolidityLibrariesImpl(step: *std.Build.Step, options: std.Build.Step.Mak
     const b = step.owner;
     const allocator = b.allocator;
 
+    // Detect target platform at runtime for CMake configuration
+    const builtin = @import("builtin");
+
     // Create build directory
     const build_dir = "vendor/solidity/build";
     std.fs.cwd().makeDir(build_dir) catch |err| switch (err) {
@@ -277,19 +280,38 @@ fn buildSolidityLibrariesImpl(step: *std.Build.Step, options: std.Build.Step.Mak
         else => return err,
     };
 
+    // Determine platform-specific CMake flags for C++ ABI compatibility
+    var cmake_args = std.ArrayList([]const u8).init(allocator);
+    defer cmake_args.deinit();
+
+    try cmake_args.appendSlice(&[_][]const u8{
+        "cmake",
+        "-S",
+        "vendor/solidity",
+        "-B",
+        build_dir,
+        "-DCMAKE_BUILD_TYPE=Release",
+        "-DONLY_BUILD_SOLIDITY_LIBRARIES=ON",
+        "-DTESTS=OFF",
+    });
+
+    // Add platform-specific flags to ensure consistent C++ ABI
+    if (builtin.os.tag == .linux) {
+        std.log.info("Adding Boost paths for Linux", .{});
+        // Force libc++ usage on Linux to match macOS ABI
+        try cmake_args.append("-DCMAKE_CXX_FLAGS=-stdlib=libc++ -lc++abi");
+        try cmake_args.append("-DCMAKE_CXX_COMPILER=clang++");
+        try cmake_args.append("-DCMAKE_C_COMPILER=clang");
+    } else if (builtin.os.tag == .macos) {
+        std.log.info("Adding Boost paths for Apple Silicon Mac", .{});
+        // macOS already uses libc++ by default, but be explicit
+        try cmake_args.append("-DCMAKE_CXX_FLAGS=-stdlib=libc++");
+    }
+
     // Configure CMake
     const cmake_configure = std.process.Child.run(.{
         .allocator = allocator,
-        .argv = &[_][]const u8{
-            "cmake",
-            "-S",
-            "vendor/solidity",
-            "-B",
-            build_dir,
-            "-DCMAKE_BUILD_TYPE=Release",
-            "-DONLY_BUILD_SOLIDITY_LIBRARIES=ON",
-            "-DTESTS=OFF",
-        },
+        .argv = cmake_args.items,
         .cwd = ".",
     }) catch |err| {
         std.log.err("Failed to configure CMake: {}", .{err});
