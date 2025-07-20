@@ -449,6 +449,19 @@ pub const FormalVerifier = struct {
                         };
                     }
                 },
+                .EnumLiteral => |*enum_literal| blk: {
+                    // Enum literals are treated as symbolic integer values
+                    const enum_symbol_name = try std.fmt.allocPrint(self.allocator, "{s}.{s}", .{ enum_literal.enum_name, enum_literal.variant_name });
+                    defer self.allocator.free(enum_symbol_name);
+
+                    break :blk SymbolicState.SymbolicValue{
+                        .symbolic = SymbolicState.SymbolicExpression{
+                            .name = enum_symbol_name,
+                            .constraints = std.ArrayList(*ast.ExprNode).init(self.allocator),
+                            .domain = MathDomain.Integer, // Enum values are integers
+                        },
+                    };
+                },
                 .Binary => |*binary| {
                     const left = try self.evaluateExpressionSymbolically(binary.lhs, state);
                     const right = try self.evaluateExpressionSymbolically(binary.rhs, state);
@@ -491,7 +504,6 @@ pub const FormalVerifier = struct {
         }
 
         fn inferDomain(self: *SymbolicExecutor, type_ref: ?*ast.TypeRef) MathDomain {
-            _ = self;
             if (type_ref) |t| {
                 return switch (t.*) {
                     .U8, .U16, .U32, .U64, .U128, .U256, .I8, .I16, .I32, .I64, .I128, .I256 => MathDomain.Integer,
@@ -501,7 +513,13 @@ pub const FormalVerifier = struct {
                     .Slice => MathDomain.Array,
                     .Mapping => MathDomain.Function,
                     .DoubleMap => MathDomain.Function,
-                    .Identifier => MathDomain.Integer, // Default for custom types
+                    .Identifier => |name| {
+                        // Check if this is an enum type
+                        if (self.isEnumType(name)) {
+                            return MathDomain.Integer; // Enum types are represented as integers
+                        }
+                        return MathDomain.Integer; // Default for custom types
+                    },
                     .ErrorUnion => MathDomain.Algebraic, // Error unions use algebraic data types
                     .Result => MathDomain.Algebraic, // Result types use algebraic data types
                 };
@@ -511,6 +529,19 @@ pub const FormalVerifier = struct {
 
         fn inferDomainFromType(self: *SymbolicExecutor, type_ref: ?*ast.TypeRef) MathDomain {
             return self.inferDomain(type_ref);
+        }
+
+        /// Check if a type name refers to an enum type
+        fn isEnumType(self: *SymbolicExecutor, type_name: []const u8) bool {
+            // TODO: This should query the type system to check if the type is an enum
+            // For now, we'll use a simple heuristic - enum types often have capitalized names
+            // In a full implementation, this would query the semantic analyzer's type information
+            _ = self;
+            _ = type_name;
+
+            // Return false for now - this is a placeholder
+            // In the future, this should check the type registry
+            return false;
         }
     };
 

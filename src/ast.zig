@@ -162,11 +162,21 @@ pub const EnumDeclNode = struct {
     name: []const u8,
     variants: []EnumVariant,
     span: SourceSpan,
+
+    /// Base type for enum discriminants (defaults to u32)
+    base_type: ?TypeRef,
+
+    /// Whether this enum has explicit value assignments
+    has_explicit_values: bool,
 };
 
 pub const EnumVariant = struct {
     name: []const u8,
+    value: ?ExprNode, // Optional explicit value assignment
     span: SourceSpan,
+
+    /// Computed discriminant value (filled during semantic analysis)
+    discriminant: ?u64,
 };
 
 /// Log Declaration
@@ -298,6 +308,9 @@ pub const ExprNode = union(enum) {
 
     // Struct instantiation
     StructInstantiation: StructInstantiationExpr, // StructName { field1: value1, field2: value2 }
+
+    // Enum literal expressions
+    EnumLiteral: EnumLiteralExpr, // EnumName.VariantName
 };
 
 pub const IdentifierExpr = struct {
@@ -500,6 +513,13 @@ pub const StructInstantiationField = struct {
     span: SourceSpan,
 };
 
+/// Enum literal expression (e.g., Status.Active)
+pub const EnumLiteralExpr = struct {
+    enum_name: []const u8,
+    variant_name: []const u8,
+    span: SourceSpan,
+};
+
 /// Visitor pattern for AST traversal
 pub const AstVisitor = struct {
     const Self = @This();
@@ -647,8 +667,31 @@ pub fn deinitAstNode(allocator: std.mem.Allocator, node: *AstNode) void {
                 }
             }
         },
-        else => {
-            // TODO: Add deinitialization for: StructDecl, EnumDecl, Import
+        .StructDecl => |*struct_decl| {
+            // Free all struct fields
+            for (struct_decl.fields) |*field| {
+                deinitTypeRef(allocator, &field.typ);
+            }
+            allocator.free(struct_decl.fields);
+        },
+        .EnumDecl => |*enum_decl| {
+            // Free all enum variants
+            for (enum_decl.variants) |*variant| {
+                if (variant.value) |*value| {
+                    deinitExprNode(allocator, value);
+                }
+            }
+            allocator.free(enum_decl.variants);
+
+            // Free base type if present
+            if (enum_decl.base_type) |*base_type| {
+                deinitTypeRef(allocator, base_type);
+            }
+        },
+        .Import => |*import| {
+            // Import name and path are usually string literals from parser,
+            // but we should be safe and not free them
+            _ = import;
         },
     }
 }
@@ -785,6 +828,11 @@ pub fn deinitExprNode(allocator: std.mem.Allocator, expr: *ExprNode) void {
                 allocator.destroy(field.value);
             }
             allocator.free(struct_inst.fields);
+        },
+        .EnumLiteral => |*enum_literal| {
+            // Note: enum_literal.enum_name and enum_literal.variant_name are
+            // string literals from the parser, not allocated memory, so we don't free them
+            _ = enum_literal;
         },
         else => {
             // Literals and identifiers don't need cleanup
@@ -1557,6 +1605,18 @@ pub const ASTSerializer = struct {
                 try writer.writeAll("\n");
                 try writeIndent(writer, indent + 1);
                 try writer.writeAll("]\n");
+            },
+            .EnumLiteral => |*enum_literal| {
+                try writeIndent(writer, indent + 1);
+                try writer.writeAll("\"type\": \"EnumLiteral\",\n");
+                try writeIndent(writer, indent + 1);
+                try writer.print("\"enum_name\": \"{s}\",\n", .{enum_literal.enum_name});
+                try writeIndent(writer, indent + 1);
+                try writer.print("\"variant_name\": \"{s}\",\n", .{enum_literal.variant_name});
+                try writeIndent(writer, indent + 1);
+                try writer.writeAll("\"span\": ");
+                try serializeSourceSpan(enum_literal.span, writer);
+                try writer.writeAll("\n");
             },
             .Identifier => |*ident| {
                 try writeIndent(writer, indent + 1);

@@ -390,6 +390,75 @@ pub const Function = struct {
     // Additional function metadata would go here
 };
 
+/// Enum type definition with discriminant values
+pub const EnumType = struct {
+    name: []const u8,
+    variants: []EnumVariant,
+    base_type: OraType, // The underlying type (e.g., u32, u8, etc.)
+    layout: EnumLayout,
+    allocator: std.mem.Allocator,
+
+    pub const EnumVariant = struct {
+        name: []const u8,
+        discriminant: u64, // The numeric value of this variant
+        span: ast.SourceSpan,
+    };
+
+    pub const EnumLayout = struct {
+        size: u32, // Size in bytes
+        alignment: u32, // Alignment requirements
+        discriminant_size: u32, // Size of discriminant field
+    };
+
+    pub fn init(allocator: std.mem.Allocator, name: []const u8, base_type: OraType) EnumType {
+        return EnumType{
+            .name = name,
+            .variants = &[_]EnumVariant{},
+            .base_type = base_type,
+            .layout = EnumLayout{
+                .size = getTypeSize(base_type),
+                .alignment = getTypeAlignment(base_type),
+                .discriminant_size = getTypeSize(base_type),
+            },
+            .allocator = allocator,
+        };
+    }
+
+    pub fn addVariant(self: *EnumType, variant: EnumVariant) !void {
+        const new_variants = try self.allocator.realloc(self.variants, self.variants.len + 1);
+        new_variants[new_variants.len - 1] = variant;
+        self.variants = new_variants;
+    }
+
+    pub fn findVariant(self: *const EnumType, name: []const u8) ?*const EnumVariant {
+        for (self.variants) |*variant| {
+            if (std.mem.eql(u8, variant.name, name)) {
+                return variant;
+            }
+        }
+        return null;
+    }
+
+    pub fn getVariantDiscriminant(self: *const EnumType, name: []const u8) ?u64 {
+        if (self.findVariant(name)) |variant| {
+            return variant.discriminant;
+        }
+        return null;
+    }
+
+    pub fn calculateSize(self: *const EnumType) u32 {
+        return self.layout.size;
+    }
+
+    pub fn calculateAlignment(self: *const EnumType) u32 {
+        return self.layout.alignment;
+    }
+
+    pub fn deinit(self: *EnumType) void {
+        self.allocator.free(self.variants);
+    }
+};
+
 /// Compare fields for storage optimization (largest first, then by alignment)
 fn compareFieldsForStorage(context: void, a: StructType.StructField, b: StructType.StructField) bool {
     _ = context;
@@ -436,6 +505,7 @@ pub fn getTypeAlignment(ora_type: OraType) u32 {
         .Slice => 32,
         .Mapping, .DoubleMap => 32,
         .Struct => |struct_type| struct_type.layout.alignment,
+        .Enum => |enum_type| enum_type.layout.alignment,
         .Function => 32,
         .Void => 1,
         .Unknown, .Error => 32,
@@ -488,6 +558,7 @@ pub const OraType = union(enum) {
 
     // Custom types
     Struct: *StructType,
+    Enum: *EnumType,
 
     // Function type
     Function: struct {
@@ -519,6 +590,7 @@ pub fn getTypeSize(ora_type: OraType) u32 {
         .Slice => 32, // Dynamic size, stored as pointer
         .Mapping, .DoubleMap => 32, // Storage slot reference
         .Struct => |struct_type| struct_type.calculateSize(),
+        .Enum => |enum_type| enum_type.calculateSize(),
         .Function => 32, // Function pointer
         .Void => 0,
         .Unknown, .Error => 32, // Default to 32 bytes
@@ -750,6 +822,21 @@ pub const Typer = struct {
                 };
                 try self.current_scope.declare(symbol);
             },
+            .StructDecl => |*struct_decl| {
+                // Register struct type in first pass to allow forward references
+                try self.registerStructType(struct_decl);
+            },
+            .EnumDecl => |*enum_decl| {
+                // Register enum type in first pass
+                const enum_symbol = Symbol{
+                    .name = enum_decl.name,
+                    .typ = OraType.Unknown, // Will be filled later
+                    .region = .Stack,
+                    .mutable = false,
+                    .span = enum_decl.span,
+                };
+                try self.current_scope.declare(enum_symbol);
+            },
             else => {
                 // Skip other node types in declaration phase
             },
@@ -770,8 +857,8 @@ pub const Typer = struct {
             .VariableDecl => |*var_decl| {
                 try self.typeCheckVariableDecl(var_decl);
             },
-            .StructDecl => |*struct_decl| {
-                try self.registerStructType(struct_decl);
+            .StructDecl => {
+                // Struct already registered in first pass
             },
             else => {
                 // TODO: Add type checking for: EnumDecl, LogDecl, Import, ErrorDecl (top-level), Block, Expression, Statement, TryBlock
@@ -1116,6 +1203,25 @@ pub const Typer = struct {
                     return TyperError.UndeclaredVariable; // Struct type not found
                 }
             },
+            .EnumLiteral => |*enum_literal| {
+                // Look up the enum type
+                if (self.current_scope.lookup(enum_literal.enum_name)) |enum_symbol| {
+                    if (enum_symbol.typ == .Enum) {
+                        const enum_type = enum_symbol.typ.Enum;
+
+                        // Validate that the variant exists
+                        if (enum_type.findVariant(enum_literal.variant_name) != null) {
+                            return enum_symbol.typ;
+                        } else {
+                            return TyperError.UndeclaredVariable; // Variant not found
+                        }
+                    } else {
+                        return TyperError.TypeMismatch; // Not an enum type
+                    }
+                } else {
+                    return TyperError.UndeclaredVariable; // Enum type not found
+                }
+            },
         }
     }
 
@@ -1198,10 +1304,29 @@ pub const Typer = struct {
                 }
                 return TyperError.TypeMismatch;
             },
-            // Comparison operators
-            .EqualEqual, .BangEqual, .Less, .LessEqual, .Greater, .GreaterEqual => {
+            // Equality comparison operators
+            .EqualEqual, .BangEqual => {
                 if (self.typesCompatible(lhs, rhs)) {
                     return OraType.Bool;
+                }
+                // Special case: enum types can be compared for equality
+                if (lhs == .Enum and rhs == .Enum) {
+                    if (std.mem.eql(u8, lhs.Enum.name, rhs.Enum.name)) {
+                        return OraType.Bool;
+                    }
+                }
+                return TyperError.TypeMismatch;
+            },
+            // Ordered comparison operators
+            .Less, .LessEqual, .Greater, .GreaterEqual => {
+                if (self.isNumericType(lhs) and self.isNumericType(rhs)) {
+                    return OraType.Bool;
+                }
+                // Special case: enum types can be compared for ordering based on discriminant values
+                if (lhs == .Enum and rhs == .Enum) {
+                    if (std.mem.eql(u8, lhs.Enum.name, rhs.Enum.name)) {
+                        return OraType.Bool;
+                    }
                 }
                 return TyperError.TypeMismatch;
             },
@@ -1209,6 +1334,19 @@ pub const Typer = struct {
             .And, .Or => {
                 if (std.meta.eql(lhs, OraType.Bool) and std.meta.eql(rhs, OraType.Bool)) {
                     return OraType.Bool;
+                }
+                return TyperError.TypeMismatch;
+            },
+            // Bitwise operators (for flag enums)
+            .BitAnd, .BitOr, .BitXor => {
+                if (self.isNumericType(lhs) and self.isNumericType(rhs)) {
+                    return self.commonNumericType(lhs, rhs);
+                }
+                // Special case: enum types can use bitwise operators for flag enums
+                if (lhs == .Enum and rhs == .Enum) {
+                    if (std.mem.eql(u8, lhs.Enum.name, rhs.Enum.name)) {
+                        return lhs; // Return the enum type
+                    }
                 }
                 return TyperError.TypeMismatch;
             },
@@ -1486,11 +1624,20 @@ pub const Typer = struct {
             .Identifier => |identifier| {
                 // Look up custom types (structs, enums)
                 if (self.getStructType(identifier)) |struct_type| {
-                    // Use arena allocator for type lifetime management
-                    const struct_type_ptr = try self.type_arena.allocator().create(StructType);
-                    struct_type_ptr.* = struct_type.*;
+                    // Return a const pointer directly to avoid copying issues
+                    const struct_type_const_ptr = @as(*const StructType, struct_type);
+                    // Cast to mutable pointer as required by OraType (but we won't mutate it)
+                    const struct_type_ptr = @as(*StructType, @constCast(struct_type_const_ptr));
                     return OraType{ .Struct = struct_type_ptr };
                 }
+
+                // Look up enum types
+                if (self.current_scope.lookup(identifier)) |symbol| {
+                    if (symbol.typ == .Enum) {
+                        return symbol.typ;
+                    }
+                }
+
                 return OraType.Unknown;
             },
             .ErrorUnion => |error_union| {
@@ -1529,6 +1676,11 @@ pub const Typer = struct {
         // Exact type match
         if (self.typeEquals(lhs, rhs)) {
             return true;
+        }
+
+        // Special case: enum types are compatible if they have the same name
+        if (lhs == .Enum and rhs == .Enum) {
+            return std.mem.eql(u8, lhs.Enum.name, rhs.Enum.name);
         }
 
         // Allow compatible numeric conversions
@@ -1730,6 +1882,13 @@ pub const Typer = struct {
                 },
                 else => false,
             },
+            .Enum => |lhs_enum| switch (rhs) {
+                .Enum => |rhs_enum| {
+                    // Compare enum names (enums are equal if they have the same name)
+                    return std.mem.eql(u8, lhs_enum.name, rhs_enum.name);
+                },
+                else => false,
+            },
         };
     }
 
@@ -1792,6 +1951,7 @@ pub const Typer = struct {
                 switch (typ) {
                     .Mapping, .DoubleMap => {}, // OK
                     .Bool, .Address, .U8, .U16, .U32, .U64, .U128, .U256, .I8, .I16, .I32, .I64, .I128, .I256, .String => {}, // OK
+                    .Struct, .Enum => {}, // Custom types are OK in storage
                     else => return TyperError.InvalidMemoryRegion,
                 }
             },

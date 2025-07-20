@@ -1128,11 +1128,23 @@ pub const Parser = struct {
                 const expr_ptr = try self.allocator.create(ast.ExprNode);
                 expr_ptr.* = expr;
 
-                expr = ast.ExprNode{ .FieldAccess = ast.FieldAccessExpr{
-                    .target = expr_ptr,
-                    .field = name_token.lexeme,
-                    .span = makeSpan(name_token),
-                } };
+                // Check if this might be an enum literal (EnumType.VariantName)
+                // We parse it as an enum literal if the left side is a simple identifier
+                if (expr == .Identifier) {
+                    const enum_name = expr.Identifier.name;
+                    expr = ast.ExprNode{ .EnumLiteral = ast.EnumLiteralExpr{
+                        .enum_name = enum_name,
+                        .variant_name = name_token.lexeme,
+                        .span = makeSpan(name_token),
+                    } };
+                } else {
+                    // Otherwise, treat it as field access
+                    expr = ast.ExprNode{ .FieldAccess = ast.FieldAccessExpr{
+                        .target = expr_ptr,
+                        .field = name_token.lexeme,
+                        .span = makeSpan(name_token),
+                    } };
+                }
             } else if (self.match(.LeftBracket)) {
                 const index = try self.parseExpression();
 
@@ -1452,22 +1464,45 @@ pub const Parser = struct {
         } };
     }
 
-    /// Parse enum declaration (placeholder)
+    /// Parse enum declaration with value assignments and base types
     fn parseEnum(self: *Parser) ParserError!AstNode {
         const name_token = try self.consume(.Identifier, "Expected enum name");
+
+        // Parse optional base type: enum Status : u8 { ... }
+        var base_type: ?ast.TypeRef = null;
+        if (self.match(.Colon)) {
+            base_type = try self.parseType();
+        }
+
         _ = try self.consume(.LeftBrace, "Expected '{' after enum name");
 
         var variants = std.ArrayList(ast.EnumVariant).init(self.allocator);
         defer variants.deinit();
 
+        var has_explicit_values = false;
+
         while (!self.check(.RightBrace) and !self.isAtEnd()) {
             const variant_name = try self.consume(.Identifier, "Expected variant name");
-            _ = self.match(.Comma); // Optional comma
+
+            // Parse optional explicit value assignment: VariantName = value
+            var value: ?ast.ExprNode = null;
+            if (self.match(.Equal)) {
+                value = try self.parseExpression();
+                has_explicit_values = true;
+            }
 
             try variants.append(ast.EnumVariant{
                 .name = variant_name.lexeme,
+                .value = value,
                 .span = makeSpan(variant_name),
+                .discriminant = null, // Will be filled during semantic analysis
             });
+
+            // Handle comma separator
+            if (self.check(.RightBrace)) {
+                break; // Allow trailing comma
+            }
+            _ = try self.consume(.Comma, "Expected ',' between enum variants");
         }
 
         _ = try self.consume(.RightBrace, "Expected '}' after enum variants");
@@ -1476,6 +1511,8 @@ pub const Parser = struct {
             .name = name_token.lexeme,
             .variants = try variants.toOwnedSlice(),
             .span = makeSpan(name_token),
+            .base_type = base_type,
+            .has_explicit_values = has_explicit_values,
         } };
     }
 

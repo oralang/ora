@@ -344,9 +344,9 @@ pub const YulCodegen = struct {
                 try signature.appendSlice(",");
             }
 
-            // Convert Ora types to canonical EVM types
-            const evm_type = convertToEVMType(param.type);
-            try signature.appendSlice(evm_type);
+            // Convert Ora types to ABI types for function signatures
+            const abi_type = convertToABIType(param.type);
+            try signature.appendSlice(abi_type);
         }
 
         try signature.appendSlice(")");
@@ -356,32 +356,6 @@ pub const YulCodegen = struct {
 
         // Function selector is first 4 bytes of keccak256 hash
         return std.mem.readInt(u32, hash[0..4], .big);
-    }
-
-    /// Convert Ora types to canonical EVM types for function signatures
-    ///
-    /// Args:
-    ///     ora_type: Ora type to convert
-    ///
-    /// Returns:
-    ///     Canonical EVM type string
-    fn convertToEVMType(ora_type: Type) []const u8 {
-        return switch (ora_type) {
-            .primitive => |prim| switch (prim) {
-                .u8, .u16, .u32, .u64, .u128, .u256 => "uint256",
-                .i8, .i16, .i32, .i64, .i128, .i256 => "int256",
-                .bool => "bool",
-                .address => "address",
-                .string => "string",
-                .bytes => "bytes",
-            },
-            .slice => |_| "uint256[]", // Simplified - slices become uint256[]
-            .mapping => |_| "mapping", // Mappings don't appear in function signatures
-            .custom => |_| "uint256", // Custom types default to uint256
-            .struct_type => |_| "tuple", // Struct types become tuples
-            .error_union => |_| "uint256", // Error unions default to uint256
-            .result => |_| "uint256", // Results default to uint256
-        };
     }
 
     /// Generate Yul code for a function
@@ -1890,6 +1864,113 @@ pub const YulCodegen = struct {
 
         // Calculate keccak256(key || slot)
         return try self.keccak256Hash(input.items);
+    }
+
+    /// Convert Ora type to actual Yul runtime type representation
+    ///
+    /// Yul variables are essentially typeless - everything is a 256-bit word.
+    /// This function returns the actual runtime representation used in Yul code.
+    ///
+    /// Returns:
+    ///     Empty string since Yul variables don't have type annotations
+    fn convertToYulType(ora_type: Type) []const u8 {
+        _ = ora_type; // Yul is typeless - all types are represented the same way
+        return ""; // No type annotation in Yul
+    }
+
+    /// Convert Ora type to ABI encoding type for external interfaces
+    ///
+    /// This is used for function signatures, event definitions, and ABI encoding.
+    /// These are NOT Yul types, but rather Ethereum ABI types.
+    ///
+    /// Returns:
+    ///     ABI type string for external interface encoding
+    fn convertToABIType(ora_type: Type) []const u8 {
+        return switch (ora_type) {
+            .primitive => |primitive| switch (primitive) {
+                // ABI types for external interfaces
+                .u8 => "uint8",
+                .u16 => "uint16",
+                .u32 => "uint32",
+                .u64 => "uint64",
+                .u128 => "uint128",
+                .u256 => "uint256",
+                .i8 => "int8",
+                .i16 => "int16",
+                .i32 => "int32",
+                .i64 => "int64",
+                .i128 => "int128",
+                .i256 => "int256",
+                .bool => "bool",
+                .address => "address",
+                .string => "string",
+                .bytes => "bytes",
+            },
+            .mapping => "mapping", // Not directly ABI encodable
+            .slice => "bytes", // Dynamic byte array
+            .custom => "uint256", // Custom types as 256-bit words
+            .struct_type => "tuple", // Structs become tuples in ABI
+            .enum_type => "uint8", // Enums are small integers (discriminant)
+            .error_union => "tuple", // Error unions are tagged unions
+            .result => "tuple", // Result types are tagged unions
+        };
+    }
+
+    /// Generate Yul type validation function for runtime type checking
+    ///
+    /// Since Yul is typeless, we implement type safety through validation functions.
+    /// This generates the appropriate validation logic for each Ora type.
+    ///
+    /// Returns:
+    ///     Yul code for type validation function
+    fn generateTypeValidation(ora_type: Type, allocator: std.mem.Allocator) ![]const u8 {
+        return switch (ora_type) {
+            .primitive => |primitive| switch (primitive) {
+                .u8 => try std.fmt.allocPrint(allocator,
+                    \\function validateU8(value) -> result {{
+                    \\    if gt(value, 0xff) {{ revert(0, 0) }}
+                    \\    result := value
+                    \\}}
+                ),
+                .u16 => try std.fmt.allocPrint(allocator,
+                    \\function validateU16(value) -> result {{
+                    \\    if gt(value, 0xffff) {{ revert(0, 0) }}
+                    \\    result := value
+                    \\}}
+                ),
+                .u32 => try std.fmt.allocPrint(allocator,
+                    \\function validateU32(value) -> result {{
+                    \\    if gt(value, 0xffffffff) {{ revert(0, 0) }}
+                    \\    result := value
+                    \\}}
+                ),
+                .address => try std.fmt.allocPrint(allocator,
+                    \\function validateAddress(value) -> result {{
+                    \\    if gt(value, 0xffffffffffffffffffffffffffffffffffffffff) {{ revert(0, 0) }}
+                    \\    result := value
+                    \\}}
+                ),
+                .i8 => try std.fmt.allocPrint(allocator,
+                    \\function validateI8(value) -> result {{
+                    \\    result := signextend(0, value)
+                    \\    if or(gt(result, 0x7f), lt(result, not(0x7f))) {{ revert(0, 0) }}
+                    \\}}
+                ),
+                // Other types don't need validation or are handled specially
+                else => "",
+            },
+            .enum_type => |enum_type| {
+                // Generate validation for enum discriminant values
+                const max_discriminant = enum_type.variants.len - 1;
+                return try std.fmt.allocPrint(allocator,
+                    \\function validateEnum_{s}(value) -> result {{
+                    \\    if gt(value, {d}) {{ revert(0, 0) }}
+                    \\    result := value
+                    \\}}
+                , .{ enum_type.name, max_discriminant });
+            },
+            else => "", // No validation needed for other types
+        };
     }
 };
 

@@ -69,6 +69,7 @@ pub const Type = union(enum) {
     slice: SliceType,
     custom: CustomType,
     struct_type: StructType, // Add struct type support
+    enum_type: EnumType, // Add enum type support
 
     // Error handling types
     error_union: ErrorUnionType,
@@ -158,6 +159,16 @@ pub const Type = union(enum) {
         error_type: *Type,
     };
 
+    pub const EnumType = struct {
+        name: []const u8,
+        variants: []EnumVariant,
+
+        pub const EnumVariant = struct {
+            name: []const u8,
+            value: *Expression,
+        };
+    };
+
     pub fn deinit(self: *Type, allocator: Allocator) void {
         switch (self.*) {
             .primitive => {},
@@ -188,6 +199,13 @@ pub const Type = union(enum) {
                     allocator.destroy(field.field_type);
                 }
                 allocator.free(struct_type.fields);
+            },
+            .enum_type => |*enum_type| {
+                for (enum_type.variants) |*variant| {
+                    variant.value.deinit();
+                    allocator.destroy(variant.value);
+                }
+                allocator.free(enum_type.variants);
             },
         }
     }
@@ -225,6 +243,13 @@ pub const Type = union(enum) {
                 .struct_type => |struct_type2| {
                     // Struct types are compatible if they have the same name
                     return std.mem.eql(u8, struct_type1.name, struct_type2.name);
+                },
+                else => false,
+            },
+            .enum_type => |enum_type1| switch (other.*) {
+                .enum_type => |enum_type2| {
+                    // Enum types are compatible if they have the same name
+                    return std.mem.eql(u8, enum_type1.name, enum_type2.name);
                 },
                 else => false,
             },
@@ -3117,6 +3142,18 @@ pub const JSONSerializer = struct {
                 }
                 try writer.writeAll("]}");
             },
+            .enum_type => |enum_type| {
+                try writer.writeAll("{\"type\": \"enum\", \"name\": \"");
+                try writer.writeAll(enum_type.name);
+                try writer.writeAll("\", \"variants\": [");
+                for (enum_type.variants, 0..) |variant, i| {
+                    if (i > 0) try writer.writeAll(", ");
+                    try writer.writeAll("{\"name\": \"");
+                    try writer.writeAll(variant.name);
+                    try writer.writeAll("\"}");
+                }
+                try writer.writeAll("]}");
+            },
         }
     }
 
@@ -3219,6 +3256,11 @@ pub const ASTToHIRConverter = struct {
                 .LogDecl => |*log_decl| {
                     const hir_event = try self.convertEvent(log_decl);
                     try events.append(hir_event);
+                },
+                .EnumDecl => |*enum_decl| {
+                    // Register enum type in HIR
+                    _ = enum_decl; // For now, just suppress unused variable warning
+                    // TODO: Add proper enum type registration to HIR
                 },
                 else => {
                     // Skip other member types for now
@@ -4113,6 +4155,15 @@ pub const ASTToHIRConverter = struct {
                     },
                 };
             },
+            .EnumLiteral => |*enum_literal| {
+                // Convert enum literal to HIR
+                // For now, represent enum literals as their discriminant values
+                _ = enum_literal; // Suppress unused variable warning
+
+                hir_expr.* = Expression{
+                    .literal = Literal{ .integer = "0" }, // For now, represent as discriminant value
+                };
+            },
             else => {
                 // Create a placeholder literal for unsupported expressions
                 hir_expr.* = Expression{
@@ -4183,10 +4234,15 @@ pub const ASTToHIRConverter = struct {
                 if (self.resolveStructType(name)) |struct_type| {
                     return struct_type;
                 } else |_| {
-                    // Fall back to custom type
-                    return Type{
-                        .custom = Type.CustomType{ .name = name },
-                    };
+                    // Try to resolve as enum type
+                    if (self.resolveEnumType(name)) |enum_type| {
+                        return enum_type;
+                    } else |_| {
+                        // Fall back to custom type
+                        return Type{
+                            .custom = Type.CustomType{ .name = name },
+                        };
+                    }
                 }
             },
             else => Type{ .primitive = .u256 }, // Default fallback
@@ -4214,6 +4270,23 @@ pub const ASTToHIRConverter = struct {
                     .packed_efficiently = true,
                 },
                 .origin_type = null,
+            },
+        };
+    }
+
+    /// Resolve an enum type by name
+    fn resolveEnumType(self: *ASTToHIRConverter, name: []const u8) anyerror!Type {
+        // This is a placeholder implementation
+        // In a full implementation, this would look up the enum type
+        // from a type registry or symbol table
+
+        // For now, create a basic enum type
+        const variants = try self.allocator.alloc(Type.EnumType.EnumVariant, 0);
+
+        return Type{
+            .enum_type = Type.EnumType{
+                .name = name,
+                .variants = variants,
             },
         };
     }

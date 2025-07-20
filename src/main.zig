@@ -234,7 +234,13 @@ fn runSemanticAnalysis(allocator: std.mem.Allocator, file_path: []const u8) !voi
         try stdout.print("Semantic analysis failed: {}\n", .{err});
         return;
     };
-    defer allocator.free(diagnostics);
+    defer {
+        // Free each diagnostic message before freeing the array
+        for (diagnostics) |diagnostic| {
+            allocator.free(diagnostic.message);
+        }
+        allocator.free(diagnostics);
+    }
 
     try stdout.print("Semantic analysis completed with {} diagnostics\n", .{diagnostics.len});
     for (diagnostics) |diagnostic| {
@@ -381,7 +387,13 @@ fn runFullCompilation(allocator: std.mem.Allocator, file_path: []const u8) !void
         try stdout.print("Semantic analysis failed: {}\n", .{err});
         return;
     };
-    defer allocator.free(diagnostics);
+    defer {
+        // Free each diagnostic message before freeing the array
+        for (diagnostics) |diagnostic| {
+            allocator.free(diagnostic.message);
+        }
+        allocator.free(diagnostics);
+    }
 
     try stdout.print("Semantic analysis completed with {} diagnostics\n", .{diagnostics.len});
     for (diagnostics) |diagnostic| {
