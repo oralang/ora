@@ -1,0 +1,12 @@
+struct Point {
+    x: u32,
+    y: u32,
+}
+
+contract Demo {
+    storage location: Point;
+    
+    pub fn init() {
+        location = Point { x: 10, y: 20 };
+    }
+}

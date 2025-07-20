@@ -1,0 +1,15 @@
+struct Point {
+    x: u32,
+    y: u32,
+}
+
+struct User {
+    name: string,
+    age: u8,
+    balance: u256,
+    location: Point,
+}
+
+contract StructDemo {
+    storage data: Point;
+}

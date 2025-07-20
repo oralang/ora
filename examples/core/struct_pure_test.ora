@@ -1,0 +1,9 @@
+struct Point {
+    x: u32,
+    y: u32,
+}
+
+contract Demo {
+    pub fn init() {
+    }
+}

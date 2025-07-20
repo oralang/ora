@@ -1,0 +1,21 @@
+struct User {
+    name: string,
+    age: u32, 
+    balance: u256,
+    active: bool,
+    metadata: map[string, string],
+}
+
+contract TestStruct {
+    storage users: User;
+    
+    pub fn init() {
+        users = User{
+            name: "Alice",
+            age: 25,
+            balance: 1000,
+            active: true,
+            metadata: {}
+        };
+    }
+}

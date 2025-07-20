@@ -1,0 +1,158 @@
+// Advanced enum example with different base types and error handling
+contract EnumAdvancedTest {
+    
+    // Error declarations
+    error InvalidTokenType;
+    error InvalidOperationState;
+    error InsufficientPermissions;
+    
+    // Enum with different base types
+    enum TokenType : u256 {
+        ERC20 = 0x1,
+        ERC721 = 0x2,
+        ERC1155 = 0x3
+    }
+    
+    // Permission levels with u16 base type
+    enum PermissionLevel : u16 {
+        None = 0,
+        Read = 1,
+        Write = 2,
+        Admin = 4,
+        Owner = 8
+    }
+    
+    // Operation states with automatic assignment
+    enum OperationState {
+        Pending,
+        Processing,
+        Completed,
+        Failed,
+        Cancelled
+    }
+    
+    // Storage variables
+    storage var token_type: TokenType;
+    storage var user_permissions: PermissionLevel;
+    storage var current_operation: OperationState;
+    
+    // Contract initialization
+    pub fn init() 
+        requires true
+        ensures token_type == TokenType.ERC20
+        ensures user_permissions == PermissionLevel.Owner
+        ensures current_operation == OperationState.Pending
+    {
+        token_type = TokenType.ERC20;
+        user_permissions = PermissionLevel.Owner;
+        current_operation = OperationState.Pending;
+    }
+    
+    // Function to set token type with validation
+    pub fn setTokenType(new_type: TokenType) -> !TokenType
+        requires new_type == TokenType.ERC20 || new_type == TokenType.ERC721 || new_type == TokenType.ERC1155
+        ensures token_type == new_type
+    {
+        // Validate token type
+        if (new_type != TokenType.ERC20 && 
+            new_type != TokenType.ERC721 && 
+            new_type != TokenType.ERC1155) {
+            return error.InvalidTokenType;
+        }
+        
+        token_type = new_type;
+        return token_type;
+    }
+    
+    // Function to update operation state
+    pub fn updateOperationState(new_state: OperationState) -> !OperationState
+        requires new_state != current_operation
+        ensures current_operation == new_state
+    {
+        // Validate state transition
+        if (current_operation == OperationState.Completed && new_state != OperationState.Pending) {
+            return error.InvalidOperationState;
+        }
+        
+        current_operation = new_state;
+        return current_operation;
+    }
+    
+    // Function to check permissions
+    pub fn checkPermission(required_permission: PermissionLevel) -> !bool
+        requires required_permission != PermissionLevel.None
+    {
+        if (user_permissions == PermissionLevel.None) {
+            return error.InsufficientPermissions;
+        }
+        
+        // Check if user has required permission level
+        return user_permissions >= required_permission;
+    }
+    
+    // Function to grant permissions
+    pub fn grantPermission(permission: PermissionLevel) -> !PermissionLevel
+        requires user_permissions == PermissionLevel.Owner
+        ensures user_permissions >= permission
+    {
+        if (user_permissions != PermissionLevel.Owner) {
+            return error.InsufficientPermissions;
+        }
+        
+        // Grant permission by OR-ing with existing permissions
+        user_permissions = user_permissions | permission;
+        return user_permissions;
+    }
+    
+    // Function demonstrating enum arithmetic
+    pub fn calculateCombinedPermissions(perm1: PermissionLevel, perm2: PermissionLevel) -> PermissionLevel
+        requires perm1 != PermissionLevel.None && perm2 != PermissionLevel.None
+    {
+        return perm1 | perm2;
+    }
+    
+    // Function to get token type as string
+    pub fn getTokenTypeName() -> string {
+        if (token_type == TokenType.ERC20) {
+            return "ERC20";
+        } else if (token_type == TokenType.ERC721) {
+            return "ERC721";
+        } else if (token_type == TokenType.ERC1155) {
+            return "ERC1155";
+        }
+        return "Unknown";
+    }
+    
+    // Function to get operation state as string
+    pub fn getOperationStateName() -> string {
+        if (current_operation == OperationState.Pending) {
+            return "Pending";
+        } else if (current_operation == OperationState.Processing) {
+            return "Processing";
+        } else if (current_operation == OperationState.Completed) {
+            return "Completed";
+        } else if (current_operation == OperationState.Failed) {
+            return "Failed";
+        } else if (current_operation == OperationState.Cancelled) {
+            return "Cancelled";
+        }
+        return "Unknown";
+    }
+    
+    // Function demonstrating enum as return type with error handling
+    pub fn getNextOperationState() -> !OperationState
+        requires current_operation != OperationState.Completed
+    {
+        if (current_operation == OperationState.Pending) {
+            return OperationState.Processing;
+        } else if (current_operation == OperationState.Processing) {
+            return OperationState.Completed;
+        } else if (current_operation == OperationState.Failed) {
+            return OperationState.Pending;
+        } else if (current_operation == OperationState.Cancelled) {
+            return OperationState.Pending;
+        }
+        
+        return error.InvalidOperationState;
+    }
+} 

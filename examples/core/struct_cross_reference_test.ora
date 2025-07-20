@@ -1,0 +1,12 @@
+struct Point {
+    x: u32,
+}
+
+struct User {
+    location: Point,
+}
+
+contract Test {
+    pub fn init() {
+    }
+}

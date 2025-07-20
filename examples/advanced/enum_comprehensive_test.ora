@@ -1,0 +1,253 @@
+// Comprehensive enum test demonstrating all enum features
+contract EnumComprehensiveTest {
+    
+    // Error declarations for testing
+    error InvalidState;
+    error InvalidValue;
+    error UnauthorizedAccess;
+    
+    // Test enum with default base type (u32)
+    enum SimpleEnum {
+        First,
+        Second,
+        Third
+    }
+    
+    // Test enum with explicit u8 base type
+    enum SmallEnum : u8 {
+        Alpha = 1,
+        Beta = 2,
+        Gamma = 3
+    }
+    
+    // Test enum with u256 base type and hex values
+    enum LargeEnum : u256 {
+        MinValue = 0x1,
+        MidValue = 0x1000,
+        MaxValue = 0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff
+    }
+    
+    // Test enum with mixed explicit and implicit values
+    enum MixedEnum {
+        Start,        // 0
+        Middle = 100, // 100
+        End,          // 101
+        Final = 200   // 200
+    }
+    
+    // Test enum with signed base type
+    enum SignedEnum : i32 {
+        Negative = -100,
+        Zero = 0,
+        Positive = 100
+    }
+    
+    // Test enum for state machine
+    enum StateMachine {
+        Initial,
+        Processing,
+        Completed,
+        Error
+    }
+    
+    // Storage variables for testing
+    storage var simple_state: SimpleEnum;
+    storage var small_value: SmallEnum;
+    storage var large_value: LargeEnum;
+    storage var mixed_value: MixedEnum;
+    storage var signed_value: SignedEnum;
+    storage var state_machine: StateMachine;
+    
+    // Contract initialization with formal verification
+    pub fn init()
+        ensures simple_state == SimpleEnum.First
+        ensures small_value == SmallEnum.Alpha
+        ensures large_value == LargeEnum.MinValue
+        ensures mixed_value == MixedEnum.Start
+        ensures signed_value == SignedEnum.Zero
+        ensures state_machine == StateMachine.Initial
+    {
+        simple_state = SimpleEnum.First;
+        small_value = SmallEnum.Alpha;
+        large_value = LargeEnum.MinValue;
+        mixed_value = MixedEnum.Start;
+        signed_value = SignedEnum.Zero;
+        state_machine = StateMachine.Initial;
+    }
+    
+    // Test function: enum assignment and comparison
+    pub fn testEnumAssignment() -> bool
+        ensures simple_state == SimpleEnum.Second
+    {
+        simple_state = SimpleEnum.Second;
+        return simple_state == SimpleEnum.Second;
+    }
+    
+    // Test function: enum with explicit values
+    pub fn testExplicitValues() -> bool {
+        small_value = SmallEnum.Beta;
+        // Test that Beta has value 2
+        return small_value == SmallEnum.Beta;
+    }
+    
+    // Test function: enum with large values
+    pub fn testLargeValues() -> bool {
+        large_value = LargeEnum.MaxValue;
+        return large_value == LargeEnum.MaxValue;
+    }
+    
+    // Test function: mixed enum values
+    pub fn testMixedValues() -> bool {
+        mixed_value = MixedEnum.Middle;
+        // Test that Middle has value 100
+        return mixed_value == MixedEnum.Middle;
+    }
+    
+    // Test function: signed enum values
+    pub fn testSignedValues() -> bool {
+        signed_value = SignedEnum.Negative;
+        return signed_value == SignedEnum.Negative;
+    }
+    
+    // Test function: enum state machine
+    pub fn testStateMachine() -> !StateMachine
+        requires state_machine == StateMachine.Initial
+        ensures state_machine == StateMachine.Processing
+    {
+        if (state_machine != StateMachine.Initial) {
+            return error.InvalidState;
+        }
+        
+        state_machine = StateMachine.Processing;
+        return state_machine;
+    }
+    
+    // Test function: enum equality
+    pub fn testEnumEquality() -> bool {
+        return (simple_state == SimpleEnum.Second) && 
+               (small_value == SmallEnum.Beta) &&
+               (large_value == LargeEnum.MaxValue);
+    }
+    
+    // Test function: enum inequality
+    pub fn testEnumInequality() -> bool {
+        return (simple_state != SimpleEnum.First) &&
+               (small_value != SmallEnum.Alpha) &&
+               (mixed_value != MixedEnum.Start);
+    }
+    
+    // Test function: enum as function parameter
+    pub fn setSimpleState(new_state: SimpleEnum) -> SimpleEnum
+        ensures simple_state == new_state
+    {
+        simple_state = new_state;
+        return simple_state;
+    }
+    
+    // Test function: enum as function return value
+    pub fn getSimpleState() -> SimpleEnum {
+        return simple_state;
+    }
+    
+    // Test function: enum with error handling
+    pub fn changeState(new_state: StateMachine) -> !StateMachine
+        requires new_state != state_machine
+        ensures state_machine == new_state
+    {
+        // State transition validation
+        if (state_machine == StateMachine.Completed && new_state != StateMachine.Initial) {
+            return error.InvalidState;
+        }
+        
+        if (state_machine == StateMachine.Error && new_state != StateMachine.Initial) {
+            return error.InvalidState;
+        }
+        
+        state_machine = new_state;
+        return state_machine;
+    }
+    
+    // Test function: enum value validation
+    pub fn validateSmallValue(value: SmallEnum) -> !bool
+        requires value == SmallEnum.Alpha || value == SmallEnum.Beta || value == SmallEnum.Gamma
+    {
+        if (value != SmallEnum.Alpha && 
+            value != SmallEnum.Beta && 
+            value != SmallEnum.Gamma) {
+            return error.InvalidValue;
+        }
+        
+        return true;
+    }
+    
+    // Test function: enum value conversion to string
+    pub fn enumToString(value: SimpleEnum) -> string {
+        if (value == SimpleEnum.First) {
+            return "First";
+        } else if (value == SimpleEnum.Second) {
+            return "Second";
+        } else if (value == SimpleEnum.Third) {
+            return "Third";
+        }
+        return "Unknown";
+    }
+    
+    // Test function: enum value conversion from string (simulation)
+    pub fn stringToEnum(value: string) -> !SimpleEnum {
+        if (value == "First") {
+            return SimpleEnum.First;
+        } else if (value == "Second") {
+            return SimpleEnum.Second;
+        } else if (value == "Third") {
+            return SimpleEnum.Third;
+        }
+        return error.InvalidValue;
+    }
+    
+    // Test function: complex enum state machine with formal verification
+    pub fn processStateMachine() -> !StateMachine
+        requires state_machine == StateMachine.Processing
+        ensures state_machine == StateMachine.Completed || state_machine == StateMachine.Error
+    {
+        if (state_machine != StateMachine.Processing) {
+            return error.InvalidState;
+        }
+        
+        // Simulate processing logic
+        // For testing, let's say processing always succeeds
+        state_machine = StateMachine.Completed;
+        return state_machine;
+    }
+    
+    // Test function: enum value ranges
+    pub fn testValueRanges() -> bool {
+        // Test that enum values are within expected ranges
+        return (small_value >= SmallEnum.Alpha && small_value <= SmallEnum.Gamma) &&
+               (mixed_value >= MixedEnum.Start && mixed_value <= MixedEnum.Final) &&
+               (signed_value >= SignedEnum.Negative && signed_value <= SignedEnum.Positive);
+    }
+    
+    // Test function: enum invariant
+    invariant enum_invariant: 
+        simple_state == SimpleEnum.First || 
+        simple_state == SimpleEnum.Second || 
+        simple_state == SimpleEnum.Third;
+    
+    // Test function: enum with precondition
+    pub fn requiresValidState() -> bool
+        requires state_machine == StateMachine.Initial || 
+                 state_machine == StateMachine.Processing ||
+                 state_machine == StateMachine.Completed
+    {
+        return true;
+    }
+    
+    // Test function: enum with postcondition
+    pub fn ensuresValidTransition() -> StateMachine
+        requires state_machine == StateMachine.Initial
+        ensures state_machine == StateMachine.Processing
+    {
+        state_machine = StateMachine.Processing;
+        return state_machine;
+    }
+} 
