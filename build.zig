@@ -306,6 +306,11 @@ fn buildSolidityLibrariesImpl(step: *std.Build.Step, options: std.Build.Step.Mak
         std.log.info("Adding Boost paths for Apple Silicon Mac", .{});
         // macOS already uses libc++ by default, but be explicit
         try cmake_args.append("-DCMAKE_CXX_FLAGS=-stdlib=libc++");
+    } else if (builtin.os.tag == .windows) {
+        std.log.info("Adding Boost paths for Windows", .{});
+        // Windows: Use MSVC by default, but ensure release mode
+        try cmake_args.append("-DCMAKE_CXX_FLAGS=/std:c++20");
+        try cmake_args.append("-DBOOST_ROOT=C:/tools/boost");
     }
 
     // Configure CMake

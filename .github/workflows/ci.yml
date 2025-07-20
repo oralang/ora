@@ -29,6 +29,7 @@ jobs:
           version: ${{ env.ZIG_VERSION }}
 
       - name: Install system dependencies
+        shell: bash
         run: |
           echo "🔧 Installing system dependencies for ${{ runner.os }}..."
           case "${{ runner.os }}" in
@@ -106,6 +107,7 @@ jobs:
           version: ${{ matrix.zig-version }}
 
       - name: Install system dependencies
+        shell: bash
         run: |
           echo "🔧 Installing system dependencies for ${{ runner.os }}..."
           case "${{ runner.os }}" in
@@ -145,12 +147,14 @@ jobs:
             ${{ runner.os }}-zig-${{ matrix.zig-version }}-
 
       - name: Build project
+        shell: bash
         run: |
           echo "🔨 Building Ora compiler..."
           zig build
           echo "✅ Build successful"
 
       - name: Run tests
+        shell: bash
         run: |
           echo "🧪 Running test suite..."
           zig test src/lexer.zig || echo "⚠️  Lexer tests failed"
@@ -164,6 +168,7 @@ jobs:
           echo "✅ Test suite completed"
 
       - name: Test individual components
+        shell: bash
         run: |
           echo "🔧 Testing individual components..."
           zig build-lib src/lexer.zig && echo "✅ Lexer compiles"
@@ -176,6 +181,7 @@ jobs:
           zig build-lib src/formal_verifier.zig && echo "✅ Formal verifier compiles"
 
       - name: Clean up build artifacts
+        shell: bash
         run: |
           rm -f lib*.a lib*.a.o
 
@@ -196,6 +202,7 @@ jobs:
           version: ${{ env.ZIG_VERSION }}
 
       - name: Install system dependencies
+        shell: bash
         run: |
           echo "🔧 Installing system dependencies for ${{ runner.os }}..."
           case "${{ runner.os }}" in
@@ -235,6 +242,7 @@ jobs:
             ${{ runner.os }}-zig-${{ env.ZIG_VERSION }}-
 
       - name: Build examples
+        shell: bash
         run: |
           echo "📚 Building examples..."
           zig build
@@ -272,7 +280,7 @@ jobs:
     
     strategy:
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        os: [ubuntu-latest, macos-latest, windows-latest]
         
     steps:
       - name: Checkout code
@@ -286,6 +294,7 @@ jobs:
           version: ${{ env.ZIG_VERSION }}
 
       - name: Install system dependencies
+        shell: bash
         run: |
           echo "🔧 Installing system dependencies for ${{ runner.os }}..."
           case "${{ runner.os }}" in
@@ -325,11 +334,13 @@ jobs:
             ${{ runner.os }}-zig-${{ env.ZIG_VERSION }}-
 
       - name: Run struct tests
+        shell: bash
         run: |
           echo "🏗️  Running comprehensive struct tests..."
           ./scripts/test-struct-examples.sh
 
       - name: Run struct performance benchmarks
+        shell: bash
         run: |
           echo "⚡ Running struct performance benchmarks..."
           ./scripts/test-struct-examples.sh --benchmark
@@ -363,11 +374,13 @@ jobs:
           submodules: recursive
 
       - name: Run security scan
+        shell: bash
         run: |
           echo "🔍 Running basic security scan..."
           # Basic security checks - more comprehensive scans in security.yml
 
       - name: Check for security issues
+        shell: bash
         run: |
           echo "🔒 Running security checks..."
           
@@ -406,6 +419,7 @@ jobs:
           version: ${{ env.ZIG_VERSION }}
 
       - name: Install system dependencies
+        shell: bash
         run: |
           echo "🔧 Installing system dependencies for ${{ runner.os }}..."
           case "${{ runner.os }}" in
@@ -445,11 +459,13 @@ jobs:
             ${{ runner.os }}-zig-${{ env.ZIG_VERSION }}-
 
       - name: Build with optimizations
+        shell: bash
         run: |
           echo "🚀 Building optimized version..."
           zig build -Doptimize=ReleaseFast
 
       - name: Run performance tests
+        shell: bash
         run: |
           echo "⚡ Running performance benchmarks..."
           
@@ -483,6 +499,7 @@ jobs:
           version: ${{ env.ZIG_VERSION }}
 
       - name: Install system dependencies
+        shell: bash
         run: |
           echo "🔧 Installing system dependencies for ${{ runner.os }}..."
           case "${{ runner.os }}" in
@@ -512,6 +529,7 @@ jobs:
           esac
 
       - name: Build release version
+        shell: bash
         run: |
           echo "🎯 Building release version..."
           zig build -Doptimize=ReleaseFast -Dtarget=x86_64-linux
@@ -520,6 +538,7 @@ jobs:
           echo "✅ Release builds completed"
 
       - name: Create release summary
+        shell: bash
         run: |
           echo "📋 Release Summary:" > release-summary.md
           echo "- Commit: ${{ github.sha }}" >> release-summary.md
