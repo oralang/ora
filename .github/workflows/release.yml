@@ -32,6 +32,9 @@ on:
 env:
   ZIG_VERSION: 0.14.1
 
+permissions:
+  contents: write
+
 jobs:
   create-release:
     name: Create Release
