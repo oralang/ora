@@ -12,7 +12,7 @@ pub fn main() !void {
     const allocator = gpa.allocator();
 
     // Read the test contract
-    const file_path = "examples/simple_test.ora";
+    const file_path = "examples/core/simple_test.ora";
     const source = std.fs.cwd().readFileAlloc(allocator, file_path, 1024 * 1024) catch |err| {
         std.debug.print("Error reading file {s}: {}\n", .{ file_path, err });
         return;
@@ -270,7 +270,14 @@ fn printTypeRef(type_ref: ast.TypeRef) void {
         .U64 => std.debug.print("u64", .{}),
         .U128 => std.debug.print("u128", .{}),
         .U256 => std.debug.print("u256", .{}),
+        .I8 => std.debug.print("i8", .{}),
+        .I16 => std.debug.print("i16", .{}),
+        .I32 => std.debug.print("i32", .{}),
+        .I64 => std.debug.print("i64", .{}),
+        .I128 => std.debug.print("i128", .{}),
+        .I256 => std.debug.print("i256", .{}),
         .String => std.debug.print("string", .{}),
+        .Bytes => std.debug.print("bytes", .{}),
         .Slice => |slice| {
             std.debug.print("slice[", .{});
             printTypeRef(slice.*);
@@ -293,5 +300,25 @@ fn printTypeRef(type_ref: ast.TypeRef) void {
             std.debug.print("]", .{});
         },
         .Identifier => |name| std.debug.print("{s}", .{name}),
+        .Tuple => |tuple| {
+            std.debug.print("(", .{});
+            for (tuple.types, 0..) |tuple_type, i| {
+                if (i > 0) std.debug.print(", ", .{});
+                printTypeRef(tuple_type);
+            }
+            std.debug.print(")", .{});
+        },
+        .ErrorUnion => |error_union| {
+            std.debug.print("!", .{});
+            printTypeRef(error_union.success_type.*);
+        },
+        .Result => |result| {
+            std.debug.print("Result[", .{});
+            printTypeRef(result.ok_type.*);
+            std.debug.print(", ", .{});
+            printTypeRef(result.error_type.*);
+            std.debug.print("]", .{});
+        },
+        .Unknown => std.debug.print("unknown", .{}),
     }
 }
