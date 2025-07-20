@@ -248,40 +248,14 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-zig-${{ env.ZIG_VERSION }}-
 
-      - name: Build examples
+      - name: Build and test examples
         shell: bash
         run: |
-          echo "📚 Building examples..."
-          zig build
-          
-          # Check if examples directory exists
-          if [ -d "examples" ]; then
-            echo "🔍 Found examples directory"
-            find examples/ -name "*.ora" -exec echo "📄 Found example: {}" \;
-            
-            # Try to compile each .ora file (if we have a compiler binary)
-            if [ -f "zig-out/bin/ora" ]; then
-              echo "🚀 Testing compiler on examples..."
-              
-              # Run general examples test
-              if [ -f "scripts/test-examples.sh" ]; then
-                echo "📜 Running test-examples.sh script..."
-                ./scripts/test-examples.sh || echo "⚠️  Some examples failed via test script"
-              else
-                echo "ℹ️  No test-examples.sh script found, trying manual compilation..."
-                find examples/ -name "*.ora" -exec echo "Compiling: {}" \; -exec ./zig-out/bin/ora {} \; || echo "⚠️  Some examples failed to compile"
-              fi
-            else
-              echo "ℹ️  No compiler binary found, skipping example compilation"
-            fi
-          else
-            echo "ℹ️  No examples directory found"
-          fi
-          
-          echo "✅ Examples processing completed"
+          echo "🧪 Running unified test suite..."
+          ./scripts/test-all.sh -q all
 
-  struct-tests:
-    name: Struct Implementation Tests
+  comprehensive-tests:
+    name: Comprehensive Feature Tests
     runs-on: ${{ matrix.os }}
     needs: [lint, test]
     
@@ -343,17 +317,11 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-zig-${{ env.ZIG_VERSION }}-
 
-      - name: Run struct tests
+      - name: Run comprehensive tests
         shell: bash
         run: |
-          echo "🏗️  Running comprehensive struct tests..."
-          ./scripts/test-struct-examples.sh
-
-      - name: Run struct performance benchmarks
-        shell: bash
-        run: |
-          echo "⚡ Running struct performance benchmarks..."
-          ./scripts/test-struct-examples.sh --benchmark
+          echo "🏗️  Running comprehensive tests..."
+          ./scripts/test-all.sh struct enum core advanced
 
       - name: Upload test results
         uses: actions/upload-artifact@v4
@@ -495,7 +463,7 @@ jobs:
     name: Release Check
     runs-on: ubuntu-latest
     if: github.ref == 'refs/heads/main'
-    needs: [lint, test, examples, struct-tests, security]
+    needs: [lint, test, examples, comprehensive-tests, security]
     
     steps:
       - name: Checkout code
@@ -573,11 +541,11 @@ jobs:
     name: Notification
     runs-on: ubuntu-latest
     if: always()
-    needs: [lint, test, examples, struct-tests, security]
+    needs: [lint, test, examples, comprehensive-tests, security]
     
     steps:
       - name: Notify on success
-        if: needs.lint.result == 'success' && needs.test.result == 'success' && needs.examples.result == 'success' && needs.struct-tests.result == 'success'
+        if: needs.lint.result == 'success' && needs.test.result == 'success' && needs.examples.result == 'success' && needs.comprehensive-tests.result == 'success'
         run: |
           echo "✅ 🎉 All CI checks passed successfully!"
           echo "📊 Results:"
