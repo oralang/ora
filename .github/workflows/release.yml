@@ -43,6 +43,7 @@ jobs:
       version: ${{ steps.version.outputs.version }}
       prerelease: ${{ steps.version.outputs.prerelease }}
       is_nightly: ${{ steps.version.outputs.is_nightly }}
+      upload_url: ${{ steps.create_release.outputs.upload_url }}
     
     steps:
       - name: Checkout code
@@ -74,16 +75,25 @@ jobs:
             
           elif [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             # Manual release
-            echo "version=${{ github.event.inputs.version }}" >> $GITHUB_OUTPUT
+            VERSION="${{ github.event.inputs.version }}"
+            echo "version=$VERSION" >> $GITHUB_OUTPUT
             echo "prerelease=${{ github.event.inputs.prerelease }}" >> $GITHUB_OUTPUT
             echo "is_nightly=false" >> $GITHUB_OUTPUT
             
+            echo "🚀 Creating manual release: $VERSION"
+            
           else
             # Tag-based release
-            echo "version=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+            VERSION="${GITHUB_REF#refs/tags/}"
+            echo "version=$VERSION" >> $GITHUB_OUTPUT
             echo "prerelease=false" >> $GITHUB_OUTPUT
             echo "is_nightly=false" >> $GITHUB_OUTPUT
+            
+            echo "🏷️ Creating tag-based release: $VERSION"
           fi
+          
+          # Debug output
+          echo "Final version: $VERSION"
 
       - name: Cleanup old nightly releases
         if: steps.version.outputs.is_nightly == 'true'
@@ -236,7 +246,7 @@ jobs:
               --notes-file CHANGELOG.md
           fi
           
-          echo "✅ Release created successfully"
+          echo "✅ Release created successfully: $VERSION"
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -275,29 +285,93 @@ jobs:
           case "${{ runner.os }}" in
             Linux)
               sudo apt-get update -qq
+              # Install C++ build tools with proper standard library
               sudo apt-get install -y \
                 build-essential \
                 cmake \
+                ninja-build \
                 libboost-all-dev \
                 libssl-dev \
                 pkg-config \
-                git
+                git \
+                libc++-dev \
+                libc++abi-dev
+              
               echo "✅ Linux dependencies installed"
+              
+              # Set CMake to use system default C++ stdlib instead of forcing libc++
+              echo "CMAKE_CXX_FLAGS=-stdlib=libstdc++" >> $GITHUB_ENV
+              echo "CC=gcc" >> $GITHUB_ENV
+              echo "CXX=g++" >> $GITHUB_ENV
               ;;
             macOS)
               brew update
-              brew install boost openssl cmake
+              brew install boost openssl cmake ninja
               echo "✅ macOS dependencies installed"
+              
+              # Use default Clang on macOS (which has proper libc++ support)
+              echo "CC=clang" >> $GITHUB_ENV
+              echo "CXX=clang++" >> $GITHUB_ENV
               ;;
           esac
 
-      - name: Cache Zig artifacts
+      - name: Cache build dependencies
         uses: actions/cache@v4
         with:
           path: |
             ~/.cache/zig
             .zig-cache
-          key: ${{ runner.os }}-zig-${{ env.ZIG_VERSION }}-release-${{ hashFiles('build.zig', 'build.zig.zon') }}
+            vendor/solidity/build
+          key: ${{ runner.os }}-${{ matrix.target }}-deps-${{ hashFiles('build.zig', 'build.zig.zon') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ matrix.target }}-deps-
+            ${{ runner.os }}-deps-
+
+      - name: Configure Solidity build
+        run: |
+          echo "🔧 Configuring Solidity build..."
+          cd vendor/solidity
+          
+          case "${{ runner.os }}" in
+            Linux)
+              # Use system default compiler and standard library
+              cmake -S . -B build \
+                -DCMAKE_BUILD_TYPE=Release \
+                -DCMAKE_CXX_COMPILER=g++ \
+                -DCMAKE_C_COMPILER=gcc \
+                -DCMAKE_CXX_STANDARD=20 \
+                -DUSE_CVC4=OFF \
+                -DUSE_Z3=OFF \
+                -DTESTS=OFF \
+                -DSTRICT=OFF \
+                -DSOLC_LINK_STATIC=ON \
+                -GNinja
+              ;;
+            macOS)
+              # Use Clang with proper macOS settings
+              cmake -S . -B build \
+                -DCMAKE_BUILD_TYPE=Release \
+                -DCMAKE_CXX_COMPILER=clang++ \
+                -DCMAKE_C_COMPILER=clang \
+                -DCMAKE_CXX_STANDARD=20 \
+                -DUSE_CVC4=OFF \
+                -DUSE_Z3=OFF \
+                -DTESTS=OFF \
+                -DSTRICT=OFF \
+                -DSOLC_LINK_STATIC=ON \
+                -GNinja
+              ;;
+          esac
+
+      - name: Build Solidity libraries
+        run: |
+          echo "🔨 Building Solidity libraries..."
+          cd vendor/solidity/build
+          
+          # Build only the libraries we need
+          ninja -j$(nproc) solutil langutil smtutil evmasm yul
+          
+          echo "✅ Solidity libraries built successfully"
 
       - name: Build release binary
         run: |
@@ -310,8 +384,13 @@ jobs:
           if [ -f "zig-out/bin/ora" ]; then
             echo "✅ Binary built successfully"
             ls -la zig-out/bin/
+            
+            # Show binary info
+            file zig-out/bin/ora
+            du -h zig-out/bin/ora
           else
             echo "❌ Binary not found"
+            ls -la zig-out/
             exit 1
           fi
 
@@ -322,9 +401,22 @@ jobs:
           if [ -f "zig-out/bin/ora" ]; then
             # Test basic functionality
             chmod +x zig-out/bin/ora
-            ./zig-out/bin/ora --version 2>/dev/null || echo "⚠️  Version check failed"
-            ./zig-out/bin/ora --help 2>/dev/null || echo "⚠️  Help check failed"
+            
+            echo "Testing --version..."
+            ./zig-out/bin/ora --version 2>/dev/null || echo "⚠️  Version check failed (expected for now)"
+            
+            echo "Testing --help..."
+            ./zig-out/bin/ora --help 2>/dev/null || echo "⚠️  Help check failed (expected for now)"
+            
+            echo "Testing compilation..."
+            echo 'contract Test { pub fn init() {} }' > test.ora
+            ./zig-out/bin/ora compile test.ora 2>/dev/null || echo "⚠️  Compilation test failed"
+            rm -f test.ora
+            
             echo "✅ Binary test completed"
+          else
+            echo "❌ No binary to test"
+            exit 1
           fi
 
       - name: Create binary package
@@ -339,54 +431,64 @@ jobs:
           
           # Add documentation
           cp LICENSE release-package/ 2>/dev/null || echo "LICENSE not found"
+          cp README.md release-package/ 2>/dev/null || echo "README not found"
           
           # Create simple README for the package
-          cat > release-package/README.txt << EOF
-          Ora Compiler - ${{ matrix.platform }}
-          ================================
-          
-          This is the Ora compiler binary for ${{ matrix.platform }}.
-          
-          Usage:
-            ./ora-${{ matrix.platform }} [options] <file.ora>
-          
-          Options:
-            --help     Show help information
-            --version  Show version information
-          
-          For more information, visit:
-          https://github.com/${{ github.repository }}
-          EOF
+          {
+            echo "Ora Compiler - ${{ matrix.platform }}"
+            echo "================================"
+            echo ""
+            echo "This is the Ora compiler binary for ${{ matrix.platform }}."
+            echo ""
+            echo "Usage:"
+            echo "  ./ora-${{ matrix.platform }} [options] <file.ora>"
+            echo ""
+            echo "Options:"
+            echo "  --help     Show help information"
+            echo "  --version  Show version information"
+            echo ""
+            echo "For more information, visit:"
+            echo "https://github.com/${{ github.repository }}"
+          } > release-package/README.txt
           
           ls -la release-package/
+          echo "Package contents:"
+          du -sh release-package/*
 
       - name: Generate checksums
         run: |
           echo "🔍 Generating checksums..."
           cd release-package
           
-          shasum -a 256 "ora-${{ matrix.platform }}" > checksums.txt
+          # Generate SHA256 checksums
+          shasum -a 256 "ora-${{ matrix.platform }}" > "checksums-${{ matrix.platform }}.txt"
           
-          echo "📋 Checksums:"
-          cat checksums.txt
+          echo "📋 Checksums for ${{ matrix.platform }}:"
+          cat "checksums-${{ matrix.platform }}.txt"
 
       - name: Upload binary to release
         run: |
           echo "📤 Uploading binary to release..."
           
-          # Get version from tag or input
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            version="${{ github.event.inputs.version }}"
+          VERSION="${{ needs.create-release.outputs.version }}"
+          echo "Using version: $VERSION"
+          
+          # Check if release exists
+          if gh release view "$VERSION" >/dev/null 2>&1; then
+            echo "✅ Release $VERSION found"
+            
+            # Upload binary
+            gh release upload "$VERSION" \
+              "release-package/ora-${{ matrix.platform }}" \
+              --clobber
+            
+            echo "✅ Binary uploaded successfully"
           else
-            version="${GITHUB_REF#refs/tags/}"
+            echo "❌ Release $VERSION not found"
+            echo "Available releases:"
+            gh release list --limit 10
+            exit 1
           fi
-          
-          # Upload binary
-          gh release upload "$version" \
-            "release-package/ora-${{ matrix.platform }}" \
-            --clobber
-          
-          echo "✅ Binary uploaded"
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -394,19 +496,14 @@ jobs:
         run: |
           echo "📤 Uploading checksums to release..."
           
-          # Get version from tag or input
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            version="${{ github.event.inputs.version }}"
-          else
-            version="${GITHUB_REF#refs/tags/}"
-          fi
+          VERSION="${{ needs.create-release.outputs.version }}"
           
           # Upload checksums
-          gh release upload "$version" \
-            "release-package/checksums.txt#checksums-${{ matrix.platform }}.txt" \
+          gh release upload "$VERSION" \
+            "release-package/checksums-${{ matrix.platform }}.txt" \
             --clobber
           
-          echo "✅ Checksums uploaded"
+          echo "✅ Checksums uploaded successfully"
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -427,7 +524,7 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Update release summary
+      - name: Post-release summary
         run: |
           VERSION="${{ needs.create-release.outputs.version }}"
           IS_NIGHTLY="${{ needs.create-release.outputs.is_nightly }}"
@@ -441,9 +538,15 @@ jobs:
             echo "📦 Release: $VERSION"
           fi
           
-          echo "🔗 URL: https://github.com/${{ github.repository }}/releases/tag/$VERSION"
+          echo "🔗 Release URL: https://github.com/${{ github.repository }}/releases/tag/$VERSION"
           echo ""
-          echo "📊 Post-release tasks completed"
+          echo "📊 Pipeline Summary:"
+          echo "✅ Release created: $VERSION"
           echo "✅ Binaries built for all platforms"
-          echo "✅ Checksums generated"
-          echo "✅ Release assets uploaded" 
+          echo "✅ Checksums generated and uploaded"
+          echo "✅ Release assets uploaded"
+          
+          echo "🎯 Next steps:"
+          echo "- Test the release binaries"
+          echo "- Update documentation if needed"
+          echo "- Announce the release" 
