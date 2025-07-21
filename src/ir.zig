@@ -1367,16 +1367,14 @@ pub const ValidationContext = struct {
     }
 
     pub fn deinit(self: *ValidationContext) void {
-        // Free all allocated error messages
+        // Free allocated error messages only
         for (self.errors.items) |error_| {
-            // Only free if it looks like a dynamically allocated message
-            if (std.mem.indexOf(u8, error_.message, "'") != null) {
+            if (error_.allocated) {
                 self.allocator.free(error_.message);
             }
         }
         for (self.warnings.items) |warning| {
-            // Only free if it looks like a dynamically allocated message
-            if (std.mem.indexOf(u8, warning.message, "'") != null) {
+            if (warning.allocated) {
                 self.allocator.free(warning.message);
             }
         }
@@ -1401,6 +1399,7 @@ pub const ValidationError = struct {
     message: []const u8,
     location: SourceLocation,
     kind: ValidationErrorKind,
+    allocated: bool, // Track if message was allocated and needs freeing
 
     pub const ValidationErrorKind = enum {
         type_error,
@@ -1413,6 +1412,26 @@ pub const ValidationError = struct {
         contract_error,
         control_flow_error,
     };
+
+    /// Create ValidationError with allocated message
+    pub fn withAllocatedMessage(message: []const u8, location: SourceLocation, kind: ValidationErrorKind) ValidationError {
+        return ValidationError{
+            .message = message,
+            .location = location,
+            .kind = kind,
+            .allocated = true,
+        };
+    }
+
+    /// Create ValidationError with static message
+    pub fn withStaticMessage(message: []const u8, location: SourceLocation, kind: ValidationErrorKind) ValidationError {
+        return ValidationError{
+            .message = message,
+            .location = location,
+            .kind = kind,
+            .allocated = false,
+        };
+    }
 };
 
 /// Symbol table for tracking variables and functions in scope
@@ -1577,11 +1596,7 @@ pub const Validator = struct {
                 .location = storage.location,
             }) catch |err| {
                 if (err == error.DuplicateSymbol) {
-                    try self.context.addError(ValidationError{
-                        .message = "Duplicate storage variable name",
-                        .location = storage.location,
-                        .kind = .symbol_error,
-                    });
+                    try self.context.addError(ValidationError.withStaticMessage("Duplicate storage variable name", storage.location, .symbol_error));
                 } else {
                     return err;
                 }
@@ -1600,11 +1615,7 @@ pub const Validator = struct {
                 .location = function.location,
             }) catch |err| {
                 if (err == error.DuplicateSymbol) {
-                    try self.context.addError(ValidationError{
-                        .message = "Duplicate function name",
-                        .location = function.location,
-                        .kind = .symbol_error,
-                    });
+                    try self.context.addError(ValidationError.withStaticMessage("Duplicate function name", function.location, .symbol_error));
                 } else {
                     return err;
                 }
@@ -1634,22 +1645,15 @@ pub const Validator = struct {
         }
 
         if (!has_init) {
-            try self.context.addError(ValidationError{
-                .message = "Contract must have an 'init' function",
-                .location = SourceLocation{ .line = 1, .column = 1, .length = 1 }, // Contract doesn't have location
-                .kind = .contract_error,
-            });
+            try self.context.addError(ValidationError.withStaticMessage("Contract must have an 'init' function", SourceLocation{ .line = 1, .column = 1, .length = 1 }, // Contract doesn't have location
+                .contract_error));
         }
 
         // Check for duplicate event names
         for (contract.events, 0..) |*event1, i| {
             for (contract.events[(i + 1)..]) |*event2| {
                 if (std.mem.eql(u8, event1.name, event2.name)) {
-                    try self.context.addError(ValidationError{
-                        .message = "Duplicate event name",
-                        .location = event2.location,
-                        .kind = .contract_error,
-                    });
+                    try self.context.addError(ValidationError.withStaticMessage("Duplicate event name", event2.location, .contract_error));
                 }
             }
         }
@@ -1660,11 +1664,7 @@ pub const Validator = struct {
         switch (storage.type) {
             .mapping => {
                 if (storage.region != .storage) {
-                    try self.context.addError(ValidationError{
-                        .message = "Mapping types can only be used in storage region",
-                        .location = storage.location,
-                        .kind = .region_error,
-                    });
+                    try self.context.addError(ValidationError.withStaticMessage("Mapping types can only be used in storage region", storage.location, .region_error));
                 }
             },
             else => {
@@ -1701,11 +1701,7 @@ pub const Validator = struct {
 
         // Validate effects don't conflict
         if (function.state_effects.hasConflict() or function.observable_effects.hasConflict()) {
-            try self.context.addError(ValidationError{
-                .message = "Function has conflicting effects",
-                .location = function.location,
-                .kind = .effect_error,
-            });
+            try self.context.addError(ValidationError.withStaticMessage("Function has conflicting effects", function.location, .effect_error));
         }
 
         // Validate function body
@@ -1714,11 +1710,7 @@ pub const Validator = struct {
         // Check for missing return statement if function has return type
         if (function.return_type != null) {
             if (!self.blockHasReturn(&function.body)) {
-                try self.context.addError(ValidationError{
-                    .message = "Function with return type must have return statement",
-                    .location = function.location,
-                    .kind = .control_flow_error,
-                });
+                try self.context.addError(ValidationError.withStaticMessage("Function with return type must have return statement", function.location, .control_flow_error));
             }
         }
     }
@@ -1729,11 +1721,7 @@ pub const Validator = struct {
         for (function.parameters, 0..) |*param1, i| {
             for (function.parameters[(i + 1)..]) |*param2| {
                 if (std.mem.eql(u8, param1.name, param2.name)) {
-                    try self.context.addError(ValidationError{
-                        .message = "Duplicate parameter name",
-                        .location = param2.location,
-                        .kind = .symbol_error,
-                    });
+                    try self.context.addError(ValidationError.withStaticMessage("Duplicate parameter name", param2.location, .symbol_error));
                 }
             }
         }
@@ -1806,11 +1794,7 @@ pub const Validator = struct {
 
         // Check if target is mutable
         if (!self.isExpressionMutable(comp_assign.target)) {
-            try self.context.addError(ValidationError{
-                .message = "Cannot assign to immutable expression",
-                .location = comp_assign.target.getLocation(),
-                .kind = .mutability_error,
-            });
+            try self.context.addError(ValidationError.withStaticMessage("Cannot assign to immutable expression", comp_assign.target.getLocation(), .mutability_error));
         }
 
         // Check type compatibility for compound assignment
@@ -1822,11 +1806,7 @@ pub const Validator = struct {
             switch (comp_assign.operator) {
                 .plus_equal, .minus_equal, .star_equal, .slash_equal, .percent_equal => {
                     if (!self.isNumericType(target_type.?) or !self.isNumericType(value_type.?)) {
-                        try self.context.addError(ValidationError{
-                            .message = "Arithmetic compound assignment requires numeric types",
-                            .location = comp_assign.target.getLocation(),
-                            .kind = .type_error,
-                        });
+                        try self.context.addError(ValidationError.withStaticMessage("Arithmetic compound assignment requires numeric types", comp_assign.target.getLocation(), .type_error));
                     }
                 },
             }
@@ -1841,17 +1821,9 @@ pub const Validator = struct {
             const has_return_value = ret_stmt.value != null;
 
             if (has_return_type and !has_return_value) {
-                try self.context.addError(ValidationError{
-                    .message = "Function with return type must return a value",
-                    .location = ret_stmt.location,
-                    .kind = .type_error,
-                });
+                try self.context.addError(ValidationError.withStaticMessage("Function with return type must return a value", ret_stmt.location, .type_error));
             } else if (!has_return_type and has_return_value) {
-                try self.context.addError(ValidationError{
-                    .message = "Function without return type cannot return a value",
-                    .location = ret_stmt.location,
-                    .kind = .type_error,
-                });
+                try self.context.addError(ValidationError.withStaticMessage("Function without return type cannot return a value", ret_stmt.location, .type_error));
             }
 
             // Validate return expression if present
@@ -1863,11 +1835,7 @@ pub const Validator = struct {
                     const return_type = self.getExpressionType(value);
                     if (return_type != null) {
                         if (!expected_type.isCompatibleWith(&return_type.?)) {
-                            try self.context.addError(ValidationError{
-                                .message = "Return type mismatch",
-                                .location = ret_stmt.location,
-                                .kind = .type_error,
-                            });
+                            try self.context.addError(ValidationError.withStaticMessage("Return type mismatch", ret_stmt.location, .type_error));
                         }
                     }
                 }
@@ -1897,11 +1865,7 @@ pub const Validator = struct {
         switch (decl.type) {
             .mapping => {
                 if (decl.region != .storage) {
-                    try self.context.addError(ValidationError{
-                        .message = "Mapping types can only be declared in storage region",
-                        .location = decl.location,
-                        .kind = .region_error,
-                    });
+                    try self.context.addError(ValidationError.withStaticMessage("Mapping types can only be declared in storage region", decl.location, .region_error));
                 }
             },
             else => {},
@@ -1917,11 +1881,7 @@ pub const Validator = struct {
 
             if (value_type != null) {
                 if (!decl_type.isCompatibleWith(&value_type.?)) {
-                    try self.context.addError(ValidationError{
-                        .message = "Type mismatch in variable initialization",
-                        .location = decl.location,
-                        .kind = .type_error,
-                    });
+                    try self.context.addError(ValidationError.withStaticMessage("Type mismatch in variable initialization", decl.location, .type_error));
                 }
             }
         }
@@ -1937,11 +1897,7 @@ pub const Validator = struct {
             .location = decl.location,
         }) catch |err| {
             if (err == error.DuplicateSymbol) {
-                try self.context.addError(ValidationError{
-                    .message = "Variable already declared in this scope",
-                    .location = decl.location,
-                    .kind = .symbol_error,
-                });
+                try self.context.addError(ValidationError.withStaticMessage("Variable already declared in this scope", decl.location, .symbol_error));
             } else {
                 return err;
             }
@@ -1955,11 +1911,7 @@ pub const Validator = struct {
 
         // Check if target is mutable
         if (!self.isExpressionMutable(assignment.target)) {
-            try self.context.addError(ValidationError{
-                .message = "Cannot assign to immutable expression",
-                .location = assignment.target.getLocation(),
-                .kind = .mutability_error,
-            });
+            try self.context.addError(ValidationError.withStaticMessage("Cannot assign to immutable expression", assignment.target.getLocation(), .mutability_error));
         }
 
         // Check type compatibility
@@ -1968,11 +1920,7 @@ pub const Validator = struct {
 
         if (target_type != null and value_type != null) {
             if (!target_type.?.isCompatibleWith(&value_type.?)) {
-                try self.context.addError(ValidationError{
-                    .message = "Type mismatch in assignment",
-                    .location = assignment.target.getLocation(),
-                    .kind = .type_error,
-                });
+                try self.context.addError(ValidationError.withStaticMessage("Type mismatch in assignment", assignment.target.getLocation(), .type_error));
             }
         }
     }
@@ -2198,11 +2146,7 @@ pub const Validator = struct {
         // Check if error name is already declared
         if (self.symbol_table.lookupSymbol(error_decl.name) != null) {
             const error_msg = try std.fmt.allocPrint(self.context.allocator, "Error '{s}' already declared", .{error_decl.name});
-            try self.context.addError(ValidationError{
-                .message = error_msg,
-                .location = error_decl.location,
-                .kind = .symbol_error,
-            });
+            try self.context.addError(ValidationError.withAllocatedMessage(error_msg, error_decl.location, .symbol_error));
         }
 
         // Add error to symbol table
@@ -2244,11 +2188,7 @@ pub const Validator = struct {
         // Check if error name is declared
         if (self.symbol_table.lookupSymbol(error_return.error_name) == null) {
             const error_msg = try std.fmt.allocPrint(self.context.allocator, "Undefined error '{s}'", .{error_return.error_name});
-            try self.context.addError(ValidationError{
-                .message = error_msg,
-                .location = error_return.location,
-                .kind = .symbol_error,
-            });
+            try self.context.addError(ValidationError.withAllocatedMessage(error_msg, error_return.location, .symbol_error));
         }
     }
 
@@ -2260,11 +2200,7 @@ pub const Validator = struct {
                 if (self.symbol_table.lookupSymbol(ident.name) == null) {
                     // Create a more helpful error message
                     const error_msg = try std.fmt.allocPrint(self.context.allocator, "Undefined identifier '{s}'", .{ident.name});
-                    try self.context.addError(ValidationError{
-                        .message = error_msg,
-                        .location = ident.location,
-                        .kind = .symbol_error,
-                    });
+                    try self.context.addError(ValidationError.withAllocatedMessage(error_msg, ident.location, .symbol_error));
                 }
             },
             .binary => |*be| {
@@ -2277,11 +2213,7 @@ pub const Validator = struct {
 
                 if (left_type != null and right_type != null) {
                     if (!self.areTypesCompatibleForBinaryOp(left_type.?, right_type.?, be.operator)) {
-                        try self.context.addError(ValidationError{
-                            .message = "Type mismatch in binary operation",
-                            .location = be.location,
-                            .kind = .type_error,
-                        });
+                        try self.context.addError(ValidationError.withStaticMessage("Type mismatch in binary operation", be.location, .type_error));
                     }
                 }
             },
@@ -2306,11 +2238,7 @@ pub const Validator = struct {
                 const target_type = self.getExpressionType(ie.target);
                 if (target_type != null) {
                     if (!self.isTypeIndexable(target_type.?)) {
-                        try self.context.addError(ValidationError{
-                            .message = "Cannot index non-indexable type",
-                            .location = ie.target.getLocation(),
-                            .kind = .type_error,
-                        });
+                        try self.context.addError(ValidationError.withStaticMessage("Cannot index non-indexable type", ie.target.getLocation(), .type_error));
                     }
                 }
             },
@@ -2321,11 +2249,7 @@ pub const Validator = struct {
                 const target_type = self.getExpressionType(fe.target);
                 if (target_type != null) {
                     if (!self.typeHasField(target_type.?, fe.field)) {
-                        try self.context.addError(ValidationError{
-                            .message = "Type does not have field",
-                            .location = fe.location,
-                            .kind = .type_error,
-                        });
+                        try self.context.addError(ValidationError.withStaticMessage("Type does not have field", fe.location, .type_error));
                     }
                 }
             },
@@ -2338,19 +2262,11 @@ pub const Validator = struct {
                 const amount_type = self.getExpressionType(te.amount);
 
                 if (to_type != null and !self.isAddressType(to_type.?)) {
-                    try self.context.addError(ValidationError{
-                        .message = "Transfer 'to' must be address type",
-                        .location = te.to.getLocation(),
-                        .kind = .type_error,
-                    });
+                    try self.context.addError(ValidationError.withStaticMessage("Transfer 'to' must be address type", te.to.getLocation(), .type_error));
                 }
 
                 if (amount_type != null and !self.isNumericType(amount_type.?)) {
-                    try self.context.addError(ValidationError{
-                        .message = "Transfer amount must be numeric type",
-                        .location = te.amount.getLocation(),
-                        .kind = .type_error,
-                    });
+                    try self.context.addError(ValidationError.withStaticMessage("Transfer amount must be numeric type", te.amount.getLocation(), .type_error));
                 }
             },
             .shift => |*se| {
@@ -2365,27 +2281,15 @@ pub const Validator = struct {
                 const amount_type = self.getExpressionType(se.amount);
 
                 if (source_type != null and !self.isAddressType(source_type.?)) {
-                    try self.context.addError(ValidationError{
-                        .message = "Shift source must be address type",
-                        .location = se.source.getLocation(),
-                        .kind = .type_error,
-                    });
+                    try self.context.addError(ValidationError.withStaticMessage("Shift source must be address type", se.source.getLocation(), .type_error));
                 }
 
                 if (dest_type != null and !self.isAddressType(dest_type.?)) {
-                    try self.context.addError(ValidationError{
-                        .message = "Shift destination must be address type",
-                        .location = se.dest.getLocation(),
-                        .kind = .type_error,
-                    });
+                    try self.context.addError(ValidationError.withStaticMessage("Shift destination must be address type", se.dest.getLocation(), .type_error));
                 }
 
                 if (amount_type != null and !self.isNumericType(amount_type.?)) {
-                    try self.context.addError(ValidationError{
-                        .message = "Shift amount must be numeric type",
-                        .location = se.amount.getLocation(),
-                        .kind = .type_error,
-                    });
+                    try self.context.addError(ValidationError.withStaticMessage("Shift amount must be numeric type", se.amount.getLocation(), .type_error));
                 }
             },
             .old => |*oe| {
@@ -2401,11 +2305,7 @@ pub const Validator = struct {
                 // Check if error name is declared
                 if (self.symbol_table.lookupSymbol(ev.error_name) == null) {
                     const error_msg = try std.fmt.allocPrint(self.context.allocator, "Undefined error '{s}'", .{ev.error_name});
-                    try self.context.addError(ValidationError{
-                        .message = error_msg,
-                        .location = ev.location,
-                        .kind = .symbol_error,
-                    });
+                    try self.context.addError(ValidationError.withAllocatedMessage(error_msg, ev.location, .symbol_error));
                 }
             },
             .error_cast => |*ec| {
@@ -2496,11 +2396,7 @@ pub const Validator = struct {
             const func_name = call.callee.identifier.name;
             if (self.symbol_table.lookupSymbol(func_name) == null) {
                 const error_msg = try std.fmt.allocPrint(self.context.allocator, "Undefined function '{s}'", .{func_name});
-                try self.context.addError(ValidationError{
-                    .message = error_msg,
-                    .location = call.callee.getLocation(),
-                    .kind = .symbol_error,
-                });
+                try self.context.addError(ValidationError.withAllocatedMessage(error_msg, call.callee.getLocation(), .symbol_error));
                 return;
             }
         }
@@ -4409,11 +4305,7 @@ test "Validation context" {
 
     try testing.expect(!context.hasErrors());
 
-    try context.addError(ValidationError{
-        .message = "Test error",
-        .location = SourceLocation{ .line = 1, .column = 1, .length = 1 },
-        .kind = .type_error,
-    });
+    try context.addError(ValidationError.withStaticMessage("Test error", SourceLocation{ .line = 1, .column = 1, .length = 1 }, .type_error));
 
     try testing.expect(context.hasErrors());
 }
