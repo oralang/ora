@@ -444,7 +444,21 @@ pub const SemanticAnalyzer = struct {
                 typer.TyperError.TypeMismatch => {
                     try self.addError("Type mismatch", ast.SourceSpan{ .line = 0, .column = 0, .length = 0 });
                 },
-                else => return SemanticError.TypeMismatch,
+                typer.TyperError.UndeclaredFunction => {
+                    try self.addError("Undeclared function", ast.SourceSpan{ .line = 0, .column = 0, .length = 0 });
+                },
+                typer.TyperError.ArgumentCountMismatch => {
+                    try self.addError("Function argument count mismatch", ast.SourceSpan{ .line = 0, .column = 0, .length = 0 });
+                },
+                typer.TyperError.InvalidOperation => {
+                    try self.addError("Invalid type operation", ast.SourceSpan{ .line = 0, .column = 0, .length = 0 });
+                },
+                typer.TyperError.InvalidMemoryRegion => {
+                    try self.addError("Invalid memory region", ast.SourceSpan{ .line = 0, .column = 0, .length = 0 });
+                },
+                typer.TyperError.OutOfMemory => {
+                    return SemanticError.OutOfMemory;
+                },
             }
         };
 
@@ -1509,7 +1523,10 @@ pub const SemanticAnalyzer = struct {
                 // Check for immutable variable assignment attempts (only for storage/immutable variables)
                 if (self.type_checker.current_scope.lookup(ident.name)) |symbol| {
                     if ((symbol.region == .Immutable or (symbol.region == .Storage and !symbol.mutable)) and self.in_assignment_target) {
-                        if (!self.in_constructor) {
+                        // Check if we're in a constructor - use function name for reliable detection
+                        const in_constructor_fn = self.current_function != null and std.mem.eql(u8, self.current_function.?, "init");
+
+                        if (!in_constructor_fn) {
                             const var_type = if (symbol.region == .Immutable) "immutable" else "storage const";
                             const message = std.fmt.allocPrint(self.allocator, "Cannot assign to {s} variable '{s}' outside constructor", .{ var_type, ident.name }) catch "Cannot assign to variable outside constructor";
                             defer if (!std.mem.eql(u8, message, "Cannot assign to variable outside constructor")) self.allocator.free(message);
@@ -1597,7 +1614,10 @@ pub const SemanticAnalyzer = struct {
             const ident = assign.target.Identifier;
             if (self.type_checker.current_scope.lookup(ident.name)) |symbol| {
                 if (symbol.region == .Immutable or (symbol.region == .Storage and !symbol.mutable)) {
-                    if (self.in_constructor) {
+                    // Check if we're in a constructor - use function name for reliable detection
+                    const in_constructor_fn = self.current_function != null and std.mem.eql(u8, self.current_function.?, "init");
+
+                    if (in_constructor_fn) {
                         // Allow assignment in constructor, but track initialization
                         if (self.immutable_variables.getPtr(ident.name)) |info| {
                             if (info.initialized) {
@@ -2128,9 +2148,10 @@ pub const SemanticAnalyzer = struct {
                     return SemanticError.StorageInNonPersistentContext;
                 }
 
-                // Storage const variables must have initializers
+                // Storage const variables can be initialized in constructor
                 if (var_decl.region == .Storage and !var_decl.mutable and var_decl.value == null) {
-                    try self.addError("Storage const variables must have initializers", var_decl.span);
+                    // Storage const variables can be initialized in constructor - track for later validation
+                    try self.addInfo("Storage const variable - must be initialized in constructor if not initialized here", var_decl.span);
                 }
             },
             .Immutable => {

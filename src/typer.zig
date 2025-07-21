@@ -743,6 +743,11 @@ pub const Typer = struct {
         };
         try self.current_scope.declare(std_symbol);
 
+        // Initialize standard library modules and their fields
+        try self.initTransactionModule();
+        try self.initBlockModule();
+        try self.initConstantsModule();
+
         // Add built-in functions
         const require_params = try self.allocator.alloc(OraType, 1);
         require_params[0] = OraType.Bool;
@@ -759,6 +764,51 @@ pub const Typer = struct {
             .span = ast.SourceSpan{ .line = 0, .column = 0, .length = 7 },
         };
         try self.current_scope.declare(require_symbol);
+    }
+
+    /// Initialize std.transaction module symbols
+    fn initTransactionModule(self: *Typer) TyperError!void {
+        // Add module identifier - silently ignore if already exists
+        const transaction_symbol = Symbol{
+            .name = "transaction",
+            .typ = OraType.Unknown, // Transaction context module
+            .region = .Stack,
+            .mutable = false,
+            .span = ast.SourceSpan{ .line = 0, .column = 0, .length = 11 },
+        };
+        self.current_scope.declare(transaction_symbol) catch {
+            // Ignore errors - symbol may already exist or OOM (non-critical)
+        };
+    }
+
+    /// Initialize std.block module symbols
+    fn initBlockModule(self: *Typer) TyperError!void {
+        // Add module identifier - silently ignore if already exists
+        const block_symbol = Symbol{
+            .name = "block",
+            .typ = OraType.Unknown, // Block context module
+            .region = .Stack,
+            .mutable = false,
+            .span = ast.SourceSpan{ .line = 0, .column = 0, .length = 5 },
+        };
+        self.current_scope.declare(block_symbol) catch {
+            // Ignore errors - symbol may already exist or OOM (non-critical)
+        };
+    }
+
+    /// Initialize std.constants module symbols
+    fn initConstantsModule(self: *Typer) TyperError!void {
+        // Add module identifier - silently ignore if already exists
+        const constants_symbol = Symbol{
+            .name = "constants",
+            .typ = OraType.Unknown, // Constants module
+            .region = .Stack,
+            .mutable = false,
+            .span = ast.SourceSpan{ .line = 0, .column = 0, .length = 9 },
+        };
+        self.current_scope.declare(constants_symbol) catch {
+            // Ignore errors - symbol may already exist or OOM (non-critical)
+        };
     }
 
     pub fn deinit(self: *Typer) void {
@@ -2023,13 +2073,38 @@ pub const Typer = struct {
             return TyperError.UndeclaredVariable; // Field doesn't exist
         }
 
-        // Special case for std library access
-        if (std.mem.eql(u8, field_name, "transaction") or
-            std.mem.eql(u8, field_name, "block") or
-            std.mem.eql(u8, field_name, "msg"))
-        {
-            // std.transaction, std.block, std.msg return special context types
-            return OraType.Unknown; // TODO: Define proper context types
+        // Handle standard library module field access
+        if (target_type == .Unknown) {
+            // This could be std library access
+            if (std.mem.eql(u8, field_name, "transaction") or
+                std.mem.eql(u8, field_name, "block") or
+                std.mem.eql(u8, field_name, "constants"))
+            {
+                // std.transaction, std.block, std.constants return module context types
+                return OraType.Unknown; // Module type for further field access
+            }
+
+            // Handle nested field access for std library modules
+            if (std.mem.eql(u8, field_name, "sender") or std.mem.eql(u8, field_name, "origin")) {
+                return OraType.Address;
+            }
+            if (std.mem.eql(u8, field_name, "value") or std.mem.eql(u8, field_name, "gasprice")) {
+                return OraType.U256;
+            }
+            if (std.mem.eql(u8, field_name, "ZERO_ADDRESS")) {
+                return OraType.Address;
+            }
+            if (std.mem.eql(u8, field_name, "MAX_UINT256") or std.mem.eql(u8, field_name, "MIN_UINT256")) {
+                return OraType.U256;
+            }
+            if (std.mem.eql(u8, field_name, "timestamp") or std.mem.eql(u8, field_name, "number") or
+                std.mem.eql(u8, field_name, "difficulty") or std.mem.eql(u8, field_name, "gaslimit"))
+            {
+                return OraType.U256;
+            }
+            if (std.mem.eql(u8, field_name, "coinbase")) {
+                return OraType.Address;
+            }
         }
 
         // TODO: Implement enum field access when enums are added

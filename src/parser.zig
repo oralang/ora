@@ -1125,20 +1125,40 @@ pub const Parser = struct {
                 expr = try self.finishCall(expr);
             } else if (self.match(.Dot)) {
                 const name_token = try self.consume(.Identifier, "Expected property name after '.'");
-                const expr_ptr = try self.allocator.create(ast.ExprNode);
-                expr_ptr.* = expr;
 
                 // Check if this might be an enum literal (EnumType.VariantName)
-                // We parse it as an enum literal if the left side is a simple identifier
+                // But exclude known module/namespace patterns
                 if (expr == .Identifier) {
                     const enum_name = expr.Identifier.name;
-                    expr = ast.ExprNode{ .EnumLiteral = ast.EnumLiteralExpr{
-                        .enum_name = enum_name,
-                        .variant_name = name_token.lexeme,
-                        .span = makeSpan(name_token),
-                    } };
+
+                    // Don't treat standard library and module access as enum literals
+                    const is_module_access = std.mem.eql(u8, enum_name, "std") or
+                        std.mem.eql(u8, enum_name, "constants") or
+                        std.mem.eql(u8, enum_name, "transaction") or
+                        std.mem.eql(u8, enum_name, "block") or
+                        std.mem.eql(u8, enum_name, "math");
+
+                    if (is_module_access) {
+                        // Treat as field access for module patterns
+                        const expr_ptr = try self.allocator.create(ast.ExprNode);
+                        expr_ptr.* = expr;
+                        expr = ast.ExprNode{ .FieldAccess = ast.FieldAccessExpr{
+                            .target = expr_ptr,
+                            .field = name_token.lexeme,
+                            .span = makeSpan(name_token),
+                        } };
+                    } else {
+                        // Treat as potential enum literal
+                        expr = ast.ExprNode{ .EnumLiteral = ast.EnumLiteralExpr{
+                            .enum_name = enum_name,
+                            .variant_name = name_token.lexeme,
+                            .span = makeSpan(name_token),
+                        } };
+                    }
                 } else {
-                    // Otherwise, treat it as field access
+                    // Complex expressions are always field access
+                    const expr_ptr = try self.allocator.create(ast.ExprNode);
+                    expr_ptr.* = expr;
                     expr = ast.ExprNode{ .FieldAccess = ast.FieldAccessExpr{
                         .target = expr_ptr,
                         .field = name_token.lexeme,
@@ -1153,6 +1173,7 @@ pub const Parser = struct {
                     const second_index = try self.parseExpression();
                     _ = try self.consume(.RightBracket, "Expected ']' after double mapping index");
 
+                    // Create pointers for the nested structure
                     const expr_ptr = try self.allocator.create(ast.ExprNode);
                     expr_ptr.* = expr;
                     const index_ptr = try self.allocator.create(ast.ExprNode);
