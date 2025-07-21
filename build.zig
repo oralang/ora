@@ -77,7 +77,7 @@ pub fn build(b: *std.Build) void {
     lib.addIncludePath(b.path("src"));
 
     // Link Solidity libraries to the executable
-    linkSolidityLibraries(b, exe, cmake_step);
+    linkSolidityLibraries(b, exe, cmake_step, target);
 
     // This declares intent for the executable to be installed into the
     // standard location when the user invokes the "install" step (the default
@@ -146,7 +146,7 @@ pub fn build(b: *std.Build) void {
     // Add include path for yul_wrapper.h
     yul_test.addIncludePath(b.path("src"));
 
-    linkSolidityLibraries(b, yul_test, cmake_step);
+    linkSolidityLibraries(b, yul_test, cmake_step, target);
 
     const run_yul_test = b.addRunArtifact(yul_test);
     run_yul_test.step.dependOn(b.getInstallStep());
@@ -412,13 +412,27 @@ fn buildYulWrapper(b: *std.Build, target: std.Build.ResolvedTarget, optimize: st
     addBoostPaths(b, yul_wrapper, target);
 
     // Link C++ standard library
-    yul_wrapper.linkLibCpp();
+    // Use the appropriate C++ stdlib based on the target
+    switch (target.result.os.tag) {
+        .linux => {
+            // On Linux, use libstdc++ for better compatibility
+            yul_wrapper.linkSystemLibrary("stdc++");
+        },
+        .macos => {
+            // On macOS, use libc++
+            yul_wrapper.linkLibCpp();
+        },
+        else => {
+            // Default to libc++
+            yul_wrapper.linkLibCpp();
+        },
+    }
 
     return yul_wrapper;
 }
 
 /// Link Solidity libraries to the executable
-fn linkSolidityLibraries(b: *std.Build, exe: *std.Build.Step.Compile, cmake_step: *std.Build.Step) void {
+fn linkSolidityLibraries(b: *std.Build, exe: *std.Build.Step.Compile, cmake_step: *std.Build.Step, target: std.Build.ResolvedTarget) void {
     // Make executable depend on CMake build
     exe.step.dependOn(cmake_step);
 
@@ -437,7 +451,21 @@ fn linkSolidityLibraries(b: *std.Build, exe: *std.Build.Step.Compile, cmake_step
     exe.linkSystemLibrary("yul");
 
     // Link C++ standard library
-    exe.linkLibCpp();
+    // Use the appropriate C++ stdlib based on the target
+    switch (target.result.os.tag) {
+        .linux => {
+            // On Linux, use libstdc++ for better compatibility
+            exe.linkSystemLibrary("stdc++");
+        },
+        .macos => {
+            // On macOS, use libc++
+            exe.linkLibCpp();
+        },
+        else => {
+            // Default to libc++
+            exe.linkLibCpp();
+        },
+    }
 
     // Add include directories for headers
     exe.addIncludePath(b.path("vendor/solidity"));
@@ -539,13 +567,28 @@ fn runExampleTests(step: *std.Build.Step, options: std.Build.Step.MakeOptions) a
 }
 
 /// Add platform-specific Boost include and library paths
+/// For cross-compilation, we use the host system paths where dependencies are actually installed
 fn addBoostPaths(b: *std.Build, compile_step: *std.Build.Step.Compile, target: std.Build.ResolvedTarget) void {
     const target_info = target.result;
+    const host_info = @import("builtin").target;
 
-    switch (target_info.os.tag) {
+    // Determine if we're cross-compiling
+    const is_cross_compiling = target_info.os.tag != host_info.os.tag or
+        target_info.cpu.arch != host_info.cpu.arch;
+
+    // For cross-compilation, use host system paths where dependencies are installed
+    // For native compilation, use target system paths
+    const os_to_use = if (is_cross_compiling) host_info.os.tag else target_info.os.tag;
+    const arch_to_use = if (is_cross_compiling) host_info.cpu.arch else target_info.cpu.arch;
+
+    if (is_cross_compiling) {
+        std.log.info("Cross-compiling from {s}-{s} to {s}-{s} - using host paths for Boost", .{ @tagName(host_info.os.tag), @tagName(host_info.cpu.arch), @tagName(target_info.os.tag), @tagName(target_info.cpu.arch) });
+    }
+
+    switch (os_to_use) {
         .macos => {
             // Check if Apple Silicon or Intel Mac
-            if (target_info.cpu.arch == .aarch64) {
+            if (arch_to_use == .aarch64) {
                 // Apple Silicon - Homebrew installs to /opt/homebrew
                 std.log.info("Adding Boost paths for Apple Silicon Mac", .{});
                 compile_step.addSystemIncludePath(.{ .cwd_relative = "/opt/homebrew/include" });
@@ -566,7 +609,7 @@ fn addBoostPaths(b: *std.Build, compile_step: *std.Build.Step.Compile, target: s
             compile_step.addLibraryPath(.{ .cwd_relative = "/usr/local/lib" });
 
             // Also check for x86_64-linux-gnu paths (common on Ubuntu)
-            if (target_info.cpu.arch == .x86_64) {
+            if (arch_to_use == .x86_64) {
                 compile_step.addLibraryPath(.{ .cwd_relative = "/usr/lib/x86_64-linux-gnu" });
             }
         },
@@ -596,9 +639,12 @@ fn addBoostPaths(b: *std.Build, compile_step: *std.Build.Step.Compile, target: s
     // Try to check if Boost is available via environment variable
     const boost_root = std.process.getEnvVarOwned(b.allocator, "BOOST_ROOT") catch null;
     if (boost_root) |root| {
+        defer b.allocator.free(root);
         std.log.info("Using BOOST_ROOT environment variable: {s}", .{root});
         const include_path = std.fmt.allocPrint(b.allocator, "{s}/include", .{root}) catch @panic("OOM");
         const lib_path = std.fmt.allocPrint(b.allocator, "{s}/lib", .{root}) catch @panic("OOM");
+        defer b.allocator.free(include_path);
+        defer b.allocator.free(lib_path);
         compile_step.addSystemIncludePath(.{ .cwd_relative = include_path });
         compile_step.addLibraryPath(.{ .cwd_relative = lib_path });
     }
