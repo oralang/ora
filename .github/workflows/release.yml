@@ -368,8 +368,23 @@ jobs:
           echo "🔨 Building Solidity libraries..."
           cd vendor/solidity/build
           
+          # Determine number of parallel jobs based on OS
+          case "${{ runner.os }}" in
+            Linux)
+              JOBS=$(nproc)
+              ;;
+            macOS)
+              JOBS=$(sysctl -n hw.logicalcpu)
+              ;;
+            *)
+              JOBS=2  # Fallback for unknown OS
+              ;;
+          esac
+          
+          echo "Using $JOBS parallel jobs for build..."
+          
           # Build only the libraries we need
-          ninja -j$(nproc) solutil langutil smtutil evmasm yul
+          ninja -j${JOBS} solutil langutil smtutil evmasm yul
           
           echo "✅ Solidity libraries built successfully"
 
