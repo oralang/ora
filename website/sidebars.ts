@@ -17,6 +17,7 @@ const sidebars: SidebarsConfig = {
   tutorialSidebar: [
     'intro',
     'getting-started',
+    'asuka-release',
     'language-basics',
     'struct-types',
     'examples',

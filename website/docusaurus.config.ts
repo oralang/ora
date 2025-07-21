@@ -125,6 +125,10 @@ const config: Config = {
               to: '/docs/getting-started',
             },
             {
+              label: 'Asuka Release',
+              to: '/docs/asuka-release',
+            },
+            {
               label: 'Language Basics',
               to: '/docs/language-basics',
             },
