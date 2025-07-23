@@ -1,6 +1,6 @@
 const std = @import("std");
-const ast = @import("ast.zig");
-const typer = @import("typer.zig");
+pub const ast = @import("ast.zig");
+pub const typer = @import("typer.zig");
 const comptime_eval = @import("comptime_eval.zig");
 const static_verifier = @import("static_verifier.zig");
 const formal_verifier = @import("formal_verifier.zig");
@@ -242,7 +242,7 @@ pub const SemanticAnalyzer = struct {
     validation_coverage: ValidationCoverage, // Track validation completeness
 
     /// Information about an immutable variable
-    const ImmutableVarInfo = struct {
+    pub const ImmutableVarInfo = struct {
         name: []const u8,
         declared_span: ast.SourceSpan,
         initialized: bool,
@@ -280,7 +280,7 @@ pub const SemanticAnalyzer = struct {
     // MEMORY SAFETY UTILITIES - Critical for preventing segfaults
 
     /// Validate that an AST node pointer is safe to dereference
-    fn isValidNodePointer(self: *SemanticAnalyzer, node: ?*ast.AstNode) bool {
+    pub fn isValidNodePointer(self: *SemanticAnalyzer, node: ?*ast.AstNode) bool {
         _ = self;
         if (node == null) return false;
 
@@ -301,7 +301,7 @@ pub const SemanticAnalyzer = struct {
     }
 
     /// Validate that a string is safe to use
-    fn isValidString(self: *SemanticAnalyzer, str: []const u8) bool {
+    pub fn isValidString(self: *SemanticAnalyzer, str: []const u8) bool {
         _ = self;
         // Check for reasonable string length (prevent reading garbage memory)
         if (str.len > 1024 * 1024) return false; // 1MB max string length
@@ -315,7 +315,7 @@ pub const SemanticAnalyzer = struct {
     }
 
     /// Validate that a SourceSpan is safe to use
-    fn validateSpan(self: *SemanticAnalyzer, span: ast.SourceSpan) ast.SourceSpan {
+    pub fn validateSpan(self: *SemanticAnalyzer, span: ast.SourceSpan) ast.SourceSpan {
         _ = self;
         // Ensure span values are reasonable
         const safe_span = ast.SourceSpan{
@@ -365,10 +365,10 @@ pub const SemanticAnalyzer = struct {
     }
 
     /// Safely analyze a node with error recovery
-    fn safeAnalyzeNode(self: *SemanticAnalyzer, node: *ast.AstNode) SemanticError!void {
+    pub fn safeAnalyzeNode(self: *SemanticAnalyzer, node: *ast.AstNode) SemanticError!void {
         // Validate node pointer before proceeding
         if (!self.isValidNodePointer(node)) {
-            try self.addError("Invalid node pointer detected", self.getDefaultSpan());
+            try self.addErrorStatic("Invalid node pointer detected", self.getDefaultSpan());
             self.validation_coverage.validation_stats.recovery_attempts += 1;
             return SemanticError.PointerValidationFailed;
         }
@@ -396,18 +396,22 @@ pub const SemanticAnalyzer = struct {
 
         switch (err) {
             SemanticError.PointerValidationFailed => {
-                const message = std.fmt.allocPrint(self.allocator, "Pointer validation failed for {s} node", .{node_type_name}) catch "Pointer validation failed";
-                defer if (!std.mem.eql(u8, message, "Pointer validation failed")) self.allocator.free(message);
-                try self.addError(message, self.getDefaultSpan());
+                if (std.fmt.allocPrint(self.allocator, "Pointer validation failed for {s} node", .{node_type_name})) |message| {
+                    try self.addError(message, self.getDefaultSpan()); // Takes ownership
+                } else |_| {
+                    try self.addErrorStatic("Pointer validation failed", self.getDefaultSpan()); // Static fallback
+                }
             },
             SemanticError.OutOfMemory => {
-                try self.addError("Out of memory during analysis", self.getDefaultSpan());
+                try self.addErrorStatic("Out of memory during analysis", self.getDefaultSpan());
                 return err; // Don't recover from OOM
             },
             else => {
-                const message = std.fmt.allocPrint(self.allocator, "Analysis error in {s} node: {s}", .{ node_type_name, @errorName(err) }) catch "Analysis error occurred";
-                defer if (!std.mem.eql(u8, message, "Analysis error occurred")) self.allocator.free(message);
-                try self.addWarning(message, self.getDefaultSpan());
+                if (std.fmt.allocPrint(self.allocator, "Analysis error in {s} node: {s}", .{ node_type_name, @errorName(err) })) |message| {
+                    try self.addWarning(message, self.getDefaultSpan()); // Takes ownership
+                } else |_| {
+                    try self.addWarningStatic("Analysis error occurred", self.getDefaultSpan()); // Static fallback
+                }
             },
         }
 
@@ -415,6 +419,11 @@ pub const SemanticAnalyzer = struct {
     }
 
     pub fn deinit(self: *SemanticAnalyzer) void {
+        // Free diagnostic messages before freeing the diagnostics array
+        for (self.diagnostics.items) |diagnostic| {
+            self.allocator.free(diagnostic.message);
+        }
+
         self.type_checker.deinit();
         self.comptime_evaluator.deinit();
         self.static_verifier.deinit();
@@ -439,22 +448,22 @@ pub const SemanticAnalyzer = struct {
         self.type_checker.typeCheck(nodes) catch |err| {
             switch (err) {
                 typer.TyperError.UndeclaredVariable => {
-                    try self.addError("Undeclared variable", ast.SourceSpan{ .line = 0, .column = 0, .length = 0 });
+                    try self.addErrorStatic("Undeclared variable", ast.SourceSpan{ .line = 0, .column = 0, .length = 0 });
                 },
                 typer.TyperError.TypeMismatch => {
-                    try self.addError("Type mismatch", ast.SourceSpan{ .line = 0, .column = 0, .length = 0 });
+                    try self.addErrorStatic("Type mismatch", ast.SourceSpan{ .line = 0, .column = 0, .length = 0 });
                 },
                 typer.TyperError.UndeclaredFunction => {
-                    try self.addError("Undeclared function", ast.SourceSpan{ .line = 0, .column = 0, .length = 0 });
+                    try self.addErrorStatic("Undeclared function", ast.SourceSpan{ .line = 0, .column = 0, .length = 0 });
                 },
                 typer.TyperError.ArgumentCountMismatch => {
-                    try self.addError("Function argument count mismatch", ast.SourceSpan{ .line = 0, .column = 0, .length = 0 });
+                    try self.addErrorStatic("Function argument count mismatch", ast.SourceSpan{ .line = 0, .column = 0, .length = 0 });
                 },
                 typer.TyperError.InvalidOperation => {
-                    try self.addError("Invalid type operation", ast.SourceSpan{ .line = 0, .column = 0, .length = 0 });
+                    try self.addErrorStatic("Invalid type operation", ast.SourceSpan{ .line = 0, .column = 0, .length = 0 });
                 },
                 typer.TyperError.InvalidMemoryRegion => {
-                    try self.addError("Invalid memory region", ast.SourceSpan{ .line = 0, .column = 0, .length = 0 });
+                    try self.addErrorStatic("Invalid memory region", ast.SourceSpan{ .line = 0, .column = 0, .length = 0 });
                 },
                 typer.TyperError.OutOfMemory => {
                     return SemanticError.OutOfMemory;
@@ -481,7 +490,7 @@ pub const SemanticAnalyzer = struct {
                 typer.TyperError.OutOfMemory => return SemanticError.OutOfMemory,
                 else => {
                     // Log the error but continue - standard library initialization is not critical
-                    try self.addWarning("Failed to initialize standard library", ast.SourceSpan{ .line = 0, .column = 0, .length = 0 });
+                    try self.addWarningStatic("Failed to initialize standard library", ast.SourceSpan{ .line = 0, .column = 0, .length = 0 });
                 },
             }
         };
@@ -614,7 +623,7 @@ pub const SemanticAnalyzer = struct {
                     // Track init function
                     if (std.mem.eql(u8, function.name, "init")) {
                         if (contract_ctx.has_init) {
-                            try self.addError("Duplicate init function", function.span);
+                            try self.addErrorStatic("Duplicate init function", function.span);
                             return SemanticError.DuplicateInitFunction;
                         }
                         contract_ctx.has_init = true;
@@ -692,17 +701,17 @@ pub const SemanticAnalyzer = struct {
     fn validateInitFunction(self: *SemanticAnalyzer, function: *ast.FunctionNode) SemanticError!void {
         // Init functions should be public
         if (!function.pub_) {
-            try self.addWarning("Init function should be public", function.span);
+            try self.addWarningStatic("Init function should be public", function.span);
         }
 
         // Init functions should not have return type
         if (function.return_type != null) {
-            try self.addError("Init function cannot have return type", function.span);
+            try self.addErrorStatic("Init function cannot have return type", function.span);
         }
 
         // Init functions should not have requires/ensures (for now)
         if (function.requires_clauses.len > 0) {
-            try self.addWarning("Init function with requires clauses - verify carefully", function.span);
+            try self.addWarningStatic("Init function with requires clauses - verify carefully", function.span);
         }
     }
 
@@ -734,10 +743,11 @@ pub const SemanticAnalyzer = struct {
                     const value_str = comptime_value.toString(self.allocator) catch "unknown";
                     defer self.allocator.free(value_str);
 
-                    const message = std.fmt.allocPrint(self.allocator, "Const '{s}' evaluated at compile time: {s}", .{ var_decl.name, value_str }) catch "Const evaluated at compile time";
-                    defer if (!std.mem.eql(u8, message, "Const evaluated at compile time")) self.allocator.free(message);
-
-                    try self.addInfo(message, var_decl.span);
+                    if (std.fmt.allocPrint(self.allocator, "Const '{s}' evaluated at compile time: {s}", .{ var_decl.name, value_str })) |message| {
+                        try self.addInfo(message, var_decl.span); // Takes ownership
+                    } else |_| {
+                        try self.addInfoStatic("Const evaluated at compile time", var_decl.span); // Static fallback
+                    }
                 } else |err| {
                     // Failed to evaluate at compile time
                     const error_msg = switch (err) {
@@ -788,11 +798,11 @@ pub const SemanticAnalyzer = struct {
                 const comptime_value = self.comptime_evaluator.evaluate(value_expr) catch |err| {
                     switch (err) {
                         comptime_eval.ComptimeError.NotCompileTimeEvaluable => {
-                            try self.addError("Enum variant value must be a compile-time constant", variant.span);
+                            try self.addErrorStatic("Enum variant value must be a compile-time constant", variant.span);
                             return SemanticError.InvalidOperation;
                         },
                         else => {
-                            try self.addError("Invalid enum variant value", variant.span);
+                            try self.addErrorStatic("Invalid enum variant value", variant.span);
                             return SemanticError.InvalidOperation;
                         },
                     }
@@ -809,7 +819,7 @@ pub const SemanticAnalyzer = struct {
                     .i32 => |val| @as(u64, @as(u32, @intCast(val))),
                     .i64 => |val| @bitCast(val),
                     else => {
-                        try self.addError("Enum variant value must be an integer", variant.span);
+                        try self.addErrorStatic("Enum variant value must be an integer", variant.span);
                         return SemanticError.InvalidOperation;
                     },
                 };
@@ -847,26 +857,26 @@ pub const SemanticAnalyzer = struct {
 
         try self.type_checker.current_scope.declare(enum_symbol);
 
-        try self.addInfo("Enum type registered", enum_decl.span);
+        try self.addInfoStatic("Enum type registered", enum_decl.span);
     }
 
     /// Analyze struct declaration with comprehensive validation
     fn analyzeStructDecl(self: *SemanticAnalyzer, struct_decl: *ast.StructDeclNode) SemanticError!void {
         // 1. Validate struct name
         if (struct_decl.name.len == 0) {
-            try self.addError("Struct name cannot be empty", struct_decl.span);
+            try self.addErrorStatic("Struct name cannot be empty", struct_decl.span);
             return SemanticError.InvalidOperation;
         }
 
         // 2. Verify struct was registered by type checker (it should be from the first pass)
         if (self.type_checker.getStructType(struct_decl.name) == null) {
-            try self.addError("Struct was not properly registered during type checking", struct_decl.span);
+            try self.addErrorStatic("Struct was not properly registered during type checking", struct_decl.span);
             return SemanticError.InvalidOperation;
         }
 
         // 3. Validate minimum field requirement
         if (struct_decl.fields.len == 0) {
-            try self.addWarning("Empty struct - consider using a unit type instead", struct_decl.span);
+            try self.addWarningStatic("Empty struct - consider using a unit type instead", struct_decl.span);
         }
 
         // 4. Validate and analyze each field
@@ -879,24 +889,28 @@ pub const SemanticAnalyzer = struct {
         for (struct_decl.fields) |*field| {
             // Check for duplicate field names
             if (field_names.get(field.name)) |existing_span| {
-                const message = std.fmt.allocPrint(self.allocator, "Duplicate field name '{s}' in struct '{s}' (first defined at line {})", .{ field.name, struct_decl.name, existing_span.line }) catch "Duplicate field name";
-                defer if (!std.mem.eql(u8, message, "Duplicate field name")) self.allocator.free(message);
-                try self.addError(message, field.span);
+                if (std.fmt.allocPrint(self.allocator, "Duplicate field name '{s}' in struct '{s}' (first defined at line {})", .{ field.name, struct_decl.name, existing_span.line })) |message| {
+                    try self.addError(message, field.span); // Takes ownership
+                } else |_| {
+                    try self.addErrorStatic("Duplicate field name", field.span); // Static fallback
+                }
                 continue;
             }
             try field_names.put(field.name, field.span);
 
             // Validate field name
             if (field.name.len == 0) {
-                try self.addError("Field name cannot be empty", field.span);
+                try self.addErrorStatic("Field name cannot be empty", field.span);
                 continue;
             }
 
             // Validate field type
             const field_type = self.type_checker.convertAstTypeToOraType(&field.typ) catch {
-                const message = std.fmt.allocPrint(self.allocator, "Invalid field type for '{s}' in struct '{s}'", .{ field.name, struct_decl.name }) catch "Invalid field type";
-                defer if (!std.mem.eql(u8, message, "Invalid field type")) self.allocator.free(message);
-                try self.addError(message, field.span);
+                if (std.fmt.allocPrint(self.allocator, "Invalid field type for '{s}' in struct '{s}'", .{ field.name, struct_decl.name })) |message| {
+                    try self.addError(message, field.span); // Takes ownership
+                } else |_| {
+                    try self.addErrorStatic("Invalid field type", field.span); // Static fallback
+                }
                 continue;
             };
 
@@ -904,11 +918,11 @@ pub const SemanticAnalyzer = struct {
             switch (field_type) {
                 .Mapping, .DoubleMap => {
                     has_complex_types = true;
-                    try self.addWarning("Mapping fields require careful gas management", field.span);
+                    try self.addWarningStatic("Mapping fields require careful gas management", field.span);
                 },
                 .String, .Bytes, .Slice => {
                     has_complex_types = true;
-                    try self.addInfo("Dynamic-size field detected - consider gas implications", field.span);
+                    try self.addInfoStatic("Dynamic-size field detected - consider gas implications", field.span);
                 },
                 .Enum => {
                     has_complex_types = true;
@@ -922,9 +936,11 @@ pub const SemanticAnalyzer = struct {
 
             // Validate field name doesn't conflict with built-in methods
             if (self.isReservedFieldName(field.name)) {
-                const message = std.fmt.allocPrint(self.allocator, "Field name '{s}' conflicts with built-in struct methods", .{field.name}) catch "Reserved field name";
-                defer if (!std.mem.eql(u8, message, "Reserved field name")) self.allocator.free(message);
-                try self.addWarning(message, field.span);
+                if (std.fmt.allocPrint(self.allocator, "Field name '{s}' conflicts with built-in struct methods", .{field.name})) |message| {
+                    try self.addWarning(message, field.span); // Takes ownership
+                } else |_| {
+                    try self.addWarningStatic("Reserved field name", field.span); // Static fallback
+                }
             }
         }
 
@@ -937,9 +953,11 @@ pub const SemanticAnalyzer = struct {
         // 7. Symbol already registered by type checker during first pass
 
         // 8. Success reporting
-        const message = std.fmt.allocPrint(self.allocator, "Struct '{s}' registered with {} fields", .{ struct_decl.name, struct_decl.fields.len }) catch "Struct registered";
-        defer if (!std.mem.eql(u8, message, "Struct registered")) self.allocator.free(message);
-        try self.addInfo(message, struct_decl.span);
+        if (std.fmt.allocPrint(self.allocator, "Struct '{s}' registered with {} fields", .{ struct_decl.name, struct_decl.fields.len })) |message| {
+            try self.addInfo(message, struct_decl.span); // Takes ownership
+        } else |_| {
+            try self.addInfoStatic("Struct registered", struct_decl.span); // Static fallback
+        }
     }
 
     /// Check for circular dependencies in struct fields
@@ -947,9 +965,11 @@ pub const SemanticAnalyzer = struct {
         _ = field_type; // TODO: Implement proper circular dependency checking
 
         // For now, just add a warning about potential circular dependencies
-        const message = std.fmt.allocPrint(self.allocator, "Struct '{s}' contains nested struct field - verify no circular dependencies", .{struct_name}) catch "Potential circular dependency";
-        defer if (!std.mem.eql(u8, message, "Potential circular dependency")) self.allocator.free(message);
-        try self.addWarning(message, span);
+        if (std.fmt.allocPrint(self.allocator, "Struct '{s}' contains nested struct field - verify no circular dependencies", .{struct_name})) |message| {
+            try self.addWarning(message, span); // Takes ownership
+        } else |_| {
+            try self.addWarningStatic("Potential circular dependency", span); // Static fallback
+        }
     }
 
     /// Analyze struct memory layout and provide optimization suggestions
@@ -958,15 +978,19 @@ pub const SemanticAnalyzer = struct {
         const storage_slots = (total_size + 31) / 32; // Round up to 32-byte slots
 
         if (storage_slots > 1) {
-            const message = std.fmt.allocPrint(self.allocator, "Struct '{s}' uses {} storage slots ({} bytes) - consider field ordering for gas optimization", .{ struct_decl.name, storage_slots, total_size }) catch "Storage layout info";
-            defer if (!std.mem.eql(u8, message, "Storage layout info")) self.allocator.free(message);
-            try self.addInfo(message, struct_decl.span);
+            if (std.fmt.allocPrint(self.allocator, "Struct '{s}' uses {} storage slots ({} bytes) - consider field ordering for gas optimization", .{ struct_decl.name, storage_slots, total_size })) |message| {
+                try self.addInfo(message, struct_decl.span); // Takes ownership
+            } else |_| {
+                try self.addInfoStatic("Storage layout info", struct_decl.span); // Static fallback
+            }
         }
 
         if (has_complex_types) {
-            const message = std.fmt.allocPrint(self.allocator, "Struct '{s}' contains complex types - actual gas costs will depend on usage patterns", .{struct_decl.name}) catch "Complex types warning";
-            defer if (!std.mem.eql(u8, message, "Complex types warning")) self.allocator.free(message);
-            try self.addWarning(message, struct_decl.span);
+            if (std.fmt.allocPrint(self.allocator, "Struct '{s}' contains complex types - actual gas costs will depend on usage patterns", .{struct_decl.name})) |message| {
+                try self.addWarning(message, struct_decl.span); // Takes ownership
+            } else |_| {
+                try self.addWarningStatic("Complex types warning", struct_decl.span); // Static fallback
+            }
         }
 
         // Field ordering suggestions for gas optimization
@@ -976,7 +1000,7 @@ pub const SemanticAnalyzer = struct {
     }
 
     /// Get the size in bytes for primitive types
-    fn getTypeSize(self: *SemanticAnalyzer, typ: typer.OraType) u32 {
+    pub fn getTypeSize(self: *SemanticAnalyzer, typ: typer.OraType) u32 {
         _ = self;
         return switch (typ) {
             .Bool => 1,
@@ -1000,7 +1024,7 @@ pub const SemanticAnalyzer = struct {
     }
 
     /// Check if a field name conflicts with built-in struct methods
-    fn isReservedFieldName(self: *SemanticAnalyzer, name: []const u8) bool {
+    pub fn isReservedFieldName(self: *SemanticAnalyzer, name: []const u8) bool {
         _ = self;
         const reserved_names = [_][]const u8{
             "init",      "deinit",      "clone", "copy",   "move", "drop",
@@ -1038,7 +1062,7 @@ pub const SemanticAnalyzer = struct {
         }
 
         if (!is_optimal) {
-            try self.addInfo("Consider reordering fields (largest first) for better storage packing", struct_decl.span);
+            try self.addInfoStatic("Consider reordering fields (largest first) for better storage packing", struct_decl.span);
         }
     }
 
@@ -1046,7 +1070,7 @@ pub const SemanticAnalyzer = struct {
     fn analyzeImport(self: *SemanticAnalyzer, import: *ast.ImportNode) SemanticError!void {
         // 1. Validate import path
         if (import.path.len == 0) {
-            try self.addError("Empty import path", import.span);
+            try self.addErrorStatic("Empty import path", import.span);
             return SemanticError.InvalidOperation;
         }
 
@@ -1058,12 +1082,14 @@ pub const SemanticAnalyzer = struct {
 
         // 4. Validate import name
         if (import.name.len == 0) {
-            try self.addWarning("Import without alias - using module name", import.span);
+            try self.addWarningStatic("Import without alias - using module name", import.span);
         } else {
             if (!self.isValidIdentifier(import.name)) {
-                const message = std.fmt.allocPrint(self.allocator, "Invalid import alias '{s}'", .{import.name}) catch "Invalid import alias";
-                defer if (!std.mem.eql(u8, message, "Invalid import alias")) self.allocator.free(message);
-                try self.addError(message, import.span);
+                if (std.fmt.allocPrint(self.allocator, "Invalid import alias '{s}'", .{import.name})) |message| {
+                    try self.addError(message, import.span); // Takes ownership
+                } else |_| {
+                    try self.addErrorStatic("Invalid import alias", import.span); // Static fallback
+                }
                 return SemanticError.InvalidOperation;
             }
         }
@@ -1075,9 +1101,11 @@ pub const SemanticAnalyzer = struct {
         try self.registerImport(import);
 
         // 7. Success reporting
-        const message = std.fmt.allocPrint(self.allocator, "Import '{s}' registered", .{import.path}) catch "Import registered";
-        defer if (!std.mem.eql(u8, message, "Import registered")) self.allocator.free(message);
-        try self.addInfo(message, import.span);
+        if (std.fmt.allocPrint(self.allocator, "Import '{s}' registered", .{import.path})) |message| {
+            try self.addInfo(message, import.span); // Takes ownership
+        } else |_| {
+            try self.addInfoStatic("Import registered", import.span); // Static fallback
+        }
     }
 
     /// Validate import path format
@@ -1087,9 +1115,11 @@ pub const SemanticAnalyzer = struct {
             switch (char) {
                 'a'...'z', 'A'...'Z', '0'...'9', '/', '.', '_', '-' => {}, // Valid
                 else => {
-                    const message = std.fmt.allocPrint(self.allocator, "Invalid character in import path: '{c}'", .{char}) catch "Invalid character in import path";
-                    defer if (!std.mem.eql(u8, message, "Invalid character in import path")) self.allocator.free(message);
-                    try self.addError(message, span);
+                    if (std.fmt.allocPrint(self.allocator, "Invalid character in import path: '{c}'", .{char})) |message| {
+                        try self.addError(message, span); // Takes ownership
+                    } else |_| {
+                        try self.addErrorStatic("Invalid character in import path", span); // Static fallback
+                    }
                     return;
                 },
             }
@@ -1097,22 +1127,22 @@ pub const SemanticAnalyzer = struct {
 
         // Check for path traversal attempts
         if (std.mem.indexOf(u8, path, "..") != null) {
-            try self.addError("Path traversal not allowed in imports", span);
+            try self.addErrorStatic("Path traversal not allowed in imports", span);
             return;
         }
 
         // Check for absolute paths (security)
         if (path.len > 0 and path[0] == '/') {
-            try self.addWarning("Absolute paths not recommended for imports", span);
+            try self.addWarningStatic("Absolute paths not recommended for imports", span);
         }
 
         // Check for common file extensions
         if (std.mem.endsWith(u8, path, ".ora")) {
-            try self.addInfo("Standard .ora module import", span);
+            try self.addInfoStatic("Standard .ora module import", span);
         } else if (std.mem.endsWith(u8, path, ".lib")) {
-            try self.addInfo("Library import detected", span);
+            try self.addInfoStatic("Library import detected", span);
         } else {
-            try self.addWarning("Import path without standard extension", span);
+            try self.addWarningStatic("Import path without standard extension", span);
         }
     }
 
@@ -1131,9 +1161,11 @@ pub const SemanticAnalyzer = struct {
         }
 
         // TODO: Implement actual duplicate checking with import registry
-        const message = std.fmt.allocPrint(self.allocator, "Import duplicate checking not implemented for '{s}'", .{import.path}) catch "Duplicate checking placeholder";
-        defer if (!std.mem.eql(u8, message, "Duplicate checking placeholder")) self.allocator.free(message);
-        try self.addInfo(message, import.span);
+        if (std.fmt.allocPrint(self.allocator, "Import duplicate checking not implemented for '{s}'", .{import.path})) |message| {
+            try self.addInfo(message, import.span); // Takes ownership
+        } else |_| {
+            try self.addInfoStatic("Duplicate checking placeholder", import.span); // Static fallback
+        }
     }
 
     /// Resolve import module (simulation of file system resolution)
@@ -1177,9 +1209,11 @@ pub const SemanticAnalyzer = struct {
         }
 
         if (!is_valid) {
-            const message = std.fmt.allocPrint(self.allocator, "Unknown standard library module: '{s}'", .{module_name}) catch "Unknown std module";
-            defer if (!std.mem.eql(u8, message, "Unknown std module")) self.allocator.free(message);
-            try self.addError(message, import.span);
+            if (std.fmt.allocPrint(self.allocator, "Unknown standard library module: '{s}'", .{module_name})) |message| {
+                try self.addError(message, import.span); // Takes ownership
+            } else |_| {
+                try self.addErrorStatic("Unknown std module", import.span); // Static fallback
+            }
             return;
         }
 
@@ -1191,18 +1225,22 @@ pub const SemanticAnalyzer = struct {
     fn resolveLibraryModule(self: *SemanticAnalyzer, import: *ast.ImportNode) SemanticError!void {
         // This would resolve third-party libraries
         // For now, just add a placeholder
-        const message = std.fmt.allocPrint(self.allocator, "Library module '{s}' resolution not implemented", .{import.path}) catch "Library module resolution";
-        defer if (!std.mem.eql(u8, message, "Library module resolution")) self.allocator.free(message);
-        try self.addWarning(message, import.span);
+        if (std.fmt.allocPrint(self.allocator, "Library module '{s}' resolution not implemented", .{import.path})) |message| {
+            try self.addWarning(message, import.span); // Takes ownership
+        } else |_| {
+            try self.addWarningStatic("Library module resolution", import.span); // Static fallback
+        }
     }
 
     /// Resolve local module
     fn resolveLocalModule(self: *SemanticAnalyzer, import: *ast.ImportNode) SemanticError!void {
         // This would resolve local .ora files
         // For now, just add a placeholder
-        const message = std.fmt.allocPrint(self.allocator, "Local module '{s}' resolution not implemented - ensure file exists", .{import.path}) catch "Local module resolution";
-        defer if (!std.mem.eql(u8, message, "Local module resolution")) self.allocator.free(message);
-        try self.addWarning(message, import.span);
+        if (std.fmt.allocPrint(self.allocator, "Local module '{s}' resolution not implemented - ensure file exists", .{import.path})) |message| {
+            try self.addWarning(message, import.span); // Takes ownership
+        } else |_| {
+            try self.addWarningStatic("Local module resolution", import.span); // Static fallback
+        }
     }
 
     /// Register standard library symbols
@@ -1239,7 +1277,7 @@ pub const SemanticAnalyzer = struct {
     }
 
     /// Check if a string is a valid Ora identifier
-    fn isValidIdentifier(self: *SemanticAnalyzer, name: []const u8) bool {
+    pub fn isValidIdentifier(self: *SemanticAnalyzer, name: []const u8) bool {
         _ = self;
         if (name.len == 0) return false;
 
@@ -1418,7 +1456,7 @@ pub const SemanticAnalyzer = struct {
             },
             .Break, .Continue => |span| {
                 if (!self.in_loop) {
-                    try self.addError("Break/continue outside loop", span);
+                    try self.addErrorStatic("Break/continue outside loop", span);
                 }
             },
             .While => |*while_stmt| {
@@ -1446,7 +1484,7 @@ pub const SemanticAnalyzer = struct {
     }
 
     /// Analyze expression
-    fn analyzeExpression(self: *SemanticAnalyzer, expr: *ast.ExprNode) SemanticError!void {
+    pub fn analyzeExpression(self: *SemanticAnalyzer, expr: *ast.ExprNode) SemanticError!void {
         switch (expr.*) {
             .Assignment => |*assign| {
                 try self.analyzeAssignment(assign);
@@ -1528,9 +1566,11 @@ pub const SemanticAnalyzer = struct {
 
                         if (!in_constructor_fn) {
                             const var_type = if (symbol.region == .Immutable) "immutable" else "storage const";
-                            const message = std.fmt.allocPrint(self.allocator, "Cannot assign to {s} variable '{s}' outside constructor", .{ var_type, ident.name }) catch "Cannot assign to variable outside constructor";
-                            defer if (!std.mem.eql(u8, message, "Cannot assign to variable outside constructor")) self.allocator.free(message);
-                            try self.addError(message, ident.span);
+                            if (std.fmt.allocPrint(self.allocator, "Cannot assign to {s} variable '{s}' outside constructor", .{ var_type, ident.name })) |message| {
+                                try self.addError(message, ident.span); // Takes ownership
+                            } else |_| {
+                                try self.addErrorStatic("Cannot assign to variable outside constructor", ident.span); // Static fallback
+                            }
                         }
                         // Constructor assignment is handled in analyzeAssignment
                     }
@@ -1554,7 +1594,7 @@ pub const SemanticAnalyzer = struct {
             .Comptime => |*comptime_expr| {
                 try self.analyzeBlock(&comptime_expr.block);
                 // Comptime blocks are valid if they parse correctly
-                try self.addInfo("Comptime block analyzed", comptime_expr.span);
+                try self.addInfoStatic("Comptime block analyzed", comptime_expr.span);
             },
             .Tuple => |*tuple| {
                 // Analyze all elements in the tuple
@@ -1577,7 +1617,7 @@ pub const SemanticAnalyzer = struct {
                 // Validate enum type exists
                 const enum_type_symbol = self.type_checker.current_scope.lookup(enum_literal.enum_name);
                 if (enum_type_symbol == null) {
-                    try self.addError("Undefined enum type", enum_literal.span);
+                    try self.addErrorStatic("Undefined enum type", enum_literal.span);
                     return SemanticError.UndeclaredIdentifier;
                 }
 
@@ -1585,11 +1625,11 @@ pub const SemanticAnalyzer = struct {
                 if (enum_type_symbol.?.typ == .Enum) {
                     const enum_type = enum_type_symbol.?.typ.Enum;
                     if (enum_type.findVariant(enum_literal.variant_name) == null) {
-                        try self.addError("Undefined enum variant", enum_literal.span);
+                        try self.addErrorStatic("Undefined enum variant", enum_literal.span);
                         return SemanticError.UndeclaredIdentifier;
                     }
                 } else {
-                    try self.addError("Not an enum type", enum_literal.span);
+                    try self.addErrorStatic("Not an enum type", enum_literal.span);
                     return SemanticError.TypeMismatch;
                 }
             },
@@ -1622,9 +1662,11 @@ pub const SemanticAnalyzer = struct {
                         if (self.immutable_variables.getPtr(ident.name)) |info| {
                             if (info.initialized) {
                                 const var_type = if (symbol.region == .Immutable) "Immutable" else "Storage const";
-                                const message = std.fmt.allocPrint(self.allocator, "{s} variable '{s}' is already initialized", .{ var_type, ident.name }) catch "Variable is already initialized";
-                                defer if (!std.mem.eql(u8, message, "Variable is already initialized")) self.allocator.free(message);
-                                try self.addError(message, ident.span);
+                                if (std.fmt.allocPrint(self.allocator, "{s} variable '{s}' is already initialized", .{ var_type, ident.name })) |message| {
+                                    try self.addError(message, ident.span); // Takes ownership
+                                } else |_| {
+                                    try self.addErrorStatic("Variable is already initialized", ident.span); // Static fallback
+                                }
                                 return SemanticError.ImmutableViolation;
                             }
                             // Mark as initialized
@@ -1633,9 +1675,11 @@ pub const SemanticAnalyzer = struct {
                         }
                     } else {
                         const var_type = if (symbol.region == .Immutable) "immutable" else "storage const";
-                        const message = std.fmt.allocPrint(self.allocator, "Cannot assign to {s} variable '{s}' outside constructor", .{ var_type, ident.name }) catch "Cannot assign to variable outside constructor";
-                        defer if (!std.mem.eql(u8, message, "Cannot assign to variable outside constructor")) self.allocator.free(message);
-                        try self.addError(message, ident.span);
+                        if (std.fmt.allocPrint(self.allocator, "Cannot assign to {s} variable '{s}' outside constructor", .{ var_type, ident.name })) |message| {
+                            try self.addError(message, ident.span); // Takes ownership
+                        } else |_| {
+                            try self.addErrorStatic("Cannot assign to variable outside constructor", ident.span); // Static fallback
+                        }
                         return SemanticError.ImmutableViolation;
                     }
                 }
@@ -1663,7 +1707,7 @@ pub const SemanticAnalyzer = struct {
                 if (self.comptime_evaluator.isComptimeEvaluable(binary.rhs)) {
                     if (self.comptime_evaluator.evaluate(binary.rhs)) |value| {
                         if (self.isZeroValue(value)) {
-                            try self.addError("Potential division by zero", binary.span);
+                            try self.addErrorStatic("Potential division by zero", binary.span);
                         }
                     } else |_| {
                         // Could not evaluate - that's fine, runtime check needed
@@ -1730,7 +1774,7 @@ pub const SemanticAnalyzer = struct {
                 };
 
                 if (shift_amount > 256) {
-                    try self.addWarning("Large shift amount may cause unexpected behavior", self.getExpressionSpan(shift_expr));
+                    try self.addWarningStatic("Large shift amount may cause unexpected behavior", self.getExpressionSpan(shift_expr));
                 }
             } else |_| {
                 // Could not evaluate - that's fine
@@ -1750,7 +1794,7 @@ pub const SemanticAnalyzer = struct {
             };
 
             if (will_overflow) {
-                try self.addWarning("Negation of minimum integer value causes overflow", unary.span);
+                try self.addWarningStatic("Negation of minimum integer value causes overflow", unary.span);
             }
         } else |_| {
             // Could not evaluate - that's fine
@@ -1771,12 +1815,12 @@ pub const SemanticAnalyzer = struct {
             if (self.type_checker.current_scope.lookup(func_name)) |symbol| {
                 // Function exists, validate it's actually callable
                 if (symbol.typ != .Function and symbol.typ != .Unknown) {
-                    try self.addError("Attempt to call non-function", call.span);
+                    try self.addErrorStatic("Attempt to call non-function", call.span);
                 }
             } else if (self.isBuiltinFunction(func_name)) {
                 // Built-in function - no additional validation needed
             } else {
-                try self.addError("Undeclared function", call.span);
+                try self.addErrorStatic("Undeclared function", call.span);
             }
         }
     }
@@ -1802,7 +1846,7 @@ pub const SemanticAnalyzer = struct {
 
         // Get the type of the target expression
         const target_type = self.type_checker.typeCheckExpression(field.target) catch {
-            try self.addError("Cannot determine type of field access target", field.span);
+            try self.addErrorStatic("Cannot determine type of field access target", field.span);
             return;
         };
 
@@ -1826,9 +1870,11 @@ pub const SemanticAnalyzer = struct {
 
             // Handle other types
             else => {
-                const message = std.fmt.allocPrint(self.allocator, "Type '{s}' does not support field access", .{@tagName(target_type)}) catch "Invalid field access";
-                defer if (!std.mem.eql(u8, message, "Invalid field access")) self.allocator.free(message);
-                try self.addError(message, field.span);
+                if (std.fmt.allocPrint(self.allocator, "Type '{s}' does not support field access", .{@tagName(target_type)})) |message| {
+                    try self.addError(message, field.span); // Takes ownership
+                } else |_| {
+                    try self.addErrorStatic("Invalid field access", field.span); // Static fallback
+                }
             },
         }
     }
@@ -1854,7 +1900,7 @@ pub const SemanticAnalyzer = struct {
         }
 
         // If we get here, it's an unsupported field access pattern
-        try self.addWarning("Unsupported field access pattern - ensure proper import and module structure", field.span);
+        try self.addWarningStatic("Unsupported field access pattern - ensure proper import and module structure", field.span);
     }
 
     /// Validate field access on a specific module
@@ -1865,13 +1911,17 @@ pub const SemanticAnalyzer = struct {
             _ = module_symbol; // Use the symbol to determine valid fields in future
 
             // For now, provide generic validation
-            const message = std.fmt.allocPrint(self.allocator, "Field '{s}' access on module '{s}' - ensure field exists", .{ field_name, module_name }) catch "Module field access";
-            defer if (!std.mem.eql(u8, message, "Module field access")) self.allocator.free(message);
-            try self.addInfo(message, span);
+            if (std.fmt.allocPrint(self.allocator, "Field '{s}' access on module '{s}' - ensure field exists", .{ field_name, module_name })) |message| {
+                try self.addInfo(message, span); // Takes ownership
+            } else |_| {
+                try self.addInfoStatic("Module field access", span); // Static fallback
+            }
         } else {
-            const message = std.fmt.allocPrint(self.allocator, "Module '{s}' not found - ensure proper import", .{module_name}) catch "Module not found";
-            defer if (!std.mem.eql(u8, message, "Module not found")) self.allocator.free(message);
-            try self.addError(message, span);
+            if (std.fmt.allocPrint(self.allocator, "Module '{s}' not found - ensure proper import", .{module_name})) |message| {
+                try self.addError(message, span); // Takes ownership
+            } else |_| {
+                try self.addErrorStatic("Module not found", span); // Static fallback
+            }
         }
     }
 
@@ -1882,9 +1932,11 @@ pub const SemanticAnalyzer = struct {
             try self.validateStandardLibraryAccess(sub_module, field_name, span);
         } else {
             // Handle other imported modules with nested access
-            const message = std.fmt.allocPrint(self.allocator, "Nested field access '{s}.{s}.{s}' - ensure proper module structure", .{ root_module, sub_module, field_name }) catch "Nested field access";
-            defer if (!std.mem.eql(u8, message, "Nested field access")) self.allocator.free(message);
-            try self.addInfo(message, span);
+            if (std.fmt.allocPrint(self.allocator, "Nested field access '{s}.{s}.{s}' - ensure proper module structure", .{ root_module, sub_module, field_name })) |message| {
+                try self.addInfo(message, span); // Takes ownership
+            } else |_| {
+                try self.addInfoStatic("Nested field access", span); // Static fallback
+            }
         }
     }
 
@@ -1894,34 +1946,42 @@ pub const SemanticAnalyzer = struct {
         if (std.mem.eql(u8, module_name, "transaction")) {
             const valid_fields = [_][]const u8{ "sender", "value", "origin", "gasprice" };
             if (self.isFieldValid(field_name, &valid_fields)) {
-                try self.addInfo("Valid std.transaction field access", span);
+                try self.addInfoStatic("Valid std.transaction field access", span);
             } else {
-                const message = std.fmt.allocPrint(self.allocator, "Invalid field '{s}' for std.transaction module", .{field_name}) catch "Invalid transaction field";
-                defer if (!std.mem.eql(u8, message, "Invalid transaction field")) self.allocator.free(message);
-                try self.addError(message, span);
+                if (std.fmt.allocPrint(self.allocator, "Invalid field '{s}' for std.transaction module", .{field_name})) |message| {
+                    try self.addError(message, span); // Takes ownership
+                } else |_| {
+                    try self.addErrorStatic("Invalid transaction field", span); // Static fallback
+                }
             }
         } else if (std.mem.eql(u8, module_name, "block")) {
             const valid_fields = [_][]const u8{ "timestamp", "number", "coinbase", "difficulty", "gaslimit" };
             if (self.isFieldValid(field_name, &valid_fields)) {
-                try self.addInfo("Valid std.block field access", span);
+                try self.addInfoStatic("Valid std.block field access", span);
             } else {
-                const message = std.fmt.allocPrint(self.allocator, "Invalid field '{s}' for std.block module", .{field_name}) catch "Invalid block field";
-                defer if (!std.mem.eql(u8, message, "Invalid block field")) self.allocator.free(message);
-                try self.addError(message, span);
+                if (std.fmt.allocPrint(self.allocator, "Invalid field '{s}' for std.block module", .{field_name})) |message| {
+                    try self.addError(message, span); // Takes ownership
+                } else |_| {
+                    try self.addErrorStatic("Invalid block field", span); // Static fallback
+                }
             }
         } else if (std.mem.eql(u8, module_name, "constants")) {
             const valid_fields = [_][]const u8{ "ZERO_ADDRESS", "MAX_UINT256", "MIN_UINT256" };
             if (self.isFieldValid(field_name, &valid_fields)) {
-                try self.addInfo("Valid std.constants field access", span);
+                try self.addInfoStatic("Valid std.constants field access", span);
             } else {
-                const message = std.fmt.allocPrint(self.allocator, "Invalid constant '{s}' for std.constants module", .{field_name}) catch "Invalid constant";
-                defer if (!std.mem.eql(u8, message, "Invalid constant")) self.allocator.free(message);
-                try self.addError(message, span);
+                if (std.fmt.allocPrint(self.allocator, "Invalid constant '{s}' for std.constants module", .{field_name})) |message| {
+                    try self.addError(message, span); // Takes ownership
+                } else |_| {
+                    try self.addErrorStatic("Invalid constant", span); // Static fallback
+                }
             }
         } else {
-            const message = std.fmt.allocPrint(self.allocator, "Unknown std library module: '{s}'", .{module_name}) catch "Unknown std module";
-            defer if (!std.mem.eql(u8, message, "Unknown std module")) self.allocator.free(message);
-            try self.addError(message, span);
+            if (std.fmt.allocPrint(self.allocator, "Unknown std library module: '{s}'", .{module_name})) |message| {
+                try self.addError(message, span); // Takes ownership
+            } else |_| {
+                try self.addErrorStatic("Unknown std module", span); // Static fallback
+            }
         }
     }
 
@@ -1931,13 +1991,15 @@ pub const SemanticAnalyzer = struct {
 
         // This would validate that the field exists on the struct
         // For now, provide basic validation
-        const message = std.fmt.allocPrint(self.allocator, "Struct field access '.{s}' - validation not fully implemented", .{field.field}) catch "Struct field access";
-        defer if (!std.mem.eql(u8, message, "Struct field access")) self.allocator.free(message);
-        try self.addWarning(message, field.span);
+        if (std.fmt.allocPrint(self.allocator, "Struct field access '.{s}' - validation not fully implemented", .{field.field})) |message| {
+            try self.addWarning(message, field.span); // Takes ownership
+        } else |_| {
+            try self.addWarningStatic("Struct field access", field.span); // Static fallback
+        }
     }
 
     /// Check if a field name is valid for a given set of valid fields
-    fn isFieldValid(self: *SemanticAnalyzer, field_name: []const u8, valid_fields: []const []const u8) bool {
+    pub fn isFieldValid(self: *SemanticAnalyzer, field_name: []const u8, valid_fields: []const []const u8) bool {
         _ = self;
         for (valid_fields) |valid_field| {
             if (std.mem.eql(u8, field_name, valid_field)) {
@@ -1992,10 +2054,10 @@ pub const SemanticAnalyzer = struct {
         if (self.type_checker.current_scope.lookup(log.event_name)) |symbol| {
             // Check if it's actually a log declaration (simplified check)
             if (symbol.region != .Stack) {
-                try self.addWarning("Log event may not be properly declared", log.span);
+                try self.addWarningStatic("Log event may not be properly declared", log.span);
             }
         } else {
-            try self.addError("Undeclared log event", log.span);
+            try self.addErrorStatic("Undeclared log event", log.span);
         }
     }
 
@@ -2005,7 +2067,7 @@ pub const SemanticAnalyzer = struct {
 
         // Validate no old() expressions in requires
         if (self.containsOldExpression(clause)) {
-            try self.addError("old() expressions not allowed in requires clauses", context_span);
+            try self.addErrorStatic("old() expressions not allowed in requires clauses", context_span);
             return SemanticError.OldExpressionInRequires;
         }
     }
@@ -2021,7 +2083,7 @@ pub const SemanticAnalyzer = struct {
     /// Analyze invariant
     fn analyzeInvariant(self: *SemanticAnalyzer, inv: *ast.InvariantNode) SemanticError!void {
         if (!self.in_loop) {
-            try self.addError("Invariant outside loop context", inv.span);
+            try self.addErrorStatic("Invariant outside loop context", inv.span);
             return SemanticError.InvalidInvariant;
         }
 
@@ -2144,26 +2206,26 @@ pub const SemanticAnalyzer = struct {
             .Storage => {
                 // Storage variables must be at contract level
                 if (self.current_function != null) {
-                    try self.addError("Storage variables must be declared at contract level", var_decl.span);
+                    try self.addErrorStatic("Storage variables must be declared at contract level", var_decl.span);
                     return SemanticError.StorageInNonPersistentContext;
                 }
 
                 // Storage const variables can be initialized in constructor
                 if (var_decl.region == .Storage and !var_decl.mutable and var_decl.value == null) {
                     // Storage const variables can be initialized in constructor - track for later validation
-                    try self.addInfo("Storage const variable - must be initialized in constructor if not initialized here", var_decl.span);
+                    try self.addInfoStatic("Storage const variable - must be initialized in constructor if not initialized here", var_decl.span);
                 }
             },
             .Immutable => {
                 // Immutable variables must be at contract level
                 if (self.current_function != null) {
-                    try self.addError("Immutable variables must be declared at contract level", var_decl.span);
+                    try self.addErrorStatic("Immutable variables must be declared at contract level", var_decl.span);
                 }
             },
             .Const => {
                 // Const can be anywhere but must have initializer
                 if (var_decl.value == null) {
-                    try self.addError("Const variables must have initializer", var_decl.span);
+                    try self.addErrorStatic("Const variables must have initializer", var_decl.span);
                 }
             },
             else => {
@@ -2179,9 +2241,11 @@ pub const SemanticAnalyzer = struct {
             // These variables must be declared at contract level
             if (self.current_function != null) {
                 const var_type = if (var_decl.region == .Immutable) "Immutable" else "Storage const";
-                const message = std.fmt.allocPrint(self.allocator, "{s} variables must be declared at contract level", .{var_type}) catch "Variables must be declared at contract level";
-                defer if (!std.mem.eql(u8, message, "Variables must be declared at contract level")) self.allocator.free(message);
-                try self.addError(message, var_decl.span);
+                if (std.fmt.allocPrint(self.allocator, "{s} variables must be declared at contract level", .{var_type})) |message| {
+                    try self.addError(message, var_decl.span); // Takes ownership
+                } else |_| {
+                    try self.addErrorStatic("Variables must be declared at contract level", var_decl.span); // Static fallback
+                }
                 return SemanticError.ImmutableViolation;
             }
 
@@ -2199,12 +2263,12 @@ pub const SemanticAnalyzer = struct {
             if (var_decl.region == .Const) {
                 // Const variables must have initializers
                 if (var_decl.value == null) {
-                    try self.addError("Const variables must have initializer", var_decl.span);
+                    try self.addErrorStatic("Const variables must have initializer", var_decl.span);
                 }
             } else {
                 // Other immutable variables (let declarations)
                 if (var_decl.value == null) {
-                    try self.addError("Immutable variables must have initializers", var_decl.span);
+                    try self.addErrorStatic("Immutable variables must have initializers", var_decl.span);
                 }
             }
         }
@@ -2214,10 +2278,10 @@ pub const SemanticAnalyzer = struct {
     fn validateLogFieldType(self: *SemanticAnalyzer, field_type: *ast.TypeRef, span: ast.SourceSpan) SemanticError!void {
         switch (field_type.*) {
             .Mapping, .DoubleMap => {
-                try self.addError("Mappings not allowed in log fields", span);
+                try self.addErrorStatic("Mappings not allowed in log fields", span);
             },
             .Slice => {
-                try self.addWarning("Slice types in logs may have gas implications", span);
+                try self.addWarningStatic("Slice types in logs may have gas implications", span);
             },
             else => {
                 // Other types are fine
@@ -2228,7 +2292,7 @@ pub const SemanticAnalyzer = struct {
     /// Validate return context
     fn validateReturnContext(self: *SemanticAnalyzer, span: ast.SourceSpan) SemanticError!void {
         if (self.current_function == null) {
-            try self.addError("Return statement outside function", span);
+            try self.addErrorStatic("Return statement outside function", span);
         }
     }
 
@@ -2244,7 +2308,7 @@ pub const SemanticAnalyzer = struct {
         }
 
         if (!has_return) {
-            try self.addError("Function with return type must have return statement", function_span);
+            try self.addErrorStatic("Function with return type must have return statement", function_span);
             return SemanticError.MissingReturnStatement;
         }
     }
@@ -2253,27 +2317,26 @@ pub const SemanticAnalyzer = struct {
     fn validateContract(self: *SemanticAnalyzer, contract: *ContractContext) SemanticError!void {
         // Check for init function
         if (!contract.has_init) {
-            try self.addError("Contract missing init function", ast.SourceSpan{ .line = 0, .column = 0, .length = 0 });
+            try self.addErrorStatic("Contract missing init function", ast.SourceSpan{ .line = 0, .column = 0, .length = 0 });
             return SemanticError.MissingInitFunction;
         }
 
         // Validate init function is public
         if (!contract.init_is_public) {
-            try self.addWarning("Init function should be public", ast.SourceSpan{ .line = 0, .column = 0, .length = 0 });
+            try self.addWarningStatic("Init function should be public", ast.SourceSpan{ .line = 0, .column = 0, .length = 0 });
         }
     }
 
-    /// Add error diagnostic (takes ownership of message if it's allocated)
+    /// Add error diagnostic (takes ownership of allocated message)
     fn addError(self: *SemanticAnalyzer, message: []const u8, span: ast.SourceSpan) !void {
         self.analysis_state.error_count += 1;
         self.validation_coverage.validation_stats.errors_found += 1;
 
-        // Duplicate the message to ensure it stays alive after the caller frees it
-        const owned_message = self.allocator.dupe(u8, message) catch return; // Skip on OOM
+        // Take ownership of the message (caller is responsible for allocating it)
         const safe_span = self.validateSpan(span);
 
         try self.diagnostics.append(Diagnostic{
-            .message = owned_message,
+            .message = message, // Direct ownership transfer - no duplication
             .span = safe_span,
             .severity = .Error,
             .context = if (self.analysis_state.current_node_type) |node_type| DiagnosticContext{
@@ -2285,17 +2348,24 @@ pub const SemanticAnalyzer = struct {
         });
     }
 
-    /// Add warning diagnostic
+    /// Add error diagnostic with static message (copies the message)
+    pub fn addErrorStatic(self: *SemanticAnalyzer, comptime message: []const u8, span: ast.SourceSpan) !void {
+        // For compile-time known strings, duplicate them so they can be safely freed later
+        const owned_message = self.allocator.dupe(u8, message) catch return; // Skip on OOM
+        return self.addError(owned_message, span);
+    }
+
+    /// Add warning diagnostic (takes ownership of allocated message)
     fn addWarning(self: *SemanticAnalyzer, message: []const u8, span: ast.SourceSpan) !void {
         self.analysis_state.warning_count += 1;
         self.validation_coverage.validation_stats.warnings_generated += 1;
 
-        // Duplicate the message to ensure it stays alive after the caller frees it
-        const owned_message = self.allocator.dupe(u8, message) catch return; // Skip on OOM
+        // Take ownership of the message (caller is responsible for allocating it)
+        const safe_span = self.validateSpan(span);
 
         try self.diagnostics.append(Diagnostic{
-            .message = owned_message,
-            .span = span,
+            .message = message, // Direct ownership transfer - no duplication
+            .span = safe_span,
             .severity = .Warning,
             .context = if (self.analysis_state.current_node_type) |node_type| DiagnosticContext{
                 .node_type = node_type,
@@ -2306,14 +2376,21 @@ pub const SemanticAnalyzer = struct {
         });
     }
 
-    /// Add info diagnostic
-    fn addInfo(self: *SemanticAnalyzer, message: []const u8, span: ast.SourceSpan) !void {
-        // Duplicate the message to ensure it stays alive after the caller frees it
+    /// Add warning diagnostic with static message (copies the message)
+    pub fn addWarningStatic(self: *SemanticAnalyzer, comptime message: []const u8, span: ast.SourceSpan) !void {
+        // For compile-time known strings, duplicate them so they can be safely freed later
         const owned_message = self.allocator.dupe(u8, message) catch return; // Skip on OOM
+        return self.addWarning(owned_message, span);
+    }
+
+    /// Add info diagnostic (takes ownership of allocated message)
+    fn addInfo(self: *SemanticAnalyzer, message: []const u8, span: ast.SourceSpan) !void {
+        // Take ownership of the message (caller is responsible for allocating it)
+        const safe_span = self.validateSpan(span);
 
         try self.diagnostics.append(Diagnostic{
-            .message = owned_message,
-            .span = span,
+            .message = message, // Direct ownership transfer - no duplication
+            .span = safe_span,
             .severity = .Info,
             .context = if (self.analysis_state.current_node_type) |node_type| DiagnosticContext{
                 .node_type = node_type,
@@ -2324,8 +2401,15 @@ pub const SemanticAnalyzer = struct {
         });
     }
 
+    /// Add info diagnostic with static message (copies the message)
+    pub fn addInfoStatic(self: *SemanticAnalyzer, comptime message: []const u8, span: ast.SourceSpan) !void {
+        // For compile-time known strings, duplicate them so they can be safely freed later
+        const owned_message = self.allocator.dupe(u8, message) catch return; // Skip on OOM
+        return self.addInfo(owned_message, span);
+    }
+
     /// Check if a function is a built-in function
-    fn isBuiltinFunction(self: *SemanticAnalyzer, name: []const u8) bool {
+    pub fn isBuiltinFunction(self: *SemanticAnalyzer, name: []const u8) bool {
         _ = self;
         // Actual built-in functions in Ora language
         return std.mem.eql(u8, name, "requires") or
@@ -2412,16 +2496,16 @@ pub const SemanticAnalyzer = struct {
         const formal_result = self.formal_verifier.verifyFunction(function) catch |err| {
             switch (err) {
                 formal_verifier.FormalVerificationError.ComplexityTooHigh => {
-                    try self.addWarning("Function too complex for formal verification", function.span);
+                    try self.addWarningStatic("Function too complex for formal verification", function.span);
                     return;
                 },
                 formal_verifier.FormalVerificationError.TimeoutError => {
-                    try self.addWarning("Formal verification timeout", function.span);
+                    try self.addWarningStatic("Formal verification timeout", function.span);
                     return;
                 },
                 formal_verifier.FormalVerificationError.OutOfMemory => return SemanticError.OutOfMemory,
                 else => {
-                    try self.addWarning("Formal verification failed", function.span);
+                    try self.addWarningStatic("Formal verification failed", function.span);
                     return;
                 },
             }
@@ -2429,23 +2513,27 @@ pub const SemanticAnalyzer = struct {
 
         // Report formal verification results
         if (formal_result.proven) {
-            const message = std.fmt.allocPrint(self.allocator, "Formal verification succeeded for function '{s}' (confidence: {d:.1}%)", .{
+            if (std.fmt.allocPrint(self.allocator, "Formal verification succeeded for function '{s}' (confidence: {d:.1}%)", .{
                 function.name,
                 formal_result.confidence_level * 100,
-            }) catch "Formal verification succeeded";
-            defer if (!std.mem.eql(u8, message, "Formal verification succeeded")) self.allocator.free(message);
-            try self.addInfo(message, function.span);
+            })) |message| {
+                try self.addInfo(message, function.span); // Takes ownership
+            } else |_| {
+                try self.addInfoStatic("Formal verification succeeded", function.span); // Static fallback
+            }
 
             // Report proof strategy used
-            const strategy_message = std.fmt.allocPrint(self.allocator, "Proof strategy: {s}", .{@tagName(formal_result.verification_method)}) catch "Proof strategy used";
-            defer if (!std.mem.eql(u8, strategy_message, "Proof strategy used")) self.allocator.free(strategy_message);
-            try self.addInfo(strategy_message, function.span);
+            if (std.fmt.allocPrint(self.allocator, "Proof strategy: {s}", .{@tagName(formal_result.verification_method)})) |strategy_message| {
+                try self.addInfo(strategy_message, function.span); // Takes ownership
+            } else |_| {
+                try self.addInfoStatic("Proof strategy used", function.span); // Static fallback
+            }
         } else {
-            try self.addWarning("Formal verification could not prove function correctness", function.span);
+            try self.addWarningStatic("Formal verification could not prove function correctness", function.span);
 
             // Report counterexample if available
             if (formal_result.counterexample != null) {
-                try self.addWarning("Counterexample found - function may have bugs", function.span);
+                try self.addWarningStatic("Counterexample found - function may have bugs", function.span);
             }
         }
 
@@ -2527,16 +2615,16 @@ pub const SemanticAnalyzer = struct {
         const result = self.formal_verifier.verify(&formal_condition) catch |err| {
             switch (err) {
                 formal_verifier.FormalVerificationError.ComplexityTooHigh => {
-                    try self.addWarning("Condition too complex for formal verification", function.span);
+                    try self.addWarningStatic("Condition too complex for formal verification", function.span);
                     return;
                 },
                 formal_verifier.FormalVerificationError.TimeoutError => {
-                    try self.addWarning("Formal verification timeout for condition", function.span);
+                    try self.addWarningStatic("Formal verification timeout for condition", function.span);
                     return;
                 },
                 formal_verifier.FormalVerificationError.OutOfMemory => return SemanticError.OutOfMemory,
                 else => {
-                    try self.addWarning("Formal verification failed for condition", function.span);
+                    try self.addWarningStatic("Formal verification failed for condition", function.span);
                     return;
                 },
             }
@@ -2550,16 +2638,20 @@ pub const SemanticAnalyzer = struct {
         };
 
         if (result.proven) {
-            const message = std.fmt.allocPrint(self.allocator, "Formal verification proved {s} (confidence: {d:.1}%)", .{
+            if (std.fmt.allocPrint(self.allocator, "Formal verification proved {s} (confidence: {d:.1}%)", .{
                 kind_str,
                 result.confidence_level * 100,
-            }) catch "Formal verification proved condition";
-            defer if (!std.mem.eql(u8, message, "Formal verification proved condition")) self.allocator.free(message);
-            try self.addInfo(message, function.span);
+            })) |message| {
+                try self.addInfo(message, function.span); // Takes ownership
+            } else |_| {
+                try self.addInfoStatic("Formal verification proved condition", function.span); // Static fallback
+            }
         } else {
-            const message = std.fmt.allocPrint(self.allocator, "Could not formally verify {s}", .{kind_str}) catch "Could not formally verify condition";
-            defer if (!std.mem.eql(u8, message, "Could not formally verify condition")) self.allocator.free(message);
-            try self.addWarning(message, function.span);
+            if (std.fmt.allocPrint(self.allocator, "Could not formally verify {s}", .{kind_str})) |message| {
+                try self.addWarning(message, function.span); // Takes ownership
+            } else |_| {
+                try self.addWarningStatic("Could not formally verify condition", function.span); // Static fallback
+            }
         }
     }
 
@@ -2626,35 +2718,41 @@ pub const SemanticAnalyzer = struct {
     fn reportOptimizationResults(self: *SemanticAnalyzer, function: *ast.FunctionNode, result: optimizer.OptimizationResult) SemanticError!void {
         // Add info about successful optimizations
         if (result.transformations_applied > 0) {
-            const message = std.fmt.allocPrint(self.allocator, "Function '{s}' optimized: {} transformations, {} checks eliminated, {} gas saved", .{
+            if (std.fmt.allocPrint(self.allocator, "Function '{s}' optimized: {} transformations, {} checks eliminated, {} gas saved", .{
                 function.name,
                 result.transformations_applied,
                 result.checks_eliminated,
                 self.optimizer.getTotalGasSavings(),
-            }) catch "Function optimized";
-            defer if (!std.mem.eql(u8, message, "Function optimized")) self.allocator.free(message);
-            try self.addInfo(message, function.span);
+            })) |message| {
+                try self.addInfo(message, function.span); // Takes ownership
+            } else |_| {
+                try self.addInfoStatic("Function optimized", function.span); // Static fallback
+            }
         }
 
         // Report specific optimizations
         for (result.optimizations) |opt| {
-            const opt_message = std.fmt.allocPrint(self.allocator, "{s}: {} gas saved", .{
+            if (std.fmt.allocPrint(self.allocator, "{s}: {} gas saved", .{
                 opt.description,
                 opt.savings.gas_saved,
-            }) catch opt.description;
-            defer if (!std.mem.eql(u8, opt_message, opt.description)) self.allocator.free(opt_message);
-            try self.addInfo(opt_message, opt.span);
+            })) |opt_message| {
+                try self.addInfo(opt_message, opt.span); // Takes ownership
+            } else |_| {
+                try self.addInfoStatic(opt.description, opt.span); // Static fallback
+            }
         }
 
         // Report significant savings
         const total_gas_saved = self.optimizer.getTotalGasSavings();
         if (total_gas_saved > 1000) {
-            const savings_message = std.fmt.allocPrint(self.allocator, "Significant optimization: {} total gas saved in function '{s}'", .{
+            if (std.fmt.allocPrint(self.allocator, "Significant optimization: {} total gas saved in function '{s}'", .{
                 total_gas_saved,
                 function.name,
-            }) catch "Significant optimization achieved";
-            defer if (!std.mem.eql(u8, savings_message, "Significant optimization achieved")) self.allocator.free(savings_message);
-            try self.addInfo(savings_message, function.span);
+            })) |savings_message| {
+                try self.addInfo(savings_message, function.span); // Takes ownership
+            } else |_| {
+                try self.addInfoStatic("Significant optimization achieved", function.span); // Static fallback
+            }
         }
     }
 
@@ -2664,9 +2762,11 @@ pub const SemanticAnalyzer = struct {
         while (iter.next()) |entry| {
             const info = entry.value_ptr.*;
             if (!info.initialized) {
-                const message = std.fmt.allocPrint(self.allocator, "Immutable variable '{s}' is not initialized", .{info.name}) catch "Immutable variable is not initialized";
-                defer if (!std.mem.eql(u8, message, "Immutable variable is not initialized")) self.allocator.free(message);
-                try self.addError(message, info.declared_span);
+                if (std.fmt.allocPrint(self.allocator, "Immutable variable '{s}' is not initialized", .{info.name})) |message| {
+                    try self.addError(message, info.declared_span); // Takes ownership
+                } else |_| {
+                    try self.addErrorStatic("Immutable variable is not initialized", info.declared_span); // Static fallback
+                }
                 return SemanticError.ImmutableViolation;
             }
         }

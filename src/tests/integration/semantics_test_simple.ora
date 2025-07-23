@@ -1,0 +1,109 @@
+// Simple test contract for semantic analysis validation
+// This contract tests basic semantic analysis features:
+// - Contract structure validation
+// - Init function presence and validation
+// - Storage variables
+// - Immutable variables  
+// - Memory region validation
+// - Function analysis
+
+contract SemanticsTestContract {
+    // Storage variables - should be valid at contract level
+    storage totalSupply: u256;
+    storage balances: map[address, u256];
+    
+    // Immutable variables - should be valid at contract level
+    immutable name: string;
+    immutable symbol: string;
+    immutable decimals: u8;
+    
+    // Constants - should be valid anywhere
+    const MAX_SUPPLY: u256 = 1000000;
+    const MIN_BALANCE: u256 = 0;
+    
+    // Error declarations
+    error InsufficientBalance;
+    error InvalidTransfer;
+    error UnauthorizedAccess;
+    
+    // Event declarations
+    log Transfer(from: address, to: address, value: u256);
+    log Approval(owner: address, spender: address, value: u256);
+    
+    // Constructor - must be present and public
+    function init() {
+        // Initialize immutable variables
+        name = "Test Token";
+        symbol = "TEST";
+        decimals = 18;
+        
+        // Initialize storage variables
+        totalSupply = MAX_SUPPLY;
+        balances[tx.sender] = totalSupply;
+    }
+    
+    // Regular public function
+    function transfer(to: address, amount: u256) -> bool public {
+        // Stack variables - should be valid in functions
+        let senderBalance = balances[tx.sender];
+        
+        // Basic validation
+        if (senderBalance < amount) {
+            return false;
+        }
+        
+        // Update balances
+        balances[tx.sender] = senderBalance - amount;
+        balances[to] = balances[to] + amount;
+        
+        // Emit event
+        log Transfer(tx.sender, to, amount);
+        
+        return true;
+    }
+    
+    // Function with return type
+    function balanceOf(owner: address) -> u256 public {
+        return balances[owner];
+    }
+    
+    // Function with local memory variables
+    function getInfo() -> (string, string, u8) public {
+        memory tempName: string = name;
+        memory tempSymbol: string = symbol;
+        memory tempDecimals: u8 = decimals;
+        
+        return (tempName, tempSymbol, tempDecimals);
+    }
+    
+    // Function with error handling
+    function safeTransfer(to: address, amount: u256) -> !bool public {
+        if (amount == 0) {
+            return InvalidTransfer;
+        }
+        
+        if (balances[tx.sender] < amount) {
+            return InsufficientBalance;
+        }
+        
+        balances[tx.sender] -= amount;
+        balances[to] += amount;
+        
+        log Transfer(tx.sender, to, amount);
+        return true;
+    }
+    
+    // Function with requires/ensures (formal verification)
+    function mint(to: address, amount: u256) -> bool
+    requires amount > 0
+    requires to != 0x0000000000000000000000000000000000000000
+    ensures totalSupply == old(totalSupply) + amount
+    ensures balances[to] == old(balances[to]) + amount
+    {
+        totalSupply += amount;
+        balances[to] += amount;
+        
+        log Transfer(0x0000000000000000000000000000000000000000, to, amount);
+        return true;
+    }
+} 

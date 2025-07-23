@@ -79,16 +79,16 @@ pub const TypeRef = union(enum) {
     String: void,
     Bytes: void,
 
-    // Complex types
-    Slice: *TypeRef,
-    Mapping: MappingType,
-    DoubleMap: DoubleMapType,
+    // Complex types with proper recursive structure
+    Slice: *const TypeRef,
+    Mapping: *const MappingType,
+    DoubleMap: *const DoubleMapType,
     Identifier: []const u8, // For custom types (structs, enums)
-    Tuple: TupleType, // Tuple types
+    Tuple: *const TupleType, // Tuple types
 
     // Error handling types
-    ErrorUnion: ErrorUnionType, // !T syntax
-    Result: ResultType, // Result[T, E] syntax
+    ErrorUnion: *const ErrorUnionType, // !T syntax
+    Result: *const ResultType, // Result[T, E] syntax
 
     // Special types
     Unknown: void, // For type inference
@@ -96,29 +96,29 @@ pub const TypeRef = union(enum) {
 
 /// Error union type (!T)
 pub const ErrorUnionType = struct {
-    success_type: *TypeRef,
+    success_type: *const TypeRef,
 };
 
 /// Result type (Result[T, E])
 pub const ResultType = struct {
-    ok_type: *TypeRef,
-    error_type: *TypeRef,
+    ok_type: *const TypeRef,
+    error_type: *const TypeRef,
 };
 
 /// Tuple type for multiple values
 pub const TupleType = struct {
-    types: []TypeRef,
+    types: []const TypeRef,
 };
 
 pub const MappingType = struct {
-    key: *TypeRef,
-    value: *TypeRef,
+    key: *const TypeRef,
+    value: *const TypeRef,
 };
 
 pub const DoubleMapType = struct {
-    key1: *TypeRef,
-    key2: *TypeRef,
-    value: *TypeRef,
+    key1: *const TypeRef,
+    key2: *const TypeRef,
+    value: *const TypeRef,
 };
 
 /// Variable Declaration with Ora's memory model
@@ -662,9 +662,7 @@ pub fn deinitAstNode(allocator: std.mem.Allocator, node: *AstNode) void {
             deinitBlockNode(allocator, &try_block.try_block);
             if (try_block.catch_block) |*catch_block| {
                 deinitBlockNode(allocator, &catch_block.block);
-                if (catch_block.error_variable) |name| {
-                    allocator.free(name);
-                }
+                // Note: error_variable is a lexeme (not allocated), so we don't free it
             }
         },
         .StructDecl => |*struct_decl| {
@@ -705,32 +703,43 @@ pub fn deinitParamNode(allocator: std.mem.Allocator, param: *ParamNode) void {
 pub fn deinitTypeRef(allocator: std.mem.Allocator, type_ref: *TypeRef) void {
     switch (type_ref.*) {
         .Slice => |elem_type| {
-            deinitTypeRef(allocator, elem_type);
+            deinitTypeRef(allocator, @constCast(elem_type));
             allocator.destroy(elem_type);
         },
         .Mapping => |mapping| {
-            deinitTypeRef(allocator, mapping.key);
-            deinitTypeRef(allocator, mapping.value);
+            deinitTypeRef(allocator, @constCast(mapping.key));
+            deinitTypeRef(allocator, @constCast(mapping.value));
             allocator.destroy(mapping.key);
             allocator.destroy(mapping.value);
+            allocator.destroy(mapping);
         },
         .DoubleMap => |doublemap| {
-            deinitTypeRef(allocator, doublemap.key1);
-            deinitTypeRef(allocator, doublemap.key2);
-            deinitTypeRef(allocator, doublemap.value);
+            deinitTypeRef(allocator, @constCast(doublemap.key1));
+            deinitTypeRef(allocator, @constCast(doublemap.key2));
+            deinitTypeRef(allocator, @constCast(doublemap.value));
             allocator.destroy(doublemap.key1);
             allocator.destroy(doublemap.key2);
             allocator.destroy(doublemap.value);
+            allocator.destroy(doublemap);
         },
         .ErrorUnion => |error_union| {
-            deinitTypeRef(allocator, error_union.success_type);
+            deinitTypeRef(allocator, @constCast(error_union.success_type));
             allocator.destroy(error_union.success_type);
+            allocator.destroy(error_union);
         },
         .Result => |result| {
-            deinitTypeRef(allocator, result.ok_type);
-            deinitTypeRef(allocator, result.error_type);
+            deinitTypeRef(allocator, @constCast(result.ok_type));
+            deinitTypeRef(allocator, @constCast(result.error_type));
             allocator.destroy(result.ok_type);
             allocator.destroy(result.error_type);
+            allocator.destroy(result);
+        },
+        .Tuple => |tuple| {
+            for (tuple.types) |*element| {
+                deinitTypeRef(allocator, @constCast(element));
+            }
+            allocator.free(tuple.types);
+            allocator.destroy(tuple);
         },
         else => {
             // Primitive types don't need cleanup
@@ -834,6 +843,12 @@ pub fn deinitExprNode(allocator: std.mem.Allocator, expr: *ExprNode) void {
             // string literals from the parser, not allocated memory, so we don't free them
             _ = enum_literal;
         },
+        .Tuple => |*tuple| {
+            for (tuple.elements) |*element| {
+                deinitExprNode(allocator, element);
+            }
+            allocator.free(tuple.elements);
+        },
         else => {
             // Literals and identifiers don't need cleanup
         },
@@ -899,9 +914,7 @@ pub fn deinitStmtNode(allocator: std.mem.Allocator, stmt: *StmtNode) void {
             deinitBlockNode(allocator, &try_block.try_block);
             if (try_block.catch_block) |*catch_block| {
                 deinitBlockNode(allocator, &catch_block.block);
-                if (catch_block.error_variable) |name| {
-                    allocator.free(name);
-                }
+                // Note: error_variable is a lexeme (not allocated), so we don't free it
             }
         },
         else => {
@@ -1101,25 +1114,25 @@ pub const ASTSerializer = struct {
             .I256 => try writer.writeAll("\"i256\""),
             .String => try writer.writeAll("\"string\""),
             .Bytes => try writer.writeAll("\"bytes\""),
-            .Slice => |slice_element_type| {
+            .Slice => |elem_type| {
                 try writer.writeAll("{\"type\": \"slice\", \"element\": ");
-                try serializeTypeRef(slice_element_type, writer);
+                try serializeTypeRef(@constCast(elem_type), writer);
                 try writer.writeAll("}");
             },
-            .Mapping => |*mapping| {
+            .Mapping => |mapping| {
                 try writer.writeAll("{\"type\": \"mapping\", \"key\": ");
-                try serializeTypeRef(mapping.key, writer);
+                try serializeTypeRef(@constCast(mapping.key), writer);
                 try writer.writeAll(", \"value\": ");
-                try serializeTypeRef(mapping.value, writer);
+                try serializeTypeRef(@constCast(mapping.value), writer);
                 try writer.writeAll("}");
             },
-            .DoubleMap => |*double_map| {
+            .DoubleMap => |double_map| {
                 try writer.writeAll("{\"type\": \"doublemap\", \"key1\": ");
-                try serializeTypeRef(double_map.key1, writer);
+                try serializeTypeRef(@constCast(double_map.key1), writer);
                 try writer.writeAll(", \"key2\": ");
-                try serializeTypeRef(double_map.key2, writer);
+                try serializeTypeRef(@constCast(double_map.key2), writer);
                 try writer.writeAll(", \"value\": ");
-                try serializeTypeRef(double_map.value, writer);
+                try serializeTypeRef(@constCast(double_map.value), writer);
                 try writer.writeAll("}");
             },
             .Identifier => |name| {
@@ -1129,21 +1142,21 @@ pub const ASTSerializer = struct {
             },
             .ErrorUnion => |error_union| {
                 try writer.writeAll("{\"type\": \"error_union\", \"success_type\": ");
-                try serializeTypeRef(error_union.success_type, writer);
+                try serializeTypeRef(@constCast(error_union.success_type), writer);
                 try writer.writeAll("}");
             },
             .Result => |result| {
                 try writer.writeAll("{\"type\": \"result\", \"ok_type\": ");
-                try serializeTypeRef(result.ok_type, writer);
+                try serializeTypeRef(@constCast(result.ok_type), writer);
                 try writer.writeAll(", \"error_type\": ");
-                try serializeTypeRef(result.error_type, writer);
+                try serializeTypeRef(@constCast(result.error_type), writer);
                 try writer.writeAll("}");
             },
-            .Tuple => |*tuple| {
+            .Tuple => |tuple| {
                 try writer.writeAll("{\"type\": \"tuple\", \"elements\": [");
                 for (tuple.types, 0..) |*element, i| {
                     if (i > 0) try writer.writeAll(", ");
-                    try serializeTypeRef(element, writer);
+                    try serializeTypeRef(@constCast(element), writer);
                 }
                 try writer.writeAll("]}");
             },

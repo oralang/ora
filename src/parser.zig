@@ -179,6 +179,11 @@ pub const Parser = struct {
             return AstNode{ .VariableDecl = try self.parseVariableDecl() };
         }
 
+        // Error declarations
+        if (self.match(.Error)) {
+            return AstNode{ .ErrorDecl = try self.parseErrorDecl() };
+        }
+
         // Log declarations
         if (self.match(.Log)) {
             return self.parseLogDecl();
@@ -238,41 +243,7 @@ pub const Parser = struct {
             return_type = try self.parseType();
         }
 
-        // Parse preconditions (requires clauses)
-        var requires_clauses = std.ArrayList(ast.ExprNode).init(self.allocator);
-        defer requires_clauses.deinit();
-        errdefer {
-            // Clean up requires clauses on error
-            for (requires_clauses.items) |*clause| {
-                ast.deinitExprNode(self.allocator, clause);
-            }
-        }
-
-        while (self.match(.Requires)) {
-            _ = try self.consume(.LeftParen, "Expected '(' after 'requires'");
-            const condition = try self.parseExpression();
-            try requires_clauses.append(condition);
-            _ = try self.consume(.RightParen, "Expected ')' after requires condition");
-            _ = self.match(.Semicolon); // Optional semicolon
-        }
-
-        // Parse postconditions (ensures clauses)
-        var ensures_clauses = std.ArrayList(ast.ExprNode).init(self.allocator);
-        defer ensures_clauses.deinit();
-        errdefer {
-            // Clean up ensures clauses on error
-            for (ensures_clauses.items) |*clause| {
-                ast.deinitExprNode(self.allocator, clause);
-            }
-        }
-
-        while (self.match(.Ensures)) {
-            _ = try self.consume(.LeftParen, "Expected '(' after 'ensures'");
-            const condition = try self.parseExpression();
-            try ensures_clauses.append(condition);
-            _ = try self.consume(.RightParen, "Expected ')' after ensures condition");
-            _ = self.match(.Semicolon); // Optional semicolon
-        }
+        // Requires and ensures clauses are now parsed as statements inside the function body
 
         // Parse function body
         const body = try self.parseBlock();
@@ -282,8 +253,8 @@ pub const Parser = struct {
             .name = name_token.lexeme,
             .parameters = try params.toOwnedSlice(),
             .return_type = return_type,
-            .requires_clauses = try requires_clauses.toOwnedSlice(),
-            .ensures_clauses = try ensures_clauses.toOwnedSlice(),
+            .requires_clauses = &[_]ast.ExprNode{}, // Empty - now parsed as statements
+            .ensures_clauses = &[_]ast.ExprNode{}, // Empty - now parsed as statements
             .body = body,
             .span = ast.SourceSpan{
                 .line = name_token.line,
@@ -328,10 +299,12 @@ pub const Parser = struct {
             value_type.* = try self.parseType();
             _ = try self.consume(.RightBracket, "Expected ']' after map value type");
 
-            return ast.TypeRef{ .Mapping = ast.MappingType{
+            const mapping = try self.allocator.create(ast.MappingType);
+            mapping.* = ast.MappingType{
                 .key = key_type,
                 .value = value_type,
-            } };
+            };
+            return ast.TypeRef{ .Mapping = mapping };
         }
 
         // Handle bytes type directly
@@ -412,11 +385,13 @@ pub const Parser = struct {
                 value_type.* = try self.parseType();
                 _ = try self.consume(.RightBracket, "Expected ']' after doublemap value type");
 
-                return ast.TypeRef{ .DoubleMap = ast.DoubleMapType{
+                const doublemap = try self.allocator.create(ast.DoubleMapType);
+                doublemap.* = ast.DoubleMapType{
                     .key1 = key1_type,
                     .key2 = key2_type,
                     .value = value_type,
-                } };
+                };
+                return ast.TypeRef{ .DoubleMap = doublemap };
             }
 
             // Result[T, E] type
@@ -435,10 +410,12 @@ pub const Parser = struct {
                 error_type.* = try self.parseType();
                 _ = try self.consume(.RightBracket, "Expected ']' after Result error type");
 
-                return ast.TypeRef{ .Result = ast.ResultType{
+                const result = try self.allocator.create(ast.ResultType);
+                result.* = ast.ResultType{
                     .ok_type = ok_type,
                     .error_type = error_type,
-                } };
+                };
+                return ast.TypeRef{ .Result = result };
             }
 
             // Custom type (struct/enum)
@@ -451,9 +428,11 @@ pub const Parser = struct {
             errdefer self.allocator.destroy(success_type);
             success_type.* = try self.parseType();
 
-            return ast.TypeRef{ .ErrorUnion = ast.ErrorUnionType{
+            const error_union = try self.allocator.create(ast.ErrorUnionType);
+            error_union.* = ast.ErrorUnionType{
                 .success_type = success_type,
-            } };
+            };
+            return ast.TypeRef{ .ErrorUnion = error_union };
         }
 
         return self.errorAtCurrent("Expected type");
@@ -533,8 +512,17 @@ pub const Parser = struct {
         } else {
             // Regular variable declaration
             name_token = try self.consume(.Identifier, "Expected variable name");
-            _ = try self.consume(.Colon, "Expected ':' after variable name");
-            var_type = try self.parseType();
+
+            // Support both explicit type and type inference
+            if (self.match(.Colon)) {
+                // Explicit type: let x: u32 = value
+                var_type = try self.parseType();
+            } else if (self.check(.Equal)) {
+                // Type inference: let x = value
+                var_type = ast.TypeRef.Unknown; // Will be inferred
+            } else {
+                return self.errorAtCurrent("Expected ':' for type annotation or '=' for assignment");
+            }
         }
 
         // Parse optional initializer
@@ -673,7 +661,28 @@ pub const Parser = struct {
         if (self.match(.Return)) {
             var value: ?ast.ExprNode = null;
             if (!self.check(.Semicolon) and !self.check(.RightBrace)) {
-                value = try self.parseExpression();
+                // Special handling for bare identifiers that could be error returns
+                if (self.check(.Identifier)) {
+                    const identifier_token = self.peek();
+                    // Look ahead to see if this is a bare identifier (followed by ; or })
+                    const next_pos = self.current + 1;
+                    if (next_pos < self.tokens.len and
+                        (self.tokens[next_pos].type == .Semicolon or
+                        self.tokens[next_pos].type == .RightBrace))
+                    {
+                        // This looks like an error return - parse as ErrorReturn
+                        _ = self.advance(); // consume the identifier
+                        value = ast.ExprNode{ .ErrorReturn = ast.ErrorReturnExpr{
+                            .error_name = identifier_token.lexeme,
+                            .span = makeSpan(identifier_token),
+                        } };
+                    } else {
+                        // Regular expression parsing
+                        value = try self.parseExpression();
+                    }
+                } else {
+                    value = try self.parseExpression();
+                }
             }
             _ = self.match(.Semicolon);
 
@@ -711,27 +720,35 @@ pub const Parser = struct {
 
         // Requires statements
         if (self.match(.Requires)) {
-            _ = try self.consume(.LeftParen, "Expected '(' after 'requires'");
+            const requires_token = self.previous();
+            // Support both requires(condition) and requires condition syntax
+            const has_paren = self.match(.LeftParen);
             const condition = try self.parseExpression();
-            _ = try self.consume(.RightParen, "Expected ')' after requires condition");
+            if (has_paren) {
+                _ = try self.consume(.RightParen, "Expected ')' after requires condition");
+            }
             _ = self.match(.Semicolon);
 
             return ast.StmtNode{ .Requires = ast.RequiresNode{
                 .condition = condition,
-                .span = makeSpan(self.previous()),
+                .span = makeSpan(requires_token),
             } };
         }
 
         // Ensures statements
         if (self.match(.Ensures)) {
-            _ = try self.consume(.LeftParen, "Expected '(' after 'ensures'");
+            const ensures_token = self.previous();
+            // Support both ensures(condition) and ensures condition syntax
+            const has_paren = self.match(.LeftParen);
             const condition = try self.parseExpression();
-            _ = try self.consume(.RightParen, "Expected ')' after ensures condition");
+            if (has_paren) {
+                _ = try self.consume(.RightParen, "Expected ')' after ensures condition");
+            }
             _ = self.match(.Semicolon);
 
             return ast.StmtNode{ .Ensures = ast.EnsuresNode{
                 .condition = condition,
-                .span = makeSpan(self.previous()),
+                .span = makeSpan(ensures_token),
             } };
         }
 
@@ -1535,6 +1552,17 @@ pub const Parser = struct {
             .base_type = base_type,
             .has_explicit_values = has_explicit_values,
         } };
+    }
+
+    /// Parse error declaration (error ErrorName;)
+    fn parseErrorDecl(self: *Parser) ParserError!ast.ErrorDeclNode {
+        const name_token = try self.consume(.Identifier, "Expected error name");
+        _ = self.match(.Semicolon); // Optional semicolon
+
+        return ast.ErrorDeclNode{
+            .name = name_token.lexeme,
+            .span = makeSpan(name_token),
+        };
     }
 
     /// Parse log declaration

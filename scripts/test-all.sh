@@ -245,6 +245,38 @@ test_all_examples() {
     fi
 }
 
+# Function to test semantic analysis
+test_semantic_analysis() {
+    print_subsection "Testing Semantic Analysis"
+    
+    if [ -f "scripts/test-semantics.sh" ]; then
+        print_status "INFO" "Running semantic analysis test suite..."
+        
+        total_tests=$((total_tests + 1))
+        
+        if $VERBOSE; then
+            if ./scripts/test-semantics.sh -v; then
+                print_status "PASS" "Semantic analysis tests passed"
+                passed_tests=$((passed_tests + 1))
+            else
+                print_status "FAIL" "Semantic analysis tests failed"
+                failed_tests=$((failed_tests + 1))
+            fi
+        else
+            if ./scripts/test-semantics.sh > /dev/null 2>&1; then
+                print_status "PASS" "Semantic analysis tests passed"
+                passed_tests=$((passed_tests + 1))
+            else
+                print_status "FAIL" "Semantic analysis tests failed"
+                failed_tests=$((failed_tests + 1))
+            fi
+        fi
+    else
+        print_status "SKIP" "Semantic analysis test script not found"
+        skipped_tests=$((skipped_tests + 1))
+    fi
+}
+
 # Function to print final summary
 print_summary() {
     print_section "Test Summary"
@@ -335,33 +367,37 @@ main() {
     build_compiler
     
     # Run tests based on categories
-    print_section "Running Tests"
-    
-    for category in $CATEGORIES; do
-        case $category in
-            all)
-                test_all_examples
-                ;;
-            struct)
-                test_struct_examples
-                ;;
-            enum)
-                test_enum_examples
-                ;;
-            core)
-                test_core_examples
-                ;;
-            advanced)
-                test_advanced_examples
-                ;;
-            examples)
-                test_all_examples
-                ;;
-            *)
-                print_status "WARN" "Unknown category: $category"
-                ;;
-        esac
-    done
+print_section "Running Tests"
+
+for category in $CATEGORIES; do
+    case $category in
+        all)
+            test_all_examples
+            test_semantic_analysis
+            ;;
+        struct)
+            test_struct_examples
+            ;;
+        enum)
+            test_enum_examples
+            ;;
+        core)
+            test_core_examples
+            ;;
+        advanced)
+            test_advanced_examples
+            ;;
+        examples)
+            test_all_examples
+            ;;
+        semantics)
+            test_semantic_analysis
+            ;;
+        *)
+            print_status "WARN" "Unknown category: $category"
+            ;;
+    esac
+done
     
     # Print final summary
     print_summary

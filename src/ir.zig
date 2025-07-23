@@ -4105,8 +4105,8 @@ pub const ASTToHIRConverter = struct {
             .Mapping => |*mapping| {
                 const key_type = try self.allocator.create(Type);
                 const value_type = try self.allocator.create(Type);
-                key_type.* = try self.convertType(mapping.key);
-                value_type.* = try self.convertType(mapping.value);
+                key_type.* = try self.convertType(@constCast(mapping.*.key));
+                value_type.* = try self.convertType(@constCast(mapping.*.value));
 
                 return Type{
                     .mapping = Type.MappingType{
@@ -4117,7 +4117,7 @@ pub const ASTToHIRConverter = struct {
             },
             .Slice => |slice_element_type| {
                 const element_type = try self.allocator.create(Type);
-                element_type.* = try self.convertType(slice_element_type);
+                element_type.* = try self.convertType(@constCast(slice_element_type));
 
                 return Type{
                     .slice = Type.SliceType{

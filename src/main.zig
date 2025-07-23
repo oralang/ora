@@ -235,10 +235,8 @@ fn runSemanticAnalysis(allocator: std.mem.Allocator, file_path: []const u8) !voi
         return;
     };
     defer {
-        // Free each diagnostic message before freeing the array
-        for (diagnostics) |diagnostic| {
-            allocator.free(diagnostic.message);
-        }
+        // NOTE: SemanticAnalyzer.deinit() now handles diagnostic message cleanup
+        // So we just free the diagnostics array, not individual messages
         allocator.free(diagnostics);
     }
 
@@ -388,10 +386,8 @@ fn runFullCompilation(allocator: std.mem.Allocator, file_path: []const u8) !void
         return;
     };
     defer {
-        // Free each diagnostic message before freeing the array
-        for (diagnostics) |diagnostic| {
-            allocator.free(diagnostic.message);
-        }
+        // NOTE: SemanticAnalyzer.deinit() now handles diagnostic message cleanup
+        // So we just free the diagnostics array, not individual messages
         allocator.free(diagnostics);
     }
 
@@ -628,16 +624,26 @@ fn runHIRGeneration(allocator: std.mem.Allocator, file_path: []const u8, output_
 
     try stdout.print("Generated {} AST nodes\n", .{ast_nodes.len});
 
-    // Skip semantic analysis for now - it's causing segfaults
-    // var typer = lib.Typer.init(allocator);
-    // defer typer.deinit();
+    try stdout.print("Running semantic analysis...\n", .{});
 
-    // typer.typeCheck(ast_nodes) catch |err| {
-    //     try stdout.print("Semantic analysis failed: {}\n", .{err});
-    //     return;
-    // };
+    var semantic_analyzer = lib.SemanticAnalyzer.init(allocator);
+    semantic_analyzer.initSelfReferences();
+    defer semantic_analyzer.deinit();
 
-    try stdout.print("Skipping semantic analysis for now\n", .{});
+    const diagnostics = semantic_analyzer.analyze(ast_nodes) catch |err| {
+        try stdout.print("Semantic analysis failed: {}\n", .{err});
+        return;
+    };
+    defer {
+        // NOTE: SemanticAnalyzer.deinit() now handles diagnostic message cleanup
+        // So we just free the diagnostics array, not individual messages
+        allocator.free(diagnostics);
+    }
+
+    try stdout.print("Semantic analysis completed with {} diagnostics\n", .{diagnostics.len});
+    for (diagnostics) |diagnostic| {
+        try stdout.print("  {}\n", .{diagnostic});
+    }
 
     // Create HIR
     var ir_builder = lib.IRBuilder.init(allocator);
