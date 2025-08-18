@@ -1,0 +1,49 @@
+const tx = @import("std/transaction");
+
+contract StorageTest {
+
+    enum Test : u8 {
+        A = 0,
+        B = 1,
+        C = 2
+    }
+
+    // Basic storage variables
+    storage var counter: u256;                     // Simple counter
+    storage let token_name: string;                // Constant token name
+    storage var is_paused: bool;                   // Boolean status flag
+    
+    // Complex storage variables
+    storage var balances: map[address, u256];      // Mapping of balances
+    storage var permissions: doublemap[address, address, bool]; // Double mapping
+    storage var transfer_logs: [TransferLog];      // Array of structs
+    
+    // Storage variables with initializers
+    storage var max_supply: u256 = 1000000000000000000000000;
+    storage let decimals: u8 = 18;
+
+    memory var last_update: u64 = 0; // TODO: this syntax don't make sense. Each call create a Frame. Frames can't access another frame memory array
+
+    
+    
+    // Constructor to initialize storage
+    pub fn init(name: string) {
+        token_name = name;          // Set constant storage
+        counter = 0;                // Initialize counter
+        is_paused = false;          // Set initial status
+    }
+    
+    // Function that updates storage variables
+    pub fn update_storage(user: address, amount: u256) {
+        counter += 1;               // Increment counter
+        balances[user] += amount;   // Update user balance
+        
+        // Update last update time
+        last_update = 1
+    }
+    
+    // Function that sets permissions in doublemap
+    pub fn set_permission(owner: address, spender: address, allowed: bool) {
+        permissions[owner, spender] = allowed;
+    }
+}

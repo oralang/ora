@@ -1,9 +1,0 @@
-struct Empty {
-}
-
-contract Test {
-    storage data: Empty;
-    
-    pub fn init() {
-    }
-}

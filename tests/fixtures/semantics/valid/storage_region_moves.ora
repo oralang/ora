@@ -1,0 +1,11 @@
+storage var s: u32;
+
+fn f() -> void {
+    let x: u32 = s;        // storage -> stack read OK
+    let one: u32 = 1;
+    s = one;               // stack -> storage OK
+    var y: u32 = 2;        // stack
+    s = y;                 // stack -> storage OK
+}
+
+

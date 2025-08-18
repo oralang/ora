@@ -1,0 +1,8 @@
+storage var arr: u32;
+storage var arr2: u32;
+
+fn f() -> void {
+    arr = arr2; // invalid: storage <- storage bulk copy without element-level path
+}
+
+

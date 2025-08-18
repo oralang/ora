@@ -1,7 +1,0 @@
-struct Point {
-    x: u32,
-}
-
-contract Test {
-    storage data: u32;
-}

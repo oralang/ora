@@ -1,0 +1,10 @@
+// Basic enum with explicit integer values and type
+enum TransferType : u8 {
+    Standard = 1,
+    Mint = 2,
+    Burn = 3,
+    Fee = 4
+}
+
+
+

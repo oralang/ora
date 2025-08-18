@@ -1,0 +1,21 @@
+// ==========================================
+// WHILE LOOP SYNTAX TEST
+// ==========================================
+// This file tests basic while loop syntax
+
+contract WhileLoopTest {
+    pub fn test_while_loops() {
+        let counter = 0;
+        
+        // Basic while loop
+        while (counter < 10) {
+            counter += 1;
+        }
+        
+        // While loop with complex condition
+        counter = 0;
+        while (counter < 20 && counter != 15) {
+            counter += 1;
+        }
+    }
+}

@@ -1,0 +1,43 @@
+// ==========================================
+// BREAK AND CONTINUE SYNTAX TEST
+// ==========================================
+// This file tests break and continue statements
+
+contract BreakContinueTest {
+    pub fn test_breaks_continues() {
+        // Break statement in for loop
+        for (0..20) |i, _| {
+            if (i > 10) {
+                break;
+            }
+        }
+        
+        // Continue statement in for loop
+        for (0..10) |i, _| {
+            if (i % 2 == 0) {
+                continue;
+            }
+            // Only executed for odd numbers
+        }
+        
+        // Break in while loop
+        let counter = 0;
+        while (true) {
+            counter += 1;
+            if (counter > 5) {
+                break;
+            }
+        }
+    }
+    
+    pub fn test_labeled_breaks() {
+        // Labeled outer loop
+        outer: for (0..5) |i, _| {
+            inner: for (0..5) |j, _| {
+                if (i * j > 10) {
+                    break :outer; // Break out of outer loop
+                }
+            }
+        }
+    }
+}

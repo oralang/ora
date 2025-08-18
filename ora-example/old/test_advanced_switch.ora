@@ -1,0 +1,226 @@
+// ==========================================
+// ADVANCED SWITCH PARSER TEST
+// ==========================================
+// This file tests advanced switch patterns and labeled blocks
+
+enum Priority : u8 {
+    Low = 0,
+    Medium = 1,
+    High = 2,
+    Critical = 3
+}
+
+enum OperationType : u8 {
+    Read = 0,
+    Write = 1,
+    Delete = 2,
+    Update = 3
+}
+
+contract AdvancedSwitchTest {
+    storage var operation_count: map[OperationType, u256];
+    storage var priority_queue: [Priority];
+    
+    pub fn test_labeled_switch() u256 {
+        let operation = \"complex\";
+        let priority = Priority.High;
+        
+        let result = switch (operation) {
+            \"simple\" => 1,
+            
+            \"complex\" => complex_operation: {
+                let intermediate = self.calculate_value(100);
+                
+                if (intermediate > 100) {
+                    let bonus = bonus_calculation: {
+                        if (priority == Priority.Critical) {
+                            break :bonus_calculation intermediate * 3;
+                        }
+                        break :bonus_calculation intermediate * 2;
+                    };
+                    break :complex_operation bonus;
+                }
+                
+                break :complex_operation intermediate;
+            },
+            
+            \"batch\" => batch_operation: {
+                let mut total: u256 = 0;
+                
+                for (0..5) |_, i| {
+                    let item_result = item_processing: {
+                        if (i == 3) {
+                            break :item_processing i * 10;
+                        }
+                        break :item_processing i;
+                    };
+                    
+                    total += item_result;
+                    
+                    if (total > 50) {
+                        break :batch_operation total;
+                    }
+                }
+                
+                break :batch_operation total;
+            },
+            
+            else => 0,
+        };
+        
+        return result;
+    }
+    
+    pub fn test_nested_switch() string {
+        let category = 1;
+        let subcategory = 2;
+        let priority = Priority.Medium;
+        
+        return switch (category) {
+            1 => switch (subcategory) {
+                1 => switch (priority) {
+                    Priority.Low => \"Cat1-Sub1-Low\",
+                    Priority.Medium => \"Cat1-Sub1-Medium\",
+                    Priority.High => \"Cat1-Sub1-High\",
+                    Priority.Critical => \"Cat1-Sub1-Critical\",
+                },
+                2 => \"Category 1, Sub 2\",
+                3...5 => \"Category 1, Sub 3-5\",
+                else => \"Category 1, Other\",
+            },
+            
+            2 => switch (priority) {
+                Priority.Low, Priority.Medium => \"Category 2, Normal Priority\",
+                Priority.High, Priority.Critical => \"Category 2, High Priority\",
+            },
+            
+            3...10 => \"Category 3-10\",
+            
+            else => \"Unknown Category\",
+        };
+    }
+    
+    pub fn test_switch_with_guards() u256 {
+        let value = 15;
+        let is_enabled = true;
+        let multiplier = 2;
+        
+        return switch (value) {
+            0 => 0,
+            
+            1...10 if is_enabled => value * multiplier,
+            1...10 => value,
+            
+            11...20 if is_enabled && multiplier > 1 => complex_guard: {
+                let base = value * multiplier;
+                if (base > 30) {
+                    break :complex_guard base + 10;
+                }
+                break :complex_guard base;
+            },
+            
+            11...20 => value / 2,
+            
+            else if is_enabled => value * 3,
+            else => value,
+        };
+    }
+    
+    pub fn test_switch_with_destructuring() string {
+        let point = Point { x: 10, y: 20 };
+        
+        return switch (point) {
+            Point { x: 0, y: 0 } => \"Origin\",
+            Point { x: 0, y } => \"Y-axis\",
+            Point { x, y: 0 } => \"X-axis\",
+            Point { x, y } if x == y => \"Diagonal\",
+            Point { x, y } if x > y => \"Above diagonal\",
+            Point { x, y } => \"General point\",
+        };
+    }
+    
+    pub fn test_switch_with_ranges_and_patterns() OperationType {
+        let code = 42;
+        let is_admin = true;
+        
+        return switch (code) {
+            0 => OperationType.Read,
+            
+            1...10 => OperationType.Write,
+            
+            11...20 if is_admin => admin_operation: {
+                // Admin can perform any operation in this range
+                let operation_type = switch (code % 4) {
+                    0 => OperationType.Read,
+                    1 => OperationType.Write,
+                    2 => OperationType.Update,
+                    3 => OperationType.Delete,
+                };
+                break :admin_operation operation_type;
+            },
+            
+            11...20 => OperationType.Read, // Non-admin limited to read
+            
+            21, 23, 25, 27, 29 => OperationType.Update, // Odd numbers in range
+            22, 24, 26, 28, 30 => OperationType.Delete, // Even numbers in range
+            
+            31...100 => batch_operation: {
+                // Batch operations based on code
+                operation_count[OperationType.Read] += 1;
+                
+                if (code % 2 == 0) {
+                    break :batch_operation OperationType.Write;
+                } else {
+                    break :batch_operation OperationType.Update;
+                }
+            },
+            
+            else => OperationType.Read, // Default to read
+        };
+    }
+    
+    pub fn test_exhaustive_enum_switch() string {
+        let priority = Priority.High;
+        
+        // Exhaustive switch - compiler ensures all enum variants are covered
+        return switch (priority) {
+            Priority.Low => \"Low priority task\",
+            Priority.Medium => \"Medium priority task\",
+            Priority.High => \"High priority task\",
+            Priority.Critical => \"Critical priority task\",
+            // No 'else' needed - all variants covered
+        };
+    }
+    
+    pub fn test_switch_statement() bool {
+        let command = \"activate\";
+        
+        switch (command) {
+            \"activate\" => {
+                operation_count[OperationType.Write] += 1;
+                return true;
+            },
+            \"deactivate\" => {
+                operation_count[OperationType.Delete] += 1;
+                return true;
+            },
+            \"suspend\" => {
+                operation_count[OperationType.Update] += 1;
+                return true;
+            },
+            else => {
+                return false;
+            }
+        }
+    }
+    
+    // Helper functions
+    fn calculate_value(base: u256) u256 {
+        return base * 2;
+    }
+}
+
+struct Point {
+    x: u256;
+    y: u256;
+}

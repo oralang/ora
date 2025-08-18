@@ -1,0 +1,33 @@
+// ==========================================
+// STRUCT DECLARATIONS TEST
+// ==========================================
+// This file tests struct declarations syntax
+
+// Basic struct with simple fields
+struct Point {
+    x: u256;
+    y: u256;
+}
+
+// Struct with various types
+struct UserProfile {
+    id: u256;
+    username: string;
+    active: bool;
+    creation_time: u256;
+    wallet: address;
+}
+
+// Struct with comments
+struct TokenInfo {
+    id: u256;        // Unique identifier
+    symbol: string;  // Token symbol (e.g., "ETH")
+    decimals: u8;    // Number of decimal places
+}
+
+// Nested struct
+struct AccountData {
+    profile: UserProfile;
+    balance: u256;
+    last_login: u256;
+}

@@ -1,0 +1,172 @@
+// ==========================================
+// MEMORY REGIONS PARSER TEST
+// ==========================================
+// This file tests all memory region keywords and combinations
+
+contract MemoryRegionTest {
+    // Storage variables (persistent across transactions)
+    storage var persistent_balance: u256;
+    storage let immutable_config: string;
+    storage const STORAGE_CONSTANT: u256 = 1000;
+    
+    // Transient storage (EIP-1153 - cleared after transaction)
+    tstore var temp_data: u256;
+    tstore var batch_size: u256;
+    tstore let temp_config: string;
+    
+    // Immutable variables (set once during construction)
+    immutable owner: address;
+    immutable creation_time: u256;
+    immutable max_supply: u256;
+    
+    // Contract constants (compile-time constants)
+    const CONTRACT_VERSION: u256 = 1;
+    const MAX_USERS: u256 = 10000;
+    
+    pub fn init() {
+        // Initialize immutable values (can only be done once)
+        owner = std.transaction.sender;
+        creation_time = std.block.timestamp;
+        max_supply = 1000000;
+        
+        // Initialize storage variables
+        persistent_balance = 0;
+        immutable_config = \"initial config\";
+        
+        // Initialize transient storage
+        temp_data = 0;
+        batch_size = 10;
+        temp_config = \"temp config\";
+    }
+    
+    pub fn test_memory_regions() bool {
+        // Stack variables (function-scoped, automatic cleanup)
+        let local_var: u256 = 100;
+        var mutable_local: u256 = 200;
+        
+        // Memory region operations (heap-allocated within function)
+        memory var temp_array: [u256] = [1, 2, 3, 4, 5];
+        memory let readonly_array: [string] = [\"a\", \"b\", \"c\"];
+        
+        // Test transient storage operations
+        temp_data = local_var + mutable_local;
+        batch_size = temp_array.len();
+        
+        // Test storage operations
+        persistent_balance += local_var;
+        
+        // Test memory array operations
+        temp_array[0] = mutable_local;
+        let first_element = temp_array[0];
+        
+        return first_element > 0;
+    }
+    
+    pub fn test_const_expressions() u256 {
+        // Constants can be used in expressions
+        let total_capacity = MAX_USERS * CONTRACT_VERSION;
+        let storage_limit = STORAGE_CONSTANT * 2;
+        
+        return total_capacity + storage_limit;
+    }
+    
+    pub fn test_immutable_access() address {
+        // Immutable values can be read but not modified
+        let contract_owner = owner;
+        let created_at = creation_time;
+        let supply_limit = max_supply;
+        
+        // This would cause a compile error:
+        // owner = std.transaction.sender; // Cannot modify immutable
+        
+        return contract_owner;
+    }
+    
+    pub fn test_transient_storage() u256 {
+        // Transient storage persists within transaction but is cleared after
+        temp_data += 100;
+        batch_size *= 2;
+        
+        // Transient storage is useful for:
+        // - Temporary calculations
+        // - Cross-function communication within same transaction
+        // - Gas-efficient temporary state
+        
+        return temp_data + batch_size;
+    }
+    
+    pub fn test_memory_vs_storage() [u256] {
+        // Memory allocation (function-scoped)
+        memory var local_array: [u256] = [10, 20, 30];
+        
+        // Storage would persist, memory is cleaned up
+        // storage var would_persist: [u256] = [10, 20, 30];
+        
+        // Memory is cheaper for temporary data
+        for (local_array) |item, index| {
+            local_array[index] = item * 2;
+        }
+        
+        return local_array;
+    }
+    
+    pub fn test_mixed_memory_regions() u256 {
+        // Mix different memory regions in same function
+        let stack_val: u256 = 42;                    // Stack
+        memory var heap_array: [u256] = [1, 2, 3];   // Heap (memory)
+        
+        // Update transient storage
+        temp_data = stack_val;                       // Transient
+        
+        // Update persistent storage
+        persistent_balance += stack_val;             // Storage
+        
+        // Use immutable values
+        let time_diff = std.block.timestamp - creation_time; // Immutable
+        
+        // Use constants
+        let max_allowed = MAX_USERS;                 // Const
+        
+        return stack_val + heap_array[0] + temp_data + time_diff + max_allowed;
+    }
+    
+    pub fn test_memory_region_scoping() u256 {
+        let outer_val: u256 = 10;
+        
+        // Block scope with memory variables
+        {
+            memory var block_array: [u256] = [1, 2, 3];
+            let block_val = outer_val * 2;
+            
+            // Nested block
+            {
+                memory var nested_array: [string] = [\"a\", \"b\"];
+                let nested_val = block_val + block_array[0];
+                
+                // All variables accessible in nested scope
+                temp_data = nested_val;
+            }
+            
+            // nested_array not accessible here
+            // but block_array still is
+            temp_data += block_array[1];
+        }
+        
+        // Only outer_val accessible here
+        // block_array and nested_array are out of scope
+        return outer_val + temp_data;
+    }
+    
+    // Function demonstrating parameter memory regions
+    pub fn test_parameter_regions(
+        stack_param: u256,              // Regular parameter (stack)
+        memory memory_param: [u256],    // Memory parameter
+        storage storage_ref: u256       // Storage reference (if supported)
+    ) u256 {
+        // Parameters have their own memory semantics
+        let local_copy = stack_param;
+        memory var local_array = memory_param;
+        
+        return local_copy + local_array[0];
+    }
+}

@@ -1,0 +1,82 @@
+// ==========================================
+// TYPE SYSTEM PARSER TEST
+// ==========================================
+// This file tests the parser's ability to handle all type variations
+
+contract TypeTest {
+    // Primitive types
+    storage var u8_val: u8;
+    storage var u16_val: u16;
+    storage var u32_val: u32;
+    storage var u64_val: u64;
+    storage var u128_val: u128;
+    storage var u256_val: u256;
+    storage var i8_val: i8;
+    storage var i16_val: i16;
+    storage var i32_val: i32;
+    storage var i64_val: i64;
+    storage var i128_val: i128;
+    storage var i256_val: i256;
+    storage var bool_val: bool;
+    storage var address_val: address;
+    storage var string_val: string;
+    storage var bytes_val: bytes;
+    
+    // Complex types
+    storage var map_val: map[address, u256];
+    storage var doublemap_val: doublemap[address, address, u256];
+    storage var slice_val: slice[u256];
+    storage var fixed_array: [u256; 10];
+    storage var dynamic_array: [u256];
+    
+    // Result types
+    storage var result_val: Result[u256, string];
+    storage var result_complex: Result[map[address, u256], InvalidAddress];
+    
+    // Error union types
+    storage var error_union: !u256;
+    storage var error_union_complex: !map[address, u256];
+    
+    // Nested complex types
+    storage var nested_map: map[address, map[u256, string]];
+    storage var array_of_maps: [map[address, u256]];
+    storage var slice_of_arrays: slice[[u256; 5]];
+    
+    pub fn test_type_usage() bool {
+        // Test all primitive assignments
+        u8_val = 255;
+        u256_val = 1000000000000000000000000;
+        bool_val = true;
+        address_val = 0x742d35Cc6634C0532925a3b8D4C9db1c55F12345;
+        string_val = \"test string\";
+        
+        // Test complex type usage
+        map_val[address_val] = u256_val;
+        doublemap_val[address_val, address_val] = u256_val;
+        
+        // Test array operations
+        fixed_array[0] = 100;
+        dynamic_array = [1, 2, 3, 4, 5];
+        
+        return true;
+    }
+    
+    pub fn test_return_types() Result[u256, string] {
+        if (u256_val > 0) {
+            return Ok(u256_val);
+        } else {
+            return Err(\"Value is zero\");
+        }
+    }
+    
+    pub fn test_error_union() !u256 {
+        if (bool_val) {
+            return u256_val;
+        } else {
+            return error.InvalidValue;
+        }
+    }
+}
+
+error InvalidAddress;
+error InvalidValue;

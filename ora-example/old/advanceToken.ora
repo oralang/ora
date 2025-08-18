@@ -1,0 +1,785 @@
+// ==========================================
+// COMPREHENSIVE ORA LANGUAGE EXAMPLE
+// ==========================================
+// This file demonstrates ALL features of the Ora smart contract language,
+// including the latest switch statement functionality for efficient pattern matching.
+//
+// NEW FEATURES DEMONSTRATED:
+// - Switch statements with enum pattern matching
+// - Switch expressions for value computation
+// - Labeled blocks with early exit (break :label value)
+// - String literal pattern matching
+// - Range patterns for numeric values
+// - Exhaustiveness checking (compiler ensures all cases covered)
+// - Tier-based processing with switch expressions
+//
+// EXISTING FEATURES DEMONSTRATED:
+// - Error handling with union types and custom errors
+// - Formal verification with requires/ensures/invariant
+// - Memory regions (storage, tstore, immutable)
+// - Move semantics for atomic operations
+// - Destructuring assignment and struct literals
+// - Quantified expressions (forall/exists)
+// - Try/catch blocks and error propagation
+// - Inline functions and compile-time expressions
+// - Anonymous structs and type unions
+// - Arrays, slices, and loop constructs
+// - Cast expressions and type safety
+// - EVM integration (std.block, std.transaction)
+//
+// ==========================================
+// TOP-LEVEL ERROR DECLARATIONS
+// ==========================================
+// Errors can be declared outside contracts for reusability across multiple contracts
+
+error InsufficientBalance(required: u256, available: u256);  // Error with parameters
+error InvalidAddress;                                        // Simple error without parameters
+error Unauthorized(caller: address, required: address);     // Multi-parameter error
+error TransferLocked(unlock_time: u256);                   // Time-based error
+error InvalidAmount(amount: u256);                         // Amount validation error
+
+// ==========================================
+// TOP-LEVEL LOG DECLARATIONS (EVENTS)
+// ==========================================
+// Log declarations define events that can be emitted by contracts
+
+log Transfer(from: address, to: address, amount: u256);     // Standard ERC20 transfer event
+log Approval(owner: address, spender: address, amount: u256); // ERC20 approval event
+log Mint(to: address, amount: u256);                       // Token minting event
+log Burn(from: address, amount: u256);                     // Token burning event
+log Lock(account: address, until: u256);                   // Account locking event
+log Unlock(account: address);                              // Account unlocking event
+log FeeCollected(amount: u256, collector: address);        // Fee collection event
+
+// ==========================================
+// TOP-LEVEL STRUCT DECLARATIONS
+// ==========================================
+// Structs define complex data types that can be reused
+
+struct TokenConfig {
+    name: string;           // Token name
+    symbol: string;         // Token symbol (e.g., "ETH")
+    decimals: u8;          // Number of decimal places
+    max_supply: u256;      // Maximum token supply
+    fee_rate: u256;        // Transfer fee rate (basis points)
+}
+
+struct AccountInfo {
+    balance: u256;         // Account token balance
+    locked_until: u256;    // Timestamp until which account is locked
+    is_frozen: bool;       // Whether account is frozen
+    last_transfer: u256;   // Timestamp of last transfer
+}
+
+struct TransferData {
+    from: address;         // Transfer sender
+    to: address;          // Transfer recipient
+    amount: u256;         // Transfer amount
+    fee: u256;           // Fee charged
+    timestamp: u256;     // When transfer occurred
+}
+
+// ==========================================
+// TOP-LEVEL ENUM DECLARATIONS
+// ==========================================
+// Enums define a set of named constants with explicit values
+
+enum TransferType : u8 {
+    Standard = 0,          // Regular transfer between accounts
+    Mint = 1,             // Creating new tokens
+    Burn = 2,             // Destroying tokens
+    Fee = 3               // Fee collection transfer
+}
+
+enum AccountStatus : u8 {
+    Active = 0,           // Account can perform operations
+    Frozen = 1,           // Account is temporarily frozen
+    Locked = 2,           // Account is time-locked
+    Suspended = 3         // Account is suspended by admin
+}
+
+// ==========================================
+// TOP-LEVEL FUNCTION DECLARATION
+// ==========================================
+// Functions can be declared outside contracts for utility purposes
+
+fn calculate_compound_fee(base_amount: u256, rate: u256, periods: u256) u256
+    requires(rate <= 10000)    // Rate must be <= 100% (10000 basis points)
+    requires(periods > 0)      // Must have at least one period
+{
+    var result: u256 = base_amount;  // Use 'var' for mutable variable
+    // Loop from 0 to periods, applying compound interest
+    for (0..periods) |_, i| {
+        result = result * (10000 + rate) / 10000;  // Now we can reassign
+    }
+    return result;
+}
+
+// ==========================================
+// TOP-LEVEL CONSTANTS AND VARIABLES
+// ==========================================
+
+const MAX_TRANSFER_LIMIT: u256 = 1000000000000000000000000;  // 1M tokens max transfer
+const MIN_LOCK_DURATION: u256 = 86400;                      // 24 hours minimum lock
+let global_fee_collector: address = 0x742d35Cc6634C0532925a3b8D4C9db1c55F12345;  // Fee recipient
+
+// ==========================================
+// MAIN CONTRACT DECLARATION
+// ==========================================
+
+contract AdvancedToken {
+    
+    // ==========================================
+    // STORAGE VARIABLES (PERSISTENT STATE)
+    // ==========================================
+    // These variables persist between transactions and are stored on-chain
+    
+    storage var accounts: map[address, AccountInfo];           // Account information mapping
+    storage var allowances: doublemap[address, address, u256]; // ERC20 allowances (owner -> spender -> amount)
+    storage var transfer_history: map[u256, TransferData];     // Historical transfer records
+    storage var locked_accounts: map[address, u256];          // Account lock timestamps
+    storage let config: TokenConfig;                          // Immutable token configuration
+    storage var total_supply: u256;                          // Total token supply
+    storage var transfer_count: u256;                        // Number of transfers made
+    storage var fee_pool: u256;                              // Accumulated fees
+        
+    // ==========================================
+    // TRANSIENT STORAGE (EIP-1153)
+    // ==========================================
+    // Variables that persist only within a single transaction but across calls
+    
+    tstore var current_batch_size: u256;                     // Size of current batch operation
+    tstore var batch_operations: [TransferData];             // Batch operation data
+    
+    // ==========================================
+    // IMMUTABLE VARIABLES (SET ONCE AT DEPLOYMENT)
+    // ==========================================
+    
+    immutable owner: address;                                // Contract owner (set in constructor)
+    immutable deployment_time: u256;                        // When contract was deployed
+    
+    // ==========================================
+    // CONTRACT CONSTANTS
+    // ==========================================
+    
+    const FEE_DENOMINATOR: u256 = 10000;                    // Fee calculation denominator (basis points)
+    const MAX_BATCH_SIZE: u256 = 100;                       // Maximum batch operation size
+
+    // ==========================================
+    // CONSTRUCTOR FUNCTION
+    // ==========================================
+    // Special function called once when contract is deployed
+    
+    pub fn init(
+        name: string,           // Token name parameter
+        symbol: string,         // Token symbol parameter
+        initial_supply: u256,   // Initial token supply
+        fee_rate: u256         // Transfer fee rate
+    )
+        // PRECONDITIONS - must be true when function is called
+        requires(initial_supply > 0)                         // Supply must be positive
+        requires(initial_supply <= MAX_TRANSFER_LIMIT)       // Supply within limits
+        requires(fee_rate <= 1000)                          // Fee rate <= 10%
+        requires(name.len() > 0)                            // Name cannot be empty
+        requires(symbol.len() > 0)                          // Symbol cannot be empty
+        // POSTCONDITIONS - guaranteed to be true after function completes
+        ensures(config.name == name)                         // Config correctly set
+        ensures(config.symbol == symbol)                     // Symbol correctly set
+        ensures(total_supply == initial_supply)              // Supply correctly initialized
+        ensures(accounts[std.transaction.sender].balance == initial_supply) // Creator gets all tokens
+    {
+        // Initialize token configuration struct
+        config = TokenConfig {
+            name: name,
+            symbol: symbol,
+            decimals: 18,                                    // Standard 18 decimals
+            max_supply: MAX_TRANSFER_LIMIT,
+            fee_rate: fee_rate
+        };
+        
+        // Set immutable variables using std namespace for blockchain data
+        owner = std.transaction.sender;                      // Current transaction sender becomes owner
+        deployment_time = std.block.timestamp;               // Current block timestamp
+        
+        // Initialize supply tracking
+        total_supply = initial_supply;
+        transfer_count = 0;
+        fee_pool = 0;
+        
+        // Give all initial tokens to deployer
+        accounts[std.transaction.sender] = AccountInfo {
+            balance: initial_supply,
+            locked_until: 0,                                // Not locked
+            is_frozen: false,                               // Not frozen
+            last_transfer: std.block.timestamp              // Set last transfer time
+        };
+        
+        // Emit mint event for initial supply
+        log Mint(std.transaction.sender, initial_supply);
+    }
+
+    // ==========================================
+    // TRANSFER FUNCTION WITH SWITCH-BASED STATUS CHECKING
+    // ==========================================
+    
+    pub fn transfer(to: address, amount: u256) bool | InsufficientBalance | InvalidAddress | TransferLocked
+        // PRECONDITIONS
+        requires(amount > 0)                                 // Amount must be positive
+        requires(to != 0x0000000000000000000000000000000000) // Cannot transfer to zero address
+        requires(accounts[std.transaction.sender].balance >= amount) // Sender has enough balance
+        requires(!accounts[std.transaction.sender].is_frozen) // Sender account not frozen
+        requires(std.block.timestamp >= accounts[std.transaction.sender].locked_until) // Sender not time-locked
+        // POSTCONDITIONS
+        ensures(old(accounts[std.transaction.sender].balance) >= amount) // Balance was sufficient
+        ensures(accounts[to].balance == old(accounts[to].balance) + amount) // Recipient received tokens
+    {
+        // SWITCH EXPRESSION for fee calculation based on amount tiers
+        let fee: u256 = switch (amount) {
+            0 => 0,                                         // No fee for zero amount (shouldn't happen due to requires)
+            1...1000 => amount * 50 / FEE_DENOMINATOR,     // 0.5% fee for small amounts
+            1001...100000 => amount * 75 / FEE_DENOMINATOR, // 0.75% fee for medium amounts
+            else => amount * config.fee_rate / FEE_DENOMINATOR, // Standard fee for large amounts
+        };
+        
+        let net_amount: u256 = amount - fee;                // Amount after fee deduction
+        
+        // MOVE STATEMENT - atomic transfer operation with type safety
+        // Syntax: amount from source -> destination : type
+        net_amount from accounts[std.transaction.sender].balance -> accounts[to].balance : u256;
+        
+        // LOCK OPERATION - prevent concurrent access to destination account
+        @lock(accounts[to]);
+        
+        // DESTRUCTURING ASSIGNMENT - extract fields from struct
+        let .{ balance, locked_until, is_frozen, last_transfer } = accounts[std.transaction.sender];
+        
+        // Update sender account info
+        accounts[std.transaction.sender] = AccountInfo {
+            balance: balance - amount,                       // Deduct full amount (including fee)
+            locked_until: locked_until,                     // Keep existing lock time
+            is_frozen: is_frozen,                           // Keep existing frozen status
+            last_transfer: std.block.timestamp              // Update last transfer time
+        };
+        
+        // Transfer fee to fee pool using move statement
+        fee from accounts[std.transaction.sender].balance -> fee_pool : u256;
+        
+        // Record transfer in history
+        transfer_history[transfer_count] = TransferData {
+            from: std.transaction.sender,
+            to: to,
+            amount: net_amount,
+            fee: fee,
+            timestamp: std.block.timestamp
+        };
+        transfer_count += 1;                                // Increment transfer counter
+        
+        // UNLOCK OPERATION - release lock on destination account, normally we don't unlock, we want to keep it locked until next transaction
+        @unlock(accounts[to]);
+        
+        // EMIT EVENTS - log transfer and fee collection
+        log Transfer(std.transaction.sender, to, net_amount);
+        log FeeCollected(fee, global_fee_collector);
+        
+        return true;                                        // Transfer successful
+    }
+
+    // ==========================================
+    // FUNCTION WITH STRING PATTERN MATCHING AND ACCOUNT TIERS
+    // ==========================================
+    
+    pub fn process_token_command(
+        command: string,
+        target: address,
+        amount: u256
+    ) struct { executed: bool, message: string, data: u256 } | InvalidAddress | Unauthorized
+        requires(target != 0x0000000000000000000000000000000000000000)
+    {
+        // SWITCH EXPRESSION with string literals for command processing
+        let command_result = switch (command) {
+            "mint" => {
+                if (std.transaction.sender != owner) {
+                    return Unauthorized!(std.transaction.sender, owner);
+                }
+                accounts[target].balance += amount;
+                total_supply += amount;
+                log Mint(target, amount);
+                return .{ executed: true, message: "Tokens minted successfully", data: amount };
+            },
+            
+            "burn" => {
+                if (accounts[target].balance < amount) {
+                    return .{ executed: false, message: "Insufficient balance", data: 0 };
+                }
+                accounts[target].balance -= amount;
+                total_supply -= amount;
+                log Burn(target, amount);
+                return .{ executed: true, message: "Tokens burned successfully", data: amount };
+            },
+            
+            "freeze" => {
+                if (std.transaction.sender != owner) {
+                    return Unauthorized!(std.transaction.sender, owner);
+                }
+                accounts[target].is_frozen = true;
+                return .{ executed: true, message: "Account frozen", data: 1 };
+            },
+            
+            "unfreeze" => {
+                if (std.transaction.sender != owner) {
+                    return Unauthorized!(std.transaction.sender, owner);
+                }
+                accounts[target].is_frozen = false;
+                return .{ executed: true, message: "Account unfrozen", data: 0 };
+            },
+            
+            "balance" => {
+                let balance = accounts[target].balance;
+                return .{ executed: true, message: "Balance retrieved", data: balance };
+            },
+            
+            else => {
+                return .{ executed: false, message: "Unknown command", data: 0 };
+            },
+        };
+    }
+
+    // ==========================================
+    // ACCOUNT TIER SYSTEM WITH SWITCH EXPRESSIONS
+    // ==========================================
+    
+    enum AccountTier : u8 {
+        Basic = 0,
+        Premium = 1, 
+        VIP = 2,
+        Enterprise = 3
+    }
+    
+    fn get_account_tier(balance: u256) AccountTier {
+        // SWITCH EXPRESSION with range patterns for tier determination
+        return switch (balance) {
+            0...1000000000000000000000 => AccountTier.Basic,        // 0-1000 tokens
+            1000000000000000000001...10000000000000000000000 => AccountTier.Premium,   // 1001-10000 tokens  
+            10000000000000000000001...100000000000000000000000 => AccountTier.VIP,       // 10001-100000 tokens
+            else => AccountTier.Enterprise,                         // 100000+ tokens
+        };
+    }
+    
+    pub fn get_transfer_fee_for_account(account: address, amount: u256) u256 {
+        let tier = get_account_tier(accounts[account].balance);
+        
+        // SWITCH EXPRESSION for tier-based fee calculation
+        let fee_multiplier = switch (tier) {
+            AccountTier.Basic => 100,        // 1.0% fee
+            AccountTier.Premium => 50,       // 0.5% fee
+            AccountTier.VIP => 25,          // 0.25% fee
+            AccountTier.Enterprise => 10,    // 0.1% fee
+        };
+        
+        return amount * fee_multiplier / FEE_DENOMINATOR;
+    }
+
+    // ==========================================
+    // BATCH TRANSFER WITH ARRAYS AND LOOPS
+    // ==========================================
+    
+    pub fn batch_transfer(
+        recipients: [address],    // Array of recipient addresses
+        amounts: [u256]          // Array of amounts to transfer
+    ) struct { success_count: u256, total_fees: u256 } | InvalidAmount  // Return anonymous struct or error
+        // PRECONDITIONS
+        requires(recipients.len() == amounts.len())          // Arrays must be same length
+        requires(recipients.len() <= MAX_BATCH_SIZE)         // Batch size within limits
+        requires(recipients.len() > 0)                       // Must have at least one transfer
+    {
+        let success_count: u256 = 0;                        // Track successful transfers
+        let total_fees: u256 = 0;                          // Track total fees collected
+        let total_required: u256 = 0;                      // Track total amount needed
+        
+        // PRE-CALCULATION LOOP - calculate total requirements before executing
+        for (amounts) |amount, i| {                        // Loop syntax: array |element, index|
+            if (amount == 0) {
+                continue;                                   // Skip zero amounts
+            }
+            total_required += amount + calculate_transfer_fee(amount);
+        }
+        
+        // Check if sender has enough balance for entire batch
+        if (accounts[std.transaction.sender].balance < total_required) {
+            return InvalidAmount!(total_required);          // Return error with parameter
+        }
+        
+        // Store batch info in transient storage (EIP-1153)
+        current_batch_size = recipients.len();
+        
+        // EXECUTION LOOP - perform actual transfers
+        for (recipients) |recipient, i| {
+            let amount: u256 = amounts[i];                  // Get corresponding amount
+            
+            // Skip invalid recipients
+            if (recipient == 0x0000000000000000000000000000000000000000) {
+                continue;
+            }
+            
+            // Skip zero amounts
+            if (amount == 0) {
+                continue;
+            }
+            
+            let fee: u256 = calculate_transfer_fee(amount);
+            let net_amount: u256 = amount - fee;
+            
+            // Use move statements for batch transfers
+            net_amount from accounts[std.transaction.sender].balance -> accounts[recipient].balance : u256;
+            fee from accounts[std.transaction.sender].balance -> fee_pool : u256;
+            
+            total_fees += fee;
+            success_count += 1;
+            
+            log Transfer(std.transaction.sender, recipient, net_amount);
+        }
+        
+        // RETURN ANONYMOUS STRUCT - create struct literal with .{} syntax
+        return .{ success_count: success_count, total_fees: total_fees };
+    }
+
+    // ==========================================
+    // APPROVAL WITH QUANTIFIED EXPRESSIONS
+    // ==========================================
+    
+    pub fn approve_with_conditions(
+        spender: address,        // Address that can spend tokens
+        amount: u256,           // Amount approved for spending
+        valid_until: u256       // Approval expiration timestamp
+    ) bool
+        // PRECONDITIONS
+        requires(spender != 0x0000000000000000000000000000000000000000) // Valid spender address
+        requires(valid_until > std.block.timestamp)         // Approval must be in future
+        requires(amount <= accounts[std.transaction.sender].balance) // Cannot approve more than balance
+        // POSTCONDITIONS
+        ensures(allowances[std.transaction.sender, spender] == amount) // Allowance correctly set
+        ensures(forall i: u256 where i <= amount =>         // QUANTIFIED EXPRESSION - for all i <= amount
+            allowances[std.transaction.sender, spender] >= i) // allowance is at least i
+    {
+        // Set allowance in doublemap (owner -> spender -> amount)
+        allowances[std.transaction.sender, spender] = amount;
+        
+        // Set temporary lock on spender account until expiration
+        accounts[spender].locked_until = valid_until;
+        
+        // Emit approval and lock events
+        log Approval(std.transaction.sender, spender, amount);
+        log Lock(spender, valid_until);
+        
+        return true;
+    }
+
+    // ==========================================
+    // FUNCTION WITH TRY/CATCH AND ERROR HANDLING
+    // ==========================================
+    
+    pub fn secure_mint(to: address, amount: u256) bool | Unauthorized | InvalidAmount
+        // PRECONDITIONS
+        requires(std.transaction.sender == owner)            // Only owner can mint
+        requires(amount > 0)                                // Must mint positive amount
+        requires(total_supply + amount <= config.max_supply) // Stay within max supply
+        // POSTCONDITIONS
+        ensures(total_supply == old(total_supply) + amount)  // Supply increased by amount
+    {
+        let old_balance: u256 = accounts[to].balance;       // Store original balance
+        
+        // TRY/CATCH BLOCK - handle errors gracefully
+        try {
+            total_supply += amount;                         // Increase total supply
+            accounts[to].balance += amount;                 // Add tokens to recipient
+            
+            // Emit minting events
+            log Mint(to, amount);
+            log Transfer(0x0000000000000000000000000000000000000000, to, amount); // From zero address
+            
+            return true;
+        } catch error {
+            // ROLLBACK ON ERROR - undo changes if anything fails
+            total_supply -= amount;                         // Revert supply increase
+            accounts[to].balance = old_balance;             // Restore original balance
+            return InvalidAmount!(amount);                  // Return error
+        }
+    }
+
+    // ==========================================
+    // FUNCTION WITH SWITCH EXPRESSIONS AND LABELED BLOCKS
+    // ==========================================
+    
+    pub fn advanced_operation_with_switch(
+        operation: TransferType,
+        target: address,
+        amount: u256,
+        params: struct { priority: u8, fee_override: bool }
+    ) struct { success: bool, gas_used: u256, result_data: [u8] } | InsufficientBalance | Unauthorized | InvalidAddress
+        requires(amount > 0)
+        requires(target != 0x0000000000000000000000000000000000000000)
+    {
+        // SWITCH EXPRESSION with labeled blocks for complex error handling
+        let operation_result = switch (operation) {
+            TransferType.Mint => mint_operation: {
+                if (std.transaction.sender != owner) {
+                    break :mint_operation .{ success: false, error: "Unauthorized mint attempt" };
+                }
+                if (total_supply + amount > config.max_supply) {
+                    break :mint_operation .{ success: false, error: "Would exceed max supply" };
+                }
+                accounts[target].balance += amount;
+                total_supply += amount;
+                log Mint(target, amount);
+                break :mint_operation .{ success: true, error: "" };
+            },
+            
+            TransferType.Burn => burn_operation: {
+                if (accounts[target].balance < amount) {
+                    break :burn_operation .{ success: false, error: "Insufficient balance to burn" };
+                }
+                accounts[target].balance -= amount;
+                total_supply -= amount;
+                log Burn(target, amount);
+                break :burn_operation .{ success: true, error: "" };
+            },
+            
+            TransferType.Standard => {
+                // Simple case - no labeled block needed
+                amount from accounts[std.transaction.sender].balance -> accounts[target].balance : u256;
+                log Transfer(std.transaction.sender, target, amount);
+                return .{ success: true, error: "" };
+            },
+            
+            TransferType.Fee => fee_collection: {
+                // Priority-based fee collection
+                let collection_rate = switch (params.priority) {
+                    0 => 1,      // Standard priority - 1x rate
+                    1 => 2,      // High priority - 2x rate  
+                    2 => 5,      // Critical priority - 5x rate
+                    else => 1,   // Default to standard
+                };
+                
+                let actual_fee = if (params.fee_override) {
+                    amount  // Use full amount as fee if override
+                } else {
+                    amount * collection_rate * config.fee_rate / FEE_DENOMINATOR
+                };
+                
+                actual_fee from accounts[std.transaction.sender].balance -> fee_pool : u256;
+                log FeeCollected(actual_fee, global_fee_collector);
+                break :fee_collection .{ success: true, error: "" };
+            },
+        };
+        
+        // SWITCH EXPRESSION for gas estimation based on operation type
+        let estimated_gas = switch (operation) {
+            TransferType.Standard => 21000,   // Basic transfer gas
+            TransferType.Mint => 45000,       // Mint operation gas
+            TransferType.Burn => 35000,       // Burn operation gas  
+            TransferType.Fee => 25000,        // Fee collection gas
+        };
+        
+        // SWITCH EXPRESSION for result data encoding based on operation
+        let result_data = switch (operation) {
+            TransferType.Mint => @encode_abi(target, amount, total_supply),
+            TransferType.Burn => @encode_abi(target, amount, total_supply),
+            TransferType.Standard => @encode_abi(std.transaction.sender, target, amount),
+            TransferType.Fee => @encode_abi(amount, fee_pool),
+        };
+        
+        return .{
+            success: operation_result.success,
+            gas_used: estimated_gas,
+            result_data: result_data
+        };
+    }
+
+    // ==========================================
+    // FUNCTION WITH COMPLEX TYPE UNIONS AND PATTERN MATCHING
+    // ==========================================
+    
+    pub fn complex_operation(
+        operation_type: TransferType,  // Enum parameter
+        target: address,              // Target address
+        amount: u256                 // Operation amount
+    ) struct { result: bool, new_balance: u256 } | InsufficientBalance | Unauthorized | InvalidAddress
+        requires(amount > 0)                                // Amount must be positive
+    {
+        // COMPTIME EXPRESSION - compile-time calculation
+        const max_single_op: u256 = comptime MAX_TRANSFER_LIMIT / 1000;
+        
+        if (amount > max_single_op) {
+            return InvalidAmount!(amount);                  // ERROR WITH PARAMETER
+        }
+        
+        // SWITCH STATEMENT - efficient pattern matching with exhaustiveness checking
+        switch (operation_type) {
+            TransferType.Mint => {
+                // AUTHORIZATION CHECK
+                if (std.transaction.sender != owner) {
+                    return Unauthorized!(std.transaction.sender, owner); // Return error with both addresses
+                }
+                accounts[target].balance += amount;            // Add tokens
+                total_supply += amount;                        // Increase supply
+            },
+            TransferType.Burn => {
+                // BALANCE CHECK
+                if (accounts[target].balance < amount) {
+                    return InsufficientBalance!(amount, accounts[target].balance); // Error with required and available
+                }
+                accounts[target].balance -= amount;            // Remove tokens
+                total_supply -= amount;                        // Decrease supply
+            },
+            TransferType.Standard => {
+                // STANDARD TRANSFER using move statement
+                amount from accounts[std.transaction.sender].balance -> accounts[target].balance : u256;
+            },
+            TransferType.Fee => {
+                // FEE COLLECTION - direct to fee pool
+                amount from accounts[std.transaction.sender].balance -> fee_pool : u256;
+                log FeeCollected(amount, global_fee_collector);
+            },
+            // Compiler ensures all enum cases are handled - no missing variants allowed
+        }
+        
+        // RETURN ANONYMOUS STRUCT with computed values
+        return .{ result: true, new_balance: accounts[target].balance };
+    }
+
+    // ==========================================
+    // INLINE FUNCTION WITH SWITCH-BASED FEE CALCULATION
+    // ==========================================
+    
+    inline fn calculate_transfer_fee(amount: u256) u256
+        requires(amount > 0)                                // Amount must be positive
+        ensures(calculate_transfer_fee(amount) <= amount / 10) // Fee never exceeds 10% of amount
+    {
+        // SWITCH EXPRESSION for tiered fee calculation based on amount
+        return switch (amount) {
+            0 => 0,                                         // No fee for zero (shouldn't happen due to requires)
+            1...1000000000000000000 => amount * 25 / FEE_DENOMINATOR,    // 0.25% for amounts <= 1 token
+            1000000000000000001...1000000000000000000000 => amount * 50 / FEE_DENOMINATOR,   // 0.5% for 1-1000 tokens
+            1000000000000000000001...100000000000000000000000 => amount * 75 / FEE_DENOMINATOR,  // 0.75% for 1000-100000 tokens
+            else => amount * config.fee_rate / FEE_DENOMINATOR, // Standard rate for large amounts
+        };
+    }
+
+    // ==========================================
+    // VIEW FUNCTION WITH ANONYMOUS STRUCT RETURN
+    // ==========================================
+    
+    pub fn get_account_details(account: address) struct { 
+        balance: u256, 
+        status: AccountStatus, 
+        locked_until: u256,
+        transfer_history_count: u256 
+    } {
+        let account_info: AccountInfo = accounts[account];  // Get account info
+        let status: AccountStatus;                          // Declare status variable
+        
+        // SWITCH EXPRESSION - determine status based on account conditions
+        let status: AccountStatus = switch {
+            account_info.is_frozen => AccountStatus.Frozen,
+            std.block.timestamp < account_info.locked_until => AccountStatus.Locked,
+            else => AccountStatus.Active,
+        };
+        
+        // RETURN ANONYMOUS STRUCT LITERAL
+        return .{
+            balance: account_info.balance,
+            status: status,
+            locked_until: account_info.locked_until,
+            transfer_history_count: transfer_count
+        };
+    }
+
+    // ==========================================
+    // FUNCTION WITH CAST EXPRESSIONS AND ERROR PREFIX TYPES
+    // ==========================================
+    
+    pub fn convert_and_transfer(
+        to: address, 
+        amount_str: string         // String representation of amount
+    ) !void  // ERROR-ONLY RETURN - ! indicates this function only returns errors or nothing
+        requires(to != 0x0000000000000000000000000000000000000000) // Valid recipient
+    {
+        // CAST EXPRESSION - convert string to u256
+        let amount: u256 = @to_u256(amount_str);
+        
+        if (amount == 0) {
+            return InvalidAmount!(amount);                  // Return error with parameter
+        }
+        
+        if (accounts[std.transaction.sender].balance < amount) {
+            return InsufficientBalance!(amount, accounts[std.transaction.sender].balance); // Return error with parameters
+        }
+        
+        // Perform transfer using move statement
+        amount from accounts[std.transaction.sender].balance -> accounts[to].balance : u256;
+        log Transfer(std.transaction.sender, to, amount);
+        
+        // Function completes successfully (returns void)
+    }
+
+    // ==========================================
+    // FUNCTION WITH SLICE OPERATIONS
+    // ==========================================
+    
+    pub fn bulk_balance_check(addresses: slice[address]) [u256] {  // SLICE TYPE - view into array
+        let balances: [u256] = [];                          // Initialize empty array
+        
+        // SLICE ITERATION - iterate over slice elements
+        for (addresses) |addr, i| {
+            balances[i] = accounts[addr].balance;           // Fill array with balances
+        }
+        
+        return balances;                                    // Return array of balances
+    }
+
+    // ==========================================
+    // PRIVATE FUNCTION (NO VISIBILITY MODIFIER)
+    // ==========================================
+    
+    fn internal_freeze_account(account: address, freeze: bool) bool
+        requires(std.transaction.sender == owner)           // Only owner can freeze
+        ensures(accounts[account].is_frozen == freeze)      // Freeze status correctly set
+    {
+        // DESTRUCTURING to extract struct fields
+        let .{ balance, locked_until, is_frozen, last_transfer } = accounts[account];
+        
+        // Reconstruct struct with updated freeze status
+        accounts[account] = AccountInfo {
+            balance: balance,
+            locked_until: locked_until,
+            is_frozen: freeze,                              // Update freeze status
+            last_transfer: last_transfer
+        };
+        
+        return true;
+    }
+
+    // ==========================================
+    // PUBLIC WRAPPER FUNCTION
+    // ==========================================
+    
+    pub fn freeze_account(account: address) bool | Unauthorized
+    {
+        // AUTHORIZATION CHECK with detailed error
+        if (std.transaction.sender != owner) {
+            return Unauthorized!(std.transaction.sender, owner);
+        }
+        // Call internal function
+        return internal_freeze_account(account, true);
+    }
+}
+
+// ==========================================
+// TOP-LEVEL CONSTANTS (COMPILE-TIME ONLY)
+// ==========================================
+// These become literals in the bytecode - no runtime storage needed
+
+const MAX_TRANSFER_LIMIT: u256 = 1000000000000000000000000;  // 1M tokens max transfer
+const MIN_LOCK_DURATION: u256 = 86400;                      // 24 hours minimum lock
+const GLOBAL_MAX_TOKENS: u256 = 1000;                       // System-wide token limit
+const DEFAULT_FEE_COLLECTOR: address = 0x742d35Cc6634C0532925a3b8D4C9db1c55F12345; // Default fee recipient

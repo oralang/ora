@@ -1,16 +1,14 @@
 //! Ora Language Compiler CLI
 //!
-//! Command-line interface for the Ora domain-specific language compiler.
-//! Provides commands for each phase of compilation from source code to EVM bytecode.
+//! Command-line interface for the Ora domain-specific language compiler frontend.
+//! Provides commands for lexing, parsing, and AST generation.
+//! Backend compilation to Yul/EVM bytecode happens internally.
 //!
 //! Available commands:
 //! - lex: Tokenize source files
 //! - parse: Generate Abstract Syntax Tree
-//! - analyze: Perform semantic analysis
-//! - ir/hir: Generate High-level Intermediate Representation
-//! - yul: Generate Yul intermediate code
-//! - bytecode: Generate EVM bytecode
-//! - compile: Full compilation pipeline
+//! - ast: Generate AST JSON
+//! - compile: Full frontend pipeline (Ora -> AST)
 
 const std = @import("std");
 const lib = @import("ora_lib");
@@ -31,6 +29,7 @@ pub fn main() !void {
 
     // Parse arguments to find output directory option
     var output_dir: ?[]const u8 = null;
+    var no_cst: bool = false;
     var command: ?[]const u8 = null;
     var input_file: ?[]const u8 = null;
     var i: usize = 1;
@@ -43,6 +42,9 @@ pub fn main() !void {
             }
             output_dir = args[i + 1];
             i += 2;
+        } else if (std.mem.eql(u8, args[i], "--no-cst")) {
+            no_cst = true;
+            i += 1;
         } else if (command == null) {
             command = args[i];
             i += 1;
@@ -66,21 +68,11 @@ pub fn main() !void {
     if (std.mem.eql(u8, cmd, "lex")) {
         try runLexer(allocator, file_path);
     } else if (std.mem.eql(u8, cmd, "parse")) {
-        try runParser(allocator, file_path);
-    } else if (std.mem.eql(u8, cmd, "analyze")) {
-        try runSemanticAnalysis(allocator, file_path);
-    } else if (std.mem.eql(u8, cmd, "ir")) {
-        try runIRGeneration(allocator, file_path);
-    } else if (std.mem.eql(u8, cmd, "compile")) {
-        try runFullCompilation(allocator, file_path);
+        try runParser(allocator, file_path, !no_cst);
     } else if (std.mem.eql(u8, cmd, "ast")) {
-        try runASTGeneration(allocator, file_path, output_dir);
-    } else if (std.mem.eql(u8, cmd, "hir")) {
-        try runHIRGeneration(allocator, file_path, output_dir);
-    } else if (std.mem.eql(u8, cmd, "yul")) {
-        try runYulGeneration(allocator, file_path, output_dir);
-    } else if (std.mem.eql(u8, cmd, "bytecode")) {
-        try runBytecodeGeneration(allocator, file_path, output_dir);
+        try runASTGeneration(allocator, file_path, output_dir, !no_cst);
+    } else if (std.mem.eql(u8, cmd, "compile")) {
+        try runFullCompilation(allocator, file_path, !no_cst);
     } else {
         try printUsage();
     }
@@ -88,20 +80,16 @@ pub fn main() !void {
 
 fn printUsage() !void {
     const stdout = std.io.getStdOut().writer();
-    try stdout.print("Ora DSL Compiler v0.1\n", .{});
+    try stdout.print("Ora Compiler v0.1\n", .{});
     try stdout.print("Usage: ora [options] <command> <file>\n", .{});
     try stdout.print("\nOptions:\n", .{});
     try stdout.print("  -o, --output-dir <dir>  - Specify output directory for generated files\n", .{});
+    try stdout.print("      --no-cst            - Disable CST building (enabled by default)\n", .{});
     try stdout.print("\nCommands:\n", .{});
     try stdout.print("  lex <file>     - Tokenize a .ora file\n", .{});
     try stdout.print("  parse <file>   - Parse a .ora file to AST\n", .{});
-    try stdout.print("  analyze <file> - Perform semantic analysis\n", .{});
-    try stdout.print("  ir <file>      - Generate and validate IR from source\n", .{});
-    try stdout.print("  compile <file> - Full compilation pipeline (lex -> parse -> analyze -> ir)\n", .{});
     try stdout.print("  ast <file>     - Generate AST and save to JSON file\n", .{});
-    try stdout.print("  hir <file>     - Generate HIR and save to JSON file\n", .{});
-    try stdout.print("  yul <file>     - Generate Yul code from HIR\n", .{});
-    try stdout.print("  bytecode <file> - Generate EVM bytecode from HIR\n", .{});
+    try stdout.print("  compile <file> - Full frontend pipeline (lex -> parse)\n", .{});
     try stdout.print("\nExample:\n", .{});
     try stdout.print("  ora -o build ast example.ora\n", .{});
 }
@@ -137,18 +125,14 @@ fn runLexer(allocator: std.mem.Allocator, file_path: []const u8) !void {
 
     try stdout.print("Generated {} tokens\n\n", .{tokens.len});
 
-    // Display tokens
+    // Display all tokens without truncation
     for (tokens, 0..) |token, i| {
-        if (i < 20 or token.type == .Eof) { // Show first 20 tokens + EOF
-            try stdout.print("[{:3}] {}\n", .{ i, token });
-        } else if (i == 20) {
-            try stdout.print("... ({} more tokens)\n", .{tokens.len - 21});
-        }
+        try stdout.print("[{:3}] {}\n", .{ i, token });
     }
 }
 
 /// Run parser on file and display AST
-fn runParser(allocator: std.mem.Allocator, file_path: []const u8) !void {
+fn runParser(allocator: std.mem.Allocator, file_path: []const u8, enable_cst: bool) !void {
     const stdout = std.io.getStdOut().writer();
 
     // Read source file
@@ -174,12 +158,22 @@ fn runParser(allocator: std.mem.Allocator, file_path: []const u8) !void {
     try stdout.print("Lexed {} tokens\n", .{tokens.len});
 
     // Run parser
-    var parser = lib.Parser.init(allocator, tokens);
+    var arena = lib.ast_arena.AstArena.init(allocator);
+    defer arena.deinit();
+    var parser = lib.Parser.init(tokens, &arena);
+    parser.setFileId(1);
+    var cst_builder_storage: lib.cst.CstBuilder = undefined;
+    var cst_builder_ptr: ?*lib.cst.CstBuilder = null;
+    if (enable_cst) {
+        cst_builder_storage = lib.cst.CstBuilder.init(allocator);
+        cst_builder_ptr = &cst_builder_storage;
+        parser.withCst(cst_builder_ptr.?);
+    }
     const ast_nodes = parser.parse() catch |err| {
         try stdout.print("Parser error: {}\n", .{err});
         return;
     };
-    defer lib.ast.deinitAstNodes(allocator, ast_nodes);
+    // Note: AST nodes are allocated in arena, so they're automatically freed when arena is deinited
 
     try stdout.print("Generated {} AST nodes\n\n", .{ast_nodes.len});
 
@@ -188,146 +182,18 @@ fn runParser(allocator: std.mem.Allocator, file_path: []const u8) !void {
         try stdout.print("[{}] ", .{i});
         try printAstSummary(stdout, node, 0);
     }
-}
 
-/// Run semantic analysis on file
-fn runSemanticAnalysis(allocator: std.mem.Allocator, file_path: []const u8) !void {
-    const stdout = std.io.getStdOut().writer();
-
-    // Read source file
-    const source = std.fs.cwd().readFileAlloc(allocator, file_path, 1024 * 1024) catch |err| {
-        try stdout.print("Error reading file {s}: {}\n", .{ file_path, err });
-        return;
-    };
-    defer allocator.free(source);
-
-    try stdout.print("Analyzing {s}\n", .{file_path});
-    try stdout.print("==================================================\n", .{});
-
-    // Run lexer + parser
-    var lexer = lib.Lexer.init(allocator, source);
-    defer lexer.deinit();
-
-    const tokens = lexer.scanTokens() catch |err| {
-        try stdout.print("Lexer error: {}\n", .{err});
-        return;
-    };
-    defer allocator.free(tokens);
-
-    var parser = lib.Parser.init(allocator, tokens);
-    const ast_nodes = parser.parse() catch |err| {
-        try stdout.print("Parser error: {}\n", .{err});
-        return;
-    };
-    defer lib.ast.deinitAstNodes(allocator, ast_nodes);
-
-    try stdout.print("Parsed {} AST nodes\n", .{ast_nodes.len});
-
-    // Run semantic analysis
-    try stdout.print("Running semantic analysis...\n", .{});
-
-    var semantic_analyzer = lib.SemanticAnalyzer.init(allocator);
-    semantic_analyzer.initSelfReferences(); // Fix self-references after struct is in final location
-    defer semantic_analyzer.deinit();
-
-    const diagnostics = semantic_analyzer.analyze(ast_nodes) catch |err| {
-        try stdout.print("Semantic analysis failed: {}\n", .{err});
-        return;
-    };
-    defer {
-        // NOTE: SemanticAnalyzer.deinit() now handles diagnostic message cleanup
-        // So we just free the diagnostics array, not individual messages
-        allocator.free(diagnostics);
-    }
-
-    try stdout.print("Semantic analysis completed with {} diagnostics\n", .{diagnostics.len});
-    for (diagnostics) |diagnostic| {
-        try stdout.print("  {}\n", .{diagnostic});
-    }
-}
-
-/// Run IR generation on file
-fn runIRGeneration(allocator: std.mem.Allocator, file_path: []const u8) !void {
-    const stdout = std.io.getStdOut().writer();
-
-    // Read source file
-    const source = std.fs.cwd().readFileAlloc(allocator, file_path, 1024 * 1024) catch |err| {
-        try stdout.print("Error reading file {s}: {}\n", .{ file_path, err });
-        return;
-    };
-    defer allocator.free(source);
-
-    try stdout.print("Generating IR for {s}\n", .{file_path});
-    try stdout.print("==================================================\n", .{});
-
-    // Run lexer + parser
-    var lexer = lib.Lexer.init(allocator, source);
-    defer lexer.deinit();
-
-    const tokens = lexer.scanTokens() catch |err| {
-        try stdout.print("Lexer error: {}\n", .{err});
-        return;
-    };
-    defer allocator.free(tokens);
-
-    var parser = lib.Parser.init(allocator, tokens);
-    const ast_nodes = parser.parse() catch |err| {
-        try stdout.print("Parser error: {}\n", .{err});
-        return;
-    };
-    defer lib.ast.deinitAstNodes(allocator, ast_nodes);
-
-    try stdout.print("Parsed {} AST nodes\n", .{ast_nodes.len});
-
-    // Create HIR
-    var ir_builder = lib.IRBuilder.init(allocator);
-    defer ir_builder.deinit();
-
-    // Convert AST to HIR
-    ir_builder.buildFromAST(ast_nodes) catch |err| {
-        try stdout.print("AST to HIR conversion failed: {}\n", .{err});
-        return;
-    };
-
-    const hir_program = ir_builder.getProgramPtr();
-    try stdout.print("HIR program created (version: {s})\n", .{hir_program.version});
-    try stdout.print("  {} contracts converted\n", .{hir_program.contracts.len});
-
-    // Validate HIR
-    var validator = lib.Validator.init(allocator);
-    defer validator.deinit();
-
-    const validation_result = validator.validateProgram(hir_program) catch |err| {
-        try stdout.print("IR validation failed: {}\n", .{err});
-        return;
-    };
-
-    if (validation_result.valid) {
-        try stdout.print("IR validation passed\n", .{});
-    } else {
-        try stdout.print("IR validation failed with {} errors\n", .{validation_result.errors.len});
-        for (validation_result.errors) |error_| {
-            try stdout.print("  Error at line {}, column {}: {s}\n", .{ error_.location.line, error_.location.column, error_.message });
+    if (enable_cst) {
+        if (cst_builder_ptr) |builder| {
+            const cst_root = try builder.buildRoot(tokens);
+            _ = cst_root; // TODO: optional dump in future flag
+            builder.deinit();
         }
-    }
-
-    // Optionally export to JSON
-    try stdout.print("\nIR Generation complete\n", .{});
-    try stdout.print("  {} contracts in HIR\n", .{hir_program.contracts.len});
-
-    // Display HIR summary
-    for (hir_program.contracts) |*contract| {
-        try stdout.print("    Contract '{s}': {} storage, {} functions, {} events\n", .{
-            contract.name,
-            contract.storage.len,
-            contract.functions.len,
-            contract.events.len,
-        });
     }
 }
 
 /// Run full compilation pipeline
-fn runFullCompilation(allocator: std.mem.Allocator, file_path: []const u8) !void {
+fn runFullCompilation(allocator: std.mem.Allocator, file_path: []const u8, enable_cst: bool) !void {
     const stdout = std.io.getStdOut().writer();
 
     try stdout.print("Compiling {s}\n", .{file_path});
@@ -358,12 +224,22 @@ fn runFullCompilation(allocator: std.mem.Allocator, file_path: []const u8) !void
 
     // Phase 2: Parsing
     try stdout.print("Phase 2: Syntax Analysis\n", .{});
-    var parser = lib.Parser.init(allocator, tokens);
+    var arena = lib.ast_arena.AstArena.init(allocator);
+    defer arena.deinit();
+    var parser = lib.Parser.init(tokens, &arena);
+    parser.setFileId(1);
+    var cst_builder_storage: lib.cst.CstBuilder = undefined;
+    var cst_builder_ptr: ?*lib.cst.CstBuilder = null;
+    if (enable_cst) {
+        cst_builder_storage = lib.cst.CstBuilder.init(allocator);
+        cst_builder_ptr = &cst_builder_storage;
+        parser.withCst(cst_builder_ptr.?);
+    }
     const ast_nodes = parser.parse() catch |err| {
         try stdout.print("Parser failed: {}\n", .{err});
         return;
     };
-    defer lib.ast.deinitAstNodes(allocator, ast_nodes);
+    // Note: AST nodes are allocated in arena, so they're automatically freed when arena is deinited
 
     try stdout.print("Generated {} AST nodes\n", .{ast_nodes.len});
 
@@ -374,105 +250,17 @@ fn runFullCompilation(allocator: std.mem.Allocator, file_path: []const u8) !void
     }
     try stdout.print("\n", .{});
 
-    // Phase 3: Semantic Analysis
-    try stdout.print("Phase 3: Semantic Analysis\n", .{});
-
-    var semantic_analyzer = lib.SemanticAnalyzer.init(allocator);
-    semantic_analyzer.initSelfReferences(); // Fix self-references after struct is in final location
-    defer semantic_analyzer.deinit();
-
-    const diagnostics = semantic_analyzer.analyze(ast_nodes) catch |err| {
-        try stdout.print("Semantic analysis failed: {}\n", .{err});
-        return;
-    };
-    defer {
-        // NOTE: SemanticAnalyzer.deinit() now handles diagnostic message cleanup
-        // So we just free the diagnostics array, not individual messages
-        allocator.free(diagnostics);
-    }
-
-    try stdout.print("Semantic analysis completed with {} diagnostics\n", .{diagnostics.len});
-    for (diagnostics) |diagnostic| {
-        try stdout.print("  {}\n", .{diagnostic});
-    }
-
-    try stdout.print("\n", .{});
-
-    // Phase 4: IR Generation
-    try stdout.print("Phase 4: IR Generation\n", .{});
-    var ir_builder = lib.IRBuilder.init(allocator);
-    defer ir_builder.deinit();
-
-    // Convert AST to HIR
-    ir_builder.buildFromAST(ast_nodes) catch |err| {
-        try stdout.print("AST to HIR conversion failed: {}\n", .{err});
-        return;
-    };
-
-    const hir_program = ir_builder.getProgramPtr();
-    try stdout.print("HIR program created (version: {s})\n", .{hir_program.version});
-    try stdout.print("  {} contracts converted to HIR\n", .{hir_program.contracts.len});
-
-    // Phase 5: IR Validation
-    try stdout.print("Phase 5: IR Validation\n", .{});
-    var validator = lib.Validator.init(allocator);
-    defer validator.deinit();
-
-    const validation_result = validator.validateProgram(hir_program) catch |err| {
-        try stdout.print("IR validation failed: {}\n", .{err});
-        return;
-    };
-
-    if (validation_result.valid) {
-        try stdout.print("IR validation passed\n", .{});
-    } else {
-        try stdout.print("IR validation failed with {} errors\n", .{validation_result.errors.len});
-        for (validation_result.errors) |error_| {
-            try stdout.print("  Error at line {}, column {}: {s}\n", .{ error_.location.line, error_.location.column, error_.message });
+    try stdout.print("============================================================\n", .{});
+    if (enable_cst) {
+        if (cst_builder_ptr) |builder| {
+            const cst_root = try builder.buildRoot(tokens);
+            _ = cst_root; // TODO: optional dump in future flag
+            builder.deinit();
         }
     }
 
-    try stdout.print("\n", .{});
-
-    // Phase 6: Yul Code Generation
-    try stdout.print("Phase 6: Yul Code Generation\n", .{});
-
-    // Generate Yul code from actual HIR program
-    var yul_codegen = lib.YulCodegen.init(allocator);
-    defer yul_codegen.deinit();
-
-    const yul_code = yul_codegen.generateYulFromProgram(hir_program) catch |err| {
-        try stdout.print("Yul generation failed: {}\n", .{err});
-        return;
-    };
-    defer allocator.free(yul_code);
-
-    try stdout.print("Generated Yul code ({} bytes)\n", .{yul_code.len});
-
-    // Phase 7: EVM Bytecode Generation
-    try stdout.print("Phase 7: EVM Bytecode Generation\n", .{});
-
-    var result = yul_codegen.compileYulToBytecode(yul_code) catch |err| {
-        try stdout.print("Bytecode generation failed: {}\n", .{err});
-        return;
-    };
-    defer result.deinit(allocator);
-
-    if (result.success) {
-        if (result.bytecode) |bytecode| {
-            try stdout.print("✓ Bytecode generation successful! ({} bytes)\n", .{bytecode.len});
-        }
-    } else {
-        try stdout.print("✗ Bytecode generation failed\n", .{});
-        if (result.error_message) |error_msg| {
-            try stdout.print("Error: {s}\n", .{error_msg});
-        }
-    }
-
-    try stdout.print("\n", .{});
-
-    try stdout.print("Compilation pipeline completed successfully\n", .{});
-    try stdout.print("   {} tokens -> {} AST nodes -> {} HIR contracts -> Yul -> EVM bytecode\n", .{ tokens.len, ast_nodes.len, hir_program.contracts.len });
+    try stdout.print("Frontend compilation completed successfully!\n", .{});
+    try stdout.print("Pipeline: {} tokens -> {} AST nodes\n", .{ tokens.len, ast_nodes.len });
 }
 
 /// Format TypeRef for display
@@ -508,11 +296,16 @@ fn printAstSummary(writer: anytype, node: *lib.AstNode, indent: u32) !void {
             try writer.print("Contract '{s}' ({} members)\n", .{ contract.name, contract.body.len });
         },
         .Function => |*function| {
-            const visibility = if (function.pub_) "pub " else "";
+            const visibility = if (function.visibility == .Public) "pub " else "";
             try writer.print("{s}Function '{s}' ({} params)\n", .{ visibility, function.name, function.parameters.len });
         },
         .VariableDecl => |*var_decl| {
-            const mutability = if (var_decl.mutable) "var " else "";
+            const mutability = switch (var_decl.kind) {
+                .Var => "var ",
+                .Let => "let ",
+                .Const => "const ",
+                .Immutable => "immutable ",
+            };
             try writer.print("Variable {s}{s}'{s}'\n", .{ @tagName(var_decl.region), mutability, var_decl.name });
         },
         .LogDecl => |*log_decl| {
@@ -525,7 +318,7 @@ fn printAstSummary(writer: anytype, node: *lib.AstNode, indent: u32) !void {
 }
 
 /// Generate AST and save to JSON file
-fn runASTGeneration(allocator: std.mem.Allocator, file_path: []const u8, output_dir: ?[]const u8) !void {
+fn runASTGeneration(allocator: std.mem.Allocator, file_path: []const u8, output_dir: ?[]const u8, enable_cst: bool) !void {
     const stdout = std.io.getStdOut().writer();
 
     // Read source file
@@ -548,12 +341,29 @@ fn runASTGeneration(allocator: std.mem.Allocator, file_path: []const u8, output_
     };
     defer allocator.free(tokens);
 
-    var parser = lib.Parser.init(allocator, tokens);
+    var arena = lib.ast_arena.AstArena.init(allocator);
+    defer arena.deinit();
+    var parser = lib.Parser.init(tokens, &arena);
+    parser.setFileId(1);
+    var cst_builder_storage: lib.cst.CstBuilder = undefined;
+    var cst_builder_ptr: ?*lib.cst.CstBuilder = null;
+    if (enable_cst) {
+        cst_builder_storage = lib.cst.CstBuilder.init(allocator);
+        cst_builder_ptr = &cst_builder_storage;
+        parser.withCst(cst_builder_ptr.?);
+    }
     const ast_nodes = parser.parse() catch |err| {
         try stdout.print("Parser error: {}\n", .{err});
         return;
     };
-    defer lib.ast.deinitAstNodes(allocator, ast_nodes);
+    if (enable_cst) {
+        if (cst_builder_ptr) |builder| {
+            const cst_root = try builder.buildRoot(tokens);
+            _ = cst_root; // CST not emitted here yet
+            builder.deinit();
+        }
+    }
+    // Note: AST nodes are allocated in arena, so they're automatically freed when arena is deinited
 
     try stdout.print("Generated {} AST nodes\n", .{ast_nodes.len});
 
@@ -583,296 +393,12 @@ fn runASTGeneration(allocator: std.mem.Allocator, file_path: []const u8, output_
     defer file.close();
 
     const writer = file.writer();
-    lib.ast.ASTSerializer.serializeAST(ast_nodes, writer) catch |err| {
+    lib.ast.AstSerializer.serializeAST(ast_nodes, writer) catch |err| {
         try stdout.print("Error serializing AST: {}\n", .{err});
         return;
     };
 
     try stdout.print("AST saved to {s}\n", .{output_file});
-}
-
-/// Generate HIR and save to JSON file
-fn runHIRGeneration(allocator: std.mem.Allocator, file_path: []const u8, output_dir: ?[]const u8) !void {
-    const stdout = std.io.getStdOut().writer();
-
-    // Read source file
-    const source = std.fs.cwd().readFileAlloc(allocator, file_path, 1024 * 1024) catch |err| {
-        try stdout.print("Error reading file {s}: {}\n", .{ file_path, err });
-        return;
-    };
-    defer allocator.free(source);
-
-    try stdout.print("Generating HIR for {s}\n", .{file_path});
-    try stdout.print("==================================================\n", .{});
-
-    // Run lexer + parser
-    var lexer = lib.Lexer.init(allocator, source);
-    defer lexer.deinit();
-
-    const tokens = lexer.scanTokens() catch |err| {
-        try stdout.print("Lexer error: {}\n", .{err});
-        return;
-    };
-    defer allocator.free(tokens);
-
-    var parser = lib.Parser.init(allocator, tokens);
-    const ast_nodes = parser.parse() catch |err| {
-        try stdout.print("Parser error: {}\n", .{err});
-        return;
-    };
-    defer lib.ast.deinitAstNodes(allocator, ast_nodes);
-
-    try stdout.print("Generated {} AST nodes\n", .{ast_nodes.len});
-
-    try stdout.print("Running semantic analysis...\n", .{});
-
-    var semantic_analyzer = lib.SemanticAnalyzer.init(allocator);
-    semantic_analyzer.initSelfReferences();
-    defer semantic_analyzer.deinit();
-
-    const diagnostics = semantic_analyzer.analyze(ast_nodes) catch |err| {
-        try stdout.print("Semantic analysis failed: {}\n", .{err});
-        return;
-    };
-    defer {
-        // NOTE: SemanticAnalyzer.deinit() now handles diagnostic message cleanup
-        // So we just free the diagnostics array, not individual messages
-        allocator.free(diagnostics);
-    }
-
-    try stdout.print("Semantic analysis completed with {} diagnostics\n", .{diagnostics.len});
-    for (diagnostics) |diagnostic| {
-        try stdout.print("  {}\n", .{diagnostic});
-    }
-
-    // Create HIR
-    var ir_builder = lib.IRBuilder.init(allocator);
-    defer ir_builder.deinit();
-
-    ir_builder.buildFromAST(ast_nodes) catch |err| {
-        try stdout.print("AST to HIR conversion failed: {}\n", .{err});
-        return;
-    };
-
-    const hir_program = ir_builder.getProgramPtr();
-    try stdout.print("HIR program created (version: {s})\n", .{hir_program.version});
-    try stdout.print("  {} contracts converted to HIR\n", .{hir_program.contracts.len});
-
-    // Generate output filename
-    const output_file = if (output_dir) |dir| blk: {
-        // Create output directory if it doesn't exist
-        std.fs.cwd().makeDir(dir) catch |err| switch (err) {
-            error.PathAlreadyExists => {},
-            else => return err,
-        };
-
-        const basename = std.fs.path.stem(file_path);
-        const filename = try std.mem.concat(allocator, u8, &[_][]const u8{ basename, ".hir.json" });
-        defer allocator.free(filename);
-        break :blk try std.fs.path.join(allocator, &[_][]const u8{ dir, filename });
-    } else blk: {
-        const basename = std.fs.path.stem(file_path);
-        break :blk try std.mem.concat(allocator, u8, &[_][]const u8{ basename, ".hir.json" });
-    };
-    defer allocator.free(output_file);
-
-    // Save HIR to JSON file
-    const file = std.fs.cwd().createFile(output_file, .{}) catch |err| {
-        try stdout.print("Error creating output file {s}: {}\n", .{ output_file, err });
-        return;
-    };
-    defer file.close();
-
-    const writer = file.writer();
-    lib.JSONSerializer.serializeProgram(hir_program, writer) catch |err| {
-        try stdout.print("Error serializing HIR: {}\n", .{err});
-        return;
-    };
-
-    try stdout.print("HIR saved to {s}\n", .{output_file});
-}
-
-/// Generate Yul code from HIR
-fn runYulGeneration(allocator: std.mem.Allocator, file_path: []const u8, output_dir: ?[]const u8) !void {
-    const stdout = std.io.getStdOut().writer();
-
-    // Read source file
-    const source = std.fs.cwd().readFileAlloc(allocator, file_path, 1024 * 1024) catch |err| {
-        try stdout.print("Error reading file {s}: {}\n", .{ file_path, err });
-        return;
-    };
-    defer allocator.free(source);
-
-    try stdout.print("Generating Yul code for {s}\n", .{file_path});
-    try stdout.print("==================================================\n", .{});
-
-    // Run lexer + parser
-    var lexer = lib.Lexer.init(allocator, source);
-    defer lexer.deinit();
-
-    const tokens = lexer.scanTokens() catch |err| {
-        try stdout.print("Lexer error: {}\n", .{err});
-        return;
-    };
-    defer allocator.free(tokens);
-
-    var parser = lib.Parser.init(allocator, tokens);
-    const ast_nodes = parser.parse() catch |err| {
-        try stdout.print("Parser error: {}\n", .{err});
-        return;
-    };
-    defer lib.ast.deinitAstNodes(allocator, ast_nodes);
-
-    // Create HIR
-    var ir_builder = lib.IRBuilder.init(allocator);
-    defer ir_builder.deinit();
-
-    ir_builder.buildFromAST(ast_nodes) catch |err| {
-        try stdout.print("AST to HIR conversion failed: {}\n", .{err});
-        return;
-    };
-
-    const hir_program = ir_builder.getProgramPtr();
-    try stdout.print("HIR program created with {} contracts\n", .{hir_program.contracts.len});
-
-    // Generate Yul code from actual HIR program
-    var yul_codegen = lib.YulCodegen.init(allocator);
-    defer yul_codegen.deinit();
-
-    const yul_code = yul_codegen.generateYulFromProgram(hir_program) catch |err| {
-        try stdout.print("Yul generation failed: {}\n", .{err});
-        return;
-    };
-    defer allocator.free(yul_code);
-
-    try stdout.print("Generated Yul code:\n", .{});
-    try stdout.print("{s}\n", .{yul_code});
-
-    // Save to file
-    const output_file = if (output_dir) |dir| blk: {
-        // Create output directory if it doesn't exist
-        std.fs.cwd().makeDir(dir) catch |err| switch (err) {
-            error.PathAlreadyExists => {},
-            else => return err,
-        };
-
-        const basename = std.fs.path.stem(file_path);
-        const filename = try std.mem.concat(allocator, u8, &[_][]const u8{ basename, ".yul" });
-        defer allocator.free(filename);
-        break :blk try std.fs.path.join(allocator, &[_][]const u8{ dir, filename });
-    } else blk: {
-        const basename = std.fs.path.stem(file_path);
-        break :blk try std.mem.concat(allocator, u8, &[_][]const u8{ basename, ".yul" });
-    };
-    defer allocator.free(output_file);
-
-    const file = std.fs.cwd().createFile(output_file, .{}) catch |err| {
-        try stdout.print("Error creating output file {s}: {}\n", .{ output_file, err });
-        return;
-    };
-    defer file.close();
-
-    try file.writeAll(yul_code);
-    try stdout.print("Yul code saved to {s}\n", .{output_file});
-}
-
-/// Generate EVM bytecode from HIR
-fn runBytecodeGeneration(allocator: std.mem.Allocator, file_path: []const u8, output_dir: ?[]const u8) !void {
-    const stdout = std.io.getStdOut().writer();
-
-    // Read source file
-    const source = std.fs.cwd().readFileAlloc(allocator, file_path, 1024 * 1024) catch |err| {
-        try stdout.print("Error reading file {s}: {}\n", .{ file_path, err });
-        return;
-    };
-    defer allocator.free(source);
-
-    try stdout.print("Generating EVM bytecode for {s}\n", .{file_path});
-    try stdout.print("==================================================\n", .{});
-
-    // Run lexer + parser
-    var lexer = lib.Lexer.init(allocator, source);
-    defer lexer.deinit();
-
-    const tokens = lexer.scanTokens() catch |err| {
-        try stdout.print("Lexer error: {}\n", .{err});
-        return;
-    };
-    defer allocator.free(tokens);
-
-    var parser = lib.Parser.init(allocator, tokens);
-    const ast_nodes = parser.parse() catch |err| {
-        try stdout.print("Parser error: {}\n", .{err});
-        return;
-    };
-    defer lib.ast.deinitAstNodes(allocator, ast_nodes);
-
-    // Create HIR
-    var ir_builder = lib.IRBuilder.init(allocator);
-    defer ir_builder.deinit();
-
-    ir_builder.buildFromAST(ast_nodes) catch |err| {
-        try stdout.print("AST to HIR conversion failed: {}\n", .{err});
-        return;
-    };
-
-    const hir_program = ir_builder.getProgramPtr();
-    try stdout.print("HIR program created with {} contracts\n", .{hir_program.contracts.len});
-
-    // Generate bytecode from actual HIR program
-    var yul_codegen = lib.YulCodegen.init(allocator);
-    defer yul_codegen.deinit();
-
-    const yul_code = yul_codegen.generateYulFromProgram(hir_program) catch |err| {
-        try stdout.print("Yul generation failed: {}\n", .{err});
-        return;
-    };
-    defer allocator.free(yul_code);
-
-    var result = yul_codegen.compileYulToBytecode(yul_code) catch |err| {
-        try stdout.print("Bytecode generation failed: {}\n", .{err});
-        return;
-    };
-    defer result.deinit(allocator);
-
-    if (result.success) {
-        if (result.bytecode) |bytecode| {
-            try stdout.print("✓ Bytecode generation successful!\n", .{});
-            try stdout.print("Bytecode: {s}\n", .{bytecode});
-
-            // Save to file
-            const output_file = if (output_dir) |dir| blk: {
-                // Create output directory if it doesn't exist
-                std.fs.cwd().makeDir(dir) catch |err| switch (err) {
-                    error.PathAlreadyExists => {},
-                    else => return err,
-                };
-
-                const basename = std.fs.path.stem(file_path);
-                const filename = try std.mem.concat(allocator, u8, &[_][]const u8{ basename, ".bin" });
-                defer allocator.free(filename);
-                break :blk try std.fs.path.join(allocator, &[_][]const u8{ dir, filename });
-            } else blk: {
-                const basename = std.fs.path.stem(file_path);
-                break :blk try std.mem.concat(allocator, u8, &[_][]const u8{ basename, ".bin" });
-            };
-            defer allocator.free(output_file);
-
-            const file = std.fs.cwd().createFile(output_file, .{}) catch |err| {
-                try stdout.print("Error creating output file {s}: {}\n", .{ output_file, err });
-                return;
-            };
-            defer file.close();
-
-            try file.writeAll(bytecode);
-            try stdout.print("Bytecode saved to {s}\n", .{output_file});
-        }
-    } else {
-        try stdout.print("✗ Bytecode generation failed\n", .{});
-        if (result.error_message) |error_msg| {
-            try stdout.print("Error: {s}\n", .{error_msg});
-        }
-    }
 }
 
 test "simple test" {

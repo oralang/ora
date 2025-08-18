@@ -107,25 +107,6 @@ pub fn build(b: *std.Build) void {
     const run_step = b.step("run", "Run the app");
     run_step.dependOn(&run_cmd.step);
 
-    // Create parser demo executable
-    const parser_demo_mod = b.createModule(.{
-        .root_source_file = b.path("examples/demos/parser_demo.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    parser_demo_mod.addImport("ora_lib", lib_mod);
-
-    const parser_demo = b.addExecutable(.{
-        .name = "parser_demo",
-        .root_module = parser_demo_mod,
-    });
-
-    const run_parser_demo = b.addRunArtifact(parser_demo);
-    run_parser_demo.step.dependOn(b.getInstallStep());
-
-    const parser_demo_step = b.step("parser-demo", "Run the parser demo");
-    parser_demo_step.dependOn(&run_parser_demo.step);
-
     // Create yul test executable
     const yul_test_mod = b.createModule(.{
         .root_source_file = b.path("examples/demos/yul_test.zig"),
@@ -192,26 +173,145 @@ pub fn build(b: *std.Build) void {
     const formal_verification_demo_step = b.step("formal-verification-demo", "Run the formal verification demo");
     formal_verification_demo_step.dependOn(&run_formal_verification_demo.step);
 
-    // Creates a step for unit testing. This only builds the test executable
-    // but does not run it.
-    const lib_unit_tests = b.addTest(.{
-        .root_module = lib_mod,
+    // Add comprehensive compiler testing framework
+    addCompilerTestFramework(b, lib_mod, target, optimize);
+
+    // Add new lexer testing framework
+    addLexerTestFramework(b, lib_mod, target, optimize);
+
+    // Add individual test suites - always included (files are present in repo)
+    const ast_tests = b.addTest(.{
+        .root_source_file = b.path("tests/ast_test.zig"),
+        .target = target,
+        .optimize = optimize,
     });
+    ast_tests.root_module.addImport("ora", lib_mod);
+    const run_ast_tests = b.addRunArtifact(ast_tests);
 
-    const run_lib_unit_tests = b.addRunArtifact(lib_unit_tests);
-
-    const exe_unit_tests = b.addTest(.{
-        .root_module = exe_mod,
+    const ast_clean_tests = b.addTest(.{
+        .root_source_file = b.path("tests/ast_test_clean.zig"),
+        .target = target,
+        .optimize = optimize,
     });
+    ast_clean_tests.root_module.addImport("ora", lib_mod);
+    const run_ast_clean_tests = b.addRunArtifact(ast_clean_tests);
 
-    const run_exe_unit_tests = b.addRunArtifact(exe_unit_tests);
+    // Legacy lexer test (keep for compatibility)
+    const simple_lexer_test = b.addTest(.{
+        .root_source_file = b.path("tests/lexer_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    simple_lexer_test.root_module.addImport("ora", lib_mod);
+    const run_simple_lexer_test = b.addRunArtifact(simple_lexer_test);
 
-    // Similar to creating the run step earlier, this exposes a `test` step to
-    // the `zig build --help` menu, providing a way for the user to request
-    // running the unit tests.
-    const test_step = b.step("test", "Run unit tests");
-    test_step.dependOn(&run_lib_unit_tests.step);
-    test_step.dependOn(&run_exe_unit_tests.step);
+    const test_lexer_legacy_step = b.step("test-lexer-legacy", "Run legacy lexer tests");
+    test_lexer_legacy_step.dependOn(&run_simple_lexer_test.step);
+
+    // Add expression parser tests
+    const expression_parser_tests = b.addTest(.{
+        .root_source_file = b.path("tests/expression_parser_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    expression_parser_tests.root_module.addImport("ora", lib_mod);
+    const run_expression_parser_tests = b.addRunArtifact(expression_parser_tests);
+
+    const test_expression_parser_step = b.step("test-expression-parser", "Run expression parser tests");
+    test_expression_parser_step.dependOn(&run_expression_parser_tests.step);
+
+    // Create AST test step
+    const test_ast_step = b.step("test-ast", "Run AST tests");
+    test_ast_step.dependOn(&run_ast_tests.step);
+    test_ast_step.dependOn(&run_ast_clean_tests.step);
+
+    // Create comprehensive test step that runs all tests
+    const test_all_step = b.step("test", "Run all tests");
+    test_all_step.dependOn(b.getInstallStep()); // Ensure everything is built first
+
+    // Add all test categories
+    const test_framework_internal = b.addTest(.{
+        .root_source_file = b.path("tests/test_framework.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    test_framework_internal.root_module.addImport("ora", lib_mod);
+
+    test_all_step.dependOn(&b.addRunArtifact(test_framework_internal).step);
+    test_all_step.dependOn(test_ast_step);
+    test_all_step.dependOn(&run_expression_parser_tests.step);
+    // Optionally: expose lexer-suite-verbose as a separate step (not part of default test)
+    // Run invalid parser fixtures
+    const invalid_parser_tests = b.addTest(.{
+        .root_source_file = b.path("tests/parser/parser_invalid_fixture_suite.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    invalid_parser_tests.root_module.addImport("ora", lib_mod);
+    test_all_step.dependOn(&b.addRunArtifact(invalid_parser_tests).step);
+
+    // Lossless round-trip tests
+    const lossless_tests = b.addTest(.{
+        .root_source_file = b.path("tests/lossless_roundtrip_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    lossless_tests.root_module.addImport("ora", lib_mod);
+    test_all_step.dependOn(&b.addRunArtifact(lossless_tests).step);
+
+    // Doc comment extraction tests
+    const doc_tests = b.addTest(.{
+        .root_source_file = b.path("tests/doc_comment_extraction_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    doc_tests.root_module.addImport("ora", lib_mod);
+    test_all_step.dependOn(&b.addRunArtifact(doc_tests).step);
+
+    // CST token stream tests
+    const cst_tests = b.addTest(.{
+        .root_source_file = b.path("tests/cst_token_stream_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    cst_tests.root_module.addImport("ora", lib_mod);
+    test_all_step.dependOn(&b.addRunArtifact(cst_tests).step);
+
+    // CST parser integration test
+    const cst_parser_tests = b.addTest(.{
+        .root_source_file = b.path("tests/cst_parser_top_level_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    cst_parser_tests.root_module.addImport("ora", lib_mod);
+    test_all_step.dependOn(&b.addRunArtifact(cst_parser_tests).step);
+
+    // Semantics fixtures suite
+    const semantics_fixture_tests = b.addTest(.{
+        .root_source_file = b.path("tests/semantics/semantics_fixture_suite.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    semantics_fixture_tests.root_module.addImport("ora", lib_mod);
+    test_all_step.dependOn(&b.addRunArtifact(semantics_fixture_tests).step);
+
+    // TypeInfo render and equality tests
+    const type_info_tests = b.addTest(.{
+        .root_source_file = b.path("tests/type_info_render_and_eq_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    type_info_tests.root_module.addImport("ora", lib_mod);
+    test_all_step.dependOn(&b.addRunArtifact(type_info_tests).step);
+
+    // Byte offset span tests
+    const span_tests = b.addTest(.{
+        .root_source_file = b.path("tests/byte_offset_span_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    span_tests.root_module.addImport("ora", lib_mod);
+    test_all_step.dependOn(&b.addRunArtifact(span_tests).step);
 
     // Documentation generation
     const install_docs = b.addInstallDirectory(.{
@@ -245,6 +345,47 @@ pub fn build(b: *std.Build) void {
     const test_examples_step = b.step("test-examples", "Test all example .ora files");
     const test_examples_run = createExampleTestStep(b, exe);
     test_examples_step.dependOn(test_examples_run);
+}
+
+/// Create a step that runs the installed lexer test suite with --verbose
+fn createRunLexerVerboseStep(b: *std.Build) *std.Build.Step {
+    const step = b.allocator.create(std.Build.Step) catch @panic("OOM");
+    step.* = std.Build.Step.init(.{
+        .id = .custom,
+        .name = "lexer-suite-verbose",
+        .owner = b,
+        .makeFn = runLexerVerbose,
+    });
+    return step;
+}
+
+fn runLexerVerbose(step: *std.Build.Step, options: std.Build.Step.MakeOptions) anyerror!void {
+    _ = options;
+    const b = step.owner;
+    const allocator = b.allocator;
+    const res = std.process.Child.run(.{
+        .allocator = allocator,
+        .argv = &[_][]const u8{ "./zig-out/bin/lexer_test_suite", "--verbose" },
+        .cwd = ".",
+    }) catch |err| {
+        std.log.err("Failed to run lexer_test_suite: {}", .{err});
+        return err;
+    };
+    switch (res.term) {
+        .Exited => |code| {
+            if (code != 0) {
+                std.log.err("lexer_test_suite failed with exit code {}", .{code});
+                std.log.err("stderr: {s}", .{res.stderr});
+                return error.LexerSuiteFailed;
+            }
+        },
+        .Signal => |sig| {
+            std.log.err("lexer_test_suite terminated by signal {}", .{sig});
+            std.log.err("stderr: {s}", .{res.stderr});
+            return error.LexerSuiteFailed;
+        },
+        else => {},
+    }
 }
 
 /// Build Solidity libraries using CMake
@@ -648,4 +789,141 @@ fn addBoostPaths(b: *std.Build, compile_step: *std.Build.Step.Compile, target: s
         compile_step.addSystemIncludePath(.{ .cwd_relative = include_path });
         compile_step.addLibraryPath(.{ .cwd_relative = lib_path });
     }
+}
+
+/// Add comprehensive compiler testing framework to build system
+fn addCompilerTestFramework(b: *std.Build, lib_mod: *std.Build.Module, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) void {
+    // Test framework infrastructure tests
+    const test_framework_tests = b.addTest(.{
+        .root_source_file = b.path("tests/test_framework.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    test_framework_tests.root_module.addImport("ora", lib_mod);
+
+    // Test arena and memory management tests
+    const test_arena_tests = b.addTest(.{
+        .root_source_file = b.path("tests/common/test_arena.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
+    // Test result types tests
+    const test_result_tests = b.addTest(.{
+        .root_source_file = b.path("tests/common/test_result.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
+    // Test runner tests
+    const test_runner_tests = b.addTest(.{
+        .root_source_file = b.path("tests/common/test_runner.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
+    // Assertions tests
+    const assertions_tests = b.addTest(.{
+        .root_source_file = b.path("tests/common/assertions.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    assertions_tests.root_module.addImport("ora", lib_mod);
+
+    // Test helpers tests
+    const test_helpers_tests = b.addTest(.{
+        .root_source_file = b.path("tests/common/test_helpers.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    test_helpers_tests.root_module.addImport("ora", lib_mod);
+
+    // Fixtures tests
+    const fixtures_tests = b.addTest(.{
+        .root_source_file = b.path("tests/common/fixtures.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
+    // Fixture cache tests
+    const fixture_cache_tests = b.addTest(.{
+        .root_source_file = b.path("tests/common/fixture_cache.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
+    // Coverage tests
+    const coverage_tests = b.addTest(.{
+        .root_source_file = b.path("tests/common/coverage.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
+    // CI integration tests
+    const ci_integration_tests = b.addTest(.{
+        .root_source_file = b.path("tests/common/ci_integration.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
+    // Create test steps for the framework components
+    const test_framework_step = b.step("test-framework", "Run test framework infrastructure tests");
+    test_framework_step.dependOn(&b.addRunArtifact(test_framework_tests).step);
+    test_framework_step.dependOn(&b.addRunArtifact(test_arena_tests).step);
+    test_framework_step.dependOn(&b.addRunArtifact(test_result_tests).step);
+    test_framework_step.dependOn(&b.addRunArtifact(test_runner_tests).step);
+    test_framework_step.dependOn(&b.addRunArtifact(assertions_tests).step);
+    test_framework_step.dependOn(&b.addRunArtifact(test_helpers_tests).step);
+    test_framework_step.dependOn(&b.addRunArtifact(fixtures_tests).step);
+    test_framework_step.dependOn(&b.addRunArtifact(fixture_cache_tests).step);
+    test_framework_step.dependOn(&b.addRunArtifact(coverage_tests).step);
+    test_framework_step.dependOn(&b.addRunArtifact(ci_integration_tests).step);
+}
+
+/// Add lexer testing framework to build system
+fn addLexerTestFramework(b: *std.Build, lib_mod: *std.Build.Module, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) void {
+    // Lexer test suite
+    const lexer_test_suite = b.addTest(.{
+        .root_source_file = b.path("tests/lexer/lexer_test_suite.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    lexer_test_suite.root_module.addImport("ora", lib_mod);
+
+    // Lexer test fixtures
+    const lexer_test_fixtures = b.addTest(.{
+        .root_source_file = b.path("tests/lexer/lexer_test_fixtures.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    lexer_test_fixtures.root_module.addImport("ora", lib_mod);
+
+    // Create lexer test executable for standalone running
+    const lexer_test_exe = b.addExecutable(.{
+        .name = "lexer_test_suite",
+        .root_source_file = b.path("tests/lexer/lexer_test_suite.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    lexer_test_exe.root_module.addImport("ora", lib_mod);
+
+    // Create test steps
+    const test_lexer_step = b.step("test-lexer", "Run comprehensive lexer tests");
+    test_lexer_step.dependOn(&b.addRunArtifact(lexer_test_suite).step);
+    test_lexer_step.dependOn(&b.addRunArtifact(lexer_test_fixtures).step);
+
+    // Create lexer benchmark step
+    const benchmark_lexer_step = b.step("benchmark-lexer", "Run lexer performance benchmarks");
+    const lexer_benchmark_run = b.addRunArtifact(lexer_test_exe);
+    lexer_benchmark_run.addArg("--benchmark");
+    benchmark_lexer_step.dependOn(&lexer_benchmark_run.step);
+
+    // Create lexer test with verbose output
+    const test_lexer_verbose_step = b.step("test-lexer-verbose", "Run lexer tests with verbose output");
+    const lexer_verbose_run = b.addRunArtifact(lexer_test_exe);
+    lexer_verbose_run.addArg("--verbose");
+    test_lexer_verbose_step.dependOn(&lexer_verbose_run.step);
+
+    // Install lexer test executable
+    b.installArtifact(lexer_test_exe);
 }

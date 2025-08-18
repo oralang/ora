@@ -1,0 +1,11 @@
+let x = 42;
+var y: u256 = 100;
+const z = "hello";
+let mut counter = 0;
+var balance: u256;
+const MAX_SUPPLY: u256 = 1000000;
+// Struct destructuring (preferred)
+let .{ a, b } = tuple_value;
+// Negative: tuple destructuring not supported (commented out)
+// let (u, v) = pair_value;
+var storage owner: address;

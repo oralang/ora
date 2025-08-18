@@ -508,7 +508,7 @@ pub fn getTypeAlignment(ora_type: OraType) u32 {
         .Enum => |enum_type| enum_type.layout.alignment,
         .Function => 32,
         .Void => 1,
-        .Unknown, .Error => 32,
+        .Unknown, .Error, .Module => 32,
         .Tuple => |tuple| blk: {
             var max_alignment: u32 = 1;
             for (tuple.types) |typ| {
@@ -570,6 +570,7 @@ pub const OraType = union(enum) {
     Void: void,
     Unknown: void,
     Error: void,
+    Module: ?[]const u8, // Module type with optional module name
     Tuple: struct {
         types: []OraType,
     },
@@ -593,7 +594,7 @@ pub fn getTypeSize(ora_type: OraType) u32 {
         .Enum => |enum_type| enum_type.calculateSize(),
         .Function => 32, // Function pointer
         .Void => 0,
-        .Unknown, .Error => 32, // Default to 32 bytes
+        .Unknown, .Error, .Module => 32, // Default to 32 bytes
         .Tuple => |tuple| blk: {
             var size: u32 = 0;
             for (tuple.types) |typ| {
@@ -622,6 +623,7 @@ pub const Symbol = struct {
     region: ast.MemoryRegion,
     mutable: bool,
     span: ast.SourceSpan,
+    namespace: ?[]const u8, // Optional namespace for namespaced symbols
 };
 
 /// Symbol table for scope management (using ArrayList to avoid HashMap overflow in Zig 0.14.1)
@@ -660,6 +662,53 @@ pub const SymbolTable = struct {
 
         return null;
     }
+
+    /// Lookup a symbol with namespace support
+    pub fn lookupNamespaced(self: *SymbolTable, namespace: ?[]const u8, name: []const u8) ?Symbol {
+        // If no namespace specified, do regular lookup
+        if (namespace == null) {
+            return self.lookup(name);
+        }
+
+        // Look for symbols that belong to the specified namespace
+        for (self.symbols.items) |symbol| {
+            if (std.mem.eql(u8, symbol.name, name) and
+                symbol.namespace != null and
+                std.mem.eql(u8, symbol.namespace.?, namespace.?))
+            {
+                return symbol;
+            }
+        }
+
+        // Check parent scope
+        if (self.parent) |parent| {
+            return parent.lookupNamespaced(namespace, name);
+        }
+
+        return null;
+    }
+
+    /// Lookup a namespace symbol (module)
+    pub fn lookupNamespace(self: *SymbolTable, namespace_name: []const u8) ?Symbol {
+        for (self.symbols.items) |symbol| {
+            if (std.mem.eql(u8, symbol.name, namespace_name) and
+                symbol.typ == .Module)
+            {
+                return symbol;
+            }
+        }
+
+        if (self.parent) |parent| {
+            return parent.lookupNamespace(namespace_name);
+        }
+
+        return null;
+    }
+
+    /// Check if a symbol exists in a namespace
+    pub fn hasSymbolInNamespace(self: *SymbolTable, namespace: []const u8, symbol_name: []const u8) bool {
+        return self.lookupNamespaced(namespace, symbol_name) != null;
+    }
 };
 
 /// Type checker for ZigOra
@@ -689,8 +738,7 @@ pub const Typer = struct {
     /// Fix self-references after struct initialization
     pub fn fixSelfReferences(self: *Typer) void {
         self.current_scope = &self.global_scope;
-        // Initialize standard library symbols after self-references are fixed
-        self.initStandardLibrary() catch {};
+        // Standard library is now imported explicitly by the user with @imports
     }
 
     /// Register a custom struct type with memory layout optimization
@@ -699,7 +747,7 @@ pub const Typer = struct {
         var fields = try self.allocator.alloc(StructType.StructField, struct_decl.fields.len);
 
         for (struct_decl.fields, 0..) |ast_field, i| {
-            const field_type = try self.convertAstTypeToOraType(&ast_field.typ);
+            const field_type = try self.convertTypeInfoToOraType(ast_field.type_info);
             fields[i] = StructType.StructField{
                 .name = ast_field.name,
                 .typ = field_type,
@@ -731,84 +779,63 @@ pub const Typer = struct {
         return null;
     }
 
-    /// Initialize standard library symbols in global scope
-    pub fn initStandardLibrary(self: *Typer) TyperError!void {
-        // Add 'std' as a module identifier
-        const std_symbol = Symbol{
-            .name = "std",
-            .typ = OraType.Unknown, // Module type - will be refined later
-            .region = .Stack,
-            .mutable = false,
-            .span = ast.SourceSpan{ .line = 0, .column = 0, .length = 3 },
-        };
-        try self.current_scope.declare(std_symbol);
+    /// Handle @imports directive to import modules
+    pub fn processImport(self: *Typer, module_name: []const u8, namespace: ?[]const u8, span: ast.SourceSpan) TyperError!void {
+        // Module name should be a known standard library module
+        if (std.mem.eql(u8, module_name, "std")) {
+            // Import into specified namespace or as direct symbols
+            const import_name = namespace orelse "std";
 
-        // Initialize standard library modules and their fields
-        try self.initTransactionModule();
-        try self.initBlockModule();
-        try self.initConstantsModule();
+            // Create the module symbol
+            const module_symbol = Symbol{
+                .name = import_name,
+                .typ = OraType.Unknown, // Module type, TODO: define proper module type
+                .region = .Stack,
+                .mutable = false,
+                .span = span,
+                .namespace = null,
+            };
+            try self.current_scope.declare(module_symbol);
 
-        // Add built-in functions
-        const require_params = try self.allocator.alloc(OraType, 1);
-        require_params[0] = OraType.Bool;
-        try self.function_params.append(require_params); // Track for cleanup
+            // For direct imports (without namespace), add child modules as top-level symbols
+            if (namespace == null) {
+                // Add std.transaction module
+                const transaction_symbol = Symbol{
+                    .name = "transaction",
+                    .typ = OraType.Unknown, // Transaction context module
+                    .region = .Stack,
+                    .mutable = false,
+                    .span = span,
+                    .namespace = "std", // Mark as part of std namespace
+                };
+                try self.current_scope.declare(transaction_symbol); // Report errors if they occur
 
-        const require_symbol = Symbol{
-            .name = "require",
-            .typ = OraType{ .Function = .{
-                .params = require_params,
-                .return_type = null,
-            } },
-            .region = .Stack,
-            .mutable = false,
-            .span = ast.SourceSpan{ .line = 0, .column = 0, .length = 7 },
-        };
-        try self.current_scope.declare(require_symbol);
-    }
+                // Add std.block module
+                const block_symbol = Symbol{
+                    .name = "block",
+                    .typ = OraType.Unknown, // Block context module
+                    .region = .Stack,
+                    .mutable = false,
+                    .span = span,
+                    .namespace = "std", // Mark as part of std namespace
+                };
+                try self.current_scope.declare(block_symbol); // Report errors if they occur
 
-    /// Initialize std.transaction module symbols
-    fn initTransactionModule(self: *Typer) TyperError!void {
-        // Add module identifier - silently ignore if already exists
-        const transaction_symbol = Symbol{
-            .name = "transaction",
-            .typ = OraType.Unknown, // Transaction context module
-            .region = .Stack,
-            .mutable = false,
-            .span = ast.SourceSpan{ .line = 0, .column = 0, .length = 11 },
-        };
-        self.current_scope.declare(transaction_symbol) catch {
-            // Ignore errors - symbol may already exist or OOM (non-critical)
-        };
-    }
-
-    /// Initialize std.block module symbols
-    fn initBlockModule(self: *Typer) TyperError!void {
-        // Add module identifier - silently ignore if already exists
-        const block_symbol = Symbol{
-            .name = "block",
-            .typ = OraType.Unknown, // Block context module
-            .region = .Stack,
-            .mutable = false,
-            .span = ast.SourceSpan{ .line = 0, .column = 0, .length = 5 },
-        };
-        self.current_scope.declare(block_symbol) catch {
-            // Ignore errors - symbol may already exist or OOM (non-critical)
-        };
-    }
-
-    /// Initialize std.constants module symbols
-    fn initConstantsModule(self: *Typer) TyperError!void {
-        // Add module identifier - silently ignore if already exists
-        const constants_symbol = Symbol{
-            .name = "constants",
-            .typ = OraType.Unknown, // Constants module
-            .region = .Stack,
-            .mutable = false,
-            .span = ast.SourceSpan{ .line = 0, .column = 0, .length = 9 },
-        };
-        self.current_scope.declare(constants_symbol) catch {
-            // Ignore errors - symbol may already exist or OOM (non-critical)
-        };
+                // Add std.constants module
+                const constants_symbol = Symbol{
+                    .name = "constants",
+                    .typ = OraType.Unknown, // Constants module
+                    .region = .Stack,
+                    .mutable = false,
+                    .span = span,
+                    .namespace = "std", // Mark as part of std namespace
+                };
+                try self.current_scope.declare(constants_symbol); // Report errors if they occur
+            }
+        } else {
+            // Unknown module - could add error reporting here
+            return TyperError.UndeclaredVariable;
+        }
     }
 
     pub fn deinit(self: *Typer) void {
@@ -850,25 +877,28 @@ pub const Typer = struct {
                 }
             },
             .Function => |*function| {
-                // Add function to symbol table (simplified to avoid createFunctionType issues)
+                // Add function to symbol table with proper function type
+                const func_type = try self.createFunctionType(function);
                 const symbol = Symbol{
                     .name = function.name,
-                    .typ = OraType.Unknown, // Simplified for now
+                    .typ = func_type,
                     .region = .Stack, // Functions don't have memory regions
                     .mutable = false,
                     .span = function.span,
+                    .namespace = null,
                 };
                 try self.current_scope.declare(symbol);
             },
             .VariableDecl => |*var_decl| {
                 // Add variable to symbol table
-                const var_type = try self.convertAstTypeToOraType(&var_decl.typ);
+                const var_type = try self.convertTypeInfoToOraType(var_decl.type_info);
                 const symbol = Symbol{
                     .name = var_decl.name,
                     .typ = var_type,
                     .region = var_decl.region,
                     .mutable = var_decl.mutable,
                     .span = var_decl.span,
+                    .namespace = null,
                 };
                 try self.current_scope.declare(symbol);
             },
@@ -884,6 +914,7 @@ pub const Typer = struct {
                     .region = .Stack,
                     .mutable = false,
                     .span = enum_decl.span,
+                    .namespace = null,
                 };
                 try self.current_scope.declare(enum_symbol);
             },
@@ -910,8 +941,12 @@ pub const Typer = struct {
             .StructDecl => {
                 // Struct already registered in first pass
             },
+            .Import => |import| {
+                // Process import directives (@imports or const = @imports)
+                try self.processImport(import.path, import.alias, import.span);
+            },
             else => {
-                // TODO: Add type checking for: EnumDecl, LogDecl, Import, ErrorDecl (top-level), Block, Expression, Statement, TryBlock
+                // TODO: Add type checking for: EnumDecl, LogDecl, ErrorDecl (top-level), Block, Expression, Statement, TryBlock
             },
         }
     }
@@ -933,13 +968,14 @@ pub const Typer = struct {
 
         // Add parameters to function scope
         for (function.parameters) |*param| {
-            const param_type = try self.convertAstTypeToOraType(&param.typ);
+            const param_type = try self.convertTypeInfoToOraType(param.type_info);
             const symbol = Symbol{
                 .name = param.name,
                 .typ = param_type,
                 .region = .Stack,
                 .mutable = false, // Parameters are immutable by default
                 .span = param.span,
+                .namespace = null,
             };
             try self.current_scope.declare(symbol);
         }
@@ -948,8 +984,8 @@ pub const Typer = struct {
         try self.typeCheckBlock(&function.body);
 
         // Verify return type consistency
-        if (function.return_type) |*return_type| {
-            const expected_return = try self.convertAstTypeToOraType(return_type);
+        if (function.return_type_info) |return_type_info| {
+            const expected_return = try self.convertTypeInfoToOraType(return_type_info);
             // TODO: Verify all return statements match this type
             _ = expected_return;
         }
@@ -960,7 +996,7 @@ pub const Typer = struct {
         // Handle tuple unpacking
         if (var_decl.tuple_names) |tuple_names| {
             // Tuple unpacking: let (a, b) = expr
-            if (var_decl.value) |*init_expr| {
+            if (var_decl.value) |init_expr| {
                 const init_type = try self.typeCheckExpression(init_expr);
 
                 // Ensure initializer is a tuple type
@@ -983,6 +1019,7 @@ pub const Typer = struct {
                         .region = var_decl.region,
                         .mutable = var_decl.mutable,
                         .span = var_decl.span,
+                        .namespace = null, // Tuple variables are local
                     };
 
                     try self.current_scope.declare(symbol);
@@ -992,10 +1029,10 @@ pub const Typer = struct {
             }
         } else {
             // Regular variable declaration
-            const var_type = try self.convertAstTypeToOraType(&var_decl.typ);
+            const var_type = try self.convertTypeInfoToOraType(var_decl.type_info);
 
             // Type check initializer if present
-            if (var_decl.value) |*init_expr| {
+            if (var_decl.value) |init_expr| {
                 const init_type = try self.typeCheckExpression(init_expr);
                 if (!self.typesCompatible(var_type, init_type)) {
                     return TyperError.TypeMismatch;
@@ -1012,6 +1049,7 @@ pub const Typer = struct {
                 .region = var_decl.region,
                 .mutable = var_decl.mutable,
                 .span = var_decl.span,
+                .namespace = null, // Regular variables are local
             };
 
             try self.current_scope.declare(symbol);
@@ -1114,6 +1152,44 @@ pub const Typer = struct {
                     return TyperError.TypeMismatch;
                 }
             },
+            .ForLoop => |*for_loop| {
+                // Type check the iterable expression
+                _ = try self.typeCheckExpression(&for_loop.iterable);
+
+                // Type check the body
+                try self.typeCheckBlock(&for_loop.body);
+
+                // TODO: Add proper iteration variable type checking
+            },
+            .Switch => |*switch_stmt| {
+                // Type check the switch expression
+                _ = try self.typeCheckExpression(&switch_stmt.condition);
+
+                // Type check each case
+                for (switch_stmt.cases) |*case| {
+                    // Type check case pattern
+                    // Note: SwitchPattern is not an expression, so we skip type checking for now
+                    // TODO: Implement proper pattern type checking
+
+                    // Type check case body based on its type
+                    switch (case.body) {
+                        .Expression => |expr| {
+                            _ = try self.typeCheckExpression(expr);
+                        },
+                        .Block => |*block| {
+                            try self.typeCheckBlock(block);
+                        },
+                        .LabeledBlock => |*labeled| {
+                            try self.typeCheckBlock(&labeled.block);
+                        },
+                    }
+                }
+
+                // Type check default case if present
+                if (switch_stmt.default_case) |*default| {
+                    try self.typeCheckBlock(default);
+                }
+            },
         }
     }
 
@@ -1177,7 +1253,7 @@ pub const Typer = struct {
                 var tuple_types = std.ArrayList(OraType).init(self.allocator);
                 defer tuple_types.deinit();
 
-                for (tuple.elements) |*element| {
+                for (tuple.elements) |element| {
                     const element_type = try self.typeCheckExpression(element);
                     try tuple_types.append(element_type);
                 }
@@ -1272,11 +1348,119 @@ pub const Typer = struct {
                     return TyperError.UndeclaredVariable; // Enum type not found
                 }
             },
+            .SwitchExpression => |*switch_expr| {
+                // Type check the switch expression
+                _ = try self.typeCheckExpression(switch_expr.condition);
+
+                // Type check each case and ensure all return types are compatible
+                var result_type: ?OraType = null;
+
+                for (switch_expr.cases) |*case| {
+                    // Type check case pattern
+                    // Note: SwitchPattern is not an expression, so we skip type checking for now
+                    // TODO: Implement proper pattern type checking
+
+                    // Type check case body and get result type
+                    const case_type = switch (case.body) {
+                        .Expression => |case_expr| try self.typeCheckExpression(case_expr),
+                        .Block => OraType.Void, // Blocks don't return values in switch expressions
+                        .LabeledBlock => OraType.Void, // Labeled blocks don't return values in switch expressions
+                    };
+                    if (result_type == null) {
+                        result_type = case_type;
+                    } else if (!self.typesCompatible(result_type.?, case_type)) {
+                        return TyperError.TypeMismatch; // All cases must return same type
+                    }
+                }
+
+                // Type check default case if present
+                if (switch_expr.default_case) |*default| {
+                    // Default case is a block, so type check it as a block
+                    try self.typeCheckBlock(default);
+                    // Blocks in switch expressions don't contribute to the result type
+                    // They are considered to return Void
+                    const default_type = OraType.Void;
+                    if (result_type) |rt| {
+                        if (!self.typesCompatible(rt, default_type)) {
+                            return TyperError.TypeMismatch;
+                        }
+                    } else {
+                        result_type = default_type;
+                    }
+                }
+
+                return result_type orelse OraType.Void;
+            },
+            .Quantified => |*quantified| {
+                // Quantified expressions (forall/exists) must return boolean
+                if (quantified.condition) |condition| {
+                    _ = try self.typeCheckExpression(condition);
+                }
+                return OraType.Bool;
+            },
+            .AnonymousStruct => |*anon_struct| {
+                // Type check all field values
+                for (anon_struct.fields) |*field| {
+                    _ = try self.typeCheckExpression(field.value);
+                }
+
+                // Return a generic struct type (simplified)
+                return OraType.Unknown; // TODO: Create proper anonymous struct type
+            },
+            .Range => |*range| {
+                // Type check range bounds
+                const start_type = try self.typeCheckExpression(range.start);
+                const end_type = try self.typeCheckExpression(range.end);
+
+                if (!self.isNumericType(start_type) or !self.isNumericType(end_type)) {
+                    return TyperError.TypeMismatch;
+                }
+
+                // Range expressions typically return an iterator type
+                return OraType.Unknown; // TODO: Create proper range iterator type
+            },
+            .LabeledBlock => |*labeled_block| {
+                // Type check the block - blocks don't return values
+                try self.typeCheckBlock(&labeled_block.block);
+                return OraType.Void;
+            },
+            .Destructuring => |*destructuring| {
+                // Type check the source expression
+                const source_type = try self.typeCheckExpression(destructuring.value);
+
+                // Ensure source is a struct or tuple type
+                if (source_type != .Struct and source_type != .Tuple) {
+                    return TyperError.TypeMismatch;
+                }
+
+                // Return void for destructuring expressions
+                return OraType.Void;
+            },
+            .ArrayLiteral => |*array_literal| {
+                if (array_literal.elements.len == 0) {
+                    // Empty array - return unknown slice type
+                    return OraType.Unknown;
+                }
+
+                // Type check all elements and ensure they're compatible
+                const first_type = try self.typeCheckExpression(array_literal.elements[0]);
+                for (array_literal.elements[1..]) |element| {
+                    const element_type = try self.typeCheckExpression(element);
+                    if (!self.typesCompatible(first_type, element_type)) {
+                        return TyperError.TypeMismatch;
+                    }
+                }
+
+                // Return slice type of the element type
+                const element_type_ptr = try self.type_arena.allocator().create(OraType);
+                element_type_ptr.* = first_type;
+                return OraType{ .Slice = element_type_ptr };
+            },
         }
     }
 
     /// Get the type of a literal
-    fn getLiteralType(self: *Typer, literal: *ast.LiteralNode) TyperError!OraType {
+    fn getLiteralType(self: *Typer, literal: *ast.LiteralExpr) TyperError!OraType {
         _ = self;
         return switch (literal.*) {
             .Integer => |*int_lit| {
@@ -1341,6 +1525,7 @@ pub const Typer = struct {
             .Bool => OraType.Bool,
             .Address => OraType.Address,
             .Hex => OraType.U256, // Hex literals default to U256
+            .Binary => OraType.U256, // Binary literals default to U256 like Hex literals
         };
     }
 
@@ -1388,7 +1573,7 @@ pub const Typer = struct {
                 return TyperError.TypeMismatch;
             },
             // Bitwise operators (for flag enums)
-            .BitAnd, .BitOr, .BitXor => {
+            .BitwiseAnd, .BitwiseOr, .BitwiseXor => {
                 if (self.isNumericType(lhs) and self.isNumericType(rhs)) {
                     return self.commonNumericType(lhs, rhs);
                 }
@@ -1436,7 +1621,7 @@ pub const Typer = struct {
                     }
 
                     // Type check each argument
-                    for (call.arguments, func_type.params) |*arg, expected_param| {
+                    for (call.arguments, func_type.params) |arg, expected_param| {
                         const arg_type = try self.typeCheckExpression(arg);
                         if (!self.typesCompatible(arg_type, expected_param)) {
                             return TyperError.TypeMismatch;
@@ -1496,13 +1681,13 @@ pub const Typer = struct {
                 return TyperError.ArgumentCountMismatch;
             }
 
-            const condition_type = try self.typeCheckExpression(&call.arguments[0]);
+            const condition_type = try self.typeCheckExpression(call.arguments[0]);
             if (!std.meta.eql(condition_type, OraType.Bool)) {
                 return TyperError.TypeMismatch;
             }
 
             if (call.arguments.len == 2) {
-                const message_type = try self.typeCheckExpression(&call.arguments[1]);
+                const message_type = try self.typeCheckExpression(call.arguments[1]);
                 if (!std.meta.eql(message_type, OraType.String)) {
                     return TyperError.TypeMismatch;
                 }
@@ -1517,13 +1702,13 @@ pub const Typer = struct {
                 return TyperError.ArgumentCountMismatch;
             }
 
-            const condition_type = try self.typeCheckExpression(&call.arguments[0]);
+            const condition_type = try self.typeCheckExpression(call.arguments[0]);
             if (!std.meta.eql(condition_type, OraType.Bool)) {
                 return TyperError.TypeMismatch;
             }
 
             if (call.arguments.len == 2) {
-                const message_type = try self.typeCheckExpression(&call.arguments[1]);
+                const message_type = try self.typeCheckExpression(call.arguments[1]);
                 if (!std.meta.eql(message_type, OraType.String)) {
                     return TyperError.TypeMismatch;
                 }
@@ -1538,13 +1723,13 @@ pub const Typer = struct {
                 return TyperError.ArgumentCountMismatch;
             }
 
-            const condition_type = try self.typeCheckExpression(&call.arguments[0]);
+            const condition_type = try self.typeCheckExpression(call.arguments[0]);
             if (!std.meta.eql(condition_type, OraType.Bool)) {
                 return TyperError.TypeMismatch;
             }
 
             if (call.arguments.len == 2) {
-                const message_type = try self.typeCheckExpression(&call.arguments[1]);
+                const message_type = try self.typeCheckExpression(call.arguments[1]);
                 if (!std.meta.eql(message_type, OraType.String)) {
                     return TyperError.TypeMismatch;
                 }
@@ -1560,7 +1745,7 @@ pub const Typer = struct {
             }
 
             // Return the same type as the argument
-            return try self.typeCheckExpression(&call.arguments[0]);
+            return try self.typeCheckExpression(call.arguments[0]);
         }
 
         if (std.mem.eql(u8, function_name, "log")) {
@@ -1580,8 +1765,8 @@ pub const Typer = struct {
                 return TyperError.ArgumentCountMismatch;
             }
 
-            const lhs_type = try self.typeCheckExpression(&call.arguments[0]);
-            const rhs_type = try self.typeCheckExpression(&call.arguments[1]);
+            const lhs_type = try self.typeCheckExpression(call.arguments[0]);
+            const rhs_type = try self.typeCheckExpression(call.arguments[1]);
 
             if (!self.isNumericType(lhs_type) or !self.isNumericType(rhs_type)) {
                 return TyperError.TypeMismatch;
@@ -1596,8 +1781,8 @@ pub const Typer = struct {
                 return TyperError.ArgumentCountMismatch;
             }
 
-            const lhs_type = try self.typeCheckExpression(&call.arguments[0]);
-            const rhs_type = try self.typeCheckExpression(&call.arguments[1]);
+            const lhs_type = try self.typeCheckExpression(call.arguments[0]);
+            const rhs_type = try self.typeCheckExpression(call.arguments[1]);
 
             if (!self.isNumericType(lhs_type) or !self.isNumericType(rhs_type)) {
                 return TyperError.TypeMismatch;
@@ -1619,6 +1804,51 @@ pub const Typer = struct {
 
         // Default for other built-ins
         return OraType.Unknown;
+    }
+
+    /// Convert TypeInfo to OraType
+    pub fn convertTypeInfoToOraType(self: *Typer, type_info: ast.TypeInfo) TyperError!OraType {
+        // If the TypeInfo already has a resolved OraType, convert it to typer's OraType
+        if (type_info.ora_type) |ast_ora_type| {
+            return self.convertAstOraTypeToTyperOraType(ast_ora_type);
+        }
+
+        // If it has an AST TypeRef, convert it
+        if (type_info.ast_type) |ast_type| {
+            return self.convertAstTypeToOraType(&ast_type);
+        }
+
+        // Otherwise, it's unknown
+        return OraType.Unknown;
+    }
+
+    /// Convert ast.type_info.OraType to typer.OraType
+    fn convertAstOraTypeToTyperOraType(self: *Typer, ast_ora_type: ast.type_info.OraType) TyperError!OraType {
+        _ = self; // May be needed for complex type conversions
+        return switch (ast_ora_type) {
+            .bool => OraType.Bool,
+            .address => OraType.Address,
+            .u8 => OraType.U8,
+            .u16 => OraType.U16,
+            .u32 => OraType.U32,
+            .u64 => OraType.U64,
+            .u128 => OraType.U128,
+            .u256 => OraType.U256,
+            .i8 => OraType.I8,
+            .i16 => OraType.I16,
+            .i32 => OraType.I32,
+            .i64 => OraType.I64,
+            .i128 => OraType.I128,
+            .i256 => OraType.I256,
+            .string => OraType.String,
+            .bytes => OraType.Bytes,
+            .void => OraType.Unknown, // Map void to Unknown for now
+            .struct_type => |_| OraType.Unknown, // TODO: Look up actual StructType by name
+            .enum_type => |_| OraType.Unknown, // TODO: Look up actual EnumType by name
+            // For complex types, we'll need more sophisticated conversion
+            // For now, map them to Unknown
+            else => OraType.Unknown,
+        };
     }
 
     /// Convert AST type reference to ZigOra type
@@ -1708,21 +1938,74 @@ pub const Typer = struct {
                     .types = element_types,
                 } };
             },
+            .Struct => |struct_name| {
+                // Look up struct type by name
+                if (self.getStructType(struct_name)) |struct_type| {
+                    const struct_type_const_ptr = @as(*const StructType, struct_type);
+                    const struct_type_ptr = @as(*StructType, @constCast(struct_type_const_ptr));
+                    return OraType{ .Struct = struct_type_ptr };
+                }
+                return OraType.Unknown;
+            },
+            .Enum => |enum_name| {
+                // Look up enum type by name
+                if (self.current_scope.lookup(enum_name)) |symbol| {
+                    if (symbol.typ == .Enum) {
+                        return symbol.typ;
+                    }
+                }
+                return OraType.Unknown;
+            },
+            .Function => |function_type| {
+                // Convert function type
+                const param_types = try self.type_arena.allocator().alloc(OraType, function_type.params.len);
+                for (function_type.params, 0..) |*param_type, i| {
+                    param_types[i] = try self.convertAstTypeToOraType(param_type);
+                }
+
+                const return_type_ptr = if (function_type.return_type) |ret_type| blk: {
+                    const ret_ptr = try self.type_arena.allocator().create(OraType);
+                    ret_ptr.* = try self.convertAstTypeToOraType(ret_type);
+                    break :blk ret_ptr;
+                } else null;
+
+                return OraType{ .Function = .{
+                    .params = param_types,
+                    .return_type = return_type_ptr,
+                } };
+            },
+            .Void => OraType.Void,
+            .Error => OraType.Error,
+            .Module => |module_name| {
+                return OraType{ .Module = module_name };
+            },
             .Unknown => OraType.Unknown,
         };
     }
 
     /// Create function type from function node
     fn createFunctionType(self: *Typer, function: *ast.FunctionNode) TyperError!OraType {
-        _ = self;
-        _ = function;
-        // TODO: Implement proper function type creation without pointer issues
-        // For now, return a simple type to avoid the segmentation fault
-        return OraType.Unknown;
+        // Convert function parameters to OraType array
+        const param_types = try self.type_arena.allocator().alloc(OraType, function.parameters.len);
+        for (function.parameters, 0..) |*param, i| {
+            param_types[i] = try self.convertTypeInfoToOraType(param.type_info);
+        }
+
+        // Convert return type if present
+        const return_type_ptr = if (function.return_type_info) |ret_type_info| blk: {
+            const ret_ptr = try self.type_arena.allocator().create(OraType);
+            ret_ptr.* = try self.convertTypeInfoToOraType(ret_type_info);
+            break :blk ret_ptr;
+        } else null;
+
+        return OraType{ .Function = .{
+            .params = param_types,
+            .return_type = return_type_ptr,
+        } };
     }
 
     /// Check if two types are compatible
-    fn typesCompatible(self: *Typer, lhs: OraType, rhs: OraType) bool {
+    pub fn typesCompatible(self: *Typer, lhs: OraType, rhs: OraType) bool {
         // Exact type match
         if (self.typeEquals(lhs, rhs)) {
             return true;
@@ -1936,6 +2219,13 @@ pub const Typer = struct {
                 .Enum => |rhs_enum| {
                     // Compare enum names (enums are equal if they have the same name)
                     return std.mem.eql(u8, lhs_enum.name, rhs_enum.name);
+                },
+                else => false,
+            },
+            .Module => |lhs_module| switch (rhs) {
+                .Module => |rhs_module| {
+                    // Compare module names (modules are equal if they have the same name)
+                    return std.mem.eql(u8, lhs_module orelse "", rhs_module orelse "");
                 },
                 else => false,
             },

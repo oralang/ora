@@ -1,0 +1,10 @@
+let a = 0;
+a = 1;
+
+let obj = SomeStruct { field: 0 };
+obj.field = 2;
+
+let arr = [1, 2, 3];
+let i = 1;
+arr[i] += 3;
+

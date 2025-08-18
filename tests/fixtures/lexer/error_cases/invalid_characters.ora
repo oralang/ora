@@ -1,0 +1,18 @@
+// Invalid character test cases
+
+// Unexpected characters
+identifier @ invalid
+test $ symbol
+code # hash
+value ~ tilde
+
+// Invalid in context
+123$abc
+var%name
+func&name
+
+// Control characters (represented as comments for readability)
+// These would contain actual control characters in real test cases
+// \x00 null character
+// \x01 start of heading
+// \x02 start of text

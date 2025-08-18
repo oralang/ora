@@ -1,0 +1,113 @@
+// ==========================================
+// MOVE SEMANTICS PARSER TEST
+// ==========================================
+// This file tests the parser's ability to handle move statements
+// for atomic transfers with type safety
+
+// Contract demonstrating move semantics
+contract MoveTest {
+    // Storage variables
+    storage var balances: map[address, u256];
+    storage var fee_pool: u256;
+    
+    // Struct for account info
+    struct AccountInfo {
+        balance: u256;
+        locked_until: u256;
+    }
+    
+    // Constructor
+    pub fn init() {
+        // Initialize creator's balance
+        balances[std.transaction.sender] = 1000000000000000000000; // 1000 tokens
+        fee_pool = 0;
+    }
+    
+    // Function demonstrating basic move semantics
+    pub fn transfer(to: address, amount: u256) bool
+        requires(amount > 0)
+        requires(to != 0x0000000000000000000000000000000000000000)
+    {
+        // Check if sender has enough balance
+        if (balances[std.transaction.sender] < amount) {
+            return false;
+        }
+        
+        // Calculate fee (1%)
+        let fee: u256 = amount / 100;
+        let net_amount: u256 = amount - fee;
+        
+        // MOVE STATEMENT - atomic transfer of net amount
+        // New Syntax: move <amount> from <source> to <destination>
+        move net_amount from balances[std.transaction.sender] to balances[to];
+        
+        // MOVE STATEMENT - atomic transfer of fee to fee pool
+        move fee from balances[std.transaction.sender] to fee_pool;
+        
+        return true;
+    }
+    
+    // Function with move semantics on complex data types
+    pub fn transfer_with_account_info(sender: address, receiver: address, amount: u256) bool {
+        // Create account info objects
+        var sender_info = AccountInfo {
+            balance: balances[sender],
+            locked_until: 0
+        };
+        
+        var receiver_info = AccountInfo {
+            balance: balances[receiver],
+            locked_until: 0
+        };
+        
+        // Check if sender has enough balance
+        if (sender_info.balance < amount) {
+            return false;
+        }
+        
+        // MOVE STATEMENT - move amount between account info structs
+        move amount from sender_info.balance to receiver_info.balance;
+        
+        // Update storage with new balances
+        balances[sender] = sender_info.balance;
+        balances[receiver] = receiver_info.balance;
+        
+        return true;
+    }
+    
+    // Function with chained moves and explicit locking
+    pub fn complex_transfer(addresses: [address], amounts: [u256]) bool
+        requires(addresses.len() == amounts.len())
+    {
+        let current_address = std.transaction.sender;
+        let remaining = balances[current_address];
+        
+        for (addresses) |to, i| {
+            let amount = amounts[i];
+            
+            // Skip invalid addresses and amounts
+            if (to == 0x0000000000000000000000000000000000000000 || amount == 0) {
+                continue;
+            }
+            
+            // Check if enough remaining balance
+            if (remaining < amount) {
+                return false;
+            }
+            
+            // LOCK OPERATION - prevent concurrent access
+            @lock(balances[to]);
+            
+            // MOVE STATEMENT - atomic transfer with locks
+            move amount from balances[current_address] to balances[to];
+            
+            // Update remaining balance
+            remaining -= amount;
+            
+            // UNLOCK OPERATION - release lock
+            @unlock(balances[to]);
+        }
+        
+        return true;
+    }
+}

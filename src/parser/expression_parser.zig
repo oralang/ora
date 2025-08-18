@@ -1,0 +1,1476 @@
+const std = @import("std");
+const lexer = @import("../lexer.zig");
+const ast = @import("../ast.zig");
+const TypeInfo = @import("../ast/type_info.zig").TypeInfo;
+const common = @import("common.zig");
+const common_parsers = @import("common_parsers.zig");
+
+const Token = lexer.Token;
+const TokenType = lexer.TokenType;
+const BaseParser = common.BaseParser;
+const ParserCommon = common.ParserCommon;
+const ParserError = @import("parser_core.zig").ParserError;
+
+// Import common parser functions
+const parseSwitchPattern = common_parsers.parseSwitchPattern;
+const parseSwitchBody = common_parsers.parseSwitchBody;
+
+/// Specialized parser for expressions using precedence climbing
+pub const ExpressionParser = struct {
+    base: BaseParser,
+
+    pub fn init(tokens: []const Token, arena: *@import("../ast/ast_arena.zig").AstArena) ExpressionParser {
+        return ExpressionParser{
+            .base = BaseParser.init(tokens, arena),
+        };
+    }
+
+    /// Parse expression with precedence climbing (entry point)
+    pub fn parseExpression(self: *ExpressionParser) ParserError!ast.ExprNode {
+        return self.parseComma();
+    }
+
+    /// Parse comma expressions (lowest precedence)
+    fn parseComma(self: *ExpressionParser) ParserError!ast.ExprNode {
+        var expr = try self.parseAssignment();
+
+        while (self.base.match(.Comma)) {
+            const comma_token = self.base.previous();
+            const right = try self.parseAssignment();
+
+            const left_ptr = try self.base.arena.createNode(ast.ExprNode);
+            left_ptr.* = expr;
+            const right_ptr = try self.base.arena.createNode(ast.ExprNode);
+            right_ptr.* = right;
+
+            expr = ast.ExprNode{
+                .Binary = ast.BinaryExpr{
+                    .lhs = left_ptr,
+                    .operator = .Comma,
+                    .rhs = right_ptr,
+                    .type_info = ast.TypeInfo.unknown(), // Result type will be resolved later
+                    .span = self.base.spanFromToken(comma_token),
+                },
+            };
+        }
+
+        return expr;
+    }
+
+    /// Parse assignment expressions (precedence 14)
+    fn parseAssignment(self: *ExpressionParser) ParserError!ast.ExprNode {
+        const expr = try self.parseLogicalOr();
+
+        // Legacy move/shift syntax removed; handled by statement parser as 'move ... from ... to ...;'
+
+        // Simple assignment
+        if (self.base.match(.Equal)) {
+            // Validate that the left side is a valid L-value
+            ast.expressions.validateLValue(&expr) catch |err| {
+                const error_msg = switch (err) {
+                    ast.expressions.LValueError.LiteralNotAssignable => "Cannot assign to literal value",
+                    ast.expressions.LValueError.CallNotAssignable => "Cannot assign to function call result",
+                    ast.expressions.LValueError.BinaryExprNotAssignable => "Cannot assign to binary expression",
+                    ast.expressions.LValueError.UnaryExprNotAssignable => "Cannot assign to unary expression",
+                    else => "Invalid assignment target",
+                };
+                try self.base.errorAtCurrent(error_msg);
+                return error.UnexpectedToken;
+            };
+
+            const value = try self.parseAssignment(); // Right-associative
+            const expr_ptr = try self.base.arena.createNode(ast.ExprNode);
+            expr_ptr.* = expr;
+            const value_ptr = try self.base.arena.createNode(ast.ExprNode);
+            value_ptr.* = value;
+
+            return ast.ExprNode{ .Assignment = ast.AssignmentExpr{
+                .target = expr_ptr,
+                .value = value_ptr,
+                .span = self.base.spanFromToken(self.base.previous()),
+            } };
+        }
+
+        // Compound assignments
+        if (self.base.match(.PlusEqual) or self.base.match(.MinusEqual) or self.base.match(.StarEqual) or
+            self.base.match(.SlashEqual) or self.base.match(.PercentEqual))
+        {
+            const op_token = self.base.previous();
+
+            // Validate that the left side is a valid L-value
+            ast.expressions.validateLValue(&expr) catch |err| {
+                const error_msg = switch (err) {
+                    ast.expressions.LValueError.LiteralNotAssignable => "Cannot assign to literal value",
+                    ast.expressions.LValueError.CallNotAssignable => "Cannot assign to function call result",
+                    ast.expressions.LValueError.BinaryExprNotAssignable => "Cannot assign to binary expression",
+                    ast.expressions.LValueError.UnaryExprNotAssignable => "Cannot assign to unary expression",
+                    else => "Invalid assignment target",
+                };
+                try self.base.errorAtCurrent(error_msg);
+                return error.UnexpectedToken;
+            };
+
+            const value = try self.parseAssignment(); // Right-associative
+            const expr_ptr = try self.base.arena.createNode(ast.ExprNode);
+            expr_ptr.* = expr;
+            const value_ptr = try self.base.arena.createNode(ast.ExprNode);
+            value_ptr.* = value;
+
+            const compound_op: ast.CompoundAssignmentOp = switch (op_token.type) {
+                .PlusEqual => .PlusEqual,
+                .MinusEqual => .MinusEqual,
+                .StarEqual => .StarEqual,
+                .SlashEqual => .SlashEqual,
+                .PercentEqual => .PercentEqual,
+                else => unreachable,
+            };
+
+            return ast.ExprNode{ .CompoundAssignment = ast.CompoundAssignmentExpr{
+                .target = expr_ptr,
+                .operator = compound_op,
+                .value = value_ptr,
+                .span = self.base.spanFromToken(op_token),
+            } };
+        }
+
+        return expr;
+    }
+
+    /// Parse logical OR expressions (precedence 13) - MIGRATED FROM ORIGINAL
+    pub fn parseLogicalOr(self: *ExpressionParser) ParserError!ast.ExprNode {
+        var expr = try self.parseLogicalAnd();
+
+        while (self.base.match(.PipePipe)) {
+            const op_token = self.base.previous();
+            const right = try self.parseLogicalAnd();
+
+            const left_ptr = try self.base.arena.createNode(ast.ExprNode);
+            left_ptr.* = expr;
+            const right_ptr = try self.base.arena.createNode(ast.ExprNode);
+            right_ptr.* = right;
+
+            expr = ast.ExprNode{
+                .Binary = ast.BinaryExpr{
+                    .lhs = left_ptr,
+                    .operator = .Or, // Logical OR
+                    .rhs = right_ptr,
+                    .type_info = ast.CommonTypes.bool_type(), // Logical operations return bool
+                    .span = self.base.spanFromToken(op_token),
+                },
+            };
+        }
+
+        return expr;
+    }
+
+    /// Parse logical AND expressions (precedence 12) - MIGRATED FROM ORIGINAL
+    fn parseLogicalAnd(self: *ExpressionParser) ParserError!ast.ExprNode {
+        var expr = try self.parseBitwiseOr();
+
+        while (self.base.match(.AmpersandAmpersand)) {
+            const op_token = self.base.previous();
+            const right = try self.parseBitwiseOr();
+
+            const left_ptr = try self.base.arena.createNode(ast.ExprNode);
+            left_ptr.* = expr;
+            const right_ptr = try self.base.arena.createNode(ast.ExprNode);
+            right_ptr.* = right;
+
+            expr = ast.ExprNode{
+                .Binary = ast.BinaryExpr{
+                    .lhs = left_ptr,
+                    .operator = .And, // Logical AND
+                    .rhs = right_ptr,
+                    .type_info = ast.CommonTypes.bool_type(), // Logical operations return bool
+                    .span = self.base.spanFromToken(op_token),
+                },
+            };
+        }
+
+        return expr;
+    }
+
+    /// Parse bitwise OR expressions (precedence 11) - MIGRATED FROM ORIGINAL
+    fn parseBitwiseOr(self: *ExpressionParser) ParserError!ast.ExprNode {
+        var expr = try self.parseBitwiseXor();
+
+        while (self.base.match(.Pipe)) {
+            const op_token = self.base.previous();
+            const right = try self.parseBitwiseXor();
+
+            const left_ptr = try self.base.arena.createNode(ast.ExprNode);
+            left_ptr.* = expr;
+            const right_ptr = try self.base.arena.createNode(ast.ExprNode);
+            right_ptr.* = right;
+
+            expr = ast.ExprNode{
+                .Binary = ast.BinaryExpr{
+                    .lhs = left_ptr,
+                    .operator = .BitwiseOr,
+                    .rhs = right_ptr,
+                    .type_info = ast.TypeInfo.unknown(), // Type will be inferred from operands
+                    .span = self.base.spanFromToken(op_token),
+                },
+            };
+        }
+
+        return expr;
+    }
+
+    /// Parse bitwise XOR expressions (precedence 10) - MIGRATED FROM ORIGINAL
+    fn parseBitwiseXor(self: *ExpressionParser) ParserError!ast.ExprNode {
+        var expr = try self.parseBitwiseAnd();
+
+        while (self.base.match(.Caret)) {
+            const op_token = self.base.previous();
+            const right = try self.parseBitwiseAnd();
+
+            const left_ptr = try self.base.arena.createNode(ast.ExprNode);
+            left_ptr.* = expr;
+            const right_ptr = try self.base.arena.createNode(ast.ExprNode);
+            right_ptr.* = right;
+
+            expr = ast.ExprNode{
+                .Binary = ast.BinaryExpr{
+                    .lhs = left_ptr,
+                    .operator = .BitwiseXor,
+                    .rhs = right_ptr,
+                    .type_info = ast.TypeInfo.unknown(), // Type will be inferred from operands
+                    .span = self.base.spanFromToken(op_token),
+                },
+            };
+        }
+
+        return expr;
+    }
+
+    /// Parse bitwise AND expressions (precedence 9) - MIGRATED FROM ORIGINAL
+    fn parseBitwiseAnd(self: *ExpressionParser) ParserError!ast.ExprNode {
+        var expr = try self.parseEquality();
+
+        while (self.base.match(.Ampersand)) {
+            const op_token = self.base.previous();
+            const right = try self.parseEquality();
+
+            const left_ptr = try self.base.arena.createNode(ast.ExprNode);
+            left_ptr.* = expr;
+            const right_ptr = try self.base.arena.createNode(ast.ExprNode);
+            right_ptr.* = right;
+
+            expr = ast.ExprNode{
+                .Binary = ast.BinaryExpr{
+                    .lhs = left_ptr,
+                    .operator = .BitwiseAnd,
+                    .rhs = right_ptr,
+                    .type_info = ast.TypeInfo.unknown(), // Type will be inferred from operands
+                    .span = self.base.spanFromToken(op_token),
+                },
+            };
+        }
+
+        return expr;
+    }
+
+    /// Parse equality expressions (precedence 8) - MIGRATED FROM ORIGINAL
+    fn parseEquality(self: *ExpressionParser) ParserError!ast.ExprNode {
+        var expr = try self.parseComparison();
+
+        while (self.base.match(.EqualEqual) or self.base.match(.BangEqual)) {
+            const op_token = self.base.previous();
+            const right = try self.parseComparison();
+
+            const operator: ast.BinaryOp = switch (op_token.type) {
+                .EqualEqual => .EqualEqual,
+                .BangEqual => .BangEqual,
+                else => unreachable,
+            };
+
+            const left_ptr = try self.base.arena.createNode(ast.ExprNode);
+            left_ptr.* = expr;
+            const right_ptr = try self.base.arena.createNode(ast.ExprNode);
+            right_ptr.* = right;
+
+            expr = ast.ExprNode{
+                .Binary = ast.BinaryExpr{
+                    .lhs = left_ptr,
+                    .operator = operator,
+                    .rhs = right_ptr,
+                    .type_info = ast.CommonTypes.bool_type(), // Equality operations return bool
+                    .span = self.base.spanFromToken(op_token),
+                },
+            };
+        }
+
+        return expr;
+    }
+
+    /// Parse comparison expressions (precedence 7) - MIGRATED FROM ORIGINAL
+    fn parseComparison(self: *ExpressionParser) ParserError!ast.ExprNode {
+        var expr = try self.parseBitwiseShift();
+
+        while (self.base.match(.Less) or self.base.match(.LessEqual) or self.base.match(.Greater) or self.base.match(.GreaterEqual)) {
+            const op_token = self.base.previous();
+            const right = try self.parseBitwiseShift();
+
+            const operator: ast.BinaryOp = switch (op_token.type) {
+                .Less => .Less,
+                .LessEqual => .LessEqual,
+                .Greater => .Greater,
+                .GreaterEqual => .GreaterEqual,
+                else => unreachable,
+            };
+
+            const left_ptr = try self.base.arena.createNode(ast.ExprNode);
+            left_ptr.* = expr;
+            const right_ptr = try self.base.arena.createNode(ast.ExprNode);
+            right_ptr.* = right;
+
+            expr = ast.ExprNode{
+                .Binary = ast.BinaryExpr{
+                    .lhs = left_ptr,
+                    .operator = operator,
+                    .rhs = right_ptr,
+                    .type_info = ast.CommonTypes.bool_type(), // Comparison operations return bool
+                    .span = self.base.spanFromToken(op_token),
+                },
+            };
+        }
+
+        return expr;
+    }
+
+    /// Parse bitwise shift expressions (precedence 6) - MIGRATED FROM ORIGINAL
+    fn parseBitwiseShift(self: *ExpressionParser) ParserError!ast.ExprNode {
+        var expr = try self.parseTerm();
+
+        while (self.base.match(.LessLess) or self.base.match(.GreaterGreater)) {
+            const op_token = self.base.previous();
+            const right = try self.parseTerm();
+
+            const operator: ast.BinaryOp = switch (op_token.type) {
+                .LessLess => .LeftShift,
+                .GreaterGreater => .RightShift,
+                else => unreachable,
+            };
+
+            const left_ptr = try self.base.arena.createNode(ast.ExprNode);
+            left_ptr.* = expr;
+            const right_ptr = try self.base.arena.createNode(ast.ExprNode);
+            right_ptr.* = right;
+
+            expr = ast.ExprNode{
+                .Binary = ast.BinaryExpr{
+                    .lhs = left_ptr,
+                    .operator = operator,
+                    .rhs = right_ptr,
+                    .type_info = ast.TypeInfo.unknown(), // Type will be inferred from left operand
+                    .span = ParserCommon.makeSpan(op_token),
+                },
+            };
+        }
+
+        return expr;
+    }
+
+    /// Parse term expressions (precedence 5: + -) - MIGRATED FROM ORIGINAL
+    fn parseTerm(self: *ExpressionParser) ParserError!ast.ExprNode {
+        var expr = try self.parseFactor();
+
+        while (self.base.match(.Plus) or self.base.match(.Minus)) {
+            const op_token = self.base.previous();
+            const right = try self.parseFactor();
+
+            const operator: ast.BinaryOp = switch (op_token.type) {
+                .Plus => .Plus,
+                .Minus => .Minus,
+                else => unreachable,
+            };
+
+            const left_ptr = try self.base.arena.createNode(ast.ExprNode);
+            left_ptr.* = expr;
+            const right_ptr = try self.base.arena.createNode(ast.ExprNode);
+            right_ptr.* = right;
+
+            expr = ast.ExprNode{
+                .Binary = ast.BinaryExpr{
+                    .lhs = left_ptr,
+                    .operator = operator,
+                    .rhs = right_ptr,
+                    .type_info = ast.TypeInfo.unknown(), // Type will be inferred from operands
+                    .span = ParserCommon.makeSpan(op_token),
+                },
+            };
+        }
+
+        return expr;
+    }
+
+    /// Parse factor expressions (precedence 4: * / %) - MIGRATED FROM ORIGINAL
+    fn parseFactor(self: *ExpressionParser) ParserError!ast.ExprNode {
+        var expr = try self.parseExponent();
+
+        while (self.base.match(.Star) or self.base.match(.Slash) or self.base.match(.Percent)) {
+            const op_token = self.base.previous();
+            const right = try self.parseExponent();
+
+            const operator: ast.BinaryOp = switch (op_token.type) {
+                .Star => .Star,
+                .Slash => .Slash,
+                .Percent => .Percent,
+                else => unreachable,
+            };
+
+            const left_ptr = try self.base.arena.createNode(ast.ExprNode);
+            left_ptr.* = expr;
+            const right_ptr = try self.base.arena.createNode(ast.ExprNode);
+            right_ptr.* = right;
+
+            expr = ast.ExprNode{
+                .Binary = ast.BinaryExpr{
+                    .lhs = left_ptr,
+                    .operator = operator,
+                    .rhs = right_ptr,
+                    .type_info = ast.TypeInfo.unknown(), // Type will be inferred from operands
+                    .span = ParserCommon.makeSpan(op_token),
+                },
+            };
+        }
+
+        return expr;
+    }
+
+    /// Parse exponentiation expressions (precedence 3: **) - MIGRATED FROM ORIGINAL
+    fn parseExponent(self: *ExpressionParser) ParserError!ast.ExprNode {
+        var expr = try self.parseUnary();
+
+        while (self.base.match(.StarStar)) {
+            const op_token = self.base.previous();
+            const right = try self.parseExponent(); // Right-associative
+
+            const left_ptr = try self.base.arena.createNode(ast.ExprNode);
+            left_ptr.* = expr;
+            const right_ptr = try self.base.arena.createNode(ast.ExprNode);
+            right_ptr.* = right;
+
+            expr = ast.ExprNode{
+                .Binary = ast.BinaryExpr{
+                    .lhs = left_ptr,
+                    .operator = .StarStar,
+                    .rhs = right_ptr,
+                    .type_info = ast.TypeInfo.unknown(), // Type will be inferred from operands
+                    .span = ParserCommon.makeSpan(op_token),
+                },
+            };
+        }
+
+        return expr;
+    }
+
+    /// Parse unary expressions (precedence 2: ! -) - MIGRATED FROM ORIGINAL
+    fn parseUnary(self: *ExpressionParser) ParserError!ast.ExprNode {
+        if (self.base.match(.Bang) or self.base.match(.Minus)) {
+            const op_token = self.base.previous();
+            const right = try self.parseUnary(); // Right-associative for unary operators
+
+            const operator: ast.UnaryOp = switch (op_token.type) {
+                .Bang => .Bang,
+                .Minus => .Minus,
+                else => unreachable,
+            };
+
+            const right_ptr = try self.base.arena.createNode(ast.ExprNode);
+            right_ptr.* = right;
+
+            return ast.ExprNode{
+                .Unary = ast.UnaryExpr{
+                    .operator = operator,
+                    .operand = right_ptr,
+                    .type_info = ast.TypeInfo.unknown(), // Type will be inferred from operand
+                    .span = ParserCommon.makeSpan(op_token),
+                },
+            };
+        }
+
+        return self.parseCall();
+    }
+
+    /// Parse function calls and member access - MIGRATED FROM ORIGINAL
+    fn parseCall(self: *ExpressionParser) ParserError!ast.ExprNode {
+        var expr = try self.parsePrimary();
+
+        while (true) {
+            if (self.base.match(.LeftParen)) {
+                expr = try self.finishCall(expr);
+            } else if (self.base.match(.Dot)) {
+                const name_token = try self.base.consume(.Identifier, "Expected property name after '.'");
+
+                // Check if this might be an enum literal (EnumType.VariantName)
+                // But exclude known module/namespace patterns
+                if (expr == .Identifier) {
+                    const enum_name = expr.Identifier.name;
+
+                    // Don't treat standard library and module access as enum literals
+                    const is_module_access = std.mem.eql(u8, enum_name, "std") or
+                        std.mem.eql(u8, enum_name, "constants") or
+                        std.mem.eql(u8, enum_name, "transaction") or
+                        std.mem.eql(u8, enum_name, "block") or
+                        std.mem.eql(u8, enum_name, "math");
+
+                    if (is_module_access) {
+                        // Treat as field access for module patterns
+                        const expr_ptr = try self.base.arena.createNode(ast.ExprNode);
+                        expr_ptr.* = expr;
+                        const field_name = try self.base.arena.createString(name_token.lexeme);
+                        expr = ast.ExprNode{
+                            .FieldAccess = ast.FieldAccessExpr{
+                                .target = expr_ptr,
+                                .field = field_name,
+                                .type_info = ast.TypeInfo.unknown(), // Field type will be resolved from struct definition
+                                .span = self.base.spanFromToken(name_token),
+                            },
+                        };
+                    } else {
+                        // Treat as potential enum literal
+                        const variant_name = try self.base.arena.createString(name_token.lexeme);
+                        expr = ast.ExprNode{ .EnumLiteral = ast.EnumLiteralExpr{
+                            .enum_name = enum_name,
+                            .variant_name = variant_name,
+                            .span = self.base.spanFromToken(name_token),
+                        } };
+                    }
+                } else {
+                    // Complex expressions are always field access
+                    const expr_ptr = try self.base.arena.createNode(ast.ExprNode);
+                    expr_ptr.* = expr;
+                    const field_name = try self.base.arena.createString(name_token.lexeme);
+                    expr = ast.ExprNode{
+                        .FieldAccess = ast.FieldAccessExpr{
+                            .target = expr_ptr,
+                            .field = field_name,
+                            .type_info = ast.TypeInfo.unknown(), // Will be resolved during type checking
+                            .span = self.base.spanFromToken(name_token),
+                        },
+                    };
+                }
+            } else if (self.base.match(.LeftBracket)) {
+                const index = try self.parseExpression();
+
+                // Check for double mapping access: target[key1, key2]
+                if (self.base.match(.Comma)) {
+                    const second_index = try self.parseExpression();
+                    _ = try self.base.consume(.RightBracket, "Expected ']' after double mapping index");
+
+                    // Create pointers for the nested structure
+                    const expr_ptr = try self.base.arena.createNode(ast.ExprNode);
+                    expr_ptr.* = expr;
+                    const index_ptr = try self.base.arena.createNode(ast.ExprNode);
+                    index_ptr.* = index;
+                    const second_index_ptr = try self.base.arena.createNode(ast.ExprNode);
+                    second_index_ptr.* = second_index;
+
+                    // Create a nested index expression for double mapping: target[key1][key2]
+                    const first_index = ast.ExprNode{ .Index = ast.IndexExpr{
+                        .target = expr_ptr,
+                        .index = index_ptr,
+                        .span = self.base.spanFromToken(self.base.previous()),
+                    } };
+
+                    const first_index_ptr = try self.base.arena.createNode(ast.ExprNode);
+                    first_index_ptr.* = first_index;
+
+                    expr = ast.ExprNode{ .Index = ast.IndexExpr{
+                        .target = first_index_ptr,
+                        .index = second_index_ptr,
+                        .span = self.base.spanFromToken(self.base.previous()),
+                    } };
+                } else {
+                    _ = try self.base.consume(.RightBracket, "Expected ']' after array index");
+
+                    const expr_ptr = try self.base.arena.createNode(ast.ExprNode);
+                    expr_ptr.* = expr;
+                    const index_ptr = try self.base.arena.createNode(ast.ExprNode);
+                    index_ptr.* = index;
+
+                    expr = ast.ExprNode{ .Index = ast.IndexExpr{
+                        .target = expr_ptr,
+                        .index = index_ptr,
+                        .span = self.base.spanFromToken(self.base.previous()),
+                    } };
+                }
+            } else {
+                break;
+            }
+        }
+
+        return expr;
+    }
+
+    // Note: '@cast(Type, expr)' is the only supported cast syntax.
+
+    /// Finish parsing a function call - MIGRATED FROM ORIGINAL
+    fn finishCall(self: *ExpressionParser, callee: ast.ExprNode) ParserError!ast.ExprNode {
+        var arguments = std.ArrayList(*ast.ExprNode).init(self.base.arena.allocator());
+        defer arguments.deinit();
+
+        if (!self.base.check(.RightParen)) {
+            repeat: while (true) {
+                const arg = try self.parseExpression();
+                const arg_ptr = try self.base.arena.createNode(ast.ExprNode);
+                arg_ptr.* = arg;
+                try arguments.append(arg_ptr);
+                if (!self.base.match(.Comma)) break :repeat;
+            }
+        }
+
+        const paren_token = try self.base.consume(.RightParen, "Expected ')' after arguments");
+
+        const callee_ptr = try self.base.arena.createNode(ast.ExprNode);
+        callee_ptr.* = callee;
+
+        return ast.ExprNode{
+            .Call = ast.CallExpr{
+                .callee = callee_ptr,
+                .arguments = try arguments.toOwnedSlice(),
+                .type_info = ast.TypeInfo.unknown(), // Return type will be resolved from function signature
+                .span = self.base.spanFromToken(paren_token),
+            },
+        };
+    }
+
+    /// Parse field access (obj.field)
+    fn parseFieldAccess(self: *ExpressionParser, target: ast.ExprNode) ParserError!ast.ExprNode {
+        const name_token = try self.base.consume(.Identifier, "Expected property name after '.'");
+
+        // Check if this might be an enum literal (EnumType.VariantName)
+        if (target == .Identifier) {
+            const enum_name = target.Identifier.name;
+
+            // Don't treat standard library and module access as enum literals
+            const is_module_access = std.mem.eql(u8, enum_name, "std") or
+                std.mem.eql(u8, enum_name, "constants") or
+                std.mem.eql(u8, enum_name, "transaction") or
+                std.mem.eql(u8, enum_name, "block") or
+                std.mem.eql(u8, enum_name, "math");
+
+            if (!is_module_access) {
+                // Treat as potential enum literal
+                return ast.ExprNode{ .EnumLiteral = ast.EnumLiteralExpr{
+                    .enum_name = enum_name,
+                    .variant_name = name_token.lexeme,
+                    .span = self.base.spanFromToken(name_token),
+                } };
+            }
+        }
+
+        // Regular field access
+        const expr_ptr = try self.base.arena.createNode(ast.ExprNode);
+        expr_ptr.* = target;
+        return ast.ExprNode{ .FieldAccess = ast.FieldAccessExpr{
+            .target = expr_ptr,
+            .field = name_token.lexeme,
+            .span = self.base.spanFromToken(name_token),
+        } };
+    }
+
+    /// Parse index access (obj[index] or obj[key1, key2])
+    fn parseIndexAccess(self: *ExpressionParser, target: ast.ExprNode) ParserError!ast.ExprNode {
+        const index = try self.parseExpression();
+
+        // Check for double mapping access: target[key1, key2]
+        if (self.base.match(.Comma)) {
+            const second_index = try self.parseExpression();
+            _ = try self.base.consume(.RightBracket, "Expected ']' after double mapping index");
+
+            // Create pointers for the nested structure
+            const expr_ptr = try self.base.arena.createNode(ast.ExprNode);
+            expr_ptr.* = target;
+            const index_ptr = try self.base.arena.createNode(ast.ExprNode);
+            index_ptr.* = index;
+            const second_index_ptr = try self.base.arena.createNode(ast.ExprNode);
+            second_index_ptr.* = second_index;
+
+            // Create a nested index expression for double mapping: target[key1][key2]
+            const first_index = ast.ExprNode{ .Index = ast.IndexExpr{
+                .target = expr_ptr,
+                .index = index_ptr,
+                .span = self.base.spanFromToken(self.base.previous()),
+            } };
+
+            const first_index_ptr = try self.base.arena.createNode(ast.ExprNode);
+            first_index_ptr.* = first_index;
+
+            return ast.ExprNode{ .Index = ast.IndexExpr{
+                .target = first_index_ptr,
+                .index = second_index_ptr,
+                .span = self.base.spanFromToken(self.base.previous()),
+            } };
+        } else {
+            _ = try self.base.consume(.RightBracket, "Expected ']' after array index");
+
+            const expr_ptr = try self.base.arena.createNode(ast.ExprNode);
+            expr_ptr.* = target;
+            const index_ptr = try self.base.arena.createNode(ast.ExprNode);
+            index_ptr.* = index;
+
+            return ast.ExprNode{ .Index = ast.IndexExpr{
+                .target = expr_ptr,
+                .index = index_ptr,
+                .span = self.base.spanFromToken(self.base.previous()),
+            } };
+        }
+    }
+
+    /// Parse primary expressions (literals, identifiers, parentheses) - MIGRATED FROM ORIGINAL
+    fn parsePrimary(self: *ExpressionParser) ParserError!ast.ExprNode {
+        // Boolean literals
+        if (self.base.match(.True)) {
+            const token = self.base.previous();
+            return ast.ExprNode{ .Literal = .{ .Bool = ast.expressions.BoolLiteral{
+                .value = true,
+                .type_info = ast.TypeInfo.explicit(.Bool, .bool, self.base.spanFromToken(token)),
+                .span = self.base.spanFromToken(token),
+            } } };
+        }
+
+        if (self.base.match(.False)) {
+            const token = self.base.previous();
+            return ast.ExprNode{ .Literal = .{ .Bool = ast.expressions.BoolLiteral{
+                .value = false,
+                .type_info = ast.TypeInfo.explicit(.Bool, .bool, self.base.spanFromToken(token)),
+                .span = self.base.spanFromToken(token),
+            } } };
+        }
+
+        // Number literals
+        if (self.base.match(.IntegerLiteral)) {
+            const token = self.base.previous();
+            const value_copy = try self.base.arena.createString(token.lexeme);
+            return ast.ExprNode{
+                .Literal = .{
+                    .Integer = ast.expressions.IntegerLiteral{
+                        .value = value_copy,
+                        .type_info = ast.CommonTypes.unknown_integer(), // Will be resolved by type resolver
+                        .span = self.base.spanFromToken(token),
+                    },
+                },
+            };
+        }
+
+        // String literals
+        if (self.base.match(.StringLiteral)) {
+            const token = self.base.previous();
+            const value_copy = try self.base.arena.createString(token.lexeme);
+            return ast.ExprNode{ .Literal = .{ .String = ast.expressions.StringLiteral{
+                .value = value_copy,
+                .type_info = ast.TypeInfo.explicit(.String, .string, self.base.spanFromToken(token)),
+                .span = self.base.spanFromToken(token),
+            } } };
+        }
+
+        // Address literals
+        if (self.base.match(.AddressLiteral)) {
+            const token = self.base.previous();
+            return ast.ExprNode{ .Literal = .{ .Address = ast.AddressLiteral{
+                .value = token.lexeme,
+                .type_info = ast.TypeInfo.explicit(.Address, .address, self.base.spanFromToken(token)),
+                .span = self.base.spanFromToken(token),
+            } } };
+        }
+
+        // Hex literals
+        if (self.base.match(.HexLiteral)) {
+            const token = self.base.previous();
+            return ast.ExprNode{
+                .Literal = .{
+                    .Hex = ast.HexLiteral{
+                        .value = token.lexeme,
+                        .type_info = ast.CommonTypes.unknown_integer(), // Hex can be various integer types
+                        .span = self.base.spanFromToken(token),
+                    },
+                },
+            };
+        }
+
+        // Binary literals
+        if (self.base.match(.BinaryLiteral)) {
+            const token = self.base.previous();
+            return ast.ExprNode{
+                .Literal = .{
+                    .Binary = ast.BinaryLiteral{
+                        .value = token.lexeme,
+                        .type_info = ast.CommonTypes.unknown_integer(), // Binary can be various integer types
+                        .span = self.base.spanFromToken(token),
+                    },
+                },
+            };
+        }
+
+        // Identifiers (including keywords that can be used as identifiers)
+        if (self.base.match(.Identifier) or self.base.matchKeywordAsIdentifier()) {
+            const token = self.base.previous();
+
+            // Check if this is struct instantiation (identifier followed by {)
+            if (self.base.check(.LeftBrace)) {
+                return try self.parseStructInstantiation(token);
+            }
+
+            // Start with the identifier - store name in arena
+            const name_copy = try self.base.arena.createString(token.lexeme);
+            var current_expr = ast.ExprNode{ .Identifier = ast.IdentifierExpr{
+                .name = name_copy,
+                .span = self.base.spanFromToken(token),
+            } };
+
+            // Handle field access (identifier.field)
+            while (self.base.match(.Dot)) {
+                const field_token = try self.base.consume(.Identifier, "Expected field name after '.'");
+
+                // Store field name in arena
+                const field_name = try self.base.arena.createString(field_token.lexeme);
+
+                // Create field access expression
+                const field_expr = ast.ExprNode{
+                    .FieldAccess = ast.FieldAccessExpr{
+                        .target = try self.base.arena.createNode(ast.ExprNode),
+                        .field = field_name,
+                        .type_info = ast.TypeInfo.unknown(), // Will be resolved during type checking
+                        .span = self.base.spanFromToken(token),
+                    },
+                };
+
+                // Set the target field
+                field_expr.FieldAccess.target.* = current_expr;
+
+                // Update current expression for potential chaining
+                current_expr = field_expr;
+            }
+
+            return current_expr;
+        }
+
+        // Try expressions
+        if (self.base.match(.Try)) {
+            const try_token = self.base.previous();
+            const expr = try self.parseUnary();
+
+            const expr_ptr = try self.base.arena.createNode(ast.ExprNode);
+            expr_ptr.* = expr;
+
+            return ast.ExprNode{ .Try = ast.TryExpr{
+                .expr = expr_ptr,
+                .span = self.base.spanFromToken(try_token),
+            } };
+        }
+
+        // Switch expressions
+        if (self.base.match(.Switch)) {
+            return try self.parseSwitchExpression();
+        }
+
+        // Parentheses
+        if (self.base.match(.LeftParen)) {
+            const expr = try self.parseExpression();
+            _ = try self.base.consume(.RightParen, "Expected ')' after expression");
+            return expr;
+        }
+        // Quantified expressions: forall/exists i: T (where predicate)? => body
+        if (self.base.match(.Forall) or self.base.match(.Exists)) {
+            const quant_token = self.base.previous();
+            const quantifier: ast.QuantifierType = if (quant_token.type == .Forall) .Forall else .Exists;
+
+            // Bound variable name
+            const var_token = try self.base.consume(.Identifier, "Expected bound variable name after quantifier");
+
+            _ = try self.base.consume(.Colon, "Expected ':' after bound variable name");
+
+            // Parse variable type using TypeParser
+            var type_parser = @import("type_parser.zig").TypeParser.init(self.base.tokens, self.base.arena);
+            type_parser.base.current = self.base.current;
+            const var_type = try type_parser.parseType();
+            self.base.current = type_parser.base.current;
+
+            // Optional where clause
+            var where_ptr: ?*ast.ExprNode = null;
+            if (self.base.match(.Where)) {
+                const where_expr = try self.parseExpression();
+                const tmp_ptr = try self.base.arena.createNode(ast.ExprNode);
+                tmp_ptr.* = where_expr;
+                where_ptr = tmp_ptr;
+            }
+
+            _ = try self.base.consume(.Arrow, "Expected '=>' after quantifier header");
+
+            // Parse body expression
+            const body_expr = try self.parseExpression();
+            const body_ptr = try self.base.arena.createNode(ast.ExprNode);
+            body_ptr.* = body_expr;
+
+            return ast.ExprNode{ .Quantified = ast.QuantifiedExpr{
+                .quantifier = quantifier,
+                .variable = var_token.lexeme,
+                .variable_type = var_type,
+                .condition = where_ptr,
+                .body = body_ptr,
+                .span = self.base.spanFromToken(quant_token),
+            } };
+        }
+
+        // Old expressions (old(expr) for postconditions)
+        if (self.base.match(.Old)) {
+            const old_token = self.base.previous();
+            _ = try self.base.consume(.LeftParen, "Expected '(' after 'old'");
+            const expr = try self.parseExpression();
+            _ = try self.base.consume(.RightParen, "Expected ')' after old expression");
+
+            const expr_ptr = try self.base.arena.createNode(ast.ExprNode);
+            expr_ptr.* = expr;
+
+            return ast.ExprNode{ .Old = ast.OldExpr{
+                .expr = expr_ptr,
+                .span = self.base.spanFromToken(old_token),
+            } };
+        }
+
+        // Comptime expressions (comptime { ... })
+        if (self.base.match(.Comptime)) {
+            const comptime_token = self.base.previous();
+            const block = try self.parseBlock();
+
+            return ast.ExprNode{ .Comptime = ast.ComptimeExpr{
+                .block = block,
+                .span = self.base.spanFromToken(comptime_token),
+            } };
+        }
+
+        // Error expressions (error.SomeError)
+        if (self.base.match(.Error)) {
+            const error_token = self.base.previous();
+            _ = try self.base.consume(.Dot, "Expected '.' after 'error'");
+            const name_token = try self.base.consume(.Identifier, "Expected error name after 'error.'");
+
+            return ast.ExprNode{ .ErrorReturn = ast.ErrorReturnExpr{
+                .error_name = name_token.lexeme,
+                .span = self.base.spanFromToken(error_token),
+            } };
+        }
+
+        // Builtin functions starting with @
+        if (self.base.match(.At)) {
+            return try self.parseBuiltinFunction();
+        }
+
+        // Address literals
+        if (self.base.match(.AddressLiteral)) {
+            const token = self.base.previous();
+            return ast.ExprNode{ .Literal = .{ .Address = ast.AddressLiteral{
+                .value = token.lexeme,
+                .type_info = ast.TypeInfo.explicit(.Address, .address, self.base.spanFromToken(token)),
+                .span = self.base.spanFromToken(token),
+            } } };
+        }
+
+        // Hex literals
+        if (self.base.match(.HexLiteral)) {
+            const token = self.base.previous();
+            return ast.ExprNode{
+                .Literal = .{
+                    .Hex = ast.HexLiteral{
+                        .value = token.lexeme,
+                        .type_info = ast.CommonTypes.unknown_integer(), // Hex can be various integer types
+                        .span = self.base.spanFromToken(token),
+                    },
+                },
+            };
+        }
+
+        // Try expressions
+        if (self.base.match(.Try)) {
+            const try_token = self.base.previous();
+            const expr = try self.parseUnary();
+
+            const expr_ptr = try self.base.arena.createNode(ast.ExprNode);
+            expr_ptr.* = expr;
+
+            return ast.ExprNode{ .Try = ast.TryExpr{
+                .expr = expr_ptr,
+                .span = self.base.spanFromToken(try_token),
+            } };
+        }
+
+        // Switch expressions
+        if (self.base.match(.Switch)) {
+            return try self.parseSwitchExpression();
+        }
+
+        // Old expressions (old(expr) for postconditions)
+        if (self.base.match(.Old)) {
+            const old_token = self.base.previous();
+            _ = try self.base.consume(.LeftParen, "Expected '(' after 'old'");
+            const expr = try self.parseExpression();
+            _ = try self.base.consume(.RightParen, "Expected ')' after old expression");
+
+            const expr_ptr = try self.base.arena.createNode(ast.ExprNode);
+            expr_ptr.* = expr;
+
+            return ast.ExprNode{ .Old = ast.OldExpr{
+                .expr = expr_ptr,
+                .span = self.base.spanFromToken(old_token),
+            } };
+        }
+
+        // Error expressions (error.SomeError)
+        if (self.base.match(.Error)) {
+            const error_token = self.base.previous();
+            _ = try self.base.consume(.Dot, "Expected '.' after 'error'");
+            const name_token = try self.base.consume(.Identifier, "Expected error name after 'error.'");
+
+            return ast.ExprNode{ .ErrorReturn = ast.ErrorReturnExpr{
+                .error_name = name_token.lexeme,
+                .span = self.base.spanFromToken(error_token),
+            } };
+        }
+
+        // Builtin functions starting with @
+        if (self.base.match(.At)) {
+            return try self.parseBuiltinFunction();
+        }
+
+        // Anonymous struct literals (.{field = value, ...})
+        if (self.base.check(.Dot) and self.base.current + 1 < self.base.tokens.len and
+            self.base.tokens[self.base.current + 1].type == .LeftBrace)
+        {
+            _ = self.base.advance(); // consume the dot
+            return try self.parseAnonymousStructLiteral();
+        }
+
+        // Array literals ([element1, element2, ...])
+        if (self.base.match(.LeftBracket)) {
+            return try self.parseArrayLiteral();
+        }
+
+        // Switch expressions
+        if (self.base.match(.Switch)) {
+            return try self.parseSwitchExpression();
+        }
+
+        // Parentheses or tuples
+        if (self.base.match(.LeftParen)) {
+            return try self.parseParenthesizedOrTuple();
+        }
+
+        // Struct instantiation (handled in parseCall via field access)
+        if (self.base.check(.Identifier)) {
+            if (self.base.current + 1 < self.base.tokens.len and
+                self.base.tokens[self.base.current + 1].type == .LeftBrace)
+            {
+                const name_token = self.base.advance();
+                return try self.parseStructInstantiation(name_token);
+            }
+        }
+
+        try self.base.errorAtCurrent("Expected expression");
+        return error.UnexpectedToken;
+    }
+
+    /// Parse switch expression (returns a value) - MIGRATED FROM ORIGINAL
+    fn parseSwitchExpression(self: *ExpressionParser) ParserError!ast.ExprNode {
+        const switch_token = self.base.previous();
+
+        // Parse required switch condition: switch (expr)
+        _ = try self.base.consume(.LeftParen, "Expected '(' after 'switch'");
+        const condition = try self.parseExpression();
+        _ = try self.base.consume(.RightParen, "Expected ')' after switch condition");
+
+        _ = try self.base.consume(.LeftBrace, "Expected '{' after switch condition");
+
+        var cases = std.ArrayList(ast.SwitchCase).init(self.base.arena.allocator());
+        defer cases.deinit();
+
+        var default_case: ?ast.BlockNode = null;
+
+        // Parse switch arms
+        while (!self.base.check(.RightBrace) and !self.base.isAtEnd()) {
+            if (self.base.match(.Else)) {
+                // Parse else clause
+                _ = try self.base.consume(.Arrow, "Expected '=>' after 'else'");
+                const else_body = try common_parsers.parseSwitchBody(&self.base, self, .ExpressionArm);
+                // Accept block or expression; for expression, synthesize a block
+                switch (else_body) {
+                    .Block => |block| {
+                        default_case = block;
+                    },
+                    .LabeledBlock => |labeled| {
+                        default_case = labeled.block;
+                    },
+                    .Expression => |expr_ptr| {
+                        // Synthesize a block node with a single expression statement
+                        var stmts = try self.base.arena.createSlice(ast.StmtNode, 1);
+                        stmts[0] = ast.StmtNode{ .Expr = expr_ptr.* };
+                        default_case = ast.BlockNode{
+                            .statements = stmts,
+                            .span = self.base.spanFromToken(self.base.previous()),
+                        };
+                    },
+                }
+                break;
+            }
+
+            // Parse pattern using common parser
+            const pattern = try common_parsers.parseSwitchPattern(&self.base, self);
+
+            _ = try self.base.consume(.Arrow, "Expected '=>' after switch pattern");
+
+            // Parse body using common parser
+            const body = try common_parsers.parseSwitchBody(&self.base, self, .ExpressionArm);
+
+            // Create switch case
+            const case = ast.SwitchCase{
+                .pattern = pattern,
+                .body = body,
+                .span = self.base.spanFromToken(switch_token),
+            };
+
+            try cases.append(case);
+
+            // Optional comma between cases
+            _ = self.base.match(.Comma);
+        }
+
+        _ = try self.base.consume(.RightBrace, "Expected '}' after switch cases");
+
+        const condition_ptr = try self.base.arena.createNode(ast.ExprNode);
+        condition_ptr.* = condition;
+
+        return ast.ExprNode{ .SwitchExpression = ast.SwitchExprNode{
+            .condition = condition_ptr,
+            .cases = try cases.toOwnedSlice(),
+            .default_case = default_case,
+            .span = self.base.spanFromToken(switch_token),
+        } };
+    }
+
+    // Using common parseSwitchPattern from common_parsers.zig
+
+    // Using common parseSwitchBody from common_parsers.zig
+
+    /// Parse block (needed for switch bodies)
+    fn parseBlock(self: *ExpressionParser) !ast.BlockNode {
+        _ = try self.base.consume(.LeftBrace, "Expected '{'");
+
+        var statements = std.ArrayList(ast.StmtNode).init(self.base.arena.allocator());
+        defer statements.deinit();
+
+        while (!self.base.check(.RightBrace) and !self.base.isAtEnd()) {
+            // Statement parsing should be handled by statement_parser.zig
+            // This is a placeholder until proper integration is implemented
+            _ = self.base.advance();
+        }
+
+        const end_token = try self.base.consume(.RightBrace, "Expected '}' after block");
+
+        return ast.BlockNode{
+            .statements = try statements.toOwnedSlice(),
+            .span = self.base.spanFromToken(end_token),
+        };
+    }
+
+    /// Parse builtin function (@function_name(...)) - MIGRATED FROM ORIGINAL
+    fn parseBuiltinFunction(self: *ExpressionParser) ParserError!ast.ExprNode {
+        const at_token = self.base.previous();
+        const name_token = try self.base.consume(.Identifier, "Expected builtin function name after '@'");
+
+        // Check if it's a valid builtin function
+        const builtin_name = name_token.lexeme;
+
+        // Handle @cast(Type, expr)
+        if (std.mem.eql(u8, builtin_name, "cast")) {
+            _ = try self.base.consume(.LeftParen, "Expected '(' after builtin function name");
+
+            // Parse target type via TypeParser
+            var type_parser = @import("type_parser.zig").TypeParser.init(self.base.tokens, self.base.arena);
+            type_parser.base.current = self.base.current;
+            const target_type = try type_parser.parseType();
+            self.base.current = type_parser.base.current;
+
+            _ = try self.base.consume(.Comma, "Expected ',' after type in @cast");
+
+            // Parse operand expression
+            const operand_expr = try self.parseExpression();
+            _ = try self.base.consume(.RightParen, "Expected ')' after @cast arguments");
+
+            const operand_ptr = try self.base.arena.createNode(ast.ExprNode);
+            operand_ptr.* = operand_expr;
+
+            return ast.ExprNode{ .Cast = ast.CastExpr{
+                .operand = operand_ptr,
+                .target_type = target_type,
+                .cast_type = .Unsafe,
+                .span = self.base.spanFromToken(at_token),
+            } };
+        }
+
+        // Handle other builtin functions
+        if (std.mem.eql(u8, builtin_name, "divTrunc") or
+            std.mem.eql(u8, builtin_name, "divFloor") or
+            std.mem.eql(u8, builtin_name, "divCeil") or
+            std.mem.eql(u8, builtin_name, "divExact") or
+            std.mem.eql(u8, builtin_name, "divmod"))
+        {
+            _ = try self.base.consume(.LeftParen, "Expected '(' after builtin function name");
+
+            var args = std.ArrayList(*ast.ExprNode).init(self.base.arena.allocator());
+            defer args.deinit();
+
+            if (!self.base.check(.RightParen)) {
+                const first_arg = try self.parseExpression();
+                const first_arg_ptr = try self.base.arena.createNode(ast.ExprNode);
+                first_arg_ptr.* = first_arg;
+                try args.append(first_arg_ptr);
+
+                while (self.base.match(.Comma)) {
+                    const arg = try self.parseExpression();
+                    const arg_ptr = try self.base.arena.createNode(ast.ExprNode);
+                    arg_ptr.* = arg;
+                    try args.append(arg_ptr);
+                }
+            }
+
+            _ = try self.base.consume(.RightParen, "Expected ')' after arguments");
+
+            // Create the builtin function call
+            const full_name = try std.fmt.allocPrint(self.base.arena.allocator(), "@{s}", .{builtin_name});
+
+            // Create identifier for the function name
+            const name_expr = try self.base.arena.createNode(ast.ExprNode);
+            name_expr.* = ast.ExprNode{ .Identifier = ast.IdentifierExpr{
+                .name = full_name,
+                .span = self.base.spanFromToken(at_token),
+            } };
+
+            return ast.ExprNode{
+                .Call = ast.CallExpr{
+                    .callee = name_expr,
+                    .arguments = try args.toOwnedSlice(),
+                    .type_info = ast.TypeInfo.unknown(), // Will be resolved during type checking
+                    .span = self.base.spanFromToken(at_token),
+                },
+            };
+        } else {
+            try self.base.errorAtCurrent("Unknown builtin function");
+            return error.UnexpectedToken;
+        }
+    }
+
+    /// Parse parenthesized expressions or tuples
+    fn parseParenthesizedOrTuple(self: *ExpressionParser) ParserError!ast.ExprNode {
+        const paren_token = self.base.previous();
+
+        // Check for empty tuple
+        if (self.base.check(.RightParen)) {
+            _ = self.base.advance();
+            var empty_elements = std.ArrayList(*ast.ExprNode).init(self.base.arena.allocator());
+            defer empty_elements.deinit();
+
+            return ast.ExprNode{ .Tuple = ast.TupleExpr{
+                .elements = try empty_elements.toOwnedSlice(),
+                .span = self.base.spanFromToken(paren_token),
+            } };
+        }
+
+        const first_expr = try self.parseExpression();
+
+        // Check if it's a tuple (has comma)
+        if (self.base.match(.Comma)) {
+            var elements = std.ArrayList(*ast.ExprNode).init(self.base.arena.allocator());
+            defer elements.deinit();
+
+            // Convert first_expr to pointer
+            const first_ptr = try self.base.arena.createNode(ast.ExprNode);
+            first_ptr.* = first_expr;
+            try elements.append(first_ptr);
+
+            // Handle trailing comma case: (a,)
+            if (!self.base.check(.RightParen)) {
+                repeat: while (true) {
+                    const element = try self.parseExpression();
+                    const element_ptr = try self.base.arena.createNode(ast.ExprNode);
+                    element_ptr.* = element;
+                    try elements.append(element_ptr);
+
+                    if (!self.base.match(.Comma)) break :repeat;
+                    if (self.base.check(.RightParen)) break :repeat; // Trailing comma
+                }
+            }
+
+            _ = try self.base.consume(.RightParen, "Expected ')' after tuple elements");
+
+            return ast.ExprNode{ .Tuple = ast.TupleExpr{
+                .elements = try elements.toOwnedSlice(),
+                .span = self.base.spanFromToken(paren_token),
+            } };
+        } else {
+            // Single parenthesized expression
+            _ = try self.base.consume(.RightParen, "Expected ')' after expression");
+            return first_expr;
+        }
+    }
+
+    /// Parse struct instantiation expression (e.g., `MyStruct { a: 1, b: 2 }`)
+    fn parseStructInstantiation(self: *ExpressionParser, name_token: Token) ParserError!ast.ExprNode {
+        _ = try self.base.consume(.LeftBrace, "Expected '{' after struct name");
+
+        var fields = std.ArrayList(ast.StructInstantiationField).init(self.base.arena.allocator());
+        defer fields.deinit();
+
+        // Parse field initializers (field_name: value)
+        while (!self.base.check(.RightBrace) and !self.base.isAtEnd()) {
+            const field_name = try self.base.consumeIdentifierOrKeyword("Expected field name in struct instantiation");
+            _ = try self.base.consume(.Colon, "Expected ':' after field name in struct instantiation");
+
+            const field_value = try self.parseAssignment();
+            const field_value_ptr = try self.base.arena.createNode(ast.ExprNode);
+            field_value_ptr.* = field_value;
+
+            try fields.append(ast.StructInstantiationField{
+                .name = field_name.lexeme,
+                .value = field_value_ptr,
+                .span = self.base.spanFromToken(field_name),
+            });
+
+            // Optional comma (but don't require it for last field)
+            if (!self.base.check(.RightBrace)) {
+                if (!self.base.match(.Comma)) {
+                    // No comma found, but we're not at the end, so this is an error
+                    return error.ExpectedToken;
+                }
+            } else {
+                _ = self.base.match(.Comma); // Consume trailing comma if present
+            }
+        }
+
+        _ = try self.base.consume(.RightBrace, "Expected '}' after struct instantiation fields");
+
+        // Create the struct name identifier
+        const struct_name_ptr = try self.base.arena.createNode(ast.ExprNode);
+        struct_name_ptr.* = ast.ExprNode{ .Identifier = ast.IdentifierExpr{
+            .name = name_token.lexeme,
+            .span = self.base.spanFromToken(name_token),
+        } };
+
+        return ast.ExprNode{ .StructInstantiation = ast.StructInstantiationExpr{
+            .struct_name = struct_name_ptr,
+            .fields = try fields.toOwnedSlice(),
+            .span = self.base.spanFromToken(name_token),
+        } };
+    }
+
+    /// Parse anonymous struct literal (.{field = value, ...})
+    fn parseAnonymousStructLiteral(self: *ExpressionParser) ParserError!ast.ExprNode {
+        const dot_token = self.base.previous();
+        _ = try self.base.consume(.LeftBrace, "Expected '{' after '.' in anonymous struct literal");
+
+        var fields = std.ArrayList(ast.AnonymousStructField).init(self.base.arena.allocator());
+        defer fields.deinit();
+
+        // Parse field initializers (.{ .field = value, ... })
+        while (!self.base.check(.RightBrace) and !self.base.isAtEnd()) {
+            // Enforce leading dot before each field name
+            _ = try self.base.consume(.Dot, "Expected '.' before field name in anonymous struct literal");
+            const field_name = try self.base.consume(.Identifier, "Expected field name in anonymous struct literal");
+            _ = try self.base.consume(.Equal, "Expected '=' after field name in anonymous struct literal");
+
+            const field_value = try self.parseAssignment();
+            const field_value_ptr = try self.base.arena.createNode(ast.ExprNode);
+            field_value_ptr.* = field_value;
+
+            try fields.append(ast.AnonymousStructField{
+                .name = field_name.lexeme,
+                .value = field_value_ptr,
+                .span = self.base.spanFromToken(field_name),
+            });
+
+            // Optional comma (but don't require it for last field)
+            if (!self.base.check(.RightBrace)) {
+                if (!self.base.match(.Comma)) {
+                    // No comma found, but we're not at the end, so this is an error
+                    return error.ExpectedToken;
+                }
+            } else {
+                _ = self.base.match(.Comma); // Consume trailing comma if present
+            }
+        }
+
+        _ = try self.base.consume(.RightBrace, "Expected '}' after anonymous struct literal fields");
+
+        return ast.ExprNode{ .AnonymousStruct = ast.AnonymousStructExpr{
+            .fields = try fields.toOwnedSlice(),
+            .span = self.base.spanFromToken(dot_token),
+        } };
+    }
+
+    /// Parse array literal ([element1, element2, ...])
+    fn parseArrayLiteral(self: *ExpressionParser) ParserError!ast.ExprNode {
+        const bracket_token = self.base.previous();
+
+        var elements = std.ArrayList(*ast.ExprNode).init(self.base.arena.allocator());
+        defer elements.deinit();
+
+        // Parse array elements
+        while (!self.base.check(.RightBracket) and !self.base.isAtEnd()) {
+            const element = try self.parseAssignment();
+            const element_ptr = try self.base.arena.createNode(ast.ExprNode);
+            element_ptr.* = element;
+            try elements.append(element_ptr);
+
+            // Optional comma (but don't require it for last element)
+            if (!self.base.check(.RightBracket)) {
+                if (!self.base.match(.Comma)) {
+                    // No comma found, but we're not at the end, so this is an error
+                    return error.ExpectedToken;
+                }
+            } else {
+                _ = self.base.match(.Comma); // Consume trailing comma if present
+            }
+        }
+
+        _ = try self.base.consume(.RightBracket, "Expected ']' after array elements");
+
+        return ast.ExprNode{
+            .ArrayLiteral = ast.ArrayLiteralExpr{
+                .elements = try elements.toOwnedSlice(),
+                .element_type = null, // Type will be inferred
+                .span = self.base.spanFromToken(bracket_token),
+            },
+        };
+    }
+
+    /// Parse a range expression (start...end)
+    /// This creates a RangeExpr which can be used both in switch patterns and directly as expressions
+    pub fn parseRangeExpression(self: *ExpressionParser) ParserError!ast.ExprNode {
+        const start_token = self.base.peek();
+
+        // Parse start expression
+        const start_expr = try self.parseExpression();
+
+        _ = try self.base.consume(.DotDotDot, "Expected '...' in range expression");
+
+        // Parse end expression
+        const end_expr = try self.parseExpression();
+
+        // Create pointers to the expressions
+        const start_ptr = try self.base.arena.createNode(ast.ExprNode);
+        start_ptr.* = start_expr;
+        const end_ptr = try self.base.arena.createNode(ast.ExprNode);
+        end_ptr.* = end_expr;
+
+        return ast.ExprNode{
+            .Range = ast.RangeExpr{
+                .start = start_ptr,
+                .end = end_ptr,
+                .inclusive = true, // Default to inclusive range
+                .type_info = TypeInfo.unknown(), // Type will be inferred
+                .span = self.base.spanFromToken(start_token),
+            },
+        };
+    }
+};

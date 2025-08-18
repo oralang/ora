@@ -1,0 +1,24 @@
+// ==========================================
+// CONTRACT DECLARATION TEST
+// ==========================================
+// This file tests basic contract declaration syntax
+
+// Simple contract with no members
+contract EmptyContract {
+    // Empty contract
+}
+
+// Contract with storage variables
+contract SimpleContract {
+    storage var value: u256;
+    storage var owner: address;
+}
+
+// Contract with constructor
+contract ContractWithConstructor {
+    storage var owner: address;
+    
+    pub fn init() {
+        owner = 0x1234567890123456789012345678901234567890;
+    }
+}

@@ -1,0 +1,185 @@
+// ==========================================
+// TUPLE PARSER TEST
+// ==========================================
+// This file tests tuple expressions and destructuring
+
+contract TupleTest {
+    storage var tuple_storage: (u256, string, bool);
+    storage var nested_tuple: ((u256, u256), (string, bool));
+    storage var tuple_array: [(u256, string)];
+    
+    pub fn test_tuple_creation() (u256, string, bool) {
+        // Simple tuple creation
+        return (42, \"hello\", true);
+    }
+    
+    pub fn test_tuple_destructuring() u256 {
+        // Destructure return value
+        let (a, b, c) = self.test_tuple_creation();
+        
+        // Use destructured values
+        if (c) {
+            return a;
+        } else {
+            return 0;
+        }
+    }
+    
+    pub fn test_empty_tuple() () {
+        // Empty tuple (unit type)
+        return ();
+    }
+    
+    pub fn test_single_element_tuple() (u256,) {
+        // Single element tuple (note the comma)
+        return (100,);
+    }
+    
+    pub fn test_nested_tuples() ((u256, u256), (string, bool)) {
+        // Nested tuple creation
+        let inner1 = (10, 20);
+        let inner2 = (\"test\", false);
+        
+        return (inner1, inner2);
+    }
+    
+    pub fn test_nested_tuple_destructuring() u256 {
+        // Get nested tuple
+        let nested = self.test_nested_tuples();
+        
+        // Destructure nested tuple
+        let ((x, y), (text, flag)) = nested;
+        
+        // Use destructured values
+        return if (flag) x + y else x - y;
+    }
+    
+    pub fn test_partial_destructuring() string {
+        // Destructure only some elements
+        let (_, text, _) = self.test_tuple_creation();
+        
+        return text;
+    }
+    
+    pub fn test_tuple_assignment() bool {
+        // Assign to tuple storage
+        tuple_storage = (100, \"stored\", true);
+        
+        // Assign nested tuple
+        nested_tuple = ((1, 2), (\"nested\", false));
+        
+        // Multiple assignment using tuples
+        let (a, b) = (10, 20);
+        let (x, y, z) = (a + b, \"computed\", a > b);
+        
+        return z;
+    }
+    
+    pub fn test_tuple_in_expressions() u256 {
+        // Tuple in function call
+        let result1 = self.process_tuple((5, \"five\", true));
+        
+        // Tuple in arithmetic (if supported)
+        let (a, b) = (10, 20);
+        let sum = a + b;
+        
+        // Tuple comparison
+        let tuple1 = (1, 2);
+        let tuple2 = (1, 2);
+        let are_equal = tuple1 == tuple2;
+        
+        return if (are_equal) sum else result1;
+    }
+    
+    pub fn test_tuple_array() u256 {
+        // Array of tuples
+        tuple_array = [
+            (1, \"one\"),
+            (2, \"two\"),
+            (3, \"three\")
+        ];
+        
+        // Access tuple in array
+        let (num, _) = tuple_array[0];
+        
+        // Iterate over tuple array
+        let mut sum: u256 = 0;
+        for (tuple_array) |tuple_item| {
+            let (value, _) = tuple_item;
+            sum += value;
+        }
+        
+        return sum;
+    }
+    
+    pub fn test_tuple_return_multiple_values() (bool, u256, string) {
+        // Function returning multiple values as tuple
+        let success = true;
+        let count = 42;
+        let message = \"operation completed\";
+        
+        return (success, count, message);
+    }
+    
+    pub fn test_tuple_swap() (u256, u256) {
+        let mut a: u256 = 10;
+        let mut b: u256 = 20;
+        
+        // Tuple swap
+        (a, b) = (b, a);
+        
+        return (a, b); // Should return (20, 10)
+    }
+    
+    pub fn test_tuple_with_complex_types() (map[address, u256], [string], Result[u256, string]) {
+        // Tuple with complex types
+        let balance_map: map[address, u256] = map[];
+        let string_array: [string] = [\"hello\", \"world\"];
+        let result_value: Result[u256, string] = Ok(42);
+        
+        return (balance_map, string_array, result_value);
+    }
+    
+    pub fn test_tuple_destructuring_in_loop() u256 {
+        let pairs = [(1, 10), (2, 20), (3, 30)];
+        let mut total: u256 = 0;
+        
+        // Destructure in for loop
+        for (pairs) |(key, value)| {
+            total += key * value;
+        }
+        
+        return total;
+    }
+    
+    pub fn test_tuple_with_function_calls() (u256, bool) {
+        // Tuple with function call results
+        return (
+            self.get_number(),
+            self.get_boolean()
+        );
+    }
+    
+    pub fn test_conditional_tuple_return(condition: bool) (u256, string) {
+        // Conditional tuple return
+        if (condition) {
+            return (100, \"success\");
+        } else {
+            return (0, \"failure\");
+        }
+    }
+    
+    // Helper functions
+    fn process_tuple(input: (u256, string, bool)) u256 {
+        let (num, _, flag) = input;
+        return if (flag) num * 2 else num;
+    }
+    
+    fn get_number() u256 {
+        return 42;
+    }
+    
+    fn get_boolean() bool {
+        return true;
+    }
+}

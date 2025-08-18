@@ -1,0 +1,62 @@
+fn complex_calculation(x: u256, y: u256, z: u256) -> u256 
+    requires(x > 0 && y > 0 && z > 0)
+    requires(x != y)
+    ensures(result > 0)
+{
+    let base_result = ((x + y) * z) / (x - y + 1);
+    let conditional = if (base_result > 100) {
+        base_result * 2
+    } else {
+        base_result / 2
+    };
+    
+    let bitwise_ops = (x << 2) & (y | z);
+    let final_result = conditional + bitwise_ops;
+    
+    // Complex nested expression with multiple operations
+    let complex_expr = (
+        (x * y + z) / 
+        (x + y - z) * 
+        (x ^ y) + 
+        (y % z)
+    ) & 0xFF;
+    
+    return final_result + complex_expr;
+}
+
+fn nested_conditionals(a: u256, b: u256, c: u256) -> u256 {
+    return if (a > b) {
+        if (b > c) {
+            a + b + c
+        } else if (c > a) {
+            c - a + b
+        } else {
+            a * b / c
+        }
+    } else if (b > c) {
+        if (a > c) {
+            b + a - c
+        } else {
+            b * c / a
+        }
+    } else {
+        c + a + b
+    };
+}
+
+fn array_and_map_operations(
+    arr: slice<u256>, 
+    mapping: map<string, u256>,
+    key: string
+) -> u256 {
+    let sum = 0;
+    
+    for (i in 0..arr.len) {
+        sum += arr[i] * (i + 1);
+    }
+    
+    let mapped_value = mapping[key];
+    let result = sum + mapped_value;
+    
+    return result * (arr[0] + arr[arr.len - 1]);
+}

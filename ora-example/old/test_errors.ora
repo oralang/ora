@@ -1,0 +1,63 @@
+// ==========================================
+// ERROR MESSAGE TESTING
+// ==========================================
+// This file is intentionally malformed to test error messages
+
+// Error 1: Missing comma between enum variants
+enum MissingCommaTest {
+    Value1 = 5
+    Value2 = 10
+}
+
+// Error 2: Mismatched braces
+enum MismatchedBracesTest {
+    Value1 = 5,
+    Value2 = 10,
+    Value3 = 15
+  // Missing closing brace
+
+// Error 3: Invalid expressions
+enum InvalidExpressionTest {
+    Value1 = 5,
+    Value2 = 10 + ,
+    Value3 = 15
+}
+
+// Contract with errors
+contract ErrorTest {
+    // Storage variable
+    storage var owner: address;
+    
+    // Constructor to set owner
+    pub fn init() {
+        owner = std.transaction.sender;
+    }
+    
+    // Function that returns error types
+    pub fn test_function(amount: u256, recipient: address) 
+        bool | InvalidAddress | InsufficientBalance | Unauthorized | TransferLocked
+    {
+        // Test zero address check
+        if (recipient == 0x0000000000000000000000000000000000000000) {
+            return InvalidAddress!(); // Simple error with no parameters
+        }
+        
+        // Test insufficient balance
+        if (amount > 100) {
+            return InsufficientBalance!(amount); // Error with one parameter
+        }
+        
+        // Test authorization
+        if (std.transaction.sender != owner) {
+            return Unauthorized!(std.transaction.sender, owner); // Error with multiple parameters
+        }
+        
+        // Test time lock
+        let unlock_time: u256 = std.block.timestamp + 100;
+        if (std.block.timestamp < unlock_time) {
+            return TransferLocked!(unlock_time); // Error with time parameter
+        }
+        
+        return true;
+    }
+}

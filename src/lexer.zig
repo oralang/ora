@@ -8,19 +8,18 @@ pub const LexerError = error{
     InvalidHexLiteral,
     UnterminatedComment,
     OutOfMemory,
-    // New error types for enhanced string processing
     InvalidEscapeSequence,
     UnterminatedRawString,
     EmptyCharacterLiteral,
     InvalidCharacterLiteral,
-    // New error types for enhanced number parsing
+    InvalidCharacterInString, // For non-ASCII characters in string literals
     InvalidBinaryLiteral,
     NumberTooLarge,
     InvalidAddressFormat,
-    // Error recovery related
     TooManyErrors,
-    // Built-in function validation
     InvalidBuiltinFunction,
+    InvalidRangePattern,
+    InvalidSwitchSyntax,
 };
 
 /// Diagnostic severity levels for error reporting
@@ -108,24 +107,6 @@ pub const LexerDiagnostic = struct {
     pub fn withSuggestion(self: LexerDiagnostic, suggestion: []const u8) LexerDiagnostic {
         var result = self;
         result.suggestion = suggestion;
-        return result;
-    }
-
-    pub fn withSeverity(self: LexerDiagnostic, severity: DiagnosticSeverity) LexerDiagnostic {
-        var result = self;
-        result.severity = severity;
-        return result;
-    }
-
-    pub fn withContext(self: LexerDiagnostic, context: ErrorContext) LexerDiagnostic {
-        var result = self;
-        result.context = context;
-        return result;
-    }
-
-    pub fn withTemplate(self: LexerDiagnostic, template: ErrorMessageTemplate) LexerDiagnostic {
-        var result = self;
-        result.template = template;
         return result;
     }
 
@@ -276,6 +257,16 @@ pub fn getErrorTemplate(error_type: LexerError) ErrorMessageTemplate {
             .description = "This is not a valid built-in function name",
             .help = "Use a valid built-in function like @divTrunc, @divFloor, @divCeil, @divExact, or @divmod",
         },
+        LexerError.InvalidRangePattern => ErrorMessageTemplate{
+            .title = "invalid range pattern",
+            .description = "Range patterns must have valid syntax with proper bounds",
+            .help = "Use range patterns like 'a..z', '0..9', or 'start..end' with valid characters or numbers",
+        },
+        LexerError.InvalidSwitchSyntax => ErrorMessageTemplate{
+            .title = "invalid switch syntax",
+            .description = "Switch statements require proper syntax with cases and optional default",
+            .help = "Ensure switch has proper case labels, expressions, and braces: switch (expr) { case value: ... default: ... }",
+        },
         else => ErrorMessageTemplate{
             .title = "lexical error",
             .description = "An error occurred during lexical analysis",
@@ -412,7 +403,7 @@ pub const ErrorRecovery = struct {
     }
 
     /// Get error count
-    pub fn getErrorCount(self: *ErrorRecovery) usize {
+    pub fn getErrorCount(self: *const ErrorRecovery) usize {
         return self.errors.items.len;
     }
 
@@ -867,6 +858,13 @@ pub const TokenValue = union(enum) {
     }
 };
 
+pub const TriviaKind = enum { Whitespace, Newline, LineComment, BlockComment, DocLineComment, DocBlockComment };
+
+pub const TriviaPiece = struct {
+    kind: TriviaKind,
+    span: SourceRange,
+};
+
 /// String interning pool for deduplicating repeated strings
 pub const StringPool = struct {
     strings: std.HashMap(u64, []const u8, std.hash_map.AutoContext(u64), std.hash_map.default_max_load_percentage),
@@ -928,6 +926,11 @@ pub const StringPool = struct {
 };
 
 /// String processing engine for handling escape sequences and string validation
+/// Simplified for smart contract language usage:
+/// - Only ASCII characters are supported
+/// - Limited escape sequences (\n, \t, \", \\)
+/// - Max string length is restricted to 1KB
+/// This simplification improves security, reduces gas costs, and simplifies the implementation
 pub const StringProcessor = struct {
     allocator: Allocator,
 
@@ -938,14 +941,27 @@ pub const StringProcessor = struct {
     }
 
     /// Process a string literal with escape sequences
+    /// Follows the simplified string model for smart contracts:
+    /// - Only ASCII characters are allowed
+    /// - Only supports limited escape sequences: \n, \t, \", \\
+    /// - String length is limited (enforced elsewhere)
     pub fn processString(self: *StringProcessor, raw_string: []const u8) LexerError![]u8 {
         var result = std.ArrayList(u8).init(self.allocator);
         defer result.deinit();
 
         var i: usize = 0;
         while (i < raw_string.len) {
-            if (raw_string[i] == '\\' and i + 1 < raw_string.len) {
-                const escaped_char = try self.processEscapeSequence(raw_string[i + 1 ..]);
+            // Check for non-ASCII characters
+            if (raw_string[i] > 127) {
+                return LexerError.InvalidCharacterInString;
+            }
+
+            if (raw_string[i] == '\\') {
+                if (i + 1 >= raw_string.len) {
+                    // Trailing backslash at end of string is invalid
+                    return LexerError.InvalidEscapeSequence;
+                }
+                const escaped_char = try StringProcessor.processEscapeSequence(raw_string[i + 1 ..]);
                 try result.append(escaped_char.char);
                 i += escaped_char.consumed + 1; // +1 for the backslash
             } else {
@@ -957,59 +973,63 @@ pub const StringProcessor = struct {
         return result.toOwnedSlice();
     }
 
-    /// Process a single escape sequence starting after the backslash
-    fn processEscapeSequence(self: *StringProcessor, sequence: []const u8) LexerError!struct { char: u8, consumed: usize } {
-        _ = self;
+    /// Process a single escape sequence starting after the backslash with simplified validation
+    /// Only supports a minimal set of escape sequences appropriate for a smart contract language
+    fn processEscapeSequence(sequence: []const u8) LexerError!struct { char: u8, consumed: usize } {
         if (sequence.len == 0) {
             return LexerError.InvalidEscapeSequence;
         }
 
         switch (sequence[0]) {
-            'n' => return .{ .char = '\n', .consumed = 1 },
-            't' => return .{ .char = '\t', .consumed = 1 },
-            'r' => return .{ .char = '\r', .consumed = 1 },
-            '\\' => return .{ .char = '\\', .consumed = 1 },
-            '"' => return .{ .char = '"', .consumed = 1 },
-            '\'' => return .{ .char = '\'', .consumed = 1 },
-            '0' => return .{ .char = 0, .consumed = 1 },
-            'x' => {
-                // Hexadecimal escape sequence \xNN
-                if (sequence.len < 3) {
-                    return LexerError.InvalidEscapeSequence;
-                }
-                const hex_digits = sequence[1..3];
-                if (!isHexDigit(hex_digits[0]) or !isHexDigit(hex_digits[1])) {
-                    return LexerError.InvalidEscapeSequence;
-                }
-                const value = std.fmt.parseInt(u8, hex_digits, 16) catch {
-                    return LexerError.InvalidEscapeSequence;
-                };
-                return .{ .char = value, .consumed = 3 };
-            },
+            // Simplified set of escape sequences for smart contract language
+            'n' => return .{ .char = '\n', .consumed = 1 }, // Newline
+            't' => return .{ .char = '\t', .consumed = 1 }, // Tab
+            '\\' => return .{ .char = '\\', .consumed = 1 }, // Backslash
+            '"' => return .{ .char = '"', .consumed = 1 }, // Double quote
+
+            // All other escape sequences are invalid in our simplified string model
             else => return LexerError.InvalidEscapeSequence,
         }
     }
 
-    /// Validate a character literal and extract its value
-    pub fn processCharacterLiteral(self: *StringProcessor, raw_char: []const u8) LexerError!u8 {
+    /// Validate a character literal and extract its value with enhanced error handling
+    pub fn processCharacterLiteral(raw_char: []const u8) LexerError!u8 {
+        // Check for empty character literal
         if (raw_char.len == 0) {
             return LexerError.EmptyCharacterLiteral;
         }
 
+        // Handle simple single character literal
         if (raw_char.len == 1) {
-            // Simple character literal
-            return raw_char[0];
+            const char = raw_char[0];
+            // Validate that it's a printable character or common whitespace
+            if ((char >= 32 and char <= 126) or char == '\t' or char == '\n' or char == '\r') {
+                return char;
+            }
+            // Allow null character explicitly
+            if (char == 0) {
+                return char;
+            }
+            // Reject control characters and invalid bytes
+            return LexerError.InvalidCharacterLiteral;
         }
 
+        // Handle escape sequences
         if (raw_char.len >= 2 and raw_char[0] == '\\') {
-            // Escape sequence in character literal
-            const escaped = try self.processEscapeSequence(raw_char[1..]);
+            const escaped = StringProcessor.processEscapeSequence(raw_char[1..]) catch |err| {
+                // Provide more specific error context for escape sequences
+                return err;
+            };
+
+            // Validate that the escape sequence consumed the entire remaining content
             if (escaped.consumed + 1 != raw_char.len) {
                 return LexerError.InvalidCharacterLiteral;
             }
+
             return escaped.char;
         }
 
+        // Multiple characters without escape sequence
         return LexerError.InvalidCharacterLiteral;
     }
 
@@ -1021,7 +1041,7 @@ pub const StringProcessor = struct {
     }
 };
 
-/// Token types for ZigOra DSL
+/// Token types for Ora
 pub const TokenType = enum {
     // End of file
     Eof,
@@ -1042,6 +1062,7 @@ pub const TokenType = enum {
     If,
     Else,
     While,
+    For,
     Break,
     Continue,
     Return,
@@ -1050,7 +1071,7 @@ pub const TokenType = enum {
     Invariant,
     Old,
     Comptime,
-    As,
+    As, // reserved keyword (not currently used)
     Import,
     Struct,
     Enum,
@@ -1062,11 +1083,48 @@ pub const TokenType = enum {
     Try,
     Catch,
 
-    // Transfer/shift keywords
-    From,
+    // Control flow keywords
+    Switch,
+
+    // Function modifiers
+    Inline,
+    Ghost,
+    Assert,
 
     // Type keywords
+    Void,
+
+    // Transfer/shift keywords
+    From,
+    Move,
+    To,
+
+    // Quantifier keywords
+    Forall,
+    Exists,
+    Where,
+
+    // Primitive type keywords
+    U8,
+    U16,
+    U32,
+    U64,
+    U128,
+    U256,
+    I8,
+    I16,
+    I32,
+    I64,
+    I128,
+    I256,
+    Bool,
+    Address,
+    String,
+
+    // Collection type keywords
     Map,
+    DoubleMap,
+    Slice,
     Bytes,
 
     // Identifiers and literals
@@ -1085,6 +1143,7 @@ pub const TokenType = enum {
     Star, // *
     Slash, // /
     Percent, // %
+    StarStar, // **
     Equal, // =
     EqualEqual, // ==
     BangEqual, // !=
@@ -1092,15 +1151,19 @@ pub const TokenType = enum {
     LessEqual, // <=
     Greater, // >
     GreaterEqual, // >=
+    LessLess, // <<
+    GreaterGreater, // >>
     Bang, // !
     Ampersand, // &
+    AmpersandAmpersand, // &&
     Pipe, // |
+    PipePipe, // ||
     Caret, // ^
-    LeftShift, // <<
-    RightShift, // >>
     PlusEqual, // +=
     MinusEqual, // -=
     StarEqual, // *=
+    SlashEqual, // /=
+    PercentEqual, // %=
     Arrow, // ->
 
     // Delimiters
@@ -1112,8 +1175,10 @@ pub const TokenType = enum {
     RightBracket, // ]
     Comma, // ,
     Semicolon, // ;
+    /// :
     Colon, // :
     Dot, // .
+    DotDotDot, // ... (range operator)
     At, // @
 };
 
@@ -1128,6 +1193,12 @@ pub const Token = struct {
     // Line and column for convenience
     line: u32,
     column: u32,
+
+    // Lossless parsing trivia attachment (leading trivia captured; trailing optional)
+    leading_trivia_start: u32 = 0,
+    leading_trivia_len: u32 = 0,
+    trailing_trivia_start: u32 = 0,
+    trailing_trivia_len: u32 = 0,
 
     pub fn format(self: Token, comptime fmt: []const u8, options: std.fmt.FormatOptions, writer: anytype) !void {
         _ = fmt;
@@ -1187,6 +1258,10 @@ pub const LexerConfig = struct {
     enable_error_recovery: bool = true,
     max_errors: u32 = 100,
     enable_suggestions: bool = true,
+
+    // Resynchronization after errors
+    enable_resync: bool = true,
+    resync_max_lookahead: u32 = 256,
 
     // String processing configuration
     enable_string_interning: bool = true,
@@ -1299,6 +1374,7 @@ pub const LexerConfig = struct {
         if (self.enable_error_recovery) {
             try writer.print("  Max Errors: {}\n", .{self.max_errors});
             try writer.print("  Suggestions: {}\n", .{self.enable_suggestions});
+            try writer.print("  Resync: {} (max lookahead {})\n", .{ self.enable_resync, self.resync_max_lookahead });
         }
 
         // String processing settings
@@ -1320,8 +1396,7 @@ pub const LexerConfig = struct {
         try writer.print("Diagnostic Filtering: {}\n", .{self.enable_diagnostic_filtering});
         try writer.print("Minimum Severity: {}\n", .{self.minimum_diagnostic_severity});
 
-        // Compatibility settings
-        try writer.print("Legacy Token Format: {}\n", .{self.legacy_token_format});
+        // General settings
         try writer.print("Strict Mode: {}\n", .{self.strict_mode});
         try writer.print("Performance Monitoring: {}\n", .{self.enable_performance_monitoring});
 
@@ -1362,6 +1437,7 @@ const keywords = std.StaticStringMap(TokenType).initComptime(.{
     .{ "if", .If },
     .{ "else", .Else },
     .{ "while", .While },
+    .{ "for", .For },
     .{ "break", .Break },
     .{ "continue", .Continue },
     .{ "return", .Return },
@@ -1369,6 +1445,10 @@ const keywords = std.StaticStringMap(TokenType).initComptime(.{
     .{ "ensures", .Ensures },
     .{ "invariant", .Invariant },
     .{ "old", .Old },
+    .{ "ghost", .Ghost },
+    .{ "inline", .Inline },
+    .{ "switch", .Switch },
+    .{ "void", .Void },
     .{ "comptime", .Comptime },
     .{ "as", .As },
     .{ "import", .Import },
@@ -1380,14 +1460,38 @@ const keywords = std.StaticStringMap(TokenType).initComptime(.{
     .{ "try", .Try },
     .{ "catch", .Catch },
     .{ "from", .From },
+    .{ "move", .Move },
+    .{ "to", .To },
+    .{ "forall", .Forall },
+    .{ "exists", .Exists },
+    .{ "where", .Where },
+    .{ "assert", .Assert },
+    .{ "u8", .U8 },
+    .{ "u16", .U16 },
+    .{ "u32", .U32 },
+    .{ "u64", .U64 },
+    .{ "u128", .U128 },
+    .{ "u256", .U256 },
+    .{ "i8", .I8 },
+    .{ "i16", .I16 },
+    .{ "i32", .I32 },
+    .{ "i64", .I64 },
+    .{ "i128", .I128 },
+    .{ "i256", .I256 },
+    .{ "bool", .Bool },
+    .{ "address", .Address },
+    .{ "string", .String },
     .{ "map", .Map },
+    .{ "doublemap", .DoubleMap },
+    .{ "slice", .Slice },
     .{ "bytes", .Bytes },
 });
 
-/// Lexer for ZigOra DSL
+/// Lexer for Ora
 pub const Lexer = struct {
     source: []const u8,
     tokens: std.ArrayList(Token),
+    trivia: std.ArrayList(TriviaPiece),
     start: u32,
     current: u32,
     line: u32,
@@ -1395,6 +1499,9 @@ pub const Lexer = struct {
     start_column: u32, // Track start position for accurate token positioning
     last_bad_char: ?u8, // Track the character that caused an error
     allocator: Allocator,
+
+    // Arena allocator for string processing - all processed strings live here
+    arena: std.heap.ArenaAllocator,
 
     // Error recovery system
     error_recovery: ?ErrorRecovery,
@@ -1410,6 +1517,7 @@ pub const Lexer = struct {
         return Lexer{
             .source = source,
             .tokens = std.ArrayList(Token).init(allocator),
+            .trivia = std.ArrayList(TriviaPiece).init(allocator),
             .start = 0,
             .current = 0,
             .line = 1,
@@ -1417,6 +1525,7 @@ pub const Lexer = struct {
             .start_column = 1,
             .last_bad_char = null,
             .allocator = allocator,
+            .arena = std.heap.ArenaAllocator.init(allocator),
             .error_recovery = null,
             .config = LexerConfig.default(),
             .string_pool = null,
@@ -1454,29 +1563,13 @@ pub const Lexer = struct {
         return lexer;
     }
 
-    /// Initialize lexer with validated configuration (assumes config is already validated)
-    pub fn initWithValidatedConfig(allocator: Allocator, source: []const u8, config: LexerConfig) Lexer {
-        var lexer = Lexer.init(allocator, source);
-        lexer.config = config;
-
-        // Initialize optional components based on configuration
-        if (config.enable_error_recovery) {
-            lexer.error_recovery = ErrorRecovery.init(allocator, config.max_errors);
-        }
-
-        if (config.enable_string_interning) {
-            lexer.string_pool = StringPool.init(allocator);
-        }
-
-        if (config.enable_performance_monitoring) {
-            lexer.performance = LexerPerformance{};
-        }
-
-        return lexer;
-    }
-
     pub fn deinit(self: *Lexer) void {
+        // Free the arena - this automatically frees all processed strings
+        self.arena.deinit();
+
+        // Free other components
         self.tokens.deinit();
+        self.trivia.deinit();
         if (self.error_recovery) |*recovery| {
             recovery.deinit();
         }
@@ -1658,7 +1751,7 @@ pub const Lexer = struct {
 
     /// Check if lexer has any errors
     pub fn hasErrors(self: *const Lexer) bool {
-        if (self.error_recovery) |*recovery| {
+        if (self.error_recovery) |recovery| {
             return recovery.getErrorCount() > 0;
         }
         return self.last_bad_char != null;
@@ -1666,7 +1759,7 @@ pub const Lexer = struct {
 
     /// Get error count
     pub fn getErrorCount(self: *const Lexer) usize {
-        if (self.error_recovery) |*recovery| {
+        if (self.error_recovery) |recovery| {
             return recovery.getErrorCount();
         }
         return if (self.last_bad_char != null) 1 else 0;
@@ -1688,6 +1781,10 @@ pub const Lexer = struct {
     /// Get all tokens
     pub fn getTokens(self: *const Lexer) []const Token {
         return self.tokens.items;
+    }
+
+    pub fn getTrivia(self: *const Lexer) []const TriviaPiece {
+        return self.trivia.items;
     }
 
     /// Reset lexer state for reuse
@@ -1734,6 +1831,10 @@ pub const Lexer = struct {
                 // If we can't record more errors, we've hit the limit
                 return;
             };
+            // Attempt resynchronization if enabled and appropriate for this error
+            if (self.config.enable_resync and shouldResyncOnError(error_type)) {
+                self.resyncToBoundary(self.config.resync_max_lookahead);
+            }
         }
     }
 
@@ -1752,7 +1853,35 @@ pub const Lexer = struct {
                 // If we can't record more errors, we've hit the limit
                 return;
             };
+            if (self.config.enable_resync and shouldResyncOnError(error_type)) {
+                self.resyncToBoundary(self.config.resync_max_lookahead);
+            }
         }
+    }
+
+    /// Advance input to a safe boundary to resume lexing after an error
+    fn resyncToBoundary(self: *Lexer, max_lookahead: u32) void {
+        var walked: u32 = 0;
+        while (!self.isAtEnd() and walked < max_lookahead) {
+            const c = self.peek();
+            // Hard boundaries: newline, braces, parens, brackets, statement delimiters
+            if (c == '\n' or c == '{' or c == '}' or c == '(' or c == ')' or c == '[' or c == ']' or c == ';' or c == ',' or c == ':') {
+                break;
+            }
+            _ = self.advance();
+            walked += 1;
+        }
+        // Do not consume the boundary; allow normal scanning to handle it
+    }
+
+    /// Decide whether a boundary resync is appropriate for the given error
+    fn shouldResyncOnError(error_type: LexerError) bool {
+        return error_type == LexerError.UnterminatedString or
+            error_type == LexerError.UnterminatedRawString or
+            error_type == LexerError.UnterminatedComment or
+            error_type == LexerError.InvalidEscapeSequence or
+            error_type == LexerError.InvalidCharacterLiteral or
+            error_type == LexerError.EmptyCharacterLiteral;
     }
 
     /// Intern a string if string interning is enabled, otherwise return the original
@@ -1788,19 +1917,27 @@ pub const Lexer = struct {
         while (!self.isAtEnd()) {
             self.start = self.current;
             self.start_column = self.column;
-
+            // Capture leading trivia for the next token
+            const trivia_start = self.trivia.items.len;
+            try self.captureLeadingTrivia();
+            const trivia_len: u32 = @intCast(self.trivia.items.len - trivia_start);
+            self.start = self.current;
+            self.start_column = self.column;
+            if (self.isAtEnd()) break;
             // Debug: print current position and character
-            if (self.current < self.source.len) {
-                const current_char = self.source[self.current];
-                std.debug.print("Scanning at pos {}: '{}' (line {}, col {})\n", .{ self.current, current_char, self.line, self.column });
-            }
+
+            //if (self.current < self.source.len) {
+            //    const current_char = self.source[self.current];
+            //    std.debug.print("Scanning at pos {}: '{}' (line {}, col {})\n", .{ self.current, current_char, self.line, self.column });
+            //}
 
             self.scanToken() catch |err| {
                 // If error recovery is enabled, continue scanning
                 if (self.hasErrorRecovery()) {
                     // Record the error and continue
                     self.recordError(err, "Lexer error occurred");
-                    // Skip to next character to continue scanning
+                    // For localized errors (e.g., unexpected char), advancing one char is sufficient.
+                    // Long-span errors will trigger boundary resync inside recordError.
                     if (!self.isAtEnd()) {
                         _ = self.advance();
                     }
@@ -1809,6 +1946,13 @@ pub const Lexer = struct {
                     return err;
                 }
             };
+
+            // Attach captured trivia as leading trivia for the token we just added
+            if (self.tokens.items.len > 0 and trivia_len > 0) {
+                var last = &self.tokens.items[self.tokens.items.len - 1];
+                last.leading_trivia_start = @as(u32, @intCast(trivia_start));
+                last.leading_trivia_len = trivia_len;
+            }
         }
 
         // Add EOF token
@@ -1847,14 +1991,8 @@ pub const Lexer = struct {
 
         const c = self.advance();
 
-        // Fast-path for whitespace using lookup table
-        if (isWhitespace(c)) {
-            if (c == '\n') {
-                self.line += 1;
-                self.column = 1;
-            }
-            return;
-        }
+        // Whitespace/comments are handled by captureLeadingTrivia()
+        if (isWhitespace(c)) return; // should be rare due to captureLeadingTrivia
 
         switch (c) {
 
@@ -1868,9 +2006,19 @@ pub const Lexer = struct {
             ',' => try self.addToken(.Comma),
             ';' => try self.addToken(.Semicolon),
             ':' => try self.addToken(.Colon),
-            '.' => try self.addToken(.Dot),
-            '@' => try self.scanBuiltinFunction(),
-            '%' => try self.addToken(.Percent),
+            '.' => {
+                // Look ahead to distinguish between '.', '..', and '...'
+                if (self.peek() == '.' and self.peekNext() == '.') {
+                    // We have "..." - consume the remaining two dots
+                    _ = self.advance(); // consume second '.'
+                    _ = self.advance(); // consume third '.'
+                    try self.addToken(.DotDotDot);
+                } else {
+                    // Single dot - don't consume any additional characters
+                    try self.addToken(.Dot);
+                }
+            },
+            '@' => try self.scanAtDirective(),
             '^' => try self.addToken(.Caret),
 
             // Operators that might have compound forms
@@ -1893,21 +2041,34 @@ pub const Lexer = struct {
             '*' => {
                 if (self.match('=')) {
                     try self.addToken(.StarEqual);
+                } else if (self.match('*')) {
+                    try self.addToken(.StarStar);
                 } else {
                     try self.addToken(.Star);
                 }
             },
             '/' => {
                 if (self.match('/')) {
-                    // Single-line comment
+                    // Single-line comment already captured by captureLeadingTrivia
                     while (self.peek() != '\n' and !self.isAtEnd()) {
                         _ = self.advance();
                     }
+                    return; // do not emit token
                 } else if (self.match('*')) {
-                    // Multi-line comment
+                    // Multi-line comment already captured by captureLeadingTrivia
                     try self.scanMultiLineComment();
+                    return; // do not emit token
+                } else if (self.match('=')) {
+                    try self.addToken(.SlashEqual);
                 } else {
                     try self.addToken(.Slash);
+                }
+            },
+            '%' => {
+                if (self.match('=')) {
+                    try self.addToken(.PercentEqual);
+                } else {
+                    try self.addToken(.Percent);
                 }
             },
             '!' => {
@@ -1918,7 +2079,10 @@ pub const Lexer = struct {
                 }
             },
             '=' => {
-                if (self.match('=')) {
+                // Support '=>' fat arrow used in switch arms and quantified expressions
+                if (self.match('>')) {
+                    try self.addToken(.Arrow);
+                } else if (self.match('=')) {
                     try self.addToken(.EqualEqual);
                 } else {
                     try self.addToken(.Equal);
@@ -1928,7 +2092,7 @@ pub const Lexer = struct {
                 if (self.match('=')) {
                     try self.addToken(.LessEqual);
                 } else if (self.match('<')) {
-                    try self.addToken(.LeftShift);
+                    try self.addToken(.LessLess);
                 } else {
                     try self.addToken(.Less);
                 }
@@ -1937,13 +2101,25 @@ pub const Lexer = struct {
                 if (self.match('=')) {
                     try self.addToken(.GreaterEqual);
                 } else if (self.match('>')) {
-                    try self.addToken(.RightShift);
+                    try self.addToken(.GreaterGreater);
                 } else {
                     try self.addToken(.Greater);
                 }
             },
-            '&' => try self.addToken(.Ampersand),
-            '|' => try self.addToken(.Pipe),
+            '&' => {
+                if (self.match('&')) {
+                    try self.addToken(.AmpersandAmpersand);
+                } else {
+                    try self.addToken(.Ampersand);
+                }
+            },
+            '|' => {
+                if (self.match('|')) {
+                    try self.addToken(.PipePipe);
+                } else {
+                    try self.addToken(.Pipe);
+                }
+            },
 
             // String literals
             '"' => try self.scanString(),
@@ -2043,6 +2219,99 @@ pub const Lexer = struct {
         }
     }
 
+    fn captureLeadingTrivia(self: *Lexer) !void {
+        // Consume whitespace and comments, recording them as trivia pieces
+        while (!self.isAtEnd()) {
+            const c = self.peek();
+            if (isWhitespace(c)) {
+                const start_off = self.current;
+                const start_col = self.column;
+                if (c == '\n') {
+                    _ = self.advance();
+                    self.line += 1;
+                    self.column = 1;
+                    const span = SourceRange{ .start_line = self.line - 1, .start_column = start_col, .end_line = self.line, .end_column = 1, .start_offset = start_off, .end_offset = self.current };
+                    try self.trivia.append(TriviaPiece{ .kind = .Newline, .span = span });
+                } else {
+                    while (isWhitespace(self.peek()) and self.peek() != '\n' and !self.isAtEnd()) {
+                        _ = self.advance();
+                    }
+                    const span = SourceRange{ .start_line = self.line, .start_column = start_col, .end_line = self.line, .end_column = self.column, .start_offset = start_off, .end_offset = self.current };
+                    try self.trivia.append(TriviaPiece{ .kind = .Whitespace, .span = span });
+                }
+                continue;
+            }
+            if (c == '/' and self.current + 1 < self.source.len and self.source[self.current + 1] == '/') {
+                const start_off = self.current;
+                const start_col = self.column;
+                _ = self.advance(); // '/'
+                _ = self.advance(); // '/'
+                const is_doc = self.peek() == '/';
+                if (is_doc) _ = self.advance(); // consume third '/'
+                while (self.peek() != '\n' and !self.isAtEnd()) _ = self.advance();
+                const span = SourceRange{ .start_line = self.line, .start_column = start_col, .end_line = self.line, .end_column = self.column, .start_offset = start_off, .end_offset = self.current };
+                // Treat entire '//' to line end as line comment trivia
+                try self.trivia.append(TriviaPiece{ .kind = if (is_doc) .DocLineComment else .LineComment, .span = span });
+                continue;
+            }
+            if (c == '/' and self.current + 1 < self.source.len and self.source[self.current + 1] == '*') {
+                // Capture block comment trivia only if it is properly closed; otherwise
+                // leave it to the main scanner to report UnterminatedComment.
+                if (self.tryCaptureClosedBlockCommentTrivia()) {
+                    continue;
+                } else {
+                    break;
+                }
+            }
+            break;
+        }
+    }
+
+    fn tryCaptureClosedBlockCommentTrivia(self: *Lexer) bool {
+        const save_current = self.current;
+        const save_line = self.line;
+        const save_column = self.column;
+
+        // consume '/*'
+        _ = self.advance();
+        _ = self.advance();
+        const is_doc = self.peek() == '*';
+        if (is_doc) _ = self.advance(); // '/**'
+        var nesting: u32 = 1;
+        while (nesting > 0 and !self.isAtEnd()) {
+            if (self.peek() == '/' and self.peekNext() == '*') {
+                _ = self.advance();
+                _ = self.advance();
+                nesting += 1;
+            } else if (self.peek() == '*' and self.peekNext() == '/') {
+                _ = self.advance();
+                _ = self.advance();
+                nesting -= 1;
+            } else if (self.peek() == '\n') {
+                _ = self.advance();
+                self.line += 1;
+                self.column = 1;
+            } else {
+                _ = self.advance();
+            }
+        }
+        if (nesting == 0) {
+            const span = SourceRange{ .start_line = save_line, .start_column = save_column, .end_line = self.line, .end_column = self.column, .start_offset = save_current, .end_offset = self.current };
+            self.trivia.append(TriviaPiece{ .kind = if (is_doc) .DocBlockComment else .BlockComment, .span = span }) catch return false;
+            return true;
+        }
+        // Not closed; restore and let main scanner handle error
+        self.current = save_current;
+        self.line = save_line;
+        self.column = save_column;
+        return false;
+    }
+
+    /// Scan a string literal
+    /// Simplified for smart contracts:
+    /// - Only ASCII characters are allowed
+    /// - Only supports basic escape sequences: \n, \t, \", \\
+    /// - String length is limited to 1KB
     fn scanString(self: *Lexer) LexerError!void {
         while (self.peek() != '"' and !self.isAtEnd()) {
             if (self.peek() == '\n') {
@@ -2053,19 +2322,20 @@ pub const Lexer = struct {
         }
 
         if (self.isAtEnd()) {
-            // Unterminated string - use error recovery if enabled
+            // Unterminated string - record detailed error with accurate span
+            const start_offset = self.start;
+            const start_line = self.line;
+            const start_column = self.start_column;
             if (self.hasErrorRecovery()) {
-                self.recordError(LexerError.UnterminatedString, "Unterminated string literal");
-                // Advance to the next line or EOF to allow recovery
-                while (!self.isAtEnd() and self.peek() != '\n') {
-                    _ = self.advance();
-                }
-                // Optionally, advance past the newline as well
-                if (!self.isAtEnd() and self.peek() == '\n') {
-                    _ = self.advance();
-                    self.line += 1;
-                    self.column = 1;
-                }
+                const range = SourceRange{
+                    .start_line = start_line,
+                    .start_column = start_column,
+                    .end_line = self.line,
+                    .end_column = self.column,
+                    .start_offset = start_offset,
+                    .end_offset = self.current,
+                };
+                self.error_recovery.?.recordDetailedError(LexerError.UnterminatedString, range, self.source, "Unterminated string literal") catch {};
                 return;
             } else {
                 return LexerError.UnterminatedString;
@@ -2103,18 +2373,49 @@ pub const Lexer = struct {
     }
 
     fn scanCharacter(self: *Lexer) LexerError!void {
-        // Scan until we find the closing single quote
+        const start_line = self.line;
+        const start_column = self.column;
+
+        // Enhanced character literal scanning with proper escape sequence handling
         while (self.peek() != '\'' and !self.isAtEnd()) {
-            if (self.peek() == '\n') {
-                self.line += 1;
-                self.column = 1;
+            if (self.peek() == '\\') {
+                // Handle escape sequence - advance past the backslash
+                _ = self.advance();
+                if (!self.isAtEnd()) {
+                    // Advance past the escaped character
+                    if (self.peek() == '\n') {
+                        self.line += 1;
+                        self.column = 1;
+                    }
+                    _ = self.advance();
+                }
+            } else {
+                if (self.peek() == '\n') {
+                    self.line += 1;
+                    self.column = 1;
+                }
+                _ = self.advance();
             }
-            _ = self.advance();
         }
 
         if (self.isAtEnd()) {
-            // Unterminated character literal (reuse string error for now)
-            return LexerError.UnterminatedString;
+            // Create proper error range for unterminated character literal
+            const range = SourceRange{
+                .start_line = start_line,
+                .start_column = start_column,
+                .end_line = self.line,
+                .end_column = self.column,
+                .start_offset = self.start,
+                .end_offset = self.current,
+            };
+
+            // Use error recovery if enabled
+            if (self.config.enable_error_recovery and self.error_recovery != null) {
+                try self.error_recovery.?.recordDetailedError(LexerError.InvalidCharacterLiteral, range, self.source, "Character literal is missing closing single quote");
+                return;
+            } else {
+                return LexerError.InvalidCharacterLiteral;
+            }
         }
 
         // Consume closing '
@@ -2162,42 +2463,176 @@ pub const Lexer = struct {
     }
 
     fn scanBinaryLiteral(self: *Lexer) LexerError!void {
-        std.debug.print("Scanning binary literal at pos {}\n", .{self.current});
+        // std.debug.print("Scanning binary literal at pos {}\n", .{self.current});
 
         var digit_count: u32 = 0;
+        var underscore_count: u32 = 0;
+        var last_was_underscore = false;
+        var first_char = true;
+        var invalid_char_pos: ?u32 = null;
+        var invalid_char: ?u8 = null;
 
-        // Scan binary digits and underscores
+        // Scan binary digits and underscores with enhanced validation
         while (!self.isAtEnd()) {
             const c = self.peek();
+
             if (isBinaryDigit(c)) {
                 digit_count += 1;
+                last_was_underscore = false;
+                first_char = false;
                 _ = self.advance();
             } else if (c == '_') {
-                _ = self.advance(); // Skip underscore separator
+                // Enhanced underscore validation
+                if (first_char) {
+                    // Binary literal cannot start with underscore after 0b
+                    invalid_char_pos = self.current;
+                    invalid_char = c;
+                    break;
+                }
+                if (last_was_underscore) {
+                    // Consecutive underscores not allowed
+                    invalid_char_pos = self.current;
+                    invalid_char = c;
+                    break;
+                }
+                underscore_count += 1;
+                last_was_underscore = true;
+                first_char = false;
+                _ = self.advance();
             } else {
+                // Check if this is an invalid character that should be part of the literal
+                if (isDigit(c) or isAlpha(c)) {
+                    invalid_char_pos = self.current;
+                    invalid_char = c;
+                }
                 break; // Stop at non-binary character
             }
         }
 
+        // Enhanced error handling with specific error messages
         if (digit_count == 0) {
-            // Invalid binary literal (just "0b") - use error recovery if enabled
+            // Invalid binary literal (just "0b" or "0b_") - use error recovery if enabled
             if (self.hasErrorRecovery()) {
-                self.recordError(LexerError.InvalidBinaryLiteral, "Invalid binary literal: missing digits after '0b'");
+                const range = SourceRange{
+                    .start_line = self.line,
+                    .start_column = self.start_column,
+                    .end_line = self.line,
+                    .end_column = self.column,
+                    .start_offset = self.start,
+                    .end_offset = self.current,
+                };
+
+                const message = if (underscore_count > 0)
+                    "Invalid binary literal: contains only underscores after '0b'"
+                else
+                    "Invalid binary literal: missing digits after '0b'";
+
+                const suggestion = "Add binary digits (0 or 1) after '0b'";
+
+                try self.error_recovery.?.recordDetailedErrorWithSuggestion(LexerError.InvalidBinaryLiteral, range, self.source, message, suggestion);
+
+                // Skip to next token boundary for recovery
+                self.current = self.findNextTokenBoundary();
                 return; // Skip adding the token
             } else {
                 return LexerError.InvalidBinaryLiteral;
             }
         }
 
-        // Check if the next character would make this invalid
+        // Check for trailing underscore
+        if (last_was_underscore) {
+            if (self.hasErrorRecovery()) {
+                const range = SourceRange{
+                    .start_line = self.line,
+                    .start_column = self.start_column,
+                    .end_line = self.line,
+                    .end_column = self.column,
+                    .start_offset = self.start,
+                    .end_offset = self.current,
+                };
+
+                const message = "Invalid binary literal: cannot end with underscore";
+                const suggestion = "Remove the trailing underscore or add binary digits after it";
+
+                try self.error_recovery.?.recordDetailedErrorWithSuggestion(LexerError.InvalidBinaryLiteral, range, self.source, message, suggestion);
+
+                // Skip to next token boundary for recovery
+                self.current = self.findNextTokenBoundary();
+                return; // Skip adding the token
+            } else {
+                return LexerError.InvalidBinaryLiteral;
+            }
+        }
+
+        // Check for invalid characters found during scanning
+        if (invalid_char_pos != null and invalid_char != null) {
+            if (self.hasErrorRecovery()) {
+                const range = SourceRange{
+                    .start_line = self.line,
+                    .start_column = self.start_column,
+                    .end_line = self.line,
+                    .end_column = self.column,
+                    .start_offset = self.start,
+                    .end_offset = self.current,
+                };
+
+                var message_buf: [256]u8 = undefined;
+                const message = if (invalid_char.? == '_' and last_was_underscore)
+                    "Invalid binary literal: consecutive underscores not allowed"
+                else if (invalid_char.? == '_')
+                    "Invalid binary literal: cannot start with underscore"
+                else if (isDigit(invalid_char.?))
+                    std.fmt.bufPrint(&message_buf, "Invalid binary literal: contains invalid digit '{c}' (only 0 and 1 allowed)", .{invalid_char.?}) catch "Invalid binary literal: contains invalid digit"
+                else
+                    std.fmt.bufPrint(&message_buf, "Invalid binary literal: contains invalid character '{c}'", .{invalid_char.?}) catch "Invalid binary literal: contains invalid character";
+
+                const suggestion = if (invalid_char.? == '2' or invalid_char.? == '3' or invalid_char.? == '4' or
+                    invalid_char.? == '5' or invalid_char.? == '6' or invalid_char.? == '7' or
+                    invalid_char.? == '8' or invalid_char.? == '9')
+                    "Binary literals can only contain digits 0 and 1. Use decimal or hex literals for other digits."
+                else if (isAlpha(invalid_char.?))
+                    "Binary literals can only contain digits 0 and 1. Remove the letter or use a hex literal."
+                else
+                    "Use only binary digits (0 and 1) and underscores as separators in binary literals.";
+
+                try self.error_recovery.?.recordDetailedErrorWithSuggestion(LexerError.InvalidBinaryLiteral, range, self.source, message, suggestion);
+
+                // Skip to next token boundary for recovery
+                self.current = self.findNextTokenBoundary();
+                return; // Skip adding the token
+            } else {
+                return LexerError.InvalidBinaryLiteral;
+            }
+        }
+
+        // Check if the next character would make this invalid (lookahead validation)
         // (e.g., "0b12" should be invalid, not "0b1" + "2")
         if (!self.isAtEnd()) {
             const next_char = self.peek();
             if (isDigit(next_char) or isAlpha(next_char)) {
                 // Invalid binary literal with non-binary digits - use error recovery if enabled
                 if (self.hasErrorRecovery()) {
-                    std.debug.print("Recording InvalidBinaryLiteral error\n", .{});
-                    self.recordError(LexerError.InvalidBinaryLiteral, "Invalid binary literal: contains non-binary digits");
+                    const range = SourceRange{
+                        .start_line = self.line,
+                        .start_column = self.start_column,
+                        .end_line = self.line,
+                        .end_column = self.column + 1, // Include the invalid character
+                        .start_offset = self.start,
+                        .end_offset = self.current + 1,
+                    };
+
+                    var message_buf: [256]u8 = undefined;
+                    const message = std.fmt.bufPrint(&message_buf, "Invalid binary literal: unexpected character '{c}' after binary digits", .{next_char}) catch "Invalid binary literal: unexpected character after binary digits";
+
+                    const suggestion = if (isDigit(next_char))
+                        "Binary literals can only contain digits 0 and 1. Separate with whitespace or use a different literal type."
+                    else
+                        "Add whitespace or operator between the binary literal and the following character.";
+
+                    try self.error_recovery.?.recordDetailedErrorWithSuggestion(LexerError.InvalidBinaryLiteral, range, self.source, message, suggestion);
+
+                    // Skip to next token boundary for recovery
+                    self.current = self.findNextTokenBoundary();
                     return; // Skip adding the token
                 } else {
                     return LexerError.InvalidBinaryLiteral;
@@ -2225,14 +2660,6 @@ pub const Lexer = struct {
             }
         }
 
-        // TODO: Future feature - type suffixes (e.g., 100u256, 5u128)
-        // if (self.peek() == 'u') {
-        //     _ = self.advance();
-        //     while (isDigit(self.peek())) {
-        //         _ = self.advance();
-        //     }
-        // }
-
         try self.addIntegerToken();
     }
 
@@ -2255,7 +2682,7 @@ pub const Lexer = struct {
         try self.addTokenWithInterning(token_type);
     }
 
-    fn scanBuiltinFunction(self: *Lexer) LexerError!void {
+    fn scanAtDirective(self: *Lexer) LexerError!void {
         // Check if the next character is a letter (start of identifier)
         if (!isAlpha(self.peek())) {
             // '@' followed by non-letter - this is an unexpected character
@@ -2273,11 +2700,11 @@ pub const Lexer = struct {
             _ = self.advance();
         }
 
-        // Get the built-in function name (without the '@')
-        const builtin_name = self.source[self.start + 1 .. self.current];
+        // Get the directive/function name (without the '@')
+        const directive_name = self.source[self.start + 1 .. self.current];
 
         // Check if we have an empty identifier (shouldn't happen due to isAlpha check above)
-        if (builtin_name.len == 0) {
+        if (directive_name.len == 0) {
             if (self.hasErrorRecovery()) {
                 const message = "Unexpected character '@'";
                 self.recordError(LexerError.UnexpectedCharacter, message);
@@ -2287,17 +2714,60 @@ pub const Lexer = struct {
             }
         }
 
-        // Check if it's a valid built-in function
-        const is_valid = std.mem.eql(u8, builtin_name, "divTrunc") or
-            std.mem.eql(u8, builtin_name, "divFloor") or
-            std.mem.eql(u8, builtin_name, "divCeil") or
-            std.mem.eql(u8, builtin_name, "divExact") or
-            std.mem.eql(u8, builtin_name, "divmod");
+        // Check if it's an import directive
+        if (std.mem.eql(u8, directive_name, "import")) {
+            // For @import, produce separate tokens: @ and import
+            // First, add the @ token
+            const at_text = self.source[self.start .. self.start + 1];
+            const at_range = SourceRange{
+                .start_line = self.line,
+                .start_column = self.start_column,
+                .end_line = self.line,
+                .end_column = self.start_column + 1,
+                .start_offset = self.start,
+                .end_offset = self.start + 1,
+            };
+            try self.tokens.append(Token{
+                .type = .At,
+                .lexeme = at_text,
+                .range = at_range,
+                .value = null,
+                .line = self.line,
+                .column = self.start_column,
+            });
 
-        if (!is_valid) {
-            // Invalid built-in function - record error and continue
+            // Then, add the import token
+            const import_text = self.source[self.start + 1 .. self.current];
+            const import_range = SourceRange{
+                .start_line = self.line,
+                .start_column = self.start_column + 1,
+                .end_line = self.line,
+                .end_column = self.column,
+                .start_offset = self.start + 1,
+                .end_offset = self.current,
+            };
+            try self.tokens.append(Token{
+                .type = .Import,
+                .lexeme = import_text,
+                .range = import_range,
+                .value = null,
+                .line = self.line,
+                .column = self.start_column + 1,
+            });
+            return;
+        }
+
+        // Check if it's a valid built-in function
+        const is_valid_builtin = std.mem.eql(u8, directive_name, "divTrunc") or
+            std.mem.eql(u8, directive_name, "divFloor") or
+            std.mem.eql(u8, directive_name, "divCeil") or
+            std.mem.eql(u8, directive_name, "divExact") or
+            std.mem.eql(u8, directive_name, "divMod");
+
+        if (!is_valid_builtin) {
+            // Invalid directive/function - record error and continue
             if (self.hasErrorRecovery()) {
-                const message = std.fmt.allocPrint(self.allocator, "Invalid built-in function '@{s}'", .{builtin_name}) catch "Invalid built-in function";
+                const message = std.fmt.allocPrint(self.allocator, "Invalid directive or built-in function '@{s}'", .{directive_name}) catch "Invalid directive or built-in function";
                 defer self.allocator.free(message);
 
                 const range = SourceRange{
@@ -2320,7 +2790,7 @@ pub const Lexer = struct {
             }
         }
 
-        // Add the built-in function token (including the '@')
+        // For built-in functions, add the @ token (same as before)
         try self.addToken(.At);
     }
 
@@ -2439,9 +2909,37 @@ pub const Lexer = struct {
             .end_offset = self.current,
         };
 
-        // For now, store the raw string content as the value
-        // This will be enhanced in later tasks with escape sequence processing
-        const token_value = TokenValue{ .string = text };
+        // Process escape sequences in the string content using arena allocator
+        var string_processor = StringProcessor.init(self.arena.allocator());
+        const processed_text = string_processor.processString(text) catch |err| {
+            // Use error recovery if enabled for better error reporting
+            if (self.config.enable_error_recovery and self.error_recovery != null) {
+                const error_message = switch (err) {
+                    LexerError.InvalidEscapeSequence => "Invalid escape sequence in string literal",
+                    else => "Error processing string literal",
+                };
+
+                const suggestion = "Use valid escape sequences: \\n, \\t, \\r, \\\\, \\\", \\', \\0, or \\xNN";
+
+                try self.error_recovery.?.recordDetailedErrorWithSuggestion(err, range, self.source, error_message, suggestion);
+
+                // Return a default empty string for error recovery
+                const token_value = TokenValue{ .string = "" };
+                try self.tokens.append(Token{
+                    .type = .StringLiteral,
+                    .lexeme = "",
+                    .range = range,
+                    .value = token_value,
+                    .line = self.line,
+                    .column = self.start_column,
+                });
+                return;
+            } else {
+                return err;
+            }
+        };
+
+        const token_value = TokenValue{ .string = processed_text };
 
         // Track performance metrics if enabled
         if (self.performance) |*perf| {
@@ -2450,7 +2948,7 @@ pub const Lexer = struct {
 
         try self.tokens.append(Token{
             .type = .StringLiteral,
-            .lexeme = text, // Content without quotes
+            .lexeme = processed_text, // Content with escape sequences processed
             .range = range,
             .value = token_value,
             // Legacy fields for backward compatibility
@@ -2498,10 +2996,44 @@ pub const Lexer = struct {
             .end_offset = self.current,
         };
 
-        // Process the character literal using StringProcessor
-        var string_processor = StringProcessor.init(self.allocator);
-        const char_value = string_processor.processCharacterLiteral(text) catch |err| {
-            return err;
+        // Process the character literal using StringProcessor with enhanced error handling
+        const char_value = StringProcessor.processCharacterLiteral(text) catch |err| {
+            // Use error recovery if enabled for better error reporting
+            if (self.config.enable_error_recovery and self.error_recovery != null) {
+                const error_message = switch (err) {
+                    LexerError.EmptyCharacterLiteral => "Character literal cannot be empty",
+                    LexerError.InvalidCharacterLiteral => "Character literal must contain exactly one character or valid escape sequence",
+                    LexerError.InvalidEscapeSequence => "Invalid escape sequence in character literal",
+                    else => "Error processing character literal",
+                };
+
+                const suggestion = switch (err) {
+                    LexerError.EmptyCharacterLiteral => "Add a character between the single quotes, e.g., 'A'",
+                    LexerError.InvalidCharacterLiteral => "Use exactly one character or a valid escape sequence like '\\n'",
+                    LexerError.InvalidEscapeSequence => "Use valid escape sequences: \\n, \\t, \\r, \\\\, \\', \\\", \\0, or \\xNN",
+                    else => null,
+                };
+
+                if (suggestion) |s| {
+                    try self.error_recovery.?.recordDetailedErrorWithSuggestion(err, range, self.source, error_message, s);
+                } else {
+                    try self.error_recovery.?.recordDetailedError(err, range, self.source, error_message);
+                }
+
+                // Return a default character value for error recovery
+                const token_value = TokenValue{ .character = 0 };
+                try self.tokens.append(Token{
+                    .type = .CharacterLiteral,
+                    .lexeme = text,
+                    .range = range,
+                    .value = token_value,
+                    .line = self.line,
+                    .column = self.start_column,
+                });
+                return;
+            } else {
+                return err;
+            }
         };
 
         const token_value = TokenValue{ .character = char_value };
@@ -2530,7 +3062,7 @@ pub const Lexer = struct {
         };
 
         // Convert binary string to integer value with overflow checking
-        const binary_value = self.parseBinaryToInteger(text) catch |err| {
+        const binary_value = Lexer.parseBinaryToInteger(text) catch |err| {
             return err;
         };
 
@@ -2547,32 +3079,51 @@ pub const Lexer = struct {
         });
     }
 
-    fn parseBinaryToInteger(self: *Lexer, binary_str: []const u8) LexerError!u256 {
-        _ = self; // Suppress unused parameter warning
-
+    fn parseBinaryToInteger(binary_str: []const u8) LexerError!u256 {
         if (binary_str.len == 0) {
             return LexerError.InvalidBinaryLiteral;
         }
 
         var result: u256 = 0;
         var bit_count: u32 = 0;
+        var underscore_count: u32 = 0;
+        var last_was_underscore = false;
 
-        for (binary_str) |c| {
+        // Enhanced validation during parsing
+        for (binary_str, 0..) |c, i| {
             if (c == '_') {
-                // Skip underscores used as separators
-                continue;
+                // Enhanced underscore validation
+                underscore_count += 1;
+
+                // Check for leading underscore
+                if (i == 0) {
+                    return LexerError.InvalidBinaryLiteral;
+                }
+
+                // Check for consecutive underscores
+                if (last_was_underscore) {
+                    return LexerError.InvalidBinaryLiteral;
+                }
+
+                // Check for trailing underscore (will be caught at end)
+                last_was_underscore = true;
+                continue; // Skip underscores used as separators
             }
 
+            // Reset underscore flag
+            last_was_underscore = false;
+
+            // Validate binary digit
             if (c != '0' and c != '1') {
                 return LexerError.InvalidBinaryLiteral;
             }
 
-            // Check for overflow (u256 has 256 bits)
+            // Check for overflow before processing (u256 has 256 bits)
             if (bit_count >= 256) {
                 return LexerError.NumberTooLarge;
             }
 
-            // Shift left and add new bit
+            // Shift left and add new bit with overflow checking
             const overflow = @mulWithOverflow(result, 2);
             if (overflow[1] != 0) {
                 return LexerError.NumberTooLarge;
@@ -2590,7 +3141,19 @@ pub const Lexer = struct {
             bit_count += 1;
         }
 
+        // Check for trailing underscore
+        if (last_was_underscore) {
+            return LexerError.InvalidBinaryLiteral;
+        }
+
+        // Final validation
         if (bit_count == 0) {
+            return LexerError.InvalidBinaryLiteral;
+        }
+
+        // Additional validation: ensure we have meaningful content
+        // (not just underscores)
+        if (bit_count == 0 and underscore_count > 0) {
             return LexerError.InvalidBinaryLiteral;
         }
 
@@ -2609,7 +3172,7 @@ pub const Lexer = struct {
         };
 
         // Convert decimal string to integer value with overflow checking
-        const integer_value = self.parseDecimalToInteger(text) catch |err| {
+        const integer_value = Lexer.parseDecimalToInteger(text) catch |err| {
             return err;
         };
 
@@ -2626,9 +3189,7 @@ pub const Lexer = struct {
         });
     }
 
-    fn parseDecimalToInteger(self: *Lexer, decimal_str: []const u8) LexerError!u256 {
-        _ = self; // Suppress unused parameter warning
-
+    fn parseDecimalToInteger(decimal_str: []const u8) LexerError!u256 {
         if (decimal_str.len == 0) {
             return LexerError.NumberTooLarge; // Should not happen, but handle gracefully
         }
@@ -2686,7 +3247,7 @@ pub const Lexer = struct {
         };
 
         // Convert hex string to integer value with overflow checking
-        const hex_value = self.parseHexToInteger(text) catch |err| {
+        const hex_value = Lexer.parseHexToInteger(text) catch |err| {
             return err;
         };
 
@@ -2716,7 +3277,7 @@ pub const Lexer = struct {
         };
 
         // Convert address string to byte array
-        const address_bytes = self.parseAddressToBytes(text) catch |err| {
+        const address_bytes = Lexer.parseAddressToBytes(text) catch |err| {
             return err;
         };
 
@@ -2733,9 +3294,7 @@ pub const Lexer = struct {
         });
     }
 
-    fn parseHexToInteger(self: *Lexer, hex_str: []const u8) LexerError!u256 {
-        _ = self; // Suppress unused parameter warning
-
+    fn parseHexToInteger(hex_str: []const u8) LexerError!u256 {
         if (hex_str.len == 0) {
             return LexerError.InvalidHexLiteral;
         }
@@ -2789,9 +3348,7 @@ pub const Lexer = struct {
         return result;
     }
 
-    fn parseAddressToBytes(self: *Lexer, address_str: []const u8) LexerError!([20]u8) {
-        _ = self; // Suppress unused parameter warning
-
+    fn parseAddressToBytes(address_str: []const u8) LexerError!([20]u8) {
         if (address_str.len != 40) {
             return LexerError.InvalidAddressFormat;
         }
@@ -2822,6 +3379,11 @@ pub const Lexer = struct {
         }
 
         return result;
+    }
+
+    /// Find the next safe token boundary for error recovery (instance method)
+    fn findNextTokenBoundary(self: *Lexer) u32 {
+        return ErrorRecovery.findNextTokenBoundary(self.source, self.current);
     }
 };
 
@@ -2923,7 +3485,7 @@ pub inline fn isWhitespace(c: u8) bool {
 // Token utility functions for parser use
 pub fn isKeyword(token_type: TokenType) bool {
     return switch (token_type) {
-        .Contract, .Pub, .Fn, .Let, .Var, .Const, .Immutable, .Storage, .Memory, .Tstore, .Init, .Log, .If, .Else, .While, .Break, .Continue, .Return, .Requires, .Ensures, .Invariant, .Old, .Comptime, .As, .Import, .Struct, .Enum, .True, .False => true,
+        .Contract, .Pub, .Fn, .Let, .Var, .Const, .Immutable, .Storage, .Memory, .Tstore, .Init, .Log, .If, .Else, .While, .For, .Break, .Continue, .Return, .Requires, .Ensures, .Invariant, .Old, .Switch, .Inline, .Ghost, .Assert, .Void, .Comptime, .As, .Import, .Struct, .Enum, .True, .False, .Error, .Try, .Catch, .From, .Move, .To, .Forall, .Exists, .Where, .U8, .U16, .U32, .U64, .U128, .U256, .I8, .I16, .I32, .I64, .I128, .I256, .Bool, .Address, .String, .Map, .DoubleMap, .Slice, .Bytes => true,
         else => false,
     };
 }
@@ -2937,14 +3499,14 @@ pub fn isLiteral(token_type: TokenType) bool {
 
 pub fn isOperator(token_type: TokenType) bool {
     return switch (token_type) {
-        .Plus, .Minus, .Star, .Slash, .Percent, .Equal, .EqualEqual, .BangEqual, .Less, .LessEqual, .Greater, .GreaterEqual, .Bang, .Ampersand, .Pipe, .Caret, .LeftShift, .RightShift, .PlusEqual, .MinusEqual, .StarEqual, .Arrow => true,
+        .Plus, .Minus, .Star, .Slash, .Percent, .StarStar, .Equal, .EqualEqual, .BangEqual, .Less, .LessEqual, .Greater, .GreaterEqual, .Bang, .Ampersand, .Pipe, .Caret, .LessLess, .GreaterGreater, .PlusEqual, .MinusEqual, .StarEqual, .SlashEqual, .PercentEqual, .AmpersandAmpersand, .PipePipe, .Arrow, .DotDotDot => true,
         else => false,
     };
 }
 
 pub fn isDelimiter(token_type: TokenType) bool {
     return switch (token_type) {
-        .LeftParen, .RightParen, .LeftBrace, .RightBrace, .LeftBracket, .RightBracket, .Comma, .Semicolon, .Colon, .Dot, .At => true,
+        .LeftParen, .RightParen, .LeftBrace, .RightBrace, .LeftBracket, .RightBracket, .Comma, .Semicolon, .Colon, .Dot, .DotDotDot, .At => true,
         else => false,
     };
 }

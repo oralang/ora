@@ -1,0 +1,17 @@
+// Test file with fundamental parsing errors
+contract MissingBrace {
+    // Missing opening brace
+    pub fn test_missing_brace() void 
+        return;
+    }
+
+    // Wrong token type
+    pub fn test_wrong_token(x: u256 u256) void {
+        return;
+    }
+    
+    // Missing closing parenthesis
+    pub fn test_missing_paren(x: u256 void {
+        return;
+    }
+}
