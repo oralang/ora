@@ -1,0 +1,10 @@
+fn may_fail() -> !u32 | E1 {
+    return error.E1;
+}
+
+fn caller() -> !u32 | E2 { // does not allow E1
+    const v = may_fail(); // should diagnose E1 not allowed
+    return v;
+}
+
+

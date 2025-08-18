@@ -1,0 +1,86 @@
+// ==========================================
+// FUNCTION DECLARATIONS PARSER TEST
+// ==========================================
+// This file tests the parser's ability to handle function declarations
+// with requires/ensures clauses, return types, and error handling
+
+// Error declarations for testing
+error InvalidInput(reason: string);
+error PermissionDenied(caller: address);
+
+// Contract demonstrating function declarations
+contract FunctionTest {
+    // Storage variables
+    storage var owner: address;
+    storage var value: u256;
+    
+    // Constructor
+    pub fn init() {
+        owner = std.transaction.sender;
+        value = 0;
+    }
+    
+    // Simple function with no parameters or return value
+    pub fn increment() void {
+        value += 1;
+    }
+    
+    // Function with parameters and return value
+    pub fn add(a: u256, b: u256) u256 {
+        return a + b;
+    }
+    
+    // Function with requires/ensures clauses
+    pub fn set_value(new_value: u256) bool
+        requires(new_value > 0)                  // Precondition: new value must be positive
+        requires(std.transaction.sender == owner) // Precondition: sender must be owner
+        ensures(value == new_value)              // Postcondition: value is updated correctly
+    {
+        value = new_value;
+        return true;
+    }
+    
+    // Function with error union return type
+    pub fn safe_divide(a: u256, b: u256) u256 | InvalidInput {
+        if (b == 0) {
+            return InvalidInput!("Division by zero");
+        }
+        return a / b;
+    }
+    
+    // Function with multiple error types
+    pub fn admin_operation(new_value: u256) bool | InvalidInput | PermissionDenied
+        requires(new_value != 0)
+    {
+        if (std.transaction.sender != owner) {
+            return PermissionDenied!(std.transaction.sender);
+        }
+        
+        if (new_value > 1000) {
+            return InvalidInput!("Value too large");
+        }
+        
+        value = new_value;
+        return true;
+    }
+    
+    // Function with anonymous struct return type
+    pub fn get_stats() struct { owner: address, current_value: u256, block_time: u256 } {
+        return .{
+            owner: owner,
+            current_value: value,
+            block_time: std.block.timestamp
+        };
+    }
+    
+    // Inline function
+    inline fn calculate_square(x: u256) u256 {
+        return x * x;
+    }
+    
+    // Function that uses inline function
+    pub fn compute_and_store(x: u256) u256 {
+        value = calculate_square(x);
+        return value;
+    }
+}

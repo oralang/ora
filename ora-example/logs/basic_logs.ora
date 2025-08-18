@@ -1,0 +1,19 @@
+// ==========================================
+// LOGS (EVENTS) DECLARATIONS TEST
+// ==========================================
+// This file tests log declarations syntax
+
+// Basic log declaration with parameters
+log Transfer(from: address, to: address, amount: u256);
+
+// Log declaration with different parameter types
+log Approval(owner: address, spender: address, amount: u256);
+log StatusChange(account: address, old_status: u8, new_status: u8);
+log ContractCreated(creator: address, timestamp: u256);
+
+// Log with documentation comment
+/// This event is emitted when a token is locked
+log TokenLocked(token_id: u256, until: u256);
+
+// Log with mixed types
+log MixedEvent(id: u256, name: string, active: bool, data: bytes);

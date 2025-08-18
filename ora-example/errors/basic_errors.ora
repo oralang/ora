@@ -1,0 +1,126 @@
+// ==========================================
+// ERROR HANDLING TEST
+// ==========================================
+// This file tests error declarations and error handling
+
+// Top-level error declarations
+error InsufficientBalance(required: u256, available: u256);
+error InvalidAddress;
+error Unauthorized(caller: address, required: address);
+error InvalidAmount(amount: u256);
+
+contract ErrorHandlingTest {
+    storage var owner: address;
+    storage var balance: u256;
+    
+    pub fn init() {
+        owner = std.transaction.sender;
+        balance = 1000;
+    }
+    
+    // Function that can return errors
+    pub fn transfer(to: address, amount: u256) bool | InsufficientBalance | InvalidAddress
+        requires(amount > 0)
+    {
+        // Check for zero address
+        if (to == 0x0000000000000000000000000000000000000000) {
+            return InvalidAddress;
+        }
+        
+        // Check balance
+        if (balance < amount) {
+            // Return error with parameters
+            return InsufficientBalance(amount, balance);
+        }
+        
+        // Perform transfer
+        balance -= amount;
+        return true;
+    }
+    
+    // Function with multiple possible errors
+    pub fn admin_operation(amount: u256) bool | Unauthorized | InvalidAmount {
+        // Check authorization
+        if (std.transaction.sender != owner) {
+            return Unauthorized(std.transaction.sender, owner);
+        }
+        
+        // Check amount
+        if (amount == 0) {
+            return InvalidAmount(amount);
+        }
+        
+        return true;
+    }
+    
+    // Function that handles errors with try/catch
+    pub fn safe_transfer(to: address, amount: u256) bool {
+        try {
+            // Attempt transfer
+            let result = transfer(to, amount);
+            return result;
+        } catch error {
+            // Handle specific error types
+            switch (error) {
+                InsufficientBalance => {
+                    // Log insufficient balance
+                    return false;
+                },
+                InvalidAddress => {
+                    // Log invalid address
+                    return false;
+                },
+                else => {
+                    // Handle any other errors
+                    return false;
+                }
+            }
+        }
+    }
+    
+    // Function that propagates errors
+    pub fn proxy_transfer(to: address, amount: u256) bool | InsufficientBalance | InvalidAddress {
+        // This will propagate any errors from transfer
+        return transfer(to, amount);
+    }
+    
+    // Function with custom error handling logic
+    pub fn batch_transfer(recipients: [address], amounts: [u256]) struct { success_count: u256, failed_count: u256 } {
+        let success_count: u256 = 0;
+        let failed_count: u256 = 0;
+        
+        for (recipients) |recipient, i| {
+            let amount = amounts[i];
+            
+            // Try transfer and handle errors
+            let result = transfer(recipient, amount) catch |err| {
+                failed_count += 1;
+                continue; // Skip to next iteration
+            };
+            
+            if (result) {
+                success_count += 1;
+            } else {
+                failed_count += 1;
+            }
+        }
+        
+        return .{
+            success_count: success_count,
+            failed_count: failed_count
+        };
+    }
+    
+    // Function with inline error creation
+    pub fn verify_operation(value: u256) bool | error {
+        if (value == 0) {
+            return error.ZeroValueNotAllowed;
+        }
+        
+        if (value > 1000) {
+            return error.ValueTooLarge;
+        }
+        
+        return true;
+    }
+}

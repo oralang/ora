@@ -1,198 +1,239 @@
-# Ora Development Notebook
+# Ora
 
-An experimental smart contract language with formal verification capabilities.
+An experimental (yet) smart-contract language and compiler targeting Yul/EVM. Ora emphasizes explicit semantics (types, memory regions, error unions) and a clean compilation pipeline suitable for analysis and verification.
 
-> **🚧 EXPERIMENTAL PROJECT**: Ora is NOT ready for production use. This repository serves as an open notebook documenting language design and implementation progress. Features, syntax, and APIs are subject to change without notice.
+## Status
 
-## Overview
+- Not production-ready; syntax and semantics are evolving.
+- CI builds and tests cover lexer, parser, early semantics, and Yul codegen stubs.
 
-Ora is an experimental smart contract language that compiles to Yul (Ethereum's intermediate language) and EVM bytecode. Built with Zig, it aims to provide safety guarantees through formal verification while maintaining high performance and developer productivity.
+## Highlights
 
-## Development Status
-
-### ✅ Currently Functional
-- Core compilation pipeline: Lexical analysis → Syntax analysis → Semantic analysis → HIR → Yul → Bytecode
-- Basic smart contract syntax and compilation
-- Yul code generation and EVM bytecode output
-- Error handling foundations
-
-### 🚧 In Active Development
-- **Formal Verification**: Mathematical proof capabilities for complex conditions and quantifiers
-- **Advanced Safety**: Memory safety, type safety, and overflow protection
-- **Comprehensive Error Handling**: Full `!T` error union implementation
-- **Standard Library**: Core utilities and common patterns
-
-### 📋 Planned Features
-- Compile-time evaluation optimizations
-- Advanced type system features
-- IDE integration and tooling
-- Comprehensive testing frameworks
+- Unified type system with explicit error unions: `!T | E1 | E2`
+- Memory regions: `storage`, `memory`, `tstore`, `stack` (default) with region transition checks
+- Clear, modern syntax: `->` for returns, `requires`/`ensures`, `switch` (statement/expression)
+- Restricted lvalues and explicit move semantics
 
 ## Quick Start
 
-### Prerequisites
-
-- Zig 0.14.1 or later
-- CMake (for Solidity library integration)
-- Git (for submodules)
-
-### Building
+- Prerequisites:
+  - Zig 0.14.1+
+  - CMake (for vendor Solidity libs)
+  - Git (for submodules)
 
 ```bash
-# Clone the repository
 git clone https://github.com/oralang/Ora.git
 cd Ora
-
-# Initialize submodules
 git submodule update --init --recursive
 
-# Build the compiler
 zig build
-
-# Run tests
 zig build test
 ```
 
-### Try Current Implementation
+## Language Snapshot
 
-Create a simple storage contract (`test.ora`):
+### Contracts and declarations
 
-```ora
-contract SimpleStorage {
-    storage var value: u256;
-    
-    pub fn set(new_value: u256) {
-        value = new_value;
-    }
-    
-    pub fn get() -> u256 {
-        return value;
-    }
-}
-```
-
-Compile it:
-
-```bash
-./zig-out/bin/ora test.ora
-```
-
-## Language Features (Current)
-
-### Basic Contract Structure
 ```ora
 contract MyContract {
     storage var balance: u256;
     immutable owner: address;
-    storage const MAX_SUPPLY: u256 = 1000000;
-    
-    pub fn transfer(to: address, amount: u256) -> bool {
-        // Implementation
-        return true;
+    storage const MAX_SUPPLY: u256 = 1_000_000;
+
+    pub fn set(new_value: u256) {
+        balance = new_value;
+    }
+
+    pub fn get() -> u256 {
+        return balance;
     }
 }
 ```
 
-### Error Handling (In Development)
+- Variables: `[memory_region] [var|let|const|immutable] name [: Type] [= expr];`
+- Regions: `storage`, `memory`, `tstore`, default is `stack` (no qualifier).
+
+### Types
+
+- Primitives: `u8..u256`, `i8..i256`, `bool`, `address`, `string`, `bytes`, `void`
+- Arrays/slices: `[T; N]`, `slice[T]`
+- Mappings: `map[K, V]`, `doublemap[K1, K2, V]`
+- Anonymous struct literals: `.{ .field = value, ... }`
+
+### Error unions
+
 ```ora
 error InsufficientBalance;
 error InvalidAddress;
 
-fn transfer(to: address, amount: u256) -> !u256 {
-    if (balance < amount) {
-        return error.InsufficientBalance;
-    }
-    
+fn transfer(to: address, amount: u256) -> !u256 | InsufficientBalance | InvalidAddress {
+    if (amount == 0) return error.InvalidAddress;
+    if (balance < amount) return error.InsufficientBalance;
     balance -= amount;
     return balance;
 }
 ```
 
-### Formal Verification (Planned)
+- `!T | E1 | E2` means “returns T or one of the error tags E1/E2”.
+- `try expr` unwraps success type when `expr` is an error union.
+
+### Regions and transitions
+
+- Reads from `storage` produce values in `stack`.
+- Writes to `storage` require a `storage` lvalue target.
+- `storage <- storage` bulk copies are disallowed; use element/field assignments.
+
+Examples:
+
 ```ora
-fn transfer(to: address, amount: u256) -> bool
-    requires balances[sender] >= amount
-    ensures balances[sender] + balances[to] == old(balances[sender]) + old(balances[to])
-{
-    balances[sender] -= amount;
-    balances[to] += amount;
-    return true;
+storage var s: u32;
+
+fn f() -> void {
+    let x: u32 = s;       // storage -> stack read: OK
+    s = x;                // stack -> storage write: OK
 }
 ```
+
+### Control flow and expressions
+
+- Return: `return expr;` or `return;` (only in `-> void`).
+- If/while/for/switch, expression statements, assignments, compound assignments.
+- Switch (statement or expression):
+
+```ora
+fn classify(x: u32) -> u32 {
+    switch (true) {
+        x == 0 => 0,
+        x < 10 => 1,
+        else   => 2,
+    }
+}
+```
+
+### Requires / Ensures (syntax defined)
+
+```ora
+fn sum(a: u32, b: u32) -> u32
+    requires a <= 1_000 and b <= 1_000
+    ensures  result >= a and result >= b
+{
+    return a + b;
+}
+```
+
+### Move statement
+
+```ora
+// move amount from source to dest;
+move amount from balances[sender] to balances[receiver];
+```
+
+## Grammar
+
+- Authoritative specs:
+  - `GRAMMAR.bnf`
+  - `GRAMMAR.ebnf`
+- Notable decisions:
+  - `->` for return types
+  - Unified variable declarations
+  - LHS restricted to lvalues
+  - Clear array/slice distinction: `[T; N]` vs `slice[T]`
+
+## Semantics
+
+- Phase 1: Symbol collection (top-level, contracts, function scopes, locals)
+- Phase 2: Type checks and validations:
+  - Return type compatibility and error unions
+  - Region transition rules
+  - Assignment and mutability checks
+  - Switch typing (in progress)
+  - Unknown-identifier walker (temporarily disabled by flag; will be re-enabled after scope hardening)
 
 ## Project Structure
 
 ```
-Ora/
-├── src/                    # Compiler implementation (Zig)
-│   ├── ast.zig            # Abstract Syntax Tree
-│   ├── parser.zig         # Syntax analysis
-│   ├── semantic.zig       # Semantic analysis
-│   ├── hir.zig            # High-level IR
-│   └── codegen_yul.zig    # Yul code generation
-├── examples/              # Working code examples
-│   ├── core/              # Basic functionality
-│   ├── advanced/          # Advanced features (experimental)
-│   └── tokens/            # Token contract patterns
-├── docs/                  # Technical specifications
-│   ├── GRAMMAR.bnf        # Language grammar
-│   ├── HIR_SPEC.md        # IR specification
-│   └── formal-verification.md
-├── website/               # Documentation site
-└── vendor/solidity/       # Solidity integration
+src/            // compiler sources (Zig)
+  ast/          // AST, type info
+  parser/       // lexer/parser
+  semantics/    // semantic analyzers
+  code-bin/     // extra tools (IR/optimizer)
+tests/          // fixtures and test suites
+docs/           // specifications and notes
+vendor/solidity // vendor libs
 ```
 
-## Documentation
+## Testing
 
-- **Website**: [ora-lang.org](https://ora-lang.org) - Development notebook and documentation
-- **Examples**: Browse `examples/` directory for working code patterns
-- **Grammar**: See `GRAMMAR.bnf` for current syntax specification
-- **API**: Check `API.md` for compiler interface
+- Run all suites: `zig build test`
+- Fixture-based semantics tests live under `tests/fixtures/semantics/{valid,invalid}`.
 
-## Development Notes
+## CLI usage
 
-### Technical Decisions
+Use the installed executable:
 
-- **Zig as Implementation Language**: Leverages compile-time capabilities for meta-programming
-- **Yul Backend**: Compiles to Ethereum's intermediate language for optimal bytecode generation
-- **Multi-Phase Compilation**: Separate lexical, syntax, semantic, and code generation phases
-- **Formal Verification Focus**: Designing for mathematical proof capabilities from the ground up
+- Lex: dump tokens
+```bash
+./zig-out/bin/ora lex tests/fixtures/semantics/valid/storage_region_moves.ora
+```
+Example output (first lines):
+```
+Lexing tests/fixtures/semantics/valid/storage_region_moves.ora
+==================================================
+Generated 44 tokens
 
-### Current Limitations
+[  0] Token{ .type = Storage, .lexeme = "storage", .range = 1:1-1:8 (0:7) }
+[  1] Token{ .type = Var, .lexeme = "var", .range = 1:9-1:12 (8:11) }
+[  2] Token{ .type = Identifier, .lexeme = "s", .range = 1:13-1:14 (12:13) }
+[  3] Token{ .type = Colon, .lexeme = ":", .range = 1:14-1:15 (13:14) }
+[  4] Token{ .type = U32, .lexeme = "u32", .range = 1:16-1:19 (15:18) }
+...
+```
 
-- No standard library implementation yet
-- Limited error messages and debugging information
-- Incomplete type system (basic types only)
-- No formal verification execution (syntax defined but not implemented)
-- Minimal testing framework
+- Parse: lex + parse and print AST summary
+```bash
+./zig-out/bin/ora parse tests/fixtures/semantics/valid/storage_region_moves.ora
+```
+Example output:
+```
+Parsing tests/fixtures/semantics/valid/storage_region_moves.ora
+==================================================
+Lexed 44 tokens
+Generated 2 AST nodes
 
-### Not Suitable For
+[0] Variable Storagevar 's'
+[1] Function 'f' (0 params)
+```
 
-- Production smart contracts
-- Financial applications
-- Critical infrastructure
-- Projects requiring stable APIs
-- Applications needing comprehensive tooling
+- AST JSON: generate and save AST to file
+```bash
+./zig-out/bin/ora -o build ast tests/fixtures/semantics/valid/storage_region_moves.ora
+```
+Example output:
+```
+Generating AST for tests/fixtures/semantics/valid/storage_region_moves.ora
+==================================================
+Generated 2 AST nodes
+AST saved to build/storage_region_moves.ast.json
+```
+
+Notes:
+- Commands shown above are verified against the current CLI (`src/main.zig`).
+- `parse` prints a concise AST summary; CST building is internal and not dumped by default.
+
+## Roadmap (abridged)
+
+- Complete call typing and operator typing
+- Re-enable and harden unknown-identifier walker
+- Switch typing and exhaustiveness
+- Region/immutability refinements
+- Improved diagnostics and IDs
+- Yul codegen completion and validation
 
 ## Contributing
 
-This is an experimental research project. Ways to contribute:
-
-1. **Report Issues**: File bugs for unexpected behavior
-2. **Suggest Improvements**: Discuss language design decisions
-3. **Submit Examples**: Share interesting contract patterns
-4. **Improve Documentation**: Help expand this development notebook
-
-## Community
-
-- **Source Code**: [GitHub Repository](https://github.com/oralang/Ora)
-- **Issues**: [Bug Reports & Feature Requests](https://github.com/oralang/Ora/issues)
-- **Discussions**: [GitHub Discussions](https://github.com/oralang/Ora/discussions)
+- File issues for bugs and proposals
+- PRs are welcome for tests, docs, analyzers, and parser work
 
 ## License
 
-This project is licensed under the GNU License - see the [LICENSE](LICENSE) file for details.
-
----
-
-*Last updated: December 2024 - Reflects current development status*
+- See `LICENSE` for details.

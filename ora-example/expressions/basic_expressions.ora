@@ -1,0 +1,41 @@
+let integer_literal = 42;
+let hex_literal = 0x2A;
+let binary_literal = 0b101010;
+let string_literal = "hello";
+let char_literal = 'A';
+let boolean_literal = true;
+let address_literal = 0x1234567890123456789012345678901234567890;
+
+// Basic arithmetic expressions (will be used in global context)
+let addition = 10 + 20;          // 30
+let subtraction = 20 - 10;       // 10
+let multiplication = 10 * 20;    // 200
+let division = 20 / 10;          // 2
+let modulo = 20 % 10;            // 0
+let exponentiation = 10 ** 2;    // 100
+
+// Unary expressions
+let negative = -10;              // -10
+let positive = +10;              // 10
+let boolean_not = !true;         // false
+
+// Parenthesized expressions
+let parenthesized = (10 + 20) * 2;  // 60
+
+// Precedence test expressions
+let precedence1 = 2 + 3 * 4;        // 14 (not 20)
+let precedence2 = 2 * 3 + 4;        // 10 (not 14)
+let precedence3 = 2 * (3 + 4);      // 14 (not 10)
+let precedence4 = 2 ** 3 ** 2;      // 2^(3^2) = 2^9 = 512 (not (2^3)^2 = 64)
+
+// Binary expressions with literals
+let logical_and = true && false;  // false
+let logical_or = true || false;   // true
+
+// Comparison expressions
+let equal = 10 == 10;            // true
+let not_equal = 10 != 20;        // true
+let greater = 20 > 10;           // true
+let less = 10 < 20;              // true
+let greater_equal = 10 >= 10;    // true
+let less_equal = 10 <= 20;       // true

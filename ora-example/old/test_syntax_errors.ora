@@ -1,0 +1,13 @@
+// Test file with more parser errors
+contract ErrorsTest {
+    pub fn test_syntax_errors() void {
+        // Missing semicolon
+        let x: u256 = 42
+        
+        // Extra parenthesis
+        let y: u256 = (5 + 3));
+        
+        // Invalid variable name (using reserved keyword)
+        let contract: u256 = 10;
+    }
+}

@@ -3,6 +3,9 @@ DS_Store
 zig-out/
 doc.md
 .kiro/
+code-bin/
+.vscode/
+.DS_Store
 
 # Build artifacts
 *.bin

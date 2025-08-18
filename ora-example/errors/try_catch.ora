@@ -1,0 +1,18 @@
+// ==========================================
+// TRY-CATCH SYNTAX TEST
+// ==========================================
+// This file tests try-catch syntax
+
+contract TryCatchTest {
+    pub fn test_try_catch() {
+        // Try-catch block
+        try {
+            // Code that might fail
+            let x = 1;
+            let y = 0;
+            let z = x / y; // Division by zero
+        } catch {
+            // Error handling code
+        }
+    }
+}

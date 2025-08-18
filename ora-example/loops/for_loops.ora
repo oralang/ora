@@ -1,0 +1,26 @@
+// ==========================================
+// FOR LOOP SYNTAX TEST
+// ==========================================
+// This file tests basic for loop syntax
+
+contract ForLoopTest {
+    pub fn test_for_loops() {
+        // Basic for loop with range
+        for (0..10) |value, index| {
+            // Loop body
+        }
+        
+        // For loop with array
+        let numbers = [1, 2, 3, 4, 5];
+        for (numbers) |value, index| {
+            // Loop body
+        }
+        
+        // Nested for loops
+        for (0..3) |i, _| {
+            for (0..3) |j, _| {
+                // Nested loop body
+            }
+        }
+    }
+}

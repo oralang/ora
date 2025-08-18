@@ -1,0 +1,192 @@
+// ==========================================
+// EXPRESSION PARSER TEST
+// ==========================================
+// This file tests all expression types and precedence levels
+
+contract ExpressionTest {
+    storage var test_map: map[address, u256];
+    storage var test_doublemap: doublemap[address, address, u256];
+    storage var test_array: [u256];
+    
+    pub fn test_precedence() u256 {
+        // Test all precedence levels in correct order
+        
+        // 1. Primary expressions (literals, identifiers, parentheses)
+        let primary = 42;
+        let grouped = (10 + 5);
+        
+        // 2. Unary expressions (!, -, +)
+        let negated = -primary;
+        let logical_not = !true;
+        let positive = +primary;
+        
+        // 3. Exponentiation (**) - right associative
+        let power = 2 ** 3 ** 2; // Should be 2 ** (3 ** 2) = 2 ** 9 = 512
+        
+        // 4. Factor expressions (*, /, %)
+        let multiplication = 10 * 5;
+        let division = 20 / 4;
+        let modulo = 17 % 5;
+        
+        // 5. Term expressions (+, -)
+        let addition = 10 + 5;
+        let subtraction = 20 - 8;
+        
+        // 6. Bitwise shift (<<, >>)
+        let left_shift = 8 << 2;
+        let right_shift = 32 >> 1;
+        
+        // 7. Comparison (<, <=, >, >=)
+        let less_than = 5 < 10;
+        let greater_equal = 15 >= 10;
+        
+        // 8. Equality (==, !=)
+        let equal = 5 == 5;
+        let not_equal = 3 != 7;
+        
+        // 9. Bitwise AND (&)
+        let bitwise_and = 0xFF & 0x0F;
+        
+        // 10. Bitwise XOR (^)
+        let bitwise_xor = 0xF0 ^ 0x55;
+        
+        // 11. Bitwise OR (|)
+        let bitwise_or = 0x0F | 0xF0;
+        
+        // 12. Logical AND (&&)
+        let logical_and = true && false;
+        
+        // 13. Logical OR (||)
+        let logical_or = true || false;
+        
+        // 14. Assignment (=, +=, -=, etc.)
+        let mut assignable: u256 = 10;
+        assignable += 5;
+        assignable -= 2;
+        assignable *= 3;
+        assignable /= 2;
+        assignable %= 7;
+        
+        // 15. Comma operator
+        let comma_result = (assignable = 100, assignable + 50);
+        
+        // Complex expression combining multiple precedence levels
+        let complex = 1 + 2 * 3 ** 2 > 15 && true || false;
+        
+        return assignable;
+    }
+    
+    pub fn test_function_calls() bool {
+        // Simple function call
+        let result1 = self.helper_function(10, 20);
+        
+        // Function calls with complex arguments
+        let result2 = self.complex_function(
+            10 + 20 * 3,
+            self.another_helper(),
+            test_array[0]
+        );
+        
+        return result1 && result2;
+    }
+    
+    pub fn test_field_access() u256 {
+        // Simple field access
+        let timestamp = std.block.timestamp;
+        let sender = std.transaction.sender;
+        
+        // Chained field access
+        let gas_info = std.transaction.gas_limit;
+        
+        return timestamp + gas_info;
+    }
+    
+    pub fn test_indexing() u256 {
+        // Array indexing
+        test_array = [1, 2, 3, 4, 5];
+        let array_val = test_array[0];
+        
+        // Map indexing
+        test_map[std.transaction.sender] = 1000;
+        let map_val = test_map[std.transaction.sender];
+        
+        // Double map indexing
+        test_doublemap[std.transaction.sender, std.transaction.sender] = 500;
+        let doublemap_val = test_doublemap[std.transaction.sender, std.transaction.sender];
+        
+        // Complex indexing with expressions
+        let complex_index = test_array[array_val % test_array.len()];
+        
+        return array_val + map_val + doublemap_val + complex_index;
+    }
+    
+    pub fn test_builtin_functions() u256 {
+        // Math builtin functions
+        let div_result = @divTrunc(100, 7);
+        let floor_result = @divFloor(100, 7);
+        let ceil_result = @divCeil(100, 7);
+        
+        return div_result + floor_result + ceil_result;
+    }
+    
+    pub fn test_try_expressions() u256 {
+        // Try expression
+        let result = try self.might_fail_function();
+        return result;
+    }
+    
+    pub fn test_old_expressions() u256
+        ensures(result > old(test_map[std.transaction.sender]))
+    {
+        let old_balance = test_map[std.transaction.sender];
+        test_map[std.transaction.sender] += 100;
+        return test_map[std.transaction.sender];
+    }
+    
+    pub fn test_cast_expressions() u256 {
+        let small_val: u8 = 42;
+        let big_val = @to_u256(small_val);
+        let addr_val = @to_address(0x742d35Cc6634C0532925a3b8D4C9db1c55F12345);
+        return big_val;
+    }
+    
+    pub fn test_tuple_expressions() (u256, string, bool) {
+        // Tuple creation
+        let tuple_val = (42, \"hello\", true);
+        
+        // Tuple destructuring
+        let (num, text, flag) = tuple_val;
+        
+        return (num * 2, text, !flag);
+    }
+    
+    pub fn test_range_expressions() [u256] {
+        // Range expressions
+        let range1 = 0..10;
+        let range2 = 1...5; // Inclusive range
+        
+        let mut result: [u256] = [];
+        for (range1) |_, i| {
+            result.push(i);
+        }
+        
+        return result;
+    }
+    
+    // Helper functions for testing
+    fn helper_function(a: u256, b: u256) bool {
+        return a + b > 0;
+    }
+    
+    fn another_helper() u256 {
+        return 42;
+    }
+    
+    fn complex_function(a: u256, b: u256, c: u256) bool {
+        return a + b + c > 0;
+    }
+    
+    fn might_fail_function() !u256 {
+        return 100;
+    }
+}

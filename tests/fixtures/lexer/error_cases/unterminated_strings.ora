@@ -1,0 +1,10 @@
+// Unterminated string test cases
+
+// Basic unterminated string
+"unterminated string
+
+// Unterminated string with escape
+"string with \n escape
+
+// Unterminated string at end of file
+"final string

@@ -1,0 +1,32 @@
+if (condition) {
+    return true;
+}
+
+if (x > 0) {
+    do_something();
+} else {
+    do_something_else();
+}
+
+while (counter < 10) {
+    counter += 1;
+}
+
+for (i in 0..10) {
+    process(i);
+}
+
+switch (value) {
+    case 1: return "one";
+    case 2: return "two";
+    default: return "other";
+}
+
+// move statement (new syntax)
+contract Mover {
+    storage var balances: map[address, u256];
+
+    pub fn pay(to: address, amount: u256) {
+        move amount from balances[std.transaction.sender] to balances[to];
+    }
+}

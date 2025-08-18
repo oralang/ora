@@ -1,0 +1,16 @@
+// ==========================================
+// TRANSIENT STORAGE TEST
+// ==========================================
+// This file tests transient storage variable declarations (EIP-1153)
+// These variables persist only within a single transaction
+
+contract TransientStorageTest {
+    // Regular storage for comparison
+    storage var persistent_counter: u256;
+    
+    // Transient storage variables
+    tstore var temp_counter: u256;
+    tstore var operation_state: bool;
+    tstore var batch_operations: [u256];
+    tstore var temp_map: map[address, u256];
+}

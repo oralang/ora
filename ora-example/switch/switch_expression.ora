@@ -1,0 +1,45 @@
+// ==========================================
+// SWITCH EXPRESSION SYNTAX TEST
+// ==========================================
+// This file tests switch expressions
+
+enum Role : u8 {
+    User = 0,
+    Admin = 1
+}
+
+contract SwitchExpressionTest {
+    pub fn test_switch_expression() {
+        // Switch expression returning a value
+        let value = 1;
+        let result = switch (value) {
+            0 => 10,
+            1 => 20,
+            2 => 30,
+            else => 0,
+        };
+    }
+    
+    pub fn test_switch_with_enum() {
+        let role = Role.Admin;
+        
+        // Switch with enum values
+        let permission_level = switch (role) {
+            Role.User => 1,
+            Role.Admin => 10,
+        };
+    }
+    
+    pub fn test_condition_switch() {
+        let balance = 100;
+        let is_active = true;
+        
+        // Switch without value (condition => result)
+        let status = switch {
+            is_active == false => "Inactive",
+            balance > 1000 => "Premium",
+            balance > 0 => "Standard",
+            else => "Empty",
+        };
+    }
+}

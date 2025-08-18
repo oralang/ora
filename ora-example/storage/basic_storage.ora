@@ -1,0 +1,25 @@
+// ==========================================
+// BASIC STORAGE VARIABLES TEST
+// ==========================================
+// This file tests basic storage variable declarations
+
+contract StorageTest {
+    // Basic storage variables with different types
+    storage var counter: u256;
+    storage var active: bool;
+    storage var owner: address;
+    storage var name: string;
+    storage var data: bytes;
+    
+    // Constant (immutable) storage variable
+    storage let token_name: string;
+    
+    // Storage mapping
+    storage var balances: map[address, u256];
+    
+    // Storage double mapping
+    storage var allowances: doublemap[address, address, u256];
+    
+    // Storage array
+    storage var history: [u256];
+}

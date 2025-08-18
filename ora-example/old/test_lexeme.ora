@@ -1,0 +1,15 @@
+// Test file for verifying lexeme information in AST
+enum ExampleEnum {
+    Value1 = 5,
+    Value2 = 10 + 20,
+    Value3 = (30 * 2)
+}
+
+fn test_function() {
+    // This is a test function with some expressions
+    let x: u256 = 42;
+    let y: u256 = x + 100;
+    if (x > 40) {
+        log("x is greater than 40");
+    }
+}

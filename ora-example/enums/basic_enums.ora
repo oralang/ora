@@ -1,0 +1,96 @@
+// ==========================================
+// ENUM DECLARATIONS TEST
+// ==========================================
+// This file tests only enum declarations
+
+
+// Basic enum without explicit values
+enum Status {
+    Pending,
+    Active,
+    Completed,
+    Cancelled
+}
+
+// Basic enum with explicit values
+enum StatusExplicit  : u8 {
+    Active = 0,
+    Pending = 1,
+    Suspended = 2,
+    Closed = 3
+}
+
+// Enum for operation types
+enum OperationType : u8 {
+    Create = 1,
+    Read = 2,
+    Update = 3,
+    Delete = 4
+}
+
+// Enum with comments
+enum TokenStandard : u8 {
+    ERC20 = 0,   // Fungible token
+    ERC721 = 1,  // Non-fungible token
+    ERC1155 = 2  // Multi-token
+}
+
+// Enum with explicit string values
+enum ErrorCode : string {
+    InvalidInput = "ERR_INVALID_INPUT",
+    InsufficientFunds = "ERR_INSUFFICIENT_FUNDS",
+    Unauthorized = "ERR_UNAUTHORIZED"
+}
+
+// Enum with complex expressions
+enum TestEnum {
+    Value1 = 5,
+    Value2 = 10 + 20
+}
+
+// Enum with boolean and complex values
+enum ConfigFlag {
+    Enabled = true,
+    Disabled = false,
+    Default = (1 + 2) * 3,
+    Complex = 0xFF & 0x0F
+}
+
+// Enum with identifiers as values (referencing other constants)
+enum AccessLevel {
+    None = 0,
+    Basic = None + 1,
+    Advanced = Basic + 1,
+    Admin = Advanced + 1
+}
+
+// Enum with trailing comma in the last entry
+enum Direction {
+    North,
+    East,
+    South,
+    West
+}
+
+// Enum with different integer types
+enum TokenStandard : u16 {
+    ERC20 = 20,
+    ERC721 = 721,
+    ERC1155 = 1155
+}
+
+
+
+// Enum with explicit string values
+enum ErrorCode : string {
+    InvalidInput = "ERR_INVALID_INPUT",
+    InsufficientFunds = "ERR_INSUFFICIENT_FUNDS",
+    Unauthorized = "ERR_UNAUTHORIZED"
+}
+// Enum with complex expressionss
+enum AdvancedConfig : u16 {
+    Value1 = 10,
+    Value2 = (5 + 15),
+    Value3 = (1 + 2) * 3
+}
+

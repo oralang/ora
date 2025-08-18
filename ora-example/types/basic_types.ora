@@ -1,0 +1,176 @@
+// ==========================================
+// TYPES TEST
+// ==========================================
+// This file tests various type declarations and type operations
+
+// Top-level type declarations
+struct CustomType {
+    value: u256;
+    name: string;
+}
+
+enum StatusType : u8 {
+    Active = 0,
+    Inactive = 1
+}
+
+contract TypesTest {
+    // Testing primitive types
+    storage var u8_value: u8;
+    storage var u16_value: u16;
+    storage var u32_value: u32;
+    storage var u64_value: u64;
+    storage var u128_value: u128;
+    storage var u256_value: u256;
+    storage var bool_value: bool;
+    storage var address_value: address;
+    storage var string_value: string;
+    storage var bytes_value: bytes;
+    
+    // Testing complex types
+    storage var array_value: [u256];
+    storage var map_value: map[address, u256];
+    storage var doublemap_value: doublemap[address, u8, u256];
+    storage var struct_value: CustomType;
+    storage var enum_value: StatusType;
+    
+    pub fn init() {
+        // Initialize primitive types
+        u8_value = 255;
+        u16_value = 65535;
+        u32_value = 4294967295;
+        u64_value = 18446744073709551615;
+        u128_value = 340282366920938463463374607431768211455;
+        u256_value = 115792089237316195423570985008687907853269984665640564039457584007913129639935;
+        bool_value = true;
+        address_value = 0x1234567890123456789012345678901234567890;
+        string_value = "Hello, World!";
+        bytes_value = hex"01020304";
+        
+        // Initialize complex types
+        array_value = [1, 2, 3, 4, 5];
+        struct_value = CustomType{
+            value: 42,
+            name: "test"
+        };
+        enum_value = StatusType.Active;
+    }
+    
+    // Type conversion examples
+    pub fn test_type_conversions() {
+        // Integer conversions
+        let small_value: u8 = 42;
+        let medium_value: u64 = @as(u64, small_value); // Explicit conversion
+        let large_value: u256 = medium_value; // Implicit conversion
+        
+        // Address to bytes conversion
+        let addr = 0x1234567890123456789012345678901234567890;
+        let addr_bytes: bytes = @addressToBytes(addr);
+        
+        // String to bytes
+        let str = "Hello";
+        let str_bytes: bytes = @stringToBytes(str);
+        
+        // Hex string parsing
+        let hex_value: u256 = 0x1A2B3C;
+        
+        // Boolean conversions
+        let num_bool: u8 = @boolToInt(true); // 1
+        let bool_val: bool = (num_bool != 0); // true
+    }
+    
+    // Type checking examples
+    pub fn test_type_checking(value: u256) bool {
+        // Range checking
+        if (value > 100) {
+            return false;
+        }
+        
+        // Type compatibility
+        let a: u64 = 42;
+        let b: u256 = a; // Implicit widening conversion
+        
+        // let c: u8 = b; // Error: narrowing conversion needs explicit cast
+        let c: u8 = @truncate(u8, b); // Explicit narrowing conversion
+        
+        // Enum type checking
+        let status: StatusType = StatusType.Active;
+        if (status == StatusType.Active) {
+            return true;
+        }
+        
+        return false;
+    }
+    
+    // Array type operations
+    pub fn test_array_operations() u256 {
+        // Array declaration
+        let numbers: [u256] = [1, 2, 3, 4, 5];
+        
+        // Array access
+        let first = numbers[0];
+        
+        // Array length
+        let length = numbers.len;
+        
+        // Array push
+        numbers.push(6);
+        
+        // Array iteration
+        let sum: u256 = 0;
+        for (numbers) |num, i| {
+            sum += num;
+        }
+        
+        return sum;
+    }
+    
+    // Map type operations
+    pub fn test_map_operations() u256 {
+        // Map usage
+        map_value[address_value] = 100;
+        
+        // Map access
+        let val = map_value[address_value];
+        
+        // Double map usage
+        doublemap_value[address_value, 1] = 200;
+        
+        // Double map access
+        let dval = doublemap_value[address_value, 1];
+        
+        return val + dval;
+    }
+    
+    // Struct type operations
+    pub fn test_struct_operations() CustomType {
+        // Create struct
+        let custom = CustomType{
+            value: 100,
+            name: "test struct"
+        };
+        
+        // Access struct fields
+        let val = custom.value;
+        let name = custom.name;
+        
+        // Modify struct fields
+        custom.value = 200;
+        
+        return custom;
+    }
+    
+    // Union types (for error handling)
+    pub fn test_union_return() u256 | error {
+        if (bool_value) {
+            return u256_value;
+        } else {
+            return error.InvalidState;
+        }
+    }
+    
+    // Function with type parameters
+    pub fn get_custom_type() CustomType {
+        return struct_value;
+    }
+}

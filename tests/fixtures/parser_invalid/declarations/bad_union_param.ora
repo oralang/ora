@@ -1,0 +1,3 @@
+fn bad_union_param(p: u32 | bool) -> void {}
+
+

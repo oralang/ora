@@ -1,0 +1,44 @@
+// simple_string.ora
+// Demonstrates Ora's simplified string handling for smart contracts
+
+contract StringDemo {
+    // Basic string usage
+    fn stringExample() string {
+        let simple = "This is a simple ASCII string";
+        let with_escapes = "Line 1\nLine 2\t(tabbed)";
+        let with_quotes = "He said, \"Hello world!\"";
+        
+        // Concatenation example
+        let combined = simple + " with " + with_quotes;
+        
+        return combined;
+    }
+    
+    // Using strings in logs
+    fn logExample() {
+        // Logs support string literals
+        log("Event occurred");
+        
+        // String concatenation in logs
+        let status = "completed";
+        log("Operation " + status);
+        
+        // Strings with special characters
+        log("Multiple\nLines\nIn\nLog");
+    }
+    
+    // Using strings with other types
+    fn stringWithTypes() string {
+        let count: u32 = 42;
+        
+        // In a real implementation, this would use string interpolation or toString()
+        // This is just a placeholder for demonstration
+        return "Count: " + toString(count);
+    }
+    
+    // Placeholder for string conversion utility
+    fn toString(value: u32) string {
+        // In a real implementation, this would convert integers to strings
+        return "42";
+    }
+}

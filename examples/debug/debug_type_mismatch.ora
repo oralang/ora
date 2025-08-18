@@ -1,7 +1,0 @@
-contract TypeMismatchTest {
-    let sum: i32 = 10 + (-5);  // Arithmetic with negative
-    
-    pub fn init() {
-        // Empty init
-    }
-} 

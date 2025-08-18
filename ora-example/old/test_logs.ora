@@ -1,0 +1,123 @@
+// ==========================================
+// LOG EVENTS PARSER TEST
+// ==========================================
+// This file tests the parser's ability to handle log declarations
+// and emit events with various parameter types
+
+// Log declarations (events)
+log Transfer(from: address, to: address, amount: u256);     // Standard transfer event
+log Approval(owner: address, spender: address, amount: u256); // Approval event
+log TokenMint(to: address, amount: u256);                   // Token minting event
+log TokenBurn(from: address, amount: u256);                 // Token burning event
+log ContractPaused(by: address, time: u256);                // Admin event
+log ContractUnpaused(by: address, time: u256);              // Admin event
+
+// Contract demonstrating log/event usage
+contract EventTest {
+    // Storage variables
+    storage var owner: address;
+    storage var paused: bool;
+    storage var balances: map[address, u256];
+    storage var allowances: doublemap[address, address, u256];
+    
+    // Constructor
+    pub fn init() {
+        owner = std.transaction.sender;
+        paused = false;
+    }
+    
+    // Function that emits Transfer event
+    pub fn transfer(to: address, amount: u256) bool {
+        // Check if contract is paused
+        if (paused) {
+            return false;
+        }
+        
+        // Ensure sender has enough balance
+        if (balances[std.transaction.sender] < amount) {
+            return false;
+        }
+        
+        // Update balances
+        balances[std.transaction.sender] -= amount;
+        balances[to] += amount;
+        
+        // Emit Transfer event
+        log Transfer(std.transaction.sender, to, amount);
+        
+        return true;
+    }
+    
+    // Function that emits Approval event
+    pub fn approve(spender: address, amount: u256) bool {
+        // Check if contract is paused
+        if (paused) {
+            return false;
+        }
+        
+        // Update allowance
+        allowances[std.transaction.sender, spender] = amount;
+        
+        // Emit Approval event
+        log Approval(std.transaction.sender, spender, amount);
+        
+        return true;
+    }
+    
+    // Admin function that emits contract status events
+    pub fn set_paused(new_paused: bool) bool {
+        // Only owner can pause/unpause
+        if (std.transaction.sender != owner) {
+            return false;
+        }
+        
+        // Set new pause state
+        paused = new_paused;
+        
+        // Emit appropriate event based on state
+        if (new_paused) {
+            log ContractPaused(std.transaction.sender, std.block.timestamp);
+        } else {
+            log ContractUnpaused(std.transaction.sender, std.block.timestamp);
+        }
+        
+        return true;
+    }
+    
+    // Function that emits mint event
+    pub fn mint(to: address, amount: u256) bool {
+        // Only owner can mint
+        if (std.transaction.sender != owner) {
+            return false;
+        }
+        
+        // Update recipient balance
+        balances[to] += amount;
+        
+        // Emit TokenMint event
+        log TokenMint(to, amount);
+        
+        return true;
+    }
+    
+    // Function that emits burn event
+    pub fn burn(from: address, amount: u256) bool {
+        // Only owner can burn other's tokens
+        if (std.transaction.sender != owner && std.transaction.sender != from) {
+            return false;
+        }
+        
+        // Check if enough balance to burn
+        if (balances[from] < amount) {
+            return false;
+        }
+        
+        // Update balance
+        balances[from] -= amount;
+        
+        // Emit TokenBurn event
+        log TokenBurn(from, amount);
+        
+        return true;
+    }
+}

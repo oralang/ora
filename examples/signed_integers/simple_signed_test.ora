@@ -1,6 +1,0 @@
-contract SimpleSignedTest {
-    storage const value: i32 = -42;
-    
-    pub fn init() {
-    }
-} 

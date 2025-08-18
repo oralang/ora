@@ -1,0 +1,92 @@
+// ==========================================
+// STRUCT DECLARATIONS PARSER TEST
+// ==========================================
+// This file tests the parser's ability to handle struct declarations
+// with various field types and struct initialization
+
+// Simple struct with basic fields
+struct TokenConfig {
+    name: string;           // Token name
+    symbol: string;         // Token symbol
+    decimals: u8;           // Number of decimal places
+    max_supply: u256;       // Maximum token supply
+}
+
+// Struct with more complex fields
+struct AccountInfo {
+    balance: u256;          // Account token balance
+    locked_until: u256;     // Timestamp until which account is locked
+    is_frozen: bool;        // Whether account is frozen
+    last_transfer: u256;    // Timestamp of last transfer
+}
+
+// Struct with nested struct reference
+struct TransferData {
+    from: address;          // Transfer sender
+    to: address;            // Transfer recipient
+    amount: u256;           // Transfer amount
+    fee: u256;              // Fee charged
+    timestamp: u256;        // When transfer occurred
+    account_info: AccountInfo; // Nested struct reference
+}
+
+// Contract demonstrating struct usage
+contract StructTest {
+    // Storage variables using structs
+    storage var token: TokenConfig;
+    storage var accounts: map[address, AccountInfo];
+    
+    // Constructor with struct initialization
+    pub fn init(name: string, symbol: string) {
+        // Initialize TokenConfig struct
+        token = TokenConfig {
+            name: name,
+            symbol: symbol,
+            decimals: 18,
+            max_supply: 1000000000000000000000000
+        };
+        
+        // Initialize account struct for contract creator
+        accounts[std.transaction.sender] = AccountInfo {
+            balance: 0,
+            locked_until: 0,
+            is_frozen: false,
+            last_transfer: std.block.timestamp
+        };
+    }
+    
+    // Function that returns struct
+    pub fn get_token_info() TokenConfig {
+        return token;
+    }
+    
+    // Function that creates and returns a TransferData struct
+    pub fn create_transfer_data(to: address, amount: u256) TransferData {
+        // Get sender's account info
+        let sender_info = accounts[std.transaction.sender];
+        
+        // Create and return TransferData struct
+        return TransferData {
+            from: std.transaction.sender,
+            to: to,
+            amount: amount,
+            fee: 0,
+            timestamp: std.block.timestamp,
+            account_info: sender_info
+        };
+    }
+    
+    // Function that demonstrates struct destructuring
+    pub fn update_account_info(account: address, new_balance: u256) {
+        // Destructuring assignment to extract fields
+        let .{ balance, locked_until, is_frozen, last_transfer } = accounts[account];
+        
+        // Update with new balance but keep other fields
+        accounts[account] = AccountInfo {
+            balance: new_balance,
+            locked_until: locked_until,
+            is_frozen: is_frozen,
+            last_transfer: std.block.timestamp
+        };
+    }
+}

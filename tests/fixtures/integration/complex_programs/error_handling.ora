@@ -1,0 +1,65 @@
+error InsufficientBalance(required: u256, available: u256);
+error Unauthorized(caller: address);
+error InvalidInput(message: string);
+
+contract ErrorHandlingContract {
+    storage {
+        balances: map<address, u256>,
+        authorized: map<address, bool>,
+    }
+    
+    pub fn withdraw(amount: u256) -> u256 {
+        let balance = balances[msg.sender];
+        
+        if (balance < amount) {
+            return error InsufficientBalance(amount, balance);
+        }
+        
+        balances[msg.sender] -= amount;
+        return amount;
+    }
+    
+    pub fn authorized_action(data: string) -> bool {
+        if (!authorized[msg.sender]) {
+            return error Unauthorized(msg.sender);
+        }
+        
+        if (data.len == 0) {
+            return error InvalidInput("Data cannot be empty");
+        }
+        
+        // Perform action
+        return true;
+    }
+    
+    pub fn safe_divide(a: u256, b: u256) -> u256 {
+        try {
+            if (b == 0) {
+                return error InvalidInput("Division by zero");
+            }
+            return a / b;
+        } catch (err) {
+            log("Division error", err);
+            return 0;
+        }
+    }
+    
+    pub fn batch_operation(amounts: slice<u256>) -> slice<u256> {
+        let results: slice<u256> = [];
+        
+        for (amount in amounts) {
+            try {
+                let result = withdraw(amount);
+                results.push(result);
+            } catch (InsufficientBalance(req, avail)) {
+                log("Insufficient balance", req, avail);
+                results.push(0);
+            } catch (err) {
+                log("Unexpected error", err);
+                results.push(0);
+            }
+        }
+        
+        return results;
+    }
+}

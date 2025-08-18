@@ -1,0 +1,32 @@
+struct Point {
+    x: u256,
+    y: u256,
+}
+
+struct Person {
+    name: string,
+    age: u8,
+    address: address,
+}
+
+struct Empty {}
+
+struct Generic<T> {
+    value: T,
+    count: u256,
+}
+
+struct Nested {
+    point: Point,
+    person: Person,
+    data: map<string, u256>,
+}
+
+// Field using anonymous struct type
+struct UsesAnonymous {
+    cfg: struct { a: u32, b: bool },
+}
+
+// Error union with pipe in type position (allowed per grammar): return type only
+fn may_fail() -> !u256 | ErrorType {
+}
