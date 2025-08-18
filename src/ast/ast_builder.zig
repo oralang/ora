@@ -1,3 +1,33 @@
+// ============================================================================
+// Ora AST Builder
+//
+// Provides a fluent, type-safe API for constructing Abstract Syntax Tree (AST)
+// nodes programmatically. The builder integrates with AstArena for memory
+// management and includes comprehensive validation and diagnostic collection.
+//
+// Key Features:
+// - Fluent API for building complex AST structures
+// - Arena-based memory management (all nodes owned by AstArena)
+// - Built-in validation with configurable error collection
+// - Diagnostic reporting with spans and error codes
+// - Type-safe expression construction with operator precedence
+// - Contract, function, and statement builders
+//
+// Usage:
+//   var arena = AstArena.init(allocator);
+//   var builder = AstBuilder.init(&arena);
+//   var contract = try builder.contract("MyContract");
+//   // ... build contract members
+//   const contract_node = try contract.build();
+//
+// Safety Notes:
+// - All nodes become invalid after arena deinit/reset
+// - Builder must be finalized before accessing built nodes
+// - Validation errors prevent finalization until resolved
+// - Not thread-safe; intended for single-threaded construction
+//
+// ============================================================================
+
 const std = @import("std");
 const ast = @import("../ast.zig");
 const ast_arena = @import("ast_arena.zig");
@@ -5,50 +35,38 @@ const semantics = @import("../semantics.zig");
 const TypeInfo = @import("type_info.zig").TypeInfo;
 const TypeCategory = @import("type_info.zig").TypeCategory;
 const OraType = @import("type_info.zig").OraType;
-const SourceSpan = @import("types.zig").SourceSpan;
-
-const type_validator = struct {
-    // Create a minimal interface for TypeValidator to make code compile
-    // TODO: This will be replaced with proper imports when TypeValidator is integrated
-    pub const TypeValidator = struct {
-        pub fn init(allocator: std.mem.Allocator) TypeValidator {
-            _ = allocator;
-            return TypeValidator{};
-        }
-
-        pub fn deinit(self: *TypeValidator) void {
-            _ = self;
-        }
-
-        pub fn validateNode(self: *TypeValidator, node: *ast.AstNode) anyerror!void {
-            _ = self;
-            _ = node;
-        }
-    };
-};
+const SourceSpan = @import("../ast.zig").SourceSpan;
 
 /// Error types for AST builder operations
+/// These errors are returned when builder operations fail validation or encounter invalid state
 pub const BuilderError = error{
-    /// Validation failed during construction
+    /// Validation failed during construction (e.g., invalid node structure, type mismatch)
     ValidationFailed,
-    /// Invalid node type for operation
+    /// Invalid node type for the requested operation (e.g., using expression where statement expected)
     InvalidNodeType,
-    /// Missing required field
+    /// Missing required field in node construction (e.g., function without name)
     MissingRequiredField,
-    /// Invalid builder state
+    /// Invalid builder state (e.g., using finalized builder)
     InvalidBuilderState,
-    /// Memory allocation failed
+    /// Memory allocation failed during node creation
     OutOfMemory,
-    /// Builder was finalized and cannot be modified
+    /// Builder was finalized and cannot be modified further
     BuilderFinalized,
 };
 
 /// Diagnostic collector for builder operations
+/// Collects and manages validation errors, warnings, and informational messages
+/// with source spans for precise error reporting
 pub const DiagnosticCollector = struct {
+    /// Allocator for diagnostic message storage
     allocator: std.mem.Allocator,
+    /// Collection of diagnostic messages with spans
     diagnostics: std.ArrayList(semantics.Diagnostic),
+    /// Maximum number of errors to collect before stopping
     max_errors: u32,
+    /// Current count of error diagnostics
     error_count: u32,
+    /// Current count of warning diagnostics
     warning_count: u32,
 
     pub fn init(allocator: std.mem.Allocator, max_errors: u32) DiagnosticCollector {
@@ -129,31 +147,31 @@ pub const DiagnosticCollector = struct {
 };
 
 /// Core AST builder with arena integration and diagnostic collection
+/// Provides the main interface for constructing AST nodes with validation and error reporting
 pub const AstBuilder = struct {
+    /// Arena allocator for all AST node memory management
     arena: *ast_arena.AstArena,
+    /// Diagnostic collector for validation errors and warnings
     diagnostics: DiagnosticCollector,
-    validator: ?*type_validator.TypeValidator,
+
+    /// Whether the builder has been finalized (no more modifications allowed)
     finalized: bool,
+    /// Whether validation is enabled during construction
     validation_enabled: bool,
+    /// Collection of all built AST nodes
     built_nodes: std.ArrayList(ast.AstNode),
+    /// Counter for tracking total nodes created
     node_counter: u32,
 
     pub fn init(arena: *ast_arena.AstArena) AstBuilder {
         return AstBuilder{
             .arena = arena,
             .diagnostics = DiagnosticCollector.init(arena.allocator(), 100),
-            .validator = null,
             .finalized = false,
             .validation_enabled = true,
             .built_nodes = std.ArrayList(ast.AstNode).init(arena.allocator()),
             .node_counter = 0,
         };
-    }
-
-    pub fn initWithValidator(arena: *ast_arena.AstArena, validator: *type_validator.TypeValidator) AstBuilder {
-        var builder = init(arena);
-        builder.validator = validator;
-        return builder;
     }
 
     pub fn deinit(self: *AstBuilder) void {
@@ -194,44 +212,50 @@ pub const AstBuilder = struct {
         self.node_counter += 1;
     }
 
-    // Contract building
+    /// Create a new contract builder for fluent contract construction
+    /// Returns a ContractBuilder that can be used to add functions, variables, etc.
     pub fn contract(self: *AstBuilder, name: []const u8) !ContractBuilder {
         if (self.finalized) return BuilderError.BuilderFinalized;
         return ContractBuilder.init(self, name);
     }
 
-    // Expression building
+    /// Create a new expression builder for fluent expression construction
+    /// Returns an ExpressionBuilder with methods for creating various expression types
     pub fn expr(self: *AstBuilder) ExpressionBuilder {
         return ExpressionBuilder.init(self);
     }
 
-    pub fn literal(self: *AstBuilder, value: anytype, span: ast.SourceSpan) !*ast.ExprNode {
+    /// Create a literal expression node from a value of any supported type
+    /// Supports string, boolean, and integer literals with automatic type detection
+    /// Integer literals are converted to strings for consistent storage
+    pub fn literal(self: *AstBuilder, value: anytype, span: ast.SourceSpan) !*ast.Expressions.ExprNode {
         if (self.finalized) return BuilderError.BuilderFinalized;
 
-        const expr_node = try self.arena.createNode(ast.ExprNode);
+        const expr_node = try self.arena.createNode(ast.Expressions.ExprNode);
         const T = @TypeOf(value);
 
         if (T == []const u8) {
-            // String literal
+            // String literal - store as owned string in arena
             const owned_value = try self.arena.createString(value);
-            expr_node.* = ast.ExprNode{ .Literal = .{ .String = .{
+            expr_node.* = ast.Expressions.ExprNode{ .Literal = .{ .String = .{
                 .value = owned_value,
                 .span = span,
             } } };
         } else if (T == bool) {
-            // Boolean literal
-            expr_node.* = ast.ExprNode{ .Literal = .{ .Bool = .{
+            // Boolean literal - store boolean value directly
+            expr_node.* = ast.Expressions.ExprNode{ .Literal = .{ .Bool = .{
                 .value = value,
                 .span = span,
             } } };
         } else if (comptime @typeInfo(T) == .int) {
-            // Integer literal - convert to string for storage
+            // Integer literal - convert to string for consistent storage format
             const value_str = try std.fmt.allocPrint(self.arena.allocator(), "{}", .{value});
-            expr_node.* = ast.ExprNode{ .Literal = .{ .Integer = .{
+            expr_node.* = ast.Expressions.ExprNode{ .Literal = .{ .Integer = .{
                 .value = value_str,
                 .span = span,
             } } };
         } else {
+            // Unsupported literal type - report error
             const type_name = @typeName(T);
             const error_msg = try std.fmt.allocPrint(self.arena.allocator(), "Unsupported literal type: {s}", .{type_name});
             try self.diagnostics.addError(span, error_msg);
@@ -246,12 +270,12 @@ pub const AstBuilder = struct {
     }
 
     /// Create a string literal with explicit type checking
-    pub fn stringLiteral(self: *AstBuilder, value: []const u8, span: ast.SourceSpan) !*ast.ExprNode {
+    pub fn stringLiteral(self: *AstBuilder, value: []const u8, span: ast.SourceSpan) !*ast.Expressions.ExprNode {
         if (self.finalized) return BuilderError.BuilderFinalized;
 
-        const expr_node = try self.arena.createNode(ast.ExprNode);
+        const expr_node = try self.arena.createNode(ast.Expressions.ExprNode);
         const owned_value = try self.arena.createString(value);
-        expr_node.* = ast.ExprNode{ .Literal = .{ .String = .{
+        expr_node.* = ast.Expressions.ExprNode{ .Literal = .{ .String = .{
             .value = owned_value,
             .span = span,
         } } };
@@ -264,7 +288,7 @@ pub const AstBuilder = struct {
     }
 
     /// Create an integer literal with explicit type checking
-    pub fn integerLiteral(self: *AstBuilder, value: []const u8, span: ast.SourceSpan) !*ast.ExprNode {
+    pub fn integerLiteral(self: *AstBuilder, value: []const u8, span: ast.SourceSpan) !*ast.Expressions.ExprNode {
         if (self.finalized) return BuilderError.BuilderFinalized;
 
         // Validate integer format
@@ -273,9 +297,9 @@ pub const AstBuilder = struct {
             return BuilderError.ValidationFailed;
         }
 
-        const expr_node = try self.arena.createNode(ast.ExprNode);
+        const expr_node = try self.arena.createNode(ast.Expressions.ExprNode);
         const owned_value = try self.arena.createString(value);
-        expr_node.* = ast.ExprNode{ .Literal = .{ .Integer = .{
+        expr_node.* = ast.Expressions.ExprNode{ .Literal = .{ .Integer = .{
             .value = owned_value,
             .span = span,
         } } };
@@ -288,11 +312,11 @@ pub const AstBuilder = struct {
     }
 
     /// Create a boolean literal with explicit type checking
-    pub fn boolLiteral(self: *AstBuilder, value: bool, span: ast.SourceSpan) !*ast.ExprNode {
+    pub fn boolLiteral(self: *AstBuilder, value: bool, span: ast.SourceSpan) !*ast.Expressions.ExprNode {
         if (self.finalized) return BuilderError.BuilderFinalized;
 
-        const expr_node = try self.arena.createNode(ast.ExprNode);
-        expr_node.* = ast.ExprNode{ .Literal = .{ .Bool = .{
+        const expr_node = try self.arena.createNode(ast.Expressions.ExprNode);
+        expr_node.* = ast.Expressions.ExprNode{ .Literal = .{ .Bool = .{
             .value = value,
             .span = span,
         } } };
@@ -305,7 +329,7 @@ pub const AstBuilder = struct {
     }
 
     /// Create an address literal with validation
-    pub fn addressLiteral(self: *AstBuilder, value: []const u8, span: ast.SourceSpan) !*ast.ExprNode {
+    pub fn addressLiteral(self: *AstBuilder, value: []const u8, span: ast.SourceSpan) !*ast.Expressions.ExprNode {
         if (self.finalized) return BuilderError.BuilderFinalized;
 
         // Basic address validation (should be hex string)
@@ -314,9 +338,9 @@ pub const AstBuilder = struct {
             return BuilderError.ValidationFailed;
         }
 
-        const expr_node = try self.arena.createNode(ast.ExprNode);
+        const expr_node = try self.arena.createNode(ast.Expressions.ExprNode);
         const owned_value = try self.arena.createString(value);
-        expr_node.* = ast.ExprNode{ .Literal = .{ .Address = .{
+        expr_node.* = ast.Expressions.ExprNode{ .Literal = .{ .Address = .{
             .value = owned_value,
             .span = span,
         } } };
@@ -329,7 +353,7 @@ pub const AstBuilder = struct {
     }
 
     /// Create a hex literal with validation
-    pub fn hexLiteral(self: *AstBuilder, value: []const u8, span: ast.SourceSpan) !*ast.ExprNode {
+    pub fn hexLiteral(self: *AstBuilder, value: []const u8, span: ast.SourceSpan) !*ast.Expressions.ExprNode {
         if (self.finalized) return BuilderError.BuilderFinalized;
 
         // Basic hex validation
@@ -338,9 +362,9 @@ pub const AstBuilder = struct {
             return BuilderError.ValidationFailed;
         }
 
-        const expr_node = try self.arena.createNode(ast.ExprNode);
+        const expr_node = try self.arena.createNode(ast.Expressions.ExprNode);
         const owned_value = try self.arena.createString(value);
-        expr_node.* = ast.ExprNode{ .Literal = .{ .Hex = .{
+        expr_node.* = ast.Expressions.ExprNode{ .Literal = .{ .Hex = .{
             .value = owned_value,
             .span = span,
         } } };
@@ -352,12 +376,12 @@ pub const AstBuilder = struct {
         return expr_node;
     }
 
-    pub fn identifier(self: *AstBuilder, name: []const u8, span: ast.SourceSpan) !*ast.ExprNode {
+    pub fn identifier(self: *AstBuilder, name: []const u8, span: ast.SourceSpan) !*ast.Expressions.ExprNode {
         if (self.finalized) return BuilderError.BuilderFinalized;
 
-        const expr_node = try self.arena.createNode(ast.ExprNode);
+        const expr_node = try self.arena.createNode(ast.Expressions.ExprNode);
         const owned_name = try self.arena.createString(name);
-        expr_node.* = ast.ExprNode{ .Identifier = .{
+        expr_node.* = ast.Expressions.ExprNode{ .Identifier = .{
             .name = owned_name,
             .span = span,
         } };
@@ -369,14 +393,18 @@ pub const AstBuilder = struct {
         return expr_node;
     }
 
-    pub fn binary(self: *AstBuilder, lhs: *ast.ExprNode, op: ast.BinaryOp, rhs: *ast.ExprNode, span: ast.SourceSpan) !*ast.ExprNode {
+    /// Create a binary expression node with left and right operands and an operator
+    /// Validates that operands are provided and creates the expression in the arena
+    /// Note: Operand validation is limited in Zig due to pointer comparison restrictions
+    pub fn binary(self: *AstBuilder, lhs: *ast.Expressions.ExprNode, op: ast.Operators.Binary, rhs: *ast.Expressions.ExprNode, span: ast.SourceSpan) !*ast.Expressions.ExprNode {
         if (self.finalized) return BuilderError.BuilderFinalized;
 
-        // Validate operands are not null (basic validation)
+        // Basic validation - ensure operands are provided
         // Note: In Zig, we can't directly compare pointers to undefined at runtime
+        // More comprehensive validation would be done by TypeValidator integration
 
-        const expr_node = try self.arena.createNode(ast.ExprNode);
-        expr_node.* = ast.ExprNode{ .Binary = .{
+        const expr_node = try self.arena.createNode(ast.Expressions.ExprNode);
+        expr_node.* = ast.Expressions.ExprNode{ .Binary = .{
             .lhs = lhs,
             .operator = op,
             .rhs = rhs,
@@ -391,13 +419,13 @@ pub const AstBuilder = struct {
     }
 
     /// Create a unary expression with validation
-    pub fn unary(self: *AstBuilder, op: ast.UnaryOp, operand: *ast.ExprNode, span: ast.SourceSpan) !*ast.ExprNode {
+    pub fn unary(self: *AstBuilder, op: ast.Operators.Unary, operand: *ast.Expressions.ExprNode, span: ast.SourceSpan) !*ast.Expressions.ExprNode {
         if (self.finalized) return BuilderError.BuilderFinalized;
 
         // Note: In Zig, we can't directly compare pointers to undefined at runtime
 
-        const expr_node = try self.arena.createNode(ast.ExprNode);
-        expr_node.* = ast.ExprNode{ .Unary = .{
+        const expr_node = try self.arena.createNode(ast.Expressions.ExprNode);
+        expr_node.* = ast.Expressions.ExprNode{ .Unary = .{
             .operator = op,
             .operand = operand,
             .span = span,
@@ -410,13 +438,16 @@ pub const AstBuilder = struct {
         return expr_node;
     }
 
-    /// Create an assignment expression with validation
-    pub fn assignment(self: *AstBuilder, target: *ast.ExprNode, value: *ast.ExprNode, span: ast.SourceSpan) !*ast.ExprNode {
+    /// Create an assignment expression with target validation
+    /// Validates that the target is assignable (identifier, field access, or index)
+    /// Reports validation errors for invalid assignment targets
+    pub fn assignment(self: *AstBuilder, target: *ast.Expressions.ExprNode, value: *ast.Expressions.ExprNode, span: ast.SourceSpan) !*ast.Expressions.ExprNode {
         if (self.finalized) return BuilderError.BuilderFinalized;
 
+        // Basic operand validation
         // Note: In Zig, we can't directly compare pointers to undefined at runtime
 
-        // Validate that target is assignable (identifier, field access, or index)
+        // Validate that target is assignable (only certain expression types can be assigned to)
         switch (target.*) {
             .Identifier, .FieldAccess, .Index => {}, // Valid assignment targets
             else => {
@@ -425,8 +456,8 @@ pub const AstBuilder = struct {
             },
         }
 
-        const expr_node = try self.arena.createNode(ast.ExprNode);
-        expr_node.* = ast.ExprNode{ .Assignment = .{
+        const expr_node = try self.arena.createNode(ast.Expressions.ExprNode);
+        expr_node.* = ast.Expressions.ExprNode{ .Assignment = .{
             .target = target,
             .value = value,
             .span = span,
@@ -440,7 +471,7 @@ pub const AstBuilder = struct {
     }
 
     /// Create a compound assignment expression with validation
-    pub fn compoundAssignment(self: *AstBuilder, target: *ast.ExprNode, op: ast.CompoundAssignmentOp, value: *ast.ExprNode, span: ast.SourceSpan) !*ast.ExprNode {
+    pub fn compoundAssignment(self: *AstBuilder, target: *ast.Expressions.ExprNode, op: ast.Operators.Compound, value: *ast.Expressions.ExprNode, span: ast.SourceSpan) !*ast.Expressions.ExprNode {
         if (self.finalized) return BuilderError.BuilderFinalized;
 
         // Note: In Zig, we can't directly compare pointers to undefined at runtime
@@ -454,8 +485,8 @@ pub const AstBuilder = struct {
             },
         }
 
-        const expr_node = try self.arena.createNode(ast.ExprNode);
-        expr_node.* = ast.ExprNode{ .CompoundAssignment = .{
+        const expr_node = try self.arena.createNode(ast.Expressions.ExprNode);
+        expr_node.* = ast.Expressions.ExprNode{ .CompoundAssignment = .{
             .target = target,
             .operator = op,
             .value = value,
@@ -474,13 +505,13 @@ pub const AstBuilder = struct {
         return StatementBuilder.init(self);
     }
 
-    pub fn block(self: *AstBuilder, statements: []ast.StmtNode, span: ast.SourceSpan) !ast.BlockNode {
+    pub fn block(self: *AstBuilder, statements: []ast.Statements.StmtNode, span: ast.SourceSpan) !ast.Statements.BlockNode {
         if (self.finalized) return BuilderError.BuilderFinalized;
 
-        const owned_statements = try self.arena.createSlice(ast.StmtNode, statements.len);
+        const owned_statements = try self.arena.createSlice(ast.Statements.StmtNode, statements.len);
         @memcpy(owned_statements, statements);
 
-        const block_node = ast.BlockNode{
+        const block_node = ast.Statements.BlockNode{
             .statements = owned_statements,
             .span = span,
         };
@@ -497,61 +528,68 @@ pub const AstBuilder = struct {
         return TypeBuilder.init(self);
     }
 
-    /// Helper method to create arithmetic expressions with precedence handling
-    pub fn add(self: *AstBuilder, lhs: *ast.ExprNode, rhs: *ast.ExprNode, span: ast.SourceSpan) !*ast.ExprNode {
+    /// Helper method to create addition expressions (+)
+    /// Convenience wrapper around binary() for arithmetic operations
+    pub fn add(self: *AstBuilder, lhs: *ast.Expressions.ExprNode, rhs: *ast.Expressions.ExprNode, span: ast.SourceSpan) !*ast.Expressions.ExprNode {
         return self.binary(lhs, .Plus, rhs, span);
     }
 
-    pub fn subtract(self: *AstBuilder, lhs: *ast.ExprNode, rhs: *ast.ExprNode, span: ast.SourceSpan) !*ast.ExprNode {
+    /// Helper method to create subtraction expressions (-)
+    /// Convenience wrapper around binary() for arithmetic operations
+    pub fn subtract(self: *AstBuilder, lhs: *ast.Expressions.ExprNode, rhs: *ast.Expressions.ExprNode, span: ast.SourceSpan) !*ast.Expressions.ExprNode {
         return self.binary(lhs, .Minus, rhs, span);
     }
 
-    pub fn multiply(self: *AstBuilder, lhs: *ast.ExprNode, rhs: *ast.ExprNode, span: ast.SourceSpan) !*ast.ExprNode {
+    /// Helper method to create multiplication expressions (*)
+    /// Convenience wrapper around binary() for arithmetic operations
+    pub fn multiply(self: *AstBuilder, lhs: *ast.Expressions.ExprNode, rhs: *ast.Expressions.ExprNode, span: ast.SourceSpan) !*ast.Expressions.ExprNode {
         return self.binary(lhs, .Star, rhs, span);
     }
 
-    pub fn divide(self: *AstBuilder, lhs: *ast.ExprNode, rhs: *ast.ExprNode, span: ast.SourceSpan) !*ast.ExprNode {
+    /// Helper method to create division expressions (/)
+    /// Convenience wrapper around binary() for arithmetic operations
+    pub fn divide(self: *AstBuilder, lhs: *ast.Expressions.ExprNode, rhs: *ast.Expressions.ExprNode, span: ast.SourceSpan) !*ast.Expressions.ExprNode {
         return self.binary(lhs, .Slash, rhs, span);
     }
 
     /// Helper method to create comparison expressions
-    pub fn equal(self: *AstBuilder, lhs: *ast.ExprNode, rhs: *ast.ExprNode, span: ast.SourceSpan) !*ast.ExprNode {
+    pub fn equal(self: *AstBuilder, lhs: *ast.Expressions.ExprNode, rhs: *ast.Expressions.ExprNode, span: ast.SourceSpan) !*ast.Expressions.ExprNode {
         return self.binary(lhs, .EqualEqual, rhs, span);
     }
 
-    pub fn notEqual(self: *AstBuilder, lhs: *ast.ExprNode, rhs: *ast.ExprNode, span: ast.SourceSpan) !*ast.ExprNode {
+    pub fn notEqual(self: *AstBuilder, lhs: *ast.Expressions.ExprNode, rhs: *ast.Expressions.ExprNode, span: ast.SourceSpan) !*ast.Expressions.ExprNode {
         return self.binary(lhs, .BangEqual, rhs, span);
     }
 
-    pub fn lessThan(self: *AstBuilder, lhs: *ast.ExprNode, rhs: *ast.ExprNode, span: ast.SourceSpan) !*ast.ExprNode {
+    pub fn lessThan(self: *AstBuilder, lhs: *ast.Expressions.ExprNode, rhs: *ast.Expressions.ExprNode, span: ast.SourceSpan) !*ast.Expressions.ExprNode {
         return self.binary(lhs, .Less, rhs, span);
     }
 
-    pub fn greaterThan(self: *AstBuilder, lhs: *ast.ExprNode, rhs: *ast.ExprNode, span: ast.SourceSpan) !*ast.ExprNode {
+    pub fn greaterThan(self: *AstBuilder, lhs: *ast.Expressions.ExprNode, rhs: *ast.Expressions.ExprNode, span: ast.SourceSpan) !*ast.Expressions.ExprNode {
         return self.binary(lhs, .Greater, rhs, span);
     }
 
     /// Helper method to create logical expressions
-    pub fn logicalAnd(self: *AstBuilder, lhs: *ast.ExprNode, rhs: *ast.ExprNode, span: ast.SourceSpan) !*ast.ExprNode {
+    pub fn logicalAnd(self: *AstBuilder, lhs: *ast.Expressions.ExprNode, rhs: *ast.Expressions.ExprNode, span: ast.SourceSpan) !*ast.Expressions.ExprNode {
         return self.binary(lhs, .And, rhs, span);
     }
 
-    pub fn logicalOr(self: *AstBuilder, lhs: *ast.ExprNode, rhs: *ast.ExprNode, span: ast.SourceSpan) !*ast.ExprNode {
+    pub fn logicalOr(self: *AstBuilder, lhs: *ast.Expressions.ExprNode, rhs: *ast.Expressions.ExprNode, span: ast.SourceSpan) !*ast.Expressions.ExprNode {
         return self.binary(lhs, .Or, rhs, span);
     }
 
-    pub fn logicalNot(self: *AstBuilder, operand: *ast.ExprNode, span: ast.SourceSpan) !*ast.ExprNode {
+    pub fn logicalNot(self: *AstBuilder, operand: *ast.Expressions.ExprNode, span: ast.SourceSpan) !*ast.Expressions.ExprNode {
         return self.unary(.Bang, operand, span);
     }
 
     // Validation methods
-    fn validateExpression(self: *AstBuilder, expr_node: *ast.ExprNode, span: ast.SourceSpan) !void {
+    fn validateExpression(self: *AstBuilder, expr_node: *ast.Expressions.ExprNode, span: ast.SourceSpan) !void {
         if (!self.validation_enabled) return;
         _ = expr_node;
         _ = span; // Suppress unused parameter warning
     }
 
-    fn validateBlock(self: *AstBuilder, block_node: *const ast.BlockNode, span: ast.SourceSpan) !void {
+    fn validateBlock(self: *AstBuilder, block_node: *const ast.Statements.BlockNode, span: ast.SourceSpan) !void {
         if (!self.validation_enabled) return;
         _ = block_node;
         _ = span; // Suppress unused parameter warning
@@ -566,19 +604,21 @@ pub const AstBuilder = struct {
     }
 
     /// Finalize the builder and perform comprehensive validation
+    /// This method must be called before accessing built nodes
+    /// Returns a slice of all built AST nodes or validation errors
     pub fn build(self: *AstBuilder) ![]ast.AstNode {
         if (self.finalized) return BuilderError.BuilderFinalized;
 
         // Perform final validation if enabled
         if (self.validation_enabled) {
-            // Check for any accumulated errors
+            // Check for any accumulated errors from construction
             if (self.diagnostics.hasErrors()) {
                 return BuilderError.ValidationFailed;
             }
 
             // Perform comprehensive validation on all built nodes
+            // Note: Built nodes validation is currently skipped until TypeValidator integration
             if (!self.validation_enabled) return;
-            // Built nodes validation is skipped until TypeValidator is properly integrated
 
             // Final check after comprehensive validation
             if (self.diagnostics.hasErrors()) {
@@ -588,7 +628,7 @@ pub const AstBuilder = struct {
 
         self.finalized = true;
 
-        // Return a copy of the built nodes
+        // Return a copy of the built nodes in arena memory
         const result = try self.arena.createSlice(ast.AstNode, self.built_nodes.items.len);
         @memcpy(result, self.built_nodes.items);
         return result;
@@ -622,10 +662,16 @@ pub const AstBuilder = struct {
 };
 
 /// Contract builder for fluent contract construction
+/// Provides methods to add functions, variables, structs, enums, logs, and errors to a contract
+/// Validates member uniqueness and contract structure during construction
 pub const ContractBuilder = struct {
+    /// Reference to the parent AST builder for arena access and diagnostics
     builder: *AstBuilder,
+    /// The contract node being constructed
     contract: *ast.ContractNode,
+    /// Collection of contract members (functions, variables, etc.)
     members: std.ArrayList(ast.AstNode),
+    /// Source span for the entire contract
     span: ast.SourceSpan,
 
     pub fn init(builder: *AstBuilder, name: []const u8) !ContractBuilder {
@@ -673,7 +719,7 @@ pub const ContractBuilder = struct {
     }
 
     /// Add a variable declaration to the contract with validation
-    pub fn addVariable(self: *ContractBuilder, variable: *ast.VariableDeclNode) !*ContractBuilder {
+    pub fn addVariable(self: *ContractBuilder, variable: *ast.Statements.VariableDeclNode) !*ContractBuilder {
         // Validate variable name uniqueness
         for (self.members.items) |member| {
             switch (member) {
@@ -753,7 +799,7 @@ pub const ContractBuilder = struct {
     }
 
     /// Add an error declaration to the contract with validation
-    pub fn addError(self: *ContractBuilder, error_decl: *ast.ErrorDeclNode) !*ContractBuilder {
+    pub fn addError(self: *ContractBuilder, error_decl: *ast.Statements.ErrorDeclNode) !*ContractBuilder {
         // Validate error name uniqueness
         for (self.members.items) |member| {
             switch (member) {
@@ -808,7 +854,10 @@ pub const ContractBuilder = struct {
 };
 
 /// Expression builder for fluent expression construction with operator precedence handling
+/// Provides methods to create complex expressions like calls, field access, casts, tuples, etc.
+/// Includes validation for expression structure and operand types
 pub const ExpressionBuilder = struct {
+    /// Reference to the parent AST builder for arena access and diagnostics
     builder: *AstBuilder,
 
     pub fn init(builder: *AstBuilder) ExpressionBuilder {
@@ -818,14 +867,14 @@ pub const ExpressionBuilder = struct {
     }
 
     /// Create a function call expression with validation
-    pub fn call(self: *const ExpressionBuilder, callee: *ast.ExprNode, args: []ast.ExprNode, span: ast.SourceSpan) !*ast.ExprNode {
+    pub fn call(self: *const ExpressionBuilder, callee: *ast.Expressions.ExprNode, args: []ast.Expressions.ExprNode, span: ast.SourceSpan) !*ast.Expressions.ExprNode {
         // Note: In Zig, we can't directly compare pointers to undefined at runtime
 
-        const expr = try self.builder.arena.createNode(ast.ExprNode);
-        const owned_args = try self.builder.arena.createSlice(ast.ExprNode, args.len);
+        const expr = try self.builder.arena.createNode(ast.Expressions.ExprNode);
+        const owned_args = try self.builder.arena.createSlice(ast.Expressions.ExprNode, args.len);
         @memcpy(owned_args, args);
 
-        expr.* = ast.ExprNode{ .Call = .{
+        expr.* = ast.Expressions.ExprNode{ .Call = .{
             .callee = callee,
             .arguments = owned_args,
             .span = span,
@@ -839,7 +888,7 @@ pub const ExpressionBuilder = struct {
     }
 
     /// Create a field access expression with validation
-    pub fn fieldAccess(self: *const ExpressionBuilder, target: *ast.ExprNode, field: []const u8, span: ast.SourceSpan) !*ast.ExprNode {
+    pub fn fieldAccess(self: *const ExpressionBuilder, target: *ast.Expressions.ExprNode, field: []const u8, span: ast.SourceSpan) !*ast.Expressions.ExprNode {
         // Note: In Zig, we can't directly compare pointers to undefined at runtime
 
         if (field.len == 0) {
@@ -847,10 +896,10 @@ pub const ExpressionBuilder = struct {
             return BuilderError.ValidationFailed;
         }
 
-        const expr = try self.builder.arena.createNode(ast.ExprNode);
+        const expr = try self.builder.arena.createNode(ast.Expressions.ExprNode);
         const owned_field = try self.builder.arena.createString(field);
 
-        expr.* = ast.ExprNode{ .FieldAccess = .{
+        expr.* = ast.Expressions.ExprNode{ .FieldAccess = .{
             .target = target,
             .field = owned_field,
             .span = span,
@@ -864,12 +913,12 @@ pub const ExpressionBuilder = struct {
     }
 
     /// Create an index expression with validation
-    pub fn index(self: *const ExpressionBuilder, target: *ast.ExprNode, index_expr: *ast.ExprNode, span: ast.SourceSpan) !*ast.ExprNode {
+    pub fn index(self: *const ExpressionBuilder, target: *ast.Expressions.ExprNode, index_expr: *ast.Expressions.ExprNode, span: ast.SourceSpan) !*ast.Expressions.ExprNode {
         // Note: In Zig, we can't directly compare pointers to undefined at runtime
 
-        const expr = try self.builder.arena.createNode(ast.ExprNode);
+        const expr = try self.builder.arena.createNode(ast.Expressions.ExprNode);
 
-        expr.* = ast.ExprNode{ .Index = .{
+        expr.* = ast.Expressions.ExprNode{ .Index = .{
             .target = target,
             .index = index_expr,
             .span = span,
@@ -883,27 +932,27 @@ pub const ExpressionBuilder = struct {
     }
 
     /// Create a cast expression with explicit type checking
-    pub fn cast(self: *const ExpressionBuilder, expr_node: *ast.ExprNode, target_type: TypeInfo, span: ast.SourceSpan) !*ast.ExprNode {
+    pub fn cast(self: *const ExpressionBuilder, expr_node: *ast.Expressions.ExprNode, target_type: TypeInfo, span: ast.SourceSpan) !*ast.Expressions.ExprNode {
         return self.castWithType(expr_node, target_type, .Unsafe, span);
     }
 
     /// Create a safe cast expression (as?)
-    pub fn safeCast(self: *const ExpressionBuilder, expr_node: *ast.ExprNode, target_type: TypeInfo, span: ast.SourceSpan) !*ast.ExprNode {
+    pub fn safeCast(self: *const ExpressionBuilder, expr_node: *ast.Expressions.ExprNode, target_type: TypeInfo, span: ast.SourceSpan) !*ast.Expressions.ExprNode {
         return self.castWithType(expr_node, target_type, .Safe, span);
     }
 
     /// Create a forced cast expression (as!)
-    pub fn forcedCast(self: *const ExpressionBuilder, expr_node: *ast.ExprNode, target_type: TypeInfo, span: ast.SourceSpan) !*ast.ExprNode {
+    pub fn forcedCast(self: *const ExpressionBuilder, expr_node: *ast.Expressions.ExprNode, target_type: TypeInfo, span: ast.SourceSpan) !*ast.Expressions.ExprNode {
         return self.castWithType(expr_node, target_type, .Forced, span);
     }
 
     /// Internal method to create cast expressions with specific cast types
-    fn castWithType(self: *const ExpressionBuilder, expr_node: *ast.ExprNode, target_type: TypeInfo, cast_type: ast.CastType, span: ast.SourceSpan) !*ast.ExprNode {
+    fn castWithType(self: *const ExpressionBuilder, expr_node: *ast.Expressions.ExprNode, target_type: TypeInfo, cast_type: ast.CastType, span: ast.SourceSpan) !*ast.Expressions.ExprNode {
         // Note: In Zig, we can't directly compare pointers to undefined at runtime
 
-        const expr = try self.builder.arena.createNode(ast.ExprNode);
+        const expr = try self.builder.arena.createNode(ast.Expressions.ExprNode);
 
-        expr.* = ast.ExprNode{
+        expr.* = ast.Expressions.ExprNode{
             .Cast = .{
                 .operand = expr_node,
                 .target_type = target_type,
@@ -920,17 +969,17 @@ pub const ExpressionBuilder = struct {
     }
 
     /// Create a tuple expression
-    pub fn tuple(self: *const ExpressionBuilder, elements: []ast.ExprNode, span: ast.SourceSpan) !*ast.ExprNode {
+    pub fn tuple(self: *const ExpressionBuilder, elements: []ast.Expressions.ExprNode, span: ast.SourceSpan) !*ast.Expressions.ExprNode {
         if (elements.len == 0) {
             try self.builder.diagnostics.addError(span, "Tuple must have at least one element");
             return BuilderError.ValidationFailed;
         }
 
-        const expr = try self.builder.arena.createNode(ast.ExprNode);
-        const owned_elements = try self.builder.arena.createSlice(ast.ExprNode, elements.len);
+        const expr = try self.builder.arena.createNode(ast.Expressions.ExprNode);
+        const owned_elements = try self.builder.arena.createSlice(ast.Expressions.ExprNode, elements.len);
         @memcpy(owned_elements, elements);
 
-        expr.* = ast.ExprNode{ .Tuple = .{
+        expr.* = ast.Expressions.ExprNode{ .Tuple = .{
             .elements = owned_elements,
             .span = span,
         } };
@@ -943,12 +992,12 @@ pub const ExpressionBuilder = struct {
     }
 
     /// Create a try expression for error handling
-    pub fn tryExpr(self: *const ExpressionBuilder, expr_node: *ast.ExprNode, span: ast.SourceSpan) !*ast.ExprNode {
+    pub fn tryExpr(self: *const ExpressionBuilder, expr_node: *ast.Expressions.ExprNode, span: ast.SourceSpan) !*ast.Expressions.ExprNode {
         // Note: In Zig, we can't directly compare pointers to undefined at runtime
 
-        const expr = try self.builder.arena.createNode(ast.ExprNode);
+        const expr = try self.builder.arena.createNode(ast.Expressions.ExprNode);
 
-        expr.* = ast.ExprNode{ .Try = .{
+        expr.* = ast.Expressions.ExprNode{ .Try = .{
             .expr = expr_node,
             .span = span,
         } };
@@ -961,16 +1010,16 @@ pub const ExpressionBuilder = struct {
     }
 
     /// Create an error return expression
-    pub fn errorReturn(self: *const ExpressionBuilder, error_name: []const u8, span: ast.SourceSpan) !*ast.ExprNode {
+    pub fn errorReturn(self: *const ExpressionBuilder, error_name: []const u8, span: ast.SourceSpan) !*ast.Expressions.ExprNode {
         if (error_name.len == 0) {
             try self.builder.diagnostics.addError(span, "Error name cannot be empty");
             return BuilderError.ValidationFailed;
         }
 
-        const expr = try self.builder.arena.createNode(ast.ExprNode);
+        const expr = try self.builder.arena.createNode(ast.Expressions.ExprNode);
         const owned_error_name = try self.builder.arena.createString(error_name);
 
-        expr.* = ast.ExprNode{ .ErrorReturn = .{
+        expr.* = ast.Expressions.ExprNode{ .ErrorReturn = .{
             .error_name = owned_error_name,
             .span = span,
         } };
@@ -983,14 +1032,14 @@ pub const ExpressionBuilder = struct {
     }
 
     /// Create a struct instantiation expression
-    pub fn structInstantiation(self: *const ExpressionBuilder, struct_name: *ast.ExprNode, fields: []ast.StructInstantiationField, span: ast.SourceSpan) !*ast.ExprNode {
+    pub fn structInstantiation(self: *const ExpressionBuilder, struct_name: *ast.Expressions.ExprNode, fields: []ast.Expressions.StructInstantiationField, span: ast.SourceSpan) !*ast.Expressions.ExprNode {
         // Note: In Zig, we can't directly compare pointers to undefined at runtime
 
-        const expr = try self.builder.arena.createNode(ast.ExprNode);
-        const owned_fields = try self.builder.arena.createSlice(ast.StructInstantiationField, fields.len);
+        const expr = try self.builder.arena.createNode(ast.Expressions.ExprNode);
+        const owned_fields = try self.builder.arena.createSlice(ast.Expressions.StructInstantiationField, fields.len);
         @memcpy(owned_fields, fields);
 
-        expr.* = ast.ExprNode{ .StructInstantiation = .{
+        expr.* = ast.Expressions.ExprNode{ .StructInstantiation = .{
             .struct_name = struct_name,
             .fields = owned_fields,
             .span = span,
@@ -1004,17 +1053,17 @@ pub const ExpressionBuilder = struct {
     }
 
     /// Create an enum literal expression
-    pub fn enumLiteral(self: *const ExpressionBuilder, enum_name: []const u8, variant_name: []const u8, span: ast.SourceSpan) !*ast.ExprNode {
+    pub fn enumLiteral(self: *const ExpressionBuilder, enum_name: []const u8, variant_name: []const u8, span: ast.SourceSpan) !*ast.Expressions.ExprNode {
         if (enum_name.len == 0 or variant_name.len == 0) {
             try self.builder.diagnostics.addError(span, "Enum name and variant name cannot be empty");
             return BuilderError.ValidationFailed;
         }
 
-        const expr = try self.builder.arena.createNode(ast.ExprNode);
+        const expr = try self.builder.arena.createNode(ast.Expressions.ExprNode);
         const owned_enum_name = try self.builder.arena.createString(enum_name);
         const owned_variant_name = try self.builder.arena.createString(variant_name);
 
-        expr.* = ast.ExprNode{ .EnumLiteral = .{
+        expr.* = ast.Expressions.ExprNode{ .EnumLiteral = .{
             .enum_name = owned_enum_name,
             .variant_name = owned_variant_name,
             .span = span,
@@ -1029,7 +1078,10 @@ pub const ExpressionBuilder = struct {
 };
 
 /// Statement builder for fluent statement construction with control flow validation
+/// Provides methods to create statements like returns, if/while loops, variable declarations, etc.
+/// Includes validation for control flow correctness and statement structure
 pub const StatementBuilder = struct {
+    /// Reference to the parent AST builder for arena access and diagnostics
     builder: *AstBuilder,
 
     pub fn init(builder: *AstBuilder) StatementBuilder {
@@ -1039,17 +1091,17 @@ pub const StatementBuilder = struct {
     }
 
     /// Create a return statement with validation
-    pub fn returnStmt(_: *const StatementBuilder, value: ?*ast.ExprNode, span: ast.SourceSpan) !ast.StmtNode {
+    pub fn returnStmt(_: *const StatementBuilder, value: ?*ast.Expressions.ExprNode, span: ast.SourceSpan) !ast.Statements.StmtNode {
         // No validation needed for this simple statement
 
-        return ast.StmtNode{ .Return = .{
+        return ast.Statements.StmtNode{ .Return = .{
             .value = if (value) |v| v.* else null,
             .span = span,
         } };
     }
 
     /// Create an if statement with control flow validation
-    pub fn ifStmt(self: *const StatementBuilder, condition: *ast.ExprNode, then_branch: ast.BlockNode, else_branch: ?ast.BlockNode, span: ast.SourceSpan) !ast.StmtNode {
+    pub fn ifStmt(self: *const StatementBuilder, condition: *ast.Expressions.ExprNode, then_branch: ast.Statements.BlockNode, else_branch: ?ast.Statements.BlockNode, span: ast.SourceSpan) !ast.Statements.StmtNode {
         // Validate condition
         // Note: In Zig, we can't directly compare pointers to undefined at runtime
 
@@ -1059,7 +1111,7 @@ pub const StatementBuilder = struct {
             return BuilderError.ValidationFailed;
         }
 
-        return ast.StmtNode{ .If = .{
+        return ast.Statements.StmtNode{ .If = .{
             .condition = condition.*,
             .then_branch = then_branch,
             .else_branch = else_branch,
@@ -1068,12 +1120,12 @@ pub const StatementBuilder = struct {
     }
 
     /// Create a while statement with loop validation
-    pub fn whileStmt(self: *const StatementBuilder, condition: *ast.ExprNode, body: ast.BlockNode, span: ast.SourceSpan) !ast.StmtNode {
-        return self.whileStmtWithInvariants(condition, body, &[_]ast.ExprNode{}, span);
+    pub fn whileStmt(self: *const StatementBuilder, condition: *ast.Expressions.ExprNode, body: ast.Statements.BlockNode, span: ast.SourceSpan) !ast.Statements.StmtNode {
+        return self.whileStmtWithInvariants(condition, body, &[_]ast.Expressions.ExprNode{}, span);
     }
 
     /// Create a while statement with loop invariants
-    pub fn whileStmtWithInvariants(self: *const StatementBuilder, condition: *ast.ExprNode, body: ast.BlockNode, invariants: []ast.ExprNode, span: ast.SourceSpan) !ast.StmtNode {
+    pub fn whileStmtWithInvariants(self: *const StatementBuilder, condition: *ast.Expressions.ExprNode, body: ast.Statements.BlockNode, invariants: []ast.Expressions.ExprNode, span: ast.SourceSpan) !ast.Statements.StmtNode {
         // Note: In Zig, we can't directly compare pointers to undefined at runtime
 
         // Validate that body has at least one statement
@@ -1083,10 +1135,10 @@ pub const StatementBuilder = struct {
         }
 
         // Create owned invariants slice
-        const owned_invariants = try self.builder.arena.createSlice(ast.ExprNode, invariants.len);
+        const owned_invariants = try self.builder.arena.createSlice(ast.Expressions.ExprNode, invariants.len);
         @memcpy(owned_invariants, invariants);
 
-        return ast.StmtNode{
+        return ast.Statements.StmtNode{
             .While = .{
                 .condition = condition.*,
                 .body = body,
@@ -1097,38 +1149,38 @@ pub const StatementBuilder = struct {
     }
 
     /// Create an expression statement
-    pub fn exprStmt(self: *const StatementBuilder, expr: *ast.ExprNode) ast.StmtNode {
+    pub fn exprStmt(self: *const StatementBuilder, expr: *ast.Expressions.ExprNode) ast.Statements.StmtNode {
         _ = self; // Suppress unused parameter warning
-        return ast.StmtNode{ .Expr = expr.* };
+        return ast.Statements.StmtNode{ .Expr = expr.* };
     }
 
     /// Create a variable declaration statement
-    pub fn variableDecl(_: *const StatementBuilder, var_decl: *ast.VariableDeclNode) ast.StmtNode {
-        return ast.StmtNode{ .VariableDecl = var_decl.* };
+    pub fn variableDecl(_: *const StatementBuilder, var_decl: *ast.Statements.VariableDeclNode) ast.Statements.StmtNode {
+        return ast.Statements.StmtNode{ .VariableDecl = var_decl.* };
     }
 
     /// Create a break statement
-    pub fn breakStmt(_: *const StatementBuilder, span: ast.SourceSpan) ast.StmtNode {
-        return ast.StmtNode{ .Break = span };
+    pub fn breakStmt(_: *const StatementBuilder, span: ast.SourceSpan) ast.Statements.StmtNode {
+        return ast.Statements.StmtNode{ .Break = span };
     }
 
     /// Create a continue statement
-    pub fn continueStmt(_: *const StatementBuilder, span: ast.SourceSpan) ast.StmtNode {
-        return ast.StmtNode{ .Continue = span };
+    pub fn continueStmt(_: *const StatementBuilder, span: ast.SourceSpan) ast.Statements.StmtNode {
+        return ast.Statements.StmtNode{ .Continue = span };
     }
 
     /// Create a log statement
-    pub fn logStmt(self: *const StatementBuilder, event_name: []const u8, args: []ast.ExprNode, span: ast.SourceSpan) !ast.StmtNode {
+    pub fn logStmt(self: *const StatementBuilder, event_name: []const u8, args: []ast.Expressions.ExprNode, span: ast.SourceSpan) !ast.Statements.StmtNode {
         if (event_name.len == 0) {
             try self.builder.diagnostics.addError(span, "Log event name cannot be empty");
             return BuilderError.ValidationFailed;
         }
 
         const owned_event_name = try self.builder.arena.createString(event_name);
-        const owned_args = try self.builder.arena.createSlice(ast.ExprNode, args.len);
+        const owned_args = try self.builder.arena.createSlice(ast.Expressions.ExprNode, args.len);
         @memcpy(owned_args, args);
 
-        return ast.StmtNode{ .Log = .{
+        return ast.Statements.StmtNode{ .Log = .{
             .event_name = owned_event_name,
             .args = owned_args,
             .span = span,
@@ -1136,27 +1188,27 @@ pub const StatementBuilder = struct {
     }
 
     /// Create a requires statement (precondition)
-    pub fn requiresStmt(self: *const StatementBuilder, condition: *ast.ExprNode, span: ast.SourceSpan) !ast.StmtNode {
+    pub fn requiresStmt(self: *const StatementBuilder, condition: *ast.Expressions.ExprNode, span: ast.SourceSpan) !ast.Statements.StmtNode {
         _ = self;
         // Note: In Zig, we can't directly compare pointers to undefined at runtime
 
-        return ast.StmtNode{ .Requires = .{
+        return ast.Statements.StmtNode{ .Requires = .{
             .condition = condition.*,
             .span = span,
         } };
     }
 
     /// Create an ensures statement (postcondition)
-    pub fn ensuresStmt(_: *const StatementBuilder, condition: *ast.ExprNode, span: ast.SourceSpan) !ast.StmtNode {
-        return ast.StmtNode{ .Ensures = .{
+    pub fn ensuresStmt(_: *const StatementBuilder, condition: *ast.Expressions.ExprNode, span: ast.SourceSpan) !ast.Statements.StmtNode {
+        return ast.Statements.StmtNode{ .Ensures = .{
             .condition = condition.*,
             .span = span,
         } };
     }
 
     /// Create an invariant statement
-    pub fn invariantStmt(_: *const StatementBuilder, condition: *ast.ExprNode, span: ast.SourceSpan) !ast.StmtNode {
-        return ast.StmtNode{ .Invariant = .{
+    pub fn invariantStmt(_: *const StatementBuilder, condition: *ast.Expressions.ExprNode, span: ast.SourceSpan) !ast.Statements.StmtNode {
+        return ast.Statements.StmtNode{ .Invariant = .{
             .condition = condition.*,
             .span = span,
         } };
@@ -1164,7 +1216,10 @@ pub const StatementBuilder = struct {
 };
 
 /// Type builder for fluent type construction with explicit type annotation validation
+/// Provides methods to create primitive types, slices, mappings, tuples, error unions, etc.
+/// Includes validation for type structure and compatibility
 pub const TypeBuilder = struct {
+    /// Reference to the parent AST builder for arena access and diagnostics
     builder: *AstBuilder,
 
     pub fn init(builder: *AstBuilder) TypeBuilder {

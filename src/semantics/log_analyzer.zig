@@ -7,7 +7,7 @@ pub fn checkLogStatement(
     allocator: std.mem.Allocator,
     symbols: *state.SymbolTable,
     scope: *state.Scope,
-    log_stmt: *const ast.LogNode,
+    log_stmt: *const ast.Statements.LogNode,
 ) ![]const ast.SourceSpan {
     var issues = std.ArrayList(ast.SourceSpan).init(allocator);
     // Resolve log declaration by name
@@ -31,7 +31,7 @@ pub fn checkLogStatement(
         const field = sig_fields[i];
         const arg_expr = log_stmt.args[i];
         const arg_ti = expr.inferExprType(symbols, scope, arg_expr);
-        if (!ast.TypeInfo.equals(arg_ti, field.type_info)) {
+        if (!ast.Types.TypeInfo.equals(arg_ti, field.type_info)) {
             try issues.append(log_stmt.span);
             // continue to collect more issues
         }
@@ -55,7 +55,7 @@ fn walkBlockForLogs(
     issues: *std.ArrayList(ast.SourceSpan),
     symbols: *state.SymbolTable,
     scope: *state.Scope,
-    block: *const ast.BlockNode,
+    block: *const ast.Statements.BlockNode,
 ) !void {
     for (block.statements) |stmt| {
         switch (stmt) {

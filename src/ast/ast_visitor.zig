@@ -13,50 +13,50 @@ pub fn Visitor(comptime Context: type, comptime ReturnType: type) type {
         visitContract: ?*const fn (*Self, *ast.ContractNode) ReturnType = null,
         visitFunction: ?*const fn (*Self, *ast.FunctionNode) ReturnType = null,
         visitConstant: ?*const fn (*Self, *ast.ConstantNode) ReturnType = null,
-        visitVariableDecl: ?*const fn (*Self, *ast.VariableDeclNode) ReturnType = null,
+        visitVariableDecl: ?*const fn (*Self, *ast.Statements.VariableDeclNode) ReturnType = null,
         visitStructDecl: ?*const fn (*Self, *ast.StructDeclNode) ReturnType = null,
         visitEnumDecl: ?*const fn (*Self, *ast.EnumDeclNode) ReturnType = null,
         visitLogDecl: ?*const fn (*Self, *ast.LogDeclNode) ReturnType = null,
         visitImport: ?*const fn (*Self, *ast.ImportNode) ReturnType = null,
-        visitErrorDecl: ?*const fn (*Self, *ast.ErrorDeclNode) ReturnType = null,
-        visitBlock: ?*const fn (*Self, *ast.BlockNode) ReturnType = null,
-        visitExpressionNode: ?*const fn (*Self, *ast.ExprNode) ReturnType = null,
-        visitStatementNode: ?*const fn (*Self, *ast.StmtNode) ReturnType = null,
-        visitTryBlock: ?*const fn (*Self, *ast.TryBlockNode) ReturnType = null,
+        visitErrorDecl: ?*const fn (*Self, *ast.Statements.ErrorDeclNode) ReturnType = null,
+        visitBlock: ?*const fn (*Self, *ast.Statements.BlockNode) ReturnType = null,
+        visitExpressionNode: ?*const fn (*Self, *ast.Expressions.ExprNode) ReturnType = null,
+        visitStatementNode: ?*const fn (*Self, *ast.Statements.StmtNode) ReturnType = null,
+        visitTryBlock: ?*const fn (*Self, *ast.Statements.TryBlockNode) ReturnType = null,
 
         // Expression-specific visit functions
-        visitIdentifier: ?*const fn (*Self, *ast.IdentifierExpr) ReturnType = null,
-        visitLiteral: ?*const fn (*Self, *ast.LiteralExpr) ReturnType = null,
-        visitBinary: ?*const fn (*Self, *ast.BinaryExpr) ReturnType = null,
-        visitUnary: ?*const fn (*Self, *ast.UnaryExpr) ReturnType = null,
-        visitAssignment: ?*const fn (*Self, *ast.AssignmentExpr) ReturnType = null,
-        visitCompoundAssignment: ?*const fn (*Self, *ast.CompoundAssignmentExpr) ReturnType = null,
-        visitCall: ?*const fn (*Self, *ast.CallExpr) ReturnType = null,
-        visitIndex: ?*const fn (*Self, *ast.IndexExpr) ReturnType = null,
-        visitFieldAccess: ?*const fn (*Self, *ast.FieldAccessExpr) ReturnType = null,
-        visitCast: ?*const fn (*Self, *ast.CastExpr) ReturnType = null,
-        visitComptime: ?*const fn (*Self, *ast.ComptimeExpr) ReturnType = null,
-        visitOld: ?*const fn (*Self, *ast.OldExpr) ReturnType = null,
-        visitTuple: ?*const fn (*Self, *ast.TupleExpr) ReturnType = null,
-        visitTry: ?*const fn (*Self, *ast.TryExpr) ReturnType = null,
-        visitErrorReturn: ?*const fn (*Self, *ast.ErrorReturnExpr) ReturnType = null,
+        visitIdentifier: ?*const fn (*Self, *ast.Expressions.IdentifierExpr) ReturnType = null,
+        visitLiteral: ?*const fn (*Self, *ast.Expressions.LiteralExpr) ReturnType = null,
+        visitBinary: ?*const fn (*Self, *ast.Expressions.BinaryExpr) ReturnType = null,
+        visitUnary: ?*const fn (*Self, *ast.Expressions.UnaryExpr) ReturnType = null,
+        visitAssignment: ?*const fn (*Self, *ast.Expressions.AssignmentExpr) ReturnType = null,
+        visitCompoundAssignment: ?*const fn (*Self, *ast.Expressions.CompoundAssignmentExpr) ReturnType = null,
+        visitCall: ?*const fn (*Self, *ast.Expressions.CallExpr) ReturnType = null,
+        visitIndex: ?*const fn (*Self, *ast.Expressions.IndexExpr) ReturnType = null,
+        visitFieldAccess: ?*const fn (*Self, *ast.Expressions.FieldAccessExpr) ReturnType = null,
+        visitCast: ?*const fn (*Self, *ast.Expressions.CastExpr) ReturnType = null,
+        visitComptime: ?*const fn (*Self, *ast.Expressions.ComptimeExpr) ReturnType = null,
+        visitOld: ?*const fn (*Self, *ast.Expressions.OldExpr) ReturnType = null,
+        visitTuple: ?*const fn (*Self, *ast.Expressions.TupleExpr) ReturnType = null,
+        visitTry: ?*const fn (*Self, *ast.Expressions.TryExpr) ReturnType = null,
+        visitErrorReturn: ?*const fn (*Self, *ast.Expressions.ErrorReturnExpr) ReturnType = null,
         visitErrorCast: ?*const fn (*Self, *ast.ErrorCastExpr) ReturnType = null,
         visitShift: ?*const fn (*Self, *ast.ShiftExpr) ReturnType = null,
-        visitStructInstantiation: ?*const fn (*Self, *ast.StructInstantiationExpr) ReturnType = null,
-        visitEnumLiteral: ?*const fn (*Self, *ast.EnumLiteralExpr) ReturnType = null,
-        visitArrayLiteral: ?*const fn (*Self, *ast.ArrayLiteralExpr) ReturnType = null,
-        visitSwitchExpression: ?*const fn (*Self, *ast.SwitchExprNode) ReturnType = null,
-        visitRangeExpr: ?*const fn (*Self, *ast.RangeExpr) ReturnType = null,
+        visitStructInstantiation: ?*const fn (*Self, *ast.Expressions.StructInstantiationExpr) ReturnType = null,
+        visitEnumLiteral: ?*const fn (*Self, *ast.Expressions.EnumLiteralExpr) ReturnType = null,
+        visitArrayLiteral: ?*const fn (*Self, *ast.Literals.Array) ReturnType = null,
+        visitSwitchExpression: ?*const fn (*Self, *ast.Switch.ExprNode) ReturnType = null,
+        visitRangeExpr: ?*const fn (*Self, *ast.Expressions.RangeExpr) ReturnType = null,
 
         // Statement-specific visit functions
-        visitReturn: ?*const fn (*Self, *ast.ReturnNode) ReturnType = null,
-        visitIf: ?*const fn (*Self, *ast.IfNode) ReturnType = null,
-        visitWhile: ?*const fn (*Self, *ast.WhileNode) ReturnType = null,
-        visitLog: ?*const fn (*Self, *ast.LogNode) ReturnType = null,
+        visitReturn: ?*const fn (*Self, *ast.Statements.ReturnNode) ReturnType = null,
+        visitIf: ?*const fn (*Self, *ast.Statements.IfNode) ReturnType = null,
+        visitWhile: ?*const fn (*Self, *ast.Statements.WhileNode) ReturnType = null,
+        visitLog: ?*const fn (*Self, *ast.Statements.LogNode) ReturnType = null,
         visitLock: ?*const fn (*Self, *ast.LockNode) ReturnType = null,
         visitInvariant: ?*const fn (*Self, *ast.InvariantNode) ReturnType = null,
-        visitRequires: ?*const fn (*Self, *ast.RequiresNode) ReturnType = null,
-        visitEnsures: ?*const fn (*Self, *ast.EnsuresNode) ReturnType = null,
+        visitRequires: ?*const fn (*Self, *ast.Statements.RequiresNode) ReturnType = null,
+        visitEnsures: ?*const fn (*Self, *ast.Statements.EnsuresNode) ReturnType = null,
 
         // Traversal control hooks
         shouldVisitChildren: ?*const fn (*Self, *ast.AstNode) bool = null,
@@ -156,7 +156,7 @@ pub fn Visitor(comptime Context: type, comptime ReturnType: type) type {
         }
 
         /// Visit expression nodes with detailed dispatch
-        fn dispatchExpression(self: *Self, expr: *ast.ExprNode) ReturnType {
+        fn dispatchExpression(self: *Self, expr: *ast.Expressions.ExprNode) ReturnType {
             // Call general expression handler first if available
             if (self.visitExpressionNode) |visitFn| {
                 return visitFn(self, expr);
@@ -280,7 +280,7 @@ pub fn Visitor(comptime Context: type, comptime ReturnType: type) type {
         }
 
         /// Visit statement nodes with detailed dispatch
-        fn dispatchStatement(self: *Self, stmt: *ast.StmtNode) ReturnType {
+        fn dispatchStatement(self: *Self, stmt: *ast.Statements.StmtNode) ReturnType {
             // Call general statement handler first if available
             if (self.visitStatementNode) |visitFn| {
                 return visitFn(self, stmt);
@@ -444,7 +444,7 @@ pub fn Visitor(comptime Context: type, comptime ReturnType: type) type {
         }
 
         /// Visit children of expression nodes
-        fn visitExpressionChildren(self: *Self, expr: *ast.ExprNode) void {
+        fn visitExpressionChildren(self: *Self, expr: *ast.Expressions.ExprNode) void {
             switch (expr.*) {
                 .Binary => |*binary| {
                     _ = self.dispatchExpression(binary.lhs);
@@ -543,7 +543,7 @@ pub fn Visitor(comptime Context: type, comptime ReturnType: type) type {
         }
 
         /// Visit children of statement nodes
-        fn visitStatementChildren(self: *Self, stmt: *ast.StmtNode) void {
+        fn visitStatementChildren(self: *Self, stmt: *ast.Statements.StmtNode) void {
             switch (stmt.*) {
                 .Expr => |*expr| {
                     _ = self.dispatchExpression(expr);
@@ -692,20 +692,20 @@ pub const MutableVisitor = struct {
     // Modification functions - all optional, covering all AST node types
     modifyContract: ?*const fn (*Self, *ast.ContractNode) anyerror!void = null,
     modifyFunction: ?*const fn (*Self, *ast.FunctionNode) anyerror!void = null,
-    modifyVariableDecl: ?*const fn (*Self, *ast.VariableDeclNode) anyerror!void = null,
+    modifyVariableDecl: ?*const fn (*Self, *ast.Statements.VariableDeclNode) anyerror!void = null,
     modifyStructDecl: ?*const fn (*Self, *ast.StructDeclNode) anyerror!void = null,
     modifyEnumDecl: ?*const fn (*Self, *ast.EnumDeclNode) anyerror!void = null,
     modifyLogDecl: ?*const fn (*Self, *ast.LogDeclNode) anyerror!void = null,
     modifyImport: ?*const fn (*Self, *ast.ImportNode) anyerror!void = null,
-    modifyErrorDecl: ?*const fn (*Self, *ast.ErrorDeclNode) anyerror!void = null,
-    modifyBlock: ?*const fn (*Self, *ast.BlockNode) anyerror!void = null,
-    modifyExpression: ?*const fn (*Self, *ast.ExprNode) anyerror!void = null,
-    modifyStatement: ?*const fn (*Self, *ast.StmtNode) anyerror!void = null,
-    modifyTryBlock: ?*const fn (*Self, *ast.TryBlockNode) anyerror!void = null,
+    modifyErrorDecl: ?*const fn (*Self, *ast.Statements.ErrorDeclNode) anyerror!void = null,
+    modifyBlock: ?*const fn (*Self, *ast.Statements.BlockNode) anyerror!void = null,
+    modifyExpression: ?*const fn (*Self, *ast.Expressions.ExprNode) anyerror!void = null,
+    modifyStatement: ?*const fn (*Self, *ast.Statements.StmtNode) anyerror!void = null,
+    modifyTryBlock: ?*const fn (*Self, *ast.Statements.TryBlockNode) anyerror!void = null,
 
     // Replacement functions - return new node or null to keep original
-    replaceExpression: ?*const fn (*Self, *ast.ExprNode) anyerror!?*ast.ExprNode = null,
-    replaceStatement: ?*const fn (*Self, *ast.StmtNode) anyerror!?*ast.StmtNode = null,
+    replaceExpression: ?*const fn (*Self, *ast.Expressions.ExprNode) anyerror!?*ast.Expressions.ExprNode = null,
+    replaceStatement: ?*const fn (*Self, *ast.Statements.StmtNode) anyerror!?*ast.Statements.StmtNode = null,
     replaceContract: ?*const fn (*Self, *ast.ContractNode) anyerror!?*ast.ContractNode = null,
     replaceFunction: ?*const fn (*Self, *ast.FunctionNode) anyerror!?*ast.FunctionNode = null,
 
@@ -898,7 +898,7 @@ pub const MutableVisitor = struct {
         self.error_count = 0;
     }
 
-    fn visitAndModifyExpression(self: *Self, expr: *ast.ExprNode) anyerror!void {
+    fn visitAndModifyExpression(self: *Self, expr: *ast.Expressions.ExprNode) anyerror!void {
         // Try replacement first
         if (self.replaceExpression) |replaceFn| {
             if (try replaceFn(self, expr)) |new_expr| {
@@ -937,7 +937,7 @@ pub const MutableVisitor = struct {
         }
     }
 
-    fn visitAndModifyStatement(self: *Self, stmt: *ast.StmtNode) anyerror!void {
+    fn visitAndModifyStatement(self: *Self, stmt: *ast.Statements.StmtNode) anyerror!void {
         // Try replacement first
         if (self.replaceStatement) |replaceFn| {
             if (try replaceFn(self, stmt)) |new_stmt| {
@@ -992,7 +992,7 @@ pub const QueryVisitor = struct {
 
     // Specific search functions
     findByName: ?[]const u8 = null,
-    findByType: ?std.meta.Tag(ast.ExprNode) = null,
+    findByType: ?std.meta.Tag(ast.Expressions.ExprNode) = null,
     findBySpan: ?ast.SourceSpan = null,
 
     // Advanced search options
@@ -1084,7 +1084,7 @@ pub const QueryVisitor = struct {
         }
     }
 
-    fn searchExpressionRecursive(self: *Self, expr: *ast.ExprNode) std.mem.Allocator.Error!void {
+    fn searchExpressionRecursive(self: *Self, expr: *ast.Expressions.ExprNode) std.mem.Allocator.Error!void {
         var expr_node = ast.AstNode{ .Expression = expr.* };
         if (self.matches(&expr_node)) {
             try self.results.append(&expr_node);
@@ -1108,7 +1108,7 @@ pub const QueryVisitor = struct {
         }
     }
 
-    fn searchStatementRecursive(self: *Self, stmt: *ast.StmtNode) std.mem.Allocator.Error!void {
+    fn searchStatementRecursive(self: *Self, stmt: *ast.Statements.StmtNode) std.mem.Allocator.Error!void {
         var stmt_node = ast.AstNode{ .Statement = stmt.* };
         if (self.matches(&stmt_node)) {
             try self.results.append(&stmt_node);
@@ -1180,8 +1180,8 @@ pub const TransformVisitor = struct {
     // Transformation functions
     transformContract: ?*const fn (*Self, *ast.ContractNode) anyerror!?*ast.ContractNode = null,
     transformFunction: ?*const fn (*Self, *ast.FunctionNode) anyerror!?*ast.FunctionNode = null,
-    transformExpression: ?*const fn (*Self, *ast.ExprNode) anyerror!?*ast.ExprNode = null,
-    transformStatement: ?*const fn (*Self, *ast.StmtNode) anyerror!?*ast.StmtNode = null,
+    transformExpression: ?*const fn (*Self, *ast.Expressions.ExprNode) anyerror!?*ast.Expressions.ExprNode = null,
+    transformStatement: ?*const fn (*Self, *ast.Statements.StmtNode) anyerror!?*ast.Statements.StmtNode = null,
 
     pub const TransformError = struct {
         message: []const u8,
@@ -1276,7 +1276,7 @@ pub const TransformVisitor = struct {
         }
     }
 
-    fn transformExpressionRecursive(self: *Self, expr: *ast.ExprNode) !*ast.AstNode {
+    fn transformExpressionRecursive(self: *Self, expr: *ast.Expressions.ExprNode) !*ast.AstNode {
         if (self.transformExpression) |transformFn| {
             if (try transformFn(self, expr)) |new_expr| {
                 const new_node = try self.allocator.create(ast.AstNode);
@@ -1291,16 +1291,16 @@ pub const TransformVisitor = struct {
                 const lhs_node = try self.transformExpressionRecursive(binary.lhs);
                 const rhs_node = try self.transformExpressionRecursive(binary.rhs);
 
-                const new_binary = try self.allocator.create(ast.BinaryExpr);
-                new_binary.* = ast.BinaryExpr{
+                const new_binary = try self.allocator.create(ast.Expressions.BinaryExpr);
+                new_binary.* = ast.Expressions.BinaryExpr{
                     .lhs = &lhs_node.Expression,
                     .operator = binary.operator,
                     .rhs = &rhs_node.Expression,
                     .span = binary.span,
                 };
 
-                const new_expr = try self.allocator.create(ast.ExprNode);
-                new_expr.* = ast.ExprNode{ .Binary = new_binary.* };
+                const new_expr = try self.allocator.create(ast.Expressions.ExprNode);
+                new_expr.* = ast.Expressions.ExprNode{ .Binary = new_binary.* };
 
                 const new_node = try self.allocator.create(ast.AstNode);
                 new_node.* = ast.AstNode{ .Expression = new_expr.* };
@@ -1315,7 +1315,7 @@ pub const TransformVisitor = struct {
         }
     }
 
-    fn transformStatementRecursive(self: *Self, stmt: *ast.StmtNode) !*ast.AstNode {
+    fn transformStatementRecursive(self: *Self, stmt: *ast.Statements.StmtNode) !*ast.AstNode {
         if (self.transformStatement) |transformFn| {
             if (try transformFn(self, stmt)) |new_stmt| {
                 const new_node = try self.allocator.create(ast.AstNode);
@@ -1350,8 +1350,8 @@ pub const ValidationVisitor = struct {
     // Validation functions
     validateContract: ?*const fn (*Self, *ast.ContractNode) anyerror!void = null,
     validateFunction: ?*const fn (*Self, *ast.FunctionNode) anyerror!void = null,
-    validateExpression: ?*const fn (*Self, *ast.ExprNode) anyerror!void = null,
-    validateStatement: ?*const fn (*Self, *ast.StmtNode) anyerror!void = null,
+    validateExpression: ?*const fn (*Self, *ast.Expressions.ExprNode) anyerror!void = null,
+    validateStatement: ?*const fn (*Self, *ast.Statements.StmtNode) anyerror!void = null,
 
     pub const ValidationError = struct {
         message: []const u8,
@@ -1444,7 +1444,7 @@ pub const ValidationVisitor = struct {
         }
     }
 
-    fn validateExpressionRecursive(self: *Self, expr: *ast.ExprNode) anyerror!void {
+    fn validateExpressionRecursive(self: *Self, expr: *ast.Expressions.ExprNode) anyerror!void {
         switch (expr.*) {
             .Binary => |*binary| {
                 try self.validateExpressionRecursive(binary.lhs);
@@ -1463,7 +1463,7 @@ pub const ValidationVisitor = struct {
         }
     }
 
-    fn validateStatementRecursive(self: *Self, stmt: *ast.StmtNode) anyerror!void {
+    fn validateStatementRecursive(self: *Self, stmt: *ast.Statements.StmtNode) anyerror!void {
         switch (stmt.*) {
             .Expr => |*expr| {
                 try self.validateExpressionRecursive(expr);

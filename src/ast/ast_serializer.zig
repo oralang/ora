@@ -1,9 +1,8 @@
 const std = @import("std");
 const ast = @import("../ast.zig");
 const AstNode = ast.AstNode;
-const TypeRef = @import("types.zig").TypeRef;
-const ExprNode = ast.ExprNode;
-const StmtNode = ast.StmtNode;
+const ExprNode = ast.Expressions.ExprNode;
+const StmtNode = ast.Statements.StmtNode;
 const SourceSpan = ast.SourceSpan;
 
 /// Serialization options for customizing output
@@ -314,7 +313,7 @@ pub const AstSerializer = struct {
         try self.serializeBlock(&function.body, writer, indent + 1, depth + 1);
     }
 
-    fn serializeVariableDecl(self: *AstSerializer, var_decl: *const ast.VariableDeclNode, writer: anytype, indent: u32, depth: u32) SerializationError!void {
+    fn serializeVariableDecl(self: *AstSerializer, var_decl: *const ast.Statements.VariableDeclNode, writer: anytype, indent: u32, depth: u32) SerializationError!void {
         try self.writeField(writer, "type", "VariableDecl", indent + 1, true);
         try self.writeField(writer, "name", var_decl.name, indent + 1, false);
         try self.writeField(writer, "region", @tagName(var_decl.region), indent + 1, false);
@@ -662,7 +661,7 @@ pub const AstSerializer = struct {
         }
     }
 
-    fn serializeErrorDecl(self: *AstSerializer, error_decl: *const ast.ErrorDeclNode, writer: anytype, indent: u32, depth: u32) SerializationError!void {
+    fn serializeErrorDecl(self: *AstSerializer, error_decl: *const ast.Statements.ErrorDeclNode, writer: anytype, indent: u32, depth: u32) SerializationError!void {
         _ = depth; // unused
         try self.writeField(writer, "type", "ErrorDecl", indent + 1, true);
         try self.writeField(writer, "name", error_decl.name, indent + 1, false);
@@ -760,7 +759,7 @@ pub const AstSerializer = struct {
         }
     }
 
-    fn serializeBlock(self: *AstSerializer, block: *const ast.BlockNode, writer: anytype, indent: u32, depth: u32) SerializationError!void {
+    fn serializeBlock(self: *AstSerializer, block: *const ast.Statements.BlockNode, writer: anytype, indent: u32, depth: u32) SerializationError!void {
         if (self.options.pretty_print and !self.options.compact_mode) {
             try writer.writeAll("{\n");
             try self.writeField(writer, "type", "Block", indent + 1, true);
@@ -794,7 +793,7 @@ pub const AstSerializer = struct {
         }
     }
 
-    fn serializeTryBlock(self: *AstSerializer, try_block: *const ast.TryBlockNode, writer: anytype, indent: u32, depth: u32) SerializationError!void {
+    fn serializeTryBlock(self: *AstSerializer, try_block: *const ast.Statements.TryBlockNode, writer: anytype, indent: u32, depth: u32) SerializationError!void {
         try self.writeField(writer, "type", "TryBlock", indent + 1, true);
 
         if (self.options.include_spans) {
@@ -1958,7 +1957,7 @@ pub const AstSerializer = struct {
             try writer.writeAll("}");
         }
     }
-    fn serializeLiteral(self: *AstSerializer, literal: *const ast.LiteralExpr, writer: anytype, indent: u32) SerializationError!void {
+    fn serializeLiteral(self: *AstSerializer, literal: *const ast.Expressions.LiteralExpr, writer: anytype, indent: u32) SerializationError!void {
         switch (literal.*) {
             .Integer => |*int_lit| {
                 try self.writeField(writer, "literal_type", "Integer", indent, false);
@@ -2060,113 +2059,7 @@ pub const AstSerializer = struct {
         }
     }
 
-    fn serializeTypeRef(self: *AstSerializer, type_ref: *const TypeRef, writer: anytype) SerializationError!void {
-        switch (type_ref.*) {
-            .Bool => try writer.writeAll("\"Bool\""),
-            .Address => try writer.writeAll("\"Address\""),
-            .U8 => try writer.writeAll("\"U8\""),
-            .U16 => try writer.writeAll("\"U16\""),
-            .U32 => try writer.writeAll("\"U32\""),
-            .U64 => try writer.writeAll("\"U64\""),
-            .U128 => try writer.writeAll("\"U128\""),
-            .U256 => try writer.writeAll("\"U256\""),
-            .I8 => try writer.writeAll("\"I8\""),
-            .I16 => try writer.writeAll("\"I16\""),
-            .I32 => try writer.writeAll("\"I32\""),
-            .I64 => try writer.writeAll("\"I64\""),
-            .I128 => try writer.writeAll("\"I128\""),
-            .I256 => try writer.writeAll("\"I256\""),
-            .String => try writer.writeAll("\"String\""),
-            .Bytes => try writer.writeAll("\"Bytes\""),
-            .Unknown => try writer.writeAll("\"Unknown\""),
-            .Identifier => |name| {
-                try writer.writeAll("{\"type\":\"Identifier\",\"name\":\"");
-                try writer.writeAll(name);
-                try writer.writeAll("\"}");
-            },
-            .Slice => |elem_type| {
-                try writer.writeAll("{\"type\":\"Slice\",\"element_type\":");
-                try self.serializeTypeRef(elem_type, writer);
-                try writer.writeAll("}");
-            },
-            .Mapping => |mapping| {
-                try writer.writeAll("{\"type\":\"Mapping\",\"key\":");
-                try self.serializeTypeRef(mapping.key, writer);
-                try writer.writeAll(",\"value\":");
-                try self.serializeTypeRef(mapping.value, writer);
-                try writer.writeAll("}");
-            },
-            .DoubleMap => |doublemap| {
-                try writer.writeAll("{\"type\":\"DoubleMap\",\"key1\":");
-                try self.serializeTypeRef(doublemap.key1, writer);
-                try writer.writeAll(",\"key2\":");
-                try self.serializeTypeRef(doublemap.key2, writer);
-                try writer.writeAll(",\"value\":");
-                try self.serializeTypeRef(doublemap.value, writer);
-                try writer.writeAll("}");
-            },
-            .Tuple => |tuple| {
-                try writer.writeAll("{\"type\":\"Tuple\",\"types\":[");
-                for (tuple.types, 0..) |*elem_type, i| {
-                    if (i > 0) try writer.writeAll(",");
-                    try self.serializeTypeRef(elem_type, writer);
-                }
-                try writer.writeAll("]}");
-            },
-            .ErrorUnion => |error_union| {
-                try writer.writeAll("{\"type\":\"ErrorUnion\",\"success_type\":");
-                try self.serializeTypeRef(error_union.success_type, writer);
-                try writer.writeAll("}");
-            },
-            // Result removed
-            .Struct => |struct_name| {
-                try writer.writeAll("{\"type\":\"Struct\",\"name\":\"");
-                try writer.writeAll(struct_name);
-                try writer.writeAll("\"}");
-            },
-            .Enum => |enum_name| {
-                try writer.writeAll("{\"type\":\"Enum\",\"name\":\"");
-                try writer.writeAll(enum_name);
-                try writer.writeAll("\"}");
-            },
-            .Contract => |contract_name| {
-                try writer.writeAll("{\"type\":\"Contract\",\"name\":\"");
-                try writer.writeAll(contract_name);
-                try writer.writeAll("\"}");
-            },
-            .Function => |func_type| {
-                try writer.writeAll("{\"type\":\"Function\",\"params\":[");
-                for (func_type.params, 0..) |*param, i| {
-                    if (i > 0) try writer.writeAll(",");
-                    try self.serializeTypeRef(param, writer);
-                }
-                try writer.writeAll("],\"return_type\":");
-                if (func_type.return_type) |ret_type| {
-                    try self.serializeTypeRef(ret_type, writer);
-                } else {
-                    try writer.writeAll("null");
-                }
-                try writer.writeAll("}");
-            },
-            .Void => {
-                try writer.writeAll("\"Void\"");
-            },
-            .Error => {
-                try writer.writeAll("\"Error\"");
-            },
-            .Module => |module_name| {
-                if (module_name) |name| {
-                    try writer.writeAll("{\"type\":\"Module\",\"name\":\"");
-                    try writer.writeAll(name);
-                    try writer.writeAll("\"}");
-                } else {
-                    try writer.writeAll("\"Module\"");
-                }
-            },
-        }
-    }
-
-    fn serializeTypeInfo(self: *AstSerializer, type_info: ast.TypeInfo, writer: anytype) SerializationError!void {
+    fn serializeTypeInfo(_: *AstSerializer, type_info: ast.Types.TypeInfo, writer: anytype) SerializationError!void {
         try writer.writeAll("{");
 
         // Write category
@@ -2178,12 +2071,6 @@ pub const AstSerializer = struct {
         try writer.writeAll(",\"source\":\"");
         try writer.writeAll(@tagName(type_info.source));
         try writer.writeAll("\"");
-
-        // Write AST type if present
-        if (type_info.ast_type) |ast_type| {
-            try writer.writeAll(",\"ast_type\":");
-            try self.serializeTypeRef(&ast_type, writer);
-        }
 
         // Write ORA type if present
         if (type_info.ora_type) |ora_type| {
@@ -2270,7 +2157,7 @@ pub const AstSerializer = struct {
     }
 
     /// Serialize a loop pattern (for ForLoop statements)
-    fn serializeLoopPattern(self: *AstSerializer, pattern: *const ast.LoopPattern, writer: anytype, indent: u32) SerializationError!void {
+    fn serializeLoopPattern(self: *AstSerializer, pattern: *const ast.Statements.LoopPattern, writer: anytype, indent: u32) SerializationError!void {
         if (self.options.pretty_print and !self.options.compact_mode) {
             try self.writeIndent(writer, indent);
             try writer.writeAll("{\n");
@@ -2320,7 +2207,7 @@ pub const AstSerializer = struct {
     }
 
     /// Serialize a switch case
-    fn serializeSwitchCase(self: *AstSerializer, case: *const ast.SwitchCase, writer: anytype, indent: u32, depth: u32) SerializationError!void {
+    fn serializeSwitchCase(self: *AstSerializer, case: *const ast.Switch.Case, writer: anytype, indent: u32, depth: u32) SerializationError!void {
         try self.writeField(writer, "type", "SwitchCase", indent + 1, true);
         if (self.options.include_spans) {
             try self.writeSpanField(writer, &case.span, indent + 1);
@@ -2348,7 +2235,7 @@ pub const AstSerializer = struct {
     }
 
     /// Serialize a switch pattern
-    fn serializeSwitchPattern(self: *AstSerializer, pattern: *const ast.SwitchPattern, writer: anytype, indent: u32) SerializationError!void {
+    fn serializeSwitchPattern(self: *AstSerializer, pattern: *const ast.Switch.Pattern, writer: anytype, indent: u32) SerializationError!void {
         if (self.options.pretty_print and !self.options.compact_mode) {
             try self.writeIndent(writer, indent);
             try writer.writeAll("{\n");
@@ -2422,7 +2309,7 @@ pub const AstSerializer = struct {
     }
 
     /// Serialize a switch body
-    fn serializeSwitchBody(self: *AstSerializer, body: *const ast.SwitchBody, writer: anytype, indent: u32, depth: u32) SerializationError!void {
+    fn serializeSwitchBody(self: *AstSerializer, body: *const ast.Switch.Body, writer: anytype, indent: u32, depth: u32) SerializationError!void {
         switch (body.*) {
             .Expression => |expr| {
                 try self.serializeExpression(expr, writer, indent, depth);
@@ -2466,7 +2353,7 @@ pub const AstSerializer = struct {
     }
 
     /// Serialize a destructuring pattern
-    fn serializeDestructuringPattern(self: *AstSerializer, pattern: *const ast.DestructuringPattern, writer: anytype, indent: u32) SerializationError!void {
+    fn serializeDestructuringPattern(self: *AstSerializer, pattern: *const ast.Expressions.DestructuringPattern, writer: anytype, indent: u32) SerializationError!void {
         if (self.options.pretty_print and !self.options.compact_mode) {
             try self.writeIndent(writer, indent);
             try writer.writeAll("{\n");

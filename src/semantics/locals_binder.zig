@@ -3,7 +3,7 @@ const ast = @import("../ast.zig");
 const state = @import("state.zig");
 const expr = @import("expression_analyzer.zig");
 
-fn mapBlockScope(table: *state.SymbolTable, block: *const ast.BlockNode, scope: *state.Scope) !void {
+fn mapBlockScope(table: *state.SymbolTable, block: *const ast.Statements.BlockNode, scope: *state.Scope) !void {
     const key: usize = @intFromPtr(block);
     try table.block_scopes.put(key, scope);
 }
@@ -27,7 +27,7 @@ fn declareVar(table: *state.SymbolTable, scope: *state.Scope, v: ast.statements.
     if (resolved_type.ora_type == null) {
         if (v.value) |val_ptr| {
             const inferred = expr.inferExprType(table, scope, val_ptr.*);
-            if (inferred.ora_type != null or inferred.ast_type != null) {
+            if (inferred.ora_type != null) {
                 resolved_type = inferred;
             }
         }
@@ -80,7 +80,7 @@ fn bindForPattern(table: *state.SymbolTable, scope: *state.Scope, pattern: ast.s
     }
 }
 
-fn bindBlock(table: *state.SymbolTable, scope: *state.Scope, block: *const ast.BlockNode) !void {
+fn bindBlock(table: *state.SymbolTable, scope: *state.Scope, block: *const ast.Statements.BlockNode) !void {
     // Declare direct local variable declarations in this block
     for (block.statements) |stmt| {
         switch (stmt) {

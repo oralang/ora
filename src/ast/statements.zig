@@ -1,8 +1,7 @@
 const std = @import("std");
-const SourceSpan = @import("types.zig").SourceSpan;
+const SourceSpan = @import("../ast.zig").SourceSpan;
 
-// Forward declaration for types and expressions
-const TypeRef = @import("types.zig").TypeRef;
+// Forward declaration for expressions
 const ExprNode = @import("expressions.zig").ExprNode;
 const LiteralExpr = @import("expressions.zig").LiteralExpr;
 const RangeExpr = @import("expressions.zig").RangeExpr;

@@ -11,7 +11,7 @@ pub const AnalysisResult = struct {
     diagnostics: []Diagnostic,
 };
 
-fn isLValue(expr: ast.ExprNode) bool {
+fn isLValue(expr: ast.Expressions.ExprNode) bool {
     return switch (expr) {
         .Identifier => true,
         .FieldAccess => true,

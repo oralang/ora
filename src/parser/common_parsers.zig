@@ -21,12 +21,12 @@ const ExpressionParser = @import("expression_parser.zig").ExpressionParser;
 pub fn parseSwitchPattern(
     base: *BaseParser,
     expr_parser: *ExpressionParser,
-) ParserError!ast.SwitchPattern {
+) ParserError!ast.Switch.Pattern {
     const pattern_token = base.peek();
 
     // Check for else pattern
     if (base.match(.Else)) {
-        return ast.SwitchPattern{ .Else = base.spanFromToken(pattern_token) };
+        return ast.Switch.Pattern{ .Else = base.spanFromToken(pattern_token) };
     }
 
     // Add support for explicit enum patterns with ranges: EnumName.Start...EnumName.End
@@ -45,7 +45,7 @@ pub fn parseSwitchPattern(
                 const range_expr = try expr_parser.parseRangeExpression();
 
                 if (range_expr == .Range) {
-                    return ast.SwitchPattern{
+                    return ast.Switch.Pattern{
                         .Range = .{
                             .start = range_expr.Range.start,
                             .end = range_expr.Range.end,
@@ -78,11 +78,11 @@ pub fn parseSwitchPattern(
         if (start_expr) |se| {
             if (base.match(.DotDotDot)) {
                 const end_expr = try expr_parser.parseExpression();
-                const start_ptr = try base.arena.createNode(ast.ExprNode);
+                const start_ptr = try base.arena.createNode(ast.Expressions.ExprNode);
                 start_ptr.* = se;
-                const end_ptr = try base.arena.createNode(ast.ExprNode);
+                const end_ptr = try base.arena.createNode(ast.Expressions.ExprNode);
                 end_ptr.* = end_expr;
-                return ast.SwitchPattern{ .Range = .{
+                return ast.Switch.Pattern{ .Range = .{
                     .start = start_ptr,
                     .end = end_ptr,
                     .inclusive = true,
@@ -103,7 +103,7 @@ pub fn parseSwitchPattern(
         if (base.match(.Dot)) {
             const variant_token = try base.consume(.Identifier, "Expected variant name after '.'");
 
-            return ast.SwitchPattern{ .EnumValue = .{
+            return ast.Switch.Pattern{ .EnumValue = .{
                 .enum_name = first_token.lexeme,
                 .variant_name = variant_token.lexeme,
                 .span = base.spanFromToken(first_token),
@@ -111,7 +111,7 @@ pub fn parseSwitchPattern(
         } else {
             // Single identifier - parsed as enum variant without explicit enum name
             // Type resolution happens in semantics phase
-            return ast.SwitchPattern{ .EnumValue = .{
+            return ast.Switch.Pattern{ .EnumValue = .{
                 .enum_name = "",
                 .variant_name = first_token.lexeme,
                 .span = base.spanFromToken(first_token),
@@ -126,39 +126,39 @@ pub fn parseSwitchPattern(
         const literal_token = base.advance();
 
         const literal_value = switch (literal_token.type) {
-            .IntegerLiteral => ast.LiteralExpr{
+            .IntegerLiteral => ast.Expressions.LiteralExpr{
                 .Integer = ast.expressions.IntegerLiteral{
                     .value = literal_token.lexeme,
-                    .type_info = ast.TypeInfo.fromOraType(.u256), // Default to u256 for integers
+                    .type_info = ast.Types.TypeInfo.fromOraType(.u256), // Default to u256 for integers
                     .span = base.spanFromToken(literal_token),
                 },
             },
-            .BinaryLiteral => ast.LiteralExpr{
-                .Binary = ast.BinaryLiteral{
+            .BinaryLiteral => ast.Expressions.LiteralExpr{
+                .Binary = ast.Expressions.BinaryLiteral{
                     .value = literal_token.lexeme,
-                    .type_info = ast.TypeInfo.fromOraType(.u256), // Default to u256 for binary literals
+                    .type_info = ast.Types.TypeInfo.fromOraType(.u256), // Default to u256 for binary literals
                     .span = base.spanFromToken(literal_token),
                 },
             },
-            .StringLiteral => ast.LiteralExpr{ .String = ast.expressions.StringLiteral{
+            .StringLiteral => ast.Expressions.LiteralExpr{ .String = ast.expressions.StringLiteral{
                 .value = literal_token.lexeme,
-                .type_info = ast.TypeInfo.fromOraType(.string),
+                .type_info = ast.Types.TypeInfo.fromOraType(.string),
                 .span = base.spanFromToken(literal_token),
             } },
-            .True => ast.LiteralExpr{ .Bool = ast.expressions.BoolLiteral{
+            .True => ast.Expressions.LiteralExpr{ .Bool = ast.expressions.BoolLiteral{
                 .value = true,
-                .type_info = ast.TypeInfo.fromOraType(.bool),
+                .type_info = ast.Types.TypeInfo.fromOraType(.bool),
                 .span = base.spanFromToken(literal_token),
             } },
-            .False => ast.LiteralExpr{ .Bool = ast.expressions.BoolLiteral{
+            .False => ast.Expressions.LiteralExpr{ .Bool = ast.expressions.BoolLiteral{
                 .value = false,
-                .type_info = ast.TypeInfo.fromOraType(.bool),
+                .type_info = ast.Types.TypeInfo.fromOraType(.bool),
                 .span = base.spanFromToken(literal_token),
             } },
             else => unreachable,
         };
 
-        return ast.SwitchPattern{ .Literal = .{
+        return ast.Switch.Pattern{ .Literal = .{
             .value = literal_value,
             .span = base.spanFromToken(literal_token),
         } };
@@ -171,7 +171,7 @@ pub fn parseSwitchPattern(
 
         // Check if the identifier is a single underscore
         if (std.mem.eql(u8, token.lexeme, "_")) {
-            return ast.SwitchPattern{ .Else = base.spanFromToken(token) };
+            return ast.Switch.Pattern{ .Else = base.spanFromToken(token) };
         }
 
         // Not an underscore, rewind
@@ -189,21 +189,21 @@ pub fn parseSwitchBody(
     base: *BaseParser,
     expr_parser: *ExpressionParser,
     mode: SwitchBodyMode,
-) ParserError!ast.SwitchBody {
+) ParserError!ast.Switch.Body {
     // Check for a block body
     if (base.match(.LeftBrace)) {
         if (mode == .ExpressionArm) {
             try base.errorAtCurrent("Block body not allowed in switch expression arm");
             return ParserError.UnexpectedToken;
         }
-        var statements = std.ArrayList(ast.StmtNode).init(base.arena.allocator());
+        var statements = std.ArrayList(ast.Statements.StmtNode).init(base.arena.allocator());
         defer statements.deinit();
 
         // Parse statements inside the block
         while (!base.check(.RightBrace) and !base.isAtEnd()) {
             // If using ExpressionParser, the statement will be an expression statement
             const expr = try expr_parser.parseExpression();
-            try statements.append(ast.StmtNode{ .Expr = expr });
+            try statements.append(ast.Statements.StmtNode{ .Expr = expr });
 
             // Consume optional semicolon
             _ = base.match(.Semicolon);
@@ -211,8 +211,8 @@ pub fn parseSwitchBody(
 
         _ = try base.consume(.RightBrace, "Expected '}' after switch case block");
 
-        return ast.SwitchBody{ .Block = .{
-            .statements = try base.arena.createSlice(ast.StmtNode, statements.items.len),
+        return ast.Switch.Body{ .Block = .{
+            .statements = try base.arena.createSlice(ast.Statements.StmtNode, statements.items.len),
             .span = base.spanFromToken(base.previous()),
         } };
     }
@@ -222,7 +222,7 @@ pub fn parseSwitchBody(
     if (mode == .StatementArm) {
         _ = try base.consume(.Semicolon, "Expected ';' after switch statement arm expression");
     }
-    const expr_ptr = try base.arena.createNode(ast.ExprNode);
+    const expr_ptr = try base.arena.createNode(ast.Expressions.ExprNode);
     expr_ptr.* = expr;
-    return ast.SwitchBody{ .Expression = expr_ptr };
+    return ast.Switch.Body{ .Expression = expr_ptr };
 }

@@ -8,8 +8,8 @@ const TokenType = lexer.TokenType;
 const BaseParser = common.BaseParser;
 const ParserCommon = common.ParserCommon;
 const ParserError = @import("parser_core.zig").ParserError;
-const TypeInfo = ast.TypeInfo;
-const OraType = ast.OraType;
+const TypeInfo = ast.Types.TypeInfo;
+const OraType = ast.Types.OraType;
 const TypeCategory = ast.TypeCategory;
 
 /// Represents the context in which a type is being parsed
@@ -97,7 +97,7 @@ pub const TypeParser = struct {
                     try self.base.errorAtCurrent("'|' is only allowed in error unions (e.g., !T | E)");
                     return error.UnexpectedToken;
                 }
-                var types = std.ArrayList(ast.OraType).init(self.base.arena.allocator());
+                var types = std.ArrayList(ast.Types.OraType).init(self.base.arena.allocator());
                 defer types.deinit();
                 // Push first
                 try types.append(left.ora_type orelse return error.UnresolvedType);
@@ -107,12 +107,11 @@ pub const TypeParser = struct {
                     try types.append(next.ora_type orelse return error.UnresolvedType);
                     if (!self.base.match(.Pipe)) break;
                 }
-                const slice_types = try self.base.arena.createSlice(ast.OraType, types.items.len);
+                const slice_types = try self.base.arena.createSlice(ast.Types.OraType, types.items.len);
                 for (types.items, 0..) |t, i| slice_types[i] = t;
                 return TypeInfo{
                     .category = .ErrorUnion,
-                    .ora_type = ast.OraType{ ._union = slice_types },
-                    .ast_type = null,
+                    .ora_type = ast.Types.OraType{ ._union = slice_types },
                     .source = .explicit,
                     .span = span,
                 };
@@ -130,7 +129,7 @@ pub const TypeParser = struct {
                     const name_tok = try self.base.consume(.Identifier, "Expected field name in anonymous struct type");
                     _ = try self.base.consume(.Colon, "Expected ':' after field name");
                     const field_type = try self.parseTypeWithContext(context);
-                    const field_type_ptr = try self.base.arena.createNode(ast.OraType);
+                    const field_type_ptr = try self.base.arena.createNode(ast.Types.OraType);
                     field_type_ptr.* = field_type.ora_type orelse return error.UnresolvedType;
                     try fields.append(.{ .name = name_tok.lexeme, .typ = field_type_ptr });
                     if (!self.base.match(.Comma)) break :repeat;
@@ -141,8 +140,7 @@ pub const TypeParser = struct {
             for (fields.items, 0..) |f, i| field_slice[i] = f;
             return TypeInfo{
                 .category = .Struct,
-                .ora_type = ast.OraType{ .anonymous_struct = field_slice },
-                .ast_type = null,
+                .ora_type = ast.Types.OraType{ .anonymous_struct = field_slice },
                 .source = .explicit,
                 .span = span,
             };
@@ -182,7 +180,6 @@ pub const TypeParser = struct {
         return TypeInfo{
             .category = .Mapping,
             .ora_type = OraType{ .mapping = mapping_type },
-            .ast_type = null,
             .source = .explicit,
             .span = span,
         };
@@ -221,7 +218,6 @@ pub const TypeParser = struct {
         return TypeInfo{
             .category = .DoubleMap,
             .ora_type = OraType{ .double_map = doublemap_type },
-            .ast_type = null,
             .source = .explicit,
             .span = span,
         };
@@ -246,7 +242,6 @@ pub const TypeParser = struct {
             return TypeInfo{
                 .category = .Array,
                 .ora_type = OraType{ .array = .{ .elem = elem_ora_type, .len = size_val } },
-                .ast_type = null,
                 .source = .explicit,
                 .span = span,
             };
@@ -279,7 +274,6 @@ pub const TypeParser = struct {
         return TypeInfo{
             .category = .Struct, // Assume struct for now, will be resolved later
             .ora_type = OraType{ .struct_type = type_name },
-            .ast_type = null,
             .source = .explicit,
             .span = span,
         };
@@ -299,7 +293,6 @@ pub const TypeParser = struct {
         return TypeInfo{
             .category = .Slice,
             .ora_type = OraType{ .slice = elem_ora_type },
-            .ast_type = null,
             .source = .explicit,
             .span = span,
         };
@@ -318,7 +311,7 @@ pub const TypeParser = struct {
 
         // Support optional explicit error list continuation: !T | E1 | E2 ...
         if (self.base.match(.Pipe)) {
-            var types = std.ArrayList(ast.OraType).init(self.base.arena.allocator());
+            var types = std.ArrayList(ast.Types.OraType).init(self.base.arena.allocator());
             defer types.deinit();
             // First member is the initial !T
             try types.append(OraType{ .error_union = success_ora_type });
@@ -328,12 +321,11 @@ pub const TypeParser = struct {
                 try types.append(next.ora_type orelse return error.UnresolvedType);
                 if (!self.base.match(.Pipe)) break;
             }
-            const slice_types = try self.base.arena.createSlice(ast.OraType, types.items.len);
+            const slice_types = try self.base.arena.createSlice(ast.Types.OraType, types.items.len);
             for (types.items, 0..) |t, i| slice_types[i] = t;
             return TypeInfo{
                 .category = .ErrorUnion,
                 .ora_type = OraType{ ._union = slice_types },
-                .ast_type = null,
                 .source = .explicit,
                 .span = span,
             };
@@ -342,7 +334,6 @@ pub const TypeParser = struct {
         return TypeInfo{
             .category = .ErrorUnion,
             .ora_type = OraType{ .error_union = success_ora_type },
-            .ast_type = null,
             .source = .explicit,
             .span = span,
         };

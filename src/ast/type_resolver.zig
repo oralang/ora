@@ -131,7 +131,7 @@ pub const TypeResolver = struct {
     }
 
     /// Update literal expression types based on context
-    fn updateLiteralType(self: *TypeResolver, expr: *ast.ExprNode, target_type_info: TypeInfo) TypeResolutionError!void {
+    fn updateLiteralType(self: *TypeResolver, expr: *ast.Expressions.ExprNode, target_type_info: TypeInfo) TypeResolutionError!void {
         switch (expr.*) {
             .Literal => |*literal| {
                 switch (literal.*) {
@@ -180,7 +180,7 @@ pub const TypeResolver = struct {
     }
 
     /// Evaluate constant expressions to compute their values
-    fn evaluateConstantExpression(self: *TypeResolver, expr: *ast.ExprNode) TypeResolutionError!?u256 {
+    fn evaluateConstantExpression(self: *TypeResolver, expr: *ast.Expressions.ExprNode) TypeResolutionError!?u256 {
         switch (expr.*) {
             .Literal => |*literal| {
                 switch (literal.*) {
@@ -231,7 +231,7 @@ pub const TypeResolver = struct {
     }
 
     /// Resolve expression types with context
-    fn resolveExpressionTypes(self: *TypeResolver, expr: *ast.ExprNode, context: TypeContext) TypeResolutionError!void {
+    fn resolveExpressionTypes(self: *TypeResolver, expr: *ast.Expressions.ExprNode, context: TypeContext) TypeResolutionError!void {
         switch (expr.*) {
             .Literal => {
                 // If we have expected type from context, apply it

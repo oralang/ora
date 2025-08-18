@@ -4,7 +4,7 @@ const DEBUG_SEMANTICS: bool = false;
 const state = @import("state.zig");
 const expr = @import("expression_analyzer.zig");
 const locals = @import("locals_binder.zig");
-const MemoryRegion = @import("../ast.zig").MemoryRegion;
+const MemoryRegion = @import("../ast.zig").Memory.Region;
 
 pub fn checkFunctionBody(
     allocator: std.mem.Allocator,
@@ -29,13 +29,13 @@ pub fn collectUnknownIdentifierSpans(
     return try issues.toOwnedSlice();
 }
 
-fn resolveBlockScope(table: *state.SymbolTable, default_scope: *state.Scope, block: *const ast.BlockNode) *state.Scope {
+fn resolveBlockScope(table: *state.SymbolTable, default_scope: *state.Scope, block: *const ast.Statements.BlockNode) *state.Scope {
     const key: usize = @intFromPtr(block);
     if (table.block_scopes.get(key)) |sc| return sc;
     return default_scope;
 }
 
-fn walkBlockForUnknowns(issues: *std.ArrayList(ast.SourceSpan), table: *state.SymbolTable, scope: *state.Scope, block: *const ast.BlockNode) !void {
+fn walkBlockForUnknowns(issues: *std.ArrayList(ast.SourceSpan), table: *state.SymbolTable, scope: *state.Scope, block: *const ast.Statements.BlockNode) !void {
     for (block.statements) |stmt| {
         switch (stmt) {
             .Expr => |e| try visitExprForUnknowns(issues, table, scope, e),
@@ -81,7 +81,7 @@ fn isScopeKnown(table: *state.SymbolTable, scope: *const state.Scope) bool {
     return false;
 }
 
-fn visitExprForUnknowns(issues: *std.ArrayList(ast.SourceSpan), table: *state.SymbolTable, scope: *state.Scope, expr_node: ast.ExprNode) !void {
+fn visitExprForUnknowns(issues: *std.ArrayList(ast.SourceSpan), table: *state.SymbolTable, scope: *state.Scope, expr_node: ast.Expressions.ExprNode) !void {
     if (!isScopeKnown(table, scope)) return; // Defensive guard
     switch (expr_node) {
         .Identifier => |id| {
@@ -151,7 +151,7 @@ fn visitExprForUnknowns(issues: *std.ArrayList(ast.SourceSpan), table: *state.Sy
     }
 }
 
-fn inferExprRegion(table: *state.SymbolTable, scope: *state.Scope, e: ast.ExprNode) MemoryRegion {
+fn inferExprRegion(table: *state.SymbolTable, scope: *state.Scope, e: ast.Expressions.ExprNode) MemoryRegion {
     return switch (e) {
         .Identifier => |id| blk: {
             if (state.SymbolTable.findUp(scope, id.name)) |sym| {
@@ -170,14 +170,14 @@ fn isStorageLike(r: MemoryRegion) bool {
     return r == .Storage or r == .TStore;
 }
 
-fn isElementLevelTarget(target: ast.ExprNode) bool {
+fn isElementLevelTarget(target: ast.Expressions.ExprNode) bool {
     return switch (target) {
         .FieldAccess, .Index => true,
         else => false,
     };
 }
 
-fn isRegionAssignmentAllowed(target_region: MemoryRegion, source_region: MemoryRegion, target_node: ast.ExprNode) bool {
+fn isRegionAssignmentAllowed(target_region: MemoryRegion, source_region: MemoryRegion, target_node: ast.Expressions.ExprNode) bool {
     if (isStorageLike(target_region)) {
         if (isStorageLike(source_region)) {
             return isElementLevelTarget(target_node);
@@ -187,7 +187,7 @@ fn isRegionAssignmentAllowed(target_region: MemoryRegion, source_region: MemoryR
     return true;
 }
 
-fn checkExpr(issues: *std.ArrayList(ast.SourceSpan), table: *state.SymbolTable, scope: *state.Scope, e: ast.ExprNode) !void {
+fn checkExpr(issues: *std.ArrayList(ast.SourceSpan), table: *state.SymbolTable, scope: *state.Scope, e: ast.Expressions.ExprNode) !void {
     switch (e) {
         .Call => |c| {
             if (scope.name) |caller_fn| {
@@ -277,7 +277,7 @@ fn checkExpr(issues: *std.ArrayList(ast.SourceSpan), table: *state.SymbolTable, 
     }
 }
 
-fn walkBlock(issues: *std.ArrayList(ast.SourceSpan), table: *state.SymbolTable, scope: *state.Scope, block: *const ast.BlockNode, ret_type: ?ast.TypeInfo) !void {
+fn walkBlock(issues: *std.ArrayList(ast.SourceSpan), table: *state.SymbolTable, scope: *state.Scope, block: *const ast.Statements.BlockNode, ret_type: ?ast.Types.TypeInfo) !void {
     for (block.statements) |stmt| {
         switch (stmt) {
             .VariableDecl => |v| {
@@ -309,7 +309,7 @@ fn walkBlock(issues: *std.ArrayList(ast.SourceSpan), table: *state.SymbolTable, 
                         // Type compatibility (best-effort)
                         const lt = expr.inferExprType(table, scope, a.target.*);
                         const rt = expr.inferExprType(table, scope, a.value.*);
-                        if (lt.ora_type != null and rt.ora_type != null and !ast.TypeInfo.equals(lt, rt)) {
+                        if (lt.ora_type != null and rt.ora_type != null and !ast.Types.TypeInfo.equals(lt, rt)) {
                             try issues.append(a.span);
                         }
                         // Recurse into RHS for error checks
@@ -362,13 +362,13 @@ fn walkBlock(issues: *std.ArrayList(ast.SourceSpan), table: *state.SymbolTable, 
                 if (ret_type) |rt| {
                     if (r.value) |v| {
                         const vt = expr.inferExprType(table, scope, v);
-                        var ok = ast.TypeInfo.equals(vt, rt) or ast.TypeInfo.isCompatibleWith(vt, rt);
+                        var ok = ast.Types.TypeInfo.equals(vt, rt) or ast.Types.TypeInfo.isCompatibleWith(vt, rt);
                         if (!ok) {
                             // Allow returning T when expected is !T (success case)
                             if (rt.ora_type) |rot| switch (rot) {
                                 .error_union => |succ_ptr| {
-                                    const succ = ast.TypeInfo.fromOraType(@constCast(succ_ptr).*);
-                                    ok = ast.TypeInfo.equals(vt, succ) or ast.TypeInfo.isCompatibleWith(vt, succ);
+                                    const succ = ast.Types.TypeInfo.fromOraType(@constCast(succ_ptr).*);
+                                    ok = ast.Types.TypeInfo.equals(vt, succ) or ast.Types.TypeInfo.isCompatibleWith(vt, succ);
                                 },
                                 ._union => |members| {
                                     var i: usize = 0;
@@ -376,8 +376,8 @@ fn walkBlock(issues: *std.ArrayList(ast.SourceSpan), table: *state.SymbolTable, 
                                         const m = members[i];
                                         switch (m) {
                                             .error_union => |succ_ptr| {
-                                                const succ = ast.TypeInfo.fromOraType(@constCast(succ_ptr).*);
-                                                if (ast.TypeInfo.equals(vt, succ) or ast.TypeInfo.isCompatibleWith(vt, succ)) {
+                                                const succ = ast.Types.TypeInfo.fromOraType(@constCast(succ_ptr).*);
+                                                if (ast.Types.TypeInfo.equals(vt, succ) or ast.Types.TypeInfo.isCompatibleWith(vt, succ)) {
                                                     ok = true;
                                                 }
                                             },

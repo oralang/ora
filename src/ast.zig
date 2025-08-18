@@ -4,7 +4,6 @@ const testing = std.testing;
 // Import modular AST components
 pub const expressions = @import("ast/expressions.zig");
 pub const statements = @import("ast/statements.zig");
-pub const types = @import("ast/types.zig");
 pub const type_info = @import("ast/type_info.zig");
 
 // Import serializer and type resolver
@@ -15,91 +14,54 @@ const type_resolver = @import("ast/type_resolver.zig");
 pub const TypeResolver = type_resolver.TypeResolver;
 pub const TypeResolutionError = type_resolver.TypeResolutionError;
 
-// Re-export main types for convenience
-pub const ExprNode = expressions.ExprNode;
-pub const StmtNode = statements.StmtNode;
-pub const SourceSpan = types.SourceSpan;
-pub const BlockNode = statements.BlockNode;
-pub const BinaryOp = expressions.BinaryOp;
-pub const UnaryOp = expressions.UnaryOp;
-pub const CompoundAssignmentOp = expressions.CompoundAssignmentOp;
-pub const CastType = expressions.CastType;
+/// Source span to track position info in the source code
+pub const SourceSpan = struct {
+    // File identity for multi-file projects (0 = unknown/default)
+    file_id: u32 = 0,
+    // 1-based caret position
+    line: u32,
+    column: u32,
+    // Byte length of the span
+    length: u32,
+    // Start byte offset within file (for precise mapping)
+    byte_offset: u32 = 0,
+    // Optional original slice
+    lexeme: ?[]const u8 = null,
+};
 
-// Re-export new unified type system
-pub const TypeInfo = type_info.TypeInfo;
-pub const TypeCategory = type_info.TypeCategory;
-pub const OraType = type_info.OraType;
-pub const TypeSource = type_info.TypeSource;
-pub const CommonTypes = type_info.CommonTypes;
+// Namespace groupings for cleaner API
+pub const Expressions = expressions;
+pub const Statements = statements;
+pub const Types = type_info;
 
-// Memory and utilities re-exports
-pub const MemoryRegion = statements.MemoryRegion;
-pub const VariableKind = statements.VariableKind;
+// Memory and region types
+pub const Memory = struct {
+    pub const Region = statements.MemoryRegion;
+    pub const VariableKind = statements.VariableKind;
+};
 
-// Re-export specific node types needed by visitor
-pub const IdentifierExpr = expressions.IdentifierExpr;
-pub const LiteralExpr = expressions.LiteralExpr;
-pub const BinaryExpr = expressions.BinaryExpr;
-pub const UnaryExpr = expressions.UnaryExpr;
-pub const AssignmentExpr = expressions.AssignmentExpr;
-pub const CompoundAssignmentExpr = expressions.CompoundAssignmentExpr;
-pub const CallExpr = expressions.CallExpr;
-pub const IndexExpr = expressions.IndexExpr;
-pub const FieldAccessExpr = expressions.FieldAccessExpr;
-pub const CastExpr = expressions.CastExpr;
-pub const ComptimeExpr = expressions.ComptimeExpr;
-pub const OldExpr = expressions.OldExpr;
-pub const TupleExpr = expressions.TupleExpr;
-pub const QuantifiedExpr = expressions.QuantifiedExpr;
-pub const QuantifierType = expressions.QuantifierType;
-pub const TryExpr = expressions.TryExpr;
-pub const ErrorReturnExpr = expressions.ErrorReturnExpr;
-pub const ErrorCastExpr = expressions.ErrorCastExpr;
-pub const ShiftExpr = expressions.ShiftExpr;
-pub const StructInstantiationExpr = expressions.StructInstantiationExpr;
-pub const AnonymousStructExpr = expressions.AnonymousStructExpr;
-pub const AnonymousStructField = expressions.AnonymousStructField;
-pub const RangeExpr = expressions.RangeExpr;
-pub const LabeledBlockExpr = expressions.LabeledBlockExpr;
-pub const DestructuringExpr = expressions.DestructuringExpr;
-pub const DestructuringPattern = expressions.DestructuringPattern;
-pub const StructDestructureField = expressions.StructDestructureField;
-pub const EnumLiteralExpr = expressions.EnumLiteralExpr;
-pub const AddressLiteral = expressions.AddressLiteral;
-pub const HexLiteral = expressions.HexLiteral;
-pub const BinaryLiteral = expressions.BinaryLiteral;
-pub const StructInstantiationField = expressions.StructInstantiationField;
-pub const SwitchCase = expressions.SwitchCase;
-pub const SwitchPattern = expressions.SwitchPattern;
-pub const SwitchBody = expressions.SwitchBody;
+// Operator types
+pub const Operators = struct {
+    pub const Binary = expressions.BinaryOp;
+    pub const Unary = expressions.UnaryOp;
+    pub const Compound = expressions.CompoundAssignmentOp;
+    pub const Cast = expressions.CastType;
+};
 
-pub const ReturnNode = statements.ReturnNode;
-pub const IfNode = statements.IfNode;
-pub const WhileNode = statements.WhileNode;
-pub const ForLoopNode = statements.ForLoopNode;
-pub const LoopPattern = statements.LoopPattern;
-pub const LogNode = statements.LogNode;
-pub const InvariantNode = statements.InvariantNode;
-pub const RequiresNode = statements.RequiresNode;
-pub const EnsuresNode = statements.EnsuresNode;
-pub const VariableDeclNode = statements.VariableDeclNode;
-pub const ErrorDeclNode = statements.ErrorDeclNode;
-pub const TryBlockNode = statements.TryBlockNode;
-pub const CatchBlock = statements.CatchBlock;
-pub const SwitchNode = statements.SwitchNode;
-pub const BreakNode = statements.BreakNode;
-pub const ContinueNode = statements.ContinueNode;
-pub const DestructuringAssignmentNode = statements.DestructuringAssignmentNode;
-pub const MoveNode = statements.MoveNode;
-pub const UnlockNode = statements.UnlockNode;
-pub const LabeledBlockNode = statements.LabeledBlockNode;
+// Switch-related types
+pub const Switch = struct {
+    pub const Case = expressions.SwitchCase;
+    pub const Pattern = expressions.SwitchPattern;
+    pub const Body = expressions.SwitchBody;
+    pub const ExprNode = expressions.SwitchExprNode;
+};
 
-// Expression nodes that were missing
-// Note: IdentifierNode doesn't exist - identifiers are handled as part of expressions
-pub const SwitchExprNode = expressions.SwitchExprNode;
-pub const IntegerLiteral = expressions.IntegerLiteral;
-pub const StringLiteral = expressions.StringLiteral;
-pub const ArrayLiteralExpr = expressions.ArrayLiteralExpr;
+// Literal types
+pub const Literals = struct {
+    pub const Integer = expressions.IntegerLiteral;
+    pub const String = expressions.StringLiteral;
+    pub const Array = expressions.ArrayLiteralExpr;
+};
 
 // Top-level AST nodes that were missing
 pub const ModuleNode = struct {
@@ -121,21 +83,21 @@ pub const ContractNode = struct {
 pub const FunctionNode = struct {
     name: []const u8,
     parameters: []ParameterNode,
-    return_type_info: ?TypeInfo, // Unified type information for return type
-    body: BlockNode,
+    return_type_info: ?Types.TypeInfo, // Unified type information for return type
+    body: Statements.BlockNode,
     visibility: Visibility,
     attributes: []u8, // Placeholder for future function attributes
     is_inline: bool, // inline functions
-    requires_clauses: []*ExprNode, // Preconditions
-    ensures_clauses: []*ExprNode, // Postconditions
+    requires_clauses: []*Expressions.ExprNode, // Preconditions
+    ensures_clauses: []*Expressions.ExprNode, // Postconditions
     span: SourceSpan,
 };
 
 pub const ParameterNode = struct {
     name: []const u8,
-    type_info: TypeInfo, // Unified type information
+    type_info: Types.TypeInfo, // Unified type information
     is_mutable: bool, // mut parameter
-    default_value: ?*ExprNode, // Default parameter value
+    default_value: ?*Expressions.ExprNode, // Default parameter value
     span: SourceSpan,
 };
 
@@ -152,21 +114,21 @@ pub const StructDeclNode = struct {
 
 pub const StructField = struct {
     name: []const u8,
-    type_info: TypeInfo, // Unified type information
+    type_info: Types.TypeInfo, // Unified type information
     span: SourceSpan,
 };
 
 pub const EnumDeclNode = struct {
     name: []const u8,
     variants: []EnumVariant,
-    underlying_type_info: ?TypeInfo, // Unified type information for underlying type
+    underlying_type_info: ?Types.TypeInfo, // Unified type information for underlying type
     span: SourceSpan,
     has_explicit_values: bool = false, // Track if this enum has explicit values
 };
 
 pub const EnumVariant = struct {
     name: []const u8,
-    value: ?ExprNode, // Optional explicit value
+    value: ?Expressions.ExprNode, // Optional explicit value
     resolved_value: ?u256 = null, // Computed value after type resolution
     span: SourceSpan,
 };
@@ -188,20 +150,20 @@ pub const LogDeclNode = struct {
 
 pub const LogField = struct {
     name: []const u8,
-    type_info: TypeInfo, // Unified type information
+    type_info: Types.TypeInfo, // Unified type information
     indexed: bool,
     span: SourceSpan,
 };
 
 pub const LockNode = struct {
-    path: ExprNode,
+    path: Expressions.ExprNode,
     span: SourceSpan,
 };
 
 pub const ConstantNode = struct {
     name: []const u8,
-    typ: TypeInfo,
-    value: *ExprNode,
+    typ: Types.TypeInfo,
+    value: *Expressions.ExprNode,
     visibility: Visibility,
     span: SourceSpan,
 };
@@ -215,30 +177,30 @@ pub const AstNode = union(enum) {
     Contract: ContractNode,
     Function: FunctionNode,
     Constant: ConstantNode,
-    VariableDecl: VariableDeclNode,
+    VariableDecl: Statements.VariableDeclNode,
     StructDecl: StructDeclNode,
     EnumDecl: EnumDeclNode,
     LogDecl: LogDeclNode,
     Import: ImportNode,
-    ErrorDecl: ErrorDeclNode,
+    ErrorDecl: Statements.ErrorDeclNode,
 
     // Structural nodes - use pointers to break circular dependency
-    Block: BlockNode,
-    Expression: *ExprNode, // Use pointer to break circular dependency
-    Statement: *StmtNode, // Use pointer to break circular dependency
-    TryBlock: TryBlockNode,
+    Block: Statements.BlockNode,
+    Expression: *Expressions.ExprNode, // Use pointer to break circular dependency
+    Statement: *Statements.StmtNode, // Use pointer to break circular dependency
+    TryBlock: Statements.TryBlockNode,
 };
 
 // Utility functions
-pub fn deinitExprNode(allocator: std.mem.Allocator, expr: *ExprNode) void {
+pub fn deinitExprNode(allocator: std.mem.Allocator, expr: *Expressions.ExprNode) void {
     expressions.deinitExprNode(allocator, expr);
 }
 
-pub fn deinitStmtNode(allocator: std.mem.Allocator, stmt: *StmtNode) void {
+pub fn deinitStmtNode(allocator: std.mem.Allocator, stmt: *Statements.StmtNode) void {
     statements.deinitStmtNode(allocator, stmt);
 }
 
-pub fn deinitBlockNode(allocator: std.mem.Allocator, block: *BlockNode) void {
+pub fn deinitBlockNode(allocator: std.mem.Allocator, block: *Statements.BlockNode) void {
     statements.deinitBlockNode(allocator, block);
 }
 

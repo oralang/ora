@@ -1,12 +1,11 @@
 const std = @import("std");
-const SourceSpan = @import("types.zig").SourceSpan;
+const SourceSpan = @import("../ast.zig").SourceSpan;
 
 /// Unified type information system for all AST nodes
 /// This replaces the various type enums and provides consistent type representation
 pub const TypeInfo = struct {
     category: TypeCategory,
     ora_type: ?OraType,
-    ast_type: ?@import("types.zig").TypeRef, // Original AST type reference
     source: TypeSource,
     span: ?SourceSpan, // Where the type was determined/declared
 
@@ -15,7 +14,6 @@ pub const TypeInfo = struct {
         return TypeInfo{
             .category = .Unknown,
             .ora_type = null,
-            .ast_type = null,
             .source = .unknown,
             .span = null,
         };
@@ -26,7 +24,6 @@ pub const TypeInfo = struct {
         return TypeInfo{
             .category = category,
             .ora_type = ora_type,
-            .ast_type = null,
             .source = .explicit,
             .span = span,
         };
@@ -37,7 +34,6 @@ pub const TypeInfo = struct {
         return TypeInfo{
             .category = category,
             .ora_type = ora_type,
-            .ast_type = null,
             .source = .inferred,
             .span = span,
         };
@@ -49,13 +45,11 @@ pub const TypeInfo = struct {
     }
 
     /// Ensure that a type is represented as TypeInfo
-    /// This helps with the transition from TypeRef to TypeInfo
+    /// This helps with the transition from various type representations to TypeInfo
     pub fn ensureTypeInfo(type_value: anytype) TypeInfo {
         const T = @TypeOf(type_value);
         if (T == TypeInfo) {
             return type_value;
-        } else if (T == @import("types.zig").TypeRef or T == *const @import("types.zig").TypeRef) {
-            return fromAstType(type_value);
         } else if (T == OraType or T == *const OraType) {
             return fromOraType(type_value);
         } else {
@@ -98,47 +92,12 @@ pub const TypeInfo = struct {
         };
     }
 
-    /// Create TypeInfo from AST TypeRef
-    pub fn fromAstType(ast_type: @import("types.zig").TypeRef) TypeInfo {
-        const category = switch (ast_type) {
-            .Bool => TypeCategory.Bool,
-            .U8, .U16, .U32, .U64, .U128, .U256, .I8, .I16, .I32, .I64, .I128, .I256 => TypeCategory.Integer,
-            .String => TypeCategory.String,
-            .Address => TypeCategory.Address,
-            .Bytes => TypeCategory.Bytes,
-            .Identifier => TypeCategory.Struct, // Assume struct for now
-            .Slice => TypeCategory.Slice,
-            .Mapping => TypeCategory.Mapping,
-            .DoubleMap => TypeCategory.DoubleMap,
-            .Tuple => TypeCategory.Tuple,
-            .ErrorUnion => TypeCategory.ErrorUnion,
-            .Result => TypeCategory.Result,
-            .Struct => TypeCategory.Struct,
-            .Enum => TypeCategory.Enum,
-            .Contract => TypeCategory.Contract, // Add Contract type support
-            .Function => TypeCategory.Function,
-            .Void => TypeCategory.Void,
-            .Error => TypeCategory.Unknown, // Map Error to Unknown for now
-            .Module => TypeCategory.Module,
-            .Unknown => TypeCategory.Unknown,
-        };
-
-        return TypeInfo{
-            .category = category,
-            .ora_type = null, // Will be resolved later
-            .ast_type = ast_type,
-            .source = .explicit,
-            .span = null,
-        };
-    }
-
     /// Create TypeInfo from OraType
     pub fn fromOraType(ora_type: OraType) TypeInfo {
         const category = ora_type.getCategory();
         return TypeInfo{
             .category = category,
             .ora_type = ora_type,
-            .ast_type = null,
             .source = .inferred,
             .span = null,
         };
@@ -659,7 +618,6 @@ pub const CommonTypes = struct {
         return TypeInfo{
             .category = .Integer,
             .ora_type = .u8,
-            .ast_type = null,
             .source = .explicit,
             .span = null,
         };
@@ -669,7 +627,6 @@ pub const CommonTypes = struct {
         return TypeInfo{
             .category = .Integer,
             .ora_type = .u16,
-            .ast_type = null,
             .source = .explicit,
             .span = null,
         };
@@ -679,7 +636,6 @@ pub const CommonTypes = struct {
         return TypeInfo{
             .category = .Integer,
             .ora_type = .u32,
-            .ast_type = null,
             .source = .explicit,
             .span = null,
         };
@@ -689,7 +645,6 @@ pub const CommonTypes = struct {
         return TypeInfo{
             .category = .Integer,
             .ora_type = .u64,
-            .ast_type = null,
             .source = .explicit,
             .span = null,
         };
@@ -699,7 +654,6 @@ pub const CommonTypes = struct {
         return TypeInfo{
             .category = .Integer,
             .ora_type = .u128,
-            .ast_type = null,
             .source = .explicit,
             .span = null,
         };
@@ -709,7 +663,6 @@ pub const CommonTypes = struct {
         return TypeInfo{
             .category = .Integer,
             .ora_type = .u256,
-            .ast_type = null,
             .source = .explicit,
             .span = null,
         };
@@ -719,7 +672,6 @@ pub const CommonTypes = struct {
         return TypeInfo{
             .category = .Bool,
             .ora_type = .bool,
-            .ast_type = null,
             .source = .explicit,
             .span = null,
         };
@@ -729,7 +681,6 @@ pub const CommonTypes = struct {
         return TypeInfo{
             .category = .String,
             .ora_type = .string,
-            .ast_type = null,
             .source = .explicit,
             .span = null,
         };
@@ -739,7 +690,6 @@ pub const CommonTypes = struct {
         return TypeInfo{
             .category = .Address,
             .ora_type = .address,
-            .ast_type = null,
             .source = .explicit,
             .span = null,
         };
@@ -749,7 +699,6 @@ pub const CommonTypes = struct {
         return TypeInfo{
             .category = .Void,
             .ora_type = .void,
-            .ast_type = null,
             .source = .explicit,
             .span = null,
         };
@@ -769,7 +718,6 @@ pub const CommonTypes = struct {
         return TypeInfo{
             .category = .Integer,
             .ora_type = null,
-            .ast_type = null,
             .source = .unknown,
             .span = null,
         };
@@ -779,7 +727,6 @@ pub const CommonTypes = struct {
         return TypeInfo{
             .category = .String,
             .ora_type = null,
-            .ast_type = null,
             .source = .unknown,
             .span = null,
         };

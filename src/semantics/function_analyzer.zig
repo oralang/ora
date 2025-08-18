@@ -4,17 +4,17 @@ const state = @import("state.zig");
 const expr = @import("expression_analyzer.zig");
 const locals = @import("locals_binder.zig");
 
-fn copyOraTypeOwned(allocator: std.mem.Allocator, src: ast.OraType) !ast.OraType {
+fn copyOraTypeOwned(allocator: std.mem.Allocator, src: ast.Types.OraType) !ast.Types.OraType {
     switch (src) {
         ._union => |members| {
-            const new_members = try allocator.alloc(ast.OraType, members.len);
+            const new_members = try allocator.alloc(ast.Types.OraType, members.len);
             @memcpy(new_members, members);
-            return ast.OraType{ ._union = new_members };
+            return ast.Types.OraType{ ._union = new_members };
         },
         .error_union => |succ_ptr| {
-            const new_succ_ptr = try allocator.create(ast.OraType);
+            const new_succ_ptr = try allocator.create(ast.Types.OraType);
             new_succ_ptr.* = succ_ptr.*;
-            return ast.OraType{ .error_union = new_succ_ptr };
+            return ast.Types.OraType{ .error_union = new_succ_ptr };
         },
         else => return src,
     }
@@ -32,7 +32,7 @@ pub fn collectFunctionSymbols(table: *state.SymbolTable, parent: *state.Scope, f
     }
 
     // Create a function symbol type from parameters and return type
-    var param_types = std.ArrayList(ast.OraType).init(table.allocator);
+    var param_types = std.ArrayList(ast.Types.OraType).init(table.allocator);
     defer param_types.deinit();
     for (f.parameters) |p| {
         if (p.type_info.ora_type) |ot| {
@@ -41,20 +41,20 @@ pub fn collectFunctionSymbols(table: *state.SymbolTable, parent: *state.Scope, f
             try param_types.append(.u256); // fallback for unknown param types
         }
     }
-    const params_slice = try table.allocator.alloc(ast.OraType, param_types.items.len);
+    const params_slice = try table.allocator.alloc(ast.Types.OraType, param_types.items.len);
     for (param_types.items, 0..) |t, i| params_slice[i] = t;
 
     // Include return type in function type if present
-    var ret_ptr: ?*const ast.OraType = null;
+    var ret_ptr: ?*const ast.Types.OraType = null;
     if (f.return_type_info) |rt| {
         if (rt.ora_type) |ot| {
-            const heap_rt = try table.allocator.create(ast.OraType);
+            const heap_rt = try table.allocator.create(ast.Types.OraType);
             heap_rt.* = try copyOraTypeOwned(table.allocator, ot);
             ret_ptr = heap_rt;
         }
     }
     const fn_type = ast.type_info.FunctionType{ .params = params_slice, .return_type = ret_ptr };
-    const new_ti = ast.TypeInfo.fromOraType(.{ .function = fn_type });
+    const new_ti = ast.Types.TypeInfo.fromOraType(.{ .function = fn_type });
     // Record success type of error unions for quick checks
     if (f.return_type_info) |rt| {
         if (rt.ora_type) |ot| switch (ot) {

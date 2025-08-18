@@ -16,7 +16,7 @@ pub const SymbolKind = enum {
 pub const Symbol = struct {
     name: []const u8,
     kind: SymbolKind,
-    typ: ?ast.TypeInfo = null,
+    typ: ?ast.Types.TypeInfo = null,
     span: ast.SourceSpan,
     mutable: bool = false,
     region: ?ast.statements.MemoryRegion = null,
@@ -50,12 +50,12 @@ pub const SymbolTable = struct {
     function_scopes: std.StringHashMap(*Scope),
     log_signatures: std.StringHashMap([]const ast.LogField),
     function_allowed_errors: std.StringHashMap([][]const u8),
-    function_success_types: std.StringHashMap(ast.OraType),
+    function_success_types: std.StringHashMap(ast.Types.OraType),
     block_scopes: std.AutoHashMap(usize, *Scope),
 
     pub fn init(allocator: std.mem.Allocator) SymbolTable {
         const root_scope = Scope.init(allocator, null, null);
-        return .{ .allocator = allocator, .root = root_scope, .scopes = std.ArrayList(*Scope).init(allocator), .contract_scopes = std.StringHashMap(*Scope).init(allocator), .function_scopes = std.StringHashMap(*Scope).init(allocator), .log_signatures = std.StringHashMap([]const ast.LogField).init(allocator), .function_allowed_errors = std.StringHashMap([][]const u8).init(allocator), .function_success_types = std.StringHashMap(ast.OraType).init(allocator), .block_scopes = std.AutoHashMap(usize, *Scope).init(allocator) };
+        return .{ .allocator = allocator, .root = root_scope, .scopes = std.ArrayList(*Scope).init(allocator), .contract_scopes = std.StringHashMap(*Scope).init(allocator), .function_scopes = std.StringHashMap(*Scope).init(allocator), .log_signatures = std.StringHashMap([]const ast.LogField).init(allocator), .function_allowed_errors = std.StringHashMap([][]const u8).init(allocator), .function_success_types = std.StringHashMap(ast.Types.OraType).init(allocator), .block_scopes = std.AutoHashMap(usize, *Scope).init(allocator) };
     }
 
     pub fn deinit(self: *SymbolTable) void {

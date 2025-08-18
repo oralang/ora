@@ -47,13 +47,12 @@ pub const ContractNode = ast.ContractNode;
 /// Function declaration node
 pub const FunctionNode = ast.FunctionNode;
 /// Variable declaration node
-pub const VariableDeclNode = ast.VariableDeclNode;
+pub const VariableDeclNode = ast.Statements.VariableDeclNode;
 /// Expression node
-pub const ExprNode = ast.ExprNode;
+pub const ExprNode = ast.Expressions.ExprNode;
 /// Type reference
-pub const TypeRef = ast.TypeRef;
 /// Memory region specification
-pub const MemoryRegion = ast.MemoryRegion;
+pub const MemoryRegion = ast.Memory.Region;
 /// Cleanup function for AST nodes
 pub const deinitAstNodes = ast.deinitAstNodes;
 

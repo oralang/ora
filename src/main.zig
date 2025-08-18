@@ -263,26 +263,6 @@ fn runFullCompilation(allocator: std.mem.Allocator, file_path: []const u8, enabl
     try stdout.print("Pipeline: {} tokens -> {} AST nodes\n", .{ tokens.len, ast_nodes.len });
 }
 
-/// Format TypeRef for display
-fn formatTypeRef(typ: lib.TypeRef) []const u8 {
-    return switch (typ) {
-        .Bool => "bool",
-        .Address => "address",
-        .U8 => "u8",
-        .U16 => "u16",
-        .U32 => "u32",
-        .U64 => "u64",
-        .U128 => "u128",
-        .U256 => "u256",
-        .String => "string",
-        .Bytes => "bytes",
-        .Slice => "slice[T]",
-        .Mapping => "map[K,V]",
-        .DoubleMap => "doublemap[K1,K2,V]",
-        .Identifier => |name| name,
-    };
-}
-
 /// Print a concise AST summary
 fn printAstSummary(writer: anytype, node: *lib.AstNode, indent: u32) !void {
     // Print indentation

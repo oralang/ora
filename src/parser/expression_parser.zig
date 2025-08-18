@@ -26,29 +26,29 @@ pub const ExpressionParser = struct {
     }
 
     /// Parse expression with precedence climbing (entry point)
-    pub fn parseExpression(self: *ExpressionParser) ParserError!ast.ExprNode {
+    pub fn parseExpression(self: *ExpressionParser) ParserError!ast.Expressions.ExprNode {
         return self.parseComma();
     }
 
     /// Parse comma expressions (lowest precedence)
-    fn parseComma(self: *ExpressionParser) ParserError!ast.ExprNode {
+    fn parseComma(self: *ExpressionParser) ParserError!ast.Expressions.ExprNode {
         var expr = try self.parseAssignment();
 
         while (self.base.match(.Comma)) {
             const comma_token = self.base.previous();
             const right = try self.parseAssignment();
 
-            const left_ptr = try self.base.arena.createNode(ast.ExprNode);
+            const left_ptr = try self.base.arena.createNode(ast.Expressions.ExprNode);
             left_ptr.* = expr;
-            const right_ptr = try self.base.arena.createNode(ast.ExprNode);
+            const right_ptr = try self.base.arena.createNode(ast.Expressions.ExprNode);
             right_ptr.* = right;
 
-            expr = ast.ExprNode{
-                .Binary = ast.BinaryExpr{
+            expr = ast.Expressions.ExprNode{
+                .Binary = ast.Expressions.BinaryExpr{
                     .lhs = left_ptr,
                     .operator = .Comma,
                     .rhs = right_ptr,
-                    .type_info = ast.TypeInfo.unknown(), // Result type will be resolved later
+                    .type_info = ast.Types.TypeInfo.unknown(), // Result type will be resolved later
                     .span = self.base.spanFromToken(comma_token),
                 },
             };
@@ -58,7 +58,7 @@ pub const ExpressionParser = struct {
     }
 
     /// Parse assignment expressions (precedence 14)
-    fn parseAssignment(self: *ExpressionParser) ParserError!ast.ExprNode {
+    fn parseAssignment(self: *ExpressionParser) ParserError!ast.Expressions.ExprNode {
         const expr = try self.parseLogicalOr();
 
         // Legacy move/shift syntax removed; handled by statement parser as 'move ... from ... to ...;'
@@ -79,12 +79,12 @@ pub const ExpressionParser = struct {
             };
 
             const value = try self.parseAssignment(); // Right-associative
-            const expr_ptr = try self.base.arena.createNode(ast.ExprNode);
+            const expr_ptr = try self.base.arena.createNode(ast.Expressions.ExprNode);
             expr_ptr.* = expr;
-            const value_ptr = try self.base.arena.createNode(ast.ExprNode);
+            const value_ptr = try self.base.arena.createNode(ast.Expressions.ExprNode);
             value_ptr.* = value;
 
-            return ast.ExprNode{ .Assignment = ast.AssignmentExpr{
+            return ast.Expressions.ExprNode{ .Assignment = ast.Expressions.AssignmentExpr{
                 .target = expr_ptr,
                 .value = value_ptr,
                 .span = self.base.spanFromToken(self.base.previous()),
@@ -111,12 +111,12 @@ pub const ExpressionParser = struct {
             };
 
             const value = try self.parseAssignment(); // Right-associative
-            const expr_ptr = try self.base.arena.createNode(ast.ExprNode);
+            const expr_ptr = try self.base.arena.createNode(ast.Expressions.ExprNode);
             expr_ptr.* = expr;
-            const value_ptr = try self.base.arena.createNode(ast.ExprNode);
+            const value_ptr = try self.base.arena.createNode(ast.Expressions.ExprNode);
             value_ptr.* = value;
 
-            const compound_op: ast.CompoundAssignmentOp = switch (op_token.type) {
+            const compound_op: ast.Operators.Compound = switch (op_token.type) {
                 .PlusEqual => .PlusEqual,
                 .MinusEqual => .MinusEqual,
                 .StarEqual => .StarEqual,
@@ -125,7 +125,7 @@ pub const ExpressionParser = struct {
                 else => unreachable,
             };
 
-            return ast.ExprNode{ .CompoundAssignment = ast.CompoundAssignmentExpr{
+            return ast.Expressions.ExprNode{ .CompoundAssignment = ast.Expressions.CompoundAssignmentExpr{
                 .target = expr_ptr,
                 .operator = compound_op,
                 .value = value_ptr,
@@ -137,24 +137,24 @@ pub const ExpressionParser = struct {
     }
 
     /// Parse logical OR expressions (precedence 13) - MIGRATED FROM ORIGINAL
-    pub fn parseLogicalOr(self: *ExpressionParser) ParserError!ast.ExprNode {
+    pub fn parseLogicalOr(self: *ExpressionParser) ParserError!ast.Expressions.ExprNode {
         var expr = try self.parseLogicalAnd();
 
         while (self.base.match(.PipePipe)) {
             const op_token = self.base.previous();
             const right = try self.parseLogicalAnd();
 
-            const left_ptr = try self.base.arena.createNode(ast.ExprNode);
+            const left_ptr = try self.base.arena.createNode(ast.Expressions.ExprNode);
             left_ptr.* = expr;
-            const right_ptr = try self.base.arena.createNode(ast.ExprNode);
+            const right_ptr = try self.base.arena.createNode(ast.Expressions.ExprNode);
             right_ptr.* = right;
 
-            expr = ast.ExprNode{
-                .Binary = ast.BinaryExpr{
+            expr = ast.Expressions.ExprNode{
+                .Binary = ast.Expressions.BinaryExpr{
                     .lhs = left_ptr,
                     .operator = .Or, // Logical OR
                     .rhs = right_ptr,
-                    .type_info = ast.CommonTypes.bool_type(), // Logical operations return bool
+                    .type_info = ast.Types.CommonTypes.bool_type(), // Logical operations return bool
                     .span = self.base.spanFromToken(op_token),
                 },
             };
@@ -164,24 +164,24 @@ pub const ExpressionParser = struct {
     }
 
     /// Parse logical AND expressions (precedence 12) - MIGRATED FROM ORIGINAL
-    fn parseLogicalAnd(self: *ExpressionParser) ParserError!ast.ExprNode {
+    fn parseLogicalAnd(self: *ExpressionParser) ParserError!ast.Expressions.ExprNode {
         var expr = try self.parseBitwiseOr();
 
         while (self.base.match(.AmpersandAmpersand)) {
             const op_token = self.base.previous();
             const right = try self.parseBitwiseOr();
 
-            const left_ptr = try self.base.arena.createNode(ast.ExprNode);
+            const left_ptr = try self.base.arena.createNode(ast.Expressions.ExprNode);
             left_ptr.* = expr;
-            const right_ptr = try self.base.arena.createNode(ast.ExprNode);
+            const right_ptr = try self.base.arena.createNode(ast.Expressions.ExprNode);
             right_ptr.* = right;
 
-            expr = ast.ExprNode{
-                .Binary = ast.BinaryExpr{
+            expr = ast.Expressions.ExprNode{
+                .Binary = ast.Expressions.BinaryExpr{
                     .lhs = left_ptr,
                     .operator = .And, // Logical AND
                     .rhs = right_ptr,
-                    .type_info = ast.CommonTypes.bool_type(), // Logical operations return bool
+                    .type_info = ast.Types.CommonTypes.bool_type(), // Logical operations return bool
                     .span = self.base.spanFromToken(op_token),
                 },
             };
@@ -191,24 +191,24 @@ pub const ExpressionParser = struct {
     }
 
     /// Parse bitwise OR expressions (precedence 11) - MIGRATED FROM ORIGINAL
-    fn parseBitwiseOr(self: *ExpressionParser) ParserError!ast.ExprNode {
+    fn parseBitwiseOr(self: *ExpressionParser) ParserError!ast.Expressions.ExprNode {
         var expr = try self.parseBitwiseXor();
 
         while (self.base.match(.Pipe)) {
             const op_token = self.base.previous();
             const right = try self.parseBitwiseXor();
 
-            const left_ptr = try self.base.arena.createNode(ast.ExprNode);
+            const left_ptr = try self.base.arena.createNode(ast.Expressions.ExprNode);
             left_ptr.* = expr;
-            const right_ptr = try self.base.arena.createNode(ast.ExprNode);
+            const right_ptr = try self.base.arena.createNode(ast.Expressions.ExprNode);
             right_ptr.* = right;
 
-            expr = ast.ExprNode{
-                .Binary = ast.BinaryExpr{
+            expr = ast.Expressions.ExprNode{
+                .Binary = ast.Expressions.BinaryExpr{
                     .lhs = left_ptr,
                     .operator = .BitwiseOr,
                     .rhs = right_ptr,
-                    .type_info = ast.TypeInfo.unknown(), // Type will be inferred from operands
+                    .type_info = ast.Types.TypeInfo.unknown(), // Type will be inferred from operands
                     .span = self.base.spanFromToken(op_token),
                 },
             };
@@ -218,24 +218,24 @@ pub const ExpressionParser = struct {
     }
 
     /// Parse bitwise XOR expressions (precedence 10) - MIGRATED FROM ORIGINAL
-    fn parseBitwiseXor(self: *ExpressionParser) ParserError!ast.ExprNode {
+    fn parseBitwiseXor(self: *ExpressionParser) ParserError!ast.Expressions.ExprNode {
         var expr = try self.parseBitwiseAnd();
 
         while (self.base.match(.Caret)) {
             const op_token = self.base.previous();
             const right = try self.parseBitwiseAnd();
 
-            const left_ptr = try self.base.arena.createNode(ast.ExprNode);
+            const left_ptr = try self.base.arena.createNode(ast.Expressions.ExprNode);
             left_ptr.* = expr;
-            const right_ptr = try self.base.arena.createNode(ast.ExprNode);
+            const right_ptr = try self.base.arena.createNode(ast.Expressions.ExprNode);
             right_ptr.* = right;
 
-            expr = ast.ExprNode{
-                .Binary = ast.BinaryExpr{
+            expr = ast.Expressions.ExprNode{
+                .Binary = ast.Expressions.BinaryExpr{
                     .lhs = left_ptr,
                     .operator = .BitwiseXor,
                     .rhs = right_ptr,
-                    .type_info = ast.TypeInfo.unknown(), // Type will be inferred from operands
+                    .type_info = ast.Types.TypeInfo.unknown(), // Type will be inferred from operands
                     .span = self.base.spanFromToken(op_token),
                 },
             };
@@ -245,24 +245,24 @@ pub const ExpressionParser = struct {
     }
 
     /// Parse bitwise AND expressions (precedence 9) - MIGRATED FROM ORIGINAL
-    fn parseBitwiseAnd(self: *ExpressionParser) ParserError!ast.ExprNode {
+    fn parseBitwiseAnd(self: *ExpressionParser) ParserError!ast.Expressions.ExprNode {
         var expr = try self.parseEquality();
 
         while (self.base.match(.Ampersand)) {
             const op_token = self.base.previous();
             const right = try self.parseEquality();
 
-            const left_ptr = try self.base.arena.createNode(ast.ExprNode);
+            const left_ptr = try self.base.arena.createNode(ast.Expressions.ExprNode);
             left_ptr.* = expr;
-            const right_ptr = try self.base.arena.createNode(ast.ExprNode);
+            const right_ptr = try self.base.arena.createNode(ast.Expressions.ExprNode);
             right_ptr.* = right;
 
-            expr = ast.ExprNode{
-                .Binary = ast.BinaryExpr{
+            expr = ast.Expressions.ExprNode{
+                .Binary = ast.Expressions.BinaryExpr{
                     .lhs = left_ptr,
                     .operator = .BitwiseAnd,
                     .rhs = right_ptr,
-                    .type_info = ast.TypeInfo.unknown(), // Type will be inferred from operands
+                    .type_info = ast.Types.TypeInfo.unknown(), // Type will be inferred from operands
                     .span = self.base.spanFromToken(op_token),
                 },
             };
@@ -272,30 +272,30 @@ pub const ExpressionParser = struct {
     }
 
     /// Parse equality expressions (precedence 8) - MIGRATED FROM ORIGINAL
-    fn parseEquality(self: *ExpressionParser) ParserError!ast.ExprNode {
+    fn parseEquality(self: *ExpressionParser) ParserError!ast.Expressions.ExprNode {
         var expr = try self.parseComparison();
 
         while (self.base.match(.EqualEqual) or self.base.match(.BangEqual)) {
             const op_token = self.base.previous();
             const right = try self.parseComparison();
 
-            const operator: ast.BinaryOp = switch (op_token.type) {
+            const operator: ast.Operators.Binary = switch (op_token.type) {
                 .EqualEqual => .EqualEqual,
                 .BangEqual => .BangEqual,
                 else => unreachable,
             };
 
-            const left_ptr = try self.base.arena.createNode(ast.ExprNode);
+            const left_ptr = try self.base.arena.createNode(ast.Expressions.ExprNode);
             left_ptr.* = expr;
-            const right_ptr = try self.base.arena.createNode(ast.ExprNode);
+            const right_ptr = try self.base.arena.createNode(ast.Expressions.ExprNode);
             right_ptr.* = right;
 
-            expr = ast.ExprNode{
-                .Binary = ast.BinaryExpr{
+            expr = ast.Expressions.ExprNode{
+                .Binary = ast.Expressions.BinaryExpr{
                     .lhs = left_ptr,
                     .operator = operator,
                     .rhs = right_ptr,
-                    .type_info = ast.CommonTypes.bool_type(), // Equality operations return bool
+                    .type_info = ast.Types.CommonTypes.bool_type(), // Equality operations return bool
                     .span = self.base.spanFromToken(op_token),
                 },
             };
@@ -305,14 +305,14 @@ pub const ExpressionParser = struct {
     }
 
     /// Parse comparison expressions (precedence 7) - MIGRATED FROM ORIGINAL
-    fn parseComparison(self: *ExpressionParser) ParserError!ast.ExprNode {
+    fn parseComparison(self: *ExpressionParser) ParserError!ast.Expressions.ExprNode {
         var expr = try self.parseBitwiseShift();
 
         while (self.base.match(.Less) or self.base.match(.LessEqual) or self.base.match(.Greater) or self.base.match(.GreaterEqual)) {
             const op_token = self.base.previous();
             const right = try self.parseBitwiseShift();
 
-            const operator: ast.BinaryOp = switch (op_token.type) {
+            const operator: ast.Operators.Binary = switch (op_token.type) {
                 .Less => .Less,
                 .LessEqual => .LessEqual,
                 .Greater => .Greater,
@@ -320,17 +320,17 @@ pub const ExpressionParser = struct {
                 else => unreachable,
             };
 
-            const left_ptr = try self.base.arena.createNode(ast.ExprNode);
+            const left_ptr = try self.base.arena.createNode(ast.Expressions.ExprNode);
             left_ptr.* = expr;
-            const right_ptr = try self.base.arena.createNode(ast.ExprNode);
+            const right_ptr = try self.base.arena.createNode(ast.Expressions.ExprNode);
             right_ptr.* = right;
 
-            expr = ast.ExprNode{
-                .Binary = ast.BinaryExpr{
+            expr = ast.Expressions.ExprNode{
+                .Binary = ast.Expressions.BinaryExpr{
                     .lhs = left_ptr,
                     .operator = operator,
                     .rhs = right_ptr,
-                    .type_info = ast.CommonTypes.bool_type(), // Comparison operations return bool
+                    .type_info = ast.Types.CommonTypes.bool_type(), // Comparison operations return bool
                     .span = self.base.spanFromToken(op_token),
                 },
             };
@@ -340,30 +340,30 @@ pub const ExpressionParser = struct {
     }
 
     /// Parse bitwise shift expressions (precedence 6) - MIGRATED FROM ORIGINAL
-    fn parseBitwiseShift(self: *ExpressionParser) ParserError!ast.ExprNode {
+    fn parseBitwiseShift(self: *ExpressionParser) ParserError!ast.Expressions.ExprNode {
         var expr = try self.parseTerm();
 
         while (self.base.match(.LessLess) or self.base.match(.GreaterGreater)) {
             const op_token = self.base.previous();
             const right = try self.parseTerm();
 
-            const operator: ast.BinaryOp = switch (op_token.type) {
+            const operator: ast.Operators.Binary = switch (op_token.type) {
                 .LessLess => .LeftShift,
                 .GreaterGreater => .RightShift,
                 else => unreachable,
             };
 
-            const left_ptr = try self.base.arena.createNode(ast.ExprNode);
+            const left_ptr = try self.base.arena.createNode(ast.Expressions.ExprNode);
             left_ptr.* = expr;
-            const right_ptr = try self.base.arena.createNode(ast.ExprNode);
+            const right_ptr = try self.base.arena.createNode(ast.Expressions.ExprNode);
             right_ptr.* = right;
 
-            expr = ast.ExprNode{
-                .Binary = ast.BinaryExpr{
+            expr = ast.Expressions.ExprNode{
+                .Binary = ast.Expressions.BinaryExpr{
                     .lhs = left_ptr,
                     .operator = operator,
                     .rhs = right_ptr,
-                    .type_info = ast.TypeInfo.unknown(), // Type will be inferred from left operand
+                    .type_info = ast.Types.TypeInfo.unknown(), // Type will be inferred from left operand
                     .span = ParserCommon.makeSpan(op_token),
                 },
             };
@@ -373,30 +373,30 @@ pub const ExpressionParser = struct {
     }
 
     /// Parse term expressions (precedence 5: + -) - MIGRATED FROM ORIGINAL
-    fn parseTerm(self: *ExpressionParser) ParserError!ast.ExprNode {
+    fn parseTerm(self: *ExpressionParser) ParserError!ast.Expressions.ExprNode {
         var expr = try self.parseFactor();
 
         while (self.base.match(.Plus) or self.base.match(.Minus)) {
             const op_token = self.base.previous();
             const right = try self.parseFactor();
 
-            const operator: ast.BinaryOp = switch (op_token.type) {
+            const operator: ast.Operators.Binary = switch (op_token.type) {
                 .Plus => .Plus,
                 .Minus => .Minus,
                 else => unreachable,
             };
 
-            const left_ptr = try self.base.arena.createNode(ast.ExprNode);
+            const left_ptr = try self.base.arena.createNode(ast.Expressions.ExprNode);
             left_ptr.* = expr;
-            const right_ptr = try self.base.arena.createNode(ast.ExprNode);
+            const right_ptr = try self.base.arena.createNode(ast.Expressions.ExprNode);
             right_ptr.* = right;
 
-            expr = ast.ExprNode{
-                .Binary = ast.BinaryExpr{
+            expr = ast.Expressions.ExprNode{
+                .Binary = ast.Expressions.BinaryExpr{
                     .lhs = left_ptr,
                     .operator = operator,
                     .rhs = right_ptr,
-                    .type_info = ast.TypeInfo.unknown(), // Type will be inferred from operands
+                    .type_info = ast.Types.TypeInfo.unknown(), // Type will be inferred from operands
                     .span = ParserCommon.makeSpan(op_token),
                 },
             };
@@ -406,31 +406,31 @@ pub const ExpressionParser = struct {
     }
 
     /// Parse factor expressions (precedence 4: * / %) - MIGRATED FROM ORIGINAL
-    fn parseFactor(self: *ExpressionParser) ParserError!ast.ExprNode {
+    fn parseFactor(self: *ExpressionParser) ParserError!ast.Expressions.ExprNode {
         var expr = try self.parseExponent();
 
         while (self.base.match(.Star) or self.base.match(.Slash) or self.base.match(.Percent)) {
             const op_token = self.base.previous();
             const right = try self.parseExponent();
 
-            const operator: ast.BinaryOp = switch (op_token.type) {
+            const operator: ast.Operators.Binary = switch (op_token.type) {
                 .Star => .Star,
                 .Slash => .Slash,
                 .Percent => .Percent,
                 else => unreachable,
             };
 
-            const left_ptr = try self.base.arena.createNode(ast.ExprNode);
+            const left_ptr = try self.base.arena.createNode(ast.Expressions.ExprNode);
             left_ptr.* = expr;
-            const right_ptr = try self.base.arena.createNode(ast.ExprNode);
+            const right_ptr = try self.base.arena.createNode(ast.Expressions.ExprNode);
             right_ptr.* = right;
 
-            expr = ast.ExprNode{
-                .Binary = ast.BinaryExpr{
+            expr = ast.Expressions.ExprNode{
+                .Binary = ast.Expressions.BinaryExpr{
                     .lhs = left_ptr,
                     .operator = operator,
                     .rhs = right_ptr,
-                    .type_info = ast.TypeInfo.unknown(), // Type will be inferred from operands
+                    .type_info = ast.Types.TypeInfo.unknown(), // Type will be inferred from operands
                     .span = ParserCommon.makeSpan(op_token),
                 },
             };
@@ -440,24 +440,24 @@ pub const ExpressionParser = struct {
     }
 
     /// Parse exponentiation expressions (precedence 3: **) - MIGRATED FROM ORIGINAL
-    fn parseExponent(self: *ExpressionParser) ParserError!ast.ExprNode {
+    fn parseExponent(self: *ExpressionParser) ParserError!ast.Expressions.ExprNode {
         var expr = try self.parseUnary();
 
         while (self.base.match(.StarStar)) {
             const op_token = self.base.previous();
             const right = try self.parseExponent(); // Right-associative
 
-            const left_ptr = try self.base.arena.createNode(ast.ExprNode);
+            const left_ptr = try self.base.arena.createNode(ast.Expressions.ExprNode);
             left_ptr.* = expr;
-            const right_ptr = try self.base.arena.createNode(ast.ExprNode);
+            const right_ptr = try self.base.arena.createNode(ast.Expressions.ExprNode);
             right_ptr.* = right;
 
-            expr = ast.ExprNode{
-                .Binary = ast.BinaryExpr{
+            expr = ast.Expressions.ExprNode{
+                .Binary = ast.Expressions.BinaryExpr{
                     .lhs = left_ptr,
                     .operator = .StarStar,
                     .rhs = right_ptr,
-                    .type_info = ast.TypeInfo.unknown(), // Type will be inferred from operands
+                    .type_info = ast.Types.TypeInfo.unknown(), // Type will be inferred from operands
                     .span = ParserCommon.makeSpan(op_token),
                 },
             };
@@ -467,25 +467,25 @@ pub const ExpressionParser = struct {
     }
 
     /// Parse unary expressions (precedence 2: ! -) - MIGRATED FROM ORIGINAL
-    fn parseUnary(self: *ExpressionParser) ParserError!ast.ExprNode {
+    fn parseUnary(self: *ExpressionParser) ParserError!ast.Expressions.ExprNode {
         if (self.base.match(.Bang) or self.base.match(.Minus)) {
             const op_token = self.base.previous();
             const right = try self.parseUnary(); // Right-associative for unary operators
 
-            const operator: ast.UnaryOp = switch (op_token.type) {
+            const operator: ast.Operators.Unary = switch (op_token.type) {
                 .Bang => .Bang,
                 .Minus => .Minus,
                 else => unreachable,
             };
 
-            const right_ptr = try self.base.arena.createNode(ast.ExprNode);
+            const right_ptr = try self.base.arena.createNode(ast.Expressions.ExprNode);
             right_ptr.* = right;
 
-            return ast.ExprNode{
-                .Unary = ast.UnaryExpr{
+            return ast.Expressions.ExprNode{
+                .Unary = ast.Expressions.UnaryExpr{
                     .operator = operator,
                     .operand = right_ptr,
-                    .type_info = ast.TypeInfo.unknown(), // Type will be inferred from operand
+                    .type_info = ast.Types.TypeInfo.unknown(), // Type will be inferred from operand
                     .span = ParserCommon.makeSpan(op_token),
                 },
             };
@@ -495,7 +495,7 @@ pub const ExpressionParser = struct {
     }
 
     /// Parse function calls and member access - MIGRATED FROM ORIGINAL
-    fn parseCall(self: *ExpressionParser) ParserError!ast.ExprNode {
+    fn parseCall(self: *ExpressionParser) ParserError!ast.Expressions.ExprNode {
         var expr = try self.parsePrimary();
 
         while (true) {
@@ -518,21 +518,21 @@ pub const ExpressionParser = struct {
 
                     if (is_module_access) {
                         // Treat as field access for module patterns
-                        const expr_ptr = try self.base.arena.createNode(ast.ExprNode);
+                        const expr_ptr = try self.base.arena.createNode(ast.Expressions.ExprNode);
                         expr_ptr.* = expr;
                         const field_name = try self.base.arena.createString(name_token.lexeme);
-                        expr = ast.ExprNode{
-                            .FieldAccess = ast.FieldAccessExpr{
+                        expr = ast.Expressions.ExprNode{
+                            .FieldAccess = ast.Expressions.FieldAccessExpr{
                                 .target = expr_ptr,
                                 .field = field_name,
-                                .type_info = ast.TypeInfo.unknown(), // Field type will be resolved from struct definition
+                                .type_info = ast.Types.TypeInfo.unknown(), // Field type will be resolved from struct definition
                                 .span = self.base.spanFromToken(name_token),
                             },
                         };
                     } else {
                         // Treat as potential enum literal
                         const variant_name = try self.base.arena.createString(name_token.lexeme);
-                        expr = ast.ExprNode{ .EnumLiteral = ast.EnumLiteralExpr{
+                        expr = ast.Expressions.ExprNode{ .EnumLiteral = ast.Expressions.EnumLiteralExpr{
                             .enum_name = enum_name,
                             .variant_name = variant_name,
                             .span = self.base.spanFromToken(name_token),
@@ -540,14 +540,14 @@ pub const ExpressionParser = struct {
                     }
                 } else {
                     // Complex expressions are always field access
-                    const expr_ptr = try self.base.arena.createNode(ast.ExprNode);
+                    const expr_ptr = try self.base.arena.createNode(ast.Expressions.ExprNode);
                     expr_ptr.* = expr;
                     const field_name = try self.base.arena.createString(name_token.lexeme);
-                    expr = ast.ExprNode{
-                        .FieldAccess = ast.FieldAccessExpr{
+                    expr = ast.Expressions.ExprNode{
+                        .FieldAccess = ast.Expressions.FieldAccessExpr{
                             .target = expr_ptr,
                             .field = field_name,
-                            .type_info = ast.TypeInfo.unknown(), // Will be resolved during type checking
+                            .type_info = ast.Types.TypeInfo.unknown(), // Will be resolved during type checking
                             .span = self.base.spanFromToken(name_token),
                         },
                     };
@@ -561,24 +561,24 @@ pub const ExpressionParser = struct {
                     _ = try self.base.consume(.RightBracket, "Expected ']' after double mapping index");
 
                     // Create pointers for the nested structure
-                    const expr_ptr = try self.base.arena.createNode(ast.ExprNode);
+                    const expr_ptr = try self.base.arena.createNode(ast.Expressions.ExprNode);
                     expr_ptr.* = expr;
-                    const index_ptr = try self.base.arena.createNode(ast.ExprNode);
+                    const index_ptr = try self.base.arena.createNode(ast.Expressions.ExprNode);
                     index_ptr.* = index;
-                    const second_index_ptr = try self.base.arena.createNode(ast.ExprNode);
+                    const second_index_ptr = try self.base.arena.createNode(ast.Expressions.ExprNode);
                     second_index_ptr.* = second_index;
 
                     // Create a nested index expression for double mapping: target[key1][key2]
-                    const first_index = ast.ExprNode{ .Index = ast.IndexExpr{
+                    const first_index = ast.Expressions.ExprNode{ .Index = ast.Expressions.IndexExpr{
                         .target = expr_ptr,
                         .index = index_ptr,
                         .span = self.base.spanFromToken(self.base.previous()),
                     } };
 
-                    const first_index_ptr = try self.base.arena.createNode(ast.ExprNode);
+                    const first_index_ptr = try self.base.arena.createNode(ast.Expressions.ExprNode);
                     first_index_ptr.* = first_index;
 
-                    expr = ast.ExprNode{ .Index = ast.IndexExpr{
+                    expr = ast.Expressions.ExprNode{ .Index = ast.Expressions.IndexExpr{
                         .target = first_index_ptr,
                         .index = second_index_ptr,
                         .span = self.base.spanFromToken(self.base.previous()),
@@ -586,12 +586,12 @@ pub const ExpressionParser = struct {
                 } else {
                     _ = try self.base.consume(.RightBracket, "Expected ']' after array index");
 
-                    const expr_ptr = try self.base.arena.createNode(ast.ExprNode);
+                    const expr_ptr = try self.base.arena.createNode(ast.Expressions.ExprNode);
                     expr_ptr.* = expr;
-                    const index_ptr = try self.base.arena.createNode(ast.ExprNode);
+                    const index_ptr = try self.base.arena.createNode(ast.Expressions.ExprNode);
                     index_ptr.* = index;
 
-                    expr = ast.ExprNode{ .Index = ast.IndexExpr{
+                    expr = ast.Expressions.ExprNode{ .Index = ast.Expressions.IndexExpr{
                         .target = expr_ptr,
                         .index = index_ptr,
                         .span = self.base.spanFromToken(self.base.previous()),
@@ -608,14 +608,14 @@ pub const ExpressionParser = struct {
     // Note: '@cast(Type, expr)' is the only supported cast syntax.
 
     /// Finish parsing a function call - MIGRATED FROM ORIGINAL
-    fn finishCall(self: *ExpressionParser, callee: ast.ExprNode) ParserError!ast.ExprNode {
-        var arguments = std.ArrayList(*ast.ExprNode).init(self.base.arena.allocator());
+    fn finishCall(self: *ExpressionParser, callee: ast.Expressions.ExprNode) ParserError!ast.Expressions.ExprNode {
+        var arguments = std.ArrayList(*ast.Expressions.ExprNode).init(self.base.arena.allocator());
         defer arguments.deinit();
 
         if (!self.base.check(.RightParen)) {
             repeat: while (true) {
                 const arg = try self.parseExpression();
-                const arg_ptr = try self.base.arena.createNode(ast.ExprNode);
+                const arg_ptr = try self.base.arena.createNode(ast.Expressions.ExprNode);
                 arg_ptr.* = arg;
                 try arguments.append(arg_ptr);
                 if (!self.base.match(.Comma)) break :repeat;
@@ -624,21 +624,21 @@ pub const ExpressionParser = struct {
 
         const paren_token = try self.base.consume(.RightParen, "Expected ')' after arguments");
 
-        const callee_ptr = try self.base.arena.createNode(ast.ExprNode);
+        const callee_ptr = try self.base.arena.createNode(ast.Expressions.ExprNode);
         callee_ptr.* = callee;
 
-        return ast.ExprNode{
-            .Call = ast.CallExpr{
+        return ast.Expressions.ExprNode{
+            .Call = ast.Expressions.CallExpr{
                 .callee = callee_ptr,
                 .arguments = try arguments.toOwnedSlice(),
-                .type_info = ast.TypeInfo.unknown(), // Return type will be resolved from function signature
+                .type_info = ast.Types.TypeInfo.unknown(), // Return type will be resolved from function signature
                 .span = self.base.spanFromToken(paren_token),
             },
         };
     }
 
     /// Parse field access (obj.field)
-    fn parseFieldAccess(self: *ExpressionParser, target: ast.ExprNode) ParserError!ast.ExprNode {
+    fn parseFieldAccess(self: *ExpressionParser, target: ast.Expressions.ExprNode) ParserError!ast.Expressions.ExprNode {
         const name_token = try self.base.consume(.Identifier, "Expected property name after '.'");
 
         // Check if this might be an enum literal (EnumType.VariantName)
@@ -654,7 +654,7 @@ pub const ExpressionParser = struct {
 
             if (!is_module_access) {
                 // Treat as potential enum literal
-                return ast.ExprNode{ .EnumLiteral = ast.EnumLiteralExpr{
+                return ast.Expressions.ExprNode{ .EnumLiteral = ast.Expressions.EnumLiteralExpr{
                     .enum_name = enum_name,
                     .variant_name = name_token.lexeme,
                     .span = self.base.spanFromToken(name_token),
@@ -663,9 +663,9 @@ pub const ExpressionParser = struct {
         }
 
         // Regular field access
-        const expr_ptr = try self.base.arena.createNode(ast.ExprNode);
+        const expr_ptr = try self.base.arena.createNode(ast.Expressions.ExprNode);
         expr_ptr.* = target;
-        return ast.ExprNode{ .FieldAccess = ast.FieldAccessExpr{
+        return ast.Expressions.ExprNode{ .FieldAccess = ast.Expressions.FieldAccessExpr{
             .target = expr_ptr,
             .field = name_token.lexeme,
             .span = self.base.spanFromToken(name_token),
@@ -673,7 +673,7 @@ pub const ExpressionParser = struct {
     }
 
     /// Parse index access (obj[index] or obj[key1, key2])
-    fn parseIndexAccess(self: *ExpressionParser, target: ast.ExprNode) ParserError!ast.ExprNode {
+    fn parseIndexAccess(self: *ExpressionParser, target: ast.Expressions.ExprNode) ParserError!ast.Expressions.ExprNode {
         const index = try self.parseExpression();
 
         // Check for double mapping access: target[key1, key2]
@@ -682,24 +682,24 @@ pub const ExpressionParser = struct {
             _ = try self.base.consume(.RightBracket, "Expected ']' after double mapping index");
 
             // Create pointers for the nested structure
-            const expr_ptr = try self.base.arena.createNode(ast.ExprNode);
+            const expr_ptr = try self.base.arena.createNode(ast.Expressions.ExprNode);
             expr_ptr.* = target;
-            const index_ptr = try self.base.arena.createNode(ast.ExprNode);
+            const index_ptr = try self.base.arena.createNode(ast.Expressions.ExprNode);
             index_ptr.* = index;
-            const second_index_ptr = try self.base.arena.createNode(ast.ExprNode);
+            const second_index_ptr = try self.base.arena.createNode(ast.Expressions.ExprNode);
             second_index_ptr.* = second_index;
 
             // Create a nested index expression for double mapping: target[key1][key2]
-            const first_index = ast.ExprNode{ .Index = ast.IndexExpr{
+            const first_index = ast.Expressions.ExprNode{ .Index = ast.Expressions.IndexExpr{
                 .target = expr_ptr,
                 .index = index_ptr,
                 .span = self.base.spanFromToken(self.base.previous()),
             } };
 
-            const first_index_ptr = try self.base.arena.createNode(ast.ExprNode);
+            const first_index_ptr = try self.base.arena.createNode(ast.Expressions.ExprNode);
             first_index_ptr.* = first_index;
 
-            return ast.ExprNode{ .Index = ast.IndexExpr{
+            return ast.Expressions.ExprNode{ .Index = ast.Expressions.IndexExpr{
                 .target = first_index_ptr,
                 .index = second_index_ptr,
                 .span = self.base.spanFromToken(self.base.previous()),
@@ -707,12 +707,12 @@ pub const ExpressionParser = struct {
         } else {
             _ = try self.base.consume(.RightBracket, "Expected ']' after array index");
 
-            const expr_ptr = try self.base.arena.createNode(ast.ExprNode);
+            const expr_ptr = try self.base.arena.createNode(ast.Expressions.ExprNode);
             expr_ptr.* = target;
-            const index_ptr = try self.base.arena.createNode(ast.ExprNode);
+            const index_ptr = try self.base.arena.createNode(ast.Expressions.ExprNode);
             index_ptr.* = index;
 
-            return ast.ExprNode{ .Index = ast.IndexExpr{
+            return ast.Expressions.ExprNode{ .Index = ast.Expressions.IndexExpr{
                 .target = expr_ptr,
                 .index = index_ptr,
                 .span = self.base.spanFromToken(self.base.previous()),
@@ -721,22 +721,22 @@ pub const ExpressionParser = struct {
     }
 
     /// Parse primary expressions (literals, identifiers, parentheses) - MIGRATED FROM ORIGINAL
-    fn parsePrimary(self: *ExpressionParser) ParserError!ast.ExprNode {
+    fn parsePrimary(self: *ExpressionParser) ParserError!ast.Expressions.ExprNode {
         // Boolean literals
         if (self.base.match(.True)) {
             const token = self.base.previous();
-            return ast.ExprNode{ .Literal = .{ .Bool = ast.expressions.BoolLiteral{
+            return ast.Expressions.ExprNode{ .Literal = .{ .Bool = ast.expressions.BoolLiteral{
                 .value = true,
-                .type_info = ast.TypeInfo.explicit(.Bool, .bool, self.base.spanFromToken(token)),
+                .type_info = ast.Types.TypeInfo.explicit(.Bool, .bool, self.base.spanFromToken(token)),
                 .span = self.base.spanFromToken(token),
             } } };
         }
 
         if (self.base.match(.False)) {
             const token = self.base.previous();
-            return ast.ExprNode{ .Literal = .{ .Bool = ast.expressions.BoolLiteral{
+            return ast.Expressions.ExprNode{ .Literal = .{ .Bool = ast.expressions.BoolLiteral{
                 .value = false,
-                .type_info = ast.TypeInfo.explicit(.Bool, .bool, self.base.spanFromToken(token)),
+                .type_info = ast.Types.TypeInfo.explicit(.Bool, .bool, self.base.spanFromToken(token)),
                 .span = self.base.spanFromToken(token),
             } } };
         }
@@ -745,11 +745,11 @@ pub const ExpressionParser = struct {
         if (self.base.match(.IntegerLiteral)) {
             const token = self.base.previous();
             const value_copy = try self.base.arena.createString(token.lexeme);
-            return ast.ExprNode{
+            return ast.Expressions.ExprNode{
                 .Literal = .{
                     .Integer = ast.expressions.IntegerLiteral{
                         .value = value_copy,
-                        .type_info = ast.CommonTypes.unknown_integer(), // Will be resolved by type resolver
+                        .type_info = ast.Types.CommonTypes.unknown_integer(), // Will be resolved by type resolver
                         .span = self.base.spanFromToken(token),
                     },
                 },
@@ -760,9 +760,9 @@ pub const ExpressionParser = struct {
         if (self.base.match(.StringLiteral)) {
             const token = self.base.previous();
             const value_copy = try self.base.arena.createString(token.lexeme);
-            return ast.ExprNode{ .Literal = .{ .String = ast.expressions.StringLiteral{
+            return ast.Expressions.ExprNode{ .Literal = .{ .String = ast.expressions.StringLiteral{
                 .value = value_copy,
-                .type_info = ast.TypeInfo.explicit(.String, .string, self.base.spanFromToken(token)),
+                .type_info = ast.Types.TypeInfo.explicit(.String, .string, self.base.spanFromToken(token)),
                 .span = self.base.spanFromToken(token),
             } } };
         }
@@ -770,9 +770,9 @@ pub const ExpressionParser = struct {
         // Address literals
         if (self.base.match(.AddressLiteral)) {
             const token = self.base.previous();
-            return ast.ExprNode{ .Literal = .{ .Address = ast.AddressLiteral{
+            return ast.Expressions.ExprNode{ .Literal = .{ .Address = ast.Expressions.AddressLiteral{
                 .value = token.lexeme,
-                .type_info = ast.TypeInfo.explicit(.Address, .address, self.base.spanFromToken(token)),
+                .type_info = ast.Types.TypeInfo.explicit(.Address, .address, self.base.spanFromToken(token)),
                 .span = self.base.spanFromToken(token),
             } } };
         }
@@ -780,11 +780,11 @@ pub const ExpressionParser = struct {
         // Hex literals
         if (self.base.match(.HexLiteral)) {
             const token = self.base.previous();
-            return ast.ExprNode{
+            return ast.Expressions.ExprNode{
                 .Literal = .{
-                    .Hex = ast.HexLiteral{
+                    .Hex = ast.Expressions.HexLiteral{
                         .value = token.lexeme,
-                        .type_info = ast.CommonTypes.unknown_integer(), // Hex can be various integer types
+                        .type_info = ast.Types.CommonTypes.unknown_integer(), // Hex can be various integer types
                         .span = self.base.spanFromToken(token),
                     },
                 },
@@ -794,11 +794,11 @@ pub const ExpressionParser = struct {
         // Binary literals
         if (self.base.match(.BinaryLiteral)) {
             const token = self.base.previous();
-            return ast.ExprNode{
+            return ast.Expressions.ExprNode{
                 .Literal = .{
-                    .Binary = ast.BinaryLiteral{
+                    .Binary = ast.Expressions.BinaryLiteral{
                         .value = token.lexeme,
-                        .type_info = ast.CommonTypes.unknown_integer(), // Binary can be various integer types
+                        .type_info = ast.Types.CommonTypes.unknown_integer(), // Binary can be various integer types
                         .span = self.base.spanFromToken(token),
                     },
                 },
@@ -816,7 +816,7 @@ pub const ExpressionParser = struct {
 
             // Start with the identifier - store name in arena
             const name_copy = try self.base.arena.createString(token.lexeme);
-            var current_expr = ast.ExprNode{ .Identifier = ast.IdentifierExpr{
+            var current_expr = ast.Expressions.ExprNode{ .Identifier = ast.Expressions.IdentifierExpr{
                 .name = name_copy,
                 .span = self.base.spanFromToken(token),
             } };
@@ -829,11 +829,11 @@ pub const ExpressionParser = struct {
                 const field_name = try self.base.arena.createString(field_token.lexeme);
 
                 // Create field access expression
-                const field_expr = ast.ExprNode{
-                    .FieldAccess = ast.FieldAccessExpr{
-                        .target = try self.base.arena.createNode(ast.ExprNode),
+                const field_expr = ast.Expressions.ExprNode{
+                    .FieldAccess = ast.Expressions.FieldAccessExpr{
+                        .target = try self.base.arena.createNode(ast.Expressions.ExprNode),
                         .field = field_name,
-                        .type_info = ast.TypeInfo.unknown(), // Will be resolved during type checking
+                        .type_info = ast.Types.TypeInfo.unknown(), // Will be resolved during type checking
                         .span = self.base.spanFromToken(token),
                     },
                 };
@@ -853,10 +853,10 @@ pub const ExpressionParser = struct {
             const try_token = self.base.previous();
             const expr = try self.parseUnary();
 
-            const expr_ptr = try self.base.arena.createNode(ast.ExprNode);
+            const expr_ptr = try self.base.arena.createNode(ast.Expressions.ExprNode);
             expr_ptr.* = expr;
 
-            return ast.ExprNode{ .Try = ast.TryExpr{
+            return ast.Expressions.ExprNode{ .Try = ast.Expressions.TryExpr{
                 .expr = expr_ptr,
                 .span = self.base.spanFromToken(try_token),
             } };
@@ -876,7 +876,7 @@ pub const ExpressionParser = struct {
         // Quantified expressions: forall/exists i: T (where predicate)? => body
         if (self.base.match(.Forall) or self.base.match(.Exists)) {
             const quant_token = self.base.previous();
-            const quantifier: ast.QuantifierType = if (quant_token.type == .Forall) .Forall else .Exists;
+            const quantifier: ast.Expressions.QuantifierType = if (quant_token.type == .Forall) .Forall else .Exists;
 
             // Bound variable name
             const var_token = try self.base.consume(.Identifier, "Expected bound variable name after quantifier");
@@ -890,10 +890,10 @@ pub const ExpressionParser = struct {
             self.base.current = type_parser.base.current;
 
             // Optional where clause
-            var where_ptr: ?*ast.ExprNode = null;
+            var where_ptr: ?*ast.Expressions.ExprNode = null;
             if (self.base.match(.Where)) {
                 const where_expr = try self.parseExpression();
-                const tmp_ptr = try self.base.arena.createNode(ast.ExprNode);
+                const tmp_ptr = try self.base.arena.createNode(ast.Expressions.ExprNode);
                 tmp_ptr.* = where_expr;
                 where_ptr = tmp_ptr;
             }
@@ -902,10 +902,10 @@ pub const ExpressionParser = struct {
 
             // Parse body expression
             const body_expr = try self.parseExpression();
-            const body_ptr = try self.base.arena.createNode(ast.ExprNode);
+            const body_ptr = try self.base.arena.createNode(ast.Expressions.ExprNode);
             body_ptr.* = body_expr;
 
-            return ast.ExprNode{ .Quantified = ast.QuantifiedExpr{
+            return ast.Expressions.ExprNode{ .Quantified = ast.Expressions.QuantifiedExpr{
                 .quantifier = quantifier,
                 .variable = var_token.lexeme,
                 .variable_type = var_type,
@@ -922,10 +922,10 @@ pub const ExpressionParser = struct {
             const expr = try self.parseExpression();
             _ = try self.base.consume(.RightParen, "Expected ')' after old expression");
 
-            const expr_ptr = try self.base.arena.createNode(ast.ExprNode);
+            const expr_ptr = try self.base.arena.createNode(ast.Expressions.ExprNode);
             expr_ptr.* = expr;
 
-            return ast.ExprNode{ .Old = ast.OldExpr{
+            return ast.Expressions.ExprNode{ .Old = ast.Expressions.OldExpr{
                 .expr = expr_ptr,
                 .span = self.base.spanFromToken(old_token),
             } };
@@ -936,7 +936,7 @@ pub const ExpressionParser = struct {
             const comptime_token = self.base.previous();
             const block = try self.parseBlock();
 
-            return ast.ExprNode{ .Comptime = ast.ComptimeExpr{
+            return ast.Expressions.ExprNode{ .Comptime = ast.Expressions.ComptimeExpr{
                 .block = block,
                 .span = self.base.spanFromToken(comptime_token),
             } };
@@ -948,7 +948,7 @@ pub const ExpressionParser = struct {
             _ = try self.base.consume(.Dot, "Expected '.' after 'error'");
             const name_token = try self.base.consume(.Identifier, "Expected error name after 'error.'");
 
-            return ast.ExprNode{ .ErrorReturn = ast.ErrorReturnExpr{
+            return ast.Expressions.ExprNode{ .ErrorReturn = ast.Expressions.ErrorReturnExpr{
                 .error_name = name_token.lexeme,
                 .span = self.base.spanFromToken(error_token),
             } };
@@ -962,9 +962,9 @@ pub const ExpressionParser = struct {
         // Address literals
         if (self.base.match(.AddressLiteral)) {
             const token = self.base.previous();
-            return ast.ExprNode{ .Literal = .{ .Address = ast.AddressLiteral{
+            return ast.Expressions.ExprNode{ .Literal = .{ .Address = ast.Expressions.AddressLiteral{
                 .value = token.lexeme,
-                .type_info = ast.TypeInfo.explicit(.Address, .address, self.base.spanFromToken(token)),
+                .type_info = ast.Types.TypeInfo.explicit(.Address, .address, self.base.spanFromToken(token)),
                 .span = self.base.spanFromToken(token),
             } } };
         }
@@ -972,11 +972,11 @@ pub const ExpressionParser = struct {
         // Hex literals
         if (self.base.match(.HexLiteral)) {
             const token = self.base.previous();
-            return ast.ExprNode{
+            return ast.Expressions.ExprNode{
                 .Literal = .{
-                    .Hex = ast.HexLiteral{
+                    .Hex = ast.Expressions.HexLiteral{
                         .value = token.lexeme,
-                        .type_info = ast.CommonTypes.unknown_integer(), // Hex can be various integer types
+                        .type_info = ast.Types.CommonTypes.unknown_integer(), // Hex can be various integer types
                         .span = self.base.spanFromToken(token),
                     },
                 },
@@ -988,10 +988,10 @@ pub const ExpressionParser = struct {
             const try_token = self.base.previous();
             const expr = try self.parseUnary();
 
-            const expr_ptr = try self.base.arena.createNode(ast.ExprNode);
+            const expr_ptr = try self.base.arena.createNode(ast.Expressions.ExprNode);
             expr_ptr.* = expr;
 
-            return ast.ExprNode{ .Try = ast.TryExpr{
+            return ast.Expressions.ExprNode{ .Try = ast.Expressions.TryExpr{
                 .expr = expr_ptr,
                 .span = self.base.spanFromToken(try_token),
             } };
@@ -1009,10 +1009,10 @@ pub const ExpressionParser = struct {
             const expr = try self.parseExpression();
             _ = try self.base.consume(.RightParen, "Expected ')' after old expression");
 
-            const expr_ptr = try self.base.arena.createNode(ast.ExprNode);
+            const expr_ptr = try self.base.arena.createNode(ast.Expressions.ExprNode);
             expr_ptr.* = expr;
 
-            return ast.ExprNode{ .Old = ast.OldExpr{
+            return ast.Expressions.ExprNode{ .Old = ast.Expressions.OldExpr{
                 .expr = expr_ptr,
                 .span = self.base.spanFromToken(old_token),
             } };
@@ -1024,7 +1024,7 @@ pub const ExpressionParser = struct {
             _ = try self.base.consume(.Dot, "Expected '.' after 'error'");
             const name_token = try self.base.consume(.Identifier, "Expected error name after 'error.'");
 
-            return ast.ExprNode{ .ErrorReturn = ast.ErrorReturnExpr{
+            return ast.Expressions.ExprNode{ .ErrorReturn = ast.Expressions.ErrorReturnExpr{
                 .error_name = name_token.lexeme,
                 .span = self.base.spanFromToken(error_token),
             } };
@@ -1073,7 +1073,7 @@ pub const ExpressionParser = struct {
     }
 
     /// Parse switch expression (returns a value) - MIGRATED FROM ORIGINAL
-    fn parseSwitchExpression(self: *ExpressionParser) ParserError!ast.ExprNode {
+    fn parseSwitchExpression(self: *ExpressionParser) ParserError!ast.Expressions.ExprNode {
         const switch_token = self.base.previous();
 
         // Parse required switch condition: switch (expr)
@@ -1083,10 +1083,10 @@ pub const ExpressionParser = struct {
 
         _ = try self.base.consume(.LeftBrace, "Expected '{' after switch condition");
 
-        var cases = std.ArrayList(ast.SwitchCase).init(self.base.arena.allocator());
+        var cases = std.ArrayList(ast.Switch.Case).init(self.base.arena.allocator());
         defer cases.deinit();
 
-        var default_case: ?ast.BlockNode = null;
+        var default_case: ?ast.Statements.BlockNode = null;
 
         // Parse switch arms
         while (!self.base.check(.RightBrace) and !self.base.isAtEnd()) {
@@ -1104,9 +1104,9 @@ pub const ExpressionParser = struct {
                     },
                     .Expression => |expr_ptr| {
                         // Synthesize a block node with a single expression statement
-                        var stmts = try self.base.arena.createSlice(ast.StmtNode, 1);
-                        stmts[0] = ast.StmtNode{ .Expr = expr_ptr.* };
-                        default_case = ast.BlockNode{
+                        var stmts = try self.base.arena.createSlice(ast.Statements.StmtNode, 1);
+                        stmts[0] = ast.Statements.StmtNode{ .Expr = expr_ptr.* };
+                        default_case = ast.Statements.BlockNode{
                             .statements = stmts,
                             .span = self.base.spanFromToken(self.base.previous()),
                         };
@@ -1124,7 +1124,7 @@ pub const ExpressionParser = struct {
             const body = try common_parsers.parseSwitchBody(&self.base, self, .ExpressionArm);
 
             // Create switch case
-            const case = ast.SwitchCase{
+            const case = ast.Switch.Case{
                 .pattern = pattern,
                 .body = body,
                 .span = self.base.spanFromToken(switch_token),
@@ -1138,10 +1138,10 @@ pub const ExpressionParser = struct {
 
         _ = try self.base.consume(.RightBrace, "Expected '}' after switch cases");
 
-        const condition_ptr = try self.base.arena.createNode(ast.ExprNode);
+        const condition_ptr = try self.base.arena.createNode(ast.Expressions.ExprNode);
         condition_ptr.* = condition;
 
-        return ast.ExprNode{ .SwitchExpression = ast.SwitchExprNode{
+        return ast.Expressions.ExprNode{ .SwitchExpression = ast.Switch.ExprNode{
             .condition = condition_ptr,
             .cases = try cases.toOwnedSlice(),
             .default_case = default_case,
@@ -1154,10 +1154,10 @@ pub const ExpressionParser = struct {
     // Using common parseSwitchBody from common_parsers.zig
 
     /// Parse block (needed for switch bodies)
-    fn parseBlock(self: *ExpressionParser) !ast.BlockNode {
+    fn parseBlock(self: *ExpressionParser) !ast.Statements.BlockNode {
         _ = try self.base.consume(.LeftBrace, "Expected '{'");
 
-        var statements = std.ArrayList(ast.StmtNode).init(self.base.arena.allocator());
+        var statements = std.ArrayList(ast.Statements.StmtNode).init(self.base.arena.allocator());
         defer statements.deinit();
 
         while (!self.base.check(.RightBrace) and !self.base.isAtEnd()) {
@@ -1168,14 +1168,14 @@ pub const ExpressionParser = struct {
 
         const end_token = try self.base.consume(.RightBrace, "Expected '}' after block");
 
-        return ast.BlockNode{
+        return ast.Statements.BlockNode{
             .statements = try statements.toOwnedSlice(),
             .span = self.base.spanFromToken(end_token),
         };
     }
 
     /// Parse builtin function (@function_name(...)) - MIGRATED FROM ORIGINAL
-    fn parseBuiltinFunction(self: *ExpressionParser) ParserError!ast.ExprNode {
+    fn parseBuiltinFunction(self: *ExpressionParser) ParserError!ast.Expressions.ExprNode {
         const at_token = self.base.previous();
         const name_token = try self.base.consume(.Identifier, "Expected builtin function name after '@'");
 
@@ -1198,10 +1198,10 @@ pub const ExpressionParser = struct {
             const operand_expr = try self.parseExpression();
             _ = try self.base.consume(.RightParen, "Expected ')' after @cast arguments");
 
-            const operand_ptr = try self.base.arena.createNode(ast.ExprNode);
+            const operand_ptr = try self.base.arena.createNode(ast.Expressions.ExprNode);
             operand_ptr.* = operand_expr;
 
-            return ast.ExprNode{ .Cast = ast.CastExpr{
+            return ast.Expressions.ExprNode{ .Cast = ast.Expressions.CastExpr{
                 .operand = operand_ptr,
                 .target_type = target_type,
                 .cast_type = .Unsafe,
@@ -1218,18 +1218,18 @@ pub const ExpressionParser = struct {
         {
             _ = try self.base.consume(.LeftParen, "Expected '(' after builtin function name");
 
-            var args = std.ArrayList(*ast.ExprNode).init(self.base.arena.allocator());
+            var args = std.ArrayList(*ast.Expressions.ExprNode).init(self.base.arena.allocator());
             defer args.deinit();
 
             if (!self.base.check(.RightParen)) {
                 const first_arg = try self.parseExpression();
-                const first_arg_ptr = try self.base.arena.createNode(ast.ExprNode);
+                const first_arg_ptr = try self.base.arena.createNode(ast.Expressions.ExprNode);
                 first_arg_ptr.* = first_arg;
                 try args.append(first_arg_ptr);
 
                 while (self.base.match(.Comma)) {
                     const arg = try self.parseExpression();
-                    const arg_ptr = try self.base.arena.createNode(ast.ExprNode);
+                    const arg_ptr = try self.base.arena.createNode(ast.Expressions.ExprNode);
                     arg_ptr.* = arg;
                     try args.append(arg_ptr);
                 }
@@ -1241,17 +1241,17 @@ pub const ExpressionParser = struct {
             const full_name = try std.fmt.allocPrint(self.base.arena.allocator(), "@{s}", .{builtin_name});
 
             // Create identifier for the function name
-            const name_expr = try self.base.arena.createNode(ast.ExprNode);
-            name_expr.* = ast.ExprNode{ .Identifier = ast.IdentifierExpr{
+            const name_expr = try self.base.arena.createNode(ast.Expressions.ExprNode);
+            name_expr.* = ast.Expressions.ExprNode{ .Identifier = ast.Expressions.IdentifierExpr{
                 .name = full_name,
                 .span = self.base.spanFromToken(at_token),
             } };
 
-            return ast.ExprNode{
-                .Call = ast.CallExpr{
+            return ast.Expressions.ExprNode{
+                .Call = ast.Expressions.CallExpr{
                     .callee = name_expr,
                     .arguments = try args.toOwnedSlice(),
-                    .type_info = ast.TypeInfo.unknown(), // Will be resolved during type checking
+                    .type_info = ast.Types.TypeInfo.unknown(), // Will be resolved during type checking
                     .span = self.base.spanFromToken(at_token),
                 },
             };
@@ -1262,16 +1262,16 @@ pub const ExpressionParser = struct {
     }
 
     /// Parse parenthesized expressions or tuples
-    fn parseParenthesizedOrTuple(self: *ExpressionParser) ParserError!ast.ExprNode {
+    fn parseParenthesizedOrTuple(self: *ExpressionParser) ParserError!ast.Expressions.ExprNode {
         const paren_token = self.base.previous();
 
         // Check for empty tuple
         if (self.base.check(.RightParen)) {
             _ = self.base.advance();
-            var empty_elements = std.ArrayList(*ast.ExprNode).init(self.base.arena.allocator());
+            var empty_elements = std.ArrayList(*ast.Expressions.ExprNode).init(self.base.arena.allocator());
             defer empty_elements.deinit();
 
-            return ast.ExprNode{ .Tuple = ast.TupleExpr{
+            return ast.Expressions.ExprNode{ .Tuple = ast.Expressions.TupleExpr{
                 .elements = try empty_elements.toOwnedSlice(),
                 .span = self.base.spanFromToken(paren_token),
             } };
@@ -1281,11 +1281,11 @@ pub const ExpressionParser = struct {
 
         // Check if it's a tuple (has comma)
         if (self.base.match(.Comma)) {
-            var elements = std.ArrayList(*ast.ExprNode).init(self.base.arena.allocator());
+            var elements = std.ArrayList(*ast.Expressions.ExprNode).init(self.base.arena.allocator());
             defer elements.deinit();
 
             // Convert first_expr to pointer
-            const first_ptr = try self.base.arena.createNode(ast.ExprNode);
+            const first_ptr = try self.base.arena.createNode(ast.Expressions.ExprNode);
             first_ptr.* = first_expr;
             try elements.append(first_ptr);
 
@@ -1293,7 +1293,7 @@ pub const ExpressionParser = struct {
             if (!self.base.check(.RightParen)) {
                 repeat: while (true) {
                     const element = try self.parseExpression();
-                    const element_ptr = try self.base.arena.createNode(ast.ExprNode);
+                    const element_ptr = try self.base.arena.createNode(ast.Expressions.ExprNode);
                     element_ptr.* = element;
                     try elements.append(element_ptr);
 
@@ -1304,7 +1304,7 @@ pub const ExpressionParser = struct {
 
             _ = try self.base.consume(.RightParen, "Expected ')' after tuple elements");
 
-            return ast.ExprNode{ .Tuple = ast.TupleExpr{
+            return ast.Expressions.ExprNode{ .Tuple = ast.Expressions.TupleExpr{
                 .elements = try elements.toOwnedSlice(),
                 .span = self.base.spanFromToken(paren_token),
             } };
@@ -1316,10 +1316,10 @@ pub const ExpressionParser = struct {
     }
 
     /// Parse struct instantiation expression (e.g., `MyStruct { a: 1, b: 2 }`)
-    fn parseStructInstantiation(self: *ExpressionParser, name_token: Token) ParserError!ast.ExprNode {
+    fn parseStructInstantiation(self: *ExpressionParser, name_token: Token) ParserError!ast.Expressions.ExprNode {
         _ = try self.base.consume(.LeftBrace, "Expected '{' after struct name");
 
-        var fields = std.ArrayList(ast.StructInstantiationField).init(self.base.arena.allocator());
+        var fields = std.ArrayList(ast.Expressions.StructInstantiationField).init(self.base.arena.allocator());
         defer fields.deinit();
 
         // Parse field initializers (field_name: value)
@@ -1328,10 +1328,10 @@ pub const ExpressionParser = struct {
             _ = try self.base.consume(.Colon, "Expected ':' after field name in struct instantiation");
 
             const field_value = try self.parseAssignment();
-            const field_value_ptr = try self.base.arena.createNode(ast.ExprNode);
+            const field_value_ptr = try self.base.arena.createNode(ast.Expressions.ExprNode);
             field_value_ptr.* = field_value;
 
-            try fields.append(ast.StructInstantiationField{
+            try fields.append(ast.Expressions.StructInstantiationField{
                 .name = field_name.lexeme,
                 .value = field_value_ptr,
                 .span = self.base.spanFromToken(field_name),
@@ -1351,13 +1351,13 @@ pub const ExpressionParser = struct {
         _ = try self.base.consume(.RightBrace, "Expected '}' after struct instantiation fields");
 
         // Create the struct name identifier
-        const struct_name_ptr = try self.base.arena.createNode(ast.ExprNode);
-        struct_name_ptr.* = ast.ExprNode{ .Identifier = ast.IdentifierExpr{
+        const struct_name_ptr = try self.base.arena.createNode(ast.Expressions.ExprNode);
+        struct_name_ptr.* = ast.Expressions.ExprNode{ .Identifier = ast.Expressions.IdentifierExpr{
             .name = name_token.lexeme,
             .span = self.base.spanFromToken(name_token),
         } };
 
-        return ast.ExprNode{ .StructInstantiation = ast.StructInstantiationExpr{
+        return ast.Expressions.ExprNode{ .StructInstantiation = ast.Expressions.StructInstantiationExpr{
             .struct_name = struct_name_ptr,
             .fields = try fields.toOwnedSlice(),
             .span = self.base.spanFromToken(name_token),
@@ -1365,11 +1365,11 @@ pub const ExpressionParser = struct {
     }
 
     /// Parse anonymous struct literal (.{field = value, ...})
-    fn parseAnonymousStructLiteral(self: *ExpressionParser) ParserError!ast.ExprNode {
+    fn parseAnonymousStructLiteral(self: *ExpressionParser) ParserError!ast.Expressions.ExprNode {
         const dot_token = self.base.previous();
         _ = try self.base.consume(.LeftBrace, "Expected '{' after '.' in anonymous struct literal");
 
-        var fields = std.ArrayList(ast.AnonymousStructField).init(self.base.arena.allocator());
+        var fields = std.ArrayList(ast.Expressions.AnonymousStructField).init(self.base.arena.allocator());
         defer fields.deinit();
 
         // Parse field initializers (.{ .field = value, ... })
@@ -1380,10 +1380,10 @@ pub const ExpressionParser = struct {
             _ = try self.base.consume(.Equal, "Expected '=' after field name in anonymous struct literal");
 
             const field_value = try self.parseAssignment();
-            const field_value_ptr = try self.base.arena.createNode(ast.ExprNode);
+            const field_value_ptr = try self.base.arena.createNode(ast.Expressions.ExprNode);
             field_value_ptr.* = field_value;
 
-            try fields.append(ast.AnonymousStructField{
+            try fields.append(ast.Expressions.AnonymousStructField{
                 .name = field_name.lexeme,
                 .value = field_value_ptr,
                 .span = self.base.spanFromToken(field_name),
@@ -1402,23 +1402,23 @@ pub const ExpressionParser = struct {
 
         _ = try self.base.consume(.RightBrace, "Expected '}' after anonymous struct literal fields");
 
-        return ast.ExprNode{ .AnonymousStruct = ast.AnonymousStructExpr{
+        return ast.Expressions.ExprNode{ .AnonymousStruct = ast.Expressions.AnonymousStructExpr{
             .fields = try fields.toOwnedSlice(),
             .span = self.base.spanFromToken(dot_token),
         } };
     }
 
     /// Parse array literal ([element1, element2, ...])
-    fn parseArrayLiteral(self: *ExpressionParser) ParserError!ast.ExprNode {
+    fn parseArrayLiteral(self: *ExpressionParser) ParserError!ast.Expressions.ExprNode {
         const bracket_token = self.base.previous();
 
-        var elements = std.ArrayList(*ast.ExprNode).init(self.base.arena.allocator());
+        var elements = std.ArrayList(*ast.Expressions.ExprNode).init(self.base.arena.allocator());
         defer elements.deinit();
 
         // Parse array elements
         while (!self.base.check(.RightBracket) and !self.base.isAtEnd()) {
             const element = try self.parseAssignment();
-            const element_ptr = try self.base.arena.createNode(ast.ExprNode);
+            const element_ptr = try self.base.arena.createNode(ast.Expressions.ExprNode);
             element_ptr.* = element;
             try elements.append(element_ptr);
 
@@ -1435,8 +1435,8 @@ pub const ExpressionParser = struct {
 
         _ = try self.base.consume(.RightBracket, "Expected ']' after array elements");
 
-        return ast.ExprNode{
-            .ArrayLiteral = ast.ArrayLiteralExpr{
+        return ast.Expressions.ExprNode{
+            .ArrayLiteral = ast.Literals.Array{
                 .elements = try elements.toOwnedSlice(),
                 .element_type = null, // Type will be inferred
                 .span = self.base.spanFromToken(bracket_token),
@@ -1446,7 +1446,7 @@ pub const ExpressionParser = struct {
 
     /// Parse a range expression (start...end)
     /// This creates a RangeExpr which can be used both in switch patterns and directly as expressions
-    pub fn parseRangeExpression(self: *ExpressionParser) ParserError!ast.ExprNode {
+    pub fn parseRangeExpression(self: *ExpressionParser) ParserError!ast.Expressions.ExprNode {
         const start_token = self.base.peek();
 
         // Parse start expression
@@ -1458,13 +1458,13 @@ pub const ExpressionParser = struct {
         const end_expr = try self.parseExpression();
 
         // Create pointers to the expressions
-        const start_ptr = try self.base.arena.createNode(ast.ExprNode);
+        const start_ptr = try self.base.arena.createNode(ast.Expressions.ExprNode);
         start_ptr.* = start_expr;
-        const end_ptr = try self.base.arena.createNode(ast.ExprNode);
+        const end_ptr = try self.base.arena.createNode(ast.Expressions.ExprNode);
         end_ptr.* = end_expr;
 
-        return ast.ExprNode{
-            .Range = ast.RangeExpr{
+        return ast.Expressions.ExprNode{
+            .Range = ast.Expressions.RangeExpr{
                 .start = start_ptr,
                 .end = end_ptr,
                 .inclusive = true, // Default to inclusive range

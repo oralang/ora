@@ -1,5 +1,5 @@
 const std = @import("std");
-const SourceSpan = @import("types.zig").SourceSpan;
+const SourceSpan = @import("../ast.zig").SourceSpan;
 const TypeInfo = @import("type_info.zig").TypeInfo;
 
 /// Binary and unary operators
@@ -55,8 +55,7 @@ pub const CastType = enum {
     Forced, // as!
 };
 
-// Forward declaration for types and blocks
-const TypeRef = @import("types.zig").TypeRef;
+// Forward declaration for blocks
 const BlockNode = @import("statements.zig").BlockNode;
 
 /// Switch pattern matching (moved from statements.zig to break circular dependency)

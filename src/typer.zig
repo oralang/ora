@@ -209,7 +209,7 @@ pub const StructType = struct {
     }
 
     /// Calculate optimal memory layout with advanced packing strategies
-    pub fn optimizeLayout(self: *StructType, region: ast.MemoryRegion) void {
+    pub fn optimizeLayout(self: *StructType, region: ast.Memory.Region) void {
         switch (region) {
             .Storage => self.optimizeStorageLayout(),
             .Memory => self.optimizeMemoryLayout(),
@@ -620,7 +620,7 @@ pub const TyperError = error{
 pub const Symbol = struct {
     name: []const u8,
     typ: OraType,
-    region: ast.MemoryRegion,
+    region: ast.Memory.Region,
     mutable: bool,
     span: ast.SourceSpan,
     namespace: ?[]const u8, // Optional namespace for namespaced symbols
@@ -992,7 +992,7 @@ pub const Typer = struct {
     }
 
     /// Type check a variable declaration
-    fn typeCheckVariableDecl(self: *Typer, var_decl: *ast.VariableDeclNode) TyperError!void {
+    fn typeCheckVariableDecl(self: *Typer, var_decl: *ast.Statements.VariableDeclNode) TyperError!void {
         // Handle tuple unpacking
         if (var_decl.tuple_names) |tuple_names| {
             // Tuple unpacking: let (a, b) = expr
@@ -1057,14 +1057,14 @@ pub const Typer = struct {
     }
 
     /// Type check a block of statements
-    fn typeCheckBlock(self: *Typer, block: *ast.BlockNode) TyperError!void {
+    fn typeCheckBlock(self: *Typer, block: *ast.Statements.BlockNode) TyperError!void {
         for (block.statements) |*stmt| {
             try self.typeCheckStatement(stmt);
         }
     }
 
     /// Type check a statement
-    fn typeCheckStatement(self: *Typer, stmt: *ast.StmtNode) TyperError!void {
+    fn typeCheckStatement(self: *Typer, stmt: *ast.Statements.StmtNode) TyperError!void {
         switch (stmt.*) {
             .Expr => |*expr| {
                 _ = try self.typeCheckExpression(expr);
@@ -1194,7 +1194,7 @@ pub const Typer = struct {
     }
 
     /// Type check an expression and return its type
-    pub fn typeCheckExpression(self: *Typer, expr: *ast.ExprNode) TyperError!OraType {
+    pub fn typeCheckExpression(self: *Typer, expr: *ast.Expressions.ExprNode) TyperError!OraType {
         switch (expr.*) {
             .Identifier => |*ident| {
                 if (self.current_scope.lookup(ident.name)) |symbol| {
@@ -1237,7 +1237,7 @@ pub const Typer = struct {
             .ErrorCast => |*error_cast| {
                 // Error casts convert to error union type
                 _ = try self.typeCheckExpression(error_cast.operand);
-                return try self.convertAstTypeToOraType(&error_cast.target_type);
+                return OraType.Unknown; // TODO: Convert from TypeInfo instead
             },
             .Shift => |*shift| {
                 // Type check shift expression components
@@ -1289,7 +1289,7 @@ pub const Typer = struct {
             },
             .Cast => |*cast| {
                 const operand_type = try self.typeCheckExpression(cast.operand);
-                const target_type = try self.convertAstTypeToOraType(&cast.target_type);
+                const target_type = OraType.Unknown; // TODO: Convert from TypeInfo instead
 
                 // Validate cast safety
                 if (!self.isCastValid(operand_type, target_type)) {
@@ -1460,7 +1460,7 @@ pub const Typer = struct {
     }
 
     /// Get the type of a literal
-    fn getLiteralType(self: *Typer, literal: *ast.LiteralExpr) TyperError!OraType {
+    fn getLiteralType(self: *Typer, literal: *ast.Expressions.LiteralExpr) TyperError!OraType {
         _ = self;
         return switch (literal.*) {
             .Integer => |*int_lit| {
@@ -1530,7 +1530,7 @@ pub const Typer = struct {
     }
 
     /// Type check a binary operation
-    fn typeCheckBinaryOp(self: *Typer, op: ast.BinaryOp, lhs: OraType, rhs: OraType) TyperError!OraType {
+    fn typeCheckBinaryOp(self: *Typer, op: ast.Operators.Binary, lhs: OraType, rhs: OraType) TyperError!OraType {
         switch (op) {
             // Arithmetic operators
             .Plus, .Minus, .Star, .Slash, .Percent => {
@@ -1592,7 +1592,7 @@ pub const Typer = struct {
     }
 
     /// Type check a compound assignment operation
-    fn typeCheckCompoundAssignmentOp(self: *Typer, op: ast.CompoundAssignmentOp, lhs: OraType, rhs: OraType) TyperError!OraType {
+    fn typeCheckCompoundAssignmentOp(self: *Typer, op: ast.Operators.Compound, lhs: OraType, rhs: OraType) TyperError!OraType {
         switch (op) {
             .PlusEqual, .MinusEqual, .StarEqual, .SlashEqual, .PercentEqual => {
                 if (self.isNumericType(lhs) and self.isNumericType(rhs)) {
@@ -1604,7 +1604,7 @@ pub const Typer = struct {
     }
 
     /// Type check a function call
-    fn typeCheckFunctionCall(self: *Typer, call: *ast.CallExpr) TyperError!OraType {
+    fn typeCheckFunctionCall(self: *Typer, call: *ast.Expressions.CallExpr) TyperError!OraType {
         // Extract function name from callee (assuming it's an identifier)
         const function_name = switch (call.callee.*) {
             .Identifier => |*ident| ident.name,
@@ -1668,7 +1668,7 @@ pub const Typer = struct {
     }
 
     /// Type check built-in function calls
-    fn typeCheckBuiltinCall(self: *Typer, call: *ast.CallExpr) TyperError!OraType {
+    fn typeCheckBuiltinCall(self: *Typer, call: *ast.Expressions.CallExpr) TyperError!OraType {
         // Extract function name from callee
         const function_name = switch (call.callee.*) {
             .Identifier => |*ident| ident.name,
@@ -1807,15 +1807,10 @@ pub const Typer = struct {
     }
 
     /// Convert TypeInfo to OraType
-    pub fn convertTypeInfoToOraType(self: *Typer, type_info: ast.TypeInfo) TyperError!OraType {
+    pub fn convertTypeInfoToOraType(self: *Typer, type_info: ast.Types.TypeInfo) TyperError!OraType {
         // If the TypeInfo already has a resolved OraType, convert it to typer's OraType
         if (type_info.ora_type) |ast_ora_type| {
             return self.convertAstOraTypeToTyperOraType(ast_ora_type);
-        }
-
-        // If it has an AST TypeRef, convert it
-        if (type_info.ast_type) |ast_type| {
-            return self.convertAstTypeToOraType(&ast_type);
         }
 
         // Otherwise, it's unknown
@@ -1848,138 +1843,6 @@ pub const Typer = struct {
             // For complex types, we'll need more sophisticated conversion
             // For now, map them to Unknown
             else => OraType.Unknown,
-        };
-    }
-
-    /// Convert AST type reference to ZigOra type
-    pub fn convertAstTypeToOraType(self: *Typer, ast_type: *const ast.TypeRef) TyperError!OraType {
-        return switch (ast_type.*) {
-            .Bool => OraType.Bool,
-            .Address => OraType.Address,
-            .U8 => OraType.U8,
-            .U16 => OraType.U16,
-            .U32 => OraType.U32,
-            .U64 => OraType.U64,
-            .U128 => OraType.U128,
-            .U256 => OraType.U256,
-            .I8 => OraType.I8,
-            .I16 => OraType.I16,
-            .I32 => OraType.I32,
-            .I64 => OraType.I64,
-            .I128 => OraType.I128,
-            .I256 => OraType.I256,
-            .String => OraType.String,
-            .Bytes => OraType.Bytes,
-            .Slice => |slice_element_type| {
-                // Use arena allocator for type lifetime management
-                const element_type = try self.type_arena.allocator().create(OraType);
-                element_type.* = try self.convertAstTypeToOraType(slice_element_type);
-                return OraType{ .Slice = element_type };
-            },
-            .Mapping => |mapping_info| {
-                // Use arena allocator for type lifetime management
-                const key_type = try self.type_arena.allocator().create(OraType);
-                key_type.* = try self.convertAstTypeToOraType(mapping_info.key);
-                const value_type = try self.type_arena.allocator().create(OraType);
-                value_type.* = try self.convertAstTypeToOraType(mapping_info.value);
-                return OraType{ .Mapping = .{
-                    .key = key_type,
-                    .value = value_type,
-                } };
-            },
-            .DoubleMap => |double_map_info| {
-                // Use arena allocator for type lifetime management
-                const key1_type = try self.type_arena.allocator().create(OraType);
-                key1_type.* = try self.convertAstTypeToOraType(double_map_info.key1);
-                const key2_type = try self.type_arena.allocator().create(OraType);
-                key2_type.* = try self.convertAstTypeToOraType(double_map_info.key2);
-                const value_type = try self.type_arena.allocator().create(OraType);
-                value_type.* = try self.convertAstTypeToOraType(double_map_info.value);
-                return OraType{ .DoubleMap = .{
-                    .key1 = key1_type,
-                    .key2 = key2_type,
-                    .value = value_type,
-                } };
-            },
-            .Identifier => |identifier| {
-                // Look up custom types (structs, enums)
-                if (self.getStructType(identifier)) |struct_type| {
-                    // Return a const pointer directly to avoid copying issues
-                    const struct_type_const_ptr = @as(*const StructType, struct_type);
-                    // Cast to mutable pointer as required by OraType (but we won't mutate it)
-                    const struct_type_ptr = @as(*StructType, @constCast(struct_type_const_ptr));
-                    return OraType{ .Struct = struct_type_ptr };
-                }
-
-                // Look up enum types
-                if (self.current_scope.lookup(identifier)) |symbol| {
-                    if (symbol.typ == .Enum) {
-                        return symbol.typ;
-                    }
-                }
-
-                return OraType.Unknown;
-            },
-            .ErrorUnion => |error_union| {
-                // Error unions use the success type as the primary type
-                return try self.convertAstTypeToOraType(error_union.success_type);
-            },
-            .Result => |result| {
-                // Result types use the ok type as the primary type
-                return try self.convertAstTypeToOraType(result.ok_type);
-            },
-            .Tuple => |tuple| {
-                // Convert tuple elements to OraType
-                const element_types = try self.type_arena.allocator().alloc(OraType, tuple.types.len);
-                for (tuple.types, 0..) |*element_type, i| {
-                    element_types[i] = try self.convertAstTypeToOraType(element_type);
-                }
-                return OraType{ .Tuple = .{
-                    .types = element_types,
-                } };
-            },
-            .Struct => |struct_name| {
-                // Look up struct type by name
-                if (self.getStructType(struct_name)) |struct_type| {
-                    const struct_type_const_ptr = @as(*const StructType, struct_type);
-                    const struct_type_ptr = @as(*StructType, @constCast(struct_type_const_ptr));
-                    return OraType{ .Struct = struct_type_ptr };
-                }
-                return OraType.Unknown;
-            },
-            .Enum => |enum_name| {
-                // Look up enum type by name
-                if (self.current_scope.lookup(enum_name)) |symbol| {
-                    if (symbol.typ == .Enum) {
-                        return symbol.typ;
-                    }
-                }
-                return OraType.Unknown;
-            },
-            .Function => |function_type| {
-                // Convert function type
-                const param_types = try self.type_arena.allocator().alloc(OraType, function_type.params.len);
-                for (function_type.params, 0..) |*param_type, i| {
-                    param_types[i] = try self.convertAstTypeToOraType(param_type);
-                }
-
-                const return_type_ptr = if (function_type.return_type) |ret_type| blk: {
-                    const ret_ptr = try self.type_arena.allocator().create(OraType);
-                    ret_ptr.* = try self.convertAstTypeToOraType(ret_type);
-                    break :blk ret_ptr;
-                } else null;
-
-                return OraType{ .Function = .{
-                    .params = param_types,
-                    .return_type = return_type_ptr,
-                } };
-            },
-            .Void => OraType.Void,
-            .Error => OraType.Error,
-            .Module => |module_name| {
-                return OraType{ .Module = module_name };
-            },
-            .Unknown => OraType.Unknown,
         };
     }
 
@@ -2282,7 +2145,7 @@ pub const Typer = struct {
     }
 
     /// Validate memory region constraints
-    fn validateMemoryRegion(self: *Typer, region: ast.MemoryRegion, typ: OraType) TyperError!void {
+    fn validateMemoryRegion(self: *Typer, region: ast.Memory.Region, typ: OraType) TyperError!void {
         _ = self;
 
         switch (region) {
@@ -2302,7 +2165,7 @@ pub const Typer = struct {
     }
 
     /// Type check unary operations
-    fn typeCheckUnaryOp(self: *Typer, op: ast.UnaryOp, operand_type: OraType) TyperError!OraType {
+    fn typeCheckUnaryOp(self: *Typer, op: ast.Operators.Unary, operand_type: OraType) TyperError!OraType {
         return switch (op) {
             .Minus => {
                 if (self.isNumericType(operand_type)) {
