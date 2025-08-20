@@ -209,7 +209,7 @@ test "FileCoverage percentage calculation" {
 }
 
 test "CoverageStats overall percentage" {
-    const files = [_]FileCoverage{
+    var files = [_]FileCoverage{
         FileCoverage{
             .file_path = "file1.zig",
             .total_lines = 100,
@@ -228,7 +228,7 @@ test "CoverageStats overall percentage" {
         .total_files = 2,
         .total_lines = 300,
         .covered_lines = 240,
-        .files = &files,
+        .files = files[0..],
     };
 
     try std.testing.expect(stats.getOverallPercentage() == 80.0);

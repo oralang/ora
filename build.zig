@@ -196,6 +196,15 @@ pub fn build(b: *std.Build) void {
     ast_clean_tests.root_module.addImport("ora", lib_mod);
     const run_ast_clean_tests = b.addRunArtifact(ast_clean_tests);
 
+    // Add AST visitor tests
+    const ast_visitor_tests = b.addTest(.{
+        .root_source_file = b.path("tests/ast_visitor_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    ast_visitor_tests.root_module.addImport("ora", lib_mod);
+    const run_ast_visitor_tests = b.addRunArtifact(ast_visitor_tests);
+
     // Legacy lexer test (keep for compatibility)
     const simple_lexer_test = b.addTest(.{
         .root_source_file = b.path("tests/lexer_test.zig"),
@@ -224,6 +233,7 @@ pub fn build(b: *std.Build) void {
     const test_ast_step = b.step("test-ast", "Run AST tests");
     test_ast_step.dependOn(&run_ast_tests.step);
     test_ast_step.dependOn(&run_ast_clean_tests.step);
+    test_ast_step.dependOn(&run_ast_visitor_tests.step);
 
     // Create comprehensive test step that runs all tests
     const test_all_step = b.step("test", "Run all tests");
@@ -643,7 +653,7 @@ fn runExampleTests(step: *std.Build.Step, options: std.Build.Step.MakeOptions) a
     std.log.info("Testing all .ora example files...", .{});
 
     // Get examples directory
-    var examples_dir = std.fs.cwd().openDir("examples", .{ .iterate = true }) catch |err| {
+    var examples_dir = std.fs.cwd().openDir("ora-example", .{ .iterate = true }) catch |err| {
         std.log.err("Failed to open examples directory: {}", .{err});
         return err;
     };
@@ -667,7 +677,7 @@ fn runExampleTests(step: *std.Build.Step, options: std.Build.Step.MakeOptions) a
         if (entry.kind != .file) continue;
         if (!std.mem.endsWith(u8, entry.basename, ".ora")) continue;
 
-        const file_path = b.fmt("examples/{s}", .{entry.path});
+        const file_path = b.fmt("ora-example/{s}", .{entry.path});
         std.log.info("Testing: {s}", .{file_path});
 
         // Test each compilation phase
@@ -688,11 +698,27 @@ fn runExampleTests(step: *std.Build.Step, options: std.Build.Step.MakeOptions) a
                 continue;
             };
 
-            if (result.term.Exited != 0) {
-                std.log.err("FAILED: {s} (phase: {s})", .{ file_path, phase });
-                std.log.err("Error output: {s}", .{result.stderr});
-                failed_count += 1;
-                break; // Don't test further phases if one fails
+            switch (result.term) {
+                .Exited => |code| {
+                    if (code != 0) {
+                        std.log.err("FAILED: {s} (phase: {s}) with exit code {}", .{ file_path, phase, code });
+                        std.log.err("Error output: {s}", .{result.stderr});
+                        failed_count += 1;
+                        break; // Don't test further phases if one fails
+                    }
+                },
+                .Signal => |sig| {
+                    std.log.err("FAILED: {s} (phase: {s}) terminated by signal {}", .{ file_path, phase, sig });
+                    std.log.err("Error output: {s}", .{result.stderr});
+                    failed_count += 1;
+                    break; // Don't test further phases if one fails
+                },
+                else => {
+                    std.log.err("FAILED: {s} (phase: {s}) with unexpected termination", .{ file_path, phase });
+                    std.log.err("Error output: {s}", .{result.stderr});
+                    failed_count += 1;
+                    break; // Don't test further phases if one fails
+                },
             }
         }
 
