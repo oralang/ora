@@ -451,12 +451,24 @@ fn buildSolidityLibrariesImpl(step: *std.Build.Step, options: std.Build.Step.Mak
         std.log.info("Adding Boost paths for Linux", .{});
         // Force libc++ usage on Linux to match macOS ABI
         try cmake_args.append("-DCMAKE_CXX_FLAGS=-stdlib=libc++ -lc++abi");
+        // Ensure the linker uses libc++ and c++abi as well
+        try cmake_args.append("-DCMAKE_EXE_LINKER_FLAGS=-stdlib=libc++ -lc++abi");
+        try cmake_args.append("-DCMAKE_SHARED_LINKER_FLAGS=-stdlib=libc++ -lc++abi");
+        try cmake_args.append("-DCMAKE_MODULE_LINKER_FLAGS=-stdlib=libc++ -lc++abi");
         try cmake_args.append("-DCMAKE_CXX_COMPILER=clang++");
         try cmake_args.append("-DCMAKE_C_COMPILER=clang");
     } else if (builtin.os.tag == .macos) {
         std.log.info("Adding Boost paths for Apple Silicon Mac", .{});
         // macOS already uses libc++ by default, but be explicit
         try cmake_args.append("-DCMAKE_CXX_FLAGS=-stdlib=libc++");
+
+        // Allow forcing CMake arch when cross-compiling on macOS via env var
+        if (std.process.getEnvVarOwned(allocator, "ORA_CMAKE_OSX_ARCH") catch null) |arch| {
+            defer allocator.free(arch);
+            const flag = b.fmt("-DCMAKE_OSX_ARCHITECTURES={s}", .{arch});
+            try cmake_args.append(flag);
+            std.log.info("Using CMAKE_OSX_ARCHITECTURES={s}", .{arch});
+        }
     } else if (builtin.os.tag == .windows) {
         std.log.info("Adding Boost paths for Windows", .{});
         // Windows: Use MSVC and configure Boost paths
@@ -497,6 +509,7 @@ fn buildSolidityLibrariesImpl(step: *std.Build.Step, options: std.Build.Step.Mak
             "cmake",
             "--build",
             build_dir,
+            "--parallel",
             "--target",
             "solutil",
             "--target",
@@ -538,13 +551,23 @@ fn buildYulWrapper(b: *std.Build, target: std.Build.ResolvedTarget, optimize: st
     yul_wrapper.step.dependOn(cmake_step);
 
     // Add the C++ source file
+    // Configure C++ flags and ensure libc++ on Linux to match CMake configuration
+    var cpp_flags = std.ArrayList([]const u8).init(b.allocator);
+    defer cpp_flags.deinit();
+    cpp_flags.appendSlice(&[_][]const u8{
+        "-std=c++20",
+        "-fPIC",
+        "-Wno-deprecated",
+    }) catch @panic("OOM");
+
+    if (target.result.os.tag == .linux) {
+        // Use libc++ headers on Linux to align with CMake's -stdlib=libc++
+        cpp_flags.append("-stdlib=libc++") catch @panic("OOM");
+    }
+
     yul_wrapper.addCSourceFile(.{
         .file = b.path("src/yul_wrapper.cpp"),
-        .flags = &[_][]const u8{
-            "-std=c++20",
-            "-fPIC",
-            "-Wno-deprecated",
-        },
+        .flags = cpp_flags.items,
     });
 
     // Add include directories
@@ -566,8 +589,9 @@ fn buildYulWrapper(b: *std.Build, target: std.Build.ResolvedTarget, optimize: st
     // Use the appropriate C++ stdlib based on the target
     switch (target.result.os.tag) {
         .linux => {
-            // On Linux, use libstdc++ for better compatibility
-            yul_wrapper.linkSystemLibrary("stdc++");
+            // On Linux, use libc++ and c++abi to match CMake build
+            yul_wrapper.linkLibCpp();
+            yul_wrapper.linkSystemLibrary("c++abi");
         },
         .macos => {
             // On macOS, use libc++
@@ -605,8 +629,9 @@ fn linkSolidityLibraries(b: *std.Build, exe: *std.Build.Step.Compile, cmake_step
     // Use the appropriate C++ stdlib based on the target
     switch (target.result.os.tag) {
         .linux => {
-            // On Linux, use libstdc++ for better compatibility
-            exe.linkSystemLibrary("stdc++");
+            // On Linux, use libc++ and c++abi to match CMake build
+            exe.linkLibCpp();
+            exe.linkSystemLibrary("c++abi");
         },
         .macos => {
             // On macOS, use libc++
