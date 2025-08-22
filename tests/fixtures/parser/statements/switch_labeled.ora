@@ -1,0 +1,11 @@
+contract SwitchLabeledFixture {
+    pub fn demo() {
+        var x: u256 = 2;
+        label_main: switch (x) {
+            0 => x = 11;
+            1...3 => lbl: { x = x + 5; };
+            else => { continue :label_main (0); }
+        }
+        _ = x;
+    }
+}

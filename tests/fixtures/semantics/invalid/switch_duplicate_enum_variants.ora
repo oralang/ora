@@ -1,0 +1,11 @@
+enum Color: u8 { Red, Green }
+
+fn f(c: Color) -> u256 {
+    return switch (c) {
+        Red => 1,
+        Red => 2, // duplicate enum variant
+        else => 0,
+    };
+}
+
+

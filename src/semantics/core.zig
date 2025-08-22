@@ -6,6 +6,7 @@ const contract = @import("contract_analyzer.zig");
 const func = @import("function_analyzer.zig");
 const stmt = @import("statement_analyzer.zig");
 const logs = @import("log_analyzer.zig");
+const expr = @import("expression_analyzer.zig");
 // TODO(semantics): Re-enable unknown-identifier walker when scope mapping is fully hardened.
 // Current crash root cause: walking identifiers while some nested block/function scopes
 // are not yet recorded leads to invalid parent chains in findUp().
@@ -85,6 +86,18 @@ pub fn analyzePhase2(allocator: std.mem.Allocator, nodes: []const ast.AstNode, s
                 const log_spans = try logs.checkLogsInFunction(allocator, symbols, s, f);
                 defer allocator.free(log_spans);
                 for (log_spans) |lsp| try diags.append(.{ .message = "Invalid log call", .span = lsp });
+
+                // Spec usage checks: quantified allowed only in requires/ensures/invariant; old only in ensures
+                for (f.requires_clauses) |rq| {
+                    if (try expr.validateSpecUsage(allocator, rq, .Requires)) |spx| {
+                        try diags.append(.{ .message = "Invalid spec expression usage", .span = spx });
+                    }
+                }
+                for (f.ensures_clauses) |en| {
+                    if (try expr.validateSpecUsage(allocator, en, .Ensures)) |spy| {
+                        try diags.append(.{ .message = "Invalid spec expression usage", .span = spy });
+                    }
+                }
             }
         },
         .Contract => |*c| {
@@ -108,6 +121,18 @@ pub fn analyzePhase2(allocator: std.mem.Allocator, nodes: []const ast.AstNode, s
                         const log_spans2 = try logs.checkLogsInFunction(allocator, symbols, s2, f2);
                         defer allocator.free(log_spans2);
                         for (log_spans2) |lsp2| try diags.append(.{ .message = "Invalid log call", .span = lsp2 });
+
+                        // Spec usage checks: quantified allowed only in requires/ensures/invariant; old only in ensures
+                        for (f2.requires_clauses) |rq2| {
+                            if (try expr.validateSpecUsage(allocator, rq2, .Requires)) |spx2| {
+                                try diags.append(.{ .message = "Invalid spec expression usage", .span = spx2 });
+                            }
+                        }
+                        for (f2.ensures_clauses) |en2| {
+                            if (try expr.validateSpecUsage(allocator, en2, .Ensures)) |spy2| {
+                                try diags.append(.{ .message = "Invalid spec expression usage", .span = spy2 });
+                            }
+                        }
                     }
                 },
                 else => {},

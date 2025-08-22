@@ -90,6 +90,9 @@ test "comprehensive AST visitor coverage" {
         .visitSwitchExpression = visitSwitchExpression,
         .visitRangeExpr = visitRangeExpr,
         .visitQuantified = visitQuantified,
+        .visitAnonymousStruct = struct_fn_expr_visit_anon,
+        .visitDestructuring = struct_fn_expr_visit_destruct,
+        .visitLabeledBlockExpr = struct_fn_expr_visit_labeled_block,
 
         // Statement visitors
         .visitReturn = visitReturn,
@@ -100,6 +103,13 @@ test "comprehensive AST visitor coverage" {
         .visitInvariant = visitInvariant,
         .visitRequires = visitRequires,
         .visitEnsures = visitEnsures,
+        .visitForLoop = visitForLoop,
+        .visitBreak = visitBreak,
+        .visitContinue = visitContinue,
+        .visitUnlock = visitUnlock,
+        .visitMove = visitMove,
+        .visitDestructuringAssignment = visitDestructuringAssignment,
+        .visitLabeledBlockStmt = visitLabeledBlockStmt,
     };
 
     // Test pre-order traversal
@@ -108,20 +118,23 @@ test "comprehensive AST visitor coverage" {
     // Verify all expected node types were visited
     const expected_node_types = [_][]const u8{
         // Top-level nodes
-        "Module",      "Contract",     "Function",           "Constant", "VariableDecl",
-        "StructDecl",  "EnumDecl",     "LogDecl",            "Import",   "ErrorDecl",
-        "Block",       "TryBlock",
+        "Module",          "Contract",                "Function",           "Constant",  "VariableDecl",
+        "StructDecl",      "EnumDecl",                "LogDecl",            "Import",    "ErrorDecl",
+        "Block",           "TryBlock",
 
         // Expression nodes
-            "Identifier",         "Literal",  "Binary",
-        "Unary",       "Assignment",   "CompoundAssignment", "Call",     "Index",
-        "FieldAccess", "Cast",         "Comptime",           "Old",      "Tuple",
-        "Try",         "ErrorReturn",  "ErrorCast",          "Shift",    "StructInstantiation",
-        "EnumLiteral", "ArrayLiteral", "SwitchExpression",   "Range",    "Quantified",
+                       "Identifier",         "Literal",   "Binary",
+        "Unary",           "Assignment",              "CompoundAssignment", "Call",      "Index",
+        "FieldAccess",     "Cast",                    "Comptime",           "Old",       "Tuple",
+        "Try",             "ErrorReturn",             "ErrorCast",          "Shift",     "StructInstantiation",
+        "EnumLiteral",     "ArrayLiteral",            "SwitchExpression",   "Range",     "Quantified",
+        "AnonymousStruct", "DestructuringExpr",       "LabeledBlockExpr",
 
         // Statement nodes
-        "Return",      "If",           "While",              "Log",      "Lock",
-        "Invariant",   "Requires",     "Ensures",
+          "Return",    "If",
+        "While",           "Log",                     "Lock",               "Invariant", "Requires",
+        "Ensures",         "ForLoop",                 "Break",              "Continue",  "Unlock",
+        "Move",            "DestructuringAssignment", "LabeledBlockStmt",
     };
 
     for (expected_node_types) |node_type| {
@@ -285,6 +298,18 @@ fn visitQuantified(visitor: *ast.ast_visitor.Visitor(TestContext, void), _: *ast
     visitor.context.addVisited("Quantified");
 }
 
+fn struct_fn_expr_visit_anon(visitor: *ast.ast_visitor.Visitor(TestContext, void), _: *ast.Expressions.AnonymousStructExpr) void {
+    visitor.context.addVisited("AnonymousStruct");
+}
+
+fn struct_fn_expr_visit_destruct(visitor: *ast.ast_visitor.Visitor(TestContext, void), _: *ast.Expressions.DestructuringExpr) void {
+    visitor.context.addVisited("DestructuringExpr");
+}
+
+fn struct_fn_expr_visit_labeled_block(visitor: *ast.ast_visitor.Visitor(TestContext, void), _: *ast.Expressions.LabeledBlockExpr) void {
+    visitor.context.addVisited("LabeledBlockExpr");
+}
+
 fn visitReturn(visitor: *ast.ast_visitor.Visitor(TestContext, void), _: *ast.Statements.ReturnNode) void {
     visitor.context.addVisited("Return");
 }
@@ -315,6 +340,34 @@ fn visitRequires(visitor: *ast.ast_visitor.Visitor(TestContext, void), _: *ast.S
 
 fn visitEnsures(visitor: *ast.ast_visitor.Visitor(TestContext, void), _: *ast.Statements.EnsuresNode) void {
     visitor.context.addVisited("Ensures");
+}
+
+fn visitForLoop(visitor: *ast.ast_visitor.Visitor(TestContext, void), _: *ast.Statements.ForLoopNode) void {
+    visitor.context.addVisited("ForLoop");
+}
+
+fn visitBreak(visitor: *ast.ast_visitor.Visitor(TestContext, void), _: *ast.Statements.BreakNode) void {
+    visitor.context.addVisited("Break");
+}
+
+fn visitContinue(visitor: *ast.ast_visitor.Visitor(TestContext, void), _: *ast.Statements.ContinueNode) void {
+    visitor.context.addVisited("Continue");
+}
+
+fn visitUnlock(visitor: *ast.ast_visitor.Visitor(TestContext, void), _: *ast.Statements.UnlockNode) void {
+    visitor.context.addVisited("Unlock");
+}
+
+fn visitMove(visitor: *ast.ast_visitor.Visitor(TestContext, void), _: *ast.Statements.MoveNode) void {
+    visitor.context.addVisited("Move");
+}
+
+fn visitDestructuringAssignment(visitor: *ast.ast_visitor.Visitor(TestContext, void), _: *ast.Statements.DestructuringAssignmentNode) void {
+    visitor.context.addVisited("DestructuringAssignment");
+}
+
+fn visitLabeledBlockStmt(visitor: *ast.ast_visitor.Visitor(TestContext, void), _: *ast.Statements.LabeledBlockNode) void {
+    visitor.context.addVisited("LabeledBlockStmt");
 }
 
 // Helper function to create a comprehensive AST with all node types
@@ -427,6 +480,23 @@ fn createFunctionNode(allocator: std.mem.Allocator) !ast.AstNode {
         },
     };
     try statements.append(while_stmt);
+
+    // Add a for loop statement
+    const for_iterable = try createIdentifierExpr(allocator, "items");
+    const for_body = ast.Statements.BlockNode{
+        .statements = &[_]ast.Statements.StmtNode{},
+        .span = .{ .line = 6, .column = 5, .length = 5, .byte_offset = 0 },
+    };
+    const loop_pattern = ast.Statements.LoopPattern{ .Single = .{ .name = "item", .span = .{ .line = 6, .column = 10, .length = 4, .byte_offset = 0 } } };
+    const for_stmt = ast.Statements.StmtNode{
+        .ForLoop = .{
+            .iterable = for_iterable.*,
+            .pattern = loop_pattern,
+            .body = for_body,
+            .span = .{ .line = 6, .column = 1, .length = 20, .byte_offset = 0 },
+        },
+    };
+    try statements.append(for_stmt);
 
     // Add a log statement
     const log_stmt = ast.Statements.StmtNode{
@@ -625,6 +695,7 @@ fn createFunctionNode(allocator: std.mem.Allocator) !ast.AstNode {
     const continue_stmt = ast.Statements.StmtNode{
         .Continue = .{
             .label = null,
+            .value = null,
             .span = .{ .line = 32, .column = 1, .length = 8, .byte_offset = 0 },
         },
     };

@@ -19,6 +19,7 @@ const sidebars: SidebarsConfig = {
     'getting-started',
     'asuka-release',
     'language-basics',
+    'switch',
     'struct-types',
     'examples',
     {

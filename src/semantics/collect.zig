@@ -40,6 +40,10 @@ pub fn collectSymbols(allocator: std.mem.Allocator, nodes: []const ast.AstNode) 
         .EnumDecl => |e| {
             const sym = state.Symbol{ .name = e.name, .kind = .Enum, .span = e.span };
             if (try table.declare(&table.root, sym)) |_| try diags.append(e.span);
+            // Record enum variants for coverage checks (direct slice copy)
+            const slice = try allocator.alloc([]const u8, e.variants.len);
+            for (e.variants, 0..) |v, i| slice[i] = v.name;
+            try table.enum_variants.put(e.name, slice);
         },
         .LogDecl => |l| {
             const sym = state.Symbol{ .name = l.name, .kind = .Log, .span = l.span };

@@ -3,6 +3,7 @@ const lexer = @import("../lexer.zig");
 const ast = @import("../ast.zig");
 const common = @import("common.zig");
 const common_parsers = @import("common_parsers.zig");
+const AstArena = @import("../ast/ast_arena.zig").AstArena;
 
 const Token = lexer.Token;
 const TokenType = lexer.TokenType;
@@ -19,7 +20,7 @@ pub const StatementParser = struct {
     expr_parser: ExpressionParser,
     decl_parser: DeclarationParser,
 
-    pub fn init(tokens: []const Token, arena: *@import("../ast/ast_arena.zig").AstArena) StatementParser {
+    pub fn init(tokens: []const Token, arena: *AstArena) StatementParser {
         return StatementParser{
             .base = BaseParser.init(tokens, arena),
             .expr_parser = ExpressionParser.init(tokens, arena),
@@ -487,14 +488,35 @@ pub const StatementParser = struct {
             const label_token = self.base.advance(); // consume identifier
 
             if (self.base.match(.Colon)) {
-                // This is a labeled block
-                const block = try self.parseBlock();
-
-                return ast.Statements.LabeledBlockNode{
-                    .label = try self.base.arena.createString(label_token.lexeme),
-                    .block = block,
-                    .span = common.ParserCommon.makeSpan(label_token),
-                };
+                // Case 1: label: { ... }
+                if (self.base.check(.LeftBrace)) {
+                    const block = try self.parseBlock();
+                    return ast.Statements.LabeledBlockNode{
+                        .label = try self.base.arena.createString(label_token.lexeme),
+                        .block = block,
+                        .span = common.ParserCommon.makeSpan(label_token),
+                    };
+                }
+                // Case 2: label: switch (...) { ... }
+                if (self.base.match(.Switch)) {
+                    const switch_stmt = try self.parseSwitchStatement();
+                    var stmts = std.ArrayList(ast.Statements.StmtNode).init(self.base.arena.allocator());
+                    defer stmts.deinit();
+                    try stmts.append(switch_stmt);
+                    const block = ast.Statements.BlockNode{
+                        .statements = try self.base.arena.createSlice(ast.Statements.StmtNode, stmts.items.len),
+                        .span = common.ParserCommon.makeSpan(label_token),
+                    };
+                    for (stmts.items, 0..) |s, i| block.statements[i] = s;
+                    return ast.Statements.LabeledBlockNode{
+                        .label = try self.base.arena.createString(label_token.lexeme),
+                        .block = block,
+                        .span = common.ParserCommon.makeSpan(label_token),
+                    };
+                }
+                // Unknown after label:, restore
+                self.base.current = saved_pos;
+                return null;
             }
 
             // Not a labeled block, restore position
@@ -630,6 +652,30 @@ pub const StatementParser = struct {
             if (self.base.match(.Else)) {
                 // Parse else clause
                 _ = try self.base.consume(.Arrow, "Expected '=>' after 'else'");
+
+                // Handle labeled block: Identifier ':' '{' ... '}'
+                if (self.base.check(.Identifier)) {
+                    const cur = self.base.current;
+                    if (cur + 2 < self.base.tokens.len and
+                        self.base.tokens[cur + 1].type == .Colon and
+                        self.base.tokens[cur + 2].type == .LeftBrace)
+                    {
+                        _ = self.base.advance(); // consume Identifier label
+                        _ = self.base.advance(); // ':'
+                        const block = try self.parseBlock();
+                        default_case = block;
+                        break;
+                    }
+                }
+
+                // Handle plain block body
+                if (self.base.check(.LeftBrace)) {
+                    const block = try self.parseBlock();
+                    default_case = block;
+                    break;
+                }
+
+                // Fallback: parse as expression arm and wrap into a block
                 const else_body = try common_parsers.parseSwitchBody(&self.base, &self.expr_parser, .StatementArm);
                 switch (else_body) {
                     .Block => |block| {
@@ -639,7 +685,6 @@ pub const StatementParser = struct {
                         default_case = labeled.block;
                     },
                     .Expression => |expr_ptr| {
-                        // Wrap expression into a block for statement AST
                         var stmts = try self.base.arena.createSlice(ast.Statements.StmtNode, 1);
                         stmts[0] = ast.Statements.StmtNode{ .Expr = expr_ptr.* };
                         default_case = ast.Statements.BlockNode{
@@ -655,8 +700,33 @@ pub const StatementParser = struct {
             const pattern = try common_parsers.parseSwitchPattern(&self.base, &self.expr_parser);
             _ = try self.base.consume(.Arrow, "Expected '=>' after switch pattern");
 
-            // Parse switch body using common parser (statement arms require ';' after expr bodies)
-            const body = try common_parsers.parseSwitchBody(&self.base, &self.expr_parser, .StatementArm);
+            // Parse switch body: handle labeled blocks, plain blocks, or expression arms
+            const body = blk: {
+                // Labeled block detection: Identifier ':' '{'
+                if (self.base.check(.Identifier)) {
+                    const cur = self.base.current;
+                    if (cur + 2 < self.base.tokens.len and
+                        self.base.tokens[cur + 1].type == .Colon and
+                        self.base.tokens[cur + 2].type == .LeftBrace)
+                    {
+                        const label_tok = self.base.advance(); // Identifier
+                        _ = self.base.advance(); // ':'
+                        const block = try self.parseBlock();
+                        break :blk ast.Switch.Body{ .LabeledBlock = .{
+                            .label = label_tok.lexeme,
+                            .block = block,
+                            .span = ParserCommon.makeSpan(label_tok),
+                        } };
+                    }
+                }
+                if (self.base.check(.LeftBrace)) {
+                    const block = try self.parseBlock();
+                    break :blk ast.Switch.Body{ .Block = block };
+                }
+                // Otherwise parse as an expression arm requiring ';'
+                const b = try common_parsers.parseSwitchBody(&self.base, &self.expr_parser, .StatementArm);
+                break :blk b;
+            };
 
             const case = ast.Switch.Case{
                 .pattern = pattern,
@@ -715,17 +785,31 @@ pub const StatementParser = struct {
     /// Parse continue statement - MIGRATED FROM ORIGINAL
     fn parseContinueStatement(self: *StatementParser) common.ParserError!ast.Statements.StmtNode {
         const continue_token = self.base.previous();
+        // Syntax: continue [:label] [value]? ;
+        // If labeled, optional replacement operand expression (value) is allowed.
 
-        // Check for optional label (continue :label)
+        // Optional label
         var label: ?[]const u8 = null;
         if (self.base.match(.Colon)) {
             const label_token = try self.base.consume(.Identifier, "Expected label name after ':'");
             label = try self.base.arena.createString(label_token.lexeme);
         }
 
+        // Optional value expression before semicolon
+        var value: ?*ast.Expressions.ExprNode = null;
+        if (!self.base.check(.Semicolon) and !self.base.check(.RightBrace)) {
+            self.syncSubParsers();
+            const expr = try self.expr_parser.parseExpression();
+            self.updateFromSubParser(self.expr_parser.base.current);
+            const expr_ptr = try self.base.arena.createNode(ast.Expressions.ExprNode);
+            expr_ptr.* = expr;
+            value = expr_ptr;
+        }
+
         _ = self.base.match(.Semicolon);
         return ast.Statements.StmtNode{ .Continue = ast.Statements.ContinueNode{
             .label = label,
+            .value = value,
             .span = ParserCommon.makeSpan(continue_token),
         } };
     }

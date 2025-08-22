@@ -146,7 +146,6 @@ jobs:
               echo ""
               echo "Choose the appropriate binary for your platform:"
               echo "- **Linux (x86_64)**: \`ora-linux-x86_64\`"
-              echo "- **macOS (x86_64)**: \`ora-macos-x86_64\`"
               echo "- **macOS (ARM64)**: \`ora-macos-arm64\`"
               echo ""
               echo "---"
@@ -187,7 +186,6 @@ jobs:
               echo ""
               echo "Choose the appropriate binary for your platform:"
               echo "- **Linux (x86_64)**: \`ora-linux-x86_64\`"
-              echo "- **macOS (x86_64)**: \`ora-macos-x86_64\`"
               echo "- **macOS (ARM64)**: \`ora-macos-arm64\`"
               echo ""
               echo "## 🔧 Installation"
@@ -261,10 +259,7 @@ jobs:
           - os: ubuntu-latest
             platform: linux-x86_64
             target: x86_64-linux
-          - os: macos-latest
-            platform: macos-x86_64
-            target: x86_64-macos
-          - os: macos-latest
+          - os: macos-14
             platform: macos-arm64
             target: aarch64-macos
     
@@ -285,31 +280,24 @@ jobs:
           case "${{ runner.os }}" in
             Linux)
               sudo apt-get update -qq
-              # Install C++ build tools with proper standard library
               sudo apt-get install -y \
-                build-essential \
+                clang \
+                lld \
                 cmake \
                 ninja-build \
-                libboost-all-dev \
-                libssl-dev \
-                pkg-config \
-                git \
+                libboost-dev \
                 libc++-dev \
-                libc++abi-dev
-              
+                libc++abi-dev \
+                pkg-config \
+                git
               echo "✅ Linux dependencies installed"
-              
-              # Set CMake to use system default C++ stdlib instead of forcing libc++
-              echo "CMAKE_CXX_FLAGS=-stdlib=libstdc++" >> $GITHUB_ENV
-              echo "CC=gcc" >> $GITHUB_ENV
-              echo "CXX=g++" >> $GITHUB_ENV
+              echo "CC=clang" >> $GITHUB_ENV
+              echo "CXX=clang++" >> $GITHUB_ENV
               ;;
             macOS)
               brew update
               brew install boost openssl cmake ninja
               echo "✅ macOS dependencies installed"
-              
-              # Use default Clang on macOS (which has proper libc++ support)
               echo "CC=clang" >> $GITHUB_ENV
               echo "CXX=clang++" >> $GITHUB_ENV
               ;;
@@ -327,66 +315,8 @@ jobs:
             ${{ runner.os }}-${{ matrix.target }}-deps-
             ${{ runner.os }}-deps-
 
-      - name: Configure Solidity build
-        run: |
-          echo "🔧 Configuring Solidity build..."
-          cd vendor/solidity
-          
-          case "${{ runner.os }}" in
-            Linux)
-              # Use system default compiler and standard library
-              cmake -S . -B build \
-                -DCMAKE_BUILD_TYPE=Release \
-                -DCMAKE_CXX_COMPILER=g++ \
-                -DCMAKE_C_COMPILER=gcc \
-                -DCMAKE_CXX_STANDARD=20 \
-                -DUSE_CVC4=OFF \
-                -DUSE_Z3=OFF \
-                -DTESTS=OFF \
-                -DSTRICT=OFF \
-                -DSOLC_LINK_STATIC=ON \
-                -GNinja
-              ;;
-            macOS)
-              # Use Clang with proper macOS settings
-              cmake -S . -B build \
-                -DCMAKE_BUILD_TYPE=Release \
-                -DCMAKE_CXX_COMPILER=clang++ \
-                -DCMAKE_C_COMPILER=clang \
-                -DCMAKE_CXX_STANDARD=20 \
-                -DUSE_CVC4=OFF \
-                -DUSE_Z3=OFF \
-                -DTESTS=OFF \
-                -DSTRICT=OFF \
-                -DSOLC_LINK_STATIC=ON \
-                -GNinja
-              ;;
-          esac
-
-      - name: Build Solidity libraries
-        run: |
-          echo "🔨 Building Solidity libraries..."
-          cd vendor/solidity/build
-          
-          # Determine number of parallel jobs based on OS
-          case "${{ runner.os }}" in
-            Linux)
-              JOBS=$(nproc)
-              ;;
-            macOS)
-              JOBS=$(sysctl -n hw.logicalcpu)
-              ;;
-            *)
-              JOBS=2  # Fallback for unknown OS
-              ;;
-          esac
-          
-          echo "Using $JOBS parallel jobs for build..."
-          
-          # Build only the libraries we need
-          ninja -j${JOBS} solutil langutil smtutil evmasm yul
-          
-          echo "✅ Solidity libraries built successfully"
+      # Rely on zig's build.zig to configure and build Solidity via CMake
+      # Ensures flags and C++ stdlib are consistent across CI and release
 
       - name: Build release binary
         run: |

@@ -1,0 +1,12 @@
+contract SemInvalidSwitchEnumRangeMismatch {
+    enum Status: u8 { Idle, Busy }
+    pub fn demo() {
+        let s: Status = Status.Idle;
+        // Invalid: mismatched enum range endpoints
+        let v: u256 = switch (s) {
+            Status.Idle...1 => 0,
+            else => 1,
+        };
+        _ = v;
+    }
+}

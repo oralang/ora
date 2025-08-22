@@ -5,7 +5,7 @@ const ParserCore = @import("../../src/parser/parser_core.zig");
 const Parser = ParserCore.Parser;
 const Semantics = @import("../../src/semantics.zig");
 const Core = @import("../../src/semantics/core.zig");
-const AstArena = @import("../../src/ast/ast_arena.zig").AstArena;
+const AstArena = @import("ora").ast_arena.AstArena;
 
 fn analyzePath(allocator: std.mem.Allocator, path: []const u8) ![]Core.Diagnostic {
     const file = try std.fs.cwd().openFile(path, .{});
@@ -60,7 +60,10 @@ fn runDir(allocator: std.mem.Allocator, dir_path: []const u8, expect_ok: bool) !
                 return error.UnexpectedDiagnostics;
             }
         } else {
-            if (diags.len == 0) return error.ExpectedDiagnostics;
+            if (diags.len == 0) {
+                std.debug.print("Expected diagnostics but got none for {s}\n", .{path});
+                return error.ExpectedDiagnostics;
+            }
         }
     }
 }

@@ -1,0 +1,8 @@
+storage var M1: map[u256, u256];
+storage var M2: map[u256, u256];
+
+fn f() -> void {
+    M1 = M2; // invalid: storage mapping bulk copy
+}
+
+

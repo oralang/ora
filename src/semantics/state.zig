@@ -52,10 +52,11 @@ pub const SymbolTable = struct {
     function_allowed_errors: std.StringHashMap([][]const u8),
     function_success_types: std.StringHashMap(ast.Types.OraType),
     block_scopes: std.AutoHashMap(usize, *Scope),
+    enum_variants: std.StringHashMap([][]const u8),
 
     pub fn init(allocator: std.mem.Allocator) SymbolTable {
         const root_scope = Scope.init(allocator, null, null);
-        return .{ .allocator = allocator, .root = root_scope, .scopes = std.ArrayList(*Scope).init(allocator), .contract_scopes = std.StringHashMap(*Scope).init(allocator), .function_scopes = std.StringHashMap(*Scope).init(allocator), .log_signatures = std.StringHashMap([]const ast.LogField).init(allocator), .function_allowed_errors = std.StringHashMap([][]const u8).init(allocator), .function_success_types = std.StringHashMap(ast.Types.OraType).init(allocator), .block_scopes = std.AutoHashMap(usize, *Scope).init(allocator) };
+        return .{ .allocator = allocator, .root = root_scope, .scopes = std.ArrayList(*Scope).init(allocator), .contract_scopes = std.StringHashMap(*Scope).init(allocator), .function_scopes = std.StringHashMap(*Scope).init(allocator), .log_signatures = std.StringHashMap([]const ast.LogField).init(allocator), .function_allowed_errors = std.StringHashMap([][]const u8).init(allocator), .function_success_types = std.StringHashMap(ast.Types.OraType).init(allocator), .block_scopes = std.AutoHashMap(usize, *Scope).init(allocator), .enum_variants = std.StringHashMap([][]const u8).init(allocator) };
     }
 
     pub fn deinit(self: *SymbolTable) void {
@@ -91,6 +92,12 @@ pub const SymbolTable = struct {
             // Scopes themselves are owned by self.scopes; nothing to free per entry
         }
         self.block_scopes.deinit();
+        // Free enum variant name slices
+        var ev_it = self.enum_variants.valueIterator();
+        while (ev_it.next()) |slice_ptr| {
+            self.allocator.free(slice_ptr.*);
+        }
+        self.enum_variants.deinit();
         self.root.deinit();
     }
 
@@ -103,8 +110,8 @@ pub const SymbolTable = struct {
         return null;
     }
 
-    pub fn findUp(scope: *const Scope, name: []const u8) ?Symbol {
-        var cur: ?*const Scope = scope;
+    pub fn findUp(scope: ?*const Scope, name: []const u8) ?Symbol {
+        var cur = scope;
         while (cur) |s| : (cur = s.parent) {
             if (s.findInCurrent(name)) |idx| return s.symbols.items[idx];
         }

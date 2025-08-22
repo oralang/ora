@@ -1,0 +1,176 @@
+// Fixes we need to do:
+// - [ ] Add slice support
+// - [ ] Allow file-level const (compile-time only, no region)
+// - [ ] Keep immutable contract-level only (error at file level)
+// - [ ] memory variables declaration at contract level don't make sense, we need to add an error
+
+
+
+error ParseError(code: u256);
+
+struct Point {
+    x: u256;
+    y: u256;
+}
+
+// Named config struct to bypass current parser limitation
+struct Config {
+    fee: u256;
+    enabled: bool;
+}
+
+enum Status: u256 { Idle, Running, Done }
+
+log Transfer(indexed source: address, indexed dest: address, amount: u256);
+// Example contract using a wide range of language features
+contract FeatureMaximizer {
+    // Contract-level constants and variables
+    const MAX_VALUE: u256 = 1000;
+    storage let threshold: u256 = 10;
+    storage var counter: u256 = 0;
+    immutable OWNER: address = 0x0123456789abcdef0123456789abcdef01234567;
+    // Contract storage variables (all regions/kinds)
+    storage let total_supply: u256 = 0;
+    storage var balances: map[address, u256];
+    storage var approvals: doublemap[address, address, u256];
+    memory var temp_points: [Point; 4];
+    // TODO: we need to test slice
+    tstore var scratch: [u256; 4];
+
+    // Struct and enum usage
+    storage var status: Status = Status.Idle;
+    storage var origin: Point = Point { x: 0, y: 0 };
+
+    // Use named struct for now to proceed with AST
+    storage let config: Config = Config { fee: 1, enabled: true };
+
+    fn init() {
+        // Basic assignments and lvalues
+        var i: u256 = 0;
+        balances[OWNER] = 100;
+        origin.x = 10;
+        origin.y = 20;
+
+        // Compound assignment
+        i += 1;
+
+        // Array literal and indexing
+        var arr: [u256; 3] = [1, 2, 3];
+        arr[0] = 42;
+
+        // Cast-like assignment (drop builtin cast to avoid lexer error)
+        let v: u256 = arr[0];
+
+        // Logical / bitwise chain
+        let flag: bool = (v == 42) && (1 | 2) == 3;
+        if (flag) {
+            status = Status.Running;
+        }
+
+        // Requires/Ensures style checks embedded in helper calls
+        _ = self.helper_require_ensure(5);
+
+        // Quantified expression usage
+        //TOOD: Review this, forall exists are Formal Verification features, not a smart contract functionality.
+        let all_ok: bool = forall x: u256 where (x < 10) => (x + 1 > x);
+        let some_ok: bool = exists y: u256 => (y == 0 || y == 1);
+        _ = all_ok; _ = some_ok;
+
+        // Switch expression
+        let mapped: u256 = switch (v) {
+            0 => 100,
+            1 => 200,
+            2 => 300,
+            else => 999
+        };
+        _ = mapped;
+
+        // Labeled block expression
+        let val: u256 = label1: {
+            if (v > 0) { break :label1 7; }
+            0;
+        };
+        _ = val;
+
+        // Old and comptime
+        let was_running: bool = old(flag);
+        _ = was_running;
+        comptime { var z: u256 = 0; z += 1; }
+
+        // Error expression and try/catch statement
+        try self.may_fail()
+        catch |e| {
+            _ = e;
+            log Transfer(OWNER, OWNER, 0);
+        }
+
+        // Move statement
+        move 5 from balances[OWNER] to approvals[OWNER][OWNER];
+
+        // Lock / Unlock annotations not used (builtins unsupported in lexer)
+
+        // Destructuring assignment
+        let .{ x, y } = origin;
+        _ = x; _ = y;
+
+        // For (single variable)
+        for (arr) |item| {
+            counter += item;
+        }
+
+        // For (key, value) over map
+        for (balances) |addr, bal| {
+            if (bal > 0) {
+                log Transfer(addr, OWNER, 0);
+            }
+        }
+
+        // While with invariant
+        while (i < 3) {
+            i += 1;
+        }
+
+        // Switch statement with range pattern and block body
+        switch (v) {
+            0...10 => {
+                status = Status.Running;
+            },
+            else => status = Status.Done;
+        }
+
+        // Break/continue with label and optional value (value ignored here)
+        outer: {
+            var j: u256 = 0;
+            while (j < 5) {
+                j += 1;
+                if (j == 3) { continue :outer; }
+                if (j == 4) { break :outer; }
+            }
+        }
+
+        return;
+    }
+
+    inline fn helper_require_ensure(x: u256) -> u256
+        requires (x > 0)
+        ensures (x + 1 > x)
+    {
+        return x + 1;
+    }
+
+    pub fn compute(a: u256, b: u256) -> u256 {
+        // Anonymous struct literal and field access
+        let cfg = .{ .fee = 2, .enabled = true };
+        let res = if (cfg.enabled) { a + b } else { a - b };
+        return res;
+    }
+
+    fn may_fail() -> !u256 | ParseError {
+        if (threshold > MAX_VALUE) {
+            return error.ParseError;
+        }
+        return 0;
+    }
+}
+
+

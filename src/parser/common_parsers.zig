@@ -22,6 +22,8 @@ pub fn parseSwitchPattern(
     base: *BaseParser,
     expr_parser: *ExpressionParser,
 ) ParserError!ast.Switch.Pattern {
+    // Ensure expression parser starts from the same cursor as base
+    expr_parser.base.current = base.current;
     const pattern_token = base.peek();
 
     // Check for else pattern
@@ -70,14 +72,22 @@ pub fn parseSwitchPattern(
     // General range pattern: parse an expression and if followed by '...'
     // parse another expression to form a Range pattern
     {
-        const saved_pos = base.current;
+        const saved_pos_base = base.current;
+        const saved_pos_expr = expr_parser.base.current;
         const start_expr = expr_parser.parseExpression() catch blk: {
-            base.current = saved_pos;
+            base.current = saved_pos_base;
+            expr_parser.base.current = saved_pos_expr;
             break :blk null;
         };
         if (start_expr) |se| {
+            // Keep base in sync with expr parser after parsing the start expression
+            base.current = expr_parser.base.current;
+
             if (base.match(.DotDotDot)) {
+                // Keep expr parser in sync for parsing the end expression
+                expr_parser.base.current = base.current;
                 const end_expr = try expr_parser.parseExpression();
+                base.current = expr_parser.base.current;
                 const start_ptr = try base.arena.createNode(ast.Expressions.ExprNode);
                 start_ptr.* = se;
                 const end_ptr = try base.arena.createNode(ast.Expressions.ExprNode);
@@ -91,7 +101,8 @@ pub fn parseSwitchPattern(
                 } };
             } else {
                 // Not a range; restore and continue with other pattern kinds
-                base.current = saved_pos;
+                base.current = saved_pos_base;
+                expr_parser.base.current = saved_pos_expr;
             }
         }
     }
@@ -190,6 +201,54 @@ pub fn parseSwitchBody(
     expr_parser: *ExpressionParser,
     mode: SwitchBodyMode,
 ) ParserError!ast.Switch.Body {
+    // Ensure expression parser starts from the same cursor as base
+    expr_parser.base.current = base.current;
+
+    // Check for a labeled block: Identifier ":" "{" ... "}"
+    if (base.check(.Identifier)) {
+        const saved_pos = base.current;
+        const label_token = base.advance();
+        if (base.match(.Colon) and base.check(.LeftBrace)) {
+            if (mode == .ExpressionArm) {
+                try base.errorAtCurrent("Labeled block not allowed in switch expression arm");
+                return ParserError.UnexpectedToken;
+            }
+
+            // Parse the block content
+            _ = base.advance(); // consume '{'
+
+            var statements = std.ArrayList(ast.Statements.StmtNode).init(base.arena.allocator());
+            defer statements.deinit();
+
+            while (!base.check(.RightBrace) and !base.isAtEnd()) {
+                // Parse statements as expressions for now; optional semicolons
+                const e = try expr_parser.parseExpression();
+                base.current = expr_parser.base.current;
+                try statements.append(ast.Statements.StmtNode{ .Expr = e });
+                _ = base.match(.Semicolon);
+            }
+
+            _ = try base.consume(.RightBrace, "Expected '}' after labeled block body");
+
+            const block = ast.Statements.BlockNode{
+                .statements = try base.arena.createSlice(ast.Statements.StmtNode, statements.items.len),
+                .span = base.spanFromToken(label_token),
+            };
+            // Copy statements into the allocated slice
+            for (statements.items, 0..) |stmt, i| block.statements[i] = stmt;
+
+            return ast.Switch.Body{ .LabeledBlock = .{
+                .label = label_token.lexeme,
+                .block = block,
+                .span = base.spanFromToken(label_token),
+            } };
+        } else {
+            // Not a labeled block; rewind
+            base.current = saved_pos;
+            expr_parser.base.current = saved_pos;
+        }
+    }
+
     // Check for a block body
     if (base.match(.LeftBrace)) {
         if (mode == .ExpressionArm) {
@@ -202,8 +261,10 @@ pub fn parseSwitchBody(
         // Parse statements inside the block
         while (!base.check(.RightBrace) and !base.isAtEnd()) {
             // If using ExpressionParser, the statement will be an expression statement
-            const expr = try expr_parser.parseExpression();
-            try statements.append(ast.Statements.StmtNode{ .Expr = expr });
+            const e = try expr_parser.parseExpression();
+            // Keep base and expr parser in sync after expression parse
+            base.current = expr_parser.base.current;
+            try statements.append(ast.Statements.StmtNode{ .Expr = e });
 
             // Consume optional semicolon
             _ = base.match(.Semicolon);
@@ -219,6 +280,8 @@ pub fn parseSwitchBody(
 
     // Single expression body
     const expr = try expr_parser.parseExpression();
+    // Keep base and expr parser in sync after expression parse
+    base.current = expr_parser.base.current;
     if (mode == .StatementArm) {
         _ = try base.consume(.Semicolon, "Expected ';' after switch statement arm expression");
     }

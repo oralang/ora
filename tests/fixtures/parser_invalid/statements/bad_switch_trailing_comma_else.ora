@@ -1,0 +1,9 @@
+contract BadSwitchTrailingCommaElse {
+    pub fn demo() {
+        var x: u256 = 0;
+        switch (x) {
+            0 => x = 1,
+            else => x = 2,
+        }
+    }
+}

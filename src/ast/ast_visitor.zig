@@ -48,6 +48,9 @@ pub fn Visitor(comptime Context: type, comptime ReturnType: type) type {
         visitSwitchExpression: ?*const fn (*Self, *ast.Switch.ExprNode) ReturnType = null,
         visitRangeExpr: ?*const fn (*Self, *ast.Expressions.RangeExpr) ReturnType = null,
         visitQuantified: ?*const fn (*Self, *ast.Expressions.QuantifiedExpr) ReturnType = null,
+        visitAnonymousStruct: ?*const fn (*Self, *ast.Expressions.AnonymousStructExpr) ReturnType = null,
+        visitDestructuring: ?*const fn (*Self, *ast.Expressions.DestructuringExpr) ReturnType = null,
+        visitLabeledBlockExpr: ?*const fn (*Self, *ast.Expressions.LabeledBlockExpr) ReturnType = null,
 
         // Statement-specific visit functions
         visitReturn: ?*const fn (*Self, *ast.Statements.ReturnNode) ReturnType = null,
@@ -58,6 +61,13 @@ pub fn Visitor(comptime Context: type, comptime ReturnType: type) type {
         visitInvariant: ?*const fn (*Self, *ast.Statements.InvariantNode) ReturnType = null,
         visitRequires: ?*const fn (*Self, *ast.Statements.RequiresNode) ReturnType = null,
         visitEnsures: ?*const fn (*Self, *ast.Statements.EnsuresNode) ReturnType = null,
+        visitForLoop: ?*const fn (*Self, *ast.Statements.ForLoopNode) ReturnType = null,
+        visitBreak: ?*const fn (*Self, *ast.Statements.BreakNode) ReturnType = null,
+        visitContinue: ?*const fn (*Self, *ast.Statements.ContinueNode) ReturnType = null,
+        visitUnlock: ?*const fn (*Self, *ast.Statements.UnlockNode) ReturnType = null,
+        visitMove: ?*const fn (*Self, *ast.Statements.MoveNode) ReturnType = null,
+        visitDestructuringAssignment: ?*const fn (*Self, *ast.Statements.DestructuringAssignmentNode) ReturnType = null,
+        visitLabeledBlockStmt: ?*const fn (*Self, *ast.Statements.LabeledBlockNode) ReturnType = null,
 
         // Traversal control hooks
         shouldVisitChildren: ?*const fn (*Self, *ast.AstNode) bool = null,
@@ -281,14 +291,20 @@ pub fn Visitor(comptime Context: type, comptime ReturnType: type) type {
                         return visitFn(self, quantified);
                     }
                 },
-                .AnonymousStruct => {
-                    // No specific handler for anonymous struct expressions yet
+                .AnonymousStruct => |*anon_struct| {
+                    if (self.visitAnonymousStruct) |visitFn| {
+                        return visitFn(self, anon_struct);
+                    }
                 },
-                .LabeledBlock => {
-                    // No specific handler for labeled block expressions yet
+                .LabeledBlock => |*lbl_block| {
+                    if (self.visitLabeledBlockExpr) |visitFn| {
+                        return visitFn(self, lbl_block);
+                    }
                 },
-                .Destructuring => {
-                    // No specific handler for destructuring expressions yet
+                .Destructuring => |*destruct| {
+                    if (self.visitDestructuring) |visitFn| {
+                        return visitFn(self, destruct);
+                    }
                 },
             }
 
@@ -327,8 +343,15 @@ pub fn Visitor(comptime Context: type, comptime ReturnType: type) type {
                         return visitFn(self, while_stmt);
                     }
                 },
-                .Break, .Continue => {
-                    // These are simple span-only statements, no specific handler needed
+                .Break => |*brk| {
+                    if (self.visitBreak) |visitFn| {
+                        return visitFn(self, brk);
+                    }
+                },
+                .Continue => |*cont| {
+                    if (self.visitContinue) |visitFn| {
+                        return visitFn(self, cont);
+                    }
                 },
                 .Log => |*log| {
                     if (self.visitLog) |visitFn| {
@@ -365,24 +388,35 @@ pub fn Visitor(comptime Context: type, comptime ReturnType: type) type {
                         return visitFn(self, try_block);
                     }
                 },
-                // Handle additional statement types without specific visitors
-                .DestructuringAssignment => {
-                    // No specific handler for destructuring assignment yet
+                // Handle additional statement types
+                .DestructuringAssignment => |*dassign| {
+                    if (self.visitDestructuringAssignment) |visitFn| {
+                        return visitFn(self, dassign);
+                    }
                 },
-                .ForLoop => {
-                    // No specific handler for for loops yet
+                .ForLoop => |*for_loop| {
+                    if (self.visitForLoop) |visitFn| {
+                        return visitFn(self, for_loop);
+                    }
                 },
-                .Unlock => {
-                    // No specific handler for unlock statements yet
+                .Unlock => |*unlock| {
+                    if (self.visitUnlock) |visitFn| {
+                        return visitFn(self, unlock);
+                    }
                 },
-                .Switch => {
-                    // No specific handler for switch statements yet
+                .Switch => |*switch_stmt| {
+                    // No dedicated handler; fall through for now
+                    _ = switch_stmt;
                 },
-                .Move => {
-                    // No specific handler for move statements yet
+                .Move => |*move_stmt| {
+                    if (self.visitMove) |visitFn| {
+                        return visitFn(self, move_stmt);
+                    }
                 },
-                .LabeledBlock => {
-                    // No specific handler for labeled block statements yet
+                .LabeledBlock => |*lbl_stmt| {
+                    if (self.visitLabeledBlockStmt) |visitFn| {
+                        return visitFn(self, lbl_stmt);
+                    }
                 },
                 .CompoundAssignment => {
                     // No specific handler for compound assignment statements yet
@@ -583,6 +617,18 @@ pub fn Visitor(comptime Context: type, comptime ReturnType: type) type {
                     }
                     _ = self.dispatchExpression(quantified.body);
                 },
+                .AnonymousStruct => |*anon_struct| {
+                    for (anon_struct.fields) |field| {
+                        _ = self.dispatchExpression(field.value);
+                    }
+                },
+                .LabeledBlock => |*lbl_block| {
+                    var block_node = ast.AstNode{ .Block = lbl_block.block };
+                    _ = self.walkPreOrder(&block_node);
+                },
+                .Destructuring => |*destruct| {
+                    _ = self.dispatchExpression(destruct.value);
+                },
                 else => {
                     // Leaf nodes (literals, identifiers, etc.) have no children
                 },
@@ -643,6 +689,30 @@ pub fn Visitor(comptime Context: type, comptime ReturnType: type) type {
                         _ = self.walkPreOrder(&catch_node);
                     }
                 },
+                .ForLoop => |*for_loop| {
+                    _ = self.dispatchExpression(&for_loop.iterable);
+                    var body_node = ast.AstNode{ .Block = for_loop.body };
+                    _ = self.walkPreOrder(&body_node);
+                },
+                .Break => |*brk| {
+                    if (brk.value) |value| {
+                        _ = self.dispatchExpression(value);
+                    }
+                },
+                .Continue => |_| {},
+                .Move => |*move_stmt| {
+                    _ = self.dispatchExpression(&move_stmt.expr);
+                    _ = self.dispatchExpression(&move_stmt.source);
+                    _ = self.dispatchExpression(&move_stmt.dest);
+                    _ = self.dispatchExpression(&move_stmt.amount);
+                },
+                .DestructuringAssignment => |*dassign| {
+                    _ = self.dispatchExpression(dassign.value);
+                },
+                .LabeledBlock => |*lbl_stmt| {
+                    var block_node = ast.AstNode{ .Block = lbl_stmt.block };
+                    _ = self.walkPreOrder(&block_node);
+                },
                 else => {
                     // Other statements have no children or are handled elsewhere
                 },
@@ -680,6 +750,16 @@ pub fn Visitor(comptime Context: type, comptime ReturnType: type) type {
                         const stmt_node = try queue.allocator.create(ast.AstNode);
                         stmt_node.* = ast.AstNode{ .Statement = stmt };
                         try queue.append(stmt_node);
+                    }
+                },
+                .Expression => |expr| {
+                    switch (expr.*) {
+                        .LabeledBlock => |*lbl_block| {
+                            const block_node = try queue.allocator.create(ast.AstNode);
+                            block_node.* = ast.AstNode{ .Block = lbl_block.block };
+                            try queue.append(block_node);
+                        },
+                        else => {},
                     }
                 },
                 else => {

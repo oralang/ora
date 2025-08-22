@@ -1,6 +1,8 @@
 const std = @import("std");
 const lexer = @import("../lexer.zig");
 const ast = @import("../ast.zig");
+const Diag = @import("diagnostics.zig");
+const AstArena = @import("../ast/ast_arena.zig").AstArena;
 
 const Token = lexer.Token;
 
@@ -58,10 +60,10 @@ pub const ParserError = error{
 pub const BaseParser = struct {
     tokens: []const Token,
     current: usize,
-    arena: *@import("../ast/ast_arena.zig").AstArena,
+    arena: *AstArena,
     file_id: u32 = 0,
 
-    pub fn init(tokens: []const Token, arena: *@import("../ast/ast_arena.zig").AstArena) BaseParser {
+    pub fn init(tokens: []const Token, arena: *AstArena) BaseParser {
         return BaseParser{
             .tokens = tokens,
             .current = 0,
@@ -107,7 +109,6 @@ pub const BaseParser = struct {
         }
 
         const current_token = self.peek();
-        const Diag = @import("diagnostics.zig");
         Diag.print("Parser error at line {}, column {}: {s} (expected {s}, got {s})\n", .{ current_token.line, current_token.column, message, @tagName(token_type), @tagName(current_token.type) });
 
         // Add more context with the lexeme if available
@@ -120,7 +121,6 @@ pub const BaseParser = struct {
 
     pub fn errorAtCurrent(self: *BaseParser, message: []const u8) !void {
         const current_token = self.peek();
-        const Diag = @import("diagnostics.zig");
         Diag.print("Parser error at line {}, column {}: {s}\n", .{ current_token.line, current_token.column, message });
         // Add more context with the lexeme if available
         if (current_token.lexeme.len > 0) {

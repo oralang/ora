@@ -1,0 +1,13 @@
+contract SemInvalidSwitchExprMismatchedArmTypes {
+    pub fn demo() {
+        let x: u256 = 1;
+        // Invalid: arm result types differ (u256 vs string)
+        let y = switch (x) {
+            0 => 10,
+            else => "nope",
+        };
+        _ = y;
+    }
+}
+
+

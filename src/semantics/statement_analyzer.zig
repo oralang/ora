@@ -6,6 +6,15 @@ const expr = @import("expression_analyzer.zig");
 const locals = @import("locals_binder.zig");
 const MemoryRegion = @import("../ast.zig").Memory.Region;
 
+fn safeFindUp(table: *state.SymbolTable, scope: *const state.Scope, name: []const u8) ?state.Symbol {
+    var cur: ?*const state.Scope = scope;
+    while (cur) |s| : (cur = s.parent) {
+        if (!isScopeKnown(table, s)) return null;
+        if (s.findInCurrent(name)) |idx| return s.symbols.items[idx];
+    }
+    return null;
+}
+
 pub fn checkFunctionBody(
     allocator: std.mem.Allocator,
     table: *state.SymbolTable,
@@ -81,11 +90,20 @@ fn isScopeKnown(table: *state.SymbolTable, scope: *const state.Scope) bool {
     return false;
 }
 
+// Add: leaf value type helper for storage composite checks
+fn isLeafValueType(ti: ast.Types.TypeInfo) bool {
+    if (ti.ora_type) |ot| switch (ot.getCategory()) {
+        .Integer, .Bool, .Address, .Bytes, .String, .Enum => return true,
+        else => return false,
+    };
+    return false;
+}
+
 fn visitExprForUnknowns(issues: *std.ArrayList(ast.SourceSpan), table: *state.SymbolTable, scope: *state.Scope, expr_node: ast.Expressions.ExprNode) !void {
     if (!isScopeKnown(table, scope)) return; // Defensive guard
     switch (expr_node) {
         .Identifier => |id| {
-            if (state.SymbolTable.findUp(scope, id.name)) |_| {
+            if (isScopeKnown(table, scope) and state.SymbolTable.findUp(scope, id.name) != null) {
                 // ok
             } else {
                 try issues.append(id.span);
@@ -119,11 +137,11 @@ fn visitExprForUnknowns(issues: *std.ArrayList(ast.SourceSpan), table: *state.Sy
         },
         .Tuple => |t| for (t.elements) |el| try visitExprForUnknowns(issues, table, scope, el.*),
         .SwitchExpression => {
-            // Only condition expression here; case bodies handled in statement traversal when needed
-            // Note: the payload provides access to condition; re-fetch from expr_node when necessary
-            if (expr_node == .SwitchExpression) {
-                try visitExprForUnknowns(issues, table, scope, expr_node.SwitchExpression.condition.*);
-            }
+            // Condition expression
+            if (expr_node == .SwitchExpression) try visitExprForUnknowns(issues, table, scope, expr_node.SwitchExpression.condition.*);
+            // Semantic checks: pattern compatibility against condition type
+            const cond_ti = expr.inferExprType(table, scope, expr_node.SwitchExpression.condition.*);
+            try checkSwitchPatterns(issues, table, scope, cond_ti, expr_node.SwitchExpression.cases);
         },
         .AnonymousStruct => |as| for (as.fields) |f| try visitExprForUnknowns(issues, table, scope, f.value.*),
         .ArrayLiteral => |al| for (al.elements) |el| try visitExprForUnknowns(issues, table, scope, el.*),
@@ -152,10 +170,21 @@ fn visitExprForUnknowns(issues: *std.ArrayList(ast.SourceSpan), table: *state.Sy
 }
 
 fn inferExprRegion(table: *state.SymbolTable, scope: *state.Scope, e: ast.Expressions.ExprNode) MemoryRegion {
+    if (!isScopeKnown(table, scope)) return MemoryRegion.Stack;
     return switch (e) {
         .Identifier => |id| blk: {
-            if (state.SymbolTable.findUp(scope, id.name)) |sym| {
-                break :blk sym.region orelse MemoryRegion.Stack;
+            var cur: ?*const state.Scope = scope;
+            while (cur) |s| : (cur = s.parent) {
+                if (!isScopeKnown(table, s)) break;
+                if (s.findInCurrent(id.name)) |idx| {
+                    const sym = s.symbols.items[idx];
+                    break :blk sym.region orelse MemoryRegion.Stack;
+                }
+            }
+            // Fallback: check root symbols for top-level variables (e.g., storage vars)
+            if (table.root.findInCurrent(id.name)) |idx_root| {
+                const rsym = table.root.symbols.items[idx_root];
+                break :blk rsym.region orelse MemoryRegion.Stack;
             }
             break :blk MemoryRegion.Stack;
         },
@@ -185,6 +214,222 @@ fn isRegionAssignmentAllowed(target_region: MemoryRegion, source_region: MemoryR
         return true;
     }
     return true;
+}
+
+fn checkSwitchPatterns(
+    issues: *std.ArrayList(ast.SourceSpan),
+    table: *state.SymbolTable,
+    scope: *state.Scope,
+    cond_type: ast.Types.TypeInfo,
+    cases: []const ast.Switch.Case,
+) !void {
+    var seen_else = false;
+    var enum_coverage: ?struct { name: []const u8, covered: std.StringHashMap(void) } = null;
+    var seen_literals = std.StringHashMap(void).init(table.allocator);
+    defer seen_literals.deinit();
+    var seen_enum_variants = std.StringHashMap(void).init(table.allocator);
+    defer seen_enum_variants.deinit();
+    // Track numeric ranges precisely to detect overlaps
+    var numeric_ranges = std.ArrayList(struct { start: u128, end: u128, span: ast.SourceSpan }).init(table.allocator);
+    defer numeric_ranges.deinit();
+    // If condition is enum, seed coverage map
+    if (cond_type.ora_type) |ot| switch (ot) {
+        .enum_type => |ename| {
+            enum_coverage = .{ .name = ename, .covered = std.StringHashMap(void).init(table.allocator) };
+        },
+        else => {},
+    };
+    defer if (enum_coverage) |*ec| ec.covered.deinit();
+    for (cases) |case| {
+        switch (case.pattern) {
+            .Else => {
+                // else must be last
+                if (!seen_else) {
+                    seen_else = true;
+                } else {
+                    // Duplicate else
+                    try issues.append(case.span);
+                }
+            },
+            .Literal => |lit| {
+                // Best-effort: if condition has an ora_type, require literal category compatibility
+                if (cond_type.ora_type) |ot| switch (lit.value) {
+                    .Integer => if (!ot.isInteger()) try issues.append(lit.span),
+                    .Bool => if (ot.getCategory() != .Bool) try issues.append(lit.span),
+                    .String => if (ot.getCategory() != .String) try issues.append(lit.span),
+                    .Address => if (ot.getCategory() != .Address) try issues.append(lit.span),
+                    .Hex, .Binary => if (!ot.isUnsignedInteger()) try issues.append(lit.span),
+                };
+                // Duplicate literal detection (key by category + value when available)
+                const key: []const u8 = switch (lit.value) {
+                    .Integer => lit.value.Integer.value,
+                    .String => lit.value.String.value,
+                    .Bool => if (lit.value.Bool.value) "true" else "false",
+                    .Address => lit.value.Address.value,
+                    .Hex => lit.value.Hex.value,
+                    .Binary => lit.value.Binary.value,
+                };
+                if (seen_literals.contains(key)) {
+                    try issues.append(lit.span);
+                } else {
+                    _ = try seen_literals.put(key, {});
+                }
+            },
+            .EnumValue => |ev| {
+                if (cond_type.ora_type) |ot| switch (ot) {
+                    .enum_type => |ename| {
+                        // If pattern provided a qualified enum name, it must match the condition's enum
+                        if (ev.enum_name.len != 0 and !std.mem.eql(u8, ev.enum_name, ename)) {
+                            try issues.append(ev.span);
+                        }
+                        if (enum_coverage) |*ec| {
+                            if (std.mem.eql(u8, ec.name, ename)) {
+                                _ = try ec.covered.put(ev.variant_name, {});
+                            }
+                        }
+                        // Duplicate enum variant detection (by variant name)
+                        if (seen_enum_variants.contains(ev.variant_name)) {
+                            try issues.append(ev.span);
+                        } else {
+                            _ = try seen_enum_variants.put(ev.variant_name, {});
+                        }
+                    },
+                    else => try issues.append(ev.span),
+                };
+            },
+            .Range => |rg| {
+                // Both endpoints must be orderable and compatible with condition type
+                const st = expr.inferExprType(table, scope, rg.start.*);
+                const et = expr.inferExprType(table, scope, rg.end.*);
+                if (cond_type.ora_type != null) {
+                    const ok_start = ast.Types.TypeInfo.equals(st, cond_type) or ast.Types.TypeInfo.isCompatibleWith(st, cond_type);
+                    const ok_end = ast.Types.TypeInfo.equals(et, cond_type) or ast.Types.TypeInfo.isCompatibleWith(et, cond_type);
+                    if (!ok_start or !ok_end) try issues.append(rg.span);
+                }
+                // Precise overlap detection for integer-like literal ranges
+                const parseU128FromLiteral = struct {
+                    fn stripPrefixDigits(s: []const u8, base: u8) []const u8 {
+                        if (base == 16) {
+                            if (s.len >= 2 and (s[0] == '0' and (s[1] == 'x' or s[1] == 'X'))) return s[2..];
+                        } else if (base == 2) {
+                            if (s.len >= 2 and (s[0] == '0' and (s[1] == 'b' or s[1] == 'B'))) return s[2..];
+                        }
+                        return s;
+                    }
+                    fn parse(l: ast.Expressions.LiteralExpr) ?u128 {
+                        return switch (l) {
+                            .Integer => |ival| blk: {
+                                const raw = ival.value;
+                                if (raw.len > 0 and raw[0] == '-') break :blk null;
+                                std.debug.assert(raw.len > 0);
+                                const cleaned = raw;
+                                return std.fmt.parseInt(u128, cleaned, 10) catch null;
+                            },
+                            .Hex => |hval| blk: {
+                                const raw = hval.value;
+                                if (raw.len > 0 and raw[0] == '-') break :blk null;
+                                const digits = stripPrefixDigits(raw, 16);
+                                return std.fmt.parseInt(u128, digits, 16) catch null;
+                            },
+                            .Binary => |bval| blk: {
+                                const raw = bval.value;
+                                if (raw.len > 0 and raw[0] == '-') break :blk null;
+                                const digits = stripPrefixDigits(raw, 2);
+                                return std.fmt.parseInt(u128, digits, 2) catch null;
+                            },
+                            .Bool, .String, .Address => null,
+                        };
+                    }
+                };
+
+                var start_val_opt: ?u128 = null;
+                var end_val_opt: ?u128 = null;
+                if (rg.start.* == .Literal) start_val_opt = parseU128FromLiteral.parse(rg.start.Literal);
+                if (rg.end.* == .Literal) end_val_opt = parseU128FromLiteral.parse(rg.end.Literal);
+                if (start_val_opt) |sv| {
+                    if (end_val_opt) |ev| {
+                        const smin: u128 = if (sv <= ev) sv else ev;
+                        const smax: u128 = if (sv <= ev) ev else sv;
+                        // Overlap if max(starts) <= min(ends)
+                        var i: usize = 0;
+                        while (i < numeric_ranges.items.len) : (i += 1) {
+                            const prev = numeric_ranges.items[i];
+                            const lo = if (prev.start >= smin) prev.start else smin;
+                            const hi = if (prev.end <= smax) prev.end else smax;
+                            if (lo <= hi) { // intervals intersect
+                                try issues.append(rg.span);
+                                break;
+                            }
+                        }
+                        try numeric_ranges.append(.{ .start = smin, .end = smax, .span = rg.span });
+                    }
+                }
+            },
+        }
+        // If we've seen else, no further cases allowed
+        if (seen_else and case.pattern != .Else) {
+            try issues.append(case.span);
+        }
+    }
+    // Enum exhaustiveness: if no else, ensure all variants are covered by enum values (ignore ranges for now)
+    if (!seen_else) {
+        if (enum_coverage) |*ec| {
+            if (table.enum_variants.get(ec.name)) |all| {
+                var i: usize = 0;
+                while (i < all.len) : (i += 1) {
+                    if (!ec.covered.contains(all[i])) {
+                        // Missing variant
+                        // Use first case span if available to report; otherwise nothing
+                        if (cases.len > 0) try issues.append(cases[0].span);
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    // Note: else positioning enforced in parser; here we could validate if needed.
+}
+
+fn checkSwitchExpressionResultTypes(
+    issues: *std.ArrayList(ast.SourceSpan),
+    table: *state.SymbolTable,
+    scope: *state.Scope,
+    sw: *const ast.Expressions.SwitchExprNode,
+) !void {
+    var result_ti: ?ast.Types.TypeInfo = null;
+    for (sw.cases) |case| {
+        switch (case.body) {
+            .Expression => |expr_ptr| {
+                const ti = expr.inferExprType(table, scope, expr_ptr.*);
+                if (result_ti == null) {
+                    result_ti = ti;
+                } else if (!ast.Types.TypeInfo.equals(result_ti.?, ti) and !ast.Types.TypeInfo.isCompatibleWith(ti, result_ti.?)) {
+                    try issues.append(case.span);
+                }
+            },
+            .Block, .LabeledBlock => {
+                // Switch expressions should not contain block bodies; parser prevents this, but double-check
+                try issues.append(case.span);
+            },
+        }
+    }
+    if (sw.default_case) |*defb| {
+        // Default is synthesized as a block with a single expression statement; check its type
+        if (defb.statements.len > 0) {
+            const first = defb.statements[0];
+            if (first == .Expr) {
+                const dti = expr.inferExprType(table, scope, first.Expr);
+                if (result_ti == null) {
+                    result_ti = dti;
+                } else if (!ast.Types.TypeInfo.equals(result_ti.?, dti) and !ast.Types.TypeInfo.isCompatibleWith(dti, result_ti.?)) {
+                    try issues.append(defb.span);
+                }
+            } else {
+                // Non-expression in default for switch expression is invalid
+                try issues.append(defb.span);
+            }
+        }
+    }
 }
 
 fn checkExpr(issues: *std.ArrayList(ast.SourceSpan), table: *state.SymbolTable, scope: *state.Scope, e: ast.Expressions.ExprNode) !void {
@@ -271,7 +516,12 @@ fn checkExpr(issues: *std.ArrayList(ast.SourceSpan), table: *state.SymbolTable, 
             try checkExpr(issues, table, scope, sh.amount.*);
         },
         .SwitchExpression => {
-            if (e == .SwitchExpression) try checkExpr(issues, table, scope, e.SwitchExpression.condition.*);
+            if (e == .SwitchExpression) {
+                try checkExpr(issues, table, scope, e.SwitchExpression.condition.*);
+                const cond_ti = expr.inferExprType(table, scope, e.SwitchExpression.condition.*);
+                try checkSwitchPatterns(issues, table, scope, cond_ti, e.SwitchExpression.cases);
+                try checkSwitchExpressionResultTypes(issues, table, scope, &e.SwitchExpression);
+            }
         },
         else => {},
     }
@@ -288,6 +538,11 @@ fn walkBlock(issues: *std.ArrayList(ast.SourceSpan), table: *state.SymbolTable, 
                     if (!isRegionAssignmentAllowed(tr, sr, .{ .Identifier = .{ .name = v.name, .span = v.span } })) {
                         try issues.append(v.span);
                     }
+                    // New: forbid composite-type bulk copies into storage
+                    if (isStorageLike(tr) and isStorageLike(sr)) {
+                        const declared_ti = v.type_info;
+                        if (!isLeafValueType(declared_ti)) try issues.append(v.span);
+                    }
                 }
             },
             .Expr => |e| {
@@ -302,8 +557,10 @@ fn walkBlock(issues: *std.ArrayList(ast.SourceSpan), table: *state.SymbolTable, 
                         // Mutability: reject writes to non-mutable bindings when target is an Identifier
                         if (a.target.* == .Identifier) {
                             const name = a.target.Identifier.name;
-                            if (state.SymbolTable.findUp(scope, name)) |sym| {
-                                if (!sym.mutable) try issues.append(a.span);
+                            if (isScopeKnown(table, scope)) {
+                                if (safeFindUp(table, scope, name)) |sym| {
+                                    if (!sym.mutable) try issues.append(a.span);
+                                }
                             }
                         }
                         // Type compatibility (best-effort)
@@ -320,6 +577,22 @@ fn walkBlock(issues: *std.ArrayList(ast.SourceSpan), table: *state.SymbolTable, 
                         if (!isRegionAssignmentAllowed(tr, sr, a.target.*)) {
                             try issues.append(a.span);
                         }
+                        // New: forbid storage-to-storage bulk copy of composite types only when assigning identifiers (whole value)
+                        if (isStorageLike(tr) and isStorageLike(sr) and a.target.* == .Identifier) {
+                            if (!isLeafValueType(lt)) try issues.append(a.span);
+                        }
+                        // Explicit root-scope storage-to-storage bulk copy guard (identifiers)
+                        if (a.target.* == .Identifier and a.value.* == .Identifier) {
+                            if (table.root.findInCurrent(a.target.Identifier.name)) |idx_t| {
+                                if (table.root.findInCurrent(a.value.Identifier.name)) |idx_s| {
+                                    const ts = table.root.symbols.items[idx_t];
+                                    const ss = table.root.symbols.items[idx_s];
+                                    if (isStorageLike(ts.region orelse MemoryRegion.Stack) and isStorageLike(ss.region orelse MemoryRegion.Stack)) {
+                                        try issues.append(a.span);
+                                    }
+                                }
+                            }
+                        }
                     },
                     .CompoundAssignment => |ca| {
                         // LHS must be an lvalue
@@ -331,8 +604,10 @@ fn walkBlock(issues: *std.ArrayList(ast.SourceSpan), table: *state.SymbolTable, 
                         // Mutability: reject writes to non-mutable bindings when target is an Identifier
                         if (ca.target.* == .Identifier) {
                             const name = ca.target.Identifier.name;
-                            if (state.SymbolTable.findUp(scope, name)) |sym| {
-                                if (!sym.mutable) try issues.append(ca.span);
+                            if (isScopeKnown(table, scope)) {
+                                if (safeFindUp(table, scope, name)) |sym| {
+                                    if (!sym.mutable) try issues.append(ca.span);
+                                }
                             }
                         }
                         // Numeric-only first cut
@@ -350,6 +625,10 @@ fn walkBlock(issues: *std.ArrayList(ast.SourceSpan), table: *state.SymbolTable, 
                         const sr2 = inferExprRegion(table, scope, ca.value.*);
                         if (!isRegionAssignmentAllowed(tr2, sr2, ca.target.*)) {
                             try issues.append(ca.span);
+                        }
+                        // New: compound ops must target leaf types in storage when targeting identifiers (bulk not allowed)
+                        if (isStorageLike(tr2) and isStorageLike(sr2) and ca.target.* == .Identifier) {
+                            if (!isLeafValueType(lt)) try issues.append(ca.span);
                         }
                     },
                     else => {

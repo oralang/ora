@@ -146,6 +146,7 @@ pub const BreakNode = struct {
 /// Continue Statement with optional label
 pub const ContinueNode = struct {
     label: ?[]const u8, // Optional label for labeled continue
+    value: ?*ExprNode, // Optional replacement operand (for labeled switch continue)
     span: SourceSpan,
 };
 

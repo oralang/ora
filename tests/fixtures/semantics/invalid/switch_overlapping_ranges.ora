@@ -1,0 +1,9 @@
+fn f(x: u256) -> u256 {
+    return switch (x) {
+        0...5 => 1,
+        3...7 => 2, // overlap with previous range
+        else => 9,
+    };
+}
+
+

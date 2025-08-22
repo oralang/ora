@@ -2,6 +2,7 @@ const std = @import("std");
 const lexer = @import("../lexer.zig");
 const ast = @import("../ast.zig");
 const common = @import("common.zig");
+const AstArena = @import("../ast/ast_arena.zig").AstArena;
 
 const Token = lexer.Token;
 const TokenType = lexer.TokenType;
@@ -12,6 +13,7 @@ const ParserError = @import("parser_core.zig").ParserError;
 // Import other parsers for cross-parser communication
 const TypeParser = @import("type_parser.zig").TypeParser;
 const ExpressionParser = @import("expression_parser.zig").ExpressionParser;
+const StatementParser = @import("statement_parser.zig").StatementParser;
 
 /// Specialized parser for declarations (functions, structs, enums, etc.)
 pub const DeclarationParser = struct {
@@ -19,7 +21,7 @@ pub const DeclarationParser = struct {
     type_parser: TypeParser,
     expr_parser: ExpressionParser,
 
-    pub fn init(tokens: []const Token, arena: *@import("../ast/ast_arena.zig").AstArena) DeclarationParser {
+    pub fn init(tokens: []const Token, arena: *AstArena) DeclarationParser {
         return DeclarationParser{
             .base = BaseParser.init(tokens, arena),
             .type_parser = TypeParser.init(tokens, arena),
@@ -176,6 +178,13 @@ pub const DeclarationParser = struct {
             try self.base.errorAtCurrent("Expected function name");
             return error.ExpectedToken;
         };
+        const is_init_fn = std.mem.eql(u8, name_token.lexeme, "init");
+
+        // Disallow inline on init
+        if (is_inline and is_init_fn) {
+            try self.base.errorAtCurrent("'init' cannot be marked inline");
+            return error.UnexpectedToken;
+        }
         _ = try self.base.consume(.LeftParen, "Expected '(' after function name");
 
         // Parse parameters with default values support
@@ -204,7 +213,12 @@ pub const DeclarationParser = struct {
 
         // Parse optional return type using arrow syntax: fn foo(...) -> Type
         var return_type_info: ?ast.Types.TypeInfo = null;
-        if (self.base.match(.Arrow)) {
+        if (self.base.check(.Arrow)) {
+            if (is_init_fn) {
+                try self.base.errorAtCurrent("'init' cannot have a return type");
+                return error.UnexpectedToken;
+            }
+            _ = self.base.advance(); // consume '->'
             // Use integrated type parser
             self.syncSubParsers();
             const parsed_type = try self.type_parser.parseReturnType();
@@ -559,7 +573,22 @@ pub const DeclarationParser = struct {
 
         // Functions (can be public or private within contracts)
         if (self.base.check(.Pub) or self.base.check(.Fn) or self.base.check(.Inline)) {
-            return ast.AstNode{ .Function = try self.parseFunction() };
+            // Parse the function header first (leaves current at '{')
+            var fn_node = try self.parseFunction();
+
+            // Parse the function body block using a local StatementParser
+            var stmt_parser = StatementParser.init(self.base.tokens, self.base.arena);
+            stmt_parser.base.current = self.base.current;
+            const body_block = try stmt_parser.parseBlock();
+
+            // Update current position from statement parser
+            self.base.current = stmt_parser.base.current;
+            self.syncSubParsers();
+
+            // Attach the parsed body
+            fn_node.body = body_block;
+
+            return ast.AstNode{ .Function = fn_node };
         }
 
         // Variable declarations (contract state variables)

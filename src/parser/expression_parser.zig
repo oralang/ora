@@ -4,6 +4,8 @@ const ast = @import("../ast.zig");
 const TypeInfo = @import("../ast/type_info.zig").TypeInfo;
 const common = @import("common.zig");
 const common_parsers = @import("common_parsers.zig");
+const AstArena = @import("../ast/ast_arena.zig").AstArena;
+const TypeParser = @import("type_parser.zig").TypeParser;
 
 const Token = lexer.Token;
 const TokenType = lexer.TokenType;
@@ -19,7 +21,7 @@ const parseSwitchBody = common_parsers.parseSwitchBody;
 pub const ExpressionParser = struct {
     base: BaseParser,
 
-    pub fn init(tokens: []const Token, arena: *@import("../ast/ast_arena.zig").AstArena) ExpressionParser {
+    pub fn init(tokens: []const Token, arena: *AstArena) ExpressionParser {
         return ExpressionParser{
             .base = BaseParser.init(tokens, arena),
         };
@@ -28,6 +30,15 @@ pub const ExpressionParser = struct {
     /// Parse expression with precedence climbing (entry point)
     pub fn parseExpression(self: *ExpressionParser) ParserError!ast.Expressions.ExprNode {
         return self.parseComma();
+    }
+
+    /// Parse an expression that must NOT consume top-level commas.
+    ///
+    /// This is used in contexts where a comma is a list/case separator
+    /// (e.g., switch expression arms, function arg separators handled elsewhere),
+    /// so we start from assignment-precedence instead of comma-precedence.
+    pub fn parseExpressionNoComma(self: *ExpressionParser) ParserError!ast.Expressions.ExprNode {
+        return self.parseAssignment();
     }
 
     /// Parse comma expressions (lowest precedence)
@@ -884,7 +895,7 @@ pub const ExpressionParser = struct {
             _ = try self.base.consume(.Colon, "Expected ':' after bound variable name");
 
             // Parse variable type using TypeParser
-            var type_parser = @import("type_parser.zig").TypeParser.init(self.base.tokens, self.base.arena);
+            var type_parser = TypeParser.init(self.base.tokens, self.base.arena);
             type_parser.base.current = self.base.current;
             const var_type = try type_parser.parseType();
             self.base.current = type_parser.base.current;
@@ -1083,6 +1094,8 @@ pub const ExpressionParser = struct {
 
         _ = try self.base.consume(.LeftBrace, "Expected '{' after switch condition");
 
+        // parse switch arms
+
         var cases = std.ArrayList(ast.Switch.Case).init(self.base.arena.allocator());
         defer cases.deinit();
 
@@ -1093,35 +1106,44 @@ pub const ExpressionParser = struct {
             if (self.base.match(.Else)) {
                 // Parse else clause
                 _ = try self.base.consume(.Arrow, "Expected '=>' after 'else'");
-                const else_body = try common_parsers.parseSwitchBody(&self.base, self, .ExpressionArm);
-                // Accept block or expression; for expression, synthesize a block
-                switch (else_body) {
-                    .Block => |block| {
-                        default_case = block;
-                    },
-                    .LabeledBlock => |labeled| {
-                        default_case = labeled.block;
-                    },
-                    .Expression => |expr_ptr| {
-                        // Synthesize a block node with a single expression statement
-                        var stmts = try self.base.arena.createSlice(ast.Statements.StmtNode, 1);
-                        stmts[0] = ast.Statements.StmtNode{ .Expr = expr_ptr.* };
-                        default_case = ast.Statements.BlockNode{
-                            .statements = stmts,
-                            .span = self.base.spanFromToken(self.base.previous()),
-                        };
-                    },
-                }
+                // For switch expressions, else body must be an expression
+                const else_expr = try self.parseExpressionNoComma();
+                const expr_ptr = try self.base.arena.createNode(ast.Expressions.ExprNode);
+                expr_ptr.* = else_expr;
+                // Synthesize a block node with a single expression statement
+                var stmts = try self.base.arena.createSlice(ast.Statements.StmtNode, 1);
+                stmts[0] = ast.Statements.StmtNode{ .Expr = expr_ptr.* };
+                default_case = ast.Statements.BlockNode{
+                    .statements = stmts,
+                    .span = self.base.spanFromToken(self.base.previous()),
+                };
+                // Optional trailing comma after else arm
+                _ = self.base.match(.Comma);
                 break;
             }
 
-            // Parse pattern using common parser
+            // Parse pattern for switch expression using common parser
             const pattern = try common_parsers.parseSwitchPattern(&self.base, self);
 
-            _ = try self.base.consume(.Arrow, "Expected '=>' after switch pattern");
+            // Sync parser state defensively before consuming '=>' and parsing the arm body
+            const sync_pos = self.base.current;
+            self.base.current = sync_pos;
 
-            // Parse body using common parser
-            const body = try common_parsers.parseSwitchBody(&self.base, self, .ExpressionArm);
+            _ = try self.base.consume(.Arrow, "Expected '=>' after switch pattern");
+            // Defensive: if cursor drifted, ensure any stray '=>' is consumed
+            if (self.base.check(.Arrow)) {
+                _ = self.base.advance();
+            }
+
+            // Parse body directly as an expression for switch expressions.
+            // IMPORTANT: Do not allow the comma operator to swallow the next case.
+            const before_idx = self.base.current;
+            const arm_expr = try self.parseExpressionNoComma();
+            const expr_ptr2 = try self.base.arena.createNode(ast.Expressions.ExprNode);
+            expr_ptr2.* = arm_expr;
+            const body = ast.Switch.Body{ .Expression = expr_ptr2 };
+
+            // no debug output
 
             // Create switch case
             const case = ast.Switch.Case{
@@ -1134,6 +1156,12 @@ pub const ExpressionParser = struct {
 
             // Optional comma between cases
             _ = self.base.match(.Comma);
+            // Defensive: if parser did not advance and next is '=>', consume it
+            if (self.base.check(.Arrow) and self.base.current == before_idx) {
+                _ = self.base.advance();
+                _ = self.base.match(.Comma);
+            }
+            // no debug output
         }
 
         _ = try self.base.consume(.RightBrace, "Expected '}' after switch cases");
@@ -1187,7 +1215,7 @@ pub const ExpressionParser = struct {
             _ = try self.base.consume(.LeftParen, "Expected '(' after builtin function name");
 
             // Parse target type via TypeParser
-            var type_parser = @import("type_parser.zig").TypeParser.init(self.base.tokens, self.base.arena);
+            var type_parser = TypeParser.init(self.base.tokens, self.base.arena);
             type_parser.base.current = self.base.current;
             const target_type = try type_parser.parseType();
             self.base.current = type_parser.base.current;

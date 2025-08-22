@@ -1,0 +1,9 @@
+storage var a: u256;
+storage var b: u256;
+
+fn f() -> void {
+    let tmp = b; // storage -> stack (ok)
+    a = tmp;     // stack -> storage (ok)
+}
+
+

@@ -1,0 +1,57 @@
+// Expanded smoke test to cover switch statements and expressions
+contract Simple {
+    storage var counter: u256 = 0;
+
+    enum Status: u8 { Idle, Busy, Done }
+
+    fn init() {
+        var v: u256 = counter;
+
+        // 1) Switch expression with literal arms and else
+        let mapped: u256 = switch (v) {
+            0 => 100,
+            1 => 200,
+            else => 999,
+        };
+        _ = mapped;
+
+        // 2) Switch expression with numeric range arms
+        let range_map: u256 = switch (v) {
+            0...9 => 1,
+            10...99 => 2,
+            else => 3
+        };
+        _ = range_map;
+
+        // 3) Switch statement with expression bodies and a block body
+        var out: u256 = 0;
+        outer_switch: switch (v) {
+            0 => out = 10;
+            1...5 => label_x: { out = 20; out = out + 1; },
+            else => {
+                // Demonstrate labeled-continue to retarget the switch operand
+                continue :outer_switch (0);
+            }
+        }
+        _ = out;
+
+        // 4) Switch expression over enum with qualified and bare variants, plus enum range
+        let s: Status = Status.Idle;
+        let e_res: u256 = switch (s) {
+            Status.Idle => 1,
+            Busy => 2,
+            Status.Busy...Status.Done => 3,
+            else => 9
+        };
+        _ = e_res;
+
+        // 5) Switch expression using underscore default pattern
+        let undersc: u256 = switch (v) {
+            42 => 1,
+            _ => 0
+        };
+        _ = undersc;
+    }
+}
+
+

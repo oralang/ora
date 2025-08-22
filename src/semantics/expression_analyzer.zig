@@ -6,12 +6,27 @@ pub const ExprAnalysis = struct {
     typ: ast.Types.TypeInfo,
 };
 
+fn isScopeKnown(table: *state.SymbolTable, scope: *const state.Scope) bool {
+    if (scope == &table.root) return true;
+    for (table.scopes.items) |sc| if (sc == scope) return true;
+    return false;
+}
+
+fn safeFindUp(table: *state.SymbolTable, scope: *const state.Scope, name: []const u8) ?state.Symbol {
+    var cur: ?*const state.Scope = scope;
+    while (cur) |s| : (cur = s.parent) {
+        if (!isScopeKnown(table, s)) return null;
+        if (s.findInCurrent(name)) |idx| return s.symbols.items[idx];
+    }
+    return null;
+}
+
 pub fn inferExprType(table: *state.SymbolTable, scope: *state.Scope, expr: ast.Expressions.ExprNode) ast.Types.TypeInfo {
     return switch (expr) {
         .Identifier => |id| blk: {
-            if (state.SymbolTable.findUp(scope, id.name)) |sym| {
-                if (sym.typ) |ti| {
-                    break :blk ti;
+            if (isScopeKnown(table, scope)) {
+                if (safeFindUp(table, scope, id.name)) |sym| {
+                    if (sym.typ) |ti| break :blk ti;
                 }
             }
             break :blk ast.Types.TypeInfo.unknown();
@@ -50,9 +65,9 @@ pub fn inferExprType(table: *state.SymbolTable, scope: *state.Scope, expr: ast.E
         },
         .Call => |c| blk_call: {
             // Prefer direct function symbol lookup for simple identifiers
-            if (c.callee.* == .Identifier) {
+            if (c.callee.* == .Identifier and isScopeKnown(table, scope)) {
                 const fname = c.callee.Identifier.name;
-                if (state.SymbolTable.findUp(scope, fname)) |sym| {
+                if (safeFindUp(table, scope, fname)) |sym| {
                     if (sym.typ) |ti| {
                         if (ti.ora_type) |ot| switch (ot) {
                             .function => |fnty| {
@@ -73,6 +88,10 @@ pub fn inferExprType(table: *state.SymbolTable, scope: *state.Scope, expr: ast.E
                 },
                 else => break :blk_call ast.Types.TypeInfo.unknown(),
             } else break :blk_call ast.Types.TypeInfo.unknown();
+        },
+        .EnumLiteral => |el| {
+            // Treat as the enum's type
+            return ast.Types.TypeInfo.fromOraType(.{ .enum_type = el.enum_name });
         },
         .Cast => |c| c.target_type,
         .Try => |t| blk_try: {
@@ -100,4 +119,45 @@ pub fn inferExprType(table: *state.SymbolTable, scope: *state.Scope, expr: ast.E
         .ErrorReturn => |_| ast.Types.TypeInfo{ .category = .Error, .ora_type = null, .source = .inferred, .span = null },
         else => ast.Types.TypeInfo.unknown(),
     };
+}
+
+pub const SpecContext = enum { None, Requires, Ensures, Invariant };
+
+pub fn validateSpecUsage(_allocator: std.mem.Allocator, expr_node: *ast.Expressions.ExprNode, ctx: SpecContext) !?ast.SourceSpan {
+    // Validate current node
+    switch (expr_node.*) {
+        .Quantified => |*q| {
+            _ = q;
+            if (ctx == .None) return expr_node.Quantified.span;
+        },
+        .Old => |*o| {
+            _ = o;
+            if (ctx != .Ensures) return expr_node.Old.span;
+        },
+        else => {},
+    }
+
+    // Recurse into common children
+    switch (expr_node.*) {
+        .Binary => |*b| {
+            if (try validateSpecUsage(_allocator, b.lhs, ctx)) |sp| return sp;
+            if (try validateSpecUsage(_allocator, b.rhs, ctx)) |sp| return sp;
+        },
+        .Unary => |*u| {
+            if (try validateSpecUsage(_allocator, u.operand, ctx)) |sp| return sp;
+        },
+        .Assignment => |*a| {
+            if (try validateSpecUsage(_allocator, a.value, ctx)) |sp| return sp;
+        },
+        .Call => |*c| {
+            if (try validateSpecUsage(_allocator, c.callee, ctx)) |sp| return sp;
+            for (c.arguments) |arg| if (try validateSpecUsage(_allocator, arg, ctx)) |sp| return sp;
+        },
+        .Tuple => |*t| {
+            for (t.elements) |e| if (try validateSpecUsage(_allocator, e, ctx)) |sp| return sp;
+        },
+        else => {},
+    }
+
+    return null;
 }

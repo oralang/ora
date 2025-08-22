@@ -1,0 +1,23 @@
+contract SwitchExprAll {
+    pub fn demo() {
+        enum Status: u8 { Idle, Busy, Done }
+
+        let x: u256 = 12;
+        let a: u256 = switch (x) {
+            0 => 1,
+            1 => 2,
+            2...10 => 3,
+            else => 9,
+        };
+        _ = a;
+
+        let s: Status = Status.Busy;
+        let b: u256 = switch (s) {
+            Status.Idle => 0,
+            Busy => 1,
+            Status.Busy...Status.Done => 2,
+            else => 3,
+        };
+        _ = b;
+    }
+}

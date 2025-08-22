@@ -1,0 +1,8 @@
+storage var S1: struct { x: u256, y: u256 };
+storage var S2: struct { x: u256, y: u256 };
+
+fn f() -> void {
+    S1 = S2; // invalid: storage struct bulk copy
+}
+
+
