@@ -2,12 +2,13 @@ const std = @import("std");
 const SourceSpan = @import("../ast.zig").SourceSpan;
 
 // Forward declaration for expressions
-const ExprNode = @import("expressions.zig").ExprNode;
-const LiteralExpr = @import("expressions.zig").LiteralExpr;
-const RangeExpr = @import("expressions.zig").RangeExpr;
-const SwitchCase = @import("expressions.zig").SwitchCase;
-const SwitchPattern = @import("expressions.zig").SwitchPattern;
-const SwitchBody = @import("expressions.zig").SwitchBody;
+const expressions = @import("expressions.zig");
+const ExprNode = expressions.ExprNode;
+const LiteralExpr = expressions.LiteralExpr;
+const RangeExpr = expressions.RangeExpr;
+const SwitchCase = expressions.SwitchCase;
+const SwitchPattern = expressions.SwitchPattern;
+const SwitchBody = expressions.SwitchBody;
 
 /// Block node to group statements
 pub const BlockNode = struct {
@@ -81,7 +82,7 @@ pub const LoopPattern = union(enum) {
 };
 
 /// Import destructuring pattern from expressions
-const DestructuringPattern = @import("expressions.zig").DestructuringPattern;
+const DestructuringPattern = expressions.DestructuringPattern;
 
 pub const ForLoopNode = struct {
     iterable: ExprNode, // The expression to iterate over
@@ -220,12 +221,12 @@ pub const SwitchNode = struct {
 pub fn deinitStmtNode(allocator: std.mem.Allocator, stmt: *StmtNode) void {
     switch (stmt.*) {
         .Expr => |*expr| {
-            @import("expressions.zig").deinitExprNode(allocator, expr);
+            expressions.deinitExprNode(allocator, expr);
         },
         .VariableDecl => |*var_decl| {
             // TypeInfo doesn't need explicit cleanup like TypeRef did
             if (var_decl.value) |value| {
-                @import("expressions.zig").deinitExprNode(allocator, value);
+                expressions.deinitExprNode(allocator, value);
                 allocator.destroy(value);
             }
             if (var_decl.tuple_names) |names| {
@@ -234,65 +235,65 @@ pub fn deinitStmtNode(allocator: std.mem.Allocator, stmt: *StmtNode) void {
         },
         .DestructuringAssignment => |*dest_assign| {
             dest_assign.pattern.deinit(allocator);
-            @import("expressions.zig").deinitExprNode(allocator, dest_assign.value);
+            expressions.deinitExprNode(allocator, dest_assign.value);
             allocator.destroy(dest_assign.value);
         },
         .Move => |*move_stmt| {
-            @import("expressions.zig").deinitExprNode(allocator, &move_stmt.expr);
-            @import("expressions.zig").deinitExprNode(allocator, &move_stmt.source);
-            @import("expressions.zig").deinitExprNode(allocator, &move_stmt.dest);
-            @import("expressions.zig").deinitExprNode(allocator, &move_stmt.amount);
+            expressions.deinitExprNode(allocator, &move_stmt.expr);
+            expressions.deinitExprNode(allocator, &move_stmt.source);
+            expressions.deinitExprNode(allocator, &move_stmt.dest);
+            expressions.deinitExprNode(allocator, &move_stmt.amount);
         },
         .Unlock => |*unlock| {
-            @import("expressions.zig").deinitExprNode(allocator, &unlock.path);
+            expressions.deinitExprNode(allocator, &unlock.path);
         },
         .LabeledBlock => |*labeled| {
             deinitBlockNode(allocator, &labeled.block);
         },
         .Return => |*ret| {
             if (ret.value) |*value| {
-                @import("expressions.zig").deinitExprNode(allocator, value);
+                expressions.deinitExprNode(allocator, value);
             }
         },
         .If => |*if_stmt| {
-            @import("expressions.zig").deinitExprNode(allocator, &if_stmt.condition);
+            expressions.deinitExprNode(allocator, &if_stmt.condition);
             deinitBlockNode(allocator, &if_stmt.then_branch);
             if (if_stmt.else_branch) |*else_branch| {
                 deinitBlockNode(allocator, else_branch);
             }
         },
         .While => |*while_stmt| {
-            @import("expressions.zig").deinitExprNode(allocator, &while_stmt.condition);
+            expressions.deinitExprNode(allocator, &while_stmt.condition);
             deinitBlockNode(allocator, &while_stmt.body);
             for (while_stmt.invariants) |*inv| {
-                @import("expressions.zig").deinitExprNode(allocator, inv);
+                expressions.deinitExprNode(allocator, inv);
             }
             allocator.free(while_stmt.invariants);
         },
         .Log => |*log| {
             for (log.args) |*arg| {
-                @import("expressions.zig").deinitExprNode(allocator, arg);
+                expressions.deinitExprNode(allocator, arg);
             }
             allocator.free(log.args);
         },
         .Lock => |*lock| {
-            @import("expressions.zig").deinitExprNode(allocator, &lock.path);
+            expressions.deinitExprNode(allocator, &lock.path);
         },
         .Invariant => |*inv| {
-            @import("expressions.zig").deinitExprNode(allocator, &inv.condition);
+            expressions.deinitExprNode(allocator, &inv.condition);
         },
         .Requires => |*req| {
-            @import("expressions.zig").deinitExprNode(allocator, &req.condition);
+            expressions.deinitExprNode(allocator, &req.condition);
         },
         .Ensures => |*ens| {
-            @import("expressions.zig").deinitExprNode(allocator, &ens.condition);
+            expressions.deinitExprNode(allocator, &ens.condition);
         },
         .ErrorDecl => |*error_decl| {
             // Clean up parameters if present
             if (error_decl.parameters) |params| {
                 for (params) |*param| {
                     if (param.default_value) |default_val| {
-                        @import("expressions.zig").deinitExprNode(allocator, default_val);
+                        expressions.deinitExprNode(allocator, default_val);
                         allocator.destroy(default_val);
                     }
                 }
@@ -306,27 +307,27 @@ pub fn deinitStmtNode(allocator: std.mem.Allocator, stmt: *StmtNode) void {
             }
         },
         .Switch => |*switch_stmt| {
-            @import("expressions.zig").deinitExprNode(allocator, &switch_stmt.condition);
+            expressions.deinitExprNode(allocator, &switch_stmt.condition);
             for (switch_stmt.cases) |*case| {
-                case.deinit(allocator);
+                expressions.deinitSwitchCase(case, allocator);
             }
             allocator.free(switch_stmt.cases);
         },
         .Break => |*break_node| {
             if (break_node.value) |value| {
-                @import("expressions.zig").deinitExprNode(allocator, value);
+                expressions.deinitExprNode(allocator, value);
             }
         },
         .Continue => {
             // Continue statements only have a span and optional label, no cleanup needed
         },
         .ForLoop => |*for_loop| {
-            @import("expressions.zig").deinitExprNode(allocator, &for_loop.iterable);
+            expressions.deinitExprNode(allocator, &for_loop.iterable);
             deinitBlockNode(allocator, &for_loop.body);
         },
         .CompoundAssignment => |*compound| {
-            @import("expressions.zig").deinitExprNode(allocator, compound.target);
-            @import("expressions.zig").deinitExprNode(allocator, compound.value);
+            expressions.deinitExprNode(allocator, compound.target);
+            expressions.deinitExprNode(allocator, compound.value);
             allocator.destroy(compound.target);
             allocator.destroy(compound.value);
         },
@@ -336,7 +337,7 @@ pub fn deinitStmtNode(allocator: std.mem.Allocator, stmt: *StmtNode) void {
 /// Compound assignment node (a += b, a -= b, etc.)
 pub const CompoundAssignmentNode = struct {
     target: *ExprNode, // Target expression (left-hand side)
-    operator: @import("expressions.zig").CompoundAssignmentOp, // Operation type
+    operator: expressions.CompoundAssignmentOp, // Operation type
     value: *ExprNode, // Value expression (right-hand side)
     span: SourceSpan,
 };

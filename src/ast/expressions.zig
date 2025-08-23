@@ -1,6 +1,9 @@
 const std = @import("std");
 const SourceSpan = @import("../ast.zig").SourceSpan;
 const TypeInfo = @import("type_info.zig").TypeInfo;
+const CommonTypes = @import("type_info.zig").CommonTypes;
+const statements = @import("statements.zig");
+const AstArena = @import("ast_arena.zig").AstArena;
 
 /// Binary and unary operators
 pub const BinaryOp = enum {
@@ -56,7 +59,7 @@ pub const CastType = enum {
 };
 
 // Forward declaration for blocks
-const BlockNode = @import("statements.zig").BlockNode;
+const BlockNode = statements.BlockNode;
 
 /// Switch pattern matching (moved from statements.zig to break circular dependency)
 pub const SwitchPattern = union(enum) {
@@ -71,18 +74,6 @@ pub const SwitchPattern = union(enum) {
         span: SourceSpan,
     },
     Else: SourceSpan,
-
-    pub fn deinit(self: *SwitchPattern, allocator: std.mem.Allocator) void {
-        switch (self.*) {
-            .Range => |*range| {
-                deinitExprNode(allocator, range.start);
-                deinitExprNode(allocator, range.end);
-                allocator.destroy(range.start);
-                allocator.destroy(range.end);
-            },
-            else => {},
-        }
-    }
 };
 
 /// Switch body types (moved from statements.zig to break circular dependency)
@@ -94,22 +85,6 @@ pub const SwitchBody = union(enum) {
         block: BlockNode,
         span: SourceSpan,
     },
-
-    pub fn deinit(self: *SwitchBody, allocator: std.mem.Allocator) void {
-        switch (self.*) {
-            .Expression => |expr| {
-                deinitExprNode(allocator, expr);
-                allocator.destroy(expr);
-            },
-            .Block => |*block| {
-                // Import deinitBlockNode when needed
-                @import("statements.zig").deinitBlockNode(allocator, block);
-            },
-            .LabeledBlock => |*labeled| {
-                @import("statements.zig").deinitBlockNode(allocator, &labeled.block);
-            },
-        }
-    }
 };
 
 /// Switch case for switch expressions (moved from statements.zig to break circular dependency)
@@ -117,37 +92,32 @@ pub const SwitchCase = struct {
     pattern: SwitchPattern,
     body: SwitchBody,
     span: SourceSpan,
-
-    pub fn deinit(self: *SwitchCase, allocator: std.mem.Allocator) void {
-        self.pattern.deinit(allocator);
-        self.body.deinit(allocator);
-    }
 };
 
 /// Forward declaration for recursive expressions
 pub const ExprNode = union(enum) {
-    Identifier: IdentifierExpr,
-    Literal: LiteralExpr,
-    Binary: BinaryExpr,
-    Unary: UnaryExpr,
-    Assignment: AssignmentExpr,
-    CompoundAssignment: CompoundAssignmentExpr,
-    Call: CallExpr,
-    Index: IndexExpr,
-    FieldAccess: FieldAccessExpr,
-    Cast: CastExpr,
-    Comptime: ComptimeExpr,
+    Identifier: IdentifierExpr, // identifier expressions (x)
+    Literal: LiteralExpr, // literal expressions (1, "hello", true, etc.)
+    Binary: BinaryExpr, // binary expressions (x + y)
+    Unary: UnaryExpr, // unary expressions (-x, !x, ~x)
+    Assignment: AssignmentExpr, // assignment expressions (x = y)
+    CompoundAssignment: CompoundAssignmentExpr, // compound assignment expressions (x += y)
+    Call: CallExpr, // function call expressions (f(x, y))
+    Index: IndexExpr, // array/map indexing expressions (x[y])
+    FieldAccess: FieldAccessExpr, // field access expressions (x.y)
+    Cast: CastExpr, // casting expressions (x as T)
+    Comptime: ComptimeExpr, // compile-time expressions (comptime { ... })
     Old: OldExpr, // old() expressions in ensures clauses
     Tuple: TupleExpr, // tuple expressions (a, b, c)
-    SwitchExpression: SwitchExprNode, // switch expressions
+    SwitchExpression: SwitchExprNode, // switch expressions (switch (x) { case y: ... default: ... })
 
     // Quantified expressions for formal verification
-    Quantified: QuantifiedExpr, // forall/exists expressions
+    Quantified: QuantifiedExpr, // forall/exists expressions (forall x: T, y: T { ... })
 
     // Error handling expressions
     Try: TryExpr, // try expression
     ErrorReturn: ErrorReturnExpr, // error.SomeError
-    ErrorCast: ErrorCastExpr, // value as !T
+    ErrorCast: ErrorCastExpr, // value as !T (value as !T)
 
     // Shift operations
     Shift: ShiftExpr, // mapping from source -> dest : amount
@@ -209,7 +179,7 @@ pub const RangeExpr = struct {
     end: *ExprNode, // End of range
     inclusive: bool, // true for ..., false for ..
     span: SourceSpan,
-    type_info: @import("type_info.zig").TypeInfo, // Type information
+    type_info: TypeInfo, // Type information
 };
 
 /// Labeled block expression (e.g., label: { ... break :label value; })
@@ -513,7 +483,7 @@ pub fn createIdentifier(allocator: std.mem.Allocator, name: []const u8, span: So
 }
 
 /// Create an identifier expression with explicit arena allocation
-pub fn createIdentifierInArena(arena: *@import("ast_arena.zig").AstArena, name: []const u8, span: SourceSpan) !*ExprNode {
+pub fn createIdentifierInArena(arena: *AstArena, name: []const u8, span: SourceSpan) !*ExprNode {
     // Ensure the name is in the arena
     const name_copy = try arena.createString(name);
 
@@ -540,7 +510,7 @@ pub fn createBinaryExpr(allocator: std.mem.Allocator, lhs: *ExprNode, op: Binary
 }
 
 /// Create a binary expression with explicit arena allocation
-pub fn createBinaryExprInArena(arena: *@import("ast_arena.zig").AstArena, lhs: *ExprNode, op: BinaryOp, rhs: *ExprNode, span: SourceSpan) !*ExprNode {
+pub fn createBinaryExprInArena(arena: *AstArena, lhs: *ExprNode, op: BinaryOp, rhs: *ExprNode, span: SourceSpan) !*ExprNode {
     // Create the node in the arena
     const node = try arena.createNode(ExprNode);
     node.* = ExprNode{ .Binary = BinaryExpr{
@@ -566,7 +536,7 @@ pub fn createUnaryExpr(allocator: std.mem.Allocator, op: UnaryOp, operand: *Expr
 }
 
 /// Create a unary expression with explicit arena allocation
-pub fn createUnaryExprInArena(arena: *@import("ast_arena.zig").AstArena, op: UnaryOp, operand: *ExprNode, span: SourceSpan) !*ExprNode {
+pub fn createUnaryExprInArena(arena: *AstArena, op: UnaryOp, operand: *ExprNode, span: SourceSpan) !*ExprNode {
     const node = try arena.createNode(ExprNode);
     node.* = ExprNode{ .Unary = UnaryExpr{
         .operator = op,
@@ -612,7 +582,7 @@ pub fn createIntegerLiteral(allocator: std.mem.Allocator, value: []const u8, typ
 
 /// Create an integer literal with unknown type (to be determined during type checking)
 pub fn createUntypedIntegerLiteral(allocator: std.mem.Allocator, value: []const u8, span: SourceSpan) !*ExprNode {
-    return createIntegerLiteral(allocator, value, @import("type_info.zig").CommonTypes.unknown_integer(), span);
+    return createIntegerLiteral(allocator, value, CommonTypes.unknown_integer(), span);
 }
 
 pub fn createRangeExpr(allocator: std.mem.Allocator, start: *ExprNode, end: *ExprNode, inclusive: bool, span: SourceSpan) !*ExprNode {
@@ -667,167 +637,6 @@ pub fn createDestructuringExpr(allocator: std.mem.Allocator, pattern: Destructur
     return node;
 }
 
-/// Free an expression node and all its children
-pub fn deinitExprNode(allocator: std.mem.Allocator, expr: *ExprNode) void {
-    switch (expr.*) {
-        .Binary => |*binary| {
-            deinitExprNode(allocator, binary.lhs);
-            deinitExprNode(allocator, binary.rhs);
-            allocator.destroy(binary.lhs);
-            allocator.destroy(binary.rhs);
-        },
-        .Unary => |*unary| {
-            deinitExprNode(allocator, unary.operand);
-            allocator.destroy(unary.operand);
-        },
-        .Assignment => |*assign| {
-            deinitExprNode(allocator, assign.target);
-            deinitExprNode(allocator, assign.value);
-            allocator.destroy(assign.target);
-            allocator.destroy(assign.value);
-        },
-        .CompoundAssignment => |*comp_assign| {
-            deinitExprNode(allocator, comp_assign.target);
-            deinitExprNode(allocator, comp_assign.value);
-            allocator.destroy(comp_assign.target);
-            allocator.destroy(comp_assign.value);
-        },
-        .Call => |*call| {
-            deinitExprNode(allocator, call.callee);
-            allocator.destroy(call.callee);
-            for (call.arguments) |arg| {
-                deinitExprNode(allocator, arg);
-                allocator.destroy(arg);
-            }
-            allocator.free(call.arguments);
-        },
-        .Index => |*index| {
-            deinitExprNode(allocator, index.target);
-            deinitExprNode(allocator, index.index);
-            allocator.destroy(index.target);
-            allocator.destroy(index.index);
-        },
-        .FieldAccess => |*field_access| {
-            deinitExprNode(allocator, field_access.target);
-            allocator.destroy(field_access.target);
-        },
-        .Cast => |*cast| {
-            deinitExprNode(allocator, cast.operand);
-            allocator.destroy(cast.operand);
-            // Note: target_type cleanup handled by main AST
-        },
-        .Comptime => |*comptime_expr| {
-            // Note: block cleanup handled by main AST
-            _ = comptime_expr;
-        },
-        .Old => |*old| {
-            deinitExprNode(allocator, old.expr);
-            allocator.destroy(old.expr);
-        },
-        .Quantified => |*quantified| {
-            if (quantified.condition) |condition| {
-                deinitExprNode(allocator, condition);
-                allocator.destroy(condition);
-            }
-            deinitExprNode(allocator, quantified.body);
-            allocator.destroy(quantified.body);
-        },
-        .Try => |*try_expr| {
-            deinitExprNode(allocator, try_expr.expr);
-            allocator.destroy(try_expr.expr);
-        },
-        .ErrorReturn => {
-            // String literals don't need cleanup
-        },
-        .ErrorCast => |*error_cast| {
-            deinitExprNode(allocator, error_cast.operand);
-            allocator.destroy(error_cast.operand);
-            // Note: target_type cleanup handled by main AST
-        },
-        .Shift => |*shift| {
-            deinitExprNode(allocator, shift.mapping);
-            deinitExprNode(allocator, shift.source);
-            deinitExprNode(allocator, shift.dest);
-            deinitExprNode(allocator, shift.amount);
-            allocator.destroy(shift.mapping);
-            allocator.destroy(shift.source);
-            allocator.destroy(shift.dest);
-            allocator.destroy(shift.amount);
-        },
-        .StructInstantiation => |*struct_inst| {
-            deinitExprNode(allocator, struct_inst.struct_name);
-            allocator.destroy(struct_inst.struct_name);
-            for (struct_inst.fields) |*field| {
-                deinitExprNode(allocator, field.value);
-                allocator.destroy(field.value);
-            }
-            allocator.free(struct_inst.fields);
-        },
-        .AnonymousStruct => |*anon_struct| {
-            for (anon_struct.fields) |*field| {
-                deinitExprNode(allocator, field.value);
-                allocator.destroy(field.value);
-            }
-            allocator.free(anon_struct.fields);
-        },
-        .Range => |*range| {
-            deinitExprNode(allocator, range.start);
-            deinitExprNode(allocator, range.end);
-            allocator.destroy(range.start);
-            allocator.destroy(range.end);
-        },
-        .LabeledBlock => |*labeled_block| {
-            // Note: block cleanup handled by main AST
-            _ = labeled_block;
-        },
-        .Destructuring => |*destructuring| {
-            deinitExprNode(allocator, destructuring.value);
-            allocator.destroy(destructuring.value);
-            // Clean up pattern
-            switch (destructuring.pattern) {
-                .Struct => |fields| {
-                    allocator.free(fields);
-                },
-                .Tuple => |vars| {
-                    allocator.free(vars);
-                },
-                .Array => |vars| {
-                    allocator.free(vars);
-                },
-            }
-        },
-        .EnumLiteral => {
-            // String literals don't need cleanup
-        },
-        .ArrayLiteral => |*array_lit| {
-            for (array_lit.elements) |element| {
-                deinitExprNode(allocator, element);
-                allocator.destroy(element);
-            }
-            allocator.free(array_lit.elements);
-        },
-        .Tuple => |*tuple| {
-            for (tuple.elements) |element| {
-                deinitExprNode(allocator, element);
-                allocator.destroy(element);
-            }
-            allocator.free(tuple.elements);
-        },
-        .SwitchExpression => |*switch_expr| {
-            deinitExprNode(allocator, switch_expr.condition);
-            allocator.destroy(switch_expr.condition);
-            for (switch_expr.cases) |*case| {
-                // Note: switch case cleanup handled by statements module
-                _ = case;
-            }
-            allocator.free(switch_expr.cases);
-        },
-        else => {
-            // Literals and identifiers don't need cleanup
-        },
-    }
-}
-
 // L-value validation functions
 
 /// Check if an expression is a valid L-value (can be assigned to)
@@ -866,5 +675,136 @@ pub fn validateLValue(expr: *const ExprNode) LValueError!void {
             .Unary => LValueError.UnaryExprNotAssignable,
             else => LValueError.InvalidLValue,
         };
+    }
+}
+
+/// Recursively deinitialize child allocations for an expression node.
+/// This does not destroy the node pointer itself; owners handle destruction.
+pub fn deinitExprNode(allocator: std.mem.Allocator, expr: *ExprNode) void {
+    switch (expr.*) {
+        .Identifier => {},
+        .Literal => {},
+        .EnumLiteral => {},
+        .ErrorReturn => {},
+        .Quantified => |*q| {
+            if (q.condition) |c| deinitExprNode(allocator, c);
+            deinitExprNode(allocator, q.body);
+        },
+
+        .Unary => |*u| {
+            deinitExprNode(allocator, u.operand);
+        },
+        .Binary => |*b| {
+            deinitExprNode(allocator, b.lhs);
+            deinitExprNode(allocator, b.rhs);
+        },
+        .Assignment => |*a| {
+            deinitExprNode(allocator, a.target);
+            deinitExprNode(allocator, a.value);
+        },
+        .CompoundAssignment => |*ca| {
+            deinitExprNode(allocator, ca.target);
+            deinitExprNode(allocator, ca.value);
+        },
+        .Call => |*c| {
+            deinitExprNode(allocator, c.callee);
+            for (c.arguments) |arg| deinitExprNode(allocator, arg);
+            allocator.free(c.arguments);
+        },
+        .Index => |*ix| {
+            deinitExprNode(allocator, ix.target);
+            deinitExprNode(allocator, ix.index);
+        },
+        .FieldAccess => |*fa| {
+            deinitExprNode(allocator, fa.target);
+        },
+        .Cast => |*c| {
+            deinitExprNode(allocator, c.operand);
+        },
+        .Comptime => |*ct| {
+            statements.deinitBlockNode(allocator, &ct.block);
+        },
+        .Old => |*o| {
+            deinitExprNode(allocator, o.expr);
+        },
+        .Tuple => |*t| {
+            for (t.elements) |el| deinitExprNode(allocator, el);
+            allocator.free(t.elements);
+        },
+        .StructInstantiation => |*si| {
+            deinitExprNode(allocator, si.struct_name);
+            for (si.fields) |*f| deinitExprNode(allocator, f.value);
+            allocator.free(si.fields);
+        },
+        .AnonymousStruct => |*as| {
+            for (as.fields) |*f| deinitExprNode(allocator, f.value);
+            allocator.free(as.fields);
+        },
+        .ArrayLiteral => |*al| {
+            for (al.elements) |el| deinitExprNode(allocator, el);
+            allocator.free(al.elements);
+        },
+        .SwitchExpression => |*sw| {
+            deinitExprNode(allocator, sw.condition);
+            // Deinit patterns and bodies per case
+            for (sw.cases) |*case| {
+                switch (case.pattern) {
+                    .Literal => {},
+                    .EnumValue => {},
+                    .Else => {},
+                    .Range => |r| {
+                        deinitExprNode(allocator, r.start);
+                        deinitExprNode(allocator, r.end);
+                    },
+                }
+                switch (case.body) {
+                    .Expression => |e| deinitExprNode(allocator, e),
+                    .Block => |b| statements.deinitBlockNode(allocator, @constCast(&b)),
+                    .LabeledBlock => |lb| statements.deinitBlockNode(allocator, @constCast(&lb.block)),
+                }
+            }
+            if (sw.default_case) |*db| {
+                statements.deinitBlockNode(allocator, @constCast(db));
+            }
+        },
+        .Range => |*r| {
+            deinitExprNode(allocator, r.start);
+            deinitExprNode(allocator, r.end);
+        },
+        .LabeledBlock => |*lb| {
+            statements.deinitBlockNode(allocator, &lb.block);
+        },
+        .Destructuring => |*d| {
+            d.pattern.deinit(allocator);
+            deinitExprNode(allocator, d.value);
+        },
+        .Try => |*t| {
+            deinitExprNode(allocator, t.expr);
+        },
+        .ErrorCast => |*ec| {
+            deinitExprNode(allocator, ec.operand);
+        },
+        .Shift => |*sh| {
+            deinitExprNode(allocator, sh.mapping);
+            deinitExprNode(allocator, sh.source);
+            deinitExprNode(allocator, sh.dest);
+            deinitExprNode(allocator, sh.amount);
+        },
+    }
+}
+
+/// Deinit helper for switch cases (used by statement deinit)
+pub fn deinitSwitchCase(self: *SwitchCase, allocator: std.mem.Allocator) void {
+    switch (self.pattern) {
+        .Range => |r| {
+            deinitExprNode(allocator, r.start);
+            deinitExprNode(allocator, r.end);
+        },
+        else => {},
+    }
+    switch (self.body) {
+        .Expression => |e| deinitExprNode(allocator, e),
+        .Block => |b| statements.deinitBlockNode(allocator, @constCast(&b)),
+        .LabeledBlock => |lb| statements.deinitBlockNode(allocator, @constCast(&lb.block)),
     }
 }
