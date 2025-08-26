@@ -160,7 +160,7 @@ pub const SymbolTable = struct {
             scope_idx -= 1;
         }
         // If symbol not found, add it to current scope
-        try self.addSymbol(name, c.mlirValueGetType(value), "stack", null);
+        try self.addSymbol(name, c.mlirValueGetType(value), lib.ast.Statements.MemoryRegion.Stack, null);
         if (self.scopes.items[self.current_scope].get(name)) |*symbol| {
             symbol.value = value;
             try self.scopes.items[self.current_scope].put(name, symbol.*);
