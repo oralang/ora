@@ -11,3 +11,6 @@ code-bin/
 *.bin
 *.yul
 *.hir.json
+vendor/mlir/lib/
+
+vendor/mlir

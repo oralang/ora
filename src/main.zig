@@ -73,6 +73,8 @@ pub fn main() !void {
         try runASTGeneration(allocator, file_path, output_dir, !no_cst);
     } else if (std.mem.eql(u8, cmd, "compile")) {
         try runFullCompilation(allocator, file_path, !no_cst);
+    } else if (std.mem.eql(u8, cmd, "mlir")) {
+        try runMlirEmit(allocator, file_path);
     } else {
         try printUsage();
     }
@@ -90,6 +92,7 @@ fn printUsage() !void {
     try stdout.print("  parse <file>   - Parse a .ora file to AST\n", .{});
     try stdout.print("  ast <file>     - Generate AST and save to JSON file\n", .{});
     try stdout.print("  compile <file> - Full frontend pipeline (lex -> parse)\n", .{});
+    try stdout.print("  mlir <file>    - Run front-end and emit MLIR (experimental)\n", .{});
     try stdout.print("\nExample:\n", .{});
     try stdout.print("  ora -o build ast example.ora\n", .{});
 }
@@ -379,6 +382,58 @@ fn runASTGeneration(allocator: std.mem.Allocator, file_path: []const u8, output_
     };
 
     try stdout.print("AST saved to {s}\n", .{output_file});
+}
+
+fn runMlirEmit(allocator: std.mem.Allocator, file_path: []const u8) !void {
+    const stdout = std.io.getStdOut().writer();
+
+    // Read source file
+    const source = std.fs.cwd().readFileAlloc(allocator, file_path, 1024 * 1024) catch |err| {
+        try stdout.print("Error reading file {s}: {}\n", .{ file_path, err });
+        return;
+    };
+    defer allocator.free(source);
+
+    // Front half: lex + parse (ensures we have a valid AST before MLIR)
+    var lexer = lib.Lexer.init(allocator, source);
+    defer lexer.deinit();
+
+    const tokens = lexer.scanTokens() catch |err| {
+        try stdout.print("Lexer error: {}\n", .{err});
+        return;
+    };
+    defer allocator.free(tokens);
+
+    var arena = lib.ast_arena.AstArena.init(allocator);
+    defer arena.deinit();
+    var parser = lib.Parser.init(tokens, &arena);
+    parser.setFileId(1);
+    const ast_nodes = parser.parse() catch |err| {
+        try stdout.print("Parser error: {}\n", .{err});
+        return;
+    };
+
+    // MLIR: create context and empty module placeholder
+    const mlir = @import("mlir/mod.zig");
+    const c = @import("mlir/c.zig").c;
+    const h = mlir.ctx.createContext();
+    defer mlir.ctx.destroyContext(h);
+    const module = mlir.lower.lowerFunctionsToModule(h.ctx, ast_nodes);
+    defer c.mlirModuleDestroy(module);
+
+    // Emit to stdout
+    const callback = struct {
+        fn cb(str: c.MlirStringRef, user: ?*anyopaque) callconv(.C) void {
+            const W = std.fs.File.Writer;
+            const w_const: *const W = @ptrCast(@alignCast(user.?));
+            const w: *W = @constCast(w_const);
+            _ = w.writeAll(str.data[0..str.length]) catch {};
+        }
+    };
+    try stdout.print("=== MLIR (prototype) ===\n", .{});
+    const op = c.mlirModuleGetOperation(module);
+    c.mlirOperationPrint(op, callback.cb, @constCast(&stdout));
+    try stdout.print("\n", .{});
 }
 
 test "simple test" {
