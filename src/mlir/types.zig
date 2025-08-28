@@ -1,6 +1,7 @@
 const std = @import("std");
 const c = @import("c.zig").c;
 const lib = @import("ora_lib");
+const constants = @import("constants.zig");
 
 /// Type alias for array struct to match AST definition
 const ArrayStruct = struct { elem: *const lib.ast.type_info.OraType, len: u64 };
@@ -23,7 +24,7 @@ pub const TypeMapper = struct {
                 .u32 => c.mlirIntegerTypeGet(self.ctx, 32),
                 .u64 => c.mlirIntegerTypeGet(self.ctx, 64),
                 .u128 => c.mlirIntegerTypeGet(self.ctx, 128),
-                .u256 => c.mlirIntegerTypeGet(self.ctx, 256),
+                .u256 => c.mlirIntegerTypeGet(self.ctx, constants.DEFAULT_INTEGER_BITS),
 
                 // Signed integer types - map to appropriate bit widths
                 .i8 => c.mlirIntegerTypeGet(self.ctx, 8),
@@ -31,7 +32,7 @@ pub const TypeMapper = struct {
                 .i32 => c.mlirIntegerTypeGet(self.ctx, 32),
                 .i64 => c.mlirIntegerTypeGet(self.ctx, 64),
                 .i128 => c.mlirIntegerTypeGet(self.ctx, 128),
-                .i256 => c.mlirIntegerTypeGet(self.ctx, 256),
+                .i256 => c.mlirIntegerTypeGet(self.ctx, constants.DEFAULT_INTEGER_BITS),
 
                 // Other primitive types
                 .bool => c.mlirIntegerTypeGet(self.ctx, 1),
@@ -57,7 +58,7 @@ pub const TypeMapper = struct {
             };
         } else {
             // Default to i256 for unknown types
-            return c.mlirIntegerTypeGet(self.ctx, 256);
+            return c.mlirIntegerTypeGet(self.ctx, constants.DEFAULT_INTEGER_BITS);
         }
     }
 
@@ -82,7 +83,7 @@ pub const TypeMapper = struct {
         _ = string_info; // String length info
         // For now, use i256 as placeholder for string type
         // In the future, this could be a proper MLIR string type or pointer type
-        return c.mlirIntegerTypeGet(self.ctx, 256);
+        return c.mlirIntegerTypeGet(self.ctx, constants.DEFAULT_INTEGER_BITS);
     }
 
     /// Convert bytes type
@@ -90,7 +91,7 @@ pub const TypeMapper = struct {
         _ = bytes_info; // Bytes length info
         // For now, use i256 as placeholder for bytes type
         // In the future, this could be a proper MLIR vector type or pointer type
-        return c.mlirIntegerTypeGet(self.ctx, 256);
+        return c.mlirIntegerTypeGet(self.ctx, constants.DEFAULT_INTEGER_BITS);
     }
 
     /// Convert void type
@@ -103,7 +104,7 @@ pub const TypeMapper = struct {
         _ = struct_info; // Struct field information
         // For now, use i256 as placeholder for struct type
         // In the future, this could be a proper MLIR struct type
-        return c.mlirIntegerTypeGet(self.ctx, 256);
+        return c.mlirIntegerTypeGet(self.ctx, constants.DEFAULT_INTEGER_BITS);
     }
 
     /// Convert enum type
@@ -111,7 +112,7 @@ pub const TypeMapper = struct {
         _ = enum_info; // Enum variant information
         // For now, use i256 as placeholder for enum type
         // In the future, this could be a proper MLIR integer type with appropriate width
-        return c.mlirIntegerTypeGet(self.ctx, 256);
+        return c.mlirIntegerTypeGet(self.ctx, constants.DEFAULT_INTEGER_BITS);
     }
 
     /// Convert contract type
@@ -119,7 +120,7 @@ pub const TypeMapper = struct {
         _ = contract_info; // Contract information
         // For now, use i256 as placeholder for contract type
         // In the future, this could be a proper MLIR pointer type or custom type
-        return c.mlirIntegerTypeGet(self.ctx, 256);
+        return c.mlirIntegerTypeGet(self.ctx, constants.DEFAULT_INTEGER_BITS);
     }
 
     /// Convert array type
@@ -127,7 +128,7 @@ pub const TypeMapper = struct {
         _ = array_info; // For now, use placeholder
         // For now, use i256 as placeholder for array type
         // In the future, this could be a proper MLIR array type or vector type
-        return c.mlirIntegerTypeGet(self.ctx, 256);
+        return c.mlirIntegerTypeGet(self.ctx, constants.DEFAULT_INTEGER_BITS);
     }
 
     /// Convert slice type
@@ -135,7 +136,7 @@ pub const TypeMapper = struct {
         _ = slice_info; // Slice element type information
         // For now, use i256 as placeholder for slice type
         // In the future, this could be a proper MLIR vector type or pointer type
-        return c.mlirIntegerTypeGet(self.ctx, 256);
+        return c.mlirIntegerTypeGet(self.ctx, constants.DEFAULT_INTEGER_BITS);
     }
 
     /// Convert mapping type
@@ -143,7 +144,7 @@ pub const TypeMapper = struct {
         _ = mapping_info; // Key and value type information
         // For now, use i256 as placeholder for mapping type
         // In the future, this could be a proper MLIR struct type or custom type
-        return c.mlirIntegerTypeGet(self.ctx, 256);
+        return c.mlirIntegerTypeGet(self.ctx, constants.DEFAULT_INTEGER_BITS);
     }
 
     /// Convert double mapping type
@@ -151,7 +152,7 @@ pub const TypeMapper = struct {
         _ = double_map_info; // Two keys and value type information
         // For now, use i256 as placeholder for double mapping type
         // In the future, this could be a proper MLIR struct type or custom type
-        return c.mlirIntegerTypeGet(self.ctx, 256);
+        return c.mlirIntegerTypeGet(self.ctx, constants.DEFAULT_INTEGER_BITS);
     }
 
     /// Convert tuple type
@@ -159,7 +160,7 @@ pub const TypeMapper = struct {
         _ = tuple_info; // Tuple element types information
         // For now, use i256 as placeholder for tuple type
         // In the future, this could be a proper MLIR tuple type or struct type
-        return c.mlirIntegerTypeGet(self.ctx, 256);
+        return c.mlirIntegerTypeGet(self.ctx, constants.DEFAULT_INTEGER_BITS);
     }
 
     /// Convert function type
@@ -167,7 +168,7 @@ pub const TypeMapper = struct {
         _ = function_info; // Parameter and return type information
         // For now, use i256 as placeholder for function type
         // In the future, this could be a proper MLIR function type
-        return c.mlirIntegerTypeGet(self.ctx, 256);
+        return c.mlirIntegerTypeGet(self.ctx, constants.DEFAULT_INTEGER_BITS);
     }
 
     /// Convert error union type
@@ -175,7 +176,7 @@ pub const TypeMapper = struct {
         _ = error_union_info; // Error and success type information
         // For now, use i256 as placeholder for error union type
         // In the future, this could be a proper MLIR union type or custom type
-        return c.mlirIntegerTypeGet(self.ctx, 256);
+        return c.mlirIntegerTypeGet(self.ctx, constants.DEFAULT_INTEGER_BITS);
     }
 
     /// Convert union type
@@ -183,7 +184,7 @@ pub const TypeMapper = struct {
         _ = union_info; // Union variant types information
         // For now, use i256 as placeholder for union type
         // In the future, this could be a proper MLIR union type or custom type
-        return c.mlirIntegerTypeGet(self.ctx, 256);
+        return c.mlirIntegerTypeGet(self.ctx, constants.DEFAULT_INTEGER_BITS);
     }
 
     /// Convert anonymous struct type
@@ -191,7 +192,7 @@ pub const TypeMapper = struct {
         _ = fields; // Anonymous struct field information
         // For now, use i256 as placeholder for anonymous struct type
         // In the future, this could be a proper MLIR struct type
-        return c.mlirIntegerTypeGet(self.ctx, 256);
+        return c.mlirIntegerTypeGet(self.ctx, constants.DEFAULT_INTEGER_BITS);
     }
 
     /// Convert module type
@@ -199,7 +200,7 @@ pub const TypeMapper = struct {
         _ = module_info; // Module information
         // For now, use i256 as placeholder for module type
         // In the future, this could be a proper MLIR module type or custom type
-        return c.mlirIntegerTypeGet(self.ctx, 256);
+        return c.mlirIntegerTypeGet(self.ctx, constants.DEFAULT_INTEGER_BITS);
     }
 
     /// Get the bit width for an integer type
@@ -211,7 +212,7 @@ pub const TypeMapper = struct {
             .u32, .i32 => 32,
             .u64, .i64 => 64,
             .u128, .i128 => 128,
-            .u256, .i256 => 256,
+            .u256, .i256 => constants.DEFAULT_INTEGER_BITS,
             else => null,
         };
     }

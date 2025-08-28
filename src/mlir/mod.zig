@@ -8,6 +8,7 @@ pub const lower = @import("lower.zig");
 pub const dialect = @import("dialect.zig");
 
 // New modular components
+pub const constants = @import("constants.zig");
 pub const types = @import("types.zig");
 pub const expressions = @import("expressions.zig");
 pub const statements = @import("statements.zig");

@@ -39,6 +39,12 @@ pub const LocationTracker = struct {
         return c.mlirLocationFileLineColGet(self.ctx, fname_ref, line, column);
     }
 
+    /// Create a file location from a source span (working function from lower.zig)
+    pub fn createFileLocationFromSpan(self: *const LocationTracker, span: lib.ast.SourceSpan) c.MlirLocation {
+        const fname = c.mlirStringRefCreateFromCString("input.ora");
+        return c.mlirLocationFileLineColGet(self.ctx, fname, span.line, span.column);
+    }
+
     /// Create a fused location combining multiple locations
     pub fn createFusedLocation(self: *const LocationTracker, locations: []const c.MlirLocation, _: ?c.MlirAttribute) c.MlirLocation {
         if (locations.len == 0) {
