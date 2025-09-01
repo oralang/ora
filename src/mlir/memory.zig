@@ -47,51 +47,143 @@ pub const MemoryManager = struct {
         return .{ .ctx = ctx };
     }
 
-    /// Get memory space for different storage types
-    pub fn getMemorySpace(self: *const MemoryManager, storage_type: lib.ast.Statements.MemoryRegion) c.MlirAttribute {
+    /// Get memory space mapping: storage=1, memory=0, tstore=2
+    pub fn getMemorySpace(self: *const MemoryManager, storage_type: lib.ast.Statements.MemoryRegion) u32 {
+        _ = self; // Context not needed for this function
         return switch (storage_type) {
-            .Storage => c.mlirIntegerAttrGet(c.mlirIntegerTypeGet(self.ctx, 64), 1), // storage=1
-            .Memory => c.mlirIntegerAttrGet(c.mlirIntegerTypeGet(self.ctx, 64), 0), // memory=0
-            .TStore => c.mlirIntegerAttrGet(c.mlirIntegerTypeGet(self.ctx, 64), 2), // tstore=2
-            .Stack => c.mlirIntegerAttrGet(c.mlirIntegerTypeGet(self.ctx, 64), 0), // stack=0 (default to memory)
+            .Storage => 1, // storage=1
+            .Memory => 0, // memory=0
+            .TStore => 2, // tstore=2
+            .Stack => 0, // stack=0 (default to memory space)
         };
     }
 
-    /// Create region attribute for attaching to operations
-    pub fn createRegionAttribute(self: *const MemoryManager, storage_type: lib.ast.Statements.MemoryRegion) c.MlirAttribute {
-        const space = self.getMemorySpace(storage_type);
-        // For now, return the memory space directly
-        // In the future, this could create a proper region attribute
-        return space;
+    /// Get memory space as MLIR attribute
+    pub fn getMemorySpaceAttribute(self: *const MemoryManager, storage_type: lib.ast.Statements.MemoryRegion) c.MlirAttribute {
+        const space_value = self.getMemorySpace(storage_type);
+        return c.mlirIntegerAttrGet(c.mlirIntegerTypeGet(self.ctx, 64), @intCast(space_value));
     }
 
-    /// Create allocation operation for variables
-    pub fn createAllocaOp(self: *const MemoryManager, var_type: c.MlirType, storage_type: []const u8, var_name: []const u8) c.MlirOperation {
-        _ = var_type;
-        _ = storage_type;
-        _ = var_name;
-        // TODO: Implement allocation operation creation
-        var state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("memref.alloca"), c.mlirLocationUnknownGet(self.ctx));
-        return c.mlirOperationCreate(&state);
+    /// Create region attribute for attaching `ora.region` attributes
+    pub fn createRegionAttribute(self: *const MemoryManager, storage_type: lib.ast.Statements.MemoryRegion) c.MlirAttribute {
+        const region_str = switch (storage_type) {
+            .Storage => "storage",
+            .Memory => "memory",
+            .TStore => "tstore",
+            .Stack => "stack",
+        };
+        const region_ref = c.mlirStringRefCreate(region_str.ptr, region_str.len);
+        return c.mlirStringAttrGet(self.ctx, region_ref);
+    }
+
+    /// Create allocation operation for variables in correct memory spaces
+    pub fn createAllocaOp(self: *const MemoryManager, var_type: c.MlirType, storage_type: lib.ast.Statements.MemoryRegion, var_name: []const u8, loc: c.MlirLocation) c.MlirOperation {
+        switch (storage_type) {
+            .Storage => {
+                // Storage variables use ora.global operations, not alloca
+                return self.createGlobalStorageDeclaration(var_name, var_type, loc);
+            },
+            .Memory => {
+                // Memory variables use memref.alloca with memory space 0
+                var state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("memref.alloca"), loc);
+
+                // Create memref type with memory space 0
+                // TODO: Create proper memref type with memory space attribute
+                c.mlirOperationStateAddResults(&state, 1, @ptrCast(&var_type));
+
+                // Add region attribute
+                const region_attr = self.createRegionAttribute(storage_type);
+                const region_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("ora.region"));
+                var attrs = [_]c.MlirNamedAttribute{
+                    c.mlirNamedAttributeGet(region_id, region_attr),
+                };
+                c.mlirOperationStateAddAttributes(&state, attrs.len, &attrs);
+
+                return c.mlirOperationCreate(&state);
+            },
+            .TStore => {
+                // Transient storage variables use ora.tstore.global operations
+                return self.createGlobalTStoreDeclaration(var_name, var_type, loc);
+            },
+            .Stack => {
+                // Stack variables use regular memref.alloca
+                var state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("memref.alloca"), loc);
+                c.mlirOperationStateAddResults(&state, 1, @ptrCast(&var_type));
+                return c.mlirOperationCreate(&state);
+            },
+        }
     }
 
     /// Create store operation with memory space semantics
-    pub fn createStoreOp(self: *const MemoryManager, value: c.MlirValue, address: c.MlirValue, storage_type: []const u8) c.MlirOperation {
-        _ = value;
-        _ = address;
-        _ = storage_type;
-        // TODO: Implement store operation creation with memory space
-        var state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("memref.store"), c.mlirLocationUnknownGet(self.ctx));
-        return c.mlirOperationCreate(&state);
+    pub fn createStoreOp(self: *const MemoryManager, value: c.MlirValue, address: c.MlirValue, storage_type: lib.ast.Statements.MemoryRegion, loc: c.MlirLocation) c.MlirOperation {
+        switch (storage_type) {
+            .Storage => {
+                // Storage uses ora.sstore - address should be variable name
+                @panic("Use createStorageStore for storage variables");
+            },
+            .Memory => {
+                // Memory uses memref.store with memory space 0
+                var state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("memref.store"), loc);
+                c.mlirOperationStateAddOperands(&state, 2, @ptrCast(&[_]c.MlirValue{ value, address }));
+
+                // Add memory space attribute
+                const space_attr = self.getMemorySpaceAttribute(storage_type);
+                const space_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("memspace"));
+                var attrs = [_]c.MlirNamedAttribute{
+                    c.mlirNamedAttributeGet(space_id, space_attr),
+                };
+                c.mlirOperationStateAddAttributes(&state, attrs.len, &attrs);
+
+                return c.mlirOperationCreate(&state);
+            },
+            .TStore => {
+                // Transient storage uses ora.tstore
+                @panic("Use createTStoreStore for transient storage variables");
+            },
+            .Stack => {
+                // Stack uses regular memref.store
+                var state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("memref.store"), loc);
+                c.mlirOperationStateAddOperands(&state, 2, @ptrCast(&[_]c.MlirValue{ value, address }));
+                return c.mlirOperationCreate(&state);
+            },
+        }
     }
 
     /// Create load operation with memory space semantics
-    pub fn createLoadOp(self: *const MemoryManager, address: c.MlirValue, storage_type: []const u8) c.MlirOperation {
-        _ = address;
-        _ = storage_type;
-        // TODO: Implement load operation creation with memory space
-        var state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("memref.load"), c.mlirLocationUnknownGet(self.ctx));
-        return c.mlirOperationCreate(&state);
+    pub fn createLoadOp(self: *const MemoryManager, address: c.MlirValue, storage_type: lib.ast.Statements.MemoryRegion, result_type: c.MlirType, loc: c.MlirLocation) c.MlirOperation {
+        switch (storage_type) {
+            .Storage => {
+                // Storage uses ora.sload - address should be variable name
+                @panic("Use createStorageLoad for storage variables");
+            },
+            .Memory => {
+                // Memory uses memref.load with memory space 0
+                var state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("memref.load"), loc);
+                c.mlirOperationStateAddOperands(&state, 1, @ptrCast(&address));
+                c.mlirOperationStateAddResults(&state, 1, @ptrCast(&result_type));
+
+                // Add memory space attribute
+                const space_attr = self.getMemorySpaceAttribute(storage_type);
+                const space_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("memspace"));
+                var attrs = [_]c.MlirNamedAttribute{
+                    c.mlirNamedAttributeGet(space_id, space_attr),
+                };
+                c.mlirOperationStateAddAttributes(&state, attrs.len, &attrs);
+
+                return c.mlirOperationCreate(&state);
+            },
+            .TStore => {
+                // Transient storage uses ora.tload
+                @panic("Use createTStoreLoad for transient storage variables");
+            },
+            .Stack => {
+                // Stack uses regular memref.load
+                var state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("memref.load"), loc);
+                c.mlirOperationStateAddOperands(&state, 1, @ptrCast(&address));
+                c.mlirOperationStateAddResults(&state, 1, @ptrCast(&result_type));
+                return c.mlirOperationCreate(&state);
+            },
+        }
     }
 
     /// Create storage load operation (ora.sload)
@@ -398,4 +490,100 @@ pub const MemoryManager = struct {
     fn createFileLocation(self: *const MemoryManager, span: lib.ast.SourceSpan) c.MlirLocation {
         return @import("locations.zig").LocationTracker.createFileLocationFromSpan(self.ctx, span);
     }
+
+    /// Create global storage declaration
+    fn createGlobalStorageDeclaration(self: *const MemoryManager, var_name: []const u8, var_type: c.MlirType, loc: c.MlirLocation) c.MlirOperation {
+        var state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("ora.global"), loc);
+
+        // Add variable name as symbol attribute
+        const name_ref = c.mlirStringRefCreate(var_name.ptr, var_name.len);
+        const name_attr = c.mlirStringAttrGet(self.ctx, name_ref);
+        const name_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("sym_name"));
+
+        // Add type attribute
+        const type_attr = c.mlirTypeAttrGet(var_type);
+        const type_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("type"));
+
+        var attrs = [_]c.MlirNamedAttribute{
+            c.mlirNamedAttributeGet(name_id, name_attr),
+            c.mlirNamedAttributeGet(type_id, type_attr),
+        };
+        c.mlirOperationStateAddAttributes(&state, attrs.len, &attrs);
+
+        return c.mlirOperationCreate(&state);
+    }
+
+    /// Create global transient storage declaration
+    fn createGlobalTStoreDeclaration(self: *const MemoryManager, var_name: []const u8, var_type: c.MlirType, loc: c.MlirLocation) c.MlirOperation {
+        var state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("ora.tstore.global"), loc);
+
+        // Add variable name as symbol attribute
+        const name_ref = c.mlirStringRefCreate(var_name.ptr, var_name.len);
+        const name_attr = c.mlirStringAttrGet(self.ctx, name_ref);
+        const name_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("sym_name"));
+
+        // Add type attribute
+        const type_attr = c.mlirTypeAttrGet(var_type);
+        const type_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("type"));
+
+        var attrs = [_]c.MlirNamedAttribute{
+            c.mlirNamedAttributeGet(name_id, name_attr),
+            c.mlirNamedAttributeGet(type_id, type_attr),
+        };
+        c.mlirOperationStateAddAttributes(&state, attrs.len, &attrs);
+
+        return c.mlirOperationCreate(&state);
+    }
+
+    /// Validate memory region constraints
+    pub fn validateMemoryAccess(self: *const MemoryManager, region: lib.ast.Statements.MemoryRegion, access_type: AccessType) bool {
+        _ = self; // Context not needed for validation
+
+        switch (region) {
+            .Storage => {
+                // Storage variables can be read and written
+                return access_type == .Read or access_type == .Write;
+            },
+            .Memory => {
+                // Memory variables can be read and written
+                return access_type == .Read or access_type == .Write;
+            },
+            .TStore => {
+                // Transient storage variables can be read and written
+                return access_type == .Read or access_type == .Write;
+            },
+            .Stack => {
+                // Stack variables can be read and written
+                return access_type == .Read or access_type == .Write;
+            },
+        }
+    }
+
+    /// Check if a memory region is persistent
+    pub fn isPersistent(self: *const MemoryManager, region: lib.ast.Statements.MemoryRegion) bool {
+        _ = self;
+        return switch (region) {
+            .Storage => true, // Storage is persistent across transactions
+            .TStore => true, // Transient storage is persistent within transaction
+            .Memory => false, // Memory is cleared between calls
+            .Stack => false, // Stack is function-local
+        };
+    }
+
+    /// Check if a memory region requires gas for access
+    pub fn requiresGas(self: *const MemoryManager, region: lib.ast.Statements.MemoryRegion) bool {
+        _ = self;
+        return switch (region) {
+            .Storage => true, // Storage access costs gas
+            .TStore => true, // Transient storage access costs gas
+            .Memory => false, // Memory access is free
+            .Stack => false, // Stack access is free
+        };
+    }
+};
+
+/// Access type for memory validation
+pub const AccessType = enum {
+    Read,
+    Write,
 };

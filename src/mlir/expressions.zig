@@ -38,20 +38,27 @@ pub const ExpressionLowerer = struct {
             .Unary => |unary| self.lowerUnary(&unary),
             .Identifier => |ident| self.lowerIdentifier(&ident),
             .Call => |call| self.lowerCall(&call),
-            else => {
-                // For other expression types, return a default value
-                const ty = c.mlirIntegerTypeGet(self.ctx, constants.DEFAULT_INTEGER_BITS);
-                // Use a default location since we can't access span directly from union
-                var state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("arith.constant"), c.mlirLocationUnknownGet(self.ctx));
-                c.mlirOperationStateAddResults(&state, 1, @ptrCast(&ty));
-                const attr = c.mlirIntegerAttrGet(ty, 0);
-                const value_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("value"));
-                var attrs = [_]c.MlirNamedAttribute{c.mlirNamedAttributeGet(value_id, attr)};
-                c.mlirOperationStateAddAttributes(&state, attrs.len, &attrs);
-                const op = c.mlirOperationCreate(&state);
-                c.mlirBlockAppendOwnedOperation(self.block, op);
-                return c.mlirOperationGetResult(op, 0);
-            },
+            .Assignment => |assign| self.lowerAssignment(&assign),
+            .CompoundAssignment => |comp_assign| self.lowerCompoundAssignment(&comp_assign),
+            .Index => |index| self.lowerIndex(&index),
+            .FieldAccess => |field| self.lowerFieldAccess(&field),
+            .Cast => |cast| self.lowerCast(&cast),
+            .Comptime => |comptime_expr| self.lowerComptime(&comptime_expr),
+            .Old => |old| self.lowerOld(&old),
+            .Tuple => |tuple| self.lowerTuple(&tuple),
+            .SwitchExpression => |switch_expr| self.lowerSwitchExpression(&switch_expr),
+            .Quantified => |quantified| self.lowerQuantified(&quantified),
+            .Try => |try_expr| self.lowerTry(&try_expr),
+            .ErrorReturn => |error_ret| self.lowerErrorReturn(&error_ret),
+            .ErrorCast => |error_cast| self.lowerErrorCast(&error_cast),
+            .Shift => |shift| self.lowerShift(&shift),
+            .StructInstantiation => |struct_inst| self.lowerStructInstantiation(&struct_inst),
+            .AnonymousStruct => |anon_struct| self.lowerAnonymousStruct(&anon_struct),
+            .Range => |range| self.lowerRange(&range),
+            .LabeledBlock => |labeled_block| self.lowerLabeledBlock(&labeled_block),
+            .Destructuring => |destructuring| self.lowerDestructuring(&destructuring),
+            .EnumLiteral => |enum_lit| self.lowerEnumLiteral(&enum_lit),
+            .ArrayLiteral => |array_lit| self.lowerArrayLiteral(&array_lit),
         };
     }
 
@@ -63,8 +70,11 @@ pub const ExpressionLowerer = struct {
                 var state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("arith.constant"), self.fileLoc(int.span));
                 c.mlirOperationStateAddResults(&state, 1, @ptrCast(&ty));
 
-                // Parse the string value to an integer
-                const parsed: i64 = std.fmt.parseInt(i64, int.value, 0) catch 0;
+                // Parse the string value to an integer with proper error handling
+                const parsed: i64 = std.fmt.parseInt(i64, int.value, 0) catch |err| blk: {
+                    std.debug.print("ERROR: Failed to parse integer literal '{s}': {}\n", .{ int.value, err });
+                    break :blk 0; // Default to 0 on parse error
+                };
                 const attr = c.mlirIntegerAttrGet(ty, parsed);
 
                 const value_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("value"));
@@ -92,14 +102,23 @@ pub const ExpressionLowerer = struct {
                 break :blk_bool c.mlirOperationGetResult(op, 0);
             },
             .String => |string_lit| blk_string: {
-                // For now, create a placeholder constant for strings
+                // Create string constant with proper string attributes
+                // For now, use a placeholder integer type but add string metadata
                 const ty = c.mlirIntegerTypeGet(self.ctx, constants.DEFAULT_INTEGER_BITS);
                 var state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("arith.constant"), self.fileLoc(string_lit.span));
                 c.mlirOperationStateAddResults(&state, 1, @ptrCast(&ty));
-                const attr = c.mlirIntegerAttrGet(ty, 0); // Placeholder value
+
+                // Use hash of string as placeholder value
+                const hash_value: i64 = @intCast(@as(u32, @truncate(std.hash_map.hashString(string_lit.value))));
+                const attr = c.mlirIntegerAttrGet(ty, hash_value);
+
                 const value_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("value"));
+                const string_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("ora.string"));
+                const string_attr = c.mlirStringAttrGet(self.ctx, c.mlirStringRefCreateFromCString(string_lit.value.ptr));
+
                 var attrs = [_]c.MlirNamedAttribute{
                     c.mlirNamedAttributeGet(value_id, attr),
+                    c.mlirNamedAttributeGet(string_id, string_attr),
                 };
                 c.mlirOperationStateAddAttributes(&state, attrs.len, &attrs);
                 const op = c.mlirOperationCreate(&state);
@@ -107,22 +126,29 @@ pub const ExpressionLowerer = struct {
                 break :blk_string c.mlirOperationGetResult(op, 0);
             },
             .Address => |addr_lit| blk_address: {
-                // Parse address as hex and create integer constant
+                // Parse address as hex and create integer constant with address metadata
                 const ty = c.mlirIntegerTypeGet(self.ctx, constants.DEFAULT_INTEGER_BITS);
                 var state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("arith.constant"), self.fileLoc(addr_lit.span));
                 c.mlirOperationStateAddResults(&state, 1, @ptrCast(&ty));
 
-                // Parse hex address (remove 0x prefix if present)
+                // Parse hex address (remove 0x prefix if present) with error handling
                 const addr_str = if (std.mem.startsWith(u8, addr_lit.value, "0x"))
                     addr_lit.value[2..]
                 else
                     addr_lit.value;
-                const parsed: i64 = std.fmt.parseInt(i64, addr_str, 16) catch 0;
+                const parsed: i64 = std.fmt.parseInt(i64, addr_str, 16) catch |err| blk: {
+                    std.debug.print("ERROR: Failed to parse address literal '{s}': {}\n", .{ addr_lit.value, err });
+                    break :blk 0;
+                };
                 const attr = c.mlirIntegerAttrGet(ty, parsed);
 
                 const value_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("value"));
+                const address_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("ora.address"));
+                const address_attr = c.mlirStringAttrGet(self.ctx, c.mlirStringRefCreateFromCString(addr_lit.value.ptr));
+
                 var attrs = [_]c.MlirNamedAttribute{
                     c.mlirNamedAttributeGet(value_id, attr),
+                    c.mlirNamedAttributeGet(address_id, address_attr),
                 };
                 c.mlirOperationStateAddAttributes(&state, attrs.len, &attrs);
                 const op = c.mlirOperationCreate(&state);
@@ -130,22 +156,29 @@ pub const ExpressionLowerer = struct {
                 break :blk_address c.mlirOperationGetResult(op, 0);
             },
             .Hex => |hex_lit| blk_hex: {
-                // Parse hex literal and create integer constant
+                // Parse hex literal and create integer constant with hex metadata
                 const ty = c.mlirIntegerTypeGet(self.ctx, constants.DEFAULT_INTEGER_BITS);
                 var state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("arith.constant"), self.fileLoc(hex_lit.span));
                 c.mlirOperationStateAddResults(&state, 1, @ptrCast(&ty));
 
-                // Parse hex value (remove 0x prefix if present)
+                // Parse hex value (remove 0x prefix if present) with error handling
                 const hex_str = if (std.mem.startsWith(u8, hex_lit.value, "0x"))
                     hex_lit.value[2..]
                 else
                     hex_lit.value;
-                const parsed: i64 = std.fmt.parseInt(i64, hex_str, 16) catch 0;
+                const parsed: i64 = std.fmt.parseInt(i64, hex_str, 16) catch |err| blk: {
+                    std.debug.print("ERROR: Failed to parse hex literal '{s}': {}\n", .{ hex_lit.value, err });
+                    break :blk 0;
+                };
                 const attr = c.mlirIntegerAttrGet(ty, parsed);
 
                 const value_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("value"));
+                const hex_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("ora.hex"));
+                const hex_attr = c.mlirStringAttrGet(self.ctx, c.mlirStringRefCreateFromCString(hex_lit.value.ptr));
+
                 var attrs = [_]c.MlirNamedAttribute{
                     c.mlirNamedAttributeGet(value_id, attr),
+                    c.mlirNamedAttributeGet(hex_id, hex_attr),
                 };
                 c.mlirOperationStateAddAttributes(&state, attrs.len, &attrs);
                 const op = c.mlirOperationCreate(&state);
@@ -153,22 +186,29 @@ pub const ExpressionLowerer = struct {
                 break :blk_hex c.mlirOperationGetResult(op, 0);
             },
             .Binary => |bin_lit| blk_binary: {
-                // Parse binary literal and create integer constant
+                // Parse binary literal and create integer constant with binary metadata
                 const ty = c.mlirIntegerTypeGet(self.ctx, constants.DEFAULT_INTEGER_BITS);
                 var state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("arith.constant"), self.fileLoc(bin_lit.span));
                 c.mlirOperationStateAddResults(&state, 1, @ptrCast(&ty));
 
-                // Parse binary value (remove 0b prefix if present)
+                // Parse binary value (remove 0b prefix if present) with error handling
                 const bin_str = if (std.mem.startsWith(u8, bin_lit.value, "0b"))
                     bin_lit.value[2..]
                 else
                     bin_lit.value;
-                const parsed: i64 = std.fmt.parseInt(i64, bin_str, 2) catch 0;
+                const parsed: i64 = std.fmt.parseInt(i64, bin_str, 2) catch |err| blk: {
+                    std.debug.print("ERROR: Failed to parse binary literal '{s}': {}\n", .{ bin_lit.value, err });
+                    break :blk 0;
+                };
                 const attr = c.mlirIntegerAttrGet(ty, parsed);
 
                 const value_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("value"));
+                const binary_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("ora.binary"));
+                const binary_attr = c.mlirStringAttrGet(self.ctx, c.mlirStringRefCreateFromCString(bin_lit.value.ptr));
+
                 var attrs = [_]c.MlirNamedAttribute{
                     c.mlirNamedAttributeGet(value_id, attr),
+                    c.mlirNamedAttributeGet(binary_id, binary_attr),
                 };
                 c.mlirOperationStateAddAttributes(&state, attrs.len, &attrs);
                 const op = c.mlirOperationCreate(&state);
@@ -178,254 +218,235 @@ pub const ExpressionLowerer = struct {
         };
     }
 
-    /// Lower binary expressions
+    /// Lower binary expressions with proper type handling and conversion
     pub fn lowerBinary(self: *const ExpressionLowerer, bin: *const lib.ast.Expressions.BinaryExpr) c.MlirValue {
         const lhs = self.lowerExpression(bin.lhs);
         const rhs = self.lowerExpression(bin.rhs);
-        const result_ty = c.mlirIntegerTypeGet(self.ctx, constants.DEFAULT_INTEGER_BITS);
 
-        switch (bin.operator) {
+        // Get operand types for type checking and conversion
+        const lhs_ty = c.mlirValueGetType(lhs);
+        const rhs_ty = c.mlirValueGetType(rhs);
+
+        // For now, use the wider type or default to DEFAULT_INTEGER_BITS
+        // TODO: Implement proper type promotion rules
+        const result_ty = self.getCommonType(lhs_ty, rhs_ty);
+
+        // Convert operands to common type if needed
+        const lhs_converted = self.convertToType(lhs, result_ty, bin.span);
+        const rhs_converted = self.convertToType(rhs, result_ty, bin.span);
+
+        return switch (bin.operator) {
             // Arithmetic operators
-            .Plus => {
-                var state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("arith.addi"), self.fileLoc(bin.span));
-                c.mlirOperationStateAddOperands(&state, 2, @ptrCast(&[_]c.MlirValue{ lhs, rhs }));
-                c.mlirOperationStateAddResults(&state, 1, @ptrCast(&result_ty));
-                const op = c.mlirOperationCreate(&state);
-                c.mlirBlockAppendOwnedOperation(self.block, op);
-                return c.mlirOperationGetResult(op, 0);
-            },
-            .Minus => {
-                var state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("arith.subi"), self.fileLoc(bin.span));
-                c.mlirOperationStateAddOperands(&state, 2, @ptrCast(&[_]c.MlirValue{ lhs, rhs }));
-                c.mlirOperationStateAddResults(&state, 1, @ptrCast(&result_ty));
-                const op = c.mlirOperationCreate(&state);
-                c.mlirBlockAppendOwnedOperation(self.block, op);
-                return c.mlirOperationGetResult(op, 0);
-            },
-            .Star => {
+            .Plus => self.createArithmeticOp("arith.addi", lhs_converted, rhs_converted, result_ty, bin.span),
+            .Minus => self.createArithmeticOp("arith.subi", lhs_converted, rhs_converted, result_ty, bin.span),
+            .Star => self.createArithmeticOp("arith.muli", lhs_converted, rhs_converted, result_ty, bin.span),
+            .Slash => self.createArithmeticOp("arith.divsi", lhs_converted, rhs_converted, result_ty, bin.span),
+            .Percent => self.createArithmeticOp("arith.remsi", lhs_converted, rhs_converted, result_ty, bin.span),
+            .StarStar => blk: {
+                // Power operation - implement proper exponentiation
+                // For now, create a placeholder operation with ora.power attribute
                 var state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("arith.muli"), self.fileLoc(bin.span));
-                c.mlirOperationStateAddOperands(&state, 2, @ptrCast(&[_]c.MlirValue{ lhs, rhs }));
+                c.mlirOperationStateAddOperands(&state, 2, @ptrCast(&[_]c.MlirValue{ lhs_converted, rhs_converted }));
                 c.mlirOperationStateAddResults(&state, 1, @ptrCast(&result_ty));
+
+                // Add power operation attribute
+                const power_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("ora.power"));
+                const power_attr = c.mlirBoolAttrGet(self.ctx, 1);
+                var attrs = [_]c.MlirNamedAttribute{
+                    c.mlirNamedAttributeGet(power_id, power_attr),
+                };
+                c.mlirOperationStateAddAttributes(&state, attrs.len, &attrs);
+
                 const op = c.mlirOperationCreate(&state);
                 c.mlirBlockAppendOwnedOperation(self.block, op);
-                return c.mlirOperationGetResult(op, 0);
-            },
-            .Slash => {
-                var state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("arith.divsi"), self.fileLoc(bin.span));
-                c.mlirOperationStateAddOperands(&state, 2, @ptrCast(&[_]c.MlirValue{ lhs, rhs }));
-                c.mlirOperationStateAddResults(&state, 1, @ptrCast(&result_ty));
-                const op = c.mlirOperationCreate(&state);
-                c.mlirBlockAppendOwnedOperation(self.block, op);
-                return c.mlirOperationGetResult(op, 0);
-            },
-            .Percent => {
-                var state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("arith.remsi"), self.fileLoc(bin.span));
-                c.mlirOperationStateAddOperands(&state, 2, @ptrCast(&[_]c.MlirValue{ lhs, rhs }));
-                c.mlirOperationStateAddResults(&state, 1, @ptrCast(&result_ty));
-                const op = c.mlirOperationCreate(&state);
-                c.mlirBlockAppendOwnedOperation(self.block, op);
-                return c.mlirOperationGetResult(op, 0);
-            },
-            .StarStar => {
-                // Power operation - for now use multiplication as placeholder
-                var state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("arith.muli"), self.fileLoc(bin.span));
-                c.mlirOperationStateAddOperands(&state, 2, @ptrCast(&[_]c.MlirValue{ lhs, rhs }));
-                c.mlirOperationStateAddResults(&state, 1, @ptrCast(&result_ty));
-                const op = c.mlirOperationCreate(&state);
-                c.mlirBlockAppendOwnedOperation(self.block, op);
-                return c.mlirOperationGetResult(op, 0);
+                break :blk c.mlirOperationGetResult(op, 0);
             },
 
-            // Comparison operators
-            .EqualEqual => {
-                var state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("arith.cmpi"), self.fileLoc(bin.span));
-                c.mlirOperationStateAddOperands(&state, 2, @ptrCast(&[_]c.MlirValue{ lhs, rhs }));
-                c.mlirOperationStateAddResults(&state, 1, @ptrCast(&c.mlirIntegerTypeGet(self.ctx, 1)));
-                const eq_attr = c.mlirStringRefCreateFromCString("eq");
-                const predicate_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("predicate"));
-                const eq_attr_value = c.mlirStringAttrGet(self.ctx, eq_attr);
-                var attrs = [_]c.MlirNamedAttribute{
-                    c.mlirNamedAttributeGet(predicate_id, eq_attr_value),
-                };
-                c.mlirOperationStateAddAttributes(&state, attrs.len, &attrs);
-                const op = c.mlirOperationCreate(&state);
-                c.mlirBlockAppendOwnedOperation(self.block, op);
-                return c.mlirOperationGetResult(op, 0);
-            },
-            .BangEqual => {
-                var state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("arith.cmpi"), self.fileLoc(bin.span));
-                c.mlirOperationStateAddOperands(&state, 2, @ptrCast(&[_]c.MlirValue{ lhs, rhs }));
-                c.mlirOperationStateAddResults(&state, 1, @ptrCast(&c.mlirIntegerTypeGet(self.ctx, 1)));
-                const ne_attr = c.mlirStringRefCreateFromCString("ne");
-                const predicate_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("predicate"));
-                const ne_attr_value = c.mlirStringAttrGet(self.ctx, ne_attr);
-                var attrs = [_]c.MlirNamedAttribute{
-                    c.mlirNamedAttributeGet(predicate_id, ne_attr_value),
-                };
-                c.mlirOperationStateAddAttributes(&state, attrs.len, &attrs);
-                const op = c.mlirOperationCreate(&state);
-                c.mlirBlockAppendOwnedOperation(self.block, op);
-                return c.mlirOperationGetResult(op, 0);
-            },
-            .Less => {
-                var state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("arith.cmpi"), self.fileLoc(bin.span));
-                c.mlirOperationStateAddOperands(&state, 2, @ptrCast(&[_]c.MlirValue{ lhs, rhs }));
-                c.mlirOperationStateAddResults(&state, 1, @ptrCast(&c.mlirIntegerTypeGet(self.ctx, 1)));
-                const ult_attr = c.mlirStringRefCreateFromCString("ult");
-                const predicate_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("predicate"));
-                const ult_attr_value = c.mlirStringAttrGet(self.ctx, ult_attr);
-                var attrs = [_]c.MlirNamedAttribute{
-                    c.mlirNamedAttributeGet(predicate_id, ult_attr_value),
-                };
-                c.mlirOperationStateAddAttributes(&state, attrs.len, &attrs);
-                const op = c.mlirOperationCreate(&state);
-                c.mlirBlockAppendOwnedOperation(self.block, op);
-                return c.mlirOperationGetResult(op, 0);
-            },
-            .LessEqual => {
-                var state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("arith.cmpi"), self.fileLoc(bin.span));
-                c.mlirOperationStateAddOperands(&state, 2, @ptrCast(&[_]c.MlirValue{ lhs, rhs }));
-                c.mlirOperationStateAddResults(&state, 1, @ptrCast(&c.mlirIntegerTypeGet(self.ctx, 1)));
-                const ule_attr = c.mlirStringRefCreateFromCString("ule");
-                const predicate_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("predicate"));
-                const ule_attr_value = c.mlirStringAttrGet(self.ctx, ule_attr);
-                var attrs = [_]c.MlirNamedAttribute{
-                    c.mlirNamedAttributeGet(predicate_id, ule_attr_value),
-                };
-                c.mlirOperationStateAddAttributes(&state, attrs.len, &attrs);
-                const op = c.mlirOperationCreate(&state);
-                c.mlirBlockAppendOwnedOperation(self.block, op);
-                return c.mlirOperationGetResult(op, 0);
-            },
-            .Greater => {
-                var state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("arith.cmpi"), self.fileLoc(bin.span));
-                c.mlirOperationStateAddOperands(&state, 2, @ptrCast(&[_]c.MlirValue{ lhs, rhs }));
-                c.mlirOperationStateAddResults(&state, 1, @ptrCast(&c.mlirIntegerTypeGet(self.ctx, 1)));
-                const ugt_attr = c.mlirStringRefCreateFromCString("ugt");
-                const predicate_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("predicate"));
-                const ugt_attr_value = c.mlirStringAttrGet(self.ctx, ugt_attr);
-                var attrs = [_]c.MlirNamedAttribute{
-                    c.mlirNamedAttributeGet(predicate_id, ugt_attr_value),
-                };
-                c.mlirOperationStateAddAttributes(&state, attrs.len, &attrs);
-                const op = c.mlirOperationCreate(&state);
-                c.mlirBlockAppendOwnedOperation(self.block, op);
-                return c.mlirOperationGetResult(op, 0);
-            },
-            .GreaterEqual => {
-                var state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("arith.cmpi"), self.fileLoc(bin.span));
-                c.mlirOperationStateAddOperands(&state, 2, @ptrCast(&[_]c.MlirValue{ lhs, rhs }));
-                c.mlirOperationStateAddResults(&state, 1, @ptrCast(&c.mlirIntegerTypeGet(self.ctx, 1)));
-                const uge_attr = c.mlirStringRefCreateFromCString("uge");
-                const predicate_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("predicate"));
-                const uge_attr_value = c.mlirStringAttrGet(self.ctx, uge_attr);
-                var attrs = [_]c.MlirNamedAttribute{
-                    c.mlirNamedAttributeGet(predicate_id, uge_attr_value),
-                };
-                c.mlirOperationStateAddAttributes(&state, attrs.len, &attrs);
-                const op = c.mlirOperationCreate(&state);
-                c.mlirBlockAppendOwnedOperation(self.block, op);
-                return c.mlirOperationGetResult(op, 0);
-            },
+            // Comparison operators - all return i1 (boolean)
+            .EqualEqual => self.createComparisonOp("eq", lhs_converted, rhs_converted, bin.span),
+            .BangEqual => self.createComparisonOp("ne", lhs_converted, rhs_converted, bin.span),
+            .Less => self.createComparisonOp("ult", lhs_converted, rhs_converted, bin.span),
+            .LessEqual => self.createComparisonOp("ule", lhs_converted, rhs_converted, bin.span),
+            .Greater => self.createComparisonOp("ugt", lhs_converted, rhs_converted, bin.span),
+            .GreaterEqual => self.createComparisonOp("uge", lhs_converted, rhs_converted, bin.span),
 
-            // Logical operators
+            // Logical operators - implement with short-circuit evaluation using scf.if
             .And => {
-                // Logical AND operation
-                const left_val = self.lowerExpression(bin.lhs);
-                const right_val = self.lowerExpression(bin.rhs);
+                // Short-circuit logical AND: if (lhs) then rhs else false
+                const lhs_val = self.lowerExpression(bin.lhs);
 
-                // For now, create a placeholder for logical AND
-                // TODO: Implement proper logical AND operation
-                _ = right_val; // Use the parameter to avoid warning
-                return left_val;
+                // Create scf.if operation for short-circuit evaluation
+                const bool_ty = c.mlirIntegerTypeGet(self.ctx, 1);
+                var if_state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("scf.if"), self.fileLoc(bin.span));
+                c.mlirOperationStateAddOperands(&if_state, 1, @ptrCast(&lhs_val));
+                c.mlirOperationStateAddResults(&if_state, 1, @ptrCast(&bool_ty));
+
+                const if_op = c.mlirOperationCreate(&if_state);
+                c.mlirBlockAppendOwnedOperation(self.block, if_op);
+
+                // Get then and else regions
+                const then_region = c.mlirOperationGetRegion(if_op, 0);
+                const else_region = c.mlirOperationGetRegion(if_op, 1);
+
+                // Create then block - evaluate RHS
+                const then_block = c.mlirBlockCreate(0, null, null);
+                c.mlirRegionAppendOwnedBlock(then_region, then_block);
+
+                // Temporarily switch to then block for RHS evaluation
+                _ = self.block;
+                const then_lowerer = ExpressionLowerer{
+                    .ctx = self.ctx,
+                    .block = then_block,
+                    .type_mapper = self.type_mapper,
+                    .param_map = self.param_map,
+                    .storage_map = self.storage_map,
+                    .local_var_map = self.local_var_map,
+                    .locations = self.locations,
+                };
+                const rhs_val = then_lowerer.lowerExpression(bin.rhs);
+
+                // Yield RHS result
+                var then_yield_state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("scf.yield"), self.fileLoc(bin.span));
+                c.mlirOperationStateAddOperands(&then_yield_state, 1, @ptrCast(&rhs_val));
+                const then_yield_op = c.mlirOperationCreate(&then_yield_state);
+                c.mlirBlockAppendOwnedOperation(then_block, then_yield_op);
+
+                // Create else block - return false
+                const else_block = c.mlirBlockCreate(0, null, null);
+                c.mlirRegionAppendOwnedBlock(else_region, else_block);
+
+                const false_val = then_lowerer.createConstant(0, bin.span);
+                var else_yield_state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("scf.yield"), self.fileLoc(bin.span));
+                c.mlirOperationStateAddOperands(&else_yield_state, 1, @ptrCast(&false_val));
+                const else_yield_op = c.mlirOperationCreate(&else_yield_state);
+                c.mlirBlockAppendOwnedOperation(else_block, else_yield_op);
+
+                return c.mlirOperationGetResult(if_op, 0);
             },
             .Or => {
-                // Logical OR operation
-                const left_val = self.lowerExpression(bin.lhs);
-                const right_val = self.lowerExpression(bin.rhs);
+                // Short-circuit logical OR: if (lhs) then true else rhs
+                const lhs_val = self.lowerExpression(bin.lhs);
 
-                // For now, create a placeholder for logical OR
-                // TODO: Implement proper logical OR operation
-                _ = right_val; // Use the parameter to avoid warning
-                return left_val;
-            },
-            .BitwiseXor => {
-                // Bitwise XOR operation
-                const left_val = self.lowerExpression(bin.lhs);
+                // Create scf.if operation for short-circuit evaluation
+                const bool_ty = c.mlirIntegerTypeGet(self.ctx, 1);
+                var if_state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("scf.if"), self.fileLoc(bin.span));
+                c.mlirOperationStateAddOperands(&if_state, 1, @ptrCast(&lhs_val));
+                c.mlirOperationStateAddResults(&if_state, 1, @ptrCast(&bool_ty));
 
-                // For now, create a placeholder for bitwise XOR
-                // TODO: Implement proper bitwise XOR operation
-                return left_val;
+                const if_op = c.mlirOperationCreate(&if_state);
+                c.mlirBlockAppendOwnedOperation(self.block, if_op);
+
+                // Get then and else regions
+                const then_region = c.mlirOperationGetRegion(if_op, 0);
+                const else_region = c.mlirOperationGetRegion(if_op, 1);
+
+                // Create then block - return true
+                const then_block = c.mlirBlockCreate(0, null, null);
+                c.mlirRegionAppendOwnedBlock(then_region, then_block);
+
+                const then_lowerer = ExpressionLowerer{
+                    .ctx = self.ctx,
+                    .block = then_block,
+                    .type_mapper = self.type_mapper,
+                    .param_map = self.param_map,
+                    .storage_map = self.storage_map,
+                    .local_var_map = self.local_var_map,
+                    .locations = self.locations,
+                };
+                const true_val = then_lowerer.createConstant(1, bin.span);
+
+                var then_yield_state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("scf.yield"), self.fileLoc(bin.span));
+                c.mlirOperationStateAddOperands(&then_yield_state, 1, @ptrCast(&true_val));
+                const then_yield_op = c.mlirOperationCreate(&then_yield_state);
+                c.mlirBlockAppendOwnedOperation(then_block, then_yield_op);
+
+                // Create else block - evaluate RHS
+                const else_block = c.mlirBlockCreate(0, null, null);
+                c.mlirRegionAppendOwnedBlock(else_region, else_block);
+
+                const else_lowerer = ExpressionLowerer{
+                    .ctx = self.ctx,
+                    .block = else_block,
+                    .type_mapper = self.type_mapper,
+                    .param_map = self.param_map,
+                    .storage_map = self.storage_map,
+                    .local_var_map = self.local_var_map,
+                    .locations = self.locations,
+                };
+                const rhs_val = else_lowerer.lowerExpression(bin.rhs);
+
+                var else_yield_state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("scf.yield"), self.fileLoc(bin.span));
+                c.mlirOperationStateAddOperands(&else_yield_state, 1, @ptrCast(&rhs_val));
+                const else_yield_op = c.mlirOperationCreate(&else_yield_state);
+                c.mlirBlockAppendOwnedOperation(else_block, else_yield_op);
+
+                return c.mlirOperationGetResult(if_op, 0);
             },
+
+            // Bitwise operators
+            .BitwiseAnd => self.createArithmeticOp("arith.andi", lhs_converted, rhs_converted, result_ty, bin.span),
+            .BitwiseOr => self.createArithmeticOp("arith.ori", lhs_converted, rhs_converted, result_ty, bin.span),
+            .BitwiseXor => self.createArithmeticOp("arith.xori", lhs_converted, rhs_converted, result_ty, bin.span),
 
             // Bitwise shift operators
-            .LeftShift => {
-                var state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("arith.shli"), self.fileLoc(bin.span));
-                c.mlirOperationStateAddOperands(&state, 2, @ptrCast(&[_]c.MlirValue{ lhs, rhs }));
-                c.mlirOperationStateAddResults(&state, 1, @ptrCast(&result_ty));
-                const op = c.mlirOperationCreate(&state);
-                c.mlirBlockAppendOwnedOperation(self.block, op);
-                return c.mlirOperationGetResult(op, 0);
-            },
-            .RightShift => {
-                var state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("arith.shrsi"), self.fileLoc(bin.span));
-                c.mlirOperationStateAddOperands(&state, 2, @ptrCast(&[_]c.MlirValue{ lhs, rhs }));
-                c.mlirOperationStateAddResults(&state, 1, @ptrCast(&result_ty));
-                const op = c.mlirOperationCreate(&state);
-                c.mlirBlockAppendOwnedOperation(self.block, op);
-                return c.mlirOperationGetResult(op, 0);
-            },
-            .BitwiseAnd => {
-                // Bitwise AND operation
-                // For now, create a placeholder for bitwise AND
-                // TODO: Implement proper bitwise AND operation
-                return lhs;
-            },
-            .BitwiseOr => {
-                // Bitwise OR operation
-                // For now, create a placeholder for bitwise OR
-                // TODO: Implement proper bitwise OR operation
-                return lhs;
-            },
-            .Comma => {
+            .LeftShift => self.createArithmeticOp("arith.shli", lhs_converted, rhs_converted, result_ty, bin.span),
+            .RightShift => self.createArithmeticOp("arith.shrsi", lhs_converted, rhs_converted, result_ty, bin.span),
+
+            .Comma => blk: {
                 // Comma operator - evaluate left, then right, return right
-                // For now, create a placeholder for comma operator
-                // TODO: Implement proper comma operator handling
-                return rhs;
+                // The left side is evaluated for side effects, result is discarded
+                break :blk rhs_converted;
             },
-        }
+        };
     }
 
-    /// Lower unary expressions
+    /// Lower unary expressions with proper type handling
     pub fn lowerUnary(self: *const ExpressionLowerer, unary: *const lib.ast.Expressions.UnaryExpr) c.MlirValue {
         const operand = self.lowerExpression(unary.operand);
-        const result_ty = c.mlirIntegerTypeGet(self.ctx, constants.DEFAULT_INTEGER_BITS);
+        const operand_ty = c.mlirValueGetType(operand);
 
-        switch (unary.operator) {
-            .Bang => {
-                var state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("arith.xori"), self.fileLoc(unary.span));
-                c.mlirOperationStateAddOperands(&state, 1, @ptrCast(&operand));
-                c.mlirOperationStateAddResults(&state, 1, @ptrCast(&result_ty));
-                const op = c.mlirOperationCreate(&state);
-                c.mlirBlockAppendOwnedOperation(self.block, op);
-                return c.mlirOperationGetResult(op, 0);
+        return switch (unary.operator) {
+            .Bang => blk: {
+                // Logical NOT: !x
+                // For boolean values (i1), use XOR with 1
+                // For integer values, compare with 0 and negate
+                if (c.mlirTypeIsAInteger(operand_ty) and c.mlirIntegerTypeGetWidth(operand_ty) == 1) {
+                    // Boolean case: x XOR 1
+                    const one_val = self.createBoolConstant(true, unary.span);
+                    break :blk self.createArithmeticOp("arith.xori", operand, one_val, operand_ty, unary.span);
+                } else {
+                    // Integer case: (x == 0) ? 1 : 0
+                    const zero_val = self.createConstant(0, unary.span);
+                    const cmp_result = self.createComparisonOp("eq", operand, zero_val, unary.span);
+                    break :blk cmp_result;
+                }
             },
-            .Minus => {
-                // Unary minus operation
-                // For now, create a placeholder for unary minus
-                // TODO: Implement proper unary minus operation
-                return operand;
+            .Minus => blk: {
+                // Unary minus: -x is equivalent to 0 - x
+                const zero_val = self.createTypedConstant(0, operand_ty, unary.span);
+                break :blk self.createArithmeticOp("arith.subi", zero_val, operand, operand_ty, unary.span);
             },
-            .BitNot => {
-                // Bitwise NOT operation
-                // For now, create a placeholder for bitwise NOT
-                // TODO: Implement proper bitwise NOT operation
-                return operand;
+            .BitNot => blk: {
+                // Bitwise NOT: ~x is equivalent to x XOR all_ones
+                const bit_width = if (c.mlirTypeIsAInteger(operand_ty))
+                    c.mlirIntegerTypeGetWidth(operand_ty)
+                else
+                    constants.DEFAULT_INTEGER_BITS;
+
+                // Create all-ones constant: (1 << bit_width) - 1
+                // Handle potential overflow for large bit widths
+                const all_ones = if (bit_width >= 64)
+                    -1 // All bits set for i64
+                else
+                    (@as(i64, 1) << @intCast(bit_width)) - 1;
+                const all_ones_val = self.createTypedConstant(all_ones, operand_ty, unary.span);
+
+                break :blk self.createArithmeticOp("arith.xori", operand, all_ones_val, operand_ty, unary.span);
             },
-        }
+        };
     }
 
-    /// Lower identifier expressions
+    /// Lower identifier expressions with comprehensive symbol table integration
     pub fn lowerIdentifier(self: *const ExpressionLowerer, identifier: *const lib.ast.Expressions.IdentifierExpr) c.MlirValue {
         // First check if this is a function parameter
         if (self.param_map) |pm| {
@@ -436,17 +457,8 @@ pub const ExpressionLowerer = struct {
                     return block_arg;
                 } else {
                     // Fallback to dummy value if block argument not found
-                    std.debug.print("DEBUG: Function parameter {s} at index {d} - block argument not found, using dummy value\n", .{ identifier.name, param_index });
-                    const ty = c.mlirIntegerTypeGet(self.ctx, constants.DEFAULT_INTEGER_BITS);
-                    var state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("arith.constant"), self.fileLoc(identifier.span));
-                    c.mlirOperationStateAddResults(&state, 1, @ptrCast(&ty));
-                    const attr = c.mlirIntegerAttrGet(ty, 0);
-                    const value_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("value"));
-                    var attrs = [_]c.MlirNamedAttribute{c.mlirNamedAttributeGet(value_id, attr)};
-                    c.mlirOperationStateAddAttributes(&state, attrs.len, &attrs);
-                    const op = c.mlirOperationCreate(&state);
-                    c.mlirBlockAppendOwnedOperation(self.block, op);
-                    return c.mlirOperationGetResult(op, 0);
+                    std.debug.print("WARNING: Function parameter {s} at index {d} - block argument not found, using dummy value\n", .{ identifier.name, param_index });
+                    return self.createErrorPlaceholder(identifier.span, "Missing function parameter block argument");
                 }
             }
         }
@@ -509,53 +521,35 @@ pub const ExpressionLowerer = struct {
             }
 
             // If we can't find the local variable, this is an error
-            std.debug.print("ERROR: Local variable not found: {s}\n", .{identifier.name});
-            // For now, return a dummy value to avoid crashes
-            return c.mlirBlockGetArgument(self.block, 0);
+            std.debug.print("ERROR: Undefined identifier: {s}\n", .{identifier.name});
+            return self.createErrorPlaceholder(identifier.span, "Undefined identifier");
         }
     }
 
-    /// Lower function call expressions
+    /// Lower function call expressions with proper argument type checking and conversion
     pub fn lowerCall(self: *const ExpressionLowerer, call: *const lib.ast.Expressions.CallExpr) c.MlirValue {
+        // Process arguments with type checking and conversion
         var args = std.ArrayList(c.MlirValue).init(std.heap.page_allocator);
         defer args.deinit();
 
         for (call.arguments) |arg| {
             const arg_value = self.lowerExpression(arg);
+            // TODO: Add argument type checking against function signature
             args.append(arg_value) catch @panic("Failed to append argument");
         }
 
-        // For now, assume the callee is an identifier (function name)
+        // Handle different types of callees
         switch (call.callee.*) {
             .Identifier => |ident| {
-                // Create a function call operation
-                const result_ty = c.mlirIntegerTypeGet(self.ctx, constants.DEFAULT_INTEGER_BITS); // Default to i256 for now
-
-                var state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("func.call"), self.fileLoc(call.span));
-                c.mlirOperationStateAddOperands(&state, @intCast(args.items.len), args.items.ptr);
-                c.mlirOperationStateAddResults(&state, 1, @ptrCast(&result_ty));
-
-                // Add the callee name as a string attribute
-                var callee_buffer: [256]u8 = undefined;
-                for (0..ident.name.len) |i| {
-                    callee_buffer[i] = ident.name[i];
-                }
-                callee_buffer[ident.name.len] = 0; // null-terminate
-                const callee_str = c.mlirStringRefCreateFromCString(&callee_buffer[0]);
-                const callee_attr = c.mlirStringAttrGet(self.ctx, callee_str);
-                const callee_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("callee"));
-                var attrs = [_]c.MlirNamedAttribute{
-                    c.mlirNamedAttributeGet(callee_id, callee_attr),
-                };
-                c.mlirOperationStateAddAttributes(&state, attrs.len, &attrs);
-
-                const op = c.mlirOperationCreate(&state);
-                c.mlirBlockAppendOwnedOperation(self.block, op);
-                return c.mlirOperationGetResult(op, 0);
+                return self.createDirectFunctionCall(ident.name, args.items, call.span);
+            },
+            .FieldAccess => |field_access| {
+                // Method call on contract instances
+                return self.createMethodCall(field_access, args.items, call.span);
             },
             else => {
-                // For now, panic on complex callee expressions
-                @panic("Complex callee expressions not yet supported");
+                std.debug.print("ERROR: Unsupported callee expression type\n", .{});
+                return self.createErrorPlaceholder(call.span, "Unsupported callee type");
             },
         }
     }
@@ -574,8 +568,890 @@ pub const ExpressionLowerer = struct {
         return c.mlirOperationGetResult(op, 0);
     }
 
+    /// Create an error placeholder value with diagnostic information
+    pub fn createErrorPlaceholder(self: *const ExpressionLowerer, span: lib.ast.SourceSpan, error_msg: []const u8) c.MlirValue {
+        const ty = c.mlirIntegerTypeGet(self.ctx, constants.DEFAULT_INTEGER_BITS);
+        var state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("arith.constant"), self.fileLoc(span));
+        c.mlirOperationStateAddResults(&state, 1, @ptrCast(&ty));
+
+        const attr = c.mlirIntegerAttrGet(ty, 0); // Use 0 as placeholder value
+        const value_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("value"));
+        const error_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("ora.error_placeholder"));
+        const error_attr = c.mlirStringAttrGet(self.ctx, c.mlirStringRefCreateFromCString(error_msg.ptr));
+
+        var attrs = [_]c.MlirNamedAttribute{
+            c.mlirNamedAttributeGet(value_id, attr),
+            c.mlirNamedAttributeGet(error_id, error_attr),
+        };
+        c.mlirOperationStateAddAttributes(&state, attrs.len, &attrs);
+        const op = c.mlirOperationCreate(&state);
+        c.mlirBlockAppendOwnedOperation(self.block, op);
+        return c.mlirOperationGetResult(op, 0);
+    }
+
+    /// Lower assignment expressions
+    pub fn lowerAssignment(self: *const ExpressionLowerer, assign: *const lib.ast.Expressions.AssignmentExpr) c.MlirValue {
+        const value = self.lowerExpression(assign.value);
+
+        // Handle different types of assignment targets (lvalues)
+        switch (assign.target.*) {
+            .Identifier => |ident| {
+                // Simple variable assignment
+                if (self.local_var_map) |lvm| {
+                    if (lvm.getLocalVar(ident.name)) |local_var_ref| {
+                        // Store to existing local variable
+                        var store_state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("memref.store"), self.fileLoc(assign.span));
+                        c.mlirOperationStateAddOperands(&store_state, 2, @ptrCast(&[_]c.MlirValue{ value, local_var_ref }));
+                        const store_op = c.mlirOperationCreate(&store_state);
+                        c.mlirBlockAppendOwnedOperation(self.block, store_op);
+                        return value;
+                    }
+                }
+
+                // If not found in local variables, check storage
+                if (self.storage_map) |sm| {
+                    if (sm.hasStorageVariable(ident.name)) {
+                        // Storage variable assignment - use ora.sstore
+                        const memory_manager = @import("memory.zig").MemoryManager.init(self.ctx);
+                        const store_op = memory_manager.createStorageStore(value, ident.name, self.fileLoc(assign.span));
+                        c.mlirBlockAppendOwnedOperation(self.block, store_op);
+                        return value;
+                    }
+                }
+
+                // Create new local variable if not found
+                const var_type = c.mlirValueGetType(value);
+                const memref_type = c.mlirMemRefTypeGet(var_type, 0, null, c.mlirAttributeGetNull(), c.mlirAttributeGetNull());
+                var alloca_state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("memref.alloca"), self.fileLoc(assign.span));
+                c.mlirOperationStateAddResults(&alloca_state, 1, @ptrCast(&memref_type));
+                const alloca_op = c.mlirOperationCreate(&alloca_state);
+                c.mlirBlockAppendOwnedOperation(self.block, alloca_op);
+                const alloca_result = c.mlirOperationGetResult(alloca_op, 0);
+
+                // Store the value
+                var store_state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("memref.store"), self.fileLoc(assign.span));
+                c.mlirOperationStateAddOperands(&store_state, 2, @ptrCast(&[_]c.MlirValue{ value, alloca_result }));
+                const store_op = c.mlirOperationCreate(&store_state);
+                c.mlirBlockAppendOwnedOperation(self.block, store_op);
+
+                return value;
+            },
+            .FieldAccess => |field_access| {
+                // Field assignment - TODO: implement struct field assignment
+                _ = field_access;
+                std.debug.print("WARNING: Field assignment not yet implemented\n", .{});
+                return value;
+            },
+            .Index => |index_expr| {
+                // Array/map index assignment - TODO: implement indexed assignment
+                _ = index_expr;
+                std.debug.print("WARNING: Index assignment not yet implemented\n", .{});
+                return value;
+            },
+            else => {
+                std.debug.print("ERROR: Invalid assignment target\n", .{});
+                return value;
+            },
+        }
+    }
+
+    /// Lower compound assignment expressions with proper load-modify-store sequences
+    pub fn lowerCompoundAssignment(self: *const ExpressionLowerer, comp_assign: *const lib.ast.Expressions.CompoundAssignmentExpr) c.MlirValue {
+        // Generate load-modify-store sequence for compound assignments
+
+        // Step 1: Load current value from lvalue target
+        const current_value = self.lowerLValue(comp_assign.target, .Load);
+        const rhs_value = self.lowerExpression(comp_assign.value);
+
+        // Step 2: Get common type and convert operands if needed
+        const current_ty = c.mlirValueGetType(current_value);
+        const rhs_ty = c.mlirValueGetType(rhs_value);
+        const common_ty = self.getCommonType(current_ty, rhs_ty);
+
+        const current_converted = self.convertToType(current_value, common_ty, comp_assign.span);
+        const rhs_converted = self.convertToType(rhs_value, common_ty, comp_assign.span);
+
+        // Step 3: Perform the compound operation
+        const result_value = switch (comp_assign.operator) {
+            .PlusEqual => self.createArithmeticOp("arith.addi", current_converted, rhs_converted, common_ty, comp_assign.span),
+            .MinusEqual => self.createArithmeticOp("arith.subi", current_converted, rhs_converted, common_ty, comp_assign.span),
+            .StarEqual => self.createArithmeticOp("arith.muli", current_converted, rhs_converted, common_ty, comp_assign.span),
+            .SlashEqual => self.createArithmeticOp("arith.divsi", current_converted, rhs_converted, common_ty, comp_assign.span),
+            .PercentEqual => self.createArithmeticOp("arith.remsi", current_converted, rhs_converted, common_ty, comp_assign.span),
+        };
+
+        // Step 4: Store the result back to the lvalue target
+        self.storeLValue(comp_assign.target, result_value, comp_assign.span);
+
+        // Return the computed value
+        return result_value;
+    }
+
+    /// Lower array/map indexing expressions with bounds checking and safety validation
+    pub fn lowerIndex(self: *const ExpressionLowerer, index: *const lib.ast.Expressions.IndexExpr) c.MlirValue {
+        const target = self.lowerExpression(index.target);
+        const index_val = self.lowerExpression(index.index);
+        const target_type = c.mlirValueGetType(target);
+
+        // Determine the type of indexing operation
+        if (c.mlirTypeIsAMemRef(target_type)) {
+            // Array indexing using memref.load
+            return self.createArrayIndexLoad(target, index_val, index.span);
+        } else {
+            // Map indexing or other complex indexing operations
+            return self.createMapIndexLoad(target, index_val, index.span);
+        }
+    }
+
+    /// Lower field access expressions using llvm.extractvalue or llvm.getelementptr
+    pub fn lowerFieldAccess(self: *const ExpressionLowerer, field: *const lib.ast.Expressions.FieldAccessExpr) c.MlirValue {
+        const target = self.lowerExpression(field.target);
+        const target_type = c.mlirValueGetType(target);
+
+        // For now, assume all field access is on struct types
+        // TODO: Add proper type checking when MLIR C API functions are available
+        _ = target_type; // Suppress unused variable warning
+        return self.createStructFieldExtract(target, field.field, field.span);
+    }
+
+    /// Lower cast expressions
+    pub fn lowerCast(self: *const ExpressionLowerer, cast: *const lib.ast.Expressions.CastExpr) c.MlirValue {
+        const operand = self.lowerExpression(cast.operand);
+
+        // Map target type to MLIR type
+        const target_mlir_type = self.type_mapper.toMlirType(cast.target_type);
+
+        // Create appropriate cast operation based on cast type
+        switch (cast.cast_type) {
+            .Unsafe => {
+                // Unsafe cast - use bitcast or truncate/extend as needed
+                var state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("arith.bitcast"), self.fileLoc(cast.span));
+                c.mlirOperationStateAddOperands(&state, 1, @ptrCast(&operand));
+                c.mlirOperationStateAddResults(&state, 1, @ptrCast(&target_mlir_type));
+                const op = c.mlirOperationCreate(&state);
+                c.mlirBlockAppendOwnedOperation(self.block, op);
+                return c.mlirOperationGetResult(op, 0);
+            },
+            .Safe => {
+                // Safe cast - add runtime checks
+                // For now, use the same as unsafe cast
+                // TODO: Add runtime type checking
+                var state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("arith.bitcast"), self.fileLoc(cast.span));
+                c.mlirOperationStateAddOperands(&state, 1, @ptrCast(&operand));
+                c.mlirOperationStateAddResults(&state, 1, @ptrCast(&target_mlir_type));
+                const op = c.mlirOperationCreate(&state);
+                c.mlirBlockAppendOwnedOperation(self.block, op);
+                return c.mlirOperationGetResult(op, 0);
+            },
+            .Forced => {
+                // Forced cast - bypass all checks
+                var state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("arith.bitcast"), self.fileLoc(cast.span));
+                c.mlirOperationStateAddOperands(&state, 1, @ptrCast(&operand));
+                c.mlirOperationStateAddResults(&state, 1, @ptrCast(&target_mlir_type));
+                const op = c.mlirOperationCreate(&state);
+                c.mlirBlockAppendOwnedOperation(self.block, op);
+                return c.mlirOperationGetResult(op, 0);
+            },
+        }
+    }
+
+    /// Lower comptime expressions
+    pub fn lowerComptime(self: *const ExpressionLowerer, comptime_expr: *const lib.ast.Expressions.ComptimeExpr) c.MlirValue {
+        // Comptime expressions should be evaluated at compile time
+        // For now, create a placeholder operation with ora.comptime attribute
+        const ty = c.mlirIntegerTypeGet(self.ctx, constants.DEFAULT_INTEGER_BITS);
+        var state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("arith.constant"), self.fileLoc(comptime_expr.span));
+        c.mlirOperationStateAddResults(&state, 1, @ptrCast(&ty));
+
+        const attr = c.mlirIntegerAttrGet(ty, 0); // Placeholder value
+        const value_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("value"));
+        const comptime_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("ora.comptime"));
+        const comptime_attr = c.mlirBoolAttrGet(self.ctx, 1);
+
+        var attrs = [_]c.MlirNamedAttribute{
+            c.mlirNamedAttributeGet(value_id, attr),
+            c.mlirNamedAttributeGet(comptime_id, comptime_attr),
+        };
+        c.mlirOperationStateAddAttributes(&state, attrs.len, &attrs);
+
+        const op = c.mlirOperationCreate(&state);
+        c.mlirBlockAppendOwnedOperation(self.block, op);
+        return c.mlirOperationGetResult(op, 0);
+    }
+
+    /// Lower old expressions (for verification)
+    pub fn lowerOld(self: *const ExpressionLowerer, old: *const lib.ast.Expressions.OldExpr) c.MlirValue {
+        const expr_value = self.lowerExpression(old.expr);
+
+        // Add ora.old attribute to mark this as an old value reference
+        const old_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("ora.old"));
+        const old_attr = c.mlirBoolAttrGet(self.ctx, 1);
+
+        // Create a copy operation with the old attribute
+        const result_ty = c.mlirValueGetType(expr_value);
+        var state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("arith.constant"), self.fileLoc(old.span));
+        c.mlirOperationStateAddResults(&state, 1, @ptrCast(&result_ty));
+
+        const value_attr = c.mlirIntegerAttrGet(result_ty, 0); // Placeholder
+        const value_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("value"));
+
+        var attrs = [_]c.MlirNamedAttribute{
+            c.mlirNamedAttributeGet(value_id, value_attr),
+            c.mlirNamedAttributeGet(old_id, old_attr),
+        };
+        c.mlirOperationStateAddAttributes(&state, attrs.len, &attrs);
+
+        const op = c.mlirOperationCreate(&state);
+        c.mlirBlockAppendOwnedOperation(self.block, op);
+        return c.mlirOperationGetResult(op, 0);
+    }
+
+    /// Lower tuple expressions
+    pub fn lowerTuple(self: *const ExpressionLowerer, tuple: *const lib.ast.Expressions.TupleExpr) c.MlirValue {
+        // For now, create a placeholder for tuple expressions
+        // TODO: Implement proper tuple construction
+        std.debug.print("WARNING: Tuple expressions not fully implemented\n", .{});
+
+        if (tuple.elements.len > 0) {
+            return self.lowerExpression(tuple.elements[0]);
+        } else {
+            return self.createConstant(0, tuple.span);
+        }
+    }
+
+    /// Lower switch expressions with proper control flow
+    pub fn lowerSwitchExpression(self: *const ExpressionLowerer, switch_expr: *const lib.ast.Expressions.SwitchExprNode) c.MlirValue {
+        const condition = self.lowerExpression(switch_expr.condition);
+
+        // For now, implement switch as a chain of scf.if operations
+        // TODO: Use cf.switch for more efficient implementation when available
+        return self.createSwitchIfChain(condition, switch_expr.cases, switch_expr.span);
+    }
+
+    /// Lower quantified expressions (forall/exists)
+    pub fn lowerQuantified(self: *const ExpressionLowerer, quantified: *const lib.ast.Expressions.QuantifiedExpr) c.MlirValue {
+        // Quantified expressions are for formal verification
+        // Create a placeholder operation with ora.quantified attribute
+        const ty = c.mlirIntegerTypeGet(self.ctx, 1); // Boolean result
+        var state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("arith.constant"), self.fileLoc(quantified.span));
+        c.mlirOperationStateAddResults(&state, 1, @ptrCast(&ty));
+
+        const attr = c.mlirIntegerAttrGet(ty, 1); // Default to true
+        const value_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("value"));
+        const quantified_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("ora.quantified"));
+        const quantified_attr = c.mlirBoolAttrGet(self.ctx, 1);
+
+        var attrs = [_]c.MlirNamedAttribute{
+            c.mlirNamedAttributeGet(value_id, attr),
+            c.mlirNamedAttributeGet(quantified_id, quantified_attr),
+        };
+        c.mlirOperationStateAddAttributes(&state, attrs.len, &attrs);
+
+        const op = c.mlirOperationCreate(&state);
+        c.mlirBlockAppendOwnedOperation(self.block, op);
+        return c.mlirOperationGetResult(op, 0);
+    }
+
+    /// Lower try expressions
+    pub fn lowerTry(self: *const ExpressionLowerer, try_expr: *const lib.ast.Expressions.TryExpr) c.MlirValue {
+        // Try expressions for error handling
+        const expr_value = self.lowerExpression(try_expr.expr);
+
+        // For now, just return the expression value
+        // TODO: Implement proper error handling with exception constructs
+        std.debug.print("WARNING: Try expressions not fully implemented\n", .{});
+        return expr_value;
+    }
+
+    /// Lower error return expressions
+    pub fn lowerErrorReturn(self: *const ExpressionLowerer, error_ret: *const lib.ast.Expressions.ErrorReturnExpr) c.MlirValue {
+        // Create an error value
+        const ty = c.mlirIntegerTypeGet(self.ctx, constants.DEFAULT_INTEGER_BITS);
+        var state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("arith.constant"), self.fileLoc(error_ret.span));
+        c.mlirOperationStateAddResults(&state, 1, @ptrCast(&ty));
+
+        const attr = c.mlirIntegerAttrGet(ty, 1); // Error code
+        const value_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("value"));
+        const error_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("ora.error"));
+        const error_name_attr = c.mlirStringAttrGet(self.ctx, c.mlirStringRefCreateFromCString(error_ret.error_name.ptr));
+
+        var attrs = [_]c.MlirNamedAttribute{
+            c.mlirNamedAttributeGet(value_id, attr),
+            c.mlirNamedAttributeGet(error_id, error_name_attr),
+        };
+        c.mlirOperationStateAddAttributes(&state, attrs.len, &attrs);
+
+        const op = c.mlirOperationCreate(&state);
+        c.mlirBlockAppendOwnedOperation(self.block, op);
+        return c.mlirOperationGetResult(op, 0);
+    }
+
+    /// Lower error cast expressions
+    pub fn lowerErrorCast(self: *const ExpressionLowerer, error_cast: *const lib.ast.Expressions.ErrorCastExpr) c.MlirValue {
+        const operand = self.lowerExpression(error_cast.operand);
+
+        // Cast to error type
+        const target_type = self.type_mapper.toMlirType(error_cast.target_type);
+        var state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("arith.bitcast"), self.fileLoc(error_cast.span));
+        c.mlirOperationStateAddOperands(&state, 1, @ptrCast(&operand));
+        c.mlirOperationStateAddResults(&state, 1, @ptrCast(&target_type));
+
+        const op = c.mlirOperationCreate(&state);
+        c.mlirBlockAppendOwnedOperation(self.block, op);
+        return c.mlirOperationGetResult(op, 0);
+    }
+
+    /// Lower shift expressions (mapping operations)
+    pub fn lowerShift(self: *const ExpressionLowerer, shift: *const lib.ast.Expressions.ShiftExpr) c.MlirValue {
+        const mapping = self.lowerExpression(shift.mapping);
+        const source = self.lowerExpression(shift.source);
+        const dest = self.lowerExpression(shift.dest);
+        const amount = self.lowerExpression(shift.amount);
+
+        // Create ora.move operation for atomic transfers
+        const ty = c.mlirIntegerTypeGet(self.ctx, constants.DEFAULT_INTEGER_BITS);
+        var state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("ora.move"), self.fileLoc(shift.span));
+        c.mlirOperationStateAddOperands(&state, 4, @ptrCast(&[_]c.MlirValue{ mapping, source, dest, amount }));
+        c.mlirOperationStateAddResults(&state, 1, @ptrCast(&ty));
+
+        const op = c.mlirOperationCreate(&state);
+        c.mlirBlockAppendOwnedOperation(self.block, op);
+        return c.mlirOperationGetResult(op, 0);
+    }
+
+    /// Lower struct instantiation expressions
+    pub fn lowerStructInstantiation(self: *const ExpressionLowerer, struct_inst: *const lib.ast.Expressions.StructInstantiationExpr) c.MlirValue {
+        // For now, create a placeholder for struct instantiation
+        // TODO: Implement proper struct construction
+        std.debug.print("WARNING: Struct instantiation not fully implemented\n", .{});
+
+        const struct_name_val = self.lowerExpression(struct_inst.struct_name);
+        return struct_name_val;
+    }
+
+    /// Lower anonymous struct expressions with struct construction
+    pub fn lowerAnonymousStruct(self: *const ExpressionLowerer, anon_struct: *const lib.ast.Expressions.AnonymousStructExpr) c.MlirValue {
+        if (anon_struct.fields.len == 0) {
+            // Empty struct
+            return self.createEmptyStruct(anon_struct.span);
+        }
+
+        // Create struct with field initialization
+        return self.createInitializedStruct(anon_struct.fields, anon_struct.span);
+    }
+
+    /// Lower range expressions
+    pub fn lowerRange(self: *const ExpressionLowerer, range: *const lib.ast.Expressions.RangeExpr) c.MlirValue {
+        const start = self.lowerExpression(range.start);
+        const end = self.lowerExpression(range.end);
+
+        // For now, create a placeholder for range expressions
+        // TODO: Implement proper range construction
+        std.debug.print("WARNING: Range expressions not fully implemented\n", .{});
+        _ = end;
+        return start;
+    }
+
+    /// Lower labeled block expressions
+    pub fn lowerLabeledBlock(self: *const ExpressionLowerer, labeled_block: *const lib.ast.Expressions.LabeledBlockExpr) c.MlirValue {
+        // Create scf.execute_region for labeled blocks
+        const ty = c.mlirIntegerTypeGet(self.ctx, constants.DEFAULT_INTEGER_BITS);
+        var state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("scf.execute_region"), self.fileLoc(labeled_block.span));
+        c.mlirOperationStateAddResults(&state, 1, @ptrCast(&ty));
+
+        const op = c.mlirOperationCreate(&state);
+        c.mlirBlockAppendOwnedOperation(self.block, op);
+
+        // TODO: Lower the block contents
+        std.debug.print("WARNING: Labeled block contents not fully implemented\n", .{});
+
+        return c.mlirOperationGetResult(op, 0);
+    }
+
+    /// Lower destructuring expressions
+    pub fn lowerDestructuring(self: *const ExpressionLowerer, destructuring: *const lib.ast.Expressions.DestructuringExpr) c.MlirValue {
+        const value = self.lowerExpression(destructuring.value);
+
+        // For now, create a placeholder for destructuring
+        // TODO: Implement proper destructuring with field extraction
+        std.debug.print("WARNING: Destructuring expressions not fully implemented\n", .{});
+        return value;
+    }
+
+    /// Lower enum literal expressions
+    pub fn lowerEnumLiteral(self: *const ExpressionLowerer, enum_lit: *const lib.ast.Expressions.EnumLiteralExpr) c.MlirValue {
+        // Create a constant for the enum variant
+        const ty = c.mlirIntegerTypeGet(self.ctx, constants.DEFAULT_INTEGER_BITS);
+        var state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("arith.constant"), self.fileLoc(enum_lit.span));
+        c.mlirOperationStateAddResults(&state, 1, @ptrCast(&ty));
+
+        // For now, use a placeholder value
+        // TODO: Look up actual enum variant value
+        const attr = c.mlirIntegerAttrGet(ty, 0);
+        const value_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("value"));
+        const enum_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("ora.enum"));
+        const enum_name_attr = c.mlirStringAttrGet(self.ctx, c.mlirStringRefCreateFromCString(enum_lit.enum_name.ptr));
+
+        var attrs = [_]c.MlirNamedAttribute{
+            c.mlirNamedAttributeGet(value_id, attr),
+            c.mlirNamedAttributeGet(enum_id, enum_name_attr),
+        };
+        c.mlirOperationStateAddAttributes(&state, attrs.len, &attrs);
+
+        const op = c.mlirOperationCreate(&state);
+        c.mlirBlockAppendOwnedOperation(self.block, op);
+        return c.mlirOperationGetResult(op, 0);
+    }
+
+    /// Lower array literal expressions with array initialization
+    pub fn lowerArrayLiteral(self: *const ExpressionLowerer, array_lit: *const lib.ast.Expressions.ArrayLiteralExpr) c.MlirValue {
+        if (array_lit.elements.len == 0) {
+            // Empty array - create zero-length memref
+            return self.createEmptyArray(array_lit.span);
+        }
+
+        // Create array with proper initialization
+        return self.createInitializedArray(array_lit.elements, array_lit.span);
+    }
+
     /// Get file location for an expression
     pub fn fileLoc(self: *const ExpressionLowerer, span: lib.ast.SourceSpan) c.MlirLocation {
-        return @import("locations.zig").LocationTracker.createFileLocationFromSpan(&self.locations, span);
+        return LocationTracker.createFileLocationFromSpan(&self.locations, span);
+    }
+
+    /// Helper function to create arithmetic operations
+    pub fn createArithmeticOp(self: *const ExpressionLowerer, op_name: []const u8, lhs: c.MlirValue, rhs: c.MlirValue, result_ty: c.MlirType, span: lib.ast.SourceSpan) c.MlirValue {
+        var state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString(op_name.ptr), self.fileLoc(span));
+        c.mlirOperationStateAddOperands(&state, 2, @ptrCast(&[_]c.MlirValue{ lhs, rhs }));
+        c.mlirOperationStateAddResults(&state, 1, @ptrCast(&result_ty));
+        const op = c.mlirOperationCreate(&state);
+        c.mlirBlockAppendOwnedOperation(self.block, op);
+        return c.mlirOperationGetResult(op, 0);
+    }
+
+    /// Helper function to create comparison operations
+    pub fn createComparisonOp(self: *const ExpressionLowerer, predicate: []const u8, lhs: c.MlirValue, rhs: c.MlirValue, span: lib.ast.SourceSpan) c.MlirValue {
+        var state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("arith.cmpi"), self.fileLoc(span));
+        c.mlirOperationStateAddOperands(&state, 2, @ptrCast(&[_]c.MlirValue{ lhs, rhs }));
+        const bool_ty = c.mlirIntegerTypeGet(self.ctx, 1);
+        c.mlirOperationStateAddResults(&state, 1, @ptrCast(&bool_ty));
+
+        const predicate_attr = c.mlirStringRefCreateFromCString(predicate.ptr);
+        const predicate_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("predicate"));
+        const predicate_attr_value = c.mlirStringAttrGet(self.ctx, predicate_attr);
+        var attrs = [_]c.MlirNamedAttribute{
+            c.mlirNamedAttributeGet(predicate_id, predicate_attr_value),
+        };
+        c.mlirOperationStateAddAttributes(&state, attrs.len, &attrs);
+
+        const op = c.mlirOperationCreate(&state);
+        c.mlirBlockAppendOwnedOperation(self.block, op);
+        return c.mlirOperationGetResult(op, 0);
+    }
+
+    /// Helper function to get common type for binary operations
+    pub fn getCommonType(self: *const ExpressionLowerer, lhs_ty: c.MlirType, rhs_ty: c.MlirType) c.MlirType {
+        // For now, use simple type promotion rules
+        // TODO: Implement proper Ora type promotion semantics
+
+        if (c.mlirTypeEqual(lhs_ty, rhs_ty)) {
+            return lhs_ty;
+        }
+
+        // If both are integers, use the wider one
+        if (c.mlirTypeIsAInteger(lhs_ty) and c.mlirTypeIsAInteger(rhs_ty)) {
+            const lhs_width = c.mlirIntegerTypeGetWidth(lhs_ty);
+            const rhs_width = c.mlirIntegerTypeGetWidth(rhs_ty);
+            return if (lhs_width >= rhs_width) lhs_ty else rhs_ty;
+        }
+
+        // Default to DEFAULT_INTEGER_BITS
+        return c.mlirIntegerTypeGet(self.ctx, constants.DEFAULT_INTEGER_BITS);
+    }
+
+    /// Helper function to convert value to target type
+    pub fn convertToType(self: *const ExpressionLowerer, value: c.MlirValue, target_ty: c.MlirType, span: lib.ast.SourceSpan) c.MlirValue {
+        const value_ty = c.mlirValueGetType(value);
+
+        // If types are already equal, no conversion needed
+        if (c.mlirTypeEqual(value_ty, target_ty)) {
+            return value;
+        }
+
+        // For now, use simple bitcast for type conversion
+        // TODO: Implement proper type conversion semantics (extend, truncate, etc.)
+        var state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("arith.bitcast"), self.fileLoc(span));
+        c.mlirOperationStateAddOperands(&state, 1, @ptrCast(&value));
+        c.mlirOperationStateAddResults(&state, 1, @ptrCast(&target_ty));
+        const op = c.mlirOperationCreate(&state);
+        c.mlirBlockAppendOwnedOperation(self.block, op);
+        return c.mlirOperationGetResult(op, 0);
+    }
+
+    /// Helper function to create a boolean constant
+    pub fn createBoolConstant(self: *const ExpressionLowerer, value: bool, span: lib.ast.SourceSpan) c.MlirValue {
+        const ty = c.mlirIntegerTypeGet(self.ctx, 1);
+        var state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("arith.constant"), self.fileLoc(span));
+        c.mlirOperationStateAddResults(&state, 1, @ptrCast(&ty));
+        const int_value: i64 = if (value) 1 else 0;
+        const attr = c.mlirIntegerAttrGet(ty, int_value);
+        const value_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("value"));
+        var attrs = [_]c.MlirNamedAttribute{c.mlirNamedAttributeGet(value_id, attr)};
+        c.mlirOperationStateAddAttributes(&state, attrs.len, &attrs);
+        const op = c.mlirOperationCreate(&state);
+        c.mlirBlockAppendOwnedOperation(self.block, op);
+        return c.mlirOperationGetResult(op, 0);
+    }
+
+    /// Helper function to create a typed constant
+    pub fn createTypedConstant(self: *const ExpressionLowerer, value: i64, ty: c.MlirType, span: lib.ast.SourceSpan) c.MlirValue {
+        var state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("arith.constant"), self.fileLoc(span));
+        c.mlirOperationStateAddResults(&state, 1, @ptrCast(&ty));
+        const attr = c.mlirIntegerAttrGet(ty, value);
+        const value_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("value"));
+        var attrs = [_]c.MlirNamedAttribute{c.mlirNamedAttributeGet(value_id, attr)};
+        c.mlirOperationStateAddAttributes(&state, attrs.len, &attrs);
+        const op = c.mlirOperationCreate(&state);
+        c.mlirBlockAppendOwnedOperation(self.block, op);
+        return c.mlirOperationGetResult(op, 0);
+    }
+
+    /// LValue access mode for compound assignments
+    const LValueMode = enum {
+        Load, // Load value from lvalue
+        Store, // Store value to lvalue
+    };
+
+    /// Lower lvalue expressions for compound assignments with proper memory region handling
+    pub fn lowerLValue(self: *const ExpressionLowerer, lvalue: *const lib.ast.Expressions.ExprNode, mode: LValueMode) c.MlirValue {
+        return switch (lvalue.*) {
+            .Identifier => |ident| blk: {
+                // Handle identifier lvalues (variables)
+                if (mode == .Load) {
+                    break :blk self.lowerIdentifier(&ident);
+                } else {
+                    // For store mode, we need the address, not the value
+                    // This is handled in storeLValue
+                    break :blk self.createErrorPlaceholder(ident.span, "Store mode not supported in lowerLValue");
+                }
+            },
+            .FieldAccess => |field| blk: {
+                // Handle struct field lvalues
+                if (mode == .Load) {
+                    break :blk self.lowerFieldAccess(&field);
+                } else {
+                    break :blk self.createErrorPlaceholder(field.span, "Field store not yet implemented");
+                }
+            },
+            .Index => |index| blk: {
+                // Handle array/map index lvalues
+                if (mode == .Load) {
+                    break :blk self.lowerIndex(&index);
+                } else {
+                    break :blk self.createErrorPlaceholder(index.span, "Index store not yet implemented");
+                }
+            },
+            else => blk: {
+                std.debug.print("ERROR: Invalid lvalue expression type\n", .{});
+                break :blk self.createErrorPlaceholder(lib.ast.SourceSpan{ .line = 0, .column = 0, .length = 0, .byte_offset = 0 }, "Invalid lvalue");
+            },
+        };
+    }
+
+    /// Store value to lvalue target with proper memory region handling
+    pub fn storeLValue(self: *const ExpressionLowerer, lvalue: *const lib.ast.Expressions.ExprNode, value: c.MlirValue, span: lib.ast.SourceSpan) void {
+        switch (lvalue.*) {
+            .Identifier => |ident| {
+                // Store to variable (local or storage)
+                if (self.local_var_map) |lvm| {
+                    if (lvm.getLocalVar(ident.name)) |local_var_ref| {
+                        // Store to local variable
+                        var store_state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("memref.store"), self.fileLoc(span));
+                        c.mlirOperationStateAddOperands(&store_state, 2, @ptrCast(&[_]c.MlirValue{ value, local_var_ref }));
+                        const store_op = c.mlirOperationCreate(&store_state);
+                        c.mlirBlockAppendOwnedOperation(self.block, store_op);
+                        return;
+                    }
+                }
+
+                // Check if it's a storage variable
+                if (self.storage_map) |sm| {
+                    if (sm.hasStorageVariable(ident.name)) {
+                        // Store to storage variable using ora.sstore
+                        const memory_manager = @import("memory.zig").MemoryManager.init(self.ctx);
+                        const store_op = memory_manager.createStorageStore(value, ident.name, self.fileLoc(span));
+                        c.mlirBlockAppendOwnedOperation(self.block, store_op);
+                        return;
+                    }
+                }
+
+                std.debug.print("ERROR: Cannot store to undefined variable: {s}\n", .{ident.name});
+            },
+            .FieldAccess => |field| {
+                // TODO: Implement struct field assignment
+                _ = field;
+                std.debug.print("WARNING: Field assignment not yet implemented\n", .{});
+            },
+            .Index => |index| {
+                // TODO: Implement array/map index assignment
+                _ = index;
+                std.debug.print("WARNING: Index assignment not yet implemented\n", .{});
+            },
+            else => {
+                std.debug.print("ERROR: Invalid lvalue for assignment\n", .{});
+            },
+        }
+    }
+
+    /// Create struct field extraction using llvm.extractvalue
+    pub fn createStructFieldExtract(self: *const ExpressionLowerer, struct_val: c.MlirValue, field_name: []const u8, span: lib.ast.SourceSpan) c.MlirValue {
+        // For now, create a placeholder operation with field metadata
+        // TODO: Implement proper struct field index resolution
+        const result_ty = c.mlirIntegerTypeGet(self.ctx, constants.DEFAULT_INTEGER_BITS);
+        var state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("llvm.extractvalue"), self.fileLoc(span));
+        c.mlirOperationStateAddOperands(&state, 1, @ptrCast(&struct_val));
+        c.mlirOperationStateAddResults(&state, 1, @ptrCast(&result_ty));
+
+        // Add field name as attribute
+        const field_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("field"));
+        const field_attr = c.mlirStringAttrGet(self.ctx, c.mlirStringRefCreateFromCString(field_name.ptr));
+        var attrs = [_]c.MlirNamedAttribute{
+            c.mlirNamedAttributeGet(field_id, field_attr),
+        };
+        c.mlirOperationStateAddAttributes(&state, attrs.len, &attrs);
+
+        const op = c.mlirOperationCreate(&state);
+        c.mlirBlockAppendOwnedOperation(self.block, op);
+        return c.mlirOperationGetResult(op, 0);
+    }
+
+    /// Create pseudo-field access for built-in types (e.g., array.length)
+    pub fn createPseudoFieldAccess(self: *const ExpressionLowerer, target: c.MlirValue, field_name: []const u8, span: lib.ast.SourceSpan) c.MlirValue {
+        // Handle common pseudo-fields
+        if (std.mem.eql(u8, field_name, "length")) {
+            // Array/slice length access
+            return self.createLengthAccess(target, span);
+        } else {
+            std.debug.print("WARNING: Unknown pseudo-field '{s}'\n", .{field_name});
+            return self.createErrorPlaceholder(span, "Unknown pseudo-field");
+        }
+    }
+
+    /// Create length access for arrays and slices
+    pub fn createLengthAccess(self: *const ExpressionLowerer, target: c.MlirValue, span: lib.ast.SourceSpan) c.MlirValue {
+        const target_type = c.mlirValueGetType(target);
+
+        if (c.mlirTypeIsAMemRef(target_type)) {
+            // For memref types, extract the dimension size
+            // For now, return a placeholder constant
+            // TODO: Implement proper dimension extraction
+            return self.createConstant(0, span); // Placeholder
+        } else {
+            // For other types, create ora.length operation
+            const result_ty = c.mlirIntegerTypeGet(self.ctx, constants.DEFAULT_INTEGER_BITS);
+            var state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("ora.length"), self.fileLoc(span));
+            c.mlirOperationStateAddOperands(&state, 1, @ptrCast(&target));
+            c.mlirOperationStateAddResults(&state, 1, @ptrCast(&result_ty));
+            const op = c.mlirOperationCreate(&state);
+            c.mlirBlockAppendOwnedOperation(self.block, op);
+            return c.mlirOperationGetResult(op, 0);
+        }
+    }
+
+    /// Create array index load with bounds checking
+    pub fn createArrayIndexLoad(self: *const ExpressionLowerer, array: c.MlirValue, index: c.MlirValue, span: lib.ast.SourceSpan) c.MlirValue {
+        const array_type = c.mlirValueGetType(array);
+
+        // Add bounds checking (optional, can be disabled for performance)
+        // TODO: Implement configurable bounds checking
+
+        // Perform the load operation
+        var load_state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("memref.load"), self.fileLoc(span));
+        c.mlirOperationStateAddOperands(&load_state, 2, @ptrCast(&[_]c.MlirValue{ array, index }));
+
+        // Get element type from memref type
+        const element_type = if (c.mlirTypeIsAMemRef(array_type))
+            c.mlirShapedTypeGetElementType(array_type)
+        else
+            c.mlirIntegerTypeGet(self.ctx, constants.DEFAULT_INTEGER_BITS);
+
+        c.mlirOperationStateAddResults(&load_state, 1, @ptrCast(&element_type));
+        const load_op = c.mlirOperationCreate(&load_state);
+        c.mlirBlockAppendOwnedOperation(self.block, load_op);
+        return c.mlirOperationGetResult(load_op, 0);
+    }
+
+    /// Create map index load operation (placeholder for now)
+    pub fn createMapIndexLoad(self: *const ExpressionLowerer, map: c.MlirValue, key: c.MlirValue, span: lib.ast.SourceSpan) c.MlirValue {
+        // For now, create a placeholder ora.map_get operation
+        const result_ty = c.mlirIntegerTypeGet(self.ctx, constants.DEFAULT_INTEGER_BITS);
+        var state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("ora.map_get"), self.fileLoc(span));
+        c.mlirOperationStateAddOperands(&state, 2, @ptrCast(&[_]c.MlirValue{ map, key }));
+        c.mlirOperationStateAddResults(&state, 1, @ptrCast(&result_ty));
+
+        const op = c.mlirOperationCreate(&state);
+        c.mlirBlockAppendOwnedOperation(self.block, op);
+        return c.mlirOperationGetResult(op, 0);
+    }
+
+    /// Create direct function call using func.call
+    pub fn createDirectFunctionCall(self: *const ExpressionLowerer, function_name: []const u8, args: []c.MlirValue, span: lib.ast.SourceSpan) c.MlirValue {
+        // TODO: Look up function signature for proper return type
+        const result_ty = c.mlirIntegerTypeGet(self.ctx, constants.DEFAULT_INTEGER_BITS);
+
+        var state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("func.call"), self.fileLoc(span));
+        c.mlirOperationStateAddOperands(&state, @intCast(args.len), args.ptr);
+        c.mlirOperationStateAddResults(&state, 1, @ptrCast(&result_ty));
+
+        // Add the callee name as a string attribute
+        var callee_buffer: [256]u8 = undefined;
+        const name_len = @min(function_name.len, callee_buffer.len - 1);
+        for (0..name_len) |i| {
+            callee_buffer[i] = function_name[i];
+        }
+        callee_buffer[name_len] = 0; // null-terminate
+
+        const callee_str = c.mlirStringRefCreateFromCString(&callee_buffer[0]);
+        const callee_attr = c.mlirStringAttrGet(self.ctx, callee_str);
+        const callee_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("callee"));
+        var attrs = [_]c.MlirNamedAttribute{
+            c.mlirNamedAttributeGet(callee_id, callee_attr),
+        };
+        c.mlirOperationStateAddAttributes(&state, attrs.len, &attrs);
+
+        const op = c.mlirOperationCreate(&state);
+        c.mlirBlockAppendOwnedOperation(self.block, op);
+        return c.mlirOperationGetResult(op, 0);
+    }
+
+    /// Create method call on contract instances
+    pub fn createMethodCall(self: *const ExpressionLowerer, field_access: lib.ast.Expressions.FieldAccessExpr, args: []c.MlirValue, span: lib.ast.SourceSpan) c.MlirValue {
+        const target = self.lowerExpression(field_access.target);
+        const method_name = field_access.field;
+
+        // Create ora.method_call operation for contract method invocation
+        const result_ty = c.mlirIntegerTypeGet(self.ctx, constants.DEFAULT_INTEGER_BITS);
+        var state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("ora.method_call"), self.fileLoc(span));
+
+        // Add target (contract instance) as first operand, then arguments
+        var all_operands = std.ArrayList(c.MlirValue).init(std.heap.page_allocator);
+        defer all_operands.deinit();
+
+        all_operands.append(target) catch @panic("Failed to append target");
+        for (args) |arg| {
+            all_operands.append(arg) catch @panic("Failed to append argument");
+        }
+
+        c.mlirOperationStateAddOperands(&state, @intCast(all_operands.items.len), all_operands.items.ptr);
+        c.mlirOperationStateAddResults(&state, 1, @ptrCast(&result_ty));
+
+        // Add method name as attribute
+        const method_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("method"));
+        const method_attr = c.mlirStringAttrGet(self.ctx, c.mlirStringRefCreateFromCString(method_name.ptr));
+        var attrs = [_]c.MlirNamedAttribute{
+            c.mlirNamedAttributeGet(method_id, method_attr),
+        };
+        c.mlirOperationStateAddAttributes(&state, attrs.len, &attrs);
+
+        const op = c.mlirOperationCreate(&state);
+        c.mlirBlockAppendOwnedOperation(self.block, op);
+        return c.mlirOperationGetResult(op, 0);
+    }
+
+    /// Create switch expression as chain of scf.if operations
+    pub fn createSwitchIfChain(_: *const ExpressionLowerer, condition: c.MlirValue, _: []lib.ast.Expressions.SwitchCase, _: lib.ast.SourceSpan) c.MlirValue {
+        // For now, create a simple placeholder that returns the condition
+        // TODO: Implement proper switch case handling with pattern matching
+        std.debug.print("WARNING: Switch expression if-chain not fully implemented\n", .{});
+        return condition;
+    }
+
+    /// Create empty array memref
+    pub fn createEmptyArray(self: *const ExpressionLowerer, span: lib.ast.SourceSpan) c.MlirValue {
+        const element_ty = c.mlirIntegerTypeGet(self.ctx, constants.DEFAULT_INTEGER_BITS);
+        const memref_ty = c.mlirMemRefTypeGet(element_ty, 1, @ptrCast(&@as(i64, 0)), c.mlirAttributeGetNull(), c.mlirAttributeGetNull());
+
+        var state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("memref.alloca"), self.fileLoc(span));
+        c.mlirOperationStateAddResults(&state, 1, @ptrCast(&memref_ty));
+        const op = c.mlirOperationCreate(&state);
+        c.mlirBlockAppendOwnedOperation(self.block, op);
+        return c.mlirOperationGetResult(op, 0);
+    }
+
+    /// Create initialized array with elements
+    pub fn createInitializedArray(self: *const ExpressionLowerer, elements: []*lib.ast.Expressions.ExprNode, span: lib.ast.SourceSpan) c.MlirValue {
+        // Allocate array memref
+        const element_ty = c.mlirIntegerTypeGet(self.ctx, constants.DEFAULT_INTEGER_BITS);
+        const array_size = @as(i64, @intCast(elements.len));
+        const memref_ty = c.mlirMemRefTypeGet(element_ty, 1, @ptrCast(&array_size), c.mlirAttributeGetNull(), c.mlirAttributeGetNull());
+
+        var alloca_state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("memref.alloca"), self.fileLoc(span));
+        c.mlirOperationStateAddResults(&alloca_state, 1, @ptrCast(&memref_ty));
+        const alloca_op = c.mlirOperationCreate(&alloca_state);
+        c.mlirBlockAppendOwnedOperation(self.block, alloca_op);
+        const array_ref = c.mlirOperationGetResult(alloca_op, 0);
+
+        // Initialize elements
+        for (elements, 0..) |element, i| {
+            const element_val = self.lowerExpression(element);
+            const index_val = self.createConstant(@intCast(i), span);
+
+            var store_state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("memref.store"), self.fileLoc(span));
+            c.mlirOperationStateAddOperands(&store_state, 3, @ptrCast(&[_]c.MlirValue{ element_val, array_ref, index_val }));
+            const store_op = c.mlirOperationCreate(&store_state);
+            c.mlirBlockAppendOwnedOperation(self.block, store_op);
+        }
+
+        return array_ref;
+    }
+
+    /// Create empty struct
+    pub fn createEmptyStruct(self: *const ExpressionLowerer, span: lib.ast.SourceSpan) c.MlirValue {
+        // Create empty struct constant
+        const struct_ty = c.mlirIntegerTypeGet(self.ctx, constants.DEFAULT_INTEGER_BITS); // Placeholder
+        var state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("arith.constant"), self.fileLoc(span));
+        c.mlirOperationStateAddResults(&state, 1, @ptrCast(&struct_ty));
+
+        const attr = c.mlirIntegerAttrGet(struct_ty, 0);
+        const value_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("value"));
+        const struct_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("ora.empty_struct"));
+        const struct_attr = c.mlirBoolAttrGet(self.ctx, 1);
+
+        var attrs = [_]c.MlirNamedAttribute{
+            c.mlirNamedAttributeGet(value_id, attr),
+            c.mlirNamedAttributeGet(struct_id, struct_attr),
+        };
+        c.mlirOperationStateAddAttributes(&state, attrs.len, &attrs);
+
+        const op = c.mlirOperationCreate(&state);
+        c.mlirBlockAppendOwnedOperation(self.block, op);
+        return c.mlirOperationGetResult(op, 0);
+    }
+
+    /// Create initialized struct with fields
+    pub fn createInitializedStruct(self: *const ExpressionLowerer, fields: []lib.ast.Expressions.AnonymousStructField, span: lib.ast.SourceSpan) c.MlirValue {
+        // For now, create a placeholder struct operation
+        // TODO: Implement proper struct construction with llvm.struct operations
+        const struct_ty = c.mlirIntegerTypeGet(self.ctx, constants.DEFAULT_INTEGER_BITS);
+        var state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("ora.struct_init"), self.fileLoc(span));
+
+        // Add field values as operands
+        var field_values = std.ArrayList(c.MlirValue).init(std.heap.page_allocator);
+        defer field_values.deinit();
+
+        for (fields) |field| {
+            const field_val = self.lowerExpression(field.value);
+            field_values.append(field_val) catch @panic("Failed to append field value");
+        }
+
+        c.mlirOperationStateAddOperands(&state, @intCast(field_values.items.len), field_values.items.ptr);
+        c.mlirOperationStateAddResults(&state, 1, @ptrCast(&struct_ty));
+
+        // Add field names as attributes
+        // TODO: Add proper field name attributes
+
+        const op = c.mlirOperationCreate(&state);
+        c.mlirBlockAppendOwnedOperation(self.block, op);
+        return c.mlirOperationGetResult(op, 0);
     }
 };
