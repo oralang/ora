@@ -28,7 +28,7 @@ const sidebars: SidebarsConfig = {
       items: [
         'specifications/index',
         'specifications/grammar',
-        'specifications/hir',
+        'specifications/mlir',
         'specifications/formal-verification',
         'specifications/api',
       ],

@@ -12,13 +12,13 @@ Complete BNF and EBNF grammar specifications for the Ora language, including:
 - Reserved keywords
 - Memory region annotations
 
-### [HIR (High-level Intermediate Representation)](./hir.md)
-Detailed specification of Ora's intermediate representation, covering:
-- Memory model and regions
-- Effect system
-- Type system
-- Node structures
-- Optimization framework
+### [MLIR Integration](./mlir.md)
+Comprehensive documentation of Ora's MLIR lowering system, covering:
+- LLVM MLIR integration
+- Type mapping strategies
+- Memory region semantics
+- Expression and statement lowering
+- Pass management and optimization
 
 ### [Formal Verification](./formal-verification.md)
 Comprehensive documentation of Ora's formal verification system:
@@ -55,7 +55,7 @@ These specifications are living documents that evolve with the language. Contrib
 ## Quick Navigation
 
 - **New to Ora?** Start with the [Grammar](./grammar.md) specification
-- **Compiler development?** Check the [HIR](./hir.md) and [API](./api.md) docs
+- **Compiler development?** Check the [MLIR Integration](./mlir.md) and [API](./api.md) docs
 - **Formal verification?** See the [Formal Verification](./formal-verification.md) guide
 - **Language implementation?** All specifications work together
 

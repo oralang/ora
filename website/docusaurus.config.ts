@@ -85,8 +85,8 @@ const config: Config = {
               label: 'Grammar',
             },
             {
-              to: '/docs/specifications/hir',
-              label: 'HIR',
+              to: '/docs/specifications/mlir',
+              label: 'MLIR',
             },
             {
               to: '/docs/specifications/formal-verification',
@@ -154,8 +154,8 @@ const config: Config = {
               to: '/docs/specifications/grammar',
             },
             {
-              label: 'HIR Design',
-              to: '/docs/specifications/hir',
+              label: 'MLIR Integration',
+              to: '/docs/specifications/mlir',
             },
           ],
         },

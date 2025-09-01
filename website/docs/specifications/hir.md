@@ -1,8 +1,14 @@
 # HIR (High-level Intermediate Representation) Specification
 
+:::warning Deprecated
+This HIR specification is deprecated. The Ora compiler now uses **MLIR (Multi-Level Intermediate Representation)** from the LLVM project as its intermediate representation. 
+
+Please see the [MLIR Integration](./mlir.md) documentation for the current implementation.
+:::
+
 ## Overview
 
-The Ora HIR bridges the AST and codegen phases. It models validated, effect-aware, and optimizable program structure.
+The Ora HIR was originally designed to bridge the AST and codegen phases. It modeled validated, effect-aware, and optimizable program structure. This has been replaced by MLIR integration.
 
 ### Key Features
 - **Explicit effect tracking**
