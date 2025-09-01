@@ -2,6 +2,8 @@
 
 An experimental (yet) smart-contract language and compiler targeting Yul/EVM. Ora emphasizes explicit semantics (types, memory regions, error unions) and a clean compilation pipeline suitable for analysis and verification.
 
+The compiler includes an MLIR (Multi-Level Intermediate Representation) lowering system that leverages the LLVM MLIR framework (https://mlir.llvm.org) for advanced analysis, optimization, and potential alternative code generation paths.
+
 ## Status
 
 - Not production-ready; syntax and semantics are evolving.
@@ -20,6 +22,7 @@ An experimental (yet) smart-contract language and compiler targeting Yul/EVM. Or
   - Zig 0.14.1+
   - CMake (for vendor Solidity libs)
   - Git (for submodules)
+  - MLIR (optional, for MLIR lowering features)
 
 ```bash
 git clone https://github.com/oralang/Ora.git
@@ -156,9 +159,11 @@ src/            // compiler sources (Zig)
   ast/          // AST, type info
   parser/       // lexer/parser
   semantics/    // semantic analyzers
+  mlir/         // MLIR lowering system
   code-bin/     // extra tools (IR/optimizer)
 tests/          // fixtures and test suites
 docs/           // specifications and notes
+website/docs/   // user documentation (Docusaurus)
 vendor/solidity // vendor libs
 ```
 
