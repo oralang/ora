@@ -329,7 +329,7 @@ pub const TestDataGenerator = struct {
             const value = try self.generateNumberLiteral();
             defer self.allocator.free(value);
 
-            try writer.print("    let {s} = {};\n", .{ var_name, value });
+            try writer.print("    let {s} = {any};\n", .{ var_name, value });
         }
 
         try writer.writeAll("}\n");

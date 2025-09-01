@@ -2129,9 +2129,9 @@ pub const AstSerializer = struct {
         if (self.options.pretty_print and !self.options.compact_mode) {
             try writer.writeAll(",\n");
             try self.writeIndent(writer, indent);
-            try writer.print("\"{s}\": {}", .{ key, value });
+            try writer.print("\"{s}\": {any}", .{ key, value });
         } else {
-            try writer.print(",\"{s}\":{}", .{ key, value });
+            try writer.print(",\"{s}\":{any}", .{ key, value });
         }
     }
 
@@ -2142,16 +2142,16 @@ pub const AstSerializer = struct {
 
             // If lexeme is available and include_lexemes option is enabled, include it in the output
             if (self.options.include_lexemes and span.lexeme != null) {
-                try writer.print("\"span\": {{\"line\": {}, \"column\": {}, \"length\": {}, \"lexeme\": \"{s}\"}}", .{ span.line, span.column, span.length, span.lexeme.? });
+                try writer.print("\"span\": {{\"line\": {d}, \"column\": {d}, \"length\": {d}, \"lexeme\": \"{s}\"}}", .{ span.line, span.column, span.length, span.lexeme.? });
             } else {
-                try writer.print("\"span\": {{\"line\": {}, \"column\": {}, \"length\": {}}}", .{ span.line, span.column, span.length });
+                try writer.print("\"span\": {{\"line\": {d}, \"column\": {d}, \"length\": {d}}}", .{ span.line, span.column, span.length });
             }
         } else {
             // Compact mode
             if (self.options.include_lexemes and span.lexeme != null) {
-                try writer.print(",\"span\":{{\"line\":{},\"column\":{},\"length\":{},\"lexeme\":\"{s}\"}}", .{ span.line, span.column, span.length, span.lexeme.? });
+                try writer.print(",\"span\":{{\"line\":{d},\"column\":{d},\"length\":{d},\"lexeme\":\"{s}\"}}", .{ span.line, span.column, span.length, span.lexeme.? });
             } else {
-                try writer.print(",\"span\":{{\"line\":{},\"column\":{},\"length\":{}}}", .{ span.line, span.column, span.length });
+                try writer.print(",\"span\":{{\"line\":{d},\"column\":{d},\"length\":{d}}}", .{ span.line, span.column, span.length });
             }
         }
     }

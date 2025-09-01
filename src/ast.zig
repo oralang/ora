@@ -6,6 +6,7 @@ pub const expressions = @import("ast/expressions.zig");
 pub const statements = @import("ast/statements.zig");
 pub const type_info = @import("ast/type_info.zig");
 pub const ast_visitor = @import("ast/ast_visitor.zig");
+pub const verification = @import("ast/verification.zig");
 
 // Import serializer and type resolver
 const ast_serializer = @import("ast/ast_serializer.zig");
@@ -34,6 +35,7 @@ pub const SourceSpan = struct {
 pub const Expressions = expressions;
 pub const Statements = statements;
 pub const Types = type_info;
+pub const Verification = verification;
 
 // Memory and region types
 pub const Memory = struct {

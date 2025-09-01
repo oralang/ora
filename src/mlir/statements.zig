@@ -799,20 +799,159 @@ pub const StatementLowerer = struct {
     }
 
     /// Lower indexed for loop (for (iterable) |item, index| body)
-    fn lowerIndexedForLoop(_: *const StatementLowerer, _: []const u8, _: []const u8, _: c.MlirValue, _: lib.ast.Statements.BlockNode, _: c.MlirLocation) LoweringError!void {
-        // Similar to simple for loop but with both item and index variables
-        // For now, implement as simple for loop and add index manually
+    fn lowerIndexedForLoop(self: *const StatementLowerer, item_name: []const u8, index_name: []const u8, iterable: c.MlirValue, body: lib.ast.Statements.BlockNode, loc: c.MlirLocation) LoweringError!void {
+        // Create scf.for operation similar to simple for loop
+        var state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("scf.for"), loc);
 
-        std.debug.print("WARNING: Indexed for loops not yet fully implemented\n", .{});
-        return LoweringError.UnsupportedStatement;
+        // Create integer type for loop bounds
+        const zero_ty = c.mlirIntegerTypeGet(self.ctx, constants.DEFAULT_INTEGER_BITS);
+
+        // Create constants for loop bounds
+        var zero_state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("arith.constant"), loc);
+        c.mlirOperationStateAddResults(&zero_state, 1, @ptrCast(&zero_ty));
+        const zero_attr = c.mlirIntegerAttrGet(zero_ty, 0);
+        const value_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("value"));
+        var zero_attrs = [_]c.MlirNamedAttribute{c.mlirNamedAttributeGet(value_id, zero_attr)};
+        c.mlirOperationStateAddAttributes(&zero_state, zero_attrs.len, &zero_attrs);
+        const zero_op = c.mlirOperationCreate(&zero_state);
+        c.mlirBlockAppendOwnedOperation(self.block, zero_op);
+        const lower_bound = c.mlirOperationGetResult(zero_op, 0);
+
+        // Use iterable as upper bound (simplified)
+        const upper_bound = iterable;
+
+        // Create step constant
+        var step_state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("arith.constant"), loc);
+        c.mlirOperationStateAddResults(&step_state, 1, @ptrCast(&zero_ty));
+        const step_attr = c.mlirIntegerAttrGet(zero_ty, 1);
+        var step_attrs = [_]c.MlirNamedAttribute{c.mlirNamedAttributeGet(value_id, step_attr)};
+        c.mlirOperationStateAddAttributes(&step_state, step_attrs.len, &step_attrs);
+        const step_op = c.mlirOperationCreate(&step_state);
+        c.mlirBlockAppendOwnedOperation(self.block, step_op);
+        const step = c.mlirOperationGetResult(step_op, 0);
+
+        // Add operands to scf.for
+        const operands = [_]c.MlirValue{ lower_bound, upper_bound, step };
+        c.mlirOperationStateAddOperands(&state, operands.len, &operands);
+
+        // Create body region with two arguments: index and item
+        const body_region = c.mlirRegionCreate();
+        const body_block = c.mlirBlockCreate(2, @ptrCast(&[_]c.MlirType{ zero_ty, zero_ty }), null);
+        c.mlirRegionInsertOwnedBlock(body_region, 0, body_block);
+        c.mlirOperationStateAddOwnedRegions(&state, 1, @ptrCast(&body_region));
+
+        const for_op = c.mlirOperationCreate(&state);
+        c.mlirBlockAppendOwnedOperation(self.block, for_op);
+
+        // Get the induction variables (index and item)
+        const index_var = c.mlirBlockGetArgument(body_block, 0);
+        const item_var = c.mlirBlockGetArgument(body_block, 1);
+
+        // Add both loop variables to local variable map
+        if (self.local_var_map) |lvm| {
+            lvm.addLocalVar(index_name, index_var) catch {
+                std.debug.print("WARNING: Failed to add index variable to map: {s}\n", .{index_name});
+            };
+            lvm.addLocalVar(item_name, item_var) catch {
+                std.debug.print("WARNING: Failed to add item variable to map: {s}\n", .{item_name});
+            };
+        }
+
+        // Lower the loop body
+        try self.lowerBlockBody(body, body_block);
+
+        // Add scf.yield at end of body
+        var yield_state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("scf.yield"), loc);
+        const yield_op = c.mlirOperationCreate(&yield_state);
+        c.mlirBlockAppendOwnedOperation(body_block, yield_op);
     }
 
     /// Lower destructured for loop (for (iterable) |.{field1, field2}| body)
-    fn lowerDestructuredForLoop(_: *const StatementLowerer, _: lib.ast.Expressions.DestructuringPattern, _: c.MlirValue, _: lib.ast.Statements.BlockNode, _: c.MlirLocation) LoweringError!void {
-        // TODO: Implement destructured for loop
+    fn lowerDestructuredForLoop(self: *const StatementLowerer, pattern: lib.ast.Expressions.DestructuringPattern, iterable: c.MlirValue, body: lib.ast.Statements.BlockNode, loc: c.MlirLocation) LoweringError!void {
+        // Create scf.for operation similar to simple for loop
+        var state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("scf.for"), loc);
 
-        std.debug.print("WARNING: Destructured for loops not yet implemented\n", .{});
-        return LoweringError.UnsupportedStatement;
+        // Create integer type for loop bounds
+        const zero_ty = c.mlirIntegerTypeGet(self.ctx, constants.DEFAULT_INTEGER_BITS);
+
+        // Create constants for loop bounds
+        var zero_state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("arith.constant"), loc);
+        c.mlirOperationStateAddResults(&zero_state, 1, @ptrCast(&zero_ty));
+        const zero_attr = c.mlirIntegerAttrGet(zero_ty, 0);
+        const value_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("value"));
+        var zero_attrs = [_]c.MlirNamedAttribute{c.mlirNamedAttributeGet(value_id, zero_attr)};
+        c.mlirOperationStateAddAttributes(&zero_state, zero_attrs.len, &zero_attrs);
+        const zero_op = c.mlirOperationCreate(&zero_state);
+        c.mlirBlockAppendOwnedOperation(self.block, zero_op);
+        const lower_bound = c.mlirOperationGetResult(zero_op, 0);
+
+        // Use iterable as upper bound (simplified)
+        const upper_bound = iterable;
+
+        // Create step constant
+        var step_state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("arith.constant"), loc);
+        c.mlirOperationStateAddResults(&step_state, 1, @ptrCast(&zero_ty));
+        const step_attr = c.mlirIntegerAttrGet(zero_ty, 1);
+        var step_attrs = [_]c.MlirNamedAttribute{c.mlirNamedAttributeGet(value_id, step_attr)};
+        c.mlirOperationStateAddAttributes(&step_state, step_attrs.len, &step_attrs);
+        const step_op = c.mlirOperationCreate(&step_state);
+        c.mlirBlockAppendOwnedOperation(self.block, step_op);
+        const step = c.mlirOperationGetResult(step_op, 0);
+
+        // Add operands to scf.for
+        const operands = [_]c.MlirValue{ lower_bound, upper_bound, step };
+        c.mlirOperationStateAddOperands(&state, operands.len, &operands);
+
+        // Create body region with one argument: the item to destructure
+        const body_region = c.mlirRegionCreate();
+        const body_block = c.mlirBlockCreate(1, @ptrCast(&zero_ty), null);
+        c.mlirRegionInsertOwnedBlock(body_region, 0, body_block);
+        c.mlirOperationStateAddOwnedRegions(&state, 1, @ptrCast(&body_region));
+
+        const for_op = c.mlirOperationCreate(&state);
+        c.mlirBlockAppendOwnedOperation(self.block, for_op);
+
+        // Get the item variable
+        const item_var = c.mlirBlockGetArgument(body_block, 0);
+
+        // Add destructured fields to local variable map
+        if (self.local_var_map) |lvm| {
+            switch (pattern) {
+                .Struct => |struct_pattern| {
+                    for (struct_pattern, 0..) |field, i| {
+                        // Create field access for each destructured field
+                        var field_access_state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("llvm.extractvalue"), loc);
+                        c.mlirOperationStateAddOperands(&field_access_state, 1, @ptrCast(&item_var));
+
+                        // Add field index as attribute (for now, assume sequential)
+                        const field_index_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("position"));
+                        const field_index_attr = c.mlirIntegerAttrGet(c.mlirIntegerTypeGet(self.ctx, 32), @intCast(i));
+                        var field_attrs = [_]c.MlirNamedAttribute{c.mlirNamedAttributeGet(field_index_id, field_index_attr)};
+                        c.mlirOperationStateAddAttributes(&field_access_state, field_attrs.len, &field_attrs);
+
+                        const field_access_op = c.mlirOperationCreate(&field_access_state);
+                        c.mlirBlockAppendOwnedOperation(body_block, field_access_op);
+                        const field_value = c.mlirOperationGetResult(field_access_op, 0);
+
+                        // Add to variable map
+                        lvm.addLocalVar(field.variable, field_value) catch {
+                            std.debug.print("WARNING: Failed to add destructured field to map: {s}\n", .{field.variable});
+                        };
+                    }
+                },
+                else => {
+                    std.debug.print("WARNING: Unsupported destructuring pattern type\n", .{});
+                },
+            }
+        }
+
+        // Lower the loop body
+        try self.lowerBlockBody(body, body_block);
+
+        // Add scf.yield at end of body
+        var yield_state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("scf.yield"), loc);
+        const yield_op = c.mlirOperationCreate(&yield_state);
+        c.mlirBlockAppendOwnedOperation(body_block, yield_op);
     }
 
     /// Lower switch statements using cf.switch with case blocks
@@ -965,34 +1104,95 @@ pub const StatementLowerer = struct {
 
     /// Lower field access assignments (struct.field = value)
     fn lowerFieldAccessAssignment(self: *const StatementLowerer, field_access: *const lib.ast.Expressions.FieldAccessExpr, value: c.MlirValue, loc: c.MlirLocation) LoweringError!void {
-        // TODO: Implement field access assignment
-        // This would involve:
-        // 1. Lower the target expression to get the struct
-        // 2. Generate llvm.insertvalue or equivalent operation
-        // 3. Store the modified struct back to its location
-        _ = self;
-        _ = field_access;
-        _ = value;
-        _ = loc;
+        // Lower the target expression to get the struct
+        const target = self.expr_lowerer.lowerExpression(field_access.target);
+        const target_type = c.mlirValueGetType(target);
 
-        std.debug.print("WARNING: Field access assignment not yet implemented\n", .{});
-        return LoweringError.UnsupportedStatement;
+        // For struct field assignment, we need to:
+        // 1. Load the current struct value
+        // 2. Insert the new field value
+        // 3. Store the updated struct back
+
+        // Create llvm.insertvalue operation to update the field
+        var insert_state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("llvm.insertvalue"), loc);
+        c.mlirOperationStateAddOperands(&insert_state, 2, @ptrCast(&[_]c.MlirValue{ target, value }));
+
+        // Add field index as attribute (for now, assume field index 0)
+        // TODO: Look up actual field index from struct definition
+        const field_index_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("position"));
+        const field_index_attr = c.mlirIntegerAttrGet(c.mlirIntegerTypeGet(self.ctx, 32), 0);
+        var attrs = [_]c.MlirNamedAttribute{c.mlirNamedAttributeGet(field_index_id, field_index_attr)};
+        c.mlirOperationStateAddAttributes(&insert_state, attrs.len, &attrs);
+
+        // Set result type to be the same as the struct type
+        c.mlirOperationStateAddResults(&insert_state, 1, @ptrCast(&target_type));
+
+        const insert_op = c.mlirOperationCreate(&insert_state);
+        c.mlirBlockAppendOwnedOperation(self.block, insert_op);
+        const updated_struct = c.mlirOperationGetResult(insert_op, 0);
+
+        // If the target is a variable, store the updated struct back
+        if (field_access.target.* == .Identifier) {
+            const ident = field_access.target.Identifier;
+            if (self.local_var_map) |var_map| {
+                if (var_map.getLocalVar(ident.name)) |var_value| {
+                    var store_state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("memref.store"), loc);
+                    c.mlirOperationStateAddOperands(&store_state, 2, @ptrCast(&[_]c.MlirValue{ updated_struct, var_value }));
+                    const store_op = c.mlirOperationCreate(&store_state);
+                    c.mlirBlockAppendOwnedOperation(self.block, store_op);
+                } else {
+                    std.debug.print("ERROR: Variable not found for field assignment: {s}\n", .{ident.name});
+                    return LoweringError.UndefinedSymbol;
+                }
+            } else {
+                std.debug.print("ERROR: No local variable map available for field assignment\n", .{});
+                return LoweringError.UndefinedSymbol;
+            }
+        } else {
+            // For complex field access (e.g., nested structs), use ora.field_store
+            var field_store_state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("ora.field_store"), loc);
+            c.mlirOperationStateAddOperands(&field_store_state, 2, @ptrCast(&[_]c.MlirValue{ updated_struct, target }));
+
+            // Add field name as attribute
+            const field_name_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("field"));
+            const field_name_attr = c.mlirStringAttrGet(self.ctx, c.mlirStringRefCreateFromCString(field_access.field.ptr));
+            var field_attrs = [_]c.MlirNamedAttribute{c.mlirNamedAttributeGet(field_name_id, field_name_attr)};
+            c.mlirOperationStateAddAttributes(&field_store_state, field_attrs.len, &field_attrs);
+
+            const field_store_op = c.mlirOperationCreate(&field_store_state);
+            c.mlirBlockAppendOwnedOperation(self.block, field_store_op);
+        }
     }
 
     /// Lower array/map index assignments (arr[index] = value)
     fn lowerIndexAssignment(self: *const StatementLowerer, index_expr: *const lib.ast.Expressions.IndexExpr, value: c.MlirValue, loc: c.MlirLocation) LoweringError!void {
-        // TODO: Implement index assignment
-        // This would involve:
-        // 1. Lower the target expression to get the array/map
-        // 2. Lower the index expression
-        // 3. Generate memref.store or map store operation
-        _ = self;
-        _ = index_expr;
-        _ = value;
-        _ = loc;
+        // Lower the target expression to get the array/map
+        const target = self.expr_lowerer.lowerExpression(index_expr.target);
+        const index_val = self.expr_lowerer.lowerExpression(index_expr.index);
+        const target_type = c.mlirValueGetType(target);
 
-        std.debug.print("WARNING: Index assignment not yet implemented\n", .{});
-        return LoweringError.UnsupportedStatement;
+        // Determine the type of indexing operation
+        if (c.mlirTypeIsAMemRef(target_type)) {
+            // Array indexing using memref.store
+            var store_state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("memref.store"), loc);
+            c.mlirOperationStateAddOperands(&store_state, 3, @ptrCast(&[_]c.MlirValue{ value, target, index_val }));
+            const store_op = c.mlirOperationCreate(&store_state);
+            c.mlirBlockAppendOwnedOperation(self.block, store_op);
+        } else {
+            // Map indexing or other complex indexing operations
+            // For now, use a generic store operation with ora.map_store attribute
+            var store_state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("ora.store"), loc);
+            c.mlirOperationStateAddOperands(&store_state, 3, @ptrCast(&[_]c.MlirValue{ value, target, index_val }));
+
+            // Add map store attribute
+            const map_store_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("ora.map_store"));
+            const map_store_attr = c.mlirBoolAttrGet(self.ctx, 1);
+            var attrs = [_]c.MlirNamedAttribute{c.mlirNamedAttributeGet(map_store_id, map_store_attr)};
+            c.mlirOperationStateAddAttributes(&store_state, attrs.len, &attrs);
+
+            const store_op = c.mlirOperationCreate(&store_state);
+            c.mlirBlockAppendOwnedOperation(self.block, store_op);
+        }
     }
 
     /// Lower labeled block statements using scf.execute_region

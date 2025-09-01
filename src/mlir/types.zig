@@ -6,12 +6,118 @@ const constants = @import("constants.zig");
 /// Type alias for array struct to match AST definition
 const ArrayStruct = struct { elem: *const lib.ast.type_info.OraType, len: u64 };
 
+/// Advanced type system features for MLIR lowering
+pub const TypeInference = struct {
+    /// Type variable for generic type parameters
+    pub const TypeVariable = struct {
+        name: []const u8,
+        constraints: []const lib.ast.type_info.OraType,
+        resolved_type: ?lib.ast.type_info.OraType,
+    };
+
+    /// Type alias definition
+    pub const TypeAlias = struct {
+        name: []const u8,
+        target_type: lib.ast.type_info.OraType,
+        generic_params: []const TypeVariable,
+    };
+
+    /// Type inference context
+    pub const InferenceContext = struct {
+        type_variables: std.HashMap([]const u8, TypeVariable, std.hash_map.StringContext, std.hash_map.default_max_load_percentage),
+        type_aliases: std.HashMap([]const u8, TypeAlias, std.hash_map.StringContext, std.hash_map.default_max_load_percentage),
+        allocator: std.mem.Allocator,
+
+        pub fn init(allocator: std.mem.Allocator) InferenceContext {
+            return .{
+                .type_variables = std.HashMap([]const u8, TypeVariable, std.hash_map.StringContext, std.hash_map.default_max_load_percentage).init(allocator),
+                .type_aliases = std.HashMap([]const u8, TypeAlias, std.hash_map.StringContext, std.hash_map.default_max_load_percentage).init(allocator),
+                .allocator = allocator,
+            };
+        }
+
+        pub fn deinit(self: *InferenceContext) void {
+            self.type_variables.deinit();
+            self.type_aliases.deinit();
+        }
+
+        /// Add a type variable for generic type parameters
+        pub fn addTypeVariable(self: *InferenceContext, name: []const u8, constraints: []const lib.ast.type_info.OraType) !void {
+            const type_var = TypeVariable{
+                .name = name,
+                .constraints = constraints,
+                .resolved_type = null,
+            };
+            try self.type_variables.put(name, type_var);
+        }
+
+        /// Resolve a type variable to a concrete type
+        pub fn resolveTypeVariable(self: *InferenceContext, name: []const u8, concrete_type: lib.ast.type_info.OraType) !void {
+            if (self.type_variables.getPtr(name)) |type_var| {
+                // Check constraints
+                for (type_var.constraints) |constraint| {
+                    if (!self.isTypeCompatible(concrete_type, constraint)) {
+                        return error.TypeConstraintViolation;
+                    }
+                }
+                type_var.resolved_type = concrete_type;
+            }
+        }
+
+        /// Add a type alias
+        pub fn addTypeAlias(self: *InferenceContext, name: []const u8, target_type: lib.ast.type_info.OraType, generic_params: []const TypeVariable) !void {
+            const alias = TypeAlias{
+                .name = name,
+                .target_type = target_type,
+                .generic_params = generic_params,
+            };
+            try self.type_aliases.put(name, alias);
+        }
+
+        /// Resolve a type alias to its target type
+        pub fn resolveTypeAlias(self: *InferenceContext, name: []const u8) ?lib.ast.type_info.OraType {
+            if (self.type_aliases.get(name)) |alias| {
+                return alias.target_type;
+            }
+            return null;
+        }
+
+        /// Check if two types are compatible for inference
+        pub fn isTypeCompatible(self: *InferenceContext, type1: lib.ast.type_info.OraType, type2: lib.ast.type_info.OraType) bool {
+            _ = self;
+            // Basic compatibility check - can be extended for more complex rules
+            return lib.ast.type_info.OraType.equals(type1, type2) or
+                (type1.isInteger() and type2.isInteger()) or
+                (type1.isUnsignedInteger() and type2.isUnsignedInteger()) or
+                (type1.isSignedInteger() and type2.isSignedInteger());
+        }
+
+        /// Infer the type of an expression based on context
+        pub fn inferExpressionType(self: *InferenceContext, expr_type: lib.ast.type_info.OraType, context_type: ?lib.ast.type_info.OraType) lib.ast.type_info.OraType {
+            if (context_type) |ctx_type| {
+                if (self.isTypeCompatible(expr_type, ctx_type)) {
+                    return ctx_type; // Use context type if compatible
+                }
+            }
+            return expr_type; // Fall back to expression's own type
+        }
+    };
+};
+
 /// Comprehensive type mapping system for converting Ora types to MLIR types
 pub const TypeMapper = struct {
     ctx: c.MlirContext,
+    inference_ctx: TypeInference.InferenceContext,
 
-    pub fn init(ctx: c.MlirContext) TypeMapper {
-        return .{ .ctx = ctx };
+    pub fn init(ctx: c.MlirContext, allocator: std.mem.Allocator) TypeMapper {
+        return .{
+            .ctx = ctx,
+            .inference_ctx = TypeInference.InferenceContext.init(allocator),
+        };
+    }
+
+    pub fn deinit(self: *TypeMapper) void {
+        self.inference_ctx.deinit();
     }
 
     /// Convert any Ora type to its corresponding MLIR type
@@ -355,6 +461,148 @@ pub const TypeMapper = struct {
         _ = param_types;
         return c.mlirIntegerTypeGet(self.ctx, constants.DEFAULT_INTEGER_BITS);
     }
+
+    /// Advanced type conversion with inference support
+    pub fn convertTypeWithInference(self: *TypeMapper, ora_type: lib.ast.type_info.OraType, context_type: ?lib.ast.type_info.OraType) c.MlirType {
+        const inferred_type = self.inference_ctx.inferExpressionType(ora_type, context_type);
+        return self.toMlirType(.{ .ora_type = inferred_type });
+    }
+
+    /// Handle generic type instantiation
+    pub fn instantiateGenericType(self: *TypeMapper, generic_type: lib.ast.type_info.OraType, type_args: []const lib.ast.type_info.OraType) !c.MlirType {
+        // TODO: Implement generic type instantiation
+        // For now, just convert the base type
+        _ = type_args;
+        return self.toMlirType(.{ .ora_type = generic_type });
+    }
+
+    /// Check if a type conversion is valid
+    pub fn isValidConversion(self: *const TypeMapper, from_type: lib.ast.type_info.OraType, to_type: lib.ast.type_info.OraType) bool {
+        return self.inference_ctx.isTypeCompatible(from_type, to_type);
+    }
+
+    /// Get the most specific common type between two types
+    pub fn getCommonType(self: *const TypeMapper, type1: lib.ast.type_info.OraType, type2: lib.ast.type_info.OraType) ?lib.ast.type_info.OraType {
+        // If types are equal, return either one
+        if (lib.ast.type_info.OraType.equals(type1, type2)) {
+            return type1;
+        }
+
+        // Handle integer type promotion
+        if (type1.isInteger() and type2.isInteger()) {
+            // Both signed or both unsigned
+            if ((type1.isSignedInteger() and type2.isSignedInteger()) or
+                (type1.isUnsignedInteger() and type2.isUnsignedInteger()))
+            {
+
+                // Get bit widths and return the larger type
+                const width1 = self.getIntegerBitWidth(type1) orelse return null;
+                const width2 = self.getIntegerBitWidth(type2) orelse return null;
+
+                if (width1 >= width2) return type1;
+                return type2;
+            }
+
+            // Mixed signed/unsigned - promote to signed with larger width
+            const width1 = self.getIntegerBitWidth(type1) orelse return null;
+            const width2 = self.getIntegerBitWidth(type2) orelse return null;
+            const max_width = @max(width1, width2);
+
+            return switch (max_width) {
+                8 => lib.ast.type_info.OraType{ .i8 = {} },
+                16 => lib.ast.type_info.OraType{ .i16 = {} },
+                32 => lib.ast.type_info.OraType{ .i32 = {} },
+                64 => lib.ast.type_info.OraType{ .i64 = {} },
+                128 => lib.ast.type_info.OraType{ .i128 = {} },
+                256 => lib.ast.type_info.OraType{ .i256 = {} },
+                else => null,
+            };
+        }
+
+        // No common type found
+        return null;
+    }
+
+    /// Create a type conversion operation if needed
+    pub fn createConversionOp(self: *const TypeMapper, block: c.MlirBlock, value: c.MlirValue, target_type: c.MlirType, span: ?lib.ast.SourceSpan) c.MlirValue {
+        const value_type = c.mlirValueGetType(value);
+
+        // If types are already the same, no conversion needed
+        if (c.mlirTypeEqual(value_type, target_type)) {
+            return value;
+        }
+
+        // Create location for the conversion operation
+        const location = if (span) |s|
+            c.mlirLocationFileLineColGet(self.ctx, c.mlirStringRefCreateFromCString(""), @intCast(s.start), @intCast(s.start))
+        else
+            c.mlirLocationUnknownGet(self.ctx);
+
+        // For integer types, use arith.extui, arith.extsi, or arith.trunci
+        if (c.mlirTypeIsAInteger(value_type) and c.mlirTypeIsAInteger(target_type)) {
+            const value_width = c.mlirIntegerTypeGetWidth(value_type);
+            const target_width = c.mlirIntegerTypeGetWidth(target_type);
+
+            if (value_width < target_width) {
+                // Extension - use unsigned extension for now
+                const op_name = c.mlirStringRefCreateFromCString("arith.extui");
+                const op_state = c.mlirOperationStateGet(op_name, location);
+                c.mlirOperationStateAddOperands(&op_state, 1, &value);
+                c.mlirOperationStateAddResults(&op_state, 1, &target_type);
+                const op = c.mlirOperationCreate(&op_state);
+                c.mlirBlockAppendOwnedOperation(block, op);
+                return c.mlirOperationGetResult(op, 0);
+            } else if (value_width > target_width) {
+                // Truncation
+                const op_name = c.mlirStringRefCreateFromCString("arith.trunci");
+                const op_state = c.mlirOperationStateGet(op_name, location);
+                c.mlirOperationStateAddOperands(&op_state, 1, &value);
+                c.mlirOperationStateAddResults(&op_state, 1, &target_type);
+                const op = c.mlirOperationCreate(&op_state);
+                c.mlirBlockAppendOwnedOperation(block, op);
+                return c.mlirOperationGetResult(op, 0);
+            }
+        }
+
+        // For other types, return the original value for now
+        // TODO: Implement more sophisticated type conversions
+        return value;
+    }
+
+    /// Handle type alias resolution
+    pub fn resolveTypeAlias(self: *TypeMapper, type_name: []const u8) ?lib.ast.type_info.OraType {
+        return self.inference_ctx.resolveTypeAlias(type_name);
+    }
+
+    /// Add a type alias to the inference context
+    pub fn addTypeAlias(self: *TypeMapper, name: []const u8, target_type: lib.ast.type_info.OraType) !void {
+        try self.inference_ctx.addTypeAlias(name, target_type, &[_]TypeInference.TypeVariable{});
+    }
+
+    /// Handle complex type relationships and conversions
+    pub fn handleComplexTypeRelationship(self: *const TypeMapper, type1: lib.ast.type_info.OraType, type2: lib.ast.type_info.OraType) TypeRelationship {
+        if (lib.ast.type_info.OraType.equals(type1, type2)) {
+            return .Identical;
+        }
+
+        if (self.isValidConversion(type1, type2)) {
+            return .Convertible;
+        }
+
+        if (self.getCommonType(type1, type2) != null) {
+            return .Compatible;
+        }
+
+        return .Incompatible;
+    }
+
+    /// Type relationship classification
+    pub const TypeRelationship = enum {
+        Identical, // Types are exactly the same
+        Convertible, // One type can be converted to the other
+        Compatible, // Types have a common supertype
+        Incompatible, // Types cannot be used together
+    };
 
     /// Get memory space attribute for different storage regions
     pub fn getMemorySpaceAttribute(self: *const TypeMapper, region: []const u8) c.MlirAttribute {

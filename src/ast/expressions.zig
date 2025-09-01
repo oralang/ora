@@ -4,6 +4,7 @@ const TypeInfo = @import("type_info.zig").TypeInfo;
 const CommonTypes = @import("type_info.zig").CommonTypes;
 const statements = @import("statements.zig");
 const AstArena = @import("ast_arena.zig").AstArena;
+const verification = @import("verification.zig");
 
 /// Binary and unary operators
 pub const BinaryOp = enum {
@@ -158,6 +159,10 @@ pub const QuantifiedExpr = struct {
     condition: ?*ExprNode, // optional where clause
     body: *ExprNode, // the quantified expression
     span: SourceSpan,
+    /// Verification metadata for formal verification tools
+    verification_metadata: ?*verification.QuantifiedMetadata,
+    /// Verification attributes for this quantified expression
+    verification_attributes: []verification.VerificationAttribute,
 };
 
 /// Anonymous struct literal expression (.{ field1: value1, field2: value2 })
@@ -557,6 +562,24 @@ pub fn createQuantifiedExpr(allocator: std.mem.Allocator, quantifier: Quantifier
         .condition = condition,
         .body = body,
         .span = span,
+        .verification_metadata = null,
+        .verification_attributes = &[_]verification.VerificationAttribute{},
+    } };
+    return node;
+}
+
+/// Create a quantified expression with verification metadata
+pub fn createQuantifiedExprWithVerification(allocator: std.mem.Allocator, quantifier: QuantifierType, variable: []const u8, variable_type: TypeInfo, condition: ?*ExprNode, body: *ExprNode, span: SourceSpan, verification_metadata: ?*verification.QuantifiedMetadata, verification_attributes: []verification.VerificationAttribute) !*ExprNode {
+    const node = try allocator.create(ExprNode);
+    node.* = .{ .Quantified = .{
+        .quantifier = quantifier,
+        .variable = variable,
+        .variable_type = variable_type,
+        .condition = condition,
+        .body = body,
+        .span = span,
+        .verification_metadata = verification_metadata,
+        .verification_attributes = verification_attributes,
     } };
     return node;
 }

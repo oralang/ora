@@ -123,7 +123,7 @@ pub fn test_yul_compilation() !void {
     print("Compiling Yul source:\n{s}\n", .{simple_yul});
 
     var result = YulCompiler.compile(allocator, simple_yul) catch |err| {
-        print("Failed to compile: {}\n", .{err});
+        print("Failed to compile: {s}\n", .{@errorName(err)});
         return;
     };
     defer result.deinit(allocator);

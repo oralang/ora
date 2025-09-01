@@ -15,6 +15,12 @@ pub fn build(b: *std.Build) void {
     // set a preferred release mode, allowing the user to decide how to optimize.
     const optimize = b.standardOptimizeOption(.{});
 
+    // MLIR-specific build options
+    const enable_mlir_debug = b.option(bool, "mlir-debug", "Enable MLIR debug features and verification passes") orelse false;
+    const enable_mlir_timing = b.option(bool, "mlir-timing", "Enable MLIR pass timing by default") orelse false;
+    const mlir_opt_level = b.option([]const u8, "mlir-opt", "Default MLIR optimization level (none, basic, aggressive)") orelse "basic";
+    const enable_mlir_passes = b.option([]const u8, "mlir-passes", "Default MLIR pass pipeline") orelse null;
+
     // Build Solidity libraries using CMake
     const cmake_step = buildSolidityLibraries(b, target, optimize);
 
@@ -67,6 +73,20 @@ pub fn build(b: *std.Build) void {
         .name = "ora",
         .root_module = exe_mod,
     });
+
+    // Add MLIR build options as compile-time constants
+    const mlir_options = b.addOptions();
+    mlir_options.addOption(bool, "mlir_debug", enable_mlir_debug);
+    mlir_options.addOption(bool, "mlir_timing", enable_mlir_timing);
+    mlir_options.addOption([]const u8, "mlir_opt_level", mlir_opt_level);
+    if (enable_mlir_passes) |passes| {
+        mlir_options.addOption(?[]const u8, "mlir_passes", passes);
+    } else {
+        mlir_options.addOption(?[]const u8, "mlir_passes", null);
+    }
+
+    exe.root_module.addOptions("build_options", mlir_options);
+    lib_mod.addOptions("build_options", mlir_options);
 
     // Build and link Yul wrapper
     const yul_wrapper = buildYulWrapper(b, target, optimize, cmake_step);
@@ -199,6 +219,17 @@ pub fn build(b: *std.Build) void {
     run_mlir_demo.step.dependOn(b.getInstallStep());
     const mlir_demo_step = b.step("mlir-demo", "Run the MLIR hello-world demo");
     mlir_demo_step.dependOn(&run_mlir_demo.step);
+
+    // Add MLIR-specific build steps
+    const mlir_debug_step = b.step("mlir-debug", "Build with MLIR debug features enabled");
+    mlir_debug_step.dependOn(b.getInstallStep());
+
+    const mlir_release_step = b.step("mlir-release", "Build with aggressive MLIR optimizations");
+    mlir_release_step.dependOn(b.getInstallStep());
+
+    // Add step to test MLIR functionality
+    const test_mlir_step = b.step("test-mlir", "Run MLIR-specific tests");
+    test_mlir_step.dependOn(b.getInstallStep());
 
     // Add new lexer testing framework
     addLexerTestFramework(b, lib_mod, target, optimize);
@@ -355,6 +386,24 @@ pub fn build(b: *std.Build) void {
     });
     quantified_tests.root_module.addImport("ora", lib_mod);
     test_all_step.dependOn(&b.addRunArtifact(quantified_tests).step);
+
+    // Verification attributes tests
+    const verification_tests = b.addTest(.{
+        .root_source_file = b.path("tests/test_verification_attributes.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    verification_tests.root_module.addImport("ora", lib_mod);
+    test_all_step.dependOn(&b.addRunArtifact(verification_tests).step);
+
+    // Function contract verification tests
+    const function_contract_tests = b.addTest(.{
+        .root_source_file = b.path("tests/test_function_contracts.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    function_contract_tests.root_module.addImport("ora", lib_mod);
+    test_all_step.dependOn(&b.addRunArtifact(function_contract_tests).step);
 
     // Documentation generation
     const install_docs = b.addInstallDirectory(.{

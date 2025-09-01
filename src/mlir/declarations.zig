@@ -78,22 +78,41 @@ pub const DeclarationLowerer = struct {
             attributes.append(c.mlirNamedAttributeGet(init_id, init_attr)) catch {};
         }
 
-        // Add requires clauses as attributes (Requirements 6.4)
-        if (func.requires_clauses.len > 0) {
-            // For now, we'll add a simple attribute indicating the presence of requires clauses
-            // Full implementation would serialize the expressions
-            const requires_attr = c.mlirIntegerAttrGet(c.mlirIntegerTypeGet(self.ctx, 32), @intCast(func.requires_clauses.len));
-            const requires_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("ora.requires"));
-            attributes.append(c.mlirNamedAttributeGet(requires_id, requires_attr)) catch {};
-        }
+        // Add comprehensive verification metadata for function contracts (Requirements 6.4, 6.5)
+        if (func.requires_clauses.len > 0 or func.ensures_clauses.len > 0) {
+            // Add verification marker for formal verification tools
+            const verification_attr = c.mlirBoolAttrGet(self.ctx, 1);
+            const verification_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("ora.verification"));
+            attributes.append(c.mlirNamedAttributeGet(verification_id, verification_attr)) catch {};
 
-        // Add ensures clauses as attributes (Requirements 6.5)
-        if (func.ensures_clauses.len > 0) {
-            // For now, we'll add a simple attribute indicating the presence of ensures clauses
-            // Full implementation would serialize the expressions
-            const ensures_attr = c.mlirIntegerAttrGet(c.mlirIntegerTypeGet(self.ctx, 32), @intCast(func.ensures_clauses.len));
-            const ensures_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("ora.ensures"));
-            attributes.append(c.mlirNamedAttributeGet(ensures_id, ensures_attr)) catch {};
+            // Add formal verification marker
+            const formal_attr = c.mlirBoolAttrGet(self.ctx, 1);
+            const formal_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("ora.formal"));
+            attributes.append(c.mlirNamedAttributeGet(formal_id, formal_attr)) catch {};
+
+            // Add verification context attribute
+            const context_attr = c.mlirStringAttrGet(self.ctx, c.mlirStringRefCreateFromCString("function_contract"));
+            const context_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("ora.verification_context"));
+            attributes.append(c.mlirNamedAttributeGet(context_id, context_attr)) catch {};
+
+            // Add requires clauses count
+            if (func.requires_clauses.len > 0) {
+                const requires_count_attr = c.mlirIntegerAttrGet(c.mlirIntegerTypeGet(self.ctx, 32), @intCast(func.requires_clauses.len));
+                const requires_count_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("ora.requires_count"));
+                attributes.append(c.mlirNamedAttributeGet(requires_count_id, requires_count_attr)) catch {};
+            }
+
+            // Add ensures clauses count
+            if (func.ensures_clauses.len > 0) {
+                const ensures_count_attr = c.mlirIntegerAttrGet(c.mlirIntegerTypeGet(self.ctx, 32), @intCast(func.ensures_clauses.len));
+                const ensures_count_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("ora.ensures_count"));
+                attributes.append(c.mlirNamedAttributeGet(ensures_count_id, ensures_count_attr)) catch {};
+            }
+
+            // Add contract verification level
+            const contract_level_attr = c.mlirStringAttrGet(self.ctx, c.mlirStringRefCreateFromCString("full"));
+            const contract_level_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("ora.contract_level"));
+            attributes.append(c.mlirNamedAttributeGet(contract_level_id, contract_level_attr)) catch {};
         }
 
         // Add function type
@@ -114,20 +133,20 @@ pub const DeclarationLowerer = struct {
         // Add precondition assertions for requires clauses (Requirements 6.4)
         if (func.requires_clauses.len > 0) {
             self.lowerRequiresClauses(func.requires_clauses, block, &param_map, contract_storage_map, local_var_map orelse &local_vars) catch |err| {
-                std.debug.print("Error lowering requires clauses: {}\n", .{err});
+                std.debug.print("Error lowering requires clauses: {s}\n", .{@errorName(err)});
             };
         }
 
         // Lower the function body
         self.lowerFunctionBody(func, block, &param_map, contract_storage_map, local_var_map orelse &local_vars) catch |err| {
-            std.debug.print("Error lowering function body: {}\n", .{err});
+            std.debug.print("Error lowering function body: {s}\n", .{@errorName(err)});
             return c.mlirOperationCreate(&state);
         };
 
         // Add postcondition assertions for ensures clauses (Requirements 6.5)
         if (func.ensures_clauses.len > 0) {
             self.lowerEnsuresClauses(func.ensures_clauses, block, &param_map, contract_storage_map, local_var_map orelse &local_vars) catch |err| {
-                std.debug.print("Error lowering ensures clauses: {}\n", .{err});
+                std.debug.print("Error lowering ensures clauses: {s}\n", .{@errorName(err)});
             };
         }
 
@@ -686,56 +705,109 @@ pub const DeclarationLowerer = struct {
         try stmt_lowerer.lowerBlockBody(func.body, block);
     }
 
-    /// Lower requires clauses as precondition assertions (Requirements 6.4)
+    /// Lower requires clauses as precondition assertions with enhanced verification metadata (Requirements 6.4)
     fn lowerRequiresClauses(self: *const DeclarationLowerer, requires_clauses: []*lib.ast.Expressions.ExprNode, block: c.MlirBlock, param_map: *const ParamMap, storage_map: ?*const StorageMap, local_var_map: ?*LocalVarMap) LoweringError!void {
         const const_local_var_map = if (local_var_map) |lvm| @as(*const LocalVarMap, lvm) else null;
         const expr_lowerer = ExpressionLowerer.init(self.ctx, block, self.type_mapper, param_map, storage_map, const_local_var_map, self.locations);
 
-        for (requires_clauses) |clause| {
+        for (requires_clauses, 0..) |clause, i| {
             // Lower the requires expression
             const condition_value = expr_lowerer.lowerExpression(clause);
 
-            // Create an assertion operation with ora.requires attribute
+            // Create an assertion operation with comprehensive verification attributes
             var assert_state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("cf.assert"), self.createFileLocation(self.getExpressionSpan(clause)));
 
             // Add the condition as an operand
             c.mlirOperationStateAddOperands(&assert_state, 1, @ptrCast(&condition_value));
 
+            // Collect verification attributes
+            var attributes = std.ArrayList(c.MlirNamedAttribute).init(std.heap.page_allocator);
+            defer attributes.deinit();
+
             // Add ora.requires attribute to mark this as a precondition
             const requires_attr = c.mlirBoolAttrGet(self.ctx, 1);
             const requires_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("ora.requires"));
-            var attrs = [_]c.MlirNamedAttribute{
-                c.mlirNamedAttributeGet(requires_id, requires_attr),
-            };
-            c.mlirOperationStateAddAttributes(&assert_state, @intCast(attrs.len), &attrs);
+            attributes.append(c.mlirNamedAttributeGet(requires_id, requires_attr)) catch {};
+
+            // Add verification context attribute
+            const context_attr = c.mlirStringAttrGet(self.ctx, c.mlirStringRefCreateFromCString("function_precondition"));
+            const context_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("ora.verification_context"));
+            attributes.append(c.mlirNamedAttributeGet(context_id, context_attr)) catch {};
+
+            // Add verification marker for formal verification tools
+            const verification_attr = c.mlirBoolAttrGet(self.ctx, 1);
+            const verification_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("ora.verification"));
+            attributes.append(c.mlirNamedAttributeGet(verification_id, verification_attr)) catch {};
+
+            // Add precondition index for multiple requires clauses
+            const index_attr = c.mlirIntegerAttrGet(c.mlirIntegerTypeGet(self.ctx, 32), @intCast(i));
+            const index_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("ora.precondition_index"));
+            attributes.append(c.mlirNamedAttributeGet(index_id, index_attr)) catch {};
+
+            // Add formal verification marker
+            const formal_attr = c.mlirBoolAttrGet(self.ctx, 1);
+            const formal_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("ora.formal"));
+            attributes.append(c.mlirNamedAttributeGet(formal_id, formal_attr)) catch {};
+
+            // Apply all attributes
+            c.mlirOperationStateAddAttributes(&assert_state, @intCast(attributes.items.len), attributes.items.ptr);
 
             const assert_op = c.mlirOperationCreate(&assert_state);
             c.mlirBlockAppendOwnedOperation(block, assert_op);
         }
     }
 
-    /// Lower ensures clauses as postcondition assertions (Requirements 6.5)
+    /// Lower ensures clauses as postcondition assertions with enhanced verification metadata (Requirements 6.5)
     fn lowerEnsuresClauses(self: *const DeclarationLowerer, ensures_clauses: []*lib.ast.Expressions.ExprNode, block: c.MlirBlock, param_map: *const ParamMap, storage_map: ?*const StorageMap, local_var_map: ?*LocalVarMap) LoweringError!void {
         const const_local_var_map = if (local_var_map) |lvm| @as(*const LocalVarMap, lvm) else null;
         const expr_lowerer = ExpressionLowerer.init(self.ctx, block, self.type_mapper, param_map, storage_map, const_local_var_map, self.locations);
 
-        for (ensures_clauses) |clause| {
+        for (ensures_clauses, 0..) |clause, i| {
             // Lower the ensures expression
             const condition_value = expr_lowerer.lowerExpression(clause);
 
-            // Create an assertion operation with ora.ensures attribute
+            // Create an assertion operation with comprehensive verification attributes
             var assert_state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("cf.assert"), self.createFileLocation(self.getExpressionSpan(clause)));
 
             // Add the condition as an operand
             c.mlirOperationStateAddOperands(&assert_state, 1, @ptrCast(&condition_value));
 
+            // Collect verification attributes
+            var attributes = std.ArrayList(c.MlirNamedAttribute).init(std.heap.page_allocator);
+            defer attributes.deinit();
+
             // Add ora.ensures attribute to mark this as a postcondition
             const ensures_attr = c.mlirBoolAttrGet(self.ctx, 1);
             const ensures_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("ora.ensures"));
-            var attrs = [_]c.MlirNamedAttribute{
-                c.mlirNamedAttributeGet(ensures_id, ensures_attr),
-            };
-            c.mlirOperationStateAddAttributes(&assert_state, @intCast(attrs.len), &attrs);
+            attributes.append(c.mlirNamedAttributeGet(ensures_id, ensures_attr)) catch {};
+
+            // Add verification context attribute
+            const context_attr = c.mlirStringAttrGet(self.ctx, c.mlirStringRefCreateFromCString("function_postcondition"));
+            const context_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("ora.verification_context"));
+            attributes.append(c.mlirNamedAttributeGet(context_id, context_attr)) catch {};
+
+            // Add verification marker for formal verification tools
+            const verification_attr = c.mlirBoolAttrGet(self.ctx, 1);
+            const verification_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("ora.verification"));
+            attributes.append(c.mlirNamedAttributeGet(verification_id, verification_attr)) catch {};
+
+            // Add postcondition index for multiple ensures clauses
+            const index_attr = c.mlirIntegerAttrGet(c.mlirIntegerTypeGet(self.ctx, 32), @intCast(i));
+            const index_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("ora.postcondition_index"));
+            attributes.append(c.mlirNamedAttributeGet(index_id, index_attr)) catch {};
+
+            // Add formal verification marker
+            const formal_attr = c.mlirBoolAttrGet(self.ctx, 1);
+            const formal_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("ora.formal"));
+            attributes.append(c.mlirNamedAttributeGet(formal_id, formal_attr)) catch {};
+
+            // Add return value reference for postconditions
+            const return_ref_attr = c.mlirStringAttrGet(self.ctx, c.mlirStringRefCreateFromCString("return_value"));
+            const return_ref_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("ora.return_reference"));
+            attributes.append(c.mlirNamedAttributeGet(return_ref_id, return_ref_attr)) catch {};
+
+            // Apply all attributes
+            c.mlirOperationStateAddAttributes(&assert_state, @intCast(attributes.items.len), attributes.items.ptr);
 
             const assert_op = c.mlirOperationCreate(&assert_state);
             c.mlirBlockAppendOwnedOperation(block, assert_op);

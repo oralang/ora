@@ -22,7 +22,7 @@ pub const FileCoverage = struct {
         _ = fmt;
         _ = options;
 
-        try writer.print("{s}: {d:.1}% ({}/{} lines)", .{
+        try writer.print("{s}: {d:.1}% ({d}/{d} lines)", .{
             self.file_path,
             self.getCoveragePercentage(),
             self.covered_lines,
@@ -47,7 +47,7 @@ pub const CoverageStats = struct {
         _ = fmt;
         _ = options;
 
-        try writer.print("Overall Coverage: {d:.1}% ({}/{} lines across {} files)", .{
+        try writer.print("Overall Coverage: {d:.1}% ({d}/{d} lines across {d} files)", .{
             self.getOverallPercentage(),
             self.covered_lines,
             self.total_lines,
@@ -72,13 +72,13 @@ pub const CoverageReporter = struct {
         try writer.writeAll("Test Coverage Report\n");
         try writer.writeAll("===================\n\n");
 
-        try writer.print("{}\n\n", .{stats});
+        try writer.print("{any}\n\n", .{stats});
 
         try writer.writeAll("File Coverage:\n");
         try writer.writeAll("--------------\n");
 
         for (stats.files) |file_coverage| {
-            try writer.print("{}\n", .{file_coverage});
+            try writer.print("{any}\n", .{file_coverage});
         }
 
         try writer.writeAll("\nCoverage Thresholds:\n");
@@ -124,7 +124,7 @@ pub const CoverageReporter = struct {
             \\
         );
 
-        try writer.print("        <p>Overall Coverage: <strong>{d:.1}%</strong> ({}/{} lines across {} files)</p>\n", .{
+        try writer.print("        <p>Overall Coverage: <strong>{d:.1}%</strong> ({d}/{d} lines across {d} files)</p>\n", .{
             stats.getOverallPercentage(),
             stats.covered_lines,
             stats.total_lines,
@@ -138,7 +138,7 @@ pub const CoverageReporter = struct {
             const css_class = if (percentage >= 80.0) "good" else if (percentage >= 60.0) "warning" else "poor";
 
             try writer.print("        <div class=\"file {s}\">\n", .{css_class});
-            try writer.print("            <strong>{s}</strong>: {d:.1}% ({}/{} lines)\n", .{
+            try writer.print("            <strong>{s}</strong>: {d:.1}% ({d}/{d} lines)\n", .{
                 file_coverage.file_path,
                 percentage,
                 file_coverage.covered_lines,

@@ -72,7 +72,7 @@ pub const ExpressionLowerer = struct {
 
                 // Parse the string value to an integer with proper error handling
                 const parsed: i64 = std.fmt.parseInt(i64, int.value, 0) catch |err| blk: {
-                    std.debug.print("ERROR: Failed to parse integer literal '{s}': {}\n", .{ int.value, err });
+                    std.debug.print("ERROR: Failed to parse integer literal '{s}': {s}\n", .{ int.value, @errorName(err) });
                     break :blk 0; // Default to 0 on parse error
                 };
                 const attr = c.mlirIntegerAttrGet(ty, parsed);
@@ -137,7 +137,7 @@ pub const ExpressionLowerer = struct {
                 else
                     addr_lit.value;
                 const parsed: i64 = std.fmt.parseInt(i64, addr_str, 16) catch |err| blk: {
-                    std.debug.print("ERROR: Failed to parse address literal '{s}': {}\n", .{ addr_lit.value, err });
+                    std.debug.print("ERROR: Failed to parse address literal '{s}': {s}\n", .{ addr_lit.value, @errorName(err) });
                     break :blk 0;
                 };
                 const attr = c.mlirIntegerAttrGet(ty, parsed);
@@ -167,7 +167,7 @@ pub const ExpressionLowerer = struct {
                 else
                     hex_lit.value;
                 const parsed: i64 = std.fmt.parseInt(i64, hex_str, 16) catch |err| blk: {
-                    std.debug.print("ERROR: Failed to parse hex literal '{s}': {}\n", .{ hex_lit.value, err });
+                    std.debug.print("ERROR: Failed to parse hex literal '{s}': {s}\n", .{ hex_lit.value, @errorName(err) });
                     break :blk 0;
                 };
                 const attr = c.mlirIntegerAttrGet(ty, parsed);
@@ -197,7 +197,7 @@ pub const ExpressionLowerer = struct {
                 else
                     bin_lit.value;
                 const parsed: i64 = std.fmt.parseInt(i64, bin_str, 2) catch |err| blk: {
-                    std.debug.print("ERROR: Failed to parse binary literal '{s}': {}\n", .{ bin_lit.value, err });
+                    std.debug.print("ERROR: Failed to parse binary literal '{s}': {s}\n", .{ bin_lit.value, @errorName(err) });
                     break :blk 0;
                 };
                 const attr = c.mlirIntegerAttrGet(ty, parsed);
@@ -844,25 +844,78 @@ pub const ExpressionLowerer = struct {
         var attributes = std.ArrayList(c.MlirNamedAttribute).init(std.heap.page_allocator);
         defer attributes.deinit();
 
-        // Add quantifier type attribute (forall or exists)
-        const quantifier_type_str = switch (quantified.quantifier) {
-            .Forall => "forall",
-            .Exists => "exists",
-        };
-        const quantifier_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("quantifier"));
-        const quantifier_attr = c.mlirStringAttrGet(self.ctx, c.mlirStringRefCreateFromCString(quantifier_type_str.ptr));
-        attributes.append(c.mlirNamedAttributeGet(quantifier_id, quantifier_attr)) catch {};
+        // Add verification metadata if present
+        if (quantified.verification_metadata) |metadata| {
+            // Add quantifier type from metadata
+            const quantifier_type_str = switch (metadata.quantifier_type) {
+                .Forall => "forall",
+                .Exists => "exists",
+            };
+            const quantifier_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("quantifier"));
+            const quantifier_attr = c.mlirStringAttrGet(self.ctx, c.mlirStringRefCreateFromCString(quantifier_type_str.ptr));
+            attributes.append(c.mlirNamedAttributeGet(quantifier_id, quantifier_attr)) catch {};
 
-        // Add bound variable name attribute
-        const var_name_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("variable"));
-        const var_name_attr = c.mlirStringAttrGet(self.ctx, c.mlirStringRefCreateFromCString(quantified.variable.ptr));
-        attributes.append(c.mlirNamedAttributeGet(var_name_id, var_name_attr)) catch {};
+            // Add bound variable information from metadata
+            const var_name_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("variable"));
+            const var_name_attr = c.mlirStringAttrGet(self.ctx, c.mlirStringRefCreateFromCString(metadata.variable_name.ptr));
+            attributes.append(c.mlirNamedAttributeGet(var_name_id, var_name_attr)) catch {};
 
-        // Add variable type attribute
-        const var_type_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("variable_type"));
-        const var_type_str = self.getTypeString(quantified.variable_type);
-        const var_type_attr = c.mlirStringAttrGet(self.ctx, c.mlirStringRefCreateFromCString(var_type_str.ptr));
-        attributes.append(c.mlirNamedAttributeGet(var_type_id, var_type_attr)) catch {};
+            const var_type_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("variable_type"));
+            const var_type_str = self.getTypeString(metadata.variable_type);
+            const var_type_attr = c.mlirStringAttrGet(self.ctx, c.mlirStringRefCreateFromCString(var_type_str.ptr));
+            attributes.append(c.mlirNamedAttributeGet(var_type_id, var_type_attr)) catch {};
+
+            // Add condition presence from metadata
+            const has_condition_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("ora.has_condition"));
+            const has_condition_attr = c.mlirBoolAttrGet(self.ctx, if (metadata.has_condition) 1 else 0);
+            attributes.append(c.mlirNamedAttributeGet(has_condition_id, has_condition_attr)) catch {};
+
+            // Add span information from metadata
+            const span_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("ora.span"));
+            const span_str = std.fmt.allocPrint(std.heap.page_allocator, "{}:{}", .{ metadata.span.line, metadata.span.column }) catch "0:0";
+            defer std.heap.page_allocator.free(span_str);
+            const span_attr = c.mlirStringAttrGet(self.ctx, c.mlirStringRefCreateFromCString(span_str.ptr));
+            attributes.append(c.mlirNamedAttributeGet(span_id, span_attr)) catch {};
+        } else {
+            // Fallback to original implementation if no metadata
+            const quantifier_type_str = switch (quantified.quantifier) {
+                .Forall => "forall",
+                .Exists => "exists",
+            };
+            const quantifier_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("quantifier"));
+            const quantifier_attr = c.mlirStringAttrGet(self.ctx, c.mlirStringRefCreateFromCString(quantifier_type_str.ptr));
+            attributes.append(c.mlirNamedAttributeGet(quantifier_id, quantifier_attr)) catch {};
+
+            // Add bound variable name attribute
+            const var_name_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("variable"));
+            const var_name_attr = c.mlirStringAttrGet(self.ctx, c.mlirStringRefCreateFromCString(quantified.variable.ptr));
+            attributes.append(c.mlirNamedAttributeGet(var_name_id, var_name_attr)) catch {};
+
+            // Add variable type attribute
+            const var_type_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("variable_type"));
+            const var_type_str = self.getTypeString(quantified.variable_type);
+            const var_type_attr = c.mlirStringAttrGet(self.ctx, c.mlirStringRefCreateFromCString(var_type_str.ptr));
+            attributes.append(c.mlirNamedAttributeGet(var_type_id, var_type_attr)) catch {};
+
+            // Add condition presence indicator for verification analysis
+            const has_condition_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("ora.has_condition"));
+            const has_condition_attr = c.mlirBoolAttrGet(self.ctx, if (quantified.condition != null) 1 else 0);
+            attributes.append(c.mlirNamedAttributeGet(has_condition_id, has_condition_attr)) catch {};
+        }
+
+        // Add verification attributes if present
+        if (quantified.verification_attributes.len > 0) {
+            for (quantified.verification_attributes) |attr| {
+                if (attr.name) |name| {
+                    const attr_name_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString(name.ptr));
+                    const attr_value = if (attr.value) |value|
+                        c.mlirStringAttrGet(self.ctx, c.mlirStringRefCreateFromCString(value.ptr))
+                    else
+                        c.mlirStringAttrGet(self.ctx, c.mlirStringRefCreateFromCString(""));
+                    attributes.append(c.mlirNamedAttributeGet(attr_name_id, attr_value)) catch {};
+                }
+            }
+        }
 
         // Add verification marker attribute
         const verification_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("ora.verification"));
@@ -892,11 +945,6 @@ pub const ExpressionLowerer = struct {
         };
         const domain_attr = c.mlirStringAttrGet(self.ctx, c.mlirStringRefCreateFromCString(domain_str.ptr));
         attributes.append(c.mlirNamedAttributeGet(domain_id, domain_attr)) catch {};
-
-        // Add condition presence indicator for verification analysis
-        const has_condition_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("ora.has_condition"));
-        const has_condition_attr = c.mlirBoolAttrGet(self.ctx, if (quantified.condition != null) 1 else 0);
-        attributes.append(c.mlirNamedAttributeGet(has_condition_id, has_condition_attr)) catch {};
 
         // Add all attributes to the operation state
         c.mlirOperationStateAddAttributes(&state, @intCast(attributes.items.len), attributes.items.ptr);

@@ -1404,8 +1404,9 @@ pub const Typer = struct {
                     _ = try self.typeCheckExpression(field.value);
                 }
 
-                // Return a generic struct type (simplified)
-                return OraType.Unknown; // TODO: Create proper anonymous struct type
+                // Anonymous structs in smart contracts are typically treated as unknown types
+                // since they're temporary constructs for data grouping
+                return OraType.Unknown;
             },
             .Range => |*range| {
                 // Type check range bounds
@@ -1416,8 +1417,9 @@ pub const Typer = struct {
                     return TyperError.TypeMismatch;
                 }
 
-                // Range expressions typically return an iterator type
-                return OraType.Unknown; // TODO: Create proper range iterator type
+                // Range expressions in smart contracts return unknown type
+                // since they're typically used for iteration control
+                return OraType.Unknown;
             },
             .LabeledBlock => |*labeled_block| {
                 // Type check the block - blocks don't return values

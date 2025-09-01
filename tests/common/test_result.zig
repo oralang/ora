@@ -128,7 +128,7 @@ pub const TestFailure = struct {
         try writer.writeAll(self.message);
 
         if (self.source_location) |location| {
-            try writer.print(" at {}:{}", .{ location.line, location.column });
+            try writer.print(" at {d}:{d}", .{ location.line, location.column });
         }
 
         if (self.expected) |expected| {
@@ -157,7 +157,7 @@ pub const SourceLocation = struct {
     pub fn format(self: SourceLocation, comptime fmt: []const u8, options: std.fmt.FormatOptions, writer: anytype) !void {
         _ = fmt;
         _ = options;
-        try writer.print("{}:{}:{}", .{ self.file, self.line, self.column });
+        try writer.print("{s}:{d}:{d}", .{ self.file, self.line, self.column });
     }
 };
 
@@ -193,7 +193,7 @@ pub const BenchmarkResult = struct {
         const duration_ms = @as(f64, @floatFromInt(self.duration_ns)) / 1_000_000.0;
         const memory_mb = @as(f64, @floatFromInt(self.memory_bytes)) / (1024.0 * 1024.0);
 
-        try writer.print("{d:.2}ms, {d:.2}MB, {d:.0} ops/sec ({} iterations)", .{
+        try writer.print("{d:.2}ms, {d:.2}MB, {d:.0} ops/sec ({d} iterations)", .{
             duration_ms,
             memory_mb,
             self.throughput_ops_per_sec,
@@ -232,7 +232,7 @@ pub const MemoryUsageResult = struct {
         const peak_mb = @as(f64, @floatFromInt(self.peak_bytes)) / (1024.0 * 1024.0);
         const final_mb = @as(f64, @floatFromInt(self.final_bytes)) / (1024.0 * 1024.0);
 
-        try writer.print("Peak: {d:.2}MB, Final: {d:.2}MB, Allocs: {}, Deallocs: {}", .{
+        try writer.print("Peak: {d:.2}MB, Final: {d:.2}MB, Allocs: {d}, Deallocs: {d}", .{
             peak_mb,
             final_mb,
             self.allocations,
@@ -241,7 +241,7 @@ pub const MemoryUsageResult = struct {
 
         if (self.leaks.len > 0) {
             const leaked_mb = @as(f64, @floatFromInt(self.getLeakedBytes())) / (1024.0 * 1024.0);
-            try writer.print(", Leaks: {} ({d:.2}MB)", .{ self.leaks.len, leaked_mb });
+            try writer.print(", Leaks: {d} ({d:.2}MB)", .{ self.leaks.len, leaked_mb });
         }
     }
 };
@@ -255,7 +255,7 @@ pub const MemoryLeak = struct {
     pub fn format(self: MemoryLeak, comptime fmt: []const u8, options: std.fmt.FormatOptions, writer: anytype) !void {
         _ = fmt;
         _ = options;
-        try writer.print("0x{x}: {} bytes", .{ self.address, self.size });
+        try writer.print("0x{x}: {d} bytes", .{ self.address, self.size });
     }
 };
 
@@ -287,7 +287,7 @@ pub const TestSuiteResult = struct {
 
         const success_rate = self.getSuccessRate() * 100.0;
 
-        try writer.print("{s}: {}/{} passed ({d:.1}%), {} failed, {} skipped ({d:.2}ms)", .{
+        try writer.print("{s}: {d}/{d} passed ({d:.1}%), {d} failed, {d} skipped ({d:.2}ms)", .{
             self.name,
             self.passed_tests,
             self.total_tests,
