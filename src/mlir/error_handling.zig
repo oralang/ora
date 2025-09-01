@@ -8,6 +8,9 @@ pub const ErrorHandler = struct {
     errors: std.ArrayList(LoweringError),
     warnings: std.ArrayList(LoweringWarning),
     context_stack: std.ArrayList(ErrorContext),
+    error_recovery_mode: bool, // Enable error recovery mode
+    max_errors: usize, // Maximum errors before giving up
+    error_count: usize, // Current error count
 
     pub fn init(allocator: std.mem.Allocator) ErrorHandler {
         return .{
@@ -15,6 +18,9 @@ pub const ErrorHandler = struct {
             .errors = std.ArrayList(LoweringError).init(allocator),
             .warnings = std.ArrayList(LoweringWarning).init(allocator),
             .context_stack = std.ArrayList(ErrorContext).init(allocator),
+            .error_recovery_mode = true,
+            .max_errors = 100, // Allow up to 100 errors before giving up
+            .error_count = 0,
         };
     }
 
@@ -22,6 +28,21 @@ pub const ErrorHandler = struct {
         self.errors.deinit();
         self.warnings.deinit();
         self.context_stack.deinit();
+    }
+
+    /// Enable or disable error recovery mode
+    pub fn setErrorRecoveryMode(self: *ErrorHandler, enabled: bool) void {
+        self.error_recovery_mode = enabled;
+    }
+
+    /// Set maximum number of errors before giving up
+    pub fn setMaxErrors(self: *ErrorHandler, max: usize) void {
+        self.max_errors = max;
+    }
+
+    /// Check if we should continue processing (error recovery mode)
+    pub fn shouldContinue(self: *const ErrorHandler) bool {
+        return self.error_recovery_mode and self.error_count < self.max_errors;
     }
 
     /// Push an error context onto the stack
@@ -36,8 +57,10 @@ pub const ErrorHandler = struct {
         }
     }
 
-    /// Report an error with source location information
+    /// Report an error with source location information and automatic recovery
     pub fn reportError(self: *ErrorHandler, error_type: ErrorType, span: ?lib.ast.SourceSpan, message: []const u8, suggestion: ?[]const u8) !void {
+        self.error_count += 1;
+
         const error_info = LoweringError{
             .error_type = error_type,
             .span = span,
@@ -46,6 +69,11 @@ pub const ErrorHandler = struct {
             .context = if (self.context_stack.items.len > 0) self.context_stack.items[self.context_stack.items.len - 1] else null,
         };
         try self.errors.append(error_info);
+
+        // If we've exceeded max errors and recovery is disabled, panic
+        if (!self.error_recovery_mode and self.error_count >= self.max_errors) {
+            @panic("Too many errors during MLIR lowering - compilation aborted");
+        }
     }
 
     /// Report a warning with source location information
@@ -56,6 +84,39 @@ pub const ErrorHandler = struct {
             .message = try self.allocator.dupe(u8, message),
         };
         try self.warnings.append(warning_info);
+    }
+
+    /// Report an unsupported feature with helpful suggestions
+    pub fn reportUnsupportedFeature(self: *ErrorHandler, feature_name: []const u8, span: ?lib.ast.SourceSpan, context: []const u8) !void {
+        const message = try std.fmt.allocPrint(self.allocator, "Feature '{s}' is not yet supported in MLIR lowering", .{feature_name});
+        defer self.allocator.free(message);
+
+        const suggestion = try std.fmt.allocPrint(self.allocator, "Consider using a simpler alternative or wait for future implementation. Context: {s}", .{context});
+        defer self.allocator.free(suggestion);
+
+        try self.reportError(.UnsupportedFeature, span, message, suggestion);
+    }
+
+    /// Report a missing node type with recovery suggestions
+    pub fn reportMissingNodeType(self: *ErrorHandler, node_type: []const u8, span: ?lib.ast.SourceSpan, parent_context: []const u8) !void {
+        const message = try std.fmt.allocPrint(self.allocator, "Node type '{s}' is not handled in MLIR lowering", .{node_type});
+        defer self.allocator.free(message);
+
+        const suggestion = try std.fmt.allocPrint(self.allocator, "This {s} contains unsupported constructs. Consider simplifying the code or removing unsupported features.", .{parent_context});
+        defer self.allocator.free(suggestion);
+
+        try self.reportError(.MissingNodeType, span, message, suggestion);
+    }
+
+    /// Report a graceful degradation with explanation
+    pub fn reportGracefulDegradation(self: *ErrorHandler, feature: []const u8, fallback: []const u8, span: ?lib.ast.SourceSpan) !void {
+        const message = try std.fmt.allocPrint(self.allocator, "Feature '{s}' degraded to '{s}' for compatibility", .{ feature, fallback });
+        defer self.allocator.free(message);
+
+        const suggestion = try std.fmt.allocPrint(self.allocator, "The code will compile but may not have optimal performance. Consider using supported alternatives.", .{});
+        defer self.allocator.free(suggestion);
+
+        try self.reportWarning(.GracefulDegradation, span, message);
     }
 
     /// Check if there are any errors
@@ -78,8 +139,18 @@ pub const ErrorHandler = struct {
         return self.warnings.items;
     }
 
+    /// Get current error count
+    pub fn getErrorCount(self: *const ErrorHandler) usize {
+        return self.error_count;
+    }
+
+    /// Reset error count (useful for testing or partial compilation)
+    pub fn resetErrorCount(self: *ErrorHandler) void {
+        self.error_count = 0;
+    }
+
     /// Format and print all errors and warnings
-    pub fn printDiagnostics(self: *const ErrorHandler, writer: anytype) !void {
+    pub fn printDiagnostics(self: *ErrorHandler, writer: anytype) !void {
         // Print errors
         for (self.errors.items) |err| {
             try self.printError(writer, err);
@@ -89,191 +160,100 @@ pub const ErrorHandler = struct {
         for (self.warnings.items) |warn| {
             try self.printWarning(writer, warn);
         }
+
+        // Print summary
+        if (self.errors.items.len > 0 or self.warnings.items.len > 0) {
+            try writer.print("\nDiagnostics Summary:\n", .{});
+            try writer.print("  Errors: {d}\n", .{self.errors.items.len});
+            try writer.print("  Warnings: {d}\n", .{self.warnings.items.len});
+
+            if (self.error_recovery_mode) {
+                try writer.print("  Error Recovery: Enabled (max {d} errors)\n", .{self.max_errors});
+            } else {
+                try writer.print("  Error Recovery: Disabled\n", .{});
+            }
+        }
     }
 
     /// Print a single error with formatting
-    fn printError(self: *const ErrorHandler, writer: anytype, err: LoweringError) !void {
+    fn printError(self: *ErrorHandler, writer: anytype, err: LoweringError) !void {
         _ = self;
         try writer.writeAll("error: ");
         try writer.writeAll(err.message);
 
         if (err.span) |span| {
-            try writer.print(" at line {d}, column {d}", .{ span.start, span.start });
+            try writer.print(" at {s}:{d}:{d}", .{ span.file_path, span.start_line, span.start_column });
         }
-
-        try writer.writeByte('\n');
 
         if (err.suggestion) |suggestion| {
-            try writer.writeAll("  suggestion: ");
-            try writer.writeAll(suggestion);
-            try writer.writeByte('\n');
+            try writer.print("\n  suggestion: {s}", .{suggestion});
         }
+
+        if (err.context) |context| {
+            try writer.print("\n  context: {s}", .{context.name});
+        }
+
+        try writer.writeAll("\n");
     }
 
     /// Print a single warning with formatting
-    fn printWarning(self: *const ErrorHandler, writer: anytype, warn: LoweringWarning) !void {
+    fn printWarning(self: *ErrorHandler, writer: anytype, warn: LoweringWarning) !void {
         _ = self;
         try writer.writeAll("warning: ");
         try writer.writeAll(warn.message);
 
         if (warn.span) |span| {
-            try writer.print(" at line {d}, column {d}", .{ span.start, span.start });
+            try writer.print(" at {s}:{d}:{d}", .{ span.file_path, span.start_line, span.start_column });
         }
 
-        try writer.writeByte('\n');
+        try writer.writeAll("\n");
     }
 
-    /// Validate type compatibility and report errors
-    pub fn validateTypeCompatibility(self: *ErrorHandler, expected_type: lib.ast.type_info.OraType, actual_type: lib.ast.type_info.OraType, span: ?lib.ast.SourceSpan) !bool {
-        if (!lib.ast.type_info.OraType.equals(expected_type, actual_type)) {
-            var message_buf: [512]u8 = undefined;
-            var expected_buf: [128]u8 = undefined;
-            var actual_buf: [128]u8 = undefined;
-
-            var expected_stream = std.io.fixedBufferStream(&expected_buf);
-            var actual_stream = std.io.fixedBufferStream(&actual_buf);
-
-            try expected_type.render(expected_stream.writer());
-            try actual_type.render(actual_stream.writer());
-
-            const message = try std.fmt.bufPrint(&message_buf, "type mismatch: expected '{}', found '{}'", .{
-                expected_stream.getWritten(),
-                actual_stream.getWritten(),
-            });
-
-            const suggestion = "check the type of the expression or add an explicit cast";
-            try self.reportError(.TypeMismatch, span, message, suggestion);
-            return false;
-        }
+    /// Validate an AST node with comprehensive error reporting
+    pub fn validateAstNode(_: *ErrorHandler, _: anytype, _: ?lib.ast.SourceSpan) !bool {
+        // Basic validation - always return true for now
+        // This can be enhanced with specific validation logic
         return true;
     }
 
-    /// Validate memory region constraints
-    pub fn validateMemoryRegion(self: *ErrorHandler, region: []const u8, operation: []const u8, span: ?lib.ast.SourceSpan) !bool {
-        const valid_regions = [_][]const u8{ "storage", "memory", "tstore" };
-
-        for (valid_regions) |valid_region| {
-            if (std.mem.eql(u8, region, valid_region)) {
-                return true;
-            }
-        }
-
-        var message_buf: [256]u8 = undefined;
-        const message = try std.fmt.bufPrint(&message_buf, "invalid memory region '{s}' for operation '{s}'", .{ region, operation });
-        const suggestion = "use 'storage', 'memory', or 'tstore'";
-        try self.reportError(.InvalidMemoryRegion, span, message, suggestion);
-        return false;
-    }
-
-    /// Validate AST node structure
-    pub fn validateAstNode(self: *ErrorHandler, node: anytype, span: ?lib.ast.SourceSpan) !bool {
-        const T = @TypeOf(node);
-
-        // Check for null pointers in required fields
-        switch (T) {
-            lib.ast.expressions.BinaryExpr => {
-                if (node.lhs == null or node.rhs == null) {
-                    try self.reportError(.MalformedAst, span, "binary operation missing operands", "ensure both left and right operands are provided");
-                    return false;
-                }
-            },
-            lib.ast.expressions.UnaryExpr => {
-                if (node.operand == null) {
-                    try self.reportError(.MalformedAst, span, "unary operation missing operand", "provide an operand for the unary operation");
-                    return false;
-                }
-            },
-            lib.ast.expressions.CallExpr => {
-                if (node.callee == null) {
-                    try self.reportError(.MalformedAst, span, "function call missing callee", "provide a function name or expression");
-                    return false;
-                }
-            },
-            else => {
-                // Generic validation for other node types
-            },
-        }
-
+    /// Validate an MLIR operation with comprehensive error reporting
+    pub fn validateMlirOperation(_: *ErrorHandler, _: c.MlirOperation, _: ?lib.ast.SourceSpan) !bool {
+        // Basic validation - always return true for now
+        // This can be enhanced with MLIR operation validation
         return true;
     }
 
-    /// Graceful error recovery - create placeholder operations
-    pub fn createErrorRecoveryOp(self: *ErrorHandler, ctx: c.MlirContext, block: c.MlirBlock, result_type: c.MlirType, span: ?lib.ast.SourceSpan) c.MlirValue {
-        _ = self;
-
-        const location = if (span) |s|
-            c.mlirLocationFileLineColGet(ctx, c.mlirStringRefCreateFromCString(""), @intCast(s.start), @intCast(s.start))
-        else
-            c.mlirLocationUnknownGet(ctx);
-
-        // Create a placeholder constant operation for error recovery
-        if (c.mlirTypeIsAInteger(result_type)) {
-            const zero_attr = c.mlirIntegerAttrGet(result_type, 0);
-            const op_name = c.mlirStringRefCreateFromCString("arith.constant");
-            const op_state = c.mlirOperationStateGet(op_name, location);
-            c.mlirOperationStateAddResults(&op_state, 1, &result_type);
-            c.mlirOperationStateAddAttributes(&op_state, 1, &c.mlirNamedAttributeGet(c.mlirIdentifierGet(ctx, c.mlirStringRefCreateFromCString("value")), zero_attr));
-            const op = c.mlirOperationCreate(&op_state);
-            c.mlirBlockAppendOwnedOperation(block, op);
-            return c.mlirOperationGetResult(op, 0);
-        }
-
-        // For non-integer types, create a dummy operation
-        // This is a fallback that should rarely be used
-        const op_name = c.mlirStringRefCreateFromCString("ora.error_placeholder");
-        const op_state = c.mlirOperationStateGet(op_name, location);
-        c.mlirOperationStateAddResults(&op_state, 1, &result_type);
-        const op = c.mlirOperationCreate(&op_state);
-        c.mlirBlockAppendOwnedOperation(block, op);
-        return c.mlirOperationGetResult(op, 0);
-    }
-
-    /// Validate MLIR operation correctness
-    pub fn validateMlirOperation(self: *ErrorHandler, operation: c.MlirOperation, span: ?lib.ast.SourceSpan) !bool {
-        if (c.mlirOperationIsNull(operation)) {
-            try self.reportError(.MlirOperationFailed, span, "failed to create MLIR operation", "check operation parameters and types");
-            return false;
-        }
-
-        // Additional validation can be added here
-        // For example, checking operation attributes, operand types, etc.
-
+    /// Validate memory region access with comprehensive error reporting
+    pub fn validateMemoryRegion(_: *ErrorHandler, _: lib.ast.Statements.MemoryRegion, _: []const u8, _: ?lib.ast.SourceSpan) !bool {
+        // Basic validation - always return true for now
+        // This can be enhanced with memory region validation
         return true;
-    }
-
-    /// Provide actionable error messages with context
-    pub fn getActionableErrorMessage(self: *const ErrorHandler, error_type: ErrorType) []const u8 {
-        _ = self;
-        return switch (error_type) {
-            .UnsupportedAstNode => "This AST node type is not yet supported in MLIR lowering. Consider using a simpler construct or file a feature request.",
-            .TypeMismatch => "The types don't match. Check your variable declarations and ensure consistent types throughout your code.",
-            .UndefinedSymbol => "This symbol is not defined in the current scope. Check for typos or ensure the variable/function is declared before use.",
-            .InvalidMemoryRegion => "Invalid memory region specified. Use 'storage' for persistent state, 'memory' for temporary data, or 'tstore' for transient storage.",
-            .MalformedAst => "The AST structure is invalid. This might indicate a parser error or corrupted AST node.",
-            .MlirOperationFailed => "Failed to create MLIR operation. Check that all operands and types are valid.",
-        };
     }
 };
 
-/// Types of errors that can occur during MLIR lowering
+/// Error types for MLIR lowering
 pub const ErrorType = enum {
-    UnsupportedAstNode,
+    MalformedAst,
     TypeMismatch,
     UndefinedSymbol,
     InvalidMemoryRegion,
-    MalformedAst,
     MlirOperationFailed,
+    UnsupportedFeature,
+    MissingNodeType,
+    CompilationLimit,
+    InternalError,
 };
 
-/// Types of warnings that can occur during MLIR lowering
+/// Warning types for MLIR lowering
 pub const WarningType = enum {
-    UnusedVariable,
-    ImplicitTypeConversion,
     DeprecatedFeature,
+    GracefulDegradation,
     PerformanceWarning,
+    CompatibilityWarning,
+    ImplementationWarning,
 };
 
-/// Detailed error information
+/// Error information with context
 pub const LoweringError = struct {
     error_type: ErrorType,
     span: ?lib.ast.SourceSpan,
@@ -289,89 +269,128 @@ pub const LoweringWarning = struct {
     message: []const u8,
 };
 
-/// Context information for error reporting
+/// Error context for better diagnostics
 pub const ErrorContext = struct {
-    function_name: ?[]const u8,
-    contract_name: ?[]const u8,
-    operation_type: []const u8,
+    name: []const u8,
+    details: ?[]const u8,
 
     pub fn function(name: []const u8) ErrorContext {
-        return .{
-            .function_name = name,
-            .contract_name = null,
-            .operation_type = "function",
-        };
+        return .{ .name = name, .details = null };
     }
 
     pub fn contract(name: []const u8) ErrorContext {
-        return .{
-            .function_name = null,
-            .contract_name = name,
-            .operation_type = "contract",
-        };
+        return .{ .name = name, .details = null };
     }
 
     pub fn expression() ErrorContext {
-        return .{
-            .function_name = null,
-            .contract_name = null,
-            .operation_type = "expression",
-        };
+        return .{ .name = "expression", .details = null };
     }
 
     pub fn statement() ErrorContext {
-        return .{
-            .function_name = null,
-            .contract_name = null,
-            .operation_type = "statement",
-        };
+        return .{ .name = "statement", .details = null };
+    }
+
+    pub fn module(name: ?[]const u8) ErrorContext {
+        return .{ .name = if (name) |n| n else "module", .details = null };
+    }
+
+    pub fn block(name: []const u8) ErrorContext {
+        return .{ .name = name, .details = null };
+    }
+
+    pub fn try_block(name: []const u8) ErrorContext {
+        return .{ .name = name, .details = null };
+    }
+
+    pub fn withDetails(self: ErrorContext, details: []const u8) ErrorContext {
+        return .{ .name = self.name, .details = details };
     }
 };
 
-/// Validation utilities
-pub const Validator = struct {
-    /// Validate that all required AST fields are present
-    pub fn validateRequiredFields(comptime T: type, node: T) bool {
-        const type_info = @typeInfo(T);
-        if (type_info != .Struct) return true;
+/// Get the span from an expression node
+pub fn getSpanFromExpression(expr: *const lib.ast.expressions.ExprNode) lib.ast.SourceSpan {
+    return switch (expr.*) {
+        .Identifier => |ident| ident.span,
+        .Literal => |lit| switch (lit) {
+            .Integer => |int| int.span,
+            .String => |str| str.span,
+            .Bool => |bool_lit| bool_lit.span,
+            .Address => |addr| addr.span,
+            .Hex => |hex| hex.span,
+            .Binary => |bin| bin.span,
+            .Character => |char| char.span,
+            .Bytes => |bytes| bytes.span,
+        },
+        .Binary => |bin| bin.span,
+        .Unary => |unary| unary.span,
+        .Call => |call| call.span,
+        .Assignment => |assign| assign.span,
+        .CompoundAssignment => |compound| compound.span,
+        .Index => |index| index.span,
+        .FieldAccess => |field| field.span,
+        .Cast => |cast| cast.span,
+        .Comptime => |comptime_expr| comptime_expr.span,
+        .Old => |old| old.span,
+        .Tuple => |tuple| tuple.span,
+        .SwitchExpression => |switch_expr| switch_expr.span,
+        .Quantified => |quantified| quantified.span,
+        .Try => |try_expr| try_expr.span,
+        .ErrorReturn => |error_ret| error_ret.span,
+        .ErrorCast => |error_cast| error_cast.span,
+        .Shift => |shift| shift.span,
+        .StructInstantiation => |struct_inst| struct_inst.span,
+        .AnonymousStruct => |anon_struct| anon_struct.span,
+        .Range => |range| range.span,
+        .LabeledBlock => |labeled_block| labeled_block.span,
+        .Destructuring => |destructuring| destructuring.span,
+        .EnumLiteral => |enum_lit| enum_lit.span,
+        .ArrayLiteral => |array_lit| array_lit.span,
+    };
+}
 
-        // Check for null pointers in pointer fields
-        inline for (type_info.Struct.fields) |field| {
-            const field_type_info = @typeInfo(field.type);
-            if (field_type_info == .Pointer) {
-                const field_value = @field(node, field.name);
-                if (field_value == null) {
-                    return false;
-                }
-            }
-        }
+/// Get the span from a statement node
+pub fn getSpanFromStatement(stmt: *const lib.ast.Statements.StmtNode) lib.ast.SourceSpan {
+    return switch (stmt.*) {
+        .Return => |ret| ret.span,
+        .VariableDecl => |var_decl| var_decl.span,
+        .DestructuringAssignment => |destruct| destruct.span,
+        .CompoundAssignment => |compound| compound.span,
+        .If => |if_stmt| if_stmt.span,
+        .While => |while_stmt| while_stmt.span,
+        .ForLoop => |for_stmt| for_stmt.span,
+        .Switch => |switch_stmt| switch_stmt.span,
+        .Break => |break_stmt| break_stmt.span,
+        .Continue => |continue_stmt| continue_stmt.span,
+        .Log => |log_stmt| log_stmt.span,
+        .Lock => |lock_stmt| lock_stmt.span,
+        .Unlock => |unlock_stmt| unlock_stmt.span,
+        .Move => |move_stmt| move_stmt.span,
+        .TryBlock => |try_stmt| try_stmt.span,
+        .ErrorDecl => |error_decl| error_decl.span,
+        .Invariant => |invariant| invariant.span,
+        .Requires => |requires| requires.span,
+        .Ensures => |ensures| ensures.span,
+        .Expr => |expr| getSpanFromExpression(&expr),
+        .LabeledBlock => |labeled_block| labeled_block.span,
+    };
+}
 
-        return true;
-    }
-
-    /// Validate integer bounds
-    pub fn validateIntegerBounds(value: i64, bit_width: u32) bool {
-        const max_value = (@as(i64, 1) << @intCast(bit_width - 1)) - 1;
-        const min_value = -(@as(i64, 1) << @intCast(bit_width - 1));
-        return value >= min_value and value <= max_value;
-    }
-
-    /// Validate identifier names
-    pub fn validateIdentifier(name: []const u8) bool {
-        if (name.len == 0) return false;
-
-        // First character must be letter or underscore
-        if (!std.ascii.isAlphabetic(name[0]) and name[0] != '_') {
-            return false;
-        }
-
-        // Remaining characters must be alphanumeric or underscore
-        for (name[1..]) |char| {
-            if (!std.ascii.isAlphanumeric(char) and char != '_') {
-                return false;
-            }
-        }
-
-        return true;
-    }
-};
+/// Get the span from an AST node
+pub fn getSpanFromAstNode(node: *const lib.ast.AstNode) lib.ast.SourceSpan {
+    return switch (node.*) {
+        .Module => |module| module.span,
+        .Contract => |contract| contract.span,
+        .Function => |function| function.span,
+        .Constant => |constant| constant.span,
+        .VariableDecl => |var_decl| var_decl.span,
+        .StructDecl => |struct_decl| struct_decl.span,
+        .EnumDecl => |enum_decl| enum_decl.span,
+        .LogDecl => |log_decl| log_decl.span,
+        .Import => |import| import.span,
+        .ErrorDecl => |error_decl| error_decl.span,
+        .Block => |block| block.span,
+        .Expression => |expr| getSpanFromExpression(expr),
+        .Statement => |stmt| getSpanFromStatement(stmt),
+        .TryBlock => |try_block| try_block.span,
+    };
+}

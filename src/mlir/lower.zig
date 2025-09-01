@@ -26,14 +26,17 @@ const LocalVarMap = @import("symbols.zig").LocalVarMap;
 const LocationTracker = @import("locations.zig").LocationTracker;
 const ErrorHandler = @import("error_handling.zig").ErrorHandler;
 const ErrorContext = @import("error_handling.zig").ErrorContext;
+const LoweringError = @import("error_handling.zig").LoweringError;
+const LoweringWarning = @import("error_handling.zig").LoweringWarning;
+const error_handling = @import("error_handling.zig");
 const PassManager = @import("pass_manager.zig").PassManager;
 const PassPipelineConfig = @import("pass_manager.zig").PassPipelineConfig;
 
 /// Enhanced lowering result with error information and pass results
 pub const LoweringResult = struct {
     module: c.MlirModule,
-    errors: []const @import("error_handling.zig").LoweringError,
-    warnings: []const @import("error_handling.zig").LoweringWarning,
+    errors: []const LoweringError,
+    warnings: []const LoweringWarning,
     success: bool,
     pass_result: ?@import("pass_manager.zig").PassResult,
 };
@@ -54,7 +57,7 @@ pub fn lowerFunctionsToModuleWithErrors(ctx: c.MlirContext, nodes: []lib.AstNode
     defer type_mapper.deinit();
 
     const locations = LocationTracker.init(ctx);
-    const decl_lowerer = DeclarationLowerer.init(ctx, &type_mapper, locations);
+    const decl_lowerer = DeclarationLowerer.withErrorHandler(ctx, &type_mapper, locations, &error_handler);
 
     // Create global symbol table and storage map for the module
     var symbol_table = SymbolTable.init(allocator);
@@ -124,14 +127,7 @@ pub fn lowerFunctionsToModuleWithErrors(ctx: c.MlirContext, nodes: []lib.AstNode
                 }
 
                 // Validate memory region
-                const region_name = switch (var_decl.region) {
-                    .Storage => "storage",
-                    .Memory => "memory",
-                    .TStore => "tstore",
-                    .Stack => "stack",
-                };
-
-                const is_valid = error_handler.validateMemoryRegion(region_name, "variable declaration", var_decl.span) catch false;
+                const is_valid = error_handler.validateMemoryRegion(var_decl.region, "variable declaration", var_decl.span) catch false;
                 if (!is_valid) {
                     continue; // Skip invalid memory region
                 }
@@ -260,33 +256,234 @@ pub fn lowerFunctionsToModuleWithErrors(ctx: c.MlirContext, nodes: []lib.AstNode
                 }
             },
             .Module => |module_node| {
-                // Handle module-level declarations by processing their contents
+                // Set error context for module lowering
+                try error_handler.pushContext(ErrorContext.module(module_node.name orelse "unnamed"));
+                defer error_handler.popContext();
+
+                // Validate module AST node
+                const module_valid = error_handler.validateAstNode(module_node, module_node.span) catch {
+                    try error_handler.reportError(.MalformedAst, module_node.span, "module validation failed", "check module structure");
+                    continue;
+                };
+                if (!module_valid) {
+                    continue;
+                }
+
+                // Process module imports first
+                for (module_node.imports) |import| {
+                    const import_valid = error_handler.validateAstNode(import, import.span) catch {
+                        try error_handler.reportError(.MalformedAst, import.span, "import validation failed", "check import structure");
+                        continue;
+                    };
+                    if (import_valid) {
+                        const import_op = decl_lowerer.lowerImport(&import);
+                        if (error_handler.validateMlirOperation(import_op, import.span) catch false) {
+                            c.mlirBlockAppendOwnedOperation(body, import_op);
+                        }
+                    }
+                }
+
+                // Process module declarations recursively
                 for (module_node.declarations) |decl| {
                     // Recursively process module declarations
-                    // This could be implemented as a recursive call to lowerFunctionsToModuleWithErrors
-                    try error_handler.reportWarning(.DeprecatedFeature, null, "nested modules are not fully supported yet");
-                    _ = decl;
+                    // This creates a proper module structure in MLIR
+                    // Note: We can't call lowerModule on individual declarations
+                    // Instead, we need to handle them based on their type
+                    switch (decl) {
+                        .Function => |func| {
+                            // Create a local variable map for this function
+                            var local_var_map = LocalVarMap.init(allocator);
+                            defer local_var_map.deinit();
+
+                            const func_op = decl_lowerer.lowerFunction(&func, &global_storage_map, &local_var_map);
+                            if (error_handler.validateMlirOperation(func_op, func.span) catch false) {
+                                c.mlirBlockAppendOwnedOperation(body, func_op);
+                            }
+                        },
+                        .Contract => |contract| {
+                            const contract_op = decl_lowerer.lowerContract(&contract);
+                            if (error_handler.validateMlirOperation(contract_op, contract.span) catch false) {
+                                c.mlirBlockAppendOwnedOperation(body, contract_op);
+                            }
+                        },
+                        .VariableDecl => |var_decl| {
+                            // Handle variable declarations within module with graceful degradation
+                            try error_handler.reportGracefulDegradation("variable declarations within modules", "global variable declarations", var_decl.span);
+                            // Create a placeholder operation to allow compilation to continue
+                            const placeholder_op = decl_lowerer.createVariablePlaceholder(&var_decl);
+                            if (error_handler.validateMlirOperation(placeholder_op, var_decl.span) catch false) {
+                                c.mlirBlockAppendOwnedOperation(body, placeholder_op);
+                            }
+                        },
+                        .StructDecl => |struct_decl| {
+                            const struct_op = decl_lowerer.lowerStruct(&struct_decl);
+                            if (error_handler.validateMlirOperation(struct_op, struct_decl.span) catch false) {
+                                c.mlirBlockAppendOwnedOperation(body, struct_op);
+                            }
+                        },
+                        .EnumDecl => |enum_decl| {
+                            const enum_op = decl_lowerer.lowerEnum(&enum_decl);
+                            if (error_handler.validateMlirOperation(enum_op, enum_decl.span) catch false) {
+                                c.mlirBlockAppendOwnedOperation(body, enum_op);
+                            }
+                        },
+                        .Import => |import_decl| {
+                            const import_op = decl_lowerer.lowerImport(&import_decl);
+                            if (error_handler.validateMlirOperation(import_op, import_decl.span) catch false) {
+                                c.mlirBlockAppendOwnedOperation(body, import_op);
+                            }
+                        },
+                        .Constant => |const_decl| {
+                            const const_op = decl_lowerer.lowerConstDecl(&const_decl);
+                            if (error_handler.validateMlirOperation(const_op, const_decl.span) catch false) {
+                                c.mlirBlockAppendOwnedOperation(body, const_op);
+                            }
+                        },
+                        .LogDecl => |log_decl| {
+                            const log_op = decl_lowerer.lowerLogDecl(&log_decl);
+                            if (error_handler.validateMlirOperation(log_op, log_decl.span) catch false) {
+                                c.mlirBlockAppendOwnedOperation(body, log_op);
+                            }
+                        },
+                        .ErrorDecl => |error_decl| {
+                            const error_op = decl_lowerer.lowerErrorDecl(&error_decl);
+                            if (error_handler.validateMlirOperation(error_op, error_decl.span) catch false) {
+                                c.mlirBlockAppendOwnedOperation(body, error_op);
+                            }
+                        },
+                        .Module => |nested_module| {
+                            // Recursively handle nested modules with graceful degradation
+                            try error_handler.reportGracefulDegradation("nested modules", "flat module structure", nested_module.span);
+                            // Create a placeholder operation to allow compilation to continue
+                            const placeholder_op = decl_lowerer.createModulePlaceholder(&nested_module);
+                            if (error_handler.validateMlirOperation(placeholder_op, nested_module.span) catch false) {
+                                c.mlirBlockAppendOwnedOperation(body, placeholder_op);
+                            }
+                        },
+                        .Block => |block| {
+                            const block_op = decl_lowerer.lowerBlock(&block);
+                            if (error_handler.validateMlirOperation(block_op, block.span) catch false) {
+                                c.mlirBlockAppendOwnedOperation(body, block_op);
+                            }
+                        },
+                        .Expression => |expr| {
+                            // Handle expressions within module with graceful degradation
+                            try error_handler.reportGracefulDegradation("expressions within modules", "expression capture operations", error_handling.getSpanFromExpression(expr));
+                            // Create a placeholder operation to allow compilation to continue
+                            const expr_lowerer = ExpressionLowerer.init(ctx, body, &type_mapper, null, null, null, locations);
+                            const expr_value = expr_lowerer.lowerExpression(expr);
+                            const expr_op = expr_lowerer.createExpressionCapture(expr_value, error_handling.getSpanFromExpression(expr));
+                            if (error_handler.validateMlirOperation(expr_op, error_handling.getSpanFromExpression(expr)) catch false) {
+                                c.mlirBlockAppendOwnedOperation(body, expr_op);
+                            }
+                        },
+                        .Statement => |stmt| {
+                            // Handle statements within modules with graceful degradation
+                            try error_handler.reportGracefulDegradation("statements within modules", "statement lowering operations", error_handling.getSpanFromStatement(stmt));
+                            // Create a placeholder operation to allow compilation to continue
+                            const expr_lowerer = ExpressionLowerer.init(ctx, body, &type_mapper, null, null, null, locations);
+                            const stmt_lowerer = StatementLowerer.init(ctx, body, &type_mapper, &expr_lowerer, null, null, null, locations, null, std.heap.page_allocator);
+                            stmt_lowerer.lowerStatement(stmt) catch {
+                                try error_handler.reportError(.MlirOperationFailed, error_handling.getSpanFromStatement(stmt), "failed to lower top-level statement", "check statement structure and dependencies");
+                                continue;
+                            };
+                        },
+                        .TryBlock => |try_block| {
+                            const try_block_op = decl_lowerer.lowerTryBlock(&try_block);
+                            if (error_handler.validateMlirOperation(try_block_op, try_block.span) catch false) {
+                                c.mlirBlockAppendOwnedOperation(body, try_block_op);
+                            }
+                        },
+                    }
                 }
             },
             .Block => |block| {
-                // Blocks at top level are unusual - report as warning
-                try error_handler.reportWarning(.DeprecatedFeature, null, "top-level blocks are not recommended");
-                _ = block;
+                // Set error context for block lowering
+                try error_handler.pushContext(ErrorContext.block("top-level"));
+                defer error_handler.popContext();
+
+                // Validate block AST node
+                const block_valid = error_handler.validateAstNode(block, block.span) catch {
+                    try error_handler.reportError(.MalformedAst, block.span, "block validation failed", "check block structure");
+                    continue;
+                };
+                if (!block_valid) {
+                    continue;
+                }
+
+                // Lower top-level block using the declaration lowerer
+                const block_op = decl_lowerer.lowerBlock(&block);
+                if (error_handler.validateMlirOperation(block_op, block.span) catch false) {
+                    c.mlirBlockAppendOwnedOperation(body, block_op);
+                }
             },
             .Expression => |expr| {
-                // Top-level expressions are unusual - report as warning
-                try error_handler.reportWarning(.DeprecatedFeature, null, "top-level expressions are not recommended");
-                _ = expr;
+                // Set error context for expression lowering
+                try error_handler.pushContext(ErrorContext.expression());
+                defer error_handler.popContext();
+
+                // Validate expression AST node
+                const expr_valid = error_handler.validateAstNode(expr, error_handling.getSpanFromExpression(expr)) catch {
+                    try error_handler.reportError(.MalformedAst, error_handling.getSpanFromExpression(expr), "expression validation failed", "check expression structure");
+                    continue;
+                };
+                if (!expr_valid) {
+                    continue;
+                }
+
+                // Create a temporary expression lowerer for top-level expressions
+                const expr_lowerer = ExpressionLowerer.init(ctx, body, &type_mapper, null, null, null, locations);
+                const expr_value = expr_lowerer.lowerExpression(expr);
+
+                // For top-level expressions, we need to create a proper operation
+                // This could be a constant or a call to a function that evaluates the expression
+                // For now, we'll create a simple operation that captures the expression value
+                const expr_op = expr_lowerer.createExpressionCapture(expr_value, error_handling.getSpanFromExpression(expr));
+                if (error_handler.validateMlirOperation(expr_op, error_handling.getSpanFromExpression(expr)) catch false) {
+                    c.mlirBlockAppendOwnedOperation(body, expr_op);
+                }
             },
             .Statement => |stmt| {
-                // Top-level statements are unusual - report as warning
-                try error_handler.reportWarning(.DeprecatedFeature, null, "top-level statements are not recommended");
-                _ = stmt;
+                // Set error context for statement lowering
+                try error_handler.pushContext(ErrorContext.statement());
+                defer error_handler.popContext();
+
+                // Validate statement AST node
+                const stmt_valid = error_handler.validateAstNode(stmt, error_handling.getSpanFromStatement(stmt)) catch {
+                    try error_handler.reportError(.MalformedAst, error_handling.getSpanFromStatement(stmt), "statement validation failed", "check statement structure");
+                    continue;
+                };
+                if (!stmt_valid) {
+                    continue;
+                }
+
+                // Create a temporary statement lowerer for top-level statements
+                const expr_lowerer = ExpressionLowerer.init(ctx, body, &type_mapper, null, null, null, locations);
+                const stmt_lowerer = StatementLowerer.init(ctx, body, &type_mapper, &expr_lowerer, null, null, null, locations, null, std.heap.page_allocator);
+                stmt_lowerer.lowerStatement(stmt) catch {
+                    try error_handler.reportError(.MlirOperationFailed, error_handling.getSpanFromStatement(stmt), "failed to lower top-level statement", "check statement structure and dependencies");
+                    continue;
+                };
             },
             .TryBlock => |try_block| {
-                // Try blocks at top level are unusual - report as warning
-                try error_handler.reportWarning(.DeprecatedFeature, null, "top-level try blocks are not recommended");
-                _ = try_block;
+                // Set error context for try block lowering
+                try error_handler.pushContext(ErrorContext.try_block("top-level"));
+                defer error_handler.popContext();
+
+                // Validate try block AST node
+                const try_block_valid = error_handler.validateAstNode(try_block, try_block.span) catch {
+                    try error_handler.reportError(.MalformedAst, try_block.span, "try block validation failed", "check try block structure");
+                    continue;
+                };
+                if (!try_block_valid) {
+                    continue;
+                }
+
+                // Lower top-level try block using the declaration lowerer
+                const try_block_op = decl_lowerer.lowerTryBlock(&try_block);
+                if (error_handler.validateMlirOperation(try_block_op, try_block.span) catch false) {
+                    c.mlirBlockAppendOwnedOperation(body, try_block_op);
+                }
             },
         }
     }
@@ -294,8 +491,8 @@ pub fn lowerFunctionsToModuleWithErrors(ctx: c.MlirContext, nodes: []lib.AstNode
     // Create and return the lowering result
     const result = LoweringResult{
         .module = module,
-        .errors = try allocator.dupe(@import("error_handling.zig").LoweringError, error_handler.getErrors()),
-        .warnings = try allocator.dupe(@import("error_handling.zig").LoweringWarning, error_handler.getWarnings()),
+        .errors = try allocator.dupe(LoweringError, error_handler.getErrors()),
+        .warnings = try allocator.dupe(LoweringWarning, error_handler.getWarnings()),
         .success = !error_handler.hasErrors(),
         .pass_result = null,
     };
@@ -343,10 +540,10 @@ pub fn lowerFunctionsToModuleWithPasses(ctx: c.MlirContext, nodes: []lib.AstNode
                 try error_handler.reportError(.MlirOperationFailed, null, "module verification failed after pass execution", "check pass configuration and module structure");
 
                 // Update the result with verification error
-                const verification_errors = try allocator.dupe(@import("error_handling.zig").LoweringError, error_handler.getErrors());
-                const combined_errors = try allocator.alloc(@import("error_handling.zig").LoweringError, lowering_result.errors.len + verification_errors.len);
-                std.mem.copyForwards(@import("error_handling.zig").LoweringError, combined_errors[0..lowering_result.errors.len], lowering_result.errors);
-                std.mem.copyForwards(@import("error_handling.zig").LoweringError, combined_errors[lowering_result.errors.len..], verification_errors);
+                const verification_errors = try allocator.dupe(LoweringError, error_handler.getErrors());
+                const combined_errors = try allocator.alloc(LoweringError, lowering_result.errors.len + verification_errors.len);
+                std.mem.copyForwards(LoweringError, combined_errors[0..lowering_result.errors.len], lowering_result.errors);
+                std.mem.copyForwards(LoweringError, combined_errors[lowering_result.errors.len..], verification_errors);
 
                 lowering_result.errors = combined_errors;
                 lowering_result.success = false;

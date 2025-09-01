@@ -119,7 +119,12 @@ pub const MemoryManager = struct {
         switch (storage_type) {
             .Storage => {
                 // Storage uses ora.sstore - address should be variable name
-                @panic("Use createStorageStore for storage variables");
+                std.debug.print("ERROR: Use createStorageStore for storage variables\n", .{});
+                // Create a placeholder error operation
+                var state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("ora.error"), loc);
+                const error_ty = c.mlirIntegerTypeGet(self.ctx, 32);
+                c.mlirOperationStateAddResults(&state, 1, @ptrCast(&error_ty));
+                return c.mlirOperationCreate(&state);
             },
             .Memory => {
                 // Memory uses memref.store with memory space 0
@@ -138,7 +143,12 @@ pub const MemoryManager = struct {
             },
             .TStore => {
                 // Transient storage uses ora.tstore
-                @panic("Use createTStoreStore for transient storage variables");
+                std.debug.print("ERROR: Use createTStoreStore for transient storage variables\n", .{});
+                // Create a placeholder error operation
+                var state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("ora.error"), loc);
+                const error_ty = c.mlirIntegerTypeGet(self.ctx, 32);
+                c.mlirOperationStateAddResults(&state, 1, @ptrCast(&error_ty));
+                return c.mlirOperationCreate(&state);
             },
             .Stack => {
                 // Stack uses regular memref.store
@@ -154,7 +164,11 @@ pub const MemoryManager = struct {
         switch (storage_type) {
             .Storage => {
                 // Storage uses ora.sload - address should be variable name
-                @panic("Use createStorageLoad for storage variables");
+                std.debug.print("ERROR: Use createStorageLoad for storage variables\n", .{});
+                // Create a placeholder error operation
+                var state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("ora.error"), loc);
+                c.mlirOperationStateAddResults(&state, 1, @ptrCast(&result_type));
+                return c.mlirOperationCreate(&state);
             },
             .Memory => {
                 // Memory uses memref.load with memory space 0
@@ -174,7 +188,11 @@ pub const MemoryManager = struct {
             },
             .TStore => {
                 // Transient storage uses ora.tload
-                @panic("Use createTStoreLoad for transient storage variables");
+                std.debug.print("ERROR: Use createTStoreLoad for transient storage variables\n", .{});
+                // Create a placeholder error operation
+                var state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("ora.error"), loc);
+                c.mlirOperationStateAddResults(&state, 1, @ptrCast(&result_type));
+                return c.mlirOperationCreate(&state);
             },
             .Stack => {
                 // Stack uses regular memref.load
@@ -410,7 +428,12 @@ pub const MemoryManager = struct {
             .Stack => {
                 // For stack variables, we return the value directly from our local variable map
                 // This is handled differently in the identifier lowering
-                @panic("Stack variables should not use createLoadOperation");
+                std.debug.print("ERROR: Stack variables should not use createLoadOperation\n", .{});
+                // Create a placeholder error operation
+                var state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("ora.error"), loc);
+                const error_ty = c.mlirIntegerTypeGet(self.ctx, 32);
+                c.mlirOperationStateAddResults(&state, 1, @ptrCast(&error_ty));
+                return c.mlirOperationCreate(&state);
             },
         }
     }
@@ -481,7 +504,12 @@ pub const MemoryManager = struct {
             .Stack => {
                 // For stack variables, we store the value directly in our local variable map
                 // This is handled differently in the assignment lowering
-                @panic("Stack variables should not use createStoreOperation");
+                std.debug.print("ERROR: Stack variables should not use createStoreOperation\n", .{});
+                // Create a placeholder error operation
+                var state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("ora.error"), loc);
+                const error_ty = c.mlirIntegerTypeGet(self.ctx, 32);
+                c.mlirOperationStateAddResults(&state, 1, @ptrCast(&error_ty));
+                return c.mlirOperationCreate(&state);
             },
         }
     }

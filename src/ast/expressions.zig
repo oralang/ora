@@ -242,6 +242,8 @@ pub const LiteralExpr = union(enum) {
     Address: AddressLiteral,
     Hex: HexLiteral,
     Binary: BinaryLiteral,
+    Character: CharacterLiteral,
+    Bytes: BytesLiteral,
 };
 
 pub const IntegerType = enum {
@@ -330,6 +332,18 @@ pub const HexLiteral = struct {
 };
 
 pub const BinaryLiteral = struct {
+    value: []const u8,
+    type_info: TypeInfo,
+    span: SourceSpan,
+};
+
+pub const CharacterLiteral = struct {
+    value: u8,
+    type_info: TypeInfo,
+    span: SourceSpan,
+};
+
+pub const BytesLiteral = struct {
     value: []const u8,
     type_info: TypeInfo,
     span: SourceSpan,

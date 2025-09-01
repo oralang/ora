@@ -11,18 +11,30 @@ const StorageMap = @import("memory.zig").StorageMap;
 const ExpressionLowerer = @import("expressions.zig").ExpressionLowerer;
 const StatementLowerer = @import("statements.zig").StatementLowerer;
 const LoweringError = @import("statements.zig").StatementLowerer.LoweringError;
+const error_handling = @import("error_handling.zig");
 
 /// Declaration lowering system for converting Ora top-level declarations to MLIR
 pub const DeclarationLowerer = struct {
     ctx: c.MlirContext,
     type_mapper: *const TypeMapper,
     locations: LocationTracker,
+    error_handler: ?*const @import("error_handling.zig").ErrorHandler,
 
     pub fn init(ctx: c.MlirContext, type_mapper: *const TypeMapper, locations: LocationTracker) DeclarationLowerer {
         return .{
             .ctx = ctx,
             .type_mapper = type_mapper,
             .locations = locations,
+            .error_handler = null,
+        };
+    }
+
+    pub fn withErrorHandler(ctx: c.MlirContext, type_mapper: *const TypeMapper, locations: LocationTracker, error_handler: *const @import("error_handling.zig").ErrorHandler) DeclarationLowerer {
+        return .{
+            .ctx = ctx,
+            .type_mapper = type_mapper,
+            .locations = locations,
+            .error_handler = error_handler,
         };
     }
 
@@ -249,15 +261,9 @@ pub const DeclarationLowerer = struct {
                         },
                     }
                 },
-                .Function => |f| {
-                    // Add function to contract symbol table
-                    // For now, use placeholder types - these should be properly extracted from the function
-                    var param_types = [_]c.MlirType{};
-                    const return_type = if (f.return_type_info) |ret_info|
-                        self.type_mapper.toMlirType(ret_info)
-                    else
-                        c.mlirNoneTypeGet(self.ctx);
-                    contract_symbol_table.addFunction(f.name, c.mlirOperationCreate(&state), &param_types, return_type) catch {};
+                .Function => |_| {
+                    // Functions are processed in the second pass - skip in first pass
+                    // This avoids creating operations before the state is fully configured
                 },
                 else => {},
             }
@@ -316,7 +322,14 @@ pub const DeclarationLowerer = struct {
                     c.mlirBlockAppendOwnedOperation(block, error_op);
                 },
                 else => {
-                    std.debug.print("WARNING: Unhandled contract body node type in MLIR lowering: {s}\n", .{@tagName(child)});
+                    // Report missing node type with context and continue processing
+                    if (self.error_handler) |eh| {
+                        // Create a mutable copy for error reporting
+                        var error_handler = @constCast(eh);
+                        error_handler.reportMissingNodeType(@tagName(child), error_handling.getSpanFromAstNode(&child), "contract body") catch {};
+                    } else {
+                        std.debug.print("WARNING: Unhandled contract body node type in MLIR lowering: {s}\n", .{@tagName(child)});
+                    }
                 },
             }
         }
@@ -462,6 +475,123 @@ pub const DeclarationLowerer = struct {
         return c.mlirOperationCreate(&state);
     }
 
+    /// Lower module declarations for top-level program structure
+    pub fn lowerModule(self: *const DeclarationLowerer, module: *const lib.ast.ModuleNode) c.MlirOperation {
+        // Create ora.module operation
+        var state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("ora.module"), self.createFileLocation(module.span));
+
+        // Collect module attributes
+        var attributes = std.ArrayList(c.MlirNamedAttribute).init(std.heap.page_allocator);
+        defer attributes.deinit();
+
+        // Add module name if present
+        if (module.name) |name| {
+            const name_ref = c.mlirStringRefCreate(name.ptr, name.len);
+            const name_attr = c.mlirStringAttrGet(self.ctx, name_ref);
+            const name_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("sym_name"));
+            attributes.append(c.mlirNamedAttributeGet(name_id, name_attr)) catch {};
+        }
+
+        // Add module declaration marker
+        const module_decl_attr = c.mlirBoolAttrGet(self.ctx, 1);
+        const module_decl_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("ora.module_decl"));
+        attributes.append(c.mlirNamedAttributeGet(module_decl_id, module_decl_attr)) catch {};
+
+        // Add import count attribute
+        const import_count_attr = c.mlirIntegerAttrGet(c.mlirIntegerTypeGet(self.ctx, 32), @intCast(module.imports.len));
+        const import_count_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("ora.import_count"));
+        attributes.append(c.mlirNamedAttributeGet(import_count_id, import_count_attr)) catch {};
+
+        // Add declaration count attribute
+        const decl_count_attr = c.mlirIntegerAttrGet(c.mlirIntegerTypeGet(self.ctx, 32), @intCast(module.declarations.len));
+        const decl_count_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("ora.declaration_count"));
+        attributes.append(c.mlirNamedAttributeGet(decl_count_id, decl_count_attr)) catch {};
+
+        // Apply all attributes
+        c.mlirOperationStateAddAttributes(&state, @intCast(attributes.items.len), attributes.items.ptr);
+
+        // Create a region for the module body
+        const region = c.mlirRegionCreate();
+        c.mlirOperationStateAddOwnedRegions(&state, 1, @ptrCast(&region));
+
+        return c.mlirOperationCreate(&state);
+    }
+
+    /// Lower block declarations for block constructs
+    pub fn lowerBlock(self: *const DeclarationLowerer, block_decl: *const lib.ast.Statements.BlockNode) c.MlirOperation {
+        // Create ora.block operation
+        var state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("ora.block"), self.createFileLocation(block_decl.span));
+
+        // Collect block attributes
+        var attributes = std.ArrayList(c.MlirNamedAttribute).init(std.heap.page_allocator);
+        defer attributes.deinit();
+
+        // Add block declaration marker
+        const block_decl_attr = c.mlirBoolAttrGet(self.ctx, 1);
+        const block_decl_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("ora.block_decl"));
+        attributes.append(c.mlirNamedAttributeGet(block_decl_id, block_decl_attr)) catch {};
+
+        // Add statement count attribute
+        const stmt_count_attr = c.mlirIntegerAttrGet(c.mlirIntegerTypeGet(self.ctx, 32), @intCast(block_decl.statements.len));
+        const stmt_count_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("ora.statement_count"));
+        attributes.append(c.mlirNamedAttributeGet(stmt_count_id, stmt_count_attr)) catch {};
+
+        // Apply all attributes
+        c.mlirOperationStateAddAttributes(&state, @intCast(attributes.items.len), attributes.items.ptr);
+
+        // Create a region for the block body
+        const region = c.mlirRegionCreate();
+        const block = c.mlirBlockCreate(0, null, null);
+        c.mlirRegionInsertOwnedBlock(region, 0, block);
+        c.mlirOperationStateAddOwnedRegions(&state, 1, @ptrCast(&region));
+
+        return c.mlirOperationCreate(&state);
+    }
+
+    /// Lower try-block declarations for try-catch blocks
+    pub fn lowerTryBlock(self: *const DeclarationLowerer, try_block: *const lib.ast.Statements.TryBlockNode) c.MlirOperation {
+        // Create ora.try_block operation
+        var state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("ora.try_block"), self.createFileLocation(try_block.span));
+
+        // Collect try-block attributes
+        var attributes = std.ArrayList(c.MlirNamedAttribute).init(std.heap.page_allocator);
+        defer attributes.deinit();
+
+        // Add try-block declaration marker
+        const try_block_decl_attr = c.mlirBoolAttrGet(self.ctx, 1);
+        const try_block_decl_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("ora.try_block_decl"));
+        attributes.append(c.mlirNamedAttributeGet(try_block_decl_id, try_block_decl_attr)) catch {};
+
+        // Add error handling marker
+        const error_handling_attr = c.mlirBoolAttrGet(self.ctx, 1);
+        const error_handling_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("ora.error_handling"));
+        attributes.append(c.mlirNamedAttributeGet(error_handling_id, error_handling_attr)) catch {};
+
+        // Add catch block presence attribute
+        const has_catch_attr = c.mlirBoolAttrGet(self.ctx, if (try_block.catch_block != null) 1 else 0);
+        const has_catch_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("ora.has_catch"));
+        attributes.append(c.mlirNamedAttributeGet(has_catch_id, has_catch_attr)) catch {};
+
+        // Apply all attributes
+        c.mlirOperationStateAddAttributes(&state, @intCast(attributes.items.len), attributes.items.ptr);
+
+        // Create regions for try and catch blocks
+        const try_region = c.mlirRegionCreate();
+        const try_block_mlir = c.mlirBlockCreate(0, null, null);
+        c.mlirRegionInsertOwnedBlock(try_region, 0, try_block_mlir);
+        c.mlirOperationStateAddOwnedRegions(&state, 1, @ptrCast(&try_region));
+
+        // Add catch region if present
+        if (try_block.catch_block != null) {
+            const catch_region = c.mlirRegionCreate();
+            const catch_block_mlir = c.mlirBlockCreate(0, null, null);
+            c.mlirRegionInsertOwnedBlock(catch_region, 0, catch_block_mlir);
+            c.mlirOperationStateAddOwnedRegions(&state, 1, @ptrCast(&catch_region));
+        }
+
+        return c.mlirOperationCreate(&state);
+    }
+
     /// Lower import declarations with module import constructs (Requirements 7.5)
     pub fn lowerImport(self: *const DeclarationLowerer, import_decl: *const lib.ast.ImportNode) c.MlirOperation {
         // Create ora.import operation
@@ -543,8 +673,9 @@ pub const DeclarationLowerer = struct {
         c.mlirOperationStateAddOwnedRegions(&state, 1, @ptrCast(&region));
 
         // Lower the constant value expression
-        // For now, we'll create a placeholder - full implementation would lower const_decl.value
-        // TODO: Lower const_decl.value expression and create appropriate constant operation
+        // Create a temporary expression lowerer to lower the constant value
+        const expr_lowerer = ExpressionLowerer.init(self.ctx, block, self.type_mapper, null, null, null, self.locations);
+        _ = expr_lowerer.lowerExpression(const_decl.value);
 
         return c.mlirOperationCreate(&state);
     }
@@ -1133,6 +1264,8 @@ pub const DeclarationLowerer = struct {
                 .Address => |addr| addr.span,
                 .Hex => |hex| hex.span,
                 .Binary => |bin| bin.span,
+                .Character => |char| char.span,
+                .Bytes => |bytes| bytes.span,
             },
             .Binary => |bin| bin.span,
             .Unary => |unary| unary.span,
@@ -1159,5 +1292,45 @@ pub const DeclarationLowerer = struct {
             .EnumLiteral => |enum_lit| enum_lit.span,
             .ArrayLiteral => |array_lit| array_lit.span,
         };
+    }
+
+    /// Create a placeholder operation for unsupported variable declarations
+    pub fn createVariablePlaceholder(self: *const DeclarationLowerer, var_decl: *const lib.ast.Statements.VariableDeclNode) c.MlirOperation {
+        const loc = self.createFileLocation(var_decl.span);
+        var state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("ora.variable_placeholder"), loc);
+
+        // Add variable name as attribute
+        const name_ref = c.mlirStringRefCreate(var_decl.name.ptr, var_decl.name.len);
+        const name_attr = c.mlirStringAttrGet(self.ctx, name_ref);
+        const name_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("name"));
+        var attrs = [_]c.MlirNamedAttribute{c.mlirNamedAttributeGet(name_id, name_attr)};
+        c.mlirOperationStateAddAttributes(&state, attrs.len, &attrs);
+
+        // Add placeholder type
+        const placeholder_ty = c.mlirIntegerTypeGet(self.ctx, 32);
+        c.mlirOperationStateAddResults(&state, 1, @ptrCast(&placeholder_ty));
+
+        return c.mlirOperationCreate(&state);
+    }
+
+    /// Create a placeholder operation for unsupported nested modules
+    pub fn createModulePlaceholder(self: *const DeclarationLowerer, module_decl: *const lib.ast.ModuleNode) c.MlirOperation {
+        const loc = self.createFileLocation(module_decl.span);
+        var state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("ora.module_placeholder"), loc);
+
+        // Add module name as attribute if available
+        if (module_decl.name) |name| {
+            const name_ref = c.mlirStringRefCreate(name.ptr, name.len);
+            const name_attr = c.mlirStringAttrGet(self.ctx, name_ref);
+            const name_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("name"));
+            var attrs = [_]c.MlirNamedAttribute{c.mlirNamedAttributeGet(name_id, name_attr)};
+            c.mlirOperationStateAddAttributes(&state, attrs.len, &attrs);
+        }
+
+        // Add placeholder type
+        const placeholder_ty = c.mlirIntegerTypeGet(self.ctx, 32);
+        c.mlirOperationStateAddResults(&state, 1, @ptrCast(&placeholder_ty));
+
+        return c.mlirOperationCreate(&state);
     }
 };

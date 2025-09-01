@@ -2031,6 +2031,30 @@ pub const AstSerializer = struct {
                     try self.writeSpanField(writer, &bin_lit.span, indent);
                 }
             },
+            .Character => |*char_lit| {
+                try self.writeField(writer, "literal_type", "Character", indent, false);
+                try writer.writeAll(",\n");
+                try self.writeIndent(writer, indent);
+                try writer.writeAll("\"type_info\": ");
+                try self.serializeTypeInfo(char_lit.type_info, writer);
+                try writer.writeAll(",\n");
+                try self.writeField(writer, "value", try std.fmt.allocPrint(self.allocator, "{c}", .{char_lit.value}), indent, false);
+                if (self.options.include_spans) {
+                    try self.writeSpanField(writer, &char_lit.span, indent);
+                }
+            },
+            .Bytes => |*bytes_lit| {
+                try self.writeField(writer, "literal_type", "Bytes", indent, false);
+                try writer.writeAll(",\n");
+                try self.writeIndent(writer, indent);
+                try writer.writeAll("\"type_info\": ");
+                try self.serializeTypeInfo(bytes_lit.type_info, writer);
+                try writer.writeAll(",\n");
+                try self.writeField(writer, "value", bytes_lit.value, indent, false);
+                if (self.options.include_spans) {
+                    try self.writeSpanField(writer, &bytes_lit.span, indent);
+                }
+            },
         }
     }
 
