@@ -4,6 +4,7 @@ const TypeInfo = @import("type_info.zig").TypeInfo;
 const CommonTypes = @import("type_info.zig").CommonTypes;
 const statements = @import("statements.zig");
 const AstArena = @import("ast_arena.zig").AstArena;
+const verification = @import("verification.zig");
 
 /// Binary and unary operators
 pub const BinaryOp = enum {
@@ -158,6 +159,10 @@ pub const QuantifiedExpr = struct {
     condition: ?*ExprNode, // optional where clause
     body: *ExprNode, // the quantified expression
     span: SourceSpan,
+    /// Verification metadata for formal verification tools
+    verification_metadata: ?*verification.QuantifiedMetadata,
+    /// Verification attributes for this quantified expression
+    verification_attributes: []verification.VerificationAttribute,
 };
 
 /// Anonymous struct literal expression (.{ field1: value1, field2: value2 })
@@ -226,6 +231,7 @@ pub const StructDestructureField = struct {
 
 pub const IdentifierExpr = struct {
     name: []const u8,
+    type_info: TypeInfo,
     span: SourceSpan,
 };
 
@@ -236,6 +242,8 @@ pub const LiteralExpr = union(enum) {
     Address: AddressLiteral,
     Hex: HexLiteral,
     Binary: BinaryLiteral,
+    Character: CharacterLiteral,
+    Bytes: BytesLiteral,
 };
 
 pub const IntegerType = enum {
@@ -324,6 +332,18 @@ pub const HexLiteral = struct {
 };
 
 pub const BinaryLiteral = struct {
+    value: []const u8,
+    type_info: TypeInfo,
+    span: SourceSpan,
+};
+
+pub const CharacterLiteral = struct {
+    value: u8,
+    type_info: TypeInfo,
+    span: SourceSpan,
+};
+
+pub const BytesLiteral = struct {
     value: []const u8,
     type_info: TypeInfo,
     span: SourceSpan,
@@ -475,8 +495,8 @@ pub fn createIdentifier(allocator: std.mem.Allocator, name: []const u8, span: So
     node.* = ExprNode{
         .Identifier = IdentifierExpr{
             .name = name, // Note: name is expected to be arena-allocated already
-            .span = span,
             .type_info = TypeInfo.unknown(),
+            .span = span,
         },
     };
     return node;
@@ -491,8 +511,8 @@ pub fn createIdentifierInArena(arena: *AstArena, name: []const u8, span: SourceS
     const node = try arena.createNode(ExprNode);
     node.* = ExprNode{ .Identifier = IdentifierExpr{
         .name = name_copy,
-        .span = span,
         .type_info = TypeInfo.unknown(),
+        .span = span,
     } };
     return node;
 }
@@ -501,7 +521,7 @@ pub fn createBinaryExpr(allocator: std.mem.Allocator, lhs: *ExprNode, op: Binary
     const node = try allocator.create(ExprNode);
     node.* = ExprNode{ .Binary = BinaryExpr{
         .lhs = lhs,
-        .op = op,
+        .operator = op,
         .rhs = rhs,
         .span = span,
         .type_info = TypeInfo.unknown(),
@@ -515,7 +535,7 @@ pub fn createBinaryExprInArena(arena: *AstArena, lhs: *ExprNode, op: BinaryOp, r
     const node = try arena.createNode(ExprNode);
     node.* = ExprNode{ .Binary = BinaryExpr{
         .lhs = lhs,
-        .op = op,
+        .operator = op,
         .rhs = rhs,
         .span = span,
         .type_info = TypeInfo.unknown(),
@@ -556,6 +576,24 @@ pub fn createQuantifiedExpr(allocator: std.mem.Allocator, quantifier: Quantifier
         .condition = condition,
         .body = body,
         .span = span,
+        .verification_metadata = null,
+        .verification_attributes = &[_]verification.VerificationAttribute{},
+    } };
+    return node;
+}
+
+/// Create a quantified expression with verification metadata
+pub fn createQuantifiedExprWithVerification(allocator: std.mem.Allocator, quantifier: QuantifierType, variable: []const u8, variable_type: TypeInfo, condition: ?*ExprNode, body: *ExprNode, span: SourceSpan, verification_metadata: ?*verification.QuantifiedMetadata, verification_attributes: []verification.VerificationAttribute) !*ExprNode {
+    const node = try allocator.create(ExprNode);
+    node.* = .{ .Quantified = .{
+        .quantifier = quantifier,
+        .variable = variable,
+        .variable_type = variable_type,
+        .condition = condition,
+        .body = body,
+        .span = span,
+        .verification_metadata = verification_metadata,
+        .verification_attributes = verification_attributes,
     } };
     return node;
 }

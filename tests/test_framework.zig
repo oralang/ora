@@ -177,7 +177,7 @@ pub const FrameworkStats = struct {
         _ = options;
 
         try writer.writeAll("Test Framework Stats:\n");
-        try writer.print("  {}\n", .{self.cache_stats});
+        try writer.print("  {any}\n", .{self.cache_stats});
     }
 };
 

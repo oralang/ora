@@ -2031,6 +2031,30 @@ pub const AstSerializer = struct {
                     try self.writeSpanField(writer, &bin_lit.span, indent);
                 }
             },
+            .Character => |*char_lit| {
+                try self.writeField(writer, "literal_type", "Character", indent, false);
+                try writer.writeAll(",\n");
+                try self.writeIndent(writer, indent);
+                try writer.writeAll("\"type_info\": ");
+                try self.serializeTypeInfo(char_lit.type_info, writer);
+                try writer.writeAll(",\n");
+                try self.writeField(writer, "value", try std.fmt.allocPrint(self.allocator, "{c}", .{char_lit.value}), indent, false);
+                if (self.options.include_spans) {
+                    try self.writeSpanField(writer, &char_lit.span, indent);
+                }
+            },
+            .Bytes => |*bytes_lit| {
+                try self.writeField(writer, "literal_type", "Bytes", indent, false);
+                try writer.writeAll(",\n");
+                try self.writeIndent(writer, indent);
+                try writer.writeAll("\"type_info\": ");
+                try self.serializeTypeInfo(bytes_lit.type_info, writer);
+                try writer.writeAll(",\n");
+                try self.writeField(writer, "value", bytes_lit.value, indent, false);
+                if (self.options.include_spans) {
+                    try self.writeSpanField(writer, &bytes_lit.span, indent);
+                }
+            },
         }
     }
 
@@ -2129,9 +2153,9 @@ pub const AstSerializer = struct {
         if (self.options.pretty_print and !self.options.compact_mode) {
             try writer.writeAll(",\n");
             try self.writeIndent(writer, indent);
-            try writer.print("\"{s}\": {}", .{ key, value });
+            try writer.print("\"{s}\": {any}", .{ key, value });
         } else {
-            try writer.print(",\"{s}\":{}", .{ key, value });
+            try writer.print(",\"{s}\":{any}", .{ key, value });
         }
     }
 
@@ -2142,16 +2166,16 @@ pub const AstSerializer = struct {
 
             // If lexeme is available and include_lexemes option is enabled, include it in the output
             if (self.options.include_lexemes and span.lexeme != null) {
-                try writer.print("\"span\": {{\"line\": {}, \"column\": {}, \"length\": {}, \"lexeme\": \"{s}\"}}", .{ span.line, span.column, span.length, span.lexeme.? });
+                try writer.print("\"span\": {{\"line\": {d}, \"column\": {d}, \"length\": {d}, \"lexeme\": \"{s}\"}}", .{ span.line, span.column, span.length, span.lexeme.? });
             } else {
-                try writer.print("\"span\": {{\"line\": {}, \"column\": {}, \"length\": {}}}", .{ span.line, span.column, span.length });
+                try writer.print("\"span\": {{\"line\": {d}, \"column\": {d}, \"length\": {d}}}", .{ span.line, span.column, span.length });
             }
         } else {
             // Compact mode
             if (self.options.include_lexemes and span.lexeme != null) {
-                try writer.print(",\"span\":{{\"line\":{},\"column\":{},\"length\":{},\"lexeme\":\"{s}\"}}", .{ span.line, span.column, span.length, span.lexeme.? });
+                try writer.print(",\"span\":{{\"line\":{d},\"column\":{d},\"length\":{d},\"lexeme\":\"{s}\"}}", .{ span.line, span.column, span.length, span.lexeme.? });
             } else {
-                try writer.print(",\"span\":{{\"line\":{},\"column\":{},\"length\":{}}}", .{ span.line, span.column, span.length });
+                try writer.print(",\"span\":{{\"line\":{d},\"column\":{d},\"length\":{d}}}", .{ span.line, span.column, span.length });
             }
         }
     }

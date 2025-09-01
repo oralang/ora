@@ -64,7 +64,7 @@ pub const ErrorContext = struct {
         _ = options;
 
         // Show line number and source line
-        try writer.print("   {} | {s}\n", .{ self.line_number, self.source_line });
+        try writer.print("   {d} | {s}\n", .{ self.line_number, self.source_line });
 
         // Show error indicator with carets
         try writer.writeAll("     | ");
@@ -138,7 +138,7 @@ pub const LexerDiagnostic = struct {
         // Use template if available, otherwise use basic message
         if (self.template) |template| {
             try writer.print("{s}: {s}", .{ @tagName(self.severity), template.title });
-            try writer.print("\n  --> {}:{}\n", .{ self.range.start_line, self.range.start_column });
+            try writer.print("\n  --> {d}:{d}\n", .{ self.range.start_line, self.range.start_column });
 
             // Show source context if available
             if (self.context) |context| {
@@ -153,7 +153,7 @@ pub const LexerDiagnostic = struct {
                 try writer.print("\n  help: {s}", .{help});
             }
         } else {
-            try writer.print("{s}: {s} at {}", .{ @tagName(self.severity), self.message, self.range });
+            try writer.print("{s}: {s} at {any}", .{ @tagName(self.severity), self.message, self.range });
         }
 
         if (self.suggestion) |suggestion| {
@@ -477,7 +477,7 @@ pub const ErrorRecovery = struct {
         const writer = buffer.writer();
 
         // Summary header
-        try writer.print("Diagnostic Summary ({} errors)\n", .{self.errors.items.len});
+        try writer.print("Diagnostic Summary ({d} errors)\n", .{self.errors.items.len});
         try writer.writeAll("=" ** 50);
         try writer.writeAll("\n\n");
 
@@ -486,18 +486,18 @@ pub const ErrorRecovery = struct {
         defer type_groups.deinit();
 
         for (type_groups.items) |group| {
-            try writer.print("{s}: {} occurrences\n", .{ @errorName(group.error_type), group.count });
+            try writer.print("{s}: {d} occurrences\n", .{ @errorName(group.error_type), group.count });
 
             // Find first occurrence for details
             for (self.errors.items) |diagnostic| {
                 if (diagnostic.error_type == group.error_type) {
-                    try writer.print("  First occurrence: {}:{}\n", .{ diagnostic.range.start_line, diagnostic.range.start_column });
+                    try writer.print("  First occurrence: {d}:{d}\n", .{ diagnostic.range.start_line, diagnostic.range.start_column });
                     break;
                 }
             }
 
             if (group.count > 1) {
-                try writer.print("  Additional occurrences: {}\n", .{group.count - 1});
+                try writer.print("  Additional occurrences: {d}\n", .{group.count - 1});
             }
             try writer.writeAll("\n");
         }
@@ -521,10 +521,10 @@ pub const ErrorRecovery = struct {
         const info_count = info_diagnostics.items.len;
         const hint_count = hint_diagnostics.items.len;
 
-        try writer.print("Errors: {}\n", .{error_count});
-        try writer.print("Warnings: {}\n", .{warning_count});
-        try writer.print("Info: {}\n", .{info_count});
-        try writer.print("Hints: {}\n", .{hint_count});
+        try writer.print("Errors: {d}\n", .{error_count});
+        try writer.print("Warnings: {d}\n", .{warning_count});
+        try writer.print("Info: {d}\n", .{info_count});
+        try writer.print("Hints: {d}\n", .{hint_count});
 
         return buffer.toOwnedSlice();
     }
@@ -537,7 +537,7 @@ pub const ErrorRecovery = struct {
         const writer = buffer.writer();
 
         // Report header
-        try writer.print("Diagnostic Report ({} issues found)\n", .{self.errors.items.len});
+        try writer.print("Diagnostic Report ({d} issues found)\n", .{self.errors.items.len});
         try writer.writeAll("=" ** 50);
         try writer.writeAll("\n\n");
 
@@ -555,12 +555,12 @@ pub const ErrorRecovery = struct {
             const primary = group.primary;
 
             // Group header
-            try writer.print("Issue #{}: {s}\n", .{ i + 1, @errorName(primary.error_type) });
+            try writer.print("Issue #{d}: {s}\n", .{ i + 1, @errorName(primary.error_type) });
             try writer.writeAll("-" ** 40);
             try writer.writeAll("\n");
 
             // Primary error details
-            try writer.print("Location: {}:{}\n", .{ primary.range.start_line, primary.range.start_column });
+            try writer.print("Location: {d}:{d}\n", .{ primary.range.start_line, primary.range.start_column });
 
             if (primary.template) |template| {
                 try writer.print("Description: {s}\n", .{template.description});
@@ -580,15 +580,15 @@ pub const ErrorRecovery = struct {
 
             // Related errors
             if (group.related.items.len > 0) {
-                try writer.print("\nRelated issues ({} similar problems):\n", .{group.related.items.len});
+                try writer.print("\nRelated issues ({d} similar problems):\n", .{group.related.items.len});
 
                 for (group.related.items, 0..) |related, j| {
                     if (j >= 3) {
-                        try writer.print("... and {} more\n", .{group.related.items.len - 3});
+                        try writer.print("... and {d} more\n", .{group.related.items.len - 3});
                         break;
                     }
 
-                    try writer.print("- {}:{} {s}\n", .{ related.range.start_line, related.range.start_column, if (related.template) |t| t.title else related.message });
+                    try writer.print("- {d}:{d} {s}\n", .{ related.range.start_line, related.range.start_column, if (related.template) |t| t.title else related.message });
                 }
             }
 
@@ -823,7 +823,7 @@ pub const SourceRange = struct {
     pub fn format(self: SourceRange, comptime fmt: []const u8, options: std.fmt.FormatOptions, writer: anytype) !void {
         _ = fmt;
         _ = options;
-        try writer.print("{}:{}-{}:{} ({}:{})", .{ self.start_line, self.start_column, self.end_line, self.end_column, self.start_offset, self.end_offset });
+        try writer.print("{d}:{d}-{d}:{d} ({d}:{d})", .{ self.start_line, self.start_column, self.end_line, self.end_column, self.start_offset, self.end_offset });
     }
 };
 
@@ -843,9 +843,9 @@ pub const TokenValue = union(enum) {
         switch (self) {
             .string => |s| try writer.print("string(\"{s}\")", .{s}),
             .character => |c| try writer.print("char('{c}')", .{c}),
-            .integer => |i| try writer.print("int({})", .{i}),
-            .binary => |b| try writer.print("bin({})", .{b}),
-            .hex => |h| try writer.print("hex({})", .{h}),
+            .integer => |i| try writer.print("int({d})", .{i}),
+            .binary => |b| try writer.print("bin({d})", .{b}),
+            .hex => |h| try writer.print("hex({d})", .{h}),
             .address => |a| {
                 try writer.writeAll("addr(0x");
                 for (a) |byte| {
@@ -853,7 +853,7 @@ pub const TokenValue = union(enum) {
                 }
                 try writer.writeAll(")");
             },
-            .boolean => |b| try writer.print("bool({})", .{b}),
+            .boolean => |b| try writer.print("bool({any})", .{b}),
         }
     }
 };
@@ -1370,35 +1370,35 @@ pub const LexerConfig = struct {
         try writer.writeAll("==================\n");
 
         // Error recovery settings
-        try writer.print("Error Recovery: {}\n", .{self.enable_error_recovery});
+        try writer.print("Error Recovery: {any}\n", .{self.enable_error_recovery});
         if (self.enable_error_recovery) {
-            try writer.print("  Max Errors: {}\n", .{self.max_errors});
-            try writer.print("  Suggestions: {}\n", .{self.enable_suggestions});
-            try writer.print("  Resync: {} (max lookahead {})\n", .{ self.enable_resync, self.resync_max_lookahead });
+            try writer.print("  Max Errors: {d}\n", .{self.max_errors});
+            try writer.print("  Suggestions: {any}\n", .{self.enable_suggestions});
+            try writer.print("  Resync: {any} (max lookahead {d})\n", .{ self.enable_resync, self.resync_max_lookahead });
         }
 
         // String processing settings
-        try writer.print("String Interning: {}\n", .{self.enable_string_interning});
+        try writer.print("String Interning: {any}\n", .{self.enable_string_interning});
         if (self.enable_string_interning) {
-            try writer.print("  Initial Capacity: {}\n", .{self.string_pool_initial_capacity});
+            try writer.print("  Initial Capacity: {d}\n", .{self.string_pool_initial_capacity});
         }
 
         // Feature toggles
-        try writer.print("Raw Strings: {}\n", .{self.enable_raw_strings});
-        try writer.print("Character Literals: {}\n", .{self.enable_character_literals});
-        try writer.print("Binary Literals: {}\n", .{self.enable_binary_literals});
-        try writer.print("Hex Validation: {}\n", .{self.enable_hex_validation});
-        try writer.print("Address Validation: {}\n", .{self.enable_address_validation});
-        try writer.print("Number Overflow Checking: {}\n", .{self.enable_number_overflow_checking});
+        try writer.print("Raw Strings: {any}\n", .{self.enable_raw_strings});
+        try writer.print("Character Literals: {any}\n", .{self.enable_character_literals});
+        try writer.print("Binary Literals: {any}\n", .{self.enable_binary_literals});
+        try writer.print("Hex Validation: {any}\n", .{self.enable_hex_validation});
+        try writer.print("Address Validation: {any}\n", .{self.enable_address_validation});
+        try writer.print("Number Overflow Checking: {any}\n", .{self.enable_number_overflow_checking});
 
         // Diagnostic settings
-        try writer.print("Diagnostic Grouping: {}\n", .{self.enable_diagnostic_grouping});
-        try writer.print("Diagnostic Filtering: {}\n", .{self.enable_diagnostic_filtering});
-        try writer.print("Minimum Severity: {}\n", .{self.minimum_diagnostic_severity});
+        try writer.print("Diagnostic Grouping: {any}\n", .{self.enable_diagnostic_grouping});
+        try writer.print("Diagnostic Filtering: {any}\n", .{self.enable_diagnostic_filtering});
+        try writer.print("Minimum Severity: {any}\n", .{self.minimum_diagnostic_severity});
 
         // General settings
-        try writer.print("Strict Mode: {}\n", .{self.strict_mode});
-        try writer.print("Performance Monitoring: {}\n", .{self.enable_performance_monitoring});
+        try writer.print("Strict Mode: {any}\n", .{self.strict_mode});
+        try writer.print("Performance Monitoring: {any}\n", .{self.enable_performance_monitoring});
 
         return buffer.toOwnedSlice();
     }

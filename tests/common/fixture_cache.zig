@@ -251,7 +251,7 @@ pub const CacheStats = struct {
         _ = fmt;
         _ = options;
 
-        try writer.print("Cache Stats: {} fixtures, {d:.2}MB memory, {} total accesses", .{
+        try writer.print("Cache Stats: {d} fixtures, {d:.2}MB memory, {d} total accesses", .{
             self.cached_fixtures,
             self.getMemoryUsageMB(),
             self.total_access_count,

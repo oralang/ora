@@ -327,7 +327,7 @@ pub fn parse(allocator: Allocator, tokens: []const Token) ParserError![]AstNode 
     // Perform type resolution on the parsed AST
     var type_resolver = ast.TypeResolver.init(allocator);
     type_resolver.resolveTypes(nodes) catch |err| {
-        std.debug.print("Type resolution error: {}\n", .{err});
+        std.debug.print("Type resolution error: {s}\n", .{@errorName(err)});
         // Type resolution errors are reported but don't prevent returning the AST
         // Full type checking happens in the semantics phase
     };

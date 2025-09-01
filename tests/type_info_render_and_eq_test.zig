@@ -54,8 +54,8 @@ test "OraType.render anonymous struct and unions" {
     defer a.destroy(map_val_elem);
     map_val_elem.* = tio.OraType.bool;
     const map_val = tio.OraType{ .slice = map_val_elem };
-    const mapping = tio.MappingType{ .key = map_key, .value = &map_val };
-    const m = tio.OraType{ .mapping = mapping };
+    const mapping = tio.MapType{ .key = map_key, .value = &map_val };
+    const m = tio.OraType{ .map = mapping };
     const s3 = try renderType(a, m);
     defer a.free(s3);
     try std.testing.expect(std.mem.indexOf(u8, s3, "map[") != null);

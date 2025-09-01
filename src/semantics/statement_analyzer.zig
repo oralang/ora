@@ -535,7 +535,7 @@ fn walkBlock(issues: *std.ArrayList(ast.SourceSpan), table: *state.SymbolTable, 
                 if (v.value) |vp2| {
                     const tr = v.region;
                     const sr = inferExprRegion(table, scope, vp2.*);
-                    if (!isRegionAssignmentAllowed(tr, sr, .{ .Identifier = .{ .name = v.name, .span = v.span } })) {
+                    if (!isRegionAssignmentAllowed(tr, sr, .{ .Identifier = .{ .name = v.name, .type_info = ast.Types.TypeInfo.unknown(), .span = v.span } })) {
                         try issues.append(v.span);
                     }
                     // New: forbid composite-type bulk copies into storage

@@ -1254,10 +1254,10 @@ pub const TypeBuilder = struct {
     /// Create a mapping type with key-value type validation
     pub fn mapping(self: *const TypeBuilder, key_type: TypeInfo, value_type: TypeInfo) !TypeInfo {
         // Create a mapping type using OraType
-        var mapping_type = OraType{ .mapping = undefined };
+        var map_type = OraType{ .map = undefined };
 
         // Store the key and value types
-        const mapping_data = try self.builder.arena.allocator().create(OraType.MappingType);
+        const mapping_data = try self.builder.arena.allocator().create(OraType.MapType);
 
         // Key type
         const key_type_ptr = try self.builder.arena.allocator().create(OraType);
@@ -1275,12 +1275,12 @@ pub const TypeBuilder = struct {
             value_type_ptr.* = OraType.Unknown;
         }
 
-        mapping_data.* = OraType.MappingType{
+        mapping_data.* = OraType.MapType{
             .key_type = key_type_ptr,
             .value_type = value_type_ptr,
         };
 
-        mapping_type.mapping = mapping_data;
+        map_type.map = mapping_data;
 
         // Determine span for the mapping type
         var span = SourceSpan{};
@@ -1290,7 +1290,7 @@ pub const TypeBuilder = struct {
             span = vs;
         }
 
-        return TypeInfo.explicit(.MappingType, mapping_type, span);
+        return TypeInfo.explicit(.MapType, map_type, span);
     }
 
     /// Create a double mapping type

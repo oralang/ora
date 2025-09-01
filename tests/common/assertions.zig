@@ -189,7 +189,7 @@ fn generateTokenDiff(allocator: Allocator, expected: Token, actual: Token) ![]u8
     }
 
     if (expected.line != actual.line or expected.column != actual.column) {
-        try writer.print("  Position: expected {}:{}, got {}:{}\n", .{ expected.line, expected.column, actual.line, actual.column });
+        try writer.print("  Position: expected {d}:{d}, got {d}:{d}\n", .{ expected.line, expected.column, actual.line, actual.column });
     }
 
     return buffer.toOwnedSlice();
@@ -216,9 +216,9 @@ fn generateStringDiff(allocator: Allocator, expected: []const u8, actual: []cons
     }
 
     if (diff_start) |start| {
-        try writer.print("  First difference at position {}: expected '{}', got '{}'\n", .{ start, expected[start], actual[start] });
+        try writer.print("  First difference at position {d}: expected '{c}', got '{c}'\n", .{ start, expected[start], actual[start] });
     } else if (expected.len != actual.len) {
-        try writer.print("  Length difference: expected {}, got {}\n", .{ expected.len, actual.len });
+        try writer.print("  Length difference: expected {d}, got {d}\n", .{ expected.len, actual.len });
     }
 
     return buffer.toOwnedSlice();

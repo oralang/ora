@@ -3,7 +3,7 @@ const SourceSpan = @import("../ast.zig").SourceSpan;
 
 // Forward declaration for expressions
 const expressions = @import("expressions.zig");
-const ExprNode = expressions.ExprNode;
+pub const ExprNode = expressions.ExprNode;
 const LiteralExpr = expressions.LiteralExpr;
 const RangeExpr = expressions.RangeExpr;
 const SwitchCase = expressions.SwitchCase;

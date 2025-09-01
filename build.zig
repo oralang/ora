@@ -15,6 +15,12 @@ pub fn build(b: *std.Build) void {
     // set a preferred release mode, allowing the user to decide how to optimize.
     const optimize = b.standardOptimizeOption(.{});
 
+    // MLIR-specific build options
+    const enable_mlir_debug = b.option(bool, "mlir-debug", "Enable MLIR debug features and verification passes") orelse false;
+    const enable_mlir_timing = b.option(bool, "mlir-timing", "Enable MLIR pass timing by default") orelse false;
+    const mlir_opt_level = b.option([]const u8, "mlir-opt", "Default MLIR optimization level (none, basic, aggressive)") orelse "basic";
+    const enable_mlir_passes = b.option([]const u8, "mlir-passes", "Default MLIR pass pipeline") orelse null;
+
     // Build Solidity libraries using CMake
     const cmake_step = buildSolidityLibraries(b, target, optimize);
 
@@ -68,6 +74,20 @@ pub fn build(b: *std.Build) void {
         .root_module = exe_mod,
     });
 
+    // Add MLIR build options as compile-time constants
+    const mlir_options = b.addOptions();
+    mlir_options.addOption(bool, "mlir_debug", enable_mlir_debug);
+    mlir_options.addOption(bool, "mlir_timing", enable_mlir_timing);
+    mlir_options.addOption([]const u8, "mlir_opt_level", mlir_opt_level);
+    if (enable_mlir_passes) |passes| {
+        mlir_options.addOption(?[]const u8, "mlir_passes", passes);
+    } else {
+        mlir_options.addOption(?[]const u8, "mlir_passes", null);
+    }
+
+    exe.root_module.addOptions("build_options", mlir_options);
+    lib_mod.addOptions("build_options", mlir_options);
+
     // Build and link Yul wrapper
     const yul_wrapper = buildYulWrapper(b, target, optimize, cmake_step);
     exe.addObject(yul_wrapper);
@@ -78,6 +98,10 @@ pub fn build(b: *std.Build) void {
 
     // Link Solidity libraries to the executable
     linkSolidityLibraries(b, exe, cmake_step, target);
+
+    // Build and link MLIR (required)
+    const mlir_step = buildMlirLibraries(b, target, optimize);
+    linkMlirLibraries(b, exe, mlir_step, target);
 
     // This declares intent for the executable to be installed into the
     // standard location when the user invokes the "install" step (the default
@@ -175,6 +199,37 @@ pub fn build(b: *std.Build) void {
 
     // Add comprehensive compiler testing framework
     addCompilerTestFramework(b, lib_mod, target, optimize);
+
+    // Create MLIR demo executable (Ora -> AST -> MLIR IR file)
+    const mlir_demo_mod = b.createModule(.{
+        .root_source_file = b.path("examples/demos/mlir_demo.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    mlir_demo_mod.addImport("ora_lib", lib_mod);
+
+    const mlir_demo = b.addExecutable(.{
+        .name = "mlir_demo",
+        .root_module = mlir_demo_mod,
+    });
+    // Reuse MLIR build step
+    linkMlirLibraries(b, mlir_demo, mlir_step, target);
+    b.installArtifact(mlir_demo);
+    const run_mlir_demo = b.addRunArtifact(mlir_demo);
+    run_mlir_demo.step.dependOn(b.getInstallStep());
+    const mlir_demo_step = b.step("mlir-demo", "Run the MLIR hello-world demo");
+    mlir_demo_step.dependOn(&run_mlir_demo.step);
+
+    // Add MLIR-specific build steps
+    const mlir_debug_step = b.step("mlir-debug", "Build with MLIR debug features enabled");
+    mlir_debug_step.dependOn(b.getInstallStep());
+
+    const mlir_release_step = b.step("mlir-release", "Build with aggressive MLIR optimizations");
+    mlir_release_step.dependOn(b.getInstallStep());
+
+    // Add step to test MLIR functionality
+    const test_mlir_step = b.step("test-mlir", "Run MLIR-specific tests");
+    test_mlir_step.dependOn(b.getInstallStep());
 
     // Add new lexer testing framework
     addLexerTestFramework(b, lib_mod, target, optimize);
@@ -323,6 +378,33 @@ pub fn build(b: *std.Build) void {
     span_tests.root_module.addImport("ora", lib_mod);
     test_all_step.dependOn(&b.addRunArtifact(span_tests).step);
 
+    // Quantified expression tests
+    const quantified_tests = b.addTest(.{
+        .root_source_file = b.path("tests/test_quantified.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    quantified_tests.root_module.addImport("ora", lib_mod);
+    test_all_step.dependOn(&b.addRunArtifact(quantified_tests).step);
+
+    // Verification attributes tests
+    const verification_tests = b.addTest(.{
+        .root_source_file = b.path("tests/test_verification_attributes.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    verification_tests.root_module.addImport("ora", lib_mod);
+    test_all_step.dependOn(&b.addRunArtifact(verification_tests).step);
+
+    // Function contract verification tests
+    const function_contract_tests = b.addTest(.{
+        .root_source_file = b.path("tests/test_function_contracts.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    function_contract_tests.root_module.addImport("ora", lib_mod);
+    test_all_step.dependOn(&b.addRunArtifact(function_contract_tests).step);
+
     // Documentation generation
     const install_docs = b.addInstallDirectory(.{
         .source_dir = lib.getEmittedDocs(),
@@ -435,8 +517,37 @@ fn buildSolidityLibrariesImpl(step: *std.Build.Step, options: std.Build.Step.Mak
     var cmake_args = std.ArrayList([]const u8).init(allocator);
     defer cmake_args.deinit();
 
+    // Prefer Ninja generator when available for faster, more parallel builds
+    var use_ninja: bool = false;
+    {
+        const probe = std.process.Child.run(.{ .allocator = allocator, .argv = &[_][]const u8{ "ninja", "--version" }, .cwd = "." }) catch null;
+        if (probe) |res| {
+            switch (res.term) {
+                .Exited => |code| {
+                    if (code == 0) use_ninja = true;
+                },
+                else => {},
+            }
+        }
+        if (!use_ninja) {
+            const probe_alt = std.process.Child.run(.{ .allocator = allocator, .argv = &[_][]const u8{ "ninja-build", "--version" }, .cwd = "." }) catch null;
+            if (probe_alt) |res2| {
+                switch (res2.term) {
+                    .Exited => |code| {
+                        if (code == 0) use_ninja = true;
+                    },
+                    else => {},
+                }
+            }
+        }
+    }
+
+    try cmake_args.append("cmake");
+    if (use_ninja) {
+        try cmake_args.append("-G");
+        try cmake_args.append("Ninja");
+    }
     try cmake_args.appendSlice(&[_][]const u8{
-        "cmake",
         "-S",
         "vendor/solidity",
         "-B",
@@ -650,6 +761,206 @@ fn linkSolidityLibraries(b: *std.Build, exe: *std.Build.Step.Compile, cmake_step
     exe.addIncludePath(b.path("vendor/solidity/libsmtutil"));
     exe.addIncludePath(b.path("vendor/solidity/libevmasm"));
     exe.addIncludePath(b.path("vendor/solidity/libyul"));
+}
+
+/// Build MLIR from vendored llvm-project and install into vendor/mlir
+fn buildMlirLibraries(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Step {
+    _ = target;
+    _ = optimize;
+
+    const step = b.allocator.create(std.Build.Step) catch @panic("OOM");
+    step.* = std.Build.Step.init(.{
+        .id = .custom,
+        .name = "cmake-build-mlir",
+        .owner = b,
+        .makeFn = buildMlirLibrariesImpl,
+    });
+    return step;
+}
+
+/// Implementation of CMake build for MLIR libraries
+fn buildMlirLibrariesImpl(step: *std.Build.Step, options: std.Build.Step.MakeOptions) anyerror!void {
+    _ = options;
+
+    const b = step.owner;
+    const allocator = b.allocator;
+
+    // Ensure submodule exists
+    const cwd = std.fs.cwd();
+    _ = cwd.openDir("vendor/llvm-project", .{ .iterate = false }) catch {
+        std.log.err("Missing submodule: vendor/llvm-project. Add it and pin a commit.", .{});
+        std.log.err("Example: git submodule add https://github.com/llvm/llvm-project.git vendor/llvm-project", .{});
+        return error.SubmoduleMissing;
+    };
+
+    // Create build and install directories
+    const build_dir = "vendor/llvm-project/build-mlir";
+    cwd.makeDir(build_dir) catch |err| switch (err) {
+        error.PathAlreadyExists => {},
+        else => return err,
+    };
+    const install_prefix = "vendor/mlir";
+    cwd.makeDir(install_prefix) catch |err| switch (err) {
+        error.PathAlreadyExists => {},
+        else => return err,
+    };
+
+    // Platform-specific flags
+    const builtin = @import("builtin");
+    var cmake_args = std.ArrayList([]const u8).init(allocator);
+    defer cmake_args.deinit();
+
+    // Prefer Ninja generator when available for faster, more parallel builds
+    var use_ninja: bool = false;
+    {
+        const probe = std.process.Child.run(.{ .allocator = allocator, .argv = &[_][]const u8{ "ninja", "--version" }, .cwd = "." }) catch null;
+        if (probe) |res| {
+            switch (res.term) {
+                .Exited => |code| {
+                    if (code == 0) use_ninja = true;
+                },
+                else => {},
+            }
+        }
+        if (!use_ninja) {
+            const probe_alt = std.process.Child.run(.{ .allocator = allocator, .argv = &[_][]const u8{ "ninja-build", "--version" }, .cwd = "." }) catch null;
+            if (probe_alt) |res2| {
+                switch (res2.term) {
+                    .Exited => |code| {
+                        if (code == 0) use_ninja = true;
+                    },
+                    else => {},
+                }
+            }
+        }
+    }
+
+    try cmake_args.append("cmake");
+    if (use_ninja) {
+        try cmake_args.append("-G");
+        try cmake_args.append("Ninja");
+    }
+    try cmake_args.appendSlice(&[_][]const u8{
+        "-S",
+        "vendor/llvm-project/llvm",
+        "-B",
+        build_dir,
+        "-DCMAKE_BUILD_TYPE=Release",
+        "-DLLVM_ENABLE_PROJECTS=mlir",
+        "-DLLVM_TARGETS_TO_BUILD=Native",
+        "-DLLVM_INCLUDE_TESTS=OFF",
+        "-DMLIR_INCLUDE_TESTS=OFF",
+        "-DLLVM_INCLUDE_BENCHMARKS=OFF",
+        "-DLLVM_INCLUDE_EXAMPLES=OFF",
+        "-DLLVM_INCLUDE_DOCS=OFF",
+        "-DMLIR_INCLUDE_DOCS=OFF",
+        "-DMLIR_ENABLE_BINDINGS_PYTHON=OFF",
+        "-DMLIR_ENABLE_EXECUTION_ENGINE=OFF",
+        "-DMLIR_ENABLE_CUDA=OFF",
+        "-DMLIR_ENABLE_ROCM=OFF",
+        "-DMLIR_ENABLE_SPIRV_CPU_RUNNER=OFF",
+        "-DLLVM_ENABLE_ZLIB=OFF",
+        "-DLLVM_ENABLE_TERMINFO=OFF",
+        "-DLLVM_ENABLE_RTTI=ON",
+        "-DLLVM_ENABLE_EH=ON",
+        "-DLLVM_BUILD_LLVM_DYLIB=OFF",
+        "-DLLVM_LINK_LLVM_DYLIB=OFF",
+        "-DLLVM_BUILD_TOOLS=ON", // needed for tblgen
+        "-DMLIR_BUILD_MLIR_C_DYLIB=ON",
+        b.fmt("-DCMAKE_INSTALL_PREFIX={s}", .{install_prefix}),
+    });
+
+    if (builtin.os.tag == .linux) {
+        try cmake_args.append("-DCMAKE_CXX_FLAGS=-stdlib=libc++ -lc++abi");
+        try cmake_args.append("-DCMAKE_EXE_LINKER_FLAGS=-stdlib=libc++ -lc++abi");
+        try cmake_args.append("-DCMAKE_SHARED_LINKER_FLAGS=-stdlib=libc++ -lc++abi");
+        try cmake_args.append("-DCMAKE_MODULE_LINKER_FLAGS=-stdlib=libc++ -lc++abi");
+        try cmake_args.append("-DCMAKE_CXX_COMPILER=clang++");
+        try cmake_args.append("-DCMAKE_C_COMPILER=clang");
+    } else if (builtin.os.tag == .macos) {
+        try cmake_args.append("-DCMAKE_CXX_FLAGS=-stdlib=libc++");
+        if (std.process.getEnvVarOwned(allocator, "ORA_CMAKE_OSX_ARCH") catch null) |arch| {
+            defer allocator.free(arch);
+            const flag = b.fmt("-DCMAKE_OSX_ARCHITECTURES={s}", .{arch});
+            try cmake_args.append(flag);
+            std.log.info("Using CMAKE_OSX_ARCHITECTURES={s}", .{arch});
+        }
+    } else if (builtin.os.tag == .windows) {
+        try cmake_args.append("-DCMAKE_CXX_FLAGS=/std:c++20");
+    }
+
+    var cfg_child = std.process.Child.init(cmake_args.items, allocator);
+    cfg_child.cwd = ".";
+    cfg_child.stdin_behavior = .Inherit;
+    cfg_child.stdout_behavior = .Inherit;
+    cfg_child.stderr_behavior = .Inherit;
+    const cfg_term = cfg_child.spawnAndWait() catch |err| {
+        std.log.err("Failed to configure MLIR CMake: {}", .{err});
+        return err;
+    };
+    switch (cfg_term) {
+        .Exited => |code| if (code != 0) {
+            std.log.err("MLIR CMake configure failed with exit code: {}", .{code});
+            return error.CMakeConfigureFailed;
+        },
+        else => {
+            std.log.err("MLIR CMake configure did not exit cleanly", .{});
+            return error.CMakeConfigureFailed;
+        },
+    }
+
+    // Build and install MLIR (with sparse checkout and minimal flags above this is lightweight)
+    var build_args = [_][]const u8{ "cmake", "--build", build_dir, "--parallel", "--target", "install" };
+    var build_child = std.process.Child.init(&build_args, allocator);
+    build_child.cwd = ".";
+    build_child.stdin_behavior = .Inherit;
+    build_child.stdout_behavior = .Inherit;
+    build_child.stderr_behavior = .Inherit;
+    const build_term = build_child.spawnAndWait() catch |err| {
+        std.log.err("Failed to build MLIR with CMake: {}", .{err});
+        return err;
+    };
+    switch (build_term) {
+        .Exited => |code| if (code != 0) {
+            std.log.err("MLIR CMake build failed with exit code: {}", .{code});
+            return error.CMakeBuildFailed;
+        },
+        else => {
+            std.log.err("MLIR CMake build did not exit cleanly", .{});
+            return error.CMakeBuildFailed;
+        },
+    }
+
+    std.log.info("Successfully built MLIR libraries", .{});
+}
+
+/// Link MLIR to the given executable using the installed prefix
+fn linkMlirLibraries(b: *std.Build, exe: *std.Build.Step.Compile, mlir_step: *std.Build.Step, target: std.Build.ResolvedTarget) void {
+    // Depend on MLIR build
+    exe.step.dependOn(mlir_step);
+
+    const include_path = b.path("vendor/mlir/include");
+    const lib_path = b.path("vendor/mlir/lib");
+
+    exe.addIncludePath(include_path);
+    exe.addLibraryPath(lib_path);
+
+    exe.linkSystemLibrary("MLIR-C");
+
+    switch (target.result.os.tag) {
+        .linux => {
+            exe.linkLibCpp();
+            exe.linkSystemLibrary("c++abi");
+            exe.addRPath(lib_path);
+        },
+        .macos => {
+            exe.linkLibCpp();
+            exe.addRPath(lib_path);
+        },
+        else => {
+            exe.linkLibCpp();
+        },
+    }
 }
 
 /// Create example testing step that runs the compiler on all .ora files

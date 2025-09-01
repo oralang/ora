@@ -386,6 +386,12 @@ pub const DeclarationParser = struct {
                 .Binary => |*bin_lit| {
                     bin_lit.type_info = updated_type_info;
                 },
+                .Character => |*char_lit| {
+                    char_lit.type_info = updated_type_info;
+                },
+                .Bytes => |*bytes_lit| {
+                    bytes_lit.type_info = updated_type_info;
+                },
             }
         }
         // For complex expressions, we leave them as-is with unknown types

@@ -829,6 +829,7 @@ pub const ExpressionParser = struct {
             const name_copy = try self.base.arena.createString(token.lexeme);
             var current_expr = ast.Expressions.ExprNode{ .Identifier = ast.Expressions.IdentifierExpr{
                 .name = name_copy,
+                .type_info = ast.Types.TypeInfo.unknown(),
                 .span = self.base.spanFromToken(token),
             } };
 
@@ -889,6 +890,9 @@ pub const ExpressionParser = struct {
             const quant_token = self.base.previous();
             const quantifier: ast.Expressions.QuantifierType = if (quant_token.type == .Forall) .Forall else .Exists;
 
+            // Parse verification attributes if present
+            const verification_attributes = try self.parseVerificationAttributes();
+
             // Bound variable name
             const var_token = try self.base.consume(.Identifier, "Expected bound variable name after quantifier");
 
@@ -916,6 +920,11 @@ pub const ExpressionParser = struct {
             const body_ptr = try self.base.arena.createNode(ast.Expressions.ExprNode);
             body_ptr.* = body_expr;
 
+            // Create verification metadata for the quantified expression
+            const verification_metadata = try self.base.arena.createNode(ast.Verification.QuantifiedMetadata);
+            verification_metadata.* = ast.Verification.QuantifiedMetadata.init(quantifier, var_token.lexeme, var_type, self.base.spanFromToken(quant_token));
+            verification_metadata.has_condition = where_ptr != null;
+
             return ast.Expressions.ExprNode{ .Quantified = ast.Expressions.QuantifiedExpr{
                 .quantifier = quantifier,
                 .variable = var_token.lexeme,
@@ -923,6 +932,8 @@ pub const ExpressionParser = struct {
                 .condition = where_ptr,
                 .body = body_ptr,
                 .span = self.base.spanFromToken(quant_token),
+                .verification_metadata = verification_metadata,
+                .verification_attributes = verification_attributes,
             } };
         }
 
@@ -1272,6 +1283,7 @@ pub const ExpressionParser = struct {
             const name_expr = try self.base.arena.createNode(ast.Expressions.ExprNode);
             name_expr.* = ast.Expressions.ExprNode{ .Identifier = ast.Expressions.IdentifierExpr{
                 .name = full_name,
+                .type_info = ast.Types.TypeInfo.unknown(),
                 .span = self.base.spanFromToken(at_token),
             } };
 
@@ -1382,6 +1394,7 @@ pub const ExpressionParser = struct {
         const struct_name_ptr = try self.base.arena.createNode(ast.Expressions.ExprNode);
         struct_name_ptr.* = ast.Expressions.ExprNode{ .Identifier = ast.Expressions.IdentifierExpr{
             .name = name_token.lexeme,
+            .type_info = ast.Types.TypeInfo.unknown(),
             .span = self.base.spanFromToken(name_token),
         } };
 
@@ -1470,6 +1483,63 @@ pub const ExpressionParser = struct {
                 .span = self.base.spanFromToken(bracket_token),
             },
         };
+    }
+
+    /// Parse verification attributes (e.g., @ora.quantified, @ora.assertion, etc.)
+    fn parseVerificationAttributes(self: *ExpressionParser) ParserError![]ast.Verification.VerificationAttribute {
+        var attributes = std.ArrayList(ast.Verification.VerificationAttribute).init(self.base.arena.allocator());
+        defer attributes.deinit();
+
+        // Parse attributes in the format @ora.attribute_name or @ora.attribute_name(value)
+        while (self.base.match(.At)) {
+            const at_token = self.base.previous();
+
+            // Expect 'ora' namespace
+            _ = try self.base.consume(.Identifier, "Expected 'ora' after '@'");
+            if (!std.mem.eql(u8, self.base.previous().lexeme, "ora")) {
+                try self.base.errorAtCurrent("Expected 'ora' namespace for verification attributes");
+                return error.UnexpectedToken;
+            }
+
+            _ = try self.base.consume(.Dot, "Expected '.' after 'ora'");
+
+            // Parse attribute name
+            const attr_name_token = try self.base.consume(.Identifier, "Expected attribute name after 'ora.'");
+            const attr_name = attr_name_token.lexeme;
+
+            // Parse optional value in parentheses
+            var attr_value: ?[]const u8 = null;
+            if (self.base.match(.LeftParen)) {
+                const value_token = try self.base.consume(.String, "Expected string value for attribute");
+                attr_value = value_token.lexeme;
+                _ = try self.base.consume(.RightParen, "Expected ')' after attribute value");
+            }
+
+            // Create verification attribute
+            const attr_type = if (std.mem.eql(u8, attr_name, "quantified"))
+                ast.Verification.VerificationAttributeType.Quantified
+            else if (std.mem.eql(u8, attr_name, "assertion"))
+                ast.Verification.VerificationAttributeType.Assertion
+            else if (std.mem.eql(u8, attr_name, "invariant"))
+                ast.Verification.VerificationAttributeType.Invariant
+            else if (std.mem.eql(u8, attr_name, "precondition"))
+                ast.Verification.VerificationAttributeType.Precondition
+            else if (std.mem.eql(u8, attr_name, "postcondition"))
+                ast.Verification.VerificationAttributeType.Postcondition
+            else if (std.mem.eql(u8, attr_name, "loop_invariant"))
+                ast.Verification.VerificationAttributeType.LoopInvariant
+            else
+                ast.Verification.VerificationAttributeType.Custom;
+
+            const attr = if (attr_type == .Custom)
+                ast.Verification.VerificationAttribute.initCustom(attr_name, attr_value, self.base.spanFromToken(at_token))
+            else
+                ast.Verification.VerificationAttribute.init(attr_type, self.base.spanFromToken(at_token));
+
+            try attributes.append(attr);
+        }
+
+        return try attributes.toOwnedSlice();
     }
 
     /// Parse a range expression (start...end)

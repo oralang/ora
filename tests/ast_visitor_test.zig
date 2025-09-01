@@ -1008,6 +1008,7 @@ fn createBinaryExpr(allocator: std.mem.Allocator) !*ast.Expressions.ExprNode {
 fn createIdentifierExpr(allocator: std.mem.Allocator, name: []const u8) !*ast.Expressions.ExprNode {
     const identifier_node = ast.Expressions.IdentifierExpr{
         .name = name,
+        .type_info = ast.Types.TypeInfo.explicit(.Integer, .u256, .{ .line = 13, .column = 1, .length = @intCast(name.len), .byte_offset = 0 }),
         .span = .{ .line = 13, .column = 1, .length = @intCast(name.len), .byte_offset = 0 },
     };
 
@@ -1257,6 +1258,8 @@ fn createQuantifiedExpr(allocator: std.mem.Allocator) !*ast.Expressions.ExprNode
         .condition = null,
         .body = body,
         .span = .{ .line = 29, .column = 1, .length = 5, .byte_offset = 0 },
+        .verification_metadata = null,
+        .verification_attributes = &[_]ast.Verification.VerificationAttribute{},
     };
 
     const expr_node = try allocator.create(ast.Expressions.ExprNode);

@@ -107,7 +107,7 @@ pub const CIIntegration = struct {
         try writer.writeAll("<testsuites>\n");
 
         for (results) |result| {
-            try writer.print("  <testsuite name=\"{s}\" tests=\"{}\" failures=\"{}\" skipped=\"{}\" time=\"{d:.3}\">\n", .{
+            try writer.print("  <testsuite name=\"{s}\" tests=\"{d}\" failures=\"{d}\" skipped=\"{d}\" time=\"{d:.3}\">\n", .{
                 result.name,
                 result.total_tests,
                 result.failed_tests,
@@ -119,7 +119,7 @@ pub const CIIntegration = struct {
             const passed_tests = result.total_tests - result.failed_tests - result.skipped_tests;
             var i: u32 = 0;
             while (i < passed_tests) : (i += 1) {
-                try writer.print("    <testcase name=\"test_{}\"/>\n", .{i});
+                try writer.print("    <testcase name=\"test_{d}\"/>\n", .{i});
             }
 
             // Add failed test cases
@@ -144,13 +144,13 @@ pub const CIIntegration = struct {
 
         for (results) |result| {
             if (result.failed_tests > 0) {
-                try writer.print("::error title=Test Failures::Suite '{s}' has {} failed tests\n", .{ result.name, result.failed_tests });
+                try writer.print("::error title=Test Failures::Suite '{s}' has {d} failed tests\n", .{ result.name, result.failed_tests });
 
                 for (result.failures) |failure| {
                     try writer.print("::error::{s}\n", .{failure.message});
                 }
             } else {
-                try writer.print("::notice title=Test Success::Suite '{s}' passed all {} tests\n", .{ result.name, result.total_tests });
+                try writer.print("::notice title=Test Success::Suite '{s}' passed all {d} tests\n", .{ result.name, result.total_tests });
             }
         }
 
@@ -171,7 +171,7 @@ pub const CIIntegration = struct {
         var total_skipped: u32 = 0;
 
         for (results) |result| {
-            try writer.print("{}\n", .{result});
+            try writer.print("{any}\n", .{result});
 
             total_tests += result.total_tests;
             total_passed += result.passed_tests;
@@ -189,7 +189,7 @@ pub const CIIntegration = struct {
 
         try writer.writeAll("Overall Summary:\n");
         try writer.writeAll("---------------\n");
-        try writer.print("Total: {}, Passed: {}, Failed: {}, Skipped: {}\n", .{ total_tests, total_passed, total_failed, total_skipped });
+        try writer.print("Total: {d}, Passed: {d}, Failed: {d}, Skipped: {d}\n", .{ total_tests, total_passed, total_failed, total_skipped });
 
         if (total_failed > 0) {
             try writer.writeAll("❌ Some tests failed\n");
@@ -210,10 +210,10 @@ pub const CIIntegration = struct {
         for (results, 0..) |result, i| {
             try writer.print("    {{\n");
             try writer.print("      \"name\": \"{s}\",\n", .{result.name});
-            try writer.print("      \"total_tests\": {},\n", .{result.total_tests});
-            try writer.print("      \"passed_tests\": {},\n", .{result.passed_tests});
-            try writer.print("      \"failed_tests\": {},\n", .{result.failed_tests});
-            try writer.print("      \"skipped_tests\": {},\n", .{result.skipped_tests});
+            try writer.print("      \"total_tests\": {d},\n", .{result.total_tests});
+            try writer.print("      \"passed_tests\": {d},\n", .{result.passed_tests});
+            try writer.print("      \"failed_tests\": {d},\n", .{result.failed_tests});
+            try writer.print("      \"skipped_tests\": {d},\n", .{result.skipped_tests});
             try writer.print("      \"duration_ms\": {d:.2}\n", .{result.duration_ms});
             try writer.print("    }}");
 
@@ -253,7 +253,7 @@ pub const CIIntegration = struct {
         var buffer = std.ArrayList(u8).init(self.allocator);
         const writer = buffer.writer();
 
-        try writer.print("Coverage: {d:.1}% ({}/{} lines)\n", .{
+        try writer.print("Coverage: {d:.1}% ({d}/{d} lines)\n", .{
             coverage.getOverallPercentage(),
             coverage.covered_lines,
             coverage.total_lines,
