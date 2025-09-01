@@ -829,6 +829,7 @@ pub const ExpressionParser = struct {
             const name_copy = try self.base.arena.createString(token.lexeme);
             var current_expr = ast.Expressions.ExprNode{ .Identifier = ast.Expressions.IdentifierExpr{
                 .name = name_copy,
+                .type_info = ast.Types.TypeInfo.unknown(),
                 .span = self.base.spanFromToken(token),
             } };
 
@@ -1272,6 +1273,7 @@ pub const ExpressionParser = struct {
             const name_expr = try self.base.arena.createNode(ast.Expressions.ExprNode);
             name_expr.* = ast.Expressions.ExprNode{ .Identifier = ast.Expressions.IdentifierExpr{
                 .name = full_name,
+                .type_info = ast.Types.TypeInfo.unknown(),
                 .span = self.base.spanFromToken(at_token),
             } };
 
@@ -1382,6 +1384,7 @@ pub const ExpressionParser = struct {
         const struct_name_ptr = try self.base.arena.createNode(ast.Expressions.ExprNode);
         struct_name_ptr.* = ast.Expressions.ExprNode{ .Identifier = ast.Expressions.IdentifierExpr{
             .name = name_token.lexeme,
+            .type_info = ast.Types.TypeInfo.unknown(),
             .span = self.base.spanFromToken(name_token),
         } };
 

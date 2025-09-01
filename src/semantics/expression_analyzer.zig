@@ -59,7 +59,7 @@ pub fn inferExprType(table: *state.SymbolTable, scope: *state.Scope, expr: ast.E
             if (target_ti.ora_type) |ot| switch (ot) {
                 .array => |arr| break :blk_idx ast.Types.TypeInfo.fromOraType(@constCast(arr.elem).*),
                 .slice => |elem| break :blk_idx ast.Types.TypeInfo.fromOraType(@constCast(elem).*),
-                .mapping => |m| break :blk_idx ast.Types.TypeInfo.fromOraType(@constCast(m.value).*),
+                .map => |m| break :blk_idx ast.Types.TypeInfo.fromOraType(@constCast(m.value).*),
                 else => break :blk_idx ast.Types.TypeInfo.unknown(),
             } else break :blk_idx ast.Types.TypeInfo.unknown();
         },

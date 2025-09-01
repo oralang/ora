@@ -828,28 +828,143 @@ pub const ExpressionLowerer = struct {
         return self.createSwitchIfChain(condition, switch_expr.cases, switch_expr.span);
     }
 
-    /// Lower quantified expressions (forall/exists)
+    /// Lower quantified expressions (forall/exists) with comprehensive verification support
     pub fn lowerQuantified(self: *const ExpressionLowerer, quantified: *const lib.ast.Expressions.QuantifiedExpr) c.MlirValue {
         // Quantified expressions are for formal verification
-        // Create a placeholder operation with ora.quantified attribute
-        const ty = c.mlirIntegerTypeGet(self.ctx, 1); // Boolean result
-        var state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("arith.constant"), self.fileLoc(quantified.span));
-        c.mlirOperationStateAddResults(&state, 1, @ptrCast(&ty));
+        // Create a verification construct with proper ora.quantified attributes
 
-        const attr = c.mlirIntegerAttrGet(ty, 1); // Default to true
-        const value_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("value"));
-        const quantified_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("ora.quantified"));
-        const quantified_attr = c.mlirBoolAttrGet(self.ctx, 1);
+        // Result type is always boolean for quantified expressions
+        const result_ty = c.mlirIntegerTypeGet(self.ctx, 1);
 
-        var attrs = [_]c.MlirNamedAttribute{
-            c.mlirNamedAttributeGet(value_id, attr),
-            c.mlirNamedAttributeGet(quantified_id, quantified_attr),
+        // Create the main quantified operation using a custom ora.quantified operation
+        var state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("ora.quantified"), self.fileLoc(quantified.span));
+        c.mlirOperationStateAddResults(&state, 1, @ptrCast(&result_ty));
+
+        // Create attributes for the quantified expression
+        var attributes = std.ArrayList(c.MlirNamedAttribute).init(std.heap.page_allocator);
+        defer attributes.deinit();
+
+        // Add quantifier type attribute (forall or exists)
+        const quantifier_type_str = switch (quantified.quantifier) {
+            .Forall => "forall",
+            .Exists => "exists",
         };
-        c.mlirOperationStateAddAttributes(&state, attrs.len, &attrs);
+        const quantifier_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("quantifier"));
+        const quantifier_attr = c.mlirStringAttrGet(self.ctx, c.mlirStringRefCreateFromCString(quantifier_type_str.ptr));
+        attributes.append(c.mlirNamedAttributeGet(quantifier_id, quantifier_attr)) catch {};
 
-        const op = c.mlirOperationCreate(&state);
-        c.mlirBlockAppendOwnedOperation(self.block, op);
-        return c.mlirOperationGetResult(op, 0);
+        // Add bound variable name attribute
+        const var_name_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("variable"));
+        const var_name_attr = c.mlirStringAttrGet(self.ctx, c.mlirStringRefCreateFromCString(quantified.variable.ptr));
+        attributes.append(c.mlirNamedAttributeGet(var_name_id, var_name_attr)) catch {};
+
+        // Add variable type attribute
+        const var_type_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("variable_type"));
+        const var_type_str = self.getTypeString(quantified.variable_type);
+        const var_type_attr = c.mlirStringAttrGet(self.ctx, c.mlirStringRefCreateFromCString(var_type_str.ptr));
+        attributes.append(c.mlirNamedAttributeGet(var_type_id, var_type_attr)) catch {};
+
+        // Add verification marker attribute
+        const verification_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("ora.verification"));
+        const verification_attr = c.mlirBoolAttrGet(self.ctx, 1);
+        attributes.append(c.mlirNamedAttributeGet(verification_id, verification_attr)) catch {};
+
+        // Add formal verification marker for analysis passes
+        const formal_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("ora.formal"));
+        const formal_attr = c.mlirBoolAttrGet(self.ctx, 1);
+        attributes.append(c.mlirNamedAttributeGet(formal_id, formal_attr)) catch {};
+
+        // Add quantified expression marker for verification tools
+        const quantified_marker_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("ora.quantified"));
+        const quantified_marker_attr = c.mlirBoolAttrGet(self.ctx, 1);
+        attributes.append(c.mlirNamedAttributeGet(quantified_marker_id, quantified_marker_attr)) catch {};
+
+        // Add verification context attribute (can be used by verification passes)
+        const context_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("ora.verification_context"));
+        const context_attr = c.mlirStringAttrGet(self.ctx, c.mlirStringRefCreateFromCString("quantified_expression"));
+        attributes.append(c.mlirNamedAttributeGet(context_id, context_attr)) catch {};
+
+        // Add bound variable domain information for verification analysis
+        const domain_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("ora.domain"));
+        const domain_str = switch (quantified.quantifier) {
+            .Forall => "universal",
+            .Exists => "existential",
+        };
+        const domain_attr = c.mlirStringAttrGet(self.ctx, c.mlirStringRefCreateFromCString(domain_str.ptr));
+        attributes.append(c.mlirNamedAttributeGet(domain_id, domain_attr)) catch {};
+
+        // Add condition presence indicator for verification analysis
+        const has_condition_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("ora.has_condition"));
+        const has_condition_attr = c.mlirBoolAttrGet(self.ctx, if (quantified.condition != null) 1 else 0);
+        attributes.append(c.mlirNamedAttributeGet(has_condition_id, has_condition_attr)) catch {};
+
+        // Add all attributes to the operation state
+        c.mlirOperationStateAddAttributes(&state, @intCast(attributes.items.len), attributes.items.ptr);
+
+        // Create regions for the quantified expression
+        // Region 0: Optional condition (where clause)
+        // Region 1: Body expression
+        var regions = [_]c.MlirRegion{ c.mlirRegionCreate(), c.mlirRegionCreate() };
+        c.mlirOperationStateAddOwnedRegions(&state, regions.len, &regions);
+
+        // Create the operation
+        const quantified_op = c.mlirOperationCreate(&state);
+        c.mlirBlockAppendOwnedOperation(self.block, quantified_op);
+
+        // Lower the condition (where clause) if present
+        if (quantified.condition) |condition| {
+            const condition_region = c.mlirOperationGetRegion(quantified_op, 0);
+            const condition_block = c.mlirBlockCreate(0, null, null);
+            c.mlirRegionAppendOwnedBlock(condition_region, condition_block);
+
+            // Create a new expression lowerer for the condition block
+            const condition_lowerer = ExpressionLowerer{
+                .ctx = self.ctx,
+                .block = condition_block,
+                .type_mapper = self.type_mapper,
+                .param_map = self.param_map,
+                .storage_map = self.storage_map,
+                .local_var_map = self.local_var_map,
+                .locations = self.locations,
+            };
+
+            // Lower the condition expression
+            const condition_value = condition_lowerer.lowerExpression(condition);
+
+            // Create yield operation for the condition
+            var condition_yield_state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("ora.yield"), self.fileLoc(quantified.span));
+            c.mlirOperationStateAddOperands(&condition_yield_state, 1, @ptrCast(&condition_value));
+            const condition_yield_op = c.mlirOperationCreate(&condition_yield_state);
+            c.mlirBlockAppendOwnedOperation(condition_block, condition_yield_op);
+        }
+
+        // Lower the body expression
+        const body_region = c.mlirOperationGetRegion(quantified_op, 1);
+        const body_block = c.mlirBlockCreate(0, null, null);
+        c.mlirRegionAppendOwnedBlock(body_region, body_block);
+
+        // Create a new expression lowerer for the body block
+        const body_lowerer = ExpressionLowerer{
+            .ctx = self.ctx,
+            .block = body_block,
+            .type_mapper = self.type_mapper,
+            .param_map = self.param_map,
+            .storage_map = self.storage_map,
+            .local_var_map = self.local_var_map,
+            .locations = self.locations,
+        };
+
+        // Lower the body expression
+        const body_value = body_lowerer.lowerExpression(quantified.body);
+
+        // Create yield operation for the body
+        var body_yield_state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("ora.yield"), self.fileLoc(quantified.span));
+        c.mlirOperationStateAddOperands(&body_yield_state, 1, @ptrCast(&body_value));
+        const body_yield_op = c.mlirOperationCreate(&body_yield_state);
+        c.mlirBlockAppendOwnedOperation(body_block, body_yield_op);
+
+        // Return the result of the quantified operation
+        return c.mlirOperationGetResult(quantified_op, 0);
     }
 
     /// Lower try expressions
@@ -1364,6 +1479,108 @@ pub const ExpressionLowerer = struct {
         // TODO: Implement proper switch case handling with pattern matching
         std.debug.print("WARNING: Switch expression if-chain not fully implemented\n", .{});
         return condition;
+    }
+
+    /// Convert TypeInfo to string representation for attributes
+    pub fn getTypeString(self: *const ExpressionLowerer, type_info: lib.ast.Types.TypeInfo) []const u8 {
+        _ = self; // Suppress unused parameter warning
+
+        if (type_info.ora_type) |ora_type| {
+            return switch (ora_type) {
+                // Unsigned integer types
+                .u8 => "u8",
+                .u16 => "u16",
+                .u32 => "u32",
+                .u64 => "u64",
+                .u128 => "u128",
+                .u256 => "u256",
+
+                // Signed integer types
+                .i8 => "i8",
+                .i16 => "i16",
+                .i32 => "i32",
+                .i64 => "i64",
+                .i128 => "i128",
+                .i256 => "i256",
+
+                // Other primitive types
+                .bool => "bool",
+                .address => "address",
+                .string => "string",
+                .bytes => "bytes",
+                .void => "void",
+
+                // Complex types - simplified representation for now
+                .array => "array",
+                .slice => "slice",
+                .map => "map",
+                .double_map => "doublemap",
+                .struct_type => "struct",
+                .enum_type => "enum",
+                .error_union => "error_union",
+                .function => "function",
+                .contract_type => "contract",
+                .tuple => "tuple",
+                ._union => "union",
+                .anonymous_struct => "anonymous_struct",
+                .module => "module",
+            };
+        }
+
+        // Fallback for unknown types
+        return "unknown";
+    }
+
+    /// Add verification-related attributes to an operation for formal verification support
+    pub fn addVerificationAttributes(self: *const ExpressionLowerer, attributes: *std.ArrayList(c.MlirNamedAttribute), verification_type: []const u8, context: []const u8) void {
+        // Add verification marker
+        const verification_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("ora.verification"));
+        const verification_attr = c.mlirBoolAttrGet(self.ctx, 1);
+        attributes.append(c.mlirNamedAttributeGet(verification_id, verification_attr)) catch {};
+
+        // Add verification type (quantified, assertion, invariant, etc.)
+        const type_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("ora.verification_type"));
+        const type_attr = c.mlirStringAttrGet(self.ctx, c.mlirStringRefCreateFromCString(verification_type.ptr));
+        attributes.append(c.mlirNamedAttributeGet(type_id, type_attr)) catch {};
+
+        // Add verification context
+        const context_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("ora.verification_context"));
+        const context_attr = c.mlirStringAttrGet(self.ctx, c.mlirStringRefCreateFromCString(context.ptr));
+        attributes.append(c.mlirNamedAttributeGet(context_id, context_attr)) catch {};
+
+        // Add formal verification marker for analysis passes
+        const formal_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("ora.formal"));
+        const formal_attr = c.mlirBoolAttrGet(self.ctx, 1);
+        attributes.append(c.mlirNamedAttributeGet(formal_id, formal_attr)) catch {};
+    }
+
+    /// Create verification metadata for quantified expressions and other formal verification constructs
+    pub fn createVerificationMetadata(self: *const ExpressionLowerer, quantifier_type: lib.ast.Expressions.QuantifierType, variable_name: []const u8, variable_type: lib.ast.Types.TypeInfo) std.ArrayList(c.MlirNamedAttribute) {
+        var metadata = std.ArrayList(c.MlirNamedAttribute).init(std.heap.page_allocator);
+
+        // Add quantifier type
+        const quantifier_str = switch (quantifier_type) {
+            .Forall => "forall",
+            .Exists => "exists",
+        };
+        const quantifier_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("quantifier"));
+        const quantifier_attr = c.mlirStringAttrGet(self.ctx, c.mlirStringRefCreateFromCString(quantifier_str.ptr));
+        metadata.append(c.mlirNamedAttributeGet(quantifier_id, quantifier_attr)) catch {};
+
+        // Add bound variable information
+        const var_name_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("variable"));
+        const var_name_attr = c.mlirStringAttrGet(self.ctx, c.mlirStringRefCreateFromCString(variable_name.ptr));
+        metadata.append(c.mlirNamedAttributeGet(var_name_id, var_name_attr)) catch {};
+
+        const var_type_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("variable_type"));
+        const var_type_str = self.getTypeString(variable_type);
+        const var_type_attr = c.mlirStringAttrGet(self.ctx, c.mlirStringRefCreateFromCString(var_type_str.ptr));
+        metadata.append(c.mlirNamedAttributeGet(var_type_id, var_type_attr)) catch {};
+
+        // Add verification attributes
+        self.addVerificationAttributes(&metadata, "quantified", "formal_verification");
+
+        return metadata;
     }
 
     /// Create empty array memref

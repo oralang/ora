@@ -49,7 +49,7 @@ enum PrimitiveType {
 
 union Type {
   primitive: PrimitiveType,
-  mapping: MappingType,
+  mapping: MapType,
   slice: SliceType,
   custom: CustomType,
   error_union: ErrorUnionType,

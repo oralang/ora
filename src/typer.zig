@@ -503,7 +503,7 @@ pub fn getTypeAlignment(ora_type: OraType) u32 {
         .Address => 20, // Ethereum addresses are 20 bytes
         .String, .Bytes => 32, // Dynamic types require 32-byte alignment
         .Slice => 32,
-        .Mapping, .DoubleMap => 32,
+        .Map, .DoubleMap => 32,
         .Struct => |struct_type| struct_type.layout.alignment,
         .Enum => |enum_type| enum_type.layout.alignment,
         .Function => 32,
@@ -589,7 +589,7 @@ pub fn getTypeSize(ora_type: OraType) u32 {
         .U256, .I256 => 32,
         .String, .Bytes => 32, // Dynamic size, stored as pointer
         .Slice => 32, // Dynamic size, stored as pointer
-        .Mapping, .DoubleMap => 32, // Storage slot reference
+        .Map, .DoubleMap => 32, // Storage slot reference
         .Struct => |struct_type| struct_type.calculateSize(),
         .Enum => |enum_type| enum_type.calculateSize(),
         .Function => 32, // Function pointer
@@ -2027,8 +2027,8 @@ pub const Typer = struct {
                 .Slice => |rhs_elem| self.typeEquals(lhs_elem.*, rhs_elem.*),
                 else => false,
             },
-            .Mapping => |lhs_map| switch (rhs) {
-                .Mapping => |rhs_map| self.typeEquals(lhs_map.key.*, rhs_map.key.*) and
+            .Map => |lhs_map| switch (rhs) {
+                .Map => |rhs_map| self.typeEquals(lhs_map.key.*, rhs_map.key.*) and
                     self.typeEquals(lhs_map.value.*, rhs_map.value.*),
                 else => false,
             },
@@ -2152,7 +2152,7 @@ pub const Typer = struct {
             .Storage => {
                 // Only certain types can be stored in storage
                 switch (typ) {
-                    .Mapping, .DoubleMap => {}, // OK
+                    .Map, .DoubleMap => {}, // OK
                     .Bool, .Address, .U8, .U16, .U32, .U64, .U128, .U256, .I8, .I16, .I32, .I64, .I128, .I256, .String => {}, // OK
                     .Struct, .Enum => {}, // Custom types are OK in storage
                     else => return TyperError.InvalidMemoryRegion,
@@ -2198,8 +2198,8 @@ pub const Typer = struct {
                 }
                 return TyperError.TypeMismatch;
             },
-            .Mapping => |mapping| {
-                // Mapping access requires compatible key type
+            .Map => |mapping| {
+                // Map access requires compatible key type
                 if (self.typesCompatible(index_type, mapping.key.*)) {
                     return mapping.value.*;
                 }

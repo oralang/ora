@@ -172,14 +172,14 @@ pub const TypeParser = struct {
         const value_ora_type = try self.base.arena.createNode(OraType);
         value_ora_type.* = value_type_info.ora_type orelse return error.UnresolvedType;
 
-        const mapping_type = ast.type_info.MappingType{
+        const map_type = ast.type_info.MapType{
             .key = key_ora_type,
             .value = value_ora_type,
         };
 
         return TypeInfo{
-            .category = .Mapping,
-            .ora_type = OraType{ .mapping = mapping_type },
+            .category = .Map,
+            .ora_type = OraType{ .map = map_type },
             .source = .explicit,
             .span = span,
         };

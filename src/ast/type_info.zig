@@ -146,7 +146,7 @@ pub const TypeCategory = enum {
     Function,
     Array,
     Slice,
-    Mapping,
+    Map,
     DoubleMap,
     Tuple,
     ErrorUnion,
@@ -197,7 +197,7 @@ pub const OraType = union(enum) {
     contract_type: []const u8, // Contract name
     array: struct { elem: *const OraType, len: u64 }, // Fixed-size array [T; N]
     slice: *const OraType, // Element type
-    mapping: MappingType, // Key and value types
+    map: MapType, // Key and value types
     double_map: DoubleMapType, // Two keys and value type
     tuple: []const OraType, // Element types
     function: FunctionType, // Parameter and return types
@@ -220,7 +220,7 @@ pub const OraType = union(enum) {
             .contract_type => .Contract,
             .array => .Array,
             .slice => .Slice,
-            .mapping => .Mapping,
+            .map => .Map,
             .double_map => .DoubleMap,
             .tuple => .Tuple,
             .function => .Function,
@@ -280,7 +280,7 @@ pub const OraType = union(enum) {
             .contract_type => |name| name,
             .array => "array",
             .slice => "slice",
-            .mapping => "mapping",
+            .map => "map",
             .double_map => "double_map",
             .tuple => "tuple",
             .function => "function",
@@ -321,8 +321,8 @@ pub const OraType = union(enum) {
                 .slice => |bp| equals(@constCast(ap).*, @constCast(bp).*),
                 else => unreachable,
             },
-            .mapping => |am| switch (b) {
-                .mapping => |bm| equals(@constCast(am.key).*, @constCast(bm.key).*) and equals(@constCast(am.value).*, @constCast(bm.value).*),
+            .map => |am| switch (b) {
+                .map => |bm| equals(@constCast(am.key).*, @constCast(bm.key).*) and equals(@constCast(am.value).*, @constCast(bm.value).*),
                 else => unreachable,
             },
             .double_map => |am| switch (b) {
@@ -411,7 +411,7 @@ pub const OraType = union(enum) {
                 const sub = OraType.hash(@constCast(elem).*);
                 h.update(std.mem.asBytes(&sub));
             },
-            .mapping => |m| {
+            .map => |m| {
                 const k = OraType.hash(@constCast(m.key).*);
                 const v = OraType.hash(@constCast(m.value).*);
                 h.update(std.mem.asBytes(&k));
@@ -500,7 +500,7 @@ pub const OraType = union(enum) {
                 try (@constCast(elem).*).render(writer);
                 try writer.writeByte(']');
             },
-            .mapping => |m| {
+            .map => |m| {
                 try writer.writeAll("map[");
                 try (@constCast(m.key).*).render(writer);
                 try writer.writeAll(", ");
@@ -572,7 +572,7 @@ pub const OraType = union(enum) {
 };
 
 /// Complex type definitions
-pub const MappingType = struct {
+pub const MapType = struct {
     key: *const OraType,
     value: *const OraType,
 };
@@ -760,8 +760,8 @@ pub fn deinitTypeInfo(allocator: std.mem.Allocator, type_info: *TypeInfo) void {
                 }
                 allocator.free(fields);
             },
-            .mapping => |mapping| {
-                // Properly handle mapping's key and value
+            .map => |mapping| {
+                // Properly handle map's key and value
                 deinitOraType(allocator, @constCast(mapping.key));
                 deinitOraType(allocator, @constCast(mapping.value));
                 allocator.destroy(mapping.key);
@@ -827,8 +827,8 @@ fn deinitOraType(allocator: std.mem.Allocator, ora_type: *OraType) void {
             }
             allocator.free(fields);
         },
-        .mapping => |mapping| {
-            // MappingType's key and value are defined as *const OraType (not optional)
+        .map => |mapping| {
+            // MapType's key and value are defined as *const OraType (not optional)
             deinitOraType(allocator, @constCast(mapping.key));
             allocator.destroy(mapping.key);
 

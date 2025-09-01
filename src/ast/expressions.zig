@@ -226,6 +226,7 @@ pub const StructDestructureField = struct {
 
 pub const IdentifierExpr = struct {
     name: []const u8,
+    type_info: TypeInfo,
     span: SourceSpan,
 };
 
@@ -475,8 +476,8 @@ pub fn createIdentifier(allocator: std.mem.Allocator, name: []const u8, span: So
     node.* = ExprNode{
         .Identifier = IdentifierExpr{
             .name = name, // Note: name is expected to be arena-allocated already
-            .span = span,
             .type_info = TypeInfo.unknown(),
+            .span = span,
         },
     };
     return node;
@@ -491,8 +492,8 @@ pub fn createIdentifierInArena(arena: *AstArena, name: []const u8, span: SourceS
     const node = try arena.createNode(ExprNode);
     node.* = ExprNode{ .Identifier = IdentifierExpr{
         .name = name_copy,
-        .span = span,
         .type_info = TypeInfo.unknown(),
+        .span = span,
     } };
     return node;
 }
@@ -501,7 +502,7 @@ pub fn createBinaryExpr(allocator: std.mem.Allocator, lhs: *ExprNode, op: Binary
     const node = try allocator.create(ExprNode);
     node.* = ExprNode{ .Binary = BinaryExpr{
         .lhs = lhs,
-        .op = op,
+        .operator = op,
         .rhs = rhs,
         .span = span,
         .type_info = TypeInfo.unknown(),
@@ -515,7 +516,7 @@ pub fn createBinaryExprInArena(arena: *AstArena, lhs: *ExprNode, op: BinaryOp, r
     const node = try arena.createNode(ExprNode);
     node.* = ExprNode{ .Binary = BinaryExpr{
         .lhs = lhs,
-        .op = op,
+        .operator = op,
         .rhs = rhs,
         .span = span,
         .type_info = TypeInfo.unknown(),

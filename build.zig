@@ -347,6 +347,15 @@ pub fn build(b: *std.Build) void {
     span_tests.root_module.addImport("ora", lib_mod);
     test_all_step.dependOn(&b.addRunArtifact(span_tests).step);
 
+    // Quantified expression tests
+    const quantified_tests = b.addTest(.{
+        .root_source_file = b.path("tests/test_quantified.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    quantified_tests.root_module.addImport("ora", lib_mod);
+    test_all_step.dependOn(&b.addRunArtifact(quantified_tests).step);
+
     // Documentation generation
     const install_docs = b.addInstallDirectory(.{
         .source_dir = lib.getEmittedDocs(),

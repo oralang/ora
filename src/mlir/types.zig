@@ -48,7 +48,7 @@ pub const TypeMapper = struct {
                 .contract_type => self.mapContractType(ora_ty.contract_type),
                 .array => self.mapArrayType(ora_ty.array),
                 .slice => self.mapSliceType(ora_ty.slice),
-                .mapping => self.mapMappingType(ora_ty.mapping),
+                .map => self.mapMapType(ora_ty.map),
                 .double_map => self.mapDoubleMapType(ora_ty.double_map),
                 .tuple => self.mapTupleType(ora_ty.tuple),
                 .function => self.mapFunctionType(ora_ty.function),
@@ -158,7 +158,7 @@ pub const TypeMapper = struct {
     }
 
     /// Convert mapping type `map[K, V]` to `!ora.map<K, V>`
-    pub fn mapMappingType(self: *const TypeMapper, mapping_info: lib.ast.type_info.MappingType) c.MlirType {
+    pub fn mapMapType(self: *const TypeMapper, mapping_info: lib.ast.type_info.MapType) c.MlirType {
         // TODO: Implement proper mapping type to !ora.map<K, V> dialect type
         // For now, use i256 as placeholder until we can create custom dialect types
         // In a full implementation, this would:
@@ -321,7 +321,7 @@ pub const TypeMapper = struct {
     pub fn isComplex(self: *const TypeMapper, ora_type: lib.ast.type_info.OraType) bool {
         _ = self;
         return switch (ora_type) {
-            .struct_type, .enum_type, .contract_type, .array, .slice, .mapping, .double_map, .tuple, .function, .error_union, ._union, .anonymous_struct, .module => true,
+            .struct_type, .enum_type, .contract_type, .array, .slice, .Map, .double_map, .tuple, .function, .error_union, ._union, .anonymous_struct, .module => true,
             else => false,
         };
     }

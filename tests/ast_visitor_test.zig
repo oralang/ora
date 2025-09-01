@@ -1008,6 +1008,7 @@ fn createBinaryExpr(allocator: std.mem.Allocator) !*ast.Expressions.ExprNode {
 fn createIdentifierExpr(allocator: std.mem.Allocator, name: []const u8) !*ast.Expressions.ExprNode {
     const identifier_node = ast.Expressions.IdentifierExpr{
         .name = name,
+        .type_info = ast.Types.TypeInfo.explicit(.Integer, .u256, .{ .line = 13, .column = 1, .length = @intCast(name.len), .byte_offset = 0 }),
         .span = .{ .line = 13, .column = 1, .length = @intCast(name.len), .byte_offset = 0 },
     };
 
