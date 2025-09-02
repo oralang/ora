@@ -38,6 +38,8 @@ pub fn inferExprType(table: *state.SymbolTable, scope: *state.Scope, expr: ast.E
             .Address => ast.Types.TypeInfo.fromOraType(.address),
             .Hex => ast.Types.TypeInfo.fromOraType(.bytes),
             .Binary => ast.Types.TypeInfo.fromOraType(.bytes),
+            .Character => ast.Types.TypeInfo.fromOraType(.u8),
+            .Bytes => ast.Types.TypeInfo.fromOraType(.bytes),
         },
         .FieldAccess => |fa| blk_fa: {
             const target_ti = inferExprType(table, scope, fa.target.*);
