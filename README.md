@@ -172,6 +172,54 @@ vendor/solidity // vendor libs
 - Run all suites: `zig build test`
 - Fixture-based semantics tests live under `tests/fixtures/semantics/{valid,invalid}`.
 
+## MLIR Integration
+
+The Ora compiler includes comprehensive MLIR lowering capabilities:
+
+### Features
+- **Type Mapping:** All Ora types mapped to appropriate MLIR representations
+- **Memory Regions:** Storage/memory/tstore semantics preserved in MLIR
+- **Source Locations:** Complete source location tracking through MLIR
+- **Error Handling:** Comprehensive error reporting with recovery
+- **Pass Integration:** Works with MLIR's optimization pass infrastructure
+- **Verification:** Contract preconditions and postconditions in MLIR
+
+### MLIR CLI Usage
+
+Generate MLIR output:
+```bash
+./zig-out/bin/ora compile --emit-mlir contract.ora
+```
+
+Verify MLIR correctness:
+```bash
+./zig-out/bin/ora compile --mlir-verify contract.ora
+```
+
+Run MLIR optimization passes:
+```bash
+./zig-out/bin/ora compile --mlir-passes="canonicalize,cse" contract.ora
+```
+
+### Example MLIR Output
+
+For a simple Ora function:
+```ora
+fn add(a: u256, b: u256) -> u256 {
+    return a + b;
+}
+```
+
+The MLIR output includes:
+```mlir
+func.func @add(%arg0: i256, %arg1: i256) -> i256 {
+    %0 = arith.addi %arg0, %arg1 : i256
+    return %0 : i256
+}
+```
+
+See `docs/mlir-lowering.md` for comprehensive technical documentation.
+
 ## CLI usage
 
 Use the installed executable:
