@@ -1,0 +1,54 @@
+// Memory region examples
+// This demonstrates how different memory regions are handled in MLIR
+
+contract MemoryExample {
+    storage balance: u256;
+    storage owner: address;
+    
+    fn storage_operations() -> u256 {
+        // Storage read - produces stack value
+        let current_balance: u256 = balance;
+        
+        // Storage write - requires storage lvalue
+        balance = current_balance + 100;
+        
+        return balance;
+    }
+    
+    fn memory_operations() -> u256 {
+        // Memory region variables
+        memory temp_value: u256 = 42;
+        memory temp_array: [u256; 3] = [1, 2, 3];
+        
+        // Memory operations
+        temp_value = temp_value * 2;
+        temp_array[0] = temp_value;
+        
+        return temp_array[0] + temp_array[1];
+    }
+    
+    fn tstore_operations() -> u256 {
+        // Transient storage operations
+        tstore pending_amount: u256 = 1000;
+        tstore temp_flag: bool = true;
+        
+        if (temp_flag) {
+            pending_amount = pending_amount / 2;
+        }
+        
+        return pending_amount;
+    }
+    
+    fn cross_region_operations() -> u256 {
+        // Reading from storage to stack
+        let storage_value: u256 = balance;
+        
+        // Using stack value in memory
+        memory temp: u256 = storage_value + 50;
+        
+        // Writing back to storage
+        balance = temp;
+        
+        return balance;
+    }
+}

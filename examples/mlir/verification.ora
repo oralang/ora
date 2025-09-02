@@ -1,0 +1,47 @@
+// Verification examples with requires/ensures clauses
+// This demonstrates how contract verification constructs are lowered to MLIR
+
+contract VerificationExample {
+    storage balance: u256;
+    storage total_supply: u256;
+    
+    fn transfer(to: address, amount: u256) -> bool
+    requires balance >= amount
+    requires amount > 0
+    ensures balance == old(balance) - amount
+    ensures total_supply == old(total_supply)
+    {
+        balance = balance - amount;
+        return true;
+    }
+    
+    fn mint(amount: u256) -> bool
+    requires amount > 0
+    requires total_supply + amount <= 1_000_000
+    ensures balance == old(balance) + amount
+    ensures total_supply == old(total_supply) + amount
+    {
+        balance = balance + amount;
+        total_supply = total_supply + amount;
+        return true;
+    }
+    
+    fn safe_divide(a: u256, b: u256) -> u256
+    requires b != 0
+    ensures result == a / b
+    {
+        return a / b;
+    }
+    
+    fn array_sum(array: [u256; 5]) -> u256
+    requires forall(i in 0...5) array[i] >= 0
+    ensures result >= 0
+    ensures result == array[0] + array[1] + array[2] + array[3] + array[4]
+    {
+        let mut sum: u256 = 0;
+        for (array) |item| {
+            sum = sum + item;
+        }
+        return sum;
+    }
+}
