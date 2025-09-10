@@ -1,6 +1,8 @@
 const std = @import("std");
 const c = @import("c.zig").c;
 const lib = @import("ora_lib");
+const verification = @import("verification.zig");
+const optimization = @import("optimization.zig");
 
 /// MLIR pass integration and management system
 pub const PassManager = struct {
@@ -23,24 +25,49 @@ pub const PassManager = struct {
 
     /// Add standard MLIR optimization passes
     pub fn addStandardOptimizationPasses(self: *PassManager) void {
-        // Use pipeline string parsing instead of individual pass creation
-        const pipeline_str = "builtin.module(canonicalize,cse,sccp,symbol-dce)";
+        // Use comprehensive optimization pipeline
+        const pipeline_str = "builtin.module(canonicalize,cse,sccp,symbol-dce,mem2reg,loop-invariant-code-motion,cf-cfg-simplification)";
         const pipeline_ref = c.mlirStringRefCreateFromCString(pipeline_str);
 
         // Parse and add the pipeline
-        const result = c.mlirParsePassPipeline(c.mlirPassManagerGetAsOpPassManager(self.pass_manager), pipeline_ref, null, // No error callback for now
-            null);
+        const result = c.mlirParsePassPipeline(c.mlirPassManagerGetAsOpPassManager(self.pass_manager), pipeline_ref, null, null);
 
         if (c.mlirLogicalResultIsFailure(result)) {
-            std.debug.print("WARNING: Failed to parse optimization pipeline\n", .{});
+            std.debug.print("WARNING: Failed to parse standard optimization pipeline\n", .{});
         }
     }
 
     /// Add Ora-specific verification passes
-    pub fn addOraVerificationPasses(_: *PassManager) void {
-        // For now, use placeholder verification passes
-        // These would be implemented as custom MLIR passes using external pass API
-        std.debug.print("WARNING: Ora verification passes not yet implemented\n", .{});
+    pub fn addOraVerificationPasses(self: *PassManager) void {
+        // Add standard MLIR verification pass first
+        // Note: mlirCreateVerifierPass might not be available in all MLIR versions
+        // For now, we'll use pipeline string parsing instead
+
+        // Add Ora-specific verification passes using pipeline strings
+        // These will be implemented as custom verification logic
+        const ora_verification_pipeline = "builtin.module(ora-type-verify,ora-memory-verify,ora-contract-verify)";
+        const pipeline_ref = c.mlirStringRefCreateFromCString(ora_verification_pipeline);
+
+        const result = c.mlirParsePassPipeline(c.mlirPassManagerGetAsOpPassManager(self.pass_manager), pipeline_ref, null, null);
+
+        if (c.mlirLogicalResultIsFailure(result)) {
+            std.debug.print("WARNING: Failed to parse Ora verification pipeline - using fallback verification\n", .{});
+            // Fallback to basic verification
+            self.addBasicOraVerification();
+        }
+    }
+
+    /// Add basic Ora verification using available MLIR passes
+    fn addBasicOraVerification(self: *PassManager) void {
+        // Use standard MLIR verification passes that work with unregistered dialects
+        const basic_verification_pipeline = "builtin.module(verify-dominance,verify-loopinfo)";
+        const pipeline_ref = c.mlirStringRefCreateFromCString(basic_verification_pipeline);
+
+        const result = c.mlirParsePassPipeline(c.mlirPassManagerGetAsOpPassManager(self.pass_manager), pipeline_ref, null, null);
+
+        if (c.mlirLogicalResultIsFailure(result)) {
+            std.debug.print("WARNING: Failed to parse basic verification pipeline\n", .{});
+        }
     }
 
     /// Add arithmetic optimization passes
@@ -148,6 +175,16 @@ pub const PassManager = struct {
     pub fn verifyModule(self: *PassManager, module: c.MlirModule) bool {
         _ = self;
         return c.mlirOperationVerify(c.mlirModuleGetOperation(module));
+    }
+
+    /// Run Ora-specific verification on a module
+    pub fn runOraVerification(self: *PassManager, module: c.MlirModule) !verification.VerificationResult {
+        return try verification.runOraVerification(self.ctx, module, self.allocator);
+    }
+
+    /// Run Ora-specific optimizations on a module
+    pub fn runOraOptimization(self: *PassManager, module: c.MlirModule, config: optimization.OptimizationConfig) !optimization.OptimizationResult {
+        return try optimization.runOraOptimization(self.ctx, module, self.allocator, config);
     }
 };
 

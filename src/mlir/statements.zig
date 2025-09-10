@@ -24,8 +24,10 @@ pub const StatementLowerer = struct {
     symbol_table: ?*SymbolTable,
     memory_manager: MemoryManager,
     allocator: std.mem.Allocator,
+    current_function_return_type: ?c.MlirType,
+    ora_dialect: *@import("dialect.zig").OraDialect,
 
-    pub fn init(ctx: c.MlirContext, block: c.MlirBlock, type_mapper: *const TypeMapper, expr_lowerer: *const ExpressionLowerer, param_map: ?*const ParamMap, storage_map: ?*const StorageMap, local_var_map: ?*LocalVarMap, locations: LocationTracker, symbol_table: ?*SymbolTable, allocator: std.mem.Allocator) StatementLowerer {
+    pub fn init(ctx: c.MlirContext, block: c.MlirBlock, type_mapper: *const TypeMapper, expr_lowerer: *const ExpressionLowerer, param_map: ?*const ParamMap, storage_map: ?*const StorageMap, local_var_map: ?*LocalVarMap, locations: LocationTracker, symbol_table: ?*SymbolTable, allocator: std.mem.Allocator, function_return_type: ?c.MlirType, ora_dialect: *@import("dialect.zig").OraDialect) StatementLowerer {
         return .{
             .ctx = ctx,
             .block = block,
@@ -36,8 +38,10 @@ pub const StatementLowerer = struct {
             .local_var_map = local_var_map,
             .locations = locations,
             .symbol_table = symbol_table,
-            .memory_manager = MemoryManager.init(ctx),
+            .memory_manager = MemoryManager.init(ctx, ora_dialect),
             .allocator = allocator,
+            .current_function_return_type = function_return_type,
+            .ora_dialect = ora_dialect,
         };
     }
 
@@ -164,45 +168,53 @@ pub const StatementLowerer = struct {
     /// Lower return statements using func.return with proper value handling
     pub fn lowerReturn(self: *const StatementLowerer, ret: *const lib.ast.Statements.ReturnNode) LoweringError!void {
         const loc = self.fileLoc(ret.span);
-        var state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("func.return"), loc);
 
         if (ret.value) |e| {
             const v = self.expr_lowerer.lowerExpression(&e);
-            c.mlirOperationStateAddOperands(&state, 1, @ptrCast(&v));
+            const op = self.ora_dialect.createFuncReturnWithValue(v, loc);
+            c.mlirBlockAppendOwnedOperation(self.block, op);
+        } else {
+            const op = self.ora_dialect.createFuncReturn(loc);
+            c.mlirBlockAppendOwnedOperation(self.block, op);
         }
+    }
 
-        const op = c.mlirOperationCreate(&state);
-        c.mlirBlockAppendOwnedOperation(self.block, op);
+    /// Lower return statements in control flow context using scf.yield
+    pub fn lowerReturnInControlFlow(self: *const StatementLowerer, ret: *const lib.ast.Statements.ReturnNode) LoweringError!void {
+        const loc = self.fileLoc(ret.span);
+
+        if (ret.value) |e| {
+            const v = self.expr_lowerer.lowerExpression(&e);
+            const op = self.ora_dialect.createScfYieldWithValues(&[_]c.MlirValue{v}, loc);
+            c.mlirBlockAppendOwnedOperation(self.block, op);
+        } else {
+            const op = self.ora_dialect.createScfYield(loc);
+            c.mlirBlockAppendOwnedOperation(self.block, op);
+        }
     }
 
     /// Lower break statements with label support using appropriate control flow transfers
     pub fn lowerBreak(self: *const StatementLowerer, break_stmt: *const lib.ast.Statements.BreakNode) LoweringError!void {
         const loc = self.fileLoc(break_stmt.span);
 
-        if (break_stmt.label) |label| {
+        if (break_stmt.label) |_| {
             // Labeled break - use cf.br with label reference
-            var state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("cf.br"), loc);
-
-            // Add label as attribute
-            const label_ref = c.mlirStringRefCreate(label.ptr, label.len);
-            const label_attr = c.mlirStringAttrGet(self.ctx, label_ref);
-            const label_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("label"));
-            var attrs = [_]c.MlirNamedAttribute{c.mlirNamedAttributeGet(label_id, label_attr)};
-            c.mlirOperationStateAddAttributes(&state, attrs.len, &attrs);
-
-            const op = c.mlirOperationCreate(&state);
+            // For now, we'll create a simple cf.br without the label attribute
+            // TODO: Add support for label attributes in the dialect helper
+            const op = self.ora_dialect.createCfBr(self.block, loc);
             c.mlirBlockAppendOwnedOperation(self.block, op);
         } else {
             // Unlabeled break - use scf.break or cf.br depending on context
-            var state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("scf.break"), loc);
+            var operands = std.ArrayList(c.MlirValue).init(self.allocator);
+            defer operands.deinit();
 
             // Add break value if present
             if (break_stmt.value) |value_expr| {
                 const value = self.expr_lowerer.lowerExpression(value_expr);
-                c.mlirOperationStateAddOperands(&state, 1, @ptrCast(&value));
+                operands.append(value) catch unreachable;
             }
 
-            const op = c.mlirOperationCreate(&state);
+            const op = self.ora_dialect.createScfBreak(operands.items, loc);
             c.mlirBlockAppendOwnedOperation(self.block, op);
         }
     }
@@ -211,30 +223,24 @@ pub const StatementLowerer = struct {
     pub fn lowerContinue(self: *const StatementLowerer, continue_stmt: *const lib.ast.Statements.ContinueNode) LoweringError!void {
         const loc = self.fileLoc(continue_stmt.span);
 
-        if (continue_stmt.label) |label| {
+        if (continue_stmt.label) |_| {
             // Labeled continue - use cf.br with label reference
-            var state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("cf.br"), loc);
-
-            // Add label as attribute
-            const label_ref = c.mlirStringRefCreate(label.ptr, label.len);
-            const label_attr = c.mlirStringAttrGet(self.ctx, label_ref);
-            const label_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("label"));
-            var attrs = [_]c.MlirNamedAttribute{c.mlirNamedAttributeGet(label_id, label_attr)};
-            c.mlirOperationStateAddAttributes(&state, attrs.len, &attrs);
-
-            const op = c.mlirOperationCreate(&state);
+            // For now, we'll create a simple cf.br without the label attribute
+            // TODO: Add support for label attributes in the dialect helper
+            const op = self.ora_dialect.createCfBr(self.block, loc);
             c.mlirBlockAppendOwnedOperation(self.block, op);
         } else {
             // Unlabeled continue - use scf.continue
-            var state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("scf.continue"), loc);
+            var operands = std.ArrayList(c.MlirValue).init(self.allocator);
+            defer operands.deinit();
 
             // Add continue value if present (for labeled switch continue)
             if (continue_stmt.value) |value_expr| {
                 const value = self.expr_lowerer.lowerExpression(value_expr);
-                c.mlirOperationStateAddOperands(&state, 1, @ptrCast(&value));
+                operands.append(value) catch unreachable;
             }
 
-            const op = c.mlirOperationCreate(&state);
+            const op = self.ora_dialect.createScfContinue(operands.items, loc);
             c.mlirBlockAppendOwnedOperation(self.block, op);
         }
     }
@@ -392,21 +398,9 @@ pub const StatementLowerer = struct {
                 // Extract each field from the struct value
                 for (fields, 0..) |field, i| {
                     // Create llvm.extractvalue operation for each field
-                    var extract_state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("llvm.extractvalue"), loc);
-                    c.mlirOperationStateAddOperands(&extract_state, 1, @ptrCast(&value));
-
-                    // Add field index as attribute
-                    const index_ty = c.mlirIntegerTypeGet(self.ctx, 32);
-                    const index_attr = c.mlirIntegerAttrGet(index_ty, @intCast(i));
-                    const index_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("position"));
-                    var attrs = [_]c.MlirNamedAttribute{c.mlirNamedAttributeGet(index_id, index_attr)};
-                    c.mlirOperationStateAddAttributes(&extract_state, attrs.len, &attrs);
-
-                    // Add result type (for now, use default integer type)
                     const result_ty = c.mlirIntegerTypeGet(self.ctx, constants.DEFAULT_INTEGER_BITS);
-                    c.mlirOperationStateAddResults(&extract_state, 1, @ptrCast(&result_ty));
-
-                    const extract_op = c.mlirOperationCreate(&extract_state);
+                    const indices = [_]u32{@intCast(i)};
+                    const extract_op = self.ora_dialect.createLlvmExtractvalue(value, &indices, result_ty, loc);
                     c.mlirBlockAppendOwnedOperation(self.block, extract_op);
                     const field_value = c.mlirOperationGetResult(extract_op, 0);
 
@@ -430,21 +424,9 @@ pub const StatementLowerer = struct {
                 // Similar to struct destructuring but for tuple elements
                 for (elements, 0..) |element_name, i| {
                     // Create llvm.extractvalue operation for each tuple element
-                    var extract_state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("llvm.extractvalue"), loc);
-                    c.mlirOperationStateAddOperands(&extract_state, 1, @ptrCast(&value));
-
-                    // Add element index as attribute
-                    const index_ty = c.mlirIntegerTypeGet(self.ctx, 32);
-                    const index_attr = c.mlirIntegerAttrGet(index_ty, @intCast(i));
-                    const index_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("position"));
-                    var attrs = [_]c.MlirNamedAttribute{c.mlirNamedAttributeGet(index_id, index_attr)};
-                    c.mlirOperationStateAddAttributes(&extract_state, attrs.len, &attrs);
-
-                    // Add result type
                     const result_ty = c.mlirIntegerTypeGet(self.ctx, constants.DEFAULT_INTEGER_BITS);
-                    c.mlirOperationStateAddResults(&extract_state, 1, @ptrCast(&result_ty));
-
-                    const extract_op = c.mlirOperationCreate(&extract_state);
+                    const indices = [_]u32{@intCast(i)};
+                    const extract_op = self.ora_dialect.createLlvmExtractvalue(value, &indices, result_ty, loc);
                     c.mlirBlockAppendOwnedOperation(self.block, extract_op);
                     const element_value = c.mlirOperationGetResult(extract_op, 0);
 
@@ -515,7 +497,6 @@ pub const StatementLowerer = struct {
     /// Lower expression-level compound assignment expressions
     pub fn lowerCompoundAssignmentExpr(self: *const StatementLowerer, assignment: *const lib.ast.Expressions.CompoundAssignmentExpr) LoweringError!void {
         // Debug: print what we're compound assigning to
-        std.debug.print("DEBUG: Compound assignment to expression\n", .{});
 
         // For now, just skip expression-level compound assignments
         // TODO: Implement proper expression-level compound assignment handling
@@ -529,14 +510,12 @@ pub const StatementLowerer = struct {
     /// Lower compound assignment statements
     pub fn lowerCompoundAssignment(self: *const StatementLowerer, assignment: *const lib.ast.Statements.CompoundAssignmentNode) LoweringError!void {
         // Debug: print what we're compound assigning to
-        std.debug.print("DEBUG: Compound assignment to expression\n", .{});
 
         // Handle compound assignment to storage variables
         // For now, we'll assume the target is an identifier expression
         // TODO: Handle more complex target expressions
         if (assignment.target.* == .Identifier) {
             const ident = assignment.target.Identifier;
-            std.debug.print("DEBUG: Would compound assign to storage variable: {s}\n", .{ident.name});
 
             if (self.storage_map) |sm| {
                 // Ensure the variable exists in storage (create if needed)
@@ -548,7 +527,7 @@ pub const StatementLowerer = struct {
                 const result_ty = c.mlirIntegerTypeGet(self.ctx, constants.DEFAULT_INTEGER_BITS);
 
                 // Load current value from storage using ora.sload
-                const memory_manager = MemoryManager.init(self.ctx);
+                const memory_manager = MemoryManager.init(self.ctx, self.ora_dialect);
                 const load_op = memory_manager.createStorageLoad(ident.name, result_ty, self.fileLoc(ident.span));
                 c.mlirBlockAppendOwnedOperation(self.block, load_op);
                 const current_value = c.mlirOperationGetResult(load_op, 0);
@@ -561,46 +540,31 @@ pub const StatementLowerer = struct {
                 switch (assignment.operator) {
                     .PlusEqual => {
                         // current_value + rhs_value
-                        var add_state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("arith.addi"), self.fileLoc(ident.span));
-                        c.mlirOperationStateAddOperands(&add_state, 2, @ptrCast(&[_]c.MlirValue{ current_value, rhs_value }));
-                        c.mlirOperationStateAddResults(&add_state, 1, @ptrCast(&result_ty));
-                        const add_op = c.mlirOperationCreate(&add_state);
+                        const add_op = self.ora_dialect.createArithAddi(current_value, rhs_value, result_ty, self.fileLoc(ident.span));
                         c.mlirBlockAppendOwnedOperation(self.block, add_op);
                         new_value = c.mlirOperationGetResult(add_op, 0);
                     },
                     .MinusEqual => {
                         // current_value - rhs_value
-                        var sub_state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("arith.subi"), self.fileLoc(ident.span));
-                        c.mlirOperationStateAddOperands(&sub_state, 2, @ptrCast(&[_]c.MlirValue{ current_value, rhs_value }));
-                        c.mlirOperationStateAddResults(&sub_state, 1, @ptrCast(&result_ty));
-                        const sub_op = c.mlirOperationCreate(&sub_state);
+                        const sub_op = self.ora_dialect.createArithSubi(current_value, rhs_value, result_ty, self.fileLoc(ident.span));
                         c.mlirBlockAppendOwnedOperation(self.block, sub_op);
                         new_value = c.mlirOperationGetResult(sub_op, 0);
                     },
                     .StarEqual => {
                         // current_value * rhs_value
-                        var mul_state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("arith.muli"), self.fileLoc(ident.span));
-                        c.mlirOperationStateAddOperands(&mul_state, 2, @ptrCast(&[_]c.MlirValue{ current_value, rhs_value }));
-                        c.mlirOperationStateAddResults(&mul_state, 1, @ptrCast(&result_ty));
-                        const mul_op = c.mlirOperationCreate(&mul_state);
+                        const mul_op = self.ora_dialect.createArithMuli(current_value, rhs_value, result_ty, self.fileLoc(ident.span));
                         c.mlirBlockAppendOwnedOperation(self.block, mul_op);
                         new_value = c.mlirOperationGetResult(mul_op, 0);
                     },
                     .SlashEqual => {
                         // current_value / rhs_value
-                        var div_state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("arith.divsi"), self.fileLoc(ident.span));
-                        c.mlirOperationStateAddOperands(&div_state, 2, @ptrCast(&[_]c.MlirValue{ current_value, rhs_value }));
-                        c.mlirOperationStateAddResults(&div_state, 1, @ptrCast(&result_ty));
-                        const div_op = c.mlirOperationCreate(&div_state);
+                        const div_op = self.ora_dialect.createArithDivsi(current_value, rhs_value, result_ty, self.fileLoc(ident.span));
                         c.mlirBlockAppendOwnedOperation(self.block, div_op);
                         new_value = c.mlirOperationGetResult(div_op, 0);
                     },
                     .PercentEqual => {
                         // current_value % rhs_value
-                        var rem_state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("arith.remsi"), self.fileLoc(ident.span));
-                        c.mlirOperationStateAddOperands(&rem_state, 2, @ptrCast(&[_]c.MlirValue{ current_value, rhs_value }));
-                        c.mlirOperationStateAddResults(&rem_state, 1, @ptrCast(&result_ty));
-                        const rem_op = c.mlirOperationCreate(&rem_state);
+                        const rem_op = self.ora_dialect.createArithRemsi(current_value, rhs_value, result_ty, self.fileLoc(ident.span));
                         c.mlirBlockAppendOwnedOperation(self.block, rem_op);
                         new_value = c.mlirOperationGetResult(rem_op, 0);
                     },
@@ -616,7 +580,7 @@ pub const StatementLowerer = struct {
                 c.mlirBlockAppendOwnedOperation(self.block, op);
             }
         } else {
-            std.debug.print("DEBUG: Compound assignment target is not an Identifier: {s}\n", .{@tagName(assignment.target.*)});
+
             // For now, skip non-identifier compound assignments
         }
     }
@@ -627,6 +591,146 @@ pub const StatementLowerer = struct {
 
         // Lower the condition expression
         const condition = self.expr_lowerer.lowerExpression(&if_stmt.condition);
+
+        // Check if this if statement contains return statements
+        if (self.ifStatementHasReturns(if_stmt)) {
+            // For now, we'll handle this by not using scf.if for return statements
+            // This is a temporary fix - ideally we'd restructure to use scf.yield
+            try self.lowerIfWithReturns(if_stmt, condition, loc);
+            return;
+        }
+
+        // Create the scf.if operation with proper then/else regions
+        var state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("scf.if"), loc);
+
+        // Add the condition operand
+        c.mlirOperationStateAddOperands(&state, 1, @ptrCast(&condition));
+
+        // Create then region
+        const then_region = c.mlirRegionCreate();
+        const then_block = c.mlirBlockCreate(0, null, null);
+        c.mlirRegionInsertOwnedBlock(then_region, 0, then_block);
+
+        // Create else region (scf.if always requires both regions)
+        const else_region = c.mlirRegionCreate();
+        const else_block = c.mlirBlockCreate(0, null, null);
+        c.mlirRegionInsertOwnedBlock(else_region, 0, else_block);
+
+        // Add both regions to the operation state
+        const regions = [_]c.MlirRegion{ then_region, else_region };
+        c.mlirOperationStateAddOwnedRegions(&state, 2, @ptrCast(&regions));
+
+        const if_op = c.mlirOperationCreate(&state);
+
+        // Lower else branch if present, otherwise add scf.yield to empty region
+        if (if_stmt.else_branch) |else_branch| {
+            try self.lowerBlockBody(else_branch, else_block);
+        } else {
+            // Add scf.yield to empty else region to satisfy MLIR requirements
+            const yield_op = self.ora_dialect.createScfYield(loc);
+            c.mlirBlockAppendOwnedOperation(else_block, yield_op);
+        }
+
+        // Lower then branch FIRST (before creating the scf.if operation)
+        try self.lowerBlockBody(if_stmt.then_branch, then_block);
+
+        // Add scf.yield to then region if it doesn't end with one
+        if (!self.blockEndsWithYield(then_block)) {
+            const yield_op = self.ora_dialect.createScfYield(loc);
+            c.mlirBlockAppendOwnedOperation(then_block, yield_op);
+        }
+
+        // Add scf.yield to else region if it doesn't end with one (for non-empty else branches)
+        if (if_stmt.else_branch != null and !self.blockEndsWithYield(else_block)) {
+            const yield_op = self.ora_dialect.createScfYield(loc);
+            c.mlirBlockAppendOwnedOperation(else_block, yield_op);
+        }
+
+        // NOW append the scf.if operation to the block
+        c.mlirBlockAppendOwnedOperation(self.block, if_op);
+    }
+
+    /// Check if a block ends with scf.yield
+    fn blockEndsWithYield(_: *const StatementLowerer, _: c.MlirBlock) bool {
+        // For now, we'll assume blocks don't end with scf.yield
+        // This is a simplified implementation - in a real implementation,
+        // we'd need to iterate through the block's operations
+        return false;
+    }
+
+    /// Check if an if statement contains return statements
+    fn ifStatementHasReturns(_: *const StatementLowerer, if_stmt: *const lib.ast.Statements.IfNode) bool {
+        // Check then branch
+        for (if_stmt.then_branch.statements) |stmt| {
+            if (stmt == .Return) return true;
+        }
+
+        // Check else branch if present
+        if (if_stmt.else_branch) |else_branch| {
+            for (else_branch.statements) |stmt| {
+                if (stmt == .Return) return true;
+            }
+        }
+
+        return false;
+    }
+
+    /// Get the return type from an if statement's return statements
+    fn getReturnTypeFromIfStatement(self: *const StatementLowerer, _: *const lib.ast.Statements.IfNode) ?c.MlirType {
+        // Use the function's return type instead of trying to infer from individual returns
+        return self.current_function_return_type;
+    }
+
+    /// Get the MLIR type from an expression
+    fn getExprType(self: *const StatementLowerer, expr: lib.ast.Expressions.ExprNode) c.MlirType {
+        switch (expr) {
+            .Literal => |lit| {
+                switch (lit) {
+                    .Integer => |int_lit| return self.expr_lowerer.type_mapper.toMlirType(int_lit.type_info),
+                    .String => |str_lit| return self.expr_lowerer.type_mapper.toMlirType(str_lit.type_info),
+                    .Bool => |bool_lit| return self.expr_lowerer.type_mapper.toMlirType(bool_lit.type_info),
+                    .Address => |addr_lit| return self.expr_lowerer.type_mapper.toMlirType(addr_lit.type_info),
+                    .Hex => |hex_lit| return self.expr_lowerer.type_mapper.toMlirType(hex_lit.type_info),
+                    .Binary => |bin_lit| return self.expr_lowerer.type_mapper.toMlirType(bin_lit.type_info),
+                    .Character => |char_lit| return self.expr_lowerer.type_mapper.toMlirType(char_lit.type_info),
+                    .Bytes => |bytes_lit| return self.expr_lowerer.type_mapper.toMlirType(bytes_lit.type_info),
+                }
+            },
+            .Binary => |bin| return self.expr_lowerer.type_mapper.toMlirType(bin.type_info),
+            .Unary => |unary| return self.expr_lowerer.type_mapper.toMlirType(unary.type_info),
+            .Call => |call| return self.expr_lowerer.type_mapper.toMlirType(call.type_info),
+            .FieldAccess => |field| return self.expr_lowerer.type_mapper.toMlirType(field.type_info),
+            .Cast => |cast| return self.expr_lowerer.type_mapper.toMlirType(cast.target_type),
+            .Comptime => |_| {
+                // For comptime expressions, we need to handle the block
+                // For now, return a default type - this is complex to handle properly
+                return c.mlirIntegerTypeGet(self.ctx, 1); // Default to i1
+            },
+            .Old => |_| {
+                // For old() expressions, we need to get the type from the inner expression
+                // For now, return a default type - this is complex to handle properly
+                return c.mlirIntegerTypeGet(self.ctx, 1); // Default to i1
+            },
+            .Tuple => |_| {
+                // For tuple expressions, we need to handle the elements
+                // For now, return a default type - this is complex to handle properly
+                return c.mlirIntegerTypeGet(self.ctx, 1); // Default to i1
+            },
+            .SwitchExpression => |switch_expr| return self.expr_lowerer.type_mapper.toMlirType(switch_expr.type_info),
+            .Identifier => |ident| return self.expr_lowerer.type_mapper.toMlirType(ident.type_info),
+            else => {
+                // For expressions without type_info (like Assignment, CompoundAssignment, Index),
+                // return a default type - this shouldn't happen in return statements
+                return c.mlirIntegerTypeGet(self.ctx, 1); // Default to i1
+            },
+        }
+    }
+
+    /// Lower if statements with returns by using scf.if with scf.yield and single return
+    fn lowerIfWithReturns(self: *const StatementLowerer, if_stmt: *const lib.ast.Statements.IfNode, condition: c.MlirValue, loc: c.MlirLocation) LoweringError!void {
+        // For if statements with returns, we need to restructure the logic:
+        // 1. Use scf.if with scf.yield to pass values out of regions
+        // 2. Have a single func.return at the end that uses the result from scf.if
 
         // Create the scf.if operation with proper then/else regions
         var state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("scf.if"), loc);
@@ -640,22 +744,70 @@ pub const StatementLowerer = struct {
         c.mlirRegionInsertOwnedBlock(then_region, 0, then_block);
         c.mlirOperationStateAddOwnedRegions(&state, 1, @ptrCast(&then_region));
 
-        // Create else region if present
-        if (if_stmt.else_branch) |else_branch| {
-            const else_region = c.mlirRegionCreate();
-            const else_block = c.mlirBlockCreate(0, null, null);
-            c.mlirRegionInsertOwnedBlock(else_region, 0, else_block);
-            c.mlirOperationStateAddOwnedRegions(&state, 1, @ptrCast(&else_region));
+        // Create else region (always needed for scf.if)
+        const else_region = c.mlirRegionCreate();
+        const else_block = c.mlirBlockCreate(0, null, null);
+        c.mlirRegionInsertOwnedBlock(else_region, 0, else_block);
+        c.mlirOperationStateAddOwnedRegions(&state, 1, @ptrCast(&else_region));
 
-            // Lower else branch
-            try self.lowerBlockBody(else_branch, else_block);
+        // Determine the result type from the return statements
+        const result_type = self.getReturnTypeFromIfStatement(if_stmt);
+        if (result_type) |ret_type| {
+            c.mlirOperationStateAddResults(&state, 1, @ptrCast(&ret_type));
         }
 
+        // Lower then branch - replace return statements with scf.yield
+        try self.lowerBlockBodyWithYield(if_stmt.then_branch, then_block);
+
+        // Lower else branch if present, otherwise add scf.yield to empty region
+        if (if_stmt.else_branch) |else_branch| {
+            try self.lowerBlockBodyWithYield(else_branch, else_block);
+        } else {
+            // Add scf.yield to empty else region
+            const yield_op = self.ora_dialect.createScfYield(loc);
+            c.mlirBlockAppendOwnedOperation(else_block, yield_op);
+        }
+
+        // Create and append the scf.if operation to the block
         const op = c.mlirOperationCreate(&state);
         c.mlirBlockAppendOwnedOperation(self.block, op);
 
-        // Lower then branch
-        try self.lowerBlockBody(if_stmt.then_branch, then_block);
+        if (result_type) |_| {
+            const result_value = c.mlirOperationGetResult(op, 0);
+            // Add a func.return to return the result
+            const return_op = self.ora_dialect.createFuncReturnWithValue(result_value, loc);
+            c.mlirBlockAppendOwnedOperation(self.block, return_op);
+        }
+    }
+
+    /// Lower block body with yield - replaces return statements with scf.yield
+    fn lowerBlockBodyWithYield(self: *const StatementLowerer, block_body: lib.ast.Statements.BlockNode, target_block: c.MlirBlock) LoweringError!void {
+        // Create a temporary lowerer for this block by copying the current one and changing the block
+        var temp_lowerer = self.*;
+        temp_lowerer.block = target_block;
+
+        // Lower each statement, replacing returns with yields
+        for (block_body.statements) |stmt| {
+            switch (stmt) {
+                .Return => |ret| {
+                    // Replace return with scf.yield
+                    const loc = temp_lowerer.fileLoc(ret.span);
+
+                    if (ret.value) |e| {
+                        const v = temp_lowerer.expr_lowerer.lowerExpression(&e);
+                        const yield_op = temp_lowerer.ora_dialect.createScfYieldWithValues(&[_]c.MlirValue{v}, loc);
+                        c.mlirBlockAppendOwnedOperation(target_block, yield_op);
+                    } else {
+                        const yield_op = temp_lowerer.ora_dialect.createScfYield(loc);
+                        c.mlirBlockAppendOwnedOperation(target_block, yield_op);
+                    }
+                },
+                else => {
+                    // Lower other statements normally
+                    try temp_lowerer.lowerStatement(&stmt);
+                },
+            }
+        }
     }
 
     /// Lower while statements using scf.while with condition and body regions
@@ -682,7 +834,7 @@ pub const StatementLowerer = struct {
 
         // Lower condition in before region
         // Create a new statement lowerer for the condition block
-        _ = StatementLowerer.init(self.ctx, before_block, self.type_mapper, self.expr_lowerer, self.param_map, self.storage_map, self.local_var_map, self.locations, self.symbol_table, self.allocator);
+        _ = StatementLowerer.init(self.ctx, before_block, self.type_mapper, self.expr_lowerer, self.param_map, self.storage_map, self.local_var_map, self.locations, self.symbol_table, self.allocator, self.current_function_return_type, self.ora_dialect);
 
         const condition = self.expr_lowerer.lowerExpression(&while_stmt.condition);
 
@@ -707,8 +859,7 @@ pub const StatementLowerer = struct {
         try self.lowerBlockBody(while_stmt.body, after_block);
 
         // Add scf.yield at end of body to continue loop
-        var yield_state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("scf.yield"), loc);
-        const yield_op = c.mlirOperationCreate(&yield_state);
+        const yield_op = self.ora_dialect.createScfYield(loc);
         c.mlirBlockAppendOwnedOperation(after_block, yield_op);
     }
 
@@ -809,8 +960,7 @@ pub const StatementLowerer = struct {
         try self.lowerBlockBody(body, body_block);
 
         // Add scf.yield at end of body
-        var yield_state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("scf.yield"), loc);
-        const yield_op = c.mlirOperationCreate(&yield_state);
+        const yield_op = self.ora_dialect.createScfYield(loc);
         c.mlirBlockAppendOwnedOperation(body_block, yield_op);
     }
 
@@ -877,8 +1027,7 @@ pub const StatementLowerer = struct {
         try self.lowerBlockBody(body, body_block);
 
         // Add scf.yield at end of body
-        var yield_state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("scf.yield"), loc);
-        const yield_op = c.mlirOperationCreate(&yield_state);
+        const yield_op = self.ora_dialect.createScfYield(loc);
         c.mlirBlockAppendOwnedOperation(body_block, yield_op);
     }
 
@@ -936,16 +1085,9 @@ pub const StatementLowerer = struct {
                 .Struct => |struct_pattern| {
                     for (struct_pattern, 0..) |field, i| {
                         // Create field access for each destructured field
-                        var field_access_state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("llvm.extractvalue"), loc);
-                        c.mlirOperationStateAddOperands(&field_access_state, 1, @ptrCast(&item_var));
-
-                        // Add field index as attribute (for now, assume sequential)
-                        const field_index_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("position"));
-                        const field_index_attr = c.mlirIntegerAttrGet(c.mlirIntegerTypeGet(self.ctx, 32), @intCast(i));
-                        var field_attrs = [_]c.MlirNamedAttribute{c.mlirNamedAttributeGet(field_index_id, field_index_attr)};
-                        c.mlirOperationStateAddAttributes(&field_access_state, field_attrs.len, &field_attrs);
-
-                        const field_access_op = c.mlirOperationCreate(&field_access_state);
+                        const result_ty = c.mlirIntegerTypeGet(self.ctx, constants.DEFAULT_INTEGER_BITS);
+                        const indices = [_]u32{@intCast(i)};
+                        const field_access_op = self.ora_dialect.createLlvmExtractvalue(item_var, &indices, result_ty, loc);
                         c.mlirBlockAppendOwnedOperation(body_block, field_access_op);
                         const field_value = c.mlirOperationGetResult(field_access_op, 0);
 
@@ -965,8 +1107,7 @@ pub const StatementLowerer = struct {
         try self.lowerBlockBody(body, body_block);
 
         // Add scf.yield at end of body
-        var yield_state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("scf.yield"), loc);
-        const yield_op = c.mlirOperationCreate(&yield_state);
+        const yield_op = self.ora_dialect.createScfYield(loc);
         c.mlirBlockAppendOwnedOperation(body_block, yield_op);
     }
 
@@ -1512,7 +1653,7 @@ pub const StatementLowerer = struct {
         // Process each statement in the block
         for (b.statements) |*s| {
             // Create a new statement lowerer for this block
-            var stmt_lowerer = StatementLowerer.init(self.ctx, block, self.type_mapper, self.expr_lowerer, self.param_map, self.storage_map, self.local_var_map, self.locations, self.symbol_table, self.allocator);
+            var stmt_lowerer = StatementLowerer.init(self.ctx, block, self.type_mapper, self.expr_lowerer, self.param_map, self.storage_map, self.local_var_map, self.locations, self.symbol_table, self.allocator, self.current_function_return_type, self.ora_dialect);
 
             // Lower the statement with error handling
             stmt_lowerer.lowerStatement(s) catch |err| {

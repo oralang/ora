@@ -941,9 +941,13 @@ fn linkMlirLibraries(b: *std.Build, exe: *std.Build.Step.Compile, mlir_step: *st
 
     const include_path = b.path("vendor/mlir/include");
     const lib_path = b.path("vendor/mlir/lib");
+    const ora_dialect_include_path = b.path("src/mlir/generated");
+    const ora_dialect_lib_path = b.path("build/cmake/lib");
 
     exe.addIncludePath(include_path);
+    exe.addIncludePath(ora_dialect_include_path);
     exe.addLibraryPath(lib_path);
+    exe.addLibraryPath(ora_dialect_lib_path);
 
     exe.linkSystemLibrary("MLIR-C");
 

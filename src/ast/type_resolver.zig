@@ -77,10 +77,10 @@ pub const TypeResolver = struct {
 
                 // Resolve requires/ensures expressions
                 for (function.requires_clauses) |*clause| {
-                    try self.resolveExpressionTypes(clause, func_context);
+                    try self.resolveExpressionTypes(clause.*, func_context);
                 }
                 for (function.ensures_clauses) |*clause| {
-                    try self.resolveExpressionTypes(clause, func_context);
+                    try self.resolveExpressionTypes(clause.*, func_context);
                 }
             },
             .VariableDecl => |*var_decl| {

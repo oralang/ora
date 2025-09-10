@@ -19,22 +19,35 @@ pub const DeclarationLowerer = struct {
     type_mapper: *const TypeMapper,
     locations: LocationTracker,
     error_handler: ?*const @import("error_handling.zig").ErrorHandler,
+    ora_dialect: *@import("dialect.zig").OraDialect,
 
-    pub fn init(ctx: c.MlirContext, type_mapper: *const TypeMapper, locations: LocationTracker) DeclarationLowerer {
+    pub fn init(ctx: c.MlirContext, type_mapper: *const TypeMapper, locations: LocationTracker, ora_dialect: *@import("dialect.zig").OraDialect) DeclarationLowerer {
         return .{
             .ctx = ctx,
             .type_mapper = type_mapper,
             .locations = locations,
             .error_handler = null,
+            .ora_dialect = ora_dialect,
         };
     }
 
-    pub fn withErrorHandler(ctx: c.MlirContext, type_mapper: *const TypeMapper, locations: LocationTracker, error_handler: *const @import("error_handling.zig").ErrorHandler) DeclarationLowerer {
+    pub fn withErrorHandler(ctx: c.MlirContext, type_mapper: *const TypeMapper, locations: LocationTracker, error_handler: *const @import("error_handling.zig").ErrorHandler, ora_dialect: *@import("dialect.zig").OraDialect) DeclarationLowerer {
         return .{
             .ctx = ctx,
             .type_mapper = type_mapper,
             .locations = locations,
             .error_handler = error_handler,
+            .ora_dialect = ora_dialect,
+        };
+    }
+
+    pub fn withErrorHandlerAndDialect(ctx: c.MlirContext, type_mapper: *const TypeMapper, locations: LocationTracker, error_handler: *const @import("error_handling.zig").ErrorHandler, ora_dialect: *@import("dialect.zig").OraDialect) DeclarationLowerer {
+        return .{
+            .ctx = ctx,
+            .type_mapper = type_mapper,
+            .locations = locations,
+            .error_handler = error_handler,
+            .ora_dialect = ora_dialect,
         };
     }
 
@@ -50,7 +63,6 @@ pub const DeclarationLowerer = struct {
         for (func.parameters, 0..) |param, i| {
             // Function parameters are calldata by default in Ora
             param_map.addParam(param.name, i) catch {};
-            std.debug.print("DEBUG: Added calldata parameter: {s} at index {d}\n", .{ param.name, i });
         }
 
         // Create the function operation
@@ -164,8 +176,7 @@ pub const DeclarationLowerer = struct {
 
         // Ensure a terminator exists (void return)
         if (func.return_type_info == null) {
-            var return_state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("func.return"), self.createFileLocation(func.span));
-            const return_op = c.mlirOperationCreate(&return_state);
+            const return_op = self.ora_dialect.createFuncReturn(self.createFileLocation(func.span));
             c.mlirBlockAppendOwnedOperation(block, return_op);
         }
 
@@ -249,11 +260,11 @@ pub const DeclarationLowerer = struct {
                         },
                         .Memory => {
                             // Memory variables are allocated in memory space
-                            std.debug.print("DEBUG: Found memory variable at contract level: {s}\n", .{var_decl.name});
+
                         },
                         .TStore => {
                             // Transient storage variables are allocated in transient storage space
-                            std.debug.print("DEBUG: Found transient storage variable at contract level: {s}\n", .{var_decl.name});
+
                         },
                         .Stack => {
                             // Stack variables at contract level are not allowed in Ora
@@ -674,7 +685,7 @@ pub const DeclarationLowerer = struct {
 
         // Lower the constant value expression
         // Create a temporary expression lowerer to lower the constant value
-        const expr_lowerer = ExpressionLowerer.init(self.ctx, block, self.type_mapper, null, null, null, self.locations);
+        const expr_lowerer = ExpressionLowerer.init(self.ctx, block, self.type_mapper, null, null, null, self.locations, self.ora_dialect);
         _ = expr_lowerer.lowerExpression(const_decl.value);
 
         return c.mlirOperationCreate(&state);
@@ -735,42 +746,20 @@ pub const DeclarationLowerer = struct {
 
     /// Create global storage variable declaration
     pub fn createGlobalDeclaration(self: *const DeclarationLowerer, var_decl: *const lib.ast.Statements.VariableDeclNode) c.MlirOperation {
-        // Create ora.global operation
-        var state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("ora.global"), self.createFileLocation(var_decl.span));
-
-        // Add the global name as a symbol attribute
-        const name_ref = c.mlirStringRefCreate(var_decl.name.ptr, var_decl.name.len);
-        const name_attr = c.mlirStringAttrGet(self.ctx, name_ref);
-        const name_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("sym_name"));
-        var attrs = [_]c.MlirNamedAttribute{
-            c.mlirNamedAttributeGet(name_id, name_attr),
-        };
-
-        // Add the type attribute
+        // Determine the variable type
         const var_type = if (std.mem.eql(u8, var_decl.name, "status"))
             c.mlirIntegerTypeGet(self.ctx, 1) // bool -> i1
         else
             c.mlirIntegerTypeGet(self.ctx, constants.DEFAULT_INTEGER_BITS); // default to i256
-        const type_attr = c.mlirTypeAttrGet(var_type);
-        const type_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("type"));
-        var type_attrs = [_]c.MlirNamedAttribute{
-            c.mlirNamedAttributeGet(type_id, type_attr),
-        };
-        c.mlirOperationStateAddAttributes(&state, @intCast(attrs.len), &attrs);
-        c.mlirOperationStateAddAttributes(&state, @intCast(type_attrs.len), &type_attrs);
 
-        // Add initial value
+        // Determine the initial value
         const init_attr = if (std.mem.eql(u8, var_decl.name, "status"))
             c.mlirIntegerAttrGet(c.mlirIntegerTypeGet(self.ctx, 1), 0) // bool -> i1 with value 0 (false)
         else
             c.mlirIntegerAttrGet(c.mlirIntegerTypeGet(self.ctx, constants.DEFAULT_INTEGER_BITS), 0); // default to i256 with value 0
-        const init_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("init"));
-        var init_attrs = [_]c.MlirNamedAttribute{
-            c.mlirNamedAttributeGet(init_id, init_attr),
-        };
-        c.mlirOperationStateAddAttributes(&state, @intCast(init_attrs.len), &init_attrs);
 
-        return c.mlirOperationCreate(&state);
+        // Use the dialect helper function to create the global operation
+        return self.ora_dialect.createGlobal(var_decl.name, var_type, init_attr, self.createFileLocation(var_decl.span));
     }
 
     /// Create memory global variable declaration
@@ -829,8 +818,15 @@ pub const DeclarationLowerer = struct {
     fn lowerFunctionBody(self: *const DeclarationLowerer, func: *const lib.FunctionNode, block: c.MlirBlock, param_map: *const ParamMap, storage_map: ?*const StorageMap, local_var_map: ?*LocalVarMap) LoweringError!void {
         // Create a statement lowerer for this function
         const const_local_var_map = if (local_var_map) |lvm| @as(*const LocalVarMap, lvm) else null;
-        const expr_lowerer = ExpressionLowerer.init(self.ctx, block, self.type_mapper, param_map, storage_map, const_local_var_map, self.locations);
-        const stmt_lowerer = StatementLowerer.init(self.ctx, block, self.type_mapper, &expr_lowerer, param_map, storage_map, local_var_map, self.locations, null, std.heap.page_allocator);
+        const expr_lowerer = ExpressionLowerer.init(self.ctx, block, self.type_mapper, param_map, storage_map, const_local_var_map, self.locations, self.ora_dialect);
+
+        // Get the function's return type
+        const function_return_type = if (func.return_type_info) |ret_info|
+            self.type_mapper.toMlirType(ret_info)
+        else
+            null;
+
+        const stmt_lowerer = StatementLowerer.init(self.ctx, block, self.type_mapper, &expr_lowerer, param_map, storage_map, local_var_map, self.locations, null, std.heap.page_allocator, function_return_type, self.ora_dialect);
 
         // Lower the function body
         try stmt_lowerer.lowerBlockBody(func.body, block);
@@ -839,7 +835,7 @@ pub const DeclarationLowerer = struct {
     /// Lower requires clauses as precondition assertions with enhanced verification metadata (Requirements 6.4)
     fn lowerRequiresClauses(self: *const DeclarationLowerer, requires_clauses: []*lib.ast.Expressions.ExprNode, block: c.MlirBlock, param_map: *const ParamMap, storage_map: ?*const StorageMap, local_var_map: ?*LocalVarMap) LoweringError!void {
         const const_local_var_map = if (local_var_map) |lvm| @as(*const LocalVarMap, lvm) else null;
-        const expr_lowerer = ExpressionLowerer.init(self.ctx, block, self.type_mapper, param_map, storage_map, const_local_var_map, self.locations);
+        const expr_lowerer = ExpressionLowerer.init(self.ctx, block, self.type_mapper, param_map, storage_map, const_local_var_map, self.locations, self.ora_dialect);
 
         for (requires_clauses, 0..) |clause, i| {
             // Lower the requires expression
@@ -891,7 +887,7 @@ pub const DeclarationLowerer = struct {
     /// Lower ensures clauses as postcondition assertions with enhanced verification metadata (Requirements 6.5)
     fn lowerEnsuresClauses(self: *const DeclarationLowerer, ensures_clauses: []*lib.ast.Expressions.ExprNode, block: c.MlirBlock, param_map: *const ParamMap, storage_map: ?*const StorageMap, local_var_map: ?*LocalVarMap) LoweringError!void {
         const const_local_var_map = if (local_var_map) |lvm| @as(*const LocalVarMap, lvm) else null;
-        const expr_lowerer = ExpressionLowerer.init(self.ctx, block, self.type_mapper, param_map, storage_map, const_local_var_map, self.locations);
+        const expr_lowerer = ExpressionLowerer.init(self.ctx, block, self.type_mapper, param_map, storage_map, const_local_var_map, self.locations, self.ora_dialect);
 
         for (ensures_clauses, 0..) |clause, i| {
             // Lower the ensures expression
@@ -956,14 +952,14 @@ pub const DeclarationLowerer = struct {
             param_types.append(param_type) catch {};
         }
 
-        // Create result type
-        const result_type = if (func.return_type_info) |ret_info|
-            self.type_mapper.toMlirType(ret_info)
-        else
-            c.mlirNoneTypeGet(self.ctx);
-
         // Create function type
-        return c.mlirFunctionTypeGet(self.ctx, @intCast(param_types.items.len), if (param_types.items.len > 0) param_types.items.ptr else null, 1, @ptrCast(&result_type));
+        if (func.return_type_info) |ret_info| {
+            const result_type = self.type_mapper.toMlirType(ret_info);
+            return c.mlirFunctionTypeGet(self.ctx, @intCast(param_types.items.len), if (param_types.items.len > 0) param_types.items.ptr else null, 1, @ptrCast(&result_type));
+        } else {
+            // Functions with no return type should have 0 result types, not a 'none' type
+            return c.mlirFunctionTypeGet(self.ctx, @intCast(param_types.items.len), if (param_types.items.len > 0) param_types.items.ptr else null, 0, null);
+        }
     }
 
     /// Create struct type from struct declaration

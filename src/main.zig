@@ -13,6 +13,7 @@
 const std = @import("std");
 const lib = @import("ora_lib");
 const build_options = @import("build_options");
+const mlir_pipeline = @import("mlir/pipeline.zig");
 
 /// MLIR-related command line options
 const MlirOptions = struct {
@@ -23,6 +24,7 @@ const MlirOptions = struct {
     timing: bool,
     print_ir: bool,
     output_dir: ?[]const u8,
+    use_pipeline: bool,
 
     fn getOptimizationLevel(self: MlirOptions) OptimizationLevel {
         if (self.opt_level) |level| {
@@ -84,6 +86,7 @@ pub fn main() !void {
     var mlir_opt_level: ?[]const u8 = null;
     var mlir_timing: bool = false;
     var mlir_print_ir: bool = false;
+    var mlir_use_pipeline: bool = false;
     var i: usize = 1;
 
     while (i < args.len) {
@@ -123,6 +126,9 @@ pub fn main() !void {
         } else if (std.mem.eql(u8, args[i], "--mlir-print-ir")) {
             mlir_print_ir = true;
             i += 1;
+        } else if (std.mem.eql(u8, args[i], "--mlir-pipeline")) {
+            mlir_use_pipeline = true;
+            i += 1;
         } else if (command == null) {
             command = args[i];
             i += 1;
@@ -152,6 +158,7 @@ pub fn main() !void {
         .timing = mlir_timing,
         .print_ir = mlir_print_ir,
         .output_dir = output_dir,
+        .use_pipeline = mlir_use_pipeline,
     };
 
     if (std.mem.eql(u8, cmd, "lex")) {
@@ -183,6 +190,7 @@ fn printUsage() !void {
     try stdout.print("      --mlir-opt <level>  - Optimization level: none, basic, aggressive\n", .{});
     try stdout.print("      --mlir-timing       - Enable pass timing statistics\n", .{});
     try stdout.print("      --mlir-print-ir     - Print IR before and after passes\n", .{});
+    try stdout.print("      --mlir-pipeline     - Use comprehensive MLIR optimization pipeline\n", .{});
     try stdout.print("\nCommands:\n", .{});
     try stdout.print("  lex <file>     - Tokenize a .ora file\n", .{});
     try stdout.print("  parse <file>   - Parse a .ora file to AST\n", .{});
@@ -504,9 +512,6 @@ fn runMlirEmitAdvanced(allocator: std.mem.Allocator, file_path: []const u8, mlir
     };
     defer allocator.free(source);
 
-    try stdout.print("Advanced MLIR compilation for {s}\n", .{file_path});
-    try stdout.print("============================================================\n", .{});
-
     // Front half: lex + parse (ensures we have a valid AST before MLIR)
     var lexer = lib.Lexer.init(allocator, source);
     defer lexer.deinit();
@@ -526,8 +531,6 @@ fn runMlirEmitAdvanced(allocator: std.mem.Allocator, file_path: []const u8, mlir
         return;
     };
 
-    try stdout.print("Parsed {d} AST nodes\n", .{ast_nodes.len});
-
     // Generate MLIR with advanced options
     try generateMlirOutput(allocator, ast_nodes, file_path, mlir_options);
 }
@@ -541,10 +544,8 @@ fn generateMlirOutput(allocator: std.mem.Allocator, ast_nodes: []lib.AstNode, fi
     const c = @import("mlir/c.zig").c;
 
     // Create MLIR context
-    const h = mlir.ctx.createContext();
+    const h = mlir.ctx.createContext(allocator);
     defer mlir.ctx.destroyContext(h);
-
-    try stdout.print("Lowering AST to MLIR...\n", .{});
 
     // Choose lowering function based on options
     const lowering_result = if (mlir_options.passes != null or mlir_options.verify or mlir_options.timing or mlir_options.print_ir) blk: {
@@ -599,6 +600,38 @@ fn generateMlirOutput(allocator: std.mem.Allocator, ast_nodes: []lib.AstNode, fi
         // Use basic lowering
         break :blk try mlir.lower.lowerFunctionsToModuleWithErrors(h.ctx, ast_nodes, allocator);
     };
+
+    // Apply MLIR pipeline if requested
+    if (mlir_options.use_pipeline) {
+        const opt_level = mlir_options.getOptimizationLevel();
+        const pipeline_config = switch (opt_level) {
+            .None => mlir_pipeline.no_opt_config,
+            .Basic => mlir_pipeline.basic_config,
+            .Aggressive => mlir_pipeline.aggressive_config,
+        };
+
+        var pipeline_result = mlir_pipeline.runMLIRPipeline(h.ctx, lowering_result.module, pipeline_config, allocator) catch |err| {
+            try stdout.print("MLIR pipeline failed: {s}\n", .{@errorName(err)});
+            return;
+        };
+        defer pipeline_result.deinit();
+
+        if (!pipeline_result.success) {
+            try stdout.print("MLIR pipeline failed: {s}\n", .{pipeline_result.error_message orelse "Unknown error"});
+            return;
+        }
+
+        // Pipeline optimization completed successfully
+        // The module has been optimized in-place
+
+        // Report applied passes
+        try stdout.print("MLIR pipeline applied {d} passes: ", .{pipeline_result.passes_applied.items.len});
+        for (pipeline_result.passes_applied.items, 0..) |pass, i| {
+            if (i > 0) try stdout.print(", ", .{});
+            try stdout.print("{s}", .{pass});
+        }
+        try stdout.print("\n", .{});
+    }
 
     // Check for errors
     if (!lowering_result.success) {
@@ -668,7 +701,7 @@ fn generateMlirOutput(allocator: std.mem.Allocator, ast_nodes: []lib.AstNode, fi
         try stdout.print("MLIR saved to {s}\n", .{output_file});
     } else {
         // Print to stdout
-        try stdout.print("=== MLIR Output ===\n", .{});
+
         const op = c.mlirModuleGetOperation(lowering_result.module);
         c.mlirOperationPrint(op, callback.cb, @constCast(&stdout));
         try stdout.print("\n", .{});

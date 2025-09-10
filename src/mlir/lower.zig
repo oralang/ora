@@ -56,8 +56,14 @@ pub fn lowerFunctionsToModuleWithErrors(ctx: c.MlirContext, nodes: []lib.AstNode
     var type_mapper = TypeMapper.init(ctx, allocator);
     defer type_mapper.deinit();
 
+    // Initialize Ora dialect
+    var ora_dialect = @import("dialect.zig").OraDialect.init(ctx, allocator);
+    ora_dialect.register() catch {
+        std.debug.print("Warning: Failed to register Ora dialect\n", .{});
+    };
+
     const locations = LocationTracker.init(ctx);
-    const decl_lowerer = DeclarationLowerer.withErrorHandler(ctx, &type_mapper, locations, &error_handler);
+    const decl_lowerer = DeclarationLowerer.withErrorHandlerAndDialect(ctx, &type_mapper, locations, &error_handler, &ora_dialect);
 
     // Create global symbol table and storage map for the module
     var symbol_table = SymbolTable.init(allocator);
@@ -370,7 +376,7 @@ pub fn lowerFunctionsToModuleWithErrors(ctx: c.MlirContext, nodes: []lib.AstNode
                             // Handle expressions within module with graceful degradation
                             try error_handler.reportGracefulDegradation("expressions within modules", "expression capture operations", error_handling.getSpanFromExpression(expr));
                             // Create a placeholder operation to allow compilation to continue
-                            const expr_lowerer = ExpressionLowerer.init(ctx, body, &type_mapper, null, null, null, locations);
+                            const expr_lowerer = ExpressionLowerer.init(ctx, body, &type_mapper, null, null, null, locations, &ora_dialect);
                             const expr_value = expr_lowerer.lowerExpression(expr);
                             const expr_op = expr_lowerer.createExpressionCapture(expr_value, error_handling.getSpanFromExpression(expr));
                             if (error_handler.validateMlirOperation(expr_op, error_handling.getSpanFromExpression(expr)) catch false) {
@@ -381,8 +387,8 @@ pub fn lowerFunctionsToModuleWithErrors(ctx: c.MlirContext, nodes: []lib.AstNode
                             // Handle statements within modules with graceful degradation
                             try error_handler.reportGracefulDegradation("statements within modules", "statement lowering operations", error_handling.getSpanFromStatement(stmt));
                             // Create a placeholder operation to allow compilation to continue
-                            const expr_lowerer = ExpressionLowerer.init(ctx, body, &type_mapper, null, null, null, locations);
-                            const stmt_lowerer = StatementLowerer.init(ctx, body, &type_mapper, &expr_lowerer, null, null, null, locations, null, std.heap.page_allocator);
+                            const expr_lowerer = ExpressionLowerer.init(ctx, body, &type_mapper, null, null, null, locations, &ora_dialect);
+                            const stmt_lowerer = StatementLowerer.init(ctx, body, &type_mapper, &expr_lowerer, null, null, null, locations, null, std.heap.page_allocator, null, &ora_dialect);
                             stmt_lowerer.lowerStatement(stmt) catch {
                                 try error_handler.reportError(.MlirOperationFailed, error_handling.getSpanFromStatement(stmt), "failed to lower top-level statement", "check statement structure and dependencies");
                                 continue;
@@ -432,7 +438,7 @@ pub fn lowerFunctionsToModuleWithErrors(ctx: c.MlirContext, nodes: []lib.AstNode
                 }
 
                 // Create a temporary expression lowerer for top-level expressions
-                const expr_lowerer = ExpressionLowerer.init(ctx, body, &type_mapper, null, null, null, locations);
+                const expr_lowerer = ExpressionLowerer.init(ctx, body, &type_mapper, null, null, null, locations, &ora_dialect);
                 const expr_value = expr_lowerer.lowerExpression(expr);
 
                 // For top-level expressions, we need to create a proper operation
@@ -458,8 +464,8 @@ pub fn lowerFunctionsToModuleWithErrors(ctx: c.MlirContext, nodes: []lib.AstNode
                 }
 
                 // Create a temporary statement lowerer for top-level statements
-                const expr_lowerer = ExpressionLowerer.init(ctx, body, &type_mapper, null, null, null, locations);
-                const stmt_lowerer = StatementLowerer.init(ctx, body, &type_mapper, &expr_lowerer, null, null, null, locations, null, std.heap.page_allocator);
+                const expr_lowerer = ExpressionLowerer.init(ctx, body, &type_mapper, null, null, null, locations, &ora_dialect);
+                const stmt_lowerer = StatementLowerer.init(ctx, body, &type_mapper, &expr_lowerer, null, null, null, locations, null, std.heap.page_allocator, null, &ora_dialect);
                 stmt_lowerer.lowerStatement(stmt) catch {
                     try error_handler.reportError(.MlirOperationFailed, error_handling.getSpanFromStatement(stmt), "failed to lower top-level statement", "check statement structure and dependencies");
                     continue;
@@ -547,6 +553,45 @@ pub fn lowerFunctionsToModuleWithPasses(ctx: c.MlirContext, nodes: []lib.AstNode
 
                 lowering_result.errors = combined_errors;
                 lowering_result.success = false;
+            } else {
+                // Run Ora-specific verification (temporarily disabled due to C API issues)
+                // const ora_verification_result = pass_manager.runOraVerification(lowering_result.module) catch |err| {
+                //     // Create a new error for Ora verification failure
+                //     var error_handler = ErrorHandler.init(allocator);
+                //     defer error_handler.deinit();
+
+                //     try error_handler.reportError(.MlirOperationFailed, null, "Ora verification failed", @errorName(err));
+
+                //     // Update the result with verification error
+                //     const verification_errors = try allocator.dupe(LoweringError, error_handler.getErrors());
+                //     const combined_errors = try allocator.alloc(LoweringError, lowering_result.errors.len + verification_errors.len);
+                //     std.mem.copyForwards(LoweringError, combined_errors[0..lowering_result.errors.len], lowering_result.errors);
+                //     std.mem.copyForwards(LoweringError, combined_errors[lowering_result.errors.len..], verification_errors);
+
+                //     lowering_result.errors = combined_errors;
+                //     lowering_result.success = false;
+                //     return lowering_result;
+                // };
+                // defer ora_verification_result.deinit(allocator);
+
+                // if (!ora_verification_result.success) {
+                //     // Create errors for each Ora verification failure
+                //     var error_handler = ErrorHandler.init(allocator);
+                //     defer error_handler.deinit();
+
+                //     for (ora_verification_result.errors) |ora_error| {
+                //         try error_handler.reportError(.MlirOperationFailed, null, ora_error.message, "Ora verification failed");
+                //     }
+
+                //     // Update the result with verification errors
+                //     const verification_errors = try allocator.dupe(LoweringError, error_handler.getErrors());
+                //     const combined_errors = try allocator.alloc(LoweringError, lowering_result.errors.len + verification_errors.len);
+                //     std.mem.copyForwards(LoweringError, combined_errors[0..lowering_result.errors.len], lowering_result.errors);
+                //     std.mem.copyForwards(LoweringError, combined_errors[lowering_result.errors.len..], verification_errors);
+
+                //     lowering_result.errors = combined_errors;
+                //     lowering_result.success = false;
+                // }
             }
         }
 
