@@ -1,0 +1,12 @@
+contract TestContract {
+    storage var value: u256 = 0;
+    
+    fn setValue() -> u256 {
+        value = 999;
+        return value;
+    }
+    
+    fn getValue() -> u256 {
+        return value;
+    }
+}

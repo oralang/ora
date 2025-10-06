@@ -198,7 +198,7 @@ pub fn build(b: *std.Build) void {
     formal_verification_demo_step.dependOn(&run_formal_verification_demo.step);
 
     // Add comprehensive compiler testing framework
-    // addCompilerTestFramework(b, lib_mod, target, optimize); // disabled for build compatibility
+    addCompilerTestFramework(b, lib_mod, target, optimize);
 
     // Create MLIR demo executable (Ora -> AST -> MLIR IR file)
     const mlir_demo_mod = b.createModule(.{
@@ -750,19 +750,15 @@ fn linkMlirLibraries(b: *std.Build, exe: *std.Build.Step.Compile, mlir_step: *st
         .linux => {
             exe.linkLibCpp();
             exe.linkSystemLibrary("c++abi");
+            exe.addRPath(lib_path);
         },
         .macos => {
             exe.linkLibCpp();
+            exe.addRPath(lib_path);
         },
         else => {
             exe.linkLibCpp();
         },
-    }
-
-    // Add RPATH once for all platforms that need it
-    if (target.result.os.tag == .linux or target.result.os.tag == .macos) {
-        // Temporarily disabled to debug duplicate RPATH issue
-        // exe.addRPath(lib_path);
     }
 }
 
@@ -955,3 +951,151 @@ fn addBoostPaths(b: *std.Build, compile_step: *std.Build.Step.Compile, target: s
         compile_step.addLibraryPath(.{ .cwd_relative = lib_path });
     }
 }
+
+/// Add comprehensive compiler testing framework to build system
+// TEMPORARILY DISABLED FOR BUILD COMPATIBILITY
+fn addCompilerTestFramework(b: *std.Build, lib_mod: *std.Build.Module, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) void {
+    _ = b;
+    _ = lib_mod;
+//     _ = target;
+//     _ = optimize; // suppress unused warnings
+//     return;
+//     // Test framework infrastructure tests
+//     const test_framework_tests = b.addTest(.{
+//         .root_source_file = b.path("tests/test_framework.zig"),
+//         .target = target,
+//         .optimize = optimize,
+//     });
+//     test_framework_tests.root_module.addImport("ora", lib_mod);
+// 
+//     // Test arena and memory management tests
+//     const test_arena_tests = b.addTest(.{
+//         .root_source_file = b.path("tests/common/test_arena.zig"),
+//         .target = target,
+//         .optimize = optimize,
+//     });
+// 
+//     // Test result types tests
+//     const test_result_tests = b.addTest(.{
+//         .root_source_file = b.path("tests/common/test_result.zig"),
+//         .target = target,
+//         .optimize = optimize,
+//     });
+// 
+//     // Test runner tests
+//     const test_runner_tests = b.addTest(.{
+//         .root_source_file = b.path("tests/common/test_runner.zig"),
+//         .target = target,
+//         .optimize = optimize,
+//     });
+// 
+//     // Assertions tests
+//     const assertions_tests = b.addTest(.{
+//         .root_source_file = b.path("tests/common/assertions.zig"),
+//         .target = target,
+//         .optimize = optimize,
+//     });
+//     assertions_tests.root_module.addImport("ora", lib_mod);
+// 
+//     // Test helpers tests
+//     const test_helpers_tests = b.addTest(.{
+//         .root_source_file = b.path("tests/common/test_helpers.zig"),
+//         .target = target,
+//         .optimize = optimize,
+//     });
+//     test_helpers_tests.root_module.addImport("ora", lib_mod);
+// 
+//     // Fixtures tests
+//     const fixtures_tests = b.addTest(.{
+//         .root_source_file = b.path("tests/common/fixtures.zig"),
+//         .target = target,
+//         .optimize = optimize,
+//     });
+// 
+//     // Fixture cache tests
+//     const fixture_cache_tests = b.addTest(.{
+//         .root_source_file = b.path("tests/common/fixture_cache.zig"),
+//         .target = target,
+//         .optimize = optimize,
+//     });
+// 
+//     // Coverage tests
+//     const coverage_tests = b.addTest(.{
+//         .root_source_file = b.path("tests/common/coverage.zig"),
+//         .target = target,
+//         .optimize = optimize,
+//     });
+// 
+//     // CI integration tests
+//     const ci_integration_tests = b.addTest(.{
+//         .root_source_file = b.path("tests/common/ci_integration.zig"),
+//         .target = target,
+//         .optimize = optimize,
+//     });
+// 
+//     // Create test steps for the framework components
+//     const test_framework_step = b.step("test-framework", "Run test framework infrastructure tests");
+//     test_framework_step.dependOn(&b.addRunArtifact(test_framework_tests).step);
+//     test_framework_step.dependOn(&b.addRunArtifact(test_arena_tests).step);
+//     test_framework_step.dependOn(&b.addRunArtifact(test_result_tests).step);
+//     test_framework_step.dependOn(&b.addRunArtifact(test_runner_tests).step);
+//     test_framework_step.dependOn(&b.addRunArtifact(assertions_tests).step);
+//     test_framework_step.dependOn(&b.addRunArtifact(test_helpers_tests).step);
+    test_framework_step.dependOn(&b.addRunArtifact(fixtures_tests).step);
+    test_framework_step.dependOn(&b.addRunArtifact(fixture_cache_tests).step);
+    test_framework_step.dependOn(&b.addRunArtifact(coverage_tests).step);
+    test_framework_step.dependOn(&b.addRunArtifact(ci_integration_tests).step);
+}
+
+/// Add lexer testing framework to build system
+// fn addLexerTestFramework(b: *std.Build, lib_mod: *std.Build.Module, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) void {
+//     _ = b;
+//     _ = lib_mod;
+//     _ = target;
+//     _ = optimize; // suppress unused warnings
+//     return;
+//     // Lexer test suite
+//     const lexer_test_suite = b.addTest(.{
+//         .root_source_file = b.path("tests/lexer/lexer_test_suite.zig"),
+//         .target = target,
+//         .optimize = optimize,
+//     });
+//     lexer_test_suite.root_module.addImport("ora", lib_mod);
+// 
+//     // Lexer test fixtures
+//     const lexer_test_fixtures = b.addTest(.{
+//         .root_source_file = b.path("tests/lexer/lexer_test_fixtures.zig"),
+//         .target = target,
+//         .optimize = optimize,
+//     });
+//     lexer_test_fixtures.root_module.addImport("ora", lib_mod);
+// 
+//     // Create lexer test executable for standalone running
+//     const lexer_test_exe = b.addExecutable(.{
+//         .name = "lexer_test_suite",
+//         .root_source_file = b.path("tests/lexer/lexer_test_suite.zig"),
+//         .target = target,
+//         .optimize = optimize,
+//     });
+//     lexer_test_exe.root_module.addImport("ora", lib_mod);
+// 
+//     // Create test steps
+//     const test_lexer_step = b.step("test-lexer", "Run comprehensive lexer tests");
+//     test_lexer_step.dependOn(&b.addRunArtifact(lexer_test_suite).step);
+//     test_lexer_step.dependOn(&b.addRunArtifact(lexer_test_fixtures).step);
+// 
+//     // Create lexer benchmark step
+//     const benchmark_lexer_step = b.step("benchmark-lexer", "Run lexer performance benchmarks");
+//     const lexer_benchmark_run = b.addRunArtifact(lexer_test_exe);
+//     lexer_benchmark_run.addArg("--benchmark");
+//     benchmark_lexer_step.dependOn(&lexer_benchmark_run.step);
+// 
+//     // Create lexer test with verbose output
+//     const test_lexer_verbose_step = b.step("test-lexer-verbose", "Run lexer tests with verbose output");
+//     const lexer_verbose_run = b.addRunArtifact(lexer_test_exe);
+//     lexer_verbose_run.addArg("--verbose");
+//     test_lexer_verbose_step.dependOn(&lexer_verbose_run.step);
+// 
+//     // Install lexer test executable
+//     b.installArtifact(lexer_test_exe);
+// }

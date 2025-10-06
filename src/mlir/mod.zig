@@ -17,6 +17,9 @@ pub const memory = @import("memory.zig");
 pub const symbols = @import("symbols.zig");
 pub const locations = @import("locations.zig");
 
+// Yul lowering
+pub const yul_lowering = @import("yul_lowering.zig");
+
 // Re-export commonly used types for convenience
 pub const TypeMapper = types.TypeMapper;
 pub const ExpressionLowerer = expressions.ExpressionLowerer;

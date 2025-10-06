@@ -764,11 +764,11 @@ pub const OraDialect = struct {
         c.mlirOperationStateAddResults(&state, 1, @ptrCast(&result_type));
 
         // Add indices attribute - create array of integer attributes
-        var index_attrs = std.ArrayList(c.MlirAttribute).init(self.allocator);
-        defer index_attrs.deinit();
+        var index_attrs = std.ArrayList(c.MlirAttribute){};
+        defer index_attrs.deinit(self.allocator);
         for (indices) |index| {
             const index_attr = c.mlirIntegerAttrGet(c.mlirIntegerTypeGet(self.ctx, 32), @intCast(index));
-            index_attrs.append(index_attr) catch unreachable;
+            index_attrs.append(self.allocator, index_attr) catch unreachable;
         }
         const indices_attr = c.mlirArrayAttrGet(self.ctx, @intCast(index_attrs.items.len), index_attrs.items.ptr);
         const indices_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("position"));
@@ -925,11 +925,11 @@ pub const OraDialect = struct {
         var state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("memref.load"), loc);
 
         // Add operands: memref + indices
-        var operands = std.ArrayList(c.MlirValue).init(self.allocator);
-        defer operands.deinit();
-        operands.append(memref) catch unreachable;
+        var operands = std.ArrayList(c.MlirValue){};
+        defer operands.deinit(self.allocator);
+        operands.append(self.allocator, memref) catch unreachable;
         for (indices) |index| {
-            operands.append(index) catch unreachable;
+            operands.append(self.allocator, index) catch unreachable;
         }
         c.mlirOperationStateAddOperands(&state, @intCast(operands.items.len), operands.items.ptr);
 
@@ -951,12 +951,12 @@ pub const OraDialect = struct {
         var state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("memref.store"), loc);
 
         // Add operands: value + memref + indices
-        var operands = std.ArrayList(c.MlirValue).init(self.allocator);
-        defer operands.deinit();
-        operands.append(value) catch unreachable;
-        operands.append(memref) catch unreachable;
+        var operands = std.ArrayList(c.MlirValue){};
+        defer operands.deinit(self.allocator);
+        operands.append(self.allocator, value) catch unreachable;
+        operands.append(self.allocator, memref) catch unreachable;
         for (indices) |index| {
-            operands.append(index) catch unreachable;
+            operands.append(self.allocator, index) catch unreachable;
         }
         c.mlirOperationStateAddOperands(&state, @intCast(operands.items.len), operands.items.ptr);
 

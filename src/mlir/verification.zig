@@ -23,12 +23,12 @@ pub const OraVerification = struct {
         return Self{
             .ctx = ctx,
             .allocator = allocator,
-            .errors = std.ArrayList(VerificationError).init(allocator),
+            .errors = std.ArrayList(VerificationError){},
         };
     }
 
     pub fn deinit(self: *Self) void {
-        self.errors.deinit();
+        self.errors.deinit(self.allocator);
     }
 
     /// Run all verification passes on a module
@@ -269,7 +269,7 @@ pub const OraVerification = struct {
             .operation = op,
             .message = try self.allocator.dupe(u8, message),
         };
-        try self.errors.append(verification_error);
+        try self.errors.append(self.allocator, verification_error);
     }
 };
 

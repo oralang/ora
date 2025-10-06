@@ -74,7 +74,7 @@ pub const PipelineResult = struct {
     allocator: std.mem.Allocator,
 
     pub fn deinit(self: *@This()) void {
-        self.passes_applied.deinit();
+        self.passes_applied.deinit(self.allocator);
         // error_message is a string literal, not allocated memory
         // so we don't need to free it
     }
@@ -92,7 +92,7 @@ pub fn runMLIRPipeline(
     var result = PipelineResult{
         .success = true,
         .optimized_module = module,
-        .passes_applied = std.ArrayList([]const u8).init(allocator),
+        .passes_applied = std.ArrayList([]const u8){},
         .allocator = allocator,
     };
 
@@ -109,7 +109,7 @@ pub fn runMLIRPipeline(
         defer verify_result.deinit(allocator);
 
         if (verify_result.success) {
-            try result.passes_applied.append("ora-verify");
+            try result.passes_applied.append(allocator, "ora-verify");
             std.debug.print("MLIR pipeline: Ora verification passed\n", .{});
         } else {
             result.success = false;
@@ -130,10 +130,10 @@ pub fn runMLIRPipeline(
 
     // Add other passes to the applied list for reporting
     if (config.canonicalize) {
-        try result.passes_applied.append("canonicalize");
+        try result.passes_applied.append(allocator, "canonicalize");
     }
     if (config.cse) {
-        try result.passes_applied.append("cse");
+        try result.passes_applied.append(allocator, "cse");
     }
 
     result.success = true;
@@ -191,7 +191,7 @@ pub fn runExternalMLIRPipeline(
     var result = PipelineResult{
         .success = true,
         .optimized_module = module,
-        .passes_applied = std.ArrayList([]const u8).init(allocator),
+        .passes_applied = std.ArrayList([]const u8){},
         .allocator = allocator,
     };
 

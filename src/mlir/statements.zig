@@ -205,13 +205,13 @@ pub const StatementLowerer = struct {
             c.mlirBlockAppendOwnedOperation(self.block, op);
         } else {
             // Unlabeled break - use scf.break or cf.br depending on context
-            var operands = std.ArrayList(c.MlirValue).init(self.allocator);
-            defer operands.deinit();
+            var operands = std.ArrayList(c.MlirValue){};
+            defer operands.deinit(self.allocator);
 
             // Add break value if present
             if (break_stmt.value) |value_expr| {
                 const value = self.expr_lowerer.lowerExpression(value_expr);
-                operands.append(value) catch unreachable;
+                operands.append(self.allocator, value) catch unreachable;
             }
 
             const op = self.ora_dialect.createScfBreak(operands.items, loc);
@@ -231,13 +231,13 @@ pub const StatementLowerer = struct {
             c.mlirBlockAppendOwnedOperation(self.block, op);
         } else {
             // Unlabeled continue - use scf.continue
-            var operands = std.ArrayList(c.MlirValue).init(self.allocator);
-            defer operands.deinit();
+            var operands = std.ArrayList(c.MlirValue){};
+            defer operands.deinit(self.allocator);
 
             // Add continue value if present (for labeled switch continue)
             if (continue_stmt.value) |value_expr| {
                 const value = self.expr_lowerer.lowerExpression(value_expr);
-                operands.append(value) catch unreachable;
+                operands.append(self.allocator, value) catch unreachable;
             }
 
             const op = self.ora_dialect.createScfContinue(operands.items, loc);
@@ -1127,40 +1127,40 @@ pub const StatementLowerer = struct {
             // Implement proper case handling with case values and blocks
 
             // Create blocks for each case
-            var case_blocks = std.ArrayList(c.MlirBlock).init(self.allocator);
-            defer case_blocks.deinit();
+            var case_blocks = std.ArrayList(c.MlirBlock){};
+            defer case_blocks.deinit(self.allocator);
 
             // Create case values array
-            var case_values = std.ArrayList(c.MlirValue).init(self.allocator);
-            defer case_values.deinit();
+            var case_values = std.ArrayList(c.MlirValue){};
+            defer case_values.deinit(self.allocator);
 
             // Process each case
             for (switch_stmt.cases) |case| {
                 // Create case block
                 const case_block = c.mlirBlockCreate(0, null, null);
-                case_blocks.append(case_block) catch {};
+                case_blocks.append(self.allocator, case_block) catch {};
 
                 // Lower case value if it's a literal
                 switch (case.pattern) {
                     .Literal => |lit| {
                         const case_value = self.expr_lowerer.lowerLiteral(&lit.value);
-                        case_values.append(case_value) catch {};
+                        case_values.append(self.allocator, case_value) catch {};
                     },
                     .Range => |range| {
                         // For range patterns, create a range check
                         const start_val = self.expr_lowerer.lowerExpression(range.start);
                         const end_val = self.expr_lowerer.lowerExpression(range.end);
                         const case_value = self.createRangeCheck(start_val, end_val, range.inclusive, case.span);
-                        case_values.append(case_value) catch {};
+                        case_values.append(self.allocator, case_value) catch {};
                     },
                     .EnumValue => |enum_val| {
                         // For enum values, create an enum constant
                         const case_value = self.createEnumConstant(enum_val.enum_name, enum_val.variant_name, case.span);
-                        case_values.append(case_value) catch {};
+                        case_values.append(self.allocator, case_value) catch {};
                     },
                     .Else => {
                         // Else case doesn't need a value
-                        case_values.append(case_values.items[0]) catch {}; // Use first case value as placeholder
+                        case_values.append(self.allocator, case_values.items[0]) catch {}; // Use first case value as placeholder
                     },
                 }
 

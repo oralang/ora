@@ -147,9 +147,9 @@ pub const SymbolTable = struct {
     types: std.StringHashMap(TypeSymbol),
 
     pub fn init(allocator: std.mem.Allocator) SymbolTable {
-        var scopes = std.ArrayList(std.StringHashMap(SymbolInfo)).init(allocator);
+        var scopes = std.ArrayList(std.StringHashMap(SymbolInfo)){};
         const global_scope = std.StringHashMap(SymbolInfo).init(allocator);
-        scopes.append(global_scope) catch unreachable;
+        scopes.append(allocator, global_scope) catch unreachable;
 
         return .{
             .allocator = allocator,
@@ -164,7 +164,7 @@ pub const SymbolTable = struct {
         for (self.scopes.items) |*scope| {
             scope.*.deinit();
         }
-        self.scopes.deinit();
+        self.scopes.deinit(self.allocator);
 
         // Clean up function symbols
         var func_iter = self.functions.iterator();
@@ -179,7 +179,7 @@ pub const SymbolTable = struct {
     /// Push a new scope
     pub fn pushScope(self: *SymbolTable) !void {
         const new_scope = std.StringHashMap(SymbolInfo).init(self.allocator);
-        try self.scopes.append(new_scope);
+        try self.scopes.append(self.allocator, new_scope);
         self.current_scope += 1;
     }
 

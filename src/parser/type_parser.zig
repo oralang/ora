@@ -97,14 +97,14 @@ pub const TypeParser = struct {
                     try self.base.errorAtCurrent("'|' is only allowed in error unions (e.g., !T | E)");
                     return error.UnexpectedToken;
                 }
-                var types = std.ArrayList(ast.Types.OraType).init(self.base.arena.allocator());
-                defer types.deinit();
+                var types = std.ArrayList(ast.Types.OraType){};
+                defer types.deinit(self.base.arena.allocator());
                 // Push first
-                try types.append(left.ora_type orelse return error.UnresolvedType);
+                try types.append(self.base.arena.allocator(), left.ora_type orelse return error.UnresolvedType);
                 // Parse subsequent types
                 while (true) {
                     const next = try self.parseTypeWithContext(context);
-                    try types.append(next.ora_type orelse return error.UnresolvedType);
+                    try types.append(self.base.arena.allocator(), next.ora_type orelse return error.UnresolvedType);
                     if (!self.base.match(.Pipe)) break;
                 }
                 const slice_types = try self.base.arena.createSlice(ast.Types.OraType, types.items.len);
@@ -122,8 +122,8 @@ pub const TypeParser = struct {
         // Anonymous struct type: struct { field: T, ... }
         if (self.base.match(.Struct)) {
             _ = try self.base.consume(.LeftBrace, "Expected '{' after 'struct'");
-            var fields = std.ArrayList(ast.type_info.AnonymousStructFieldType).init(self.base.arena.allocator());
-            defer fields.deinit();
+            var fields = std.ArrayList(ast.Types.AnonymousStructFieldType){};
+            defer fields.deinit(self.base.arena.allocator());
             if (!self.base.check(.RightBrace)) {
                 repeat: while (true) {
                     const name_tok = try self.base.consume(.Identifier, "Expected field name in anonymous struct type");
@@ -131,7 +131,7 @@ pub const TypeParser = struct {
                     const field_type = try self.parseTypeWithContext(context);
                     const field_type_ptr = try self.base.arena.createNode(ast.Types.OraType);
                     field_type_ptr.* = field_type.ora_type orelse return error.UnresolvedType;
-                    try fields.append(.{ .name = name_tok.lexeme, .typ = field_type_ptr });
+                    try fields.append(self.base.arena.allocator(), .{ .name = name_tok.lexeme, .typ = field_type_ptr });
                     if (!self.base.match(.Comma)) break :repeat;
                 }
             }
@@ -311,14 +311,14 @@ pub const TypeParser = struct {
 
         // Support optional explicit error list continuation: !T | E1 | E2 ...
         if (self.base.match(.Pipe)) {
-            var types = std.ArrayList(ast.Types.OraType).init(self.base.arena.allocator());
-            defer types.deinit();
+            var types = std.ArrayList(ast.Types.OraType){};
+            defer types.deinit(self.base.arena.allocator());
             // First member is the initial !T
-            try types.append(OraType{ .error_union = success_ora_type });
+            try types.append(self.base.arena.allocator(), OraType{ .error_union = success_ora_type });
             // Parse subsequent types
             while (true) {
                 const next = try self.parseTypeWithContext(context);
-                try types.append(next.ora_type orelse return error.UnresolvedType);
+                try types.append(self.base.arena.allocator(), next.ora_type orelse return error.UnresolvedType);
                 if (!self.base.match(.Pipe)) break;
             }
             const slice_types = try self.base.arena.createSlice(ast.Types.OraType, types.items.len);

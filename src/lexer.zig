@@ -302,7 +302,7 @@ pub const ErrorRecovery = struct {
                 self.allocator.free(diagnostic.message);
             }
         }
-        self.errors.deinit();
+        self.errors.deinit(self.allocator);
     }
 
     /// Record an error with the given details
@@ -315,7 +315,7 @@ pub const ErrorRecovery = struct {
         const owned_message = try self.allocator.dupe(u8, message);
         var diagnostic = LexerDiagnostic.init(error_type, range, owned_message);
         diagnostic.message_owned = true; // Mark message as owned
-        try self.errors.append(diagnostic);
+        try self.errors.append(self.allocator, diagnostic);
     }
 
     /// Record an error with a suggestion
@@ -330,7 +330,7 @@ pub const ErrorRecovery = struct {
         var diagnostic = LexerDiagnostic.init(error_type, range, owned_message).withSuggestion(owned_suggestion);
         diagnostic.message_owned = true; // Mark message as owned
         diagnostic.suggestion_owned = true; // Mark suggestion as owned
-        try self.errors.append(diagnostic);
+        try self.errors.append(self.allocator, diagnostic);
     }
 
     /// Record a detailed error with source context
@@ -340,7 +340,7 @@ pub const ErrorRecovery = struct {
         }
 
         const diagnostic = try LexerDiagnostic.createDetailed(self.allocator, error_type, range, source, message);
-        try self.errors.append(diagnostic);
+        try self.errors.append(self.allocator, diagnostic);
 
         std.debug.print("Added error to recovery: {s} at {}:{}\n", .{ @errorName(error_type), range.start_line, range.start_column });
     }
@@ -355,7 +355,7 @@ pub const ErrorRecovery = struct {
         const owned_suggestion = try self.allocator.dupe(u8, suggestion);
         diagnostic = diagnostic.withSuggestion(owned_suggestion);
         diagnostic.suggestion_owned = true; // Mark suggestion as owned
-        try self.errors.append(diagnostic);
+        try self.errors.append(self.allocator, diagnostic);
     }
 
     /// Record a diagnostic with custom severity
@@ -666,7 +666,7 @@ pub const ErrorRecovery = struct {
 
             // Add all but the first error as related
             for (self.errors.items[1..]) |diagnostic| {
-                try related.append(diagnostic);
+                try related.append(self.allocator, diagnostic);
             }
 
             // Add the group with the first error as primary
@@ -707,7 +707,7 @@ pub const ErrorRecovery = struct {
                 const nearby = line_distance <= 3; // Within 3 lines
 
                 if (same_type or nearby) {
-                    try related.append(other);
+                    try related.append(self.allocator, other);
                     try processed.put(j, {}); // Mark as processed
                 }
             }
@@ -946,8 +946,8 @@ pub const StringProcessor = struct {
     /// - Only supports limited escape sequences: \n, \t, \", \\
     /// - String length is limited (enforced elsewhere)
     pub fn processString(self: *StringProcessor, raw_string: []const u8) LexerError![]u8 {
-        var result = std.ArrayList(u8).init(self.allocator);
-        defer result.deinit();
+        var result = std.ArrayList(u8){};
+        defer result.deinit(self.allocator);
 
         var i: usize = 0;
         while (i < raw_string.len) {
@@ -962,15 +962,15 @@ pub const StringProcessor = struct {
                     return LexerError.InvalidEscapeSequence;
                 }
                 const escaped_char = try StringProcessor.processEscapeSequence(raw_string[i + 1 ..]);
-                try result.append(escaped_char.char);
+                try result.append(self.allocator, escaped_char.char);
                 i += escaped_char.consumed + 1; // +1 for the backslash
             } else {
-                try result.append(raw_string[i]);
+                try result.append(self.allocator, raw_string[i]);
                 i += 1;
             }
         }
 
-        return result.toOwnedSlice();
+        return result.toOwnedSlice(self.allocator);
     }
 
     /// Process a single escape sequence starting after the backslash with simplified validation
@@ -1516,8 +1516,8 @@ pub const Lexer = struct {
     pub fn init(allocator: Allocator, source: []const u8) Lexer {
         return Lexer{
             .source = source,
-            .tokens = std.ArrayList(Token).init(allocator),
-            .trivia = std.ArrayList(TriviaPiece).init(allocator),
+            .tokens = std.ArrayList(Token){},
+            .trivia = std.ArrayList(TriviaPiece){},
             .start = 0,
             .current = 0,
             .line = 1,
@@ -1568,8 +1568,8 @@ pub const Lexer = struct {
         self.arena.deinit();
 
         // Free other components
-        self.tokens.deinit();
-        self.trivia.deinit();
+        self.tokens.deinit(self.allocator);
+        self.trivia.deinit(self.allocator);
         if (self.error_recovery) |*recovery| {
             recovery.deinit();
         }
@@ -1912,7 +1912,7 @@ pub const Lexer = struct {
     pub fn scanTokens(self: *Lexer) LexerError![]Token {
         // Pre-allocate capacity based on source length estimate (1 token per ~8 characters)
         const estimated_tokens = @max(32, self.source.len / 8);
-        try self.tokens.ensureTotalCapacity(estimated_tokens);
+        try self.tokens.ensureTotalCapacity(self.allocator, estimated_tokens);
 
         while (!self.isAtEnd()) {
             self.start = self.current;
@@ -1970,7 +1970,7 @@ pub const Lexer = struct {
             perf.tokens_scanned += 1;
         }
 
-        try self.tokens.append(Token{
+        try self.tokens.append(self.allocator, Token{
             .type = .Eof,
             .lexeme = "",
             .range = eof_range,
@@ -1980,7 +1980,7 @@ pub const Lexer = struct {
             .column = self.column,
         });
 
-        return self.tokens.toOwnedSlice();
+        return self.tokens.toOwnedSlice(self.allocator);
     }
 
     fn scanToken(self: *Lexer) LexerError!void {
@@ -2231,13 +2231,13 @@ pub const Lexer = struct {
                     self.line += 1;
                     self.column = 1;
                     const span = SourceRange{ .start_line = self.line - 1, .start_column = start_col, .end_line = self.line, .end_column = 1, .start_offset = start_off, .end_offset = self.current };
-                    try self.trivia.append(TriviaPiece{ .kind = .Newline, .span = span });
+                    try self.trivia.append(self.allocator, TriviaPiece{ .kind = .Newline, .span = span });
                 } else {
                     while (isWhitespace(self.peek()) and self.peek() != '\n' and !self.isAtEnd()) {
                         _ = self.advance();
                     }
                     const span = SourceRange{ .start_line = self.line, .start_column = start_col, .end_line = self.line, .end_column = self.column, .start_offset = start_off, .end_offset = self.current };
-                    try self.trivia.append(TriviaPiece{ .kind = .Whitespace, .span = span });
+                    try self.trivia.append(self.allocator, TriviaPiece{ .kind = .Whitespace, .span = span });
                 }
                 continue;
             }
@@ -2251,7 +2251,7 @@ pub const Lexer = struct {
                 while (self.peek() != '\n' and !self.isAtEnd()) _ = self.advance();
                 const span = SourceRange{ .start_line = self.line, .start_column = start_col, .end_line = self.line, .end_column = self.column, .start_offset = start_off, .end_offset = self.current };
                 // Treat entire '//' to line end as line comment trivia
-                try self.trivia.append(TriviaPiece{ .kind = if (is_doc) .DocLineComment else .LineComment, .span = span });
+                try self.trivia.append(self.allocator, TriviaPiece{ .kind = if (is_doc) .DocLineComment else .LineComment, .span = span });
                 continue;
             }
             if (c == '/' and self.current + 1 < self.source.len and self.source[self.current + 1] == '*') {
@@ -2297,7 +2297,7 @@ pub const Lexer = struct {
         }
         if (nesting == 0) {
             const span = SourceRange{ .start_line = save_line, .start_column = save_column, .end_line = self.line, .end_column = self.column, .start_offset = save_current, .end_offset = self.current };
-            self.trivia.append(TriviaPiece{ .kind = if (is_doc) .DocBlockComment else .BlockComment, .span = span }) catch return false;
+            self.trivia.append(self.allocator, TriviaPiece{ .kind = if (is_doc) .DocBlockComment else .BlockComment, .span = span }) catch return false;
             return true;
         }
         // Not closed; restore and let main scanner handle error
@@ -2727,7 +2727,7 @@ pub const Lexer = struct {
                 .start_offset = self.start,
                 .end_offset = self.start + 1,
             };
-            try self.tokens.append(Token{
+            try self.tokens.append(self.allocator, Token{
                 .type = .At,
                 .lexeme = at_text,
                 .range = at_range,
@@ -2746,7 +2746,7 @@ pub const Lexer = struct {
                 .start_offset = self.start + 1,
                 .end_offset = self.current,
             };
-            try self.tokens.append(Token{
+            try self.tokens.append(self.allocator, Token{
                 .type = .Import,
                 .lexeme = import_text,
                 .range = import_range,
@@ -2848,7 +2848,7 @@ pub const Lexer = struct {
             perf.tokens_scanned += 1;
         }
 
-        try self.tokens.append(Token{
+        try self.tokens.append(self.allocator, Token{
             .type = token_type,
             .lexeme = text,
             .range = range,
@@ -2886,7 +2886,7 @@ pub const Lexer = struct {
             perf.tokens_scanned += 1;
         }
 
-        try self.tokens.append(Token{
+        try self.tokens.append(self.allocator, Token{
             .type = token_type,
             .lexeme = interned_text,
             .range = range,
@@ -2925,7 +2925,7 @@ pub const Lexer = struct {
 
                 // Return a default empty string for error recovery
                 const token_value = TokenValue{ .string = "" };
-                try self.tokens.append(Token{
+                try self.tokens.append(self.allocator, Token{
                     .type = .StringLiteral,
                     .lexeme = "",
                     .range = range,
@@ -2946,7 +2946,7 @@ pub const Lexer = struct {
             perf.tokens_scanned += 1;
         }
 
-        try self.tokens.append(Token{
+        try self.tokens.append(self.allocator, Token{
             .type = .StringLiteral,
             .lexeme = processed_text, // Content with escape sequences processed
             .range = range,
@@ -2973,7 +2973,7 @@ pub const Lexer = struct {
         // Raw strings don't process escape sequences, store content as-is
         const token_value = TokenValue{ .string = text };
 
-        try self.tokens.append(Token{
+        try self.tokens.append(self.allocator, Token{
             .type = .RawStringLiteral,
             .lexeme = text, // Content without r" and "
             .range = range,
@@ -3022,7 +3022,7 @@ pub const Lexer = struct {
 
                 // Return a default character value for error recovery
                 const token_value = TokenValue{ .character = 0 };
-                try self.tokens.append(Token{
+                try self.tokens.append(self.allocator, Token{
                     .type = .CharacterLiteral,
                     .lexeme = text,
                     .range = range,
@@ -3038,7 +3038,7 @@ pub const Lexer = struct {
 
         const token_value = TokenValue{ .character = char_value };
 
-        try self.tokens.append(Token{
+        try self.tokens.append(self.allocator, Token{
             .type = .CharacterLiteral,
             .lexeme = text, // Content without quotes
             .range = range,
@@ -3068,7 +3068,7 @@ pub const Lexer = struct {
 
         const token_value = TokenValue{ .binary = binary_value };
 
-        try self.tokens.append(Token{
+        try self.tokens.append(self.allocator, Token{
             .type = .BinaryLiteral,
             .lexeme = self.source[self.start..self.current], // Full lexeme including 0b prefix
             .range = range,
@@ -3178,7 +3178,7 @@ pub const Lexer = struct {
 
         const token_value = TokenValue{ .integer = integer_value };
 
-        try self.tokens.append(Token{
+        try self.tokens.append(self.allocator, Token{
             .type = .IntegerLiteral,
             .lexeme = text,
             .range = range,
@@ -3253,7 +3253,7 @@ pub const Lexer = struct {
 
         const token_value = TokenValue{ .hex = hex_value };
 
-        try self.tokens.append(Token{
+        try self.tokens.append(self.allocator, Token{
             .type = .HexLiteral,
             .lexeme = self.source[self.start..self.current], // Full lexeme including 0x prefix
             .range = range,
@@ -3283,7 +3283,7 @@ pub const Lexer = struct {
 
         const token_value = TokenValue{ .address = address_bytes };
 
-        try self.tokens.append(Token{
+        try self.tokens.append(self.allocator, Token{
             .type = .AddressLiteral,
             .lexeme = self.source[self.start..self.current], // Full lexeme including 0x prefix
             .range = range,
