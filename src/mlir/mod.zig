@@ -3,12 +3,11 @@
 
 // Core MLIR functionality
 pub const ctx = @import("context.zig");
-pub const emit = @import("emit.zig");
 pub const lower = @import("lower.zig");
 pub const dialect = @import("dialect.zig");
 
 // New modular components
-pub const constants = @import("constants.zig");
+// Constants are now defined in lower.zig
 pub const types = @import("types.zig");
 pub const expressions = @import("expressions.zig");
 pub const statements = @import("statements.zig");

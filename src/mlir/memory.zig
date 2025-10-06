@@ -1,7 +1,7 @@
 const std = @import("std");
 const c = @import("c.zig").c;
 const lib = @import("ora_lib");
-const constants = @import("constants.zig");
+const constants = @import("lower.zig");
 
 // Storage variable mapping for contract storage
 pub const StorageMap = struct {

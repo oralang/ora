@@ -1,7 +1,7 @@
 const std = @import("std");
 const c = @import("c.zig").c;
 const lib = @import("ora_lib");
-const constants = @import("constants.zig");
+const constants = @import("lower.zig");
 const TypeMapper = @import("types.zig").TypeMapper;
 const LocationTracker = @import("locations.zig").LocationTracker;
 const LocalVarMap = @import("symbols.zig").LocalVarMap;
@@ -237,7 +237,26 @@ pub const DeclarationLowerer = struct {
         const region = c.mlirRegionCreate();
         const block = c.mlirBlockCreate(0, null, null);
         c.mlirRegionInsertOwnedBlock(region, 0, block);
-        c.mlirOperationStateAddOwnedRegions(&state, 1, @ptrCast(&region));
+
+        // Create ora.storage region for storage variables
+        const storage_region = c.mlirRegionCreate();
+        const storage_block = c.mlirBlockCreate(0, null, null);
+        c.mlirRegionInsertOwnedBlock(storage_region, 0, storage_block);
+
+        // Create ora.storage operation
+        var storage_state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("ora.storage"), self.createFileLocation(contract.span));
+        const storage_region_for_op = c.mlirRegionCreate();
+        const storage_block_for_op = c.mlirBlockCreate(0, null, null);
+        c.mlirRegionInsertOwnedBlock(storage_region_for_op, 0, storage_block_for_op);
+        c.mlirOperationStateAddOwnedRegions(&storage_state, 1, @ptrCast(&storage_region_for_op));
+        const storage_op = c.mlirOperationCreate(&storage_state);
+
+        // Add both regions to the contract operation
+        const regions = [_]c.MlirRegion{ region, storage_region };
+        c.mlirOperationStateAddOwnedRegions(&state, 2, @ptrCast(&regions));
+
+        // Add storage operation to the main contract block
+        c.mlirBlockAppendOwnedOperation(block, storage_op);
 
         // Create contract-level symbol management
         var contract_symbol_table = SymbolTable.init(std.heap.page_allocator);
@@ -292,9 +311,9 @@ pub const DeclarationLowerer = struct {
                 .VariableDecl => |var_decl| {
                     switch (var_decl.region) {
                         .Storage => {
-                            // Create ora.global operation for storage variables
+                            // Create ora.global operation for storage variables in storage region
                             const global_op = self.createGlobalDeclaration(&var_decl);
-                            c.mlirBlockAppendOwnedOperation(block, global_op);
+                            c.mlirBlockAppendOwnedOperation(storage_block_for_op, global_op);
                         },
                         .Memory => {
                             // Create ora.memory.global operation for memory variables

@@ -74,28 +74,24 @@ pub const PipelineResult = struct {
     passes_applied: std.ArrayList([]const u8),
     optimization_level: OptimizationLevel,
     timing_info: ?[]const u8,
-    modified_module: c.MlirModule,
-    optimized_module: c.MlirModule,
 
-    pub fn init(_: std.mem.Allocator) PipelineResult {
+    pub fn init(allocator: std.mem.Allocator) PipelineResult {
         return PipelineResult{
             .success = false,
             .error_message = null,
-            .passes_applied = std.ArrayList([]const u8){},
+            .passes_applied = std.ArrayList([]const u8).init(allocator),
             .optimization_level = .None,
             .timing_info = null,
-            .modified_module = c.MlirModule{},
-            .optimized_module = c.MlirModule{},
         };
     }
 
-    pub fn deinit(self: *PipelineResult, allocator: std.mem.Allocator) void {
-        self.passes_applied.deinit(allocator);
+    pub fn deinit(self: *PipelineResult) void {
+        self.passes_applied.deinit();
         if (self.error_message) |msg| {
-            allocator.free(msg);
+            self.passes_applied.allocator.free(msg);
         }
         if (self.timing_info) |timing| {
-            allocator.free(timing);
+            self.passes_applied.allocator.free(timing);
         }
     }
 };
@@ -170,8 +166,7 @@ pub const PassManager = struct {
 
     /// Run the pass manager on a module
     pub fn run(self: *PassManager, module: c.MlirModule) !bool {
-        const op = c.mlirModuleGetOperation(module);
-        const result = c.mlirPassManagerRunOnOp(self.pass_manager, op);
+        const result = c.mlirPassManagerRun(self.pass_manager, module);
         return c.mlirLogicalResultIsSuccess(result);
     }
 };
@@ -270,7 +265,7 @@ pub const OraPassUtils = struct {
 /// Run MLIR pipeline with configuration
 pub fn runMLIRPipeline(ctx: c.MlirContext, module: c.MlirModule, config: PipelineConfig, allocator: std.mem.Allocator) !PipelineResult {
     var result = PipelineResult.init(allocator);
-    defer result.deinit(allocator);
+    defer result.deinit();
 
     // Convert PipelineConfig to PassPipelineConfig
     const pass_config = PassPipelineConfig{

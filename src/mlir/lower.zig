@@ -13,11 +13,17 @@ const std = @import("std");
 const lib = @import("ora_lib");
 const c = @import("c.zig").c;
 
+// MLIR constants used throughout the lowering system
+pub const DEFAULT_INTEGER_BITS: u32 = 256;
+pub const DEFAULT_INTEGER_TYPE_NAME: []const u8 = "i256";
+
 // Import modular components
 const TypeMapper = @import("types.zig").TypeMapper;
 const ExpressionLowerer = @import("expressions.zig").ExpressionLowerer;
 const StatementLowerer = @import("statements.zig").StatementLowerer;
 const DeclarationLowerer = @import("declarations.zig").DeclarationLowerer;
+const pass_manager = @import("pass_manager.zig");
+const verification = @import("verification.zig");
 const MemoryManager = @import("memory.zig").MemoryManager;
 const StorageMap = @import("memory.zig").StorageMap;
 const SymbolTable = @import("symbols.zig").SymbolTable;
@@ -518,27 +524,21 @@ pub fn lowerFunctionsToModuleWithPasses(ctx: c.MlirContext, nodes: []lib.AstNode
 
     // Apply passes if configuration is provided
     if (pass_config) |config| {
-        var pass_manager = PassManager.init(ctx, allocator);
-        defer pass_manager.deinit();
+        // Create pass manager with configuration
+        var pm = try pass_manager.OraPassUtils.createOraPassManager(ctx, allocator, config);
+        defer pm.deinit();
 
-        // Configure the pass pipeline
-        pass_manager.configurePipeline(config);
-
-        // Enable timing if requested
-        if (config.enable_timing) {
-            pass_manager.enableTiming();
-        }
-
-        // Enable IR printing if requested
-        pass_manager.enableIRPrinting(config.ir_printing);
+        // Note: IR printing configuration is handled in createOraPassManager
 
         // Run the passes
-        const pass_result = try pass_manager.runPasses(lowering_result.module);
+        const pass_result = try pm.run(lowering_result.module);
 
         // Verify the module after passes
-        if (pass_result.success) {
-            const verification_success = pass_manager.verifyModule(lowering_result.module);
-            if (!verification_success) {
+        if (pass_result) {
+            var verifier = verification.OraVerification.init(ctx, allocator);
+            defer verifier.deinit();
+            const verification_result = try verifier.verifyModule(lowering_result.module);
+            if (!verification_result.success) {
                 // Create a new error for verification failure
                 var error_handler = ErrorHandler.init(allocator);
                 defer error_handler.deinit();
@@ -596,10 +596,14 @@ pub fn lowerFunctionsToModuleWithPasses(ctx: c.MlirContext, nodes: []lib.AstNode
         }
 
         // Update the result with pass information
-        lowering_result.pass_result = pass_result;
-        lowering_result.module = pass_result.modified_module;
+        lowering_result.pass_result = .{
+            .success = pass_result,
+            .error_message = null,
+            .passes_run = std.ArrayList([]const u8){},
+            .timing_info = null,
+        };
 
-        if (!pass_result.success) {
+        if (!pass_result) {
             lowering_result.success = false;
         }
     }
@@ -661,19 +665,23 @@ pub fn lowerFunctionsToModuleWithPipelineString(ctx: c.MlirContext, nodes: []lib
     }
 
     // Create pass manager and parse pipeline string
-    var pass_manager = PassManager.init(ctx, allocator);
-    defer pass_manager.deinit();
+    var pm = PassManager.init(ctx, allocator);
+    defer pm.deinit();
 
-    try @import("pass_manager.zig").OraPassUtils.parsePipelineString(&pass_manager, pipeline_str);
+    try @import("pass_manager.zig").OraPassUtils.parsePipelineString(&pm, pipeline_str);
 
     // Run the passes
-    const pass_result = try pass_manager.runPasses(lowering_result.module);
+    const pass_success = try pm.run(lowering_result.module);
 
     // Update the result
-    lowering_result.pass_result = pass_result;
-    lowering_result.module = pass_result.modified_module;
+    lowering_result.pass_result = .{
+        .success = pass_success,
+        .error_message = null,
+        .passes_run = std.ArrayList([]const u8){},
+        .timing_info = null,
+    };
 
-    if (!pass_result.success) {
+    if (!pass_success) {
         lowering_result.success = false;
     }
 

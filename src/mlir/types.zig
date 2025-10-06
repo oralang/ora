@@ -1,7 +1,7 @@
 const std = @import("std");
 const c = @import("c.zig").c;
 const lib = @import("ora_lib");
-const constants = @import("constants.zig");
+const constants = @import("lower.zig");
 
 /// Type alias for array struct to match AST definition
 const ArrayStruct = struct { elem: *const lib.ast.type_info.OraType, len: u64 };

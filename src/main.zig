@@ -13,7 +13,7 @@
 const std = @import("std");
 const lib = @import("ora_lib");
 const build_options = @import("build_options");
-const mlir_pipeline = @import("mlir/pipeline.zig");
+const mlir_pipeline = @import("mlir/pass_manager.zig");
 
 /// Artifact saving options
 const ArtifactOptions = struct {
@@ -897,7 +897,7 @@ fn generateMlirOutput(allocator: std.mem.Allocator, ast_nodes: []lib.AstNode, fi
             try stdout.print("MLIR pipeline failed: {s}\n", .{@errorName(err)});
             return;
         };
-        defer pipeline_result.deinit();
+        defer pipeline_result.deinit(allocator);
 
         if (!pipeline_result.success) {
             try stdout.print("MLIR pipeline failed: {s}\n", .{pipeline_result.error_message orelse "Unknown error"});
