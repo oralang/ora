@@ -117,15 +117,15 @@ pub const DeclarationParser = struct {
         }
 
         // Parse optional interface implementations: contract MyContract implements Interface1, Interface2
-        var implements = std.ArrayList([]const u8).init(self.base.arena.allocator());
-        defer implements.deinit();
+        var implements = std.ArrayList([]const u8){};
+        defer implements.deinit(self.base.arena.allocator());
 
         if (self.base.check(.Identifier) and std.mem.eql(u8, self.base.peek().lexeme, "implements")) {
             _ = self.base.advance(); // consume "implements"
             // Parse comma-separated list of interface names
             repeat: while (true) {
                 const interface_token = try self.base.consume(.Identifier, "Expected interface name");
-                try implements.append(interface_token.lexeme);
+                try implements.append(self.base.arena.allocator(), interface_token.lexeme);
 
                 if (!self.base.match(.Comma)) break :repeat;
             }
@@ -133,8 +133,8 @@ pub const DeclarationParser = struct {
 
         _ = try self.base.consume(.LeftBrace, "Expected '{' after contract declaration");
 
-        var body = std.ArrayList(ast.AstNode).init(self.base.arena.allocator());
-        defer body.deinit();
+        var body = std.ArrayList(ast.AstNode){};
+        defer body.deinit(self.base.arena.allocator());
         errdefer {
             // Clean up any partially parsed members on error
             for (body.items) |*member| {
@@ -144,7 +144,7 @@ pub const DeclarationParser = struct {
 
         while (!self.base.check(.RightBrace) and !self.base.isAtEnd()) {
             const member = try self.parseContractMember();
-            try body.append(member);
+            try body.append(self.base.arena.allocator(), member);
         }
 
         _ = try self.base.consume(.RightBrace, "Expected '}' after contract body");
@@ -152,9 +152,9 @@ pub const DeclarationParser = struct {
         return ast.AstNode{ .Contract = ast.ContractNode{
             .name = name_token.lexeme,
             .extends = extends,
-            .implements = try implements.toOwnedSlice(),
+            .implements = try implements.toOwnedSlice(self.base.arena.allocator()),
             .attributes = &[_]u8{},
-            .body = try body.toOwnedSlice(),
+            .body = try body.toOwnedSlice(self.base.arena.allocator()),
             .span = self.base.spanFromToken(name_token),
         } };
     }
@@ -188,8 +188,8 @@ pub const DeclarationParser = struct {
         _ = try self.base.consume(.LeftParen, "Expected '(' after function name");
 
         // Parse parameters with default values support
-        var params = std.ArrayList(ast.ParameterNode).init(self.base.arena.allocator());
-        defer params.deinit();
+        var params = std.ArrayList(ast.ParameterNode){};
+        defer params.deinit(self.base.arena.allocator());
         errdefer {
             // Clean up parameters on error
             for (params.items) |*param| {
@@ -203,7 +203,7 @@ pub const DeclarationParser = struct {
         if (!self.base.check(.RightParen)) {
             repeat: while (true) {
                 const param = try self.parseParameterWithDefaults();
-                try params.append(param);
+                try params.append(self.base.arena.allocator(), param);
 
                 if (!self.base.match(.Comma)) break :repeat;
             }
@@ -227,8 +227,8 @@ pub const DeclarationParser = struct {
         }
 
         // Parse requires clauses
-        var requires_clauses = std.ArrayList(*ast.Expressions.ExprNode).init(self.base.arena.allocator());
-        defer requires_clauses.deinit();
+        var requires_clauses = std.ArrayList(*ast.Expressions.ExprNode){};
+        defer requires_clauses.deinit(self.base.arena.allocator());
 
         while (self.base.match(.Requires)) {
             _ = try self.base.consume(.LeftParen, "Expected '(' after 'requires'");
@@ -247,12 +247,12 @@ pub const DeclarationParser = struct {
             // Store the expression in arena
             const condition_ptr = try self.base.arena.createNode(ast.Expressions.ExprNode);
             condition_ptr.* = condition;
-            try requires_clauses.append(condition_ptr);
+            try requires_clauses.append(self.base.arena.allocator(), condition_ptr);
         }
 
         // Parse ensures clauses
-        var ensures_clauses = std.ArrayList(*ast.Expressions.ExprNode).init(self.base.arena.allocator());
-        defer ensures_clauses.deinit();
+        var ensures_clauses = std.ArrayList(*ast.Expressions.ExprNode){};
+        defer ensures_clauses.deinit(self.base.arena.allocator());
 
         while (self.base.match(.Ensures)) {
             _ = try self.base.consume(.LeftParen, "Expected '(' after 'ensures'");
@@ -271,7 +271,7 @@ pub const DeclarationParser = struct {
             // Store the expression in arena
             const condition_ptr = try self.base.arena.createNode(ast.Expressions.ExprNode);
             condition_ptr.* = condition;
-            try ensures_clauses.append(condition_ptr);
+            try ensures_clauses.append(self.base.arena.allocator(), condition_ptr);
         }
 
         // Parse function body - delegate to statement parser
@@ -281,14 +281,14 @@ pub const DeclarationParser = struct {
 
         return ast.FunctionNode{
             .name = name_token.lexeme,
-            .parameters = try params.toOwnedSlice(),
+            .parameters = try params.toOwnedSlice(self.base.arena.allocator()),
             .return_type_info = return_type_info,
             .body = body,
             .visibility = if (is_pub) ast.Visibility.Public else ast.Visibility.Private,
             .attributes = &[_]u8{}, // Empty attributes
             .is_inline = is_inline,
-            .requires_clauses = try requires_clauses.toOwnedSlice(),
-            .ensures_clauses = try ensures_clauses.toOwnedSlice(),
+            .requires_clauses = try requires_clauses.toOwnedSlice(self.base.arena.allocator()),
+            .ensures_clauses = try ensures_clauses.toOwnedSlice(self.base.arena.allocator()),
             .span = self.base.spanFromToken(name_token),
         };
     }
@@ -303,8 +303,8 @@ pub const DeclarationParser = struct {
         const name_token = try self.base.consume(.Identifier, "Expected struct name");
         _ = try self.base.consume(.LeftBrace, "Expected '{' after struct name");
 
-        var fields = std.ArrayList(ast.StructField).init(self.base.arena.allocator());
-        defer fields.deinit();
+        var fields = std.ArrayList(ast.StructField){};
+        defer fields.deinit(self.base.arena.allocator());
 
         while (!self.base.check(.RightBrace) and !self.base.isAtEnd()) {
             // Skip any field attributes/annotations for now
@@ -334,7 +334,7 @@ pub const DeclarationParser = struct {
 
             _ = try self.base.consume(.Semicolon, "Expected ';' after field");
 
-            try fields.append(ast.StructField{
+            try fields.append(self.base.arena.allocator(), ast.StructField{
                 .name = field_name.lexeme,
                 .type_info = field_type,
                 .span = self.base.spanFromToken(field_name),
@@ -345,7 +345,7 @@ pub const DeclarationParser = struct {
 
         return ast.AstNode{ .StructDecl = ast.StructDeclNode{
             .name = name_token.lexeme,
-            .fields = try fields.toOwnedSlice(),
+            .fields = try fields.toOwnedSlice(self.base.arena.allocator()),
             .span = self.base.spanFromToken(name_token),
         } };
     }
@@ -415,8 +415,8 @@ pub const DeclarationParser = struct {
 
         _ = try self.base.consume(.LeftBrace, "Expected '{' after enum name");
 
-        var variants = std.ArrayList(ast.EnumVariant).init(self.base.arena.allocator());
-        defer variants.deinit();
+        var variants = std.ArrayList(ast.EnumVariant){};
+        defer variants.deinit(self.base.arena.allocator());
 
         // Track if any variants have explicit values
         var has_explicit_values = false;
@@ -477,7 +477,7 @@ pub const DeclarationParser = struct {
             }
 
             // Add the variant to our list
-            try variants.append(ast.EnumVariant{
+            try variants.append(self.base.arena.allocator(), ast.EnumVariant{
                 .name = variant_name.lexeme,
                 .value = value,
                 .span = self.base.spanFromToken(variant_name),
@@ -499,7 +499,7 @@ pub const DeclarationParser = struct {
         return ast.AstNode{
             .EnumDecl = ast.EnumDeclNode{
                 .name = name_token.lexeme,
-                .variants = try variants.toOwnedSlice(),
+                .variants = try variants.toOwnedSlice(self.base.arena.allocator()),
                 .underlying_type_info = base_type,
                 .span = self.base.spanFromToken(name_token),
                 .has_explicit_values = true, // We now always have values (implicit or explicit)
@@ -512,8 +512,8 @@ pub const DeclarationParser = struct {
         const name_token = try self.base.consume(.Identifier, "Expected log name");
         _ = try self.base.consume(.LeftParen, "Expected '(' after log name");
 
-        var fields = std.ArrayList(ast.LogField).init(self.base.arena.allocator());
-        defer fields.deinit();
+        var fields = std.ArrayList(ast.LogField){};
+        defer fields.deinit(self.base.arena.allocator());
 
         if (!self.base.check(.RightParen)) {
             repeat: while (true) {
@@ -531,7 +531,7 @@ pub const DeclarationParser = struct {
                 const field_type = try self.type_parser.parseTypeWithContext(.LogField);
                 self.updateFromSubParser(self.type_parser.base.current);
 
-                try fields.append(ast.LogField{
+                try fields.append(self.base.arena.allocator(), ast.LogField{
                     .name = field_name.lexeme,
                     .type_info = field_type,
                     .indexed = is_indexed,
@@ -547,7 +547,7 @@ pub const DeclarationParser = struct {
 
         return ast.AstNode{ .LogDecl = ast.LogDeclNode{
             .name = name_token.lexeme,
-            .fields = try fields.toOwnedSlice(),
+            .fields = try fields.toOwnedSlice(self.base.arena.allocator()),
             .span = self.base.spanFromToken(name_token),
         } };
     }
@@ -597,13 +597,13 @@ pub const DeclarationParser = struct {
             return ast.AstNode{ .Function = fn_node };
         }
 
-        // Variable declarations (contract state variables)
-        if (self.isMemoryRegionKeyword() or self.base.check(.Let) or self.base.check(.Var)) {
-            return ast.AstNode{ .VariableDecl = try self.parseVariableDecl() };
+        // Constant declarations (contract constants) - check before variables
+        if (self.base.check(.Const)) {
+            return ast.AstNode{ .Constant = try self.parseConstantDecl() };
         }
 
-        // Constant declarations (contract constants)
-        if (self.base.check(.Const)) {
+        // Variable declarations (contract state variables)
+        if (self.isMemoryRegionKeyword() or self.base.check(.Let) or self.base.check(.Var) or self.base.check(.Immutable)) {
             return ast.AstNode{ .VariableDecl = try self.parseVariableDecl() };
         }
 
@@ -801,6 +801,41 @@ pub const DeclarationParser = struct {
         return .{ .region = region, .kind = kind };
     }
 
+    /// Parse constant declaration (const NAME: type = value;)
+    fn parseConstantDecl(self: *DeclarationParser) !ast.ConstantNode {
+        // Consume the 'const' keyword
+        _ = try self.base.consume(.Const, "Expected 'const' keyword");
+
+        // Parse constant name
+        const name_token = try self.base.consume(.Identifier, "Expected constant name");
+
+        // Parse type annotation
+        _ = try self.base.consume(.Colon, "Expected ':' after constant name");
+        self.syncSubParsers();
+        const const_type = try self.type_parser.parseTypeWithContext(.Variable);
+        self.updateFromSubParser(self.type_parser.base.current);
+
+        // Parse initializer
+        _ = try self.base.consume(.Equal, "Expected '=' after constant type");
+        self.syncSubParsers();
+        const value_expr = try self.expr_parser.parseExpression();
+        self.updateFromSubParser(self.expr_parser.base.current);
+
+        // Create the value expression node
+        const value_ptr = try self.base.arena.createNode(ast.Expressions.ExprNode);
+        value_ptr.* = value_expr;
+
+        _ = try self.base.consume(.Semicolon, "Expected ';' after constant declaration");
+
+        return ast.ConstantNode{
+            .name = name_token.lexeme,
+            .typ = const_type,
+            .value = value_ptr,
+            .visibility = .Private, // Constants are private by default
+            .span = ParserCommon.makeSpan(name_token),
+        };
+    }
+
     /// Parse error declaration with optional parameter list (error ErrorName(param: type);)
     fn parseErrorDecl(self: *DeclarationParser) !ast.Statements.ErrorDeclNode {
         const name_token = try self.base.consume(.Identifier, "Expected error name");
@@ -808,20 +843,20 @@ pub const DeclarationParser = struct {
         // Parse optional parameter list
         var parameters: ?[]ast.ParameterNode = null;
         if (self.base.match(.LeftParen)) {
-            var params = std.ArrayList(ast.ParameterNode).init(self.base.arena.allocator());
-            defer params.deinit();
+            var params = std.ArrayList(ast.ParameterNode){};
+            defer params.deinit(self.base.arena.allocator());
 
             if (!self.base.check(.RightParen)) {
                 repeat: while (true) {
                     const param = try self.parseParameter();
-                    try params.append(param);
+                    try params.append(self.base.arena.allocator(), param);
 
                     if (!self.base.match(.Comma)) break :repeat;
                 }
             }
 
             _ = try self.base.consume(.RightParen, "Expected ')' after error parameters");
-            parameters = try params.toOwnedSlice();
+            parameters = try params.toOwnedSlice(self.base.arena.allocator());
         }
 
         _ = try self.base.consume(.Semicolon, "Expected ';' after error declaration");
@@ -853,14 +888,13 @@ pub const DeclarationParser = struct {
         const end_token = try self.base.consume(.RightBrace, "Expected '}' after block");
 
         return ast.Statements.BlockNode{
-            .statements = try statements.toOwnedSlice(),
+            .statements = try statements.toOwnedSlice(self.base.arena.allocator()),
             .span = self.base.spanFromToken(end_token),
         };
     }
 
     /// Check if current token is a memory region keyword
     fn isMemoryRegionKeyword(self: *DeclarationParser) bool {
-        return self.base.check(.Const) or self.base.check(.Immutable) or
-            self.base.check(.Storage) or self.base.check(.Memory) or self.base.check(.Tstore);
+        return self.base.check(.Storage) or self.base.check(.Memory) or self.base.check(.Tstore);
     }
 };

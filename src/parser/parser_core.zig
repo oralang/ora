@@ -76,17 +76,17 @@ pub const Parser = struct {
 
     /// Parse tokens into a list of top-level AST nodes
     pub fn parse(self: *Parser) ParserError![]AstNode {
-        var nodes = std.ArrayList(AstNode).init(self.arena.allocator());
-        defer nodes.deinit();
+        var nodes = std.ArrayList(AstNode){};
+        defer nodes.deinit(self.arena.allocator());
 
         while (!self.isAtEnd()) {
             if (self.check(.Eof)) break;
 
             const node = try self.parseTopLevel();
-            try nodes.append(node);
+            try nodes.append(self.arena.allocator(), node);
         }
 
-        return nodes.toOwnedSlice();
+        return nodes.toOwnedSlice(self.arena.allocator());
     }
 
     /// Parse a top-level declaration

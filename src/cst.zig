@@ -31,14 +31,12 @@ pub const CstBuilder = struct {
     backing_allocator: std.mem.Allocator,
 
     pub fn init(alloc: std.mem.Allocator) CstBuilder {
-        var b = CstBuilder{ .arena = std.heap.ArenaAllocator.init(alloc), .top_levels = undefined, .backing_allocator = alloc };
-        b.top_levels = std.ArrayList(*CstNode).init(b.backing_allocator);
-        return b;
+        return CstBuilder{ .arena = std.heap.ArenaAllocator.init(alloc), .top_levels = std.ArrayList(*CstNode){}, .backing_allocator = alloc };
     }
 
     pub fn deinit(self: *CstBuilder) void {
         // Free lists before destroying the arena that backs them
-        self.top_levels.deinit();
+        self.top_levels.deinit(self.backing_allocator);
         self.arena.deinit();
     }
 
@@ -81,21 +79,17 @@ pub const CstBuilder = struct {
         };
 
         // Collect non-EOF token indices
-        var indices = std.ArrayList(u32).init(alloc);
+        var indices = std.ArrayList(u32){};
         for (tokens, 0..) |t, idx| {
             if (t.type == .Eof) continue;
-            try indices.append(@as(u32, @intCast(idx)));
+            try indices.append(alloc, @as(u32, @intCast(idx)));
         }
-        stream.token_indices = try indices.toOwnedSlice();
+        stream.token_indices = try indices.toOwnedSlice(alloc);
 
-        var kids = std.ArrayList(*CstNode).init(self.backing_allocator);
-        try kids.append(stream);
+        var kids = std.ArrayList(*CstNode){};
+        try kids.append(alloc, stream);
         // Move to arena-owned slice
-        const tmp = try kids.toOwnedSlice();
-        const dst = try alloc.alloc(*CstNode, tmp.len);
-        std.mem.copyForwards(*CstNode, dst, tmp);
-        self.backing_allocator.free(tmp);
-        root.child_nodes = dst;
+        root.child_nodes = try kids.toOwnedSlice(alloc);
         return root;
     }
 
@@ -111,7 +105,7 @@ pub const CstBuilder = struct {
             .token_indices = &[_]u32{},
             .child_nodes = &[_]*CstNode{},
         };
-        try self.top_levels.append(n);
+        try self.top_levels.append(self.backing_allocator, n);
         return n;
     }
 
@@ -138,13 +132,13 @@ pub const CstBuilder = struct {
             .child_nodes = &[_]*CstNode{},
         };
         // Move recorded top-levels to arena-owned slice
-        const tmp = try self.top_levels.toOwnedSlice();
+        const tmp = try self.top_levels.toOwnedSlice(self.backing_allocator);
         const dst = try self.getAllocator().alloc(*CstNode, tmp.len);
         std.mem.copyForwards(*CstNode, dst, tmp);
         self.backing_allocator.free(tmp);
         root.child_nodes = dst;
         // Reset internal list using backing allocator and free old buffer
-        self.top_levels = std.ArrayList(*CstNode).init(self.backing_allocator);
+        self.top_levels = std.ArrayList(*CstNode){};
         return root;
     }
 };

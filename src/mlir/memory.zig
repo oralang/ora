@@ -1,7 +1,7 @@
 const std = @import("std");
 const c = @import("c.zig").c;
 const lib = @import("ora_lib");
-const constants = @import("constants.zig");
+const constants = @import("lower.zig");
 
 // Storage variable mapping for contract storage
 pub const StorageMap = struct {
@@ -42,9 +42,13 @@ pub const StorageMap = struct {
 /// Memory region management system for Ora storage types
 pub const MemoryManager = struct {
     ctx: c.MlirContext,
+    ora_dialect: *@import("dialect.zig").OraDialect,
 
-    pub fn init(ctx: c.MlirContext) MemoryManager {
-        return .{ .ctx = ctx };
+    pub fn init(ctx: c.MlirContext, ora_dialect: *@import("dialect.zig").OraDialect) MemoryManager {
+        return .{
+            .ctx = ctx,
+            .ora_dialect = ora_dialect,
+        };
     }
 
     /// Get memory space mapping: storage=1, memory=0, tstore=2
@@ -85,21 +89,10 @@ pub const MemoryManager = struct {
             },
             .Memory => {
                 // Memory variables use memref.alloca with memory space 0
-                var state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("memref.alloca"), loc);
-
-                // Create memref type with memory space 0
                 // TODO: Create proper memref type with memory space attribute
-                c.mlirOperationStateAddResults(&state, 1, @ptrCast(&var_type));
-
-                // Add region attribute
-                const region_attr = self.createRegionAttribute(storage_type);
-                const region_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("ora.region"));
-                var attrs = [_]c.MlirNamedAttribute{
-                    c.mlirNamedAttributeGet(region_id, region_attr),
-                };
-                c.mlirOperationStateAddAttributes(&state, attrs.len, &attrs);
-
-                return c.mlirOperationCreate(&state);
+                // For now, we'll use the simple helper without attributes
+                // TODO: Add support for attributes in the dialect helper
+                return self.ora_dialect.createMemrefAlloca(var_type, loc);
             },
             .TStore => {
                 // Transient storage variables use ora.tstore.global operations
@@ -107,9 +100,7 @@ pub const MemoryManager = struct {
             },
             .Stack => {
                 // Stack variables use regular memref.alloca
-                var state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("memref.alloca"), loc);
-                c.mlirOperationStateAddResults(&state, 1, @ptrCast(&var_type));
-                return c.mlirOperationCreate(&state);
+                return self.ora_dialect.createMemrefAlloca(var_type, loc);
             },
         }
     }
@@ -152,9 +143,8 @@ pub const MemoryManager = struct {
             },
             .Stack => {
                 // Stack uses regular memref.store
-                var state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("memref.store"), loc);
-                c.mlirOperationStateAddOperands(&state, 2, @ptrCast(&[_]c.MlirValue{ value, address }));
-                return c.mlirOperationCreate(&state);
+                const indices = [_]c.MlirValue{};
+                return self.ora_dialect.createMemrefStore(value, address, &indices, loc);
             },
         }
     }
@@ -196,36 +186,15 @@ pub const MemoryManager = struct {
             },
             .Stack => {
                 // Stack uses regular memref.load
-                var state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("memref.load"), loc);
-                c.mlirOperationStateAddOperands(&state, 1, @ptrCast(&address));
-                c.mlirOperationStateAddResults(&state, 1, @ptrCast(&result_type));
-                return c.mlirOperationCreate(&state);
+                const indices = [_]c.MlirValue{};
+                return self.ora_dialect.createMemrefLoad(address, &indices, result_type, loc);
             },
         }
     }
 
     /// Create storage load operation (ora.sload)
     pub fn createStorageLoad(self: *const MemoryManager, var_name: []const u8, result_type: c.MlirType, loc: c.MlirLocation) c.MlirOperation {
-        var state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("ora.sload"), loc);
-
-        // Add the global name as a symbol reference
-        var name_buffer: [256]u8 = undefined;
-        for (0..var_name.len) |i| {
-            name_buffer[i] = var_name[i];
-        }
-        name_buffer[var_name.len] = 0; // null-terminate
-        const name_str = c.mlirStringRefCreateFromCString(&name_buffer[0]);
-        const name_attr = c.mlirStringAttrGet(self.ctx, name_str);
-        const name_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("global"));
-        var attrs = [_]c.MlirNamedAttribute{
-            c.mlirNamedAttributeGet(name_id, name_attr),
-        };
-        c.mlirOperationStateAddAttributes(&state, attrs.len, &attrs);
-
-        // Add result type from parameter
-        c.mlirOperationStateAddResults(&state, 1, @ptrCast(&result_type));
-
-        return c.mlirOperationCreate(&state);
+        return self.ora_dialect.createSLoad(var_name, result_type, loc);
     }
 
     /// Create memory load operation (ora.mload)
@@ -275,24 +244,7 @@ pub const MemoryManager = struct {
 
     /// Create storage store operation (ora.sstore)
     pub fn createStorageStore(self: *const MemoryManager, value: c.MlirValue, var_name: []const u8, loc: c.MlirLocation) c.MlirOperation {
-        var state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("ora.sstore"), loc);
-        c.mlirOperationStateAddOperands(&state, 1, @ptrCast(&value));
-
-        // Add the global name as a symbol reference
-        var name_buffer: [256]u8 = undefined;
-        for (0..var_name.len) |i| {
-            name_buffer[i] = var_name[i];
-        }
-        name_buffer[var_name.len] = 0; // null-terminate
-        const name_str = c.mlirStringRefCreateFromCString(&name_buffer[0]);
-        const name_attr = c.mlirStringAttrGet(self.ctx, name_str);
-        const name_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("global"));
-        var attrs = [_]c.MlirNamedAttribute{
-            c.mlirNamedAttributeGet(name_id, name_attr),
-        };
-        c.mlirOperationStateAddAttributes(&state, attrs.len, &attrs);
-
-        return c.mlirOperationCreate(&state);
+        return self.ora_dialect.createSStore(value, var_name, loc);
     }
 
     /// Create memory store operation (ora.mstore)
@@ -516,7 +468,7 @@ pub const MemoryManager = struct {
 
     /// Create file location for operations
     fn createFileLocation(self: *const MemoryManager, span: lib.ast.SourceSpan) c.MlirLocation {
-        return @import("locations.zig").LocationTracker.createFileLocationFromSpan(self.ctx, span);
+        return @import("lower.zig").LocationTracker.createFileLocationFromSpan(self.ctx, span);
     }
 
     /// Create global storage declaration

@@ -620,15 +620,15 @@ pub const ExpressionParser = struct {
 
     /// Finish parsing a function call - MIGRATED FROM ORIGINAL
     fn finishCall(self: *ExpressionParser, callee: ast.Expressions.ExprNode) ParserError!ast.Expressions.ExprNode {
-        var arguments = std.ArrayList(*ast.Expressions.ExprNode).init(self.base.arena.allocator());
-        defer arguments.deinit();
+        var arguments = std.ArrayList(*ast.Expressions.ExprNode){};
+        defer arguments.deinit(self.base.arena.allocator());
 
         if (!self.base.check(.RightParen)) {
             repeat: while (true) {
                 const arg = try self.parseExpression();
                 const arg_ptr = try self.base.arena.createNode(ast.Expressions.ExprNode);
                 arg_ptr.* = arg;
-                try arguments.append(arg_ptr);
+                try arguments.append(self.base.arena.allocator(), arg_ptr);
                 if (!self.base.match(.Comma)) break :repeat;
             }
         }
@@ -641,7 +641,7 @@ pub const ExpressionParser = struct {
         return ast.Expressions.ExprNode{
             .Call = ast.Expressions.CallExpr{
                 .callee = callee_ptr,
-                .arguments = try arguments.toOwnedSlice(),
+                .arguments = try arguments.toOwnedSlice(self.base.arena.allocator()),
                 .type_info = ast.Types.TypeInfo.unknown(), // Return type will be resolved from function signature
                 .span = self.base.spanFromToken(paren_token),
             },
@@ -833,20 +833,41 @@ pub const ExpressionParser = struct {
                 .span = self.base.spanFromToken(token),
             } };
 
-            // Handle field access (identifier.field)
+            // Handle field access (identifier.field) or enum literal (EnumType.VariantName)
             while (self.base.match(.Dot)) {
                 const field_token = try self.base.consume(.Identifier, "Expected field name after '.'");
 
-                // Store field name in arena
-                const field_name = try self.base.arena.createString(field_token.lexeme);
+                // Check if this might be an enum literal (EnumType.VariantName)
+                if (current_expr == .Identifier) {
+                    const enum_name = current_expr.Identifier.name;
 
-                // Create field access expression
+                    // Don't treat standard library and module access as enum literals
+                    const is_module_access = std.mem.eql(u8, enum_name, "std") or
+                        std.mem.eql(u8, enum_name, "constants") or
+                        std.mem.eql(u8, enum_name, "transaction") or
+                        std.mem.eql(u8, enum_name, "block") or
+                        std.mem.eql(u8, enum_name, "math");
+
+                    if (!is_module_access) {
+                        // Treat as potential enum literal
+                        const variant_name = try self.base.arena.createString(field_token.lexeme);
+                        current_expr = ast.Expressions.ExprNode{ .EnumLiteral = ast.Expressions.EnumLiteralExpr{
+                            .enum_name = enum_name,
+                            .variant_name = variant_name,
+                            .span = self.base.spanFromToken(field_token),
+                        } };
+                        continue;
+                    }
+                }
+
+                // Regular field access
+                const field_name = try self.base.arena.createString(field_token.lexeme);
                 const field_expr = ast.Expressions.ExprNode{
                     .FieldAccess = ast.Expressions.FieldAccessExpr{
                         .target = try self.base.arena.createNode(ast.Expressions.ExprNode),
                         .field = field_name,
                         .type_info = ast.Types.TypeInfo.unknown(), // Will be resolved during type checking
-                        .span = self.base.spanFromToken(token),
+                        .span = self.base.spanFromToken(field_token),
                     },
                 };
 
@@ -1107,8 +1128,8 @@ pub const ExpressionParser = struct {
 
         // parse switch arms
 
-        var cases = std.ArrayList(ast.Switch.Case).init(self.base.arena.allocator());
-        defer cases.deinit();
+        var cases = std.ArrayList(ast.Switch.Case){};
+        defer cases.deinit(self.base.arena.allocator());
 
         var default_case: ?ast.Statements.BlockNode = null;
 
@@ -1163,7 +1184,7 @@ pub const ExpressionParser = struct {
                 .span = self.base.spanFromToken(switch_token),
             };
 
-            try cases.append(case);
+            try cases.append(self.base.arena.allocator(), case);
 
             // Optional comma between cases
             _ = self.base.match(.Comma);
@@ -1182,7 +1203,7 @@ pub const ExpressionParser = struct {
 
         return ast.Expressions.ExprNode{ .SwitchExpression = ast.Switch.ExprNode{
             .condition = condition_ptr,
-            .cases = try cases.toOwnedSlice(),
+            .cases = try cases.toOwnedSlice(self.base.arena.allocator()),
             .default_case = default_case,
             .span = self.base.spanFromToken(switch_token),
         } };
@@ -1196,8 +1217,8 @@ pub const ExpressionParser = struct {
     fn parseBlock(self: *ExpressionParser) !ast.Statements.BlockNode {
         _ = try self.base.consume(.LeftBrace, "Expected '{'");
 
-        var statements = std.ArrayList(ast.Statements.StmtNode).init(self.base.arena.allocator());
-        defer statements.deinit();
+        var statements = std.ArrayList(ast.Statements.StmtNode){};
+        defer statements.deinit(self.base.arena.allocator());
 
         while (!self.base.check(.RightBrace) and !self.base.isAtEnd()) {
             // Statement parsing should be handled by statement_parser.zig
@@ -1208,7 +1229,7 @@ pub const ExpressionParser = struct {
         const end_token = try self.base.consume(.RightBrace, "Expected '}' after block");
 
         return ast.Statements.BlockNode{
-            .statements = try statements.toOwnedSlice(),
+            .statements = try statements.toOwnedSlice(self.base.arena.allocator()),
             .span = self.base.spanFromToken(end_token),
         };
     }
@@ -1257,20 +1278,20 @@ pub const ExpressionParser = struct {
         {
             _ = try self.base.consume(.LeftParen, "Expected '(' after builtin function name");
 
-            var args = std.ArrayList(*ast.Expressions.ExprNode).init(self.base.arena.allocator());
-            defer args.deinit();
+            var args = std.ArrayList(*ast.Expressions.ExprNode){};
+            defer args.deinit(self.base.arena.allocator());
 
             if (!self.base.check(.RightParen)) {
                 const first_arg = try self.parseExpression();
                 const first_arg_ptr = try self.base.arena.createNode(ast.Expressions.ExprNode);
                 first_arg_ptr.* = first_arg;
-                try args.append(first_arg_ptr);
+                try args.append(self.base.arena.allocator(), first_arg_ptr);
 
                 while (self.base.match(.Comma)) {
                     const arg = try self.parseExpression();
                     const arg_ptr = try self.base.arena.createNode(ast.Expressions.ExprNode);
                     arg_ptr.* = arg;
-                    try args.append(arg_ptr);
+                    try args.append(self.base.arena.allocator(), arg_ptr);
                 }
             }
 
@@ -1290,7 +1311,7 @@ pub const ExpressionParser = struct {
             return ast.Expressions.ExprNode{
                 .Call = ast.Expressions.CallExpr{
                     .callee = name_expr,
-                    .arguments = try args.toOwnedSlice(),
+                    .arguments = try args.toOwnedSlice(self.base.arena.allocator()),
                     .type_info = ast.Types.TypeInfo.unknown(), // Will be resolved during type checking
                     .span = self.base.spanFromToken(at_token),
                 },
@@ -1308,11 +1329,11 @@ pub const ExpressionParser = struct {
         // Check for empty tuple
         if (self.base.check(.RightParen)) {
             _ = self.base.advance();
-            var empty_elements = std.ArrayList(*ast.Expressions.ExprNode).init(self.base.arena.allocator());
-            defer empty_elements.deinit();
+            var empty_elements = std.ArrayList(*ast.Expressions.ExprNode){};
+            defer empty_elements.deinit(self.base.arena.allocator());
 
             return ast.Expressions.ExprNode{ .Tuple = ast.Expressions.TupleExpr{
-                .elements = try empty_elements.toOwnedSlice(),
+                .elements = try empty_elements.toOwnedSlice(self.base.arena.allocator()),
                 .span = self.base.spanFromToken(paren_token),
             } };
         }
@@ -1321,13 +1342,13 @@ pub const ExpressionParser = struct {
 
         // Check if it's a tuple (has comma)
         if (self.base.match(.Comma)) {
-            var elements = std.ArrayList(*ast.Expressions.ExprNode).init(self.base.arena.allocator());
-            defer elements.deinit();
+            var elements = std.ArrayList(*ast.Expressions.ExprNode){};
+            defer elements.deinit(self.base.arena.allocator());
 
             // Convert first_expr to pointer
             const first_ptr = try self.base.arena.createNode(ast.Expressions.ExprNode);
             first_ptr.* = first_expr;
-            try elements.append(first_ptr);
+            try elements.append(self.base.arena.allocator(), first_ptr);
 
             // Handle trailing comma case: (a,)
             if (!self.base.check(.RightParen)) {
@@ -1335,7 +1356,7 @@ pub const ExpressionParser = struct {
                     const element = try self.parseExpression();
                     const element_ptr = try self.base.arena.createNode(ast.Expressions.ExprNode);
                     element_ptr.* = element;
-                    try elements.append(element_ptr);
+                    try elements.append(self.base.arena.allocator(), element_ptr);
 
                     if (!self.base.match(.Comma)) break :repeat;
                     if (self.base.check(.RightParen)) break :repeat; // Trailing comma
@@ -1345,7 +1366,7 @@ pub const ExpressionParser = struct {
             _ = try self.base.consume(.RightParen, "Expected ')' after tuple elements");
 
             return ast.Expressions.ExprNode{ .Tuple = ast.Expressions.TupleExpr{
-                .elements = try elements.toOwnedSlice(),
+                .elements = try elements.toOwnedSlice(self.base.arena.allocator()),
                 .span = self.base.spanFromToken(paren_token),
             } };
         } else {
@@ -1359,8 +1380,8 @@ pub const ExpressionParser = struct {
     fn parseStructInstantiation(self: *ExpressionParser, name_token: Token) ParserError!ast.Expressions.ExprNode {
         _ = try self.base.consume(.LeftBrace, "Expected '{' after struct name");
 
-        var fields = std.ArrayList(ast.Expressions.StructInstantiationField).init(self.base.arena.allocator());
-        defer fields.deinit();
+        var fields = std.ArrayList(ast.Expressions.StructInstantiationField){};
+        defer fields.deinit(self.base.arena.allocator());
 
         // Parse field initializers (field_name: value)
         while (!self.base.check(.RightBrace) and !self.base.isAtEnd()) {
@@ -1371,7 +1392,7 @@ pub const ExpressionParser = struct {
             const field_value_ptr = try self.base.arena.createNode(ast.Expressions.ExprNode);
             field_value_ptr.* = field_value;
 
-            try fields.append(ast.Expressions.StructInstantiationField{
+            try fields.append(self.base.arena.allocator(), ast.Expressions.StructInstantiationField{
                 .name = field_name.lexeme,
                 .value = field_value_ptr,
                 .span = self.base.spanFromToken(field_name),
@@ -1400,7 +1421,7 @@ pub const ExpressionParser = struct {
 
         return ast.Expressions.ExprNode{ .StructInstantiation = ast.Expressions.StructInstantiationExpr{
             .struct_name = struct_name_ptr,
-            .fields = try fields.toOwnedSlice(),
+            .fields = try fields.toOwnedSlice(self.base.arena.allocator()),
             .span = self.base.spanFromToken(name_token),
         } };
     }
@@ -1410,8 +1431,8 @@ pub const ExpressionParser = struct {
         const dot_token = self.base.previous();
         _ = try self.base.consume(.LeftBrace, "Expected '{' after '.' in anonymous struct literal");
 
-        var fields = std.ArrayList(ast.Expressions.AnonymousStructField).init(self.base.arena.allocator());
-        defer fields.deinit();
+        var fields = std.ArrayList(ast.Expressions.AnonymousStructField){};
+        defer fields.deinit(self.base.arena.allocator());
 
         // Parse field initializers (.{ .field = value, ... })
         while (!self.base.check(.RightBrace) and !self.base.isAtEnd()) {
@@ -1424,7 +1445,7 @@ pub const ExpressionParser = struct {
             const field_value_ptr = try self.base.arena.createNode(ast.Expressions.ExprNode);
             field_value_ptr.* = field_value;
 
-            try fields.append(ast.Expressions.AnonymousStructField{
+            try fields.append(self.base.arena.allocator(), ast.Expressions.AnonymousStructField{
                 .name = field_name.lexeme,
                 .value = field_value_ptr,
                 .span = self.base.spanFromToken(field_name),
@@ -1444,7 +1465,7 @@ pub const ExpressionParser = struct {
         _ = try self.base.consume(.RightBrace, "Expected '}' after anonymous struct literal fields");
 
         return ast.Expressions.ExprNode{ .AnonymousStruct = ast.Expressions.AnonymousStructExpr{
-            .fields = try fields.toOwnedSlice(),
+            .fields = try fields.toOwnedSlice(self.base.arena.allocator()),
             .span = self.base.spanFromToken(dot_token),
         } };
     }
@@ -1453,15 +1474,15 @@ pub const ExpressionParser = struct {
     fn parseArrayLiteral(self: *ExpressionParser) ParserError!ast.Expressions.ExprNode {
         const bracket_token = self.base.previous();
 
-        var elements = std.ArrayList(*ast.Expressions.ExprNode).init(self.base.arena.allocator());
-        defer elements.deinit();
+        var elements = std.ArrayList(*ast.Expressions.ExprNode){};
+        defer elements.deinit(self.base.arena.allocator());
 
         // Parse array elements
         while (!self.base.check(.RightBracket) and !self.base.isAtEnd()) {
             const element = try self.parseAssignment();
             const element_ptr = try self.base.arena.createNode(ast.Expressions.ExprNode);
             element_ptr.* = element;
-            try elements.append(element_ptr);
+            try elements.append(self.base.arena.allocator(), element_ptr);
 
             // Optional comma (but don't require it for last element)
             if (!self.base.check(.RightBracket)) {
@@ -1478,7 +1499,7 @@ pub const ExpressionParser = struct {
 
         return ast.Expressions.ExprNode{
             .ArrayLiteral = ast.Literals.Array{
-                .elements = try elements.toOwnedSlice(),
+                .elements = try elements.toOwnedSlice(self.base.arena.allocator()),
                 .element_type = null, // Type will be inferred
                 .span = self.base.spanFromToken(bracket_token),
             },
@@ -1487,8 +1508,8 @@ pub const ExpressionParser = struct {
 
     /// Parse verification attributes (e.g., @ora.quantified, @ora.assertion, etc.)
     fn parseVerificationAttributes(self: *ExpressionParser) ParserError![]ast.Verification.VerificationAttribute {
-        var attributes = std.ArrayList(ast.Verification.VerificationAttribute).init(self.base.arena.allocator());
-        defer attributes.deinit();
+        var attributes = std.ArrayList(ast.Verification.VerificationAttribute){};
+        defer attributes.deinit(self.base.arena.allocator());
 
         // Parse attributes in the format @ora.attribute_name or @ora.attribute_name(value)
         while (self.base.match(.At)) {
@@ -1536,10 +1557,10 @@ pub const ExpressionParser = struct {
             else
                 ast.Verification.VerificationAttribute.init(attr_type, self.base.spanFromToken(at_token));
 
-            try attributes.append(attr);
+            try attributes.append(self.base.arena.allocator(), attr);
         }
 
-        return try attributes.toOwnedSlice();
+        return try attributes.toOwnedSlice(self.base.arena.allocator());
     }
 
     /// Parse a range expression (start...end)

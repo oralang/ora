@@ -18,7 +18,7 @@ contract MemoryDeclarationTest {
         const MIN_VALUE = 0;
         
         // Memory arrays
-        let numbers: [u256] = [1, 2, 3, 4, 5];
+        let numbers: slice[u256] = [1, 2, 3, 4, 5];
         
         // Memory struct
         let user_data = .{

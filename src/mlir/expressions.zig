@@ -1,7 +1,7 @@
 const std = @import("std");
 const c = @import("c.zig").c;
 const lib = @import("ora_lib");
-const constants = @import("constants.zig");
+const constants = @import("lower.zig");
 const TypeMapper = @import("types.zig").TypeMapper;
 const ParamMap = @import("symbols.zig").ParamMap;
 const StorageMap = @import("memory.zig").StorageMap;
@@ -18,8 +18,9 @@ pub const ExpressionLowerer = struct {
     storage_map: ?*const StorageMap,
     local_var_map: ?*const LocalVarMap,
     locations: LocationTracker,
+    ora_dialect: *@import("dialect.zig").OraDialect,
 
-    pub fn init(ctx: c.MlirContext, block: c.MlirBlock, type_mapper: *const TypeMapper, param_map: ?*const ParamMap, storage_map: ?*const StorageMap, local_var_map: ?*const LocalVarMap, locations: LocationTracker) ExpressionLowerer {
+    pub fn init(ctx: c.MlirContext, block: c.MlirBlock, type_mapper: *const TypeMapper, param_map: ?*const ParamMap, storage_map: ?*const StorageMap, local_var_map: ?*const LocalVarMap, locations: LocationTracker, ora_dialect: *@import("dialect.zig").OraDialect) ExpressionLowerer {
         return .{
             .ctx = ctx,
             .block = block,
@@ -28,6 +29,7 @@ pub const ExpressionLowerer = struct {
             .storage_map = storage_map,
             .local_var_map = local_var_map,
             .locations = locations,
+            .ora_dialect = ora_dialect,
         };
     }
 
@@ -68,37 +70,19 @@ pub const ExpressionLowerer = struct {
         return switch (literal.*) {
             .Integer => |int| blk_int: {
                 const ty = c.mlirIntegerTypeGet(self.ctx, constants.DEFAULT_INTEGER_BITS);
-                var state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("arith.constant"), self.fileLoc(int.span));
-                c.mlirOperationStateAddResults(&state, 1, @ptrCast(&ty));
 
                 // Parse the string value to an integer with proper error handling
                 const parsed: i64 = std.fmt.parseInt(i64, int.value, 0) catch |err| blk: {
                     std.debug.print("ERROR: Failed to parse integer literal '{s}': {s}\n", .{ int.value, @errorName(err) });
                     break :blk 0; // Default to 0 on parse error
                 };
-                const attr = c.mlirIntegerAttrGet(ty, parsed);
 
-                const value_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("value"));
-                var attrs = [_]c.MlirNamedAttribute{
-                    c.mlirNamedAttributeGet(value_id, attr),
-                };
-                c.mlirOperationStateAddAttributes(&state, attrs.len, &attrs);
-                const op = c.mlirOperationCreate(&state);
+                const op = self.ora_dialect.createArithConstant(parsed, ty, self.fileLoc(int.span));
                 c.mlirBlockAppendOwnedOperation(self.block, op);
                 break :blk_int c.mlirOperationGetResult(op, 0);
             },
             .Bool => |bool_lit| blk_bool: {
-                const ty = c.mlirIntegerTypeGet(self.ctx, 1);
-                var state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("arith.constant"), self.fileLoc(bool_lit.span));
-                c.mlirOperationStateAddResults(&state, 1, @ptrCast(&ty));
-                const default_value: i64 = if (bool_lit.value) 1 else 0;
-                const attr = c.mlirIntegerAttrGet(ty, default_value);
-                const value_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("value"));
-                var attrs = [_]c.MlirNamedAttribute{
-                    c.mlirNamedAttributeGet(value_id, attr),
-                };
-                c.mlirOperationStateAddAttributes(&state, attrs.len, &attrs);
-                const op = c.mlirOperationCreate(&state);
+                const op = self.ora_dialect.createArithConstantBool(bool_lit.value, self.fileLoc(bool_lit.span));
                 c.mlirBlockAppendOwnedOperation(self.block, op);
                 break :blk_bool c.mlirOperationGetResult(op, 0);
             },
@@ -274,8 +258,6 @@ pub const ExpressionLowerer = struct {
             .Character => |char_lit| blk_character: {
                 // Create character constant with proper character type and attributes
                 const ty = c.mlirIntegerTypeGet(self.ctx, 8); // 8 bits for character
-                var state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("arith.constant"), self.fileLoc(char_lit.span));
-                c.mlirOperationStateAddResults(&state, 1, @ptrCast(&ty));
 
                 // Validate character value (should be a valid ASCII character)
                 if (char_lit.value > 127) {
@@ -283,13 +265,9 @@ pub const ExpressionLowerer = struct {
                     break :blk_character self.createConstant(0, char_lit.span);
                 }
 
-                const attr = c.mlirIntegerAttrGet(ty, @intCast(char_lit.value));
-                const value_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("value"));
                 const character_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("ora.character_literal"));
-                var attrs = [_]c.MlirNamedAttribute{ c.mlirNamedAttributeGet(value_id, attr), c.mlirNamedAttributeGet(character_id, c.mlirBoolAttrGet(self.ctx, 1)) };
-                c.mlirOperationStateAddAttributes(&state, attrs.len, &attrs);
-
-                const op = c.mlirOperationCreate(&state);
+                const custom_attrs = [_]c.MlirNamedAttribute{c.mlirNamedAttributeGet(character_id, c.mlirBoolAttrGet(self.ctx, 1))};
+                const op = self.ora_dialect.createArithConstantWithAttrs(@intCast(char_lit.value), ty, &custom_attrs, self.fileLoc(char_lit.span));
                 c.mlirBlockAppendOwnedOperation(self.block, op);
                 break :blk_character c.mlirOperationGetResult(op, 0);
             },
@@ -399,11 +377,8 @@ pub const ExpressionLowerer = struct {
 
                 // Create scf.if operation for short-circuit evaluation
                 const bool_ty = c.mlirIntegerTypeGet(self.ctx, 1);
-                var if_state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("scf.if"), self.fileLoc(bin.span));
-                c.mlirOperationStateAddOperands(&if_state, 1, @ptrCast(&lhs_val));
-                c.mlirOperationStateAddResults(&if_state, 1, @ptrCast(&bool_ty));
-
-                const if_op = c.mlirOperationCreate(&if_state);
+                const result_types = [_]c.MlirType{bool_ty};
+                const if_op = self.ora_dialect.createScfIf(lhs_val, &result_types, self.fileLoc(bin.span));
                 c.mlirBlockAppendOwnedOperation(self.block, if_op);
 
                 // Get then and else regions
@@ -416,21 +391,11 @@ pub const ExpressionLowerer = struct {
 
                 // Temporarily switch to then block for RHS evaluation
                 _ = self.block;
-                const then_lowerer = ExpressionLowerer{
-                    .ctx = self.ctx,
-                    .block = then_block,
-                    .type_mapper = self.type_mapper,
-                    .param_map = self.param_map,
-                    .storage_map = self.storage_map,
-                    .local_var_map = self.local_var_map,
-                    .locations = self.locations,
-                };
+                const then_lowerer = ExpressionLowerer.init(self.ctx, then_block, self.type_mapper, self.param_map, self.storage_map, self.local_var_map, self.locations, self.ora_dialect);
                 const rhs_val = then_lowerer.lowerExpression(bin.rhs);
 
                 // Yield RHS result
-                var then_yield_state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("scf.yield"), self.fileLoc(bin.span));
-                c.mlirOperationStateAddOperands(&then_yield_state, 1, @ptrCast(&rhs_val));
-                const then_yield_op = c.mlirOperationCreate(&then_yield_state);
+                const then_yield_op = self.ora_dialect.createScfYieldWithValues(&[_]c.MlirValue{rhs_val}, self.fileLoc(bin.span));
                 c.mlirBlockAppendOwnedOperation(then_block, then_yield_op);
 
                 // Create else block - return false
@@ -438,9 +403,7 @@ pub const ExpressionLowerer = struct {
                 c.mlirRegionAppendOwnedBlock(else_region, else_block);
 
                 const false_val = then_lowerer.createConstant(0, bin.span);
-                var else_yield_state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("scf.yield"), self.fileLoc(bin.span));
-                c.mlirOperationStateAddOperands(&else_yield_state, 1, @ptrCast(&false_val));
-                const else_yield_op = c.mlirOperationCreate(&else_yield_state);
+                const else_yield_op = self.ora_dialect.createScfYieldWithValues(&[_]c.MlirValue{false_val}, self.fileLoc(bin.span));
                 c.mlirBlockAppendOwnedOperation(else_block, else_yield_op);
 
                 return c.mlirOperationGetResult(if_op, 0);
@@ -451,11 +414,8 @@ pub const ExpressionLowerer = struct {
 
                 // Create scf.if operation for short-circuit evaluation
                 const bool_ty = c.mlirIntegerTypeGet(self.ctx, 1);
-                var if_state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("scf.if"), self.fileLoc(bin.span));
-                c.mlirOperationStateAddOperands(&if_state, 1, @ptrCast(&lhs_val));
-                c.mlirOperationStateAddResults(&if_state, 1, @ptrCast(&bool_ty));
-
-                const if_op = c.mlirOperationCreate(&if_state);
+                const result_types = [_]c.MlirType{bool_ty};
+                const if_op = self.ora_dialect.createScfIf(lhs_val, &result_types, self.fileLoc(bin.span));
                 c.mlirBlockAppendOwnedOperation(self.block, if_op);
 
                 // Get then and else regions
@@ -466,40 +426,20 @@ pub const ExpressionLowerer = struct {
                 const then_block = c.mlirBlockCreate(0, null, null);
                 c.mlirRegionAppendOwnedBlock(then_region, then_block);
 
-                const then_lowerer = ExpressionLowerer{
-                    .ctx = self.ctx,
-                    .block = then_block,
-                    .type_mapper = self.type_mapper,
-                    .param_map = self.param_map,
-                    .storage_map = self.storage_map,
-                    .local_var_map = self.local_var_map,
-                    .locations = self.locations,
-                };
+                const then_lowerer = ExpressionLowerer.init(self.ctx, then_block, self.type_mapper, self.param_map, self.storage_map, self.local_var_map, self.locations, self.ora_dialect);
                 const true_val = then_lowerer.createConstant(1, bin.span);
 
-                var then_yield_state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("scf.yield"), self.fileLoc(bin.span));
-                c.mlirOperationStateAddOperands(&then_yield_state, 1, @ptrCast(&true_val));
-                const then_yield_op = c.mlirOperationCreate(&then_yield_state);
+                const then_yield_op = self.ora_dialect.createScfYieldWithValues(&[_]c.MlirValue{true_val}, self.fileLoc(bin.span));
                 c.mlirBlockAppendOwnedOperation(then_block, then_yield_op);
 
                 // Create else block - evaluate RHS
                 const else_block = c.mlirBlockCreate(0, null, null);
                 c.mlirRegionAppendOwnedBlock(else_region, else_block);
 
-                const else_lowerer = ExpressionLowerer{
-                    .ctx = self.ctx,
-                    .block = else_block,
-                    .type_mapper = self.type_mapper,
-                    .param_map = self.param_map,
-                    .storage_map = self.storage_map,
-                    .local_var_map = self.local_var_map,
-                    .locations = self.locations,
-                };
+                const else_lowerer = ExpressionLowerer.init(self.ctx, else_block, self.type_mapper, self.param_map, self.storage_map, self.local_var_map, self.locations, self.ora_dialect);
                 const rhs_val = else_lowerer.lowerExpression(bin.rhs);
 
-                var else_yield_state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("scf.yield"), self.fileLoc(bin.span));
-                c.mlirOperationStateAddOperands(&else_yield_state, 1, @ptrCast(&rhs_val));
-                const else_yield_op = c.mlirOperationCreate(&else_yield_state);
+                const else_yield_op = self.ora_dialect.createScfYieldWithValues(&[_]c.MlirValue{rhs_val}, self.fileLoc(bin.span));
                 c.mlirBlockAppendOwnedOperation(else_block, else_yield_op);
 
                 return c.mlirOperationGetResult(if_op, 0);
@@ -590,22 +530,12 @@ pub const ExpressionLowerer = struct {
             if (pm.getParamIndex(identifier.name)) |param_index| {
                 // This is a function parameter - get the actual block argument
                 if (pm.getBlockArgument(identifier.name)) |block_arg| {
-                    std.debug.print("DEBUG: Function parameter {s} at index {d} - using block argument\n", .{ identifier.name, param_index });
                     return block_arg;
                 } else {
                     // Fallback to dummy value if block argument not found
                     std.debug.print("WARNING: Function parameter {s} at index {d} - block argument not found, using dummy value\n", .{ identifier.name, param_index });
                     return self.createErrorPlaceholder(identifier.span, "Missing function parameter block argument");
                 }
-            }
-        }
-
-        // Check if this is a local variable
-        if (self.local_var_map) |lvm| {
-            if (lvm.hasLocalVar(identifier.name)) {
-                // This is a local variable - return the stored value directly
-                std.debug.print("DEBUG: Loading local variable: {s}\n", .{identifier.name});
-                return lvm.getLocalVar(identifier.name).?;
             }
         }
 
@@ -621,10 +551,9 @@ pub const ExpressionLowerer = struct {
 
         if (is_storage_variable) {
             // This is a storage variable - use ora.sload
-            std.debug.print("DEBUG: Loading storage variable: {s}\n", .{identifier.name});
 
             // Create a memory manager to use the storage load operation
-            const memory_manager = @import("memory.zig").MemoryManager.init(self.ctx);
+            const memory_manager = @import("memory.zig").MemoryManager.init(self.ctx, self.ora_dialect);
             // TODO: Get the actual type from the storage map instead of hardcoding
             const result_type = if (std.mem.eql(u8, identifier.name, "status"))
                 c.mlirIntegerTypeGet(self.ctx, 1) // i1 for boolean
@@ -633,46 +562,49 @@ pub const ExpressionLowerer = struct {
             const load_op = memory_manager.createStorageLoad(identifier.name, result_type, self.fileLoc(identifier.span));
             c.mlirBlockAppendOwnedOperation(self.block, load_op);
             return c.mlirOperationGetResult(load_op, 0);
-        } else {
-            // This is a local variable - load from the allocated memory
-            std.debug.print("DEBUG: Loading local variable: {s}\n", .{identifier.name});
-
-            // Get the local variable reference from our map
-            if (self.local_var_map) |lvm| {
-                if (lvm.getLocalVar(identifier.name)) |local_var_ref| {
-                    // Load the value from the allocated memory
-                    var load_state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("scf.load"), self.fileLoc(identifier.span));
-
-                    // Add the local variable reference as operand
-                    c.mlirOperationStateAddOperands(&load_state, 1, @ptrCast(&local_var_ref));
-
-                    // Add the result type (the type of the stored value)
-                    const var_type = c.mlirValueGetType(local_var_ref);
-                    const memref_type = c.mlirShapedTypeGetElementType(var_type);
-                    c.mlirOperationStateAddResults(&load_state, 1, @ptrCast(&memref_type));
-
-                    const load_op = c.mlirOperationCreate(&load_state);
-                    c.mlirBlockAppendOwnedOperation(self.block, load_op);
-                    return c.mlirOperationGetResult(load_op, 0);
-                }
-            }
-
-            // If we can't find the local variable, this is an error
-            std.debug.print("ERROR: Undefined identifier: {s}\n", .{identifier.name});
-            return self.createErrorPlaceholder(identifier.span, "Undefined identifier");
         }
+
+        // Check if this is a local variable
+        if (self.local_var_map) |lvm| {
+            if (lvm.getLocalVar(identifier.name)) |local_var_ref| {
+                // Load the value from the allocated memory
+                const var_type = c.mlirValueGetType(local_var_ref);
+
+                // Check if it's a memref type
+                if (!c.mlirTypeIsAMemRef(var_type)) {
+                    // It's already a value, not a memref - return it directly
+                    return local_var_ref;
+                }
+
+                // It's a memref - create a load operation
+                var load_state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("memref.load"), self.fileLoc(identifier.span));
+                c.mlirOperationStateAddOperands(&load_state, 1, @ptrCast(&local_var_ref));
+
+                // Get the element type from the memref
+                const element_type = c.mlirShapedTypeGetElementType(var_type);
+                c.mlirOperationStateAddResults(&load_state, 1, @ptrCast(&element_type));
+
+                const load_op = c.mlirOperationCreate(&load_state);
+                c.mlirBlockAppendOwnedOperation(self.block, load_op);
+                return c.mlirOperationGetResult(load_op, 0);
+            }
+        }
+
+        // If we can't find the local variable, this is an error
+        std.debug.print("ERROR: Undefined identifier: {s}\n", .{identifier.name});
+        return self.createErrorPlaceholder(identifier.span, "Undefined identifier");
     }
 
     /// Lower function call expressions with proper argument type checking and conversion
     pub fn lowerCall(self: *const ExpressionLowerer, call: *const lib.ast.Expressions.CallExpr) c.MlirValue {
         // Process arguments with type checking and conversion
-        var args = std.ArrayList(c.MlirValue).init(std.heap.page_allocator);
-        defer args.deinit();
+        var args = std.ArrayList(c.MlirValue){};
+        defer args.deinit(std.heap.page_allocator);
 
         for (call.arguments) |arg| {
             const arg_value = self.lowerExpression(arg);
             // TODO: Add argument type checking against function signature
-            args.append(arg_value) catch {
+            args.append(std.heap.page_allocator, arg_value) catch {
                 // Create error placeholder and continue processing
                 std.debug.print("WARNING: Failed to append argument to function call\n", .{});
                 return self.createErrorPlaceholder(call.span, "Failed to append argument");
@@ -698,13 +630,7 @@ pub const ExpressionLowerer = struct {
     /// Create a constant value
     pub fn createConstant(self: *const ExpressionLowerer, value: i64, span: lib.ast.SourceSpan) c.MlirValue {
         const ty = c.mlirIntegerTypeGet(self.ctx, constants.DEFAULT_INTEGER_BITS);
-        var state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("arith.constant"), self.fileLoc(span));
-        c.mlirOperationStateAddResults(&state, 1, @ptrCast(&ty));
-        const attr = c.mlirIntegerAttrGet(ty, value);
-        const value_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("value"));
-        var attrs = [_]c.MlirNamedAttribute{c.mlirNamedAttributeGet(value_id, attr)};
-        c.mlirOperationStateAddAttributes(&state, attrs.len, &attrs);
-        const op = c.mlirOperationCreate(&state);
+        const op = self.ora_dialect.createArithConstant(value, ty, self.fileLoc(span));
         c.mlirBlockAppendOwnedOperation(self.block, op);
         return c.mlirOperationGetResult(op, 0);
     }
@@ -753,7 +679,7 @@ pub const ExpressionLowerer = struct {
                 if (self.storage_map) |sm| {
                     if (sm.hasStorageVariable(ident.name)) {
                         // Storage variable assignment - use ora.sstore
-                        const memory_manager = @import("memory.zig").MemoryManager.init(self.ctx);
+                        const memory_manager = @import("memory.zig").MemoryManager.init(self.ctx, self.ora_dialect);
                         const store_op = memory_manager.createStorageStore(value, ident.name, self.fileLoc(assign.span));
                         c.mlirBlockAppendOwnedOperation(self.block, store_op);
                         return value;
@@ -763,9 +689,7 @@ pub const ExpressionLowerer = struct {
                 // Create new local variable if not found
                 const var_type = c.mlirValueGetType(value);
                 const memref_type = c.mlirMemRefTypeGet(var_type, 0, null, c.mlirAttributeGetNull(), c.mlirAttributeGetNull());
-                var alloca_state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("memref.alloca"), self.fileLoc(assign.span));
-                c.mlirOperationStateAddResults(&alloca_state, 1, @ptrCast(&memref_type));
-                const alloca_op = c.mlirOperationCreate(&alloca_state);
+                const alloca_op = self.ora_dialect.createMemrefAlloca(memref_type, self.fileLoc(assign.span));
                 c.mlirBlockAppendOwnedOperation(self.block, alloca_op);
                 const alloca_result = c.mlirOperationGetResult(alloca_op, 0);
 
@@ -888,10 +812,7 @@ pub const ExpressionLowerer = struct {
         switch (cast.cast_type) {
             .Unsafe => {
                 // Unsafe cast - use bitcast or truncate/extend as needed
-                var state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("arith.bitcast"), self.fileLoc(cast.span));
-                c.mlirOperationStateAddOperands(&state, 1, @ptrCast(&operand));
-                c.mlirOperationStateAddResults(&state, 1, @ptrCast(&target_mlir_type));
-                const op = c.mlirOperationCreate(&state);
+                const op = self.ora_dialect.createArithBitcast(operand, target_mlir_type, self.fileLoc(cast.span));
                 c.mlirBlockAppendOwnedOperation(self.block, op);
                 return c.mlirOperationGetResult(op, 0);
             },
@@ -899,19 +820,13 @@ pub const ExpressionLowerer = struct {
                 // Safe cast - add runtime checks
                 // For now, use the same as unsafe cast
                 // TODO: Add runtime type checking
-                var state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("arith.bitcast"), self.fileLoc(cast.span));
-                c.mlirOperationStateAddOperands(&state, 1, @ptrCast(&operand));
-                c.mlirOperationStateAddResults(&state, 1, @ptrCast(&target_mlir_type));
-                const op = c.mlirOperationCreate(&state);
+                const op = self.ora_dialect.createArithBitcast(operand, target_mlir_type, self.fileLoc(cast.span));
                 c.mlirBlockAppendOwnedOperation(self.block, op);
                 return c.mlirOperationGetResult(op, 0);
             },
             .Forced => {
                 // Forced cast - bypass all checks
-                var state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("arith.bitcast"), self.fileLoc(cast.span));
-                c.mlirOperationStateAddOperands(&state, 1, @ptrCast(&operand));
-                c.mlirOperationStateAddResults(&state, 1, @ptrCast(&target_mlir_type));
-                const op = c.mlirOperationCreate(&state);
+                const op = self.ora_dialect.createArithBitcast(operand, target_mlir_type, self.fileLoc(cast.span));
                 c.mlirBlockAppendOwnedOperation(self.block, op);
                 return c.mlirOperationGetResult(op, 0);
             },
@@ -978,21 +893,21 @@ pub const ExpressionLowerer = struct {
         }
 
         // Lower all tuple elements
-        var element_values = std.ArrayList(c.MlirValue).init(std.heap.page_allocator);
-        defer element_values.deinit();
+        var element_values = std.ArrayList(c.MlirValue){};
+        defer element_values.deinit(std.heap.page_allocator);
 
         for (tuple.elements) |element| {
             const value = self.lowerExpression(element);
-            element_values.append(value) catch {};
+            element_values.append(std.heap.page_allocator, value) catch {};
         }
 
         // Create tuple type from element types
-        var element_types = std.ArrayList(c.MlirType).init(std.heap.page_allocator);
-        defer element_types.deinit();
+        var element_types = std.ArrayList(c.MlirType){};
+        defer element_types.deinit(std.heap.page_allocator);
 
         for (element_values.items) |value| {
             const ty = c.mlirValueGetType(value);
-            element_types.append(ty) catch {};
+            element_types.append(std.heap.page_allocator, ty) catch {};
         }
 
         // Create tuple using llvm.insertvalue operations
@@ -1048,8 +963,8 @@ pub const ExpressionLowerer = struct {
         c.mlirOperationStateAddResults(&state, 1, @ptrCast(&result_ty));
 
         // Create attributes for the quantified expression
-        var attributes = std.ArrayList(c.MlirNamedAttribute).init(std.heap.page_allocator);
-        defer attributes.deinit();
+        var attributes = std.ArrayList(c.MlirNamedAttribute){};
+        defer attributes.deinit(std.heap.page_allocator);
 
         // Add verification metadata if present
         if (quantified.verification_metadata) |metadata| {
@@ -1060,29 +975,29 @@ pub const ExpressionLowerer = struct {
             };
             const quantifier_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("quantifier"));
             const quantifier_attr = c.mlirStringAttrGet(self.ctx, c.mlirStringRefCreateFromCString(quantifier_type_str.ptr));
-            attributes.append(c.mlirNamedAttributeGet(quantifier_id, quantifier_attr)) catch {};
+            attributes.append(std.heap.page_allocator, c.mlirNamedAttributeGet(quantifier_id, quantifier_attr)) catch {};
 
             // Add bound variable information from metadata
             const var_name_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("variable"));
             const var_name_attr = c.mlirStringAttrGet(self.ctx, c.mlirStringRefCreateFromCString(metadata.variable_name.ptr));
-            attributes.append(c.mlirNamedAttributeGet(var_name_id, var_name_attr)) catch {};
+            attributes.append(std.heap.page_allocator, c.mlirNamedAttributeGet(var_name_id, var_name_attr)) catch {};
 
             const var_type_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("variable_type"));
             const var_type_str = self.getTypeString(metadata.variable_type);
             const var_type_attr = c.mlirStringAttrGet(self.ctx, c.mlirStringRefCreateFromCString(var_type_str.ptr));
-            attributes.append(c.mlirNamedAttributeGet(var_type_id, var_type_attr)) catch {};
+            attributes.append(std.heap.page_allocator, c.mlirNamedAttributeGet(var_type_id, var_type_attr)) catch {};
 
             // Add condition presence from metadata
             const has_condition_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("ora.has_condition"));
             const has_condition_attr = c.mlirBoolAttrGet(self.ctx, if (metadata.has_condition) 1 else 0);
-            attributes.append(c.mlirNamedAttributeGet(has_condition_id, has_condition_attr)) catch {};
+            attributes.append(std.heap.page_allocator, c.mlirNamedAttributeGet(has_condition_id, has_condition_attr)) catch {};
 
             // Add span information from metadata
             const span_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("ora.span"));
             const span_str = std.fmt.allocPrint(std.heap.page_allocator, "{}:{}", .{ metadata.span.line, metadata.span.column }) catch "0:0";
             defer std.heap.page_allocator.free(span_str);
             const span_attr = c.mlirStringAttrGet(self.ctx, c.mlirStringRefCreateFromCString(span_str.ptr));
-            attributes.append(c.mlirNamedAttributeGet(span_id, span_attr)) catch {};
+            attributes.append(std.heap.page_allocator, c.mlirNamedAttributeGet(span_id, span_attr)) catch {};
         } else {
             // Fallback to original implementation if no metadata
             const quantifier_type_str = switch (quantified.quantifier) {
@@ -1091,23 +1006,23 @@ pub const ExpressionLowerer = struct {
             };
             const quantifier_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("quantifier"));
             const quantifier_attr = c.mlirStringAttrGet(self.ctx, c.mlirStringRefCreateFromCString(quantifier_type_str.ptr));
-            attributes.append(c.mlirNamedAttributeGet(quantifier_id, quantifier_attr)) catch {};
+            attributes.append(std.heap.page_allocator, c.mlirNamedAttributeGet(quantifier_id, quantifier_attr)) catch {};
 
             // Add bound variable name attribute
             const var_name_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("variable"));
             const var_name_attr = c.mlirStringAttrGet(self.ctx, c.mlirStringRefCreateFromCString(quantified.variable.ptr));
-            attributes.append(c.mlirNamedAttributeGet(var_name_id, var_name_attr)) catch {};
+            attributes.append(std.heap.page_allocator, c.mlirNamedAttributeGet(var_name_id, var_name_attr)) catch {};
 
             // Add variable type attribute
             const var_type_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("variable_type"));
             const var_type_str = self.getTypeString(quantified.variable_type);
             const var_type_attr = c.mlirStringAttrGet(self.ctx, c.mlirStringRefCreateFromCString(var_type_str.ptr));
-            attributes.append(c.mlirNamedAttributeGet(var_type_id, var_type_attr)) catch {};
+            attributes.append(std.heap.page_allocator, c.mlirNamedAttributeGet(var_type_id, var_type_attr)) catch {};
 
             // Add condition presence indicator for verification analysis
             const has_condition_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("ora.has_condition"));
             const has_condition_attr = c.mlirBoolAttrGet(self.ctx, if (quantified.condition != null) 1 else 0);
-            attributes.append(c.mlirNamedAttributeGet(has_condition_id, has_condition_attr)) catch {};
+            attributes.append(std.heap.page_allocator, c.mlirNamedAttributeGet(has_condition_id, has_condition_attr)) catch {};
         }
 
         // Add verification attributes if present
@@ -1119,7 +1034,7 @@ pub const ExpressionLowerer = struct {
                         c.mlirStringAttrGet(self.ctx, c.mlirStringRefCreateFromCString(value.ptr))
                     else
                         c.mlirStringAttrGet(self.ctx, c.mlirStringRefCreateFromCString(""));
-                    attributes.append(c.mlirNamedAttributeGet(attr_name_id, attr_value)) catch {};
+                    attributes.append(std.heap.page_allocator, c.mlirNamedAttributeGet(attr_name_id, attr_value)) catch {};
                 }
             }
         }
@@ -1127,22 +1042,22 @@ pub const ExpressionLowerer = struct {
         // Add verification marker attribute
         const verification_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("ora.verification"));
         const verification_attr = c.mlirBoolAttrGet(self.ctx, 1);
-        attributes.append(c.mlirNamedAttributeGet(verification_id, verification_attr)) catch {};
+        attributes.append(std.heap.page_allocator, c.mlirNamedAttributeGet(verification_id, verification_attr)) catch {};
 
         // Add formal verification marker for analysis passes
         const formal_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("ora.formal"));
         const formal_attr = c.mlirBoolAttrGet(self.ctx, 1);
-        attributes.append(c.mlirNamedAttributeGet(formal_id, formal_attr)) catch {};
+        attributes.append(std.heap.page_allocator, c.mlirNamedAttributeGet(formal_id, formal_attr)) catch {};
 
         // Add quantified expression marker for verification tools
         const quantified_marker_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("ora.quantified"));
         const quantified_marker_attr = c.mlirBoolAttrGet(self.ctx, 1);
-        attributes.append(c.mlirNamedAttributeGet(quantified_marker_id, quantified_marker_attr)) catch {};
+        attributes.append(std.heap.page_allocator, c.mlirNamedAttributeGet(quantified_marker_id, quantified_marker_attr)) catch {};
 
         // Add verification context attribute (can be used by verification passes)
         const context_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("ora.verification_context"));
         const context_attr = c.mlirStringAttrGet(self.ctx, c.mlirStringRefCreateFromCString("quantified_expression"));
-        attributes.append(c.mlirNamedAttributeGet(context_id, context_attr)) catch {};
+        attributes.append(std.heap.page_allocator, c.mlirNamedAttributeGet(context_id, context_attr)) catch {};
 
         // Add bound variable domain information for verification analysis
         const domain_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("ora.domain"));
@@ -1151,7 +1066,7 @@ pub const ExpressionLowerer = struct {
             .Exists => "existential",
         };
         const domain_attr = c.mlirStringAttrGet(self.ctx, c.mlirStringRefCreateFromCString(domain_str.ptr));
-        attributes.append(c.mlirNamedAttributeGet(domain_id, domain_attr)) catch {};
+        attributes.append(std.heap.page_allocator, c.mlirNamedAttributeGet(domain_id, domain_attr)) catch {};
 
         // Add all attributes to the operation state
         c.mlirOperationStateAddAttributes(&state, @intCast(attributes.items.len), attributes.items.ptr);
@@ -1173,15 +1088,7 @@ pub const ExpressionLowerer = struct {
             c.mlirRegionAppendOwnedBlock(condition_region, condition_block);
 
             // Create a new expression lowerer for the condition block
-            const condition_lowerer = ExpressionLowerer{
-                .ctx = self.ctx,
-                .block = condition_block,
-                .type_mapper = self.type_mapper,
-                .param_map = self.param_map,
-                .storage_map = self.storage_map,
-                .local_var_map = self.local_var_map,
-                .locations = self.locations,
-            };
+            const condition_lowerer = ExpressionLowerer.init(self.ctx, condition_block, self.type_mapper, self.param_map, self.storage_map, self.local_var_map, self.locations, self.ora_dialect);
 
             // Lower the condition expression
             const condition_value = condition_lowerer.lowerExpression(condition);
@@ -1199,15 +1106,7 @@ pub const ExpressionLowerer = struct {
         c.mlirRegionAppendOwnedBlock(body_region, body_block);
 
         // Create a new expression lowerer for the body block
-        const body_lowerer = ExpressionLowerer{
-            .ctx = self.ctx,
-            .block = body_block,
-            .type_mapper = self.type_mapper,
-            .param_map = self.param_map,
-            .storage_map = self.storage_map,
-            .local_var_map = self.local_var_map,
-            .locations = self.locations,
-        };
+        const body_lowerer = ExpressionLowerer.init(self.ctx, body_block, self.type_mapper, self.param_map, self.storage_map, self.local_var_map, self.locations, self.ora_dialect);
 
         // Lower the body expression
         const body_value = body_lowerer.lowerExpression(quantified.body);
@@ -1275,11 +1174,7 @@ pub const ExpressionLowerer = struct {
 
         // Cast to error type
         const target_type = self.type_mapper.toMlirType(error_cast.target_type);
-        var state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("arith.bitcast"), self.fileLoc(error_cast.span));
-        c.mlirOperationStateAddOperands(&state, 1, @ptrCast(&operand));
-        c.mlirOperationStateAddResults(&state, 1, @ptrCast(&target_type));
-
-        const op = c.mlirOperationCreate(&state);
+        const op = self.ora_dialect.createArithBitcast(operand, target_type, self.fileLoc(error_cast.span));
         c.mlirBlockAppendOwnedOperation(self.block, op);
         return c.mlirOperationGetResult(op, 0);
     }
@@ -1313,12 +1208,12 @@ pub const ExpressionLowerer = struct {
         }
 
         // Create struct with field initialization
-        var field_values = std.ArrayList(c.MlirValue).init(std.heap.page_allocator);
-        defer field_values.deinit();
+        var field_values = std.ArrayList(c.MlirValue){};
+        defer field_values.deinit(std.heap.page_allocator);
 
         for (struct_inst.fields) |field| {
             const field_value = self.lowerExpression(field.value);
-            field_values.append(field_value) catch {};
+            field_values.append(std.heap.page_allocator, field_value) catch {};
         }
 
         // Create ora.struct_instantiate operation
@@ -1331,13 +1226,13 @@ pub const ExpressionLowerer = struct {
         c.mlirOperationStateAddResults(&state, 1, @ptrCast(&result_ty));
 
         // Add field names as attributes
-        var attrs = std.ArrayList(c.MlirNamedAttribute).init(std.heap.page_allocator);
-        defer attrs.deinit();
+        var attrs = std.ArrayList(c.MlirNamedAttribute){};
+        defer attrs.deinit(std.heap.page_allocator);
 
         for (struct_inst.fields) |field| {
             const field_name_attr = c.mlirStringAttrGet(self.ctx, c.mlirStringRefCreateFromCString(field.name.ptr));
             const field_name_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("field_name"));
-            attrs.append(c.mlirNamedAttributeGet(field_name_id, field_name_attr)) catch {};
+            attrs.append(std.heap.page_allocator, c.mlirNamedAttributeGet(field_name_id, field_name_attr)) catch {};
         }
 
         if (attrs.items.len > 0) {
@@ -1408,18 +1303,11 @@ pub const ExpressionLowerer = struct {
         const region = c.mlirOperationGetRegion(op, 0);
         const block = c.mlirRegionGetFirstBlock(region);
 
-        const stmt_lowerer = StatementLowerer.init(
-            self.ctx,
-            block,
-            self.type_mapper,
-            self, // expr_lowerer
-            self.param_map,
-            self.storage_map,
-            @constCast(self.local_var_map),
-            self.locations,
-            null, // symbol_table
+        const stmt_lowerer = StatementLowerer.init(self.ctx, block, self.type_mapper, self, // expr_lowerer
+            self.param_map, self.storage_map, @constCast(self.local_var_map), self.locations, null, // symbol_table
             std.heap.page_allocator, // allocator
-        );
+            null, // function_return_type - not available in expression context
+            self.ora_dialect);
 
         // Lower the block statements
         for (labeled_block.block.statements) |stmt| {
@@ -1519,17 +1407,37 @@ pub const ExpressionLowerer = struct {
         const bool_ty = c.mlirIntegerTypeGet(self.ctx, 1);
         c.mlirOperationStateAddResults(&state, 1, @ptrCast(&bool_ty));
 
-        const predicate_attr = c.mlirStringRefCreateFromCString(predicate.ptr);
+        // Convert string predicate to integer value
+        const predicate_value = self.predicateStringToInt(predicate);
+        const predicate_attr = c.mlirIntegerAttrGet(c.mlirIntegerTypeGet(self.ctx, 64), predicate_value);
         const predicate_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("predicate"));
-        const predicate_attr_value = c.mlirStringAttrGet(self.ctx, predicate_attr);
         var attrs = [_]c.MlirNamedAttribute{
-            c.mlirNamedAttributeGet(predicate_id, predicate_attr_value),
+            c.mlirNamedAttributeGet(predicate_id, predicate_attr),
         };
+
         c.mlirOperationStateAddAttributes(&state, attrs.len, &attrs);
 
         const op = c.mlirOperationCreate(&state);
         c.mlirBlockAppendOwnedOperation(self.block, op);
         return c.mlirOperationGetResult(op, 0);
+    }
+
+    /// Convert predicate string to integer value for arith.cmpi
+    fn predicateStringToInt(_: *const ExpressionLowerer, predicate: []const u8) i64 {
+        if (std.mem.eql(u8, predicate, "eq")) return 0;
+        if (std.mem.eql(u8, predicate, "ne")) return 1;
+        if (std.mem.eql(u8, predicate, "slt")) return 2;
+        if (std.mem.eql(u8, predicate, "sle")) return 3;
+        if (std.mem.eql(u8, predicate, "sgt")) return 4;
+        if (std.mem.eql(u8, predicate, "sge")) return 5;
+        if (std.mem.eql(u8, predicate, "ult")) return 6;
+        if (std.mem.eql(u8, predicate, "ule")) return 7;
+        if (std.mem.eql(u8, predicate, "ugt")) return 8;
+        if (std.mem.eql(u8, predicate, "uge")) return 9;
+
+        // Default to equality if unknown predicate
+        std.debug.print("WARNING: Unknown predicate '{s}', defaulting to 'eq' (0)\n", .{predicate});
+        return 0;
     }
 
     /// Helper function to get common type for binary operations
@@ -1563,38 +1471,21 @@ pub const ExpressionLowerer = struct {
 
         // For now, use simple bitcast for type conversion
         // TODO: Implement proper type conversion semantics (extend, truncate, etc.)
-        var state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("arith.bitcast"), self.fileLoc(span));
-        c.mlirOperationStateAddOperands(&state, 1, @ptrCast(&value));
-        c.mlirOperationStateAddResults(&state, 1, @ptrCast(&target_ty));
-        const op = c.mlirOperationCreate(&state);
+        const op = self.ora_dialect.createArithBitcast(value, target_ty, self.fileLoc(span));
         c.mlirBlockAppendOwnedOperation(self.block, op);
         return c.mlirOperationGetResult(op, 0);
     }
 
     /// Helper function to create a boolean constant
     pub fn createBoolConstant(self: *const ExpressionLowerer, value: bool, span: lib.ast.SourceSpan) c.MlirValue {
-        const ty = c.mlirIntegerTypeGet(self.ctx, 1);
-        var state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("arith.constant"), self.fileLoc(span));
-        c.mlirOperationStateAddResults(&state, 1, @ptrCast(&ty));
-        const int_value: i64 = if (value) 1 else 0;
-        const attr = c.mlirIntegerAttrGet(ty, int_value);
-        const value_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("value"));
-        var attrs = [_]c.MlirNamedAttribute{c.mlirNamedAttributeGet(value_id, attr)};
-        c.mlirOperationStateAddAttributes(&state, attrs.len, &attrs);
-        const op = c.mlirOperationCreate(&state);
+        const op = self.ora_dialect.createArithConstantBool(value, self.fileLoc(span));
         c.mlirBlockAppendOwnedOperation(self.block, op);
         return c.mlirOperationGetResult(op, 0);
     }
 
     /// Helper function to create a typed constant
     pub fn createTypedConstant(self: *const ExpressionLowerer, value: i64, ty: c.MlirType, span: lib.ast.SourceSpan) c.MlirValue {
-        var state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("arith.constant"), self.fileLoc(span));
-        c.mlirOperationStateAddResults(&state, 1, @ptrCast(&ty));
-        const attr = c.mlirIntegerAttrGet(ty, value);
-        const value_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("value"));
-        var attrs = [_]c.MlirNamedAttribute{c.mlirNamedAttributeGet(value_id, attr)};
-        c.mlirOperationStateAddAttributes(&state, attrs.len, &attrs);
-        const op = c.mlirOperationCreate(&state);
+        const op = self.ora_dialect.createArithConstant(value, ty, self.fileLoc(span));
         c.mlirBlockAppendOwnedOperation(self.block, op);
         return c.mlirOperationGetResult(op, 0);
     }
@@ -1661,7 +1552,7 @@ pub const ExpressionLowerer = struct {
                 if (self.storage_map) |sm| {
                     if (sm.hasStorageVariable(ident.name)) {
                         // Store to storage variable using ora.sstore
-                        const memory_manager = @import("memory.zig").MemoryManager.init(self.ctx);
+                        const memory_manager = @import("memory.zig").MemoryManager.init(self.ctx, self.ora_dialect);
                         const store_op = memory_manager.createStorageStore(value, ident.name, self.fileLoc(span));
                         c.mlirBlockAppendOwnedOperation(self.block, store_op);
                         return;
@@ -1688,22 +1579,12 @@ pub const ExpressionLowerer = struct {
 
     /// Create struct field extraction using llvm.extractvalue
     pub fn createStructFieldExtract(self: *const ExpressionLowerer, struct_val: c.MlirValue, field_name: []const u8, span: lib.ast.SourceSpan) c.MlirValue {
+        _ = field_name; // TODO: Use field_name for proper field index resolution
         // For now, create a placeholder operation with field metadata
         // TODO: Implement proper struct field index resolution
         const result_ty = c.mlirIntegerTypeGet(self.ctx, constants.DEFAULT_INTEGER_BITS);
-        var state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("llvm.extractvalue"), self.fileLoc(span));
-        c.mlirOperationStateAddOperands(&state, 1, @ptrCast(&struct_val));
-        c.mlirOperationStateAddResults(&state, 1, @ptrCast(&result_ty));
-
-        // Add field name as attribute
-        const field_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("field"));
-        const field_attr = c.mlirStringAttrGet(self.ctx, c.mlirStringRefCreateFromCString(field_name.ptr));
-        var attrs = [_]c.MlirNamedAttribute{
-            c.mlirNamedAttributeGet(field_id, field_attr),
-        };
-        c.mlirOperationStateAddAttributes(&state, attrs.len, &attrs);
-
-        const op = c.mlirOperationCreate(&state);
+        const indices = [_]u32{0}; // Placeholder index
+        const op = self.ora_dialect.createLlvmExtractvalue(struct_val, &indices, result_ty, self.fileLoc(span));
         c.mlirBlockAppendOwnedOperation(self.block, op);
         return c.mlirOperationGetResult(op, 0);
     }
@@ -1781,28 +1662,9 @@ pub const ExpressionLowerer = struct {
     pub fn createDirectFunctionCall(self: *const ExpressionLowerer, function_name: []const u8, args: []c.MlirValue, span: lib.ast.SourceSpan) c.MlirValue {
         // TODO: Look up function signature for proper return type
         const result_ty = c.mlirIntegerTypeGet(self.ctx, constants.DEFAULT_INTEGER_BITS);
+        const result_types = [_]c.MlirType{result_ty};
 
-        var state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("func.call"), self.fileLoc(span));
-        c.mlirOperationStateAddOperands(&state, @intCast(args.len), args.ptr);
-        c.mlirOperationStateAddResults(&state, 1, @ptrCast(&result_ty));
-
-        // Add the callee name as a string attribute
-        var callee_buffer: [256]u8 = undefined;
-        const name_len = @min(function_name.len, callee_buffer.len - 1);
-        for (0..name_len) |i| {
-            callee_buffer[i] = function_name[i];
-        }
-        callee_buffer[name_len] = 0; // null-terminate
-
-        const callee_str = c.mlirStringRefCreateFromCString(&callee_buffer[0]);
-        const callee_attr = c.mlirStringAttrGet(self.ctx, callee_str);
-        const callee_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("callee"));
-        var attrs = [_]c.MlirNamedAttribute{
-            c.mlirNamedAttributeGet(callee_id, callee_attr),
-        };
-        c.mlirOperationStateAddAttributes(&state, attrs.len, &attrs);
-
-        const op = c.mlirOperationCreate(&state);
+        const op = self.ora_dialect.createFuncCall(function_name, args, &result_types, self.fileLoc(span));
         c.mlirBlockAppendOwnedOperation(self.block, op);
         return c.mlirOperationGetResult(op, 0);
     }
@@ -1817,15 +1679,15 @@ pub const ExpressionLowerer = struct {
         var state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("ora.method_call"), self.fileLoc(span));
 
         // Add target (contract instance) as first operand, then arguments
-        var all_operands = std.ArrayList(c.MlirValue).init(std.heap.page_allocator);
-        defer all_operands.deinit();
+        var all_operands = std.ArrayList(c.MlirValue){};
+        defer all_operands.deinit(std.heap.page_allocator);
 
-        all_operands.append(target) catch {
+        all_operands.append(std.heap.page_allocator, target) catch {
             std.debug.print("WARNING: Failed to append target to method call\n", .{});
             return self.createErrorPlaceholder(span, "Failed to append target");
         };
         for (args) |arg| {
-            all_operands.append(arg) catch {
+            all_operands.append(std.heap.page_allocator, arg) catch {
                 std.debug.print("WARNING: Failed to append argument to method call\n", .{});
                 return self.createErrorPlaceholder(span, "Failed to append argument");
             };
@@ -1910,27 +1772,27 @@ pub const ExpressionLowerer = struct {
         // Add verification marker
         const verification_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("ora.verification"));
         const verification_attr = c.mlirBoolAttrGet(self.ctx, 1);
-        attributes.append(c.mlirNamedAttributeGet(verification_id, verification_attr)) catch {};
+        attributes.append(std.heap.page_allocator, c.mlirNamedAttributeGet(verification_id, verification_attr)) catch {};
 
         // Add verification type (quantified, assertion, invariant, etc.)
         const type_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("ora.verification_type"));
         const type_attr = c.mlirStringAttrGet(self.ctx, c.mlirStringRefCreateFromCString(verification_type.ptr));
-        attributes.append(c.mlirNamedAttributeGet(type_id, type_attr)) catch {};
+        attributes.append(std.heap.page_allocator, c.mlirNamedAttributeGet(type_id, type_attr)) catch {};
 
         // Add verification context
         const context_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("ora.verification_context"));
         const context_attr = c.mlirStringAttrGet(self.ctx, c.mlirStringRefCreateFromCString(context.ptr));
-        attributes.append(c.mlirNamedAttributeGet(context_id, context_attr)) catch {};
+        attributes.append(std.heap.page_allocator, c.mlirNamedAttributeGet(context_id, context_attr)) catch {};
 
         // Add formal verification marker for analysis passes
         const formal_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("ora.formal"));
         const formal_attr = c.mlirBoolAttrGet(self.ctx, 1);
-        attributes.append(c.mlirNamedAttributeGet(formal_id, formal_attr)) catch {};
+        attributes.append(std.heap.page_allocator, c.mlirNamedAttributeGet(formal_id, formal_attr)) catch {};
     }
 
     /// Create verification metadata for quantified expressions and other formal verification constructs
     pub fn createVerificationMetadata(self: *const ExpressionLowerer, quantifier_type: lib.ast.Expressions.QuantifierType, variable_name: []const u8, variable_type: lib.ast.Types.TypeInfo) std.ArrayList(c.MlirNamedAttribute) {
-        var metadata = std.ArrayList(c.MlirNamedAttribute).init(std.heap.page_allocator);
+        var metadata = std.ArrayList(c.MlirNamedAttribute){};
 
         // Add quantifier type
         const quantifier_str = switch (quantifier_type) {
@@ -1939,17 +1801,17 @@ pub const ExpressionLowerer = struct {
         };
         const quantifier_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("quantifier"));
         const quantifier_attr = c.mlirStringAttrGet(self.ctx, c.mlirStringRefCreateFromCString(quantifier_str.ptr));
-        metadata.append(c.mlirNamedAttributeGet(quantifier_id, quantifier_attr)) catch {};
+        metadata.append(std.heap.page_allocator, c.mlirNamedAttributeGet(quantifier_id, quantifier_attr)) catch {};
 
         // Add bound variable information
         const var_name_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("variable"));
         const var_name_attr = c.mlirStringAttrGet(self.ctx, c.mlirStringRefCreateFromCString(variable_name.ptr));
-        metadata.append(c.mlirNamedAttributeGet(var_name_id, var_name_attr)) catch {};
+        metadata.append(std.heap.page_allocator, c.mlirNamedAttributeGet(var_name_id, var_name_attr)) catch {};
 
         const var_type_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("variable_type"));
         const var_type_str = self.getTypeString(variable_type);
         const var_type_attr = c.mlirStringAttrGet(self.ctx, c.mlirStringRefCreateFromCString(var_type_str.ptr));
-        metadata.append(c.mlirNamedAttributeGet(var_type_id, var_type_attr)) catch {};
+        metadata.append(std.heap.page_allocator, c.mlirNamedAttributeGet(var_type_id, var_type_attr)) catch {};
 
         // Add verification attributes
         self.addVerificationAttributes(&metadata, "quantified", "formal_verification");
@@ -1962,9 +1824,7 @@ pub const ExpressionLowerer = struct {
         const element_ty = c.mlirIntegerTypeGet(self.ctx, constants.DEFAULT_INTEGER_BITS);
         const memref_ty = c.mlirMemRefTypeGet(element_ty, 1, @ptrCast(&@as(i64, 0)), c.mlirAttributeGetNull(), c.mlirAttributeGetNull());
 
-        var state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("memref.alloca"), self.fileLoc(span));
-        c.mlirOperationStateAddResults(&state, 1, @ptrCast(&memref_ty));
-        const op = c.mlirOperationCreate(&state);
+        const op = self.ora_dialect.createMemrefAlloca(memref_ty, self.fileLoc(span));
         c.mlirBlockAppendOwnedOperation(self.block, op);
         return c.mlirOperationGetResult(op, 0);
     }
@@ -1976,9 +1836,7 @@ pub const ExpressionLowerer = struct {
         const array_size = @as(i64, @intCast(elements.len));
         const memref_ty = c.mlirMemRefTypeGet(element_ty, 1, @ptrCast(&array_size), c.mlirAttributeGetNull(), c.mlirAttributeGetNull());
 
-        var alloca_state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("memref.alloca"), self.fileLoc(span));
-        c.mlirOperationStateAddResults(&alloca_state, 1, @ptrCast(&memref_ty));
-        const alloca_op = c.mlirOperationCreate(&alloca_state);
+        const alloca_op = self.ora_dialect.createMemrefAlloca(memref_ty, self.fileLoc(span));
         c.mlirBlockAppendOwnedOperation(self.block, alloca_op);
         const array_ref = c.mlirOperationGetResult(alloca_op, 0);
 
@@ -2027,12 +1885,12 @@ pub const ExpressionLowerer = struct {
         var state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("ora.struct_init"), self.fileLoc(span));
 
         // Add field values as operands
-        var field_values = std.ArrayList(c.MlirValue).init(std.heap.page_allocator);
-        defer field_values.deinit();
+        var field_values = std.ArrayList(c.MlirValue){};
+        defer field_values.deinit(std.heap.page_allocator);
 
         for (fields) |field| {
             const field_val = self.lowerExpression(field.value);
-            field_values.append(field_val) catch {
+            field_values.append(std.heap.page_allocator, field_val) catch {
                 std.debug.print("WARNING: Failed to append field value to struct initialization\n", .{});
                 return self.createErrorPlaceholder(span, "Failed to append field value");
             };

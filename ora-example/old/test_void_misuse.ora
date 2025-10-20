@@ -1,6 +1,0 @@
-contract VoidTest {
-    // This should fail since void is not a valid parameter type
-    pub fn test(param: void) void {
-        // Function body
-    }
-}

@@ -28,7 +28,7 @@ contract SwitchTest {
             },
             else => {
                 result = 999;
-            },
+            }
         }
     }
 }

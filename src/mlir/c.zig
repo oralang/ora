@@ -5,4 +5,7 @@ pub const c = @cImport({
     @cInclude("mlir-c/Support.h");
     @cInclude("mlir-c/Pass.h");
     @cInclude("mlir-c/RegisterEverything.h");
+
+    // Ora dialect C interface
+    // @cInclude("OraDialectC.h"); // Not needed for unregistered mode
 });

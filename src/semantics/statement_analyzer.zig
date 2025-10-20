@@ -259,6 +259,8 @@ fn checkSwitchPatterns(
                     .String => if (ot.getCategory() != .String) try issues.append(lit.span),
                     .Address => if (ot.getCategory() != .Address) try issues.append(lit.span),
                     .Hex, .Binary => if (!ot.isUnsignedInteger()) try issues.append(lit.span),
+                    .Character => if (!ot.isUnsignedInteger()) try issues.append(lit.span),
+                    .Bytes => if (!ot.isUnsignedInteger()) try issues.append(lit.span),
                 };
                 // Duplicate literal detection (key by category + value when available)
                 const key: []const u8 = switch (lit.value) {
@@ -268,6 +270,12 @@ fn checkSwitchPatterns(
                     .Address => lit.value.Address.value,
                     .Hex => lit.value.Hex.value,
                     .Binary => lit.value.Binary.value,
+                    .Character => blk: {
+                        var buf: [4]u8 = undefined;
+                        const result = std.fmt.bufPrint(&buf, "{c}", .{lit.value.Character.value}) catch "?";
+                        break :blk result;
+                    },
+                    .Bytes => lit.value.Bytes.value,
                 };
                 if (seen_literals.contains(key)) {
                     try issues.append(lit.span);
@@ -337,7 +345,7 @@ fn checkSwitchPatterns(
                                 const digits = stripPrefixDigits(raw, 2);
                                 return std.fmt.parseInt(u128, digits, 2) catch null;
                             },
-                            .Bool, .String, .Address => null,
+                            .Bool, .String, .Address, .Character, .Bytes => null,
                         };
                     }
                 };

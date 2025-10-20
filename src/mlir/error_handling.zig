@@ -3,6 +3,13 @@ const c = @import("c.zig").c;
 const lib = @import("ora_lib");
 
 /// Comprehensive error handling and validation system for MLIR lowering
+///
+/// Memory ownership:
+/// - Owns: errors ArrayList, warnings ArrayList, context_stack ArrayList
+/// - Owns: All error/warning message strings (via dupe)
+/// - Owns: All suggestion strings (via dupe)
+/// - Borrows: span references from AST (caller owns source)
+/// - Must call: deinit() to avoid leaks
 pub const ErrorHandler = struct {
     allocator: std.mem.Allocator,
     errors: std.ArrayList(LoweringError),
@@ -15,9 +22,9 @@ pub const ErrorHandler = struct {
     pub fn init(allocator: std.mem.Allocator) ErrorHandler {
         return .{
             .allocator = allocator,
-            .errors = std.ArrayList(LoweringError).init(allocator),
-            .warnings = std.ArrayList(LoweringWarning).init(allocator),
-            .context_stack = std.ArrayList(ErrorContext).init(allocator),
+            .errors = std.ArrayList(LoweringError){},
+            .warnings = std.ArrayList(LoweringWarning){},
+            .context_stack = std.ArrayList(ErrorContext){},
             .error_recovery_mode = true,
             .max_errors = 100, // Allow up to 100 errors before giving up
             .error_count = 0,
@@ -25,9 +32,22 @@ pub const ErrorHandler = struct {
     }
 
     pub fn deinit(self: *ErrorHandler) void {
-        self.errors.deinit();
-        self.warnings.deinit();
-        self.context_stack.deinit();
+        // Free individual error messages and suggestions
+        for (self.errors.items) |*err| {
+            self.allocator.free(err.message);
+            if (err.suggestion) |suggestion| {
+                self.allocator.free(suggestion);
+            }
+        }
+
+        // Free individual warning messages
+        for (self.warnings.items) |*warn| {
+            self.allocator.free(warn.message);
+        }
+
+        self.errors.deinit(self.allocator);
+        self.warnings.deinit(self.allocator);
+        self.context_stack.deinit(self.allocator);
     }
 
     /// Enable or disable error recovery mode
@@ -47,7 +67,7 @@ pub const ErrorHandler = struct {
 
     /// Push an error context onto the stack
     pub fn pushContext(self: *ErrorHandler, context: ErrorContext) !void {
-        try self.context_stack.append(context);
+        try self.context_stack.append(self.allocator, context);
     }
 
     /// Pop the current error context
@@ -68,7 +88,7 @@ pub const ErrorHandler = struct {
             .suggestion = if (suggestion) |s| try self.allocator.dupe(u8, s) else null,
             .context = if (self.context_stack.items.len > 0) self.context_stack.items[self.context_stack.items.len - 1] else null,
         };
-        try self.errors.append(error_info);
+        try self.errors.append(self.allocator, error_info);
 
         // If we've exceeded max errors and recovery is disabled, panic
         if (!self.error_recovery_mode and self.error_count >= self.max_errors) {
@@ -83,7 +103,7 @@ pub const ErrorHandler = struct {
             .span = span,
             .message = try self.allocator.dupe(u8, message),
         };
-        try self.warnings.append(warning_info);
+        try self.warnings.append(self.allocator, warning_info);
     }
 
     /// Report an unsupported feature with helpful suggestions

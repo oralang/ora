@@ -1,0 +1,34 @@
+// Basic arithmetic operations example
+// This demonstrates how Ora arithmetic expressions are lowered to MLIR
+
+fn add(a: u256, b: u256) -> u256 {
+    return a + b;
+}
+
+fn subtract(a: u256, b: u256) -> u256 {
+    return a - b;
+}
+
+fn multiply(a: u256, b: u256) -> u256 {
+    return a * b;
+}
+
+fn divide(a: u256, b: u256) -> u256 {
+    return a / b;
+}
+
+fn modulo(a: u256, b: u256) -> u256 {
+    return a % b;
+}
+
+fn complex_expression(x: u256, y: u256, z: u256) -> u256 {
+    return (x + y) * z - (x / y);
+}
+
+fn boolean_operations(a: bool, b: bool) -> bool {
+    return a && b || !a;
+}
+
+fn comparison_operations(x: u256, y: u256) -> bool {
+    return x > y && x <= (y + 100);
+}

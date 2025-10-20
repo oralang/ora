@@ -1,0 +1,54 @@
+// Basic storage variables test
+contract StorageTest1 {
+    // Primitive types
+    storage var counter: u256;
+    storage var active: bool;
+    storage var owner: address;
+    storage var name: string;
+    
+    // Constants
+    const MAX_VALUE: u256 = 1000000;
+    const CONTRACT_ADDRESS: address = 0x1234567890123456789012345678901234567890;
+    
+    // Initialize contract
+    fn init() {
+        counter = 0;
+        active = true;
+        owner = CONTRACT_ADDRESS;
+        name = "StorageTest1";
+    }
+    
+    // Getter functions
+    fn getCounter() -> u256 {
+        return counter;
+    }
+    
+    fn getActive() -> bool {
+        return active;
+    }
+    
+    fn getOwner() -> address {
+        return owner;
+    }
+    
+    fn getName() -> string {
+        return name;
+    }
+    
+    // Setter functions
+    fn setCounter(value: u256) {
+        counter = value;
+    }
+    
+    fn setActive(value: bool) {
+        active = value;
+    }
+    
+    fn setOwner(value: address) {
+        owner = value;
+    }
+    
+    fn setName(value: string) {
+        name = value;
+    }
+}

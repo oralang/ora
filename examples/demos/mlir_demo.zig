@@ -7,7 +7,7 @@ const c = @cImport({
     @cInclude("mlir-c/RegisterEverything.h");
 });
 
-fn writeToFile(str: c.MlirStringRef, user_data: ?*anyopaque) callconv(.C) void {
+fn writeToFile(str: c.MlirStringRef, user_data: ?*anyopaque) callconv(.c) void {
     const file: *std.fs.File = @ptrCast(@alignCast(user_data.?));
     _ = file.writeAll(str.data[0..str.length]) catch {};
 }

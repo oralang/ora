@@ -1,7 +1,7 @@
 const std = @import("std");
 const c = @import("c.zig").c;
 const lib = @import("ora_lib");
-const constants = @import("constants.zig");
+const constants = @import("lower.zig");
 const TypeMapper = @import("types.zig").TypeMapper;
 const LocationTracker = @import("locations.zig").LocationTracker;
 const LocalVarMap = @import("symbols.zig").LocalVarMap;
@@ -19,22 +19,47 @@ pub const DeclarationLowerer = struct {
     type_mapper: *const TypeMapper,
     locations: LocationTracker,
     error_handler: ?*const @import("error_handling.zig").ErrorHandler,
+    ora_dialect: *@import("dialect.zig").OraDialect,
+    symbol_table: ?*@import("lower.zig").SymbolTable = null,
 
-    pub fn init(ctx: c.MlirContext, type_mapper: *const TypeMapper, locations: LocationTracker) DeclarationLowerer {
+    pub fn init(ctx: c.MlirContext, type_mapper: *const TypeMapper, locations: LocationTracker, ora_dialect: *@import("dialect.zig").OraDialect) DeclarationLowerer {
         return .{
             .ctx = ctx,
             .type_mapper = type_mapper,
             .locations = locations,
             .error_handler = null,
+            .ora_dialect = ora_dialect,
         };
     }
 
-    pub fn withErrorHandler(ctx: c.MlirContext, type_mapper: *const TypeMapper, locations: LocationTracker, error_handler: *const @import("error_handling.zig").ErrorHandler) DeclarationLowerer {
+    pub fn withErrorHandler(ctx: c.MlirContext, type_mapper: *const TypeMapper, locations: LocationTracker, error_handler: *const @import("error_handling.zig").ErrorHandler, ora_dialect: *@import("dialect.zig").OraDialect) DeclarationLowerer {
         return .{
             .ctx = ctx,
             .type_mapper = type_mapper,
             .locations = locations,
             .error_handler = error_handler,
+            .ora_dialect = ora_dialect,
+        };
+    }
+
+    pub fn withErrorHandlerAndDialect(ctx: c.MlirContext, type_mapper: *const TypeMapper, locations: LocationTracker, error_handler: *const @import("error_handling.zig").ErrorHandler, ora_dialect: *@import("dialect.zig").OraDialect) DeclarationLowerer {
+        return .{
+            .ctx = ctx,
+            .type_mapper = type_mapper,
+            .locations = locations,
+            .error_handler = error_handler,
+            .ora_dialect = ora_dialect,
+        };
+    }
+
+    pub fn withErrorHandlerAndDialectAndSymbolTable(ctx: c.MlirContext, type_mapper: *const TypeMapper, locations: LocationTracker, error_handler: *const @import("error_handling.zig").ErrorHandler, ora_dialect: *@import("dialect.zig").OraDialect, symbol_table: *@import("lower.zig").SymbolTable) DeclarationLowerer {
+        return .{
+            .ctx = ctx,
+            .type_mapper = type_mapper,
+            .locations = locations,
+            .error_handler = error_handler,
+            .ora_dialect = ora_dialect,
+            .symbol_table = symbol_table,
         };
     }
 
@@ -50,7 +75,6 @@ pub const DeclarationLowerer = struct {
         for (func.parameters, 0..) |param, i| {
             // Function parameters are calldata by default in Ora
             param_map.addParam(param.name, i) catch {};
-            std.debug.print("DEBUG: Added calldata parameter: {s} at index {d}\n", .{ param.name, i });
         }
 
         // Create the function operation
@@ -62,11 +86,11 @@ pub const DeclarationLowerer = struct {
         const sym_name_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("sym_name"));
 
         // Collect all function attributes
-        var attributes = std.ArrayList(c.MlirNamedAttribute).init(std.heap.page_allocator);
-        defer attributes.deinit();
+        var attributes = std.ArrayList(c.MlirNamedAttribute){};
+        defer attributes.deinit(std.heap.page_allocator);
 
         // Add function name attribute
-        attributes.append(c.mlirNamedAttributeGet(sym_name_id, name_attr)) catch {};
+        attributes.append(std.heap.page_allocator, c.mlirNamedAttributeGet(sym_name_id, name_attr)) catch {};
 
         // Add visibility modifier attribute (Requirements 6.1)
         const visibility_attr = switch (func.visibility) {
@@ -74,20 +98,20 @@ pub const DeclarationLowerer = struct {
             .Private => c.mlirStringAttrGet(self.ctx, c.mlirStringRefCreateFromCString("private")),
         };
         const visibility_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("ora.visibility"));
-        attributes.append(c.mlirNamedAttributeGet(visibility_id, visibility_attr)) catch {};
+        attributes.append(std.heap.page_allocator, c.mlirNamedAttributeGet(visibility_id, visibility_attr)) catch {};
 
         // Add inline function attribute (Requirements 6.2)
         if (func.is_inline) {
             const inline_attr = c.mlirBoolAttrGet(self.ctx, 1);
             const inline_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("ora.inline"));
-            attributes.append(c.mlirNamedAttributeGet(inline_id, inline_attr)) catch {};
+            attributes.append(std.heap.page_allocator, c.mlirNamedAttributeGet(inline_id, inline_attr)) catch {};
         }
 
         // Add special function name attributes (Requirements 6.8)
         if (std.mem.eql(u8, func.name, "init")) {
             const init_attr = c.mlirBoolAttrGet(self.ctx, 1);
             const init_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("ora.init"));
-            attributes.append(c.mlirNamedAttributeGet(init_id, init_attr)) catch {};
+            attributes.append(std.heap.page_allocator, c.mlirNamedAttributeGet(init_id, init_attr)) catch {};
         }
 
         // Add comprehensive verification metadata for function contracts (Requirements 6.4, 6.5)
@@ -95,43 +119,43 @@ pub const DeclarationLowerer = struct {
             // Add verification marker for formal verification tools
             const verification_attr = c.mlirBoolAttrGet(self.ctx, 1);
             const verification_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("ora.verification"));
-            attributes.append(c.mlirNamedAttributeGet(verification_id, verification_attr)) catch {};
+            attributes.append(std.heap.page_allocator, c.mlirNamedAttributeGet(verification_id, verification_attr)) catch {};
 
             // Add formal verification marker
             const formal_attr = c.mlirBoolAttrGet(self.ctx, 1);
             const formal_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("ora.formal"));
-            attributes.append(c.mlirNamedAttributeGet(formal_id, formal_attr)) catch {};
+            attributes.append(std.heap.page_allocator, c.mlirNamedAttributeGet(formal_id, formal_attr)) catch {};
 
             // Add verification context attribute
             const context_attr = c.mlirStringAttrGet(self.ctx, c.mlirStringRefCreateFromCString("function_contract"));
             const context_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("ora.verification_context"));
-            attributes.append(c.mlirNamedAttributeGet(context_id, context_attr)) catch {};
+            attributes.append(std.heap.page_allocator, c.mlirNamedAttributeGet(context_id, context_attr)) catch {};
 
             // Add requires clauses count
             if (func.requires_clauses.len > 0) {
                 const requires_count_attr = c.mlirIntegerAttrGet(c.mlirIntegerTypeGet(self.ctx, 32), @intCast(func.requires_clauses.len));
                 const requires_count_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("ora.requires_count"));
-                attributes.append(c.mlirNamedAttributeGet(requires_count_id, requires_count_attr)) catch {};
+                attributes.append(std.heap.page_allocator, c.mlirNamedAttributeGet(requires_count_id, requires_count_attr)) catch {};
             }
 
             // Add ensures clauses count
             if (func.ensures_clauses.len > 0) {
                 const ensures_count_attr = c.mlirIntegerAttrGet(c.mlirIntegerTypeGet(self.ctx, 32), @intCast(func.ensures_clauses.len));
                 const ensures_count_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("ora.ensures_count"));
-                attributes.append(c.mlirNamedAttributeGet(ensures_count_id, ensures_count_attr)) catch {};
+                attributes.append(std.heap.page_allocator, c.mlirNamedAttributeGet(ensures_count_id, ensures_count_attr)) catch {};
             }
 
             // Add contract verification level
             const contract_level_attr = c.mlirStringAttrGet(self.ctx, c.mlirStringRefCreateFromCString("full"));
             const contract_level_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("ora.contract_level"));
-            attributes.append(c.mlirNamedAttributeGet(contract_level_id, contract_level_attr)) catch {};
+            attributes.append(std.heap.page_allocator, c.mlirNamedAttributeGet(contract_level_id, contract_level_attr)) catch {};
         }
 
         // Add function type
         const fn_type = self.createFunctionType(func);
         const fn_type_attr = c.mlirTypeAttrGet(fn_type);
         const fn_type_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("function_type"));
-        attributes.append(c.mlirNamedAttributeGet(fn_type_id, fn_type_attr)) catch {};
+        attributes.append(std.heap.page_allocator, c.mlirNamedAttributeGet(fn_type_id, fn_type_attr)) catch {};
 
         // Apply all attributes to the operation state
         c.mlirOperationStateAddAttributes(&state, @intCast(attributes.items.len), attributes.items.ptr);
@@ -164,8 +188,7 @@ pub const DeclarationLowerer = struct {
 
         // Ensure a terminator exists (void return)
         if (func.return_type_info == null) {
-            var return_state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("func.return"), self.createFileLocation(func.span));
-            const return_op = c.mlirOperationCreate(&return_state);
+            const return_op = self.ora_dialect.createFuncReturn(self.createFileLocation(func.span));
             c.mlirBlockAppendOwnedOperation(block, return_op);
         }
 
@@ -180,44 +203,44 @@ pub const DeclarationLowerer = struct {
         var state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("ora.contract"), self.createFileLocation(contract.span));
 
         // Collect contract attributes
-        var attributes = std.ArrayList(c.MlirNamedAttribute).init(std.heap.page_allocator);
-        defer attributes.deinit();
+        var attributes = std.ArrayList(c.MlirNamedAttribute){};
+        defer attributes.deinit(std.heap.page_allocator);
 
         // Add contract name
         const name_ref = c.mlirStringRefCreate(contract.name.ptr, contract.name.len);
         const name_attr = c.mlirStringAttrGet(self.ctx, name_ref);
         const name_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("sym_name"));
-        attributes.append(c.mlirNamedAttributeGet(name_id, name_attr)) catch {};
+        attributes.append(std.heap.page_allocator, c.mlirNamedAttributeGet(name_id, name_attr)) catch {};
 
         // Add inheritance information if present
         if (contract.extends) |base_contract| {
             const extends_ref = c.mlirStringRefCreate(base_contract.ptr, base_contract.len);
             const extends_attr = c.mlirStringAttrGet(self.ctx, extends_ref);
             const extends_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("ora.extends"));
-            attributes.append(c.mlirNamedAttributeGet(extends_id, extends_attr)) catch {};
+            attributes.append(std.heap.page_allocator, c.mlirNamedAttributeGet(extends_id, extends_attr)) catch {};
         }
 
         // Add interface implementation information
         if (contract.implements.len > 0) {
             // Create array attribute for implemented interfaces
-            var interface_attrs = std.ArrayList(c.MlirAttribute).init(std.heap.page_allocator);
-            defer interface_attrs.deinit();
+            var interface_attrs = std.ArrayList(c.MlirAttribute){};
+            defer interface_attrs.deinit(std.heap.page_allocator);
 
             for (contract.implements) |interface_name| {
                 const interface_ref = c.mlirStringRefCreate(interface_name.ptr, interface_name.len);
                 const interface_attr = c.mlirStringAttrGet(self.ctx, interface_ref);
-                interface_attrs.append(interface_attr) catch {};
+                interface_attrs.append(std.heap.page_allocator, interface_attr) catch {};
             }
 
             const implements_array = c.mlirArrayAttrGet(self.ctx, @intCast(interface_attrs.items.len), interface_attrs.items.ptr);
             const implements_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("ora.implements"));
-            attributes.append(c.mlirNamedAttributeGet(implements_id, implements_array)) catch {};
+            attributes.append(std.heap.page_allocator, c.mlirNamedAttributeGet(implements_id, implements_array)) catch {};
         }
 
         // Add contract metadata attributes
         const contract_attr = c.mlirBoolAttrGet(self.ctx, 1);
         const contract_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("ora.contract_decl"));
-        attributes.append(c.mlirNamedAttributeGet(contract_id, contract_attr)) catch {};
+        attributes.append(std.heap.page_allocator, c.mlirNamedAttributeGet(contract_id, contract_attr)) catch {};
 
         // Apply all attributes
         c.mlirOperationStateAddAttributes(&state, @intCast(attributes.items.len), attributes.items.ptr);
@@ -226,7 +249,26 @@ pub const DeclarationLowerer = struct {
         const region = c.mlirRegionCreate();
         const block = c.mlirBlockCreate(0, null, null);
         c.mlirRegionInsertOwnedBlock(region, 0, block);
-        c.mlirOperationStateAddOwnedRegions(&state, 1, @ptrCast(&region));
+
+        // Create ora.storage region for storage variables
+        const storage_region = c.mlirRegionCreate();
+        const storage_block = c.mlirBlockCreate(0, null, null);
+        c.mlirRegionInsertOwnedBlock(storage_region, 0, storage_block);
+
+        // Create ora.storage operation
+        var storage_state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("ora.storage"), self.createFileLocation(contract.span));
+        const storage_region_for_op = c.mlirRegionCreate();
+        const storage_block_for_op = c.mlirBlockCreate(0, null, null);
+        c.mlirRegionInsertOwnedBlock(storage_region_for_op, 0, storage_block_for_op);
+        c.mlirOperationStateAddOwnedRegions(&storage_state, 1, @ptrCast(&storage_region_for_op));
+        const storage_op = c.mlirOperationCreate(&storage_state);
+
+        // Add both regions to the contract operation
+        const regions = [_]c.MlirRegion{ region, storage_region };
+        c.mlirOperationStateAddOwnedRegions(&state, 2, @ptrCast(&regions));
+
+        // Add storage operation to the main contract block
+        c.mlirBlockAppendOwnedOperation(block, storage_op);
 
         // Create contract-level symbol management
         var contract_symbol_table = SymbolTable.init(std.heap.page_allocator);
@@ -249,11 +291,11 @@ pub const DeclarationLowerer = struct {
                         },
                         .Memory => {
                             // Memory variables are allocated in memory space
-                            std.debug.print("DEBUG: Found memory variable at contract level: {s}\n", .{var_decl.name});
+
                         },
                         .TStore => {
                             // Transient storage variables are allocated in transient storage space
-                            std.debug.print("DEBUG: Found transient storage variable at contract level: {s}\n", .{var_decl.name});
+
                         },
                         .Stack => {
                             // Stack variables at contract level are not allowed in Ora
@@ -281,9 +323,9 @@ pub const DeclarationLowerer = struct {
                 .VariableDecl => |var_decl| {
                     switch (var_decl.region) {
                         .Storage => {
-                            // Create ora.global operation for storage variables
+                            // Create ora.global operation for storage variables in storage region
                             const global_op = self.createGlobalDeclaration(&var_decl);
-                            c.mlirBlockAppendOwnedOperation(block, global_op);
+                            c.mlirBlockAppendOwnedOperation(storage_block_for_op, global_op);
                         },
                         .Memory => {
                             // Create ora.memory.global operation for memory variables
@@ -344,49 +386,49 @@ pub const DeclarationLowerer = struct {
         var state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("ora.struct.decl"), self.createFileLocation(struct_decl.span));
 
         // Collect struct attributes
-        var attributes = std.ArrayList(c.MlirNamedAttribute).init(std.heap.page_allocator);
-        defer attributes.deinit();
+        var attributes = std.ArrayList(c.MlirNamedAttribute){};
+        defer attributes.deinit(std.heap.page_allocator);
 
         // Add struct name
         const name_ref = c.mlirStringRefCreate(struct_decl.name.ptr, struct_decl.name.len);
         const name_attr = c.mlirStringAttrGet(self.ctx, name_ref);
         const name_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("sym_name"));
-        attributes.append(c.mlirNamedAttributeGet(name_id, name_attr)) catch {};
+        attributes.append(std.heap.page_allocator, c.mlirNamedAttributeGet(name_id, name_attr)) catch {};
 
         // Create field information as attributes
-        var field_names = std.ArrayList(c.MlirAttribute).init(std.heap.page_allocator);
-        defer field_names.deinit();
-        var field_types = std.ArrayList(c.MlirAttribute).init(std.heap.page_allocator);
-        defer field_types.deinit();
+        var field_names = std.ArrayList(c.MlirAttribute){};
+        defer field_names.deinit(std.heap.page_allocator);
+        var field_types = std.ArrayList(c.MlirAttribute){};
+        defer field_types.deinit(std.heap.page_allocator);
 
         for (struct_decl.fields) |field| {
             // Add field name
             const field_name_ref = c.mlirStringRefCreate(field.name.ptr, field.name.len);
             const field_name_attr = c.mlirStringAttrGet(self.ctx, field_name_ref);
-            field_names.append(field_name_attr) catch {};
+            field_names.append(std.heap.page_allocator, field_name_attr) catch {};
 
             // Add field type
             const field_type = self.type_mapper.toMlirType(field.type_info);
             const field_type_attr = c.mlirTypeAttrGet(field_type);
-            field_types.append(field_type_attr) catch {};
+            field_types.append(std.heap.page_allocator, field_type_attr) catch {};
         }
 
         // Add field names array attribute
         if (field_names.items.len > 0) {
             const field_names_array = c.mlirArrayAttrGet(self.ctx, @intCast(field_names.items.len), field_names.items.ptr);
             const field_names_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("ora.field_names"));
-            attributes.append(c.mlirNamedAttributeGet(field_names_id, field_names_array)) catch {};
+            attributes.append(std.heap.page_allocator, c.mlirNamedAttributeGet(field_names_id, field_names_array)) catch {};
 
             // Add field types array attribute
             const field_types_array = c.mlirArrayAttrGet(self.ctx, @intCast(field_types.items.len), field_types.items.ptr);
             const field_types_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("ora.field_types"));
-            attributes.append(c.mlirNamedAttributeGet(field_types_id, field_types_array)) catch {};
+            attributes.append(std.heap.page_allocator, c.mlirNamedAttributeGet(field_types_id, field_types_array)) catch {};
         }
 
         // Add struct declaration marker
         const struct_decl_attr = c.mlirBoolAttrGet(self.ctx, 1);
         const struct_decl_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("ora.struct_decl"));
-        attributes.append(c.mlirNamedAttributeGet(struct_decl_id, struct_decl_attr)) catch {};
+        attributes.append(std.heap.page_allocator, c.mlirNamedAttributeGet(struct_decl_id, struct_decl_attr)) catch {};
 
         // Apply all attributes
         c.mlirOperationStateAddAttributes(&state, @intCast(attributes.items.len), attributes.items.ptr);
@@ -404,14 +446,14 @@ pub const DeclarationLowerer = struct {
         var state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("ora.enum.decl"), self.createFileLocation(enum_decl.span));
 
         // Collect enum attributes
-        var attributes = std.ArrayList(c.MlirNamedAttribute).init(std.heap.page_allocator);
-        defer attributes.deinit();
+        var attributes = std.ArrayList(c.MlirNamedAttribute){};
+        defer attributes.deinit(std.heap.page_allocator);
 
         // Add enum name
         const name_ref = c.mlirStringRefCreate(enum_decl.name.ptr, enum_decl.name.len);
         const name_attr = c.mlirStringAttrGet(self.ctx, name_ref);
         const name_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("sym_name"));
-        attributes.append(c.mlirNamedAttributeGet(name_id, name_attr)) catch {};
+        attributes.append(std.heap.page_allocator, c.mlirNamedAttributeGet(name_id, name_attr)) catch {};
 
         // Add underlying type information
         const underlying_type = if (enum_decl.underlying_type_info) |type_info|
@@ -420,19 +462,19 @@ pub const DeclarationLowerer = struct {
             c.mlirIntegerTypeGet(self.ctx, 32); // Default to i32
         const underlying_type_attr = c.mlirTypeAttrGet(underlying_type);
         const underlying_type_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("ora.underlying_type"));
-        attributes.append(c.mlirNamedAttributeGet(underlying_type_id, underlying_type_attr)) catch {};
+        attributes.append(std.heap.page_allocator, c.mlirNamedAttributeGet(underlying_type_id, underlying_type_attr)) catch {};
 
         // Create variant information as attributes
-        var variant_names = std.ArrayList(c.MlirAttribute).init(std.heap.page_allocator);
-        defer variant_names.deinit();
-        var variant_values = std.ArrayList(c.MlirAttribute).init(std.heap.page_allocator);
-        defer variant_values.deinit();
+        var variant_names = std.ArrayList(c.MlirAttribute){};
+        defer variant_names.deinit(std.heap.page_allocator);
+        var variant_values = std.ArrayList(c.MlirAttribute){};
+        defer variant_values.deinit(std.heap.page_allocator);
 
         for (enum_decl.variants, 0..) |variant, i| {
             // Add variant name
             const variant_name_ref = c.mlirStringRefCreate(variant.name.ptr, variant.name.len);
             const variant_name_attr = c.mlirStringAttrGet(self.ctx, variant_name_ref);
-            variant_names.append(variant_name_attr) catch {};
+            variant_names.append(std.heap.page_allocator, variant_name_attr) catch {};
 
             // Add variant value (use resolved value if available, otherwise use index)
             const variant_value = if (variant.resolved_value) |resolved|
@@ -440,30 +482,30 @@ pub const DeclarationLowerer = struct {
             else
                 @as(i64, @intCast(i));
             const variant_value_attr = c.mlirIntegerAttrGet(underlying_type, variant_value);
-            variant_values.append(variant_value_attr) catch {};
+            variant_values.append(std.heap.page_allocator, variant_value_attr) catch {};
         }
 
         // Add variant names array attribute
         if (variant_names.items.len > 0) {
             const variant_names_array = c.mlirArrayAttrGet(self.ctx, @intCast(variant_names.items.len), variant_names.items.ptr);
             const variant_names_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("ora.variant_names"));
-            attributes.append(c.mlirNamedAttributeGet(variant_names_id, variant_names_array)) catch {};
+            attributes.append(std.heap.page_allocator, c.mlirNamedAttributeGet(variant_names_id, variant_names_array)) catch {};
 
             // Add variant values array attribute
             const variant_values_array = c.mlirArrayAttrGet(self.ctx, @intCast(variant_values.items.len), variant_values.items.ptr);
             const variant_values_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("ora.variant_values"));
-            attributes.append(c.mlirNamedAttributeGet(variant_values_id, variant_values_array)) catch {};
+            attributes.append(std.heap.page_allocator, c.mlirNamedAttributeGet(variant_values_id, variant_values_array)) catch {};
         }
 
         // Add explicit values flag
         const has_explicit_values_attr = c.mlirBoolAttrGet(self.ctx, if (enum_decl.has_explicit_values) 1 else 0);
         const has_explicit_values_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("ora.has_explicit_values"));
-        attributes.append(c.mlirNamedAttributeGet(has_explicit_values_id, has_explicit_values_attr)) catch {};
+        attributes.append(std.heap.page_allocator, c.mlirNamedAttributeGet(has_explicit_values_id, has_explicit_values_attr)) catch {};
 
         // Add enum declaration marker
         const enum_decl_attr = c.mlirBoolAttrGet(self.ctx, 1);
         const enum_decl_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("ora.enum_decl"));
-        attributes.append(c.mlirNamedAttributeGet(enum_decl_id, enum_decl_attr)) catch {};
+        attributes.append(std.heap.page_allocator, c.mlirNamedAttributeGet(enum_decl_id, enum_decl_attr)) catch {};
 
         // Apply all attributes
         c.mlirOperationStateAddAttributes(&state, @intCast(attributes.items.len), attributes.items.ptr);
@@ -481,31 +523,31 @@ pub const DeclarationLowerer = struct {
         var state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("ora.module"), self.createFileLocation(module.span));
 
         // Collect module attributes
-        var attributes = std.ArrayList(c.MlirNamedAttribute).init(std.heap.page_allocator);
-        defer attributes.deinit();
+        var attributes = std.ArrayList(c.MlirNamedAttribute){};
+        defer attributes.deinit(std.heap.page_allocator);
 
         // Add module name if present
         if (module.name) |name| {
             const name_ref = c.mlirStringRefCreate(name.ptr, name.len);
             const name_attr = c.mlirStringAttrGet(self.ctx, name_ref);
             const name_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("sym_name"));
-            attributes.append(c.mlirNamedAttributeGet(name_id, name_attr)) catch {};
+            attributes.append(std.heap.page_allocator, c.mlirNamedAttributeGet(name_id, name_attr)) catch {};
         }
 
         // Add module declaration marker
         const module_decl_attr = c.mlirBoolAttrGet(self.ctx, 1);
         const module_decl_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("ora.module_decl"));
-        attributes.append(c.mlirNamedAttributeGet(module_decl_id, module_decl_attr)) catch {};
+        attributes.append(std.heap.page_allocator, c.mlirNamedAttributeGet(module_decl_id, module_decl_attr)) catch {};
 
         // Add import count attribute
         const import_count_attr = c.mlirIntegerAttrGet(c.mlirIntegerTypeGet(self.ctx, 32), @intCast(module.imports.len));
         const import_count_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("ora.import_count"));
-        attributes.append(c.mlirNamedAttributeGet(import_count_id, import_count_attr)) catch {};
+        attributes.append(std.heap.page_allocator, c.mlirNamedAttributeGet(import_count_id, import_count_attr)) catch {};
 
         // Add declaration count attribute
         const decl_count_attr = c.mlirIntegerAttrGet(c.mlirIntegerTypeGet(self.ctx, 32), @intCast(module.declarations.len));
         const decl_count_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("ora.declaration_count"));
-        attributes.append(c.mlirNamedAttributeGet(decl_count_id, decl_count_attr)) catch {};
+        attributes.append(std.heap.page_allocator, c.mlirNamedAttributeGet(decl_count_id, decl_count_attr)) catch {};
 
         // Apply all attributes
         c.mlirOperationStateAddAttributes(&state, @intCast(attributes.items.len), attributes.items.ptr);
@@ -523,18 +565,18 @@ pub const DeclarationLowerer = struct {
         var state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("ora.block"), self.createFileLocation(block_decl.span));
 
         // Collect block attributes
-        var attributes = std.ArrayList(c.MlirNamedAttribute).init(std.heap.page_allocator);
-        defer attributes.deinit();
+        var attributes = std.ArrayList(c.MlirNamedAttribute){};
+        defer attributes.deinit(std.heap.page_allocator);
 
         // Add block declaration marker
         const block_decl_attr = c.mlirBoolAttrGet(self.ctx, 1);
         const block_decl_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("ora.block_decl"));
-        attributes.append(c.mlirNamedAttributeGet(block_decl_id, block_decl_attr)) catch {};
+        attributes.append(std.heap.page_allocator, c.mlirNamedAttributeGet(block_decl_id, block_decl_attr)) catch {};
 
         // Add statement count attribute
         const stmt_count_attr = c.mlirIntegerAttrGet(c.mlirIntegerTypeGet(self.ctx, 32), @intCast(block_decl.statements.len));
         const stmt_count_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("ora.statement_count"));
-        attributes.append(c.mlirNamedAttributeGet(stmt_count_id, stmt_count_attr)) catch {};
+        attributes.append(std.heap.page_allocator, c.mlirNamedAttributeGet(stmt_count_id, stmt_count_attr)) catch {};
 
         // Apply all attributes
         c.mlirOperationStateAddAttributes(&state, @intCast(attributes.items.len), attributes.items.ptr);
@@ -554,23 +596,23 @@ pub const DeclarationLowerer = struct {
         var state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("ora.try_block"), self.createFileLocation(try_block.span));
 
         // Collect try-block attributes
-        var attributes = std.ArrayList(c.MlirNamedAttribute).init(std.heap.page_allocator);
-        defer attributes.deinit();
+        var attributes = std.ArrayList(c.MlirNamedAttribute){};
+        defer attributes.deinit(std.heap.page_allocator);
 
         // Add try-block declaration marker
         const try_block_decl_attr = c.mlirBoolAttrGet(self.ctx, 1);
         const try_block_decl_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("ora.try_block_decl"));
-        attributes.append(c.mlirNamedAttributeGet(try_block_decl_id, try_block_decl_attr)) catch {};
+        attributes.append(std.heap.page_allocator, c.mlirNamedAttributeGet(try_block_decl_id, try_block_decl_attr)) catch {};
 
         // Add error handling marker
         const error_handling_attr = c.mlirBoolAttrGet(self.ctx, 1);
         const error_handling_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("ora.error_handling"));
-        attributes.append(c.mlirNamedAttributeGet(error_handling_id, error_handling_attr)) catch {};
+        attributes.append(std.heap.page_allocator, c.mlirNamedAttributeGet(error_handling_id, error_handling_attr)) catch {};
 
         // Add catch block presence attribute
         const has_catch_attr = c.mlirBoolAttrGet(self.ctx, if (try_block.catch_block != null) 1 else 0);
         const has_catch_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("ora.has_catch"));
-        attributes.append(c.mlirNamedAttributeGet(has_catch_id, has_catch_attr)) catch {};
+        attributes.append(std.heap.page_allocator, c.mlirNamedAttributeGet(has_catch_id, has_catch_attr)) catch {};
 
         // Apply all attributes
         c.mlirOperationStateAddAttributes(&state, @intCast(attributes.items.len), attributes.items.ptr);
@@ -598,27 +640,27 @@ pub const DeclarationLowerer = struct {
         var state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("ora.import"), self.createFileLocation(import_decl.span));
 
         // Collect import attributes
-        var attributes = std.ArrayList(c.MlirNamedAttribute).init(std.heap.page_allocator);
-        defer attributes.deinit();
+        var attributes = std.ArrayList(c.MlirNamedAttribute){};
+        defer attributes.deinit(std.heap.page_allocator);
 
         // Add import path
         const path_ref = c.mlirStringRefCreate(import_decl.path.ptr, import_decl.path.len);
         const path_attr = c.mlirStringAttrGet(self.ctx, path_ref);
         const path_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("ora.import_path"));
-        attributes.append(c.mlirNamedAttributeGet(path_id, path_attr)) catch {};
+        attributes.append(std.heap.page_allocator, c.mlirNamedAttributeGet(path_id, path_attr)) catch {};
 
         // Add alias if present
         if (import_decl.alias) |alias| {
             const alias_ref = c.mlirStringRefCreate(alias.ptr, alias.len);
             const alias_attr = c.mlirStringAttrGet(self.ctx, alias_ref);
             const alias_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("ora.import_alias"));
-            attributes.append(c.mlirNamedAttributeGet(alias_id, alias_attr)) catch {};
+            attributes.append(std.heap.page_allocator, c.mlirNamedAttributeGet(alias_id, alias_attr)) catch {};
         }
 
         // Add import declaration marker
         const import_decl_attr = c.mlirBoolAttrGet(self.ctx, 1);
         const import_decl_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("ora.import_decl"));
-        attributes.append(c.mlirNamedAttributeGet(import_decl_id, import_decl_attr)) catch {};
+        attributes.append(std.heap.page_allocator, c.mlirNamedAttributeGet(import_decl_id, import_decl_attr)) catch {};
 
         // Apply all attributes
         c.mlirOperationStateAddAttributes(&state, @intCast(attributes.items.len), attributes.items.ptr);
@@ -632,20 +674,20 @@ pub const DeclarationLowerer = struct {
         var state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("ora.const"), self.createFileLocation(const_decl.span));
 
         // Collect const attributes
-        var attributes = std.ArrayList(c.MlirNamedAttribute).init(std.heap.page_allocator);
-        defer attributes.deinit();
+        var attributes = std.ArrayList(c.MlirNamedAttribute){};
+        defer attributes.deinit(std.heap.page_allocator);
 
         // Add constant name
         const name_ref = c.mlirStringRefCreate(const_decl.name.ptr, const_decl.name.len);
         const name_attr = c.mlirStringAttrGet(self.ctx, name_ref);
         const name_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("sym_name"));
-        attributes.append(c.mlirNamedAttributeGet(name_id, name_attr)) catch {};
+        attributes.append(std.heap.page_allocator, c.mlirNamedAttributeGet(name_id, name_attr)) catch {};
 
         // Add constant type
         const const_type = self.type_mapper.toMlirType(const_decl.typ);
         const type_attr = c.mlirTypeAttrGet(const_type);
         const type_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("type"));
-        attributes.append(c.mlirNamedAttributeGet(type_id, type_attr)) catch {};
+        attributes.append(std.heap.page_allocator, c.mlirNamedAttributeGet(type_id, type_attr)) catch {};
 
         // Add visibility modifier
         const visibility_attr = switch (const_decl.visibility) {
@@ -653,12 +695,12 @@ pub const DeclarationLowerer = struct {
             .Private => c.mlirStringAttrGet(self.ctx, c.mlirStringRefCreateFromCString("private")),
         };
         const visibility_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("ora.visibility"));
-        attributes.append(c.mlirNamedAttributeGet(visibility_id, visibility_attr)) catch {};
+        attributes.append(std.heap.page_allocator, c.mlirNamedAttributeGet(visibility_id, visibility_attr)) catch {};
 
         // Add constant declaration marker
         const const_decl_attr = c.mlirBoolAttrGet(self.ctx, 1);
         const const_decl_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("ora.const_decl"));
-        attributes.append(c.mlirNamedAttributeGet(const_decl_id, const_decl_attr)) catch {};
+        attributes.append(std.heap.page_allocator, c.mlirNamedAttributeGet(const_decl_id, const_decl_attr)) catch {};
 
         // Apply all attributes
         c.mlirOperationStateAddAttributes(&state, @intCast(attributes.items.len), attributes.items.ptr);
@@ -674,7 +716,7 @@ pub const DeclarationLowerer = struct {
 
         // Lower the constant value expression
         // Create a temporary expression lowerer to lower the constant value
-        const expr_lowerer = ExpressionLowerer.init(self.ctx, block, self.type_mapper, null, null, null, self.locations);
+        const expr_lowerer = ExpressionLowerer.init(self.ctx, block, self.type_mapper, null, null, null, self.locations, self.ora_dialect);
         _ = expr_lowerer.lowerExpression(const_decl.value);
 
         return c.mlirOperationCreate(&state);
@@ -686,31 +728,31 @@ pub const DeclarationLowerer = struct {
         var state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("ora.immutable"), self.createFileLocation(var_decl.span));
 
         // Collect immutable attributes
-        var attributes = std.ArrayList(c.MlirNamedAttribute).init(std.heap.page_allocator);
-        defer attributes.deinit();
+        var attributes = std.ArrayList(c.MlirNamedAttribute){};
+        defer attributes.deinit(std.heap.page_allocator);
 
         // Add variable name
         const name_ref = c.mlirStringRefCreate(var_decl.name.ptr, var_decl.name.len);
         const name_attr = c.mlirStringAttrGet(self.ctx, name_ref);
         const name_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("sym_name"));
-        attributes.append(c.mlirNamedAttributeGet(name_id, name_attr)) catch {};
+        attributes.append(std.heap.page_allocator, c.mlirNamedAttributeGet(name_id, name_attr)) catch {};
 
         // Add variable type
         const var_type = self.type_mapper.toMlirType(var_decl.type_info);
         const type_attr = c.mlirTypeAttrGet(var_type);
         const type_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("type"));
-        attributes.append(c.mlirNamedAttributeGet(type_id, type_attr)) catch {};
+        attributes.append(std.heap.page_allocator, c.mlirNamedAttributeGet(type_id, type_attr)) catch {};
 
         // Add immutable constraint marker
         const immutable_attr = c.mlirBoolAttrGet(self.ctx, 1);
         const immutable_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("ora.immutable"));
-        attributes.append(c.mlirNamedAttributeGet(immutable_id, immutable_attr)) catch {};
+        attributes.append(std.heap.page_allocator, c.mlirNamedAttributeGet(immutable_id, immutable_attr)) catch {};
 
         // Add initialization constraint - immutable variables must be initialized
         if (var_decl.value == null) {
             const requires_init_attr = c.mlirBoolAttrGet(self.ctx, 1);
             const requires_init_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("ora.requires_init"));
-            attributes.append(c.mlirNamedAttributeGet(requires_init_id, requires_init_attr)) catch {};
+            attributes.append(std.heap.page_allocator, c.mlirNamedAttributeGet(requires_init_id, requires_init_attr)) catch {};
         }
 
         // Apply all attributes
@@ -735,42 +777,20 @@ pub const DeclarationLowerer = struct {
 
     /// Create global storage variable declaration
     pub fn createGlobalDeclaration(self: *const DeclarationLowerer, var_decl: *const lib.ast.Statements.VariableDeclNode) c.MlirOperation {
-        // Create ora.global operation
-        var state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("ora.global"), self.createFileLocation(var_decl.span));
-
-        // Add the global name as a symbol attribute
-        const name_ref = c.mlirStringRefCreate(var_decl.name.ptr, var_decl.name.len);
-        const name_attr = c.mlirStringAttrGet(self.ctx, name_ref);
-        const name_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("sym_name"));
-        var attrs = [_]c.MlirNamedAttribute{
-            c.mlirNamedAttributeGet(name_id, name_attr),
-        };
-
-        // Add the type attribute
+        // Determine the variable type
         const var_type = if (std.mem.eql(u8, var_decl.name, "status"))
             c.mlirIntegerTypeGet(self.ctx, 1) // bool -> i1
         else
             c.mlirIntegerTypeGet(self.ctx, constants.DEFAULT_INTEGER_BITS); // default to i256
-        const type_attr = c.mlirTypeAttrGet(var_type);
-        const type_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("type"));
-        var type_attrs = [_]c.MlirNamedAttribute{
-            c.mlirNamedAttributeGet(type_id, type_attr),
-        };
-        c.mlirOperationStateAddAttributes(&state, @intCast(attrs.len), &attrs);
-        c.mlirOperationStateAddAttributes(&state, @intCast(type_attrs.len), &type_attrs);
 
-        // Add initial value
+        // Determine the initial value
         const init_attr = if (std.mem.eql(u8, var_decl.name, "status"))
             c.mlirIntegerAttrGet(c.mlirIntegerTypeGet(self.ctx, 1), 0) // bool -> i1 with value 0 (false)
         else
             c.mlirIntegerAttrGet(c.mlirIntegerTypeGet(self.ctx, constants.DEFAULT_INTEGER_BITS), 0); // default to i256 with value 0
-        const init_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("init"));
-        var init_attrs = [_]c.MlirNamedAttribute{
-            c.mlirNamedAttributeGet(init_id, init_attr),
-        };
-        c.mlirOperationStateAddAttributes(&state, @intCast(init_attrs.len), &init_attrs);
 
-        return c.mlirOperationCreate(&state);
+        // Use the dialect helper function to create the global operation
+        return self.ora_dialect.createGlobal(var_decl.name, var_type, init_attr, self.createFileLocation(var_decl.span));
     }
 
     /// Create memory global variable declaration
@@ -829,8 +849,15 @@ pub const DeclarationLowerer = struct {
     fn lowerFunctionBody(self: *const DeclarationLowerer, func: *const lib.FunctionNode, block: c.MlirBlock, param_map: *const ParamMap, storage_map: ?*const StorageMap, local_var_map: ?*LocalVarMap) LoweringError!void {
         // Create a statement lowerer for this function
         const const_local_var_map = if (local_var_map) |lvm| @as(*const LocalVarMap, lvm) else null;
-        const expr_lowerer = ExpressionLowerer.init(self.ctx, block, self.type_mapper, param_map, storage_map, const_local_var_map, self.locations);
-        const stmt_lowerer = StatementLowerer.init(self.ctx, block, self.type_mapper, &expr_lowerer, param_map, storage_map, local_var_map, self.locations, null, std.heap.page_allocator);
+        const expr_lowerer = ExpressionLowerer.init(self.ctx, block, self.type_mapper, param_map, storage_map, const_local_var_map, self.locations, self.ora_dialect);
+
+        // Get the function's return type
+        const function_return_type = if (func.return_type_info) |ret_info|
+            self.type_mapper.toMlirType(ret_info)
+        else
+            null;
+
+        const stmt_lowerer = StatementLowerer.init(self.ctx, block, self.type_mapper, &expr_lowerer, param_map, storage_map, local_var_map, self.locations, self.symbol_table, std.heap.page_allocator, function_return_type, self.ora_dialect);
 
         // Lower the function body
         try stmt_lowerer.lowerBlockBody(func.body, block);
@@ -839,7 +866,7 @@ pub const DeclarationLowerer = struct {
     /// Lower requires clauses as precondition assertions with enhanced verification metadata (Requirements 6.4)
     fn lowerRequiresClauses(self: *const DeclarationLowerer, requires_clauses: []*lib.ast.Expressions.ExprNode, block: c.MlirBlock, param_map: *const ParamMap, storage_map: ?*const StorageMap, local_var_map: ?*LocalVarMap) LoweringError!void {
         const const_local_var_map = if (local_var_map) |lvm| @as(*const LocalVarMap, lvm) else null;
-        const expr_lowerer = ExpressionLowerer.init(self.ctx, block, self.type_mapper, param_map, storage_map, const_local_var_map, self.locations);
+        const expr_lowerer = ExpressionLowerer.init(self.ctx, block, self.type_mapper, param_map, storage_map, const_local_var_map, self.locations, self.ora_dialect);
 
         for (requires_clauses, 0..) |clause, i| {
             // Lower the requires expression
@@ -852,33 +879,33 @@ pub const DeclarationLowerer = struct {
             c.mlirOperationStateAddOperands(&assert_state, 1, @ptrCast(&condition_value));
 
             // Collect verification attributes
-            var attributes = std.ArrayList(c.MlirNamedAttribute).init(std.heap.page_allocator);
-            defer attributes.deinit();
+            var attributes = std.ArrayList(c.MlirNamedAttribute){};
+            defer attributes.deinit(std.heap.page_allocator);
 
             // Add ora.requires attribute to mark this as a precondition
             const requires_attr = c.mlirBoolAttrGet(self.ctx, 1);
             const requires_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("ora.requires"));
-            attributes.append(c.mlirNamedAttributeGet(requires_id, requires_attr)) catch {};
+            attributes.append(std.heap.page_allocator, c.mlirNamedAttributeGet(requires_id, requires_attr)) catch {};
 
             // Add verification context attribute
             const context_attr = c.mlirStringAttrGet(self.ctx, c.mlirStringRefCreateFromCString("function_precondition"));
             const context_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("ora.verification_context"));
-            attributes.append(c.mlirNamedAttributeGet(context_id, context_attr)) catch {};
+            attributes.append(std.heap.page_allocator, c.mlirNamedAttributeGet(context_id, context_attr)) catch {};
 
             // Add verification marker for formal verification tools
             const verification_attr = c.mlirBoolAttrGet(self.ctx, 1);
             const verification_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("ora.verification"));
-            attributes.append(c.mlirNamedAttributeGet(verification_id, verification_attr)) catch {};
+            attributes.append(std.heap.page_allocator, c.mlirNamedAttributeGet(verification_id, verification_attr)) catch {};
 
             // Add precondition index for multiple requires clauses
             const index_attr = c.mlirIntegerAttrGet(c.mlirIntegerTypeGet(self.ctx, 32), @intCast(i));
             const index_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("ora.precondition_index"));
-            attributes.append(c.mlirNamedAttributeGet(index_id, index_attr)) catch {};
+            attributes.append(std.heap.page_allocator, c.mlirNamedAttributeGet(index_id, index_attr)) catch {};
 
             // Add formal verification marker
             const formal_attr = c.mlirBoolAttrGet(self.ctx, 1);
             const formal_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("ora.formal"));
-            attributes.append(c.mlirNamedAttributeGet(formal_id, formal_attr)) catch {};
+            attributes.append(std.heap.page_allocator, c.mlirNamedAttributeGet(formal_id, formal_attr)) catch {};
 
             // Apply all attributes
             c.mlirOperationStateAddAttributes(&assert_state, @intCast(attributes.items.len), attributes.items.ptr);
@@ -891,7 +918,7 @@ pub const DeclarationLowerer = struct {
     /// Lower ensures clauses as postcondition assertions with enhanced verification metadata (Requirements 6.5)
     fn lowerEnsuresClauses(self: *const DeclarationLowerer, ensures_clauses: []*lib.ast.Expressions.ExprNode, block: c.MlirBlock, param_map: *const ParamMap, storage_map: ?*const StorageMap, local_var_map: ?*LocalVarMap) LoweringError!void {
         const const_local_var_map = if (local_var_map) |lvm| @as(*const LocalVarMap, lvm) else null;
-        const expr_lowerer = ExpressionLowerer.init(self.ctx, block, self.type_mapper, param_map, storage_map, const_local_var_map, self.locations);
+        const expr_lowerer = ExpressionLowerer.init(self.ctx, block, self.type_mapper, param_map, storage_map, const_local_var_map, self.locations, self.ora_dialect);
 
         for (ensures_clauses, 0..) |clause, i| {
             // Lower the ensures expression
@@ -904,38 +931,38 @@ pub const DeclarationLowerer = struct {
             c.mlirOperationStateAddOperands(&assert_state, 1, @ptrCast(&condition_value));
 
             // Collect verification attributes
-            var attributes = std.ArrayList(c.MlirNamedAttribute).init(std.heap.page_allocator);
-            defer attributes.deinit();
+            var attributes = std.ArrayList(c.MlirNamedAttribute){};
+            defer attributes.deinit(std.heap.page_allocator);
 
             // Add ora.ensures attribute to mark this as a postcondition
             const ensures_attr = c.mlirBoolAttrGet(self.ctx, 1);
             const ensures_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("ora.ensures"));
-            attributes.append(c.mlirNamedAttributeGet(ensures_id, ensures_attr)) catch {};
+            attributes.append(std.heap.page_allocator, c.mlirNamedAttributeGet(ensures_id, ensures_attr)) catch {};
 
             // Add verification context attribute
             const context_attr = c.mlirStringAttrGet(self.ctx, c.mlirStringRefCreateFromCString("function_postcondition"));
             const context_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("ora.verification_context"));
-            attributes.append(c.mlirNamedAttributeGet(context_id, context_attr)) catch {};
+            attributes.append(std.heap.page_allocator, c.mlirNamedAttributeGet(context_id, context_attr)) catch {};
 
             // Add verification marker for formal verification tools
             const verification_attr = c.mlirBoolAttrGet(self.ctx, 1);
             const verification_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("ora.verification"));
-            attributes.append(c.mlirNamedAttributeGet(verification_id, verification_attr)) catch {};
+            attributes.append(std.heap.page_allocator, c.mlirNamedAttributeGet(verification_id, verification_attr)) catch {};
 
             // Add postcondition index for multiple ensures clauses
             const index_attr = c.mlirIntegerAttrGet(c.mlirIntegerTypeGet(self.ctx, 32), @intCast(i));
             const index_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("ora.postcondition_index"));
-            attributes.append(c.mlirNamedAttributeGet(index_id, index_attr)) catch {};
+            attributes.append(std.heap.page_allocator, c.mlirNamedAttributeGet(index_id, index_attr)) catch {};
 
             // Add formal verification marker
             const formal_attr = c.mlirBoolAttrGet(self.ctx, 1);
             const formal_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("ora.formal"));
-            attributes.append(c.mlirNamedAttributeGet(formal_id, formal_attr)) catch {};
+            attributes.append(std.heap.page_allocator, c.mlirNamedAttributeGet(formal_id, formal_attr)) catch {};
 
             // Add return value reference for postconditions
             const return_ref_attr = c.mlirStringAttrGet(self.ctx, c.mlirStringRefCreateFromCString("return_value"));
             const return_ref_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("ora.return_reference"));
-            attributes.append(c.mlirNamedAttributeGet(return_ref_id, return_ref_attr)) catch {};
+            attributes.append(std.heap.page_allocator, c.mlirNamedAttributeGet(return_ref_id, return_ref_attr)) catch {};
 
             // Apply all attributes
             c.mlirOperationStateAddAttributes(&assert_state, @intCast(attributes.items.len), attributes.items.ptr);
@@ -948,33 +975,33 @@ pub const DeclarationLowerer = struct {
     /// Enhanced function type creation with parameter default values (Requirements 6.3)
     fn createFunctionType(self: *const DeclarationLowerer, func: *const lib.FunctionNode) c.MlirType {
         // Create parameter types array
-        var param_types = std.ArrayList(c.MlirType).init(std.heap.page_allocator);
-        defer param_types.deinit();
+        var param_types = std.ArrayList(c.MlirType){};
+        defer param_types.deinit(std.heap.page_allocator);
 
         for (func.parameters) |param| {
             const param_type = self.type_mapper.toMlirType(param.type_info);
-            param_types.append(param_type) catch {};
+            param_types.append(std.heap.page_allocator, param_type) catch {};
         }
 
-        // Create result type
-        const result_type = if (func.return_type_info) |ret_info|
-            self.type_mapper.toMlirType(ret_info)
-        else
-            c.mlirNoneTypeGet(self.ctx);
-
         // Create function type
-        return c.mlirFunctionTypeGet(self.ctx, @intCast(param_types.items.len), if (param_types.items.len > 0) param_types.items.ptr else null, 1, @ptrCast(&result_type));
+        if (func.return_type_info) |ret_info| {
+            const result_type = self.type_mapper.toMlirType(ret_info);
+            return c.mlirFunctionTypeGet(self.ctx, @intCast(param_types.items.len), if (param_types.items.len > 0) param_types.items.ptr else null, 1, @ptrCast(&result_type));
+        } else {
+            // Functions with no return type should have 0 result types, not a 'none' type
+            return c.mlirFunctionTypeGet(self.ctx, @intCast(param_types.items.len), if (param_types.items.len > 0) param_types.items.ptr else null, 0, null);
+        }
     }
 
     /// Create struct type from struct declaration
-    fn createStructType(self: *const DeclarationLowerer, struct_decl: *const lib.ast.StructDeclNode) c.MlirType {
+    pub fn createStructType(self: *const DeclarationLowerer, struct_decl: *const lib.ast.StructDeclNode) c.MlirType {
         // Create field types array
-        var field_types = std.ArrayList(c.MlirType).init(std.heap.page_allocator);
-        defer field_types.deinit();
+        var field_types = std.ArrayList(c.MlirType){};
+        defer field_types.deinit(std.heap.page_allocator);
 
         for (struct_decl.fields) |field| {
             const field_type = self.type_mapper.toMlirType(field.type_info);
-            field_types.append(field_type) catch {};
+            field_types.append(std.heap.page_allocator, field_type) catch {};
         }
 
         // For now, create a simple struct type using the first field type
@@ -987,7 +1014,7 @@ pub const DeclarationLowerer = struct {
     }
 
     /// Create enum type from enum declaration
-    fn createEnumType(self: *const DeclarationLowerer, enum_decl: *const lib.ast.EnumDeclNode) c.MlirType {
+    pub fn createEnumType(self: *const DeclarationLowerer, enum_decl: *const lib.ast.EnumDeclNode) c.MlirType {
         // For now, return the underlying type
         // TODO: Create !ora.enum<name, repr> dialect type
         return if (enum_decl.underlying_type_info) |type_info|
@@ -1002,58 +1029,58 @@ pub const DeclarationLowerer = struct {
         var state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("ora.log.decl"), self.createFileLocation(log_decl.span));
 
         // Collect log attributes
-        var attributes = std.ArrayList(c.MlirNamedAttribute).init(std.heap.page_allocator);
-        defer attributes.deinit();
+        var attributes = std.ArrayList(c.MlirNamedAttribute){};
+        defer attributes.deinit(std.heap.page_allocator);
 
         // Add log name
         const name_ref = c.mlirStringRefCreate(log_decl.name.ptr, log_decl.name.len);
         const name_attr = c.mlirStringAttrGet(self.ctx, name_ref);
         const name_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("sym_name"));
-        attributes.append(c.mlirNamedAttributeGet(name_id, name_attr)) catch {};
+        attributes.append(std.heap.page_allocator, c.mlirNamedAttributeGet(name_id, name_attr)) catch {};
 
         // Create field information as attributes
-        var field_names = std.ArrayList(c.MlirAttribute).init(std.heap.page_allocator);
-        defer field_names.deinit();
-        var field_types = std.ArrayList(c.MlirAttribute).init(std.heap.page_allocator);
-        defer field_types.deinit();
-        var field_indexed = std.ArrayList(c.MlirAttribute).init(std.heap.page_allocator);
-        defer field_indexed.deinit();
+        var field_names = std.ArrayList(c.MlirAttribute){};
+        defer field_names.deinit(std.heap.page_allocator);
+        var field_types = std.ArrayList(c.MlirAttribute){};
+        defer field_types.deinit(std.heap.page_allocator);
+        var field_indexed = std.ArrayList(c.MlirAttribute){};
+        defer field_indexed.deinit(std.heap.page_allocator);
 
         for (log_decl.fields) |field| {
             // Add field name
             const field_name_ref = c.mlirStringRefCreate(field.name.ptr, field.name.len);
             const field_name_attr = c.mlirStringAttrGet(self.ctx, field_name_ref);
-            field_names.append(field_name_attr) catch {};
+            field_names.append(std.heap.page_allocator, field_name_attr) catch {};
 
             // Add field type
             const field_type = self.type_mapper.toMlirType(field.type_info);
             const field_type_attr = c.mlirTypeAttrGet(field_type);
-            field_types.append(field_type_attr) catch {};
+            field_types.append(std.heap.page_allocator, field_type_attr) catch {};
 
             // Add indexed flag
             const indexed_attr = c.mlirBoolAttrGet(self.ctx, if (field.indexed) 1 else 0);
-            field_indexed.append(indexed_attr) catch {};
+            field_indexed.append(std.heap.page_allocator, indexed_attr) catch {};
         }
 
         // Add field arrays as attributes
         if (field_names.items.len > 0) {
             const field_names_array = c.mlirArrayAttrGet(self.ctx, @intCast(field_names.items.len), field_names.items.ptr);
             const field_names_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("ora.field_names"));
-            attributes.append(c.mlirNamedAttributeGet(field_names_id, field_names_array)) catch {};
+            attributes.append(std.heap.page_allocator, c.mlirNamedAttributeGet(field_names_id, field_names_array)) catch {};
 
             const field_types_array = c.mlirArrayAttrGet(self.ctx, @intCast(field_types.items.len), field_types.items.ptr);
             const field_types_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("ora.field_types"));
-            attributes.append(c.mlirNamedAttributeGet(field_types_id, field_types_array)) catch {};
+            attributes.append(std.heap.page_allocator, c.mlirNamedAttributeGet(field_types_id, field_types_array)) catch {};
 
             const field_indexed_array = c.mlirArrayAttrGet(self.ctx, @intCast(field_indexed.items.len), field_indexed.items.ptr);
             const field_indexed_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("ora.field_indexed"));
-            attributes.append(c.mlirNamedAttributeGet(field_indexed_id, field_indexed_array)) catch {};
+            attributes.append(std.heap.page_allocator, c.mlirNamedAttributeGet(field_indexed_id, field_indexed_array)) catch {};
         }
 
         // Add log declaration marker
         const log_decl_attr = c.mlirBoolAttrGet(self.ctx, 1);
         const log_decl_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("ora.log_decl"));
-        attributes.append(c.mlirNamedAttributeGet(log_decl_id, log_decl_attr)) catch {};
+        attributes.append(std.heap.page_allocator, c.mlirNamedAttributeGet(log_decl_id, log_decl_attr)) catch {};
 
         // Apply all attributes
         c.mlirOperationStateAddAttributes(&state, @intCast(attributes.items.len), attributes.items.ptr);
@@ -1067,50 +1094,50 @@ pub const DeclarationLowerer = struct {
         var state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("ora.error.decl"), self.createFileLocation(error_decl.span));
 
         // Collect error attributes
-        var attributes = std.ArrayList(c.MlirNamedAttribute).init(std.heap.page_allocator);
-        defer attributes.deinit();
+        var attributes = std.ArrayList(c.MlirNamedAttribute){};
+        defer attributes.deinit(std.heap.page_allocator);
 
         // Add error name
         const name_ref = c.mlirStringRefCreate(error_decl.name.ptr, error_decl.name.len);
         const name_attr = c.mlirStringAttrGet(self.ctx, name_ref);
         const name_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("sym_name"));
-        attributes.append(c.mlirNamedAttributeGet(name_id, name_attr)) catch {};
+        attributes.append(std.heap.page_allocator, c.mlirNamedAttributeGet(name_id, name_attr)) catch {};
 
         // Add error parameters if present
         if (error_decl.parameters) |params| {
-            var param_names = std.ArrayList(c.MlirAttribute).init(std.heap.page_allocator);
-            defer param_names.deinit();
-            var param_types = std.ArrayList(c.MlirAttribute).init(std.heap.page_allocator);
-            defer param_types.deinit();
+            var param_names = std.ArrayList(c.MlirAttribute){};
+            defer param_names.deinit(std.heap.page_allocator);
+            var param_types = std.ArrayList(c.MlirAttribute){};
+            defer param_types.deinit(std.heap.page_allocator);
 
             for (params) |param| {
                 // Add parameter name
                 const param_name_ref = c.mlirStringRefCreate(param.name.ptr, param.name.len);
                 const param_name_attr = c.mlirStringAttrGet(self.ctx, param_name_ref);
-                param_names.append(param_name_attr) catch {};
+                param_names.append(std.heap.page_allocator, param_name_attr) catch {};
 
                 // Add parameter type
                 const param_type = self.type_mapper.toMlirType(param.type_info);
                 const param_type_attr = c.mlirTypeAttrGet(param_type);
-                param_types.append(param_type_attr) catch {};
+                param_types.append(std.heap.page_allocator, param_type_attr) catch {};
             }
 
             // Add parameter arrays as attributes
             if (param_names.items.len > 0) {
                 const param_names_array = c.mlirArrayAttrGet(self.ctx, @intCast(param_names.items.len), param_names.items.ptr);
                 const param_names_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("ora.param_names"));
-                attributes.append(c.mlirNamedAttributeGet(param_names_id, param_names_array)) catch {};
+                attributes.append(std.heap.page_allocator, c.mlirNamedAttributeGet(param_names_id, param_names_array)) catch {};
 
                 const param_types_array = c.mlirArrayAttrGet(self.ctx, @intCast(param_types.items.len), param_types.items.ptr);
                 const param_types_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("ora.param_types"));
-                attributes.append(c.mlirNamedAttributeGet(param_types_id, param_types_array)) catch {};
+                attributes.append(std.heap.page_allocator, c.mlirNamedAttributeGet(param_types_id, param_types_array)) catch {};
             }
         }
 
         // Add error declaration marker
         const error_decl_attr = c.mlirBoolAttrGet(self.ctx, 1);
         const error_decl_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("ora.error_decl"));
-        attributes.append(c.mlirNamedAttributeGet(error_decl_id, error_decl_attr)) catch {};
+        attributes.append(std.heap.page_allocator, c.mlirNamedAttributeGet(error_decl_id, error_decl_attr)) catch {};
 
         // Apply all attributes
         c.mlirOperationStateAddAttributes(&state, @intCast(attributes.items.len), attributes.items.ptr);
@@ -1136,8 +1163,8 @@ pub const DeclarationLowerer = struct {
         var state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("ora.quantified"), self.createFileLocation(quantified.span));
 
         // Collect quantified attributes
-        var attributes = std.ArrayList(c.MlirNamedAttribute).init(std.heap.page_allocator);
-        defer attributes.deinit();
+        var attributes = std.ArrayList(c.MlirNamedAttribute){};
+        defer attributes.deinit(std.heap.page_allocator);
 
         // Add quantifier type (forall or exists)
         const quantifier_str = switch (quantified.quantifier) {
@@ -1146,24 +1173,24 @@ pub const DeclarationLowerer = struct {
         };
         const quantifier_attr = c.mlirStringAttrGet(self.ctx, c.mlirStringRefCreate(quantifier_str.ptr, quantifier_str.len));
         const quantifier_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("ora.quantifier"));
-        attributes.append(c.mlirNamedAttributeGet(quantifier_id, quantifier_attr)) catch {};
+        attributes.append(std.heap.page_allocator, c.mlirNamedAttributeGet(quantifier_id, quantifier_attr)) catch {};
 
         // Add bound variable name
         const var_name_ref = c.mlirStringRefCreate(quantified.variable.ptr, quantified.variable.len);
         const var_name_attr = c.mlirStringAttrGet(self.ctx, var_name_ref);
         const var_name_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("ora.bound_variable"));
-        attributes.append(c.mlirNamedAttributeGet(var_name_id, var_name_attr)) catch {};
+        attributes.append(std.heap.page_allocator, c.mlirNamedAttributeGet(var_name_id, var_name_attr)) catch {};
 
         // Add bound variable type
         const var_type = self.type_mapper.toMlirType(quantified.variable_type);
         const var_type_attr = c.mlirTypeAttrGet(var_type);
         const var_type_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("ora.bound_variable_type"));
-        attributes.append(c.mlirNamedAttributeGet(var_type_id, var_type_attr)) catch {};
+        attributes.append(std.heap.page_allocator, c.mlirNamedAttributeGet(var_type_id, var_type_attr)) catch {};
 
         // Add quantified expression marker
         const quantified_attr = c.mlirBoolAttrGet(self.ctx, 1);
         const quantified_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("ora.quantified"));
-        attributes.append(c.mlirNamedAttributeGet(quantified_id, quantified_attr)) catch {};
+        attributes.append(std.heap.page_allocator, c.mlirNamedAttributeGet(quantified_id, quantified_attr)) catch {};
 
         // Apply all attributes
         c.mlirOperationStateAddAttributes(&state, @intCast(attributes.items.len), attributes.items.ptr);

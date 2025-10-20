@@ -180,8 +180,8 @@ pub const StatementParser = struct {
     pub fn parseBlock(self: *StatementParser) common.ParserError!ast.Statements.BlockNode {
         _ = try self.base.consume(.LeftBrace, "Expected '{'");
 
-        var statements = std.ArrayList(ast.Statements.StmtNode).init(self.base.arena.allocator());
-        defer statements.deinit();
+        var statements = std.ArrayList(ast.Statements.StmtNode){};
+        defer statements.deinit(self.base.arena.allocator());
         errdefer {
             // Clean up statements on error
             for (statements.items) |*stmt| {
@@ -191,13 +191,13 @@ pub const StatementParser = struct {
 
         while (!self.base.check(.RightBrace) and !self.base.isAtEnd()) {
             const stmt = try self.parseStatement();
-            try statements.append(stmt);
+            try statements.append(self.base.arena.allocator(), stmt);
         }
 
         const end_token = try self.base.consume(.RightBrace, "Expected '}' after block");
 
         return ast.Statements.BlockNode{
-            .statements = try statements.toOwnedSlice(),
+            .statements = try statements.toOwnedSlice(self.base.arena.allocator()),
             .span = ParserCommon.makeSpan(end_token),
         };
     }
@@ -232,8 +232,8 @@ pub const StatementParser = struct {
         const event_name_token = try self.base.consume(.Identifier, "Expected event name");
         _ = try self.base.consume(.LeftParen, "Expected '(' after event name");
 
-        var args = std.ArrayList(ast.Expressions.ExprNode).init(self.base.arena.allocator());
-        defer args.deinit();
+        var args = std.ArrayList(ast.Expressions.ExprNode){};
+        defer args.deinit(self.base.arena.allocator());
 
         if (!self.base.check(.RightParen)) {
             repeat: while (true) {
@@ -241,7 +241,7 @@ pub const StatementParser = struct {
                 self.syncSubParsers();
                 const arg = try self.expr_parser.parseExpression();
                 self.updateFromSubParser(self.expr_parser.base.current);
-                try args.append(arg);
+                try args.append(self.base.arena.allocator(), arg);
                 if (!self.base.match(.Comma)) break :repeat;
             }
         }
@@ -251,7 +251,7 @@ pub const StatementParser = struct {
 
         return ast.Statements.StmtNode{ .Log = ast.Statements.LogNode{
             .event_name = try self.base.arena.createString(event_name_token.lexeme),
-            .args = try args.toOwnedSlice(),
+            .args = try args.toOwnedSlice(self.base.arena.allocator()),
             .span = ParserCommon.makeStmtSpan(event_name_token),
         } };
     }
@@ -368,8 +368,8 @@ pub const StatementParser = struct {
         _ = try self.base.consume(.LeftBrace, "Expected '{' after '.' in destructuring pattern");
 
         // Parse struct destructuring fields
-        var fields = std.ArrayList(ast.Expressions.StructDestructureField).init(self.base.arena.allocator());
-        defer fields.deinit();
+        var fields = std.ArrayList(ast.Expressions.StructDestructureField){};
+        defer fields.deinit(self.base.arena.allocator());
 
         if (!self.base.check(.RightBrace)) {
             repeat: while (true) {
@@ -382,7 +382,7 @@ pub const StatementParser = struct {
                     variable_name = try self.base.arena.createString(var_name_token.lexeme);
                 }
 
-                try fields.append(ast.Expressions.StructDestructureField{
+                try fields.append(self.base.arena.allocator(), ast.Expressions.StructDestructureField{
                     .name = try self.base.arena.createString(field_name_token.lexeme),
                     .variable = variable_name,
                     .span = common.ParserCommon.makeSpan(field_name_token),
@@ -405,7 +405,7 @@ pub const StatementParser = struct {
 
         _ = self.base.match(.Semicolon);
 
-        const pattern = ast.Expressions.DestructuringPattern{ .Struct = try fields.toOwnedSlice() };
+        const pattern = ast.Expressions.DestructuringPattern{ .Struct = try fields.toOwnedSlice(self.base.arena.allocator()) };
 
         return ast.Statements.DestructuringAssignmentNode{
             .pattern = pattern,
@@ -500,9 +500,9 @@ pub const StatementParser = struct {
                 // Case 2: label: switch (...) { ... }
                 if (self.base.match(.Switch)) {
                     const switch_stmt = try self.parseSwitchStatement();
-                    var stmts = std.ArrayList(ast.Statements.StmtNode).init(self.base.arena.allocator());
-                    defer stmts.deinit();
-                    try stmts.append(switch_stmt);
+                    var stmts = std.ArrayList(ast.Statements.StmtNode){};
+                    defer stmts.deinit(self.base.arena.allocator());
+                    try stmts.append(self.base.arena.allocator(), switch_stmt);
                     const block = ast.Statements.BlockNode{
                         .statements = try self.base.arena.createSlice(ast.Statements.StmtNode, stmts.items.len),
                         .span = common.ParserCommon.makeSpan(label_token),
@@ -575,13 +575,13 @@ pub const StatementParser = struct {
         const body = try self.parseBlock();
 
         // TODO: Invariants are not currently part of the language syntax, but they should be
-        var invariants = std.ArrayList(ast.Expressions.ExprNode).init(self.base.arena.allocator());
-        defer invariants.deinit();
+        var invariants = std.ArrayList(ast.Expressions.ExprNode){};
+        defer invariants.deinit(self.base.arena.allocator());
 
         return ast.Statements.StmtNode{ .While = ast.Statements.WhileNode{
             .condition = condition,
             .body = body,
-            .invariants = try invariants.toOwnedSlice(),
+            .invariants = try invariants.toOwnedSlice(self.base.arena.allocator()),
             .span = self.base.spanFromToken(self.base.previous()),
         } };
     }
@@ -642,8 +642,8 @@ pub const StatementParser = struct {
 
         _ = try self.base.consume(.LeftBrace, "Expected '{' after switch condition");
 
-        var cases = std.ArrayList(ast.Switch.Case).init(self.base.arena.allocator());
-        defer cases.deinit();
+        var cases = std.ArrayList(ast.Switch.Case){};
+        defer cases.deinit(self.base.arena.allocator());
 
         var default_case: ?ast.Statements.BlockNode = null;
 
@@ -734,7 +734,7 @@ pub const StatementParser = struct {
                 .span = ParserCommon.makeSpan(self.base.previous()),
             };
 
-            try cases.append(case);
+            try cases.append(self.base.arena.allocator(), case);
 
             // Optional comma between cases
             _ = self.base.match(.Comma);
@@ -744,7 +744,7 @@ pub const StatementParser = struct {
 
         return ast.Statements.StmtNode{ .Switch = ast.Statements.SwitchNode{
             .condition = condition,
-            .cases = try cases.toOwnedSlice(),
+            .cases = try cases.toOwnedSlice(self.base.arena.allocator()),
             .default_case = default_case,
             .span = self.base.spanFromToken(switch_token),
         } };

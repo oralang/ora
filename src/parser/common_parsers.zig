@@ -217,14 +217,14 @@ pub fn parseSwitchBody(
             // Parse the block content
             _ = base.advance(); // consume '{'
 
-            var statements = std.ArrayList(ast.Statements.StmtNode).init(base.arena.allocator());
-            defer statements.deinit();
+            var statements = std.ArrayList(ast.Statements.StmtNode){};
+            defer statements.deinit(base.arena.allocator());
 
             while (!base.check(.RightBrace) and !base.isAtEnd()) {
                 // Parse statements as expressions for now; optional semicolons
                 const e = try expr_parser.parseExpression();
                 base.current = expr_parser.base.current;
-                try statements.append(ast.Statements.StmtNode{ .Expr = e });
+                try statements.append(base.arena.allocator(), ast.Statements.StmtNode{ .Expr = e });
                 _ = base.match(.Semicolon);
             }
 
@@ -255,8 +255,8 @@ pub fn parseSwitchBody(
             try base.errorAtCurrent("Block body not allowed in switch expression arm");
             return ParserError.UnexpectedToken;
         }
-        var statements = std.ArrayList(ast.Statements.StmtNode).init(base.arena.allocator());
-        defer statements.deinit();
+        var statements = std.ArrayList(ast.Statements.StmtNode){};
+        defer statements.deinit(base.arena.allocator());
 
         // Parse statements inside the block
         while (!base.check(.RightBrace) and !base.isAtEnd()) {
@@ -264,7 +264,7 @@ pub fn parseSwitchBody(
             const e = try expr_parser.parseExpression();
             // Keep base and expr parser in sync after expression parse
             base.current = expr_parser.base.current;
-            try statements.append(ast.Statements.StmtNode{ .Expr = e });
+            try statements.append(base.arena.allocator(), ast.Statements.StmtNode{ .Expr = e });
 
             // Consume optional semicolon
             _ = base.match(.Semicolon);
