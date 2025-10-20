@@ -34,12 +34,10 @@ contract SwitchExpressionTest {
         let balance = 100;
         let is_active = true;
         
-        // Switch without value (condition => result)
-        let status = switch {
-            is_active == false => "Inactive",
-            balance > 1000 => "Premium",
-            balance > 0 => "Standard",
-            else => "Empty",
+        // Switch with boolean condition
+        let status = switch (is_active) {
+            false => "Inactive",
+            true => "Active",
         };
     }
 }

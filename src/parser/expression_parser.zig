@@ -833,20 +833,41 @@ pub const ExpressionParser = struct {
                 .span = self.base.spanFromToken(token),
             } };
 
-            // Handle field access (identifier.field)
+            // Handle field access (identifier.field) or enum literal (EnumType.VariantName)
             while (self.base.match(.Dot)) {
                 const field_token = try self.base.consume(.Identifier, "Expected field name after '.'");
 
-                // Store field name in arena
-                const field_name = try self.base.arena.createString(field_token.lexeme);
+                // Check if this might be an enum literal (EnumType.VariantName)
+                if (current_expr == .Identifier) {
+                    const enum_name = current_expr.Identifier.name;
 
-                // Create field access expression
+                    // Don't treat standard library and module access as enum literals
+                    const is_module_access = std.mem.eql(u8, enum_name, "std") or
+                        std.mem.eql(u8, enum_name, "constants") or
+                        std.mem.eql(u8, enum_name, "transaction") or
+                        std.mem.eql(u8, enum_name, "block") or
+                        std.mem.eql(u8, enum_name, "math");
+
+                    if (!is_module_access) {
+                        // Treat as potential enum literal
+                        const variant_name = try self.base.arena.createString(field_token.lexeme);
+                        current_expr = ast.Expressions.ExprNode{ .EnumLiteral = ast.Expressions.EnumLiteralExpr{
+                            .enum_name = enum_name,
+                            .variant_name = variant_name,
+                            .span = self.base.spanFromToken(field_token),
+                        } };
+                        continue;
+                    }
+                }
+
+                // Regular field access
+                const field_name = try self.base.arena.createString(field_token.lexeme);
                 const field_expr = ast.Expressions.ExprNode{
                     .FieldAccess = ast.Expressions.FieldAccessExpr{
                         .target = try self.base.arena.createNode(ast.Expressions.ExprNode),
                         .field = field_name,
                         .type_info = ast.Types.TypeInfo.unknown(), // Will be resolved during type checking
-                        .span = self.base.spanFromToken(token),
+                        .span = self.base.spanFromToken(field_token),
                     },
                 };
 

@@ -199,6 +199,7 @@ pub const PassResult = struct {
     error_message: ?[]const u8,
     passes_run: std.ArrayList([]const u8),
     timing_info: ?[]const u8,
+    allocator: std.mem.Allocator,
 
     pub fn init(allocator: std.mem.Allocator) PassResult {
         return PassResult{
@@ -206,16 +207,17 @@ pub const PassResult = struct {
             .error_message = null,
             .passes_run = std.ArrayList([]const u8).init(allocator),
             .timing_info = null,
+            .allocator = allocator,
         };
     }
 
     pub fn deinit(self: *PassResult) void {
-        self.passes_run.deinit();
+        self.passes_run.deinit(self.allocator);
         if (self.error_message) |msg| {
-            self.passes_run.allocator.free(msg);
+            self.allocator.free(msg);
         }
         if (self.timing_info) |timing| {
-            self.passes_run.allocator.free(timing);
+            self.allocator.free(timing);
         }
     }
 };

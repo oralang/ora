@@ -10,12 +10,16 @@
 
 const std = @import("std");
 const c = @import("c.zig").c;
+const lib = @import("ora_lib");
+const ErrorHandler = @import("error_handling.zig").ErrorHandler;
+const ErrorType = @import("error_handling.zig").ErrorType;
+const WarningType = @import("error_handling.zig").WarningType;
 
 /// Ora MLIR verification system
 pub const OraVerification = struct {
     ctx: c.MlirContext,
     allocator: std.mem.Allocator,
-    errors: std.ArrayList(VerificationError),
+    error_handler: ErrorHandler,
 
     const Self = @This();
 
@@ -23,17 +27,18 @@ pub const OraVerification = struct {
         return Self{
             .ctx = ctx,
             .allocator = allocator,
-            .errors = std.ArrayList(VerificationError){},
+            .error_handler = ErrorHandler.init(allocator),
         };
     }
 
     pub fn deinit(self: *Self) void {
-        self.errors.deinit(self.allocator);
+        self.error_handler.deinit();
     }
 
     /// Run all verification passes on a module
     pub fn verifyModule(self: *Self, module: c.MlirModule) !VerificationResult {
-        self.errors.clearRetainingCapacity();
+        // Reset error handler for new verification run
+        self.error_handler = ErrorHandler.init(self.allocator);
 
         const module_op = c.mlirModuleGetOperation(module);
 
@@ -43,9 +48,32 @@ pub const OraVerification = struct {
         try self.verifyContracts(module_op);
         try self.verifySemantics(module_op);
 
+        // Convert ErrorHandler errors to VerificationResult
+        const errors = self.error_handler.getErrors();
+        var verification_errors = std.ArrayList(VerificationError){};
+        defer verification_errors.deinit(self.allocator);
+
+        for (errors) |err| {
+            try verification_errors.append(self.allocator, VerificationError{
+                .type = switch (err.error_type) {
+                    .MalformedAst => .SemanticError,
+                    .TypeMismatch => .InvalidType,
+                    .UndefinedSymbol => .SemanticError,
+                    .InvalidMemoryRegion => .MemorySafety,
+                    .MlirOperationFailed => .SemanticError,
+                    .UnsupportedFeature => .SemanticError,
+                    .MissingNodeType => .MissingAttribute,
+                    .CompilationLimit => .SemanticError,
+                    .InternalError => .SemanticError,
+                },
+                .operation = c.MlirOperation{}, // We don't have operation context in ErrorHandler
+                .message = err.message,
+            });
+        }
+
         return VerificationResult{
-            .success = self.errors.items.len == 0,
-            .errors = try self.allocator.dupe(VerificationError, self.errors.items),
+            .success = errors.len == 0,
+            .errors = try verification_errors.toOwnedSlice(self.allocator),
         };
     }
 
@@ -102,13 +130,13 @@ pub const OraVerification = struct {
 
         // Contract should have at least one result (the contract instance)
         if (num_results == 0) {
-            try self.addError(.InvalidResultCount, op, "Contract operation must have at least one result");
+            try self.error_handler.reportError(.MlirOperationFailed, null, "Contract operation must have at least one result", "add result to contract operation");
         }
 
         // Contract should have at least one region (the body)
         const num_regions = c.mlirOperationGetNumRegions(op);
         if (num_regions == 0) {
-            try self.addError(.SemanticError, op, "Contract operation must have at least one region");
+            try self.error_handler.reportError(.MlirOperationFailed, null, "Contract operation must have at least one region", "add region to contract operation");
         }
     }
 
@@ -119,7 +147,7 @@ pub const OraVerification = struct {
 
         // Global should have exactly one result
         if (num_results != 1) {
-            try self.addError(.InvalidResultCount, op, "Global operation must have exactly one result");
+            try self.error_handler.reportError(.MlirOperationFailed, null, "Global operation must have exactly one result", "ensure global operation has exactly one result");
         }
     }
 
@@ -130,10 +158,10 @@ pub const OraVerification = struct {
 
         // SLoad should have exactly one operand (address) and one result (value)
         if (num_operands != 1) {
-            try self.addError(.InvalidOperandCount, op, "SLoad operation must have exactly one operand (address)");
+            try self.error_handler.reportError(.MlirOperationFailed, null, "SLoad operation must have exactly one operand (address)", "ensure sload has exactly one address operand");
         }
         if (num_results != 1) {
-            try self.addError(.InvalidResultCount, op, "SLoad operation must have exactly one result (value)");
+            try self.error_handler.reportError(.MlirOperationFailed, null, "SLoad operation must have exactly one result (value)", "ensure sload has exactly one result");
         }
     }
 
@@ -144,10 +172,10 @@ pub const OraVerification = struct {
 
         // SStore should have exactly two operands (address, value) and no results
         if (num_operands != 2) {
-            try self.addError(.InvalidOperandCount, op, "SStore operation must have exactly two operands (address, value)");
+            try self.error_handler.reportError(.MlirOperationFailed, null, "SStore operation must have exactly two operands (address, value)", "ensure sstore has exactly two operands");
         }
         if (num_results != 0) {
-            try self.addError(.InvalidResultCount, op, "SStore operation must have no results");
+            try self.error_handler.reportError(.MlirOperationFailed, null, "SStore operation must have no results", "ensure sstore has no results");
         }
     }
 
@@ -158,10 +186,10 @@ pub const OraVerification = struct {
 
         // MLoad should have exactly one operand (address) and one result (value)
         if (num_operands != 1) {
-            try self.addError(.InvalidOperandCount, op, "MLoad operation must have exactly one operand (address)");
+            try self.error_handler.reportError(.MlirOperationFailed, null, "MLoad operation must have exactly one operand (address)", "ensure mload has exactly one address operand");
         }
         if (num_results != 1) {
-            try self.addError(.InvalidResultCount, op, "MLoad operation must have exactly one result (value)");
+            try self.error_handler.reportError(.MlirOperationFailed, null, "MLoad operation must have exactly one result (value)", "ensure mload has exactly one result");
         }
     }
 
@@ -172,10 +200,10 @@ pub const OraVerification = struct {
 
         // MStore should have exactly two operands (address, value) and no results
         if (num_operands != 2) {
-            try self.addError(.InvalidOperandCount, op, "MStore operation must have exactly two operands (address, value)");
+            try self.error_handler.reportError(.MlirOperationFailed, null, "MStore operation must have exactly two operands (address, value)", "ensure mstore has exactly two operands");
         }
         if (num_results != 0) {
-            try self.addError(.InvalidResultCount, op, "MStore operation must have no results");
+            try self.error_handler.reportError(.MlirOperationFailed, null, "MStore operation must have no results", "ensure mstore has no results");
         }
     }
 
@@ -213,7 +241,7 @@ pub const OraVerification = struct {
             // Contract operations should have exactly one operand (the condition)
             const num_operands = c.mlirOperationGetNumOperands(op);
             if (num_operands != 1) {
-                try self.addError(.InvalidOperandCount, op, "Contract operation must have exactly one operand (condition)");
+                try self.error_handler.reportError(.MlirOperationFailed, null, "Contract operation must have exactly one operand (condition)", "ensure contract has exactly one condition operand");
             }
         }
 
@@ -238,10 +266,10 @@ pub const OraVerification = struct {
             const num_regions = c.mlirOperationGetNumRegions(op);
 
             if (num_operands != 1) {
-                try self.addError(.InvalidOperandCount, op, "If operation must have exactly one operand (condition)");
+                try self.error_handler.reportError(.MlirOperationFailed, null, "If operation must have exactly one operand (condition)", "ensure if operation has exactly one condition operand");
             }
             if (num_regions < 1) {
-                try self.addError(.SemanticError, op, "If operation must have at least one region (then branch)");
+                try self.error_handler.reportError(.MlirOperationFailed, null, "If operation must have at least one region (then branch)", "ensure if operation has at least one region");
             }
         }
 
@@ -260,16 +288,6 @@ pub const OraVerification = struct {
         _ = op;
         // For now, return a placeholder since MLIR C API string functions may not be available
         return "ora.operation";
-    }
-
-    /// Add verification error
-    fn addError(self: *Self, error_type: VerificationErrorType, op: c.MlirOperation, message: []const u8) !void {
-        const verification_error = VerificationError{
-            .type = error_type,
-            .operation = op,
-            .message = try self.allocator.dupe(u8, message),
-        };
-        try self.errors.append(self.allocator, verification_error);
     }
 };
 

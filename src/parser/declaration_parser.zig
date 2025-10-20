@@ -597,13 +597,13 @@ pub const DeclarationParser = struct {
             return ast.AstNode{ .Function = fn_node };
         }
 
-        // Variable declarations (contract state variables)
-        if (self.isMemoryRegionKeyword() or self.base.check(.Let) or self.base.check(.Var)) {
-            return ast.AstNode{ .VariableDecl = try self.parseVariableDecl() };
+        // Constant declarations (contract constants) - check before variables
+        if (self.base.check(.Const)) {
+            return ast.AstNode{ .Constant = try self.parseConstantDecl() };
         }
 
-        // Constant declarations (contract constants)
-        if (self.base.check(.Const)) {
+        // Variable declarations (contract state variables)
+        if (self.isMemoryRegionKeyword() or self.base.check(.Let) or self.base.check(.Var) or self.base.check(.Immutable)) {
             return ast.AstNode{ .VariableDecl = try self.parseVariableDecl() };
         }
 
@@ -801,6 +801,41 @@ pub const DeclarationParser = struct {
         return .{ .region = region, .kind = kind };
     }
 
+    /// Parse constant declaration (const NAME: type = value;)
+    fn parseConstantDecl(self: *DeclarationParser) !ast.ConstantNode {
+        // Consume the 'const' keyword
+        _ = try self.base.consume(.Const, "Expected 'const' keyword");
+
+        // Parse constant name
+        const name_token = try self.base.consume(.Identifier, "Expected constant name");
+
+        // Parse type annotation
+        _ = try self.base.consume(.Colon, "Expected ':' after constant name");
+        self.syncSubParsers();
+        const const_type = try self.type_parser.parseTypeWithContext(.Variable);
+        self.updateFromSubParser(self.type_parser.base.current);
+
+        // Parse initializer
+        _ = try self.base.consume(.Equal, "Expected '=' after constant type");
+        self.syncSubParsers();
+        const value_expr = try self.expr_parser.parseExpression();
+        self.updateFromSubParser(self.expr_parser.base.current);
+
+        // Create the value expression node
+        const value_ptr = try self.base.arena.createNode(ast.Expressions.ExprNode);
+        value_ptr.* = value_expr;
+
+        _ = try self.base.consume(.Semicolon, "Expected ';' after constant declaration");
+
+        return ast.ConstantNode{
+            .name = name_token.lexeme,
+            .typ = const_type,
+            .value = value_ptr,
+            .visibility = .Private, // Constants are private by default
+            .span = ParserCommon.makeSpan(name_token),
+        };
+    }
+
     /// Parse error declaration with optional parameter list (error ErrorName(param: type);)
     fn parseErrorDecl(self: *DeclarationParser) !ast.Statements.ErrorDeclNode {
         const name_token = try self.base.consume(.Identifier, "Expected error name");
@@ -860,7 +895,6 @@ pub const DeclarationParser = struct {
 
     /// Check if current token is a memory region keyword
     fn isMemoryRegionKeyword(self: *DeclarationParser) bool {
-        return self.base.check(.Const) or self.base.check(.Immutable) or
-            self.base.check(.Storage) or self.base.check(.Memory) or self.base.check(.Tstore);
+        return self.base.check(.Storage) or self.base.check(.Memory) or self.base.check(.Tstore);
     }
 };

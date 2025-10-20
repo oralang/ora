@@ -1,0 +1,41 @@
+// ==========================================
+// BASIC CONTROL FLOW TEST
+// ==========================================
+// This file tests basic control flow constructs
+
+contract BasicControlFlowTest {
+    // Test if statement
+    fn testIf() -> u256 {
+        let x: u256 = 10;
+        if (x > 5) {
+            return 1;
+        } else {
+            return 0;
+        }
+    }
+    
+    // Test while loop
+    fn testWhile() -> u256 {
+        let counter: u256 = 0;
+        while (counter < 5) {
+            counter = counter + 1;
+        }
+        return counter;
+    }
+    
+    // Test simple switch (without enum for now)
+    fn testSwitch() -> u256 {
+        let value: u256 = 2;
+        switch (value) {
+            1 => { return 10; }
+            2 => { return 20; }
+            3 => { return 30; }
+            else => { return 0; }
+        }
+    }
+    
+    // Test return statement
+    fn testReturn() -> u256 {
+        return 42;
+    }
+}

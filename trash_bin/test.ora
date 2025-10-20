@@ -1,1 +1,0 @@
-contract Test { storage var value: u256; pub fn setValue(newValue: u256) { value = newValue; } }

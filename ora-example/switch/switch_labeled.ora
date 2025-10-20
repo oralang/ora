@@ -10,7 +10,5 @@ contract LabeledSwitchDemo {
                 continue :outer (0);
             }
         }
-
-        _ = x;
     }
 }

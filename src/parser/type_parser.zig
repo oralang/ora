@@ -84,6 +84,10 @@ pub const TypeParser = struct {
             return try self.parseDoubleMapType(context);
         }
 
+        if (self.base.match(.Slice)) {
+            return try self.parseSliceType(context);
+        }
+
         if (self.base.match(.LeftBracket)) {
             return try self.parseArrayType(context);
         }

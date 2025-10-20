@@ -539,15 +539,6 @@ pub const ExpressionLowerer = struct {
             }
         }
 
-        // Check if this is a local variable
-        if (self.local_var_map) |lvm| {
-            if (lvm.hasLocalVar(identifier.name)) {
-                // This is a local variable - return the stored value directly
-
-                return lvm.getLocalVar(identifier.name).?;
-            }
-        }
-
         // Check if we have a storage map and if this variable exists in storage
         var is_storage_variable = false;
         if (self.storage_map) |sm| {
@@ -571,33 +562,37 @@ pub const ExpressionLowerer = struct {
             const load_op = memory_manager.createStorageLoad(identifier.name, result_type, self.fileLoc(identifier.span));
             c.mlirBlockAppendOwnedOperation(self.block, load_op);
             return c.mlirOperationGetResult(load_op, 0);
-        } else {
-            // This is a local variable - load from the allocated memory
-
-            // Get the local variable reference from our map
-            if (self.local_var_map) |lvm| {
-                if (lvm.getLocalVar(identifier.name)) |local_var_ref| {
-                    // Load the value from the allocated memory
-                    var load_state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("scf.load"), self.fileLoc(identifier.span));
-
-                    // Add the local variable reference as operand
-                    c.mlirOperationStateAddOperands(&load_state, 1, @ptrCast(&local_var_ref));
-
-                    // Add the result type (the type of the stored value)
-                    const var_type = c.mlirValueGetType(local_var_ref);
-                    const memref_type = c.mlirShapedTypeGetElementType(var_type);
-                    c.mlirOperationStateAddResults(&load_state, 1, @ptrCast(&memref_type));
-
-                    const load_op = c.mlirOperationCreate(&load_state);
-                    c.mlirBlockAppendOwnedOperation(self.block, load_op);
-                    return c.mlirOperationGetResult(load_op, 0);
-                }
-            }
-
-            // If we can't find the local variable, this is an error
-            std.debug.print("ERROR: Undefined identifier: {s}\n", .{identifier.name});
-            return self.createErrorPlaceholder(identifier.span, "Undefined identifier");
         }
+
+        // Check if this is a local variable
+        if (self.local_var_map) |lvm| {
+            if (lvm.getLocalVar(identifier.name)) |local_var_ref| {
+                // Load the value from the allocated memory
+                const var_type = c.mlirValueGetType(local_var_ref);
+
+                // Check if it's a memref type
+                if (!c.mlirTypeIsAMemRef(var_type)) {
+                    // It's already a value, not a memref - return it directly
+                    return local_var_ref;
+                }
+
+                // It's a memref - create a load operation
+                var load_state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("memref.load"), self.fileLoc(identifier.span));
+                c.mlirOperationStateAddOperands(&load_state, 1, @ptrCast(&local_var_ref));
+
+                // Get the element type from the memref
+                const element_type = c.mlirShapedTypeGetElementType(var_type);
+                c.mlirOperationStateAddResults(&load_state, 1, @ptrCast(&element_type));
+
+                const load_op = c.mlirOperationCreate(&load_state);
+                c.mlirBlockAppendOwnedOperation(self.block, load_op);
+                return c.mlirOperationGetResult(load_op, 0);
+            }
+        }
+
+        // If we can't find the local variable, this is an error
+        std.debug.print("ERROR: Undefined identifier: {s}\n", .{identifier.name});
+        return self.createErrorPlaceholder(identifier.span, "Undefined identifier");
     }
 
     /// Lower function call expressions with proper argument type checking and conversion

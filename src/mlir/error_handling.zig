@@ -3,6 +3,13 @@ const c = @import("c.zig").c;
 const lib = @import("ora_lib");
 
 /// Comprehensive error handling and validation system for MLIR lowering
+///
+/// Memory ownership:
+/// - Owns: errors ArrayList, warnings ArrayList, context_stack ArrayList
+/// - Owns: All error/warning message strings (via dupe)
+/// - Owns: All suggestion strings (via dupe)
+/// - Borrows: span references from AST (caller owns source)
+/// - Must call: deinit() to avoid leaks
 pub const ErrorHandler = struct {
     allocator: std.mem.Allocator,
     errors: std.ArrayList(LoweringError),
@@ -25,6 +32,19 @@ pub const ErrorHandler = struct {
     }
 
     pub fn deinit(self: *ErrorHandler) void {
+        // Free individual error messages and suggestions
+        for (self.errors.items) |*err| {
+            self.allocator.free(err.message);
+            if (err.suggestion) |suggestion| {
+                self.allocator.free(suggestion);
+            }
+        }
+
+        // Free individual warning messages
+        for (self.warnings.items) |*warn| {
+            self.allocator.free(warn.message);
+        }
+
         self.errors.deinit(self.allocator);
         self.warnings.deinit(self.allocator);
         self.context_stack.deinit(self.allocator);

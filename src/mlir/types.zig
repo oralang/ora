@@ -108,11 +108,21 @@ pub const TypeInference = struct {
 pub const TypeMapper = struct {
     ctx: c.MlirContext,
     inference_ctx: TypeInference.InferenceContext,
+    symbol_table: ?*@import("lower.zig").SymbolTable,
 
     pub fn init(ctx: c.MlirContext, allocator: std.mem.Allocator) TypeMapper {
         return .{
             .ctx = ctx,
             .inference_ctx = TypeInference.InferenceContext.init(allocator),
+            .symbol_table = null,
+        };
+    }
+
+    pub fn initWithSymbolTable(ctx: c.MlirContext, allocator: std.mem.Allocator, symbol_table: *@import("lower.zig").SymbolTable) TypeMapper {
+        return .{
+            .ctx = ctx,
+            .inference_ctx = TypeInference.InferenceContext.init(allocator),
+            .symbol_table = symbol_table,
         };
     }
 
@@ -572,6 +582,16 @@ pub const TypeMapper = struct {
     /// Handle type alias resolution
     pub fn resolveTypeAlias(self: *TypeMapper, type_name: []const u8) ?lib.ast.type_info.OraType {
         return self.inference_ctx.resolveTypeAlias(type_name);
+    }
+
+    /// Resolve type name using symbol table
+    pub fn resolveTypeName(self: *TypeMapper, type_name: []const u8) ?c.MlirType {
+        if (self.symbol_table) |st| {
+            if (st.lookupType(type_name)) |type_symbol| {
+                return type_symbol.mlir_type;
+            }
+        }
+        return null;
     }
 
     /// Add a type alias to the inference context

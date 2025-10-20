@@ -1,0 +1,49 @@
+// Storage with maps and slices test
+contract StorageTest2 {
+    // Storage mapping
+    storage var balances: map[address, u256];
+    
+    // Storage double mapping
+    storage var allowances: doublemap[address, address, u256];
+    
+    // Storage slice (dynamic array)
+    storage var history: slice[u256];
+    
+    // Constants
+    const OWNER: address = 0x1234567890123456789012345678901234567890;
+    const INITIAL_BALANCE: u256 = 1000;
+    
+    // Initialize contract
+    fn init() {
+        balances[OWNER] = INITIAL_BALANCE;
+        allowances[OWNER][OWNER] = 500;
+    }
+    
+    // Map operations
+    fn getBalance(account: address) -> u256 {
+        return balances[account];
+    }
+    
+    fn setBalance(account: address, amount: u256) {
+        balances[account] = amount;
+    }
+    
+    fn getAllowance(owner: address, spender: address) -> u256 {
+        return allowances[owner][spender];
+    }
+    
+    fn setAllowance(owner: address, spender: address, amount: u256) {
+        allowances[owner][spender] = amount;
+    }
+    
+    // Slice operations
+    fn addToHistory(value: u256) {
+        // Note: slice operations would need to be implemented
+        // For now, this is just a placeholder
+    }
+    
+    fn getHistoryLength() -> u256 {
+        // Note: slice length would need to be implemented
+        return 0;
+    }
+}

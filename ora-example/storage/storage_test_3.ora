@@ -1,0 +1,68 @@
+// Storage with structs test
+contract StorageTest3 {
+    // Struct definition
+    struct User {
+        addr: address;
+        balance: u256;
+        active: bool;
+    }
+    
+    // Storage variables using structs
+    storage var users: map[address, User];
+    storage var total_users: u256;
+    storage var owner: address;
+    
+    // Constants
+    const OWNER_ADDRESS: address = 0x1234567890123456789012345678901234567890;
+    const INITIAL_BALANCE: u256 = 1000;
+    
+    // Initialize contract
+    fn init() {
+        owner = OWNER_ADDRESS;
+        total_users = 0;
+        
+        // Create owner user
+        let owner_user = User {
+            addr: OWNER_ADDRESS,
+            balance: INITIAL_BALANCE,
+            active: true
+        };
+        users[OWNER_ADDRESS] = owner_user;
+        total_users = 1;
+    }
+    
+    // User management
+    fn createUser(account: address, initial_balance: u256) {
+        let new_user = User {
+            addr: account,
+            balance: initial_balance,
+            active: true
+        };
+        users[account] = new_user;
+        total_users = total_users + 1;
+    }
+    
+    fn getUser(account: address) -> User {
+        return users[account];
+    }
+    
+    fn updateUserBalance(account: address, new_balance: u256) {
+        let user = users[account];
+        user.balance = new_balance;
+        users[account] = user;
+    }
+    
+    fn deactivateUser(account: address) {
+        let user = users[account];
+        user.active = false;
+        users[account] = user;
+    }
+    
+    fn getTotalUsers() -> u256 {
+        return total_users;
+    }
+    
+    fn getOwner() -> address {
+        return owner;
+    }
+}

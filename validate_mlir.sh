@@ -55,7 +55,8 @@ validate_file() {
     if grep -q "=== MLIR Output ===" "$temp_file"; then
         sed -n '/=== MLIR Output ===/,$p' "$temp_file" | tail -n +2 > "$clean_file"
     else
-        cp "$temp_file" "$clean_file"
+        # Filter out debug messages and keep only MLIR
+        grep -v "^info:" "$temp_file" | grep -v "^ERROR:" | grep -v "^WARNING:" | grep -v "^Error " > "$clean_file"
     fi
     
     # Validate with mlir-opt

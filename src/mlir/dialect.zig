@@ -21,7 +21,7 @@ pub const OraDialect = struct {
     pub fn register(self: *OraDialect) !void {
         // For now, we use unregistered mode due to TableGen compatibility issues
         // This still produces clean MLIR output with ora.* operations
-        std.log.info("Ora dialect using unregistered mode (produces clean MLIR output)", .{});
+        // std.log.info("Ora dialect using unregistered mode (produces clean MLIR output)", .{});
         self.dialect_handle = null;
     }
 

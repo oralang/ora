@@ -233,7 +233,7 @@ pub fn main() !void {
             try runFullCompilation(allocator, file_path, !no_cst, mlir_options, artifact_options);
         }
     } else if (std.mem.eql(u8, cmd, "mlir")) {
-        try runMlirEmitAdvanced(allocator, file_path, mlir_options, artifact_options);
+        try runMlirEmitAdvancedWithYul(allocator, file_path, mlir_options, artifact_options, false);
     } else {
         try printUsage();
     }
@@ -642,7 +642,7 @@ fn runFullCompilation(allocator: std.mem.Allocator, file_path: []const u8, enabl
     // Phase 3: MLIR Generation (if requested)
     if (mlir_options.emit_mlir) {
         try stdout.print("Phase 3: MLIR Generation\n", .{});
-        try generateMlirOutput(allocator, ast_nodes, file_path, mlir_options, artifact_options);
+        try generateMlirOutput(allocator, ast_nodes, file_path, mlir_options, artifact_options, true);
     }
 
     try stdout.print("Frontend compilation completed successfully!\n", .{});
@@ -780,6 +780,10 @@ fn runASTGeneration(allocator: std.mem.Allocator, file_path: []const u8, output_
 
 /// Advanced MLIR emission with full pass pipeline support
 fn runMlirEmitAdvanced(allocator: std.mem.Allocator, file_path: []const u8, mlir_options: MlirOptions, artifact_options: ArtifactOptions) !void {
+    try runMlirEmitAdvancedWithYul(allocator, file_path, mlir_options, artifact_options, true);
+}
+
+fn runMlirEmitAdvancedWithYul(allocator: std.mem.Allocator, file_path: []const u8, mlir_options: MlirOptions, artifact_options: ArtifactOptions, generate_yul: bool) !void {
     var stdout_buffer: [1024]u8 = undefined;
     var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
     const stdout = &stdout_writer.interface;
@@ -811,12 +815,12 @@ fn runMlirEmitAdvanced(allocator: std.mem.Allocator, file_path: []const u8, mlir
     };
 
     // Generate MLIR with advanced options
-    try generateMlirOutput(allocator, ast_nodes, file_path, mlir_options, artifact_options);
+    try generateMlirOutput(allocator, ast_nodes, file_path, mlir_options, artifact_options, generate_yul);
     try stdout.flush();
 }
 
 /// Generate MLIR output with comprehensive options
-fn generateMlirOutput(allocator: std.mem.Allocator, ast_nodes: []lib.AstNode, file_path: []const u8, mlir_options: MlirOptions, artifact_options: ArtifactOptions) !void {
+fn generateMlirOutput(allocator: std.mem.Allocator, ast_nodes: []lib.AstNode, file_path: []const u8, mlir_options: MlirOptions, artifact_options: ArtifactOptions, generate_yul: bool) !void {
     var stdout_buffer: [1024]u8 = undefined;
     var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
     const stdout = &stdout_writer.interface;
@@ -825,12 +829,18 @@ fn generateMlirOutput(allocator: std.mem.Allocator, ast_nodes: []lib.AstNode, fi
     const mlir = @import("mlir/mod.zig");
     const c = @import("mlir/c.zig").c;
 
+    // Create arena allocator for MLIR lowering phase
+    // This arena will be freed after MLIR generation completes
+    var mlir_arena = std.heap.ArenaAllocator.init(allocator);
+    defer mlir_arena.deinit();
+    const mlir_allocator = mlir_arena.allocator();
+
     // Create MLIR context
-    const h = mlir.ctx.createContext(allocator);
-    defer mlir.ctx.destroyContext(h);
+    const h = mlir.createContext(mlir_allocator);
+    defer mlir.destroyContext(h);
 
     // Choose lowering function based on options
-    const lowering_result = if (mlir_options.passes != null or mlir_options.verify or mlir_options.timing or mlir_options.print_ir) blk: {
+    var lowering_result = if (mlir_options.passes != null or mlir_options.verify or mlir_options.timing or mlir_options.print_ir) blk: {
         // Use advanced lowering with passes
         const PassPipelineConfig = @import("mlir/pass_manager.zig").PassPipelineConfig;
         const PassOptimizationLevel = @import("mlir/pass_manager.zig").OptimizationLevel;
@@ -850,7 +860,7 @@ fn generateMlirOutput(allocator: std.mem.Allocator, ast_nodes: []lib.AstNode, fi
         };
 
         var custom_passes = std.ArrayList([]const u8){};
-        defer custom_passes.deinit(allocator);
+        defer custom_passes.deinit(mlir_allocator);
 
         // Parse custom passes if provided (command-line or build-time default)
         if (mlir_options.getDefaultPasses()) |passes_str| {
@@ -858,7 +868,7 @@ fn generateMlirOutput(allocator: std.mem.Allocator, ast_nodes: []lib.AstNode, fi
             while (pass_iter.next()) |pass_name| {
                 const trimmed = std.mem.trim(u8, pass_name, " \t");
                 if (trimmed.len > 0) {
-                    try custom_passes.append(allocator, trimmed);
+                    try custom_passes.append(mlir_allocator, trimmed);
                 }
             }
         }
@@ -873,16 +883,28 @@ fn generateMlirOutput(allocator: std.mem.Allocator, ast_nodes: []lib.AstNode, fi
 
         if (mlir_options.getDefaultPasses()) |passes_str| {
             // Use pipeline string parsing
-            break :blk try mlir.lower.lowerFunctionsToModuleWithPipelineString(h.ctx, ast_nodes, allocator, passes_str);
+            break :blk try mlir.lower.lowerFunctionsToModuleWithPipelineString(h.ctx, ast_nodes, mlir_allocator, passes_str);
         } else {
             // Use configuration-based approach
-            break :blk try mlir.lower.lowerFunctionsToModuleWithPasses(h.ctx, ast_nodes, allocator, pass_config);
+            break :blk try mlir.lower.lowerFunctionsToModuleWithPasses(h.ctx, ast_nodes, mlir_allocator, pass_config);
         }
     } else blk: {
         // Use basic lowering
-        break :blk try mlir.lower.lowerFunctionsToModuleWithErrors(h.ctx, ast_nodes, allocator);
+        break :blk try mlir.lower.lowerFunctionsToModuleWithErrors(h.ctx, ast_nodes, mlir_allocator);
     };
+    defer lowering_result.deinit(mlir_allocator);
 
+    // Check for errors first, before proceeding to YUL generation
+    if (!lowering_result.success) {
+        try stdout.print("MLIR lowering failed with {d} errors:\n", .{lowering_result.errors.len});
+        for (lowering_result.errors) |err| {
+            try stdout.print("  - {s}\n", .{err.message});
+            if (err.suggestion) |suggestion| {
+                try stdout.print("    Suggestion: {s}\n", .{suggestion});
+            }
+        }
+        return;
+    }
     // Apply MLIR pipeline if requested
     var final_module = lowering_result.module;
     if (mlir_options.use_pipeline) {
@@ -893,11 +915,11 @@ fn generateMlirOutput(allocator: std.mem.Allocator, ast_nodes: []lib.AstNode, fi
             .Aggressive => mlir_pipeline.aggressive_config,
         };
 
-        var pipeline_result = mlir_pipeline.runMLIRPipeline(h.ctx, lowering_result.module, pipeline_config, allocator) catch |err| {
+        var pipeline_result = mlir_pipeline.runMLIRPipeline(h.ctx, lowering_result.module, pipeline_config, mlir_allocator) catch |err| {
             try stdout.print("MLIR pipeline failed: {s}\n", .{@errorName(err)});
             return;
         };
-        defer pipeline_result.deinit(allocator);
+        defer pipeline_result.deinit(mlir_allocator);
 
         if (!pipeline_result.success) {
             try stdout.print("MLIR pipeline failed: {s}\n", .{pipeline_result.error_message orelse "Unknown error"});
@@ -908,74 +930,66 @@ fn generateMlirOutput(allocator: std.mem.Allocator, ast_nodes: []lib.AstNode, fi
         // The module has been optimized in-place
         final_module = pipeline_result.optimized_module;
 
-        // Report applied passes
-        try stdout.print("MLIR pipeline applied {d} passes: ", .{pipeline_result.passes_applied.items.len});
-        for (pipeline_result.passes_applied.items, 0..) |pass, i| {
-            if (i > 0) try stdout.print(", ", .{});
-            try stdout.print("{s}", .{pass});
-        }
-        try stdout.print("\n", .{});
-    }
-
-    // Convert MLIR to Yul
-    try stdout.print("Converting MLIR to Yul...\n", .{});
-    var yul_result = mlir.yul_lowering.lowerToYul(final_module, h.ctx, allocator) catch |err| {
-        try stdout.print("MLIR to Yul conversion failed: {s}\n", .{@errorName(err)});
-        return;
-    };
-    defer yul_result.deinit();
-
-    if (!yul_result.success) {
-        try stdout.print("MLIR to Yul conversion failed with {d} errors:\n", .{yul_result.errors.len});
-        for (yul_result.errors) |err| {
-            try stdout.print("  - {s}\n", .{err});
-        }
-        return;
-    }
-
-    try stdout.print("Generated Yul code ({d} bytes):\n", .{yul_result.yul_code.len});
-    try stdout.print("{s}\n", .{yul_result.yul_code});
-
-    // Save Yul if requested
-    if (artifact_options.save_yul) {
-        try saveYul(allocator, file_path, yul_result.yul_code, artifact_options);
-    }
-
-    // Compile Yul to bytecode using the existing Yul backend
-    try stdout.print("Compiling Yul to EVM bytecode...\n", .{});
-    var yul_compile_result = lib.yul_bindings.YulCompiler.compile(allocator, yul_result.yul_code) catch |err| {
-        try stdout.print("Yul compilation failed: {s}\n", .{@errorName(err)});
-        return;
-    };
-    defer yul_compile_result.deinit(allocator);
-
-    if (!yul_compile_result.success) {
-        try stdout.print("Yul compilation failed: {?s}\n", .{yul_compile_result.error_message});
-        return;
-    }
-
-    try stdout.print("Successfully compiled to EVM bytecode!\n", .{});
-    if (yul_compile_result.bytecode) |bytecode| {
-        try stdout.print("Bytecode: {s}\n", .{bytecode});
-
-        // Save bytecode if requested
-        if (artifact_options.save_bytecode) {
-            try saveBytecode(allocator, file_path, bytecode, artifact_options);
-        }
-    } else {
-        try stdout.print("No bytecode generated\n", .{});
-    }
-
-    // Check for errors
-    if (!lowering_result.success) {
-        try stdout.print("MLIR lowering failed with {d} errors:\n", .{lowering_result.errors.len});
-        for (lowering_result.errors) |err| {
-            try stdout.print("  - {s}\n", .{err.message});
-            if (err.suggestion) |suggestion| {
-                try stdout.print("    Suggestion: {s}\n", .{suggestion});
+        // Report applied passes (only if generating YUL, otherwise keep output clean)
+        if (generate_yul) {
+            try stdout.print("MLIR pipeline applied {d} passes: ", .{pipeline_result.passes_applied.items.len});
+            for (pipeline_result.passes_applied.items, 0..) |pass, i| {
+                if (i > 0) try stdout.print(", ", .{});
+                try stdout.print("{s}", .{pass});
             }
+            try stdout.print("\n", .{});
         }
-        return;
+    }
+
+    // Convert MLIR to Yul (only if requested)
+    if (generate_yul) {
+        try stdout.print("Converting MLIR to Yul...\n", .{});
+        var yul_result = mlir.yul_lowering.lowerToYul(final_module, h.ctx, allocator) catch |err| {
+            try stdout.print("MLIR to Yul conversion failed: {s}\n", .{@errorName(err)});
+            return;
+        };
+        defer yul_result.deinit();
+
+        if (!yul_result.success) {
+            try stdout.print("MLIR to Yul conversion failed with {d} errors:\n", .{yul_result.errors.len});
+            for (yul_result.errors) |err| {
+                try stdout.print("  - {s}\n", .{err});
+            }
+            return;
+        }
+
+        try stdout.print("Generated Yul code ({d} bytes):\n", .{yul_result.yul_code.len});
+        try stdout.print("{s}\n", .{yul_result.yul_code});
+
+        // Save Yul if requested
+        if (artifact_options.save_yul) {
+            try saveYul(allocator, file_path, yul_result.yul_code, artifact_options);
+        }
+
+        // Compile Yul to bytecode using the existing Yul backend
+        try stdout.print("Compiling Yul to EVM bytecode...\n", .{});
+        var yul_compile_result = lib.yul_bindings.YulCompiler.compile(allocator, yul_result.yul_code) catch |err| {
+            try stdout.print("Yul compilation failed: {s}\n", .{@errorName(err)});
+            return;
+        };
+        defer yul_compile_result.deinit(allocator);
+
+        if (!yul_compile_result.success) {
+            try stdout.print("Yul compilation failed: {?s}\n", .{yul_compile_result.error_message});
+            return;
+        }
+
+        try stdout.print("Successfully compiled to EVM bytecode!\n", .{});
+        if (yul_compile_result.bytecode) |bytecode| {
+            try stdout.print("Bytecode: {s}\n", .{bytecode});
+
+            // Save bytecode if requested
+            if (artifact_options.save_bytecode) {
+                try saveBytecode(allocator, file_path, bytecode, artifact_options);
+            }
+        } else {
+            try stdout.print("No bytecode generated\n", .{});
+        }
     }
 
     // Print warnings if any
@@ -1037,7 +1051,6 @@ fn generateMlirOutput(allocator: std.mem.Allocator, ast_nodes: []lib.AstNode, fi
 
         const op = c.mlirModuleGetOperation(lowering_result.module);
         c.mlirOperationPrint(op, callback.cb, @constCast(&stdout_file));
-        try stdout.print("\n", .{});
     }
 
     // Always save MLIR to artifact directory if requested

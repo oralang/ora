@@ -468,7 +468,7 @@ pub const MemoryManager = struct {
 
     /// Create file location for operations
     fn createFileLocation(self: *const MemoryManager, span: lib.ast.SourceSpan) c.MlirLocation {
-        return @import("locations.zig").LocationTracker.createFileLocationFromSpan(self.ctx, span);
+        return @import("lower.zig").LocationTracker.createFileLocationFromSpan(self.ctx, span);
     }
 
     /// Create global storage declaration

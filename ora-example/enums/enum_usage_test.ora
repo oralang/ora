@@ -1,0 +1,68 @@
+// ==========================================
+// ENUM USAGE TEST
+// ==========================================
+// This file tests actual usage of enums in functions and expressions
+
+// Basic enum for testing
+enum Status : u8 {
+    Pending = 0,
+    Active = 1,
+    Completed = 2,
+    Cancelled = 3
+}
+
+// Enum with string values
+enum ErrorCode : string {
+    InvalidInput = "ERR_INVALID_INPUT",
+    InsufficientFunds = "ERR_INSUFFICIENT_FUNDS",
+    Unauthorized = "ERR_UNAUTHORIZED"
+}
+
+// Contract that uses enums
+contract EnumUsageTest {
+    // Storage variable to hold enum value
+    storage var current_status: Status;
+    storage var last_error: ErrorCode;
+    
+    // Initialize with enum value
+    fn init() {
+        current_status = Status.Active;
+        last_error = ErrorCode.InvalidInput;
+    }
+    
+    // Function that returns enum value
+    fn getStatus() -> Status {
+        return current_status;
+    }
+    
+    // Function that takes enum parameter
+    fn setStatus(new_status: Status) {
+        current_status = new_status;
+    }
+    
+    // Function with enum in conditional
+    fn isActive() -> bool {
+        return current_status == Status.Active;
+    }
+    
+    // Function with enum switch
+    fn processStatus() -> u8 {
+        switch (current_status) {
+            Status.Pending => { return 0; }
+            Status.Active => { return 1; }
+            Status.Completed => { return 2; }
+            Status.Cancelled => { return 3; }
+            else => { return 255; }
+        }
+    }
+    
+    // Function that sets error enum
+    fn setError(err: ErrorCode) {
+        last_error = err;
+    }
+    
+    // Function that returns error enum
+    fn getLastError() -> ErrorCode {
+        return last_error;
+    }
+}

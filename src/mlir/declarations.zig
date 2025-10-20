@@ -20,6 +20,7 @@ pub const DeclarationLowerer = struct {
     locations: LocationTracker,
     error_handler: ?*const @import("error_handling.zig").ErrorHandler,
     ora_dialect: *@import("dialect.zig").OraDialect,
+    symbol_table: ?*@import("lower.zig").SymbolTable = null,
 
     pub fn init(ctx: c.MlirContext, type_mapper: *const TypeMapper, locations: LocationTracker, ora_dialect: *@import("dialect.zig").OraDialect) DeclarationLowerer {
         return .{
@@ -48,6 +49,17 @@ pub const DeclarationLowerer = struct {
             .locations = locations,
             .error_handler = error_handler,
             .ora_dialect = ora_dialect,
+        };
+    }
+
+    pub fn withErrorHandlerAndDialectAndSymbolTable(ctx: c.MlirContext, type_mapper: *const TypeMapper, locations: LocationTracker, error_handler: *const @import("error_handling.zig").ErrorHandler, ora_dialect: *@import("dialect.zig").OraDialect, symbol_table: *@import("lower.zig").SymbolTable) DeclarationLowerer {
+        return .{
+            .ctx = ctx,
+            .type_mapper = type_mapper,
+            .locations = locations,
+            .error_handler = error_handler,
+            .ora_dialect = ora_dialect,
+            .symbol_table = symbol_table,
         };
     }
 
@@ -845,7 +857,7 @@ pub const DeclarationLowerer = struct {
         else
             null;
 
-        const stmt_lowerer = StatementLowerer.init(self.ctx, block, self.type_mapper, &expr_lowerer, param_map, storage_map, local_var_map, self.locations, null, std.heap.page_allocator, function_return_type, self.ora_dialect);
+        const stmt_lowerer = StatementLowerer.init(self.ctx, block, self.type_mapper, &expr_lowerer, param_map, storage_map, local_var_map, self.locations, self.symbol_table, std.heap.page_allocator, function_return_type, self.ora_dialect);
 
         // Lower the function body
         try stmt_lowerer.lowerBlockBody(func.body, block);
@@ -982,7 +994,7 @@ pub const DeclarationLowerer = struct {
     }
 
     /// Create struct type from struct declaration
-    fn createStructType(self: *const DeclarationLowerer, struct_decl: *const lib.ast.StructDeclNode) c.MlirType {
+    pub fn createStructType(self: *const DeclarationLowerer, struct_decl: *const lib.ast.StructDeclNode) c.MlirType {
         // Create field types array
         var field_types = std.ArrayList(c.MlirType){};
         defer field_types.deinit(std.heap.page_allocator);
@@ -1002,7 +1014,7 @@ pub const DeclarationLowerer = struct {
     }
 
     /// Create enum type from enum declaration
-    fn createEnumType(self: *const DeclarationLowerer, enum_decl: *const lib.ast.EnumDeclNode) c.MlirType {
+    pub fn createEnumType(self: *const DeclarationLowerer, enum_decl: *const lib.ast.EnumDeclNode) c.MlirType {
         // For now, return the underlying type
         // TODO: Create !ora.enum<name, repr> dialect type
         return if (enum_decl.underlying_type_info) |type_info|

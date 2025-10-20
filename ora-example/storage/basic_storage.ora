@@ -20,6 +20,6 @@ contract StorageTest {
     // Storage double mapping
     storage var allowances: doublemap[address, address, u256];
     
-    // Storage array
-    storage var history: [u256];
+    // Storage slice (dynamic array)
+    storage var history: slice[u256];
 }
