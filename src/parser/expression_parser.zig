@@ -1,3 +1,36 @@
+// ============================================================================
+// Expression Parser
+// ============================================================================
+//
+// This file implements expression parsing using precedence climbing.
+//
+// FILE ORGANIZATION:
+//   Lines   1-150:  Setup & Entry Points
+//   Lines 151-480:  Precedence Chain (highest to lowest)
+//   Lines 481-735:  Unary & Postfix Operators
+//   Lines 735-1120: Primary Expressions (literals, identifiers, etc.)
+//   Lines 1120-END: Complex Primary Expressions (switch, struct, array, etc.)
+//
+// PRECEDENCE LEVELS (low to high):
+//   1. Comma (,)
+//   2. Assignment (=, +=, -=, etc.)
+//   3. Logical OR (||)
+//   4. Logical AND (&&)
+//   5. Bitwise OR (|)
+//   6. Bitwise XOR (^)
+//   7. Bitwise AND (&)
+//   8. Equality (==, !=)
+//   9. Comparison (<, >, <=, >=)
+//  10. Bitwise Shift (<<, >>)
+//  11. Additive (+, -)
+//  12. Multiplicative (*, /, %)
+//  13. Exponentiation (**)
+//  14. Unary (!, -, +)
+//  15. Postfix (., [], ())
+//  16. Primary (literals, identifiers, etc.)
+//
+// ============================================================================
+
 const std = @import("std");
 const lexer = @import("../lexer.zig");
 const ast = @import("../ast.zig");
@@ -146,6 +179,10 @@ pub const ExpressionParser = struct {
 
         return expr;
     }
+
+    // ========================================================================
+    // PRECEDENCE CHAIN: Logical & Bitwise Operators
+    // ========================================================================
 
     /// Parse logical OR expressions (precedence 13) - MIGRATED FROM ORIGINAL
     pub fn parseLogicalOr(self: *ExpressionParser) ParserError!ast.Expressions.ExprNode {
@@ -477,6 +514,10 @@ pub const ExpressionParser = struct {
         return expr;
     }
 
+    // ========================================================================
+    // UNARY & POSTFIX OPERATORS
+    // ========================================================================
+
     /// Parse unary expressions (precedence 2: ! -) - MIGRATED FROM ORIGINAL
     fn parseUnary(self: *ExpressionParser) ParserError!ast.Expressions.ExprNode {
         if (self.base.match(.Bang) or self.base.match(.Minus)) {
@@ -730,6 +771,10 @@ pub const ExpressionParser = struct {
             } };
         }
     }
+
+    // ========================================================================
+    // PRIMARY EXPRESSIONS (literals, identifiers, etc.)
+    // ========================================================================
 
     /// Parse primary expressions (literals, identifiers, parentheses) - MIGRATED FROM ORIGINAL
     fn parsePrimary(self: *ExpressionParser) ParserError!ast.Expressions.ExprNode {
@@ -1114,6 +1159,10 @@ pub const ExpressionParser = struct {
         try self.base.errorAtCurrent("Expected expression");
         return error.UnexpectedToken;
     }
+
+    // ========================================================================
+    // COMPLEX PRIMARY EXPRESSIONS (switch, structs, arrays, verification)
+    // ========================================================================
 
     /// Parse switch expression (returns a value) - MIGRATED FROM ORIGINAL
     fn parseSwitchExpression(self: *ExpressionParser) ParserError!ast.Expressions.ExprNode {

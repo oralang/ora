@@ -16,29 +16,14 @@ const ExpressionParser = @import("expression_parser.zig").ExpressionParser;
 const StatementParser = @import("statement_parser.zig").StatementParser;
 
 /// Specialized parser for declarations (functions, structs, enums, etc.)
+/// Uses dependency injection: methods that need other parsers receive them as parameters
 pub const DeclarationParser = struct {
     base: BaseParser,
-    type_parser: TypeParser,
-    expr_parser: ExpressionParser,
 
     pub fn init(tokens: []const Token, arena: *AstArena) DeclarationParser {
         return DeclarationParser{
             .base = BaseParser.init(tokens, arena),
-            .type_parser = TypeParser.init(tokens, arena),
-            .expr_parser = ExpressionParser.init(tokens, arena),
         };
-    }
-
-    /// Sync sub-parser states with current position
-    fn syncSubParsers(self: *DeclarationParser) void {
-        self.type_parser.base.current = self.base.current;
-        self.expr_parser.base.current = self.base.current;
-    }
-
-    /// Update current position from sub-parser
-    fn updateFromSubParser(self: *DeclarationParser, new_current: usize) void {
-        self.base.current = new_current;
-        self.syncSubParsers();
     }
 
     /// Parse import statement (@import("path"))
@@ -104,7 +89,11 @@ pub const DeclarationParser = struct {
     }
 
     /// Parse contract declaration
-    pub fn parseContract(self: *DeclarationParser) !ast.AstNode {
+    pub fn parseContract(
+        self: *DeclarationParser,
+        type_parser: *TypeParser,
+        expr_parser: *ExpressionParser,
+    ) !ast.AstNode {
         const name_token = try self.base.consume(.Identifier, "Expected contract name");
 
         // Parse optional inheritance: contract Child extends Parent
@@ -143,7 +132,7 @@ pub const DeclarationParser = struct {
         }
 
         while (!self.base.check(.RightBrace) and !self.base.isAtEnd()) {
-            const member = try self.parseContractMember();
+            const member = try self.parseContractMember(type_parser, expr_parser);
             try body.append(self.base.arena.allocator(), member);
         }
 
@@ -160,7 +149,11 @@ pub const DeclarationParser = struct {
     }
 
     /// Parse function declaration
-    pub fn parseFunction(self: *DeclarationParser) !ast.FunctionNode {
+    pub fn parseFunction(
+        self: *DeclarationParser,
+        type_parser: *TypeParser,
+        expr_parser: *ExpressionParser,
+    ) !ast.FunctionNode {
         // Parse inline modifier
         const is_inline = self.base.match(.Inline);
 
@@ -202,7 +195,7 @@ pub const DeclarationParser = struct {
 
         if (!self.base.check(.RightParen)) {
             repeat: while (true) {
-                const param = try self.parseParameterWithDefaults();
+                const param = try self.parseParameterWithDefaults(type_parser, expr_parser);
                 try params.append(self.base.arena.allocator(), param);
 
                 if (!self.base.match(.Comma)) break :repeat;
@@ -219,11 +212,11 @@ pub const DeclarationParser = struct {
                 return error.UnexpectedToken;
             }
             _ = self.base.advance(); // consume '->'
-            // Use integrated type parser
-            self.syncSubParsers();
-            const parsed_type = try self.type_parser.parseReturnType();
+            // Use type parser
+            type_parser.base.current = self.base.current;
+            const parsed_type = try type_parser.parseReturnType();
+            self.base.current = type_parser.base.current;
             return_type_info = parsed_type;
-            self.updateFromSubParser(self.type_parser.base.current);
         }
 
         // Parse requires clauses
@@ -234,9 +227,9 @@ pub const DeclarationParser = struct {
             _ = try self.base.consume(.LeftParen, "Expected '(' after 'requires'");
 
             // Parse the condition expression
-            self.syncSubParsers();
-            const condition = try self.expr_parser.parseExpression();
-            self.updateFromSubParser(self.expr_parser.base.current);
+            expr_parser.base.current = self.base.current;
+            const condition = try expr_parser.parseExpression();
+            self.base.current = expr_parser.base.current;
 
             _ = try self.base.consume(.RightParen, "Expected ')' after requires condition");
             if (self.base.match(.Semicolon)) {
@@ -258,9 +251,9 @@ pub const DeclarationParser = struct {
             _ = try self.base.consume(.LeftParen, "Expected '(' after 'ensures'");
 
             // Parse the condition expression
-            self.syncSubParsers();
-            const condition = try self.expr_parser.parseExpression();
-            self.updateFromSubParser(self.expr_parser.base.current);
+            expr_parser.base.current = self.base.current;
+            const condition = try expr_parser.parseExpression();
+            self.base.current = expr_parser.base.current;
 
             _ = try self.base.consume(.RightParen, "Expected ')' after ensures condition");
             if (self.base.match(.Semicolon)) {
@@ -294,12 +287,16 @@ pub const DeclarationParser = struct {
     }
 
     /// Parse variable declaration
-    pub fn parseVariableDecl(self: *DeclarationParser) !ast.Statements.VariableDeclNode {
-        return self.parseVariableDeclWithLock(false);
+    pub fn parseVariableDecl(
+        self: *DeclarationParser,
+        type_parser: *TypeParser,
+        expr_parser: *ExpressionParser,
+    ) !ast.Statements.VariableDeclNode {
+        return self.parseVariableDeclWithLock(type_parser, expr_parser, false);
     }
 
     /// Parse struct declaration with complete field definitions
-    pub fn parseStruct(self: *DeclarationParser) !ast.AstNode {
+    pub fn parseStruct(self: *DeclarationParser, type_parser: *TypeParser) !ast.AstNode {
         const name_token = try self.base.consume(.Identifier, "Expected struct name");
         _ = try self.base.consume(.LeftBrace, "Expected '{' after struct name");
 
@@ -327,10 +324,10 @@ pub const DeclarationParser = struct {
             const field_name = try self.base.consumeIdentifierOrKeyword("Expected field name");
             _ = try self.base.consume(.Colon, "Expected ':' after field name");
 
-            // Use integrated type parser with complete type information
-            self.syncSubParsers();
-            const field_type = try self.type_parser.parseTypeWithContext(.StructField);
-            self.updateFromSubParser(self.type_parser.base.current);
+            // Use type parser with complete type information
+            type_parser.base.current = self.base.current;
+            const field_type = try type_parser.parseTypeWithContext(.StructField);
+            self.base.current = type_parser.base.current;
 
             _ = try self.base.consume(.Semicolon, "Expected ';' after field");
 
@@ -353,12 +350,16 @@ pub const DeclarationParser = struct {
     /// Parse a single enum variant value with proper precedence handling
     /// This avoids using the general expression parser which would interpret commas as operators
     /// The enum's underlying type is used for integer literals instead of generic integers
-    fn parseEnumVariantValue(self: *DeclarationParser, underlying_type: ?ast.Types.TypeInfo) !ast.Expressions.ExprNode {
+    fn parseEnumVariantValue(
+        self: *DeclarationParser,
+        expr_parser: *ExpressionParser,
+        underlying_type: ?ast.Types.TypeInfo,
+    ) !ast.Expressions.ExprNode {
         // Use the expression parser but stop at comma level to avoid enum separator confusion
         // This ensures proper operator precedence and left-associativity
-        self.syncSubParsers();
-        var expr = try self.expr_parser.parseLogicalOr();
-        self.updateFromSubParser(self.expr_parser.base.current);
+        expr_parser.base.current = self.base.current;
+        var expr = try expr_parser.parseLogicalOr();
+        self.base.current = expr_parser.base.current;
 
         // If this is a simple literal and we have an underlying type for the enum,
         // apply the enum's underlying type immediately. For complex expressions, leave as unknown
@@ -401,16 +402,20 @@ pub const DeclarationParser = struct {
     }
 
     /// Parse enum declaration with value assignments and base types
-    pub fn parseEnum(self: *DeclarationParser) !ast.AstNode {
+    pub fn parseEnum(
+        self: *DeclarationParser,
+        type_parser: *TypeParser,
+        expr_parser: *ExpressionParser,
+    ) !ast.AstNode {
         const name_token = try self.base.consume(.Identifier, "Expected enum name");
 
         // Parse optional underlying type: enum Status : u8 { ... }
         var base_type: ?ast.Types.TypeInfo = null; // No default - let type system infer
         if (self.base.match(.Colon)) {
-            // Use integrated type parser for underlying type
-            self.syncSubParsers();
-            base_type = try self.type_parser.parseTypeWithContext(.EnumUnderlying);
-            self.updateFromSubParser(self.type_parser.base.current);
+            // Use type parser for underlying type
+            type_parser.base.current = self.base.current;
+            base_type = try type_parser.parseTypeWithContext(.EnumUnderlying);
+            self.base.current = type_parser.base.current;
         }
 
         _ = try self.base.consume(.LeftBrace, "Expected '{' after enum name");
@@ -436,7 +441,7 @@ pub const DeclarationParser = struct {
                 // Use our dedicated enum variant value parser to ensure complex expressions
                 // like (1 + 2) * 3 are parsed correctly without misinterpreting operators
                 // as enum variant separators
-                const expr = try self.parseEnumVariantValue(base_type);
+                const expr = try self.parseEnumVariantValue(expr_parser, base_type);
                 value = expr;
 
                 // If this is an integer literal, we need to update the next_implicit_value
@@ -508,7 +513,7 @@ pub const DeclarationParser = struct {
     }
 
     /// Parse log declaration with indexed parameter support
-    pub fn parseLogDecl(self: *DeclarationParser) !ast.AstNode {
+    pub fn parseLogDecl(self: *DeclarationParser, type_parser: *TypeParser) !ast.AstNode {
         const name_token = try self.base.consume(.Identifier, "Expected log name");
         _ = try self.base.consume(.LeftParen, "Expected '(' after log name");
 
@@ -526,10 +531,10 @@ pub const DeclarationParser = struct {
                 const field_name = try self.base.consumeIdentifierOrKeyword("Expected field name");
                 _ = try self.base.consume(.Colon, "Expected ':' after field name");
 
-                // Use integrated type parser
-                self.syncSubParsers();
-                const field_type = try self.type_parser.parseTypeWithContext(.LogField);
-                self.updateFromSubParser(self.type_parser.base.current);
+                // Use type parser
+                type_parser.base.current = self.base.current;
+                const field_type = try type_parser.parseTypeWithContext(.LogField);
+                self.base.current = type_parser.base.current;
 
                 try fields.append(self.base.arena.allocator(), ast.LogField{
                     .name = field_name.lexeme,
@@ -552,9 +557,13 @@ pub const DeclarationParser = struct {
         } };
     }
     /// Parse contract member (function, variable, etc.) with proper scoping
-    pub fn parseContractMember(self: *DeclarationParser) !ast.AstNode {
+    pub fn parseContractMember(
+        self: *DeclarationParser,
+        type_parser: *TypeParser,
+        expr_parser: *ExpressionParser,
+    ) !ast.AstNode {
         // Check for @lock annotation before variable declarations
-        if (try self.tryParseLockAnnotation()) |var_decl| {
+        if (try self.tryParseLockAnnotation(type_parser, expr_parser)) |var_decl| {
             return ast.AstNode{ .VariableDecl = var_decl };
         }
 
@@ -580,7 +589,7 @@ pub const DeclarationParser = struct {
         // Functions (can be public or private within contracts)
         if (self.base.check(.Pub) or self.base.check(.Fn) or self.base.check(.Inline)) {
             // Parse the function header first (leaves current at '{')
-            var fn_node = try self.parseFunction();
+            var fn_node = try self.parseFunction(type_parser, expr_parser);
 
             // Parse the function body block using a local StatementParser
             var stmt_parser = StatementParser.init(self.base.tokens, self.base.arena);
@@ -589,7 +598,6 @@ pub const DeclarationParser = struct {
 
             // Update current position from statement parser
             self.base.current = stmt_parser.base.current;
-            self.syncSubParsers();
 
             // Attach the parsed body
             fn_node.body = body_block;
@@ -599,32 +607,32 @@ pub const DeclarationParser = struct {
 
         // Constant declarations (contract constants) - check before variables
         if (self.base.check(.Const)) {
-            return ast.AstNode{ .Constant = try self.parseConstantDecl() };
+            return ast.AstNode{ .Constant = try self.parseConstantDecl(type_parser, expr_parser) };
         }
 
         // Variable declarations (contract state variables)
         if (self.isMemoryRegionKeyword() or self.base.check(.Let) or self.base.check(.Var) or self.base.check(.Immutable)) {
-            return ast.AstNode{ .VariableDecl = try self.parseVariableDecl() };
+            return ast.AstNode{ .VariableDecl = try self.parseVariableDecl(type_parser, expr_parser) };
         }
 
         // Error declarations (contract-specific errors)
         if (self.base.match(.Error)) {
-            return ast.AstNode{ .ErrorDecl = try self.parseErrorDecl() };
+            return ast.AstNode{ .ErrorDecl = try self.parseErrorDecl(type_parser) };
         }
 
         // Log declarations (contract events)
         if (self.base.match(.Log)) {
-            return self.parseLogDecl();
+            return self.parseLogDecl(type_parser);
         }
 
         // Struct declarations (contract-scoped structs)
         if (self.base.match(.Struct)) {
-            return self.parseStruct();
+            return self.parseStruct(type_parser);
         }
 
         // Enum declarations (contract-scoped enums)
         if (self.base.match(.Enum)) {
-            return self.parseEnum();
+            return self.parseEnum(type_parser, expr_parser);
         }
 
         try self.base.errorAtCurrent("Expected contract member (function, variable, struct, enum, log, or error)");
@@ -632,13 +640,13 @@ pub const DeclarationParser = struct {
     }
 
     /// Parse function parameter
-    fn parseParameter(self: *DeclarationParser) !ast.ParameterNode {
+    fn parseParameter(self: *DeclarationParser, type_parser: *TypeParser) !ast.ParameterNode {
         const name_token = try self.base.consumeIdentifierOrKeyword("Expected parameter name");
         _ = try self.base.consume(.Colon, "Expected ':' after parameter name");
-        // Use integrated type parser
-        self.syncSubParsers();
-        const param_type = try self.type_parser.parseTypeWithContext(.Parameter);
-        self.updateFromSubParser(self.type_parser.base.current);
+        // Use type parser
+        type_parser.base.current = self.base.current;
+        const param_type = try type_parser.parseTypeWithContext(.Parameter);
+        self.base.current = type_parser.base.current;
 
         return ast.ParameterNode{
             .name = name_token.lexeme,
@@ -650,7 +658,11 @@ pub const DeclarationParser = struct {
     }
 
     /// Parse function parameter with default value support
-    fn parseParameterWithDefaults(self: *DeclarationParser) !ast.ParameterNode {
+    fn parseParameterWithDefaults(
+        self: *DeclarationParser,
+        type_parser: *TypeParser,
+        expr_parser: *ExpressionParser,
+    ) !ast.ParameterNode {
         // Check for mutable parameter modifier (mut param_name)
         const is_mutable = if (self.base.check(.Identifier) and std.mem.eql(u8, self.base.peek().lexeme, "mut")) blk: {
             _ = self.base.advance(); // consume "mut"
@@ -660,18 +672,18 @@ pub const DeclarationParser = struct {
         const name_token = try self.base.consumeIdentifierOrKeyword("Expected parameter name");
         _ = try self.base.consume(.Colon, "Expected ':' after parameter name");
 
-        // Use integrated type parser
-        self.syncSubParsers();
-        const param_type = try self.type_parser.parseTypeWithContext(.Parameter);
-        self.updateFromSubParser(self.type_parser.base.current);
+        // Use type parser
+        type_parser.base.current = self.base.current;
+        const param_type = try type_parser.parseTypeWithContext(.Parameter);
+        self.base.current = type_parser.base.current;
 
         // Parse optional default value
         var default_value: ?*ast.Expressions.ExprNode = null;
         if (self.base.match(.Equal)) {
             // Parse default value expression
-            self.syncSubParsers();
-            const expr = try self.expr_parser.parseExpression();
-            self.updateFromSubParser(self.expr_parser.base.current);
+            expr_parser.base.current = self.base.current;
+            const expr = try expr_parser.parseExpression();
+            self.base.current = expr_parser.base.current;
 
             // Store in arena
             const expr_ptr = try self.base.arena.createNode(ast.Expressions.ExprNode);
@@ -689,7 +701,11 @@ pub const DeclarationParser = struct {
     }
 
     /// Try to parse @lock annotation, returns variable declaration if found
-    pub fn tryParseLockAnnotation(self: *DeclarationParser) !?ast.Statements.VariableDeclNode {
+    pub fn tryParseLockAnnotation(
+        self: *DeclarationParser,
+        type_parser: *TypeParser,
+        expr_parser: *ExpressionParser,
+    ) !?ast.Statements.VariableDeclNode {
         if (self.base.check(.At)) {
             const saved_pos = self.base.current;
             _ = self.base.advance(); // consume @
@@ -698,7 +714,7 @@ pub const DeclarationParser = struct {
 
                 // Check if this is followed by a variable declaration
                 if (self.isMemoryRegionKeyword() or self.base.check(.Let) or self.base.check(.Var)) {
-                    return try self.parseVariableDeclWithLock(true);
+                    return try self.parseVariableDeclWithLock(type_parser, expr_parser, true);
                 }
             }
 
@@ -709,7 +725,12 @@ pub const DeclarationParser = struct {
     }
 
     /// Parse variable declaration with lock annotation flag - ENHANCED FOR MEMORY REGIONS
-    fn parseVariableDeclWithLock(self: *DeclarationParser, is_locked: bool) !ast.Statements.VariableDeclNode {
+    fn parseVariableDeclWithLock(
+        self: *DeclarationParser,
+        type_parser: *TypeParser,
+        expr_parser: *ExpressionParser,
+        is_locked: bool,
+    ) !ast.Statements.VariableDeclNode {
         // Parse memory region and variable kind together
         const region_and_kind = try self.parseMemoryRegionAndKind();
         const region = region_and_kind.region;
@@ -728,9 +749,9 @@ pub const DeclarationParser = struct {
         // Support both explicit type and type inference
         if (self.base.match(.Colon)) {
             // Explicit type: let x: u32 = value
-            self.syncSubParsers();
-            var_type = try self.type_parser.parseTypeWithContext(.Variable);
-            self.updateFromSubParser(self.type_parser.base.current);
+            type_parser.base.current = self.base.current;
+            var_type = try type_parser.parseTypeWithContext(.Variable);
+            self.base.current = type_parser.base.current;
         } else if (self.base.check(.Equal)) {
             // Type inference: let x = value
             var_type = ast.Types.TypeInfo.unknown(); // Will be inferred
@@ -742,10 +763,10 @@ pub const DeclarationParser = struct {
         // Parse optional initializer
         var initializer: ?*ast.Expressions.ExprNode = null;
         if (self.base.match(.Equal)) {
-            // Use integrated expression parser
-            self.syncSubParsers();
-            const expr = try self.expr_parser.parseExpression();
-            self.updateFromSubParser(self.expr_parser.base.current);
+            // Use expression parser
+            expr_parser.base.current = self.base.current;
+            const expr = try expr_parser.parseExpression();
+            self.base.current = expr_parser.base.current;
             const expr_ptr = try self.base.arena.createNode(ast.Expressions.ExprNode);
             expr_ptr.* = expr;
             initializer = expr_ptr;
@@ -802,7 +823,11 @@ pub const DeclarationParser = struct {
     }
 
     /// Parse constant declaration (const NAME: type = value;)
-    fn parseConstantDecl(self: *DeclarationParser) !ast.ConstantNode {
+    fn parseConstantDecl(
+        self: *DeclarationParser,
+        type_parser: *TypeParser,
+        expr_parser: *ExpressionParser,
+    ) !ast.ConstantNode {
         // Consume the 'const' keyword
         _ = try self.base.consume(.Const, "Expected 'const' keyword");
 
@@ -811,15 +836,15 @@ pub const DeclarationParser = struct {
 
         // Parse type annotation
         _ = try self.base.consume(.Colon, "Expected ':' after constant name");
-        self.syncSubParsers();
-        const const_type = try self.type_parser.parseTypeWithContext(.Variable);
-        self.updateFromSubParser(self.type_parser.base.current);
+        type_parser.base.current = self.base.current;
+        const const_type = try type_parser.parseTypeWithContext(.Variable);
+        self.base.current = type_parser.base.current;
 
         // Parse initializer
         _ = try self.base.consume(.Equal, "Expected '=' after constant type");
-        self.syncSubParsers();
-        const value_expr = try self.expr_parser.parseExpression();
-        self.updateFromSubParser(self.expr_parser.base.current);
+        expr_parser.base.current = self.base.current;
+        const value_expr = try expr_parser.parseExpression();
+        self.base.current = expr_parser.base.current;
 
         // Create the value expression node
         const value_ptr = try self.base.arena.createNode(ast.Expressions.ExprNode);
@@ -837,7 +862,7 @@ pub const DeclarationParser = struct {
     }
 
     /// Parse error declaration with optional parameter list (error ErrorName(param: type);)
-    fn parseErrorDecl(self: *DeclarationParser) !ast.Statements.ErrorDeclNode {
+    fn parseErrorDecl(self: *DeclarationParser, type_parser: *TypeParser) !ast.Statements.ErrorDeclNode {
         const name_token = try self.base.consume(.Identifier, "Expected error name");
 
         // Parse optional parameter list
@@ -848,7 +873,7 @@ pub const DeclarationParser = struct {
 
             if (!self.base.check(.RightParen)) {
                 repeat: while (true) {
-                    const param = try self.parseParameter();
+                    const param = try self.parseParameter(type_parser);
                     try params.append(self.base.arena.allocator(), param);
 
                     if (!self.base.match(.Comma)) break :repeat;
@@ -868,8 +893,8 @@ pub const DeclarationParser = struct {
         };
     }
 
-    pub fn parseErrorDeclTopLevel(self: *DeclarationParser) !ast.Statements.ErrorDeclNode {
-        return self.parseErrorDecl();
+    pub fn parseErrorDeclTopLevel(self: *DeclarationParser, type_parser: *TypeParser) !ast.Statements.ErrorDeclNode {
+        return self.parseErrorDecl(type_parser);
     }
 
     /// Parse block (temporary - should delegate to statement parser)
@@ -895,6 +920,6 @@ pub const DeclarationParser = struct {
 
     /// Check if current token is a memory region keyword
     fn isMemoryRegionKeyword(self: *DeclarationParser) bool {
-        return self.base.check(.Storage) or self.base.check(.Memory) or self.base.check(.Tstore);
+        return ParserCommon.isMemoryRegionKeyword(self.base.peek().type);
     }
 };

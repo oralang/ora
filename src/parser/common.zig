@@ -20,24 +20,22 @@ pub const ParserCommon = struct {
         };
     }
 
-    /// Helper function to create statement SourceSpan from Token
-    pub fn makeStmtSpan(token: Token) ast.SourceSpan {
-        return ast.SourceSpan{
-            .file_id = 0,
-            .line = token.line,
-            .column = token.column,
-            .length = @intCast(token.lexeme.len),
-            .byte_offset = token.range.start_offset,
-            .lexeme = token.lexeme,
-        };
-    }
-
     /// Check if a keyword can be used as an identifier in certain contexts
     pub fn isKeywordThatCanBeIdentifier(token_type: lexer.TokenType) bool {
         return switch (token_type) {
             .From => true, // 'from' can be used as a parameter name in log declarations
             else => false,
         };
+    }
+
+    /// Check if token type is a memory region keyword
+    /// Includes: storage, memory, tstore, const, immutable
+    pub fn isMemoryRegionKeyword(token_type: lexer.TokenType) bool {
+        return token_type == .Storage or
+            token_type == .Memory or
+            token_type == .Tstore or
+            token_type == .Const or
+            token_type == .Immutable;
     }
 };
 

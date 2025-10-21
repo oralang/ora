@@ -64,7 +64,7 @@ pub const StatementParser = struct {
                 self.updateFromSubParser(self.expr_parser.base.current);
                 _ = try self.base.consume(.RightParen, "Expected ')' after @lock expression");
                 _ = self.base.match(.Semicolon);
-                return ast.Statements.StmtNode{ .Lock = .{ .path = path_expr, .span = ParserCommon.makeStmtSpan(self.base.previous()) } };
+                return ast.Statements.StmtNode{ .Lock = .{ .path = path_expr, .span = ParserCommon.makeSpan(self.base.previous()) } };
             }
             // Not a lock statement; restore and continue
             self.base.current = saved;
@@ -205,9 +205,15 @@ pub const StatementParser = struct {
     /// Parse variable declaration - DELEGATE TO DECLARATION PARSER
     fn parseVariableDecl(self: *StatementParser) !ast.Statements.VariableDeclNode {
         // Delegate to declaration parser
+        // Create temporary TypeParser - this is part of circular deps that need fixing
+        var type_parser = @import("type_parser.zig").TypeParser.init(self.base.tokens, self.base.arena);
+        type_parser.base.current = self.base.current;
+        type_parser.base.file_id = self.base.file_id;
+        self.expr_parser.base.current = self.base.current;
+        self.decl_parser.base.current = self.base.current;
+        const result = try self.decl_parser.parseVariableDecl(&type_parser, &self.expr_parser);
+        self.base.current = self.decl_parser.base.current;
         self.syncSubParsers();
-        const result = try self.decl_parser.parseVariableDecl();
-        self.updateFromSubParser(self.decl_parser.base.current);
         return result;
     }
 
@@ -223,7 +229,7 @@ pub const StatementParser = struct {
 
         return ast.Statements.StmtNode{ .Return = ast.Statements.ReturnNode{
             .value = value,
-            .span = ParserCommon.makeStmtSpan(self.base.previous()),
+            .span = ParserCommon.makeSpan(self.base.previous()),
         } };
     }
 
@@ -252,7 +258,7 @@ pub const StatementParser = struct {
         return ast.Statements.StmtNode{ .Log = ast.Statements.LogNode{
             .event_name = try self.base.arena.createString(event_name_token.lexeme),
             .args = try args.toOwnedSlice(self.base.arena.allocator()),
-            .span = ParserCommon.makeStmtSpan(event_name_token),
+            .span = ParserCommon.makeSpan(event_name_token),
         } };
     }
 
@@ -274,7 +280,7 @@ pub const StatementParser = struct {
 
         return ast.Statements.StmtNode{ .Requires = ast.Statements.RequiresNode{
             .condition = condition,
-            .span = ParserCommon.makeStmtSpan(requires_token),
+            .span = ParserCommon.makeSpan(requires_token),
         } };
     }
 
@@ -296,7 +302,7 @@ pub const StatementParser = struct {
 
         return ast.Statements.StmtNode{ .Ensures = ast.Statements.EnsuresNode{
             .condition = condition,
-            .span = ParserCommon.makeStmtSpan(ensures_token),
+            .span = ParserCommon.makeSpan(ensures_token),
         } };
     }
 
@@ -309,14 +315,13 @@ pub const StatementParser = struct {
         return ast.Statements.StmtNode{ .ErrorDecl = ast.Statements.ErrorDeclNode{
             .name = try self.base.arena.createString(name_token.lexeme),
             .parameters = null,
-            .span = ParserCommon.makeStmtSpan(error_token),
+            .span = ParserCommon.makeSpan(error_token),
         } };
     }
 
     /// Check if current token is a memory region keyword
     fn isMemoryRegionKeyword(self: *StatementParser) bool {
-        return self.base.check(.Const) or self.base.check(.Immutable) or
-            self.base.check(.Storage) or self.base.check(.Memory) or self.base.check(.Tstore);
+        return ParserCommon.isMemoryRegionKeyword(self.base.peek().type);
     }
     /// Try to parse @lock annotation, returns variable declaration if found
     fn tryParseLockAnnotation(self: *StatementParser) !?ast.Statements.VariableDeclNode {
@@ -328,12 +333,16 @@ pub const StatementParser = struct {
 
                 // Check if this is followed by a variable declaration
                 if (self.isMemoryRegionKeyword() or self.base.check(.Let) or self.base.check(.Var)) {
-                    // Delegate to declaration parser
-                    // Restore position to start of @lock and let declaration parser handle it
+                    // Delegate to declaration parser (get TypeParser from parent)
+                    // For now, create temporary parsers - this is part of circular deps that need fixing
                     self.base.current = saved_pos;
-                    self.syncSubParsers();
-                    if (try self.decl_parser.tryParseLockAnnotation()) |var_decl| {
-                        self.updateFromSubParser(self.decl_parser.base.current);
+                    var type_parser = @import("type_parser.zig").TypeParser.init(self.base.tokens, self.base.arena);
+                    type_parser.base.current = self.base.current;
+                    type_parser.base.file_id = self.base.file_id;
+                    self.expr_parser.base.current = self.base.current;
+                    if (try self.decl_parser.tryParseLockAnnotation(&type_parser, &self.expr_parser)) |var_decl| {
+                        self.base.current = self.decl_parser.base.current;
+                        self.syncSubParsers();
                         return var_decl;
                     }
                     return error.UnexpectedToken;
