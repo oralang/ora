@@ -1,3 +1,16 @@
+// ============================================================================
+// Type Parser
+// ============================================================================
+//
+// Parses type expressions and annotations.
+//
+// SUPPORTED TYPES:
+//   • Primitives: uint, int, bool, address, string, bytes
+//   • Collections: arrays, maps, doublemaps, slices
+//   • Complex: structs, enums, function types, error unions
+//
+// ============================================================================
+
 const std = @import("std");
 const lexer = @import("../lexer.zig");
 const ast = @import("../ast.zig");

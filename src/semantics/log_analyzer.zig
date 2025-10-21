@@ -1,3 +1,16 @@
+// ============================================================================
+// Log Statement Analyzer
+// ============================================================================
+//
+// Validates log statements against declared log signatures.
+//
+// VALIDATION RULES:
+//   • Log name must exist in symbol table
+//   • Argument count must match signature
+//   • Argument types must match field types
+//
+// ============================================================================
+
 const std = @import("std");
 const ast = @import("../ast.zig");
 const state = @import("state.zig");

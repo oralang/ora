@@ -2,32 +2,19 @@
 // Expression Parser
 // ============================================================================
 //
-// This file implements expression parsing using precedence climbing.
-//
-// FILE ORGANIZATION:
-//   Lines   1-150:  Setup & Entry Points
-//   Lines 151-480:  Precedence Chain (highest to lowest)
-//   Lines 481-735:  Unary & Postfix Operators
-//   Lines 735-1120: Primary Expressions (literals, identifiers, etc.)
-//   Lines 1120-END: Complex Primary Expressions (switch, struct, array, etc.)
+// Implements expression parsing using precedence climbing.
 //
 // PRECEDENCE LEVELS (low to high):
-//   1. Comma (,)
-//   2. Assignment (=, +=, -=, etc.)
-//   3. Logical OR (||)
-//   4. Logical AND (&&)
-//   5. Bitwise OR (|)
-//   6. Bitwise XOR (^)
-//   7. Bitwise AND (&)
-//   8. Equality (==, !=)
-//   9. Comparison (<, >, <=, >=)
-//  10. Bitwise Shift (<<, >>)
-//  11. Additive (+, -)
-//  12. Multiplicative (*, /, %)
-//  13. Exponentiation (**)
-//  14. Unary (!, -, +)
-//  15. Postfix (., [], ())
-//  16. Primary (literals, identifiers, etc.)
+//   Comma → Assignment → Logical OR/AND → Bitwise OR/XOR/AND →
+//   Equality → Comparison → Shifts → Add/Sub → Mul/Div/Mod →
+//   Exponentiation → Unary → Postfix → Primary
+//
+// SECTIONS:
+//   • Setup & entry points
+//   • Precedence chain (17 levels)
+//   • Unary & postfix operators
+//   • Primary expressions (literals, identifiers)
+//   • Complex expressions (switch, struct, array, etc.)
 //
 // ============================================================================
 

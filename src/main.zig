@@ -1,14 +1,15 @@
 //! Ora Language Compiler CLI
 //!
-//! Command-line interface for the Ora domain-specific language compiler frontend.
-//! Provides commands for lexing, parsing, and AST generation.
-//! Backend compilation to Yul/EVM bytecode happens internally.
+//! Command-line interface for the Ora compiler. Supports lexing, parsing,
+//! AST generation, MLIR emission, and full compilation to Yul/bytecode.
 //!
-//! Available commands:
-//! - lex: Tokenize source files
-//! - parse: Generate Abstract Syntax Tree
-//! - ast: Generate AST JSON
-//! - compile: Full frontend pipeline (Ora -> AST)
+//! SECTIONS:
+//!   • Main entry & argument parsing
+//!   • Usage & help text
+//!   • Command handlers (lex, parse, ast, compile)
+//!   • Artifact saving functions
+//!   • Parser & compilation workflows
+//!   • MLIR integration & code generation
 
 const std = @import("std");
 const lib = @import("ora_lib");
@@ -78,6 +79,10 @@ const OptimizationLevel = enum {
     Basic,
     Aggressive,
 };
+
+// ============================================================================
+// SECTION 1: Main Entry Point & Argument Parsing
+// ============================================================================
 
 /// Ora CLI application
 pub fn main() !void {
@@ -307,6 +312,10 @@ pub fn main() !void {
     }
 }
 
+// ============================================================================
+// SECTION 2: Usage & Help Text
+// ============================================================================
+
 fn printUsage() !void {
     var stdout_buffer: [1024]u8 = undefined;
     var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
@@ -354,6 +363,10 @@ fn printUsage() !void {
     try stdout.flush();
 }
 
+// ============================================================================
+// SECTION 3: Command Handlers (lex, parse, ast, compile)
+// ============================================================================
+
 /// Run lexer on file and display tokens
 fn runLexer(allocator: std.mem.Allocator, file_path: []const u8, artifact_options: ArtifactOptions) !void {
     var stdout_buffer: [1024]u8 = undefined;
@@ -398,6 +411,10 @@ fn runLexer(allocator: std.mem.Allocator, file_path: []const u8, artifact_option
     }
     try stdout.flush();
 }
+
+// ============================================================================
+// SECTION 4: Artifact Saving Functions
+// ============================================================================
 
 /// Save tokens to file
 fn saveTokens(allocator: std.mem.Allocator, file_path: []const u8, tokens: []const lib.Token, artifact_options: ArtifactOptions) !void {
@@ -566,6 +583,10 @@ fn saveBytecode(allocator: std.mem.Allocator, file_path: []const u8, bytecode: [
     try stdout.print("Saved bytecode to: {s}\n", .{bytecode_file});
     try stdout.flush();
 }
+
+// ============================================================================
+// SECTION 5: Parser & Compilation Workflows
+// ============================================================================
 
 /// Run parser on file and display AST
 fn runParser(allocator: std.mem.Allocator, file_path: []const u8, artifact_options: ArtifactOptions) !void {
@@ -811,6 +832,10 @@ fn runASTGeneration(allocator: std.mem.Allocator, file_path: []const u8, output_
     }
     try stdout.flush();
 }
+
+// ============================================================================
+// SECTION 6: MLIR Integration & Code Generation
+// ============================================================================
 
 /// Advanced MLIR emission with full pass pipeline support
 fn runMlirEmitAdvanced(allocator: std.mem.Allocator, file_path: []const u8, mlir_options: MlirOptions, artifact_options: ArtifactOptions) !void {

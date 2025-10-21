@@ -1,3 +1,28 @@
+// ============================================================================
+// Statement Analyzer - Phase 2 Validation
+// ============================================================================
+//
+// Validates statement-level semantics including type checking, memory regions,
+// and control flow.
+//
+// VALIDATION RULES:
+//   • Return types must match declarations
+//   • Storage → Storage assignments only for element-level (a[0] = b[1])
+//   • Switch patterns must be exhaustive for enums
+//   • Assignment targets must be mutable lvalues
+//
+// SECTIONS:
+//   • Entry points
+//   • Unknown identifier checking (optional)
+//   • Memory region inference
+//   • Switch pattern validation
+//   • Expression validation
+//   • Block walking
+//
+// NOTE: Unknown identifier checking currently disabled (see ENABLE_UNKNOWN_WALKER).
+//
+// ============================================================================
+
 const std = @import("std");
 const ast = @import("../ast.zig");
 const DEBUG_SEMANTICS: bool = false;
@@ -6,14 +31,11 @@ const expr = @import("expression_analyzer.zig");
 const locals = @import("locals_binder.zig");
 const MemoryRegion = @import("../ast.zig").Memory.Region;
 
-fn safeFindUp(table: *state.SymbolTable, scope: *const state.Scope, name: []const u8) ?state.Symbol {
-    var cur: ?*const state.Scope = scope;
-    while (cur) |s| : (cur = s.parent) {
-        if (!isScopeKnown(table, s)) return null;
-        if (s.findInCurrent(name)) |idx| return s.symbols.items[idx];
-    }
-    return null;
-}
+// ============================================================================
+// SECTION 1: Entry Points
+// ============================================================================
+
+// Removed: now using table.safeFindUp() instead
 
 pub fn checkFunctionBody(
     allocator: std.mem.Allocator,
@@ -43,6 +65,10 @@ fn resolveBlockScope(table: *state.SymbolTable, default_scope: *state.Scope, blo
     if (table.block_scopes.get(key)) |sc| return sc;
     return default_scope;
 }
+
+// ============================================================================
+// SECTION 2: Unknown Identifier Checking
+// ============================================================================
 
 fn walkBlockForUnknowns(issues: *std.ArrayList(ast.SourceSpan), table: *state.SymbolTable, scope: *state.Scope, block: *const ast.Statements.BlockNode) !void {
     for (block.statements) |stmt| {
@@ -82,13 +108,7 @@ fn walkBlockForUnknowns(issues: *std.ArrayList(ast.SourceSpan), table: *state.Sy
     }
 }
 
-fn isScopeKnown(table: *state.SymbolTable, scope: *const state.Scope) bool {
-    if (scope == &table.root) return true;
-    for (table.scopes.items) |sc| {
-        if (sc == scope) return true;
-    }
-    return false;
-}
+// Removed: now using table.isScopeKnown() instead
 
 // Add: leaf value type helper for storage composite checks
 fn isLeafValueType(ti: ast.Types.TypeInfo) bool {
@@ -100,10 +120,10 @@ fn isLeafValueType(ti: ast.Types.TypeInfo) bool {
 }
 
 fn visitExprForUnknowns(issues: *std.ArrayList(ast.SourceSpan), table: *state.SymbolTable, scope: *state.Scope, expr_node: ast.Expressions.ExprNode) !void {
-    if (!isScopeKnown(table, scope)) return; // Defensive guard
+    if (!table.isScopeKnown(scope)) return; // Defensive guard
     switch (expr_node) {
         .Identifier => |id| {
-            if (isScopeKnown(table, scope) and state.SymbolTable.findUp(scope, id.name) != null) {
+            if (table.isScopeKnown(scope) and state.SymbolTable.findUp(scope, id.name) != null) {
                 // ok
             } else {
                 try issues.append(id.span);
@@ -169,13 +189,17 @@ fn visitExprForUnknowns(issues: *std.ArrayList(ast.SourceSpan), table: *state.Sy
     }
 }
 
+// ============================================================================
+// SECTION 3: Memory Region Inference
+// ============================================================================
+
 fn inferExprRegion(table: *state.SymbolTable, scope: *state.Scope, e: ast.Expressions.ExprNode) MemoryRegion {
-    if (!isScopeKnown(table, scope)) return MemoryRegion.Stack;
+    if (!table.isScopeKnown(scope)) return MemoryRegion.Stack;
     return switch (e) {
         .Identifier => |id| blk: {
             var cur: ?*const state.Scope = scope;
             while (cur) |s| : (cur = s.parent) {
-                if (!isScopeKnown(table, s)) break;
+                if (!table.isScopeKnown(s)) break;
                 if (s.findInCurrent(id.name)) |idx| {
                     const sym = s.symbols.items[idx];
                     break :blk sym.region orelse MemoryRegion.Stack;
@@ -215,6 +239,10 @@ fn isRegionAssignmentAllowed(target_region: MemoryRegion, source_region: MemoryR
     }
     return true;
 }
+
+// ============================================================================
+// SECTION 4: Switch Expression Validation
+// ============================================================================
 
 fn checkSwitchPatterns(
     issues: *std.ArrayList(ast.SourceSpan),
@@ -440,6 +468,10 @@ fn checkSwitchExpressionResultTypes(
     }
 }
 
+// ============================================================================
+// SECTION 5: Expression Validation (Assignments, Mutability)
+// ============================================================================
+
 fn checkExpr(issues: *std.ArrayList(ast.SourceSpan), table: *state.SymbolTable, scope: *state.Scope, e: ast.Expressions.ExprNode) !void {
     switch (e) {
         .Call => |c| {
@@ -535,6 +567,10 @@ fn checkExpr(issues: *std.ArrayList(ast.SourceSpan), table: *state.SymbolTable, 
     }
 }
 
+// ============================================================================
+// SECTION 6: Block Walking & Statement Checking
+// ============================================================================
+
 fn walkBlock(issues: *std.ArrayList(ast.SourceSpan), table: *state.SymbolTable, scope: *state.Scope, block: *const ast.Statements.BlockNode, ret_type: ?ast.Types.TypeInfo) !void {
     for (block.statements) |stmt| {
         switch (stmt) {
@@ -565,8 +601,8 @@ fn walkBlock(issues: *std.ArrayList(ast.SourceSpan), table: *state.SymbolTable, 
                         // Mutability: reject writes to non-mutable bindings when target is an Identifier
                         if (a.target.* == .Identifier) {
                             const name = a.target.Identifier.name;
-                            if (isScopeKnown(table, scope)) {
-                                if (safeFindUp(table, scope, name)) |sym| {
+                            if (table.isScopeKnown(scope)) {
+                                if (table.safeFindUp(scope, name)) |sym| {
                                     if (!sym.mutable) try issues.append(a.span);
                                 }
                             }
@@ -612,8 +648,8 @@ fn walkBlock(issues: *std.ArrayList(ast.SourceSpan), table: *state.SymbolTable, 
                         // Mutability: reject writes to non-mutable bindings when target is an Identifier
                         if (ca.target.* == .Identifier) {
                             const name = ca.target.Identifier.name;
-                            if (isScopeKnown(table, scope)) {
-                                if (safeFindUp(table, scope, name)) |sym| {
+                            if (table.isScopeKnown(scope)) {
+                                if (table.safeFindUp(scope, name)) |sym| {
                                     if (!sym.mutable) try issues.append(ca.span);
                                 }
                             }

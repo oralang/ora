@@ -1,3 +1,26 @@
+// ============================================================================
+// AST Serializer
+// ============================================================================
+//
+// Serializes AST nodes to JSON format with comprehensive customization options.
+//
+// FEATURES:
+//   • Multiple output formats (JSON, compact, pretty-printed)
+//   • Optional span/type/lexeme inclusion
+//   • Depth limiting for large trees
+//   • Streaming to writer for memory efficiency
+//
+// SECTIONS:
+//   • Options & initialization
+//   • Core serialization infrastructure
+//   • Top-level node serialization
+//   • Statement serialization
+//   • Expression serialization
+//   • Helper serializers
+//   • Pattern serializers
+//
+// ============================================================================
+
 const std = @import("std");
 const ast = @import("../ast.zig");
 const AstNode = ast.AstNode;
@@ -172,6 +195,15 @@ pub const AstSerializer = struct {
             try writer.print("}");
         }
     }
+
+    // ========================================================================
+    // TOP-LEVEL NODE SERIALIZATION
+    // ========================================================================
+    // serializeContract, serializeFunction, serializeModule, serializeConstant,
+    // serializeVariableDecl, serializeStructDecl, serializeEnumDecl,
+    // serializeLogDecl, serializeImport, serializeErrorDecl, serializeBlock,
+    // serializeTryBlock
+    // ========================================================================
 
     fn serializeContract(self: *AstSerializer, contract: *const ast.ContractNode, writer: anytype, indent: u32, depth: u32) SerializationError!void {
         try self.writeField(writer, "type", "Contract", indent + 1, true);

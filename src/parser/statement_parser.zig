@@ -1,3 +1,17 @@
+// ============================================================================
+// Statement Parser
+// ============================================================================
+//
+// Parses statements and blocks.
+//
+// SUPPORTED STATEMENTS:
+//   • Variable declarations, assignments
+//   • Control flow: if, while, for, try-catch, return
+//   • Expressions, blocks, log statements
+//   • Requires/ensures/invariant (spec statements)
+//
+// ============================================================================
+
 const std = @import("std");
 const lexer = @import("../lexer.zig");
 const ast = @import("../ast.zig");

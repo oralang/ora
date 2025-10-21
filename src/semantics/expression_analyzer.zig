@@ -1,3 +1,19 @@
+// ============================================================================
+// Expression Type Analyzer
+// ============================================================================
+//
+// Infers types for expressions and validates spec expression usage.
+//
+// TYPE INFERENCE:
+//   Identifiers → lookup | Literals → direct mapping | Field access → resolve
+//   Index → element type | Call → return type | Try → unwrap error union
+//
+// SPEC VALIDATION:
+//   • Quantified expressions: requires/ensures/invariant only
+//   • Old expressions: ensures only
+//
+// ============================================================================
+
 const std = @import("std");
 const ast = @import("../ast.zig");
 const state = @import("state.zig");
@@ -6,26 +22,13 @@ pub const ExprAnalysis = struct {
     typ: ast.Types.TypeInfo,
 };
 
-fn isScopeKnown(table: *state.SymbolTable, scope: *const state.Scope) bool {
-    if (scope == &table.root) return true;
-    for (table.scopes.items) |sc| if (sc == scope) return true;
-    return false;
-}
-
-fn safeFindUp(table: *state.SymbolTable, scope: *const state.Scope, name: []const u8) ?state.Symbol {
-    var cur: ?*const state.Scope = scope;
-    while (cur) |s| : (cur = s.parent) {
-        if (!isScopeKnown(table, s)) return null;
-        if (s.findInCurrent(name)) |idx| return s.symbols.items[idx];
-    }
-    return null;
-}
+// Removed: now using table.isScopeKnown() and table.safeFindUp() instead
 
 pub fn inferExprType(table: *state.SymbolTable, scope: *state.Scope, expr: ast.Expressions.ExprNode) ast.Types.TypeInfo {
     return switch (expr) {
         .Identifier => |id| blk: {
-            if (isScopeKnown(table, scope)) {
-                if (safeFindUp(table, scope, id.name)) |sym| {
+            if (table.isScopeKnown(scope)) {
+                if (table.safeFindUp(scope, id.name)) |sym| {
                     if (sym.typ) |ti| break :blk ti;
                 }
             }
@@ -67,9 +70,9 @@ pub fn inferExprType(table: *state.SymbolTable, scope: *state.Scope, expr: ast.E
         },
         .Call => |c| blk_call: {
             // Prefer direct function symbol lookup for simple identifiers
-            if (c.callee.* == .Identifier and isScopeKnown(table, scope)) {
+            if (c.callee.* == .Identifier and table.isScopeKnown(scope)) {
                 const fname = c.callee.Identifier.name;
-                if (safeFindUp(table, scope, fname)) |sym| {
+                if (table.safeFindUp(scope, fname)) |sym| {
                     if (sym.typ) |ti| {
                         if (ti.ora_type) |ot| switch (ot) {
                             .function => |fnty| {

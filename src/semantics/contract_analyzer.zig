@@ -1,3 +1,17 @@
+// ============================================================================
+// Contract Analyzer
+// ============================================================================
+//
+// Collects symbols from contract members and creates contract scopes.
+//
+// RESPONSIBILITIES:
+//   • Create contract scope
+//   • Collect member declarations
+//   • Delegate function collection to function_analyzer
+//   • Record log signatures
+//
+// ============================================================================
+
 const std = @import("std");
 const ast = @import("../ast.zig");
 const state = @import("state.zig");
@@ -17,6 +31,8 @@ pub fn collectContractSymbols(table: *state.SymbolTable, root: *state.Scope, c: 
         .StructDecl => |s| {
             const sym = state.Symbol{ .name = s.name, .kind = .Struct, .span = s.span };
             _ = try table.declare(contract_scope, sym);
+            // Store struct fields for type resolution
+            try table.struct_fields.put(s.name, s.fields);
         },
         .EnumDecl => |e| {
             const sym = state.Symbol{ .name = e.name, .kind = .Enum, .span = e.span };

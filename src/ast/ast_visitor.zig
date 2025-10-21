@@ -1,3 +1,24 @@
+// ============================================================================
+// AST Visitor
+// ============================================================================
+//
+// Generic visitor pattern for traversing AST nodes with flexible strategies.
+//
+// FEATURES:
+//   • Comptime-parameterized visitor with custom context
+//   • Optional visit callbacks for selective traversal
+//   • Depth-first and breadth-first strategies
+//   • Specialized visitors (symbol/type collecting)
+//   • Type-erased AnyVisitor wrapper
+//
+// USAGE:
+//   const MyCtx = struct { count: usize };
+//   var ctx = MyCtx{ .count = 0 };
+//   var visitor = Visitor(MyCtx, void){ .context = &ctx, .visitFunc = myFn };
+//   visitor.visit(&node);
+//
+// ============================================================================
+
 const std = @import("std");
 const ast = @import("../ast.zig");
 

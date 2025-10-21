@@ -1,3 +1,11 @@
+// ============================================================================
+// Parser Module - Public API
+// ============================================================================
+//
+// Re-exports all parser components for external use.
+//
+// ============================================================================
+
 // Parser module exports
 pub const Parser = @import("parser_core.zig").Parser;
 pub const ExpressionParser = @import("expression_parser.zig").ExpressionParser;

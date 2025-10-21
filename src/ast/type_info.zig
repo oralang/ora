@@ -1,3 +1,23 @@
+// ============================================================================
+// Type Information System
+// ============================================================================
+//
+// Unified type system providing comprehensive type representation,
+// validation, and operations for all AST nodes.
+//
+// KEY CONCEPTS:
+//   • TypeInfo: Unified type representation (category + ora_type + source)
+//   • TypeCategory: High-level classification (Integer, String, Array, etc.)
+//   • OraType: Specific type details (u8, u256, arrays, maps, 80+ variants)
+//   • TypeSource: How type was determined (explicit, inferred, unknown)
+//
+// SECTIONS:
+//   • TypeInfo core & common types
+//   • TypeCategory & OraType definitions
+//   • Type rendering & display
+//
+// ============================================================================
+
 const std = @import("std");
 const SourceSpan = @import("../ast.zig").SourceSpan;
 

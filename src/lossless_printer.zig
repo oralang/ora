@@ -1,3 +1,21 @@
+// ============================================================================
+// Lossless Printer
+// ============================================================================
+//
+// Reconstructs source code from tokens and trivia with perfect fidelity.
+// Ensures that printed output matches the original source byte-for-byte.
+//
+// ALGORITHM:
+//   For each token: emit leading trivia → token text → trailing trivia
+//   Finally, emit any remaining EOF trivia
+//
+// USE CASES:
+//   • Code formatting preservation
+//   • Syntax tree manipulation with comment preservation
+//   • Testing lexer round-trip accuracy
+//
+// ============================================================================
+
 const std = @import("std");
 const lexer_mod = @import("lexer.zig");
 

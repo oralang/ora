@@ -1,3 +1,16 @@
+// ============================================================================
+// Parser Common Utilities
+// ============================================================================
+//
+// Shared utilities and base infrastructure for all parser modules.
+//
+// KEY COMPONENTS:
+//   • ParserCommon: Helper functions (isMemoryRegionKeyword, etc.)
+//   • ParserError: Error types for parsing
+//   • BaseParser: Base state and token manipulation
+//
+// ============================================================================
+
 const std = @import("std");
 const lexer = @import("../lexer.zig");
 const ast = @import("../ast.zig");

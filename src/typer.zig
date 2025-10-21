@@ -1,5 +1,34 @@
+// ============================================================================
+// Type System - Advanced Type Checker & Semantics
+// ============================================================================
+//
+// Comprehensive type system with struct semantics, storage layout calculation,
+// and advanced features like copy/move/drop behavior.
+//
+// FEATURES:
+//   • Struct lifecycle management (constructor/destructor)
+//   • Copy/Move/Drop semantics (inspired by Rust)
+//   • Storage layout optimization
+//   • Type checking for expressions, statements, functions
+//   • Memory region tracking
+//
+// SECTIONS:
+//   • Struct lifecycle & semantics
+//   • Struct type definition & memory layout
+//   • Type system infrastructure
+//   • Main type checking engine
+//
+// NOTE: Contains sophisticated features that may not all be actively used.
+//       Consider auditing feature usage.
+//
+// ============================================================================
+
 const std = @import("std");
 const ast = @import("ast.zig");
+
+// ============================================================================
+// SECTION 1: Struct Lifecycle & Semantics
+// ============================================================================
 
 /// Advanced struct semantics and lifecycle management
 pub const StructSemantics = struct {
@@ -73,6 +102,10 @@ pub const StructSemantics = struct {
         return self.destructor != null or self.drop_behavior == .manual;
     }
 };
+
+// ============================================================================
+// SECTION 2: Struct Type Definition & Memory Layout
+// ============================================================================
 
 /// Enhanced struct type definition with advanced semantics
 pub const StructType = struct {
@@ -375,6 +408,10 @@ pub const StructType = struct {
         return self.layout.packed_efficiently;
     }
 };
+
+// ============================================================================
+// SECTION 3: Type System Infrastructure
+// ============================================================================
 
 /// Access context for field access control
 pub const AccessContext = enum {
@@ -710,6 +747,10 @@ pub const SymbolTable = struct {
         return self.lookupNamespaced(namespace, symbol_name) != null;
     }
 };
+
+// ============================================================================
+// SECTION 4: Typer - Main Type Checking Engine
+// ============================================================================
 
 /// Type checker for ZigOra
 pub const Typer = struct {

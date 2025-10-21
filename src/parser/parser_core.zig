@@ -1,3 +1,17 @@
+// ============================================================================
+// Parser Core - Main Orchestrator
+// ============================================================================
+//
+// Main parser entry point that coordinates all sub-parsers.
+//
+// ARCHITECTURE:
+//   Embeds BaseParser for state management and delegates to specialized parsers
+//   (ExpressionParser, StatementParser, DeclarationParser, TypeParser).
+//
+// ENTRY POINT: parse() - Converts tokens → AST nodes
+//
+// ============================================================================
+
 const std = @import("std");
 const lexer = @import("../lexer.zig");
 const ast = @import("../ast.zig");

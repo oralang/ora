@@ -1,3 +1,20 @@
+// ============================================================================
+// Semantic State - Symbol Table & Scope Management
+// ============================================================================
+//
+// Core data structures for semantic analysis.
+//
+// DATA STRUCTURES:
+//   • **Symbol**: name, kind, type, span, mutability, memory region
+//   • **Scope**: symbols list, parent pointer, hierarchical lookup
+//   • **SymbolTable**: root scope, child scopes, specialized maps
+//     (contracts, functions, blocks, logs, enums)
+//
+// LOOKUP METHODS:
+//   findInCurrent, findUp, safeFindUp, isScopeKnown
+//
+// ============================================================================
+
 const std = @import("std");
 const ast = @import("../ast.zig");
 
@@ -53,10 +70,23 @@ pub const SymbolTable = struct {
     function_success_types: std.StringHashMap(ast.Types.OraType),
     block_scopes: std.AutoHashMap(usize, *Scope),
     enum_variants: std.StringHashMap([][]const u8),
+    struct_fields: std.StringHashMap([]const ast.StructField), // struct name → fields
 
     pub fn init(allocator: std.mem.Allocator) SymbolTable {
         const root_scope = Scope.init(allocator, null, null);
-        return .{ .allocator = allocator, .root = root_scope, .scopes = std.ArrayList(*Scope).init(allocator), .contract_scopes = std.StringHashMap(*Scope).init(allocator), .function_scopes = std.StringHashMap(*Scope).init(allocator), .log_signatures = std.StringHashMap([]const ast.LogField).init(allocator), .function_allowed_errors = std.StringHashMap([][]const u8).init(allocator), .function_success_types = std.StringHashMap(ast.Types.OraType).init(allocator), .block_scopes = std.AutoHashMap(usize, *Scope).init(allocator), .enum_variants = std.StringHashMap([][]const u8).init(allocator) };
+        return .{
+            .allocator = allocator,
+            .root = root_scope,
+            .scopes = std.ArrayList(*Scope).init(allocator),
+            .contract_scopes = std.StringHashMap(*Scope).init(allocator),
+            .function_scopes = std.StringHashMap(*Scope).init(allocator),
+            .log_signatures = std.StringHashMap([]const ast.LogField).init(allocator),
+            .function_allowed_errors = std.StringHashMap([][]const u8).init(allocator),
+            .function_success_types = std.StringHashMap(ast.Types.OraType).init(allocator),
+            .block_scopes = std.AutoHashMap(usize, *Scope).init(allocator),
+            .enum_variants = std.StringHashMap([][]const u8).init(allocator),
+            .struct_fields = std.StringHashMap([]const ast.StructField).init(allocator),
+        };
     }
 
     pub fn deinit(self: *SymbolTable) void {
@@ -98,6 +128,8 @@ pub const SymbolTable = struct {
             self.allocator.free(slice_ptr.*);
         }
         self.enum_variants.deinit();
+        // Note: struct_fields values are direct references to AST nodes, not owned copies
+        self.struct_fields.deinit();
         self.root.deinit();
     }
 
@@ -113,6 +145,25 @@ pub const SymbolTable = struct {
     pub fn findUp(scope: ?*const Scope, name: []const u8) ?Symbol {
         var cur = scope;
         while (cur) |s| : (cur = s.parent) {
+            if (s.findInCurrent(name)) |idx| return s.symbols.items[idx];
+        }
+        return null;
+    }
+
+    /// Check if a scope is registered in the symbol table
+    pub fn isScopeKnown(self: *const SymbolTable, scope: *const Scope) bool {
+        if (scope == &self.root) return true;
+        for (self.scopes.items) |sc| {
+            if (sc == scope) return true;
+        }
+        return false;
+    }
+
+    /// Safe version of findUp that checks if scopes are known before traversing
+    pub fn safeFindUp(self: *const SymbolTable, scope: *const Scope, name: []const u8) ?Symbol {
+        var cur: ?*const Scope = scope;
+        while (cur) |s| : (cur = s.parent) {
+            if (!self.isScopeKnown(s)) return null;
             if (s.findInCurrent(name)) |idx| return s.symbols.items[idx];
         }
         return null;

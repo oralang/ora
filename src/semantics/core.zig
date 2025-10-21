@@ -1,3 +1,22 @@
+// ============================================================================
+// Semantic Analysis Core - Orchestrator
+// ============================================================================
+//
+// Coordinates the two-phase semantic analysis pipeline.
+//
+// TWO-PHASE ARCHITECTURE:
+//   **Phase 1:** Symbol collection & scope building
+//     Collect symbols → Build scopes → Bind locals
+//   **Phase 2:** Validation & type checking
+//     Check bodies → Validate returns → Check logs → Validate specs
+//
+// Delegates to: collect.zig, contract_analyzer.zig, function_analyzer.zig,
+//               locals_binder.zig, statement_analyzer.zig, log_analyzer.zig
+//
+// NOTE: Unknown-identifier checking currently disabled (see ENABLE_UNKNOWN_WALKER).
+//
+// ============================================================================
+
 const std = @import("std");
 const ast = @import("../ast.zig");
 const state = @import("state.zig");
@@ -63,82 +82,64 @@ pub fn analyzePhase1(allocator: std.mem.Allocator, nodes: []const ast.AstNode) !
     return .{ .symbols = cr.table, .diagnostics = try diags.toOwnedSlice() };
 }
 
+// Helper function to check a single function (top-level or contract member)
+fn checkFunction(
+    allocator: std.mem.Allocator,
+    symbols: *state.SymbolTable,
+    f: *const ast.FunctionNode,
+    diags: *std.ArrayList(Diagnostic),
+) !void {
+    const scope = symbols.function_scopes.get(f.name) orelse return;
+
+    // Check return statements
+    const spans = try stmt.checkFunctionBody(allocator, symbols, scope, f);
+    defer allocator.free(spans);
+    for (spans) |sp| try diags.append(.{ .message = "Return type mismatch", .span = sp });
+
+    // Unknown identifiers in function body
+    if (ENABLE_UNKNOWN_WALKER and f.body.statements.len > 0) {
+        const unknowns = try stmt.collectUnknownIdentifierSpans(allocator, symbols, scope, f);
+        defer allocator.free(unknowns);
+        for (unknowns) |usp| try diags.append(.{ .message = "Unknown identifier", .span = usp });
+    }
+
+    // Log statement checks (signature and argument typing)
+    const log_spans = try logs.checkLogsInFunction(allocator, symbols, scope, f);
+    defer allocator.free(log_spans);
+    for (log_spans) |lsp| try diags.append(.{ .message = "Invalid log call", .span = lsp });
+
+    // Spec usage checks: quantified allowed only in requires/ensures/invariant; old only in ensures
+    for (f.requires_clauses) |rq| {
+        if (try expr.validateSpecUsage(allocator, rq, .Requires)) |spx| {
+            try diags.append(.{ .message = "Invalid spec expression usage", .span = spx });
+        }
+    }
+    for (f.ensures_clauses) |en| {
+        if (try expr.validateSpecUsage(allocator, en, .Ensures)) |spy| {
+            try diags.append(.{ .message = "Invalid spec expression usage", .span = spy });
+        }
+    }
+}
+
 // Phase 2 scaffolding: type-check and validation will be added here, orchestrating analyzers.
 pub fn analyzePhase2(allocator: std.mem.Allocator, nodes: []const ast.AstNode, symbols: *state.SymbolTable) ![]Diagnostic {
     var diags = std.ArrayList(Diagnostic).init(allocator);
-    // Walk functions and check returns basic rule
+
+    // Check all functions (top-level and contract members)
     for (nodes) |*n| switch (n.*) {
         .Function => |*f| {
-            const scope = symbols.function_scopes.get(f.name) orelse null;
-            if (scope) |s| {
-                const spans = try stmt.checkFunctionBody(allocator, symbols, s, f);
-                defer allocator.free(spans);
-                for (spans) |sp| try diags.append(.{ .message = "Return type mismatch", .span = sp });
-
-                // Unknown identifiers in function body
-                if (ENABLE_UNKNOWN_WALKER and f.body.statements.len > 0) {
-                    const unknowns = try stmt.collectUnknownIdentifierSpans(allocator, symbols, s, f);
-                    defer allocator.free(unknowns);
-                    for (unknowns) |usp| try diags.append(.{ .message = "Unknown identifier", .span = usp });
-                }
-
-                // Log statement checks (signature and argument typing)
-                const log_spans = try logs.checkLogsInFunction(allocator, symbols, s, f);
-                defer allocator.free(log_spans);
-                for (log_spans) |lsp| try diags.append(.{ .message = "Invalid log call", .span = lsp });
-
-                // Spec usage checks: quantified allowed only in requires/ensures/invariant; old only in ensures
-                for (f.requires_clauses) |rq| {
-                    if (try expr.validateSpecUsage(allocator, rq, .Requires)) |spx| {
-                        try diags.append(.{ .message = "Invalid spec expression usage", .span = spx });
-                    }
-                }
-                for (f.ensures_clauses) |en| {
-                    if (try expr.validateSpecUsage(allocator, en, .Ensures)) |spy| {
-                        try diags.append(.{ .message = "Invalid spec expression usage", .span = spy });
-                    }
-                }
-            }
+            try checkFunction(allocator, symbols, f, &diags);
         },
         .Contract => |*c| {
-            // Check each member function
             for (c.body) |*m| switch (m.*) {
-                .Function => |*f2| {
-                    const scope2 = symbols.function_scopes.get(f2.name) orelse null;
-                    if (scope2) |s2| {
-                        const spans2 = try stmt.checkFunctionBody(allocator, symbols, s2, f2);
-                        defer allocator.free(spans2);
-                        for (spans2) |sp2| try diags.append(.{ .message = "Return type mismatch", .span = sp2 });
-
-                        // Unknown identifiers in member function body
-                        if (ENABLE_UNKNOWN_WALKER and f2.body.statements.len > 0) {
-                            const unknowns2 = try stmt.collectUnknownIdentifierSpans(allocator, symbols, s2, f2);
-                            defer allocator.free(unknowns2);
-                            for (unknowns2) |usp2| try diags.append(.{ .message = "Unknown identifier", .span = usp2 });
-                        }
-
-                        // Log statement checks
-                        const log_spans2 = try logs.checkLogsInFunction(allocator, symbols, s2, f2);
-                        defer allocator.free(log_spans2);
-                        for (log_spans2) |lsp2| try diags.append(.{ .message = "Invalid log call", .span = lsp2 });
-
-                        // Spec usage checks: quantified allowed only in requires/ensures/invariant; old only in ensures
-                        for (f2.requires_clauses) |rq2| {
-                            if (try expr.validateSpecUsage(allocator, rq2, .Requires)) |spx2| {
-                                try diags.append(.{ .message = "Invalid spec expression usage", .span = spx2 });
-                            }
-                        }
-                        for (f2.ensures_clauses) |en2| {
-                            if (try expr.validateSpecUsage(allocator, en2, .Ensures)) |spy2| {
-                                try diags.append(.{ .message = "Invalid spec expression usage", .span = spy2 });
-                            }
-                        }
-                    }
+                .Function => |*f| {
+                    try checkFunction(allocator, symbols, f, &diags);
                 },
                 else => {},
             };
         },
         else => {},
     };
+
     return try diags.toOwnedSlice();
 }

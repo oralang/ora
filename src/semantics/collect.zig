@@ -1,3 +1,19 @@
+// ============================================================================
+// Symbol Collector - Phase 1 of Semantic Analysis
+// ============================================================================
+//
+// Collects top-level declarations and populates the root scope.
+//
+// RESPONSIBILITIES:
+//   • Collect top-level declarations (contracts, functions, structs, enums, etc.)
+//   • Detect duplicate declarations at the global scope
+//   • Record enum variants for exhaustiveness checking
+//
+// NOTE: Contract and function members are collected by contract_analyzer.zig
+//       and function_analyzer.zig in later phases.
+//
+// ============================================================================
+
 const std = @import("std");
 const ast = @import("../ast.zig");
 const state = @import("state.zig");
@@ -36,6 +52,8 @@ pub fn collectSymbols(allocator: std.mem.Allocator, nodes: []const ast.AstNode) 
         .StructDecl => |s| {
             const sym = state.Symbol{ .name = s.name, .kind = .Struct, .span = s.span };
             if (try table.declare(&table.root, sym)) |_| try diags.append(s.span);
+            // Store struct fields for type resolution
+            try table.struct_fields.put(s.name, s.fields);
         },
         .EnumDecl => |e| {
             const sym = state.Symbol{ .name = e.name, .kind = .Enum, .span = e.span };

@@ -1,5 +1,33 @@
+// ============================================================================
+// Lexer - Comprehensive Lexical Analyzer
+// ============================================================================
+//
+// Full-featured lexer with sophisticated error diagnostics, trivia tracking,
+// and comprehensive token support for the Ora language.
+//
+// FEATURES:
+//   • Rich error diagnostics with context and suggestions
+//   • Trivia tracking (comments, whitespace) for lossless printing
+//   • 50+ token types including keywords, operators, literals
+//   • Source position tracking (line, column, byte offset)
+//   • Multi-file support with file_id
+//   • Error recovery for better diagnostics
+//
+// SECTIONS:
+//   • Error diagnostics infrastructure
+//   • Source management & position tracking
+//   • Trivia handling (comments & whitespace)
+//   • Token types & definitions
+//   • Core lexer logic & state machine
+//
+// ============================================================================
+
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+
+// ============================================================================
+// SECTION 1: Error Diagnostics Infrastructure
+// ============================================================================
 
 /// Lexer-specific errors for better diagnostics
 pub const LexerError = error{
@@ -811,6 +839,10 @@ pub const ErrorRecovery = struct {
     }
 };
 
+// ============================================================================
+// SECTION 2: Source Management & Position Tracking
+// ============================================================================
+
 /// Source range information for precise token positioning
 pub const SourceRange = struct {
     start_line: u32,
@@ -857,6 +889,10 @@ pub const TokenValue = union(enum) {
         }
     }
 };
+
+// ============================================================================
+// SECTION 3: Trivia Handling (Comments & Whitespace)
+// ============================================================================
 
 pub const TriviaKind = enum { Whitespace, Newline, LineComment, BlockComment, DocLineComment, DocBlockComment };
 
@@ -1040,6 +1076,10 @@ pub const StringProcessor = struct {
         return self.allocator.dupe(u8, raw_string);
     }
 };
+
+// ============================================================================
+// SECTION 4: Token Types & Definitions
+// ============================================================================
 
 /// Token types for Ora
 pub const TokenType = enum {
@@ -1486,6 +1526,10 @@ const keywords = std.StaticStringMap(TokenType).initComptime(.{
     .{ "slice", .Slice },
     .{ "bytes", .Bytes },
 });
+
+// ============================================================================
+// SECTION 5: Core Lexer Logic & State Machine
+// ============================================================================
 
 /// Lexer for Ora
 pub const Lexer = struct {

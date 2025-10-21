@@ -1,3 +1,21 @@
+// ============================================================================
+// Local Variable Binder
+// ============================================================================
+//
+// Binds local variables and creates nested block scopes within functions.
+// Part of Phase 1 (after function scopes are created).
+//
+// RESPONSIBILITIES:
+//   • Create nested block scopes (if/while/for/try/switch)
+//   • Bind local variable declarations
+//   • Handle loop patterns (single, index-pair, destructured)
+//   • Infer types for variables with initializers
+//
+// SCOPE HIERARCHY:
+//   Root → Function → Blocks (if/while/for/try/switch)
+//
+// ============================================================================
+
 const std = @import("std");
 const ast = @import("../ast.zig");
 const state = @import("state.zig");

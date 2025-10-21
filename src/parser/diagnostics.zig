@@ -1,3 +1,12 @@
+// ============================================================================
+// Parser Diagnostics
+// ============================================================================
+//
+// Simple diagnostic output control for parser debugging.
+// Enable/disable via enable_stderr_diagnostics flag.
+//
+// ============================================================================
+
 const std = @import("std");
 
 // Global switch to enable/disable parser diagnostics to stderr

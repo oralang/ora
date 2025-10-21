@@ -1,3 +1,18 @@
+// ============================================================================
+// Semantics - Unified Entry Point
+// ============================================================================
+//
+// Provides a clean facade for semantic analysis, orchestrating the two-phase
+// analysis pipeline (symbol collection → validation).
+//
+// PUBLIC API:
+//   • analyze() - Full two-phase semantic analysis
+//   • validateLValues() - Assignment target validation
+//
+// Delegates to: semantics/core.zig, semantics/state.zig
+//
+// ============================================================================
+
 const std = @import("std");
 const ast = @import("ast.zig");
 const core = @import("semantics/core.zig");

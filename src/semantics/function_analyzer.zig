@@ -1,3 +1,17 @@
+// ============================================================================
+// Function Analyzer
+// ============================================================================
+//
+// Collects function symbols, creates scopes, and processes parameters.
+//
+// RESPONSIBILITIES:
+//   • Create function scope
+//   • Collect parameters as symbols
+//   • Build function type (params + return)
+//   • Handle error unions and union returns
+//
+// ============================================================================
+
 const std = @import("std");
 const ast = @import("../ast.zig");
 const state = @import("state.zig");

@@ -1,3 +1,20 @@
+// ============================================================================
+// Documentation Comment Extraction
+// ============================================================================
+//
+// Extracts documentation comments from token trivia.
+// Supports both line comments (///) and block comments (/** */).
+//
+// ALGORITHM:
+//   For each token with leading trivia:
+//     • If doc block (/** */): use it alone
+//     • Otherwise: collect contiguous doc line comments (///)
+//     • Associate with token index
+//
+// Only immediate preceding comments attached (whitespace allowed between lines).
+//
+// ============================================================================
+
 const std = @import("std");
 const lexer = @import("lexer.zig");
 

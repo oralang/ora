@@ -1,3 +1,16 @@
+// ============================================================================
+// Declaration Parser
+// ============================================================================
+//
+// Parses top-level and contract-level declarations.
+//
+// SUPPORTED DECLARATIONS:
+//   • Contracts, functions, structs, enums, logs, errors
+//   • Constants, variables, imports
+//   • Storage variables with memory regions
+//
+// ============================================================================
+
 const std = @import("std");
 const lexer = @import("../lexer.zig");
 const ast = @import("../ast.zig");

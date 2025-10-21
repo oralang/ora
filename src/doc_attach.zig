@@ -1,3 +1,21 @@
+// ============================================================================
+// Documentation Attachment
+// ============================================================================
+//
+// Attaches extracted doc comments to their corresponding AST nodes.
+// Matches doc comments to declarations based on token positions.
+//
+// ALGORITHM:
+//   1. Extract doc comments with token indices
+//   2. Build map: token_index → doc_text
+//   3. For each AST node, find first token and attach its doc comment
+//
+// TOKEN MATCHING:
+//   Doc comments attach to the token immediately following them,
+//   ensuring they associate with the right declaration.
+//
+// ============================================================================
+
 const std = @import("std");
 const ora = @import("root.zig");
 const ast = ora.ast;
