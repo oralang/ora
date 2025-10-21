@@ -197,30 +197,7 @@ pub fn build(b: *std.Build) void {
     const formal_verification_demo_step = b.step("formal-verification-demo", "Run the formal verification demo");
     formal_verification_demo_step.dependOn(&run_formal_verification_demo.step);
 
-    // Add comprehensive compiler testing framework
-    // addCompilerTestFramework(b, lib_mod, target, optimize); // disabled for build compatibility
-
-    // Create MLIR demo executable (Ora -> AST -> MLIR IR file)
-    const mlir_demo_mod = b.createModule(.{
-        .root_source_file = b.path("examples/demos/mlir_demo.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    mlir_demo_mod.addImport("ora_lib", lib_mod);
-
-    const mlir_demo = b.addExecutable(.{
-        .name = "mlir_demo",
-        .root_module = mlir_demo_mod,
-    });
-    // Reuse MLIR build step
-    linkMlirLibraries(b, mlir_demo, mlir_step, target);
-    b.installArtifact(mlir_demo);
-    const run_mlir_demo = b.addRunArtifact(mlir_demo);
-    run_mlir_demo.step.dependOn(b.getInstallStep());
-    const mlir_demo_step = b.step("mlir-demo", "Run the MLIR hello-world demo");
-    mlir_demo_step.dependOn(&run_mlir_demo.step);
-
-    // Add MLIR-specific build steps
+    // MLIR-specific build steps
     const mlir_debug_step = b.step("mlir-debug", "Build with MLIR debug features enabled");
     mlir_debug_step.dependOn(b.getInstallStep());
 
@@ -230,8 +207,6 @@ pub fn build(b: *std.Build) void {
     // Add step to test MLIR functionality
     const test_mlir_step = b.step("test-mlir", "Run MLIR-specific tests");
     test_mlir_step.dependOn(b.getInstallStep());
-
-    // Test configurations temporarily removed for build compatibility with Zig 0.15.1
 }
 
 /// Create a step that runs the installed lexer test suite with --verbose
@@ -757,12 +732,6 @@ fn linkMlirLibraries(b: *std.Build, exe: *std.Build.Step.Compile, mlir_step: *st
         else => {
             exe.linkLibCpp();
         },
-    }
-
-    // Add RPATH once for all platforms that need it
-    if (target.result.os.tag == .linux or target.result.os.tag == .macos) {
-        // Temporarily disabled to debug duplicate RPATH issue
-        // exe.addRPath(lib_path);
     }
 }
 

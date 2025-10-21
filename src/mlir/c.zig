@@ -1,3 +1,11 @@
+// ============================================================================
+// MLIR C Bindings
+// ============================================================================
+//
+// FFI bindings to MLIR C API for IR manipulation and dialect integration.
+//
+// ============================================================================
+
 pub const c = @cImport({
     @cInclude("mlir-c/IR.h");
     @cInclude("mlir-c/BuiltinTypes.h");

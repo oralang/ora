@@ -1,7 +1,32 @@
+// ============================================================================
+// Declaration Lowering
+// ============================================================================
+//
+// Converts Ora top-level declarations to MLIR module-level constructs.
+//
+// SUPPORTED DECLARATIONS:
+//   • Functions with parameters, return types, and bodies
+//   • Contracts with member functions and storage variables
+//   • Structs with field definitions
+//   • Enums with variant definitions
+//   • Constants and global variables
+//   • Logs (event declarations)
+//   • Error type declarations
+//
+// FEATURES:
+//   • Symbol table construction
+//   • Function signature generation
+//   • ABI generation for public functions
+//   • Contract storage layout
+//   • Type definition registration
+//
+// ============================================================================
+
 const std = @import("std");
 const c = @import("c.zig").c;
 const lib = @import("ora_lib");
 const constants = @import("lower.zig");
+const h = @import("helpers.zig");
 const TypeMapper = @import("types.zig").TypeMapper;
 const LocationTracker = @import("locations.zig").LocationTracker;
 const LocalVarMap = @import("symbols.zig").LocalVarMap;
@@ -1277,7 +1302,7 @@ pub const DeclarationLowerer = struct {
 
     /// Create file location for operation
     fn createFileLocation(self: *const DeclarationLowerer, span: lib.ast.SourceSpan) c.MlirLocation {
-        return LocationTracker.createFileLocationFromSpan(&self.locations, span);
+        return self.locations.createLocation(span);
     }
 
     /// Get the source span for any expression type

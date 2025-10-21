@@ -1,3 +1,16 @@
+// ============================================================================
+// Symbol Tables & Variable Mapping
+// ============================================================================
+//
+// Manages symbol tables for parameters, local variables, and declarations.
+//
+// KEY COMPONENTS:
+//   • ParamMap: Function parameter name → MLIR value mapping
+//   • LocalVarMap: Local variable name → MLIR value mapping
+//   • SymbolTable: Global symbol tracking for functions, types, contracts
+//
+// ============================================================================
+
 const std = @import("std");
 const c = @import("c.zig").c;
 const lib = @import("ora_lib");

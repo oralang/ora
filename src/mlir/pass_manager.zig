@@ -1,3 +1,18 @@
+// ============================================================================
+// MLIR Pass Manager
+// ============================================================================
+//
+// Configures and runs optimization passes on MLIR modules.
+//
+// FEATURES:
+//   • Configurable optimization pipeline
+//   • Verification passes
+//   • Canonicalization and CSE
+//   • SCCP (Sparse Conditional Constant Propagation)
+//   • Symbol DCE (Dead Code Elimination)
+//
+// ============================================================================
+
 const std = @import("std");
 const c = @import("c.zig").c;
 const lib = @import("ora_lib");

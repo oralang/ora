@@ -1,12 +1,16 @@
-//===- verification.zig - MLIR Verification Passes ------------*- zig -*-===//
+// ============================================================================
+// MLIR Verification
+// ============================================================================
 //
-// This file implements Ora-specific MLIR verification passes:
-// - Type verification for ora.* operations
-// - Memory verification for storage operations
-// - Contract verification for function contracts
-// - Semantic verification for Ora-specific constructs
+// Verifies MLIR module correctness and detects common errors.
 //
-//===----------------------------------------------------------------------===//
+// FEATURES:
+//   • Type verification for ora.* operations
+//   • Memory verification for storage operations
+//   • Contract verification for function contracts
+//   • Semantic verification for Ora-specific constructs
+//
+// ============================================================================
 
 const std = @import("std");
 const c = @import("c.zig").c;

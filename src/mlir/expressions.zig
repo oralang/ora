@@ -1,7 +1,30 @@
+// ============================================================================
+// Expression Lowering
+// ============================================================================
+//
+// Converts Ora AST expressions to MLIR operations.
+//
+// SUPPORTED EXPRESSIONS:
+//   • Literals: integers, strings, bools, addresses, hex values
+//   • Operators: binary, unary, arithmetic, logical, bitwise
+//   • Access: identifiers, field access, array indexing
+//   • Calls: function calls with argument marshalling
+//   • Advanced: tuples, struct instantiation, casts, try/catch
+//   • Blockchain: shift operations, storage access
+//
+// FEATURES:
+//   • Type-aware operation selection
+//   • Constant folding and optimization
+//   • Memory region tracking
+//   • Location preservation for debugging
+//
+// ============================================================================
+
 const std = @import("std");
 const c = @import("c.zig").c;
 const lib = @import("ora_lib");
 const constants = @import("lower.zig");
+const h = @import("helpers.zig");
 const TypeMapper = @import("types.zig").TypeMapper;
 const ParamMap = @import("symbols.zig").ParamMap;
 const StorageMap = @import("memory.zig").StorageMap;
@@ -95,12 +118,11 @@ pub const ExpressionLowerer = struct {
                 c.mlirOperationStateAddResults(&state, 1, @ptrCast(&ty));
 
                 // Create string attribute with proper string reference
-                const string_ref = c.mlirStringRefCreate(string_lit.value.ptr, string_lit.value.len);
-                const string_attr = c.mlirStringAttrGet(self.ctx, string_ref);
+                const string_attr = h.stringAttr(self.ctx, string_lit.value);
 
-                const value_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("value"));
-                const length_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("length"));
-                const length_attr = c.mlirIntegerAttrGet(c.mlirIntegerTypeGet(self.ctx, 32), @intCast(string_len));
+                const value_id = h.identifier(self.ctx, "value");
+                const length_id = h.identifier(self.ctx, "length");
+                const length_attr = h.intAttr(self.ctx, c.mlirIntegerTypeGet(self.ctx, 32), @intCast(string_len));
 
                 var attrs = [_]c.MlirNamedAttribute{
                     c.mlirNamedAttributeGet(value_id, string_attr),
@@ -140,14 +162,13 @@ pub const ExpressionLowerer = struct {
                     std.debug.print("ERROR: Failed to parse address literal '{s}': {s}\n", .{ addr_lit.value, @errorName(err) });
                     break :blk 0;
                 };
-                const attr = c.mlirIntegerAttrGet(ty, parsed);
+                const attr = h.intAttr(self.ctx, ty, parsed);
 
-                const value_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("value"));
-                const address_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("ora.address"));
-                const address_ref = c.mlirStringRefCreate(addr_lit.value.ptr, addr_lit.value.len);
-                const address_attr = c.mlirStringAttrGet(self.ctx, address_ref);
-                const length_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("length"));
-                const length_attr = c.mlirIntegerAttrGet(c.mlirIntegerTypeGet(self.ctx, 32), @intCast(addr_str.len));
+                const value_id = h.identifier(self.ctx, "value");
+                const address_id = h.identifier(self.ctx, "ora.address");
+                const address_attr = h.stringAttr(self.ctx, addr_lit.value);
+                const length_id = h.identifier(self.ctx, "length");
+                const length_attr = h.intAttr(self.ctx, c.mlirIntegerTypeGet(self.ctx, 32), @intCast(addr_str.len));
 
                 var attrs = [_]c.MlirNamedAttribute{
                     c.mlirNamedAttributeGet(value_id, attr),
@@ -190,7 +211,7 @@ pub const ExpressionLowerer = struct {
                 };
                 const attr = c.mlirIntegerAttrGet(ty, parsed);
 
-                const value_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("value"));
+                const value_id = h.identifier(self.ctx, "value");
                 const hex_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("ora.hex"));
                 const hex_ref = c.mlirStringRefCreate(hex_lit.value.ptr, hex_lit.value.len);
                 const hex_attr = c.mlirStringAttrGet(self.ctx, hex_ref);
@@ -238,7 +259,7 @@ pub const ExpressionLowerer = struct {
                 };
                 const attr = c.mlirIntegerAttrGet(ty, parsed);
 
-                const value_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("value"));
+                const value_id = h.identifier(self.ctx, "value");
                 const binary_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("ora.binary"));
                 const binary_ref = c.mlirStringRefCreate(bin_lit.value.ptr, bin_lit.value.len);
                 const binary_attr = c.mlirStringAttrGet(self.ctx, binary_ref);
@@ -305,7 +326,7 @@ pub const ExpressionLowerer = struct {
                 };
 
                 const attr = c.mlirIntegerAttrGet(ty, parsed);
-                const value_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("value"));
+                const value_id = h.identifier(self.ctx, "value");
                 const bytes_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("ora.bytes_literal"));
                 var attrs = [_]c.MlirNamedAttribute{ c.mlirNamedAttributeGet(value_id, attr), c.mlirNamedAttributeGet(bytes_id, c.mlirBoolAttrGet(self.ctx, 1)) };
                 c.mlirOperationStateAddAttributes(&state, attrs.len, &attrs);
@@ -642,7 +663,7 @@ pub const ExpressionLowerer = struct {
         c.mlirOperationStateAddResults(&state, 1, @ptrCast(&ty));
 
         const attr = c.mlirIntegerAttrGet(ty, 0); // Use 0 as placeholder value
-        const value_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("value"));
+        const value_id = h.identifier(self.ctx, "value");
         const error_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("ora.error_placeholder"));
         const error_attr = c.mlirStringAttrGet(self.ctx, c.mlirStringRefCreateFromCString(error_msg.ptr));
 
@@ -842,7 +863,7 @@ pub const ExpressionLowerer = struct {
         c.mlirOperationStateAddResults(&state, 1, @ptrCast(&ty));
 
         const attr = c.mlirIntegerAttrGet(ty, 0); // Placeholder value
-        const value_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("value"));
+        const value_id = h.identifier(self.ctx, "value");
         const comptime_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("ora.comptime"));
         const comptime_attr = c.mlirBoolAttrGet(self.ctx, 1);
 
@@ -871,7 +892,7 @@ pub const ExpressionLowerer = struct {
         c.mlirOperationStateAddResults(&state, 1, @ptrCast(&result_ty));
 
         const value_attr = c.mlirIntegerAttrGet(result_ty, 0); // Placeholder
-        const value_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("value"));
+        const value_id = h.identifier(self.ctx, "value");
 
         var attrs = [_]c.MlirNamedAttribute{
             c.mlirNamedAttributeGet(value_id, value_attr),
@@ -1153,7 +1174,7 @@ pub const ExpressionLowerer = struct {
         c.mlirOperationStateAddResults(&state, 1, @ptrCast(&ty));
 
         const attr = c.mlirIntegerAttrGet(ty, 1); // Error code
-        const value_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("value"));
+        const value_id = h.identifier(self.ctx, "value");
         const error_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("ora.error"));
         const error_name_attr = c.mlirStringAttrGet(self.ctx, c.mlirStringRefCreateFromCString(error_ret.error_name.ptr));
 
@@ -1359,7 +1380,7 @@ pub const ExpressionLowerer = struct {
         // For now, use a placeholder value
         // TODO: Look up actual enum variant value
         const attr = c.mlirIntegerAttrGet(ty, 0);
-        const value_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("value"));
+        const value_id = h.identifier(self.ctx, "value");
         const enum_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("ora.enum"));
         const enum_name_attr = c.mlirStringAttrGet(self.ctx, c.mlirStringRefCreateFromCString(enum_lit.enum_name.ptr));
 
@@ -1387,7 +1408,7 @@ pub const ExpressionLowerer = struct {
 
     /// Get file location for an expression
     pub fn fileLoc(self: *const ExpressionLowerer, span: lib.ast.SourceSpan) c.MlirLocation {
-        return LocationTracker.createFileLocationFromSpan(&self.locations, span);
+        return self.locations.createLocation(span);
     }
 
     /// Helper function to create arithmetic operations
@@ -1862,7 +1883,7 @@ pub const ExpressionLowerer = struct {
         c.mlirOperationStateAddResults(&state, 1, @ptrCast(&struct_ty));
 
         const attr = c.mlirIntegerAttrGet(struct_ty, 0);
-        const value_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("value"));
+        const value_id = h.identifier(self.ctx, "value");
         const struct_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("ora.empty_struct"));
         const struct_attr = c.mlirBoolAttrGet(self.ctx, 1);
 

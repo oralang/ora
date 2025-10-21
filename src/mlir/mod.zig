@@ -1,9 +1,21 @@
-/// MLIR lowering system for the Ora compiler
-/// This module provides a comprehensive system for converting Ora AST to MLIR IR
+// ============================================================================
+// MLIR Module - Public API
+// ============================================================================
+//
+// MLIR lowering system for converting Ora AST to MLIR IR.
+//
+// ARCHITECTURE:
+//   Modular design with specialized components for types, expressions,
+//   statements, declarations, memory management, and code generation.
+//
+// ============================================================================
 
 // Core MLIR functionality - consolidated into lower.zig
 pub const lower = @import("lower.zig");
 pub const dialect = @import("dialect.zig");
+
+// Helper utilities for reducing MLIR C API boilerplate
+pub const helpers = @import("helpers.zig");
 
 // Modular components
 pub const types = @import("types.zig");

@@ -1,3 +1,17 @@
+// ============================================================================
+// Ora MLIR Dialect
+// ============================================================================
+//
+// Defines and registers the Ora-specific MLIR dialect.
+//
+// FEATURES:
+//   • Runtime dialect registration
+//   • Operation creation (ora.constant, ora.storage_load, etc.)
+//   • Type system integration
+//   • Attribute handling
+//
+// ============================================================================
+
 const std = @import("std");
 const c = @import("c.zig").c;
 

@@ -1,7 +1,27 @@
+// ============================================================================
+// Type Mapping
+// ============================================================================
+//
+// Maps Ora types to MLIR types for lowering.
+//
+// FEATURES:
+//   • Primitive type mapping (integers, bools, strings, addresses)
+//   • Complex type mapping (arrays, maps, tuples, structs)
+//   • Type inference system for generics and type variables
+//   • Type constraints and validation
+//
+// KEY COMPONENTS:
+//   • TypeMapper: Main type conversion engine
+//   • TypeInference: Type variable and constraint resolution
+//   • Specialized handlers for each type category
+//
+// ============================================================================
+
 const std = @import("std");
 const c = @import("c.zig").c;
 const lib = @import("ora_lib");
 const constants = @import("lower.zig");
+const h = @import("helpers.zig");
 
 /// Type alias for array struct to match AST definition
 const ArrayStruct = struct { elem: *const lib.ast.type_info.OraType, len: u64 };
@@ -544,9 +564,9 @@ pub const TypeMapper = struct {
 
         // Create location for the conversion operation
         const location = if (span) |s|
-            c.mlirLocationFileLineColGet(self.ctx, c.mlirStringRefCreateFromCString(""), @intCast(s.start), @intCast(s.start))
+            c.mlirLocationFileLineColGet(self.ctx, h.strRefLit(""), @intCast(s.start), @intCast(s.start))
         else
-            c.mlirLocationUnknownGet(self.ctx);
+            h.unknownLoc(self.ctx);
 
         // For integer types, use arith.extui, arith.extsi, or arith.trunci
         if (c.mlirTypeIsAInteger(value_type) and c.mlirTypeIsAInteger(target_type)) {
@@ -555,8 +575,7 @@ pub const TypeMapper = struct {
 
             if (value_width < target_width) {
                 // Extension - use unsigned extension for now
-                const op_name = c.mlirStringRefCreateFromCString("arith.extui");
-                const op_state = c.mlirOperationStateGet(op_name, location);
+                const op_state = h.opState("arith.extui", location);
                 c.mlirOperationStateAddOperands(&op_state, 1, &value);
                 c.mlirOperationStateAddResults(&op_state, 1, &target_type);
                 const op = c.mlirOperationCreate(&op_state);
@@ -564,8 +583,7 @@ pub const TypeMapper = struct {
                 return c.mlirOperationGetResult(op, 0);
             } else if (value_width > target_width) {
                 // Truncation
-                const op_name = c.mlirStringRefCreateFromCString("arith.trunci");
-                const op_state = c.mlirOperationStateGet(op_name, location);
+                const op_state = h.opState("arith.trunci", location);
                 c.mlirOperationStateAddOperands(&op_state, 1, &value);
                 c.mlirOperationStateAddResults(&op_state, 1, &target_type);
                 const op = c.mlirOperationCreate(&op_state);
@@ -640,7 +658,6 @@ pub const TypeMapper = struct {
 
     /// Create region attribute for attaching `ora.region` attributes
     pub fn createRegionAttribute(self: *const TypeMapper, region: []const u8) c.MlirAttribute {
-        const region_ref = c.mlirStringRefCreate(region.ptr, region.len);
-        return c.mlirStringAttrGet(self.ctx, region_ref);
+        return h.stringAttr(self.ctx, region);
     }
 };

@@ -1,7 +1,32 @@
+// ============================================================================
+// Statement Lowering
+// ============================================================================
+//
+// Converts Ora AST statements to MLIR operations and control flow.
+//
+// SUPPORTED STATEMENTS:
+//   • Variable declarations (let/const/var)
+//   • Assignments (simple, compound, destructuring)
+//   • Control flow: if/else, while, for loops
+//   • Error handling: try/catch, error returns
+//   • Advanced: switch expressions, labeled blocks, pattern matching
+//   • Blockchain: log statements, storage operations
+//   • Verification: requires, ensures, invariant clauses
+//
+// FEATURES:
+//   • Scoped variable management
+//   • Control flow graph construction
+//   • Loop optimization and lowering
+//   • Error propagation
+//   • Location tracking for all operations
+//
+// ============================================================================
+
 const std = @import("std");
 const c = @import("c.zig").c;
 const lib = @import("ora_lib");
 const constants = @import("lower.zig");
+const h = @import("helpers.zig");
 const TypeMapper = @import("types.zig").TypeMapper;
 const ExpressionLowerer = @import("expressions.zig").ExpressionLowerer;
 const ParamMap = @import("lower.zig").ParamMap;
@@ -2106,7 +2131,7 @@ pub const StatementLowerer = struct {
 
     /// Create file location for operations
     fn fileLoc(self: *const StatementLowerer, span: lib.ast.SourceSpan) c.MlirLocation {
-        return LocationTracker.createFileLocationFromSpan(&self.locations, span);
+        return self.locations.createLocation(span);
     }
 
     /// Create range check for switch case patterns using standard MLIR operations

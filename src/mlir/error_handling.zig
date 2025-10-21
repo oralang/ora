@@ -1,15 +1,28 @@
+// ============================================================================
+// MLIR Error Handling
+// ============================================================================
+//
+// Comprehensive error handling and validation system for MLIR lowering.
+//
+// FEATURES:
+//   • Detailed error reporting with source spans
+//   • Warning system for non-fatal issues
+//   • Error recovery mode for batch compilation
+//   • Context stack for nested error tracking
+//   • Suggestions for common mistakes
+//
+// MEMORY OWNERSHIP:
+//   Owns: errors, warnings, context_stack, all message strings
+//   Borrows: source spans from AST
+//   Must call deinit() to avoid leaks
+//
+// ============================================================================
+
 const std = @import("std");
 const c = @import("c.zig").c;
 const lib = @import("ora_lib");
 
 /// Comprehensive error handling and validation system for MLIR lowering
-///
-/// Memory ownership:
-/// - Owns: errors ArrayList, warnings ArrayList, context_stack ArrayList
-/// - Owns: All error/warning message strings (via dupe)
-/// - Owns: All suggestion strings (via dupe)
-/// - Borrows: span references from AST (caller owns source)
-/// - Must call: deinit() to avoid leaks
 pub const ErrorHandler = struct {
     allocator: std.mem.Allocator,
     errors: std.ArrayList(LoweringError),

@@ -1,3 +1,11 @@
+// ============================================================================
+// MLIR Context Management
+// ============================================================================
+//
+// Manages MLIR context lifecycle and dialect registration.
+//
+// ============================================================================
+
 const std = @import("std");
 const c = @import("c.zig").c;
 const OraDialect = @import("dialect.zig").OraDialect;

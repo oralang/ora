@@ -1,7 +1,26 @@
+// ============================================================================
+// Memory Management
+// ============================================================================
+//
+// Manages memory regions and storage allocation for MLIR lowering.
+//
+// KEY COMPONENTS:
+//   • StorageMap: Contract storage variable → address mapping
+//   • MemoryManager: Memory region tracking (storage/memory/stack)
+//   • Allocation strategies for different memory types
+//
+// MEMORY REGIONS:
+//   • Storage: Persistent contract state (blockchain storage)
+//   • Memory: Temporary heap-like memory
+//   • Stack: Function-local variables
+//
+// ============================================================================
+
 const std = @import("std");
 const c = @import("c.zig").c;
 const lib = @import("ora_lib");
 const constants = @import("lower.zig");
+const h = @import("helpers.zig"); // Import helpers
 
 // Storage variable mapping for contract storage
 pub const StorageMap = struct {
@@ -468,7 +487,7 @@ pub const MemoryManager = struct {
 
     /// Create file location for operations
     fn createFileLocation(self: *const MemoryManager, span: lib.ast.SourceSpan) c.MlirLocation {
-        return @import("lower.zig").LocationTracker.createFileLocationFromSpan(self.ctx, span);
+        return c.mlirLocationFileLineColGet(self.ctx, h.strRefLit("input.ora"), span.line, span.column);
     }
 
     /// Create global storage declaration

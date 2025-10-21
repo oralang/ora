@@ -1,4 +1,29 @@
-//! Minimal MLIR to Yul Lowering
+// ============================================================================
+// Yul Lowering
+// ============================================================================
+//
+// Converts MLIR IR to Yul (Solidity assembly) for EVM compilation.
+//
+// ARCHITECTURE:
+//   MLIR operations → Yul statements → EVM bytecode (via solc)
+//
+// FEATURES:
+//   • Operation-by-operation Yul generation
+//   • Function dispatcher generation
+//   • ABI encoding/decoding
+//   • Storage access patterns
+//   • Memory management
+//   • Public function selectors (4-byte signatures)
+//
+// SUPPORTED OPERATIONS:
+//   • Arithmetic: add, sub, mul, div, mod
+//   • Logical: and, or, xor, not
+//   • Comparison: eq, ne, lt, gt, le, ge
+//   • Memory: load, store, alloca
+//   • Control flow: br, cond_br, return
+//   • Special: storage_load, storage_store, log
+//
+// ============================================================================
 
 const std = @import("std");
 const c = @import("c.zig").c;

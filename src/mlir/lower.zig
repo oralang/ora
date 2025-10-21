@@ -1,13 +1,23 @@
-// Main MLIR lowering orchestrator - coordinates modular components
-// This file contains only the main lowerFunctionsToModule function and orchestration logic.
-// All specific lowering functionality has been moved to modular files:
-// - Type mapping: types.zig
-// - Expression lowering: expressions.zig
-// - Statement lowering: statements.zig
-// - Declaration lowering: declarations.zig
-// - Memory management: memory.zig
-// - Symbol table: symbols.zig
-// - Location tracking: locations.zig
+// ============================================================================
+// MLIR Lowering Orchestrator
+// ============================================================================
+//
+// Main entry point for converting Ora AST to MLIR IR.
+//
+// ARCHITECTURE:
+//   Coordinates modular components for type mapping, expression lowering,
+//   statement lowering, declarations, memory management, and symbol tables.
+//
+// COMPONENTS:
+//   • types.zig - Type mapping (Ora → MLIR types)
+//   • expressions.zig - Expression lowering
+//   • statements.zig - Statement lowering
+//   • declarations.zig - Declaration lowering
+//   • memory.zig - Memory management
+//   • symbols.zig - Symbol tables
+//   • locations.zig - Location tracking
+//
+// ============================================================================
 
 const std = @import("std");
 const lib = @import("ora_lib");
