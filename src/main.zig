@@ -93,12 +93,19 @@ pub fn main() !void {
         return;
     }
 
-    // Parse arguments with enhanced MLIR support
+    // Parse arguments with compiler-style CLI
     var output_dir: ?[]const u8 = null;
-    var no_cst: bool = false;
-    var command: ?[]const u8 = null;
+    var command: ?[]const u8 = null; // For legacy commands (lex, parse, etc.)
     var input_file: ?[]const u8 = null;
+
+    // Compilation stage control (--emit-X flags)
+    var emit_tokens: bool = false;
+    var emit_ast: bool = false;
     var emit_mlir: bool = false;
+    var emit_yul: bool = false;
+    var emit_bytecode: bool = false;
+
+    // MLIR options
     var mlir_verify: bool = false;
     var mlir_passes: ?[]const u8 = null;
     var mlir_opt_level: ?[]const u8 = null;
@@ -106,12 +113,14 @@ pub fn main() !void {
     var mlir_print_ir: bool = false;
     var mlir_use_pipeline: bool = false;
 
-    // Artifact saving options
+    // Artifact saving options (for --save-all)
     var save_tokens: bool = false;
     var save_ast: bool = false;
     var save_mlir: bool = false;
     var save_yul: bool = false;
     var save_bytecode: bool = false;
+
+    // var verbose: bool = false;  // TODO: implement verbose mode
     var i: usize = 1;
 
     while (i < args.len) {
@@ -122,12 +131,33 @@ pub fn main() !void {
             }
             output_dir = args[i + 1];
             i += 2;
-        } else if (std.mem.eql(u8, args[i], "--no-cst")) {
-            no_cst = true;
+            // New --emit-X flags
+        } else if (std.mem.eql(u8, args[i], "--emit-tokens")) {
+            emit_tokens = true;
+            i += 1;
+        } else if (std.mem.eql(u8, args[i], "--emit-ast")) {
+            emit_ast = true;
             i += 1;
         } else if (std.mem.eql(u8, args[i], "--emit-mlir")) {
             emit_mlir = true;
             i += 1;
+        } else if (std.mem.eql(u8, args[i], "--emit-yul")) {
+            emit_yul = true;
+            i += 1;
+        } else if (std.mem.eql(u8, args[i], "--emit-bytecode")) {
+            emit_bytecode = true;
+            i += 1;
+            // Optimization level flags (-O0, -O1, -O2)
+        } else if (std.mem.eql(u8, args[i], "-O0") or std.mem.eql(u8, args[i], "-Onone")) {
+            mlir_opt_level = "none";
+            i += 1;
+        } else if (std.mem.eql(u8, args[i], "-O1") or std.mem.eql(u8, args[i], "-Obasic")) {
+            mlir_opt_level = "basic";
+            i += 1;
+        } else if (std.mem.eql(u8, args[i], "-O2") or std.mem.eql(u8, args[i], "-Oaggressive")) {
+            mlir_opt_level = "aggressive";
+            i += 1;
+            // MLIR options
         } else if (std.mem.eql(u8, args[i], "--mlir-verify")) {
             mlir_verify = true;
             i += 1;
@@ -154,6 +184,7 @@ pub fn main() !void {
         } else if (std.mem.eql(u8, args[i], "--mlir-pipeline")) {
             mlir_use_pipeline = true;
             i += 1;
+            // Legacy --save-X flags
         } else if (std.mem.eql(u8, args[i], "--save-tokens")) {
             save_tokens = true;
             i += 1;
@@ -176,10 +207,21 @@ pub fn main() !void {
             save_yul = true;
             save_bytecode = true;
             i += 1;
-        } else if (command == null) {
+            // Debug/verbose
+        } else if (std.mem.eql(u8, args[i], "--verbose") or std.mem.eql(u8, args[i], "-v")) {
+            // verbose = true;  // TODO: implement verbose mode
+            i += 1;
+            // Legacy commands (lex, parse, ast, compile, mlir)
+        } else if (std.mem.eql(u8, args[i], "lex") or
+            std.mem.eql(u8, args[i], "parse") or
+            std.mem.eql(u8, args[i], "ast") or
+            std.mem.eql(u8, args[i], "compile") or
+            std.mem.eql(u8, args[i], "mlir"))
+        {
             command = args[i];
             i += 1;
-        } else if (input_file == null) {
+            // Input file
+        } else if (input_file == null and !std.mem.startsWith(u8, args[i], "-")) {
             input_file = args[i];
             i += 1;
         } else {
@@ -188,13 +230,19 @@ pub fn main() !void {
         }
     }
 
-    if (command == null or input_file == null) {
+    // Require input file
+    if (input_file == null) {
         try printUsage();
         return;
     }
 
-    const cmd = command.?;
     const file_path = input_file.?;
+
+    // Determine compilation mode
+    // If no --emit-X flag is set and no legacy command, default to bytecode
+    if (!emit_tokens and !emit_ast and !emit_mlir and !emit_yul and !emit_bytecode and command == null) {
+        emit_bytecode = true; // Default: compile to bytecode
+    }
 
     // Create MLIR options structure
     const mlir_options = MlirOptions{
@@ -218,24 +266,44 @@ pub fn main() !void {
         .output_dir = output_dir,
     };
 
-    if (std.mem.eql(u8, cmd, "lex")) {
-        try runLexer(allocator, file_path, artifact_options);
-    } else if (std.mem.eql(u8, cmd, "parse")) {
-        try runParser(allocator, file_path, !no_cst, artifact_options);
-    } else if (std.mem.eql(u8, cmd, "ast")) {
-        try runASTGeneration(allocator, file_path, output_dir, !no_cst, artifact_options);
-    } else if (std.mem.eql(u8, cmd, "compile")) {
-        if (mlir_options.emit_mlir or artifact_options.save_mlir or artifact_options.save_yul or artifact_options.save_bytecode) {
-            // If MLIR, Yul, or bytecode is requested, use the advanced MLIR pipeline with Yul conversion
-            try runMlirEmitAdvanced(allocator, file_path, mlir_options, artifact_options);
+    // Handle legacy commands first
+    if (command) |cmd| {
+        if (std.mem.eql(u8, cmd, "lex")) {
+            try runLexer(allocator, file_path, artifact_options);
+        } else if (std.mem.eql(u8, cmd, "parse")) {
+            try runParser(allocator, file_path, artifact_options);
+        } else if (std.mem.eql(u8, cmd, "ast")) {
+            try runASTGeneration(allocator, file_path, output_dir, artifact_options);
+        } else if (std.mem.eql(u8, cmd, "compile")) {
+            if (mlir_options.emit_mlir or artifact_options.save_mlir or artifact_options.save_yul or artifact_options.save_bytecode) {
+                try runMlirEmitAdvanced(allocator, file_path, mlir_options, artifact_options);
+            } else {
+                try runFullCompilation(allocator, file_path, mlir_options, artifact_options);
+            }
+        } else if (std.mem.eql(u8, cmd, "mlir")) {
+            try runMlirEmitAdvancedWithYul(allocator, file_path, mlir_options, artifact_options, false);
         } else {
-            // Otherwise, use the basic frontend compilation
-            try runFullCompilation(allocator, file_path, !no_cst, mlir_options, artifact_options);
+            try printUsage();
         }
-    } else if (std.mem.eql(u8, cmd, "mlir")) {
+        return;
+    }
+
+    // New compiler-style behavior: process --emit-X flags
+    // Stop at the earliest stage specified, but save later stages if --save-X is set
+    // TODO: Use verbose flag for detailed output
+
+    if (emit_tokens) {
+        // Stop after lexer
+        try runLexer(allocator, file_path, artifact_options);
+    } else if (emit_ast) {
+        // Stop after parser
+        try runParser(allocator, file_path, artifact_options);
+    } else if (emit_mlir or emit_yul or emit_bytecode) {
+        // Run full MLIR pipeline (includes Yul and bytecode if needed)
         try runMlirEmitAdvancedWithYul(allocator, file_path, mlir_options, artifact_options, false);
     } else {
-        try printUsage();
+        // Default: full compilation
+        try runMlirEmitAdvancedWithYul(allocator, file_path, mlir_options, artifact_options, false);
     }
 }
 
@@ -244,38 +312,45 @@ fn printUsage() !void {
     var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
     const stdout = &stdout_writer.interface;
     try stdout.print("Ora Compiler v0.1 - Asuka\n", .{});
-    try stdout.print("Usage: ora [options] <command> <file>\n", .{});
-    try stdout.print("\nGeneral Options:\n", .{});
-    try stdout.print("  -o, --output-dir <dir>  - Specify output directory for generated files\n", .{});
-    try stdout.print("      --no-cst            - Disable CST building (enabled by default)\n", .{});
-    try stdout.print("\nArtifact Saving Options:\n", .{});
-    try stdout.print("      --save-tokens       - Save tokens from lexical analysis\n", .{});
-    try stdout.print("      --save-ast          - Save AST from syntax analysis\n", .{});
-    try stdout.print("      --save-mlir         - Save MLIR from generation\n", .{});
-    try stdout.print("      --save-yul          - Save Yul from lowering\n", .{});
-    try stdout.print("      --save-bytecode     - Save EVM bytecode\n", .{});
-    try stdout.print("      --save-all          - Save all artifacts\n", .{});
+    try stdout.print("Usage: ora [options] <file.ora>\n", .{});
+    try stdout.print("\nCompilation Control:\n", .{});
+    try stdout.print("  (default)              - Compile to EVM bytecode\n", .{});
+    try stdout.print("  --emit-tokens          - Stop after lexical analysis (emit tokens)\n", .{});
+    try stdout.print("  --emit-ast             - Stop after parsing (emit AST)\n", .{});
+    try stdout.print("  --emit-mlir            - Stop after MLIR generation\n", .{});
+    try stdout.print("  --emit-yul             - Stop after Yul lowering\n", .{});
+    try stdout.print("  --emit-bytecode        - Generate EVM bytecode (default)\n", .{});
+    try stdout.print("\nOutput Options:\n", .{});
+    try stdout.print("  -o <file>              - Write output to <file> (e.g., -o out.hex, -o out.mlir)\n", .{});
+    try stdout.print("  -o <dir>/              - Write artifacts to <dir>/ (e.g., -o build/)\n", .{});
+    try stdout.print("                           Default: ./<basename>_artifacts/ or current dir\n", .{});
+    try stdout.print("\nOptimization Options:\n", .{});
+    try stdout.print("  -O0, -Onone            - No optimization (default)\n", .{});
+    try stdout.print("  -O1, -Obasic           - Basic optimizations\n", .{});
+    try stdout.print("  -O2, -Oaggressive      - Aggressive optimizations\n", .{});
     try stdout.print("\nMLIR Options:\n", .{});
-    try stdout.print("      --emit-mlir         - Generate MLIR output in addition to normal compilation\n", .{});
-    try stdout.print("      --mlir-verify       - Run MLIR verification passes\n", .{});
-    try stdout.print("      --mlir-passes <str> - Custom MLIR pass pipeline (e.g., 'canonicalize,cse')\n", .{});
-    try stdout.print("      --mlir-opt <level>  - Optimization level: none, basic, aggressive\n", .{});
-    try stdout.print("      --mlir-timing       - Enable pass timing statistics\n", .{});
-    try stdout.print("      --mlir-print-ir     - Print IR before and after passes\n", .{});
-    try stdout.print("      --mlir-pipeline     - Use comprehensive MLIR optimization pipeline\n", .{});
-    try stdout.print("\nCommands:\n", .{});
-    try stdout.print("  lex <file>     - Tokenize a .ora file\n", .{});
-    try stdout.print("  parse <file>   - Parse a .ora file to AST\n", .{});
-    try stdout.print("  ast <file>     - Generate AST and save to JSON file\n", .{});
-    try stdout.print("  compile <file> - Full frontend pipeline (lex -> parse -> [mlir])\n", .{});
-    try stdout.print("  mlir <file>    - Run front-end and emit MLIR with advanced options\n", .{});
+    try stdout.print("  --mlir-verify          - Run MLIR verification passes\n", .{});
+    try stdout.print("  --mlir-passes <passes> - Custom MLIR pass pipeline (comma-separated)\n", .{});
+    try stdout.print("  --mlir-timing          - Enable pass timing statistics\n", .{});
+    try stdout.print("  --mlir-print-ir        - Print IR before and after passes\n", .{});
+    try stdout.print("  --mlir-pipeline        - Use comprehensive MLIR optimization pipeline\n", .{});
+    try stdout.print("\nDevelopment/Debug Options:\n", .{});
+    try stdout.print("  --save-all             - Save all intermediate artifacts\n", .{});
+    try stdout.print("  --verbose              - Verbose output (show each compilation stage)\n", .{});
+    try stdout.print("\nLegacy Commands (for step-by-step debugging):\n", .{});
+    try stdout.print("  ora lex <file>         - Only tokenize (legacy: use --emit-tokens)\n", .{});
+    try stdout.print("  ora parse <file>       - Only parse (legacy: use --emit-ast)\n", .{});
+    try stdout.print("  ora ast <file>         - Generate AST JSON (legacy)\n", .{});
+    try stdout.print("  ora compile <file>     - Full compilation (legacy: just use 'ora <file>')\n", .{});
     try stdout.print("\nExamples:\n", .{});
-    try stdout.print("  ora -o build ast example.ora\n", .{});
-    try stdout.print("  ora --emit-mlir compile example.ora\n", .{});
-    try stdout.print("  ora --save-all compile example.ora\n", .{});
-    try stdout.print("  ora --save-tokens --save-ast lex example.ora\n", .{});
-    try stdout.print("  ora --mlir-opt aggressive --mlir-verify mlir example.ora\n", .{});
-    try stdout.print("  ora --mlir-passes 'canonicalize,cse,sccp' --mlir-timing mlir example.ora\n", .{});
+    try stdout.print("  ora contract.ora                      # Compile to bytecode → contract_artifacts/\n", .{});
+    try stdout.print("  ora contract.ora -o build/            # Compile to bytecode → build/\n", .{});
+    try stdout.print("  ora contract.ora -o contract.hex      # Compile to specific file\n", .{});
+    try stdout.print("  ora --emit-ast contract.ora           # Stop at AST → contract_artifacts/ast.json\n", .{});
+    try stdout.print("  ora --emit-mlir -O2 contract.ora      # Generate optimized MLIR\n", .{});
+    try stdout.print("  ora --emit-yul -o out.yul contract.ora  # Compile to Yul\n", .{});
+    try stdout.print("  ora --save-all contract.ora           # Save all stages (tokens, AST, MLIR, Yul, bytecode)\n", .{});
+    try stdout.print("  ora --mlir-verify --mlir-timing -O2 contract.ora  # Compile with verification and timing\n", .{});
     try stdout.flush();
 }
 
@@ -493,7 +568,7 @@ fn saveBytecode(allocator: std.mem.Allocator, file_path: []const u8, bytecode: [
 }
 
 /// Run parser on file and display AST
-fn runParser(allocator: std.mem.Allocator, file_path: []const u8, enable_cst: bool, artifact_options: ArtifactOptions) !void {
+fn runParser(allocator: std.mem.Allocator, file_path: []const u8, artifact_options: ArtifactOptions) !void {
     var stdout_buffer: [1024]u8 = undefined;
     var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
     const stdout = &stdout_writer.interface;
@@ -525,13 +600,6 @@ fn runParser(allocator: std.mem.Allocator, file_path: []const u8, enable_cst: bo
     defer arena.deinit();
     var parser = lib.Parser.init(tokens, &arena);
     parser.setFileId(1);
-    var cst_builder_storage: lib.cst.CstBuilder = undefined;
-    var cst_builder_ptr: ?*lib.cst.CstBuilder = null;
-    if (enable_cst) {
-        cst_builder_storage = lib.cst.CstBuilder.init(allocator);
-        cst_builder_ptr = &cst_builder_storage;
-        parser.withCst(cst_builder_ptr.?);
-    }
     const ast_nodes = parser.parse() catch |err| {
         try stdout.print("Parser error: {s}\n", .{@errorName(err)});
         return;
@@ -551,17 +619,11 @@ fn runParser(allocator: std.mem.Allocator, file_path: []const u8, enable_cst: bo
         try saveAST(allocator, file_path, ast_nodes, artifact_options);
     }
 
-    if (enable_cst) {
-        if (cst_builder_ptr) |builder| {
-            const cst_root = try builder.buildRoot(tokens);
-            _ = cst_root; // TODO: optional dump in future flag
-            builder.deinit();
-        }
-    }
+    try stdout.flush();
 }
 
 /// Run full compilation pipeline with optional MLIR support
-fn runFullCompilation(allocator: std.mem.Allocator, file_path: []const u8, enable_cst: bool, mlir_options: MlirOptions, artifact_options: ArtifactOptions) !void {
+fn runFullCompilation(allocator: std.mem.Allocator, file_path: []const u8, mlir_options: MlirOptions, artifact_options: ArtifactOptions) !void {
     var stdout_buffer: [1024]u8 = undefined;
     var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
     const stdout = &stdout_writer.interface;
@@ -603,13 +665,6 @@ fn runFullCompilation(allocator: std.mem.Allocator, file_path: []const u8, enabl
     defer arena.deinit();
     var parser = lib.Parser.init(tokens, &arena);
     parser.setFileId(1);
-    var cst_builder_storage: lib.cst.CstBuilder = undefined;
-    var cst_builder_ptr: ?*lib.cst.CstBuilder = null;
-    if (enable_cst) {
-        cst_builder_storage = lib.cst.CstBuilder.init(allocator);
-        cst_builder_ptr = &cst_builder_storage;
-        parser.withCst(cst_builder_ptr.?);
-    }
     const ast_nodes = parser.parse() catch |err| {
         try stdout.print("Parser failed: {s}\n", .{@errorName(err)});
         return;
@@ -631,13 +686,6 @@ fn runFullCompilation(allocator: std.mem.Allocator, file_path: []const u8, enabl
     }
 
     try stdout.print("============================================================\n", .{});
-    if (enable_cst) {
-        if (cst_builder_ptr) |builder| {
-            const cst_root = try builder.buildRoot(tokens);
-            _ = cst_root; // TODO: optional dump in future flag
-            builder.deinit();
-        }
-    }
 
     // Phase 3: MLIR Generation (if requested)
     if (mlir_options.emit_mlir) {
@@ -689,7 +737,7 @@ fn printAstSummary(writer: anytype, node: *lib.AstNode, indent: u32) !void {
 }
 
 /// Generate AST and save to JSON file
-fn runASTGeneration(allocator: std.mem.Allocator, file_path: []const u8, output_dir: ?[]const u8, enable_cst: bool, artifact_options: ArtifactOptions) !void {
+fn runASTGeneration(allocator: std.mem.Allocator, file_path: []const u8, output_dir: ?[]const u8, artifact_options: ArtifactOptions) !void {
     var stdout_buffer: [1024]u8 = undefined;
     var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
     const stdout = &stdout_writer.interface;
@@ -718,24 +766,10 @@ fn runASTGeneration(allocator: std.mem.Allocator, file_path: []const u8, output_
     defer arena.deinit();
     var parser = lib.Parser.init(tokens, &arena);
     parser.setFileId(1);
-    var cst_builder_storage: lib.cst.CstBuilder = undefined;
-    var cst_builder_ptr: ?*lib.cst.CstBuilder = null;
-    if (enable_cst) {
-        cst_builder_storage = lib.cst.CstBuilder.init(allocator);
-        cst_builder_ptr = &cst_builder_storage;
-        parser.withCst(cst_builder_ptr.?);
-    }
     const ast_nodes = parser.parse() catch |err| {
         try stdout.print("Parser error: {s}\n", .{@errorName(err)});
         return;
     };
-    if (enable_cst) {
-        if (cst_builder_ptr) |builder| {
-            const cst_root = try builder.buildRoot(tokens);
-            _ = cst_root; // CST not emitted here yet
-            builder.deinit();
-        }
-    }
     // Note: AST nodes are allocated in arena, so they're automatically freed when arena is deinited
 
     try stdout.print("Generated {d} AST nodes\n", .{ast_nodes.len});
