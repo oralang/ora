@@ -36,10 +36,10 @@ pub fn extractDocComments(
     tokens: []const Token,
     trivia: []const TriviaPiece,
 ) ![]DocCommentEntry {
-    var entries = std.ArrayList(DocCommentEntry).init(allocator);
+    var entries = std.ArrayList(DocCommentEntry){};
     errdefer {
         for (entries.items) |e| allocator.free(e.text);
-        entries.deinit();
+        entries.deinit(allocator);
     }
 
     var i: usize = 0;
@@ -66,7 +66,7 @@ pub fn extractDocComments(
         if (trivia[end_idx].kind == .DocBlockComment) {
             const span = trivia[end_idx].span;
             const text = try allocator.dupe(u8, source[span.start_offset..span.end_offset]);
-            try entries.append(.{ .token_index = @as(u32, @intCast(i)), .text = text });
+            try entries.append(allocator, .{ .token_index = @as(u32, @intCast(i)), .text = text });
             continue;
         }
 
@@ -88,22 +88,22 @@ pub fn extractDocComments(
         }
         if (start_idx_opt) |start_idx| {
             // Combine from start_idx..=end_idx in original order
-            var buf = std.ArrayList(u8).init(allocator);
-            defer buf.deinit();
+            var buf = std.ArrayList(u8){};
+            defer buf.deinit(allocator);
             var k: usize = start_idx;
             while (k <= end_idx) : (k += 1) {
                 const piece = trivia[k];
                 switch (piece.kind) {
                     .DocLineComment, .Whitespace, .Newline => {
-                        try buf.appendSlice(source[piece.span.start_offset..piece.span.end_offset]);
+                        try buf.appendSlice(allocator, source[piece.span.start_offset..piece.span.end_offset]);
                     },
                     else => {},
                 }
             }
-            const text = try buf.toOwnedSlice();
-            try entries.append(.{ .token_index = @as(u32, @intCast(i)), .text = text });
+            const text = try buf.toOwnedSlice(allocator);
+            try entries.append(allocator, .{ .token_index = @as(u32, @intCast(i)), .text = text });
         }
     }
 
-    return entries.toOwnedSlice();
+    return entries.toOwnedSlice(allocator);
 }

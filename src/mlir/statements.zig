@@ -817,16 +817,81 @@ pub const StatementLowerer = struct {
         // Check then branch
         for (if_stmt.then_branch.statements) |stmt| {
             if (stmt == .Return) return true;
+            // Check nested if statements
+            if (stmt == .If) {
+                const nested_if = &stmt.If;
+                for (nested_if.then_branch.statements) |nested_stmt| {
+                    if (nested_stmt == .Return) return true;
+                }
+                if (nested_if.else_branch) |nested_else| {
+                    for (nested_else.statements) |nested_stmt| {
+                        if (nested_stmt == .Return) return true;
+                    }
+                }
+            }
         }
 
         // Check else branch if present
         if (if_stmt.else_branch) |else_branch| {
             for (else_branch.statements) |stmt| {
                 if (stmt == .Return) return true;
+                // Check nested if statements
+                if (stmt == .If) {
+                    const nested_if = &stmt.If;
+                    for (nested_if.then_branch.statements) |nested_stmt| {
+                        if (nested_stmt == .Return) return true;
+                    }
+                    if (nested_if.else_branch) |nested_else| {
+                        for (nested_else.statements) |nested_stmt| {
+                            if (nested_stmt == .Return) return true;
+                        }
+                    }
+                }
             }
         }
 
         return false;
+    }
+
+    /// Check if a block has a return statement (recursively checks nested if statements)
+    fn blockHasReturn(self: *const StatementLowerer, block: lib.ast.Statements.BlockNode) bool {
+        for (block.statements) |stmt| {
+            if (stmt == .Return) return true;
+            // Check nested if statements recursively
+            if (stmt == .If) {
+                if (self.ifStatementHasReturns(&stmt.If)) return true;
+            }
+        }
+        return false;
+    }
+
+    /// Create a default value for a given MLIR type
+    fn createDefaultValueForType(self: *const StatementLowerer, mlir_type: c.MlirType, loc: c.MlirLocation) !c.MlirValue {
+        // Check if it's an integer type
+        if (c.mlirTypeIsAInteger(mlir_type)) {
+            // Create a constant 0 value
+            var const_state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("arith.constant"), loc);
+            const value_attr = c.mlirIntegerAttrGet(mlir_type, 0);
+            const value_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("value"));
+            var attrs = [_]c.MlirNamedAttribute{c.mlirNamedAttributeGet(value_id, value_attr)};
+            c.mlirOperationStateAddAttributes(&const_state, attrs.len, &attrs);
+            c.mlirOperationStateAddResults(&const_state, 1, @ptrCast(&mlir_type));
+            const const_op = c.mlirOperationCreate(&const_state);
+            c.mlirBlockAppendOwnedOperation(self.block, const_op);
+            return c.mlirOperationGetResult(const_op, 0);
+        }
+
+        // For other types, create a zero constant (simplified)
+        var const_state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("arith.constant"), loc);
+        const zero_type = c.mlirIntegerTypeGet(self.ctx, constants.DEFAULT_INTEGER_BITS);
+        const value_attr = c.mlirIntegerAttrGet(zero_type, 0);
+        const value_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("value"));
+        var attrs = [_]c.MlirNamedAttribute{c.mlirNamedAttributeGet(value_id, value_attr)};
+        c.mlirOperationStateAddAttributes(&const_state, attrs.len, &attrs);
+        c.mlirOperationStateAddResults(&const_state, 1, @ptrCast(&zero_type));
+        const const_op = c.mlirOperationCreate(&const_state);
+        c.mlirBlockAppendOwnedOperation(self.block, const_op);
+        return c.mlirOperationGetResult(const_op, 0);
     }
 
     /// Get the return type from an if statement's return statements
@@ -911,26 +976,59 @@ pub const StatementLowerer = struct {
         }
 
         // Lower then branch - replace return statements with scf.yield
+        const then_has_return = self.blockHasReturn(if_stmt.then_branch);
         try self.lowerBlockBodyWithYield(if_stmt.then_branch, then_block);
 
-        // Lower else branch if present, otherwise add scf.yield to empty region
+        // If then branch doesn't end with a yield, add one with a default value
+        if (!then_has_return and result_type != null) {
+            if (result_type) |ret_type| {
+                const default_val = try self.createDefaultValueForType(ret_type, loc);
+                const yield_op = self.ora_dialect.createScfYieldWithValues(&[_]c.MlirValue{default_val}, loc);
+                c.mlirBlockAppendOwnedOperation(then_block, yield_op);
+            }
+        }
+
+        // Lower else branch if present, otherwise add scf.yield with default value
         if (if_stmt.else_branch) |else_branch| {
+            const else_has_return = self.blockHasReturn(else_branch);
             try self.lowerBlockBodyWithYield(else_branch, else_block);
+
+            // If else branch doesn't end with a yield, add one with a default value
+            if (!else_has_return and result_type != null) {
+                if (result_type) |ret_type| {
+                    const default_val = try self.createDefaultValueForType(ret_type, loc);
+                    const yield_op = self.ora_dialect.createScfYieldWithValues(&[_]c.MlirValue{default_val}, loc);
+                    c.mlirBlockAppendOwnedOperation(else_block, yield_op);
+                }
+            }
         } else {
-            // Add scf.yield to empty else region
-            const yield_op = self.ora_dialect.createScfYield(loc);
-            c.mlirBlockAppendOwnedOperation(else_block, yield_op);
+            // No else branch - add scf.yield with default value if needed
+            if (result_type) |ret_type| {
+                const default_val = try self.createDefaultValueForType(ret_type, loc);
+                const yield_op = self.ora_dialect.createScfYieldWithValues(&[_]c.MlirValue{default_val}, loc);
+                c.mlirBlockAppendOwnedOperation(else_block, yield_op);
+            } else {
+                const yield_op = self.ora_dialect.createScfYield(loc);
+                c.mlirBlockAppendOwnedOperation(else_block, yield_op);
+            }
         }
 
         // Create and append the scf.if operation to the block
         const op = c.mlirOperationCreate(&state);
         c.mlirBlockAppendOwnedOperation(self.block, op);
 
+        // If both branches return (no subsequent statements), add func.return
+        // This handles the case where the entire function is just an if-else with returns
         if (result_type) |_| {
-            const result_value = c.mlirOperationGetResult(op, 0);
-            // Add a func.return to return the result
-            const return_op = self.ora_dialect.createFuncReturnWithValue(result_value, loc);
-            c.mlirBlockAppendOwnedOperation(self.block, return_op);
+            const then_returns = self.blockHasReturn(if_stmt.then_branch);
+            const else_returns = if (if_stmt.else_branch) |else_branch| self.blockHasReturn(else_branch) else false;
+
+            // If both branches return, this is the function's final statement
+            if (then_returns and else_returns) {
+                const result_value = c.mlirOperationGetResult(op, 0);
+                const return_op = self.ora_dialect.createFuncReturnWithValue(result_value, loc);
+                c.mlirBlockAppendOwnedOperation(self.block, return_op);
+            }
         }
     }
 
@@ -940,8 +1038,14 @@ pub const StatementLowerer = struct {
         var temp_lowerer = self.*;
         temp_lowerer.block = target_block;
 
+        // Track if we've added a terminator to this block
+        var has_terminator = false;
+
         // Lower each statement, replacing returns with yields
         for (block_body.statements) |stmt| {
+            // If we've already added a terminator, skip remaining statements
+            if (has_terminator) break;
+
             switch (stmt) {
                 .Return => |ret| {
                     // Replace return with scf.yield
@@ -954,6 +1058,88 @@ pub const StatementLowerer = struct {
                     } else {
                         const yield_op = temp_lowerer.ora_dialect.createScfYield(loc);
                         c.mlirBlockAppendOwnedOperation(target_block, yield_op);
+                    }
+                    has_terminator = true;
+                },
+                .If => |if_stmt| {
+                    // Handle nested if statements with returns
+                    const loc = temp_lowerer.fileLoc(if_stmt.span);
+                    const condition = temp_lowerer.expr_lowerer.lowerExpression(&if_stmt.condition);
+
+                    // If the nested if has returns, handle it specially
+                    if (temp_lowerer.ifStatementHasReturns(&if_stmt)) {
+                        // Create scf.if with result type
+                        var state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("scf.if"), loc);
+                        c.mlirOperationStateAddOperands(&state, 1, @ptrCast(&condition));
+
+                        const result_type = temp_lowerer.getReturnTypeFromIfStatement(&if_stmt);
+                        if (result_type) |ret_type| {
+                            c.mlirOperationStateAddResults(&state, 1, @ptrCast(&ret_type));
+                        }
+
+                        // Create then region
+                        const then_region = c.mlirRegionCreate();
+                        const then_block = c.mlirBlockCreate(0, null, null);
+                        c.mlirRegionInsertOwnedBlock(then_region, 0, then_block);
+
+                        // Create else region
+                        const else_region = c.mlirRegionCreate();
+                        const else_block = c.mlirBlockCreate(0, null, null);
+                        c.mlirRegionInsertOwnedBlock(else_region, 0, else_block);
+
+                        // Lower then branch
+                        const then_has_return = temp_lowerer.blockHasReturn(if_stmt.then_branch);
+                        try temp_lowerer.lowerBlockBodyWithYield(if_stmt.then_branch, then_block);
+
+                        if (!then_has_return and result_type != null) {
+                            if (result_type) |ret_type| {
+                                const default_val = try temp_lowerer.createDefaultValueForType(ret_type, loc);
+                                const yield_op = temp_lowerer.ora_dialect.createScfYieldWithValues(&[_]c.MlirValue{default_val}, loc);
+                                c.mlirBlockAppendOwnedOperation(then_block, yield_op);
+                            }
+                        }
+
+                        // Lower else branch
+                        if (if_stmt.else_branch) |else_branch| {
+                            const else_has_return = temp_lowerer.blockHasReturn(else_branch);
+                            try temp_lowerer.lowerBlockBodyWithYield(else_branch, else_block);
+
+                            if (!else_has_return and result_type != null) {
+                                if (result_type) |ret_type| {
+                                    const default_val = try temp_lowerer.createDefaultValueForType(ret_type, loc);
+                                    const yield_op = temp_lowerer.ora_dialect.createScfYieldWithValues(&[_]c.MlirValue{default_val}, loc);
+                                    c.mlirBlockAppendOwnedOperation(else_block, yield_op);
+                                }
+                            }
+                        } else {
+                            if (result_type) |ret_type| {
+                                const default_val = try temp_lowerer.createDefaultValueForType(ret_type, loc);
+                                const yield_op = temp_lowerer.ora_dialect.createScfYieldWithValues(&[_]c.MlirValue{default_val}, loc);
+                                c.mlirBlockAppendOwnedOperation(else_block, yield_op);
+                            } else {
+                                const yield_op = temp_lowerer.ora_dialect.createScfYield(loc);
+                                c.mlirBlockAppendOwnedOperation(else_block, yield_op);
+                            }
+                        }
+
+                        // Add regions
+                        c.mlirOperationStateAddOwnedRegions(&state, 1, @ptrCast(&then_region));
+                        c.mlirOperationStateAddOwnedRegions(&state, 1, @ptrCast(&else_region));
+
+                        // Create and append the scf.if
+                        const if_op = c.mlirOperationCreate(&state);
+                        c.mlirBlockAppendOwnedOperation(target_block, if_op);
+
+                        // If the nested if returns a value, yield it and mark as terminated
+                        if (result_type != null) {
+                            const result_value = c.mlirOperationGetResult(if_op, 0);
+                            const yield_op = temp_lowerer.ora_dialect.createScfYieldWithValues(&[_]c.MlirValue{result_value}, loc);
+                            c.mlirBlockAppendOwnedOperation(target_block, yield_op);
+                            has_terminator = true;
+                        }
+                    } else {
+                        // No returns in nested if, lower normally
+                        try temp_lowerer.lowerStatement(&stmt);
                     }
                 },
                 else => {
@@ -1562,7 +1748,23 @@ pub const StatementLowerer = struct {
 
                 switch (region) {
                     .Storage => {
-                        const store_op = self.memory_manager.createStorageStore(value, ident.name, loc);
+                        // Storage always holds i256 values in EVM
+                        // If value is i1 (boolean), extend it to i256
+                        const value_type = c.mlirValueGetType(value);
+                        const actual_value = if (c.mlirTypeIsAInteger(value_type) and c.mlirIntegerTypeGetWidth(value_type) == 1) blk: {
+                            // This is i1, need to extend to i256
+                            const i256_type = c.mlirIntegerTypeGet(self.ctx, constants.DEFAULT_INTEGER_BITS);
+                            var ext_state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("arith.extui"), loc);
+                            c.mlirOperationStateAddOperands(&ext_state, 1, @ptrCast(&value));
+                            c.mlirOperationStateAddResults(&ext_state, 1, @ptrCast(&i256_type));
+                            const ext_op = c.mlirOperationCreate(&ext_state);
+                            c.mlirBlockAppendOwnedOperation(self.block, ext_op);
+                            break :blk c.mlirOperationGetResult(ext_op, 0);
+                        } else blk: {
+                            break :blk value;
+                        };
+
+                        const store_op = self.memory_manager.createStorageStore(actual_value, ident.name, loc);
                         c.mlirBlockAppendOwnedOperation(self.block, store_op);
                         return;
                     },

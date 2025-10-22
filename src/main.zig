@@ -305,7 +305,7 @@ pub fn main() !void {
         try runParser(allocator, file_path, artifact_options);
     } else if (emit_mlir or emit_yul or emit_bytecode) {
         // Run full MLIR pipeline (includes Yul and bytecode if needed)
-        try runMlirEmitAdvancedWithYul(allocator, file_path, mlir_options, artifact_options, false);
+        try runMlirEmitAdvancedWithYul(allocator, file_path, mlir_options, artifact_options, emit_yul or emit_bytecode);
     } else {
         // Default: full compilation
         try runMlirEmitAdvancedWithYul(allocator, file_path, mlir_options, artifact_options, false);
@@ -610,7 +610,8 @@ fn runParser(allocator: std.mem.Allocator, file_path: []const u8, artifact_optio
 
     const tokens = lexer.scanTokens() catch |err| {
         try stdout.print("Lexer error: {s}\n", .{@errorName(err)});
-        return;
+        try stdout.flush();
+        std.process.exit(1);
     };
     defer allocator.free(tokens);
 
@@ -623,7 +624,8 @@ fn runParser(allocator: std.mem.Allocator, file_path: []const u8, artifact_optio
     parser.setFileId(1);
     const ast_nodes = parser.parse() catch |err| {
         try stdout.print("Parser error: {s}\n", .{@errorName(err)});
-        return;
+        try stdout.flush();
+        std.process.exit(1);
     };
     // Note: AST nodes are allocated in arena, so they're automatically freed when arena is deinited
 
@@ -779,7 +781,8 @@ fn runASTGeneration(allocator: std.mem.Allocator, file_path: []const u8, output_
 
     const tokens = lexer.scanTokens() catch |err| {
         try stdout.print("Lexer error: {s}\n", .{@errorName(err)});
-        return;
+        try stdout.flush();
+        std.process.exit(1);
     };
     defer allocator.free(tokens);
 
@@ -789,7 +792,8 @@ fn runASTGeneration(allocator: std.mem.Allocator, file_path: []const u8, output_
     parser.setFileId(1);
     const ast_nodes = parser.parse() catch |err| {
         try stdout.print("Parser error: {s}\n", .{@errorName(err)});
-        return;
+        try stdout.flush();
+        std.process.exit(1);
     };
     // Note: AST nodes are allocated in arena, so they're automatically freed when arena is deinited
 
@@ -860,7 +864,8 @@ fn runMlirEmitAdvancedWithYul(allocator: std.mem.Allocator, file_path: []const u
 
     const tokens = lexer.scanTokens() catch |err| {
         try stdout.print("Lexer error: {s}\n", .{@errorName(err)});
-        return;
+        try stdout.flush();
+        std.process.exit(1);
     };
     defer allocator.free(tokens);
 
@@ -870,7 +875,8 @@ fn runMlirEmitAdvancedWithYul(allocator: std.mem.Allocator, file_path: []const u
     parser.setFileId(1);
     const ast_nodes = parser.parse() catch |err| {
         try stdout.print("Parser error: {s}\n", .{@errorName(err)});
-        return;
+        try stdout.flush();
+        std.process.exit(1);
     };
 
     // Generate MLIR with advanced options
@@ -962,7 +968,8 @@ fn generateMlirOutput(allocator: std.mem.Allocator, ast_nodes: []lib.AstNode, fi
                 try stdout.print("    Suggestion: {s}\n", .{suggestion});
             }
         }
-        return;
+        try stdout.flush();
+        std.process.exit(1);
     }
     // Apply MLIR pipeline if requested
     var final_module = lowering_result.module;
@@ -982,7 +989,8 @@ fn generateMlirOutput(allocator: std.mem.Allocator, ast_nodes: []lib.AstNode, fi
 
         if (!pipeline_result.success) {
             try stdout.print("MLIR pipeline failed: {s}\n", .{pipeline_result.error_message orelse "Unknown error"});
-            return;
+            try stdout.flush();
+            std.process.exit(1);
         }
 
         // Pipeline optimization completed successfully
@@ -1014,7 +1022,8 @@ fn generateMlirOutput(allocator: std.mem.Allocator, ast_nodes: []lib.AstNode, fi
             for (yul_result.errors) |err| {
                 try stdout.print("  - {s}\n", .{err});
             }
-            return;
+            try stdout.flush();
+            std.process.exit(1);
         }
 
         try stdout.print("Generated Yul code ({d} bytes):\n", .{yul_result.yul_code.len});
@@ -1035,7 +1044,8 @@ fn generateMlirOutput(allocator: std.mem.Allocator, ast_nodes: []lib.AstNode, fi
 
         if (!yul_compile_result.success) {
             try stdout.print("Yul compilation failed: {?s}\n", .{yul_compile_result.error_message});
-            return;
+            try stdout.flush();
+            std.process.exit(1);
         }
 
         try stdout.print("Successfully compiled to EVM bytecode!\n", .{});

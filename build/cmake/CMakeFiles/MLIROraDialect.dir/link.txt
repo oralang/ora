@@ -1,2 +1,0 @@
-/Library/Developer/CommandLineTools/usr/bin/ar qc lib/libMLIROraDialect.a CMakeFiles/obj.MLIROraDialect.dir/OraDialect.cpp.o
-/Library/Developer/CommandLineTools/usr/bin/ranlib lib/libMLIROraDialect.a

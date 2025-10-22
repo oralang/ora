@@ -311,7 +311,7 @@ pub const ErrorRecovery = struct {
 
     pub fn init(allocator: Allocator, max_errors: u32) ErrorRecovery {
         return ErrorRecovery{
-            .errors = std.ArrayList(LexerDiagnostic).init(allocator),
+            .errors = std.ArrayList(LexerDiagnostic){},
             .max_errors = max_errors,
             .allocator = allocator,
         };
@@ -437,7 +437,7 @@ pub const ErrorRecovery = struct {
 
     /// Get errors filtered by severity
     pub fn getErrorsBySeverity(self: *ErrorRecovery, severity: DiagnosticSeverity) std.ArrayList(LexerDiagnostic) {
-        var filtered = std.ArrayList(LexerDiagnostic).init(self.allocator);
+        var filtered = std.ArrayList(LexerDiagnostic){};
 
         for (self.errors.items) |diagnostic| {
             if (diagnostic.severity == severity) {
@@ -463,7 +463,7 @@ pub const ErrorRecovery = struct {
             type_counts.put(diagnostic.error_type, current + 1) catch continue;
         }
 
-        var result = std.ArrayList(ErrorTypeCount).init(self.allocator);
+        var result = std.ArrayList(ErrorTypeCount){};
         var iterator = type_counts.iterator();
         while (iterator.next()) |entry| {
             result.append(.{ .error_type = entry.key_ptr.*, .count = entry.value_ptr.* }) catch continue;
@@ -488,7 +488,7 @@ pub const ErrorRecovery = struct {
             line_counts.put(line, current + 1) catch continue;
         }
 
-        var result = std.ArrayList(LineCount).init(self.allocator);
+        var result = std.ArrayList(LineCount){};
         var iterator = line_counts.iterator();
         while (iterator.next()) |entry| {
             result.append(.{ .line = entry.key_ptr.*, .count = entry.value_ptr.* }) catch continue;
@@ -499,10 +499,10 @@ pub const ErrorRecovery = struct {
 
     /// Create a summary report of all errors
     pub fn createSummaryReport(self: *ErrorRecovery, allocator: Allocator) ![]u8 {
-        var buffer = std.ArrayList(u8).init(allocator);
-        defer buffer.deinit();
+        var buffer = std.ArrayList(u8){};
+        defer buffer.deinit(allocator);
 
-        const writer = buffer.writer();
+        const writer = buffer.writer(allocator);
 
         // Summary header
         try writer.print("Diagnostic Summary ({d} errors)\n", .{self.errors.items.len});
@@ -554,15 +554,15 @@ pub const ErrorRecovery = struct {
         try writer.print("Info: {d}\n", .{info_count});
         try writer.print("Hints: {d}\n", .{hint_count});
 
-        return buffer.toOwnedSlice();
+        return buffer.toOwnedSlice(allocator);
     }
 
     /// Create a detailed diagnostic report with grouped errors and source context
     pub fn createDetailedReport(self: *ErrorRecovery, allocator: Allocator) ![]u8 {
-        var buffer = std.ArrayList(u8).init(allocator);
-        defer buffer.deinit();
+        var buffer = std.ArrayList(u8){};
+        defer buffer.deinit(allocator);
 
-        const writer = buffer.writer();
+        const writer = buffer.writer(allocator);
 
         // Report header
         try writer.print("Diagnostic Report ({d} issues found)\n", .{self.errors.items.len});
@@ -572,10 +572,11 @@ pub const ErrorRecovery = struct {
         // Group errors for better organization
         var groups = try self.groupErrors();
         defer {
-            for (groups.items) |group| {
-                group.related.deinit();
+            for (groups.items) |*group| {
+                var related = group.related;
+                related.deinit(self.allocator);
             }
-            groups.deinit();
+            groups.deinit(self.allocator);
         }
 
         // Print each group
@@ -628,12 +629,12 @@ pub const ErrorRecovery = struct {
             try writer.writeAll("\n\n");
         }
 
-        return buffer.toOwnedSlice();
+        return buffer.toOwnedSlice(allocator);
     }
 
     /// Filter diagnostics by severity level (minimum severity)
     pub fn filterByMinimumSeverity(self: *ErrorRecovery, min_severity: DiagnosticSeverity) std.ArrayList(LexerDiagnostic) {
-        var filtered = std.ArrayList(LexerDiagnostic).init(self.allocator);
+        var filtered = std.ArrayList(LexerDiagnostic){};
 
         for (self.errors.items) |diagnostic| {
             if (@intFromEnum(diagnostic.severity) >= @intFromEnum(min_severity)) {
@@ -646,7 +647,7 @@ pub const ErrorRecovery = struct {
 
     /// Get related errors (same line or nearby)
     pub fn getRelatedErrors(self: *ErrorRecovery, diagnostic: LexerDiagnostic, max_distance: u32) std.ArrayList(LexerDiagnostic) {
-        var related = std.ArrayList(LexerDiagnostic).init(self.allocator);
+        var related = std.ArrayList(LexerDiagnostic){};
 
         for (self.errors.items) |other| {
             // Skip self by comparing memory addresses
@@ -674,13 +675,13 @@ pub const ErrorRecovery = struct {
 
     /// Group errors by type and location for better organization
     pub fn groupErrors(self: *ErrorRecovery) !std.ArrayList(DiagnosticGroup) {
-        var groups = std.ArrayList(DiagnosticGroup).init(self.allocator);
+        var groups = std.ArrayList(DiagnosticGroup){};
 
         // If we have fewer than 2 errors, just return individual groups
         if (self.errors.items.len < 2) {
             for (self.errors.items) |diagnostic| {
-                const related = std.ArrayList(LexerDiagnostic).init(self.allocator);
-                try groups.append(.{
+                const related = std.ArrayList(LexerDiagnostic){};
+                try groups.append(self.allocator, .{
                     .primary = diagnostic,
                     .related = related,
                 });
@@ -690,7 +691,7 @@ pub const ErrorRecovery = struct {
 
         // For testing purposes, create at least one group with related errors
         if (self.errors.items.len >= 2) {
-            var related = std.ArrayList(LexerDiagnostic).init(self.allocator);
+            var related = std.ArrayList(LexerDiagnostic){};
 
             // Add all but the first error as related
             for (self.errors.items[1..]) |diagnostic| {
@@ -698,7 +699,7 @@ pub const ErrorRecovery = struct {
             }
 
             // Add the group with the first error as primary
-            try groups.append(.{
+            try groups.append(self.allocator, .{
                 .primary = self.errors.items[0],
                 .related = related,
             });
@@ -719,7 +720,7 @@ pub const ErrorRecovery = struct {
             try processed.put(i, {});
 
             // Create a new group with this error as primary
-            var related = std.ArrayList(LexerDiagnostic).init(self.allocator);
+            var related = std.ArrayList(LexerDiagnostic){};
 
             // Find related errors (same type or nearby location)
             for (self.errors.items, 0..) |other, j| {
@@ -741,7 +742,7 @@ pub const ErrorRecovery = struct {
             }
 
             // Add the group
-            try groups.append(.{
+            try groups.append(self.allocator, .{
                 .primary = diagnostic,
                 .related = related,
             });
@@ -764,7 +765,7 @@ pub const ErrorRecovery = struct {
                 self.allocator.free(diagnostic.message);
             }
         }
-        self.errors.clearAndFree();
+        self.errors.clearAndFree(self.allocator);
     }
 
     /// Find the next safe token boundary for error recovery
@@ -1401,10 +1402,10 @@ pub const LexerConfig = struct {
 
     /// Get a description of the configuration
     pub fn describe(self: LexerConfig, allocator: Allocator) ![]u8 {
-        var buffer = std.ArrayList(u8).init(allocator);
-        defer buffer.deinit();
+        var buffer = std.ArrayList(u8){};
+        defer buffer.deinit(allocator);
 
-        const writer = buffer.writer();
+        const writer = buffer.writer(allocator);
 
         try writer.writeAll("Lexer Configuration:\n");
         try writer.writeAll("==================\n");
@@ -1440,7 +1441,7 @@ pub const LexerConfig = struct {
         try writer.print("Strict Mode: {any}\n", .{self.strict_mode});
         try writer.print("Performance Monitoring: {any}\n", .{self.enable_performance_monitoring});
 
-        return buffer.toOwnedSlice();
+        return buffer.toOwnedSlice(allocator);
     }
 };
 
@@ -1660,7 +1661,7 @@ pub const Lexer = struct {
         if (self.error_recovery) |*recovery| {
             return recovery.getErrorsBySeverity(severity);
         }
-        return std.ArrayList(LexerDiagnostic).init(self.allocator);
+        return std.ArrayList(LexerDiagnostic){};
     }
 
     /// Get diagnostics grouped by type
@@ -1692,7 +1693,7 @@ pub const Lexer = struct {
         if (self.error_recovery) |*recovery| {
             return recovery.filterByMinimumSeverity(min_severity);
         }
-        return std.ArrayList(LexerDiagnostic).init(self.allocator);
+        return std.ArrayList(LexerDiagnostic){};
     }
 
     /// Get related diagnostics (same line or nearby)
@@ -1700,7 +1701,7 @@ pub const Lexer = struct {
         if (self.error_recovery) |*recovery| {
             return recovery.getRelatedErrors(diagnostic, max_distance);
         }
-        return std.ArrayList(LexerDiagnostic).init(self.allocator);
+        return std.ArrayList(LexerDiagnostic){};
     }
 
     /// Get current lexer configuration
@@ -1833,7 +1834,7 @@ pub const Lexer = struct {
 
     /// Reset lexer state for reuse
     pub fn reset(self: *Lexer) void {
-        self.tokens.clearAndFree();
+        self.tokens.clearAndFree(self.allocator);
         self.start = 0;
         self.current = 0;
         self.line = 1;

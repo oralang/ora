@@ -1,5 +1,0 @@
-fn bar() -> !u32 | MyError {
-    return error.OtherError;
-}
-
-

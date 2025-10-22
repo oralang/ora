@@ -23,8 +23,8 @@ const Token = lexer_mod.Token;
 const TriviaPiece = lexer_mod.TriviaPiece;
 
 pub fn printLossless(allocator: std.mem.Allocator, source: []const u8, tokens: []const Token, trivia: []const TriviaPiece) ![]u8 {
-    var out = std.ArrayList(u8).init(allocator);
-    errdefer out.deinit();
+    var out = std.ArrayList(u8){};
+    errdefer out.deinit(allocator);
 
     var consumed_trivia_idx: usize = 0;
 
@@ -43,14 +43,14 @@ pub fn printLossless(allocator: std.mem.Allocator, source: []const u8, tokens: [
                 const piece = trivia[tstart + j];
                 const begin = @as(usize, piece.span.start_offset);
                 const end = @as(usize, piece.span.end_offset);
-                try out.appendSlice(source[begin..end]);
+                try out.appendSlice(allocator, source[begin..end]);
             }
             consumed_trivia_idx = @max(consumed_trivia_idx, tstart + tlen);
         }
 
         const begin = @as(usize, tok.range.start_offset);
         const end = @as(usize, tok.range.end_offset);
-        try out.appendSlice(source[begin..end]);
+        try out.appendSlice(allocator, source[begin..end]);
 
         // Trailing trivia
         if (tok.trailing_trivia_len > 0) {
@@ -61,7 +61,7 @@ pub fn printLossless(allocator: std.mem.Allocator, source: []const u8, tokens: [
                 const piece = trivia[tstart2 + k];
                 const b2 = @as(usize, piece.span.start_offset);
                 const e2 = @as(usize, piece.span.end_offset);
-                try out.appendSlice(source[b2..e2]);
+                try out.appendSlice(allocator, source[b2..e2]);
             }
             consumed_trivia_idx = @max(consumed_trivia_idx, tstart2 + tlen2);
         }
@@ -72,8 +72,8 @@ pub fn printLossless(allocator: std.mem.Allocator, source: []const u8, tokens: [
         const piece = trivia[consumed_trivia_idx];
         const begin = @as(usize, piece.span.start_offset);
         const end = @as(usize, piece.span.end_offset);
-        try out.appendSlice(source[begin..end]);
+        try out.appendSlice(allocator, source[begin..end]);
     }
 
-    return out.toOwnedSlice();
+    return out.toOwnedSlice(allocator);
 }

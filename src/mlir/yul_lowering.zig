@@ -34,6 +34,7 @@ const WarningType = @import("error_handling.zig").WarningType;
 
 const PublicFunction = struct {
     name: []const u8,
+    signature: []const u8, // Full signature: "transfer(address,uint256)"
     selector: u32,
     has_return: bool,
 };
@@ -57,6 +58,8 @@ const YulLoweringContext = struct {
     // Value tracking for MLIR values to Yul variables
     value_map: std.HashMap(u64, []const u8, std.hash_map.AutoContext(u64), std.hash_map.default_max_load_percentage),
     next_temp_var: u32,
+    // Constant value tracking for optimization (SSA value -> constant literal)
+    constant_values: std.HashMap(u64, []const u8, std.hash_map.AutoContext(u64), std.hash_map.default_max_load_percentage),
     // Public functions for dispatcher
     public_functions: std.ArrayList(PublicFunction),
 
@@ -72,6 +75,7 @@ const YulLoweringContext = struct {
             .indent_level = 0,
             .value_map = std.HashMap(u64, []const u8, std.hash_map.AutoContext(u64), std.hash_map.default_max_load_percentage).init(allocator),
             .next_temp_var = 0,
+            .constant_values = std.HashMap(u64, []const u8, std.hash_map.AutoContext(u64), std.hash_map.default_max_load_percentage).init(allocator),
             .public_functions = std.ArrayList(PublicFunction){},
         };
     }
@@ -89,8 +93,14 @@ const YulLoweringContext = struct {
             self.allocator.free(entry.value_ptr.*);
         }
         self.value_map.deinit();
+        var const_iter = self.constant_values.iterator();
+        while (const_iter.next()) |entry| {
+            self.allocator.free(entry.value_ptr.*);
+        }
+        self.constant_values.deinit();
         for (self.public_functions.items) |func| {
             self.allocator.free(func.name);
+            self.allocator.free(func.signature);
         }
         self.public_functions.deinit(self.allocator);
     }
@@ -147,6 +157,13 @@ const YulLoweringContext = struct {
 
     fn getValueName(self: *Self, value: c.MlirValue) ![]const u8 {
         const value_ptr = @intFromPtr(value.ptr);
+
+        // Check if this is a constant value - if so, return the literal
+        if (self.constant_values.get(value_ptr)) |const_val| {
+            return const_val;
+        }
+
+        // Check if we already have a variable name for this value
         if (self.value_map.get(value_ptr)) |name| {
             return name;
         }
@@ -157,17 +174,25 @@ const YulLoweringContext = struct {
         return temp_name;
     }
 
+    fn setConstantValue(self: *Self, value: c.MlirValue, const_literal: []const u8) !void {
+        const value_ptr = @intFromPtr(value.ptr);
+        const literal_copy = try self.allocator.dupe(u8, const_literal);
+        try self.constant_values.put(value_ptr, literal_copy);
+    }
+
     fn setValueName(self: *Self, value: c.MlirValue, name: []const u8) !void {
         const value_ptr = @intFromPtr(value.ptr);
         const name_copy = try self.allocator.dupe(u8, name);
         try self.value_map.put(value_ptr, name_copy);
     }
 
-    fn addPublicFunction(self: *Self, name: []const u8, has_return: bool) !void {
+    fn addPublicFunction(self: *Self, name: []const u8, signature: []const u8, has_return: bool) !void {
         const name_copy = try self.allocator.dupe(u8, name);
-        const selector = calculateFunctionSelector(name);
+        const signature_copy = try self.allocator.dupe(u8, signature);
+        const selector = calculateFunctionSelector(signature);
         try self.public_functions.append(self.allocator, PublicFunction{
             .name = name_copy,
+            .signature = signature_copy,
             .selector = selector,
             .has_return = has_return,
         });
@@ -373,6 +398,21 @@ fn processOperation(op: c.MlirOperation, ctx: *YulLoweringContext) void {
             ctx.addError(.MlirOperationFailed, "Failed to process ora.binary.constant", "check binary constant value") catch {};
             std.log.err("Error processing ora.binary.constant: {}", .{err});
         };
+    } else if (std.mem.eql(u8, op_name, "memref.alloca")) {
+        processMemrefAlloca(op, ctx) catch |err| {
+            ctx.addError(.MlirOperationFailed, "Failed to process memref.alloca", "check local variable allocation") catch {};
+            std.log.err("Error processing memref.alloca: {}", .{err});
+        };
+    } else if (std.mem.eql(u8, op_name, "memref.store")) {
+        processMemrefStore(op, ctx) catch |err| {
+            ctx.addError(.MlirOperationFailed, "Failed to process memref.store", "check local variable store") catch {};
+            std.log.err("Error processing memref.store: {}", .{err});
+        };
+    } else if (std.mem.eql(u8, op_name, "memref.load")) {
+        processMemrefLoad(op, ctx) catch |err| {
+            ctx.addError(.MlirOperationFailed, "Failed to process memref.load", "check local variable load") catch {};
+            std.log.err("Error processing memref.load: {}", .{err});
+        };
     } else if (std.mem.eql(u8, op_name, "arith.addi")) {
         processArithAddi(op, ctx) catch |err| {
             ctx.addError(.MlirOperationFailed, "Failed to process arith.addi", "check addition operands") catch {};
@@ -434,6 +474,16 @@ fn processOperation(op: c.MlirOperation, ctx: *YulLoweringContext) void {
         processArithCmpi(op, ctx) catch |err| {
             ctx.addError(.MlirOperationFailed, "Failed to process arith.cmpi", "check comparison operands") catch {};
             std.log.err("Error processing arith.cmpi: {}", .{err});
+        };
+    } else if (std.mem.eql(u8, op_name, "arith.trunci")) {
+        processArithTrunci(op, ctx) catch |err| {
+            ctx.addError(.MlirOperationFailed, "Failed to process arith.trunci", "check truncation operands") catch {};
+            std.log.err("Error processing arith.trunci: {}", .{err});
+        };
+    } else if (std.mem.eql(u8, op_name, "arith.extui")) {
+        processArithExtui(op, ctx) catch |err| {
+            ctx.addError(.MlirOperationFailed, "Failed to process arith.extui", "check extension operands") catch {};
+            std.log.err("Error processing arith.extui: {}", .{err});
         };
     } else if (std.mem.eql(u8, op_name, "scf.if")) {
         processScfIf(op, ctx) catch |err| {
@@ -558,14 +608,50 @@ fn processFuncFunc(op: c.MlirOperation, ctx: *YulLoweringContext) !void {
         // Check if this function actually returns a value by looking at func.return operations in the body
         const has_return_value = checkFunctionHasReturnValue(op);
 
-        // Add to public functions for dispatcher (assume all non-init functions are public for now)
-        try ctx.addPublicFunction(func_name, has_return_value);
+        // Build function signature for selector calculation
+        var signature_buf: [512]u8 = undefined;
+        var signature: []const u8 = func_name;
+
+        // Extract function parameters from MLIR function type
+        const func_type_attr = c.mlirOperationGetAttributeByName(op, c.MlirStringRef{ .data = "function_type".ptr, .length = "function_type".len });
+        if (!c.mlirAttributeIsNull(func_type_attr)) {
+            const func_type = c.mlirTypeAttrGetValue(func_type_attr);
+            const num_inputs = c.mlirFunctionTypeGetNumInputs(func_type);
+
+            // Build ABI signature with parameter types
+            var param_buf: [256]u8 = undefined;
+            var param_offset: usize = 0;
+
+            if (num_inputs > 0) {
+                var i: u32 = 0;
+                while (i < num_inputs) : (i += 1) {
+                    const input_type = c.mlirFunctionTypeGetInput(func_type, i);
+                    const abi_type = try mlirTypeToAbiType(ctx.allocator, input_type);
+                    defer ctx.allocator.free(abi_type);
+
+                    if (i > 0) {
+                        param_buf[param_offset] = ',';
+                        param_offset += 1;
+                    }
+                    @memcpy(param_buf[param_offset..][0..abi_type.len], abi_type);
+                    param_offset += abi_type.len;
+                }
+            }
+
+            // Create full signature: "functionName(type1,type2)"
+            signature = try std.fmt.bufPrint(&signature_buf, "{s}({s})", .{ func_name, param_buf[0..param_offset] });
+        } else {
+            // No parameters
+            signature = try std.fmt.bufPrint(&signature_buf, "{s}()", .{func_name});
+        }
+
+        // Add to public functions for dispatcher with full signature
+        try ctx.addPublicFunction(func_name, signature, has_return_value);
 
         try ctx.writeIndented("function ");
         try ctx.write(func_name);
 
-        // Extract function parameters from MLIR function type
-        const func_type_attr = c.mlirOperationGetAttributeByName(op, c.MlirStringRef{ .data = "function_type".ptr, .length = "function_type".len });
+        // Write Yul function parameters
         if (!c.mlirAttributeIsNull(func_type_attr)) {
             const func_type = c.mlirTypeAttrGetValue(func_type_attr);
             const num_inputs = c.mlirFunctionTypeGetNumInputs(func_type);
@@ -655,13 +741,29 @@ fn checkFunctionHasReturnValue(func_op: c.MlirOperation) bool {
     return false;
 }
 
-fn calculateFunctionSelector(function_name: []const u8) u32 {
-    // Create function signature: "functionName()"
-    // For now, we assume no parameters (can be enhanced later)
-    var signature_buf: [256]u8 = undefined;
-    const signature = std.fmt.bufPrint(&signature_buf, "{s}()", .{function_name}) catch function_name;
+/// Convert MLIR type to Solidity ABI type string
+fn mlirTypeToAbiType(allocator: std.mem.Allocator, mlir_type: c.MlirType) ![]const u8 {
+    // Check if it's an integer type
+    if (c.mlirTypeIsAInteger(mlir_type)) {
+        const width = c.mlirIntegerTypeGetWidth(mlir_type);
+        // Map common widths to Solidity types
+        if (width == 1) return allocator.dupe(u8, "bool");
+        if (width == 160) return allocator.dupe(u8, "address"); // address is 160 bits
+        if (width % 8 == 0 and width <= 256) {
+            return std.fmt.allocPrint(allocator, "uint{d}", .{width});
+        }
+        // Default to uint256 for other integer types
+        return allocator.dupe(u8, "uint256");
+    }
 
-    // Calculate Keccak256 hash
+    // For other types, use generic uint256
+    // TODO: Handle more complex types (arrays, structs, etc.)
+    return allocator.dupe(u8, "uint256");
+}
+
+/// Calculate function selector from full signature "functionName(type1,type2)"
+fn calculateFunctionSelector(signature: []const u8) u32 {
+    // Calculate Keccak256 hash of the signature
     var hasher = std.crypto.hash.sha3.Keccak256.init(.{});
     hasher.update(signature);
     var hash: [32]u8 = undefined;
@@ -845,19 +947,17 @@ fn processArithConstant(op: c.MlirOperation, ctx: *YulLoweringContext) !void {
     }
 
     const result = c.mlirOperationGetResult(op, 0);
-    const var_name = try ctx.getValueName(result);
 
-    // For now, we'll extract the value as a simple integer
-    // This is a simplified approach - in a full implementation we'd need proper type checking
-    const int_value = c.mlirIntegerAttrGetValueSInt(value_attr);
-    try ctx.writeIndented("let ");
-    try ctx.write(var_name);
-    try ctx.write(" := ");
+    // Extract the constant value
     // Fix boolean representation: MLIR uses -1 for true, but Ethereum/Yul uses 1
+    const int_value = c.mlirIntegerAttrGetValueSInt(value_attr);
     const ethereum_val = if (int_value == -1) 1 else int_value;
     const value_str = try std.fmt.allocPrint(ctx.allocator, "{d}", .{ethereum_val});
     defer ctx.allocator.free(value_str);
-    try ctx.writeln(value_str);
+
+    // Register this as a constant value for inlining
+    // This avoids generating unnecessary temporary variables
+    try ctx.setConstantValue(result, value_str);
 }
 
 fn processOraStringConstant(op: c.MlirOperation, ctx: *YulLoweringContext) !void {
@@ -927,6 +1027,53 @@ fn processOraBinaryConstant(op: c.MlirOperation, ctx: *YulLoweringContext) !void
     try ctx.write(var_name);
     try ctx.write(" := ");
     try ctx.write(hex_value);
+    try ctx.writeln("");
+}
+
+fn processMemrefAlloca(op: c.MlirOperation, ctx: *YulLoweringContext) !void {
+    // memref.alloca allocates a local variable
+    // In Yul, local variables are just SSA values, so we just register the memref
+    const result = c.mlirOperationGetResult(op, 0);
+    const var_name = try ctx.getValueName(result);
+
+    // Initialize to 0 (Yul variables must be initialized)
+    try ctx.writeIndented("let ");
+    try ctx.write(var_name);
+    try ctx.writeln(" := 0");
+}
+
+fn processMemrefStore(op: c.MlirOperation, ctx: *YulLoweringContext) !void {
+    // memref.store stores a value to a memref
+    // operand 0: value to store
+    // operand 1: memref destination
+    const value = c.mlirOperationGetOperand(op, 0);
+    const memref = c.mlirOperationGetOperand(op, 1);
+
+    const value_name = try ctx.getValueName(value);
+    const memref_name = try ctx.getValueName(memref);
+
+    // In Yul, this is just an assignment
+    try ctx.writeIndented("");
+    try ctx.write(memref_name);
+    try ctx.write(" := ");
+    try ctx.write(value_name);
+    try ctx.writeln("");
+}
+
+fn processMemrefLoad(op: c.MlirOperation, ctx: *YulLoweringContext) !void {
+    // memref.load loads a value from a memref
+    // operand 0: memref source
+    const memref = c.mlirOperationGetOperand(op, 0);
+    const result = c.mlirOperationGetResult(op, 0);
+
+    const memref_name = try ctx.getValueName(memref);
+    const result_name = try ctx.getValueName(result);
+
+    // In Yul, just assign the memref value to the result
+    try ctx.writeIndented("let ");
+    try ctx.write(result_name);
+    try ctx.write(" := ");
+    try ctx.write(memref_name);
     try ctx.writeln("");
 }
 
@@ -1210,6 +1357,38 @@ fn processArithCmpi(op: c.MlirOperation, ctx: *YulLoweringContext) !void {
         },
     }
 
+    try ctx.writeln("");
+}
+
+fn processArithTrunci(op: c.MlirOperation, ctx: *YulLoweringContext) !void {
+    // arith.trunci converts i256 to i1 (for boolean storage loads)
+    // In Yul, we use iszero(iszero(value)) to normalize to 0 or 1
+    const operand = c.mlirOperationGetOperand(op, 0);
+    const result = c.mlirOperationGetResult(op, 0);
+
+    const operand_name = try ctx.getValueName(operand);
+    const result_name = try ctx.getValueName(result);
+
+    try ctx.writeIndented("let ");
+    try ctx.write(result_name);
+    try ctx.write(" := iszero(iszero(");
+    try ctx.write(operand_name);
+    try ctx.writeln("))");
+}
+
+fn processArithExtui(op: c.MlirOperation, ctx: *YulLoweringContext) !void {
+    // arith.extui extends i1 to i256 (for boolean storage stores)
+    // In Yul, the value is already 0 or 1, so we just assign it
+    const operand = c.mlirOperationGetOperand(op, 0);
+    const result = c.mlirOperationGetResult(op, 0);
+
+    const operand_name = try ctx.getValueName(operand);
+    const result_name = try ctx.getValueName(result);
+
+    try ctx.writeIndented("let ");
+    try ctx.write(result_name);
+    try ctx.write(" := ");
+    try ctx.write(operand_name);
     try ctx.writeln("");
 }
 
@@ -1543,7 +1722,7 @@ fn processOraStructInstantiate(op: c.MlirOperation, ctx: *YulLoweringContext) !v
     // ora.struct_instantiate has:
     // - attribute: struct_name
     // - operands: field values
-    // - result: struct instance
+    // - result: struct instance (storage pointer)
 
     const struct_name = getStringAttribute(op, "struct_name") orelse {
         try ctx.addError(.MalformedAst, "ora.struct_instantiate missing struct_name attribute", "add struct_name attribute");
@@ -1553,20 +1732,25 @@ fn processOraStructInstantiate(op: c.MlirOperation, ctx: *YulLoweringContext) !v
     const result = c.mlirOperationGetResult(op, 0);
     const result_name = try ctx.getValueName(result);
 
-    // For now, we'll create a simple struct by concatenating field values
-    // In a full implementation, we'd need proper struct layout and field access
+    // TODO: Implement proper struct instantiation
+    // For now, allocate a storage slot for the struct
+    // In a full implementation, we need to:
+    // 1. Allocate contiguous storage slots for all fields
+    // 2. Initialize each field with the corresponding operand
+    // 3. Return the base storage pointer
     try ctx.writeIndented("let ");
     try ctx.write(result_name);
-    try ctx.write(" := 0x0 // Struct instance: ");
+    try ctx.write(" := 0 // TODO: Allocate struct ");
     try ctx.write(struct_name);
     try ctx.writeln("");
 }
 
 fn processOraStructFieldStore(op: c.MlirOperation, ctx: *YulLoweringContext) !void {
     // ora.struct_field_store has:
-    // - operand 0: struct instance
+    // - operand 0: struct instance (storage pointer)
     // - operand 1: field value
     // - attribute: field_name
+    // - attribute: field_offset (optional)
 
     const field_name = getStringAttribute(op, "field_name") orelse {
         try ctx.addError(.MalformedAst, "ora.struct_field_store missing field_name attribute", "add field_name attribute");
@@ -1576,23 +1760,30 @@ fn processOraStructFieldStore(op: c.MlirOperation, ctx: *YulLoweringContext) !vo
     const struct_instance = c.mlirOperationGetOperand(op, 0);
     const field_value = c.mlirOperationGetOperand(op, 1);
 
-    const struct_name = try ctx.getValueName(struct_instance);
+    const struct_ptr = try ctx.getValueName(struct_instance);
     const value_name = try ctx.getValueName(field_value);
 
-    // For now, we'll just store the field value
-    // In a full implementation, we'd need proper struct field access
-    try ctx.writeIndented("// Store field ");
-    try ctx.write(field_name);
-    try ctx.write(" = ");
+    // Get field offset if available, otherwise use 0
+    const field_offset = getIntegerAttribute(op, "field_offset") orelse 0;
+
+    // TODO: Implement proper struct field storage
+    // For now, store at (struct_ptr + field_offset)
+    // In a full implementation, we need proper struct layout calculation
+    try ctx.writeIndented("sstore(add(");
+    try ctx.write(struct_ptr);
+    try ctx.write(", ");
+    const offset_str = try std.fmt.allocPrint(ctx.allocator, "{d}", .{field_offset});
+    defer ctx.allocator.free(offset_str);
+    try ctx.write(offset_str);
+    try ctx.write("), ");
     try ctx.write(value_name);
-    try ctx.write(" in struct ");
-    try ctx.write(struct_name);
-    try ctx.writeln("");
+    try ctx.write(") // field: ");
+    try ctx.writeln(field_name);
 }
 
 fn processOraMapGet(op: c.MlirOperation, ctx: *YulLoweringContext) !void {
     // ora.map_get has:
-    // - operand 0: map
+    // - operand 0: map (storage slot)
     // - operand 1: key
     // - result: value
 
@@ -1604,20 +1795,30 @@ fn processOraMapGet(op: c.MlirOperation, ctx: *YulLoweringContext) !void {
     const key_name = try ctx.getValueName(key);
     const result_name = try ctx.getValueName(result);
 
-    // For now, we'll use a simple storage-based map implementation
-    // In a full implementation, we'd need proper map storage layout
+    // Use proper Solidity map storage layout: keccak256(key . slot)
+    // This matches how Solidity stores mappings
     try ctx.writeIndented("let ");
     try ctx.write(result_name);
-    try ctx.write(" := sload(add(");
-    try ctx.write(map_name);
-    try ctx.write(", ");
+    try ctx.writeln(" := 0");
+
+    // Store key at position 0
+    try ctx.writeIndented("mstore(0, ");
     try ctx.write(key_name);
-    try ctx.writeln("))");
+    try ctx.writeln(")");
+
+    // Store slot at position 32 (0x20)
+    try ctx.writeIndented("mstore(32, ");
+    try ctx.write(map_name);
+    try ctx.writeln(")");
+
+    // Calculate storage slot: keccak256(key . map_slot)
+    try ctx.writeIndented(result_name);
+    try ctx.writeln(" := sload(keccak256(0, 64))");
 }
 
 fn processOraMapStore(op: c.MlirOperation, ctx: *YulLoweringContext) !void {
     // ora.map_store has:
-    // - operand 0: map
+    // - operand 0: map (storage slot)
     // - operand 1: key
     // - operand 2: value
 
@@ -1629,13 +1830,19 @@ fn processOraMapStore(op: c.MlirOperation, ctx: *YulLoweringContext) !void {
     const key_name = try ctx.getValueName(key);
     const value_name = try ctx.getValueName(value);
 
-    // For now, we'll use a simple storage-based map implementation
-    // In a full implementation, we'd need proper map storage layout
-    try ctx.writeIndented("sstore(add(");
-    try ctx.write(map_name);
-    try ctx.write(", ");
+    // Use proper Solidity map storage layout: keccak256(key . slot)
+    // Store key at position 0
+    try ctx.writeIndented("mstore(0, ");
     try ctx.write(key_name);
-    try ctx.write("), ");
+    try ctx.writeln(")");
+
+    // Store slot at position 32 (0x20)
+    try ctx.writeIndented("mstore(32, ");
+    try ctx.write(map_name);
+    try ctx.writeln(")");
+
+    // Calculate storage slot and store: sstore(keccak256(key . map_slot), value)
+    try ctx.writeIndented("sstore(keccak256(0, 64), ");
     try ctx.write(value_name);
     try ctx.writeln(")");
 }
@@ -1647,11 +1854,15 @@ fn convertBinaryToHex(allocator: std.mem.Allocator, binary_str: []const u8) ![]c
     else
         binary_str;
 
-    // Convert binary string to hex
-    var hex_buf = std.ArrayList(u8).initCapacity(allocator, binary.len / 4 + 2) catch return allocator.dupe(u8, "0x0");
-    defer hex_buf.deinit(allocator);
+    // Allocate buffer for hex string (each 4 bits = 1 hex char, plus "0x" prefix)
+    var hex_buf: [256]u8 = undefined;
+    var hex_len: usize = 0;
 
-    try hex_buf.appendSlice(allocator, "0x");
+    // Add "0x" prefix
+    hex_buf[hex_len] = '0';
+    hex_len += 1;
+    hex_buf[hex_len] = 'x';
+    hex_len += 1;
 
     // Process binary string in chunks of 4 bits
     var i: usize = 0;
@@ -1679,8 +1890,9 @@ fn convertBinaryToHex(allocator: std.mem.Allocator, binary_str: []const u8) ![]c
             '0' + @as(u8, chunk)
         else
             'a' + @as(u8, chunk - 10);
-        try hex_buf.append(allocator, hex_char);
+        hex_buf[hex_len] = hex_char;
+        hex_len += 1;
     }
 
-    return hex_buf.toOwnedSlice(allocator);
+    return allocator.dupe(u8, hex_buf[0..hex_len]);
 }

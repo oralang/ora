@@ -207,6 +207,20 @@ pub fn build(b: *std.Build) void {
     // Add step to test MLIR functionality
     const test_mlir_step = b.step("test-mlir", "Run MLIR-specific tests");
     test_mlir_step.dependOn(b.getInstallStep());
+
+    // Test suite - Simple focused tests
+    const test_step = b.step("test", "Run all tests");
+
+    // End-to-end compiler tests
+    const e2e_test_mod = b.createModule(.{
+        .root_source_file = b.path("tests/compiler_e2e_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    e2e_test_mod.addImport("ora", lib_mod);
+
+    const e2e_tests = b.addTest(.{ .root_module = e2e_test_mod });
+    test_step.dependOn(&b.addRunArtifact(e2e_tests).step);
 }
 
 /// Create a step that runs the installed lexer test suite with --verbose
@@ -712,12 +726,10 @@ fn linkMlirLibraries(b: *std.Build, exe: *std.Build.Step.Compile, mlir_step: *st
     const include_path = b.path("vendor/mlir/include");
     const lib_path = b.path("vendor/mlir/lib");
     const ora_dialect_include_path = b.path("src/mlir/generated");
-    const ora_dialect_lib_path = b.path("build/cmake/lib");
 
     exe.addIncludePath(include_path);
     exe.addIncludePath(ora_dialect_include_path);
     exe.addLibraryPath(lib_path);
-    exe.addLibraryPath(ora_dialect_lib_path);
 
     exe.linkSystemLibrary("MLIR-C");
 

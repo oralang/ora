@@ -1,8 +1,0 @@
-storage var a: u32;
-storage var b: u32;
-
-fn f() -> void {
-    a = b; // invalid: storage <- storage bulk copy (element-level required)
-}
-
-

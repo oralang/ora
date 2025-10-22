@@ -201,6 +201,13 @@ pub const DeclarationLowerer = struct {
         // Lower the function body
         self.lowerFunctionBody(func, block, &param_map, contract_storage_map, local_var_map orelse &local_vars) catch |err| {
             std.debug.print("Error lowering function body: {s}\n", .{@errorName(err)});
+
+            // Report to error handler if available
+            if (self.error_handler) |eh| {
+                var error_handler = @constCast(eh);
+                error_handler.reportError(.MlirOperationFailed, func.span, "Failed to lower function body", "check function implementation for type errors and unsupported operations") catch {};
+            }
+
             return c.mlirOperationCreate(&state);
         };
 

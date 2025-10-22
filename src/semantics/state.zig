@@ -45,8 +45,8 @@ pub const Scope = struct {
     symbols: std.ArrayList(Symbol),
     parent: ?*Scope = null,
 
-    pub fn init(allocator: std.mem.Allocator, parent: ?*Scope, name: ?[]const u8) Scope {
-        return .{ .name = name, .symbols = std.ArrayList(Symbol).init(allocator), .parent = parent };
+    pub fn init(_: std.mem.Allocator, parent: ?*Scope, name: ?[]const u8) Scope {
+        return .{ .name = name, .symbols = std.ArrayList(Symbol){}, .parent = parent };
     }
 
     pub fn deinit(self: *Scope) void {
@@ -77,7 +77,7 @@ pub const SymbolTable = struct {
         return .{
             .allocator = allocator,
             .root = root_scope,
-            .scopes = std.ArrayList(*Scope).init(allocator),
+            .scopes = std.ArrayList(*Scope){},
             .contract_scopes = std.StringHashMap(*Scope).init(allocator),
             .function_scopes = std.StringHashMap(*Scope).init(allocator),
             .log_signatures = std.StringHashMap([]const ast.LogField).init(allocator),
@@ -134,11 +134,10 @@ pub const SymbolTable = struct {
     }
 
     pub fn declare(self: *SymbolTable, scope: *Scope, sym: Symbol) !?Symbol {
-        _ = self;
         if (scope.findInCurrent(sym.name)) |_| {
             return sym; // signal duplicate by returning the conflicting symbol content
         }
-        try scope.symbols.append(sym);
+        try scope.symbols.append(self.allocator, sym);
         return null;
     }
 

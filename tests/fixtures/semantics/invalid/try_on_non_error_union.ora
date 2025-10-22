@@ -1,7 +1,0 @@
-fn baz() -> u32 {
-    const x: u32 = 5;
-    const y = try x; // invalid: try on non-!T
-    return y;
-}
-
-

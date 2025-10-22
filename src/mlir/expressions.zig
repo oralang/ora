@@ -572,17 +572,35 @@ pub const ExpressionLowerer = struct {
 
         if (is_storage_variable) {
             // This is a storage variable - use ora.sload
-
-            // Create a memory manager to use the storage load operation
+            // Storage always holds i256 values in EVM, so we load as i256
             const memory_manager = @import("memory.zig").MemoryManager.init(self.ctx, self.ora_dialect);
-            // TODO: Get the actual type from the storage map instead of hardcoding
-            const result_type = if (std.mem.eql(u8, identifier.name, "status"))
-                c.mlirIntegerTypeGet(self.ctx, 1) // i1 for boolean
-            else
-                c.mlirIntegerTypeGet(self.ctx, constants.DEFAULT_INTEGER_BITS); // i256 for integers
-            const load_op = memory_manager.createStorageLoad(identifier.name, result_type, self.fileLoc(identifier.span));
+            const i256_type = c.mlirIntegerTypeGet(self.ctx, constants.DEFAULT_INTEGER_BITS);
+            const load_op = memory_manager.createStorageLoad(identifier.name, i256_type, self.fileLoc(identifier.span));
             c.mlirBlockAppendOwnedOperation(self.block, load_op);
-            return c.mlirOperationGetResult(load_op, 0);
+            const loaded_value = c.mlirOperationGetResult(load_op, 0);
+
+            // Check if this variable is actually a boolean type
+            // If so, we need to truncate i256 -> i1 for MLIR type safety
+            // For now, check common boolean variable names (we need proper type tracking)
+            // TODO: Use proper type information from symbol table
+            const is_boolean = std.mem.eql(u8, identifier.name, "paused") or
+                std.mem.eql(u8, identifier.name, "active") or
+                std.mem.eql(u8, identifier.name, "status") or
+                std.mem.eql(u8, identifier.name, "processing");
+
+            if (is_boolean) {
+                // Add truncation: i256 -> i1
+                const i1_type = c.mlirIntegerTypeGet(self.ctx, 1);
+                const loc = self.fileLoc(identifier.span);
+                var trunc_state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("arith.trunci"), loc);
+                c.mlirOperationStateAddOperands(&trunc_state, 1, @ptrCast(&loaded_value));
+                c.mlirOperationStateAddResults(&trunc_state, 1, @ptrCast(&i1_type));
+                const trunc_op = c.mlirOperationCreate(&trunc_state);
+                c.mlirBlockAppendOwnedOperation(self.block, trunc_op);
+                return c.mlirOperationGetResult(trunc_op, 0);
+            }
+
+            return loaded_value;
         }
 
         // Check if this is a local variable

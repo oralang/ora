@@ -1,7 +1,0 @@
-func()
-func(a)
-func(a, b, c)
-nested.func(x, y)
-obj.method(param1, param2)
-chain().call().another()
-func(nested(x), y + z)

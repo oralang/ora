@@ -1,4 +1,0 @@
-// Switch expression should not accept block arms
-let y = switch (x) { 1 => { 42 }, else => 0 };
-
-

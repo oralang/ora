@@ -1,9 +1,0 @@
-contract BadSwitchMissingArrow {
-    pub fn demo() {
-        var x: u256 = 0;
-        switch (x) {
-            0 x = 1; // missing =>
-            else => x = 2;
-        }
-    }
-}

@@ -1,7 +1,0 @@
-obj.field
-obj.field.nested
-person.name
-contract.storage.balance
-deeply.nested.field.access.chain
-array[0].field
-map[key].value
