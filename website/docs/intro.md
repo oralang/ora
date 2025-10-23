@@ -33,6 +33,8 @@ Ora is an experimental smart contract language that compiles to Yul (Ethereum's 
 - Structs, enums, and custom types
 - Function preconditions (`requires`)
 - Contract declarations and event logs
+- **Inline functions** with automatic complexity analysis
+- **Code quality tools** built into the compiler
 
 ### In Development
 
