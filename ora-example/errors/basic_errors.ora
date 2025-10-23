@@ -19,12 +19,12 @@ contract ErrorHandlingTest {
     }
     
     // Function that can return errors
-    pub fn transfer(to: address, amount: u256) bool | InsufficientBalance | InvalidAddress
+    pub fn transfer(recipient: address, amount: u256) -> !bool | InsufficientBalance | InvalidAddress
         requires(amount > 0)
     {
         // Check for zero address
-        if (to == 0x0000000000000000000000000000000000000000) {
-            return InvalidAddress;
+        if (recipient == 0x0000000000000000000000000000000000000000) {
+            return error.InvalidAddress;
         }
         
         // Check balance

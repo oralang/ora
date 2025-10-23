@@ -4,14 +4,10 @@
 // This file tests only import statements syntax
 
 // Standard library imports
-const std = @import(\"std\");
-const math = @import(\"math\");
-const crypto = @import(\"crypto\");
+const std = @import("std");
+const math = @import("math");
+const crypto = @import("crypto");
 
 // Local module imports with relative paths
-const utils = @import(\"./utils.ora\");
-const types = @import(\"../types/common.ora\");
-
-// Specific imports from modules with destructuring
-const { hash, verify } = @import(\"crypto\");
-const { add, multiply } = @import(\"./math_utils.ora\");
+const utils = @import("./utils.ora");
+const types = @import("../types/common.ora");

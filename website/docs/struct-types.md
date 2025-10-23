@@ -12,12 +12,12 @@ Define custom types by grouping related fields together:
 
 ```ora
 struct Point {
-    x: u32,
-    y: u32,
+    x: u32;
+    y: u32;
 }
 
 struct User {
-    name: string,
+    name: string;
     age: u8,
     balance: u256,
     location: Point,
@@ -70,14 +70,14 @@ The compiler analyzes field types and suggests optimizations:
 ```ora
 struct OptimizedData {
     // Small fields packed together (1 storage slot)
-    active: bool,     // 1 byte
+    active: bool;     // 1 byte
     level: u8,        // 1 byte
     flags: u16,       // 2 bytes
     counter: u32,     // 4 bytes
     
     // Large fields get dedicated slots
     balance: u256,    // 32 bytes (1 slot)
-    metadata: string, // Dynamic size
+    metadata: string; // Dynamic size
 }
 ```
 
@@ -87,8 +87,8 @@ For critical contracts, consider field ordering:
 ```ora
 struct GasOptimized {
     // Group small fields first
-    flag1: bool,
-    flag2: bool,
+    flag1: bool;
+    flag2: bool;
     small_counter: u32,
     
     // Place large fields last
@@ -103,16 +103,16 @@ Structs can contain other struct types, enabling complex data modeling:
 
 ```ora
 struct Address {
-    street: string,
-    city: string,
-    postal_code: u32,
+    street: string;
+    city: string;
+    postal_code: u32;
 }
 
 struct Employee {
-    id: u256,
-    name: string,
-    home_address: Address,
-    work_address: Address,
+    id: u256;
+    name: string;
+    home_address: Address;
+    work_address: Address;
 }
 
 contract Company {
@@ -205,7 +205,7 @@ Structs with dynamic fields (strings, arrays) have variable gas costs:
 ```ora
 struct VariableSize {
     id: u256,           // Fixed cost
-    name: string,       // Variable cost based on length
+    name: string;       // Variable cost based on length
     tags: u32[],        // Variable cost based on array size
 }
 ```
@@ -216,23 +216,23 @@ Struct types work seamlessly with Ora's formal verification system:
 
 ```ora
 struct BankAccount {
-    balance: u256,
-    frozen: bool,
-    owner: address,
+    balance: u256;
+    frozen: bool;
+    owner: address;
 }
 
 storage account: BankAccount;
 
 pub fn withdraw(amount: u256) 
-    requires: !account.frozen && account.balance >= amount
-    ensures: account.balance == old(account.balance) - amount
+    requires(!account.frozen && account.balance >= amount)
+    ensures(account.balance == old(account.balance) - amount)
 {
     account.balance = account.balance - amount;
 }
 
 pub fn freeze_account()
-    requires: account.owner == msg.sender
-    ensures: account.frozen == true
+    requires(account.owner == msg.sender)
+    ensures(account.frozen == true)
 {
     account.frozen = true;
 }

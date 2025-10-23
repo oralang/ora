@@ -4,7 +4,7 @@
 // This file tests log declarations syntax
 
 // Basic log declaration with parameters
-log Transfer(from: address, to: address, amount: u256);
+log Transfer(sender: address, recipient: address, amount: u256);
 
 // Log declaration with different parameter types
 log Approval(owner: address, spender: address, amount: u256);

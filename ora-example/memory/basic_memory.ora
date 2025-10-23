@@ -22,9 +22,9 @@ contract MemoryDeclarationTest {
         
         // Memory struct
         let user_data = .{
-            id: 42,
-            balance: 100,
-            active: true
+            .id = 42,
+            .balance = 100,
+            .active = true
         };
     }
 }

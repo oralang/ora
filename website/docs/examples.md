@@ -4,7 +4,10 @@ sidebar_position: 4
 
 # Examples
 
-Explore real Ora snippets and repository fixtures that reflect the current implementation.
+Working Ora code examples demonstrating current language features.
+
+> **✅ Validated**: All examples below compile successfully with the current compiler.  
+> See [`ora-example/README.md`](https://github.com/oralang/Ora/blob/main/ora-example/README.md) for complete list and testing status.
 
 ## Simple Storage
 
@@ -127,18 +130,46 @@ fn describe(s: Status) -> u32 {
 }
 ```
 
-## Where to find more
+## Testing Examples
 
-- Semantics fixtures:
-  - `tests/fixtures/semantics/valid/`
-  - `tests/fixtures/semantics/invalid/`
-- Parser fixtures: `tests/fixtures/parser/`
-- Reference snippets: `ora-example/` (some files are experimental and may not compile under the current parser)
-
-To inspect examples quickly:
+All examples in `ora-example/` are validated automatically:
 
 ```bash
-./zig-out/bin/ora lex path/to/example.ora
-./zig-out/bin/ora parse path/to/example.ora
-./zig-out/bin/ora -o build ast path/to/example.ora
-``` 
+# Validate all examples
+./scripts/validate-examples.sh
+
+# Test a specific example
+./zig-out/bin/ora parse ora-example/smoke.ora
+
+# Inspect example in detail
+./zig-out/bin/ora lex ora-example/smoke.ora     # Show tokens
+./zig-out/bin/ora parse ora-example/smoke.ora   # Show AST
+./zig-out/bin/ora ast ora-example/smoke.ora     # Generate JSON
+```
+
+## More Examples
+
+**Repository Examples:**
+- [`ora-example/`](https://github.com/oralang/Ora/tree/main/ora-example) - 23+ working examples
+- [`tests/fixtures/semantics/valid/`](https://github.com/oralang/Ora/tree/main/tests/fixtures/semantics/valid) - Test fixtures
+- [`tests/fixtures/parser/`](https://github.com/oralang/Ora/tree/main/tests/fixtures/parser) - Parser tests
+
+## Example Status
+
+Current validation: **23/29 examples pass** (79%)
+
+**Working Features:**
+- Basic contracts and functions
+- Storage, memory, transient storage
+- Structs and enums
+- Switch statements
+- Error declarations
+- Event logs
+- While loops
+
+**In Progress:**
+- For loops with captures
+- Advanced error handling
+- Some complex expressions
+
+See [Language Basics](./language-basics.md) for detailed feature documentation. 

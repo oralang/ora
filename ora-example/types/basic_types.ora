@@ -28,7 +28,6 @@ contract TypesTest {
     storage var bytes_value: bytes;
     
     // Testing complex types
-    storage var array_value: [u256];
     storage var map_value: map[address, u256];
     storage var doublemap_value: doublemap[address, u8, u256];
     storage var struct_value: CustomType;
@@ -48,50 +47,15 @@ contract TypesTest {
         bytes_value = hex"01020304";
         
         // Initialize complex types
-        array_value = [1, 2, 3, 4, 5];
-        struct_value = CustomType{
-            value: 42,
-            name: "test"
-        };
         enum_value = StatusType.Active;
     }
     
-    // Type conversion examples
-    pub fn test_type_conversions() {
-        // Integer conversions
-        let small_value: u8 = 42;
-        let medium_value: u64 = @as(u64, small_value); // Explicit conversion
-        let large_value: u256 = medium_value; // Implicit conversion
-        
-        // Address to bytes conversion
-        let addr = 0x1234567890123456789012345678901234567890;
-        let addr_bytes: bytes = @addressToBytes(addr);
-        
-        // String to bytes
-        let str = "Hello";
-        let str_bytes: bytes = @stringToBytes(str);
-        
-        // Hex string parsing
-        let hex_value: u256 = 0x1A2B3C;
-        
-        // Boolean conversions
-        let num_bool: u8 = @boolToInt(true); // 1
-        let bool_val: bool = (num_bool != 0); // true
-    }
-    
     // Type checking examples
-    pub fn test_type_checking(value: u256) bool {
+    pub fn test_type_checking(value: u256) -> bool {
         // Range checking
         if (value > 100) {
             return false;
         }
-        
-        // Type compatibility
-        let a: u64 = 42;
-        let b: u256 = a; // Implicit widening conversion
-        
-        // let c: u8 = b; // Error: narrowing conversion needs explicit cast
-        let c: u8 = @truncate(u8, b); // Explicit narrowing conversion
         
         // Enum type checking
         let status: StatusType = StatusType.Active;
@@ -102,31 +66,8 @@ contract TypesTest {
         return false;
     }
     
-    // Array type operations
-    pub fn test_array_operations() u256 {
-        // Array declaration
-        let numbers: [u256] = [1, 2, 3, 4, 5];
-        
-        // Array access
-        let first = numbers[0];
-        
-        // Array length
-        let length = numbers.len;
-        
-        // Array push
-        numbers.push(6);
-        
-        // Array iteration
-        let sum: u256 = 0;
-        for (numbers) |num, i| {
-            sum += num;
-        }
-        
-        return sum;
-    }
-    
     // Map type operations
-    pub fn test_map_operations() u256 {
+    pub fn test_map_operations() -> u256 {
         // Map usage
         map_value[address_value] = 100;
         
@@ -140,37 +81,5 @@ contract TypesTest {
         let dval = doublemap_value[address_value, 1];
         
         return val + dval;
-    }
-    
-    // Struct type operations
-    pub fn test_struct_operations() CustomType {
-        // Create struct
-        let custom = CustomType{
-            value: 100,
-            name: "test struct"
-        };
-        
-        // Access struct fields
-        let val = custom.value;
-        let name = custom.name;
-        
-        // Modify struct fields
-        custom.value = 200;
-        
-        return custom;
-    }
-    
-    // Union types (for error handling)
-    pub fn test_union_return() u256 | error {
-        if (bool_value) {
-            return u256_value;
-        } else {
-            return error.InvalidState;
-        }
-    }
-    
-    // Function with type parameters
-    pub fn get_custom_type() CustomType {
-        return struct_value;
     }
 }

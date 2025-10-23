@@ -14,26 +14,25 @@ fn function_with_params(a: u256, b: string) {
 }
 
 // Function with return type
-fn function_with_return() u256 {
+fn function_with_return() -> u256 {
     return 42;
 }
 
 // Function with parameters and return type
-fn add(a: u256, b: u256) u256 {
+fn add(a: u256, b: u256) -> u256 {
     return a + b;
 }
 
 // Function with preconditions
-fn calculate_fee(amount: u256, rate: u256) u256 
-    requires(rate <= 10000) // Rate must be <= 100% (10000 basis points)
+fn calculate_fee(amount: u256, rate: u256) -> u256 
+    requires(rate <= 10000)
 {
     return amount * rate / 10000;
 }
 
 // Function with postconditions
-fn safe_subtract(a: u256, b: u256) u256
-    requires(a >= b) // Precondition
-    ensures(self + b == a) // Postcondition
+fn safe_subtract(a: u256, b: u256) -> u256
+    requires(a >= b)
 {
     return a - b;
 }

@@ -209,6 +209,133 @@
   background: linear-gradient(135deg, #1e293b 0%, #0f172a 100%);
 }
 
+/* Blog enhancements */
+.blog-post-item {
+  border-radius: 12px;
+  border: 1px solid rgba(76, 110, 245, 0.1);
+  transition: all 0.3s ease;
+  margin-bottom: 2rem;
+}
+
+.blog-post-item:hover {
+  transform: translateY(-4px);
+  box-shadow: 0 12px 40px rgba(76, 110, 245, 0.15);
+}
+
+.blog-post-item header h2 {
+  font-size: 2rem;
+  margin-bottom: 0.5rem;
+}
+
+.blog-post-item .avatar__intro {
+  display: flex;
+  flex-direction: column;
+}
+
+.blog-post-item time {
+  color: var(--ifm-color-primary);
+  font-weight: 600;
+}
+
+/* Blog tags */
+.blog-tags {
+  display: flex;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.blog-tags a {
+  background: rgba(76, 110, 245, 0.1);
+  color: var(--ifm-color-primary);
+  padding: 0.25rem 0.75rem;
+  border-radius: 12px;
+  font-size: 0.85rem;
+  font-weight: 600;
+  text-decoration: none;
+  transition: all 0.2s ease;
+}
+
+.blog-tags a:hover {
+  background: var(--ifm-color-primary);
+  color: white;
+}
+
+/* Status badges in content */
+.badge-container {
+  display: inline-flex;
+  gap: 0.5rem;
+  margin: 1rem 0;
+}
+
+.status-badge {
+  padding: 0.4rem 1rem;
+  border-radius: 20px;
+  font-weight: 600;
+  font-size: 0.85rem;
+}
+
+.status-badge.working {
+  background: rgba(16, 185, 129, 0.1);
+  color: var(--ora-success);
+}
+
+.status-badge.in-progress {
+  background: rgba(245, 158, 11, 0.1);
+  color: var(--ora-warning);
+}
+
+.status-badge.planned {
+  background: rgba(76, 110, 245, 0.1);
+  color: var(--ifm-color-primary);
+}
+
+/* Markdown table enhancements */
+.markdown table {
+  border-collapse: collapse;
+  width: 100%;
+  margin: 2rem 0;
+}
+
+.markdown table th {
+  background: rgba(76, 110, 245, 0.1);
+  font-weight: 600;
+  padding: 0.75rem 1rem;
+  text-align: left;
+}
+
+.markdown table td {
+  padding: 0.75rem 1rem;
+  border-bottom: 1px solid rgba(76, 110, 245, 0.1);
+}
+
+.markdown table tr:hover {
+  background: rgba(76, 110, 245, 0.05);
+}
+
+/* Admonitions enhancement */
+.admonition {
+  border-radius: 12px;
+  margin: 1.5rem 0;
+}
+
+/* Blog author avatar styling */
+.avatar__photo {
+  width: 48px !important;
+  height: 48px !important;
+  object-fit: cover;
+  border: 2px solid var(--ifm-color-primary);
+}
+
+.avatar--vertical .avatar__photo {
+  width: 100px !important;
+  height: 100px !important;
+}
+
+.blog-post-item .avatar__photo {
+  width: 40px !important;
+  height: 40px !important;
+}
+
 /* Responsive design improvements */
 @media (max-width: 768px) {
   .hero .hero__title {
@@ -217,5 +344,9 @@
 
   .hero .hero__subtitle {
     font-size: 1.1rem;
+  }
+
+  .blog-post-item header h2 {
+    font-size: 1.5rem;
   }
 }

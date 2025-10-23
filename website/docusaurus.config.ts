@@ -6,7 +6,7 @@ import type * as Preset from '@docusaurus/preset-classic';
 
 const config: Config = {
   title: 'Ora Development Notebook',
-  tagline: 'Experimental smart contract language research and development',
+  tagline: 'Pre-ASUKA Alpha - Smart Contract Language for EVM',
   favicon: 'img/favicon.ico',
 
   // Future flags, see https://docusaurus.io/docs/api/docusaurus-config#future
@@ -42,12 +42,19 @@ const config: Config = {
       {
         docs: {
           sidebarPath: './sidebars.ts',
-          // Please change this to your repo.
-          // Remove this to remove the "edit this page" links.
           editUrl:
             'https://github.com/oralang/Ora/tree/main/website/',
         },
-
+        blog: {
+          showReadingTime: true,
+          blogTitle: 'Ora Development Blog',
+          blogDescription: 'Updates on Ora language development, compiler progress, and technical deep-dives',
+          postsPerPage: 'ALL',
+          blogSidebarTitle: 'Recent Posts',
+          blogSidebarCount: 10,
+          editUrl:
+            'https://github.com/oralang/Ora/tree/main/website/',
+        },
         theme: {
           customCss: './src/css/custom.css',
         },
@@ -69,43 +76,31 @@ const config: Config = {
           type: 'docSidebar',
           sidebarId: 'tutorialSidebar',
           position: 'left',
-          label: 'Documentation',
+          label: 'Docs',
         },
         {
-          type: 'dropdown',
-          label: 'Technical Specs',
+          to: '/docs/examples',
+          label: 'Examples',
           position: 'left',
-          items: [
-            {
-              to: '/docs/specifications/',
-              label: 'Overview',
-            },
-            {
-              to: '/docs/specifications/grammar',
-              label: 'Grammar',
-            },
-            {
-              to: '/docs/specifications/mlir',
-              label: 'MLIR',
-            },
-            {
-              to: '/docs/specifications/formal-verification',
-              label: 'Formal Verification',
-            },
-            {
-              to: '/docs/specifications/api',
-              label: 'API',
-            },
-          ],
         },
         {
-          to: '/api-docs/',
-          label: 'API Reference',
+          to: '/blog',
+          label: 'Blog',
           position: 'left',
+        },
+        {
+          to: '/docs/roadmap-to-asuka',
+          label: 'Roadmap',
+          position: 'left',
+        },
+        {
+          href: 'https://github.com/oralang/Ora/blob/main/CONTRIBUTING.md',
+          label: 'Contributing',
+          position: 'right',
         },
         {
           href: 'https://github.com/oralang/Ora',
-          label: 'Source Code',
+          label: 'GitHub',
           position: 'right',
         },
       ],
@@ -114,7 +109,7 @@ const config: Config = {
       style: 'dark',
       links: [
         {
-          title: 'Development Notebook',
+          title: 'Documentation',
           items: [
             {
               label: 'Introduction',
@@ -123,10 +118,6 @@ const config: Config = {
             {
               label: 'Getting Started',
               to: '/docs/getting-started',
-            },
-            {
-              label: 'Asuka Release',
-              to: '/docs/asuka-release',
             },
             {
               label: 'Language Basics',
@@ -139,45 +130,54 @@ const config: Config = {
           ],
         },
         {
-          title: 'Technical Documentation',
+          title: 'Specifications',
           items: [
             {
-              label: 'Specifications',
-              to: '/docs/specifications/',
-            },
-            {
-              label: 'API Reference',
-              to: '/api-docs/',
-            },
-            {
-              label: 'Grammar Definition',
+              label: 'Grammar',
               to: '/docs/specifications/grammar',
             },
             {
               label: 'MLIR Integration',
               to: '/docs/specifications/mlir',
             },
+            {
+              label: 'API Reference',
+              to: '/docs/specifications/api',
+            },
           ],
         },
         {
-          title: 'Development',
+          title: 'More',
           items: [
             {
-              label: 'Source Code',
+              label: 'Blog',
+              to: '/blog',
+            },
+            {
+              label: 'Roadmap',
+              to: '/docs/roadmap-to-asuka',
+            },
+          ],
+        },
+        {
+          title: 'Community',
+          items: [
+            {
+              label: 'GitHub',
               href: 'https://github.com/oralang/Ora',
             },
             {
-              label: 'Issues & Bugs',
+              label: 'Issues',
               href: 'https://github.com/oralang/Ora/issues',
             },
             {
-              label: 'Discussions',
-              href: 'https://github.com/oralang/Ora/discussions',
+              label: 'Contributing',
+              href: 'https://github.com/oralang/Ora/blob/main/CONTRIBUTING.md',
             },
           ],
         },
       ],
-      copyright: `Copyright © ${new Date().getFullYear()} Ora Language Project. Experimental research project - not for production use.`,
+      copyright: `Copyright © 2025 Ora Language Project. Pre-ASUKA Alpha - Not for production use.`,
     },
     colorMode: {
       defaultMode: 'dark',

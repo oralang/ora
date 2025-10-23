@@ -4,33 +4,42 @@ sidebar_position: 1
 
 # Introduction to Ora
 
-Welcome to the **Ora Development Notebook** - documentation for an experimental smart contract language with formal verification capabilities.
+> **Pre-ASUKA Alpha** | **Contributors Welcome** | **Active Development**
 
-> **🚧 EXPERIMENTAL PROJECT**: Ora is in active development and is NOT ready for production use. This documentation serves as an open notebook documenting the language design and implementation progress. Features, syntax, and APIs are subject to change without notice.
+Welcome to the **Ora Development Notebook** - documentation for an experimental smart contract language targeting EVM/Yul with explicit semantics and clean compilation pipeline.
+
+## Project Status
+
+Ora is in **pre-release alpha**, working toward the first ASUKA release. The core compiler infrastructure is functional, with active development on Yul code generation and standard library.
+
+**Not ready for production.** Syntax and features may change without notice.
 
 ## What is Ora?
 
 Ora is an experimental smart contract language that compiles to Yul (Ethereum's intermediate language) and EVM bytecode. Built with Zig, it aims to provide safety guarantees through formal verification while maintaining high performance and developer productivity.
 
-### Development Status
+### What Works Now
 
-**✅ Currently Functional:**
-- Core compilation pipeline: Lexical analysis → Syntax analysis → Semantic analysis → HIR → Yul → Bytecode
-- Basic smart contract syntax and compilation
-- Yul code generation and EVM bytecode output
-- Error handling foundations
+✅ **Compiler Pipeline**
+- Full lexer and parser (23/29 examples pass)
+- Type checking and semantic analysis
+- AST generation and validation
+- MLIR lowering for optimization
 
-**🚧 In Active Development:**
-- **Formal Verification**: Mathematical proof capabilities with `requires`, `ensures`, and `invariant` statements
-- **Advanced Safety**: Memory safety guarantees and overflow protection
-- **Comprehensive Error Handling**: Full `!T` error union implementation
-- **Standard Library**: Core utilities and common patterns
+✅ **Language Features**
+- Storage, memory, and transient storage regions
+- Error unions (`!T | E1 | E2`)
+- Switch statements (expression and statement forms)
+- Structs, enums, and custom types
+- Function preconditions (`requires`)
+- Contract declarations and event logs
 
-**📋 Planned Features:**
-- Compile-time evaluation optimizations
-- Advanced type system features
-- IDE integration and tooling
-- Comprehensive testing frameworks
+### In Development
+
+🚧 **Yul Backend**: Complete code generation for EVM bytecode
+🚧 **Standard Library**: Core utilities and common patterns
+🚧 **For Loops**: Advanced capture syntax
+🚧 **Formal Verification**: Full `requires`/`ensures` implementation
 
 ## Language Design Philosophy
 
@@ -65,8 +74,8 @@ contract SimpleStorage {
 
 ```ora
 function transfer(to: address, amount: u256) -> bool
-    requires balances[sender] >= amount
-    ensures balances[sender] + balances[to] == old(balances[sender]) + old(balances[to])
+    requires(balances[sender] >= amount)
+    ensures(balances[sender] + balances[to] == old(balances[sender]) + old(balances[to]))
 {
     balances[sender] -= amount;
     balances[to] += amount;
@@ -122,14 +131,31 @@ This is an **experimental project** serving as:
 - Critical infrastructure
 - Stable API requirements
 
-## Contributing & Community
+## Contributing
 
-Ora is an open-source research project. Follow development:
+**We welcome contributors!** Ora is a great project for learning compiler development and language design.
 
-- **Source Code**: [oralang/Ora](https://github.com/oralang/Ora)
-- **Issues**: [Report bugs or discuss features](https://github.com/oralang/Ora/issues)
-- **Discussions**: [GitHub Discussions](https://github.com/oralang/Ora/discussions)
+**Ways to contribute:**
+- 🐛 Report bugs or unexpected behavior
+- 📝 Improve documentation and examples
+- ✅ Add test cases
+- 🔧 Implement language features
+- 💡 Participate in design discussions
+
+See [CONTRIBUTING.md](https://github.com/oralang/Ora/blob/main/CONTRIBUTING.md) for setup and guidelines.
+
+**Good first issues:**
+- Add test cases to `tests/fixtures/`
+- Improve parser error messages  
+- Create more examples in `ora-example/`
+- Update documentation
+
+## Community
+
+- **GitHub**: [oralang/Ora](https://github.com/oralang/Ora)
+- **Issues**: [Report bugs](https://github.com/oralang/Ora/issues)
+- **Discussions**: [Join conversations](https://github.com/oralang/Ora/discussions)
 
 ---
 
-*Last updated: December 2024*
+*Last updated: October 2025*

@@ -1,13 +1,27 @@
 # Ora
 
-An experimental (yet) smart-contract language and compiler targeting Yul/EVM. Ora emphasizes explicit semantics (types, memory regions, error unions) and a clean compilation pipeline suitable for analysis and verification.
+> **Pre-ASUKA Alpha** | Early Development | Contributors Welcome
 
-The compiler includes an MLIR (Multi-Level Intermediate Representation) lowering system that leverages the LLVM MLIR framework (https://mlir.llvm.org) for advanced analysis, optimization, and potential alternative code generation paths.
+An experimental smart-contract language and compiler targeting Yul/EVM. Ora emphasizes explicit semantics (types, memory regions, error unions) and a clean compilation pipeline suitable for analysis and verification.
 
 ## Status
 
-- Not production-ready; syntax and semantics are evolving.
-- CI builds and tests cover lexer, parser, early semantics, and Yul codegen stubs.
+🚧 **Pre-Release Alpha**: Ora is under active development toward the first ASUKA release. The core compiler works, but syntax and semantics are evolving.
+
+**What Works Now:**
+- ✅ Full lexer and parser (23/29 examples pass)
+- ✅ Type checking and semantic analysis
+- ✅ Storage, memory, and transient storage regions
+- ✅ Error unions and basic error handling
+- ✅ Switch statements (expression and statement forms)
+- ✅ Structs, enums, and custom types
+- ✅ MLIR lowering for optimization
+
+**In Development:**
+- 🚧 Advanced for-loop syntax
+- 🚧 Complete Yul backend
+- 🚧 Standard library
+- 🚧 Formal verification (requires/ensures)
 
 ## Highlights
 
@@ -18,19 +32,25 @@ The compiler includes an MLIR (Multi-Level Intermediate Representation) lowering
 
 ## Quick Start
 
-- Prerequisites:
-  - Zig 0.14.1+
-  - CMake (for vendor Solidity libs)
-  - Git (for submodules)
-  - MLIR (optional, for MLIR lowering features)
+**Prerequisites:** Zig 0.15.x, CMake, Git
 
 ```bash
 git clone https://github.com/oralang/Ora.git
 cd Ora
-git submodule update --init --recursive
+./setup.sh  # Automated setup (installs deps, builds, tests)
 
-zig build
-zig build test
+# Or manually:
+git submodule update --init --depth=1 vendor/solidity
+zig build && zig build test
+```
+
+**Try it:**
+```bash
+# Parse a single file
+./zig-out/bin/ora parse ora-example/smoke.ora
+
+# Validate all examples
+./scripts/validate-examples.sh
 ```
 
 ## Language Snapshot
@@ -117,8 +137,8 @@ fn classify(x: u32) -> u32 {
 
 ```ora
 fn sum(a: u32, b: u32) -> u32
-    requires a <= 1_000 and b <= 1_000
-    ensures  result >= a and result >= b
+    requires(a <= 1_000 && b <= 1_000)
+    ensures(result >= a && result >= b)
 {
     return a + b;
 }
@@ -155,138 +175,114 @@ move amount from balances[sender] to balances[receiver];
 ## Project Structure
 
 ```
-src/            // compiler sources (Zig)
-  ast/          // AST, type info
-  parser/       // lexer/parser
-  semantics/    // semantic analyzers
-  mlir/         // MLIR lowering system
-  code-bin/     // extra tools (IR/optimizer)
-tests/          // fixtures and test suites
-docs/           // specifications and notes
-website/docs/   // user documentation (Docusaurus)
-vendor/solidity // vendor libs
+src/                    # Compiler source code (Zig)
+  ast/                  # AST and type information
+  parser/               # Lexer and parser
+  semantics/            # Semantic analysis
+  mlir/                 # MLIR lowering system
+tests/                  # Test fixtures and suites
+  fixtures/             # Test input files
+    semantics/valid/    # Valid Ora programs
+    semantics/invalid/  # Programs with expected errors
+ora-example/            # Example Ora programs (validated)
+docs/                   # Documentation and guides
+  tech-work/            # Internal AI-assisted development docs
+website/                # Documentation website (Docusaurus)
+  docs/                 # User-facing documentation
+scripts/                # Utility scripts (validation, etc.)
+vendor/                 # External dependencies
 ```
 
 ## Testing
 
-- Run all suites: `zig build test`
-- Fixture-based semantics tests live under `tests/fixtures/semantics/{valid,invalid}`.
+### Running Tests
 
-## MLIR Integration
+```bash
+# Run all compiler tests
+zig build test
 
-The Ora compiler includes comprehensive MLIR lowering capabilities:
+# Validate all example files
+./scripts/validate-examples.sh
 
-### Features
-- **Type Mapping:** All Ora types mapped to appropriate MLIR representations
-- **Memory Regions:** Storage/memory/tstore semantics preserved in MLIR
-- **Source Locations:** Complete source location tracking through MLIR
-- **Error Handling:** Comprehensive error reporting with recovery
-- **Pass Integration:** Works with MLIR's optimization pass infrastructure
-- **Verification:** Contract preconditions and postconditions in MLIR
+# Run specific test suite
+zig build test -- <test-name>
+```
 
-### MLIR CLI Usage
+### Test Organization
 
-Generate MLIR output:
+- **Unit tests**: Embedded in source files (`src/**/*.zig`)
+- **Fixture tests**: `tests/fixtures/semantics/{valid,invalid}`
+- **Example validation**: `ora-example/` (validated by script)
+- **Integration tests**: `tests/compiler_e2e_test.zig`
+
+## Advanced Features
+
+### MLIR Integration
+
+Ora includes MLIR (Multi-Level Intermediate Representation) lowering for advanced optimization:
+
 ```bash
 ./zig-out/bin/ora compile --emit-mlir contract.ora
-```
-
-Verify MLIR correctness:
-```bash
-./zig-out/bin/ora compile --mlir-verify contract.ora
-```
-
-Run MLIR optimization passes:
-```bash
 ./zig-out/bin/ora compile --mlir-passes="canonicalize,cse" contract.ora
 ```
 
-### Example MLIR Output
+See [website/docs/specifications/mlir.md](website/docs/specifications/mlir.md) for details.
 
-For a simple Ora function:
-```ora
-fn add(a: u256, b: u256) -> u256 {
-    return a + b;
-}
-```
+## CLI Usage
 
-The MLIR output includes:
-```mlir
-func.func @add(%arg0: i256, %arg1: i256) -> i256 {
-    %0 = arith.addi %arg0, %arg1 : i256
-    return %0 : i256
-}
-```
-
-See `docs/mlir-lowering.md` for comprehensive technical documentation.
-
-## CLI usage
-
-Use the installed executable:
-
-- Lex: dump tokens
 ```bash
-./zig-out/bin/ora lex tests/fixtures/semantics/valid/storage_region_moves.ora
-```
-Example output (first lines):
-```
-Lexing tests/fixtures/semantics/valid/storage_region_moves.ora
-==================================================
-Generated 44 tokens
+# Lex (tokenize) a file
+./zig-out/bin/ora lex contract.ora
 
-[  0] Token{ .type = Storage, .lexeme = "storage", .range = 1:1-1:8 (0:7) }
-[  1] Token{ .type = Var, .lexeme = "var", .range = 1:9-1:12 (8:11) }
-[  2] Token{ .type = Identifier, .lexeme = "s", .range = 1:13-1:14 (12:13) }
-[  3] Token{ .type = Colon, .lexeme = ":", .range = 1:14-1:15 (13:14) }
-[  4] Token{ .type = U32, .lexeme = "u32", .range = 1:16-1:19 (15:18) }
-...
+# Parse and show AST
+./zig-out/bin/ora parse contract.ora
+
+# Generate AST JSON
+./zig-out/bin/ora -o build ast contract.ora
+
+# Compile (when Yul backend is complete)
+./zig-out/bin/ora compile contract.ora
 ```
 
-- Parse: lex + parse and print AST summary
-```bash
-./zig-out/bin/ora parse tests/fixtures/semantics/valid/storage_region_moves.ora
-```
-Example output:
-```
-Parsing tests/fixtures/semantics/valid/storage_region_moves.ora
-==================================================
-Lexed 44 tokens
-Generated 2 AST nodes
+See [website/docs/specifications/api.md](website/docs/specifications/api.md) for complete CLI reference.
 
-[0] Variable Storagevar 's'
-[1] Function 'f' (0 params)
-```
+## Roadmap to ASUKA Release
 
-- AST JSON: generate and save AST to file
-```bash
-./zig-out/bin/ora -o build ast tests/fixtures/semantics/valid/storage_region_moves.ora
-```
-Example output:
-```
-Generating AST for tests/fixtures/semantics/valid/storage_region_moves.ora
-==================================================
-Generated 2 AST nodes
-AST saved to build/storage_region_moves.ast.json
-```
+The first stable release (ASUKA) will include:
+- ✅ Complete lexer/parser pipeline
+- ✅ Type checking and semantic analysis
+- 🚧 Full Yul code generation
+- 🚧 Basic standard library
+- 📋 Comprehensive documentation
+- 📋 Language specification v1.0
 
-Notes:
-- Commands shown above are verified against the current CLI (`src/main.zig`).
-- `parse` prints a concise AST summary; CST building is internal and not dumped by default.
-
-## Roadmap (abridged)
-
-- Complete call typing and operator typing
-- Re-enable and harden unknown-identifier walker
-- Switch typing and exhaustiveness
-- Region/immutability refinements
-- Improved diagnostics and IDs
-- Yul codegen completion and validation
+See [docs/roadmap-to-asuka.md](website/docs/roadmap-to-asuka.md) for details.
 
 ## Contributing
 
-- File issues for bugs and proposals
-- PRs are welcome for tests, docs, analyzers, and parser work
+**We welcome contributors!** Ora is in active development and there are many ways to help:
+
+- 🐛 **Bug Reports**: File issues for bugs or unexpected behavior
+- 📝 **Documentation**: Improve examples, guides, or specifications
+- ✅ **Testing**: Add test cases or validate examples
+- 🔧 **Compiler Development**: Implement features, optimize passes, improve errors
+- 💡 **Language Design**: Participate in discussions about syntax and semantics
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for setup instructions and development guidelines.
+
+**Good First Issues:**
+- Add more test cases to `tests/fixtures/`
+- Improve error messages in parser
+- Add examples to `ora-example/`
+- Update documentation for current features
+
+## Community
+
+- **GitHub**: [oralang/Ora](https://github.com/oralang/Ora)
+- **Issues**: [Report bugs](https://github.com/oralang/Ora/issues)
+- **Discussions**: [Join the conversation](https://github.com/oralang/Ora/discussions)
+- **Website**: [ora-lang.org](https://ora-lang.org)
 
 ## License
 
-- See `LICENSE` for details.
+See `LICENSE` for details.

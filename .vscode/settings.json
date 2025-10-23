@@ -23,5 +23,6 @@
         "unordered_map": "cpp",
         "unordered_set": "cpp",
         "vector": "cpp"
-    }
+    },
+    "cmake.sourceDirectory": "/Users/logic/Ora/Ora/vendor/solidity"
 }

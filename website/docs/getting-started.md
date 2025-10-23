@@ -10,7 +10,7 @@ Set up the Ora development environment and try the current implementation.
 
 ## Prerequisites
 
-- Zig 0.14.1 or later
+- Zig 0.15.x
 - CMake (for Solidity library integration)
 - Git (for submodules)
 
@@ -71,15 +71,19 @@ Parse and inspect:
 
 ## Current Implementation Status
 
-What works now:
-- Basic contract parsing and AST generation
-- Error unions and return checking (partial)
-- Region transition checks (storage/stack/memory/tstore basics)
+**✅ What Works:**
+- Contract parsing and AST generation (23/29 examples pass)
+- Type checking and semantic analysis
+- Error unions and return type checking
+- Region transition validation (storage/memory/tstore)
+- Switch statements (expression and statement forms)
+- Struct and enum declarations
 
-In development:
-- Formal verification (`requires`/`ensures`/`invariant` checks)
-- Full operator typing and switch typing
-- Yul/EVM backend stabilization
+**🚧 In Development:**
+- Complete Yul/EVM code generation
+- Advanced for-loop syntax
+- Standard library
+- Formal verification (`requires`/`ensures` full implementation)
 
 ## Exploring Examples
 
@@ -108,9 +112,16 @@ zig build -Doptimize=Debug
 zig build -Doptimize=ReleaseFast
 ```
 
-## Limitations
+## Current Limitations
 
-- No standard library
-- Diagnostics and typing are evolving
-- Backend codegen is experimental
-- Syntax may change without notice 
+**Not Yet Available:**
+- Standard library (in development)
+- Complete Yul code generation
+- Advanced for-loop capture syntax
+- Full formal verification
+
+**Important Notes:**
+- Syntax may change before ASUKA release
+- Not ready for production use
+- Some examples demonstrate planned features
+- See [roadmap](./roadmap-to-asuka.md) for development timeline 

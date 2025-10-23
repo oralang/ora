@@ -14,23 +14,27 @@ Ora is designed as a smart contract language with formal verification capabiliti
 
 ### Current Implementation Status
 
-**✅ Implemented:**
-- Basic contract structure
-- Function definitions
-- Storage variables
-- Basic types (u256, address, bool)
-- Simple control flow
+**✅ Complete (79% examples pass):**
+- Contract structure and declarations
+- Function definitions with visibility
+- Storage, memory, and transient variables
+- Types: primitives, structs, enums, maps
+- Error unions (`!T | E1 | E2`)
+- Switch statements (expression and statement forms)
+- Control flow (if/else, while loops)
+- Event logs
 
 **🚧 In Development:**
-- Formal verification syntax
-- Advanced error handling
-- Memory safety features
-- Standard library functions
+- For loops with capture syntax
+- Complete Yul code generation
+- Standard library
+- Full formal verification
 
-**📋 Planned:**
-- Comprehensive type system
-- Advanced compile-time features
+**📋 Planned for ASUKA:**
+- Advanced type features
+- Compile-time evaluation
 - IDE integration
+- Comprehensive standard library
 
 ## Contract Structure
 
@@ -114,9 +118,9 @@ var approved: map[address, map[address, u256]];
 
 // Custom struct types
 struct User {
-    name: string,
-    balance: u256,
-    active: bool,
+    name: string;
+    balance: u256;
+    active: bool;
 }
 
 // Struct usage in storage
@@ -374,10 +378,10 @@ fn check_zero_address(addr: address) -> bool {
 
 ```ora
 fn transfer(to: address, amount: u256) -> bool
-    requires balances[std.transaction.sender] >= amount
-    requires to != std.constants.ZERO_ADDRESS
-    ensures balances[std.transaction.sender] + balances[to] == 
-            old(balances[std.transaction.sender]) + old(balances[to])
+    requires(balances[std.transaction.sender] >= amount)
+    requires(to != std.constants.ZERO_ADDRESS)
+    ensures(balances[std.transaction.sender] + balances[to] == 
+            old(balances[std.transaction.sender]) + old(balances[to]))
 {
     balances[std.transaction.sender] -= amount;
     balances[to] += amount;
@@ -505,4 +509,4 @@ fn remove_user(user: address) -> !bool {
 
 ---
 
-*Last updated: December 2024 - Reflects current implementation status* 
+*Last updated: October 2025 - Reflects current implementation status* 

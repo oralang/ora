@@ -307,8 +307,8 @@ ora.assert %all_positive {ora.requires = true}
 
 ```ora
 fn transfer(amount: u256) 
-requires amount > 0
-requires balance >= amount
+    requires(amount > 0)
+    requires(balance >= amount)
 {
     // function body
 }
@@ -440,9 +440,9 @@ contract Token {
     storage total_supply: u256;
     
     fn transfer(to: address, amount: u256)
-    requires balance[msg.sender] >= amount
-    ensures balance[to] == old(balance[to]) + amount
-    ensures balance[msg.sender] == old(balance[msg.sender]) - amount
+        requires(balance[msg.sender] >= amount)
+        ensures(balance[to] == old(balance[to]) + amount)
+        ensures(balance[msg.sender] == old(balance[msg.sender]) - amount)
     {
         move amount from msg.sender to to;
         log Transfer(from: msg.sender, to: to, amount: amount);

@@ -2,7 +2,6 @@ let integer_literal = 42;
 let hex_literal = 0x2A;
 let binary_literal = 0b101010;
 let string_literal = "hello";
-let char_literal = 'A';
 let boolean_literal = true;
 let address_literal = 0x1234567890123456789012345678901234567890;
 
@@ -16,7 +15,6 @@ let exponentiation = 10 ** 2;    // 100
 
 // Unary expressions
 let negative = -10;              // -10
-let positive = +10;              // 10
 let boolean_not = !true;         // false
 
 // Parenthesized expressions

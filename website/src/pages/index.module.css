@@ -1,19 +1,35 @@
-/**
- * CSS files with the .module.css suffix will be treated as CSS modules
- * and scoped locally.
- */
-
+/* Hero Banner */
 .heroBanner {
-  padding: 6rem 0;
+  padding: 4rem 0;
   text-align: center;
   position: relative;
   overflow: hidden;
+  background: linear-gradient(135deg, var(--ifm-color-primary) 0%, var(--ora-accent-purple) 100%);
 }
 
-@media screen and (max-width: 996px) {
-  .heroBanner {
-    padding: 4rem 2rem;
-  }
+.statusBadge {
+  display: flex;
+  gap: 0.5rem;
+  justify-content: center;
+  margin-bottom: 1.5rem;
+}
+
+.badge {
+  background: rgba(255, 255, 255, 0.2);
+  backdrop-filter: blur(10px);
+  padding: 0.4rem 1rem;
+  border-radius: 20px;
+  font-weight: 600;
+  font-size: 0.85rem;
+  color: white;
+}
+
+.heroDescription {
+  font-size: 1.1rem;
+  max-width: 600px;
+  margin: 1.5rem auto;
+  opacity: 0.95;
+  line-height: 1.6;
 }
 
 .buttons {
@@ -21,215 +37,229 @@
   align-items: center;
   justify-content: center;
   gap: 1rem;
-  margin: 2rem 0;
+  margin-top: 2rem;
   flex-wrap: wrap;
 }
 
-@media screen and (max-width: 768px) {
-  .buttons {
-    flex-direction: column;
-    gap: 0.8rem;
-  }
-}
-
-/* Experimental Status Banner */
-.statusBanner {
-  max-width: 800px;
-  margin: 2rem auto;
-}
-
-.experimentalWarning {
-  background: rgba(239, 68, 68, 0.1);
-  border: 2px solid rgba(239, 68, 68, 0.3);
-  border-radius: 12px;
-  padding: 1.5rem;
+.stats {
   display: flex;
-  flex-direction: column;
-  gap: 0.5rem;
-  backdrop-filter: blur(10px);
+  justify-content: center;
+  gap: 3rem;
+  margin-top: 3rem;
+  flex-wrap: wrap;
 }
 
-.experimentalWarning strong {
-  color: #fca5a5;
-  font-size: 1.1rem;
-  font-weight: 600;
-}
-
-.experimentalWarning span {
-  color: rgba(255, 255, 255, 0.9);
-  font-size: 0.95rem;
-  line-height: 1.5;
-}
-
-/* Implementation Status */
-.implementationStatus {
-  max-width: 700px;
-  margin: 3rem auto;
-}
-
-.statusGrid {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-  gap: 1.5rem;
-  margin-top: 1rem;
-}
-
-.statusItem {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  text-align: center;
-  gap: 0.5rem;
-  padding: 1rem;
-  background: rgba(255, 255, 255, 0.1);
-  border-radius: 8px;
-  backdrop-filter: blur(5px);
-}
-
-.statusIcon {
-  font-size: 1.5rem;
-  margin-bottom: 0.5rem;
-}
-
-.statusItem strong {
-  color: rgba(255, 255, 255, 0.95);
-  font-size: 1rem;
-  font-weight: 600;
-}
-
-.statusItem span:last-child {
-  color: rgba(255, 255, 255, 0.7);
-  font-size: 0.85rem;
-  line-height: 1.3;
-}
-
-/* Code Example Styling */
-.codeExample {
-  max-width: 600px;
-  margin: 3rem auto;
-  text-align: left;
-}
-
-.codeHeader {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  margin-bottom: 0.5rem;
-  padding: 0 0.5rem;
-}
-
-.codeHeader span {
-  color: rgba(255, 255, 255, 0.9);
-  font-weight: 600;
-  font-size: 0.9rem;
-}
-
-.codeHeader small {
-  color: rgba(255, 255, 255, 0.6);
-  font-size: 0.8rem;
-  font-style: italic;
-}
-
-.codeBlock {
-  background: rgba(255, 255, 255, 0.1);
-  border-radius: 12px;
-  padding: 1.5rem;
-  backdrop-filter: blur(10px);
-  border: 1px solid rgba(255, 255, 255, 0.2);
-  font-family: 'JetBrains Mono', 'Fira Code', Monaco, monospace;
-  font-size: 0.9rem;
-  line-height: 1.6;
-  color: rgba(255, 255, 255, 0.9);
-  overflow-x: auto;
-}
-
-.codeBlock code {
-  background: none;
-  color: inherit;
-  padding: 0;
-  font-size: inherit;
-}
-
-/* Progress Section */
-.progressSection {
-  max-width: 800px;
-  margin: 4rem auto 2rem;
+.stat {
   text-align: center;
 }
 
-.progressSection h3 {
-  color: rgba(255, 255, 255, 0.95);
-  font-size: 1.5rem;
-  margin-bottom: 2rem;
-  font-weight: 600;
+.statValue {
+  font-size: 2rem;
+  font-weight: 700;
+  color: white;
 }
 
-.progressGrid {
+.statLabel {
+  font-size: 0.9rem;
+  opacity: 0.9;
+  color: white;
+}
+
+/* Features Section */
+.features {
+  padding: 4rem 0;
+  background: var(--ifm-background-surface-color);
+}
+
+.featureGrid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
   gap: 2rem;
   margin-top: 2rem;
 }
 
-.progressItem {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  text-align: center;
-  gap: 0.5rem;
-  padding: 1.5rem;
-  background: rgba(255, 255, 255, 0.05);
+.featureCard {
+  background: var(--ifm-background-color);
+  border: 1px solid rgba(76, 110, 245, 0.1);
   border-radius: 12px;
-  border: 1px solid rgba(255, 255, 255, 0.1);
-  backdrop-filter: blur(5px);
+  padding: 2rem;
+  transition: all 0.3s ease;
 }
 
-.progressItem strong {
-  color: rgba(255, 255, 255, 0.95);
-  font-size: 1.1rem;
-  font-weight: 600;
+.featureCard:hover {
+  transform: translateY(-4px);
+  box-shadow: 0 12px 40px rgba(76, 110, 245, 0.15);
+}
+
+.featureCard h3 {
+  margin-bottom: 1.5rem;
+  font-size: 1.5rem;
+}
+
+.featureCard ul {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+
+.featureCard li {
+  padding: 0.5rem 0;
+  padding-left: 1.5rem;
+  position: relative;
+}
+
+.featureCard li::before {
+  content: "→";
+  position: absolute;
+  left: 0;
+  color: var(--ifm-color-primary);
+  font-weight: bold;
+}
+
+/* Code Section */
+.codeSection {
+  padding: 4rem 0;
+}
+
+.codeSection h2 {
+  text-align: center;
+  font-size: 2.5rem;
   margin-bottom: 0.5rem;
 }
 
-.progressItem span {
-  color: rgba(255, 255, 255, 0.8);
-  font-size: 0.9rem;
-  line-height: 1.4;
+.codeSection>.container>p {
+  text-align: center;
+  font-size: 1.2rem;
+  opacity: 0.8;
+  margin-bottom: 2rem;
 }
 
-@media screen and (max-width: 768px) {
-  .codeExample {
-    margin: 2rem auto;
+.codeContainer {
+  max-width: 800px;
+  margin: 0 auto;
+  border-radius: 12px;
+  overflow: hidden;
+  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.1);
+}
+
+.codeBlock {
+  margin: 0;
+  padding: 2rem;
+  background: var(--ifm-background-surface-color);
+  font-size: 0.9rem;
+  line-height: 1.6;
+  overflow-x: auto;
+}
+
+.codeActions {
+  display: flex;
+  justify-content: center;
+  gap: 1rem;
+  margin-top: 2rem;
+  flex-wrap: wrap;
+}
+
+/* Contribute Section */
+.contribute {
+  padding: 4rem 0;
+  background: var(--ifm-background-surface-color);
+}
+
+.contribute h2 {
+  text-align: center;
+  font-size: 2.5rem;
+  margin-bottom: 0.5rem;
+}
+
+.contribute>.container>p {
+  text-align: center;
+  font-size: 1.2rem;
+  opacity: 0.8;
+  margin-bottom: 3rem;
+}
+
+.contributeGrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 2rem;
+  margin-top: 2rem;
+}
+
+.contributeCard {
+  background: var(--ifm-background-color);
+  border: 1px solid rgba(76, 110, 245, 0.1);
+  border-radius: 12px;
+  padding: 2rem;
+  text-align: center;
+  transition: all 0.3s ease;
+}
+
+.contributeCard:hover {
+  transform: translateY(-4px);
+  box-shadow: 0 12px 40px rgba(76, 110, 245, 0.15);
+  border-color: var(--ifm-color-primary);
+}
+
+.contributeCard h3 {
+  font-size: 1.5rem;
+  margin-bottom: 1rem;
+}
+
+.contributeCard p {
+  margin-bottom: 1.5rem;
+  opacity: 0.8;
+}
+
+.contributeCard a {
+  color: var(--ifm-color-primary);
+  font-weight: 600;
+  text-decoration: none;
+}
+
+.contributeCard a:hover {
+  text-decoration: underline;
+}
+
+/* Responsive Design */
+@media (max-width: 996px) {
+  .heroBanner {
+    padding: 3rem 0;
   }
 
-  .codeBlock {
-    padding: 1rem;
-    font-size: 0.8rem;
-  }
-
-  .statusGrid {
-    grid-template-columns: 1fr;
-    gap: 1rem;
-  }
-
-  .progressGrid {
-    grid-template-columns: 1fr;
-    gap: 1.5rem;
-  }
-
-  .progressItem {
-    padding: 1rem;
-  }
-
-  .experimentalWarning {
-    padding: 1rem;
-  }
-
-  .experimentalWarning strong {
+  .heroDescription {
     font-size: 1rem;
   }
 
-  .experimentalWarning span {
-    font-size: 0.9rem;
+  .stats {
+    gap: 2rem;
+  }
+
+  .statValue {
+    font-size: 1.5rem;
+  }
+
+  .featureGrid,
+  .contributeGrid {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 576px) {
+  .heroBanner {
+    padding: 2rem 0;
+  }
+
+  .buttons {
+    flex-direction: column;
+    width: 100%;
+  }
+
+  .buttons .button {
+    width: 100%;
+  }
+
+  .codeBlock {
+    font-size: 0.8rem;
+    padding: 1rem;
   }
 }

@@ -17,11 +17,16 @@ const sidebars: SidebarsConfig = {
   tutorialSidebar: [
     'intro',
     'getting-started',
-    'asuka-release',
     'language-basics',
-    'switch',
-    'struct-types',
     'examples',
+    {
+      type: 'category',
+      label: 'Language Features',
+      items: [
+        'switch',
+        'struct-types',
+      ],
+    },
     {
       type: 'category',
       label: 'Specifications',
@@ -29,11 +34,9 @@ const sidebars: SidebarsConfig = {
         'specifications/index',
         'specifications/grammar',
         'specifications/mlir',
-        'specifications/formal-verification',
         'specifications/api',
       ],
     },
-    'api-reference',
   ],
 };
 
