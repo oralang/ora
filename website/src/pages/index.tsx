@@ -130,12 +130,13 @@ function CodeExample() {
     
     log Transfer(sender: address, recipient: address, amount: u256);
     
-    pub fn transfer(to: address, amount: u256) -> !bool {
-        requires(balances[std.transaction.sender] >= amount);
-        requires(to != std.constants.ZERO_ADDRESS);
-        
+    pub fn transfer(to: address, amount: u256) -> !bool
+        requires(balances[std.transaction.sender] >= amount)
+        requires(to != std.constants.ZERO_ADDRESS)
+    {
         balances[std.transaction.sender] -= amount;
         balances[to] += amount;
+        @lock(balances[to]);
         
         log Transfer(std.transaction.sender, to, amount);
         return true;

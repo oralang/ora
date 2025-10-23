@@ -18,9 +18,9 @@ struct Point {
 
 struct User {
     name: string;
-    age: u8,
-    balance: u256,
-    location: Point,
+    age: u8;
+    balance: u256;
+    location: Point;
 }
 ```
 
@@ -71,12 +71,12 @@ The compiler analyzes field types and suggests optimizations:
 struct OptimizedData {
     // Small fields packed together (1 storage slot)
     active: bool;     // 1 byte
-    level: u8,        // 1 byte
-    flags: u16,       // 2 bytes
-    counter: u32,     // 4 bytes
+    level: u8;        // 1 byte
+    flags: u16;       // 2 bytes
+    counter: u32;     // 4 bytes
     
     // Large fields get dedicated slots
-    balance: u256,    // 32 bytes (1 slot)
+    balance: u256;    // 32 bytes (1 slot)
     metadata: string; // Dynamic size
 }
 ```
@@ -89,11 +89,11 @@ struct GasOptimized {
     // Group small fields first
     flag1: bool;
     flag2: bool;
-    small_counter: u32,
+    small_counter: u32;
     
     // Place large fields last
-    primary_balance: u256,
-    secondary_balance: u256,
+    primary_balance: u256;
+    secondary_balance: u256;
 }
 ```
 
@@ -204,9 +204,9 @@ Structs with dynamic fields (strings, arrays) have variable gas costs:
 
 ```ora
 struct VariableSize {
-    id: u256,           // Fixed cost
+    id: u256;           // Fixed cost
     name: string;       // Variable cost based on length
-    tags: u32[],        // Variable cost based on array size
+    tags: slice[u32];   // Variable cost based on array size
 }
 ```
 

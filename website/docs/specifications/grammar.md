@@ -126,8 +126,8 @@ doublemap_type ::= "doublemap" "[" type "," type "," type "]"
 array_type ::= "[" type (";" expression)? "]"
 
 # Array types in Ora:
-# [T; N] - Fixed-size array (N elements of type T)
-# [T]    - Dynamic-size array (variable number of elements)
+# [T; N]    - Fixed-size array (N elements of type T)
+# slice[T]  - Dynamic-size array (variable number of elements)
 
 error_union_type ::= type "|" type
 
