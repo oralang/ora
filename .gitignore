@@ -16,3 +16,4 @@ vendor/mlir/lib/
 vendor/mlir
 backup/
 vendor/llvm-project/
+docs/tech-work/
