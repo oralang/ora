@@ -231,20 +231,55 @@ See [website/docs/specifications/mlir.md](website/docs/specifications/mlir.md) f
 ## CLI Usage
 
 ```bash
-# Lex (tokenize) a file
-./zig-out/bin/ora lex contract.ora
+# Compile to EVM bytecode (default)
+./zig-out/bin/ora contract.ora
 
-# Parse and show AST
-./zig-out/bin/ora parse contract.ora
+# Compilation stages
+./zig-out/bin/ora --emit-tokens contract.ora    # Stop after lexing
+./zig-out/bin/ora --emit-ast contract.ora       # Stop after parsing
+./zig-out/bin/ora --emit-mlir contract.ora      # Stop after MLIR generation
+./zig-out/bin/ora --emit-yul contract.ora       # Stop after Yul lowering
 
-# Generate AST JSON
-./zig-out/bin/ora -o build ast contract.ora
+# Optimization levels
+./zig-out/bin/ora -O0 contract.ora              # No optimization
+./zig-out/bin/ora -O1 contract.ora              # Basic optimizations
+./zig-out/bin/ora -O2 contract.ora              # Aggressive optimizations
 
-# Compile (when Yul backend is complete)
-./zig-out/bin/ora compile contract.ora
+# Code analysis
+./zig-out/bin/ora --analyze-complexity contract.ora  # Analyze function complexity
+
+# Output control
+./zig-out/bin/ora -o build/ contract.ora        # Output to directory
+./zig-out/bin/ora --save-all contract.ora       # Save all intermediate stages
+
+# Examples
+./zig-out/bin/ora ora-example/smoke.ora                           # Compile example
+./zig-out/bin/ora --analyze-complexity ora-example/complexity_example.ora  # Analyze complexity
+
+# Showcase: Analyze a realistic DeFi contract (400+ lines)
+./zig-out/bin/ora --analyze-complexity ora-example/defi_lending_pool.ora
 ```
 
-See [website/docs/specifications/api.md](website/docs/specifications/api.md) for complete CLI reference.
+Run `./zig-out/bin/ora --help` for complete options.
+
+### 🎯 Complexity Analysis Showcase
+
+Want to see the power of Ora's analysis tools? Try analyzing our realistic DeFi lending pool contract:
+
+```bash
+./zig-out/bin/ora --analyze-complexity ora-example/defi_lending_pool.ora
+```
+
+This 400+ line contract demonstrates:
+- **15 functions** with varying complexity levels
+- **73% simple functions** - optimal for performance
+- **26% moderate functions** - well-structured business logic
+- Real-world DeFi patterns: lending, borrowing, liquidations, interest calculations
+
+The analysis helps you:
+- ✓ Identify functions suitable for `inline` optimization
+- ○ Ensure moderate complexity stays maintainable  
+- ✗ Catch overly complex functions before they become technical debt
 
 ## Roadmap to ASUKA Release
 

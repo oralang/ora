@@ -20,6 +20,7 @@ pub const ast_builder = @import("ast/ast_builder.zig");
 pub const ast_serializer = @import("ast/ast_serializer.zig");
 pub const typer = @import("typer.zig");
 pub const semantics = @import("semantics.zig");
+pub const complexity = @import("analysis/complexity.zig");
 
 // Yul integration (backend compilation target)
 pub const yul_bindings = @import("yul_bindings.zig");

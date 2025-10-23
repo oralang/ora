@@ -29,6 +29,13 @@ const sidebars: SidebarsConfig = {
     },
     {
       type: 'category',
+      label: 'Optimization',
+      items: [
+        'inline-functions',
+      ],
+    },
+    {
+      type: 'category',
       label: 'Specifications',
       items: [
         'specifications/index',

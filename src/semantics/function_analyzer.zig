@@ -17,6 +17,7 @@ const ast = @import("../ast.zig");
 const state = @import("state.zig");
 const expr = @import("expression_analyzer.zig");
 const locals = @import("locals_binder.zig");
+const complexity = @import("../analysis/complexity.zig");
 
 fn copyOraTypeOwned(allocator: std.mem.Allocator, src: ast.Types.OraType) !ast.Types.OraType {
     switch (src) {
@@ -121,5 +122,18 @@ pub fn collectFunctionSymbols(table: *state.SymbolTable, parent: *state.Scope, f
             },
             else => {},
         };
+    }
+
+    // Complexity analysis for inline functions
+    if (f.is_inline) {
+        var analyzer = complexity.ComplexityAnalyzer.init(table.allocator);
+        const metrics = analyzer.analyzeFunction(f);
+
+        if (metrics.isComplex()) {
+            // TODO: Add proper warning mechanism when available
+            // For now, we just log to stderr
+            std.debug.print("Warning: Function '{s}' is marked inline but has high complexity ({} nodes). " ++
+                "Consider removing 'inline' modifier or refactoring the function.\n", .{ f.name, metrics.node_count });
+        }
     }
 }
