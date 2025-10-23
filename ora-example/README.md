@@ -48,6 +48,30 @@ The following examples use syntax not yet fully implemented:
 - `storage/storage_test_3.ora` - Complex storage operations
 - `max_features.ora` - Comprehensive feature showcase (various advanced features)
 
+## 🔍 Analysis & Development Tools
+
+### Complexity Analysis Examples
+
+- `complexity_example.ora` - Simple example demonstrating different function complexity levels
+  ```bash
+  ./zig-out/bin/ora --analyze-complexity ora-example/complexity_example.ora
+  ```
+
+- `defi_lending_pool.ora` - **Realistic DeFi lending pool contract** (400+ lines)
+  - Complete lending/borrowing implementation
+  - Interest rate calculations
+  - Health factor monitoring
+  - Liquidation mechanics
+  - 15 functions ranging from simple to moderate complexity
+  ```bash
+  ./zig-out/bin/ora --analyze-complexity ora-example/defi_lending_pool.ora
+  ```
+  
+  **Complexity Distribution:**
+  - ✓ 11 Simple functions (73%) - Optimal for performance
+  - ○ 4 Moderate functions (26%) - Well-structured business logic
+  - Perfect example of maintainable smart contract design!
+
 ## Testing Examples
 
 To validate all examples:

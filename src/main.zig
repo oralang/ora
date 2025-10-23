@@ -109,6 +109,7 @@ pub fn main() !void {
     var emit_mlir: bool = false;
     var emit_yul: bool = false;
     var emit_bytecode: bool = false;
+    var analyze_complexity: bool = false;
 
     // MLIR options
     var mlir_verify: bool = false;
@@ -151,6 +152,9 @@ pub fn main() !void {
             i += 1;
         } else if (std.mem.eql(u8, args[i], "--emit-bytecode")) {
             emit_bytecode = true;
+            i += 1;
+        } else if (std.mem.eql(u8, args[i], "--analyze-complexity")) {
+            analyze_complexity = true;
             i += 1;
             // Optimization level flags (-O0, -O1, -O2)
         } else if (std.mem.eql(u8, args[i], "-O0") or std.mem.eql(u8, args[i], "-Onone")) {
@@ -242,6 +246,12 @@ pub fn main() !void {
     }
 
     const file_path = input_file.?;
+
+    // Handle complexity analysis first (it's a special mode)
+    if (analyze_complexity) {
+        try runComplexityAnalysis(allocator, file_path);
+        return;
+    }
 
     // Determine compilation mode
     // If no --emit-X flag is set and no legacy command, default to bytecode
@@ -343,6 +353,8 @@ fn printUsage() !void {
     try stdout.print("  --mlir-timing          - Enable pass timing statistics\n", .{});
     try stdout.print("  --mlir-print-ir        - Print IR before and after passes\n", .{});
     try stdout.print("  --mlir-pipeline        - Use comprehensive MLIR optimization pipeline\n", .{});
+    try stdout.print("\nAnalysis Options:\n", .{});
+    try stdout.print("  --analyze-complexity   - Analyze function complexity metrics\n", .{});
     try stdout.print("\nDevelopment/Debug Options:\n", .{});
     try stdout.print("  --save-all             - Save all intermediate artifacts\n", .{});
     try stdout.print("  --verbose              - Verbose output (show each compilation stage)\n", .{});
@@ -360,6 +372,7 @@ fn printUsage() !void {
     try stdout.print("  ora --emit-yul -o out.yul contract.ora  # Compile to Yul\n", .{});
     try stdout.print("  ora --save-all contract.ora           # Save all stages (tokens, AST, MLIR, Yul, bytecode)\n", .{});
     try stdout.print("  ora --mlir-verify --mlir-timing -O2 contract.ora  # Compile with verification and timing\n", .{});
+    try stdout.print("  ora --analyze-complexity contract.ora  # Analyze function complexity\n", .{});
     try stdout.flush();
 }
 
@@ -641,6 +654,153 @@ fn runParser(allocator: std.mem.Allocator, file_path: []const u8, artifact_optio
     if (artifact_options.save_ast) {
         try saveAST(allocator, file_path, ast_nodes, artifact_options);
     }
+
+    try stdout.flush();
+}
+
+/// Run complexity analysis on all functions in the contract
+fn runComplexityAnalysis(allocator: std.mem.Allocator, file_path: []const u8) !void {
+    const complexity = lib.complexity;
+
+    var stdout_buffer: [1024]u8 = undefined;
+    var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
+    const stdout = &stdout_writer.interface;
+
+    // Read source file
+    const source = std.fs.cwd().readFileAlloc(allocator, file_path, 1024 * 1024) catch |err| {
+        try stdout.print("Error reading file {s}: {s}\n", .{ file_path, @errorName(err) });
+        return;
+    };
+    defer allocator.free(source);
+
+    try stdout.print("Analyzing complexity for {s}\n", .{file_path});
+    try stdout.print("==================================================\n", .{});
+
+    // Run lexer
+    var lexer = lib.Lexer.init(allocator, source);
+    defer lexer.deinit();
+
+    const tokens = lexer.scanTokens() catch |err| {
+        try stdout.print("Lexer error: {s}\n", .{@errorName(err)});
+        try stdout.flush();
+        std.process.exit(1);
+    };
+    defer allocator.free(tokens);
+
+    // Run parser
+    var arena = lib.ast_arena.AstArena.init(allocator);
+    defer arena.deinit();
+    var parser = lib.Parser.init(tokens, &arena);
+    parser.setFileId(1);
+    const ast_nodes = parser.parse() catch |err| {
+        try stdout.print("Parser error: {s}\n", .{@errorName(err)});
+        try stdout.flush();
+        std.process.exit(1);
+    };
+
+    try stdout.print("\n", .{});
+
+    // Analyze each function
+    var analyzer = complexity.ComplexityAnalyzer.init(allocator);
+    var function_count: u32 = 0;
+    var total_complexity: u32 = 0;
+    var simple_count: u32 = 0;
+    var moderate_count: u32 = 0;
+    var complex_count: u32 = 0;
+
+    for (ast_nodes) |*node| {
+        switch (node.*) {
+            .Contract => |*contract| {
+                try stdout.print("Contract: {s}\n", .{contract.name});
+                try stdout.print("{s}\n", .{"─" ** 50});
+
+                for (contract.body) |*body_node| {
+                    if (body_node.* == .Function) {
+                        const func = &body_node.Function;
+                        function_count += 1;
+
+                        const metrics = analyzer.analyzeFunction(func);
+                        total_complexity += metrics.node_count;
+
+                        // Categorize
+                        if (metrics.isSimple()) {
+                            simple_count += 1;
+                        } else if (metrics.isComplex()) {
+                            complex_count += 1;
+                        } else {
+                            moderate_count += 1;
+                        }
+
+                        // Format visibility
+                        const visibility = if (func.visibility == .Public) "pub " else "";
+                        const inline_marker = if (func.is_inline) "inline " else "";
+
+                        // Complexity rating
+                        const rating = if (metrics.isSimple())
+                            "✓ Simple"
+                        else if (metrics.isComplex())
+                            "✗ Complex"
+                        else
+                            "○ Moderate";
+
+                        try stdout.print("\n{s}{s}fn {s}()\n", .{ visibility, inline_marker, func.name });
+                        try stdout.print("  Complexity: {s}\n", .{rating});
+                        try stdout.print("  Nodes:      {d}\n", .{metrics.node_count});
+                        try stdout.print("  Statements: {d}\n", .{metrics.statement_count});
+                        try stdout.print("  Max Depth:  {d}\n", .{metrics.max_depth});
+
+                        // Warning for inline functions
+                        if (func.is_inline and metrics.isComplex()) {
+                            try stdout.print("  ⚠️  WARNING: Function marked 'inline' but has high complexity!\n", .{});
+                            try stdout.print("      Consider removing 'inline' or refactoring.\n", .{});
+                        }
+
+                        // Recommendations
+                        if (metrics.isComplex()) {
+                            try stdout.print("  💡 Recommendation: Consider breaking into smaller functions\n", .{});
+                        } else if (metrics.isSimple() and !func.is_inline and func.visibility == .Private) {
+                            try stdout.print("  💡 Tip: This function is a good candidate for 'inline'\n", .{});
+                        }
+                    }
+                }
+            },
+            .Function => |*func| {
+                // Top-level function (rare, but handle it)
+                function_count += 1;
+                const metrics = analyzer.analyzeFunction(func);
+                total_complexity += metrics.node_count;
+
+                if (metrics.isSimple()) {
+                    simple_count += 1;
+                } else if (metrics.isComplex()) {
+                    complex_count += 1;
+                } else {
+                    moderate_count += 1;
+                }
+
+                try stdout.print("\nFunction: {s}\n", .{func.name});
+                try stdout.print("  Nodes:      {d}\n", .{metrics.node_count});
+                try stdout.print("  Statements: {d}\n", .{metrics.statement_count});
+                try stdout.print("  Max Depth:  {d}\n", .{metrics.max_depth});
+            },
+            else => {},
+        }
+    }
+
+    // Summary
+    try stdout.print("\n{s}\n", .{"═" ** 50});
+    try stdout.print("SUMMARY\n", .{});
+    try stdout.print("{s}\n", .{"═" ** 50});
+    try stdout.print("Total Functions:    {d}\n", .{function_count});
+    try stdout.print("  ✓ Simple:         {d} ({d}%)\n", .{ simple_count, if (function_count > 0) simple_count * 100 / function_count else 0 });
+    try stdout.print("  ○ Moderate:       {d} ({d}%)\n", .{ moderate_count, if (function_count > 0) moderate_count * 100 / function_count else 0 });
+    try stdout.print("  ✗ Complex:        {d} ({d}%)\n", .{ complex_count, if (function_count > 0) complex_count * 100 / function_count else 0 });
+    try stdout.print("Average Complexity: {d} nodes/function\n", .{if (function_count > 0) total_complexity / function_count else 0});
+
+    try stdout.print("\nComplexity Thresholds:\n", .{});
+    try stdout.print("  Simple:   < 20 nodes (good for inline)\n", .{});
+    try stdout.print("  Moderate: 20-100 nodes\n", .{});
+    try stdout.print("  Complex:  > 100 nodes (not recommended for inline)\n", .{});
 
     try stdout.flush();
 }
