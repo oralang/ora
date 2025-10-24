@@ -405,10 +405,36 @@ pub fn convertSemanticSymbolTable(semantic_table: *const lib.semantics.state.Sym
     _ = allocator;
 }
 
+/// Helper to get span from AstNode
+fn getNodeSpan(node: *const lib.AstNode) ?lib.ast.SourceSpan {
+    return switch (node.*) {
+        .Contract => |contract| contract.span,
+        .Function => |func| func.span,
+        .VariableDecl => |var_decl| var_decl.span,
+        .StructDecl => |struct_decl| struct_decl.span,
+        .EnumDecl => |enum_decl| enum_decl.span,
+        .LogDecl => |log_decl| log_decl.span,
+        .Import => |import| import.span,
+        .ErrorDecl => |error_decl| error_decl.span,
+        else => null,
+    };
+}
+
 /// Main entry point for lowering Ora AST nodes to MLIR module with semantic analysis symbol table
 /// This function uses the semantic analysis symbol table for type resolution
-pub fn lowerFunctionsToModuleWithSemanticTable(ctx: c.MlirContext, nodes: []lib.AstNode, allocator: std.mem.Allocator, semantic_table: *const lib.semantics.state.SymbolTable) !LoweringResult {
-    const loc = c.mlirLocationUnknownGet(ctx);
+pub fn lowerFunctionsToModuleWithSemanticTable(ctx: c.MlirContext, nodes: []lib.AstNode, allocator: std.mem.Allocator, semantic_table: *const lib.semantics.state.SymbolTable, source_filename: ?[]const u8) !LoweringResult {
+    // Create location tracker to get proper module location
+    const location_tracker = if (source_filename) |fname|
+        LocationTracker.initWithFilename(ctx, fname)
+    else
+        LocationTracker.init(ctx);
+
+    // Use first node's location if available, otherwise unknown (module wrapper has no single location)
+    const loc = if (nodes.len > 0)
+        location_tracker.createLocation(getNodeSpan(&nodes[0]))
+    else
+        location_tracker.getUnknownLocation();
+
     const module = c.mlirModuleCreateEmpty(loc);
     _ = c.mlirModuleGetBody(module);
 
@@ -422,7 +448,10 @@ pub fn lowerFunctionsToModuleWithSemanticTable(ctx: c.MlirContext, nodes: []lib.
         std.debug.print("Warning: Failed to register Ora dialect\n", .{});
     };
 
-    const locations = LocationTracker.init(ctx);
+    const locations = if (source_filename) |fname|
+        LocationTracker.initWithFilename(ctx, fname)
+    else
+        LocationTracker.init(ctx);
 
     // Create global symbol table and storage map for the module
     var symbol_table = SymbolTable.init(allocator);
@@ -500,8 +529,12 @@ pub fn lowerFunctionsToModuleWithSemanticTable(ctx: c.MlirContext, nodes: []lib.
 
 /// Main entry point for lowering Ora AST nodes to MLIR module with comprehensive error handling
 /// This function orchestrates the modular lowering components and provides robust error reporting
-pub fn lowerFunctionsToModuleWithErrors(ctx: c.MlirContext, nodes: []lib.AstNode, allocator: std.mem.Allocator) !LoweringResult {
-    const loc = c.mlirLocationUnknownGet(ctx);
+pub fn lowerFunctionsToModuleWithErrors(ctx: c.MlirContext, nodes: []lib.AstNode, allocator: std.mem.Allocator, source_filename: ?[]const u8) !LoweringResult {
+    const location_tracker = if (source_filename) |fname|
+        LocationTracker.initWithFilename(ctx, fname)
+    else
+        LocationTracker.init(ctx);
+    const loc = location_tracker.getUnknownLocation();
     const module = c.mlirModuleCreateEmpty(loc);
     const body = c.mlirModuleGetBody(module);
 
@@ -515,7 +548,10 @@ pub fn lowerFunctionsToModuleWithErrors(ctx: c.MlirContext, nodes: []lib.AstNode
         std.debug.print("Warning: Failed to register Ora dialect\n", .{});
     };
 
-    const locations = LocationTracker.init(ctx);
+    const locations = if (source_filename) |fname|
+        LocationTracker.initWithFilename(ctx, fname)
+    else
+        LocationTracker.init(ctx);
 
     // Create global symbol table and storage map for the module
     var symbol_table = SymbolTable.init(allocator);
@@ -1081,9 +1117,9 @@ pub fn lowerFunctionsToModuleWithErrors(ctx: c.MlirContext, nodes: []lib.AstNode
 }
 
 /// Main entry point with pass management support
-pub fn lowerFunctionsToModuleWithPasses(ctx: c.MlirContext, nodes: []lib.AstNode, allocator: std.mem.Allocator, pass_config: ?PassPipelineConfig) !LoweringResult {
+pub fn lowerFunctionsToModuleWithPasses(ctx: c.MlirContext, nodes: []lib.AstNode, allocator: std.mem.Allocator, pass_config: ?PassPipelineConfig, source_filename: ?[]const u8) !LoweringResult {
     // First, perform the basic lowering
-    var lowering_result = try lowerFunctionsToModuleWithErrors(ctx, nodes, allocator);
+    var lowering_result = try lowerFunctionsToModuleWithErrors(ctx, nodes, allocator, source_filename);
 
     // If lowering failed, return early
     if (!lowering_result.success) {
@@ -1224,9 +1260,9 @@ pub fn lowerFunctionsToModuleRelease(ctx: c.MlirContext, nodes: []lib.AstNode, a
 }
 
 /// Convenience function with custom pass pipeline string
-pub fn lowerFunctionsToModuleWithPipelineString(ctx: c.MlirContext, nodes: []lib.AstNode, allocator: std.mem.Allocator, pipeline_str: []const u8) !LoweringResult {
+pub fn lowerFunctionsToModuleWithPipelineString(ctx: c.MlirContext, nodes: []lib.AstNode, allocator: std.mem.Allocator, pipeline_str: []const u8, source_filename: ?[]const u8) !LoweringResult {
     // First, perform the basic lowering
-    var lowering_result = try lowerFunctionsToModuleWithErrors(ctx, nodes, allocator);
+    var lowering_result = try lowerFunctionsToModuleWithErrors(ctx, nodes, allocator, source_filename);
 
     // If lowering failed, return early
     if (!lowering_result.success) {

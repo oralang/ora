@@ -1106,16 +1106,22 @@ fn generateMlirOutput(allocator: std.mem.Allocator, ast_nodes: []lib.AstNode, fi
             .ir_printing = ir_config,
         };
 
+        // Extract filename for location tracking
+        const source_filename = std.fs.path.basename(file_path);
+
         if (mlir_options.getDefaultPasses()) |passes_str| {
             // Use pipeline string parsing
-            break :blk try mlir.lower.lowerFunctionsToModuleWithPipelineString(h.ctx, ast_nodes, mlir_allocator, passes_str);
+            break :blk try mlir.lower.lowerFunctionsToModuleWithPipelineString(h.ctx, ast_nodes, mlir_allocator, passes_str, source_filename);
         } else {
             // Use configuration-based approach
-            break :blk try mlir.lower.lowerFunctionsToModuleWithPasses(h.ctx, ast_nodes, mlir_allocator, pass_config);
+            break :blk try mlir.lower.lowerFunctionsToModuleWithPasses(h.ctx, ast_nodes, mlir_allocator, pass_config, source_filename);
         }
     } else blk: {
+        // Extract filename for location tracking
+        const source_filename = std.fs.path.basename(file_path);
+
         // Use basic lowering
-        break :blk try mlir.lower.lowerFunctionsToModuleWithErrors(h.ctx, ast_nodes, mlir_allocator);
+        break :blk try mlir.lower.lowerFunctionsToModuleWithErrors(h.ctx, ast_nodes, mlir_allocator, source_filename);
     };
     defer lowering_result.deinit(mlir_allocator);
 
@@ -1279,7 +1285,13 @@ fn generateMlirOutput(allocator: std.mem.Allocator, ast_nodes: []lib.AstNode, fi
         var stdout_file = std.fs.File.stdout();
 
         const op = c.mlirModuleGetOperation(lowering_result.module);
-        c.mlirOperationPrint(op, callback.cb, @constCast(&stdout_file));
+
+        // Create printing flags to enable location information
+        const flags = c.mlirOpPrintingFlagsCreate();
+        defer c.mlirOpPrintingFlagsDestroy(flags);
+        c.mlirOpPrintingFlagsEnableDebugInfo(flags, true, false);
+
+        c.mlirOperationPrintWithFlags(op, flags, callback.cb, @constCast(&stdout_file));
     }
 
     // Always save MLIR to artifact directory if requested

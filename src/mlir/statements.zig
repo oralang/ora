@@ -207,10 +207,10 @@ pub const StatementLowerer = struct {
         if (ret.value) |e| {
             const v = self.expr_lowerer.lowerExpression(&e);
             const op = self.ora_dialect.createFuncReturnWithValue(v, loc);
-            c.mlirBlockAppendOwnedOperation(self.block, op);
+            h.appendOp(self.block, op);
         } else {
             const op = self.ora_dialect.createFuncReturn(loc);
-            c.mlirBlockAppendOwnedOperation(self.block, op);
+            h.appendOp(self.block, op);
         }
     }
 
@@ -221,10 +221,10 @@ pub const StatementLowerer = struct {
         if (ret.value) |e| {
             const v = self.expr_lowerer.lowerExpression(&e);
             const op = self.ora_dialect.createScfYieldWithValues(&[_]c.MlirValue{v}, loc);
-            c.mlirBlockAppendOwnedOperation(self.block, op);
+            h.appendOp(self.block, op);
         } else {
             const op = self.ora_dialect.createScfYield(loc);
-            c.mlirBlockAppendOwnedOperation(self.block, op);
+            h.appendOp(self.block, op);
         }
     }
 
@@ -245,7 +245,7 @@ pub const StatementLowerer = struct {
             }
 
             const op = self.ora_dialect.createScfYield(loc);
-            c.mlirBlockAppendOwnedOperation(self.block, op);
+            h.appendOp(self.block, op);
         } else {
             // Unlabeled break - use scf.break or cf.br depending on context
             var operands = std.ArrayList(c.MlirValue){};
@@ -258,7 +258,7 @@ pub const StatementLowerer = struct {
             }
 
             const op = self.ora_dialect.createScfBreak(operands.items, loc);
-            c.mlirBlockAppendOwnedOperation(self.block, op);
+            h.appendOp(self.block, op);
         }
     }
 
@@ -279,51 +279,51 @@ pub const StatementLowerer = struct {
                             // If it's a memref, load the value
                             if (c.mlirTypeIsAMemRef(val_type)) {
                                 const element_type = c.mlirShapedTypeGetElementType(val_type);
-                                var load_state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("memref.load"), loc);
+                                var load_state = h.opState("memref.load", loc);
                                 c.mlirOperationStateAddOperands(&load_state, 1, @ptrCast(&value));
                                 c.mlirOperationStateAddResults(&load_state, 1, @ptrCast(&element_type));
                                 const load_op = c.mlirOperationCreate(&load_state);
-                                c.mlirBlockAppendOwnedOperation(self.block, load_op);
-                                break :blk c.mlirOperationGetResult(load_op, 0);
+                                h.appendOp(self.block, load_op);
+                                break :blk h.getResult(load_op, 0);
                             }
                             break :blk value;
                         };
 
                         // Store new value to value_memref
-                        var value_store_state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("memref.store"), loc);
+                        var value_store_state = h.opState("memref.store", loc);
                         c.mlirOperationStateAddOperands(&value_store_state, 2, @ptrCast(&[_]c.MlirValue{ value_to_store, label_ctx.value_memref }));
                         const value_store = c.mlirOperationCreate(&value_store_state);
-                        c.mlirBlockAppendOwnedOperation(self.block, value_store);
+                        h.appendOp(self.block, value_store);
                     }
 
                     // Set continue_flag to true
-                    const i1_type = c.mlirIntegerTypeGet(self.ctx, 1);
-                    var true_const_state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("arith.constant"), loc);
+                    const i1_type = h.boolType(self.ctx);
+                    var true_const_state = h.opState("arith.constant", loc);
                     const true_attr = c.mlirIntegerAttrGet(i1_type, 1);
-                    const value_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("value"));
+                    const value_id = h.identifier(self.ctx, "value");
                     var true_attrs = [_]c.MlirNamedAttribute{c.mlirNamedAttributeGet(value_id, true_attr)};
                     c.mlirOperationStateAddAttributes(&true_const_state, true_attrs.len, &true_attrs);
                     c.mlirOperationStateAddResults(&true_const_state, 1, @ptrCast(&i1_type));
                     const true_const = c.mlirOperationCreate(&true_const_state);
-                    c.mlirBlockAppendOwnedOperation(self.block, true_const);
-                    const true_val = c.mlirOperationGetResult(true_const, 0);
+                    h.appendOp(self.block, true_const);
+                    const true_val = h.getResult(true_const, 0);
 
-                    var flag_store_state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("memref.store"), loc);
+                    var flag_store_state = h.opState("memref.store", loc);
                     c.mlirOperationStateAddOperands(&flag_store_state, 2, @ptrCast(&[_]c.MlirValue{ true_val, label_ctx.continue_flag_memref }));
                     const flag_store = c.mlirOperationCreate(&flag_store_state);
-                    c.mlirBlockAppendOwnedOperation(self.block, flag_store);
+                    h.appendOp(self.block, flag_store);
 
                     // Add scf.yield to exit the current case
-                    var yield_state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("scf.yield"), loc);
+                    var yield_state = h.opState("scf.yield", loc);
                     const yield_op = c.mlirOperationCreate(&yield_state);
-                    c.mlirBlockAppendOwnedOperation(self.block, yield_op);
+                    h.appendOp(self.block, yield_op);
                     return;
                 }
             }
 
             // Labeled continue without matching context - use scf.yield
             const op = self.ora_dialect.createScfYield(loc);
-            c.mlirBlockAppendOwnedOperation(self.block, op);
+            h.appendOp(self.block, op);
         } else {
             // Unlabeled continue - use scf.continue
             var operands = std.ArrayList(c.MlirValue){};
@@ -336,7 +336,7 @@ pub const StatementLowerer = struct {
             }
 
             const op = self.ora_dialect.createScfContinue(operands.items, loc);
-            c.mlirBlockAppendOwnedOperation(self.block, op);
+            h.appendOp(self.block, op);
         }
     }
 
@@ -381,19 +381,19 @@ pub const StatementLowerer = struct {
 
             // Allocate memory on the stack
             const alloca_op = self.ora_dialect.createMemrefAlloca(memref_type, loc);
-            c.mlirBlockAppendOwnedOperation(self.block, alloca_op);
-            const memref = c.mlirOperationGetResult(alloca_op, 0);
+            h.appendOp(self.block, alloca_op);
+            const memref = h.getResult(alloca_op, 0);
 
             // Initialize the variable if there's an initializer
             if (var_decl.value) |init_expr| {
                 const init_value = self.expr_lowerer.lowerExpression(&init_expr.*);
                 const store_op = self.ora_dialect.createMemrefStore(init_value, memref, &[_]c.MlirValue{}, loc);
-                c.mlirBlockAppendOwnedOperation(self.block, store_op);
+                h.appendOp(self.block, store_op);
             } else {
                 // Store default value
                 const default_value = try self.createDefaultValue(mlir_type, var_decl.kind, loc);
                 const store_op = self.ora_dialect.createMemrefStore(default_value, memref, &[_]c.MlirValue{}, loc);
-                c.mlirBlockAppendOwnedOperation(self.block, store_op);
+                h.appendOp(self.block, store_op);
             }
 
             // Store the memref in the local variable map
@@ -448,7 +448,7 @@ pub const StatementLowerer = struct {
 
             // Generate storage store operation
             const store_op = self.memory_manager.createStorageStore(init_value, var_decl.name, loc);
-            c.mlirBlockAppendOwnedOperation(self.block, store_op);
+            h.appendOp(self.block, store_op);
         }
 
         // Ensure storage variable is registered
@@ -463,15 +463,15 @@ pub const StatementLowerer = struct {
     fn lowerMemoryVariableDecl(self: *const StatementLowerer, var_decl: *const lib.ast.Statements.VariableDeclNode, mlir_type: c.MlirType, loc: c.MlirLocation) LoweringError!void {
         // Create memory allocation
         const alloca_op = self.memory_manager.createAllocaOp(mlir_type, var_decl.region, var_decl.name, loc);
-        c.mlirBlockAppendOwnedOperation(self.block, alloca_op);
-        const alloca_result = c.mlirOperationGetResult(alloca_op, 0);
+        h.appendOp(self.block, alloca_op);
+        const alloca_result = h.getResult(alloca_op, 0);
 
         if (var_decl.value) |init_expr| {
             // Lower initializer and store to memory
             const init_value = self.expr_lowerer.lowerExpression(&init_expr.*);
 
             const store_op = self.memory_manager.createStoreOp(init_value, alloca_result, var_decl.region, loc);
-            c.mlirBlockAppendOwnedOperation(self.block, store_op);
+            h.appendOp(self.block, store_op);
         }
 
         // Store the memory reference in local variable map
@@ -493,7 +493,7 @@ pub const StatementLowerer = struct {
 
             // Generate transient storage store operation
             const store_op = self.memory_manager.createTStoreStore(init_value, var_decl.name, loc);
-            c.mlirBlockAppendOwnedOperation(self.block, store_op);
+            h.appendOp(self.block, store_op);
         } else {
             // Create default value for uninitialized transient storage variables
             init_value = try self.createDefaultValue(mlir_type, var_decl.kind, loc);
@@ -520,18 +520,18 @@ pub const StatementLowerer = struct {
         _ = kind; // Variable kind might affect default value in the future
 
         // For now, create zero value for integer types
-        var const_state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("arith.constant"), loc);
+        var const_state = h.opState("arith.constant", loc);
         c.mlirOperationStateAddResults(&const_state, 1, @ptrCast(&mlir_type));
 
         const attr = c.mlirIntegerAttrGet(mlir_type, 0);
-        const value_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("value"));
+        const value_id = h.identifier(self.ctx, "value");
         var attrs = [_]c.MlirNamedAttribute{c.mlirNamedAttributeGet(value_id, attr)};
         c.mlirOperationStateAddAttributes(&const_state, attrs.len, &attrs);
 
         const const_op = c.mlirOperationCreate(&const_state);
-        c.mlirBlockAppendOwnedOperation(self.block, const_op);
+        h.appendOp(self.block, const_op);
 
-        return c.mlirOperationGetResult(const_op, 0);
+        return h.getResult(const_op, 0);
     }
 
     /// Lower destructuring assignment statements with field extraction operations
@@ -555,8 +555,8 @@ pub const StatementLowerer = struct {
                     const result_ty = c.mlirIntegerTypeGet(self.ctx, constants.DEFAULT_INTEGER_BITS);
                     const indices = [_]u32{@intCast(i)};
                     const extract_op = self.ora_dialect.createLlvmExtractvalue(value, &indices, result_ty, loc);
-                    c.mlirBlockAppendOwnedOperation(self.block, extract_op);
-                    const field_value = c.mlirOperationGetResult(extract_op, 0);
+                    h.appendOp(self.block, extract_op);
+                    const field_value = h.getResult(extract_op, 0);
 
                     // Assign the extracted value to the field variable
                     if (self.local_var_map) |lvm| {
@@ -581,8 +581,8 @@ pub const StatementLowerer = struct {
                     const result_ty = c.mlirIntegerTypeGet(self.ctx, constants.DEFAULT_INTEGER_BITS);
                     const indices = [_]u32{@intCast(i)};
                     const extract_op = self.ora_dialect.createLlvmExtractvalue(value, &indices, result_ty, loc);
-                    c.mlirBlockAppendOwnedOperation(self.block, extract_op);
-                    const element_value = c.mlirOperationGetResult(extract_op, 0);
+                    h.appendOp(self.block, extract_op);
+                    const element_value = h.getResult(extract_op, 0);
 
                     // Assign the extracted value to the element variable
                     if (self.local_var_map) |lvm| {
@@ -606,18 +606,18 @@ pub const StatementLowerer = struct {
                     // Create memref.load operation for each array element
                     // First, create index constant
                     const index_ty = c.mlirIntegerTypeGet(self.ctx, constants.DEFAULT_INTEGER_BITS);
-                    var index_state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("arith.constant"), loc);
+                    var index_state = h.opState("arith.constant", loc);
                     c.mlirOperationStateAddResults(&index_state, 1, @ptrCast(&index_ty));
                     const index_attr = c.mlirIntegerAttrGet(index_ty, @intCast(i));
-                    const value_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("value"));
+                    const value_id = h.identifier(self.ctx, "value");
                     var index_attrs = [_]c.MlirNamedAttribute{c.mlirNamedAttributeGet(value_id, index_attr)};
                     c.mlirOperationStateAddAttributes(&index_state, index_attrs.len, &index_attrs);
                     const index_op = c.mlirOperationCreate(&index_state);
-                    c.mlirBlockAppendOwnedOperation(self.block, index_op);
-                    const index_value = c.mlirOperationGetResult(index_op, 0);
+                    h.appendOp(self.block, index_op);
+                    const index_value = h.getResult(index_op, 0);
 
                     // Create memref.load operation
-                    var load_state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("memref.load"), loc);
+                    var load_state = h.opState("memref.load", loc);
                     const operands = [_]c.MlirValue{ value, index_value };
                     c.mlirOperationStateAddOperands(&load_state, operands.len, &operands);
 
@@ -626,8 +626,8 @@ pub const StatementLowerer = struct {
                     c.mlirOperationStateAddResults(&load_state, 1, @ptrCast(&result_ty));
 
                     const load_op = c.mlirOperationCreate(&load_state);
-                    c.mlirBlockAppendOwnedOperation(self.block, load_op);
-                    const element_value = c.mlirOperationGetResult(load_op, 0);
+                    h.appendOp(self.block, load_op);
+                    const element_value = h.getResult(load_op, 0);
 
                     // Assign the extracted value to the element variable
                     if (self.local_var_map) |lvm| {
@@ -683,8 +683,8 @@ pub const StatementLowerer = struct {
                 // Load current value from storage using ora.sload
                 const memory_manager = MemoryManager.init(self.ctx, self.ora_dialect);
                 const load_op = memory_manager.createStorageLoad(ident.name, result_ty, self.fileLoc(ident.span));
-                c.mlirBlockAppendOwnedOperation(self.block, load_op);
-                const current_value = c.mlirOperationGetResult(load_op, 0);
+                h.appendOp(self.block, load_op);
+                const current_value = h.getResult(load_op, 0);
 
                 // Lower the right-hand side expression
                 const rhs_value = self.expr_lowerer.lowerExpression(assignment.value);
@@ -695,43 +695,43 @@ pub const StatementLowerer = struct {
                     .PlusEqual => {
                         // current_value + rhs_value
                         const add_op = self.ora_dialect.createArithAddi(current_value, rhs_value, result_ty, self.fileLoc(ident.span));
-                        c.mlirBlockAppendOwnedOperation(self.block, add_op);
-                        new_value = c.mlirOperationGetResult(add_op, 0);
+                        h.appendOp(self.block, add_op);
+                        new_value = h.getResult(add_op, 0);
                     },
                     .MinusEqual => {
                         // current_value - rhs_value
                         const sub_op = self.ora_dialect.createArithSubi(current_value, rhs_value, result_ty, self.fileLoc(ident.span));
-                        c.mlirBlockAppendOwnedOperation(self.block, sub_op);
-                        new_value = c.mlirOperationGetResult(sub_op, 0);
+                        h.appendOp(self.block, sub_op);
+                        new_value = h.getResult(sub_op, 0);
                     },
                     .StarEqual => {
                         // current_value * rhs_value
                         const mul_op = self.ora_dialect.createArithMuli(current_value, rhs_value, result_ty, self.fileLoc(ident.span));
-                        c.mlirBlockAppendOwnedOperation(self.block, mul_op);
-                        new_value = c.mlirOperationGetResult(mul_op, 0);
+                        h.appendOp(self.block, mul_op);
+                        new_value = h.getResult(mul_op, 0);
                     },
                     .SlashEqual => {
                         // current_value / rhs_value
                         const div_op = self.ora_dialect.createArithDivsi(current_value, rhs_value, result_ty, self.fileLoc(ident.span));
-                        c.mlirBlockAppendOwnedOperation(self.block, div_op);
-                        new_value = c.mlirOperationGetResult(div_op, 0);
+                        h.appendOp(self.block, div_op);
+                        new_value = h.getResult(div_op, 0);
                     },
                     .PercentEqual => {
                         // current_value % rhs_value
                         const rem_op = self.ora_dialect.createArithRemsi(current_value, rhs_value, result_ty, self.fileLoc(ident.span));
-                        c.mlirBlockAppendOwnedOperation(self.block, rem_op);
-                        new_value = c.mlirOperationGetResult(rem_op, 0);
+                        h.appendOp(self.block, rem_op);
+                        new_value = h.getResult(rem_op, 0);
                     },
                 }
 
                 // Store the result back to storage using ora.sstore
                 const store_op = memory_manager.createStorageStore(new_value, ident.name, self.fileLoc(ident.span));
-                c.mlirBlockAppendOwnedOperation(self.block, store_op);
+                h.appendOp(self.block, store_op);
             } else {
                 // No storage map - fall back to placeholder
-                var state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("ora.compound_assign"), self.fileLoc(ident.span));
+                var state = h.opState("ora.compound_assign", self.fileLoc(ident.span));
                 const op = c.mlirOperationCreate(&state);
-                c.mlirBlockAppendOwnedOperation(self.block, op);
+                h.appendOp(self.block, op);
             }
         } else {
 
@@ -755,7 +755,7 @@ pub const StatementLowerer = struct {
         }
 
         // Create the scf.if operation with proper then/else regions
-        var state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("scf.if"), loc);
+        var state = h.opState("scf.if", loc);
 
         // Add the condition operand
         c.mlirOperationStateAddOperands(&state, 1, @ptrCast(&condition));
@@ -782,7 +782,7 @@ pub const StatementLowerer = struct {
         } else {
             // Add scf.yield to empty else region to satisfy MLIR requirements
             const yield_op = self.ora_dialect.createScfYield(loc);
-            c.mlirBlockAppendOwnedOperation(else_block, yield_op);
+            h.appendOp(else_block, yield_op);
         }
 
         // Lower then branch FIRST (before creating the scf.if operation)
@@ -791,17 +791,17 @@ pub const StatementLowerer = struct {
         // Add scf.yield to then region if it doesn't end with one
         if (!self.blockEndsWithYield(then_block)) {
             const yield_op = self.ora_dialect.createScfYield(loc);
-            c.mlirBlockAppendOwnedOperation(then_block, yield_op);
+            h.appendOp(then_block, yield_op);
         }
 
         // Add scf.yield to else region if it doesn't end with one (for non-empty else branches)
         if (if_stmt.else_branch != null and !self.blockEndsWithYield(else_block)) {
             const yield_op = self.ora_dialect.createScfYield(loc);
-            c.mlirBlockAppendOwnedOperation(else_block, yield_op);
+            h.appendOp(else_block, yield_op);
         }
 
         // NOW append the scf.if operation to the block
-        c.mlirBlockAppendOwnedOperation(self.block, if_op);
+        h.appendOp(self.block, if_op);
     }
 
     /// Check if a block ends with scf.yield
@@ -870,28 +870,28 @@ pub const StatementLowerer = struct {
         // Check if it's an integer type
         if (c.mlirTypeIsAInteger(mlir_type)) {
             // Create a constant 0 value
-            var const_state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("arith.constant"), loc);
+            var const_state = h.opState("arith.constant", loc);
             const value_attr = c.mlirIntegerAttrGet(mlir_type, 0);
-            const value_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("value"));
+            const value_id = h.identifier(self.ctx, "value");
             var attrs = [_]c.MlirNamedAttribute{c.mlirNamedAttributeGet(value_id, value_attr)};
             c.mlirOperationStateAddAttributes(&const_state, attrs.len, &attrs);
             c.mlirOperationStateAddResults(&const_state, 1, @ptrCast(&mlir_type));
             const const_op = c.mlirOperationCreate(&const_state);
-            c.mlirBlockAppendOwnedOperation(self.block, const_op);
-            return c.mlirOperationGetResult(const_op, 0);
+            h.appendOp(self.block, const_op);
+            return h.getResult(const_op, 0);
         }
 
         // For other types, create a zero constant (simplified)
-        var const_state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("arith.constant"), loc);
+        var const_state = h.opState("arith.constant", loc);
         const zero_type = c.mlirIntegerTypeGet(self.ctx, constants.DEFAULT_INTEGER_BITS);
         const value_attr = c.mlirIntegerAttrGet(zero_type, 0);
-        const value_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("value"));
+        const value_id = h.identifier(self.ctx, "value");
         var attrs = [_]c.MlirNamedAttribute{c.mlirNamedAttributeGet(value_id, value_attr)};
         c.mlirOperationStateAddAttributes(&const_state, attrs.len, &attrs);
         c.mlirOperationStateAddResults(&const_state, 1, @ptrCast(&zero_type));
         const const_op = c.mlirOperationCreate(&const_state);
-        c.mlirBlockAppendOwnedOperation(self.block, const_op);
-        return c.mlirOperationGetResult(const_op, 0);
+        h.appendOp(self.block, const_op);
+        return h.getResult(const_op, 0);
     }
 
     /// Get the return type from an if statement's return statements
@@ -923,24 +923,24 @@ pub const StatementLowerer = struct {
             .Comptime => |_| {
                 // For comptime expressions, we need to handle the block
                 // For now, return a default type - this is complex to handle properly
-                return c.mlirIntegerTypeGet(self.ctx, 1); // Default to i1
+                return h.boolType(self.ctx); // Default to i1
             },
             .Old => |_| {
                 // For old() expressions, we need to get the type from the inner expression
                 // For now, return a default type - this is complex to handle properly
-                return c.mlirIntegerTypeGet(self.ctx, 1); // Default to i1
+                return h.boolType(self.ctx); // Default to i1
             },
             .Tuple => |_| {
                 // For tuple expressions, we need to handle the elements
                 // For now, return a default type - this is complex to handle properly
-                return c.mlirIntegerTypeGet(self.ctx, 1); // Default to i1
+                return h.boolType(self.ctx); // Default to i1
             },
             .SwitchExpression => |switch_expr| return self.expr_lowerer.type_mapper.toMlirType(switch_expr.type_info),
             .Identifier => |ident| return self.expr_lowerer.type_mapper.toMlirType(ident.type_info),
             else => {
                 // For expressions without type_info (like Assignment, CompoundAssignment, Index),
                 // return a default type - this shouldn't happen in return statements
-                return c.mlirIntegerTypeGet(self.ctx, 1); // Default to i1
+                return h.boolType(self.ctx); // Default to i1
             },
         }
     }
@@ -952,7 +952,7 @@ pub const StatementLowerer = struct {
         // 2. Have a single func.return at the end that uses the result from scf.if
 
         // Create the scf.if operation with proper then/else regions
-        var state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("scf.if"), loc);
+        var state = h.opState("scf.if", loc);
 
         // Add the condition operand
         c.mlirOperationStateAddOperands(&state, 1, @ptrCast(&condition));
@@ -984,7 +984,7 @@ pub const StatementLowerer = struct {
             if (result_type) |ret_type| {
                 const default_val = try self.createDefaultValueForType(ret_type, loc);
                 const yield_op = self.ora_dialect.createScfYieldWithValues(&[_]c.MlirValue{default_val}, loc);
-                c.mlirBlockAppendOwnedOperation(then_block, yield_op);
+                h.appendOp(then_block, yield_op);
             }
         }
 
@@ -998,7 +998,7 @@ pub const StatementLowerer = struct {
                 if (result_type) |ret_type| {
                     const default_val = try self.createDefaultValueForType(ret_type, loc);
                     const yield_op = self.ora_dialect.createScfYieldWithValues(&[_]c.MlirValue{default_val}, loc);
-                    c.mlirBlockAppendOwnedOperation(else_block, yield_op);
+                    h.appendOp(else_block, yield_op);
                 }
             }
         } else {
@@ -1006,16 +1006,16 @@ pub const StatementLowerer = struct {
             if (result_type) |ret_type| {
                 const default_val = try self.createDefaultValueForType(ret_type, loc);
                 const yield_op = self.ora_dialect.createScfYieldWithValues(&[_]c.MlirValue{default_val}, loc);
-                c.mlirBlockAppendOwnedOperation(else_block, yield_op);
+                h.appendOp(else_block, yield_op);
             } else {
                 const yield_op = self.ora_dialect.createScfYield(loc);
-                c.mlirBlockAppendOwnedOperation(else_block, yield_op);
+                h.appendOp(else_block, yield_op);
             }
         }
 
         // Create and append the scf.if operation to the block
         const op = c.mlirOperationCreate(&state);
-        c.mlirBlockAppendOwnedOperation(self.block, op);
+        h.appendOp(self.block, op);
 
         // If both branches return (no subsequent statements), add func.return
         // This handles the case where the entire function is just an if-else with returns
@@ -1025,9 +1025,9 @@ pub const StatementLowerer = struct {
 
             // If both branches return, this is the function's final statement
             if (then_returns and else_returns) {
-                const result_value = c.mlirOperationGetResult(op, 0);
+                const result_value = h.getResult(op, 0);
                 const return_op = self.ora_dialect.createFuncReturnWithValue(result_value, loc);
-                c.mlirBlockAppendOwnedOperation(self.block, return_op);
+                h.appendOp(self.block, return_op);
             }
         }
     }
@@ -1054,10 +1054,10 @@ pub const StatementLowerer = struct {
                     if (ret.value) |e| {
                         const v = temp_lowerer.expr_lowerer.lowerExpression(&e);
                         const yield_op = temp_lowerer.ora_dialect.createScfYieldWithValues(&[_]c.MlirValue{v}, loc);
-                        c.mlirBlockAppendOwnedOperation(target_block, yield_op);
+                        h.appendOp(target_block, yield_op);
                     } else {
                         const yield_op = temp_lowerer.ora_dialect.createScfYield(loc);
-                        c.mlirBlockAppendOwnedOperation(target_block, yield_op);
+                        h.appendOp(target_block, yield_op);
                     }
                     has_terminator = true;
                 },
@@ -1069,7 +1069,7 @@ pub const StatementLowerer = struct {
                     // If the nested if has returns, handle it specially
                     if (temp_lowerer.ifStatementHasReturns(&if_stmt)) {
                         // Create scf.if with result type
-                        var state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("scf.if"), loc);
+                        var state = h.opState("scf.if", loc);
                         c.mlirOperationStateAddOperands(&state, 1, @ptrCast(&condition));
 
                         const result_type = temp_lowerer.getReturnTypeFromIfStatement(&if_stmt);
@@ -1095,7 +1095,7 @@ pub const StatementLowerer = struct {
                             if (result_type) |ret_type| {
                                 const default_val = try temp_lowerer.createDefaultValueForType(ret_type, loc);
                                 const yield_op = temp_lowerer.ora_dialect.createScfYieldWithValues(&[_]c.MlirValue{default_val}, loc);
-                                c.mlirBlockAppendOwnedOperation(then_block, yield_op);
+                                h.appendOp(then_block, yield_op);
                             }
                         }
 
@@ -1108,17 +1108,17 @@ pub const StatementLowerer = struct {
                                 if (result_type) |ret_type| {
                                     const default_val = try temp_lowerer.createDefaultValueForType(ret_type, loc);
                                     const yield_op = temp_lowerer.ora_dialect.createScfYieldWithValues(&[_]c.MlirValue{default_val}, loc);
-                                    c.mlirBlockAppendOwnedOperation(else_block, yield_op);
+                                    h.appendOp(else_block, yield_op);
                                 }
                             }
                         } else {
                             if (result_type) |ret_type| {
                                 const default_val = try temp_lowerer.createDefaultValueForType(ret_type, loc);
                                 const yield_op = temp_lowerer.ora_dialect.createScfYieldWithValues(&[_]c.MlirValue{default_val}, loc);
-                                c.mlirBlockAppendOwnedOperation(else_block, yield_op);
+                                h.appendOp(else_block, yield_op);
                             } else {
                                 const yield_op = temp_lowerer.ora_dialect.createScfYield(loc);
-                                c.mlirBlockAppendOwnedOperation(else_block, yield_op);
+                                h.appendOp(else_block, yield_op);
                             }
                         }
 
@@ -1128,13 +1128,13 @@ pub const StatementLowerer = struct {
 
                         // Create and append the scf.if
                         const if_op = c.mlirOperationCreate(&state);
-                        c.mlirBlockAppendOwnedOperation(target_block, if_op);
+                        h.appendOp(target_block, if_op);
 
                         // If the nested if returns a value, yield it and mark as terminated
                         if (result_type != null) {
-                            const result_value = c.mlirOperationGetResult(if_op, 0);
+                            const result_value = h.getResult(if_op, 0);
                             const yield_op = temp_lowerer.ora_dialect.createScfYieldWithValues(&[_]c.MlirValue{result_value}, loc);
-                            c.mlirBlockAppendOwnedOperation(target_block, yield_op);
+                            h.appendOp(target_block, yield_op);
                             has_terminator = true;
                         }
                     } else {
@@ -1155,7 +1155,7 @@ pub const StatementLowerer = struct {
         const loc = self.fileLoc(while_stmt.span);
 
         // Create scf.while operation
-        var state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("scf.while"), loc);
+        var state = h.opState("scf.while", loc);
 
         // Create before region (condition)
         const before_region = c.mlirRegionCreate();
@@ -1170,7 +1170,7 @@ pub const StatementLowerer = struct {
         c.mlirOperationStateAddOwnedRegions(&state, 1, @ptrCast(&after_region));
 
         const op = c.mlirOperationCreate(&state);
-        c.mlirBlockAppendOwnedOperation(self.block, op);
+        h.appendOp(self.block, op);
 
         // Lower condition in before region
         // Create a new statement lowerer for the condition block
@@ -1179,20 +1179,20 @@ pub const StatementLowerer = struct {
         const condition = self.expr_lowerer.lowerExpression(&while_stmt.condition);
 
         // Create scf.condition operation in before block
-        var cond_state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("scf.condition"), loc);
+        var cond_state = h.opState("scf.condition", loc);
         c.mlirOperationStateAddOperands(&cond_state, 1, @ptrCast(&condition));
         const cond_op = c.mlirOperationCreate(&cond_state);
-        c.mlirBlockAppendOwnedOperation(before_block, cond_op);
+        h.appendOp(before_block, cond_op);
 
         // Lower loop invariants if present
         for (while_stmt.invariants) |*invariant| {
             const invariant_value = self.expr_lowerer.lowerExpression(invariant);
 
             // Create ora.invariant operation
-            var inv_state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("ora.invariant"), loc);
+            var inv_state = h.opState("ora.invariant", loc);
             c.mlirOperationStateAddOperands(&inv_state, 1, @ptrCast(&invariant_value));
             const inv_op = c.mlirOperationCreate(&inv_state);
-            c.mlirBlockAppendOwnedOperation(before_block, inv_op);
+            h.appendOp(before_block, inv_op);
         }
 
         // Lower body in after region
@@ -1200,7 +1200,7 @@ pub const StatementLowerer = struct {
 
         // Add scf.yield at end of body to continue loop
         const yield_op = self.ora_dialect.createScfYield(loc);
-        c.mlirBlockAppendOwnedOperation(after_block, yield_op);
+        h.appendOp(after_block, yield_op);
     }
 
     /// Lower for loop statements using scf.for with proper iteration variables
@@ -1227,7 +1227,7 @@ pub const StatementLowerer = struct {
     /// Lower simple for loop (for (iterable) |item| body)
     fn lowerSimpleForLoop(self: *const StatementLowerer, item_name: []const u8, iterable: c.MlirValue, body: lib.ast.Statements.BlockNode, loc: c.MlirLocation) LoweringError!void {
         // Create scf.for operation
-        var state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("scf.for"), loc);
+        var state = h.opState("scf.for", loc);
 
         // Get the iterable type to determine proper iteration strategy
         const iterable_ty = c.mlirValueGetType(iterable);
@@ -1241,37 +1241,37 @@ pub const StatementLowerer = struct {
         // Check if iterable is a memref (array/map) or other type
         if (c.mlirTypeIsAMemRef(iterable_ty)) {
             // For memref types, get the dimension as upper bound
-            var dim_state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("memref.dim"), loc);
+            var dim_state = h.opState("memref.dim", loc);
             c.mlirOperationStateAddOperands(&dim_state, 2, @ptrCast(&[_]c.MlirValue{ iterable, iterable }));
             c.mlirOperationStateAddResults(&dim_state, 1, @ptrCast(&zero_ty));
             const dim_op = c.mlirOperationCreate(&dim_state);
-            c.mlirBlockAppendOwnedOperation(self.block, dim_op);
-            upper_bound = c.mlirOperationGetResult(dim_op, 0);
+            h.appendOp(self.block, dim_op);
+            upper_bound = h.getResult(dim_op, 0);
         } else {
             // For other types, use a default range
             upper_bound = iterable;
         }
 
         // Create constants for loop bounds
-        var zero_state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("arith.constant"), loc);
+        var zero_state = h.opState("arith.constant", loc);
         c.mlirOperationStateAddResults(&zero_state, 1, @ptrCast(&zero_ty));
         const zero_attr = c.mlirIntegerAttrGet(zero_ty, 0);
-        const value_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("value"));
+        const value_id = h.identifier(self.ctx, "value");
         var zero_attrs = [_]c.MlirNamedAttribute{c.mlirNamedAttributeGet(value_id, zero_attr)};
         c.mlirOperationStateAddAttributes(&zero_state, zero_attrs.len, &zero_attrs);
         const zero_op = c.mlirOperationCreate(&zero_state);
-        c.mlirBlockAppendOwnedOperation(self.block, zero_op);
-        lower_bound = c.mlirOperationGetResult(zero_op, 0);
+        h.appendOp(self.block, zero_op);
+        lower_bound = h.getResult(zero_op, 0);
 
         // Create step constant
-        var step_state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("arith.constant"), loc);
+        var step_state = h.opState("arith.constant", loc);
         c.mlirOperationStateAddResults(&step_state, 1, @ptrCast(&zero_ty));
         const step_attr = c.mlirIntegerAttrGet(zero_ty, 1);
         var step_attrs = [_]c.MlirNamedAttribute{c.mlirNamedAttributeGet(value_id, step_attr)};
         c.mlirOperationStateAddAttributes(&step_state, step_attrs.len, &step_attrs);
         const step_op = c.mlirOperationCreate(&step_state);
-        c.mlirBlockAppendOwnedOperation(self.block, step_op);
-        step = c.mlirOperationGetResult(step_op, 0);
+        h.appendOp(self.block, step_op);
+        step = h.getResult(step_op, 0);
 
         // Add operands to scf.for
         const operands = [_]c.MlirValue{ lower_bound, upper_bound, step };
@@ -1284,7 +1284,7 @@ pub const StatementLowerer = struct {
         c.mlirOperationStateAddOwnedRegions(&state, 1, @ptrCast(&body_region));
 
         const for_op = c.mlirOperationCreate(&state);
-        c.mlirBlockAppendOwnedOperation(self.block, for_op);
+        h.appendOp(self.block, for_op);
 
         // Get the induction variable
         const induction_var = c.mlirBlockGetArgument(body_block, 0);
@@ -1301,40 +1301,40 @@ pub const StatementLowerer = struct {
 
         // Add scf.yield at end of body
         const yield_op = self.ora_dialect.createScfYield(loc);
-        c.mlirBlockAppendOwnedOperation(body_block, yield_op);
+        h.appendOp(body_block, yield_op);
     }
 
     /// Lower indexed for loop (for (iterable) |item, index| body)
     fn lowerIndexedForLoop(self: *const StatementLowerer, item_name: []const u8, index_name: []const u8, iterable: c.MlirValue, body: lib.ast.Statements.BlockNode, loc: c.MlirLocation) LoweringError!void {
         // Create scf.for operation similar to simple for loop
-        var state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("scf.for"), loc);
+        var state = h.opState("scf.for", loc);
 
         // Create integer type for loop bounds
         const zero_ty = c.mlirIntegerTypeGet(self.ctx, constants.DEFAULT_INTEGER_BITS);
 
         // Create constants for loop bounds
-        var zero_state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("arith.constant"), loc);
+        var zero_state = h.opState("arith.constant", loc);
         c.mlirOperationStateAddResults(&zero_state, 1, @ptrCast(&zero_ty));
         const zero_attr = c.mlirIntegerAttrGet(zero_ty, 0);
-        const value_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("value"));
+        const value_id = h.identifier(self.ctx, "value");
         var zero_attrs = [_]c.MlirNamedAttribute{c.mlirNamedAttributeGet(value_id, zero_attr)};
         c.mlirOperationStateAddAttributes(&zero_state, zero_attrs.len, &zero_attrs);
         const zero_op = c.mlirOperationCreate(&zero_state);
-        c.mlirBlockAppendOwnedOperation(self.block, zero_op);
-        const lower_bound = c.mlirOperationGetResult(zero_op, 0);
+        h.appendOp(self.block, zero_op);
+        const lower_bound = h.getResult(zero_op, 0);
 
         // Use iterable as upper bound (simplified)
         const upper_bound = iterable;
 
         // Create step constant
-        var step_state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("arith.constant"), loc);
+        var step_state = h.opState("arith.constant", loc);
         c.mlirOperationStateAddResults(&step_state, 1, @ptrCast(&zero_ty));
         const step_attr = c.mlirIntegerAttrGet(zero_ty, 1);
         var step_attrs = [_]c.MlirNamedAttribute{c.mlirNamedAttributeGet(value_id, step_attr)};
         c.mlirOperationStateAddAttributes(&step_state, step_attrs.len, &step_attrs);
         const step_op = c.mlirOperationCreate(&step_state);
-        c.mlirBlockAppendOwnedOperation(self.block, step_op);
-        const step = c.mlirOperationGetResult(step_op, 0);
+        h.appendOp(self.block, step_op);
+        const step = h.getResult(step_op, 0);
 
         // Add operands to scf.for
         const operands = [_]c.MlirValue{ lower_bound, upper_bound, step };
@@ -1347,7 +1347,7 @@ pub const StatementLowerer = struct {
         c.mlirOperationStateAddOwnedRegions(&state, 1, @ptrCast(&body_region));
 
         const for_op = c.mlirOperationCreate(&state);
-        c.mlirBlockAppendOwnedOperation(self.block, for_op);
+        h.appendOp(self.block, for_op);
 
         // Get the induction variables (index and item)
         const index_var = c.mlirBlockGetArgument(body_block, 0);
@@ -1368,40 +1368,40 @@ pub const StatementLowerer = struct {
 
         // Add scf.yield at end of body
         const yield_op = self.ora_dialect.createScfYield(loc);
-        c.mlirBlockAppendOwnedOperation(body_block, yield_op);
+        h.appendOp(body_block, yield_op);
     }
 
     /// Lower destructured for loop (for (iterable) |.{field1, field2}| body)
     fn lowerDestructuredForLoop(self: *const StatementLowerer, pattern: lib.ast.Expressions.DestructuringPattern, iterable: c.MlirValue, body: lib.ast.Statements.BlockNode, loc: c.MlirLocation) LoweringError!void {
         // Create scf.for operation similar to simple for loop
-        var state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("scf.for"), loc);
+        var state = h.opState("scf.for", loc);
 
         // Create integer type for loop bounds
         const zero_ty = c.mlirIntegerTypeGet(self.ctx, constants.DEFAULT_INTEGER_BITS);
 
         // Create constants for loop bounds
-        var zero_state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("arith.constant"), loc);
+        var zero_state = h.opState("arith.constant", loc);
         c.mlirOperationStateAddResults(&zero_state, 1, @ptrCast(&zero_ty));
         const zero_attr = c.mlirIntegerAttrGet(zero_ty, 0);
-        const value_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("value"));
+        const value_id = h.identifier(self.ctx, "value");
         var zero_attrs = [_]c.MlirNamedAttribute{c.mlirNamedAttributeGet(value_id, zero_attr)};
         c.mlirOperationStateAddAttributes(&zero_state, zero_attrs.len, &zero_attrs);
         const zero_op = c.mlirOperationCreate(&zero_state);
-        c.mlirBlockAppendOwnedOperation(self.block, zero_op);
-        const lower_bound = c.mlirOperationGetResult(zero_op, 0);
+        h.appendOp(self.block, zero_op);
+        const lower_bound = h.getResult(zero_op, 0);
 
         // Use iterable as upper bound (simplified)
         const upper_bound = iterable;
 
         // Create step constant
-        var step_state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("arith.constant"), loc);
+        var step_state = h.opState("arith.constant", loc);
         c.mlirOperationStateAddResults(&step_state, 1, @ptrCast(&zero_ty));
         const step_attr = c.mlirIntegerAttrGet(zero_ty, 1);
         var step_attrs = [_]c.MlirNamedAttribute{c.mlirNamedAttributeGet(value_id, step_attr)};
         c.mlirOperationStateAddAttributes(&step_state, step_attrs.len, &step_attrs);
         const step_op = c.mlirOperationCreate(&step_state);
-        c.mlirBlockAppendOwnedOperation(self.block, step_op);
-        const step = c.mlirOperationGetResult(step_op, 0);
+        h.appendOp(self.block, step_op);
+        const step = h.getResult(step_op, 0);
 
         // Add operands to scf.for
         const operands = [_]c.MlirValue{ lower_bound, upper_bound, step };
@@ -1414,7 +1414,7 @@ pub const StatementLowerer = struct {
         c.mlirOperationStateAddOwnedRegions(&state, 1, @ptrCast(&body_region));
 
         const for_op = c.mlirOperationCreate(&state);
-        c.mlirBlockAppendOwnedOperation(self.block, for_op);
+        h.appendOp(self.block, for_op);
 
         // Get the item variable
         const item_var = c.mlirBlockGetArgument(body_block, 0);
@@ -1428,8 +1428,8 @@ pub const StatementLowerer = struct {
                         const result_ty = c.mlirIntegerTypeGet(self.ctx, constants.DEFAULT_INTEGER_BITS);
                         const indices = [_]u32{@intCast(i)};
                         const field_access_op = self.ora_dialect.createLlvmExtractvalue(item_var, &indices, result_ty, loc);
-                        c.mlirBlockAppendOwnedOperation(body_block, field_access_op);
-                        const field_value = c.mlirOperationGetResult(field_access_op, 0);
+                        h.appendOp(body_block, field_access_op);
+                        const field_value = h.getResult(field_access_op, 0);
 
                         // Add to variable map
                         lvm.addLocalVar(field.variable, field_value) catch {
@@ -1448,7 +1448,7 @@ pub const StatementLowerer = struct {
 
         // Add scf.yield at end of body
         const yield_op = self.ora_dialect.createScfYield(loc);
-        c.mlirBlockAppendOwnedOperation(body_block, yield_op);
+        h.appendOp(body_block, yield_op);
     }
 
     /// Helper to load value from memref if needed
@@ -1458,12 +1458,12 @@ pub const StatementLowerer = struct {
         // If it's a memref, load the value
         if (c.mlirTypeIsAMemRef(val_type)) {
             const element_type = c.mlirShapedTypeGetElementType(val_type);
-            var load_state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("memref.load"), loc);
+            var load_state = h.opState("memref.load", loc);
             c.mlirOperationStateAddOperands(&load_state, 1, @ptrCast(&val));
             c.mlirOperationStateAddResults(&load_state, 1, @ptrCast(&element_type));
             const load_op = c.mlirOperationCreate(&load_state);
-            c.mlirBlockAppendOwnedOperation(self.block, load_op);
-            return c.mlirOperationGetResult(load_op, 0);
+            h.appendOp(self.block, load_op);
+            return h.getResult(load_op, 0);
         }
 
         return val;
@@ -1502,20 +1502,20 @@ pub const StatementLowerer = struct {
             .Literal => |lit| blk: {
                 const case_value = self.expr_lowerer.lowerLiteral(&lit.value);
                 // Compare condition with case value using arith.cmpi
-                var cmp_state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("arith.cmpi"), loc);
+                var cmp_state = h.opState("arith.cmpi", loc);
 
                 // Add predicate attribute (0 = eq)
-                const pred_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("predicate"));
+                const pred_id = h.identifier(self.ctx, "predicate");
                 const pred_attr = c.mlirIntegerAttrGet(c.mlirIntegerTypeGet(self.ctx, 64), 0); // eq
                 var attrs = [_]c.MlirNamedAttribute{c.mlirNamedAttributeGet(pred_id, pred_attr)};
                 c.mlirOperationStateAddAttributes(&cmp_state, attrs.len, &attrs);
 
                 c.mlirOperationStateAddOperands(&cmp_state, 2, @ptrCast(&[_]c.MlirValue{ condition, case_value }));
-                c.mlirOperationStateAddResults(&cmp_state, 1, @ptrCast(&c.mlirIntegerTypeGet(self.ctx, 1)));
+                c.mlirOperationStateAddResults(&cmp_state, 1, @ptrCast(&h.boolType(self.ctx)));
 
                 const cmp_op = c.mlirOperationCreate(&cmp_state);
-                c.mlirBlockAppendOwnedOperation(self.block, cmp_op);
-                break :blk c.mlirOperationGetResult(cmp_op, 0);
+                h.appendOp(self.block, cmp_op);
+                break :blk h.getResult(cmp_op, 0);
             },
             .Range => |range| blk: {
                 // Create range check: condition >= start && condition <= end
@@ -1523,35 +1523,35 @@ pub const StatementLowerer = struct {
                 const end_val = self.expr_lowerer.lowerExpression(range.end);
 
                 // Lower bound check: condition >= start
-                var lower_cmp_state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("arith.cmpi"), loc);
-                const pred_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("predicate"));
+                var lower_cmp_state = h.opState("arith.cmpi", loc);
+                const pred_id = h.identifier(self.ctx, "predicate");
                 const pred_sge_attr = c.mlirIntegerAttrGet(c.mlirIntegerTypeGet(self.ctx, 64), 5); // sge
                 var lower_attrs = [_]c.MlirNamedAttribute{c.mlirNamedAttributeGet(pred_id, pred_sge_attr)};
                 c.mlirOperationStateAddAttributes(&lower_cmp_state, lower_attrs.len, &lower_attrs);
                 c.mlirOperationStateAddOperands(&lower_cmp_state, 2, @ptrCast(&[_]c.MlirValue{ condition, start_val }));
-                c.mlirOperationStateAddResults(&lower_cmp_state, 1, @ptrCast(&c.mlirIntegerTypeGet(self.ctx, 1)));
+                c.mlirOperationStateAddResults(&lower_cmp_state, 1, @ptrCast(&h.boolType(self.ctx)));
                 const lower_cmp_op = c.mlirOperationCreate(&lower_cmp_state);
-                c.mlirBlockAppendOwnedOperation(self.block, lower_cmp_op);
-                const lower_bound = c.mlirOperationGetResult(lower_cmp_op, 0);
+                h.appendOp(self.block, lower_cmp_op);
+                const lower_bound = h.getResult(lower_cmp_op, 0);
 
                 // Upper bound check: condition <= end
-                var upper_cmp_state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("arith.cmpi"), loc);
+                var upper_cmp_state = h.opState("arith.cmpi", loc);
                 const pred_sle_attr = c.mlirIntegerAttrGet(c.mlirIntegerTypeGet(self.ctx, 64), 3); // sle
                 var upper_attrs = [_]c.MlirNamedAttribute{c.mlirNamedAttributeGet(pred_id, pred_sle_attr)};
                 c.mlirOperationStateAddAttributes(&upper_cmp_state, upper_attrs.len, &upper_attrs);
                 c.mlirOperationStateAddOperands(&upper_cmp_state, 2, @ptrCast(&[_]c.MlirValue{ condition, end_val }));
-                c.mlirOperationStateAddResults(&upper_cmp_state, 1, @ptrCast(&c.mlirIntegerTypeGet(self.ctx, 1)));
+                c.mlirOperationStateAddResults(&upper_cmp_state, 1, @ptrCast(&h.boolType(self.ctx)));
                 const upper_cmp_op = c.mlirOperationCreate(&upper_cmp_state);
-                c.mlirBlockAppendOwnedOperation(self.block, upper_cmp_op);
-                const upper_bound = c.mlirOperationGetResult(upper_cmp_op, 0);
+                h.appendOp(self.block, upper_cmp_op);
+                const upper_bound = h.getResult(upper_cmp_op, 0);
 
                 // AND the two conditions
-                var and_state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("arith.andi"), loc);
+                var and_state = h.opState("arith.andi", loc);
                 c.mlirOperationStateAddOperands(&and_state, 2, @ptrCast(&[_]c.MlirValue{ lower_bound, upper_bound }));
-                c.mlirOperationStateAddResults(&and_state, 1, @ptrCast(&c.mlirIntegerTypeGet(self.ctx, 1)));
+                c.mlirOperationStateAddResults(&and_state, 1, @ptrCast(&h.boolType(self.ctx)));
                 const and_op = c.mlirOperationCreate(&and_state);
-                c.mlirBlockAppendOwnedOperation(self.block, and_op);
-                break :blk c.mlirOperationGetResult(and_op, 0);
+                h.appendOp(self.block, and_op);
+                break :blk h.getResult(and_op, 0);
             },
             .EnumValue => |enum_val| blk: {
                 // Look up enum variant index
@@ -1559,57 +1559,57 @@ pub const StatementLowerer = struct {
                     if (st.lookupType(enum_val.enum_name)) |enum_type| {
                         if (enum_type.getVariantIndex(enum_val.variant_name)) |variant_idx| {
                             // Create constant for variant index
-                            var const_state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("arith.constant"), loc);
-                            const value_attr = c.mlirIntegerAttrGet(c.mlirIntegerTypeGet(self.ctx, 256), @intCast(variant_idx));
-                            const value_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("value"));
+                            var const_state = h.opState("arith.constant", loc);
+                            const value_attr = c.mlirIntegerAttrGet(h.i256Type(self.ctx), @intCast(variant_idx));
+                            const value_id = h.identifier(self.ctx, "value");
                             var attrs = [_]c.MlirNamedAttribute{c.mlirNamedAttributeGet(value_id, value_attr)};
                             c.mlirOperationStateAddAttributes(&const_state, attrs.len, &attrs);
-                            c.mlirOperationStateAddResults(&const_state, 1, @ptrCast(&c.mlirIntegerTypeGet(self.ctx, 256)));
+                            c.mlirOperationStateAddResults(&const_state, 1, @ptrCast(&h.i256Type(self.ctx)));
                             const const_op = c.mlirOperationCreate(&const_state);
-                            c.mlirBlockAppendOwnedOperation(self.block, const_op);
-                            const variant_const = c.mlirOperationGetResult(const_op, 0);
+                            h.appendOp(self.block, const_op);
+                            const variant_const = h.getResult(const_op, 0);
 
                             // Compare condition with variant constant
-                            var cmp_state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("arith.cmpi"), loc);
-                            const pred_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("predicate"));
+                            var cmp_state = h.opState("arith.cmpi", loc);
+                            const pred_id = h.identifier(self.ctx, "predicate");
                             const pred_attr = c.mlirIntegerAttrGet(c.mlirIntegerTypeGet(self.ctx, 64), 0); // eq
                             var cmp_attrs = [_]c.MlirNamedAttribute{c.mlirNamedAttributeGet(pred_id, pred_attr)};
                             c.mlirOperationStateAddAttributes(&cmp_state, cmp_attrs.len, &cmp_attrs);
                             c.mlirOperationStateAddOperands(&cmp_state, 2, @ptrCast(&[_]c.MlirValue{ condition, variant_const }));
-                            c.mlirOperationStateAddResults(&cmp_state, 1, @ptrCast(&c.mlirIntegerTypeGet(self.ctx, 1)));
+                            c.mlirOperationStateAddResults(&cmp_state, 1, @ptrCast(&h.boolType(self.ctx)));
                             const cmp_op = c.mlirOperationCreate(&cmp_state);
-                            c.mlirBlockAppendOwnedOperation(self.block, cmp_op);
-                            break :blk c.mlirOperationGetResult(cmp_op, 0);
+                            h.appendOp(self.block, cmp_op);
+                            break :blk h.getResult(cmp_op, 0);
                         }
                     }
                 }
                 // Fallback: create a false condition
-                var const_state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("arith.constant"), loc);
-                const value_attr = c.mlirIntegerAttrGet(c.mlirIntegerTypeGet(self.ctx, 1), 0);
-                const value_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("value"));
+                var const_state = h.opState("arith.constant", loc);
+                const value_attr = c.mlirIntegerAttrGet(h.boolType(self.ctx), 0);
+                const value_id = h.identifier(self.ctx, "value");
                 var attrs = [_]c.MlirNamedAttribute{c.mlirNamedAttributeGet(value_id, value_attr)};
                 c.mlirOperationStateAddAttributes(&const_state, attrs.len, &attrs);
-                c.mlirOperationStateAddResults(&const_state, 1, @ptrCast(&c.mlirIntegerTypeGet(self.ctx, 1)));
+                c.mlirOperationStateAddResults(&const_state, 1, @ptrCast(&h.boolType(self.ctx)));
                 const const_op = c.mlirOperationCreate(&const_state);
-                c.mlirBlockAppendOwnedOperation(self.block, const_op);
-                break :blk c.mlirOperationGetResult(const_op, 0);
+                h.appendOp(self.block, const_op);
+                break :blk h.getResult(const_op, 0);
             },
             .Else => blk: {
                 // Else pattern always matches, create a true condition
-                var const_state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("arith.constant"), loc);
-                const value_attr = c.mlirIntegerAttrGet(c.mlirIntegerTypeGet(self.ctx, 1), 1);
-                const value_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("value"));
+                var const_state = h.opState("arith.constant", loc);
+                const value_attr = c.mlirIntegerAttrGet(h.boolType(self.ctx), 1);
+                const value_id = h.identifier(self.ctx, "value");
                 var attrs = [_]c.MlirNamedAttribute{c.mlirNamedAttributeGet(value_id, value_attr)};
                 c.mlirOperationStateAddAttributes(&const_state, attrs.len, &attrs);
-                c.mlirOperationStateAddResults(&const_state, 1, @ptrCast(&c.mlirIntegerTypeGet(self.ctx, 1)));
+                c.mlirOperationStateAddResults(&const_state, 1, @ptrCast(&h.boolType(self.ctx)));
                 const const_op = c.mlirOperationCreate(&const_state);
-                c.mlirBlockAppendOwnedOperation(self.block, const_op);
-                break :blk c.mlirOperationGetResult(const_op, 0);
+                h.appendOp(self.block, const_op);
+                break :blk h.getResult(const_op, 0);
             },
         };
 
         // Create scf.if operation for this case
-        var if_state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("scf.if"), loc);
+        var if_state = h.opState("scf.if", loc);
         c.mlirOperationStateAddOperands(&if_state, 1, @ptrCast(&case_condition));
 
         // Create then region for the case body
@@ -1634,9 +1634,9 @@ pub const StatementLowerer = struct {
         }
 
         // Add yield to then block
-        var yield_state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("scf.yield"), loc);
+        var yield_state = h.opState("scf.yield", loc);
         const yield_op = c.mlirOperationCreate(&yield_state);
-        c.mlirBlockAppendOwnedOperation(then_block, yield_op);
+        h.appendOp(then_block, yield_op);
 
         // Create else region for next cases
         const else_region = c.mlirRegionCreate();
@@ -1650,9 +1650,9 @@ pub const StatementLowerer = struct {
         // (the base case with default block will add its own yield)
         const is_last_case = (case_idx + 1 >= cases.len);
         if (!(is_last_case and default_case != null)) {
-            var else_yield_state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("scf.yield"), loc);
+            var else_yield_state = h.opState("scf.yield", loc);
             const else_yield_op = c.mlirOperationCreate(&else_yield_state);
-            c.mlirBlockAppendOwnedOperation(else_block, else_yield_op);
+            h.appendOp(else_block, else_yield_op);
         }
 
         // Add regions to the if operation
@@ -1660,7 +1660,7 @@ pub const StatementLowerer = struct {
         c.mlirOperationStateAddOwnedRegions(&if_state, 1, @ptrCast(&else_region));
 
         const if_op = c.mlirOperationCreate(&if_state);
-        c.mlirBlockAppendOwnedOperation(target_block, if_op);
+        h.appendOp(target_block, if_op);
     }
 
     /// Lower switch cases with label context for continue support
@@ -1754,18 +1754,18 @@ pub const StatementLowerer = struct {
                         const actual_value = if (c.mlirTypeIsAInteger(value_type) and c.mlirIntegerTypeGetWidth(value_type) == 1) blk: {
                             // This is i1, need to extend to i256
                             const i256_type = c.mlirIntegerTypeGet(self.ctx, constants.DEFAULT_INTEGER_BITS);
-                            var ext_state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("arith.extui"), loc);
+                            var ext_state = h.opState("arith.extui", loc);
                             c.mlirOperationStateAddOperands(&ext_state, 1, @ptrCast(&value));
                             c.mlirOperationStateAddResults(&ext_state, 1, @ptrCast(&i256_type));
                             const ext_op = c.mlirOperationCreate(&ext_state);
-                            c.mlirBlockAppendOwnedOperation(self.block, ext_op);
-                            break :blk c.mlirOperationGetResult(ext_op, 0);
+                            h.appendOp(self.block, ext_op);
+                            break :blk h.getResult(ext_op, 0);
                         } else blk: {
                             break :blk value;
                         };
 
                         const store_op = self.memory_manager.createStorageStore(actual_value, ident.name, loc);
-                        c.mlirBlockAppendOwnedOperation(self.block, store_op);
+                        h.appendOp(self.block, store_op);
                         return;
                     },
                     .Memory => {
@@ -1773,14 +1773,14 @@ pub const StatementLowerer = struct {
                         if (self.local_var_map) |lvm| {
                             if (lvm.getLocalVar(ident.name)) |memref| {
                                 const store_op = self.memory_manager.createStoreOp(value, memref, region, loc);
-                                c.mlirBlockAppendOwnedOperation(self.block, store_op);
+                                h.appendOp(self.block, store_op);
                                 return;
                             }
                         }
                     },
                     .TStore => {
                         const store_op = self.memory_manager.createTStoreStore(value, ident.name, loc);
-                        c.mlirBlockAppendOwnedOperation(self.block, store_op);
+                        h.appendOp(self.block, store_op);
                         return;
                     },
                     .Stack => {
@@ -1792,7 +1792,7 @@ pub const StatementLowerer = struct {
                                 if (c.mlirTypeIsAMemRef(var_type)) {
                                     // It's a memref - use memref.store
                                     const store_op = self.ora_dialect.createMemrefStore(value, var_value, &[_]c.MlirValue{}, loc);
-                                    c.mlirBlockAppendOwnedOperation(self.block, store_op);
+                                    h.appendOp(self.block, store_op);
                                     return;
                                 } else {
                                     // It's an immutable variable - can't reassign
@@ -1813,7 +1813,7 @@ pub const StatementLowerer = struct {
         if (self.storage_map) |sm| {
             if (sm.hasStorageVariable(ident.name)) {
                 const store_op = self.memory_manager.createStorageStore(value, ident.name, loc);
-                c.mlirBlockAppendOwnedOperation(self.block, store_op);
+                h.appendOp(self.block, store_op);
                 return;
             }
         }
@@ -1844,12 +1844,12 @@ pub const StatementLowerer = struct {
         // 3. Store the updated struct back
 
         // Create llvm.insertvalue operation to update the field
-        var insert_state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("llvm.insertvalue"), loc);
+        var insert_state = h.opState("llvm.insertvalue", loc);
         c.mlirOperationStateAddOperands(&insert_state, 2, @ptrCast(&[_]c.MlirValue{ target, value }));
 
         // Add field index as attribute (for now, assume field index 0)
         // TODO: Look up actual field index from struct definition
-        const field_index_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("position"));
+        const field_index_id = h.identifier(self.ctx, "position");
         const field_index_attr = c.mlirIntegerAttrGet(c.mlirIntegerTypeGet(self.ctx, 32), 0);
         var attrs = [_]c.MlirNamedAttribute{c.mlirNamedAttributeGet(field_index_id, field_index_attr)};
         c.mlirOperationStateAddAttributes(&insert_state, attrs.len, &attrs);
@@ -1858,18 +1858,18 @@ pub const StatementLowerer = struct {
         c.mlirOperationStateAddResults(&insert_state, 1, @ptrCast(&target_type));
 
         const insert_op = c.mlirOperationCreate(&insert_state);
-        c.mlirBlockAppendOwnedOperation(self.block, insert_op);
-        const updated_struct = c.mlirOperationGetResult(insert_op, 0);
+        h.appendOp(self.block, insert_op);
+        const updated_struct = h.getResult(insert_op, 0);
 
         // If the target is a variable, store the updated struct back
         if (field_access.target.* == .Identifier) {
             const ident = field_access.target.Identifier;
             if (self.local_var_map) |var_map| {
                 if (var_map.getLocalVar(ident.name)) |var_value| {
-                    var store_state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("memref.store"), loc);
+                    var store_state = h.opState("memref.store", loc);
                     c.mlirOperationStateAddOperands(&store_state, 2, @ptrCast(&[_]c.MlirValue{ updated_struct, var_value }));
                     const store_op = c.mlirOperationCreate(&store_state);
-                    c.mlirBlockAppendOwnedOperation(self.block, store_op);
+                    h.appendOp(self.block, store_op);
                 } else {
                     std.debug.print("ERROR: Variable not found for field assignment: {s}\n", .{ident.name});
                     return LoweringError.UndefinedSymbol;
@@ -1880,17 +1880,17 @@ pub const StatementLowerer = struct {
             }
         } else {
             // For complex field access (e.g., nested structs), use ora.field_store
-            var field_store_state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("ora.field_store"), loc);
+            var field_store_state = h.opState("ora.field_store", loc);
             c.mlirOperationStateAddOperands(&field_store_state, 2, @ptrCast(&[_]c.MlirValue{ updated_struct, target }));
 
             // Add field name as attribute
-            const field_name_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("field"));
-            const field_name_attr = c.mlirStringAttrGet(self.ctx, c.mlirStringRefCreateFromCString(field_access.field.ptr));
+            const field_name_id = h.identifier(self.ctx, "field");
+            const field_name_attr = h.stringAttr(self.ctx, field_access.field);
             var field_attrs = [_]c.MlirNamedAttribute{c.mlirNamedAttributeGet(field_name_id, field_name_attr)};
             c.mlirOperationStateAddAttributes(&field_store_state, field_attrs.len, &field_attrs);
 
             const field_store_op = c.mlirOperationCreate(&field_store_state);
-            c.mlirBlockAppendOwnedOperation(self.block, field_store_op);
+            h.appendOp(self.block, field_store_op);
         }
     }
 
@@ -1904,24 +1904,24 @@ pub const StatementLowerer = struct {
         // Determine the type of indexing operation
         if (c.mlirTypeIsAMemRef(target_type)) {
             // Array indexing using memref.store
-            var store_state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("memref.store"), loc);
+            var store_state = h.opState("memref.store", loc);
             c.mlirOperationStateAddOperands(&store_state, 3, @ptrCast(&[_]c.MlirValue{ value, target, index_val }));
             const store_op = c.mlirOperationCreate(&store_state);
-            c.mlirBlockAppendOwnedOperation(self.block, store_op);
+            h.appendOp(self.block, store_op);
         } else {
             // Map indexing or other complex indexing operations
             // For now, use a generic store operation with ora.map_store attribute
-            var store_state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("ora.store"), loc);
+            var store_state = h.opState("ora.store", loc);
             c.mlirOperationStateAddOperands(&store_state, 3, @ptrCast(&[_]c.MlirValue{ value, target, index_val }));
 
             // Add map store attribute
-            const map_store_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("ora.map_store"));
+            const map_store_id = h.identifier(self.ctx, "ora.map_store");
             const map_store_attr = c.mlirBoolAttrGet(self.ctx, 1);
             var attrs = [_]c.MlirNamedAttribute{c.mlirNamedAttributeGet(map_store_id, map_store_attr)};
             c.mlirOperationStateAddAttributes(&store_state, attrs.len, &attrs);
 
             const store_op = c.mlirOperationCreate(&store_state);
-            c.mlirBlockAppendOwnedOperation(self.block, store_op);
+            h.appendOp(self.block, store_op);
         }
     }
 
@@ -1938,51 +1938,51 @@ pub const StatementLowerer = struct {
         };
 
         // Create memref for continue flag (i1)
-        const i1_type = c.mlirIntegerTypeGet(self.ctx, 1);
+        const i1_type = h.boolType(self.ctx);
         const empty_attr = c.mlirAttributeGetNull();
         const continue_flag_memref_type = c.mlirMemRefTypeGet(i1_type, 0, null, empty_attr, empty_attr);
-        var continue_flag_alloca_state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("memref.alloca"), loc);
+        var continue_flag_alloca_state = h.opState("memref.alloca", loc);
         c.mlirOperationStateAddResults(&continue_flag_alloca_state, 1, @ptrCast(&continue_flag_memref_type));
         const continue_flag_alloca = c.mlirOperationCreate(&continue_flag_alloca_state);
-        c.mlirBlockAppendOwnedOperation(self.block, continue_flag_alloca);
-        const continue_flag_memref = c.mlirOperationGetResult(continue_flag_alloca, 0);
+        h.appendOp(self.block, continue_flag_alloca);
+        const continue_flag_memref = h.getResult(continue_flag_alloca, 0);
 
         // Create memref for switch value (same type as switch condition)
         const condition_raw = self.expr_lowerer.lowerExpression(&switch_stmt.condition);
         const initial_value = self.ensureValue(condition_raw, loc);
         const value_type = c.mlirValueGetType(initial_value);
         const value_memref_type = c.mlirMemRefTypeGet(value_type, 0, null, empty_attr, empty_attr);
-        var value_alloca_state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("memref.alloca"), loc);
+        var value_alloca_state = h.opState("memref.alloca", loc);
         c.mlirOperationStateAddResults(&value_alloca_state, 1, @ptrCast(&value_memref_type));
         const value_alloca = c.mlirOperationCreate(&value_alloca_state);
-        c.mlirBlockAppendOwnedOperation(self.block, value_alloca);
-        const value_memref = c.mlirOperationGetResult(value_alloca, 0);
+        h.appendOp(self.block, value_alloca);
+        const value_memref = h.getResult(value_alloca, 0);
 
         // Initialize continue_flag to true
-        var true_const_state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("arith.constant"), loc);
+        var true_const_state = h.opState("arith.constant", loc);
         const true_attr = c.mlirIntegerAttrGet(i1_type, 1);
-        const value_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("value"));
+        const value_id = h.identifier(self.ctx, "value");
         var true_attrs = [_]c.MlirNamedAttribute{c.mlirNamedAttributeGet(value_id, true_attr)};
         c.mlirOperationStateAddAttributes(&true_const_state, true_attrs.len, &true_attrs);
         c.mlirOperationStateAddResults(&true_const_state, 1, @ptrCast(&i1_type));
         const true_const = c.mlirOperationCreate(&true_const_state);
-        c.mlirBlockAppendOwnedOperation(self.block, true_const);
-        const true_val = c.mlirOperationGetResult(true_const, 0);
+        h.appendOp(self.block, true_const);
+        const true_val = h.getResult(true_const, 0);
 
         // Store true to continue_flag
-        var init_flag_store_state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("memref.store"), loc);
+        var init_flag_store_state = h.opState("memref.store", loc);
         c.mlirOperationStateAddOperands(&init_flag_store_state, 2, @ptrCast(&[_]c.MlirValue{ true_val, continue_flag_memref }));
         const init_flag_store = c.mlirOperationCreate(&init_flag_store_state);
-        c.mlirBlockAppendOwnedOperation(self.block, init_flag_store);
+        h.appendOp(self.block, init_flag_store);
 
         // Store initial value to value_memref
-        var init_value_store_state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("memref.store"), loc);
+        var init_value_store_state = h.opState("memref.store", loc);
         c.mlirOperationStateAddOperands(&init_value_store_state, 2, @ptrCast(&[_]c.MlirValue{ initial_value, value_memref }));
         const init_value_store = c.mlirOperationCreate(&init_value_store_state);
-        c.mlirBlockAppendOwnedOperation(self.block, init_value_store);
+        h.appendOp(self.block, init_value_store);
 
         // Create scf.while operation
-        var while_state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("scf.while"), loc);
+        var while_state = h.opState("scf.while", loc);
 
         // Create before region (condition check)
         const before_region = c.mlirRegionCreate();
@@ -1990,17 +1990,17 @@ pub const StatementLowerer = struct {
         c.mlirRegionInsertOwnedBlock(before_region, 0, before_block);
 
         // In before block: load continue_flag and use scf.condition
-        var load_flag_state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("memref.load"), loc);
+        var load_flag_state = h.opState("memref.load", loc);
         c.mlirOperationStateAddOperands(&load_flag_state, 1, @ptrCast(&continue_flag_memref));
         c.mlirOperationStateAddResults(&load_flag_state, 1, @ptrCast(&i1_type));
         const load_flag = c.mlirOperationCreate(&load_flag_state);
-        c.mlirBlockAppendOwnedOperation(before_block, load_flag);
-        const should_continue = c.mlirOperationGetResult(load_flag, 0);
+        h.appendOp(before_block, load_flag);
+        const should_continue = h.getResult(load_flag, 0);
 
-        var condition_state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("scf.condition"), loc);
+        var condition_state = h.opState("scf.condition", loc);
         c.mlirOperationStateAddOperands(&condition_state, 1, @ptrCast(&should_continue));
         const condition_op = c.mlirOperationCreate(&condition_state);
-        c.mlirBlockAppendOwnedOperation(before_block, condition_op);
+        h.appendOp(before_block, condition_op);
 
         // Create after region (loop body with switch)
         const after_region = c.mlirRegionCreate();
@@ -2008,42 +2008,42 @@ pub const StatementLowerer = struct {
         c.mlirRegionInsertOwnedBlock(after_region, 0, after_block);
 
         // In after block: set continue_flag to false, then execute switch
-        var false_const_state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("arith.constant"), loc);
+        var false_const_state = h.opState("arith.constant", loc);
         const false_attr = c.mlirIntegerAttrGet(i1_type, 0);
         var false_attrs = [_]c.MlirNamedAttribute{c.mlirNamedAttributeGet(value_id, false_attr)};
         c.mlirOperationStateAddAttributes(&false_const_state, false_attrs.len, &false_attrs);
         c.mlirOperationStateAddResults(&false_const_state, 1, @ptrCast(&i1_type));
         const false_const = c.mlirOperationCreate(&false_const_state);
-        c.mlirBlockAppendOwnedOperation(after_block, false_const);
-        const false_val = c.mlirOperationGetResult(false_const, 0);
+        h.appendOp(after_block, false_const);
+        const false_val = h.getResult(false_const, 0);
 
-        var reset_flag_store_state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("memref.store"), loc);
+        var reset_flag_store_state = h.opState("memref.store", loc);
         c.mlirOperationStateAddOperands(&reset_flag_store_state, 2, @ptrCast(&[_]c.MlirValue{ false_val, continue_flag_memref }));
         const reset_flag_store = c.mlirOperationCreate(&reset_flag_store_state);
-        c.mlirBlockAppendOwnedOperation(after_block, reset_flag_store);
+        h.appendOp(after_block, reset_flag_store);
 
         // Load the switch value
-        var load_value_state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("memref.load"), loc);
+        var load_value_state = h.opState("memref.load", loc);
         c.mlirOperationStateAddOperands(&load_value_state, 1, @ptrCast(&value_memref));
         c.mlirOperationStateAddResults(&load_value_state, 1, @ptrCast(&value_type));
         const load_value = c.mlirOperationCreate(&load_value_state);
-        c.mlirBlockAppendOwnedOperation(after_block, load_value);
-        const switch_value = c.mlirOperationGetResult(load_value, 0);
+        h.appendOp(after_block, load_value);
+        const switch_value = h.getResult(load_value, 0);
 
         // Lower switch cases in after_block (passing label and memrefs for continue support)
         try self.lowerSwitchCasesWithLabel(switch_stmt.cases, switch_value, 0, after_block, loc, switch_stmt.default_case, labeled_block.label, continue_flag_memref, value_memref);
 
         // Add scf.yield at the end of after_block
-        var yield_state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("scf.yield"), loc);
+        var yield_state = h.opState("scf.yield", loc);
         const yield_op = c.mlirOperationCreate(&yield_state);
-        c.mlirBlockAppendOwnedOperation(after_block, yield_op);
+        h.appendOp(after_block, yield_op);
 
         // Add regions to while operation
         c.mlirOperationStateAddOwnedRegions(&while_state, 1, @ptrCast(&before_region));
         c.mlirOperationStateAddOwnedRegions(&while_state, 1, @ptrCast(&after_region));
 
         const while_op = c.mlirOperationCreate(&while_state);
-        c.mlirBlockAppendOwnedOperation(self.block, while_op);
+        h.appendOp(self.block, while_op);
     }
 
     /// Lower labeled block statements using scf.execute_region or scf.while for switches
@@ -2064,12 +2064,12 @@ pub const StatementLowerer = struct {
         } else {
             // For regular labeled blocks, use scf.execute_region
             // Create scf.execute_region operation
-            var state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("scf.execute_region"), loc);
+            var state = h.opState("scf.execute_region", loc);
 
             // Add label as attribute
             const label_ref = c.mlirStringRefCreate(labeled_block.label.ptr, labeled_block.label.len);
             const label_attr = c.mlirStringAttrGet(self.ctx, label_ref);
-            const label_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("label"));
+            const label_id = h.identifier(self.ctx, "label");
             var attrs = [_]c.MlirNamedAttribute{c.mlirNamedAttributeGet(label_id, label_attr)};
             c.mlirOperationStateAddAttributes(&state, attrs.len, &attrs);
 
@@ -2080,7 +2080,7 @@ pub const StatementLowerer = struct {
             c.mlirOperationStateAddOwnedRegions(&state, 1, @ptrCast(&region));
 
             const op = c.mlirOperationCreate(&state);
-            c.mlirBlockAppendOwnedOperation(self.block, op);
+            h.appendOp(self.block, op);
 
             // Lower the block body in the new region
             try self.lowerBlockBody(labeled_block.block, block);
@@ -2092,12 +2092,12 @@ pub const StatementLowerer = struct {
         const loc = self.fileLoc(log_stmt.span);
 
         // Create ora.log operation
-        var state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("ora.log"), loc);
+        var state = h.opState("ora.log", loc);
 
         // Add event name as attribute
         const event_ref = c.mlirStringRefCreate(log_stmt.event_name.ptr, log_stmt.event_name.len);
         const event_attr = c.mlirStringAttrGet(self.ctx, event_ref);
-        const event_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("event"));
+        const event_id = h.identifier(self.ctx, "event");
         var attrs = [_]c.MlirNamedAttribute{c.mlirNamedAttributeGet(event_id, event_attr)};
         c.mlirOperationStateAddAttributes(&state, attrs.len, &attrs);
 
@@ -2114,7 +2114,7 @@ pub const StatementLowerer = struct {
         }
 
         const op = c.mlirOperationCreate(&state);
-        c.mlirBlockAppendOwnedOperation(self.block, op);
+        h.appendOp(self.block, op);
     }
 
     /// Lower lock statements using ora.lock operations
@@ -2125,11 +2125,11 @@ pub const StatementLowerer = struct {
         const path_value = self.expr_lowerer.lowerExpression(&lock_stmt.path);
 
         // Create ora.lock operation
-        var state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("ora.lock"), loc);
+        var state = h.opState("ora.lock", loc);
         c.mlirOperationStateAddOperands(&state, 1, @ptrCast(&path_value));
 
         const op = c.mlirOperationCreate(&state);
-        c.mlirBlockAppendOwnedOperation(self.block, op);
+        h.appendOp(self.block, op);
     }
 
     /// Lower unlock statements using ora.unlock operations
@@ -2140,11 +2140,11 @@ pub const StatementLowerer = struct {
         const path_value = self.expr_lowerer.lowerExpression(&unlock_stmt.path);
 
         // Create ora.unlock operation
-        var state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("ora.unlock"), loc);
+        var state = h.opState("ora.unlock", loc);
         c.mlirOperationStateAddOperands(&state, 1, @ptrCast(&path_value));
 
         const op = c.mlirOperationCreate(&state);
-        c.mlirBlockAppendOwnedOperation(self.block, op);
+        h.appendOp(self.block, op);
     }
 
     /// Lower move statements with atomic transfer operations and ora.move attributes
@@ -2161,19 +2161,19 @@ pub const StatementLowerer = struct {
         const amount_value = self.expr_lowerer.lowerExpression(&move_stmt.amount);
 
         // Create ora.move operation with atomic transfer semantics
-        var state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("ora.move"), loc);
+        var state = h.opState("ora.move", loc);
 
         const operands = [_]c.MlirValue{ expr_value, source_value, dest_value, amount_value };
         c.mlirOperationStateAddOperands(&state, operands.len, &operands);
 
         // Add atomic attribute
         const atomic_attr = c.mlirBoolAttrGet(self.ctx, 1);
-        const atomic_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("atomic"));
+        const atomic_id = h.identifier(self.ctx, "atomic");
         var attrs = [_]c.MlirNamedAttribute{c.mlirNamedAttributeGet(atomic_id, atomic_attr)};
         c.mlirOperationStateAddAttributes(&state, attrs.len, &attrs);
 
         const op = c.mlirOperationCreate(&state);
-        c.mlirBlockAppendOwnedOperation(self.block, op);
+        h.appendOp(self.block, op);
     }
 
     /// Lower try-catch statements with exception handling constructs and error propagation
@@ -2181,7 +2181,7 @@ pub const StatementLowerer = struct {
         const loc = self.fileLoc(try_stmt.span);
 
         // Create ora.try operation
-        var state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("ora.try"), loc);
+        var state = h.opState("ora.try", loc);
 
         // Create try region
         const try_region = c.mlirRegionCreate();
@@ -2205,14 +2205,14 @@ pub const StatementLowerer = struct {
             if (catch_block.error_variable) |error_var| {
                 const error_ref = c.mlirStringRefCreate(error_var.ptr, error_var.len);
                 const error_attr = c.mlirStringAttrGet(self.ctx, error_ref);
-                const error_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("error_var"));
+                const error_id = h.identifier(self.ctx, "error_var");
                 var attrs = [_]c.MlirNamedAttribute{c.mlirNamedAttributeGet(error_id, error_attr)};
                 c.mlirOperationStateAddAttributes(&state, attrs.len, &attrs);
             }
         }
 
         const op = c.mlirOperationCreate(&state);
-        c.mlirBlockAppendOwnedOperation(self.block, op);
+        h.appendOp(self.block, op);
 
         // Lower try block
         try self.lowerBlockBody(try_stmt.try_block, try_block);
@@ -2223,12 +2223,12 @@ pub const StatementLowerer = struct {
         const loc = self.fileLoc(error_decl.span);
 
         // Create ora.error.decl operation
-        var state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("ora.error.decl"), loc);
+        var state = h.opState("ora.error.decl", loc);
 
         // Add error name as attribute
         const name_ref = c.mlirStringRefCreate(error_decl.name.ptr, error_decl.name.len);
         const name_attr = c.mlirStringAttrGet(self.ctx, name_ref);
-        const name_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("name"));
+        const name_id = h.identifier(self.ctx, "name");
         var attrs = [_]c.MlirNamedAttribute{c.mlirNamedAttributeGet(name_id, name_attr)};
         c.mlirOperationStateAddAttributes(&state, attrs.len, &attrs);
 
@@ -2238,14 +2238,14 @@ pub const StatementLowerer = struct {
             for (parameters) |param| {
                 const param_ref = c.mlirStringRefCreate(param.name.ptr, param.name.len);
                 const param_attr = c.mlirStringAttrGet(self.ctx, param_ref);
-                const param_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("param"));
+                const param_id = h.identifier(self.ctx, "param");
                 var param_attrs = [_]c.MlirNamedAttribute{c.mlirNamedAttributeGet(param_id, param_attr)};
                 c.mlirOperationStateAddAttributes(&state, param_attrs.len, &param_attrs);
             }
         }
 
         const op = c.mlirOperationCreate(&state);
-        c.mlirBlockAppendOwnedOperation(self.block, op);
+        h.appendOp(self.block, op);
     }
 
     /// Lower invariant statements for loop invariants
@@ -2256,11 +2256,11 @@ pub const StatementLowerer = struct {
         const condition = self.expr_lowerer.lowerExpression(&invariant.condition);
 
         // Create ora.invariant operation
-        var state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("ora.invariant"), loc);
+        var state = h.opState("ora.invariant", loc);
         c.mlirOperationStateAddOperands(&state, 1, @ptrCast(&condition));
 
         const op = c.mlirOperationCreate(&state);
-        c.mlirBlockAppendOwnedOperation(self.block, op);
+        h.appendOp(self.block, op);
     }
 
     /// Lower requires statements for function preconditions
@@ -2271,11 +2271,11 @@ pub const StatementLowerer = struct {
         const condition = self.expr_lowerer.lowerExpression(&requires.condition);
 
         // Create ora.requires operation
-        var state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("ora.requires"), loc);
+        var state = h.opState("ora.requires", loc);
         c.mlirOperationStateAddOperands(&state, 1, @ptrCast(&condition));
 
         const op = c.mlirOperationCreate(&state);
-        c.mlirBlockAppendOwnedOperation(self.block, op);
+        h.appendOp(self.block, op);
     }
 
     /// Lower ensures statements for function postconditions
@@ -2286,11 +2286,11 @@ pub const StatementLowerer = struct {
         const condition = self.expr_lowerer.lowerExpression(&ensures.condition);
 
         // Create ora.ensures operation
-        var state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("ora.ensures"), loc);
+        var state = h.opState("ora.ensures", loc);
         c.mlirOperationStateAddOperands(&state, 1, @ptrCast(&condition));
 
         const op = c.mlirOperationCreate(&state);
-        c.mlirBlockAppendOwnedOperation(self.block, op);
+        h.appendOp(self.block, op);
     }
 
     /// Lower block body with proper error handling and location tracking
@@ -2339,16 +2339,16 @@ pub const StatementLowerer = struct {
     /// Create range check for switch case patterns using standard MLIR operations
     fn createRangeCheck(self: *const StatementLowerer, _: c.MlirValue, _: c.MlirValue, _: bool, span: lib.ast.SourceSpan) c.MlirValue {
         const loc = self.fileLoc(span);
-        const result_ty = c.mlirIntegerTypeGet(self.ctx, 1);
+        const result_ty = h.boolType(self.ctx);
 
         // For range patterns like `1...10`, we need to check if the switch value is within the range
         // This requires the switch value, which we don't have here. Instead, we'll create a placeholder
         // that will be used in the switch comparison logic.
 
         // Create a constant true for now - the actual range check will be done in the switch comparison
-        var const_state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("arith.constant"), loc);
+        var const_state = h.opState("arith.constant", loc);
         const true_attr = c.mlirBoolAttrGet(self.ctx, 1);
-        const true_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("value"));
+        const true_id = h.identifier(self.ctx, "value");
         var const_attrs = [_]c.MlirNamedAttribute{
             c.mlirNamedAttributeGet(true_id, true_attr),
         };
@@ -2356,8 +2356,8 @@ pub const StatementLowerer = struct {
         c.mlirOperationStateAddResults(&const_state, 1, @ptrCast(&result_ty));
 
         const const_op = c.mlirOperationCreate(&const_state);
-        c.mlirBlockAppendOwnedOperation(self.block, const_op);
-        return c.mlirOperationGetResult(const_op, 0);
+        h.appendOp(self.block, const_op);
+        return h.getResult(const_op, 0);
     }
 
     /// Create enum constant for switch case patterns using standard MLIR operations
@@ -2370,9 +2370,9 @@ pub const StatementLowerer = struct {
         // 2. Create an arith.constant with that value
         // For now, we'll use a placeholder value of 0
 
-        var const_state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("arith.constant"), loc);
+        var const_state = h.opState("arith.constant", loc);
         const value_attr = c.mlirIntegerAttrGet(c.mlirIntegerTypeGet(self.ctx, constants.DEFAULT_INTEGER_BITS), 0);
-        const value_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("value"));
+        const value_id = h.identifier(self.ctx, "value");
         var const_attrs = [_]c.MlirNamedAttribute{
             c.mlirNamedAttributeGet(value_id, value_attr),
         };
@@ -2380,7 +2380,7 @@ pub const StatementLowerer = struct {
         c.mlirOperationStateAddResults(&const_state, 1, @ptrCast(&result_ty));
 
         const const_op = c.mlirOperationCreate(&const_state);
-        c.mlirBlockAppendOwnedOperation(self.block, const_op);
-        return c.mlirOperationGetResult(const_op, 0);
+        h.appendOp(self.block, const_op);
+        return h.getResult(const_op, 0);
     }
 };

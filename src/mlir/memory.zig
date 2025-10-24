@@ -131,19 +131,19 @@ pub const MemoryManager = struct {
                 // Storage uses ora.sstore - address should be variable name
                 std.debug.print("ERROR: Use createStorageStore for storage variables\n", .{});
                 // Create a placeholder error operation
-                var state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("ora.error"), loc);
+                var state = h.opState("ora.error", loc);
                 const error_ty = c.mlirIntegerTypeGet(self.ctx, 32);
                 c.mlirOperationStateAddResults(&state, 1, @ptrCast(&error_ty));
                 return c.mlirOperationCreate(&state);
             },
             .Memory => {
                 // Memory uses memref.store with memory space 0
-                var state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("memref.store"), loc);
+                var state = h.opState("memref.store", loc);
                 c.mlirOperationStateAddOperands(&state, 2, @ptrCast(&[_]c.MlirValue{ value, address }));
 
                 // Add memory space attribute
                 const space_attr = self.getMemorySpaceAttribute(storage_type);
-                const space_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("memspace"));
+                const space_id = h.identifier(self.ctx, "memspace");
                 var attrs = [_]c.MlirNamedAttribute{
                     c.mlirNamedAttributeGet(space_id, space_attr),
                 };
@@ -155,7 +155,7 @@ pub const MemoryManager = struct {
                 // Transient storage uses ora.tstore
                 std.debug.print("ERROR: Use createTStoreStore for transient storage variables\n", .{});
                 // Create a placeholder error operation
-                var state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("ora.error"), loc);
+                var state = h.opState("ora.error", loc);
                 const error_ty = c.mlirIntegerTypeGet(self.ctx, 32);
                 c.mlirOperationStateAddResults(&state, 1, @ptrCast(&error_ty));
                 return c.mlirOperationCreate(&state);
@@ -175,19 +175,19 @@ pub const MemoryManager = struct {
                 // Storage uses ora.sload - address should be variable name
                 std.debug.print("ERROR: Use createStorageLoad for storage variables\n", .{});
                 // Create a placeholder error operation
-                var state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("ora.error"), loc);
+                var state = h.opState("ora.error", loc);
                 c.mlirOperationStateAddResults(&state, 1, @ptrCast(&result_type));
                 return c.mlirOperationCreate(&state);
             },
             .Memory => {
                 // Memory uses memref.load with memory space 0
-                var state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("memref.load"), loc);
+                var state = h.opState("memref.load", loc);
                 c.mlirOperationStateAddOperands(&state, 1, @ptrCast(&address));
                 c.mlirOperationStateAddResults(&state, 1, @ptrCast(&result_type));
 
                 // Add memory space attribute
                 const space_attr = self.getMemorySpaceAttribute(storage_type);
-                const space_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("memspace"));
+                const space_id = h.identifier(self.ctx, "memspace");
                 var attrs = [_]c.MlirNamedAttribute{
                     c.mlirNamedAttributeGet(space_id, space_attr),
                 };
@@ -199,7 +199,7 @@ pub const MemoryManager = struct {
                 // Transient storage uses ora.tload
                 std.debug.print("ERROR: Use createTStoreLoad for transient storage variables\n", .{});
                 // Create a placeholder error operation
-                var state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("ora.error"), loc);
+                var state = h.opState("ora.error", loc);
                 c.mlirOperationStateAddResults(&state, 1, @ptrCast(&result_type));
                 return c.mlirOperationCreate(&state);
             },
@@ -218,12 +218,12 @@ pub const MemoryManager = struct {
 
     /// Create memory load operation (ora.mload)
     pub fn createMemoryLoad(self: *const MemoryManager, var_name: []const u8, loc: c.MlirLocation) c.MlirOperation {
-        var state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("ora.mload"), loc);
+        var state = h.opState("ora.mload", loc);
 
         // Add the variable name as an attribute
         const name_ref = c.mlirStringRefCreate(var_name.ptr, var_name.len);
         const name_attr = c.mlirStringAttrGet(self.ctx, name_ref);
-        const name_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("name"));
+        const name_id = h.identifier(self.ctx, "name");
         var attrs = [_]c.MlirNamedAttribute{
             c.mlirNamedAttributeGet(name_id, name_attr),
         };
@@ -238,7 +238,7 @@ pub const MemoryManager = struct {
 
     /// Create transient storage load operation (ora.tload)
     pub fn createTStoreLoad(self: *const MemoryManager, var_name: []const u8, loc: c.MlirLocation) c.MlirOperation {
-        var state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("ora.tload"), loc);
+        var state = h.opState("ora.tload", loc);
 
         // Add the global name as a symbol reference
         var name_buffer: [256]u8 = undefined;
@@ -248,7 +248,7 @@ pub const MemoryManager = struct {
         name_buffer[var_name.len] = 0; // null-terminate
         const name_str = c.mlirStringRefCreateFromCString(&name_buffer[0]);
         const name_attr = c.mlirStringAttrGet(self.ctx, name_str);
-        const name_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("global"));
+        const name_id = h.identifier(self.ctx, "global");
         var attrs = [_]c.MlirNamedAttribute{
             c.mlirNamedAttributeGet(name_id, name_attr),
         };
@@ -268,13 +268,13 @@ pub const MemoryManager = struct {
 
     /// Create memory store operation (ora.mstore)
     pub fn createMemoryStore(self: *const MemoryManager, value: c.MlirValue, var_name: []const u8, loc: c.MlirLocation) c.MlirOperation {
-        var state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("ora.mstore"), loc);
+        var state = h.opState("ora.mstore", loc);
         c.mlirOperationStateAddOperands(&state, 1, @ptrCast(&value));
 
         // Add the variable name as an attribute
         const name_ref = c.mlirStringRefCreate(var_name.ptr, var_name.len);
         const name_attr = c.mlirStringAttrGet(self.ctx, name_ref);
-        const name_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("name"));
+        const name_id = h.identifier(self.ctx, "name");
         var attrs = [_]c.MlirNamedAttribute{
             c.mlirNamedAttributeGet(name_id, name_attr),
         };
@@ -285,7 +285,7 @@ pub const MemoryManager = struct {
 
     /// Create transient storage store operation (ora.tstore)
     pub fn createTStoreStore(self: *const MemoryManager, value: c.MlirValue, var_name: []const u8, loc: c.MlirLocation) c.MlirOperation {
-        var state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("ora.tstore"), loc);
+        var state = h.opState("ora.tstore", loc);
         c.mlirOperationStateAddOperands(&state, 1, @ptrCast(&value));
 
         // Add the global name as a symbol reference
@@ -296,7 +296,7 @@ pub const MemoryManager = struct {
         name_buffer[var_name.len] = 0; // null-terminate
         const name_str = c.mlirStringRefCreateFromCString(&name_buffer[0]);
         const name_attr = c.mlirStringAttrGet(self.ctx, name_str);
-        const name_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("global"));
+        const name_id = h.identifier(self.ctx, "global");
         var attrs = [_]c.MlirNamedAttribute{
             c.mlirNamedAttributeGet(name_id, name_attr),
         };
@@ -331,7 +331,7 @@ pub const MemoryManager = struct {
         switch (storage_type) {
             .Storage => {
                 // Generate ora.sload for storage variables
-                var state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("ora.sload"), loc);
+                var state = h.opState("ora.sload", loc);
 
                 // Add the global name as a symbol reference
                 var name_buffer: [256]u8 = undefined;
@@ -341,7 +341,7 @@ pub const MemoryManager = struct {
                 name_buffer[var_name.len] = 0; // null-terminate
                 const name_str = c.mlirStringRefCreateFromCString(&name_buffer[0]);
                 const name_attr = c.mlirStringAttrGet(self.ctx, name_str);
-                const name_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("global"));
+                const name_id = h.identifier(self.ctx, "global");
                 var attrs = [_]c.MlirNamedAttribute{
                     c.mlirNamedAttributeGet(name_id, name_attr),
                 };
@@ -355,12 +355,12 @@ pub const MemoryManager = struct {
             },
             .Memory => {
                 // Generate ora.mload for memory variables
-                var state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("ora.mload"), loc);
+                var state = h.opState("ora.mload", loc);
 
                 // Add the variable name as an attribute
                 const name_ref = c.mlirStringRefCreate(var_name.ptr, var_name.len);
                 const name_attr = c.mlirStringAttrGet(self.ctx, name_ref);
-                const name_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("name"));
+                const name_id = h.identifier(self.ctx, "name");
                 var attrs = [_]c.MlirNamedAttribute{
                     c.mlirNamedAttributeGet(name_id, name_attr),
                 };
@@ -374,7 +374,7 @@ pub const MemoryManager = struct {
             },
             .TStore => {
                 // Generate ora.tload for transient storage variables
-                var state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("ora.tload"), loc);
+                var state = h.opState("ora.tload", loc);
 
                 // Add the global name as a symbol reference
                 var name_buffer: [256]u8 = undefined;
@@ -384,7 +384,7 @@ pub const MemoryManager = struct {
                 name_buffer[var_name.len] = 0; // null-terminate
                 const name_str = c.mlirStringRefCreateFromCString(&name_buffer[0]);
                 const name_attr = c.mlirStringAttrGet(self.ctx, name_str);
-                const name_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("global"));
+                const name_id = h.identifier(self.ctx, "global");
                 var attrs = [_]c.MlirNamedAttribute{
                     c.mlirNamedAttributeGet(name_id, name_attr),
                 };
@@ -401,7 +401,7 @@ pub const MemoryManager = struct {
                 // This is handled differently in the identifier lowering
                 std.debug.print("ERROR: Stack variables should not use createLoadOperation\n", .{});
                 // Create a placeholder error operation
-                var state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("ora.error"), loc);
+                var state = h.opState("ora.error", loc);
                 const error_ty = c.mlirIntegerTypeGet(self.ctx, 32);
                 c.mlirOperationStateAddResults(&state, 1, @ptrCast(&error_ty));
                 return c.mlirOperationCreate(&state);
@@ -416,7 +416,7 @@ pub const MemoryManager = struct {
         switch (storage_type) {
             .Storage => {
                 // Generate ora.sstore for storage variables
-                var state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("ora.sstore"), loc);
+                var state = h.opState("ora.sstore", loc);
                 c.mlirOperationStateAddOperands(&state, 1, @ptrCast(&value));
 
                 // Add the global name as a symbol reference
@@ -427,7 +427,7 @@ pub const MemoryManager = struct {
                 name_buffer[var_name.len] = 0; // null-terminate
                 const name_str = c.mlirStringRefCreateFromCString(&name_buffer[0]);
                 const name_attr = c.mlirStringAttrGet(self.ctx, name_str);
-                const name_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("global"));
+                const name_id = h.identifier(self.ctx, "global");
                 var attrs = [_]c.MlirNamedAttribute{
                     c.mlirNamedAttributeGet(name_id, name_attr),
                 };
@@ -437,13 +437,13 @@ pub const MemoryManager = struct {
             },
             .Memory => {
                 // Generate ora.mstore for memory variables
-                var state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("ora.mstore"), loc);
+                var state = h.opState("ora.mstore", loc);
                 c.mlirOperationStateAddOperands(&state, 1, @ptrCast(&value));
 
                 // Add the variable name as an attribute
                 const name_ref = c.mlirStringRefCreate(var_name.ptr, var_name.len);
                 const name_attr = c.mlirStringAttrGet(self.ctx, name_ref);
-                const name_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("name"));
+                const name_id = h.identifier(self.ctx, "name");
                 var attrs = [_]c.MlirNamedAttribute{
                     c.mlirNamedAttributeGet(name_id, name_attr),
                 };
@@ -453,7 +453,7 @@ pub const MemoryManager = struct {
             },
             .TStore => {
                 // Generate ora.tstore for transient storage variables
-                var state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("ora.tstore"), loc);
+                var state = h.opState("ora.tstore", loc);
                 c.mlirOperationStateAddOperands(&state, 1, @ptrCast(&value));
 
                 // Add the global name as a symbol reference
@@ -464,7 +464,7 @@ pub const MemoryManager = struct {
                 name_buffer[var_name.len] = 0; // null-terminate
                 const name_str = c.mlirStringRefCreateFromCString(&name_buffer[0]);
                 const name_attr = c.mlirStringAttrGet(self.ctx, name_str);
-                const name_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("global"));
+                const name_id = h.identifier(self.ctx, "global");
                 var attrs = [_]c.MlirNamedAttribute{
                     c.mlirNamedAttributeGet(name_id, name_attr),
                 };
@@ -477,7 +477,7 @@ pub const MemoryManager = struct {
                 // This is handled differently in the assignment lowering
                 std.debug.print("ERROR: Stack variables should not use createStoreOperation\n", .{});
                 // Create a placeholder error operation
-                var state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("ora.error"), loc);
+                var state = h.opState("ora.error", loc);
                 const error_ty = c.mlirIntegerTypeGet(self.ctx, 32);
                 c.mlirOperationStateAddResults(&state, 1, @ptrCast(&error_ty));
                 return c.mlirOperationCreate(&state);
@@ -492,16 +492,16 @@ pub const MemoryManager = struct {
 
     /// Create global storage declaration
     fn createGlobalStorageDeclaration(self: *const MemoryManager, var_name: []const u8, var_type: c.MlirType, loc: c.MlirLocation) c.MlirOperation {
-        var state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("ora.global"), loc);
+        var state = h.opState("ora.global", loc);
 
         // Add variable name as symbol attribute
         const name_ref = c.mlirStringRefCreate(var_name.ptr, var_name.len);
         const name_attr = c.mlirStringAttrGet(self.ctx, name_ref);
-        const name_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("sym_name"));
+        const name_id = h.identifier(self.ctx, "sym_name");
 
         // Add type attribute
         const type_attr = c.mlirTypeAttrGet(var_type);
-        const type_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("type"));
+        const type_id = h.identifier(self.ctx, "type");
 
         var attrs = [_]c.MlirNamedAttribute{
             c.mlirNamedAttributeGet(name_id, name_attr),
@@ -514,16 +514,16 @@ pub const MemoryManager = struct {
 
     /// Create global transient storage declaration
     fn createGlobalTStoreDeclaration(self: *const MemoryManager, var_name: []const u8, var_type: c.MlirType, loc: c.MlirLocation) c.MlirOperation {
-        var state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("ora.tstore.global"), loc);
+        var state = h.opState("ora.tstore.global", loc);
 
         // Add variable name as symbol attribute
         const name_ref = c.mlirStringRefCreate(var_name.ptr, var_name.len);
         const name_attr = c.mlirStringAttrGet(self.ctx, name_ref);
-        const name_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("sym_name"));
+        const name_id = h.identifier(self.ctx, "sym_name");
 
         // Add type attribute
         const type_attr = c.mlirTypeAttrGet(var_type);
-        const type_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("type"));
+        const type_id = h.identifier(self.ctx, "type");
 
         var attrs = [_]c.MlirNamedAttribute{
             c.mlirNamedAttributeGet(name_id, name_attr),

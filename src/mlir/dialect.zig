@@ -14,6 +14,7 @@
 
 const std = @import("std");
 const c = @import("c.zig").c;
+const h = @import("helpers.zig");
 
 /// Ora MLIR Dialect implementation
 /// This provides runtime registration and operation creation for the Ora dialect
@@ -71,20 +72,18 @@ pub const OraDialect = struct {
     ) c.MlirOperation {
         // Create a global variable declaration
         // This will be equivalent to ora.global @name : type = init_value
-        var state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("ora.global"), loc);
+        var state = h.opState("ora.global", loc);
 
         // Add the global name as a symbol attribute
-        const name_attr = c.mlirStringAttrGet(self.ctx, c.mlirStringRefCreate(name.ptr, name.len));
-        const name_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("sym_name"));
-        var attrs = [_]c.MlirNamedAttribute{c.mlirNamedAttributeGet(name_id, name_attr)};
+        const name_attr = h.stringAttr(self.ctx, name);
+        var attrs = [_]c.MlirNamedAttribute{h.namedAttr(self.ctx, "sym_name", name_attr)};
         c.mlirOperationStateAddAttributes(&state, attrs.len, &attrs);
 
         // Add the type and initial value
         c.mlirOperationStateAddResults(&state, 1, @ptrCast(&value_type));
 
         // Add the initial value attribute
-        const init_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("init"));
-        var init_attrs = [_]c.MlirNamedAttribute{c.mlirNamedAttributeGet(init_id, init_value)};
+        var init_attrs = [_]c.MlirNamedAttribute{h.namedAttr(self.ctx, "init", init_value)};
         c.mlirOperationStateAddAttributes(&state, init_attrs.len, &init_attrs);
 
         const op = c.mlirOperationCreate(&state);
@@ -109,11 +108,11 @@ pub const OraDialect = struct {
         result_type: c.MlirType,
         loc: c.MlirLocation,
     ) c.MlirOperation {
-        var state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("ora.sload"), loc);
+        var state = h.opState("ora.sload", loc);
 
         // Add the global name attribute
-        const global_attr = c.mlirStringAttrGet(self.ctx, c.mlirStringRefCreate(global_name.ptr, global_name.len));
-        const global_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("global"));
+        const global_attr = h.stringAttr(self.ctx, global_name);
+        const global_id = h.identifier(self.ctx, "global");
         var attrs = [_]c.MlirNamedAttribute{c.mlirNamedAttributeGet(global_id, global_attr)};
         c.mlirOperationStateAddAttributes(&state, attrs.len, &attrs);
 
@@ -142,15 +141,15 @@ pub const OraDialect = struct {
         global_name: []const u8,
         loc: c.MlirLocation,
     ) c.MlirOperation {
-        var state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("ora.sstore"), loc);
+        var state = h.opState("ora.sstore", loc);
 
         // Add operands
         var operands = [_]c.MlirValue{value};
         c.mlirOperationStateAddOperands(&state, operands.len, &operands);
 
         // Add the global name attribute
-        const global_attr = c.mlirStringAttrGet(self.ctx, c.mlirStringRefCreate(global_name.ptr, global_name.len));
-        const global_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("global"));
+        const global_attr = h.stringAttr(self.ctx, global_name);
+        const global_id = h.identifier(self.ctx, "global");
         var attrs = [_]c.MlirNamedAttribute{c.mlirNamedAttributeGet(global_id, global_attr)};
         c.mlirOperationStateAddAttributes(&state, attrs.len, &attrs);
 
@@ -193,11 +192,11 @@ pub const OraDialect = struct {
         name: []const u8,
         loc: c.MlirLocation,
     ) c.MlirOperation {
-        var state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("ora.contract"), loc);
+        var state = h.opState("ora.contract", loc);
 
         // Add the contract name as a symbol attribute
-        const name_attr = c.mlirStringAttrGet(self.ctx, c.mlirStringRefCreateFromCString(name.ptr));
-        const name_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("sym_name"));
+        const name_attr = h.stringAttr(self.ctx, name);
+        const name_id = h.identifier(self.ctx, "sym_name");
         var attrs = [_]c.MlirNamedAttribute{c.mlirNamedAttributeGet(name_id, name_attr)};
         c.mlirOperationStateAddAttributes(&state, attrs.len, &attrs);
 
@@ -217,7 +216,7 @@ pub const OraDialect = struct {
         loc: c.MlirLocation,
     ) c.MlirOperation {
         _ = self; // Mark as used
-        var state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("ora.cast"), loc);
+        var state = h.opState("ora.cast", loc);
 
         // Add operands
         var operands = [_]c.MlirValue{input};
@@ -236,7 +235,7 @@ pub const OraDialect = struct {
         condition: c.MlirValue,
         loc: c.MlirLocation,
     ) c.MlirOperation {
-        var state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("ora.requires"), loc);
+        var state = h.opState("ora.requires", loc);
 
         // Add operands
         var operands = [_]c.MlirValue{condition};
@@ -252,7 +251,7 @@ pub const OraDialect = struct {
         condition: c.MlirValue,
         loc: c.MlirLocation,
     ) c.MlirOperation {
-        var state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("ora.ensures"), loc);
+        var state = h.opState("ora.ensures", loc);
 
         // Add operands
         var operands = [_]c.MlirValue{condition};
@@ -268,7 +267,7 @@ pub const OraDialect = struct {
         condition: c.MlirValue,
         loc: c.MlirLocation,
     ) c.MlirOperation {
-        var state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("ora.invariant"), loc);
+        var state = h.opState("ora.invariant", loc);
 
         // Add operands
         var operands = [_]c.MlirValue{condition};
@@ -284,7 +283,7 @@ pub const OraDialect = struct {
         value: c.MlirValue,
         loc: c.MlirLocation,
     ) c.MlirOperation {
-        var state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("ora.old"), loc);
+        var state = h.opState("ora.old", loc);
 
         // Add operands
         var operands = [_]c.MlirValue{value};
@@ -309,11 +308,11 @@ pub const OraDialect = struct {
         result_type: c.MlirType,
         loc: c.MlirLocation,
     ) c.MlirOperation {
-        var state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("ora.string.constant"), loc);
+        var state = h.opState("ora.string.constant", loc);
 
         // Add the string value attribute
-        const value_attr = c.mlirStringAttrGet(self.ctx, c.mlirStringRefCreateFromCString(value.ptr));
-        const value_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("value"));
+        const value_attr = h.stringAttr(self.ctx, value);
+        const value_id = h.identifier(self.ctx, "value");
         var attrs = [_]c.MlirNamedAttribute{c.mlirNamedAttributeGet(value_id, value_attr)};
         c.mlirOperationStateAddAttributes(&state, attrs.len, &attrs);
 
@@ -332,7 +331,7 @@ pub const OraDialect = struct {
         result_type: c.MlirType,
         loc: c.MlirLocation,
     ) c.MlirOperation {
-        var state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("ora.power"), loc);
+        var state = h.opState("ora.power", loc);
 
         // Add operands
         var operands = [_]c.MlirValue{ base, exponent };
@@ -352,7 +351,7 @@ pub const OraDialect = struct {
         loc: c.MlirLocation,
     ) c.MlirOperation {
         _ = self; // Mark as used
-        var state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("ora.yield"), loc);
+        var state = h.opState("ora.yield", loc);
 
         // Add operands
         if (operands.len > 0) {
@@ -375,15 +374,15 @@ pub const OraDialect = struct {
         result_type: c.MlirType,
         loc: c.MlirLocation,
     ) c.MlirOperation {
-        var state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("ora.destructure"), loc);
+        var state = h.opState("ora.destructure", loc);
 
         // Add operands
         var operands = [_]c.MlirValue{value};
         c.mlirOperationStateAddOperands(&state, operands.len, &operands);
 
         // Add pattern type attribute
-        const pattern_attr = c.mlirStringAttrGet(self.ctx, c.mlirStringRefCreateFromCString(pattern_type.ptr));
-        const pattern_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("pattern_type"));
+        const pattern_attr = h.stringAttr(self.ctx, pattern_type);
+        const pattern_id = h.identifier(self.ctx, "pattern_type");
         var attrs = [_]c.MlirNamedAttribute{c.mlirNamedAttributeGet(pattern_id, pattern_attr)};
         c.mlirOperationStateAddAttributes(&state, attrs.len, &attrs);
 
@@ -405,17 +404,17 @@ pub const OraDialect = struct {
         repr_type: c.MlirType,
         loc: c.MlirLocation,
     ) c.MlirOperation {
-        var state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("ora.enum.decl"), loc);
+        var state = h.opState("ora.enum.decl", loc);
 
         // Add enum name attribute
-        const name_attr = c.mlirStringAttrGet(self.ctx, c.mlirStringRefCreateFromCString(name.ptr));
-        const name_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("name"));
+        const name_attr = h.stringAttr(self.ctx, name);
+        const name_id = h.identifier(self.ctx, "name");
         var attrs = [_]c.MlirNamedAttribute{c.mlirNamedAttributeGet(name_id, name_attr)};
         c.mlirOperationStateAddAttributes(&state, attrs.len, &attrs);
 
         // Add representation type attribute
         const type_attr = c.mlirTypeAttrGet(repr_type);
-        const type_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("repr_type"));
+        const type_id = h.identifier(self.ctx, "repr_type");
         var type_attrs = [_]c.MlirNamedAttribute{c.mlirNamedAttributeGet(type_id, type_attr)};
         c.mlirOperationStateAddAttributes(&state, type_attrs.len, &type_attrs);
 
@@ -435,16 +434,16 @@ pub const OraDialect = struct {
         result_type: c.MlirType,
         loc: c.MlirLocation,
     ) c.MlirOperation {
-        var state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("ora.enum_constant"), loc);
+        var state = h.opState("ora.enum_constant", loc);
 
         // Add enum name attribute
-        const enum_attr = c.mlirStringAttrGet(self.ctx, c.mlirStringRefCreateFromCString(enum_name.ptr));
-        const enum_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("enum_name"));
+        const enum_attr = h.stringAttr(self.ctx, enum_name);
+        const enum_id = h.identifier(self.ctx, "enum_name");
         const enum_named_attr = c.mlirNamedAttributeGet(enum_id, enum_attr);
 
         // Add variant name attribute
-        const variant_attr = c.mlirStringAttrGet(self.ctx, c.mlirStringRefCreateFromCString(variant_name.ptr));
-        const variant_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("variant_name"));
+        const variant_attr = h.stringAttr(self.ctx, variant_name);
+        const variant_id = h.identifier(self.ctx, "variant_name");
         const variant_named_attr = c.mlirNamedAttributeGet(variant_id, variant_attr);
 
         var all_attrs = [_]c.MlirNamedAttribute{ enum_named_attr, variant_named_attr };
@@ -467,11 +466,11 @@ pub const OraDialect = struct {
         name: []const u8,
         loc: c.MlirLocation,
     ) c.MlirOperation {
-        var state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("ora.struct.decl"), loc);
+        var state = h.opState("ora.struct.decl", loc);
 
         // Add struct name attribute
-        const name_attr = c.mlirStringAttrGet(self.ctx, c.mlirStringRefCreateFromCString(name.ptr));
-        const name_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("name"));
+        const name_attr = h.stringAttr(self.ctx, name);
+        const name_id = h.identifier(self.ctx, "name");
         var attrs = [_]c.MlirNamedAttribute{c.mlirNamedAttributeGet(name_id, name_attr)};
         c.mlirOperationStateAddAttributes(&state, attrs.len, &attrs);
 
@@ -491,15 +490,15 @@ pub const OraDialect = struct {
         value: c.MlirValue,
         loc: c.MlirLocation,
     ) c.MlirOperation {
-        var state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("ora.struct_field_store"), loc);
+        var state = h.opState("ora.struct_field_store", loc);
 
         // Add operands
         var operands = [_]c.MlirValue{ struct_value, value };
         c.mlirOperationStateAddOperands(&state, operands.len, &operands);
 
         // Add field name attribute
-        const field_attr = c.mlirStringAttrGet(self.ctx, c.mlirStringRefCreateFromCString(field_name.ptr));
-        const field_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("field_name"));
+        const field_attr = h.stringAttr(self.ctx, field_name);
+        const field_id = h.identifier(self.ctx, "field_name");
         var attrs = [_]c.MlirNamedAttribute{c.mlirNamedAttributeGet(field_id, field_attr)};
         c.mlirOperationStateAddAttributes(&state, attrs.len, &attrs);
 
@@ -515,7 +514,7 @@ pub const OraDialect = struct {
         result_type: c.MlirType,
         loc: c.MlirLocation,
     ) c.MlirOperation {
-        var state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("ora.struct_instantiate"), loc);
+        var state = h.opState("ora.struct_instantiate", loc);
 
         // Add operands
         if (field_values.len > 0) {
@@ -523,8 +522,8 @@ pub const OraDialect = struct {
         }
 
         // Add struct name attribute
-        const name_attr = c.mlirStringAttrGet(self.ctx, c.mlirStringRefCreateFromCString(struct_name.ptr));
-        const name_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("struct_name"));
+        const name_attr = h.stringAttr(self.ctx, struct_name);
+        const name_id = h.identifier(self.ctx, "struct_name");
         var attrs = [_]c.MlirNamedAttribute{c.mlirNamedAttributeGet(name_id, name_attr)};
         c.mlirOperationStateAddAttributes(&state, attrs.len, &attrs);
 
@@ -542,7 +541,7 @@ pub const OraDialect = struct {
         result_type: c.MlirType,
         loc: c.MlirLocation,
     ) c.MlirOperation {
-        var state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("ora.struct_init"), loc);
+        var state = h.opState("ora.struct_init", loc);
 
         // Add operands
         if (field_values.len > 0) {
@@ -568,7 +567,7 @@ pub const OraDialect = struct {
         result_type: c.MlirType,
         loc: c.MlirLocation,
     ) c.MlirOperation {
-        var state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("ora.map_get"), loc);
+        var state = h.opState("ora.map_get", loc);
 
         // Add operands
         var operands = [_]c.MlirValue{ map, key };
@@ -589,7 +588,7 @@ pub const OraDialect = struct {
         value: c.MlirValue,
         loc: c.MlirLocation,
     ) c.MlirOperation {
-        var state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("ora.map_store"), loc);
+        var state = h.opState("ora.map_store", loc);
 
         // Add operands
         var operands = [_]c.MlirValue{ map, key, value };
@@ -610,14 +609,14 @@ pub const OraDialect = struct {
         value_type: c.MlirType,
         loc: c.MlirLocation,
     ) c.MlirOperation {
-        var state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("arith.constant"), loc);
+        var state = h.opState("arith.constant", loc);
 
         // Add result type
         c.mlirOperationStateAddResults(&state, 1, @ptrCast(&value_type));
 
         // Add value attribute
         const attr = c.mlirIntegerAttrGet(value_type, value);
-        const value_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("value"));
+        const value_id = h.identifier(self.ctx, "value");
         const attrs = [_]c.MlirNamedAttribute{c.mlirNamedAttributeGet(value_id, attr)};
         c.mlirOperationStateAddAttributes(&state, attrs.len, &attrs);
 
@@ -644,14 +643,14 @@ pub const OraDialect = struct {
         custom_attrs: []const c.MlirNamedAttribute,
         loc: c.MlirLocation,
     ) c.MlirOperation {
-        var state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("arith.constant"), loc);
+        var state = h.opState("arith.constant", loc);
 
         // Add result type
         c.mlirOperationStateAddResults(&state, 1, @ptrCast(&value_type));
 
         // Add value attribute
         const attr = c.mlirIntegerAttrGet(value_type, value);
-        const value_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("value"));
+        const value_id = h.identifier(self.ctx, "value");
         const attrs = [_]c.MlirNamedAttribute{c.mlirNamedAttributeGet(value_id, attr)};
 
         // Combine with custom attributes
@@ -678,7 +677,7 @@ pub const OraDialect = struct {
         loc: c.MlirLocation,
     ) c.MlirOperation {
         _ = self;
-        var state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("func.return"), loc);
+        var state = h.opState("func.return", loc);
         const op = c.mlirOperationCreate(&state);
         return op;
     }
@@ -690,7 +689,7 @@ pub const OraDialect = struct {
         loc: c.MlirLocation,
     ) c.MlirOperation {
         _ = self;
-        var state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("func.return"), loc);
+        var state = h.opState("func.return", loc);
         c.mlirOperationStateAddOperands(&state, 1, @ptrCast(&return_value));
         const op = c.mlirOperationCreate(&state);
         return op;
@@ -702,7 +701,7 @@ pub const OraDialect = struct {
         loc: c.MlirLocation,
     ) c.MlirOperation {
         _ = self;
-        var state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("scf.yield"), loc);
+        var state = h.opState("scf.yield", loc);
         const op = c.mlirOperationCreate(&state);
         return op;
     }
@@ -714,7 +713,7 @@ pub const OraDialect = struct {
         loc: c.MlirLocation,
     ) c.MlirOperation {
         _ = self;
-        var state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("scf.yield"), loc);
+        var state = h.opState("scf.yield", loc);
         if (values.len > 0) {
             c.mlirOperationStateAddOperands(&state, @intCast(values.len), values.ptr);
         }
@@ -729,7 +728,7 @@ pub const OraDialect = struct {
         loc: c.MlirLocation,
     ) c.MlirOperation {
         _ = self;
-        var state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("cf.br"), loc);
+        var state = h.opState("cf.br", loc);
         c.mlirOperationStateAddSuccessors(&state, 1, @ptrCast(&dest_block));
         const op = c.mlirOperationCreate(&state);
         return op;
@@ -744,7 +743,7 @@ pub const OraDialect = struct {
         loc: c.MlirLocation,
     ) c.MlirOperation {
         _ = self;
-        var state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("cf.cond_br"), loc);
+        var state = h.opState("cf.cond_br", loc);
         c.mlirOperationStateAddOperands(&state, 1, @ptrCast(&condition));
         const successors = [_]c.MlirBlock{ true_block, false_block };
         c.mlirOperationStateAddSuccessors(&state, 2, successors.ptr);
@@ -759,7 +758,7 @@ pub const OraDialect = struct {
         loc: c.MlirLocation,
     ) c.MlirOperation {
         _ = self;
-        var state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("memref.alloca"), loc);
+        var state = h.opState("memref.alloca", loc);
         c.mlirOperationStateAddResults(&state, 1, @ptrCast(&memref_type));
         const op = c.mlirOperationCreate(&state);
         return op;
@@ -773,7 +772,7 @@ pub const OraDialect = struct {
         result_type: c.MlirType,
         loc: c.MlirLocation,
     ) c.MlirOperation {
-        var state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("llvm.extractvalue"), loc);
+        var state = h.opState("llvm.extractvalue", loc);
         c.mlirOperationStateAddOperands(&state, 1, @ptrCast(&aggregate));
         c.mlirOperationStateAddResults(&state, 1, @ptrCast(&result_type));
 
@@ -785,7 +784,7 @@ pub const OraDialect = struct {
             index_attrs.append(self.allocator, index_attr) catch unreachable;
         }
         const indices_attr = c.mlirArrayAttrGet(self.ctx, @intCast(index_attrs.items.len), index_attrs.items.ptr);
-        const indices_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("position"));
+        const indices_id = h.identifier(self.ctx, "position");
         const attrs = [_]c.MlirNamedAttribute{c.mlirNamedAttributeGet(indices_id, indices_attr)};
         c.mlirOperationStateAddAttributes(&state, attrs.len, &attrs);
 
@@ -801,7 +800,7 @@ pub const OraDialect = struct {
         result_types: []const c.MlirType,
         loc: c.MlirLocation,
     ) c.MlirOperation {
-        var state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("func.call"), loc);
+        var state = h.opState("func.call", loc);
 
         // Add operands
         if (operands.len > 0) {
@@ -816,7 +815,7 @@ pub const OraDialect = struct {
         // Add callee attribute
         const callee_ref = c.mlirStringRefCreate(callee.ptr, callee.len);
         const callee_attr = c.mlirFlatSymbolRefAttrGet(self.ctx, callee_ref);
-        const callee_id = c.mlirIdentifierGet(self.ctx, c.mlirStringRefCreateFromCString("callee"));
+        const callee_id = h.identifier(self.ctx, "callee");
         const attrs = [_]c.MlirNamedAttribute{c.mlirNamedAttributeGet(callee_id, callee_attr)};
         c.mlirOperationStateAddAttributes(&state, attrs.len, &attrs);
 
@@ -832,7 +831,7 @@ pub const OraDialect = struct {
         loc: c.MlirLocation,
     ) c.MlirOperation {
         _ = self;
-        var state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("arith.bitcast"), loc);
+        var state = h.opState("arith.bitcast", loc);
         c.mlirOperationStateAddOperands(&state, 1, @ptrCast(&operand));
         c.mlirOperationStateAddResults(&state, 1, @ptrCast(&result_type));
         const op = c.mlirOperationCreate(&state);
@@ -847,7 +846,7 @@ pub const OraDialect = struct {
         loc: c.MlirLocation,
     ) c.MlirOperation {
         _ = self;
-        var state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("scf.if"), loc);
+        var state = h.opState("scf.if", loc);
         c.mlirOperationStateAddOperands(&state, 1, @ptrCast(&condition));
         if (result_types.len > 0) {
             c.mlirOperationStateAddResults(&state, @intCast(result_types.len), result_types.ptr);
@@ -864,7 +863,7 @@ pub const OraDialect = struct {
         loc: c.MlirLocation,
     ) c.MlirOperation {
         _ = self;
-        var state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("scf.while"), loc);
+        var state = h.opState("scf.while", loc);
         if (operands.len > 0) {
             c.mlirOperationStateAddOperands(&state, @intCast(operands.len), operands.ptr);
         }
@@ -886,7 +885,7 @@ pub const OraDialect = struct {
         loc: c.MlirLocation,
     ) c.MlirOperation {
         _ = self;
-        var state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("scf.for"), loc);
+        var state = h.opState("scf.for", loc);
 
         // Add bounds and step operands
         const bounds_operands = [_]c.MlirValue{ lower_bound, upper_bound, step };
@@ -914,7 +913,7 @@ pub const OraDialect = struct {
         loc: c.MlirLocation,
     ) c.MlirOperation {
         _ = self;
-        var state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("scf.condition"), loc);
+        var state = h.opState("scf.condition", loc);
 
         // Add condition operand
         c.mlirOperationStateAddOperands(&state, 1, @ptrCast(&condition));
@@ -936,7 +935,7 @@ pub const OraDialect = struct {
         result_type: c.MlirType,
         loc: c.MlirLocation,
     ) c.MlirOperation {
-        var state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("memref.load"), loc);
+        var state = h.opState("memref.load", loc);
 
         // Add operands: memref + indices
         var operands = std.ArrayList(c.MlirValue){};
@@ -962,7 +961,7 @@ pub const OraDialect = struct {
         indices: []const c.MlirValue,
         loc: c.MlirLocation,
     ) c.MlirOperation {
-        var state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("memref.store"), loc);
+        var state = h.opState("memref.store", loc);
 
         // Add operands: value + memref + indices
         var operands = std.ArrayList(c.MlirValue){};
@@ -985,7 +984,7 @@ pub const OraDialect = struct {
         loc: c.MlirLocation,
     ) c.MlirOperation {
         _ = self;
-        var state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("scf.break"), loc);
+        var state = h.opState("scf.break", loc);
         if (operands.len > 0) {
             c.mlirOperationStateAddOperands(&state, @intCast(operands.len), operands.ptr);
         }
@@ -1000,7 +999,7 @@ pub const OraDialect = struct {
         loc: c.MlirLocation,
     ) c.MlirOperation {
         _ = self;
-        var state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("scf.continue"), loc);
+        var state = h.opState("scf.continue", loc);
         if (operands.len > 0) {
             c.mlirOperationStateAddOperands(&state, @intCast(operands.len), operands.ptr);
         }
@@ -1017,7 +1016,7 @@ pub const OraDialect = struct {
         loc: c.MlirLocation,
     ) c.MlirOperation {
         _ = self;
-        var state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("arith.addi"), loc);
+        var state = h.opState("arith.addi", loc);
         const operands = [_]c.MlirValue{ lhs, rhs };
         c.mlirOperationStateAddOperands(&state, operands.len, &operands);
         c.mlirOperationStateAddResults(&state, 1, @ptrCast(&result_type));
@@ -1034,7 +1033,7 @@ pub const OraDialect = struct {
         loc: c.MlirLocation,
     ) c.MlirOperation {
         _ = self;
-        var state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("arith.subi"), loc);
+        var state = h.opState("arith.subi", loc);
         const operands = [_]c.MlirValue{ lhs, rhs };
         c.mlirOperationStateAddOperands(&state, operands.len, &operands);
         c.mlirOperationStateAddResults(&state, 1, @ptrCast(&result_type));
@@ -1051,7 +1050,7 @@ pub const OraDialect = struct {
         loc: c.MlirLocation,
     ) c.MlirOperation {
         _ = self;
-        var state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("arith.muli"), loc);
+        var state = h.opState("arith.muli", loc);
         const operands = [_]c.MlirValue{ lhs, rhs };
         c.mlirOperationStateAddOperands(&state, operands.len, &operands);
         c.mlirOperationStateAddResults(&state, 1, @ptrCast(&result_type));
@@ -1068,7 +1067,7 @@ pub const OraDialect = struct {
         loc: c.MlirLocation,
     ) c.MlirOperation {
         _ = self;
-        var state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("arith.divsi"), loc);
+        var state = h.opState("arith.divsi", loc);
         const operands = [_]c.MlirValue{ lhs, rhs };
         c.mlirOperationStateAddOperands(&state, operands.len, &operands);
         c.mlirOperationStateAddResults(&state, 1, @ptrCast(&result_type));
@@ -1085,7 +1084,7 @@ pub const OraDialect = struct {
         loc: c.MlirLocation,
     ) c.MlirOperation {
         _ = self;
-        var state = c.mlirOperationStateGet(c.mlirStringRefCreateFromCString("arith.remsi"), loc);
+        var state = h.opState("arith.remsi", loc);
         const operands = [_]c.MlirValue{ lhs, rhs };
         c.mlirOperationStateAddOperands(&state, operands.len, &operands);
         c.mlirOperationStateAddResults(&state, 1, @ptrCast(&result_type));

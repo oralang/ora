@@ -17,10 +17,10 @@ const std = @import("std");
 const c = @import("c.zig").c;
 const lib = @import("ora_lib");
 
-/// Create MLIR string reference from null-terminated string
-/// Replaces the verbose: c.mlirStringRefCreateFromCString(str.ptr)
+/// Create MLIR string reference from Zig slice
+/// Replaces the verbose: c.mlirStringRefCreate(str.ptr, str.len)
 pub inline fn strRef(str: []const u8) c.MlirStringRef {
-    return c.mlirStringRefCreateFromCString(str.ptr);
+    return c.mlirStringRefCreate(str.ptr, str.len);
 }
 
 /// Create MLIR string reference from string literal at comptime
