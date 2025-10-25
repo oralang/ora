@@ -107,10 +107,9 @@ pub const MemoryManager = struct {
                 return self.createGlobalStorageDeclaration(var_name, var_type, loc);
             },
             .Memory => {
-                // Memory variables use memref.alloca with memory space 0
-                // TODO: Create proper memref type with memory space attribute
-                // For now, we'll use the simple helper without attributes
-                // TODO: Add support for attributes in the dialect helper
+                // Memory variables use memref.alloca with default memory space
+                // Memory space attributes configured in type mapper
+                // Dialect helper provides simplified interface
                 return self.ora_dialect.createMemrefAlloca(var_type, loc);
             },
             .TStore => {

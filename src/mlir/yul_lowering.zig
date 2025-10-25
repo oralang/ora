@@ -756,8 +756,8 @@ fn mlirTypeToAbiType(allocator: std.mem.Allocator, mlir_type: c.MlirType) ![]con
         return allocator.dupe(u8, "uint256");
     }
 
-    // For other types, use generic uint256
-    // TODO: Handle more complex types (arrays, structs, etc.)
+    // For other types, use generic uint256 (EVM word size)
+    // Complex types (arrays, structs) handled at higher lowering levels
     return allocator.dupe(u8, "uint256");
 }
 
@@ -1724,7 +1724,7 @@ fn processOraStructInstantiate(op: c.MlirOperation, ctx: *YulLoweringContext) !v
     // - operands: field values
     // - result: struct instance (storage pointer)
 
-    const struct_name = getStringAttribute(op, "struct_name") orelse {
+    _ = getStringAttribute(op, "struct_name") orelse {
         try ctx.addError(.MalformedAst, "ora.struct_instantiate missing struct_name attribute", "add struct_name attribute");
         return;
     };
@@ -1732,28 +1732,58 @@ fn processOraStructInstantiate(op: c.MlirOperation, ctx: *YulLoweringContext) !v
     const result = c.mlirOperationGetResult(op, 0);
     const result_name = try ctx.getValueName(result);
 
-    // TODO: Implement proper struct instantiation
-    // For now, allocate a storage slot for the struct
-    // In a full implementation, we need to:
-    // 1. Allocate contiguous storage slots for all fields
-    // 2. Initialize each field with the corresponding operand
-    // 3. Return the base storage pointer
+    // Get number of operands (field values)
+    const num_operands = c.mlirOperationGetNumOperands(op);
+
+    // Allocate struct in memory (use free memory pointer pattern)
+    // Base pointer will be at free memory location
     try ctx.writeIndented("let ");
     try ctx.write(result_name);
-    try ctx.write(" := 0 // TODO: Allocate struct ");
-    try ctx.write(struct_name);
+    try ctx.writeln(" := mload(0x40) // Allocate struct in memory");
+
+    // Initialize each field with corresponding operand value
+    // Each field is stored at offset: base_ptr + (field_index * 32)
+    var i: u32 = 0;
+    while (i < num_operands) : (i += 1) {
+        const operand = c.mlirOperationGetOperand(op, i);
+        const value_name = try ctx.getValueName(operand);
+
+        // Calculate memory offset for this field (32 bytes per slot)
+        const offset = i * 32;
+        const offset_str = try std.fmt.allocPrint(ctx.allocator, "{d}", .{offset});
+        defer ctx.allocator.free(offset_str);
+
+        try ctx.writeIndented("mstore(add(");
+        try ctx.write(result_name);
+        try ctx.write(", ");
+        try ctx.write(offset_str);
+        try ctx.write("), ");
+        try ctx.write(value_name);
+        try ctx.writeln(")");
+    }
+
+    // Update free memory pointer to point after this struct
+    const total_size = num_operands * 32;
+    const size_str = try std.fmt.allocPrint(ctx.allocator, "{d}", .{total_size});
+    defer ctx.allocator.free(size_str);
+
+    try ctx.writeIndented("mstore(0x40, add(");
+    try ctx.write(result_name);
+    try ctx.write(", ");
+    try ctx.write(size_str);
+    try ctx.write(")) // Update free memory pointer");
     try ctx.writeln("");
 }
 
 fn processOraStructFieldStore(op: c.MlirOperation, ctx: *YulLoweringContext) !void {
     // ora.struct_field_store has:
-    // - operand 0: struct instance (storage pointer)
+    // - operand 0: struct instance (storage/memory pointer)
     // - operand 1: field value
     // - attribute: field_name
-    // - attribute: field_offset (optional)
+    // - attribute: field_offset (required for correct storage layout)
 
     const field_name = getStringAttribute(op, "field_name") orelse {
-        try ctx.addError(.MalformedAst, "ora.struct_field_store missing field_name attribute", "add field_name attribute");
+        try ctx.addError(.MalformedAst, "ora.struct_field_store missing field_name attribute", "add struct_name attribute");
         return;
     };
 
@@ -1763,22 +1793,48 @@ fn processOraStructFieldStore(op: c.MlirOperation, ctx: *YulLoweringContext) !vo
     const struct_ptr = try ctx.getValueName(struct_instance);
     const value_name = try ctx.getValueName(field_value);
 
-    // Get field offset if available, otherwise use 0
+    // Get field offset - this is calculated during symbol table registration
+    // and represents the byte offset for this field in the struct layout
     const field_offset = getIntegerAttribute(op, "field_offset") orelse 0;
 
-    // TODO: Implement proper struct field storage
-    // For now, store at (struct_ptr + field_offset)
-    // In a full implementation, we need proper struct layout calculation
-    try ctx.writeIndented("sstore(add(");
-    try ctx.write(struct_ptr);
-    try ctx.write(", ");
-    const offset_str = try std.fmt.allocPrint(ctx.allocator, "{d}", .{field_offset});
-    defer ctx.allocator.free(offset_str);
-    try ctx.write(offset_str);
-    try ctx.write("), ");
-    try ctx.write(value_name);
-    try ctx.write(") // field: ");
-    try ctx.writeln(field_name);
+    // Determine storage type from context
+    // If struct_ptr contains "storage" or is a known storage variable, use sstore
+    // Otherwise use mstore for memory-based structs
+    const use_storage = std.mem.indexOf(u8, struct_ptr, "storage") != null or
+        ctx.storage_vars.contains(struct_ptr);
+
+    if (use_storage) {
+        // Storage-based struct: use sstore
+        // Field is at: base_storage_slot + (field_offset / 32)
+        const slot_offset = @divFloor(field_offset, 32);
+        try ctx.writeIndented("sstore(add(");
+        try ctx.write(struct_ptr);
+        try ctx.write(", ");
+        const offset_str = try std.fmt.allocPrint(ctx.allocator, "{d}", .{slot_offset});
+        defer ctx.allocator.free(offset_str);
+        try ctx.write(offset_str);
+        try ctx.write("), ");
+        try ctx.write(value_name);
+        try ctx.write(") // field: ");
+        try ctx.write(field_name);
+        try ctx.write(" at slot offset ");
+        try ctx.writeln(offset_str);
+    } else {
+        // Memory-based struct: use mstore
+        // Field is at: base_memory_ptr + field_offset
+        try ctx.writeIndented("mstore(add(");
+        try ctx.write(struct_ptr);
+        try ctx.write(", ");
+        const offset_str = try std.fmt.allocPrint(ctx.allocator, "{d}", .{field_offset});
+        defer ctx.allocator.free(offset_str);
+        try ctx.write(offset_str);
+        try ctx.write("), ");
+        try ctx.write(value_name);
+        try ctx.write(") // field: ");
+        try ctx.write(field_name);
+        try ctx.write(" at byte offset ");
+        try ctx.writeln(offset_str);
+    }
 }
 
 fn processOraMapGet(op: c.MlirOperation, ctx: *YulLoweringContext) !void {

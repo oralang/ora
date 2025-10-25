@@ -177,7 +177,7 @@ pub const OraDialect = struct {
         name: []const u8,
         loc: c.MlirLocation,
     ) c.MlirOperation {
-        // TODO: Once C++ dialect is linked, use:
+        // Future: Once C++ dialect is linked via TableGen, use:
         // const name_ref = c.mlirStringRefCreateFromCString(name.ptr);
         // const region = c.mlirRegionCreate();
         // return c.oraContractCreate(loc, name_ref, region);
