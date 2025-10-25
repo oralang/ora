@@ -350,27 +350,80 @@ fn transfer(to: address, amount: u256) {
 }
 ```
 
-## Standard Library (In Development)
+## Standard Library
+
+### Overview
+
+Ora's standard library provides zero-overhead access to EVM primitives. All built-ins compile directly to EVM opcodes.
+
+For comprehensive documentation, see [Standard Library](standard-library.md).
+
+### Block Data
+
+```ora
+pub fn getTimestamp() -> u256 {
+    return std.block.timestamp();  // Current block timestamp
+}
+
+pub fn getBlockNumber() -> u256 {
+    return std.block.number();  // Current block number
+}
+
+pub fn getCoinbase() -> address {
+    return std.block.coinbase();  // Miner address
+}
+```
+
+### Message Context
+
+```ora
+pub fn getCaller() -> address {
+    return std.msg.sender();  // Immediate caller (use for access control!)
+}
+
+pub fn getValue() -> u256 {
+    return std.msg.value();  // Wei sent with call
+}
+```
 
 ### Transaction Context
 
 ```ora
-fn get_sender() -> address {
-    return std.transaction.sender;
-}
-
-fn get_value() -> u256 {
-    return std.transaction.value;
+pub fn getOrigin() -> address {
+    return std.transaction.sender();  // Original transaction sender (EOA)
 }
 ```
+
+⚠️ **Security Note**: Use `std.msg.sender()` for access control, not `std.transaction.sender()`.
 
 ### Constants
 
 ```ora
-fn check_zero_address(addr: address) -> bool {
+pub fn isZeroAddress(addr: address) -> bool {
     return addr == std.constants.ZERO_ADDRESS;
 }
+
+pub fn maxU256() -> u256 {
+    return std.constants.U256_MAX;
+}
 ```
+
+### Available Built-ins
+
+| Function | Returns | EVM Opcode |
+|----------|---------|------------|
+| `std.block.timestamp()` | `u256` | `TIMESTAMP` |
+| `std.block.number()` | `u256` | `NUMBER` |
+| `std.block.gaslimit()` | `u256` | `GASLIMIT` |
+| `std.block.coinbase()` | `address` | `COINBASE` |
+| `std.block.basefee()` | `u256` | `BASEFEE` |
+| `std.transaction.sender()` | `address` | `ORIGIN` |
+| `std.transaction.gasprice()` | `u256` | `GASPRICE` |
+| `std.msg.sender()` | `address` | `CALLER` |
+| `std.msg.value()` | `u256` | `CALLVALUE` |
+| `std.msg.data.size()` | `u256` | `CALLDATASIZE` |
+
+**Constants**: `ZERO_ADDRESS`, `U256_MAX`, `U128_MAX`, `U64_MAX`, `U32_MAX`
 
 ## Formal Verification (Planned)
 

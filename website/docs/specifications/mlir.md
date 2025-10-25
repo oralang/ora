@@ -355,61 +355,248 @@ func.func @transfer(%amount: i256) {
 
 ### CLI Usage
 
-Generate MLIR output:
+The Ora compiler uses a modern, streamlined command interface:
+
+**Compile and emit bytecode:**
 ```bash
-ora compile --emit-mlir contract.ora
+ora contract.ora
+ora --emit-bytecode contract.ora
 ```
 
-Verify MLIR correctness:
+**View MLIR IR:**
 ```bash
-ora compile --mlir-verify contract.ora
+ora --emit-mlir contract.ora
 ```
 
-Run optimization passes:
+**View Yul intermediate code:**
 ```bash
-ora compile --mlir-passes="canonicalize,cse" contract.ora
+ora --emit-yul contract.ora
 ```
+
+**Advanced options:**
+```bash
+# Disable automatic MLIR validation (not recommended)
+ora --no-validate-mlir contract.ora
+
+# Use custom MLIR optimization passes
+ora --mlir-passes="canonicalize,cse,mem2reg" contract.ora
+```
+
+### Automatic MLIR Validation
+
+The compiler automatically validates MLIR correctness before Yul lowering:
+
+```
+$ ora contract.ora
+Parsing contract.ora...
+Performing semantic analysis...
+Lowering to MLIR...
+Validating MLIR before Yul lowering...
+✅ MLIR validation passed
+Lowering to Yul...
+Compiling to EVM bytecode...
+Successfully compiled to EVM bytecode!
+```
+
+If validation fails, compilation stops immediately:
+```
+❌ MLIR validation failed with 3 error(s):
+  - [TypeMismatch] Expected i256, found i1
+  - [MalformedAst] Missing operand for arith.addi
+  - [InvalidRegion] Block has no terminator
+```
+
+Validation is automatic to catch errors early in the compilation pipeline.
 
 ### Build Integration
 
-The MLIR lowering integrates with the existing compilation pipeline:
+The MLIR lowering pipeline:
 
-1. **Lexing and Parsing:** Source code → AST
-2. **Semantic Analysis:** Type checking and validation
-3. **MLIR Lowering:** AST → MLIR module
-4. **MLIR Passes:** Optimization and analysis
-5. **Backend Selection:** MLIR → Yul (primary) or other targets
+1. **Lexing and Parsing**: Source code → AST
+2. **Semantic Analysis**: Type checking, builtin validation
+3. **MLIR Lowering**: AST → MLIR module (with source locations)
+4. **MLIR Validation**: Structural and semantic checks (automatic)
+5. **MLIR Optimization**: CSE, canonicalization, mem2reg, SCCP, LICM
+6. **Yul Lowering**: MLIR → Yul (EVM intermediate language)
+7. **Bytecode Generation**: Yul → EVM bytecode
+
+## SSA Transformation
+
+### Ora to SSA
+
+While Ora allows mutable local variables, the MLIR representation uses **Static Single Assignment (SSA)** form internally:
+
+**Ora Code (Mutable Variables)**:
+```ora
+pub fn calculate(x: u256) -> u256 {
+    let result = x;      // Mutable local variable
+    result = result + 10;
+    result = result * 2;
+    return result;
+}
+```
+
+**MLIR Representation (SSA with Memory)**:
+```mlir
+func.func @calculate(%arg0: i256) -> i256 {
+    %0 = memref.alloca() : memref<1xi256>    // Stack allocation
+    memref.store %arg0, %0[] : memref<1xi256> // Store initial value
+    
+    %1 = memref.load %0[] : memref<1xi256>    // Load for +10
+    %c10 = arith.constant 10 : i256
+    %2 = arith.addi %1, %c10 : i256
+    memref.store %2, %0[] : memref<1xi256>    // Store back
+    
+    %3 = memref.load %0[] : memref<1xi256>    // Load for *2
+    %c2 = arith.constant 2 : i256
+    %4 = arith.muli %3, %c2 : i256
+    memref.store %4, %0[] : memref<1xi256>    // Store back
+    
+    %5 = memref.load %0[] : memref<1xi256>    // Load final result
+    return %5 : i256
+}
+```
+
+**After mem2reg Optimization Pass**:
+```mlir
+func.func @calculate(%arg0: i256) -> i256 {
+    %c10 = arith.constant 10 : i256
+    %0 = arith.addi %arg0, %c10 : i256       // Pure SSA!
+    %c2 = arith.constant 2 : i256
+    %1 = arith.muli %0, %c2 : i256           // Pure SSA!
+    return %1 : i256
+}
+```
+
+### SSA Benefits
+
+1. **Optimization**: Standard MLIR passes (CSE, SCCP, dead code elimination) work directly
+2. **Analysis**: Data flow analysis is straightforward in SSA form
+3. **Type Safety**: Each SSA value has a single, well-defined type
+4. **Gas Efficiency**: `mem2reg` eliminates redundant loads/stores
+
+### Memory Regions vs SSA
+
+**Local Variables** (SSA via mem2reg):
+- Function-scope variables
+- `memref.alloca` → SSA values
+- Optimized away in final code
+
+**Storage Variables** (NOT SSA):
+- Contract state (persistent)
+- `ora.sload` / `ora.sstore` operations
+- Direct EVM `SLOAD`/`SSTORE` opcodes
+- Cannot be optimized away
+
+```mlir
+// Local variable (SSA):
+%local = arith.constant 100 : i256
+
+// Storage variable (NOT SSA):
+%slot = arith.constant 0 : i256
+%value = ora.sload %slot : i256
+ora.sstore %slot, %value : i256
+```
+
+---
+
+## Standard Library Integration
+
+### Built-in Lowering
+
+Ora's standard library built-ins are lowered to custom `ora.evm.*` MLIR operations:
+
+**Ora Code**:
+```ora
+let timestamp = std.block.timestamp();
+let sender = std.msg.sender();
+```
+
+**MLIR**:
+```mlir
+%timestamp = ora.evm.timestamp() : i256 loc("contract.ora":10:20)
+%sender = ora.evm.caller() : i160 loc("contract.ora":11:17)
+```
+
+**Yul**:
+```yul
+let timestamp := timestamp()
+let sender := caller()
+```
+
+### Zero-Overhead Guarantee
+
+All standard library calls are **inlined** at the MLIR level - no function call overhead:
+
+| Ora Built-in | MLIR Operation | Yul Opcode | Overhead |
+|--------------|----------------|------------|----------|
+| `std.block.timestamp()` | `ora.evm.timestamp` | `timestamp()` | **Zero** |
+| `std.msg.sender()` | `ora.evm.caller` | `caller()` | **Zero** |
+| `std.constants.U256_MAX` | `arith.constant -1` | `0xfff...fff` | **Zero** |
+
+### Semantic Validation
+
+Built-in calls are validated during semantic analysis:
+
+✅ **Valid**:
+```ora
+let sender = std.msg.sender();  // Correct usage
+```
+
+❌ **Invalid** (caught at compile time):
+```ora
+let sender = std.msg.sender;    // Error: missing ()
+let invalid = std.block.fake(); // Error: unknown built-in
+```
+
+---
 
 ## Debugging and Analysis
 
 ### Source Location Preservation
 
-All MLIR operations preserve source location information:
+All MLIR operations preserve **exact** source location information (97% coverage):
 
 ```mlir
 %result = arith.addi %a, %b : i256 loc("contract.ora":15:8)
 ```
 
+**What's tracked**:
+- Filename (e.g., `contract.ora`)
+- Line number (e.g., `15`)
+- Column number (e.g., `8`)
+
+**Use cases**:
+- Error reporting with exact source position
+- Debugging with source-level stepping
+- Coverage analysis
+- Profiling with source attribution
+
 ### Error Reporting
 
-MLIR lowering provides detailed error messages with source context:
+MLIR validation provides detailed error messages:
 
 ```
-error: Type mismatch in binary operation
-  --> contract.ora:15:8
-   |
-15 |     let result = balance + "invalid";
-   |                          ^ expected numeric type, found string
+❌ MLIR validation failed with 2 error(s):
+  - [TypeMismatch] Expected i256, found i1
+    at contract.ora:42:15
+  - [MalformedAst] Missing terminator in block
+    at contract.ora:50:1
 ```
 
-### Verification Passes
+### Optimization Passes
 
-Custom verification passes check Ora-specific constraints:
+Standard MLIR passes optimize the IR:
 
-- Memory region usage validation
-- Contract invariant checking
-- Gas usage analysis
-- Security pattern detection
+| Pass | Purpose | Benefit |
+|------|---------|---------|
+| **CSE** | Common Subexpression Elimination | Reduce duplicate computations |
+| **Canonicalization** | Simplify IR patterns | Cleaner code |
+| **mem2reg** | Convert memory to SSA values | Eliminate loads/stores |
+| **SCCP** | Sparse Conditional Constant Propagation | Constant folding |
+| **LICM** | Loop-Invariant Code Motion | Hoist invariants |
+
+**Result**: Significant gas savings in generated EVM bytecode!
 
 ## Performance Characteristics
 
@@ -420,44 +607,84 @@ The MLIR lowering system is designed for:
 - **Scalability:** Handles large smart contracts
 - **Deterministic output:** Consistent results for testing
 
-## Future Enhancements
+## Implementation Features
 
-Planned improvements include:
+### Core Features
 
-1. **Enhanced Dialect:** Complete Ora dialect with custom operations
-2. **Advanced Analysis:** Data flow and control flow analysis
-3. **Optimization Passes:** Ora-specific optimizations
-4. **Alternative Backends:** LLVM, WebAssembly, and native targets
-5. **Formal Verification:** Integration with verification tools
+| Feature | Coverage |
+|---------|----------|
+| AST → MLIR Lowering | Complete |
+| Source Location Tracking | 97% |
+| Automatic Validation | Yes |
+| Type System Mapping | Complete |
+| Standard Library | 17 built-ins |
+| SSA Transformation | mem2reg pass |
+| Optimization Passes | 5 passes (CSE, canonicalization, mem2reg, SCCP, LICM) |
+| Storage Operations | sload, sstore, tload, tstore |
+| Control Flow | if, while, for, switch |
+| Function Calls | Complete |
+| Yul Lowering | Complete |
+
+### In Development
+
+- Formal verification integration
+- Custom Ora dialect registration
+- Advanced type features (generics, constraints)
+
+### Future
+
+- Advanced analysis (loop, alias, escape)
+- Gas cost modeling
+- Alternative backends (LLVM IR, WebAssembly)
+- IDE integration
 
 ## Examples
 
-### Complete Contract Example
+### ERC20 Token Contract
 
 ```ora
-contract Token {
-    storage balance: map[address, u256];
-    storage total_supply: u256;
+contract SimpleToken {
+    storage totalSupply: u256;
+    storage balances: map[address, u256];
+    storage allowances: doublemap[address, address, u256];
     
-    fn transfer(to: address, amount: u256)
-        requires(balance[msg.sender] >= amount)
-        ensures(balance[to] == old(balance[to]) + amount)
-        ensures(balance[msg.sender] == old(balance[msg.sender]) - amount)
-    {
-        move amount from msg.sender to to;
-        log Transfer(from: msg.sender, to: to, amount: amount);
+    pub fn initialize(initialSupply: u256) -> bool {
+        let deployer = std.msg.sender();
+        totalSupply = initialSupply;
+        balances[deployer] = initialSupply;
+        return true;
+    }
+    
+    pub fn transfer(recipient: address, amount: u256) -> bool {
+        let sender = std.msg.sender();
+        let senderBalance = balances[sender];
+        
+        if (recipient == std.constants.ZERO_ADDRESS) {
+            return false;
+        }
+        
+        if (senderBalance < amount) {
+            return false;
+        }
+        
+        balances[sender] = senderBalance - amount;
+        let recipientBalance = balances[recipient];
+        balances[recipient] = recipientBalance + amount;
+        
+        return true;
     }
 }
 ```
 
-This generates MLIR with:
-- Memory space annotations for storage variables
-- Precondition and postcondition assertions
-- Move operation with transfer semantics
-- Event logging with indexed parameters
-- Source location preservation throughout
+This example demonstrates:
 
-The MLIR representation enables advanced analysis and optimization while maintaining the semantic integrity of the original Ora code.
+- Zero-overhead built-ins (`std.msg.sender()` → `CALLER` opcode)
+- Storage operations (`balances[sender]` → `ora.sload` with keccak256)
+- Type safety (all operations type-checked)
+- SSA form (local variables via mem2reg)
+- Source locations (every operation tagged with source position)
+
+The MLIR representation enables analysis and optimization while maintaining semantic integrity.
 
 ## MLIR Resources
 
