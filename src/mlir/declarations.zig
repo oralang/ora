@@ -97,9 +97,24 @@ pub const DeclarationLowerer = struct {
         // Create parameter mapping for calldata parameters
         var param_map = ParamMap.init(std.heap.page_allocator);
         defer param_map.deinit();
+
+        // Collect parameter types for MLIR block arguments
+        var param_types_buf: [16]c.MlirType = undefined; // Support up to 16 parameters
+        const param_types = if (func.parameters.len <= 16) param_types_buf[0..func.parameters.len] else blk: {
+            break :blk std.heap.page_allocator.alloc(c.MlirType, func.parameters.len) catch {
+                std.debug.print("FATAL: Failed to allocate parameter types\n", .{});
+                @panic("Allocation failure");
+            };
+        };
+        defer if (func.parameters.len > 16) std.heap.page_allocator.free(param_types);
+
         for (func.parameters, 0..) |param, i| {
             // Function parameters are calldata by default in Ora
             param_map.addParam(param.name, i) catch {};
+
+            // Get MLIR type for parameter
+            const param_type = self.type_mapper.toMlirType(param.type_info);
+            param_types[i] = param_type;
         }
 
         // Create the function operation
@@ -185,11 +200,32 @@ pub const DeclarationLowerer = struct {
         // Apply all attributes to the operation state
         c.mlirOperationStateAddAttributes(&state, @intCast(attributes.items.len), attributes.items.ptr);
 
-        // Create the function body region
+        // Create the function body region with block arguments for parameters
         const region = c.mlirRegionCreate();
-        const block = c.mlirBlockCreate(0, null, null);
+
+        // Create locations for block arguments
+        var param_locs_buf: [16]c.MlirLocation = undefined;
+        const param_locs = if (func.parameters.len <= 16) param_locs_buf[0..func.parameters.len] else blk: {
+            break :blk std.heap.page_allocator.alloc(c.MlirLocation, func.parameters.len) catch {
+                std.debug.print("FATAL: Failed to allocate parameter locations\n", .{});
+                @panic("Allocation failure");
+            };
+        };
+        defer if (func.parameters.len > 16) std.heap.page_allocator.free(param_locs);
+
+        for (func.parameters, 0..) |param, i| {
+            param_locs[i] = self.createFileLocation(param.span);
+        }
+
+        const block = c.mlirBlockCreate(@intCast(param_types.len), param_types.ptr, param_locs.ptr);
         c.mlirRegionInsertOwnedBlock(region, 0, block);
         c.mlirOperationStateAddOwnedRegions(&state, 1, @ptrCast(&region));
+
+        // Map parameter names to block arguments
+        for (func.parameters, 0..) |param, i| {
+            const block_arg = c.mlirBlockGetArgument(block, @intCast(i));
+            param_map.setBlockArgument(param.name, block_arg) catch {};
+        }
 
         // Add precondition assertions for requires clauses (Requirements 6.4)
         if (func.requires_clauses.len > 0) {

@@ -557,9 +557,9 @@ pub const ExpressionLowerer = struct {
                 if (pm.getBlockArgument(identifier.name)) |block_arg| {
                     return block_arg;
                 } else {
-                    // Fallback to dummy value if block argument not found
-                    std.debug.print("WARNING: Function parameter {s} at index {d} - block argument not found, using dummy value\n", .{ identifier.name, param_index });
-                    return self.createErrorPlaceholder(identifier.span, "Missing function parameter block argument");
+                    // ERROR: Missing function parameter - this should never happen in valid code
+                    std.debug.print("FATAL ERROR: Function parameter '{s}' at index {d} not found - compilation aborted\n", .{ identifier.name, param_index });
+                    @panic("Missing function parameter - formal verification violated");
                 }
             }
         }
@@ -633,9 +633,10 @@ pub const ExpressionLowerer = struct {
             }
         }
 
-        // If we can't find the local variable, this is an error
-        std.debug.print("ERROR: Undefined identifier: {s}\n", .{identifier.name});
-        return self.createErrorPlaceholder(identifier.span, "Undefined identifier");
+        // If we can't find the local variable, this is a FATAL error for Ora (formally verified language)
+        std.debug.print("FATAL ERROR: Undefined identifier '{s}' - compilation aborted\n", .{identifier.name});
+        std.debug.print("Ora is a formally verified language - all identifiers must be defined before use\n", .{});
+        @panic("Undefined identifier - formal verification violated");
     }
 
     /// Lower function call expressions with proper argument type checking and conversion
