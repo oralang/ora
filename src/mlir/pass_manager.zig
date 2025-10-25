@@ -175,7 +175,7 @@ pub const PassManager = struct {
 
     /// Add custom passes from a pipeline string
     pub fn addCustomPasses(self: *PassManager, pipeline_str: []const u8) !void {
-        const pipeline_ref = c.mlirStringRefCreateFromCString(pipeline_str.ptr);
+        const pipeline_ref = c.mlirStringRefCreate(pipeline_str.ptr, pipeline_str.len);
         const result = c.mlirParsePassPipeline(c.mlirPassManagerGetAsOpPassManager(self.pass_manager), pipeline_ref, null, null);
 
         if (c.mlirLogicalResultIsFailure(result)) {
@@ -241,7 +241,7 @@ pub const PassResult = struct {
 pub const OraPassUtils = struct {
     /// Parse a pipeline string and add passes to the pass manager
     pub fn parsePipelineString(pass_manager: *PassManager, pipeline_str: []const u8) !void {
-        const pipeline_ref = c.mlirStringRefCreateFromCString(pipeline_str.ptr);
+        const pipeline_ref = c.mlirStringRefCreate(pipeline_str.ptr, pipeline_str.len);
         const result = c.mlirParsePassPipeline(c.mlirPassManagerGetAsOpPassManager(pass_manager.pass_manager), pipeline_ref, null, null);
 
         if (c.mlirLogicalResultIsFailure(result)) {

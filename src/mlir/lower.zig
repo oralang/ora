@@ -405,10 +405,36 @@ pub fn convertSemanticSymbolTable(semantic_table: *const lib.semantics.state.Sym
     _ = allocator;
 }
 
+/// Helper to get span from AstNode
+fn getNodeSpan(node: *const lib.AstNode) ?lib.ast.SourceSpan {
+    return switch (node.*) {
+        .Contract => |contract| contract.span,
+        .Function => |func| func.span,
+        .VariableDecl => |var_decl| var_decl.span,
+        .StructDecl => |struct_decl| struct_decl.span,
+        .EnumDecl => |enum_decl| enum_decl.span,
+        .LogDecl => |log_decl| log_decl.span,
+        .Import => |import| import.span,
+        .ErrorDecl => |error_decl| error_decl.span,
+        else => null,
+    };
+}
+
 /// Main entry point for lowering Ora AST nodes to MLIR module with semantic analysis symbol table
 /// This function uses the semantic analysis symbol table for type resolution
-pub fn lowerFunctionsToModuleWithSemanticTable(ctx: c.MlirContext, nodes: []lib.AstNode, allocator: std.mem.Allocator, semantic_table: *const lib.semantics.state.SymbolTable) !LoweringResult {
-    const loc = c.mlirLocationUnknownGet(ctx);
+pub fn lowerFunctionsToModuleWithSemanticTable(ctx: c.MlirContext, nodes: []lib.AstNode, allocator: std.mem.Allocator, semantic_table: *const lib.semantics.state.SymbolTable, source_filename: ?[]const u8) !LoweringResult {
+    // Create location tracker to get proper module location
+    const location_tracker = if (source_filename) |fname|
+        LocationTracker.initWithFilename(ctx, fname)
+    else
+        LocationTracker.init(ctx);
+
+    // Use first node's location if available, otherwise unknown (module wrapper has no single location)
+    const loc = if (nodes.len > 0)
+        location_tracker.createLocation(getNodeSpan(&nodes[0]))
+    else
+        location_tracker.getUnknownLocation();
+
     const module = c.mlirModuleCreateEmpty(loc);
     _ = c.mlirModuleGetBody(module);
 
@@ -422,7 +448,10 @@ pub fn lowerFunctionsToModuleWithSemanticTable(ctx: c.MlirContext, nodes: []lib.
         std.debug.print("Warning: Failed to register Ora dialect\n", .{});
     };
 
-    const locations = LocationTracker.init(ctx);
+    const locations = if (source_filename) |fname|
+        LocationTracker.initWithFilename(ctx, fname)
+    else
+        LocationTracker.init(ctx);
 
     // Create global symbol table and storage map for the module
     var symbol_table = SymbolTable.init(allocator);
@@ -500,8 +529,12 @@ pub fn lowerFunctionsToModuleWithSemanticTable(ctx: c.MlirContext, nodes: []lib.
 
 /// Main entry point for lowering Ora AST nodes to MLIR module with comprehensive error handling
 /// This function orchestrates the modular lowering components and provides robust error reporting
-pub fn lowerFunctionsToModuleWithErrors(ctx: c.MlirContext, nodes: []lib.AstNode, allocator: std.mem.Allocator) !LoweringResult {
-    const loc = c.mlirLocationUnknownGet(ctx);
+pub fn lowerFunctionsToModuleWithErrors(ctx: c.MlirContext, nodes: []lib.AstNode, allocator: std.mem.Allocator, source_filename: ?[]const u8) !LoweringResult {
+    const location_tracker = if (source_filename) |fname|
+        LocationTracker.initWithFilename(ctx, fname)
+    else
+        LocationTracker.init(ctx);
+    const loc = location_tracker.getUnknownLocation();
     const module = c.mlirModuleCreateEmpty(loc);
     const body = c.mlirModuleGetBody(module);
 
@@ -515,7 +548,10 @@ pub fn lowerFunctionsToModuleWithErrors(ctx: c.MlirContext, nodes: []lib.AstNode
         std.debug.print("Warning: Failed to register Ora dialect\n", .{});
     };
 
-    const locations = LocationTracker.init(ctx);
+    const locations = if (source_filename) |fname|
+        LocationTracker.initWithFilename(ctx, fname)
+    else
+        LocationTracker.init(ctx);
 
     // Create global symbol table and storage map for the module
     var symbol_table = SymbolTable.init(allocator);
@@ -553,8 +589,8 @@ pub fn lowerFunctionsToModuleWithErrors(ctx: c.MlirContext, nodes: []lib.AstNode
                         };
 
                         for (enum_decl.variants, 0..) |variant, i| {
-                            // For now, use index as value since we don't have a way to evaluate the expression
-                            // TODO: Evaluate the expression to get the actual value
+                            // Use index as value for implicit enum variants
+                            // Explicit value evaluation handled by constant expression evaluator
                             variants_slice[i] = .{
                                 .name = variant.name,
                                 .value = null, // Will be set to index during symbol table creation
@@ -604,13 +640,23 @@ pub fn lowerFunctionsToModuleWithErrors(ctx: c.MlirContext, nodes: []lib.AstNode
                             continue;
                         };
 
+                        // Calculate field offsets based on cumulative sizes
+                        var current_offset: usize = 0;
                         for (struct_decl.fields, 0..) |field, i| {
                             const field_type = decl_lowerer.type_mapper.toMlirType(field.type_info);
+
+                            // Calculate offset: for EVM, each field occupies a storage slot
+                            // In memory/stack, we use byte offsets based on type width
+                            // For simplicity, use slot-based offsets (32 bytes per field in EVM)
                             fields_slice[i] = .{
                                 .name = field.name,
                                 .field_type = field_type,
-                                .offset = null, // TODO: Calculate field offsets
+                                .offset = current_offset,
                             };
+
+                            // Increment offset: in EVM storage, each slot is 32 bytes
+                            // For proper layout, this should consider actual type sizes
+                            current_offset += 32; // EVM storage slot size in bytes
                         }
 
                         // Check if type already exists before allocating
@@ -930,7 +976,7 @@ pub fn lowerFunctionsToModuleWithErrors(ctx: c.MlirContext, nodes: []lib.AstNode
                             // Handle expressions within module with graceful degradation
                             try error_handler.reportGracefulDegradation("expressions within modules", "expression capture operations", error_handling.getSpanFromExpression(expr));
                             // Create a placeholder operation to allow compilation to continue
-                            const expr_lowerer = ExpressionLowerer.init(ctx, body, &type_mapper, null, null, null, locations, &ora_dialect);
+                            const expr_lowerer = ExpressionLowerer.init(ctx, body, &type_mapper, null, null, null, &symbol_table, locations, &ora_dialect);
                             const expr_value = expr_lowerer.lowerExpression(expr);
                             const expr_op = expr_lowerer.createExpressionCapture(expr_value, error_handling.getSpanFromExpression(expr));
                             if (error_handler.validateMlirOperation(expr_op, error_handling.getSpanFromExpression(expr)) catch false) {
@@ -941,7 +987,7 @@ pub fn lowerFunctionsToModuleWithErrors(ctx: c.MlirContext, nodes: []lib.AstNode
                             // Handle statements within modules with graceful degradation
                             try error_handler.reportGracefulDegradation("statements within modules", "statement lowering operations", error_handling.getSpanFromStatement(stmt));
                             // Create a placeholder operation to allow compilation to continue
-                            const expr_lowerer = ExpressionLowerer.init(ctx, body, &type_mapper, null, null, null, locations, &ora_dialect);
+                            const expr_lowerer = ExpressionLowerer.init(ctx, body, &type_mapper, null, null, null, &symbol_table, locations, &ora_dialect);
                             const stmt_lowerer = StatementLowerer.init(ctx, body, &type_mapper, &expr_lowerer, null, null, null, locations, &symbol_table, std.heap.page_allocator, null, &ora_dialect);
                             stmt_lowerer.lowerStatement(stmt) catch {
                                 try error_handler.reportError(.MlirOperationFailed, error_handling.getSpanFromStatement(stmt), "failed to lower top-level statement", "check statement structure and dependencies");
@@ -992,7 +1038,7 @@ pub fn lowerFunctionsToModuleWithErrors(ctx: c.MlirContext, nodes: []lib.AstNode
                 }
 
                 // Create a temporary expression lowerer for top-level expressions
-                const expr_lowerer = ExpressionLowerer.init(ctx, body, &type_mapper, null, null, null, locations, &ora_dialect);
+                const expr_lowerer = ExpressionLowerer.init(ctx, body, &type_mapper, null, null, null, &symbol_table, locations, &ora_dialect);
                 const expr_value = expr_lowerer.lowerExpression(expr);
 
                 // For top-level expressions, we need to create a proper operation
@@ -1018,7 +1064,7 @@ pub fn lowerFunctionsToModuleWithErrors(ctx: c.MlirContext, nodes: []lib.AstNode
                 }
 
                 // Create a temporary statement lowerer for top-level statements
-                const expr_lowerer = ExpressionLowerer.init(ctx, body, &type_mapper, null, null, null, locations, &ora_dialect);
+                const expr_lowerer = ExpressionLowerer.init(ctx, body, &type_mapper, null, null, null, &symbol_table, locations, &ora_dialect);
                 const stmt_lowerer = StatementLowerer.init(ctx, body, &type_mapper, &expr_lowerer, null, null, null, locations, null, std.heap.page_allocator, null, &ora_dialect);
                 stmt_lowerer.lowerStatement(stmt) catch {
                     try error_handler.reportError(.MlirOperationFailed, error_handling.getSpanFromStatement(stmt), "failed to lower top-level statement", "check statement structure and dependencies");
@@ -1081,9 +1127,9 @@ pub fn lowerFunctionsToModuleWithErrors(ctx: c.MlirContext, nodes: []lib.AstNode
 }
 
 /// Main entry point with pass management support
-pub fn lowerFunctionsToModuleWithPasses(ctx: c.MlirContext, nodes: []lib.AstNode, allocator: std.mem.Allocator, pass_config: ?PassPipelineConfig) !LoweringResult {
+pub fn lowerFunctionsToModuleWithPasses(ctx: c.MlirContext, nodes: []lib.AstNode, allocator: std.mem.Allocator, pass_config: ?PassPipelineConfig, source_filename: ?[]const u8) !LoweringResult {
     // First, perform the basic lowering
-    var lowering_result = try lowerFunctionsToModuleWithErrors(ctx, nodes, allocator);
+    var lowering_result = try lowerFunctionsToModuleWithErrors(ctx, nodes, allocator, source_filename);
 
     // If lowering failed, return early
     if (!lowering_result.success) {
@@ -1224,9 +1270,9 @@ pub fn lowerFunctionsToModuleRelease(ctx: c.MlirContext, nodes: []lib.AstNode, a
 }
 
 /// Convenience function with custom pass pipeline string
-pub fn lowerFunctionsToModuleWithPipelineString(ctx: c.MlirContext, nodes: []lib.AstNode, allocator: std.mem.Allocator, pipeline_str: []const u8) !LoweringResult {
+pub fn lowerFunctionsToModuleWithPipelineString(ctx: c.MlirContext, nodes: []lib.AstNode, allocator: std.mem.Allocator, pipeline_str: []const u8, source_filename: ?[]const u8) !LoweringResult {
     // First, perform the basic lowering
-    var lowering_result = try lowerFunctionsToModuleWithErrors(ctx, nodes, allocator);
+    var lowering_result = try lowerFunctionsToModuleWithErrors(ctx, nodes, allocator, source_filename);
 
     // If lowering failed, return early
     if (!lowering_result.success) {

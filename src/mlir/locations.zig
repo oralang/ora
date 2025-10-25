@@ -19,15 +19,21 @@ const h = @import("helpers.zig"); // Import helpers
 /// Location tracking system for preserving source information in MLIR
 pub const LocationTracker = struct {
     ctx: c.MlirContext,
+    filename: []const u8,
 
     pub fn init(ctx: c.MlirContext) LocationTracker {
-        return .{ .ctx = ctx };
+        return .{ .ctx = ctx, .filename = "input.ora" };
+    }
+
+    pub fn initWithFilename(ctx: c.MlirContext, filename: []const u8) LocationTracker {
+        return .{ .ctx = ctx, .filename = filename };
     }
 
     /// Create a location from SourceSpan information
     pub fn createLocation(self: *const LocationTracker, span: ?lib.ast.SourceSpan) c.MlirLocation {
         if (span) |s| {
-            return c.mlirLocationFileLineColGet(self.ctx, h.strRefLit("input.ora"), s.line, s.column);
+            const fname_ref = c.mlirStringRefCreate(self.filename.ptr, self.filename.len);
+            return c.mlirLocationFileLineColGet(self.ctx, fname_ref, s.line, s.column);
         }
         return h.unknownLoc(self.ctx);
     }
