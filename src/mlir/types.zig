@@ -153,50 +153,53 @@ pub const TypeMapper = struct {
     /// Convert any Ora type to its corresponding MLIR type
     /// Supports all primitive types (u8-u256, i8-i256, bool, address, string, bytes, void)
     pub fn toMlirType(self: *const TypeMapper, ora_type: anytype) c.MlirType {
-        if (ora_type.ora_type) |ora_ty| {
-            return switch (ora_ty) {
-                // Unsigned integer types - map to appropriate bit widths
-                .u8 => c.mlirIntegerTypeGet(self.ctx, 8),
-                .u16 => c.mlirIntegerTypeGet(self.ctx, 16),
-                .u32 => c.mlirIntegerTypeGet(self.ctx, 32),
-                .u64 => c.mlirIntegerTypeGet(self.ctx, 64),
-                .u128 => c.mlirIntegerTypeGet(self.ctx, 128),
-                .u256 => c.mlirIntegerTypeGet(self.ctx, constants.DEFAULT_INTEGER_BITS),
-
-                // Signed integer types - map to appropriate bit widths
-                .i8 => c.mlirIntegerTypeGet(self.ctx, 8),
-                .i16 => c.mlirIntegerTypeGet(self.ctx, 16),
-                .i32 => c.mlirIntegerTypeGet(self.ctx, 32),
-                .i64 => c.mlirIntegerTypeGet(self.ctx, 64),
-                .i128 => c.mlirIntegerTypeGet(self.ctx, 128),
-                .i256 => c.mlirIntegerTypeGet(self.ctx, constants.DEFAULT_INTEGER_BITS),
-
-                // Other primitive types
-                .bool => c.mlirIntegerTypeGet(self.ctx, 1),
-                .address => c.mlirIntegerTypeGet(self.ctx, 160), // Ethereum address is 20 bytes (160 bits)
-                .string => self.mapStringType(),
-                .bytes => self.mapBytesType(),
-                .void => c.mlirNoneTypeGet(self.ctx),
-
-                // Complex types - comprehensive mapping
-                .struct_type => self.mapStructType(ora_ty.struct_type),
-                .enum_type => self.mapEnumType(ora_ty.enum_type),
-                .contract_type => self.mapContractType(ora_ty.contract_type),
-                .array => self.mapArrayType(ora_ty.array),
-                .slice => self.mapSliceType(ora_ty.slice),
-                .map => self.mapMapType(ora_ty.map),
-                .double_map => self.mapDoubleMapType(ora_ty.double_map),
-                .tuple => self.mapTupleType(ora_ty.tuple),
-                .function => self.mapFunctionType(ora_ty.function),
-                .error_union => self.mapErrorUnionType(ora_ty.error_union),
-                ._union => self.mapUnionType(ora_ty._union),
-                .anonymous_struct => self.mapAnonymousStructType(ora_ty.anonymous_struct),
-                .module => self.mapModuleType(ora_ty.module),
-            };
-        } else {
-            // Default to i256 for unknown types
+        // Handle both optional and non-optional ora_type field
+        const ora_ty_opt = if (@TypeOf(ora_type.ora_type) == lib.ast.type_info.OraType)
+            ora_type.ora_type
+        else if (ora_type.ora_type) |ot|
+            ot
+        else
             return c.mlirIntegerTypeGet(self.ctx, constants.DEFAULT_INTEGER_BITS);
-        }
+
+        return switch (ora_ty_opt) {
+            // Unsigned integer types - map to appropriate bit widths
+            .u8 => c.mlirIntegerTypeGet(self.ctx, 8),
+            .u16 => c.mlirIntegerTypeGet(self.ctx, 16),
+            .u32 => c.mlirIntegerTypeGet(self.ctx, 32),
+            .u64 => c.mlirIntegerTypeGet(self.ctx, 64),
+            .u128 => c.mlirIntegerTypeGet(self.ctx, 128),
+            .u256 => c.mlirIntegerTypeGet(self.ctx, constants.DEFAULT_INTEGER_BITS),
+
+            // Signed integer types - map to appropriate bit widths
+            .i8 => c.mlirIntegerTypeGet(self.ctx, 8),
+            .i16 => c.mlirIntegerTypeGet(self.ctx, 16),
+            .i32 => c.mlirIntegerTypeGet(self.ctx, 32),
+            .i64 => c.mlirIntegerTypeGet(self.ctx, 64),
+            .i128 => c.mlirIntegerTypeGet(self.ctx, 128),
+            .i256 => c.mlirIntegerTypeGet(self.ctx, constants.DEFAULT_INTEGER_BITS),
+
+            // Other primitive types
+            .bool => c.mlirIntegerTypeGet(self.ctx, 1),
+            .address => c.mlirIntegerTypeGet(self.ctx, 160), // Ethereum address is 20 bytes (160 bits)
+            .string => self.mapStringType(),
+            .bytes => self.mapBytesType(),
+            .void => c.mlirNoneTypeGet(self.ctx),
+
+            // Complex types - comprehensive mapping
+            .struct_type => self.mapStructType(ora_ty_opt.struct_type),
+            .enum_type => self.mapEnumType(ora_ty_opt.enum_type),
+            .contract_type => self.mapContractType(ora_ty_opt.contract_type),
+            .array => self.mapArrayType(ora_ty_opt.array),
+            .slice => self.mapSliceType(ora_ty_opt.slice),
+            .map => self.mapMapType(ora_ty_opt.map),
+            .double_map => self.mapDoubleMapType(ora_ty_opt.double_map),
+            .tuple => self.mapTupleType(ora_ty_opt.tuple),
+            .function => self.mapFunctionType(ora_ty_opt.function),
+            .error_union => self.mapErrorUnionType(ora_ty_opt.error_union),
+            ._union => self.mapUnionType(ora_ty_opt._union),
+            .anonymous_struct => self.mapAnonymousStructType(ora_ty_opt.anonymous_struct),
+            .module => self.mapModuleType(ora_ty_opt.module),
+        };
     }
 
     /// Convert primitive integer types with proper bit width
