@@ -44,6 +44,7 @@ const MlirOptions = struct {
     print_ir: bool,
     output_dir: ?[]const u8,
     use_pipeline: bool,
+    validate_before_yul: bool,
 
     fn getOptimizationLevel(self: MlirOptions) OptimizationLevel {
         if (self.opt_level) |level| {
@@ -71,6 +72,11 @@ const MlirOptions = struct {
 
     fn getDefaultPasses(self: MlirOptions) ?[]const u8 {
         return self.passes orelse build_options.mlir_passes;
+    }
+
+    fn shouldValidateBeforeYul(self: MlirOptions) bool {
+        // Always validate unless explicitly disabled
+        return self.validate_before_yul;
     }
 };
 
@@ -100,7 +106,6 @@ pub fn main() !void {
 
     // Parse arguments with compiler-style CLI
     var output_dir: ?[]const u8 = null;
-    var command: ?[]const u8 = null; // For legacy commands (lex, parse, etc.)
     var input_file: ?[]const u8 = null;
 
     // Compilation stage control (--emit-X flags)
@@ -118,6 +123,7 @@ pub fn main() !void {
     var mlir_timing: bool = false;
     var mlir_print_ir: bool = false;
     var mlir_use_pipeline: bool = false;
+    var mlir_validate_before_yul: bool = true; // Default enabled for safety
 
     // Artifact saving options (for --save-all)
     var save_tokens: bool = false;
@@ -193,6 +199,9 @@ pub fn main() !void {
         } else if (std.mem.eql(u8, args[i], "--mlir-pipeline")) {
             mlir_use_pipeline = true;
             i += 1;
+        } else if (std.mem.eql(u8, args[i], "--no-validate-mlir")) {
+            mlir_validate_before_yul = false;
+            i += 1;
             // Legacy --save-X flags
         } else if (std.mem.eql(u8, args[i], "--save-tokens")) {
             save_tokens = true;
@@ -220,15 +229,6 @@ pub fn main() !void {
         } else if (std.mem.eql(u8, args[i], "--verbose") or std.mem.eql(u8, args[i], "-v")) {
             // verbose = true;  // TODO: implement verbose mode
             i += 1;
-            // Legacy commands (lex, parse, ast, compile, mlir)
-        } else if (std.mem.eql(u8, args[i], "lex") or
-            std.mem.eql(u8, args[i], "parse") or
-            std.mem.eql(u8, args[i], "ast") or
-            std.mem.eql(u8, args[i], "compile") or
-            std.mem.eql(u8, args[i], "mlir"))
-        {
-            command = args[i];
-            i += 1;
             // Input file
         } else if (input_file == null and !std.mem.startsWith(u8, args[i], "-")) {
             input_file = args[i];
@@ -254,8 +254,8 @@ pub fn main() !void {
     }
 
     // Determine compilation mode
-    // If no --emit-X flag is set and no legacy command, default to bytecode
-    if (!emit_tokens and !emit_ast and !emit_mlir and !emit_yul and !emit_bytecode and command == null) {
+    // If no --emit-X flag is set, default to bytecode
+    if (!emit_tokens and !emit_ast and !emit_mlir and !emit_yul and !emit_bytecode) {
         emit_bytecode = true; // Default: compile to bytecode
     }
 
@@ -269,6 +269,7 @@ pub fn main() !void {
         .print_ir = mlir_print_ir,
         .output_dir = output_dir,
         .use_pipeline = mlir_use_pipeline,
+        .validate_before_yul = mlir_validate_before_yul,
     };
 
     // Create artifact options structure
@@ -281,31 +282,8 @@ pub fn main() !void {
         .output_dir = output_dir,
     };
 
-    // Handle legacy commands first
-    if (command) |cmd| {
-        if (std.mem.eql(u8, cmd, "lex")) {
-            try runLexer(allocator, file_path, artifact_options);
-        } else if (std.mem.eql(u8, cmd, "parse")) {
-            try runParser(allocator, file_path, artifact_options);
-        } else if (std.mem.eql(u8, cmd, "ast")) {
-            try runASTGeneration(allocator, file_path, output_dir, artifact_options);
-        } else if (std.mem.eql(u8, cmd, "compile")) {
-            if (mlir_options.emit_mlir or artifact_options.save_mlir or artifact_options.save_yul or artifact_options.save_bytecode) {
-                try runMlirEmitAdvanced(allocator, file_path, mlir_options, artifact_options);
-            } else {
-                try runFullCompilation(allocator, file_path, mlir_options, artifact_options);
-            }
-        } else if (std.mem.eql(u8, cmd, "mlir")) {
-            try runMlirEmitAdvancedWithYul(allocator, file_path, mlir_options, artifact_options, false);
-        } else {
-            try printUsage();
-        }
-        return;
-    }
-
-    // New compiler-style behavior: process --emit-X flags
+    // Modern compiler-style behavior: process --emit-X flags
     // Stop at the earliest stage specified, but save later stages if --save-X is set
-    // TODO: Use verbose flag for detailed output
 
     if (emit_tokens) {
         // Stop after lexer
@@ -353,16 +331,12 @@ fn printUsage() !void {
     try stdout.print("  --mlir-timing          - Enable pass timing statistics\n", .{});
     try stdout.print("  --mlir-print-ir        - Print IR before and after passes\n", .{});
     try stdout.print("  --mlir-pipeline        - Use comprehensive MLIR optimization pipeline\n", .{});
+    try stdout.print("  --no-validate-mlir     - Disable automatic MLIR validation before Yul (not recommended)\n", .{});
     try stdout.print("\nAnalysis Options:\n", .{});
     try stdout.print("  --analyze-complexity   - Analyze function complexity metrics\n", .{});
     try stdout.print("\nDevelopment/Debug Options:\n", .{});
     try stdout.print("  --save-all             - Save all intermediate artifacts\n", .{});
     try stdout.print("  --verbose              - Verbose output (show each compilation stage)\n", .{});
-    try stdout.print("\nLegacy Commands (for step-by-step debugging):\n", .{});
-    try stdout.print("  ora lex <file>         - Only tokenize (legacy: use --emit-tokens)\n", .{});
-    try stdout.print("  ora parse <file>       - Only parse (legacy: use --emit-ast)\n", .{});
-    try stdout.print("  ora ast <file>         - Generate AST JSON (legacy)\n", .{});
-    try stdout.print("  ora compile <file>     - Full compilation (legacy: just use 'ora <file>')\n", .{});
     try stdout.print("\nExamples:\n", .{});
     try stdout.print("  ora contract.ora                      # Compile to bytecode → contract_artifacts/\n", .{});
     try stdout.print("  ora contract.ora -o build/            # Compile to bytecode → build/\n", .{});
@@ -805,86 +779,6 @@ fn runComplexityAnalysis(allocator: std.mem.Allocator, file_path: []const u8) !v
     try stdout.flush();
 }
 
-/// Run full compilation pipeline with optional MLIR support
-fn runFullCompilation(allocator: std.mem.Allocator, file_path: []const u8, mlir_options: MlirOptions, artifact_options: ArtifactOptions) !void {
-    var stdout_buffer: [1024]u8 = undefined;
-    var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
-    const stdout = &stdout_writer.interface;
-
-    try stdout.print("Compiling {s}\n", .{file_path});
-    try stdout.print("============================================================\n", .{});
-
-    // Read source file
-    const source = std.fs.cwd().readFileAlloc(allocator, file_path, 1024 * 1024) catch |err| {
-        try stdout.print("Error reading file {s}: {s}\n", .{ file_path, @errorName(err) });
-        return;
-    };
-    defer allocator.free(source);
-
-    try stdout.print("Source ({d} bytes):\n", .{source.len});
-    try stdout.print("{s}\n\n", .{source});
-
-    // Phase 1: Lexical Analysis
-    try stdout.print("Phase 1: Lexical Analysis\n", .{});
-    var lexer = lib.Lexer.init(allocator, source);
-    defer lexer.deinit();
-
-    const tokens = lexer.scanTokens() catch |err| {
-        try stdout.print("Lexer failed: {s}\n", .{@errorName(err)});
-        return;
-    };
-    defer allocator.free(tokens);
-
-    try stdout.print("Generated {d} tokens\n\n", .{tokens.len});
-
-    // Save tokens if requested
-    if (artifact_options.save_tokens) {
-        try saveTokens(allocator, file_path, tokens, artifact_options);
-    }
-
-    // Phase 2: Parsing
-    try stdout.print("Phase 2: Syntax Analysis\n", .{});
-    var arena = lib.ast_arena.AstArena.init(allocator);
-    defer arena.deinit();
-    var parser = lib.Parser.init(tokens, &arena);
-    parser.setFileId(1);
-    const ast_nodes = parser.parse() catch |err| {
-        try stdout.print("Parser failed: {s}\n", .{@errorName(err)});
-        return;
-    };
-    // Note: AST nodes are allocated in arena, so they're automatically freed when arena is deinited
-
-    try stdout.print("Generated {d} AST nodes\n", .{ast_nodes.len});
-
-    // Display AST structure
-    for (ast_nodes, 0..) |*node, i| {
-        try stdout.print("  [{d}] ", .{i});
-        try printAstSummary(stdout, node, 1);
-    }
-    try stdout.print("\n", .{});
-
-    // Save AST if requested
-    if (artifact_options.save_ast) {
-        try saveAST(allocator, file_path, ast_nodes, artifact_options);
-    }
-
-    try stdout.print("============================================================\n", .{});
-
-    // Phase 3: MLIR Generation (if requested)
-    if (mlir_options.emit_mlir) {
-        try stdout.print("Phase 3: MLIR Generation\n", .{});
-        try generateMlirOutput(allocator, ast_nodes, file_path, mlir_options, artifact_options, true);
-    }
-
-    try stdout.print("Frontend compilation completed successfully!\n", .{});
-    try stdout.print("Pipeline: {d} tokens -> {d} AST nodes", .{ tokens.len, ast_nodes.len });
-    if (mlir_options.emit_mlir) {
-        try stdout.print(" -> MLIR module", .{});
-    }
-    try stdout.print("\n", .{});
-    try stdout.flush();
-}
-
 /// Print a concise AST summary
 fn printAstSummary(writer: anytype, node: *lib.AstNode, indent: u32) !void {
     // Print indentation
@@ -917,84 +811,6 @@ fn printAstSummary(writer: anytype, node: *lib.AstNode, indent: u32) !void {
             try writer.print("AST Node\n", .{});
         },
     }
-}
-
-/// Generate AST and save to JSON file
-fn runASTGeneration(allocator: std.mem.Allocator, file_path: []const u8, output_dir: ?[]const u8, artifact_options: ArtifactOptions) !void {
-    var stdout_buffer: [1024]u8 = undefined;
-    var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
-    const stdout = &stdout_writer.interface;
-
-    // Read source file
-    const source = std.fs.cwd().readFileAlloc(allocator, file_path, 1024 * 1024) catch |err| {
-        try stdout.print("Error reading file {s}: {s}\n", .{ file_path, @errorName(err) });
-        return;
-    };
-    defer allocator.free(source);
-
-    try stdout.print("Generating AST for {s}\n", .{file_path});
-    try stdout.print("==================================================\n", .{});
-
-    // Run lexer + parser
-    var lexer = lib.Lexer.init(allocator, source);
-    defer lexer.deinit();
-
-    const tokens = lexer.scanTokens() catch |err| {
-        try stdout.print("Lexer error: {s}\n", .{@errorName(err)});
-        try stdout.flush();
-        std.process.exit(1);
-    };
-    defer allocator.free(tokens);
-
-    var arena = lib.ast_arena.AstArena.init(allocator);
-    defer arena.deinit();
-    var parser = lib.Parser.init(tokens, &arena);
-    parser.setFileId(1);
-    const ast_nodes = parser.parse() catch |err| {
-        try stdout.print("Parser error: {s}\n", .{@errorName(err)});
-        try stdout.flush();
-        std.process.exit(1);
-    };
-    // Note: AST nodes are allocated in arena, so they're automatically freed when arena is deinited
-
-    try stdout.print("Generated {d} AST nodes\n", .{ast_nodes.len});
-
-    // Generate output filename
-    const output_file = if (output_dir) |dir| blk: {
-        // Create output directory if it doesn't exist
-        std.fs.cwd().makeDir(dir) catch |err| switch (err) {
-            error.PathAlreadyExists => {},
-            else => return err,
-        };
-
-        const basename = std.fs.path.stem(file_path);
-        const filename = try std.mem.concat(allocator, u8, &[_][]const u8{ basename, ".ast.json" });
-        defer allocator.free(filename);
-        break :blk try std.fs.path.join(allocator, &[_][]const u8{ dir, filename });
-    } else blk: {
-        const basename = std.fs.path.stem(file_path);
-        break :blk try std.mem.concat(allocator, u8, &[_][]const u8{ basename, ".ast.json" });
-    };
-    defer allocator.free(output_file);
-
-    // Save AST to JSON file
-    const file = std.fs.cwd().createFile(output_file, .{}) catch |err| {
-        try stdout.print("Error creating output file {s}: {s}\n", .{ output_file, @errorName(err) });
-        return;
-    };
-    defer file.close();
-
-    // Use a simple direct approach for file writing
-    // TODO: Fix AST serialization for Zig 0.15.1 compatibility
-    try file.writeAll("{\"type\":\"AST\",\"nodes\":[]}");
-
-    try stdout.print("AST saved to {s}\n", .{output_file});
-
-    // Also save AST in artifact format if requested
-    if (artifact_options.save_ast) {
-        try saveAST(allocator, file_path, ast_nodes, artifact_options);
-    }
-    try stdout.flush();
 }
 
 // ============================================================================
@@ -1176,6 +992,29 @@ fn generateMlirOutput(allocator: std.mem.Allocator, ast_nodes: []lib.AstNode, fi
 
     // Convert MLIR to Yul (only if requested)
     if (generate_yul) {
+        // Validate MLIR before Yul lowering (production safety feature)
+        if (mlir_options.shouldValidateBeforeYul()) {
+            try stdout.print("Validating MLIR before Yul lowering...\n", .{});
+
+            const verification = @import("mlir/verification.zig");
+            var verifier = verification.OraVerification.init(h.ctx, mlir_allocator);
+            defer verifier.deinit();
+
+            const validation_result = try verifier.verifyModule(final_module);
+
+            if (!validation_result.success) {
+                try stdout.print("❌ MLIR validation failed with {d} error(s):\n", .{validation_result.errors.len});
+                for (validation_result.errors) |err| {
+                    try stdout.print("  - [{s}] {s}\n", .{ @tagName(err.type), err.message });
+                }
+
+                try stdout.flush();
+                std.process.exit(1);
+            }
+
+            try stdout.print("✅ MLIR validation passed\n", .{});
+        }
+
         try stdout.print("Converting MLIR to Yul...\n", .{});
         var yul_result = mlir.yul_lowering.lowerToYul(final_module, h.ctx, allocator) catch |err| {
             try stdout.print("MLIR to Yul conversion failed: {s}\n", .{@errorName(err)});
