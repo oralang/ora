@@ -37,6 +37,7 @@ const PublicFunction = struct {
     signature: []const u8, // Full signature: "transfer(address,uint256)"
     selector: u32,
     has_return: bool,
+    num_params: u32, // Number of parameters
 };
 
 /// YulLoweringContext manages the MLIR to Yul conversion
@@ -186,7 +187,7 @@ const YulLoweringContext = struct {
         try self.value_map.put(value_ptr, name_copy);
     }
 
-    fn addPublicFunction(self: *Self, name: []const u8, signature: []const u8, has_return: bool) !void {
+    fn addPublicFunction(self: *Self, name: []const u8, signature: []const u8, has_return: bool, num_params: u32) !void {
         const name_copy = try self.allocator.dupe(u8, name);
         const signature_copy = try self.allocator.dupe(u8, signature);
         const selector = calculateFunctionSelector(signature);
@@ -195,6 +196,7 @@ const YulLoweringContext = struct {
             .signature = signature_copy,
             .selector = selector,
             .has_return = has_return,
+            .num_params = num_params,
         });
     }
 };
@@ -291,16 +293,56 @@ fn generateDispatcher(ctx: *YulLoweringContext) !void {
         try ctx.write(selector_str);
         try ctx.writeln(" {");
 
+        // Decode calldata parameters
+        if (func.num_params > 0) {
+            var i: u32 = 0;
+            while (i < func.num_params) : (i += 1) {
+                const offset = 4 + (i * 32); // 4-byte selector + 32 bytes per param
+                try ctx.writeIndented("  let arg");
+                const arg_num = try std.fmt.allocPrint(ctx.allocator, "{d}", .{i});
+                defer ctx.allocator.free(arg_num);
+                try ctx.write(arg_num);
+                try ctx.write(" := calldataload(");
+                const offset_str = try std.fmt.allocPrint(ctx.allocator, "{d}", .{offset});
+                defer ctx.allocator.free(offset_str);
+                try ctx.write(offset_str);
+                try ctx.writeln(")");
+            }
+        }
+
+        // Call function with parameters
         if (func.has_return) {
             try ctx.writeIndented("  let result := ");
             try ctx.write(func.name);
-            try ctx.writeln("()");
+            try ctx.write("(");
+            if (func.num_params > 0) {
+                var i: u32 = 0;
+                while (i < func.num_params) : (i += 1) {
+                    if (i > 0) try ctx.write(", ");
+                    try ctx.write("arg");
+                    const arg_num = try std.fmt.allocPrint(ctx.allocator, "{d}", .{i});
+                    defer ctx.allocator.free(arg_num);
+                    try ctx.write(arg_num);
+                }
+            }
+            try ctx.writeln(")");
             try ctx.writelnIndented("  mstore(0, result)");
             try ctx.writelnIndented("  return(0, 32)");
         } else {
             try ctx.writeIndented("  ");
             try ctx.write(func.name);
-            try ctx.writeln("()");
+            try ctx.write("(");
+            if (func.num_params > 0) {
+                var i: u32 = 0;
+                while (i < func.num_params) : (i += 1) {
+                    if (i > 0) try ctx.write(", ");
+                    try ctx.write("arg");
+                    const arg_num = try std.fmt.allocPrint(ctx.allocator, "{d}", .{i});
+                    defer ctx.allocator.free(arg_num);
+                    try ctx.write(arg_num);
+                }
+            }
+            try ctx.writeln(")");
             try ctx.writelnIndented("  return(0, 0)");
         }
         try ctx.writelnIndented("}");
@@ -540,6 +582,12 @@ fn processOperation(op: c.MlirOperation, ctx: *YulLoweringContext) void {
             ctx.addError(.MlirOperationFailed, "Failed to process ora.map_store", "check map store operation") catch {};
             std.log.err("Error processing ora.map_store: {}", .{err});
         };
+    } else if (std.mem.startsWith(u8, op_name, "ora.evm.")) {
+        // Handle all EVM builtin operations (e.g., ora.evm.timestamp, ora.evm.caller, etc.)
+        processOraEvmBuiltin(op, ctx) catch |err| {
+            ctx.addError(.MlirOperationFailed, "Failed to process ora.evm builtin", "check EVM builtin operation") catch {};
+            std.log.err("Error processing ora.evm.* operation: {}", .{err});
+        };
     }
     // Ignore other operations for now
 }
@@ -646,7 +694,11 @@ fn processFuncFunc(op: c.MlirOperation, ctx: *YulLoweringContext) !void {
         }
 
         // Add to public functions for dispatcher with full signature
-        try ctx.addPublicFunction(func_name, signature, has_return_value);
+        const num_params: u32 = if (!c.mlirAttributeIsNull(func_type_attr))
+            @intCast(c.mlirFunctionTypeGetNumInputs(c.mlirTypeAttrGetValue(func_type_attr)))
+        else
+            0;
+        try ctx.addPublicFunction(func_name, signature, has_return_value, num_params);
 
         try ctx.writeIndented("function ");
         try ctx.write(func_name);
@@ -683,6 +735,23 @@ fn processFuncFunc(op: c.MlirOperation, ctx: *YulLoweringContext) !void {
     }
 
     ctx.indent_level += 1;
+
+    // Map MLIR block arguments to Yul argN parameters
+    const num_regions = c.mlirOperationGetNumRegions(op);
+    if (num_regions > 0) {
+        const region = c.mlirOperationGetRegion(op, 0);
+        const first_block = c.mlirRegionGetFirstBlock(region);
+        if (!c.mlirBlockIsNull(first_block)) {
+            const num_block_args = c.mlirBlockGetNumArguments(first_block);
+            var arg_idx: u32 = 0;
+            while (arg_idx < num_block_args) : (arg_idx += 1) {
+                const block_arg = c.mlirBlockGetArgument(first_block, @intCast(arg_idx));
+                const yul_arg_name = try std.fmt.allocPrint(ctx.allocator, "arg{d}", .{arg_idx});
+                defer ctx.allocator.free(yul_arg_name); // Free after setValueName duplicates it
+                try ctx.setValueName(block_arg, yul_arg_name);
+            }
+        }
+    }
 
     // Process function body
     try processFuncBody(op, ctx);
@@ -1901,6 +1970,31 @@ fn processOraMapStore(op: c.MlirOperation, ctx: *YulLoweringContext) !void {
     try ctx.writeIndented("sstore(keccak256(0, 64), ");
     try ctx.write(value_name);
     try ctx.writeln(")");
+}
+
+/// Process EVM builtin operations (e.g., ora.evm.timestamp, ora.evm.caller, etc.)
+/// Maps MLIR operations to Yul EVM opcodes
+fn processOraEvmBuiltin(op: c.MlirOperation, ctx: *YulLoweringContext) !void {
+    const op_name = getOperationName(op);
+
+    // Extract the opcode name from "ora.evm.<opcode>"
+    const opcode_name = if (std.mem.startsWith(u8, op_name, "ora.evm."))
+        op_name["ora.evm.".len..]
+    else {
+        try ctx.addError(.MalformedAst, "Invalid ora.evm operation name", "operation should start with ora.evm.");
+        return;
+    };
+
+    // Get the result value (all EVM builtins return a value)
+    const result = c.mlirOperationGetResult(op, 0);
+    const var_name = try ctx.getValueName(result);
+
+    // Generate Yul: let <var_name> := <opcode>()
+    try ctx.writeIndented("let ");
+    try ctx.write(var_name);
+    try ctx.write(" := ");
+    try ctx.write(opcode_name);
+    try ctx.writeln("()");
 }
 
 fn convertBinaryToHex(allocator: std.mem.Allocator, binary_str: []const u8) ![]const u8 {

@@ -303,31 +303,145 @@ defer compiler.deinit();
 const result = try compiler.compileFile("my_contract.ora");
 ```
 
+## Standard Library API
+
+### Overview
+
+Ora provides a built-in standard library (`std`) for zero-overhead access to EVM primitives. No imports needed.
+
+**Key Features**:
+- Zero-overhead (compiles to direct EVM opcodes)
+- Type-safe (full compile-time checking)
+- Always available
+
+For comprehensive documentation, see [Standard Library](../standard-library.md).
+
+### Quick Reference
+
+```zig
+// Block data
+std.block.timestamp() -> u256      // Current block timestamp
+std.block.number() -> u256         // Current block number
+std.block.gaslimit() -> u256       // Block gas limit
+std.block.coinbase() -> address    // Miner address
+std.block.basefee() -> u256        // Base fee (EIP-1559)
+
+// Transaction data
+std.transaction.sender() -> address      // Transaction origin (EOA)
+std.transaction.gasprice() -> u256       // Gas price
+
+// Message data (call context)
+std.msg.sender() -> address        // Immediate caller
+std.msg.value() -> u256            // Wei sent with call
+std.msg.data.size() -> u256        // Calldata size
+
+// Constants
+std.constants.ZERO_ADDRESS         // 0x000...000
+std.constants.U256_MAX            // 2^256 - 1
+std.constants.U128_MAX            // 2^128 - 1
+std.constants.U64_MAX             // 2^64 - 1
+std.constants.U32_MAX             // 2^32 - 1
+```
+
+### Usage Example
+
+```ora
+contract AccessControl {
+    storage owner: address;
+    
+    pub fn initialize() {
+        // Use std.msg.sender() for access control
+        owner = std.msg.sender();
+    }
+    
+    pub fn isOwner() -> bool {
+        let caller = std.msg.sender();
+        return caller == owner;
+    }
+    
+    pub fn validRecipient(addr: address) -> bool {
+        // Use std.constants for validation
+        return addr != std.constants.ZERO_ADDRESS;
+    }
+    
+    pub fn hasExpired(deadline: u256) -> bool {
+        // Use std.block for time-based logic
+        return std.block.timestamp() > deadline;
+    }
+}
+```
+
+### Compilation Flow
+
+```
+Ora Source:
+  std.msg.sender()
+       ↓ (Semantic Validation)
+AST:
+  BuiltinCall { path: "std.msg.sender", args: [] }
+       ↓ (MLIR Lowering)
+MLIR:
+  %0 = ora.evm.caller() : i160
+       ↓ (Yul Lowering)
+Yul:
+  let temp_0 := caller()
+       ↓ (Bytecode Generation)
+EVM:
+  CALLER (opcode 0x33)
+```
+
+Total overhead: zero (direct opcode mapping).
+
+### Integration with Other APIs
+
+The standard library integrates seamlessly with other compiler phases:
+
+**Semantic Analysis**:
+```zig
+// In src/semantics/builtins.zig
+var analyzer = SemanticAnalyzer.init(allocator);
+// ... analyzer automatically validates std.* calls via BuiltinRegistry
+```
+
+**MLIR Lowering**:
+```zig
+// In src/mlir/expressions.zig
+const expr_lowerer = ExpressionLowerer.init(..., builtin_registry);
+// ... std.* calls are lowered to ora.evm.* MLIR operations
+```
+
+**Type Checking**:
+```zig
+// All std.* calls are type-checked at compile time
+let timestamp: u256 = std.block.timestamp();  // ✅ Correct
+let timestamp: address = std.block.timestamp(); // ❌ Compile error
+```
+
+---
+
 ## Current Implementation Status
 
-### ✅ Fully Implemented
+### Implemented
 - Lexical analysis with all Ora keywords
 - Parser supporting contracts, functions, variables, and expressions
 - AST generation with memory region support
 - Type system with primitive and complex types
+- Standard Library (17 built-in functions and constants)
+- MLIR lowering with automatic validation
+- SSA transformation via mem2reg
 - HIR generation and validation
 - Yul code generation
 - Bytecode compilation via Solidity integration
-- Basic semantic analysis
+- Semantic analysis with builtin validation
 - Effect tracking and analysis
 
-### 🚧 In Development
-- **Formal Verification**: Framework exists but most proof strategies return placeholder results
-- **Static Verification**: Basic implementation with TODO items for complex analysis
-- **Optimization**: Basic framework implemented
-- **Error Handling**: Syntax support exists but semantic analysis is incomplete
-- **Cross-contract calls**: Planning stage
-
-### 📋 Planned
-- Complete formal verification implementation
+### In Development
+- Formal verification framework
 - Advanced optimization passes
-- Full error union type support
-- SMT solver integration for complex proofs
+- Error handling improvements
+- Cross-contract calls
+
+### Planned
 - Language server protocol support
 - Debugger integration
 - Package manager integration

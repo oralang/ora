@@ -54,13 +54,14 @@ pub const StatementLowerer = struct {
     local_var_map: ?*LocalVarMap,
     locations: LocationTracker,
     symbol_table: ?*SymbolTable,
+    builtin_registry: ?*const lib.semantics.builtins.BuiltinRegistry,
     memory_manager: MemoryManager,
     allocator: std.mem.Allocator,
     current_function_return_type: ?c.MlirType,
     ora_dialect: *@import("dialect.zig").OraDialect,
     label_context: ?*const LabelContext,
 
-    pub fn init(ctx: c.MlirContext, block: c.MlirBlock, type_mapper: *const TypeMapper, expr_lowerer: *const ExpressionLowerer, param_map: ?*const ParamMap, storage_map: ?*const StorageMap, local_var_map: ?*LocalVarMap, locations: LocationTracker, symbol_table: ?*SymbolTable, allocator: std.mem.Allocator, function_return_type: ?c.MlirType, ora_dialect: *@import("dialect.zig").OraDialect) StatementLowerer {
+    pub fn init(ctx: c.MlirContext, block: c.MlirBlock, type_mapper: *const TypeMapper, expr_lowerer: *const ExpressionLowerer, param_map: ?*const ParamMap, storage_map: ?*const StorageMap, local_var_map: ?*LocalVarMap, locations: LocationTracker, symbol_table: ?*SymbolTable, builtin_registry: ?*const lib.semantics.builtins.BuiltinRegistry, allocator: std.mem.Allocator, function_return_type: ?c.MlirType, ora_dialect: *@import("dialect.zig").OraDialect) StatementLowerer {
         return .{
             .ctx = ctx,
             .block = block,
@@ -71,6 +72,7 @@ pub const StatementLowerer = struct {
             .local_var_map = local_var_map,
             .locations = locations,
             .symbol_table = symbol_table,
+            .builtin_registry = builtin_registry,
             .memory_manager = MemoryManager.init(ctx, ora_dialect),
             .allocator = allocator,
             .current_function_return_type = function_return_type,
@@ -1173,7 +1175,7 @@ pub const StatementLowerer = struct {
 
         // Lower condition in before region
         // Create a new statement lowerer for the condition block
-        _ = StatementLowerer.init(self.ctx, before_block, self.type_mapper, self.expr_lowerer, self.param_map, self.storage_map, self.local_var_map, self.locations, self.symbol_table, self.allocator, self.current_function_return_type, self.ora_dialect);
+        _ = StatementLowerer.init(self.ctx, before_block, self.type_mapper, self.expr_lowerer, self.param_map, self.storage_map, self.local_var_map, self.locations, self.symbol_table, self.builtin_registry, self.allocator, self.current_function_return_type, self.ora_dialect);
 
         const condition = self.expr_lowerer.lowerExpression(&while_stmt.condition);
 
@@ -1617,7 +1619,7 @@ pub const StatementLowerer = struct {
         c.mlirRegionInsertOwnedBlock(then_region, 0, then_block);
 
         // Create a new expression lowerer for this case body with the correct block
-        const case_expr_lowerer = ExpressionLowerer.init(self.ctx, then_block, self.type_mapper, self.param_map, self.storage_map, self.local_var_map, self.symbol_table, self.locations, self.ora_dialect);
+        const case_expr_lowerer = ExpressionLowerer.init(self.ctx, then_block, self.type_mapper, self.param_map, self.storage_map, self.local_var_map, self.symbol_table, self.builtin_registry, self.locations, self.ora_dialect);
 
         // Lower case body into the then block
         switch (case.body) {
@@ -1682,6 +1684,7 @@ pub const StatementLowerer = struct {
             self.local_var_map,
             self.locations,
             self.symbol_table,
+            self.builtin_registry,
             self.allocator,
             self.current_function_return_type,
             self.ora_dialect,
@@ -2322,12 +2325,12 @@ pub const StatementLowerer = struct {
         }
 
         // Create a new expression lowerer with the correct block context
-        const expr_lowerer = ExpressionLowerer.init(self.ctx, block, self.type_mapper, self.param_map, self.storage_map, self.local_var_map, self.symbol_table, self.locations, self.ora_dialect);
+        const expr_lowerer = ExpressionLowerer.init(self.ctx, block, self.type_mapper, self.param_map, self.storage_map, self.local_var_map, self.symbol_table, self.builtin_registry, self.locations, self.ora_dialect);
 
         // Process each statement in the block
         for (b.statements) |*s| {
             // Create a new statement lowerer for this block with the correct expression lowerer
-            var stmt_lowerer = StatementLowerer.init(self.ctx, block, self.type_mapper, &expr_lowerer, self.param_map, self.storage_map, self.local_var_map, self.locations, self.symbol_table, self.allocator, self.current_function_return_type, self.ora_dialect);
+            var stmt_lowerer = StatementLowerer.init(self.ctx, block, self.type_mapper, &expr_lowerer, self.param_map, self.storage_map, self.local_var_map, self.locations, self.symbol_table, self.builtin_registry, self.allocator, self.current_function_return_type, self.ora_dialect);
 
             // Preserve label context if present
             stmt_lowerer.label_context = self.label_context;

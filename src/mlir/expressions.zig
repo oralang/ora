@@ -32,6 +32,7 @@ const StorageMap = @import("memory.zig").StorageMap;
 const LocalVarMap = @import("symbols.zig").LocalVarMap;
 const LocationTracker = @import("locations.zig").LocationTracker;
 const OraDialect = @import("dialect.zig").OraDialect;
+const builtins = lib.semantics.builtins;
 
 /// Expression lowering system for converting Ora expressions to MLIR operations
 pub const ExpressionLowerer = struct {
@@ -43,10 +44,11 @@ pub const ExpressionLowerer = struct {
     storage_map: ?*const StorageMap,
     local_var_map: ?*const LocalVarMap,
     symbol_table: ?*const SymbolTable,
+    builtin_registry: ?*const builtins.BuiltinRegistry,
     locations: LocationTracker,
     ora_dialect: *OraDialect,
 
-    pub fn init(ctx: c.MlirContext, block: c.MlirBlock, type_mapper: *const TypeMapper, param_map: ?*const ParamMap, storage_map: ?*const StorageMap, local_var_map: ?*const LocalVarMap, symbol_table: ?*const SymbolTable, locations: LocationTracker, ora_dialect: *@import("dialect.zig").OraDialect) ExpressionLowerer {
+    pub fn init(ctx: c.MlirContext, block: c.MlirBlock, type_mapper: *const TypeMapper, param_map: ?*const ParamMap, storage_map: ?*const StorageMap, local_var_map: ?*const LocalVarMap, symbol_table: ?*const SymbolTable, builtin_registry: ?*const builtins.BuiltinRegistry, locations: LocationTracker, ora_dialect: *@import("dialect.zig").OraDialect) ExpressionLowerer {
         return .{
             .ctx = ctx,
             .block = block,
@@ -55,6 +57,7 @@ pub const ExpressionLowerer = struct {
             .storage_map = storage_map,
             .local_var_map = local_var_map,
             .symbol_table = symbol_table,
+            .builtin_registry = builtin_registry,
             .locations = locations,
             .ora_dialect = ora_dialect,
         };
@@ -416,7 +419,7 @@ pub const ExpressionLowerer = struct {
 
                 // Temporarily switch to then block for RHS evaluation
                 _ = self.block;
-                const then_lowerer = ExpressionLowerer.init(self.ctx, then_block, self.type_mapper, self.param_map, self.storage_map, self.local_var_map, self.symbol_table, self.locations, self.ora_dialect);
+                const then_lowerer = ExpressionLowerer.init(self.ctx, then_block, self.type_mapper, self.param_map, self.storage_map, self.local_var_map, self.symbol_table, self.builtin_registry, self.locations, self.ora_dialect);
                 const rhs_val = then_lowerer.lowerExpression(bin.rhs);
 
                 // Yield RHS result
@@ -451,7 +454,7 @@ pub const ExpressionLowerer = struct {
                 const then_block = c.mlirBlockCreate(0, null, null);
                 c.mlirRegionAppendOwnedBlock(then_region, then_block);
 
-                const then_lowerer = ExpressionLowerer.init(self.ctx, then_block, self.type_mapper, self.param_map, self.storage_map, self.local_var_map, self.symbol_table, self.locations, self.ora_dialect);
+                const then_lowerer = ExpressionLowerer.init(self.ctx, then_block, self.type_mapper, self.param_map, self.storage_map, self.local_var_map, self.symbol_table, self.builtin_registry, self.locations, self.ora_dialect);
                 const true_val = then_lowerer.createConstant(1, bin.span);
 
                 const then_yield_op = self.ora_dialect.createScfYieldWithValues(&[_]c.MlirValue{true_val}, self.fileLoc(bin.span));
@@ -461,7 +464,7 @@ pub const ExpressionLowerer = struct {
                 const else_block = c.mlirBlockCreate(0, null, null);
                 c.mlirRegionAppendOwnedBlock(else_region, else_block);
 
-                const else_lowerer = ExpressionLowerer.init(self.ctx, else_block, self.type_mapper, self.param_map, self.storage_map, self.local_var_map, self.symbol_table, self.locations, self.ora_dialect);
+                const else_lowerer = ExpressionLowerer.init(self.ctx, else_block, self.type_mapper, self.param_map, self.storage_map, self.local_var_map, self.symbol_table, self.builtin_registry, self.locations, self.ora_dialect);
                 const rhs_val = else_lowerer.lowerExpression(bin.rhs);
 
                 const else_yield_op = self.ora_dialect.createScfYieldWithValues(&[_]c.MlirValue{rhs_val}, self.fileLoc(bin.span));
@@ -550,6 +553,16 @@ pub const ExpressionLowerer = struct {
 
     /// Lower identifier expressions with comprehensive symbol table integration
     pub fn lowerIdentifier(self: *const ExpressionLowerer, identifier: *const lib.ast.Expressions.IdentifierExpr) c.MlirValue {
+        // Check if this is the 'std' namespace identifier
+        // This should never be used directly - it's always used as std.something
+        // But if we get here, it means it's part of a builtin path that will be handled at a higher level
+        if (std.mem.eql(u8, identifier.name, "std")) {
+            // Return a placeholder - this should never actually be used
+            // The parent FieldAccess or Call should handle the builtin
+            std.debug.print("WARNING: 'std' namespace accessed directly without member - this is a bug\n", .{});
+            return self.createConstant(0, identifier.span);
+        }
+
         // First check if this is a function parameter
         if (self.param_map) |pm| {
             if (pm.getParamIndex(identifier.name)) |param_index| {
@@ -641,6 +654,26 @@ pub const ExpressionLowerer = struct {
 
     /// Lower function call expressions with proper argument type checking and conversion
     pub fn lowerCall(self: *const ExpressionLowerer, call: *const lib.ast.Expressions.CallExpr) c.MlirValue {
+        // Check if this is a builtin call (e.g., std.block.timestamp())
+        if (self.builtin_registry) |registry| {
+            if (builtins.isMemberAccessChain(call.callee)) {
+                const path = builtins.getMemberAccessPath(registry.allocator, call.callee) catch {
+                    // Continue to normal processing
+                    return self.processNormalCall(call);
+                };
+                defer registry.allocator.free(path);
+
+                if (registry.lookup(path)) |builtin_info| {
+                    return self.lowerBuiltinCall(&builtin_info, call);
+                }
+            }
+        }
+
+        return self.processNormalCall(call);
+    }
+
+    /// Process a normal (non-builtin) function call
+    fn processNormalCall(self: *const ExpressionLowerer, call: *const lib.ast.Expressions.CallExpr) c.MlirValue {
         // Process arguments with type checking and conversion
         var args = std.ArrayList(c.MlirValue){};
         defer args.deinit(std.heap.page_allocator);
@@ -670,6 +703,33 @@ pub const ExpressionLowerer = struct {
                 return self.createErrorPlaceholder(call.span, "Unsupported callee type");
             },
         }
+    }
+
+    /// Lower builtin function call (e.g., std.block.timestamp())
+    fn lowerBuiltinCall(self: *const ExpressionLowerer, builtin_info: *const builtins.BuiltinInfo, call: *const lib.ast.Expressions.CallExpr) c.MlirValue {
+        // Create ora.evm.<opcode> operation
+        const op_name = std.fmt.allocPrint(std.heap.page_allocator, "ora.evm.{s}", .{builtin_info.evm_opcode}) catch {
+            std.debug.print("FATAL: Failed to allocate opcode name for builtin call\n", .{});
+            return self.createErrorPlaceholder(call.span, "Failed to create builtin call");
+        };
+        defer std.heap.page_allocator.free(op_name);
+
+        const op_name_ref = c.mlirStringRefCreate(op_name.ptr, op_name.len);
+        const location = self.fileLoc(call.span);
+
+        // Map return type
+        const result_type = self.type_mapper.toMlirType(.{
+            .ora_type = builtin_info.return_type,
+        });
+
+        // Create operation state
+        var state = c.mlirOperationStateGet(op_name_ref, location);
+        c.mlirOperationStateAddResults(&state, 1, &result_type);
+
+        // Create and insert operation
+        const op = c.mlirOperationCreate(&state);
+        h.appendOp(self.block, op);
+        return h.getResult(op, 0);
     }
 
     /// Create a constant value
@@ -837,6 +897,29 @@ pub const ExpressionLowerer = struct {
 
     /// Lower field access expressions using llvm.extractvalue or llvm.getelementptr
     pub fn lowerFieldAccess(self: *const ExpressionLowerer, field: *const lib.ast.Expressions.FieldAccessExpr) c.MlirValue {
+        // Check if this is a builtin constant (e.g., std.constants.ZERO_ADDRESS)
+        if (self.builtin_registry) |registry| {
+            // Try to build the full path
+            const field_expr_node = lib.ast.Expressions.ExprNode{ .FieldAccess = field.* };
+            const path = builtins.getMemberAccessPath(registry.allocator, &field_expr_node) catch {
+                // Not a valid path, continue to normal processing
+                const target = self.lowerExpression(field.target);
+                const target_type = c.mlirValueGetType(target);
+                _ = target_type;
+                return self.createStructFieldExtract(target, field.field, field.span);
+            };
+            defer registry.allocator.free(path);
+
+            if (registry.lookup(path)) |builtin_info| {
+                // It's a builtin constant - generate constant value
+                if (!builtin_info.is_call) {
+                    return self.lowerBuiltinConstant(&builtin_info, field.span);
+                }
+                // It's a function being accessed without () - this is an error
+                // But semantic analysis should have caught this, so treat as normal field access
+            }
+        }
+
         const target = self.lowerExpression(field.target);
         const target_type = c.mlirValueGetType(target);
 
@@ -844,6 +927,52 @@ pub const ExpressionLowerer = struct {
         // MLIR lowering assumes type-correct AST from semantics phase
         _ = target_type; // Suppress unused variable warning
         return self.createStructFieldExtract(target, field.field, field.span);
+    }
+
+    /// Lower builtin constant (e.g., std.constants.ZERO_ADDRESS)
+    fn lowerBuiltinConstant(self: *const ExpressionLowerer, builtin_info: *const builtins.BuiltinInfo, span: lib.ast.SourceSpan) c.MlirValue {
+        const ty = self.type_mapper.toMlirType(.{
+            .ora_type = builtin_info.return_type,
+        });
+
+        // Special handling for specific constants
+        if (std.mem.eql(u8, builtin_info.full_path, "std.constants.ZERO_ADDRESS")) {
+            // Create address constant 0x0
+            const addr_ty = c.mlirIntegerTypeGet(self.ctx, 160); // address is 160 bits
+            const op = self.ora_dialect.createArithConstant(0, addr_ty, self.fileLoc(span));
+            h.appendOp(self.block, op);
+            return h.getResult(op, 0);
+        }
+
+        if (std.mem.eql(u8, builtin_info.full_path, "std.constants.U256_MAX")) {
+            // Create i256 constant -1 (all 1s in two's complement = max unsigned)
+            const op = self.ora_dialect.createArithConstant(-1, ty, self.fileLoc(span));
+            h.appendOp(self.block, op);
+            return h.getResult(op, 0);
+        }
+
+        if (std.mem.eql(u8, builtin_info.full_path, "std.constants.U128_MAX")) {
+            const op = self.ora_dialect.createArithConstant(-1, ty, self.fileLoc(span));
+            h.appendOp(self.block, op);
+            return h.getResult(op, 0);
+        }
+
+        if (std.mem.eql(u8, builtin_info.full_path, "std.constants.U64_MAX")) {
+            const op = self.ora_dialect.createArithConstant(-1, ty, self.fileLoc(span));
+            h.appendOp(self.block, op);
+            return h.getResult(op, 0);
+        }
+
+        if (std.mem.eql(u8, builtin_info.full_path, "std.constants.U32_MAX")) {
+            const op = self.ora_dialect.createArithConstant(-1, ty, self.fileLoc(span));
+            h.appendOp(self.block, op);
+            return h.getResult(op, 0);
+        }
+
+        // Fallback: return 0
+        const op = self.ora_dialect.createArithConstant(0, ty, self.fileLoc(span));
+        h.appendOp(self.block, op);
+        return h.getResult(op, 0);
     }
 
     /// Lower cast expressions
@@ -1133,7 +1262,7 @@ pub const ExpressionLowerer = struct {
             c.mlirRegionAppendOwnedBlock(condition_region, condition_block);
 
             // Create a new expression lowerer for the condition block
-            const condition_lowerer = ExpressionLowerer.init(self.ctx, condition_block, self.type_mapper, self.param_map, self.storage_map, self.local_var_map, self.symbol_table, self.locations, self.ora_dialect);
+            const condition_lowerer = ExpressionLowerer.init(self.ctx, condition_block, self.type_mapper, self.param_map, self.storage_map, self.local_var_map, self.symbol_table, self.builtin_registry, self.locations, self.ora_dialect);
 
             // Lower the condition expression
             const condition_value = condition_lowerer.lowerExpression(condition);
@@ -1151,7 +1280,7 @@ pub const ExpressionLowerer = struct {
         c.mlirRegionAppendOwnedBlock(body_region, body_block);
 
         // Create a new expression lowerer for the body block
-        const body_lowerer = ExpressionLowerer.init(self.ctx, body_block, self.type_mapper, self.param_map, self.storage_map, self.local_var_map, self.symbol_table, self.locations, self.ora_dialect);
+        const body_lowerer = ExpressionLowerer.init(self.ctx, body_block, self.type_mapper, self.param_map, self.storage_map, self.local_var_map, self.symbol_table, self.builtin_registry, self.locations, self.ora_dialect);
 
         // Lower the body expression
         const body_value = body_lowerer.lowerExpression(quantified.body);
@@ -1350,6 +1479,7 @@ pub const ExpressionLowerer = struct {
 
         const stmt_lowerer = StatementLowerer.init(self.ctx, block, self.type_mapper, self, // expr_lowerer
             self.param_map, self.storage_map, @constCast(self.local_var_map), self.locations, null, // symbol_table
+            self.builtin_registry, // builtin_registry
             std.heap.page_allocator, // allocator
             null, // function_return_type - not available in expression context
             self.ora_dialect);
@@ -1539,7 +1669,6 @@ pub const ExpressionLowerer = struct {
         // Use the type_mapper's createConversionOp for proper type conversion semantics
         // It handles: extension (extui/extsi), truncation (trunci), and same-width conversions
         return self.type_mapper.createConversionOp(self.block, value, target_ty, span);
-        
     }
 
     /// Helper function to create a boolean constant

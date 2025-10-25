@@ -17,6 +17,9 @@ const std = @import("std");
 const ast = @import("ast.zig");
 const core = @import("semantics/core.zig");
 
+// Export builtins module for use by MLIR lowering
+pub const builtins = @import("semantics/builtins.zig");
+
 pub const Diagnostic = struct {
     message: []const u8,
     span: ast.SourceSpan,
