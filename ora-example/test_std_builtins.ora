@@ -1,0 +1,57 @@
+// Test contract for standard library builtins
+contract StdBuiltinsTest {
+    storage lastCaller: address;
+    storage lastTimestamp: u256;
+    
+    // Test basic builtin usage
+    pub fn recordInfo() -> bool {
+        let caller = std.msg.sender();
+        let time = std.block.timestamp();
+        
+        lastCaller = caller;
+        lastTimestamp = time;
+        
+        return true;
+    }
+    
+    // Test block.timestamp
+    pub fn getTimestamp() -> u256 {
+        return std.block.timestamp();
+    }
+    
+    // Test block.number
+    pub fn getBlockNumber() -> u256 {
+        return std.block.number();
+    }
+    
+    // Test block.coinbase
+    pub fn getCoinbase() -> address {
+        return std.block.coinbase();
+    }
+    
+    // Test transaction.sender
+    pub fn getOrigin() -> address {
+        return std.transaction.sender();
+    }
+    
+    // Test msg.sender
+    pub fn getSender() -> address {
+        return std.msg.sender();
+    }
+    
+    // Test msg.value
+    pub fn getValue() -> u256 {
+        return std.msg.value();
+    }
+    
+    // Test constant ZERO_ADDRESS
+    pub fn getZeroAddress() -> address {
+        return std.constants.ZERO_ADDRESS;
+    }
+    
+    // Test constant U256_MAX
+    pub fn getMaxU256() -> u256 {
+        return std.constants.U256_MAX;
+    }
+}
+
