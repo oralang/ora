@@ -114,6 +114,8 @@ pub fn main() !void {
     var emit_mlir: bool = false;
     var emit_yul: bool = false;
     var emit_bytecode: bool = false;
+    var emit_abi: bool = false;
+    var emit_json: bool = false;
     var analyze_complexity: bool = false;
 
     // MLIR options
@@ -158,6 +160,12 @@ pub fn main() !void {
             i += 1;
         } else if (std.mem.eql(u8, args[i], "--emit-bytecode")) {
             emit_bytecode = true;
+            i += 1;
+        } else if (std.mem.eql(u8, args[i], "--abi")) {
+            emit_abi = true;
+            i += 1;
+        } else if (std.mem.eql(u8, args[i], "--json")) {
+            emit_json = true;
             i += 1;
         } else if (std.mem.eql(u8, args[i], "--analyze-complexity")) {
             analyze_complexity = true;
@@ -291,6 +299,12 @@ pub fn main() !void {
     } else if (emit_ast) {
         // Stop after parser
         try runParser(allocator, file_path, artifact_options);
+    } else if (emit_abi) {
+        // Generate and output ABI (requires parsing to AST)
+        try runAbiGeneration(allocator, file_path, emit_json);
+    } else if (emit_json) {
+        // Full compilation with JSON output
+        try runJsonOutput(allocator, file_path, mlir_options, artifact_options);
     } else if (emit_mlir or emit_yul or emit_bytecode) {
         // Run full MLIR pipeline (includes Yul and bytecode if needed)
         try runMlirEmitAdvancedWithYul(allocator, file_path, mlir_options, artifact_options, emit_yul or emit_bytecode);
@@ -317,6 +331,8 @@ fn printUsage() !void {
     try stdout.print("  --emit-mlir            - Stop after MLIR generation\n", .{});
     try stdout.print("  --emit-yul             - Stop after Yul lowering\n", .{});
     try stdout.print("  --emit-bytecode        - Generate EVM bytecode (default)\n", .{});
+    try stdout.print("  --abi                  - Generate contract ABI (JSON format)\n", .{});
+    try stdout.print("  --json                 - Output in JSON format (for tools)\n", .{});
     try stdout.print("\nOutput Options:\n", .{});
     try stdout.print("  -o <file>              - Write output to <file> (e.g., -o out.hex, -o out.mlir)\n", .{});
     try stdout.print("  -o <dir>/              - Write artifacts to <dir>/ (e.g., -o build/)\n", .{});
@@ -814,6 +830,170 @@ fn printAstSummary(writer: anytype, node: *lib.AstNode, indent: u32) !void {
 }
 
 // ============================================================================
+// SECTION 5.5: ABI and JSON Output Generation
+// ============================================================================
+
+/// Generate and output contract ABI
+fn runAbiGeneration(allocator: std.mem.Allocator, file_path: []const u8, as_json: bool) !void {
+    var stdout_buffer: [1024]u8 = undefined;
+    var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
+    const stdout = &stdout_writer.interface;
+
+    // Read and parse source file
+    const source = std.fs.cwd().readFileAlloc(allocator, file_path, 1024 * 1024) catch |err| {
+        try stdout.print("Error reading file {s}: {s}\n", .{ file_path, @errorName(err) });
+        return;
+    };
+    defer allocator.free(source);
+
+    // Lex
+    var lexer = lib.Lexer.init(allocator, source);
+    defer lexer.deinit();
+    const tokens = lexer.scanTokens() catch |err| {
+        try stdout.print("Lexer error: {s}\n", .{@errorName(err)});
+        try stdout.flush();
+        std.process.exit(1);
+    };
+    defer allocator.free(tokens);
+
+    // Parse
+    var arena = lib.ast_arena.AstArena.init(allocator);
+    defer arena.deinit();
+    var parser = lib.Parser.init(tokens, &arena);
+    parser.setFileId(1);
+    const ast_nodes = parser.parse() catch |err| {
+        try stdout.print("Parser error: {s}\n", .{@errorName(err)});
+        try stdout.flush();
+        std.process.exit(1);
+    };
+
+    // Generate ABI
+    var abi_generator = try lib.abi.AbiGenerator.init(allocator);
+    defer abi_generator.deinit();
+    var contract_abi = try abi_generator.generate(ast_nodes);
+    defer contract_abi.deinit();
+
+    // Output ABI
+    if (as_json) {
+        const abi_json = try contract_abi.toJson(allocator);
+        defer allocator.free(abi_json);
+        try stdout.print("{s}", .{abi_json});
+    } else {
+        const abi_json = try contract_abi.toJson(allocator);
+        defer allocator.free(abi_json);
+        try stdout.print("{s}", .{abi_json});
+    }
+    try stdout.flush();
+}
+
+/// Generate full JSON output with compilation artifacts
+fn runJsonOutput(allocator: std.mem.Allocator, file_path: []const u8, mlir_options: MlirOptions, artifact_options: ArtifactOptions) !void {
+    var stdout_buffer: [1024]u8 = undefined;
+    var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
+    const stdout = &stdout_writer.interface;
+
+    // Read and parse source file
+    const source = std.fs.cwd().readFileAlloc(allocator, file_path, 1024 * 1024) catch |err| {
+        const err_json = try std.fmt.allocPrint(allocator,
+            \\{{
+            \\  "success": false,
+            \\  "errors": [
+            \\    {{
+            \\      "type": "FileError",
+            \\      "message": "Error reading file: {s}"
+            \\    }}
+            \\  ]
+            \\}}
+            \\
+        , .{@errorName(err)});
+        defer allocator.free(err_json);
+        try stdout.print("{s}", .{err_json});
+        try stdout.flush();
+        std.process.exit(1);
+    };
+    defer allocator.free(source);
+
+    // Lex
+    var lexer = lib.Lexer.init(allocator, source);
+    defer lexer.deinit();
+    const tokens = lexer.scanTokens() catch |err| {
+        const err_json = try std.fmt.allocPrint(allocator,
+            \\{{
+            \\  "success": false,
+            \\  "errors": [
+            \\    {{
+            \\      "type": "LexerError",
+            \\      "message": "{s}"
+            \\    }}
+            \\  ]
+            \\}}
+            \\
+        , .{@errorName(err)});
+        defer allocator.free(err_json);
+        try stdout.print("{s}", .{err_json});
+        try stdout.flush();
+        std.process.exit(1);
+    };
+    defer allocator.free(tokens);
+
+    // Parse
+    var arena = lib.ast_arena.AstArena.init(allocator);
+    defer arena.deinit();
+    var parser = lib.Parser.init(tokens, &arena);
+    parser.setFileId(1);
+    const ast_nodes = parser.parse() catch |err| {
+        const err_json = try std.fmt.allocPrint(allocator,
+            \\{{
+            \\  "success": false,
+            \\  "errors": [
+            \\    {{
+            \\      "type": "ParseError",
+            \\      "message": "{s}"
+            \\    }}
+            \\  ]
+            \\}}
+            \\
+        , .{@errorName(err)});
+        defer allocator.free(err_json);
+        try stdout.print("{s}", .{err_json});
+        try stdout.flush();
+        std.process.exit(1);
+    };
+
+    // Generate ABI
+    var abi_generator = try lib.abi.AbiGenerator.init(allocator);
+    defer abi_generator.deinit();
+    var contract_abi = try abi_generator.generate(ast_nodes);
+    defer contract_abi.deinit();
+    const abi_json = try contract_abi.toJson(allocator);
+    defer allocator.free(abi_json);
+
+    // TODO: Actually compile to bytecode here
+    // For now, just output ABI in JSON format with placeholders
+    _ = mlir_options;
+    _ = artifact_options;
+
+    const json_output = try std.fmt.allocPrint(allocator,
+        \\{{
+        \\  "success": true,
+        \\  "artifacts": {{
+        \\    "bytecode": "0x",
+        \\    "abi": {s}
+        \\  }},
+        \\  "compiler": {{
+        \\    "version": "0.1.0",
+        \\    "optimization": "basic"
+        \\  }}
+        \\}}
+        \\
+    , .{abi_json});
+    defer allocator.free(json_output);
+
+    try stdout.print("{s}", .{json_output});
+    try stdout.flush();
+}
+
+// ============================================================================
 // SECTION 6: MLIR Integration & Code Generation
 // ============================================================================
 
@@ -1093,44 +1273,47 @@ fn generateMlirOutput(allocator: std.mem.Allocator, ast_nodes: []lib.AstNode, fi
         }
     };
 
-    // Determine output destination
-    if (mlir_options.output_dir) |output_dir| {
-        // Save to file
-        std.fs.cwd().makeDir(output_dir) catch |err| switch (err) {
-            error.PathAlreadyExists => {},
-            else => return err,
-        };
+    // Only output MLIR if explicitly requested with --emit-mlir
+    if (mlir_options.emit_mlir) {
+        // Determine output destination
+        if (mlir_options.output_dir) |output_dir| {
+            // Save to file
+            std.fs.cwd().makeDir(output_dir) catch |err| switch (err) {
+                error.PathAlreadyExists => {},
+                else => return err,
+            };
 
-        const basename = std.fs.path.stem(file_path);
-        const filename = try std.mem.concat(allocator, u8, &[_][]const u8{ basename, ".mlir" });
-        defer allocator.free(filename);
-        const output_file = try std.fs.path.join(allocator, &[_][]const u8{ output_dir, filename });
-        defer allocator.free(output_file);
+            const basename = std.fs.path.stem(file_path);
+            const filename = try std.mem.concat(allocator, u8, &[_][]const u8{ basename, ".mlir" });
+            defer allocator.free(filename);
+            const output_file = try std.fs.path.join(allocator, &[_][]const u8{ output_dir, filename });
+            defer allocator.free(output_file);
 
-        const file = std.fs.cwd().createFile(output_file, .{}) catch |err| {
-            try stdout.print("Error creating output file {s}: {s}\n", .{ output_file, @errorName(err) });
-            return;
-        };
-        defer file.close();
+            const file = std.fs.cwd().createFile(output_file, .{}) catch |err| {
+                try stdout.print("Error creating output file {s}: {s}\n", .{ output_file, @errorName(err) });
+                return;
+            };
+            defer file.close();
 
-        var file_buffer: [4096]u8 = undefined;
-        const file_writer = file.writer(&file_buffer);
-        const op = c.mlirModuleGetOperation(lowering_result.module);
-        c.mlirOperationPrint(op, callback.cb, @constCast(&file_writer));
+            var file_buffer: [4096]u8 = undefined;
+            const file_writer = file.writer(&file_buffer);
+            const op = c.mlirModuleGetOperation(lowering_result.module);
+            c.mlirOperationPrint(op, callback.cb, @constCast(&file_writer));
 
-        try stdout.print("MLIR saved to {s}\n", .{output_file});
-    } else {
-        // Print to stdout
-        var stdout_file = std.fs.File.stdout();
+            try stdout.print("MLIR saved to {s}\n", .{output_file});
+        } else {
+            // Print to stdout
+            var stdout_file = std.fs.File.stdout();
 
-        const op = c.mlirModuleGetOperation(lowering_result.module);
+            const op = c.mlirModuleGetOperation(lowering_result.module);
 
-        // Create printing flags to enable location information
-        const flags = c.mlirOpPrintingFlagsCreate();
-        defer c.mlirOpPrintingFlagsDestroy(flags);
-        c.mlirOpPrintingFlagsEnableDebugInfo(flags, true, false);
+            // Create printing flags to enable location information
+            const flags = c.mlirOpPrintingFlagsCreate();
+            defer c.mlirOpPrintingFlagsDestroy(flags);
+            c.mlirOpPrintingFlagsEnableDebugInfo(flags, true, false);
 
-        c.mlirOperationPrintWithFlags(op, flags, callback.cb, @constCast(&stdout_file));
+            c.mlirOperationPrintWithFlags(op, flags, callback.cb, @constCast(&stdout_file));
+        }
     }
 
     // Always save MLIR to artifact directory if requested
