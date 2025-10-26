@@ -14,7 +14,6 @@
 const std = @import("std");
 const lib = @import("ora_lib");
 const build_options = @import("build_options");
-const mlir_pipeline = @import("mlir/pass_manager.zig");
 
 /// Artifact saving options
 const ArtifactOptions = struct {
@@ -1046,7 +1045,7 @@ fn generateMlirOutput(allocator: std.mem.Allocator, ast_nodes: []lib.AstNode, fi
     var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
     const stdout = &stdout_writer.interface;
 
-    // Import MLIR modules
+    // Import MLIR modules directly (NOT through ora_lib to avoid circular dependencies)
     const mlir = @import("mlir/mod.zig");
     const c = @import("mlir/c.zig").c;
 
@@ -1063,9 +1062,10 @@ fn generateMlirOutput(allocator: std.mem.Allocator, ast_nodes: []lib.AstNode, fi
     // Choose lowering function based on options
     var lowering_result = if (mlir_options.passes != null or mlir_options.verify or mlir_options.timing or mlir_options.print_ir) blk: {
         // Use advanced lowering with passes
-        const PassPipelineConfig = @import("mlir/pass_manager.zig").PassPipelineConfig;
-        const PassOptimizationLevel = @import("mlir/pass_manager.zig").OptimizationLevel;
-        const IRPrintingConfig = @import("mlir/pass_manager.zig").IRPrintingConfig;
+        const mlir_pipeline = @import("mlir/pass_manager.zig");
+        const PassPipelineConfig = mlir_pipeline.PassPipelineConfig;
+        const PassOptimizationLevel = mlir_pipeline.OptimizationLevel;
+        const IRPrintingConfig = mlir_pipeline.IRPrintingConfig;
 
         const opt_level: PassOptimizationLevel = switch (mlir_options.getOptimizationLevel()) {
             .None => .None,
@@ -1136,6 +1136,7 @@ fn generateMlirOutput(allocator: std.mem.Allocator, ast_nodes: []lib.AstNode, fi
     // Apply MLIR pipeline if requested
     var final_module = lowering_result.module;
     if (mlir_options.use_pipeline) {
+        const mlir_pipeline = @import("mlir/pass_manager.zig");
         const opt_level = mlir_options.getOptimizationLevel();
         const pipeline_config = switch (opt_level) {
             .None => mlir_pipeline.no_opt_config,

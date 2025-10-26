@@ -99,9 +99,13 @@ pub fn build(b: *std.Build) void {
     // Link Solidity libraries to the executable
     linkSolidityLibraries(b, exe, cmake_step, target);
 
-    // Build and link MLIR (required)
+    // Build and link MLIR (required) - only for executable, not library
     const mlir_step = buildMlirLibraries(b, target, optimize);
     linkMlirLibraries(b, exe, mlir_step, target);
+
+    // Build and link Z3 (for formal verification) - only for executable
+    const z3_step = buildZ3Libraries(b, target, optimize);
+    linkZ3Libraries(b, exe, z3_step, target);
 
     // This declares intent for the executable to be installed into the
     // standard location when the user invokes the "install" step (the default
@@ -850,6 +854,250 @@ fn runExampleTests(step: *std.Build.Step, options: std.Build.Step.MakeOptions) a
     if (failed_count > 0) {
         std.log.err("{} example files failed compilation", .{failed_count});
         return error.ExampleTestsFailed;
+    }
+}
+
+/// Build Z3 from vendored z3 repository and install into vendor/z3-install
+fn buildZ3Libraries(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Step {
+    _ = target;
+    _ = optimize;
+
+    const step = b.allocator.create(std.Build.Step) catch @panic("OOM");
+    step.* = std.Build.Step.init(.{
+        .id = .custom,
+        .name = "cmake-build-z3",
+        .owner = b,
+        .makeFn = buildZ3LibrariesImpl,
+    });
+    return step;
+}
+
+/// Implementation of CMake build for Z3 libraries
+fn buildZ3LibrariesImpl(step: *std.Build.Step, options: std.Build.Step.MakeOptions) anyerror!void {
+    _ = options;
+
+    const b = step.owner;
+    const allocator = b.allocator;
+
+    // Check if Z3 is installed on the system
+    const z3_check = std.process.Child.run(.{
+        .allocator = allocator,
+        .argv = &[_][]const u8{ "z3", "--version" },
+        .cwd = ".",
+    }) catch null;
+
+    if (z3_check) |res| {
+        switch (res.term) {
+            .Exited => |code| {
+                if (code == 0) {
+                    std.log.info("Z3 found on system: {s}", .{res.stdout});
+                    // Z3 is installed, we'll link to it
+                    return;
+                }
+            },
+            else => {},
+        }
+    }
+
+    // Z3 not found on system, try to build from vendor
+    std.log.info("Z3 not found on system, checking vendor/z3...", .{});
+
+    const cwd = std.fs.cwd();
+    _ = cwd.openDir("vendor/z3", .{ .iterate = false }) catch {
+        std.log.warn("Z3 not found! Please install Z3 or add it as a submodule:", .{});
+        std.log.warn("  System install (recommended): brew install z3  (macOS)", .{});
+        std.log.warn("  System install (recommended): sudo apt install z3  (Linux)", .{});
+        std.log.warn("  Or add as submodule: git submodule add https://github.com/Z3Prover/z3.git vendor/z3", .{});
+        std.log.warn("Z3 is optional for now - continuing without formal verification support", .{});
+        return;
+    };
+
+    // Create build and install directories
+    const build_dir = "vendor/z3/build-release";
+    cwd.makeDir(build_dir) catch |err| switch (err) {
+        error.PathAlreadyExists => {},
+        else => return err,
+    };
+    const install_prefix = "vendor/z3-install";
+    cwd.makeDir(install_prefix) catch |err| switch (err) {
+        error.PathAlreadyExists => {},
+        else => return err,
+    };
+
+    // Platform-specific flags
+    const builtin = @import("builtin");
+    var cmake_args = std.array_list.Managed([]const u8).init(allocator);
+    defer cmake_args.deinit();
+
+    // Prefer Ninja generator when available
+    var use_ninja: bool = false;
+    {
+        const probe = std.process.Child.run(.{ .allocator = allocator, .argv = &[_][]const u8{ "ninja", "--version" }, .cwd = "." }) catch null;
+        if (probe) |res| {
+            switch (res.term) {
+                .Exited => |code| {
+                    if (code == 0) use_ninja = true;
+                },
+                else => {},
+            }
+        }
+    }
+
+    try cmake_args.append("cmake");
+    if (use_ninja) {
+        try cmake_args.append("-G");
+        try cmake_args.append("Ninja");
+    }
+    try cmake_args.appendSlice(&[_][]const u8{
+        "-S",
+        "vendor/z3",
+        "-B",
+        build_dir,
+        "-DCMAKE_BUILD_TYPE=Release",
+        "-DZ3_BUILD_LIBZ3_SHARED=OFF", // Static library
+        "-DZ3_BUILD_PYTHON_BINDINGS=OFF",
+        "-DZ3_BUILD_DOTNET_BINDINGS=OFF",
+        "-DZ3_BUILD_JAVA_BINDINGS=OFF",
+        "-DZ3_BUILD_EXECUTABLE=OFF", // Don't need the z3 binary
+        "-DZ3_ENABLE_EXAMPLE_TARGETS=OFF",
+        "-DZ3_BUILD_TEST_EXECUTABLES=OFF",
+        b.fmt("-DCMAKE_INSTALL_PREFIX={s}", .{install_prefix}),
+    });
+
+    if (builtin.os.tag == .linux) {
+        try cmake_args.append("-DCMAKE_CXX_FLAGS=-stdlib=libc++ -lc++abi");
+        try cmake_args.append("-DCMAKE_CXX_COMPILER=clang++");
+        try cmake_args.append("-DCMAKE_C_COMPILER=clang");
+    } else if (builtin.os.tag == .macos) {
+        try cmake_args.append("-DCMAKE_CXX_FLAGS=-stdlib=libc++");
+    }
+
+    var cfg_child = std.process.Child.init(cmake_args.items, allocator);
+    cfg_child.cwd = ".";
+    cfg_child.stdin_behavior = .Inherit;
+    cfg_child.stdout_behavior = .Inherit;
+    cfg_child.stderr_behavior = .Inherit;
+    const cfg_term = cfg_child.spawnAndWait() catch |err| {
+        std.log.err("Failed to configure Z3 CMake: {}", .{err});
+        return err;
+    };
+    switch (cfg_term) {
+        .Exited => |code| if (code != 0) {
+            std.log.err("Z3 CMake configure failed with exit code: {}", .{code});
+            return error.CMakeConfigureFailed;
+        },
+        else => {
+            std.log.err("Z3 CMake configure did not exit cleanly", .{});
+            return error.CMakeConfigureFailed;
+        },
+    }
+
+    // Build and install Z3
+    var build_args = [_][]const u8{ "cmake", "--build", build_dir, "--parallel", "--target", "install" };
+    var build_child = std.process.Child.init(&build_args, allocator);
+    build_child.cwd = ".";
+    build_child.stdin_behavior = .Inherit;
+    build_child.stdout_behavior = .Inherit;
+    build_child.stderr_behavior = .Inherit;
+    const build_term = build_child.spawnAndWait() catch |err| {
+        std.log.err("Failed to build Z3 with CMake: {}", .{err});
+        return err;
+    };
+    switch (build_term) {
+        .Exited => |code| if (code != 0) {
+            std.log.err("Z3 CMake build failed with exit code: {}", .{code});
+            return error.CMakeBuildFailed;
+        },
+        else => {
+            std.log.err("Z3 CMake build did not exit cleanly", .{});
+            return error.CMakeBuildFailed;
+        },
+    }
+
+    std.log.info("Successfully built Z3 libraries", .{});
+}
+
+/// Link Z3 to the given executable
+fn linkZ3Libraries(b: *std.Build, exe: *std.Build.Step.Compile, z3_step: *std.Build.Step, target: std.Build.ResolvedTarget) void {
+    // Depend on Z3 build
+    exe.step.dependOn(z3_step);
+
+    // Try system-installed Z3 first
+    const z3_check = std.process.Child.run(.{
+        .allocator = b.allocator,
+        .argv = &[_][]const u8{ "z3", "--version" },
+        .cwd = ".",
+    }) catch null;
+
+    var using_system_z3 = false;
+    if (z3_check) |res| {
+        switch (res.term) {
+            .Exited => |code| {
+                if (code == 0) {
+                    using_system_z3 = true;
+                }
+            },
+            else => {},
+        }
+    }
+
+    if (using_system_z3) {
+        std.log.info("Linking against system Z3", .{});
+        // Add system Z3 paths based on platform
+        switch (target.result.os.tag) {
+            .macos => {
+                // Homebrew paths
+                if (target.result.cpu.arch == .aarch64) {
+                    exe.addIncludePath(.{ .cwd_relative = "/opt/homebrew/include" });
+                    exe.addLibraryPath(.{ .cwd_relative = "/opt/homebrew/lib" });
+                } else {
+                    exe.addIncludePath(.{ .cwd_relative = "/usr/local/include" });
+                    exe.addLibraryPath(.{ .cwd_relative = "/usr/local/lib" });
+                }
+            },
+            .linux => {
+                exe.addIncludePath(.{ .cwd_relative = "/usr/include" });
+                exe.addLibraryPath(.{ .cwd_relative = "/usr/lib" });
+                exe.addLibraryPath(.{ .cwd_relative = "/usr/local/lib" });
+                if (target.result.cpu.arch == .x86_64) {
+                    exe.addLibraryPath(.{ .cwd_relative = "/usr/lib/x86_64-linux-gnu" });
+                }
+            },
+            else => {
+                exe.addIncludePath(.{ .cwd_relative = "/usr/include" });
+                exe.addLibraryPath(.{ .cwd_relative = "/usr/lib" });
+            },
+        }
+    } else {
+        // Use vendored Z3 if available
+        const cwd = std.fs.cwd();
+        _ = cwd.openDir("vendor/z3-install", .{ .iterate = false }) catch {
+            std.log.warn("Z3 not available - formal verification features will be disabled", .{});
+            return;
+        };
+
+        std.log.info("Linking against vendored Z3", .{});
+        const include_path = b.path("vendor/z3-install/include");
+        const lib_path = b.path("vendor/z3-install/lib");
+        exe.addIncludePath(include_path);
+        exe.addLibraryPath(lib_path);
+    }
+
+    // Link Z3 library
+    exe.linkSystemLibrary("z3");
+
+    // Link C++ standard library (Z3 is C++)
+    switch (target.result.os.tag) {
+        .linux => {
+            exe.linkLibCpp();
+            exe.linkSystemLibrary("c++abi");
+        },
+        .macos => {
+            exe.linkLibCpp();
+        },
+        else => {
+            exe.linkLibCpp();
+        },
     }
 }
 
