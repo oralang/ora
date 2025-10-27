@@ -83,6 +83,21 @@ pub const ContractNode = struct {
     span: SourceSpan,
 };
 
+/// Contract invariant (class invariant) for formal verification
+/// Example: invariant totalSupplyInvariant(totalSupply == sumOfBalances);
+pub const ContractInvariant = struct {
+    name: []const u8, // Name of the invariant
+    condition: *Expressions.ExprNode, // Invariant condition
+    span: SourceSpan,
+    /// Metadata: Always specification-only
+    is_specification: bool = true,
+
+    /// Check if this invariant is specification-only (not compiled to bytecode)
+    pub fn isSpecificationOnly(self: *const ContractInvariant) bool {
+        return self.is_specification;
+    }
+};
+
 pub const FunctionNode = struct {
     name: []const u8,
     parameters: []ParameterNode,
@@ -91,9 +106,15 @@ pub const FunctionNode = struct {
     visibility: Visibility,
     attributes: []u8, // Placeholder for future function attributes
     is_inline: bool, // inline functions
-    requires_clauses: []*Expressions.ExprNode, // Preconditions
-    ensures_clauses: []*Expressions.ExprNode, // Postconditions
+    requires_clauses: []*Expressions.ExprNode, // Preconditions (formal verification)
+    ensures_clauses: []*Expressions.ExprNode, // Postconditions (formal verification)
+    is_ghost: bool = false, // Is this a ghost function? (specification-only)
     span: SourceSpan,
+
+    /// Check if this function is specification-only (not compiled to bytecode)
+    pub fn isSpecificationOnly(self: *const FunctionNode) bool {
+        return self.is_ghost;
+    }
 };
 
 pub const ParameterNode = struct {
@@ -169,6 +190,12 @@ pub const ConstantNode = struct {
     value: *Expressions.ExprNode,
     visibility: Visibility,
     span: SourceSpan,
+    /// Is this a ghost constant (specification-only)?
+    is_ghost: bool = false,
+
+    pub fn isSpecificationOnly(self: *const ConstantNode) bool {
+        return self.is_ghost;
+    }
 };
 
 // Unified AST Node type that the visitor expects
@@ -186,6 +213,7 @@ pub const AstNode = union(enum) {
     LogDecl: LogDeclNode,
     Import: ImportNode,
     ErrorDecl: Statements.ErrorDeclNode,
+    ContractInvariant: ContractInvariant, // Formal verification invariants
 
     // Structural nodes - use pointers to break circular dependency
     Block: Statements.BlockNode,
@@ -225,6 +253,10 @@ pub fn deinitAstNode(allocator: std.mem.Allocator, node: *AstNode) void {
         .Constant => |*constant| {
             deinitExprNode(allocator, constant.value);
             allocator.destroy(constant.value);
+        },
+        .ContractInvariant => |*invariant| {
+            deinitExprNode(allocator, invariant.condition);
+            allocator.destroy(invariant.condition);
         },
         .Function => |*function| {
             for (function.parameters) |*param| {

@@ -765,6 +765,11 @@ pub const ExpressionParser = struct {
 
     /// Parse primary expressions (literals, identifiers, parentheses) - MIGRATED FROM ORIGINAL
     fn parsePrimary(self: *ExpressionParser) ParserError!ast.Expressions.ExprNode {
+        // Quantified expressions (forall, exists) - Formal verification
+        if (self.base.match(.Forall) or self.base.match(.Exists)) {
+            return try self.parseQuantifiedExpression();
+        }
+
         // Boolean literals
         if (self.base.match(.True)) {
             const token = self.base.previous();
@@ -1625,6 +1630,65 @@ pub const ExpressionParser = struct {
                 .inclusive = true, // Default to inclusive range
                 .type_info = TypeInfo.unknown(), // Type will be inferred
                 .span = self.base.spanFromToken(start_token),
+            },
+        };
+    }
+
+    /// Parse quantified expressions for formal verification
+    /// Syntax: forall variable: Type where condition => body
+    ///         exists variable: Type where condition => body
+    fn parseQuantifiedExpression(self: *ExpressionParser) ParserError!ast.Expressions.ExprNode {
+        const quant_token = self.base.previous();
+
+        // Determine quantifier type
+        const quantifier: ast.Expressions.QuantifierType = if (std.mem.eql(u8, quant_token.lexeme, "forall"))
+            .Forall
+        else
+            .Exists;
+
+        // Parse variable name
+        const var_token = try self.base.consume(.Identifier, "Expected variable name after quantifier");
+        const variable = try self.base.arena.createString(var_token.lexeme);
+
+        // Expect ":"
+        _ = try self.base.consume(.Colon, "Expected ':' after variable name");
+
+        // Parse variable type
+        const type_parser = @import("type_parser.zig").TypeParser.init(self.base.tokens, self.base.arena);
+        var type_parser_mut = type_parser;
+        type_parser_mut.base.current = self.base.current;
+        const variable_type = try type_parser_mut.parseType();
+        self.base.current = type_parser_mut.base.current;
+
+        // Parse optional where clause
+        var condition: ?*ast.Expressions.ExprNode = null;
+        if (self.base.match(.Where)) {
+            const cond_expr = try self.parseExpression();
+            const cond_ptr = try self.base.arena.createNode(ast.Expressions.ExprNode);
+            cond_ptr.* = cond_expr;
+            condition = cond_ptr;
+        }
+
+        // Expect "=>" (parsed as two tokens: = and >)
+        _ = try self.base.consume(.Equal, "Expected '=>' after quantifier condition");
+        _ = try self.base.consume(.Greater, "Expected '>' after '=' in '=>'");
+
+        // Parse body expression
+        const body_expr = try self.parseExpression();
+        const body_ptr = try self.base.arena.createNode(ast.Expressions.ExprNode);
+        body_ptr.* = body_expr;
+
+        return ast.Expressions.ExprNode{
+            .Quantified = ast.Expressions.QuantifiedExpr{
+                .quantifier = quantifier,
+                .variable = variable,
+                .variable_type = variable_type,
+                .condition = condition,
+                .body = body_ptr,
+                .span = self.base.spanFromToken(quant_token),
+                .is_specification = true,
+                .verification_metadata = null,
+                .verification_attributes = &[_]ast.verification.VerificationAttribute{},
             },
         };
     }

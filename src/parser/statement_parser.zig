@@ -121,6 +121,11 @@ pub const StatementParser = struct {
             return try self.parseLogStatement();
         }
 
+        // Assert statements (formal verification)
+        if (self.base.match(.Assert)) {
+            return try self.parseAssertStatement();
+        }
+
         // Requires statements
         if (self.base.match(.Requires)) {
             return try self.parseRequiresStatement();
@@ -274,6 +279,37 @@ pub const StatementParser = struct {
             .args = try args.toOwnedSlice(self.base.arena.allocator()),
             .span = ParserCommon.makeSpan(event_name_token),
         } };
+    }
+
+    /// Parse assert statement for formal verification
+    /// Syntax: assert(condition, "optional message");
+    fn parseAssertStatement(self: *StatementParser) common.ParserError!ast.Statements.StmtNode {
+        const assert_token = self.base.previous();
+        _ = try self.base.consume(.LeftParen, "Expected '(' after 'assert'");
+
+        // Parse the condition expression
+        self.syncSubParsers();
+        const condition = try self.expr_parser.parseExpression();
+        self.updateFromSubParser(self.expr_parser.base.current);
+
+        // Parse optional message
+        var message: ?[]const u8 = null;
+        if (self.base.match(.Comma)) {
+            const msg_token = try self.base.consume(.String, "Expected string literal for assert message");
+            message = try self.base.arena.createString(msg_token.lexeme);
+        }
+
+        _ = try self.base.consume(.RightParen, "Expected ')' after assert condition");
+        _ = try self.base.consume(.Semicolon, "Expected ';' after assert statement");
+
+        return ast.Statements.StmtNode{
+            .Assert = ast.Statements.AssertNode{
+                .condition = condition,
+                .message = message,
+                .is_ghost = false, // Runtime assertion by default (ghost context handled elsewhere)
+                .span = ParserCommon.makeSpan(assert_token),
+            },
+        };
     }
 
     /// Parse requires statement - MIGRATED FROM ORIGINAL
@@ -595,11 +631,20 @@ pub const StatementParser = struct {
 
         _ = try self.base.consume(.RightParen, "Expected ')' after while condition");
 
-        const body = try self.parseBlock();
-
-        // TODO: Invariants are not currently part of the language syntax, but they should be
+        // Parse optional loop invariants: invariant(expr) invariant(expr) ...
         var invariants = std.ArrayList(ast.Expressions.ExprNode){};
         defer invariants.deinit(self.base.arena.allocator());
+
+        while (self.base.match(.Invariant)) {
+            _ = try self.base.consume(.LeftParen, "Expected '(' after 'invariant'");
+            self.syncSubParsers();
+            const inv_expr = try self.expr_parser.parseExpression();
+            self.updateFromSubParser(self.expr_parser.base.current);
+            _ = try self.base.consume(.RightParen, "Expected ')' after invariant expression");
+            try invariants.append(self.base.arena.allocator(), inv_expr);
+        }
+
+        const body = try self.parseBlock();
 
         return ast.Statements.StmtNode{ .While = ast.Statements.WhileNode{
             .condition = condition,
@@ -634,6 +679,19 @@ pub const StatementParser = struct {
 
         _ = try self.base.consume(.Pipe, "Expected '|' after loop variables");
 
+        // Parse optional loop invariants: invariant(expr) invariant(expr) ...
+        var invariants = std.ArrayList(ast.Expressions.ExprNode){};
+        defer invariants.deinit(self.base.arena.allocator());
+
+        while (self.base.match(.Invariant)) {
+            _ = try self.base.consume(.LeftParen, "Expected '(' after 'invariant'");
+            self.syncSubParsers();
+            const inv_expr = try self.expr_parser.parseExpression();
+            self.updateFromSubParser(self.expr_parser.base.current);
+            _ = try self.base.consume(.RightParen, "Expected ')' after invariant expression");
+            try invariants.append(self.base.arena.allocator(), inv_expr);
+        }
+
         const body = try self.parseBlock();
 
         const pattern = if (var2) |v2|
@@ -641,12 +699,15 @@ pub const StatementParser = struct {
         else
             ast.Statements.LoopPattern{ .Single = .{ .name = var1, .span = self.base.spanFromToken(var1_token) } };
 
-        return ast.Statements.StmtNode{ .ForLoop = ast.Statements.ForLoopNode{
-            .iterable = iterable,
-            .pattern = pattern,
-            .body = body,
-            .span = self.base.spanFromToken(for_token),
-        } };
+        return ast.Statements.StmtNode{
+            .ForLoop = ast.Statements.ForLoopNode{
+                .iterable = iterable,
+                .pattern = pattern,
+                .body = body,
+                .invariants = try invariants.toOwnedSlice(self.base.arena.allocator()),
+                .span = self.base.spanFromToken(for_token),
+            },
+        };
     }
 
     /// Parse switch statement - MIGRATED FROM ORIGINAL

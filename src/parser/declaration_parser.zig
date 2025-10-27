@@ -569,12 +569,109 @@ pub const DeclarationParser = struct {
             .span = self.base.spanFromToken(name_token),
         } };
     }
+    /// Parse contract invariant declaration
+    /// Syntax: invariant name(condition);
+    pub fn parseContractInvariant(
+        self: *DeclarationParser,
+        expr_parser: *ExpressionParser,
+    ) !ast.AstNode {
+        const invariant_token = self.base.previous(); // The 'invariant' keyword
+
+        const name_token = try self.base.consume(.Identifier, "Expected invariant name");
+        const name = try self.base.arena.createString(name_token.lexeme);
+
+        _ = try self.base.consume(.LeftParen, "Expected '(' after invariant name");
+
+        // Parse the condition expression
+        expr_parser.base.current = self.base.current;
+        const condition = try expr_parser.parseExpression();
+        self.base.current = expr_parser.base.current;
+
+        _ = try self.base.consume(.RightParen, "Expected ')' after invariant condition");
+        _ = try self.base.consume(.Semicolon, "Expected ';' after invariant declaration");
+
+        // Store the expression in arena
+        const condition_ptr = try self.base.arena.createNode(ast.Expressions.ExprNode);
+        condition_ptr.* = condition;
+
+        return ast.AstNode{ .ContractInvariant = ast.ContractInvariant{
+            .name = name,
+            .condition = condition_ptr,
+            .span = self.base.spanFromToken(invariant_token),
+            .is_specification = true,
+        } };
+    }
+
+    /// Parse ghost declaration (ghost variable/function/block)
+    pub fn parseGhostDeclaration(
+        self: *DeclarationParser,
+        type_parser: *TypeParser,
+        expr_parser: *ExpressionParser,
+    ) !ast.AstNode {
+        _ = try self.base.consume(.Ghost, "Expected 'ghost' keyword");
+
+        // Ghost can precede: variable declaration, function declaration, or block
+        if (self.base.check(.Pub) or self.base.check(.Fn) or self.base.check(.Inline)) {
+            // Ghost function
+            var fn_node = try self.parseFunction(type_parser, expr_parser);
+
+            // Parse the function body block using a local StatementParser
+            var stmt_parser = StatementParser.init(self.base.tokens, self.base.arena);
+            stmt_parser.base.current = self.base.current;
+            const body_block = try stmt_parser.parseBlock();
+
+            // Update current position from statement parser
+            self.base.current = stmt_parser.base.current;
+
+            // Attach the parsed body
+            fn_node.body = body_block;
+            fn_node.is_ghost = true; // Mark as ghost
+
+            return ast.AstNode{ .Function = fn_node };
+        } else if (self.isMemoryRegionKeyword() or self.base.check(.Let) or self.base.check(.Var) or self.base.check(.Immutable) or self.base.check(.Const)) {
+            // Ghost variable or constant
+            if (self.base.check(.Const)) {
+                var const_node = try self.parseConstantDecl(type_parser, expr_parser);
+                const_node.is_ghost = true; // Mark as ghost
+                return ast.AstNode{ .Constant = const_node };
+            } else {
+                var var_node = try self.parseVariableDecl(type_parser, expr_parser);
+                var_node.is_ghost = true; // Mark as ghost
+                return ast.AstNode{ .VariableDecl = var_node };
+            }
+        } else if (self.base.check(.LeftBrace)) {
+            // Ghost block - parse as a statement block
+            var stmt_parser = StatementParser.init(self.base.tokens, self.base.arena);
+            stmt_parser.base.current = self.base.current;
+            var ghost_block = try stmt_parser.parseBlock();
+            self.base.current = stmt_parser.base.current;
+
+            ghost_block.is_ghost = true; // Mark as ghost
+
+            return ast.AstNode{ .Block = ghost_block };
+        } else {
+            try self.base.errorAtCurrent("Expected function, variable, or block after 'ghost'");
+            return error.UnexpectedToken;
+        }
+    }
+
     /// Parse contract member (function, variable, etc.) with proper scoping
     pub fn parseContractMember(
         self: *DeclarationParser,
         type_parser: *TypeParser,
         expr_parser: *ExpressionParser,
     ) !ast.AstNode {
+        // Check for contract invariants
+        if (self.base.check(.Invariant)) {
+            _ = self.base.advance(); // consume 'invariant'
+            return try self.parseContractInvariant(expr_parser);
+        }
+
+        // Check for ghost declarations
+        if (self.base.check(.Ghost)) {
+            return try self.parseGhostDeclaration(type_parser, expr_parser);
+        }
+
         // Check for @lock annotation before variable declarations
         if (try self.tryParseLockAnnotation(type_parser, expr_parser)) |var_decl| {
             return ast.AstNode{ .VariableDecl = var_decl };

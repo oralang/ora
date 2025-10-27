@@ -416,6 +416,7 @@ fn getNodeSpan(node: *const lib.AstNode) ?lib.ast.SourceSpan {
         .LogDecl => |log_decl| log_decl.span,
         .Import => |import| import.span,
         .ErrorDecl => |error_decl| error_decl.span,
+        .ContractInvariant => |invariant| invariant.span,
         else => null,
     };
 }
@@ -515,6 +516,9 @@ pub fn lowerFunctionsToModuleWithSemanticTable(ctx: c.MlirContext, nodes: []lib.
             },
             .EnumDecl, .StructDecl => {
                 // Skip enum and struct declarations - already processed in semantic analysis
+            },
+            .ContractInvariant => {
+                // Skip contract invariants - specification-only, don't generate code
             },
         }
     }
@@ -875,6 +879,10 @@ pub fn lowerFunctionsToModuleWithErrors(ctx: c.MlirContext, nodes: []lib.AstNode
                     }
                 }
             },
+            .ContractInvariant => {
+                // Skip contract invariants - they are specification-only and don't generate code
+                continue;
+            },
             .Module => |module_node| {
                 // Set error context for module lowering
                 try error_handler.pushContext(ErrorContext.module(module_node.name orelse "unnamed"));
@@ -970,6 +978,10 @@ pub fn lowerFunctionsToModuleWithErrors(ctx: c.MlirContext, nodes: []lib.AstNode
                             if (error_handler.validateMlirOperation(error_op, error_decl.span) catch false) {
                                 c.mlirBlockAppendOwnedOperation(body, error_op);
                             }
+                        },
+                        .ContractInvariant => {
+                            // Skip contract invariants - they are specification-only
+                            continue;
                         },
                         .Module => |nested_module| {
                             // Recursively handle nested modules with graceful degradation

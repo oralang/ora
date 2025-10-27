@@ -351,6 +351,9 @@ pub const DeclarationLowerer = struct {
         for (contract.body) |child| {
             switch (child) {
                 .VariableDecl => |var_decl| {
+                    // Skip ghost variables (specification-only)
+                    if (var_decl.is_ghost) continue;
+
                     switch (var_decl.region) {
                         .Storage => {
                             // This is a storage variable - add it to the storage map and symbol table
@@ -377,6 +380,9 @@ pub const DeclarationLowerer = struct {
                     // Functions are processed in the second pass - skip in first pass
                     // This avoids creating operations before the state is fully configured
                 },
+                .ContractInvariant => {
+                    // Skip contract invariants (specification-only)
+                },
                 else => {},
             }
         }
@@ -385,12 +391,18 @@ pub const DeclarationLowerer = struct {
         for (contract.body) |child| {
             switch (child) {
                 .Function => |f| {
+                    // Skip ghost functions (specification-only)
+                    if (f.is_ghost) continue;
+
                     var local_var_map = LocalVarMap.init(std.heap.page_allocator);
                     defer local_var_map.deinit();
                     const func_op = self.lowerFunction(&f, &storage_map, &local_var_map);
                     h.appendOp(block, func_op);
                 },
                 .VariableDecl => |var_decl| {
+                    // Skip ghost variables (specification-only)
+                    if (var_decl.is_ghost) continue;
+
                     switch (var_decl.region) {
                         .Storage => {
                             // Create ora.global operation for storage variables in storage region
@@ -432,6 +444,9 @@ pub const DeclarationLowerer = struct {
                     // Lower error declarations within contract
                     const error_op = self.lowerErrorDecl(&error_decl);
                     h.appendOp(block, error_op);
+                },
+                .ContractInvariant => {
+                    // Skip contract invariants (specification-only)
                 },
                 else => {
                     // Report missing node type with context and continue processing
