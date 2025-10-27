@@ -34,6 +34,7 @@ top_level_declaration ::=
     | log_declaration
     | import_declaration
     | error_declaration
+    | ghost_declaration
 
 # ==========================================
 # IMPORT DECLARATIONS
@@ -56,6 +57,8 @@ contract_member ::=
     | struct_declaration
     | enum_declaration
     | error_declaration
+    | ghost_declaration
+    | contract_invariant
 
 # ==========================================
 # FUNCTION DECLARATIONS
@@ -137,6 +140,16 @@ indexed_modifier ::= "indexed"
 error_declaration ::= "error" identifier ("(" parameter_list? ")")? ";"
 
 # ==========================================
+# FORMAL VERIFICATION DECLARATIONS
+# ==========================================
+
+# Ghost declarations (specification-only code)
+ghost_declaration ::= "ghost" (variable_declaration | function_declaration | block)
+
+# Contract invariants (class invariants)
+contract_invariant ::= "invariant" identifier "(" expression ")" ";"
+
+# ==========================================
 # TYPE SYSTEM
 # ==========================================
 
@@ -203,6 +216,7 @@ statement ::=
     | lock_statement
     | unlock_statement
     | try_statement
+    | assert_statement
     | block
 
 # REVISED: LHS of assignment now restricted to a valid 'lvalue'.
@@ -229,10 +243,13 @@ expression_statement ::= expression ";"
 
 if_statement ::= "if" "(" expression ")" statement ("else" statement)?
 
-while_statement ::= "while" "(" expression ")" statement
+# Formal verification: Loop invariants
+while_statement ::= "while" "(" expression ")" invariant_clause* statement
 
 # NOTE: This is a foreach-style loop, e.g., for (my_map) |key, value| { ... }
-for_statement ::= "for" "(" expression ")" "|" identifier ("," identifier)? "|" statement
+for_statement ::= "for" "(" expression ")" "|" identifier ("," identifier)? "|" invariant_clause* statement
+
+invariant_clause ::= "invariant" "(" expression ")"
 
 return_statement ::= "return" expression? ";"
 
@@ -245,6 +262,9 @@ log_statement ::= "log" identifier "(" expression_list? ")" ";"
 lock_statement ::= "@" "lock" "(" expression ")" ";"
 
 unlock_statement ::= "@" "unlock" "(" expression ")" ";"
+
+# Formal verification: Assertions
+assert_statement ::= "assert" "(" expression ("," string_literal)? ")" ";"
 
 try_statement ::= "try" expression ("catch" ("|" identifier "|")? block)?
 
