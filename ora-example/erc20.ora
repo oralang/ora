@@ -7,7 +7,14 @@ contract SimpleToken {
     storage balances: map[address, u256];
     storage allowances: doublemap[address, address, u256];
     
-    // Initialize with supply (call once at deployment)
+    // Constructor - runs once at deployment
+    pub fn init(initialSupply: u256) {
+        let deployer = std.msg.sender();
+        totalSupply = initialSupply;
+        balances[deployer] = initialSupply;
+    }
+    
+    // Initialize with supply (can be called after deployment)
     pub fn initialize(initialSupply: u256) -> bool {
         let deployer = std.msg.sender();
         totalSupply = initialSupply;
