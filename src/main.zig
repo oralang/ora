@@ -14,7 +14,6 @@
 const std = @import("std");
 const lib = @import("ora_lib");
 const build_options = @import("build_options");
-const mlir_pipeline = @import("mlir/pass_manager.zig");
 
 /// Artifact saving options
 const ArtifactOptions = struct {
@@ -117,6 +116,7 @@ pub fn main() !void {
     var emit_abi: bool = false;
     var emit_json: bool = false;
     var analyze_complexity: bool = false;
+    var analyze_state: bool = false;
 
     // MLIR options
     var mlir_verify: bool = false;
@@ -169,6 +169,9 @@ pub fn main() !void {
             i += 1;
         } else if (std.mem.eql(u8, args[i], "--analyze-complexity")) {
             analyze_complexity = true;
+            i += 1;
+        } else if (std.mem.eql(u8, args[i], "--analyze-state")) {
+            analyze_state = true;
             i += 1;
             // Optimization level flags (-O0, -O1, -O2)
         } else if (std.mem.eql(u8, args[i], "-O0") or std.mem.eql(u8, args[i], "-Onone")) {
@@ -261,6 +264,12 @@ pub fn main() !void {
         return;
     }
 
+    // Handle state analysis (also a special analysis mode)
+    if (analyze_state) {
+        try runStateAnalysis(allocator, file_path);
+        return;
+    }
+
     // Determine compilation mode
     // If no --emit-X flag is set, default to bytecode
     if (!emit_tokens and !emit_ast and !emit_mlir and !emit_yul and !emit_bytecode) {
@@ -350,6 +359,7 @@ fn printUsage() !void {
     try stdout.print("  --no-validate-mlir     - Disable automatic MLIR validation before Yul (not recommended)\n", .{});
     try stdout.print("\nAnalysis Options:\n", .{});
     try stdout.print("  --analyze-complexity   - Analyze function complexity metrics\n", .{});
+    try stdout.print("  --analyze-state        - Analyze storage reads/writes per function\n", .{});
     try stdout.print("\nDevelopment/Debug Options:\n", .{});
     try stdout.print("  --save-all             - Save all intermediate artifacts\n", .{});
     try stdout.print("  --verbose              - Verbose output (show each compilation stage)\n", .{});
@@ -363,6 +373,7 @@ fn printUsage() !void {
     try stdout.print("  ora --save-all contract.ora           # Save all stages (tokens, AST, MLIR, Yul, bytecode)\n", .{});
     try stdout.print("  ora --mlir-verify --mlir-timing -O2 contract.ora  # Compile with verification and timing\n", .{});
     try stdout.print("  ora --analyze-complexity contract.ora  # Analyze function complexity\n", .{});
+    try stdout.print("  ora --analyze-state contract.ora       # Analyze state changes\n", .{});
     try stdout.flush();
 }
 
@@ -795,6 +806,96 @@ fn runComplexityAnalysis(allocator: std.mem.Allocator, file_path: []const u8) !v
     try stdout.flush();
 }
 
+/// Run state analysis on AST nodes (used during normal compilation)
+fn runStateAnalysisForContracts(allocator: std.mem.Allocator, ast_nodes: []lib.AstNode) !void {
+    const state_tracker = lib.state_tracker;
+
+    var stdout_buffer: [1024]u8 = undefined;
+    var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
+    const stdout = &stdout_writer.interface;
+
+    // Analyze each contract
+    for (ast_nodes) |*node| {
+        switch (node.*) {
+            .Contract => |*contract| {
+                // Run state analysis on this contract
+                var contract_analysis = state_tracker.analyzeContract(allocator, contract) catch |err| {
+                    try stdout.print("State analysis error: {s}\n", .{@errorName(err)});
+                    continue;
+                };
+                defer contract_analysis.deinit();
+
+                // Print only warnings during compilation (not full analysis)
+                try state_tracker.printWarnings(stdout, &contract_analysis);
+            },
+            else => {},
+        }
+    }
+
+    try stdout.flush();
+}
+
+/// Run state analysis on all functions in the contract (standalone mode with --analyze-state)
+fn runStateAnalysis(allocator: std.mem.Allocator, file_path: []const u8) !void {
+    const state_tracker = lib.state_tracker;
+
+    var stdout_buffer: [1024]u8 = undefined;
+    var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
+    const stdout = &stdout_writer.interface;
+
+    // Read source file
+    const source = std.fs.cwd().readFileAlloc(allocator, file_path, 1024 * 1024) catch |err| {
+        try stdout.print("Error reading file {s}: {s}\n", .{ file_path, @errorName(err) });
+        return;
+    };
+    defer allocator.free(source);
+
+    try stdout.print("Analyzing state changes for {s}\n", .{file_path});
+    try stdout.print("==================================================\n", .{});
+
+    // Run lexer
+    var lexer = lib.Lexer.init(allocator, source);
+    defer lexer.deinit();
+
+    const tokens = lexer.scanTokens() catch |err| {
+        try stdout.print("Lexer error: {s}\n", .{@errorName(err)});
+        try stdout.flush();
+        std.process.exit(1);
+    };
+    defer allocator.free(tokens);
+
+    // Run parser
+    var arena = lib.ast_arena.AstArena.init(allocator);
+    defer arena.deinit();
+    var parser = lib.Parser.init(tokens, &arena);
+    parser.setFileId(1);
+    const ast_nodes = parser.parse() catch |err| {
+        try stdout.print("Parser error: {s}\n", .{@errorName(err)});
+        try stdout.flush();
+        std.process.exit(1);
+    };
+
+    // Analyze each contract
+    for (ast_nodes) |*node| {
+        switch (node.*) {
+            .Contract => |*contract| {
+                // Run state analysis on this contract
+                var contract_analysis = state_tracker.analyzeContract(allocator, contract) catch |err| {
+                    try stdout.print("State analysis error: {s}\n", .{@errorName(err)});
+                    continue;
+                };
+                defer contract_analysis.deinit();
+
+                // Print results
+                try state_tracker.printAnalysis(stdout, &contract_analysis);
+            },
+            else => {},
+        }
+    }
+
+    try stdout.flush();
+}
+
 /// Print a concise AST summary
 fn printAstSummary(writer: anytype, node: *lib.AstNode, indent: u32) !void {
     // Print indentation
@@ -1035,6 +1136,9 @@ fn runMlirEmitAdvancedWithYul(allocator: std.mem.Allocator, file_path: []const u
         std.process.exit(1);
     };
 
+    // Run state analysis automatically during compilation
+    try runStateAnalysisForContracts(allocator, ast_nodes);
+
     // Generate MLIR with advanced options
     try generateMlirOutput(allocator, ast_nodes, file_path, mlir_options, artifact_options, generate_yul);
     try stdout.flush();
@@ -1046,7 +1150,7 @@ fn generateMlirOutput(allocator: std.mem.Allocator, ast_nodes: []lib.AstNode, fi
     var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
     const stdout = &stdout_writer.interface;
 
-    // Import MLIR modules
+    // Import MLIR modules directly (NOT through ora_lib to avoid circular dependencies)
     const mlir = @import("mlir/mod.zig");
     const c = @import("mlir/c.zig").c;
 
@@ -1063,9 +1167,10 @@ fn generateMlirOutput(allocator: std.mem.Allocator, ast_nodes: []lib.AstNode, fi
     // Choose lowering function based on options
     var lowering_result = if (mlir_options.passes != null or mlir_options.verify or mlir_options.timing or mlir_options.print_ir) blk: {
         // Use advanced lowering with passes
-        const PassPipelineConfig = @import("mlir/pass_manager.zig").PassPipelineConfig;
-        const PassOptimizationLevel = @import("mlir/pass_manager.zig").OptimizationLevel;
-        const IRPrintingConfig = @import("mlir/pass_manager.zig").IRPrintingConfig;
+        const mlir_pipeline = @import("mlir/pass_manager.zig");
+        const PassPipelineConfig = mlir_pipeline.PassPipelineConfig;
+        const PassOptimizationLevel = mlir_pipeline.OptimizationLevel;
+        const IRPrintingConfig = mlir_pipeline.IRPrintingConfig;
 
         const opt_level: PassOptimizationLevel = switch (mlir_options.getOptimizationLevel()) {
             .None => .None,
@@ -1136,6 +1241,7 @@ fn generateMlirOutput(allocator: std.mem.Allocator, ast_nodes: []lib.AstNode, fi
     // Apply MLIR pipeline if requested
     var final_module = lowering_result.module;
     if (mlir_options.use_pipeline) {
+        const mlir_pipeline = @import("mlir/pass_manager.zig");
         const opt_level = mlir_options.getOptimizationLevel();
         const pipeline_config = switch (opt_level) {
             .None => mlir_pipeline.no_opt_config,

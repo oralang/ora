@@ -31,17 +31,21 @@ Ora is an experimental smart contract language that compiles to Yul (Ethereum's 
 - Error unions (`!T | E1 | E2`)
 - Switch statements (expression and statement forms)
 - Structs, enums, and custom types
-- Function preconditions (`requires`)
 - Contract declarations and event logs
 - **Inline functions** with automatic complexity analysis
-- **Code quality tools** built into the compiler
+
+✅ **Advanced Compiler Features**
+- **State Analysis**: Automatic storage access tracking with dead store detection
+- **Formal Verification**: Z3 integration for mathematical proofs (AST complete)
+- **MLIR Optimization**: Industry-standard compiler infrastructure
+- **Gas Insights**: Built-in warnings for inefficient patterns
 
 ### In Development
 
-🚧 **Yul Backend**: Complete code generation for EVM bytecode
-🚧 **Standard Library**: Core utilities and common patterns
+🚧 **Yul Backend**: Complete code generation for EVM bytecode  
+🚧 **Standard Library**: Core utilities and common patterns  
+🚧 **Z3 Verification**: Verification condition generation (grammar & AST complete)  
 🚧 **For Loops**: Advanced capture syntax
-🚧 **Formal Verification**: Full `requires`/`ensures` implementation
 
 ## Language Design Philosophy
 
@@ -70,20 +74,45 @@ contract SimpleStorage {
 }
 ```
 
-## Planned Advanced Features
+## Advanced Compiler Features
 
-### Formal Verification (In Development)
+### State Analysis (✅ Complete)
+
+Automatic storage access tracking with actionable warnings:
+
+```bash
+$ ora contract.ora
+
+⚠️  State Analysis Warnings for MyContract (2):
+
+💡 [DeadStore] Storage variable 'unusedData' is written but never read
+   💬 Remove unused storage variable or add read logic
+
+ℹ️  [MissingCheck] Function 'approve' modifies storage without validation
+   💬 Add validation checks before modifying storage
+```
+
+[Learn more about State Analysis →](./state-analysis)
+
+### Formal Verification (🚧 In Progress)
+
+Mathematical proofs for contract correctness using Z3 SMT solver:
 
 ```ora
-function transfer(to: address, amount: u256) -> bool
-    requires(balances[sender] >= amount)
-    ensures(balances[sender] + balances[to] == old(balances[sender]) + old(balances[to]))
+pub fn transfer(to: address, amount: u256) -> bool
+    requires amount > 0
+    requires balances[std.msg.sender()] >= amount
+    ensures balances[std.msg.sender()] == old(balances[std.msg.sender()]) - amount
+    ensures balances[to] == old(balances[to]) + amount
 {
+    let sender = std.msg.sender();
     balances[sender] -= amount;
     balances[to] += amount;
     return true;
 }
 ```
+
+[Learn more about Formal Verification →](./formal-verification)
 
 ### Error Handling (In Development)
 
@@ -115,9 +144,25 @@ contract Token {
 
 ## Getting Started
 
-Ready to explore? Check out our [Getting Started](./getting-started) guide to set up the development environment and try the current implementation.
+Ready to explore? Check out our guides:
 
-Browse our [Examples](./examples) to see working code patterns from the repository.
+- 📚 [Getting Started](./getting-started) - Set up the compiler and try examples
+- 🔍 [State Analysis](./state-analysis) - Automatic storage optimization
+- 🔬 [Formal Verification](./formal-verification) - Mathematical proofs with Z3
+- 📖 [Examples](./examples) - Working code patterns
+
+Try the compiler features:
+
+```bash
+# Compile with automatic state analysis
+ora contract.ora
+
+# Detailed storage access analysis
+ora --analyze-state contract.ora
+
+# Generate optimized MLIR
+ora --emit-mlir contract.ora
+```
 
 ## Development Notes
 

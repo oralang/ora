@@ -109,11 +109,9 @@ pub const ExprNode = union(enum) {
     Cast: CastExpr, // casting expressions (x as T)
     Comptime: ComptimeExpr, // compile-time expressions (comptime { ... })
     Old: OldExpr, // old() expressions in ensures clauses
+    Quantified: QuantifiedExpr, // quantified expressions (forall, exists)
     Tuple: TupleExpr, // tuple expressions (a, b, c)
     SwitchExpression: SwitchExprNode, // switch expressions (switch (x) { case y: ... default: ... })
-
-    // Quantified expressions for formal verification
-    Quantified: QuantifiedExpr, // forall/exists expressions (forall x: T, y: T { ... })
 
     // Error handling expressions
     Try: TryExpr, // try expression
@@ -143,6 +141,15 @@ pub const ExprNode = union(enum) {
 
     // Array literal expressions
     ArrayLiteral: ArrayLiteralExpr, // [1, 2, 3] or []
+
+    /// Check if this expression is specification-only (not compiled to bytecode)
+    pub fn isSpecificationOnly(self: *const ExprNode) bool {
+        return switch (self.*) {
+            .Old => true,
+            .Quantified => true,
+            else => false,
+        };
+    }
 };
 
 /// Quantifier type for formal verification
@@ -152,6 +159,7 @@ pub const QuantifierType = enum {
 };
 
 /// Quantified expressions for formal verification (forall/exists)
+/// Example: forall i: u256 where i < len => array[i] > 0
 pub const QuantifiedExpr = struct {
     quantifier: QuantifierType, // forall | exists
     variable: []const u8, // bound variable name
@@ -159,10 +167,12 @@ pub const QuantifiedExpr = struct {
     condition: ?*ExprNode, // optional where clause
     body: *ExprNode, // the quantified expression
     span: SourceSpan,
+    /// Metadata: Always specification-only
+    is_specification: bool = true,
     /// Verification metadata for formal verification tools
-    verification_metadata: ?*verification.QuantifiedMetadata,
+    verification_metadata: ?*verification.QuantifiedMetadata = null,
     /// Verification attributes for this quantified expression
-    verification_attributes: []verification.VerificationAttribute,
+    verification_attributes: []verification.VerificationAttribute = &[_]verification.VerificationAttribute{},
 };
 
 /// Anonymous struct literal expression (.{ field1: value1, field2: value2 })
@@ -416,6 +426,8 @@ pub const ComptimeExpr = struct {
 pub const OldExpr = struct {
     expr: *ExprNode,
     span: SourceSpan,
+    /// Metadata: Always specification-only
+    is_specification: bool = true,
 };
 
 /// Tuple expressions (a, b, c)

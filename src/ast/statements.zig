@@ -14,6 +14,13 @@ const SwitchBody = expressions.SwitchBody;
 pub const BlockNode = struct {
     statements: []StmtNode,
     span: SourceSpan,
+    /// Is this a ghost block? (specification-only)
+    is_ghost: bool = false,
+
+    /// Metadata: Specification-only if ghost
+    pub fn isSpecificationOnly(self: *const BlockNode) bool {
+        return self.is_ghost;
+    }
 };
 
 /// Statement node types
@@ -30,6 +37,7 @@ pub const StmtNode = union(enum) {
     Log: LogNode,
     Lock: LockNode, // @lock annotations
     Unlock: UnlockNode, // @unlock annotations
+    Assert: AssertNode, // assert statements (runtime or ghost)
     Invariant: InvariantNode, // Loop invariants
     Requires: RequiresNode,
     Ensures: EnsuresNode,
@@ -43,6 +51,18 @@ pub const StmtNode = union(enum) {
 
     // Compound assignment statements
     CompoundAssignment: CompoundAssignmentNode, // a += b, a -= b, etc.
+
+    /// Check if this statement is specification-only (not compiled to bytecode)
+    pub fn isSpecificationOnly(self: *const StmtNode) bool {
+        return switch (self.*) {
+            .Assert => |assert_stmt| assert_stmt.isSpecificationOnly(),
+            .VariableDecl => |var_decl| var_decl.isSpecificationOnly(),
+            .Invariant => true, // Loop invariants are always specification-only
+            .Requires => true, // Preconditions are always specification-only
+            .Ensures => true, // Postconditions are always specification-only
+            else => false,
+        };
+    }
 };
 
 pub const ReturnNode = struct {
@@ -88,6 +108,7 @@ pub const ForLoopNode = struct {
     iterable: ExprNode, // The expression to iterate over
     pattern: LoopPattern, // Enhanced from simple var names
     body: BlockNode, // Loop body block
+    invariants: []ExprNode, // Loop invariants (formal verification)
     span: SourceSpan,
 };
 
@@ -95,6 +116,20 @@ pub const LogNode = struct {
     event_name: []const u8,
     args: []ExprNode,
     span: SourceSpan,
+};
+
+/// Assert statement: runtime or ghost assertion
+/// Example: assert(amount > 0, "Amount must be positive");
+pub const AssertNode = struct {
+    condition: ExprNode, // Condition to assert
+    message: ?[]const u8, // Optional error message
+    is_ghost: bool, // Is this a ghost assertion? (specification-only)
+    span: SourceSpan,
+
+    /// Metadata: Specification-only if ghost
+    pub fn isSpecificationOnly(self: *const AssertNode) bool {
+        return self.is_ghost;
+    }
 };
 
 pub const InvariantNode = struct {
@@ -162,6 +197,13 @@ pub const VariableDeclNode = struct {
     span: SourceSpan,
     // Tuple unpacking support
     tuple_names: ?[][]const u8, // For tuple unpacking: let (a, b) = expr
+    /// Is this a ghost variable? (specification-only)
+    is_ghost: bool = false,
+
+    /// Metadata: Specification-only if ghost
+    pub fn isSpecificationOnly(self: *const VariableDeclNode) bool {
+        return self.is_ghost;
+    }
 };
 
 /// Destructuring Assignment Statement
@@ -330,6 +372,9 @@ pub fn deinitStmtNode(allocator: std.mem.Allocator, stmt: *StmtNode) void {
             expressions.deinitExprNode(allocator, compound.value);
             allocator.destroy(compound.target);
             allocator.destroy(compound.value);
+        },
+        .Assert => |*assert_stmt| {
+            expressions.deinitExprNode(allocator, &assert_stmt.condition);
         },
     }
 }

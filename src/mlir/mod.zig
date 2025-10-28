@@ -11,8 +11,11 @@
 // ============================================================================
 
 // Core MLIR functionality - consolidated into lower.zig
+pub const c = @import("c.zig");
 pub const lower = @import("lower.zig");
 pub const dialect = @import("dialect.zig");
+pub const pass_manager = @import("pass_manager.zig");
+pub const verification = @import("verification.zig");
 
 // Helper utilities for reducing MLIR C API boilerplate
 pub const helpers = @import("helpers.zig");

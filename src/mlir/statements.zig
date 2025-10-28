@@ -127,6 +127,11 @@ pub const StatementLowerer = struct {
             .Unlock => |unlock_stmt| {
                 try self.lowerUnlock(&unlock_stmt);
             },
+            .Assert => |assert_stmt| {
+                // For now, skip assert statements in MLIR lowering
+                // TODO: Implement runtime assertion lowering for non-ghost asserts
+                _ = assert_stmt;
+            },
             .Move => |move_stmt| {
                 try self.lowerMove(&move_stmt);
             },
@@ -184,6 +189,7 @@ pub const StatementLowerer = struct {
             .Log => |log_stmt| log_stmt.span,
             .Lock => |lock_stmt| lock_stmt.span,
             .Unlock => |unlock_stmt| unlock_stmt.span,
+            .Assert => |assert_stmt| assert_stmt.span,
             .Move => |move_stmt| move_stmt.span,
             .TryBlock => |try_stmt| try_stmt.span,
             .ErrorDecl => |error_decl| error_decl.span,

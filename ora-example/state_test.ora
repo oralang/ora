@@ -1,0 +1,127 @@
+// State Analysis Test Contract
+// This contract tests various storage access patterns
+
+contract StateTest {
+    // Storage variables
+    storage counter: u256;
+    storage balances: map[address, u256];
+    storage owner: address;
+    storage config: u256;
+    storage unusedData: u256;
+    
+    // 1. Stateless function (pure computation, no storage access)
+    pub fn add(a: u256, b: u256) -> u256 {
+        return a + b;
+    }
+    
+    // 2. Readonly function (only reads storage)
+    pub fn getCounter() -> u256 {
+        return counter;
+    }
+    
+    // 3. Readonly function with multiple reads
+    pub fn getBalance(account: address) -> u256 {
+        let balance = balances[account];
+        let currentOwner = owner;
+        return balance;
+    }
+    
+    // 4. Write-only function (only writes storage)
+    pub fn setCounter(value: u256) {
+        counter = value;
+    }
+    
+    // 5. Read-Write function (reads then writes)
+    pub fn incrementCounter() {
+        let current = counter;
+        counter = current + 1;
+    }
+    
+    // 6. Complex function with multiple reads and writes
+    pub fn transfer(from: address, recipient: address, amount: u256) {
+        let fromBalance = balances[from];
+        let toBalance = balances[recipient];
+        
+        balances[from] = fromBalance - amount;
+        balances[recipient] = toBalance + amount;
+    }
+    
+    // 7. Function that only reads (never writes)
+    pub fn checkBalance(account: address) -> bool {
+        return balances[account] > 0;
+    }
+    
+    // 8. Function with conditional reads
+    pub fn getBalanceOrDefault(account: address, useDefault: bool) -> u256 {
+        if (useDefault) {
+            return 100;
+        }
+        return balances[account];
+    }
+    
+    // 9. Function with loop reading storage
+    pub fn sumBalances(accounts: slice[address]) -> u256 {
+        let total: u256 = 0;
+        for (accounts) |account| {
+            total = total + balances[account];
+        }
+        return total;
+    }
+    
+    // 10. Dead store (writes but value never read)
+    pub fn writeUnused(value: u256) {
+        unusedData = value;
+    }
+    
+    // 11. Function that reads multiple variables
+    pub fn getOwnerBalance() -> u256 {
+        let currentOwner = owner;
+        return balances[currentOwner];
+    }
+    
+    // 12. Function with nested reads
+    pub fn complexRead() -> u256 {
+        let a = counter;
+        let b = config;
+        return a + b;
+    }
+    
+    // 13. Write without prior read
+    pub fn initialize(initialOwner: address) {
+        owner = initialOwner;
+        counter = 0;
+    }
+    
+    // 14. Mixed stateless and readonly
+    pub fn calculateFee(amount: u256) -> u256 {
+        let fee = amount / 100;  // Stateless computation
+        let minFee = config;     // Storage read
+        if (fee < minFee) {
+            return minFee;
+        }
+        return fee;
+    }
+    
+    // 15. Function that modifies multiple storage variables
+    pub fn reset() {
+        counter = 0;
+        config = 0;
+    }
+    
+    // 16. Function that reads and writes multiple variables
+    pub fn updateConfigFromCounter() {
+        let currentCounter = counter;  // Read from counter
+        let currentConfig = config;    // Read from config
+        
+        config = currentCounter + 1;   // Write to config
+        counter = currentConfig * 2;   // Write to counter
+    }
+    
+    // 17. Function with cross-variable logic (read 2, write 2)
+    pub fn swapCounterAndConfig() {
+        let temp = counter;            // Read counter
+        counter = config;              // Read config, Write counter
+        config = temp;                 // Write config
+    }
+}
+

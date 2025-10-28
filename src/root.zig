@@ -21,10 +21,14 @@ pub const ast_serializer = @import("ast/ast_serializer.zig");
 pub const typer = @import("typer.zig");
 pub const semantics = @import("semantics.zig");
 pub const complexity = @import("analysis/complexity.zig");
+pub const state_tracker = @import("analysis/state_tracker.zig");
 pub const abi = @import("abi.zig");
 
 // Yul integration (backend compilation target)
 pub const yul_bindings = @import("yul_bindings.zig");
+
+// Note: MLIR and Z3 are NOT exported from ora_lib because they import ora_lib themselves,
+// which would create circular dependencies. They should be imported directly by main.zig.
 
 // Lossless printer
 pub const lossless_printer = @import("lossless_printer.zig");

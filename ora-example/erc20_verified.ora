@@ -1,21 +1,24 @@
-// Minimal ERC20 Token Implementation in Ora
-// Using only currently available features
+// ERC20 Token with Formal Verification
+// Testing FV features on a real contract
 
-contract SimpleToken {
+contract VerifiedToken {
     // Storage
     storage totalSupply: u256;
     storage balances: map[address, u256];
     storage allowances: doublemap[address, address, u256];
     
-    // Constructor - runs once at deployment
-    pub fn init(initialSupply: u256) {
-        let deployer = std.msg.sender();
-        totalSupply = initialSupply;
-        balances[deployer] = initialSupply;
-    }
+    // Contract invariants (specification-only)
+    invariant totalSupplyPositive(totalSupply >= 0);
     
-    // Initialize with supply (can be called after deployment)
-    pub fn initialize(initialSupply: u256) -> bool {
+    // Ghost variable to track sum of all balances
+    ghost storage sumOfBalances: u256;
+    
+    // Initialize with supply (call once at deployment)
+    pub fn initialize(initialSupply: u256) -> bool
+        requires(initialSupply > 0)
+        ensures(totalSupply == initialSupply)
+        ensures(balances[std.msg.sender()] == initialSupply)
+    {
         let deployer = std.msg.sender();
         totalSupply = initialSupply;
         balances[deployer] = initialSupply;
@@ -33,7 +36,13 @@ contract SimpleToken {
     }
     
     // Transfer tokens from sender to recipient
-    pub fn transfer(recipient: address, amount: u256) -> bool {
+    pub fn transfer(recipient: address, amount: u256) -> bool
+        requires(amount > 0)
+        requires(recipient != std.constants.ZERO_ADDRESS)
+        requires(balances[std.msg.sender()] >= amount)
+        ensures(balances[std.msg.sender()] == old(balances[std.msg.sender()]) - amount)
+        ensures(balances[recipient] == old(balances[recipient]) + amount)
+    {
         let sender = std.msg.sender();
         let senderBalance = balances[sender];
         
@@ -55,7 +64,10 @@ contract SimpleToken {
     }
     
     // Approve spender to spend tokens
-    pub fn approve(spender: address, amount: u256) -> bool {
+    pub fn approve(spender: address, amount: u256) -> bool
+        requires(spender != std.constants.ZERO_ADDRESS)
+        ensures(allowances[std.msg.sender()][spender] == amount)
+    {
         let owner = std.msg.sender();
         
         if (spender == std.constants.ZERO_ADDRESS) {
@@ -72,7 +84,15 @@ contract SimpleToken {
     }
     
     // Transfer from one address to another using allowance
-    pub fn transferFrom(sender: address, recipient: address, amount: u256) -> bool {
+    pub fn transferFrom(sender: address, recipient: address, amount: u256) -> bool
+        requires(amount > 0)
+        requires(recipient != std.constants.ZERO_ADDRESS)
+        requires(allowances[sender][std.msg.sender()] >= amount)
+        requires(balances[sender] >= amount)
+        ensures(balances[sender] == old(balances[sender]) - amount)
+        ensures(balances[recipient] == old(balances[recipient]) + amount)
+        ensures(allowances[sender][std.msg.sender()] == old(allowances[sender][std.msg.sender()]) - amount)
+    {
         let spender = std.msg.sender();
         
         let currentAllowance = allowances[sender][spender];
@@ -98,6 +118,11 @@ contract SimpleToken {
         balances[recipient] = recipientBalance + amount;
         
         return true;
+    }
+    
+    // Ghost function to calculate total supply (specification-only)
+    ghost fn calculateTotalSupply() -> u256 {
+        return sumOfBalances;
     }
 }
 

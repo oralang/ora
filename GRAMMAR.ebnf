@@ -16,7 +16,8 @@ TopLevelDeclaration =
   | EnumDeclaration
   | LogDeclaration
   | ImportDeclaration
-  | ErrorDeclaration ;
+  | ErrorDeclaration
+  | GhostDeclaration ;
 
 # ==========================================
 # IMPORT DECLARATIONS
@@ -38,7 +39,9 @@ ContractMember =
   | LogDeclaration
   | StructDeclaration
   | EnumDeclaration
-  | ErrorDeclaration ;
+  | ErrorDeclaration
+  | GhostDeclaration
+  | ContractInvariant ;
 
 # ==========================================
 # FUNCTION DECLARATIONS
@@ -105,6 +108,16 @@ LogParameter = [ "indexed" ] Identifier ":" Type ;
 ErrorDeclaration = "error" Identifier [ "(" [ ParameterList ] ")" ] ";" ;
 
 # ==========================================
+# FORMAL VERIFICATION DECLARATIONS
+# ==========================================
+
+# Ghost declarations (specification-only code)
+GhostDeclaration = "ghost" ( VariableDeclaration | FunctionDeclaration | Block ) ;
+
+# Contract invariants (class invariants)
+ContractInvariant = "invariant" Identifier "(" Expression ")" ";" ;
+
+# ==========================================
 # TYPE SYSTEM
 # ==========================================
 
@@ -162,6 +175,7 @@ Statement =
   | LockStatement
   | UnlockStatement
   | TryStatement
+  | AssertStatement
   | Block ;
 
 AssignmentStatement         = LValue "="  Expression ";" ;
@@ -177,10 +191,11 @@ MoveStatement        = "move" Expression "from" Expression "to" Expression ";" ;
 ExpressionStatement  = Expression ";" ;
 
 IfStatement    = "if"    "(" Expression ")" Statement [ "else" Statement ] ;
-WhileStatement = "while" "(" Expression ")" Statement ;
 
-# foreach-style loop: for (iterable) |item[, index]| statement
-ForStatement = "for" "(" Expression ")" "|" Identifier [ "," Identifier ] "|" Statement ;
+# Formal verification: Loop invariants
+WhileStatement = "while" "(" Expression ")" { InvariantClause } Statement ;
+ForStatement = "for" "(" Expression ")" "|" Identifier [ "," Identifier ] "|" { InvariantClause } Statement ;
+InvariantClause = "invariant" "(" Expression ")" ;
 
 ReturnStatement   = "return" [ Expression ] ";" ;
 BreakStatement    = "break"  [ ":" Identifier [ Expression ] ] ";" ;
@@ -189,6 +204,9 @@ ContinueStatement = "continue" [ ":" Identifier ] ";" ;
 LogStatement    = "log" Identifier "(" [ ExpressionList ] ")" ";" ;
 LockStatement   = "@" "lock"   "(" Expression ")" ";" ;
 UnlockStatement = "@" "unlock" "(" Expression ")" ";" ;
+
+# Formal verification: Assertions
+AssertStatement = "assert" "(" Expression [ "," StringLiteral ] ")" ";" ;
 
 TryStatement = "try" Expression [ "catch" [ "|" Identifier "|" ] Block ] ;
 
@@ -262,6 +280,10 @@ OldExpression      = "old" "(" Expression ")" ;
 ComptimeExpression = "comptime" Block ;
 CastExpression     = "@" "cast" "(" Type "," Expression ")" ;
 ErrorExpression    = "error" "." Identifier ;
+
+# Formal verification: Quantified expressions
+QuantifiedExpression = Quantifier Identifier ":" Type [ "where" Expression ] "=>" Expression ;
+Quantifier = "forall" | "exists" ;
 
 AnonymousStructLiteral = "." "{" [ AnonymousStructLiteralFieldList ] "}" ;
 AnonymousStructLiteralFieldList = AnonymousStructLiteralField { "," AnonymousStructLiteralField } [ "," ] ;
