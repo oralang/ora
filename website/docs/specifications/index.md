@@ -20,21 +20,29 @@ Comprehensive documentation of Ora's MLIR lowering system, covering:
 - Expression and statement lowering
 - Pass management and optimization
 
-### [Formal Verification](./formal-verification.md)
-Comprehensive documentation of Ora's formal verification system:
-- Proof strategies
-- Mathematical domains
-- Quantifier support
-- SMT solver integration
-- Verification examples
+### [Formal Verification](../formal-verification.md)
+Z3 SMT solver integration for mathematical proof of contract properties:
+- Preconditions and postconditions (`requires`, `ensures`)
+- Contract and loop invariants
+- Quantified expressions (`forall`, `exists`)
+- Ghost code for specification
+- Verification condition generation
 
 ### [API Documentation](./api.md)
 Complete API reference for the Ora compiler:
-- CLI commands
+- CLI commands and flags
 - Library interfaces
 - Compilation pipeline
 - Error handling
 - Performance benchmarks
+
+### [State Analysis](../state-analysis.md)
+Automatic storage access tracking and optimization:
+- Function property detection (stateless, readonly, state-modifying)
+- Dead store detection (contract-level analysis)
+- Missing validation warnings
+- Constructor-specific checks
+- Gas optimization insights
 
 ## Implementation Status
 
@@ -52,9 +60,10 @@ Each specification includes implementation status indicators:
 | Type System | ✅ Complete | Full inference and checking |
 | Semantics | ✅ Complete | Region and error validation |
 | MLIR | ✅ Complete | Lowering and optimization |
+| State Analysis | ✅ Complete | Automatic tracking & warnings |
 | Yul Backend | 🚧 In Progress | Core generation working |
 | Standard Lib | 🚧 In Progress | Basic utilities |
-| Verification | 📋 Planned | Full formal verification |
+| Z3 Verification | 🚧 In Progress | Grammar & AST complete, VC generation in progress |
 
 ## Contributing
 
@@ -68,8 +77,9 @@ These specifications are living documents that evolve with the language. Contrib
 ## Quick Navigation
 
 - **New to Ora?** Start with the [Grammar](./grammar.md) specification
-- **Compiler development?** Check the [MLIR Integration](./mlir.md) and [API](./api.md) docs
-- **Formal verification?** See the [Formal Verification](./formal-verification.md) guide
+- **Writing contracts?** Check out [State Analysis](../state-analysis.md) for automatic optimization
+- **Formal verification?** See the [Formal Verification](../formal-verification.md) guide for Z3 integration
+- **Compiler development?** Explore [MLIR Integration](./mlir.md) and [API](./api.md) docs
 - **Language implementation?** All specifications work together
 
 These specifications provide the foundation for understanding and extending the Ora language. 

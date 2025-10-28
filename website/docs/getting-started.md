@@ -36,15 +36,17 @@ zig build test
 ### Verify Installation
 
 ```bash
-# CLI help
+# View CLI help and available commands
 ./zig-out/bin/ora --help
 
-# Lex/parse a simple, known-good fixture
-./zig-out/bin/ora lex tests/fixtures/semantics/valid/storage_region_moves.ora
-./zig-out/bin/ora parse tests/fixtures/semantics/valid/storage_region_moves.ora
+# Compile an example contract
+./zig-out/bin/ora ora-example/smoke.ora
 
-# Generate AST JSON
-./zig-out/bin/ora -o build ast tests/fixtures/semantics/valid/storage_region_moves.ora
+# Analyze storage access patterns
+./zig-out/bin/ora --analyze-state ora-example/smoke.ora
+
+# Generate MLIR intermediate representation
+./zig-out/bin/ora --emit-mlir ora-example/smoke.ora
 ```
 
 ## Try Your First Contract (current syntax)
