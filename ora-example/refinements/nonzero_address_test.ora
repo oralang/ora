@@ -1,0 +1,27 @@
+// Test NonZeroAddress refinement type
+
+contract TestNonZeroAddress {
+    fn testNonZeroAddress() {
+        // Valid non-zero addresses
+        let addr1: NonZeroAddress = 0x1234567890123456789012345678901234567890;
+        let addr2: NonZeroAddress = 0xabcdefabcdefabcdefabcdefabcdefabcdefabcd;
+        
+        // This should fail at compile time - zero address
+        // let zero: NonZeroAddress = 0x0000000000000000000000000000000000000000;
+    }
+
+    fn testFunctionParam(recipient: NonZeroAddress) {
+        // Function parameter is guaranteed to be non-zero
+    }
+
+    fn testReturn() -> NonZeroAddress {
+        return 0x1234567890123456789012345678901234567890; // OK
+        // return 0x0000000000000000000000000000000000000000; // ERROR
+    }
+
+    fn testSubtyping() {
+        let nonzero: NonZeroAddress = 0x1234567890123456789012345678901234567890;
+        let addr: address = nonzero; // OK: NonZeroAddress is subtype of address
+    }
+}
+

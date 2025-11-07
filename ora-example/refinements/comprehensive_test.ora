@@ -1,0 +1,129 @@
+// Comprehensive test of all refinement types
+
+contract ComprehensiveRefinements {
+    // ============================================================================
+    // MinValue<T, N> - values >= N
+    // ============================================================================
+    fn testMinValue() {
+        let x: MinValue<u256, 100> = 100;   // OK: at minimum
+        let y: MinValue<u256, 100> = 500;   // OK: above minimum
+        // let z: MinValue<u256, 100> = 50; // ERROR: below minimum
+    }
+
+    // ============================================================================
+    // MaxValue<T, N> - values <= N
+    // ============================================================================
+    fn testMaxValue() {
+        let x: MaxValue<u256, 1000> = 1000;  // OK: at maximum
+        let y: MaxValue<u256, 1000> = 500;   // OK: below maximum
+        // let z: MaxValue<u256, 1000> = 2000; // ERROR: above maximum
+    }
+
+    // ============================================================================
+    // InRange<T, MIN, MAX> - MIN <= value <= MAX
+    // ============================================================================
+    fn testInRange() {
+        let x: InRange<u256, 0, 100> = 0;    // OK: at minimum
+        let y: InRange<u256, 0, 100> = 50;   // OK: in range
+        let z: InRange<u256, 0, 100> = 100;  // OK: at maximum
+        // let w: InRange<u256, 0, 100> = 150; // ERROR: above maximum
+        // let v: InRange<u256, 10, 100> = 5;   // ERROR: below minimum
+    }
+
+    // ============================================================================
+    // Scaled<T, D> - scaled by 10^D (compile-time annotation)
+    // ============================================================================
+    fn testScaled() {
+        let x: Scaled<u256, 18> = 1000000000000000000; // 1.0 with 18 decimals
+        let y: Scaled<u256, 6> = 1000000;              // 1.0 with 6 decimals
+        // No compile-time validation - scaling is semantic annotation
+    }
+
+    // ============================================================================
+    // Exact<T> - must divide exactly (runtime check at division)
+    // ============================================================================
+    fn testExact() {
+        let x: Exact<u256> = 1000;
+        let y: Exact<u256> = 2000;
+        // No compile-time validation - exactness checked at division operations
+    }
+
+    // ============================================================================
+    // NonZero<T> - alias for MinValue<T, 1> (values > 0)
+    // ============================================================================
+    fn testNonZero() {
+        let x: NonZero<u256> = 1;   // OK: at minimum (1)
+        let y: NonZero<u256> = 100; // OK: above minimum
+        // let z: NonZero<u256> = 0; // ERROR: below minimum (0 < 1)
+    }
+
+    // ============================================================================
+    // BasisPoints<T> - alias for InRange<T, 0, 10000> (0-10000 basis points)
+    // ============================================================================
+    fn testBasisPoints() {
+        let x: BasisPoints<u256> = 0;      // OK: at minimum
+        let y: BasisPoints<u256> = 250;     // OK: 2.5%
+        let z: BasisPoints<u256> = 10000;   // OK: 100% (at maximum)
+        // let w: BasisPoints<u256> = 15000; // ERROR: above maximum
+    }
+
+    // ============================================================================
+    // Subtyping Tests
+    // ============================================================================
+    fn testSubtyping() {
+        // MinValue: more restrictive (higher min) is subtype of less restrictive
+        let x: MinValue<u256, 2000> = 3000;
+        let y: MinValue<u256, 1000> = x; // OK: 2000 >= 1000
+
+        // MaxValue: more restrictive (lower max) is subtype of less restrictive
+        let a: MaxValue<u256, 5000> = 3000;
+        let b: MaxValue<u256, 10000> = a; // OK: 5000 <= 10000
+
+        // InRange: narrower range is subtype of wider range
+        let c: InRange<u256, 100, 500> = 300;
+        let d: InRange<u256, 0, 1000> = c; // OK: [100,500] ⊆ [0,1000]
+
+        // Scaled: same decimals required
+        let e: Scaled<u256, 18> = 1000000000000000000;
+        let f: Scaled<u256, 18> = e; // OK: same decimals
+    }
+
+    // ============================================================================
+    // Function Parameters and Returns
+    // ============================================================================
+    fn testFunctionParams(
+        amount: MinValue<u256, 1000>,
+        limit: MaxValue<u256, 10000>,
+        rate: BasisPoints<u256>
+    ) {
+        // Parameters are validated at call site
+    }
+
+    fn testFunctionReturns() -> MinValue<u256, 1000> {
+        return 2000; // OK: 2000 >= 1000
+        // return 500; // ERROR: 500 < 1000
+    }
+
+    // ============================================================================
+    // Assignment Tests
+    // ============================================================================
+    fn testAssignments() {
+        var x: MinValue<u256, 1000> = 2000; // OK: 2000 >= 1000
+        x = 3000; // OK: 3000 >= 1000
+        // x = 500; // ERROR: 500 < 1000 (compile-time if constant)
+    }
+
+    // ============================================================================
+    // Arithmetic Operations
+    // ============================================================================
+    fn testArithmetic() {
+        let x: MinValue<u256, 100> = 200;
+        let y: MinValue<u256, 50> = 100;
+        
+        // Result type should be inferred from operands
+        let sum = x + y; // Type: MinValue<u256, 150>? (conservative)
+        
+        // Operations preserve refinement constraints where possible
+    }
+}
+

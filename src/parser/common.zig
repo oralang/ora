@@ -37,6 +37,8 @@ pub const ParserCommon = struct {
     pub fn isKeywordThatCanBeIdentifier(token_type: lexer.TokenType) bool {
         return switch (token_type) {
             .From => true, // 'from' can be used as a parameter name in log declarations
+            .To => true, // 'to' can be used as a parameter name
+            .Error => true, // 'error' can be used as a variable name in catch blocks
             else => false,
         };
     }

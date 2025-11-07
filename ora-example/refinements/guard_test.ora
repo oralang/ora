@@ -1,0 +1,21 @@
+// Test runtime guards for refinement types
+
+contract GuardTest {
+    fn testMinValue(amount: MinValue<u256, 1000>) {
+        // Guard should check: amount >= 1000
+    }
+
+    fn testMaxValue(limit: MaxValue<u256, 10000>) {
+        // Guard should check: limit <= 10000
+    }
+
+    fn testInRange(rate: InRange<u256, 0, 10000>) {
+        // Guard should check: 0 <= rate <= 10000
+    }
+
+    fn testVariable() {
+        let deposit: MinValue<u256, 1_000_000> = 1_000_000;
+        // Guard should check: 1_000_000 >= 1_000_000 (should pass)
+    }
+}
+

@@ -47,6 +47,8 @@ pub fn collectContractSymbols(table: *state.SymbolTable, root: *state.Scope, c: 
         .ErrorDecl => |err| {
             const sym = state.Symbol{ .name = err.name, .kind = .Error, .span = err.span };
             _ = try table.declare(contract_scope, sym);
+            // Store error signature (parameters) for validation
+            try table.error_signatures.put(err.name, err.parameters);
         },
         else => {},
     };

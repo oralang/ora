@@ -70,6 +70,8 @@ pub fn collectSymbols(allocator: std.mem.Allocator, nodes: []const ast.AstNode) 
         .ErrorDecl => |err| {
             const sym = state.Symbol{ .name = err.name, .kind = .Error, .span = err.span };
             if (try table.declare(&table.root, sym)) |_| try diags.append(allocator, err.span);
+            // Store error signature (parameters) for validation
+            try table.error_signatures.put(err.name, err.parameters);
         },
         .Import => |im| {
             const name = im.alias orelse im.path; // simplistic; refine later

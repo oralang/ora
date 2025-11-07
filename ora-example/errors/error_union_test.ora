@@ -1,0 +1,34 @@
+// Test error union support
+
+error InsufficientBalance(required: u256, available: u256);
+error InvalidAddress;
+
+contract Test {
+    // Function returning error union with one error
+    fn test1() -> !bool | InsufficientBalance {
+        // Return success value
+        return true;
+    }
+    
+    // Function returning error union with multiple errors
+    fn test2() -> !bool | InsufficientBalance | InvalidAddress {
+        // Return error - should be valid
+        return error.InvalidAddress;
+    }
+    
+    // Function returning error with parameters
+    fn test3() -> !bool | InsufficientBalance {
+        // Return error with parameters - should be valid
+        return InsufficientBalance(100, 50);
+    }
+    
+    // Function that can return different errors
+    fn test4(condition: bool) -> !bool | InsufficientBalance | InvalidAddress {
+        if (condition) {
+            return error.InvalidAddress;
+        } else {
+            return InsufficientBalance(100, 50);
+        }
+    }
+}
+

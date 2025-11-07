@@ -226,6 +226,27 @@ pub const OraType = union(enum) {
     anonymous_struct: []const AnonymousStructFieldType, // struct { field: T, ... }
     module: ?[]const u8, // Optional module name
 
+    // Refinement types
+    min_value: struct {
+        base: *const OraType, // Base integer type
+        min: u256, // Minimum value (compile-time constant)
+    },
+    max_value: struct {
+        base: *const OraType, // Base integer type
+        max: u256, // Maximum value (compile-time constant)
+    },
+    in_range: struct {
+        base: *const OraType, // Base integer type
+        min: u256, // Minimum value
+        max: u256, // Maximum value
+    },
+    scaled: struct {
+        base: *const OraType, // Base integer type
+        decimals: u32, // Scale factor (10^decimals)
+    },
+    exact: *const OraType, // Base integer type (must participate in exact division)
+    non_zero_address: void,         // Address type that cannot be zero address
+
     /// Get the category for this Ora type
     pub fn getCategory(self: OraType) TypeCategory {
         return switch (self) {
@@ -248,6 +269,13 @@ pub const OraType = union(enum) {
             ._union => .Union,
             .anonymous_struct => .Struct,
             .module => .Module,
+            // Refinement types inherit the category of their base type
+            .min_value => |mv| mv.base.getCategory(),
+            .max_value => |mv| mv.base.getCategory(),
+            .in_range => |ir| ir.base.getCategory(),
+            .scaled => |s| s.base.getCategory(),
+            .exact => |e| e.getCategory(),
+            .non_zero_address => .Address, // NonZeroAddress is an Address type
         };
     }
 
@@ -255,6 +283,12 @@ pub const OraType = union(enum) {
     pub fn isInteger(self: OraType) bool {
         return switch (self) {
             .u8, .u16, .u32, .u64, .u128, .u256, .i8, .i16, .i32, .i64, .i128, .i256 => true,
+            // Refinement types: check the base type
+            .min_value => |mv| mv.base.isInteger(),
+            .max_value => |mv| mv.base.isInteger(),
+            .in_range => |ir| ir.base.isInteger(),
+            .scaled => |s| s.base.isInteger(),
+            .exact => |e| e.isInteger(),
             else => false,
         };
     }
@@ -263,6 +297,12 @@ pub const OraType = union(enum) {
     pub fn isUnsignedInteger(self: OraType) bool {
         return switch (self) {
             .u8, .u16, .u32, .u64, .u128, .u256 => true,
+            // Refinement types: check the base type
+            .min_value => |mv| mv.base.isUnsignedInteger(),
+            .max_value => |mv| mv.base.isUnsignedInteger(),
+            .in_range => |ir| ir.base.isUnsignedInteger(),
+            .scaled => |s| s.base.isUnsignedInteger(),
+            .exact => |e| e.isUnsignedInteger(),
             else => false,
         };
     }
@@ -271,6 +311,12 @@ pub const OraType = union(enum) {
     pub fn isSignedInteger(self: OraType) bool {
         return switch (self) {
             .i8, .i16, .i32, .i64, .i128, .i256 => true,
+            // Refinement types: check the base type
+            .min_value => |mv| mv.base.isSignedInteger(),
+            .max_value => |mv| mv.base.isSignedInteger(),
+            .in_range => |ir| ir.base.isSignedInteger(),
+            .scaled => |s| s.base.isSignedInteger(),
+            .exact => |e| e.isSignedInteger(),
             else => false,
         };
     }
@@ -308,6 +354,8 @@ pub const OraType = union(enum) {
             ._union => "union",
             .anonymous_struct => "struct",
             .module => "module",
+            // Refinement types - use render() for proper formatting
+            .min_value, .max_value, .in_range, .scaled, .exact, .non_zero_address => "refinement",
         };
     }
 
@@ -410,6 +458,26 @@ pub const OraType = union(enum) {
                 },
                 else => unreachable,
             },
+            .min_value => |am| switch (b) {
+                .min_value => |bm| equals(@constCast(am.base).*, @constCast(bm.base).*) and (am.min == bm.min),
+                else => unreachable,
+            },
+            .max_value => |am| switch (b) {
+                .max_value => |bm| equals(@constCast(am.base).*, @constCast(bm.base).*) and (am.max == bm.max),
+                else => unreachable,
+            },
+            .in_range => |am| switch (b) {
+                .in_range => |bm| equals(@constCast(am.base).*, @constCast(bm.base).*) and (am.min == bm.min) and (am.max == bm.max),
+                else => unreachable,
+            },
+            .scaled => |am| switch (b) {
+                .scaled => |bm| equals(@constCast(am.base).*, @constCast(bm.base).*) and (am.decimals == bm.decimals),
+                else => unreachable,
+            },
+            .exact => |am| switch (b) {
+                .exact => |bm| equals(@constCast(am).*, @constCast(bm).*),
+                else => unreachable,
+            },
         };
     }
 
@@ -478,6 +546,31 @@ pub const OraType = union(enum) {
             },
             .module => |m| {
                 if (m) |name| h.update(name);
+            },
+            .min_value => |mv| {
+                const sub = OraType.hash(@constCast(mv.base).*);
+                h.update(std.mem.asBytes(&sub));
+                h.update(std.mem.asBytes(&mv.min));
+            },
+            .max_value => |mv| {
+                const sub = OraType.hash(@constCast(mv.base).*);
+                h.update(std.mem.asBytes(&sub));
+                h.update(std.mem.asBytes(&mv.max));
+            },
+            .in_range => |ir| {
+                const sub = OraType.hash(@constCast(ir.base).*);
+                h.update(std.mem.asBytes(&sub));
+                h.update(std.mem.asBytes(&ir.min));
+                h.update(std.mem.asBytes(&ir.max));
+            },
+            .scaled => |s| {
+                const sub = OraType.hash(@constCast(s.base).*);
+                h.update(std.mem.asBytes(&sub));
+                h.update(std.mem.asBytes(&s.decimals));
+            },
+            .exact => |e| {
+                const sub = OraType.hash(@constCast(e).*);
+                h.update(std.mem.asBytes(&sub));
             },
         }
         return h.final();
@@ -587,6 +680,51 @@ pub const OraType = union(enum) {
                 try writer.writeByte('}');
             },
             .module => |_| try writer.writeAll("module"),
+            .min_value => |mv| {
+                try writer.writeAll("MinValue<");
+                try (@constCast(mv.base).*).render(writer);
+                try writer.writeAll(", ");
+                var buf: [32]u8 = undefined;
+                const s = std.fmt.bufPrint(&buf, "{d}", .{mv.min}) catch "?";
+                try writer.writeAll(s);
+                try writer.writeByte('>');
+            },
+            .max_value => |mv| {
+                try writer.writeAll("MaxValue<");
+                try (@constCast(mv.base).*).render(writer);
+                try writer.writeAll(", ");
+                var buf: [32]u8 = undefined;
+                const s = std.fmt.bufPrint(&buf, "{d}", .{mv.max}) catch "?";
+                try writer.writeAll(s);
+                try writer.writeByte('>');
+            },
+            .in_range => |ir| {
+                try writer.writeAll("InRange<");
+                try (@constCast(ir.base).*).render(writer);
+                try writer.writeAll(", ");
+                var buf_min: [32]u8 = undefined;
+                var buf_max: [32]u8 = undefined;
+                const s_min = std.fmt.bufPrint(&buf_min, "{d}", .{ir.min}) catch "?";
+                const s_max = std.fmt.bufPrint(&buf_max, "{d}", .{ir.max}) catch "?";
+                try writer.writeAll(s_min);
+                try writer.writeAll(", ");
+                try writer.writeAll(s_max);
+                try writer.writeByte('>');
+            },
+            .scaled => |s| {
+                try writer.writeAll("Scaled<");
+                try (@constCast(s.base).*).render(writer);
+                try writer.writeAll(", ");
+                var buf: [32]u8 = undefined;
+                const s_dec = std.fmt.bufPrint(&buf, "{d}", .{s.decimals}) catch "?";
+                try writer.writeAll(s_dec);
+                try writer.writeByte('>');
+            },
+            .exact => |e| {
+                try writer.writeAll("Exact<");
+                try (@constCast(e).*).render(writer);
+                try writer.writeByte('>');
+            },
         }
     }
 };
@@ -816,6 +954,18 @@ pub fn deinitTypeInfo(allocator: std.mem.Allocator, type_info: *TypeInfo) void {
                     allocator.destroy(ret_type);
                 }
             },
+            .min_value, .max_value, .in_range => |ref| {
+                deinitOraType(allocator, @constCast(ref.base));
+                allocator.destroy(ref.base);
+            },
+            .scaled => |s| {
+                deinitOraType(allocator, @constCast(s.base));
+                allocator.destroy(s.base);
+            },
+            .exact => |e| {
+                deinitOraType(allocator, @constCast(e));
+                allocator.destroy(e);
+            },
             else => {
                 // Primitive types don't need cleanup
             },
@@ -882,6 +1032,19 @@ fn deinitOraType(allocator: std.mem.Allocator, ora_type: *OraType) void {
             // They're typically owned by the parser, not by OraType
         },
 
+        // Refinement types
+        .min_value, .max_value, .in_range => |ref| {
+            deinitOraType(allocator, @constCast(ref.base));
+            allocator.destroy(ref.base);
+        },
+        .scaled => |s| {
+            deinitOraType(allocator, @constCast(s.base));
+            allocator.destroy(s.base);
+        },
+        .exact => |e| {
+            deinitOraType(allocator, @constCast(e));
+            allocator.destroy(e);
+        },
         // Other primitive types don't need cleanup
         else => {},
     }

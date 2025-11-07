@@ -1,0 +1,8 @@
+// Simple test of refinement types
+
+contract SimpleTest {
+    fn test() {
+        let amount: MinValue<u256, 1000> = 1000;
+    }
+}
+

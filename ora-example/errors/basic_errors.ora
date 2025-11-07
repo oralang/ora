@@ -39,7 +39,7 @@ contract ErrorHandlingTest {
     }
     
     // Function with multiple possible errors
-    pub fn admin_operation(amount: u256) bool | Unauthorized | InvalidAmount {
+    pub fn admin_operation(amount: u256) -> !bool | Unauthorized | InvalidAmount {
         // Check authorization
         if (std.transaction.sender != owner) {
             return Unauthorized(std.transaction.sender, owner);
@@ -54,12 +54,12 @@ contract ErrorHandlingTest {
     }
     
     // Function that handles errors with try/catch
-    pub fn safe_transfer(to: address, amount: u256) bool {
+    pub fn safe_transfer(to: address, amount: u256) -> bool {
         try {
             // Attempt transfer
             let result = transfer(to, amount);
             return result;
-        } catch error {
+        } catch (error) {
             // Handle specific error types
             switch (error) {
                 InsufficientBalance => {
@@ -79,13 +79,13 @@ contract ErrorHandlingTest {
     }
     
     // Function that propagates errors
-    pub fn proxy_transfer(to: address, amount: u256) bool | InsufficientBalance | InvalidAddress {
+    pub fn proxy_transfer(to: address, amount: u256) -> !bool | InsufficientBalance | InvalidAddress {
         // This will propagate any errors from transfer
         return transfer(to, amount);
     }
     
     // Function with custom error handling logic
-    pub fn batch_transfer(recipients: [address], amounts: [u256]) struct { success_count: u256, failed_count: u256 } {
+    pub fn batch_transfer(recipients: slice[address], amounts: slice[u256]) -> struct { success_count: u256, failed_count: u256 } {
         let success_count: u256 = 0;
         let failed_count: u256 = 0;
         
@@ -93,26 +93,27 @@ contract ErrorHandlingTest {
             let amount = amounts[i];
             
             // Try transfer and handle errors
-            let result = transfer(recipient, amount) catch |err| {
+            try {
+                let result = transfer(recipient, amount);
+                if (result) {
+                    success_count += 1;
+                } else {
+                    failed_count += 1;
+                }
+            } catch (err) {
                 failed_count += 1;
                 continue; // Skip to next iteration
-            };
-            
-            if (result) {
-                success_count += 1;
-            } else {
-                failed_count += 1;
             }
         }
         
         return .{
-            success_count: success_count,
-            failed_count: failed_count
+            .success_count = success_count,
+            .failed_count = failed_count
         };
     }
     
     // Function with inline error creation
-    pub fn verify_operation(value: u256) bool | error {
+    pub fn verify_operation(value: u256) -> !bool {
         if (value == 0) {
             return error.ZeroValueNotAllowed;
         }
