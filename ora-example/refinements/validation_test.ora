@@ -1,0 +1,48 @@
+// Test compile-time validation of literal values against refinement types
+
+contract TestValidation {
+    fn testValidMinValue() {
+        // These should compile - values satisfy constraints
+        let deposit: MinValue<u256, 1000> = 1000;  // OK: 1000 >= 1000
+        let large: MinValue<u256, 1000> = 5000;     // OK: 5000 >= 1000
+    }
+
+    fn testInvalidMinValue() {
+        // This should fail at compile time - value below minimum
+        // let small: MinValue<u256, 1000> = 500;  // ERROR: 500 < 1000
+    }
+
+    fn testValidInRange() {
+        // These should compile
+        let fee: BasisPoints<u256> = 250;      // OK: 0 <= 250 <= 10000
+        let rate: InRange<u256, 0, 100> = 50;   // OK: 0 <= 50 <= 100
+    }
+
+    fn testInvalidInRange() {
+        // These should fail at compile time
+        // let tooHigh: InRange<u256, 0, 100> = 150;  // ERROR: 150 > 100
+        // let tooLow: BasisPoints<u256> = 20000;    // ERROR: 20000 > 10000
+    }
+
+    fn testValidMaxValue() {
+        // These should compile
+        let limit: MaxValue<u256, 10000> = 5000;  // OK: 5000 <= 10000
+        let small: MaxValue<u256, 10000> = 10000; // OK: 10000 <= 10000
+    }
+
+    fn testInvalidMaxValue() {
+        // This should fail at compile time
+        // let tooBig: MaxValue<u256, 10000> = 20000;  // ERROR: 20000 > 10000
+    }
+
+    fn testValidReturn() -> MinValue<u256, 1000> {
+        return 2000;  // OK: 2000 >= 1000
+    }
+
+    fn testInvalidReturn() -> MinValue<u256, 1000> {
+        // This should fail at compile time
+        // return 500;  // ERROR: 500 < 1000
+        return 2000;  // OK
+    }
+}
+

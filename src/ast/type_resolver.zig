@@ -145,6 +145,11 @@ pub const TypeResolver = struct {
                     // Create context with expected type from variable declaration
                     const var_context = TypeContext.withExpectedType(var_decl.type_info);
                     try self.resolveExpressionTypes(value, var_context);
+
+                    // Validate constant literal values against refinement constraints
+                    if (var_decl.type_info.ora_type) |target_ora_type| {
+                        try self.validateLiteralAgainstRefinement(value, target_ora_type);
+                    }
                 }
             },
             else => {
@@ -176,14 +181,216 @@ pub const TypeResolver = struct {
 
     /// Validate that a TypeInfo is properly resolved
     fn validateTypeInfo(self: *TypeResolver, type_info: *TypeInfo) TypeResolutionError!void {
-        _ = self; // unused for now
-
         if (!type_info.isResolved()) {
             return TypeResolutionError.UnknownType;
         }
 
+        // Validate refinement types
+        if (type_info.ora_type) |ora_type| {
+            try self.validateRefinementType(ora_type);
+        }
+
+        // Validate error union types
+        if (type_info.ora_type) |ora_type| {
+            try self.validateErrorUnionType(ora_type);
+        }
+
         // Additional validation can be added here
         // e.g., check if custom types (structs, enums) are defined
+    }
+
+    /// Validate error union type structure
+    fn validateErrorUnionType(self: *TypeResolver, ora_type: OraType) TypeResolutionError!void {
+        switch (ora_type) {
+            .error_union => |success_type| {
+                // Validate the success type
+                try self.validateRefinementType(success_type.*);
+            },
+            ._union => |union_types| {
+                // Validate each type in the union
+                for (union_types) |union_type| {
+                    switch (union_type) {
+                        .error_union => |success_type| {
+                            try self.validateRefinementType(success_type.*);
+                        },
+                        .struct_type => |error_name| {
+                            // Check if this is a declared error
+                            if (self.lookupIdentifier(error_name)) |_| {
+                                // Found in symbol table - type resolver will check if it's an error
+                                // during semantic analysis
+                            } else {
+                                return TypeResolutionError.UnknownType;
+                            }
+                        },
+                        else => {
+                            // Other types in union are valid
+                        },
+                    }
+                }
+            },
+            else => {
+                // Not an error union type
+            },
+        }
+    }
+
+    /// Validate error parameter types match error declaration
+    fn validateErrorParameterTypes(
+        self: *TypeResolver,
+        _: []const u8, // error_name - may be used for better error messages
+        arguments: []ast.Expressions.ExprNode,
+        error_params: ?[]const ast.ParameterNode,
+    ) TypeResolutionError!void {
+        if (error_params == null) {
+            // Error has no parameters, arguments should be empty
+            if (arguments.len > 0) {
+                return TypeResolutionError.TypeMismatch;
+            }
+            return;
+        }
+
+        const params = error_params.?;
+
+        if (arguments.len != params.len) {
+            return TypeResolutionError.TypeMismatch;
+        }
+
+        // Validate each argument type matches parameter type
+        for (arguments, 0..) |*arg, i| {
+            const param = params[i];
+
+            // Resolve argument type
+            try self.resolveExpressionTypes(arg, TypeContext{});
+
+            // Get argument type
+            const arg_type = switch (arg.*) {
+                .Identifier => |*id| id.type_info,
+                .Literal => |lit| switch (lit) {
+                    .Integer => |*int| int.type_info,
+                    .Bool => |*b| b.type_info,
+                    .String => |*s| s.type_info,
+                    .Address => |*a| a.type_info,
+                    .Hex => |*h| h.type_info,
+                },
+                .Binary => |*b| b.type_info,
+                .Unary => |*u| u.type_info,
+                .Call => |*c| c.type_info,
+                .FieldAccess => |*fa| fa.type_info,
+                .Index => |*idx| idx.type_info,
+                else => null,
+            };
+
+            // Validate argument type matches parameter type
+            if (arg_type) |a_type| {
+                if (!self.isAssignable(param.type_info, a_type)) {
+                    return TypeResolutionError.IncompatibleTypes;
+                }
+            }
+        }
+    }
+
+    /// Validate that a literal value satisfies refinement type constraints
+    fn validateLiteralAgainstRefinement(self: *TypeResolver, expr: *ast.Expressions.ExprNode, target_ora_type: OraType) TypeResolutionError!void {
+        // Try to evaluate the expression as a constant
+        const value = try self.evaluateConstantExpression(expr) orelse return;
+
+        // Check if the value satisfies the refinement constraint
+        switch (target_ora_type) {
+            .min_value => |mv| {
+                if (value < mv.min) {
+                    return TypeResolutionError.TypeMismatch; // Value below minimum
+                }
+            },
+            .max_value => |mv| {
+                if (value > mv.max) {
+                    return TypeResolutionError.TypeMismatch; // Value above maximum
+                }
+            },
+            .in_range => |ir| {
+                if (value < ir.min or value > ir.max) {
+                    return TypeResolutionError.TypeMismatch; // Value out of range
+                }
+            },
+            .scaled => |_| {
+                // Scaled types don't have runtime constraints on values
+                // The scaling is a compile-time annotation
+            },
+            .exact => |_| {
+                // Exact types don't have compile-time constraints on values
+                // The constraint is enforced at division operations
+            },
+            .non_zero_address => {
+                // Check if address literal is zero address
+                // Zero address is 0x0000000000000000000000000000000000000000
+                if (value == 0) {
+                    return TypeResolutionError.TypeMismatch; // Zero address not allowed
+                }
+            },
+            else => {
+                // Not a refinement type, no validation needed
+            },
+        }
+    }
+
+    /// Validate refinement type constraints
+    fn validateRefinementType(self: *TypeResolver, ora_type: OraType) TypeResolutionError!void {
+        switch (ora_type) {
+            .min_value => |mv| {
+                // Base type must be an integer type
+                if (!mv.base.isInteger()) {
+                    return TypeResolutionError.TypeMismatch; // Base type must be integer
+                }
+                // Recursively validate base type
+                try self.validateRefinementType(mv.base.*);
+            },
+            .max_value => |mv| {
+                // Base type must be an integer type
+                if (!mv.base.isInteger()) {
+                    return TypeResolutionError.TypeMismatch; // Base type must be integer
+                }
+                // Recursively validate base type
+                try self.validateRefinementType(mv.base.*);
+            },
+            .in_range => |ir| {
+                // Base type must be an integer type
+                if (!ir.base.isInteger()) {
+                    return TypeResolutionError.TypeMismatch; // Base type must be integer
+                }
+                // MIN <= MAX already validated in parser, but double-check
+                if (ir.min > ir.max) {
+                    return TypeResolutionError.TypeMismatch; // Invalid range
+                }
+                // Recursively validate base type
+                try self.validateRefinementType(ir.base.*);
+            },
+            .scaled => |s| {
+                // Base type must be an integer type
+                if (!s.base.isInteger()) {
+                    return TypeResolutionError.TypeMismatch; // Base type must be integer
+                }
+                // Decimals should be reasonable (0-77 is typical for EVM)
+                if (s.decimals > 77) {
+                    return TypeResolutionError.TypeMismatch; // Too many decimals
+                }
+                // Recursively validate base type
+                try self.validateRefinementType(s.base.*);
+            },
+            .exact => |e| {
+                // Base type must be an integer type
+                if (!e.isInteger()) {
+                    return TypeResolutionError.TypeMismatch; // Base type must be integer
+                }
+                // Recursively validate base type
+                try self.validateRefinementType(e.*);
+            },
+            .non_zero_address => {
+                // NonZeroAddress is always valid - it's a refinement of address type
+                // No base type to validate
+            },
+            else => {
+                // Not a refinement type, no validation needed
+            },
+        }
     }
 
     /// Look up an identifier in the current scope chain
@@ -231,8 +438,12 @@ pub const TypeResolver = struct {
                     if (self.function_registry.get(func_name)) |func_node| {
                         try self.validateFunctionArguments(call, func_node);
                     }
+                } else if (symbol.kind == .Error) {
+                    // This is an error call - validate error parameters
+                    const error_params = self.symbol_table.error_signatures.get(func_name);
+                    try self.validateErrorParameterTypes(func_name, call.arguments, error_params);
                 } else {
-                    return TypeResolutionError.TypeMismatch; // Not a function
+                    return TypeResolutionError.TypeMismatch; // Not a function or error
                 }
             } else {
                 return TypeResolutionError.UndefinedIdentifier;
@@ -331,6 +542,11 @@ pub const TypeResolver = struct {
                         if (return_value_type) |actual| {
                             if (!self.isAssignable(expected, actual)) {
                                 return TypeResolutionError.TypeMismatch;
+                            }
+
+                            // Validate constant return values against refinement constraints
+                            if (expected.ora_type) |target_ora_type| {
+                                try self.validateLiteralAgainstRefinement(value_expr, target_ora_type);
                             }
                         }
                     } else {
@@ -467,16 +683,24 @@ pub const TypeResolver = struct {
 
     /// Check if two types are compatible (can be used interchangeably)
     fn areTypesCompatible(self: *TypeResolver, type1: TypeInfo, type2: TypeInfo) bool {
-        _ = self;
+        // For primitive types with ora_type, check exact match or subtyping
+        // (Refinement types can have different categories but same base, so check ora_type first)
+        if (type1.ora_type != null and type2.ora_type != null) {
+            // Check refinement subtyping (handles both directions)
+            if (self.checkRefinementSubtyping(type1.ora_type.?, type2.ora_type.?) or
+                self.checkRefinementSubtyping(type2.ora_type.?, type1.ora_type.?))
+            {
+                return true;
+            }
+            // Check exact match
+            if (OraType.equals(type1.ora_type.?, type2.ora_type.?)) {
+                return true;
+            }
+        }
 
         // Same category is usually compatible
         if (type1.category != type2.category) {
             return false;
-        }
-
-        // For primitive types with ora_type, check exact match
-        if (type1.ora_type != null and type2.ora_type != null) {
-            return type1.ora_type.? == type2.ora_type.?;
         }
 
         // For custom types, check name match
@@ -490,15 +714,100 @@ pub const TypeResolver = struct {
         return true;
     }
 
+    /// Check refinement type subtyping rules
+    fn checkRefinementSubtyping(self: *TypeResolver, source: OraType, target: OraType) bool {
+        return switch (source) {
+            .min_value => |smv| switch (target) {
+                .min_value => |tmv| OraType.equals(smv.base.*, tmv.base.*) and smv.min >= tmv.min,
+                else => OraType.equals(source, target) or self.isBaseTypeCompatible(smv.base.*, target),
+            },
+            .max_value => |smv| switch (target) {
+                .max_value => |tmv| OraType.equals(smv.base.*, tmv.base.*) and smv.max <= tmv.max,
+                else => OraType.equals(source, target) or self.isBaseTypeCompatible(smv.base.*, target),
+            },
+            .in_range => |sir| switch (target) {
+                .in_range => |tir| OraType.equals(sir.base.*, tir.base.*) and sir.min >= tir.min and sir.max <= tir.max,
+                .min_value => |tmv| OraType.equals(sir.base.*, tmv.base.*) and sir.min >= tmv.min,
+                .max_value => |tmv| OraType.equals(sir.base.*, tmv.base.*) and sir.max <= tmv.max,
+                else => OraType.equals(source, target) or self.isBaseTypeCompatible(sir.base.*, target),
+            },
+            .scaled => |ss| switch (target) {
+                .scaled => |ts| OraType.equals(ss.base.*, ts.base.*) and ss.decimals == ts.decimals,
+                else => OraType.equals(source, target) or self.isBaseTypeCompatible(ss.base.*, target),
+            },
+            .exact => |se| switch (target) {
+                .exact => |te| self.isBaseTypeCompatible(se.*, te.*),
+                else => OraType.equals(source, target) or self.isBaseTypeCompatible(se.*, target),
+            },
+            .non_zero_address => switch (target) {
+                .non_zero_address => true, // NonZeroAddress is compatible with NonZeroAddress
+                .address => true, // NonZeroAddress is compatible with address (subtyping)
+                else => false,
+            },
+            else => false,
+        };
+    }
+
+    /// Check if base types are compatible (handles width subtyping)
+    fn isBaseTypeCompatible(self: *TypeResolver, source: OraType, target: OraType) bool {
+        // Direct match
+        if (OraType.equals(source, target)) return true;
+
+        // Width subtyping: u8 <: u16 <: u32 <: u64 <: u128 <: u256
+        const width_order = [_]OraType{ .u8, .u16, .u32, .u64, .u128, .u256 };
+        const signed_width_order = [_]OraType{ .i8, .i16, .i32, .i64, .i128, .i256 };
+
+        const source_idx = self.getTypeIndex(source, &width_order) orelse
+            self.getTypeIndex(source, &signed_width_order);
+        const target_idx = self.getTypeIndex(target, &width_order) orelse
+            self.getTypeIndex(target, &signed_width_order);
+
+        if (source_idx) |s_idx| {
+            if (target_idx) |t_idx| {
+                // Same sign category, check if source is narrower than target
+                return s_idx <= t_idx;
+            }
+        }
+
+        return false;
+    }
+
+    /// Get index of type in hierarchy (for width subtyping)
+    fn getTypeIndex(self: *TypeResolver, ora_type: OraType, hierarchy: []const OraType) ?usize {
+        _ = self;
+        for (hierarchy, 0..) |t, i| {
+            if (OraType.equals(ora_type, t)) return i;
+        }
+        return null;
+    }
+
     /// Check if a type can be assigned to a target type
     fn isAssignable(self: *TypeResolver, target_type: TypeInfo, value_type: TypeInfo) bool {
-        // Direct compatibility
+        // Direct compatibility (includes refinement subtyping)
         if (self.areTypesCompatible(target_type, value_type)) {
             return true;
         }
 
+        // Check refinement subtyping explicitly
+        if (target_type.ora_type != null and value_type.ora_type != null) {
+            // Check if value type is a subtype of target type
+            if (self.checkRefinementSubtyping(value_type.ora_type.?, target_type.ora_type.?)) {
+                return true;
+            }
+        }
+
         // Allow implicit conversions for numeric types (e.g., u8 -> u256)
         if (self.isNumericType(target_type) and self.isNumericType(value_type)) {
+            // Check if value base type is assignable to target base type
+            if (target_type.ora_type != null and value_type.ora_type != null) {
+                const target_base = self.extractBaseType(target_type.ora_type.?);
+                const value_base = self.extractBaseType(value_type.ora_type.?);
+                if (target_base != null and value_base != null) {
+                    if (self.isBaseTypeCompatible(value_base.?, target_base.?)) {
+                        return true;
+                    }
+                }
+            }
             // Could add more sophisticated rules here (e.g., no narrowing conversions)
             return true;
         }
@@ -506,13 +815,378 @@ pub const TypeResolver = struct {
         return false;
     }
 
+    /// Infer result type for arithmetic operations with refined types
+    /// Returns inferred type if both operands are compatible refined types, null otherwise
+    fn inferArithmeticResultType(
+        self: *TypeResolver,
+        operator: ast.Expressions.BinaryOperator,
+        lhs_type: ?TypeInfo,
+        rhs_type: ?TypeInfo,
+    ) ?TypeInfo {
+        // Only handle arithmetic operators
+        if (lhs_type == null or rhs_type == null) return null;
+
+        const lhs = lhs_type.?;
+        const rhs = rhs_type.?;
+
+        // Both must have ora_type
+        const lhs_ora = lhs.ora_type orelse return null;
+        const rhs_ora = rhs.ora_type orelse return null;
+
+        // Both must have compatible base types
+        const lhs_base = self.extractBaseType(lhs_ora) orelse return null;
+        const rhs_base = self.extractBaseType(rhs_ora) orelse return null;
+
+        // Base types must be compatible (same type)
+        if (!self.areTypesCompatible(TypeInfo.inferred(lhs.category, lhs_base, lhs.span), TypeInfo.inferred(rhs.category, rhs_base, rhs.span))) {
+            return null;
+        }
+
+        // Infer result type based on operator and refinement types
+        return switch (operator) {
+            .Plus => self.inferAdditionResultType(lhs_ora, rhs_ora, lhs.span),
+            .Minus => self.inferSubtractionResultType(lhs_ora, rhs_ora, lhs.span),
+            .Star => self.inferMultiplicationResultType(lhs_ora, rhs_ora, lhs.span),
+            .Slash, .Percent => null, // Division/modulo lose refinement information
+            else => null, // Other operators don't preserve refinements
+        };
+    }
+
+    /// Infer result type for addition: MinValue + MinValue = MinValue with sum of mins
+    fn inferAdditionResultType(
+        _: *TypeResolver,
+        lhs_ora: OraType,
+        rhs_ora: OraType,
+        span: ast.SourceSpan,
+    ) ?TypeInfo {
+        return switch (lhs_ora) {
+            .scaled => |lhs_s| switch (rhs_ora) {
+                .scaled => |rhs_s| {
+                    // Scaled<T, D> + Scaled<T, D> = Scaled<T, D> (preserve scale)
+                    // Both must have same base type and same decimals
+                    if (!OraType.equals(lhs_s.base.*, rhs_s.base.*) or lhs_s.decimals != rhs_s.decimals) {
+                        return null; // Different scales cannot be added directly
+                    }
+                    const scaled_type = OraType{
+                        .scaled = .{
+                            .base = lhs_s.base,
+                            .decimals = lhs_s.decimals,
+                        },
+                    };
+                    return TypeInfo.inferred(TypeCategory.Integer, scaled_type, span);
+                },
+                else => null,
+            },
+            .min_value => |lhs_mv| switch (rhs_ora) {
+                .min_value => |rhs_mv| {
+                    // MinValue<u256, 100> + MinValue<u256, 50> = MinValue<u256, 150>
+                    const result_min = lhs_mv.min + rhs_mv.min;
+                    // Use the base type pointer from lhs (they should be the same)
+                    const min_value_type = OraType{
+                        .min_value = .{
+                            .base = lhs_mv.base,
+                            .min = result_min,
+                        },
+                    };
+                    return TypeInfo.inferred(TypeCategory.Integer, min_value_type, span);
+                },
+                else => null,
+            },
+            .max_value => |lhs_mv| switch (rhs_ora) {
+                .max_value => |rhs_mv| {
+                    // MaxValue<u256, 1000> + MaxValue<u256, 500> = MaxValue<u256, 1500>
+                    const result_max = lhs_mv.max + rhs_mv.max;
+                    const max_value_type = OraType{
+                        .max_value = .{
+                            .base = lhs_mv.base,
+                            .max = result_max,
+                        },
+                    };
+                    return TypeInfo.inferred(TypeCategory.Integer, max_value_type, span);
+                },
+                else => null,
+            },
+            .in_range => |lhs_ir| switch (rhs_ora) {
+                .in_range => |rhs_ir| {
+                    // InRange<u256, 10, 100> + InRange<u256, 20, 200> = InRange<u256, 30, 300>
+                    const result_min = lhs_ir.min + rhs_ir.min;
+                    const result_max = lhs_ir.max + rhs_ir.max;
+                    const in_range_type = OraType{
+                        .in_range = .{
+                            .base = lhs_ir.base,
+                            .min = result_min,
+                            .max = result_max,
+                        },
+                    };
+                    return TypeInfo.inferred(TypeCategory.Integer, in_range_type, span);
+                },
+                else => null,
+            },
+            // Handle mixed types: MinValue + regular u256, etc.
+            // For now, we preserve the refinement if possible
+            else => {
+                // If LHS is refined and RHS is not, try to preserve LHS refinement
+                // This is conservative but safe
+                switch (lhs_ora) {
+                    .min_value => |lhs_mv| {
+                        // MinValue + u256 = MinValue (preserves minimum)
+                        const min_value_type = OraType{
+                            .min_value = .{
+                                .base = lhs_mv.base,
+                                .min = lhs_mv.min,
+                            },
+                        };
+                        return TypeInfo.inferred(TypeCategory.Integer, min_value_type, span);
+                    },
+                    .max_value => |_| {
+                        // MaxValue + u256 = u256 (loses max constraint, too conservative)
+                        // Actually, we can't preserve max because we don't know the RHS value
+                        return null;
+                    },
+                    .in_range => |_| {
+                        // InRange + u256 = u256 (loses range constraint)
+                        return null;
+                    },
+                    else => null,
+                }
+            },
+        };
+    }
+
+    /// Infer result type for subtraction
+    fn inferSubtractionResultType(
+        self: *TypeResolver,
+        lhs_ora: OraType,
+        rhs_ora: OraType,
+        span: ast.SourceSpan,
+    ) ?TypeInfo {
+        _ = self;
+
+        return switch (lhs_ora) {
+            .scaled => |lhs_s| switch (rhs_ora) {
+                .scaled => |rhs_s| {
+                    // Scaled<T, D> - Scaled<T, D> = Scaled<T, D> (preserve scale)
+                    // Both must have same base type and same decimals
+                    if (!OraType.equals(lhs_s.base.*, rhs_s.base.*) or lhs_s.decimals != rhs_s.decimals) {
+                        return null; // Different scales cannot be subtracted directly
+                    }
+                    const scaled_type = OraType{
+                        .scaled = .{
+                            .base = lhs_s.base,
+                            .decimals = lhs_s.decimals,
+                        },
+                    };
+                    return TypeInfo.inferred(TypeCategory.Integer, scaled_type, span);
+                },
+                else => null,
+            },
+            .min_value => |lhs_mv| switch (rhs_ora) {
+                .min_value => |rhs_mv| {
+                    // MinValue<u256, 100> - MinValue<u256, 50> = MinValue<u256, 50> (conservative)
+                    // Result is at least (lhs_min - rhs_min), but could be higher
+                    // We use conservative lower bound: max(0, lhs_min - rhs_min)
+                    const result_min = if (lhs_mv.min >= rhs_mv.min) lhs_mv.min - rhs_mv.min else 0;
+                    const min_value_type = OraType{
+                        .min_value = .{
+                            .base = lhs_mv.base,
+                            .min = result_min,
+                        },
+                    };
+                    return TypeInfo.inferred(TypeCategory.Integer, min_value_type, span);
+                },
+                .max_value => |rhs_mv| {
+                    // MinValue<u256, 100> - MaxValue<u256, 50> = MinValue<u256, 50> (conservative)
+                    // We can't know the exact result, so we use a conservative lower bound
+                    const result_min = if (lhs_mv.min >= rhs_mv.max) lhs_mv.min - rhs_mv.max else 0;
+                    const min_value_type = OraType{
+                        .min_value = .{
+                            .base = lhs_mv.base,
+                            .min = result_min,
+                        },
+                    };
+                    return TypeInfo.inferred(TypeCategory.Integer, min_value_type, span);
+                },
+                else => null,
+            },
+            .max_value => |lhs_mv| switch (rhs_ora) {
+                .min_value => |rhs_mv| {
+                    // MaxValue<u256, 1000> - MinValue<u256, 100> = MaxValue<u256, 900>
+                    const result_max = if (lhs_mv.max >= rhs_mv.min) lhs_mv.max - rhs_mv.min else 0;
+                    const max_value_type = OraType{
+                        .max_value = .{
+                            .base = lhs_mv.base,
+                            .max = result_max,
+                        },
+                    };
+                    return TypeInfo.inferred(TypeCategory.Integer, max_value_type, span);
+                },
+                .max_value => |rhs_mv| {
+                    // MaxValue<u256, 1000> - MaxValue<u256, 500> = MaxValue<u256, 500> (conservative)
+                    // Result is at most (lhs_max - rhs_min), but we only know rhs_max
+                    // Conservative upper bound: max(0, lhs_max - rhs_max)
+                    const result_max = if (lhs_mv.max >= rhs_mv.max) lhs_mv.max - rhs_mv.max else 0;
+                    const max_value_type = OraType{
+                        .max_value = .{
+                            .base = lhs_mv.base,
+                            .max = result_max,
+                        },
+                    };
+                    return TypeInfo.inferred(TypeCategory.Integer, max_value_type, span);
+                },
+                else => null,
+            },
+            .in_range => |lhs_ir| switch (rhs_ora) {
+                .in_range => |rhs_ir| {
+                    // InRange<u256, 10, 100> - InRange<u256, 20, 200> = InRange<u256, 0, 80>
+                    // Min: lhs_min - rhs_max (worst case)
+                    // Max: lhs_max - rhs_min (best case)
+                    const result_min = if (lhs_ir.min >= rhs_ir.max) lhs_ir.min - rhs_ir.max else 0;
+                    const result_max = if (lhs_ir.max >= rhs_ir.min) lhs_ir.max - rhs_ir.min else 0;
+                    const in_range_type = OraType{
+                        .in_range = .{
+                            .base = lhs_ir.base,
+                            .min = result_min,
+                            .max = result_max,
+                        },
+                    };
+                    return TypeInfo.inferred(TypeCategory.Integer, in_range_type, span);
+                },
+                else => null,
+            },
+            else => null,
+        };
+    }
+
+    /// Infer result type for multiplication
+    fn inferMultiplicationResultType(
+        self: *TypeResolver,
+        lhs_ora: OraType,
+        rhs_ora: OraType,
+        span: ast.SourceSpan,
+    ) ?TypeInfo {
+        _ = self;
+
+        return switch (lhs_ora) {
+            .scaled => |lhs_s| switch (rhs_ora) {
+                .scaled => |rhs_s| {
+                    // Scaled<T, D1> * Scaled<T, D2> = Scaled<T, D1 + D2> (scale doubles)
+                    // Both must have same base type
+                    if (!OraType.equals(lhs_s.base.*, rhs_s.base.*)) {
+                        return null;
+                    }
+                    // Result scale is sum of both scales
+                    // Note: This may overflow u32, but that's a compile-time error
+                    const result_decimals = lhs_s.decimals + rhs_s.decimals;
+                    const scaled_type = OraType{
+                        .scaled = .{
+                            .base = lhs_s.base,
+                            .decimals = result_decimals,
+                        },
+                    };
+                    return TypeInfo.inferred(TypeCategory.Integer, scaled_type, span);
+                },
+                else => null,
+            },
+            .min_value => |lhs_mv| switch (rhs_ora) {
+                .min_value => |rhs_mv| {
+                    // MinValue<u256, 100> * MinValue<u256, 50> = MinValue<u256, 5000>
+                    const result_min = lhs_mv.min * rhs_mv.min;
+                    const min_value_type = OraType{
+                        .min_value = .{
+                            .base = lhs_mv.base,
+                            .min = result_min,
+                        },
+                    };
+                    return TypeInfo.inferred(TypeCategory.Integer, min_value_type, span);
+                },
+                .max_value => |rhs_mv| {
+                    // MinValue<u256, 100> * MaxValue<u256, 500> = MinValue<u256, 50000>
+                    // Conservative: use lhs_min * rhs_max for minimum
+                    const result_min = lhs_mv.min * rhs_mv.max;
+                    const min_value_type = OraType{
+                        .min_value = .{
+                            .base = lhs_mv.base,
+                            .min = result_min,
+                        },
+                    };
+                    return TypeInfo.inferred(TypeCategory.Integer, min_value_type, span);
+                },
+                else => null,
+            },
+            .max_value => |lhs_mv| switch (rhs_ora) {
+                .min_value => |rhs_mv| {
+                    // MaxValue<u256, 1000> * MinValue<u256, 50> = MinValue<u256, 50000>
+                    // Conservative: use lhs_max * rhs_min for minimum
+                    const result_min = lhs_mv.max * rhs_mv.min;
+                    const min_value_type = OraType{
+                        .min_value = .{
+                            .base = lhs_mv.base,
+                            .min = result_min,
+                        },
+                    };
+                    return TypeInfo.inferred(TypeCategory.Integer, min_value_type, span);
+                },
+                .max_value => |rhs_mv| {
+                    // MaxValue<u256, 1000> * MaxValue<u256, 500> = MaxValue<u256, 500000>
+                    const result_max = lhs_mv.max * rhs_mv.max;
+                    const max_value_type = OraType{
+                        .max_value = .{
+                            .base = lhs_mv.base,
+                            .max = result_max,
+                        },
+                    };
+                    return TypeInfo.inferred(TypeCategory.Integer, max_value_type, span);
+                },
+                else => null,
+            },
+            .in_range => |lhs_ir| switch (rhs_ora) {
+                .in_range => |rhs_ir| {
+                    // InRange<u256, 10, 100> * InRange<u256, 20, 200> = InRange<u256, 200, 20000>
+                    // Min: lhs_min * rhs_min (worst case)
+                    // Max: lhs_max * rhs_max (best case)
+                    const result_min = lhs_ir.min * rhs_ir.min;
+                    const result_max = lhs_ir.max * rhs_ir.max;
+                    const in_range_type = OraType{
+                        .in_range = .{
+                            .base = lhs_ir.base,
+                            .min = result_min,
+                            .max = result_max,
+                        },
+                    };
+                    return TypeInfo.inferred(TypeCategory.Integer, in_range_type, span);
+                },
+                else => null,
+            },
+            else => null,
+        };
+    }
+
+    /// Extract base type from refinement type (or return the type itself if not a refinement)
+    fn extractBaseType(self: *TypeResolver, ora_type: OraType) ?OraType {
+        _ = self;
+        return switch (ora_type) {
+            .min_value => |mv| mv.base.*,
+            .max_value => |mv| mv.base.*,
+            .in_range => |ir| ir.base.*,
+            .scaled => |s| s.base.*,
+            .exact => |e| e.*,
+            .non_zero_address => .address, // Base type is address
+            else => ora_type, // Not a refinement, return as-is
+        };
+    }
+
     /// Check if a type is numeric
     fn isNumericType(self: *TypeResolver, type_info: TypeInfo) bool {
         _ = self;
-        return switch (type_info.category) {
-            .Uint, .Int => true,
-            else => false,
-        };
+        // Check category first
+        if (type_info.category != .Integer) {
+            return false;
+        }
+        // Refinement types with integer base types are numeric
+        if (type_info.ora_type) |ora_type| {
+            return ora_type.isInteger();
+        }
+        return true; // Category is Integer, assume numeric
     }
 
     /// Check if a type is boolean
@@ -563,6 +1237,19 @@ pub const TypeResolver = struct {
                 }
                 if (!self.areTypesCompatible(lhs, rhs)) {
                     return TypeResolutionError.IncompatibleTypes;
+                }
+                // Check for Scaled type scale mismatch
+                if (lhs.ora_type) |lhs_ora| {
+                    if (rhs.ora_type) |rhs_ora| {
+                        if (lhs_ora == .scaled and rhs_ora == .scaled) {
+                            const lhs_scaled = lhs_ora.scaled;
+                            const rhs_scaled = rhs_ora.scaled;
+                            // For addition and subtraction, scales must match
+                            if ((operator == .Plus or operator == .Minus) and lhs_scaled.decimals != rhs_scaled.decimals) {
+                                return TypeResolutionError.IncompatibleTypes; // Different scales cannot be added/subtracted
+                            }
+                        }
+                    }
                 }
             },
 
@@ -699,6 +1386,17 @@ pub const TypeResolver = struct {
                     else => null,
                 };
             },
+            .Address => |*addr_literal| {
+                // Parse address literal and check if it's zero
+                const addr_str = if (std.mem.startsWith(u8, addr_literal.value, "0x"))
+                    addr_literal.value[2..]
+                else
+                    addr_literal.value;
+
+                // Parse as u256 to check if it's zero
+                const parsed = std.fmt.parseInt(u256, addr_str, 16) catch return null;
+                return parsed;
+            },
             .Identifier => {
                 // Look up identifier in symbol table for constant values
                 // For now, we don't support constant identifier evaluation
@@ -777,14 +1475,28 @@ pub const TypeResolver = struct {
                     .And, .Or => {
                         binary.type_info = CommonTypes.bool_type();
                     },
-                    // Arithmetic and bitwise operators inherit operand types
+                    // Arithmetic and bitwise operators - infer result type from operands
                     else => {
                         if (context.expected_type) |expected| {
                             binary.type_info = expected;
-                        } else if (lhs_type) |ltype| {
-                            binary.type_info = ltype;
-                        } else if (context.enum_underlying_type) |enum_type| {
-                            binary.type_info = enum_type;
+                        } else {
+                            // Try to infer refined result type from operands
+                            const inferred_type = self.inferArithmeticResultType(
+                                binary.operator,
+                                lhs_type,
+                                rhs_type,
+                            );
+
+                            if (inferred_type) |inferred| {
+                                binary.type_info = inferred;
+                            } else {
+                                // Fall back to LHS type if inference fails
+                                if (lhs_type) |ltype| {
+                                    binary.type_info = ltype;
+                                } else if (context.enum_underlying_type) |enum_type| {
+                                    binary.type_info = enum_type;
+                                }
+                            }
                         }
                     },
                 }
@@ -848,6 +1560,13 @@ pub const TypeResolver = struct {
 
                 // Validate assignment type compatibility
                 try self.validateAssignment(target_type, value_type);
+
+                // Validate constant literal values against refinement constraints
+                if (target_type) |t_type| {
+                    if (t_type.ora_type) |target_ora_type| {
+                        try self.validateLiteralAgainstRefinement(assignment.value, target_ora_type);
+                    }
+                }
             },
             .CompoundAssignment => |*compound| {
                 // Resolve both sides

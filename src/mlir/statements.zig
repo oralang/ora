@@ -214,6 +214,10 @@ pub const StatementLowerer = struct {
 
         if (ret.value) |e| {
             const v = self.expr_lowerer.lowerExpression(&e);
+
+            // TODO: Insert refinement guard for return value if function has refined return type
+            // Need to get actual return type from function signature
+
             const op = self.ora_dialect.createFuncReturnWithValue(v, loc);
             h.appendOp(self.block, op);
         } else {
@@ -394,12 +398,24 @@ pub const StatementLowerer = struct {
 
             // Initialize the variable if there's an initializer
             if (var_decl.value) |init_expr| {
-                const init_value = self.expr_lowerer.lowerExpression(&init_expr.*);
+                var init_value = self.expr_lowerer.lowerExpression(&init_expr.*);
+
+                // Insert refinement guard for variable initialization
+                if (var_decl.type_info.ora_type) |ora_type| {
+                    init_value = try self.insertRefinementGuard(init_value, ora_type, var_decl.span);
+                }
+
                 const store_op = self.ora_dialect.createMemrefStore(init_value, memref, &[_]c.MlirValue{}, loc);
                 h.appendOp(self.block, store_op);
             } else {
                 // Store default value
-                const default_value = try self.createDefaultValue(mlir_type, var_decl.kind, loc);
+                var default_value = try self.createDefaultValue(mlir_type, var_decl.kind, loc);
+
+                // Insert refinement guard for default value
+                if (var_decl.type_info.ora_type) |ora_type| {
+                    default_value = try self.insertRefinementGuard(default_value, ora_type, var_decl.span);
+                }
+
                 const store_op = self.ora_dialect.createMemrefStore(default_value, memref, &[_]c.MlirValue{}, loc);
                 h.appendOp(self.block, store_op);
             }
@@ -425,9 +441,19 @@ pub const StatementLowerer = struct {
             if (var_decl.value) |init_expr| {
                 // Lower the initializer expression
                 init_value = self.expr_lowerer.lowerExpression(&init_expr.*);
+
+                // Insert refinement guard for variable initialization
+                if (var_decl.type_info.ora_type) |ora_type| {
+                    init_value = try self.insertRefinementGuard(init_value, ora_type, var_decl.span);
+                }
             } else {
                 // Create default value based on variable kind
                 init_value = try self.createDefaultValue(mlir_type, var_decl.kind, loc);
+
+                // Insert refinement guard for default value
+                if (var_decl.type_info.ora_type) |ora_type| {
+                    init_value = try self.insertRefinementGuard(init_value, ora_type, var_decl.span);
+                }
             }
 
             // Store the local variable in our map for later reference
@@ -1349,7 +1375,9 @@ pub const StatementLowerer = struct {
 
         // Create body region with two arguments: index and item
         const body_region = c.mlirRegionCreate();
-        const body_block = c.mlirBlockCreate(2, @ptrCast(&[_]c.MlirType{ zero_ty, zero_ty }), null);
+        const body_arg_types = [_]c.MlirType{ zero_ty, zero_ty };
+        const body_arg_locs = [_]c.MlirLocation{ loc, loc }; // Use same location for both arguments
+        const body_block = c.mlirBlockCreate(2, @ptrCast(&body_arg_types), @ptrCast(&body_arg_locs));
         c.mlirRegionInsertOwnedBlock(body_region, 0, body_block);
         c.mlirOperationStateAddOwnedRegions(&state, 1, @ptrCast(&body_region));
 
@@ -2220,7 +2248,28 @@ pub const StatementLowerer = struct {
         // Create catch region if present
         if (try_stmt.catch_block) |catch_block| {
             const catch_region = c.mlirRegionCreate();
-            const catch_block_mlir = c.mlirBlockCreate(0, null, null);
+            
+            // Create catch block with error argument if error variable is present
+            var catch_block_mlir: c.MlirBlock = undefined;
+            if (catch_block.error_variable) |error_var| {
+                // Create error type (for now, use i256 as a placeholder - this should be an error union type)
+                const error_type = c.mlirIntegerTypeGet(self.ctx, 256);
+                const error_loc = self.fileLoc(catch_block.span);
+                const error_types = [_]c.MlirType{error_type};
+                const error_locs = [_]c.MlirLocation{error_loc};
+                catch_block_mlir = c.mlirBlockCreate(1, &error_types, &error_locs);
+                
+                // Get the error block argument and add it to local variable map
+                const error_arg = c.mlirBlockGetArgument(catch_block_mlir, 0);
+                if (self.local_var_map) |lvm| {
+                    lvm.addLocalVar(error_var, error_arg) catch {
+                        std.debug.print("WARNING: Failed to add error variable '{s}' to local var map\n", .{error_var});
+                    };
+                }
+            } else {
+                catch_block_mlir = c.mlirBlockCreate(0, null, null);
+            }
+            
             c.mlirRegionInsertOwnedBlock(catch_region, 0, catch_block_mlir);
             c.mlirOperationStateAddOwnedRegions(&state, 1, @ptrCast(&catch_region));
 
@@ -2407,6 +2456,146 @@ pub const StatementLowerer = struct {
         c.mlirOperationStateAddAttributes(&const_state, const_attrs.len, &const_attrs);
         c.mlirOperationStateAddResults(&const_state, 1, @ptrCast(&result_ty));
 
+        const const_op = c.mlirOperationCreate(&const_state);
+        h.appendOp(self.block, const_op);
+        return h.getResult(const_op, 0);
+    }
+
+    /// Insert runtime guard for refinement type value
+    fn insertRefinementGuard(
+        self: *const StatementLowerer,
+        value: c.MlirValue,
+        ora_type: lib.ast.Types.OraType,
+        span: lib.ast.SourceSpan,
+    ) LoweringError!c.MlirValue {
+        const loc = self.fileLoc(span);
+
+        switch (ora_type) {
+            .min_value => |mv| {
+                // Generate: require(value >= min)
+                const min_type = c.mlirValueGetType(value);
+                const min_attr = c.mlirIntegerAttrGet(min_type, @intCast(mv.min));
+                const min_const = self.createConstantValue(min_attr, min_type, loc);
+                
+                var cmp_state = h.opState("arith.cmpi", loc);
+                const pred_id = h.identifier(self.ctx, "predicate");
+                const pred_uge_attr = c.mlirIntegerAttrGet(c.mlirIntegerTypeGet(self.ctx, 64), 5); // uge
+                var attrs = [_]c.MlirNamedAttribute{c.mlirNamedAttributeGet(pred_id, pred_uge_attr)};
+                c.mlirOperationStateAddAttributes(&cmp_state, attrs.len, &attrs);
+                c.mlirOperationStateAddOperands(&cmp_state, 2, @ptrCast(&[_]c.MlirValue{ value, min_const }));
+c.mlirOperationStateAddResults(&cmp_state, 1, @ptrCast(&h.boolType(self.ctx)));
+                const cmp_op = c.mlirOperationCreate(&cmp_state);
+                h.appendOp(self.block, cmp_op);
+                const condition = h.getResult(cmp_op, 0);
+
+                var assert_state = h.opState("cf.assert", loc);
+                c.mlirOperationStateAddOperands(&assert_state, 1, @ptrCast(&condition));
+                const msg = try std.fmt.allocPrint(self.allocator, "Refinement violation: expected MinValue<u256, {d}>", .{mv.min});
+                defer self.allocator.free(msg);
+                const msg_attr = h.stringAttr(self.ctx, msg);
+                const msg_id = h.identifier(self.ctx, "msg");
+                var assert_attrs = [_]c.MlirNamedAttribute{c.mlirNamedAttributeGet(msg_id, msg_attr)};
+                c.mlirOperationStateAddAttributes(&assert_state, assert_attrs.len, &assert_attrs);
+                const assert_op = c.mlirOperationCreate(&assert_state);
+                h.appendOp(self.block, assert_op);
+            },
+            .max_value => |mv| {
+                // Generate: require(value <= max)
+                const max_type = c.mlirValueGetType(value);
+                const max_attr = c.mlirIntegerAttrGet(max_type, @intCast(mv.max));
+                const max_const = self.createConstantValue(max_attr, max_type, loc);
+                
+                var cmp_state = h.opState("arith.cmpi", loc);
+                const pred_id = h.identifier(self.ctx, "predicate");
+                const pred_ule_attr = c.mlirIntegerAttrGet(c.mlirIntegerTypeGet(self.ctx, 64), 3); // ule
+                var attrs = [_]c.MlirNamedAttribute{c.mlirNamedAttributeGet(pred_id, pred_ule_attr)};
+                c.mlirOperationStateAddAttributes(&cmp_state, attrs.len, &attrs);
+                c.mlirOperationStateAddOperands(&cmp_state, 2, @ptrCast(&[_]c.MlirValue{ value, max_const }));
+                c.mlirOperationStateAddResults(&cmp_state, 1, @ptrCast(&h.boolType(self.ctx)));
+                const cmp_op = c.mlirOperationCreate(&cmp_state);
+                h.appendOp(self.block, cmp_op);
+                const condition = h.getResult(cmp_op, 0);
+
+                var assert_state = h.opState("cf.assert", loc);
+                c.mlirOperationStateAddOperands(&assert_state, 1, @ptrCast(&condition));
+                const msg = try std.fmt.allocPrint(self.allocator, "Refinement violation: expected MaxValue<u256, {d}>", .{mv.max});
+                defer self.allocator.free(msg);
+                const msg_attr = h.stringAttr(self.ctx, msg);
+                const msg_id = h.identifier(self.ctx, "msg");
+                var assert_attrs = [_]c.MlirNamedAttribute{c.mlirNamedAttributeGet(msg_id, msg_attr)};
+                c.mlirOperationStateAddAttributes(&assert_state, assert_attrs.len, &assert_attrs);
+                const assert_op = c.mlirOperationCreate(&assert_state);
+                h.appendOp(self.block, assert_op);
+            },
+            .in_range => |ir| {
+                // Generate: require(min <= value <= max)
+                const value_type = c.mlirValueGetType(value);
+                const min_attr = c.mlirIntegerAttrGet(value_type, @intCast(ir.min));
+                const max_attr = c.mlirIntegerAttrGet(value_type, @intCast(ir.max));
+                const min_const = self.createConstantValue(min_attr, value_type, loc);
+                const max_const = self.createConstantValue(max_attr, value_type, loc);
+
+                // Check: value >= min
+                var min_cmp_state = h.opState("arith.cmpi", loc);
+                const pred_id = h.identifier(self.ctx, "predicate");
+                const pred_uge_attr = c.mlirIntegerAttrGet(c.mlirIntegerTypeGet(self.ctx, 64), 5);
+                var min_attrs = [_]c.MlirNamedAttribute{c.mlirNamedAttributeGet(pred_id, pred_uge_attr)};
+                c.mlirOperationStateAddAttributes(&min_cmp_state, min_attrs.len, &min_attrs);
+                c.mlirOperationStateAddOperands(&min_cmp_state, 2, @ptrCast(&[_]c.MlirValue{ value, min_const }));
+                c.mlirOperationStateAddResults(&min_cmp_state, 1, @ptrCast(&h.boolType(self.ctx)));
+                const min_cmp_op = c.mlirOperationCreate(&min_cmp_state);
+                h.appendOp(self.block, min_cmp_op);
+                const min_check = h.getResult(min_cmp_op, 0);
+
+                // Check: value <= max
+                var max_cmp_state = h.opState("arith.cmpi", loc);
+                const pred_ule_attr = c.mlirIntegerAttrGet(c.mlirIntegerTypeGet(self.ctx, 64), 3);
+                var max_attrs = [_]c.MlirNamedAttribute{c.mlirNamedAttributeGet(pred_id, pred_ule_attr)};
+                c.mlirOperationStateAddAttributes(&max_cmp_state, max_attrs.len, &max_attrs);
+                c.mlirOperationStateAddOperands(&max_cmp_state, 2, @ptrCast(&[_]c.MlirValue{ value, max_const }));
+                c.mlirOperationStateAddResults(&max_cmp_state, 1, @ptrCast(&h.boolType(self.ctx)));
+                const max_cmp_op = c.mlirOperationCreate(&max_cmp_state);
+                h.appendOp(self.block, max_cmp_op);
+                const max_check = h.getResult(max_cmp_op, 0);
+
+                // Combine: min_check && max_check
+                var and_state = h.opState("arith.andi", loc);
+                c.mlirOperationStateAddOperands(&and_state, 2, @ptrCast(&[_]c.MlirValue{ min_check, max_check }));
+                c.mlirOperationStateAddResults(&and_state, 1, @ptrCast(&h.boolType(self.ctx)));
+                const and_op = c.mlirOperationCreate(&and_state);
+                h.appendOp(self.block, and_op);
+                const condition = h.getResult(and_op, 0);
+
+                var assert_state = h.opState("cf.assert", loc);
+                c.mlirOperationStateAddOperands(&assert_state, 1, @ptrCast(&condition));
+                const msg = try std.fmt.allocPrint(self.allocator, "Refinement violation: expected InRange<u256, {d}, {d}>", .{ ir.min, ir.max });
+                defer self.allocator.free(msg);
+                const msg_attr = h.stringAttr(self.ctx, msg);
+                const msg_id = h.identifier(self.ctx, "msg");
+                var assert_attrs = [_]c.MlirNamedAttribute{c.mlirNamedAttributeGet(msg_id, msg_attr)};
+                c.mlirOperationStateAddAttributes(&assert_state, assert_attrs.len, &assert_attrs);
+                const assert_op = c.mlirOperationCreate(&assert_state);
+                h.appendOp(self.block, assert_op);
+            },
+            .exact, .scaled => {
+                // Exact and Scaled guards are inserted at specific operations (division, arithmetic)
+                // No initialization guard needed
+            },
+            else => {
+                // Not a refinement type, no guard needed
+            },
+        }
+
+        return value;
+    }
+
+    /// Create a constant value from an attribute
+    fn createConstantValue(self: *const StatementLowerer, attr: c.MlirAttribute, ty: c.MlirType, loc: c.MlirLocation) c.MlirValue {
+        var const_state = h.opState("arith.constant", loc);
+        const value_id = h.identifier(self.ctx, "value");
+        var attrs = [_]c.MlirNamedAttribute{c.mlirNamedAttributeGet(value_id, attr)};
+        c.mlirOperationStateAddAttributes(&const_state, attrs.len, &attrs);
+        c.mlirOperationStateAddResults(&const_state, 1, @ptrCast(&ty));
         const const_op = c.mlirOperationCreate(&const_state);
         h.appendOp(self.block, const_op);
         return h.getResult(const_op, 0);

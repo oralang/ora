@@ -1,0 +1,22 @@
+// Test error union parsing
+
+error InsufficientBalance(required: u256, available: u256);
+error InvalidAddress;
+
+contract Test {
+    // Simple error union
+    fn test1() -> !bool {
+        return true;
+    }
+    
+    // Error union with one error
+    fn test2() -> !bool | InsufficientBalance {
+        return true;
+    }
+    
+    // Error union with multiple errors
+    fn test3() -> !bool | InsufficientBalance | InvalidAddress {
+        return true;
+    }
+}
+

@@ -362,6 +362,37 @@ pub const ExpressionLowerer = struct {
         const lhs_converted = self.convertToType(lhs, result_ty, bin.span);
         const rhs_converted = self.convertToType(rhs, result_ty, bin.span);
 
+        // Check for Exact<T> division guard before performing division
+        if (bin.operator == .Slash) {
+            // Check if LHS is Exact<T> type by checking the lhs expression's type_info
+            const lhs_type_info = switch (bin.lhs.*) {
+                .Binary => |b| b.type_info,
+                .Unary => |u| u.type_info,
+                .Identifier => |i| i.type_info,
+                .Literal => |l| switch (l) {
+                    .Integer => |int_lit| int_lit.type_info,
+                    .String => |str_lit| str_lit.type_info,
+                    .Bool => |bool_lit| bool_lit.type_info,
+                    .Address => |addr_lit| addr_lit.type_info,
+                    .Hex => |hex_lit| hex_lit.type_info,
+                    .Binary => |bin_lit| bin_lit.type_info,
+                    .Character => |char_lit| char_lit.type_info,
+                    .Bytes => |bytes_lit| bytes_lit.type_info,
+                },
+                .Call => |call_expr| call_expr.type_info,
+                .FieldAccess => |f| f.type_info,
+                .Cast => |cast_expr| cast_expr.target_type,
+                else => lib.ast.Types.TypeInfo.unknown(),
+            };
+
+            if (lhs_type_info.ora_type) |lhs_ora_type| {
+                if (lhs_ora_type == .exact) {
+                    // Insert exactness guard: require(dividend % divisor == 0)
+                    self.insertExactDivisionGuard(lhs_converted, rhs_converted, bin.span);
+                }
+            }
+        }
+
         return switch (bin.operator) {
             // Arithmetic operators
             .Plus => self.createArithmeticOp("arith.addi", lhs_converted, rhs_converted, result_ty, bin.span),
@@ -2094,6 +2125,14 @@ pub const ExpressionLowerer = struct {
                 ._union => "union",
                 .anonymous_struct => "anonymous_struct",
                 .module => "module",
+
+                // Refinement types - render as base type with refinement info
+                .min_value => "MinValue",
+                .max_value => "MaxValue",
+                .in_range => "InRange",
+                .scaled => "Scaled",
+                .exact => "Exact",
+                .non_zero_address => "NonZeroAddress",
             };
         }
 
@@ -2273,5 +2312,58 @@ pub const ExpressionLowerer = struct {
         const op = c.mlirOperationCreate(&state);
         h.appendOp(self.block, op);
         return op;
+    }
+
+    /// Insert exactness guard for Exact<T> division: require(dividend % divisor == 0)
+    fn insertExactDivisionGuard(
+        self: *const ExpressionLowerer,
+        dividend: c.MlirValue,
+        divisor: c.MlirValue,
+        span: lib.ast.SourceSpan,
+    ) void {
+        const loc = self.fileLoc(span);
+
+        // Compute: dividend % divisor
+        const dividend_type = c.mlirValueGetType(dividend);
+        var mod_state = h.opState("arith.remui", loc);
+        c.mlirOperationStateAddOperands(&mod_state, 2, @ptrCast(&[_]c.MlirValue{ dividend, divisor }));
+        c.mlirOperationStateAddResults(&mod_state, 1, @ptrCast(&dividend_type));
+        const mod_op = c.mlirOperationCreate(&mod_state);
+        h.appendOp(self.block, mod_op);
+        const remainder = h.getResult(mod_op, 0);
+
+        // Create constant 0
+        const zero_attr = c.mlirIntegerAttrGet(dividend_type, 0);
+        var zero_state = h.opState("arith.constant", loc);
+        const value_id = h.identifier(self.ctx, "value");
+        var zero_attrs = [_]c.MlirNamedAttribute{c.mlirNamedAttributeGet(value_id, zero_attr)};
+        c.mlirOperationStateAddAttributes(&zero_state, zero_attrs.len, &zero_attrs);
+        c.mlirOperationStateAddResults(&zero_state, 1, @ptrCast(&dividend_type));
+        const zero_op = c.mlirOperationCreate(&zero_state);
+        h.appendOp(self.block, zero_op);
+        const zero_const = h.getResult(zero_op, 0);
+
+        // Check: remainder == 0
+        var cmp_state = h.opState("arith.cmpi", loc);
+        const pred_id = h.identifier(self.ctx, "predicate");
+        const pred_eq_attr = c.mlirIntegerAttrGet(c.mlirIntegerTypeGet(self.ctx, 64), 0); // eq
+        var attrs = [_]c.MlirNamedAttribute{c.mlirNamedAttributeGet(pred_id, pred_eq_attr)};
+        c.mlirOperationStateAddAttributes(&cmp_state, attrs.len, &attrs);
+        c.mlirOperationStateAddOperands(&cmp_state, 2, @ptrCast(&[_]c.MlirValue{ remainder, zero_const }));
+        c.mlirOperationStateAddResults(&cmp_state, 1, @ptrCast(&h.boolType(self.ctx)));
+        const cmp_op = c.mlirOperationCreate(&cmp_state);
+        h.appendOp(self.block, cmp_op);
+        const condition = h.getResult(cmp_op, 0);
+
+        // Create assertion
+        var assert_state = h.opState("cf.assert", loc);
+        c.mlirOperationStateAddOperands(&assert_state, 1, @ptrCast(&condition));
+        const msg = "Refinement violation: Exact<T> division must have no remainder";
+        const msg_attr = h.stringAttr(self.ctx, msg);
+        const msg_id = h.identifier(self.ctx, "msg");
+        var assert_attrs = [_]c.MlirNamedAttribute{c.mlirNamedAttributeGet(msg_id, msg_attr)};
+        c.mlirOperationStateAddAttributes(&assert_state, assert_attrs.len, &assert_attrs);
+        const assert_op = c.mlirOperationCreate(&assert_state);
+        h.appendOp(self.block, assert_op);
     }
 };

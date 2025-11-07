@@ -199,6 +199,14 @@ pub const TypeMapper = struct {
             ._union => self.mapUnionType(ora_ty_opt._union),
             .anonymous_struct => self.mapAnonymousStructType(ora_ty_opt.anonymous_struct),
             .module => self.mapModuleType(ora_ty_opt.module),
+
+            // Refinement types - map to base type (refinements are compile-time constraints)
+            .min_value => self.toMlirType(.{ .ora_type = ora_ty_opt.min_value.base.* }),
+            .max_value => self.toMlirType(.{ .ora_type = ora_ty_opt.max_value.base.* }),
+            .in_range => self.toMlirType(.{ .ora_type = ora_ty_opt.in_range.base.* }),
+            .scaled => self.toMlirType(.{ .ora_type = ora_ty_opt.scaled.base.* }),
+            .exact => self.toMlirType(.{ .ora_type = ora_ty_opt.exact.* }),
+            .non_zero_address => c.mlirIntegerTypeGet(self.ctx, 160), // Map to address type (160 bits)
         };
     }
 

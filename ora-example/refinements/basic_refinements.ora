@@ -1,0 +1,58 @@
+// Test basic refinement types parsing and type checking
+
+contract TestRefinements {
+    // Test MinValue
+    fn testMinValue(amount: MinValue<u256, 1000>) {
+        // Should compile - amount is guaranteed >= 1000
+    }
+
+    // Test MaxValue
+    fn testMaxValue(limit: MaxValue<u256, 10000>) {
+        // Should compile - limit is guaranteed <= 10000
+    }
+
+    // Test InRange
+    fn testInRange(rate: InRange<u256, 0, 10000>) {
+        // Should compile - rate is guaranteed 0 <= rate <= 10000
+    }
+
+    // Test Scaled
+    fn testScaled(amount: Scaled<u256, 18>) {
+        // Should compile - amount is scaled by 10^18
+    }
+
+    // Test Exact
+    fn testExact(total: Exact<u256>) {
+        // Should compile - total must divide exactly
+    }
+
+    // Test NonZero alias
+    fn testNonZero(divisor: NonZero<u256>) {
+        // Should compile - divisor is guaranteed > 0
+    }
+
+    // Test BasisPoints alias
+    fn testBasisPoints(fee: BasisPoints<u256>) {
+        // Should compile - fee is 0-10000 (basis points)
+    }
+
+    // Test subtyping: MinValue<u256, 2000> should be assignable to MinValue<u256, 1000>
+    fn testSubtyping(amount: MinValue<u256, 1000>) {
+        // This should work if subtyping is correct
+    }
+
+    // Test combining refinements
+    fn testCombined(amount: MinValue<u256, 2000>) -> MinValue<u256, 1000> {
+        // Return type should accept values >= 1000
+        // amount is >= 2000, which is >= 1000, so this should work
+        return amount;
+    }
+
+    // Test variable declarations
+    fn testVariables() {
+        let deposit: MinValue<u256, 1_000_000> = 1_000_000;
+        let fee: BasisPoints<u256> = 250; // 2.5%
+        let total: Exact<u256> = 1000;
+    }
+}
+

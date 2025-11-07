@@ -25,6 +25,7 @@ const contract = @import("contract_analyzer.zig");
 const func = @import("function_analyzer.zig");
 const stmt = @import("statement_analyzer.zig");
 const logs = @import("log_analyzer.zig");
+const errors = @import("error_analyzer.zig");
 const expr = @import("expression_analyzer.zig");
 // TODO(semantics): Re-enable unknown-identifier walker when scope mapping is fully hardened.
 // Current crash root cause: walking identifiers while some nested block/function scopes
@@ -108,6 +109,11 @@ fn checkFunction(
     defer allocator.free(log_spans);
     for (log_spans) |lsp| try diags.append(.{ .message = "Invalid log call", .span = lsp });
 
+    // Error validation
+    const error_result = try errors.validateErrors(allocator, symbols, &[_]ast.AstNode{.{ .Function = f.* }});
+    defer error_result.diagnostics.deinit();
+    for (error_result.diagnostics.items) |esp| try diags.append(.{ .message = "Invalid error usage", .span = esp });
+
     // Spec usage checks: quantified allowed only in requires/ensures/invariant; old only in ensures
     for (f.requires_clauses) |rq| {
         if (try expr.validateSpecUsage(allocator, rq, .Requires)) |spx| {
@@ -140,6 +146,13 @@ pub fn analyzePhase2(allocator: std.mem.Allocator, nodes: []const ast.AstNode, s
         },
         else => {},
     };
+
+    // Global error validation (validate errors across entire AST)
+    const global_error_result = try errors.validateErrors(allocator, symbols, nodes);
+    defer global_error_result.diagnostics.deinit();
+    for (global_error_result.diagnostics.items) |esp| {
+        try diags.append(.{ .message = "Invalid error usage", .span = esp });
+    }
 
     return try diags.toOwnedSlice();
 }

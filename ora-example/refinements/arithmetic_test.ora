@@ -1,0 +1,150 @@
+// ============================================================================
+// Arithmetic Operations with Refined Types - Comprehensive Test
+// ============================================================================
+// This file tests all arithmetic operations with refined types to verify
+// that result type inference works correctly.
+// ============================================================================
+
+contract ArithmeticRefinements {
+    // ============================================================================
+    // Addition Tests
+    // ============================================================================
+    
+    fn testAddition() {
+        // MinValue + MinValue = MinValue with sum of mins
+        let x: MinValue<u256, 100> = 200;
+        let y: MinValue<u256, 50> = 100;
+        let sum1 = x + y; // Type: MinValue<u256, 150>
+        
+        // MaxValue + MaxValue = MaxValue with sum of maxs
+        let a: MaxValue<u256, 1000> = 800;
+        let b: MaxValue<u256, 500> = 400;
+        let sum2 = a + b; // Type: MaxValue<u256, 1500>
+        
+        // InRange + InRange = InRange with sum of bounds
+        let c: InRange<u256, 10, 100> = 50;
+        let d: InRange<u256, 20, 200> = 100;
+        let sum3 = c + d; // Type: InRange<u256, 30, 300>
+        
+        // MinValue + regular u256 = MinValue (preserves minimum)
+        let e: MinValue<u256, 100> = 200;
+        let f: u256 = 50;
+        let sum4 = e + f; // Type: MinValue<u256, 100>
+    }
+    
+    // ============================================================================
+    // Subtraction Tests
+    // ============================================================================
+    
+    fn testSubtraction() {
+        // MinValue - MinValue = MinValue (conservative)
+        let x: MinValue<u256, 100> = 200;
+        let y: MinValue<u256, 50> = 100;
+        let diff1 = x - y; // Type: MinValue<u256, 50> (100 - 50)
+        
+        // MaxValue - MinValue = MaxValue
+        let a: MaxValue<u256, 1000> = 800;
+        let b: MinValue<u256, 100> = 200;
+        let diff2 = a - b; // Type: MaxValue<u256, 900> (1000 - 100)
+        
+        // MinValue - MaxValue = MinValue (conservative)
+        let c: MinValue<u256, 100> = 200;
+        let d: MaxValue<u256, 50> = 40;
+        let diff3 = c - d; // Type: MinValue<u256, 50> (100 - 50)
+        
+        // MaxValue - MaxValue = MaxValue (conservative)
+        let e: MaxValue<u256, 1000> = 800;
+        let f: MaxValue<u256, 500> = 400;
+        let diff4 = e - f; // Type: MaxValue<u256, 500> (1000 - 500)
+        
+        // InRange - InRange = InRange
+        let g: InRange<u256, 10, 100> = 50;
+        let h: InRange<u256, 20, 200> = 100;
+        let diff5 = g - h; // Type: InRange<u256, 0, 80> (min: 10-200, max: 100-20)
+    }
+    
+    // ============================================================================
+    // Multiplication Tests
+    // ============================================================================
+    
+    fn testMultiplication() {
+        // MinValue * MinValue = MinValue with product of mins
+        let x: MinValue<u256, 100> = 200;
+        let y: MinValue<u256, 50> = 100;
+        let prod1 = x * y; // Type: MinValue<u256, 5000> (100 * 50)
+        
+        // MaxValue * MaxValue = MaxValue with product of maxs
+        let a: MaxValue<u256, 1000> = 800;
+        let b: MaxValue<u256, 500> = 400;
+        let prod2 = a * b; // Type: MaxValue<u256, 500000> (1000 * 500)
+        
+        // MinValue * MaxValue = MinValue (conservative)
+        let c: MinValue<u256, 100> = 200;
+        let d: MaxValue<u256, 500> = 400;
+        let prod3 = c * d; // Type: MinValue<u256, 50000> (100 * 500)
+        
+        // MaxValue * MinValue = MinValue (conservative)
+        let e: MaxValue<u256, 1000> = 800;
+        let f: MinValue<u256, 50> = 100;
+        let prod4 = e * f; // Type: MinValue<u256, 50000> (1000 * 50)
+        
+        // InRange * InRange = InRange
+        let g: InRange<u256, 10, 100> = 50;
+        let h: InRange<u256, 20, 200> = 100;
+        let prod5 = g * h; // Type: InRange<u256, 200, 20000> (min: 10*20, max: 100*200)
+    }
+    
+    // ============================================================================
+    // Real-World Examples
+    // ============================================================================
+    
+    fn testRealWorldExamples() {
+        // Example 1: Fee calculation
+        // Transfer amount with minimum
+        let amount: MinValue<u256, 1000> = 5000;
+        // Fee rate in basis points (0-10000 = 0-100%)
+        let fee_rate: BasisPoints<u256> = 250; // 2.5%
+        
+        // Calculate fee: amount * fee_rate / 10000
+        // Note: Division loses refinement, but we can still use the types safely
+        let fee = (amount * fee_rate) / 10000; // Type: u256 (refinement lost in division)
+        
+        // Example 2: Supply cap enforcement
+        let current_supply: MaxValue<u256, 1_000_000_000> = 500_000_000;
+        let mint_amount: MinValue<u256, 1> = 100_000;
+        
+        // Check if minting would exceed cap
+        let new_supply = current_supply + mint_amount; // Type: MaxValue<u256, 1_000_000_100>
+        // Type system ensures new_supply <= 1_000_000_100, but we need runtime check for exact cap
+        
+        // Example 3: Range validation
+        let price: InRange<u256, 1, 1000> = 500;
+        let quantity: InRange<u256, 1, 100> = 50;
+        
+        // Total value is in range
+        let total = price * quantity; // Type: InRange<u256, 1, 100000> (1*1 to 1000*100)
+    }
+    
+    // ============================================================================
+    // Chained Operations
+    // ============================================================================
+    
+    fn testChainedOperations() {
+        // Multiple additions preserve refinement
+        let x: MinValue<u256, 100> = 200;
+        let y: MinValue<u256, 50> = 100;
+        let z: MinValue<u256, 25> = 50;
+        
+        let sum1 = x + y; // Type: MinValue<u256, 150>
+        let sum2 = sum1 + z; // Type: MinValue<u256, 175> (150 + 25)
+        
+        // Mixed operations
+        let a: MinValue<u256, 1000> = 2000;
+        let b: MaxValue<u256, 500> = 400;
+        let c: u256 = 100;
+        
+        let result1 = a + c; // Type: MinValue<u256, 1000>
+        let result2 = result1 - b; // Type: MinValue<u256, 500> (conservative: 1000 - 500)
+    }
+}
+

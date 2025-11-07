@@ -1,0 +1,309 @@
+// ============================================================================
+// ERC20 Token Contract with Refined Types
+// ============================================================================
+// This example demonstrates the power of refined types in Ora by creating
+// a type-safe ERC20 token contract that prevents common bugs through
+// compile-time and runtime type checking.
+//
+// REFINED TYPES USED:
+//   • MinValue<T, N> - Enforces minimum values (e.g., minimum transfer amount)
+//   • MaxValue<T, N> - Enforces maximum values (e.g., supply cap)
+//   • BasisPoints<T> - Type-safe fee rates (0-10000 basis points = 0-100%)
+//   • NonZero<T> - Prevents division by zero
+//   • NonZeroAddress - Prevents zero address errors
+//   • Scaled<T, D> - Represents scaled values (e.g., token amounts with decimals)
+//   • Exact<T> - Ensures exact division (no rounding errors)
+// ============================================================================
+
+contract ERC20Token {
+    // ============================================================================
+    // State Variables with Refined Types
+    // ============================================================================
+    
+    storage owner: NonZeroAddress;
+    storage total_supply: MaxValue<u256, 1_000_000_000>; // Max 1 billion tokens
+    storage decimals: InRange<u8, 0, 18>; // Standard: 0-18 decimals
+    
+    // Fee configuration (in basis points: 100 = 1%, 10000 = 100%)
+    storage transfer_fee_rate: BasisPoints<u256>;
+    storage burn_rate: BasisPoints<u256>;
+    
+    // Minimum transfer amount (prevents dust attacks)
+    storage min_transfer: MinValue<u256, 1>;
+    
+    // ============================================================================
+    // Errors
+    // ============================================================================
+    
+    error InsufficientBalance(available: u256, required: u256);
+    error TransferToZeroAddress();
+    error TransferFromZeroAddress();
+    error AmountBelowMinimum(amount: u256, minimum: u256);
+    error ExceedsSupplyCap(requested: u256, cap: u256);
+    error InvalidFeeRate(rate: u256);
+    error DivisionByZero();
+    error Unauthorized(caller: address, required: address);
+    
+    // ============================================================================
+    // Constructor
+    // ============================================================================
+    
+    pub fn init(
+        initial_supply: MinValue<u256, 1>,
+        token_decimals: InRange<u8, 0, 18>,
+        fee_rate: BasisPoints<u256>,
+        burn_rate_bps: BasisPoints<u256>,
+        minimum_transfer: MinValue<u256, 1>
+    ) {
+        // Refined types ensure:
+        // - initial_supply >= 1 (prevents zero supply)
+        // - token_decimals in [0, 18] (standard range)
+        // - fee_rate in [0, 10000] (0-100%)
+        // - burn_rate_bps in [0, 10000] (0-100%)
+        // - minimum_transfer >= 1 (prevents zero transfers)
+        
+        owner = std.transaction.sender; // NonZeroAddress ensures sender != 0
+        total_supply = initial_supply; // MaxValue ensures <= cap
+        decimals = token_decimals;
+        transfer_fee_rate = fee_rate;
+        burn_rate = burn_rate_bps;
+        min_transfer = minimum_transfer;
+    }
+    
+    // ============================================================================
+    // Core ERC20 Functions with Refined Types
+    // ============================================================================
+    
+    /// Transfer tokens with automatic fee deduction
+    /// Returns remaining balance after transfer
+    pub fn transfer(
+        to: NonZeroAddress,
+        amount: MinValue<u256, 1>
+    ) -> !u256 | InsufficientBalance | TransferToZeroAddress | AmountBelowMinimum {
+        // Refined types ensure:
+        // - to != 0 (NonZeroAddress)
+        // - amount >= 1 (MinValue)
+        
+        // Check minimum transfer amount
+        if (amount < min_transfer) {
+            return AmountBelowMinimum(amount, min_transfer);
+        }
+        
+        // Get sender balance
+        const sender_balance = getBalance(std.transaction.sender);
+        
+        // Calculate total required (amount + fees)
+        const total_required = calculateTotalRequired(amount);
+        
+        // Check sufficient balance
+        if (sender_balance < total_required) {
+            return InsufficientBalance(sender_balance, total_required);
+        }
+        
+        // Execute transfer with fees
+        executeTransfer(std.transaction.sender, to, amount);
+        
+        // Return remaining balance
+        return sender_balance - total_required;
+    }
+    
+    /// Transfer from one address to another (for contracts)
+    pub fn transferFrom(
+        from: NonZeroAddress,
+        to: NonZeroAddress,
+        amount: MinValue<u256, 1>
+    ) -> !bool | InsufficientBalance | TransferToZeroAddress | TransferFromZeroAddress | AmountBelowMinimum {
+        // All parameters are refined types - compile-time and runtime validated
+        
+        if (amount < min_transfer) {
+            return AmountBelowMinimum(amount, min_transfer);
+        }
+        
+        const from_balance = getBalance(from);
+        const total_required = calculateTotalRequired(amount);
+        
+        if (from_balance < total_required) {
+            return InsufficientBalance(from_balance, total_required);
+        }
+        
+        executeTransfer(from, to, amount);
+        return true;
+    }
+    
+    /// Mint new tokens (only owner, with supply cap check)
+    pub fn mint(
+        to: NonZeroAddress,
+        amount: MinValue<u256, 1>
+    ) -> !u256 | ExceedsSupplyCap | Unauthorized {
+        // Only owner can mint
+        if (std.transaction.sender != owner) {
+            return Unauthorized(std.transaction.sender, owner);
+        }
+        
+        // Check supply cap - refined type ensures total_supply <= cap
+        const new_supply = total_supply + amount;
+        
+        // MaxValue refinement ensures this check is type-safe
+        if (new_supply > 1_000_000_000) {
+            return ExceedsSupplyCap(new_supply, 1_000_000_000);
+        }
+        
+        total_supply = new_supply; // Type system ensures new_supply <= cap
+        setBalance(to, getBalance(to) + amount);
+        
+        return total_supply;
+    }
+    
+    /// Burn tokens (reduces total supply)
+    pub fn burn(amount: MinValue<u256, 1>) -> !u256 | InsufficientBalance {
+        const sender_balance = getBalance(std.transaction.sender);
+        
+        if (sender_balance < amount) {
+            return InsufficientBalance(sender_balance, amount);
+        }
+        
+        // Calculate burn amount (may include burn rate)
+        const actual_burn = calculateBurnAmount(amount);
+        
+        setBalance(std.transaction.sender, sender_balance - actual_burn);
+        total_supply = total_supply - actual_burn; // Type-safe subtraction
+        
+        return total_supply;
+    }
+    
+    // ============================================================================
+    // Fee Calculation Functions (Demonstrating Refined Type Arithmetic)
+    // ============================================================================
+    
+    /// Calculate total required amount including fees
+    /// Uses refined type arithmetic: BasisPoints operations preserve type safety
+    fn calculateTotalRequired(amount: MinValue<u256, 1>) -> MinValue<u256, 1> {
+        // Calculate fee: amount * transfer_fee_rate / 10000
+        // transfer_fee_rate is BasisPoints<u256> (0-10000)
+        // Result is guaranteed to be >= amount (since fee >= 0)
+        
+        const fee = calculateFee(amount, transfer_fee_rate);
+        const total = amount + fee; // MinValue + u256 = MinValue (type inference)
+        
+        // Type system ensures total >= amount >= 1, so result is MinValue<u256, 1>
+        return total;
+    }
+    
+    /// Calculate fee using basis points
+    /// Demonstrates: BasisPoints arithmetic preserves type safety
+    fn calculateFee(
+        amount: MinValue<u256, 1>,
+        rate: BasisPoints<u256>
+    ) -> u256 {
+        // rate is in [0, 10000], so fee is in [0, amount]
+        // Using Exact<u256> for precise division
+        const exact_amount: Exact<u256> = amount;
+        const exact_rate: Exact<u256> = rate;
+        
+        // Exact division ensures no rounding errors
+        // fee = (amount * rate) / 10000
+        const fee = (exact_amount * exact_rate) / 10000;
+        
+        return fee;
+    }
+    
+    /// Calculate burn amount with burn rate
+    fn calculateBurnAmount(amount: MinValue<u256, 1>) -> MinValue<u256, 1> {
+        // If burn_rate > 0, apply it; otherwise burn full amount
+        if (burn_rate > 0) {
+            const burn_fee = calculateFee(amount, burn_rate);
+            const actual_burn = amount - burn_fee; // MinValue - u256 = MinValue (conservative)
+            
+            // Ensure we don't burn more than available
+            if (actual_burn < 1) {
+                return 1; // Minimum burn amount
+            }
+            return actual_burn;
+        }
+        return amount;
+    }
+    
+    // ============================================================================
+    // Administrative Functions
+    // ============================================================================
+    
+    /// Update transfer fee rate (only owner)
+    pub fn setTransferFeeRate(new_rate: BasisPoints<u256>) -> !bool | Unauthorized {
+        if (std.transaction.sender != owner) {
+            return Unauthorized(std.transaction.sender, owner);
+        }
+        
+        // BasisPoints type ensures new_rate is in [0, 10000]
+        transfer_fee_rate = new_rate;
+        return true;
+    }
+    
+    /// Update burn rate (only owner)
+    pub fn setBurnRate(new_rate: BasisPoints<u256>) -> !bool | Unauthorized {
+        if (std.transaction.sender != owner) {
+            return Unauthorized(std.transaction.sender, owner);
+        }
+        
+        burn_rate = new_rate;
+        return true;
+    }
+    
+    /// Update minimum transfer amount (only owner)
+    pub fn setMinTransfer(new_min: MinValue<u256, 1>) -> !bool | Unauthorized {
+        if (std.transaction.sender != owner) {
+            return Unauthorized(std.transaction.sender, owner);
+        }
+        
+        min_transfer = new_min;
+        return true;
+    }
+    
+    // ============================================================================
+    // View Functions
+    // ============================================================================
+    
+    pub fn getTotalSupply() -> MaxValue<u256, 1_000_000_000> {
+        return total_supply;
+    }
+    
+    pub fn getDecimals() -> InRange<u8, 0, 18> {
+        return decimals;
+    }
+    
+    pub fn getTransferFeeRate() -> BasisPoints<u256> {
+        return transfer_fee_rate;
+    }
+    
+    pub fn getBurnRate() -> BasisPoints<u256> {
+        return burn_rate;
+    }
+    
+    pub fn getMinTransfer() -> MinValue<u256, 1> {
+        return min_transfer;
+    }
+    
+    // ============================================================================
+    // Storage Mappings
+    // ============================================================================
+    
+    storage balances: map[address, u256];
+    
+    // ============================================================================
+    // Helper Functions
+    // ============================================================================
+    
+    fn getBalance(addr: address) -> u256 {
+        return balances[addr];
+    }
+    
+    fn setBalance(addr: address, amount: u256) {
+        balances[addr] = amount;
+    }
+    
+    fn executeTransfer(from: address, to: address, amount: u256) {
+        // Refined types ensure amount >= 1, so this is safe
+        setBalance(from, getBalance(from) - amount);
+        setBalance(to, getBalance(to) + amount);
+    }
+}
+

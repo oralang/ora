@@ -1,0 +1,95 @@
+// ============================================================================
+// Scaled Type Arithmetic - Test File
+// ============================================================================
+// This file tests Scaled<T, D> type arithmetic to verify that scales are
+// preserved correctly in operations.
+// ============================================================================
+
+contract ScaledArithmetic {
+    // ============================================================================
+    // Type Aliases for Common Scales
+    // ============================================================================
+    // WAD: 18 decimals (standard for most tokens)
+    // RAY: 27 decimals (used in some DeFi protocols)
+    
+    // ============================================================================
+    // Addition Tests
+    // ============================================================================
+    
+    fn testScaledAddition() {
+        // Scaled<u256, 18> + Scaled<u256, 18> = Scaled<u256, 18> (preserve scale)
+        let wad1: Scaled<u256, 18> = 1_000_000_000_000_000_000; // 1.0 with 18 decimals
+        let wad2: Scaled<u256, 18> = 2_000_000_000_000_000_000; // 2.0 with 18 decimals
+        let sum = wad1 + wad2; // Type: Scaled<u256, 18> = 3.0 with 18 decimals
+        
+        // Different scales cannot be added (compile-time error)
+        // let ray: Scaled<u256, 27> = 1_000_000_000_000_000_000_000_000_000; // 1.0 with 27 decimals
+        // let invalid = wad1 + ray; // ERROR: Different scales (18 vs 27)
+    }
+    
+    // ============================================================================
+    // Subtraction Tests
+    // ============================================================================
+    
+    fn testScaledSubtraction() {
+        // Scaled<u256, 18> - Scaled<u256, 18> = Scaled<u256, 18> (preserve scale)
+        let wad1: Scaled<u256, 18> = 5_000_000_000_000_000_000; // 5.0 with 18 decimals
+        let wad2: Scaled<u256, 18> = 2_000_000_000_000_000_000; // 2.0 with 18 decimals
+        let diff = wad1 - wad2; // Type: Scaled<u256, 18> = 3.0 with 18 decimals
+    }
+    
+    // ============================================================================
+    // Multiplication Tests
+    // ============================================================================
+    
+    fn testScaledMultiplication() {
+        // Scaled<u256, 18> * Scaled<u256, 18> = Scaled<u256, 36> (scale doubles)
+        let wad1: Scaled<u256, 18> = 1_000_000_000_000_000_000; // 1.0 with 18 decimals
+        let wad2: Scaled<u256, 18> = 2_000_000_000_000_000_000; // 2.0 with 18 decimals
+        let product = wad1 * wad2; // Type: Scaled<u256, 36> = 2.0 with 36 decimals
+        
+        // Note: In practice, you'd need to normalize (divide by 10^18) to get back to 18 decimals
+        // This is a compile-time type annotation - the actual value needs manual normalization
+        
+        // Different base types cannot be multiplied
+        // let wad_u8: Scaled<u8, 18> = 100;
+        // let invalid = wad1 * wad_u8; // ERROR: Different base types (u256 vs u8)
+    }
+    
+    // ============================================================================
+    // Real-World Example: Token Amount Calculations
+    // ============================================================================
+    
+    fn calculateTokenAmount(
+        price_per_token: Scaled<u256, 18>,  // Price in wei per token (18 decimals)
+        quantity: Scaled<u256, 18>          // Quantity of tokens (18 decimals)
+    ) -> Scaled<u256, 36> {                 // Total value (36 decimals, needs normalization)
+        // price * quantity = Scaled<u256, 36>
+        return price_per_token * quantity;
+    }
+    
+    fn addTokenAmounts(
+        amount1: Scaled<u256, 18>,
+        amount2: Scaled<u256, 18>
+    ) -> Scaled<u256, 18> {
+        // Both have same scale, addition preserves scale
+        return amount1 + amount2;
+    }
+    
+    // ============================================================================
+    // Error Cases (should fail at compile time)
+    // ============================================================================
+    
+    fn testScaleMismatch() {
+        let wad: Scaled<u256, 18> = 1_000_000_000_000_000_000;
+        // Note: 27 decimals would require 10^27 which is too large for a literal
+        // In practice, you'd construct this from smaller values
+        let ray: Scaled<u256, 27> = 1; // Represents 1 * 10^-27 in scaled form
+        
+        // These should cause compile-time errors:
+        // let invalid1 = wad + ray;  // ERROR: Different scales (18 vs 27)
+        // let invalid2 = wad - ray;  // ERROR: Different scales (18 vs 27)
+        // let valid = wad * ray;     // OK: Multiplication allows different scales (result: Scaled<u256, 45>)
+    }
+}
+

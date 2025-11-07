@@ -909,7 +909,7 @@ pub const StatementParser = struct {
 
             // Optional catch variable: catch(e) { ... }
             if (self.base.match(.LeftParen)) {
-                const var_token = try self.base.consume(.Identifier, "Expected variable name in catch");
+                const var_token = try self.base.consumeIdentifierOrKeyword("Expected variable name in catch");
                 error_variable = try self.base.arena.createString(var_token.lexeme);
                 _ = try self.base.consume(.RightParen, "Expected ')' after catch variable");
             }

@@ -67,6 +67,7 @@ pub const SymbolTable = struct {
     contract_scopes: std.StringHashMap(*Scope),
     function_scopes: std.StringHashMap(*Scope),
     log_signatures: std.StringHashMap([]const ast.LogField),
+    error_signatures: std.StringHashMap(?[]const ast.ParameterNode), // error name → parameters (null if no params)
     function_allowed_errors: std.StringHashMap([][]const u8),
     function_success_types: std.StringHashMap(ast.Types.OraType),
     block_scopes: std.AutoHashMap(usize, *Scope),
@@ -87,6 +88,7 @@ pub const SymbolTable = struct {
             .contract_scopes = std.StringHashMap(*Scope).init(allocator),
             .function_scopes = std.StringHashMap(*Scope).init(allocator),
             .log_signatures = std.StringHashMap([]const ast.LogField).init(allocator),
+            .error_signatures = std.StringHashMap(?[]const ast.ParameterNode).init(allocator),
             .function_allowed_errors = std.StringHashMap([][]const u8).init(allocator),
             .function_success_types = std.StringHashMap(ast.Types.OraType).init(allocator),
             .block_scopes = std.AutoHashMap(usize, *Scope).init(allocator),
@@ -118,6 +120,7 @@ pub const SymbolTable = struct {
         self.contract_scopes.deinit();
         self.function_scopes.deinit();
         self.log_signatures.deinit();
+        self.error_signatures.deinit();
         var it = self.function_allowed_errors.valueIterator();
         while (it.next()) |slice_ptr| {
             self.allocator.free(slice_ptr.*);
