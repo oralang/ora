@@ -1,6 +1,6 @@
 ---
 slug: refinement-types-in-ora
-title: Refinement Types: Making Smart Contracts Safer by Default
+title: "Refinement Types: Making Smart Contracts Safer by Default"
 authors: [axe]
 tags: [compiler, type-system, safety, refinement-types]
 ---
