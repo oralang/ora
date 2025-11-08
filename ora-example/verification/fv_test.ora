@@ -1,0 +1,82 @@
+// Test file for formal verification annotations
+// This demonstrates requires, ensures, invariants, ghost functions, and ghost variables
+
+contract FVTest {
+    storage balance: u256 = 0;
+    storage max_balance: u256 = 1000;
+    
+    // Ghost variable for verification (not in bytecode)
+    ghost storage sumOfBalances: u256 = 0;
+
+    pub fn transfer(amount: u256, to: address) -> !bool | InsufficientBalance
+        requires(amount > 0)
+        requires(amount <= balance)
+        requires(to != std.constants.ZERO_ADDRESS)
+        ensures(balance == old(balance) - amount)
+    {
+        if (amount > balance) {
+            return InsufficientBalance();
+        }
+        
+        balance = balance - amount;
+        return true;
+    }
+
+    pub fn deposit(amount: u256) -> !u256
+        requires(amount > 0)
+        requires(balance + amount <= max_balance)
+        ensures(balance == old(balance) + amount)
+        ensures(getTotalBalance() == old(getTotalBalance()) + amount)
+    {
+        balance = balance + amount;
+        return balance;
+    }
+    
+    // Ghost function for verification (not in bytecode)
+    ghost fn getTotalBalance() -> u256 {
+        return balance + sumOfBalances;
+    }
+
+    pub fn withdraw(amount: u256) -> !u256 | InsufficientBalance
+        requires(amount > 0)
+        requires(amount <= balance)
+        ensures(balance == old(balance) - amount)
+    {
+        balance = balance - amount;
+        return balance;
+    }
+
+    pub fn loop_example(n: u256) -> !u256
+        requires(n <= 100)
+    {
+        var sum: u256 = 0;
+        var i: u256 = 1;
+        
+        while (i <= n)
+            invariant(sum == (i - 1) * i / 2)
+            invariant(i <= n + 1)
+            decreases(n - i)
+        {
+            sum = sum + i;
+            i = i + 1;
+        }
+        
+        return sum;
+    }
+
+    pub fn assume_example(x: u256) -> !u256
+        requires(x > 0)
+    {
+        assume(x < 100);
+        return x * 2;
+    }
+
+    pub fn havoc_example() -> !u256 {
+        var y: u256 = 10;
+        havoc y;
+        return y;
+    }
+}
+
+error InsufficientBalance;
+

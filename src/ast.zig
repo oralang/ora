@@ -108,6 +108,7 @@ pub const FunctionNode = struct {
     is_inline: bool, // inline functions
     requires_clauses: []*Expressions.ExprNode, // Preconditions (formal verification)
     ensures_clauses: []*Expressions.ExprNode, // Postconditions (formal verification)
+    modifies_clause: ?[]*Expressions.ExprNode = null, // Frame conditions - what storage can be modified
     is_ghost: bool = false, // Is this a ghost function? (specification-only)
     span: SourceSpan,
 

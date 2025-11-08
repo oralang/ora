@@ -64,7 +64,7 @@ contract_member ::=
 # FUNCTION DECLARATIONS
 # ==========================================
 
-function_declaration ::= inline_modifier? visibility? "fn" function_name "(" parameter_list? ")" return_type? requires_clause* ensures_clause* block
+function_declaration ::= inline_modifier? visibility? "fn" function_name "(" parameter_list? ")" return_type? requires_clause* ensures_clause* modifies_clause? block
 
 function_name ::= identifier | special_function_name
 
@@ -83,6 +83,13 @@ requires_clause ::= "requires" "(" expression ")"
 
 # REVISED: Semicolon removed for consistency.
 ensures_clause ::= "ensures" "(" expression ")"
+
+# Frame conditions - what storage can be modified
+modifies_clause ::= "modifies" "(" expression_list ")"
+
+# Loop termination/progress measures
+decreases_clause ::= "decreases" "(" expression ")"
+increases_clause ::= "increases" "(" expression ")"
 
 # Formal verification with quantifiers
 quantified_expression ::= quantifier identifier ":" type ("where" expression)? "=>" expression
@@ -243,11 +250,11 @@ expression_statement ::= expression ";"
 
 if_statement ::= "if" "(" expression ")" statement ("else" statement)?
 
-# Formal verification: Loop invariants
-while_statement ::= "while" "(" expression ")" invariant_clause* statement
+# Formal verification: Loop invariants and termination
+while_statement ::= "while" "(" expression ")" invariant_clause* decreases_clause? increases_clause? statement
 
 # NOTE: This is a foreach-style loop, e.g., for (my_map) |key, value| { ... }
-for_statement ::= "for" "(" expression ")" "|" identifier ("," identifier)? "|" invariant_clause* statement
+for_statement ::= "for" "(" expression ")" "|" identifier ("," identifier)? "|" invariant_clause* decreases_clause? increases_clause? statement
 
 invariant_clause ::= "invariant" "(" expression ")"
 
@@ -263,8 +270,10 @@ lock_statement ::= "@" "lock" "(" expression ")" ";"
 
 unlock_statement ::= "@" "unlock" "(" expression ")" ";"
 
-# Formal verification: Assertions
+# Formal verification: Assertions and assumptions
 assert_statement ::= "assert" "(" expression ("," string_literal)? ")" ";"
+assume_statement ::= "assume" "(" expression ")" ";"
+havoc_statement ::= "havoc" identifier ";"
 
 try_statement ::= "try" expression ("catch" ("|" identifier "|")? block)?
 

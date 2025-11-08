@@ -277,6 +277,95 @@ pub const OraDialect = struct {
         return op;
     }
 
+    /// Create ora.assert operation for assertions
+    pub fn createAssert(
+        self: *OraDialect,
+        condition: c.MlirValue,
+        loc: c.MlirLocation,
+        message: ?[]const u8,
+    ) c.MlirOperation {
+        var state = h.opState("ora.assert", loc);
+
+        // Add operands
+        var operands = [_]c.MlirValue{condition};
+        c.mlirOperationStateAddOperands(&state, operands.len, &operands);
+
+        // Add optional message attribute
+        if (message) |msg| {
+            const msg_attr = h.stringAttr(self.ctx, msg);
+            const msg_id = h.identifier(self.ctx, "message");
+            c.mlirOperationStateAddAttributes(&state, 1, &[_]c.MlirNamedAttribute{c.mlirNamedAttributeGet(msg_id, msg_attr)});
+        }
+
+        const op = c.mlirOperationCreate(&state);
+        return op;
+    }
+
+    /// Create ora.decreases operation for loop termination measures
+    pub fn createDecreases(
+        _: *OraDialect,
+        measure: c.MlirValue,
+        loc: c.MlirLocation,
+    ) c.MlirOperation {
+        var state = h.opState("ora.decreases", loc);
+
+        // Add operands
+        var operands = [_]c.MlirValue{measure};
+        c.mlirOperationStateAddOperands(&state, operands.len, &operands);
+
+        const op = c.mlirOperationCreate(&state);
+        return op;
+    }
+
+    /// Create ora.increases operation for loop progress measures
+    pub fn createIncreases(
+        _: *OraDialect,
+        measure: c.MlirValue,
+        loc: c.MlirLocation,
+    ) c.MlirOperation {
+        var state = h.opState("ora.increases", loc);
+
+        // Add operands
+        var operands = [_]c.MlirValue{measure};
+        c.mlirOperationStateAddOperands(&state, operands.len, &operands);
+
+        const op = c.mlirOperationCreate(&state);
+        return op;
+    }
+
+    /// Create ora.assume operation for assumptions
+    pub fn createAssume(
+        _: *OraDialect,
+        condition: c.MlirValue,
+        loc: c.MlirLocation,
+    ) c.MlirOperation {
+        var state = h.opState("ora.assume", loc);
+
+        // Add operands
+        var operands = [_]c.MlirValue{condition};
+        c.mlirOperationStateAddOperands(&state, operands.len, &operands);
+
+        const op = c.mlirOperationCreate(&state);
+        return op;
+    }
+
+    /// Create ora.havoc operation for havoc statements
+    pub fn createHavoc(
+        self: *OraDialect,
+        variable_name: []const u8,
+        loc: c.MlirLocation,
+    ) c.MlirOperation {
+        var state = h.opState("ora.havoc", loc);
+
+        // Add variable name as attribute
+        const var_attr = h.stringAttr(self.ctx, variable_name);
+        const var_id = h.identifier(self.ctx, "variable_name");
+        c.mlirOperationStateAddAttributes(&state, 1, &[_]c.MlirNamedAttribute{c.mlirNamedAttributeGet(var_id, var_attr)});
+
+        const op = c.mlirOperationCreate(&state);
+        return op;
+    }
+
     /// Create ora.old operation for old value references
     pub fn createOld(
         _: *OraDialect,

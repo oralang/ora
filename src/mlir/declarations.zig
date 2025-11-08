@@ -227,7 +227,7 @@ pub const DeclarationLowerer = struct {
         for (func.parameters, 0..) |param, i| {
             const block_arg = c.mlirBlockGetArgument(block, @intCast(i));
             param_map.setBlockArgument(param.name, block_arg) catch {};
-            
+
             // Insert refinement type guards for parameters
             if (param.type_info.ora_type) |ora_type| {
                 self.insertRefinementGuard(block, block_arg, ora_type, param.span) catch |err| {
@@ -358,12 +358,12 @@ pub const DeclarationLowerer = struct {
         for (contract.body) |child| {
             switch (child) {
                 .VariableDecl => |var_decl| {
-                    // Skip ghost variables (specification-only)
-                    if (var_decl.is_ghost) continue;
-
+                    // Include ghost variables in storage map for verification
+                    // They will be filtered out during Yul lowering (not in bytecode)
                     switch (var_decl.region) {
                         .Storage => {
                             // This is a storage variable - add it to the storage map and symbol table
+                            // Ghost variables are included for verification purposes
                             _ = storage_map.getOrCreateAddress(var_decl.name) catch {};
                             // Add to contract symbol table for member variable tracking
                             const var_type = self.type_mapper.toMlirType(var_decl.type_info);
@@ -398,17 +398,16 @@ pub const DeclarationLowerer = struct {
         for (contract.body) |child| {
             switch (child) {
                 .Function => |f| {
-                    // Skip ghost functions (specification-only)
-                    if (f.is_ghost) continue;
-
+                    // Include ghost functions in MLIR for verification
+                    // They will be filtered out during Yul lowering (not in bytecode)
                     var local_var_map = LocalVarMap.init(std.heap.page_allocator);
                     defer local_var_map.deinit();
                     const func_op = self.lowerFunction(&f, &storage_map, &local_var_map);
                     h.appendOp(block, func_op);
                 },
                 .VariableDecl => |var_decl| {
-                    // Skip ghost variables (specification-only)
-                    if (var_decl.is_ghost) continue;
+                    // Include ghost variables in MLIR for verification
+                    // They will be filtered out during Yul lowering (not in bytecode)
 
                     switch (var_decl.region) {
                         .Storage => {
@@ -1469,7 +1468,7 @@ pub const DeclarationLowerer = struct {
                 const min_type = c.mlirValueGetType(value);
                 const min_attr = c.mlirIntegerAttrGet(min_type, @intCast(mv.min));
                 const min_const = self.createConstant(block, min_attr, min_type, loc);
-                
+
                 var cmp_state = h.opState("arith.cmpi", loc);
                 const pred_id = h.identifier(self.ctx, "predicate");
                 const pred_uge_attr = c.mlirIntegerAttrGet(c.mlirIntegerTypeGet(self.ctx, 64), 5); // uge
@@ -1497,7 +1496,7 @@ pub const DeclarationLowerer = struct {
                 const max_type = c.mlirValueGetType(value);
                 const max_attr = c.mlirIntegerAttrGet(max_type, @intCast(mv.max));
                 const max_const = self.createConstant(block, max_attr, max_type, loc);
-                
+
                 var cmp_state = h.opState("arith.cmpi", loc);
                 const pred_id = h.identifier(self.ctx, "predicate");
                 const pred_ule_attr = c.mlirIntegerAttrGet(c.mlirIntegerTypeGet(self.ctx, 64), 3); // ule

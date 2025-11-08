@@ -536,6 +536,80 @@ def Ora_InvariantOp : Ora_Op<"invariant"> {
   let arguments = (ins I1:$condition);
 }
 
+def Ora_AssertOp : Ora_Op<"assert"> {
+  let summary = "Assertion operation";
+  let description = [{
+    Asserts a condition that must be true. Can be runtime or ghost (specification-only).
+    
+    Example:
+    ```mlir
+    ora.assert %condition : i1
+    ```
+  }];
+  
+  let arguments = (ins I1:$condition, OptionalAttr<StrAttr>:$message);
+}
+
+def Ora_DecreasesOp : Ora_Op<"decreases"> {
+  let summary = "Loop termination measure";
+  let description = [{
+    Specifies a termination measure that must decrease on each loop iteration.
+    Used for formal verification to prove loop termination.
+    
+    Example:
+    ```mlir
+    ora.decreases %measure : i256
+    ```
+  }];
+  
+  let arguments = (ins AnyType:$measure);
+}
+
+def Ora_IncreasesOp : Ora_Op<"increases"> {
+  let summary = "Loop progress measure";
+  let description = [{
+    Specifies a progress measure that must increase on each loop iteration.
+    Used for formal verification to prove loop progress.
+    
+    Example:
+    ```mlir
+    ora.increases %measure : i256
+    ```
+  }];
+  
+  let arguments = (ins AnyType:$measure);
+}
+
+def Ora_AssumeOp : Ora_Op<"assume"> {
+  let summary = "Assume operation";
+  let description = [{
+    Assumes a condition for formal verification. The condition is assumed to be true
+    for subsequent verification steps.
+    
+    Example:
+    ```mlir
+    ora.assume %condition : i1
+    ```
+  }];
+  
+  let arguments = (ins I1:$condition);
+}
+
+def Ora_HavocOp : Ora_Op<"havoc"> {
+  let summary = "Havoc operation";
+  let description = [{
+    Models unknown state for a variable. The variable can take any value after havoc.
+    Used for formal verification to model non-deterministic behavior.
+    
+    Example:
+    ```mlir
+    ora.havoc "variable_name"
+    ```
+  }];
+  
+  let arguments = (ins StrAttr:$variable_name);
+}
+
 def Ora_OldOp : Ora_PureOp<"old"> {
   let summary = "Old value reference";
   let description = [{

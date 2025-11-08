@@ -280,6 +280,38 @@ pub const DeclarationParser = struct {
             try ensures_clauses.append(self.base.arena.allocator(), condition_ptr);
         }
 
+        // Parse modifies clause (frame conditions)
+        var modifies_clause: ?[]*ast.Expressions.ExprNode = null;
+        if (self.base.match(.Modifies)) {
+            _ = try self.base.consume(.LeftParen, "Expected '(' after 'modifies'");
+
+            var modifies_list = std.ArrayList(*ast.Expressions.ExprNode){};
+            defer modifies_list.deinit(self.base.arena.allocator());
+
+            // Parse expression list (comma-separated)
+            if (!self.base.check(.RightParen)) {
+                repeat: while (true) {
+                    expr_parser.base.current = self.base.current;
+                    const expr = try expr_parser.parseExpression();
+                    self.base.current = expr_parser.base.current;
+
+                    const expr_ptr = try self.base.arena.createNode(ast.Expressions.ExprNode);
+                    expr_ptr.* = expr;
+                    try modifies_list.append(self.base.arena.allocator(), expr_ptr);
+
+                    if (!self.base.match(.Comma)) break :repeat;
+                }
+            }
+
+            _ = try self.base.consume(.RightParen, "Expected ')' after modifies list");
+            if (self.base.match(.Semicolon)) {
+                try self.base.errorAtCurrent("Unexpected ';' after modifies(...) (no semicolon allowed)");
+                return error.UnexpectedToken;
+            }
+
+            modifies_clause = try modifies_list.toOwnedSlice(self.base.arena.allocator());
+        }
+
         // Parse function body - delegate to statement parser
         // Placeholder body: parser_core will parse the real block with StatementParser
         // Do not consume any tokens here; leave current at '{'
@@ -295,6 +327,7 @@ pub const DeclarationParser = struct {
             .is_inline = is_inline,
             .requires_clauses = try requires_clauses.toOwnedSlice(self.base.arena.allocator()),
             .ensures_clauses = try ensures_clauses.toOwnedSlice(self.base.arena.allocator()),
+            .modifies_clause = modifies_clause,
             .span = self.base.spanFromToken(name_token),
         };
     }

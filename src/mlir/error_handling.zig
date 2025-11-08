@@ -404,6 +404,8 @@ pub fn getSpanFromStatement(stmt: *const lib.ast.Statements.StmtNode) lib.ast.So
         .Invariant => |invariant| invariant.span,
         .Requires => |requires| requires.span,
         .Ensures => |ensures| ensures.span,
+        .Assume => |assume| assume.span,
+        .Havoc => |havoc| havoc.span,
         .Expr => |expr| getSpanFromExpression(&expr),
         .LabeledBlock => |labeled_block| labeled_block.span,
     };

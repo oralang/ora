@@ -126,6 +126,16 @@ pub const StatementParser = struct {
             return try self.parseAssertStatement();
         }
 
+        // Assume statements (formal verification)
+        if (self.base.match(.Assume)) {
+            return try self.parseAssumeStatement();
+        }
+
+        // Havoc statements (formal verification)
+        if (self.base.match(.Havoc)) {
+            return try self.parseHavocStatement();
+        }
+
         // Requires statements
         if (self.base.match(.Requires)) {
             return try self.parseRequiresStatement();
@@ -331,6 +341,39 @@ pub const StatementParser = struct {
         return ast.Statements.StmtNode{ .Requires = ast.Statements.RequiresNode{
             .condition = condition,
             .span = ParserCommon.makeSpan(requires_token),
+        } };
+    }
+
+    /// Parse assume statement (formal verification)
+    fn parseAssumeStatement(self: *StatementParser) common.ParserError!ast.Statements.StmtNode {
+        const assume_token = self.base.previous();
+        _ = try self.base.consume(.LeftParen, "Expected '(' after 'assume'");
+
+        // Parse the condition expression
+        self.syncSubParsers();
+        const condition = try self.expr_parser.parseExpression();
+        self.updateFromSubParser(self.expr_parser.base.current);
+
+        _ = try self.base.consume(.RightParen, "Expected ')' after assume condition");
+        _ = try self.base.consume(.Semicolon, "Expected ';' after assume statement");
+
+        return ast.Statements.StmtNode{ .Assume = ast.Statements.AssumeNode{
+            .condition = condition,
+            .span = ParserCommon.makeSpan(assume_token),
+        } };
+    }
+
+    /// Parse havoc statement (formal verification)
+    fn parseHavocStatement(self: *StatementParser) common.ParserError!ast.Statements.StmtNode {
+        const havoc_token = self.base.previous();
+        const var_token = try self.base.consume(.Identifier, "Expected variable name after 'havoc'");
+        _ = try self.base.consume(.Semicolon, "Expected ';' after havoc statement");
+
+        const var_name = try self.base.arena.createString(var_token.lexeme);
+
+        return ast.Statements.StmtNode{ .Havoc = ast.Statements.HavocNode{
+            .variable_name = var_name,
+            .span = ParserCommon.makeSpan(havoc_token),
         } };
     }
 
@@ -644,12 +687,40 @@ pub const StatementParser = struct {
             try invariants.append(self.base.arena.allocator(), inv_expr);
         }
 
+        // Parse optional decreases clause
+        var decreases_expr: ?*ast.Expressions.ExprNode = null;
+        if (self.base.match(.Decreases)) {
+            _ = try self.base.consume(.LeftParen, "Expected '(' after 'decreases'");
+            self.syncSubParsers();
+            const dec_expr = try self.expr_parser.parseExpression();
+            self.updateFromSubParser(self.expr_parser.base.current);
+            _ = try self.base.consume(.RightParen, "Expected ')' after decreases expression");
+            const dec_ptr = try self.base.arena.createNode(ast.Expressions.ExprNode);
+            dec_ptr.* = dec_expr;
+            decreases_expr = dec_ptr;
+        }
+
+        // Parse optional increases clause
+        var increases_expr: ?*ast.Expressions.ExprNode = null;
+        if (self.base.match(.Increases)) {
+            _ = try self.base.consume(.LeftParen, "Expected '(' after 'increases'");
+            self.syncSubParsers();
+            const inc_expr = try self.expr_parser.parseExpression();
+            self.updateFromSubParser(self.expr_parser.base.current);
+            _ = try self.base.consume(.RightParen, "Expected ')' after increases expression");
+            const inc_ptr = try self.base.arena.createNode(ast.Expressions.ExprNode);
+            inc_ptr.* = inc_expr;
+            increases_expr = inc_ptr;
+        }
+
         const body = try self.parseBlock();
 
         return ast.Statements.StmtNode{ .While = ast.Statements.WhileNode{
             .condition = condition,
             .body = body,
             .invariants = try invariants.toOwnedSlice(self.base.arena.allocator()),
+            .decreases = decreases_expr,
+            .increases = increases_expr,
             .span = self.base.spanFromToken(self.base.previous()),
         } };
     }
@@ -690,6 +761,32 @@ pub const StatementParser = struct {
             self.updateFromSubParser(self.expr_parser.base.current);
             _ = try self.base.consume(.RightParen, "Expected ')' after invariant expression");
             try invariants.append(self.base.arena.allocator(), inv_expr);
+        }
+
+        // Parse optional decreases clause
+        var decreases_expr: ?*ast.Expressions.ExprNode = null;
+        if (self.base.match(.Decreases)) {
+            _ = try self.base.consume(.LeftParen, "Expected '(' after 'decreases'");
+            self.syncSubParsers();
+            const dec_expr = try self.expr_parser.parseExpression();
+            self.updateFromSubParser(self.expr_parser.base.current);
+            _ = try self.base.consume(.RightParen, "Expected ')' after decreases expression");
+            const dec_ptr = try self.base.arena.createNode(ast.Expressions.ExprNode);
+            dec_ptr.* = dec_expr;
+            decreases_expr = dec_ptr;
+        }
+
+        // Parse optional increases clause
+        var increases_expr: ?*ast.Expressions.ExprNode = null;
+        if (self.base.match(.Increases)) {
+            _ = try self.base.consume(.LeftParen, "Expected '(' after 'increases'");
+            self.syncSubParsers();
+            const inc_expr = try self.expr_parser.parseExpression();
+            self.updateFromSubParser(self.expr_parser.base.current);
+            _ = try self.base.consume(.RightParen, "Expected ')' after increases expression");
+            const inc_ptr = try self.base.arena.createNode(ast.Expressions.ExprNode);
+            inc_ptr.* = inc_expr;
+            increases_expr = inc_ptr;
         }
 
         const body = try self.parseBlock();

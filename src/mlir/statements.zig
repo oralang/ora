@@ -128,9 +128,7 @@ pub const StatementLowerer = struct {
                 try self.lowerUnlock(&unlock_stmt);
             },
             .Assert => |assert_stmt| {
-                // For now, skip assert statements in MLIR lowering
-                // TODO: Implement runtime assertion lowering for non-ghost asserts
-                _ = assert_stmt;
+                try self.lowerAssert(&assert_stmt);
             },
             .Move => |move_stmt| {
                 try self.lowerMove(&move_stmt);
@@ -149,6 +147,12 @@ pub const StatementLowerer = struct {
             },
             .Ensures => |ensures| {
                 try self.lowerEnsures(&ensures);
+            },
+            .Assume => |assume| {
+                try self.lowerAssume(&assume);
+            },
+            .Havoc => |havoc| {
+                try self.lowerHavoc(&havoc);
             },
             .Expr => |expr| {
                 try self.lowerExpressionStatement(&expr);
@@ -196,6 +200,8 @@ pub const StatementLowerer = struct {
             .Invariant => |invariant| invariant.span,
             .Requires => |requires| requires.span,
             .Ensures => |ensures| ensures.span,
+            .Assume => |assume| assume.span,
+            .Havoc => |havoc| havoc.span,
             .Expr => |expr| getExpressionSpan(&expr),
             .LabeledBlock => |labeled_block| labeled_block.span,
         };
@@ -1224,8 +1230,29 @@ pub const StatementLowerer = struct {
             // Create ora.invariant operation
             var inv_state = h.opState("ora.invariant", loc);
             c.mlirOperationStateAddOperands(&inv_state, 1, @ptrCast(&invariant_value));
+            self.addVerificationAttributes(&inv_state, "invariant", "loop_invariant");
             const inv_op = c.mlirOperationCreate(&inv_state);
             h.appendOp(before_block, inv_op);
+        }
+
+        // Lower decreases clause if present
+        if (while_stmt.decreases) |decreases_expr| {
+            const decreases_value = self.expr_lowerer.lowerExpression(decreases_expr);
+            var dec_state = h.opState("ora.decreases", loc);
+            c.mlirOperationStateAddOperands(&dec_state, 1, @ptrCast(&decreases_value));
+            self.addVerificationAttributes(&dec_state, "decreases", "loop_termination_measure");
+            const dec_op = c.mlirOperationCreate(&dec_state);
+            h.appendOp(before_block, dec_op);
+        }
+
+        // Lower increases clause if present
+        if (while_stmt.increases) |increases_expr| {
+            const increases_value = self.expr_lowerer.lowerExpression(increases_expr);
+            var inc_state = h.opState("ora.increases", loc);
+            c.mlirOperationStateAddOperands(&inc_state, 1, @ptrCast(&increases_value));
+            self.addVerificationAttributes(&inc_state, "increases", "loop_progress_measure");
+            const inc_op = c.mlirOperationCreate(&inc_state);
+            h.appendOp(before_block, inc_op);
         }
 
         // Lower body in after region
@@ -1246,19 +1273,19 @@ pub const StatementLowerer = struct {
         // Handle different loop patterns
         switch (for_stmt.pattern) {
             .Single => |single| {
-                try self.lowerSimpleForLoop(single.name, iterable, for_stmt.body, loc);
+                try self.lowerSimpleForLoop(single.name, iterable, for_stmt.body, for_stmt.invariants, for_stmt.decreases, for_stmt.increases, loc);
             },
             .IndexPair => |pair| {
-                try self.lowerIndexedForLoop(pair.item, pair.index, iterable, for_stmt.body, loc);
+                try self.lowerIndexedForLoop(pair.item, pair.index, iterable, for_stmt.body, for_stmt.invariants, for_stmt.decreases, for_stmt.increases, loc);
             },
             .Destructured => |destructured| {
-                try self.lowerDestructuredForLoop(destructured.pattern, iterable, for_stmt.body, loc);
+                try self.lowerDestructuredForLoop(destructured.pattern, iterable, for_stmt.body, for_stmt.invariants, for_stmt.decreases, for_stmt.increases, loc);
             },
         }
     }
 
     /// Lower simple for loop (for (iterable) |item| body)
-    fn lowerSimpleForLoop(self: *const StatementLowerer, item_name: []const u8, iterable: c.MlirValue, body: lib.ast.Statements.BlockNode, loc: c.MlirLocation) LoweringError!void {
+    fn lowerSimpleForLoop(self: *const StatementLowerer, item_name: []const u8, iterable: c.MlirValue, body: lib.ast.Statements.BlockNode, invariants: []lib.ast.Expressions.ExprNode, decreases: ?*lib.ast.Expressions.ExprNode, increases: ?*lib.ast.Expressions.ExprNode, loc: c.MlirLocation) LoweringError!void {
         // Create scf.for operation
         var state = h.opState("scf.for", loc);
 
@@ -1329,6 +1356,36 @@ pub const StatementLowerer = struct {
             };
         }
 
+        // Lower loop invariants if present
+        for (invariants) |*invariant| {
+            const invariant_value = self.expr_lowerer.lowerExpression(invariant);
+            var inv_state = h.opState("ora.invariant", loc);
+            c.mlirOperationStateAddOperands(&inv_state, 1, @ptrCast(&invariant_value));
+            self.addVerificationAttributes(&inv_state, "invariant", "loop_invariant");
+            const inv_op = c.mlirOperationCreate(&inv_state);
+            h.appendOp(body_block, inv_op);
+        }
+
+        // Lower decreases clause if present
+        if (decreases) |decreases_expr| {
+            const decreases_value = self.expr_lowerer.lowerExpression(decreases_expr);
+            var dec_state = h.opState("ora.decreases", loc);
+            c.mlirOperationStateAddOperands(&dec_state, 1, @ptrCast(&decreases_value));
+            self.addVerificationAttributes(&dec_state, "decreases", "loop_termination_measure");
+            const dec_op = c.mlirOperationCreate(&dec_state);
+            h.appendOp(body_block, dec_op);
+        }
+
+        // Lower increases clause if present
+        if (increases) |increases_expr| {
+            const increases_value = self.expr_lowerer.lowerExpression(increases_expr);
+            var inc_state = h.opState("ora.increases", loc);
+            c.mlirOperationStateAddOperands(&inc_state, 1, @ptrCast(&increases_value));
+            self.addVerificationAttributes(&inc_state, "increases", "loop_progress_measure");
+            const inc_op = c.mlirOperationCreate(&inc_state);
+            h.appendOp(body_block, inc_op);
+        }
+
         // Lower the loop body
         try self.lowerBlockBody(body, body_block);
 
@@ -1338,7 +1395,7 @@ pub const StatementLowerer = struct {
     }
 
     /// Lower indexed for loop (for (iterable) |item, index| body)
-    fn lowerIndexedForLoop(self: *const StatementLowerer, item_name: []const u8, index_name: []const u8, iterable: c.MlirValue, body: lib.ast.Statements.BlockNode, loc: c.MlirLocation) LoweringError!void {
+    fn lowerIndexedForLoop(self: *const StatementLowerer, item_name: []const u8, index_name: []const u8, iterable: c.MlirValue, body: lib.ast.Statements.BlockNode, invariants: []lib.ast.Expressions.ExprNode, decreases: ?*lib.ast.Expressions.ExprNode, increases: ?*lib.ast.Expressions.ExprNode, loc: c.MlirLocation) LoweringError!void {
         // Create scf.for operation similar to simple for loop
         var state = h.opState("scf.for", loc);
 
@@ -1398,6 +1455,36 @@ pub const StatementLowerer = struct {
             };
         }
 
+        // Lower loop invariants if present
+        for (invariants) |*invariant| {
+            const invariant_value = self.expr_lowerer.lowerExpression(invariant);
+            var inv_state = h.opState("ora.invariant", loc);
+            c.mlirOperationStateAddOperands(&inv_state, 1, @ptrCast(&invariant_value));
+            self.addVerificationAttributes(&inv_state, "invariant", "loop_invariant");
+            const inv_op = c.mlirOperationCreate(&inv_state);
+            h.appendOp(body_block, inv_op);
+        }
+
+        // Lower decreases clause if present
+        if (decreases) |decreases_expr| {
+            const decreases_value = self.expr_lowerer.lowerExpression(decreases_expr);
+            var dec_state = h.opState("ora.decreases", loc);
+            c.mlirOperationStateAddOperands(&dec_state, 1, @ptrCast(&decreases_value));
+            self.addVerificationAttributes(&dec_state, "decreases", "loop_termination_measure");
+            const dec_op = c.mlirOperationCreate(&dec_state);
+            h.appendOp(body_block, dec_op);
+        }
+
+        // Lower increases clause if present
+        if (increases) |increases_expr| {
+            const increases_value = self.expr_lowerer.lowerExpression(increases_expr);
+            var inc_state = h.opState("ora.increases", loc);
+            c.mlirOperationStateAddOperands(&inc_state, 1, @ptrCast(&increases_value));
+            self.addVerificationAttributes(&inc_state, "increases", "loop_progress_measure");
+            const inc_op = c.mlirOperationCreate(&inc_state);
+            h.appendOp(body_block, inc_op);
+        }
+
         // Lower the loop body
         try self.lowerBlockBody(body, body_block);
 
@@ -1407,7 +1494,7 @@ pub const StatementLowerer = struct {
     }
 
     /// Lower destructured for loop (for (iterable) |.{field1, field2}| body)
-    fn lowerDestructuredForLoop(self: *const StatementLowerer, pattern: lib.ast.Expressions.DestructuringPattern, iterable: c.MlirValue, body: lib.ast.Statements.BlockNode, loc: c.MlirLocation) LoweringError!void {
+    fn lowerDestructuredForLoop(self: *const StatementLowerer, pattern: lib.ast.Expressions.DestructuringPattern, iterable: c.MlirValue, body: lib.ast.Statements.BlockNode, invariants: []lib.ast.Expressions.ExprNode, decreases: ?*lib.ast.Expressions.ExprNode, increases: ?*lib.ast.Expressions.ExprNode, loc: c.MlirLocation) LoweringError!void {
         // Create scf.for operation similar to simple for loop
         var state = h.opState("scf.for", loc);
 
@@ -1476,6 +1563,36 @@ pub const StatementLowerer = struct {
                     std.debug.print("WARNING: Unsupported destructuring pattern type\n", .{});
                 },
             }
+        }
+
+        // Lower loop invariants if present
+        for (invariants) |*invariant| {
+            const invariant_value = self.expr_lowerer.lowerExpression(invariant);
+            var inv_state = h.opState("ora.invariant", loc);
+            c.mlirOperationStateAddOperands(&inv_state, 1, @ptrCast(&invariant_value));
+            self.addVerificationAttributes(&inv_state, "invariant", "loop_invariant");
+            const inv_op = c.mlirOperationCreate(&inv_state);
+            h.appendOp(body_block, inv_op);
+        }
+
+        // Lower decreases clause if present
+        if (decreases) |decreases_expr| {
+            const decreases_value = self.expr_lowerer.lowerExpression(decreases_expr);
+            var dec_state = h.opState("ora.decreases", loc);
+            c.mlirOperationStateAddOperands(&dec_state, 1, @ptrCast(&decreases_value));
+            self.addVerificationAttributes(&dec_state, "decreases", "loop_termination_measure");
+            const dec_op = c.mlirOperationCreate(&dec_state);
+            h.appendOp(body_block, dec_op);
+        }
+
+        // Lower increases clause if present
+        if (increases) |increases_expr| {
+            const increases_value = self.expr_lowerer.lowerExpression(increases_expr);
+            var inc_state = h.opState("ora.increases", loc);
+            c.mlirOperationStateAddOperands(&inc_state, 1, @ptrCast(&increases_value));
+            self.addVerificationAttributes(&inc_state, "increases", "loop_progress_measure");
+            const inc_op = c.mlirOperationCreate(&inc_state);
+            h.appendOp(body_block, inc_op);
         }
 
         // Lower the loop body
@@ -2248,7 +2365,7 @@ pub const StatementLowerer = struct {
         // Create catch region if present
         if (try_stmt.catch_block) |catch_block| {
             const catch_region = c.mlirRegionCreate();
-            
+
             // Create catch block with error argument if error variable is present
             var catch_block_mlir: c.MlirBlock = undefined;
             if (catch_block.error_variable) |error_var| {
@@ -2258,7 +2375,7 @@ pub const StatementLowerer = struct {
                 const error_types = [_]c.MlirType{error_type};
                 const error_locs = [_]c.MlirLocation{error_loc};
                 catch_block_mlir = c.mlirBlockCreate(1, &error_types, &error_locs);
-                
+
                 // Get the error block argument and add it to local variable map
                 const error_arg = c.mlirBlockGetArgument(catch_block_mlir, 0);
                 if (self.local_var_map) |lvm| {
@@ -2269,7 +2386,7 @@ pub const StatementLowerer = struct {
             } else {
                 catch_block_mlir = c.mlirBlockCreate(0, null, null);
             }
-            
+
             c.mlirRegionInsertOwnedBlock(catch_region, 0, catch_block_mlir);
             c.mlirOperationStateAddOwnedRegions(&state, 1, @ptrCast(&catch_region));
 
@@ -2325,6 +2442,91 @@ pub const StatementLowerer = struct {
         h.appendOp(self.block, op);
     }
 
+    /// Add verification attributes to an operation
+    fn addVerificationAttributes(self: *const StatementLowerer, state: *c.MlirOperationState, verification_type: []const u8, context: []const u8) void {
+        var attributes = std.ArrayList(c.MlirNamedAttribute){};
+        defer attributes.deinit(self.allocator);
+
+        // Add verification marker
+        const verification_attr = c.mlirBoolAttrGet(self.ctx, 1);
+        const verification_id = h.identifier(self.ctx, "ora.verification");
+        attributes.append(self.allocator, c.mlirNamedAttributeGet(verification_id, verification_attr)) catch {};
+
+        // Add verification type (requires, ensures, invariant, assert)
+        const type_id = h.identifier(self.ctx, "ora.verification_type");
+        const type_attr = h.stringAttr(self.ctx, verification_type);
+        attributes.append(self.allocator, c.mlirNamedAttributeGet(type_id, type_attr)) catch {};
+
+        // Add verification context
+        const context_id = h.identifier(self.ctx, "ora.verification_context");
+        const context_attr = h.stringAttr(self.ctx, context);
+        attributes.append(self.allocator, c.mlirNamedAttributeGet(context_id, context_attr)) catch {};
+
+        // Add formal verification marker
+        const formal_id = h.identifier(self.ctx, "ora.formal");
+        const formal_attr = c.mlirBoolAttrGet(self.ctx, 1);
+        attributes.append(self.allocator, c.mlirNamedAttributeGet(formal_id, formal_attr)) catch {};
+
+        // Apply all attributes
+        if (attributes.items.len > 0) {
+            c.mlirOperationStateAddAttributes(state, @intCast(attributes.items.len), attributes.items.ptr);
+        }
+    }
+
+    /// Lower assert statements for runtime or ghost assertions
+    pub fn lowerAssert(self: *const StatementLowerer, assert_stmt: *const lib.ast.Statements.AssertNode) LoweringError!void {
+        const loc = self.fileLoc(assert_stmt.span);
+
+        // Lower the condition expression
+        const condition = self.expr_lowerer.lowerExpression(&assert_stmt.condition);
+
+        // Create ora.assert operation with verification attributes
+        var state = h.opState("ora.assert", loc);
+        c.mlirOperationStateAddOperands(&state, 1, @ptrCast(&condition));
+
+        // Collect all attributes
+        var attributes = std.ArrayList(c.MlirNamedAttribute){};
+        defer attributes.deinit(self.allocator);
+
+        // Add optional message attribute
+        if (assert_stmt.message) |msg| {
+            const msg_attr = h.stringAttr(self.ctx, msg);
+            const msg_id = h.identifier(self.ctx, "message");
+            attributes.append(self.allocator, c.mlirNamedAttributeGet(msg_id, msg_attr)) catch {};
+        }
+
+        // Add verification attributes (for both runtime and ghost assertions)
+        const context_str = if (assert_stmt.is_ghost) "ghost_assertion" else "runtime_assertion";
+
+        // Add verification marker
+        const verification_attr = c.mlirBoolAttrGet(self.ctx, 1);
+        const verification_id = h.identifier(self.ctx, "ora.verification");
+        attributes.append(self.allocator, c.mlirNamedAttributeGet(verification_id, verification_attr)) catch {};
+
+        // Add verification type
+        const type_id = h.identifier(self.ctx, "ora.verification_type");
+        const type_attr = h.stringAttr(self.ctx, "assert");
+        attributes.append(self.allocator, c.mlirNamedAttributeGet(type_id, type_attr)) catch {};
+
+        // Add verification context
+        const context_id = h.identifier(self.ctx, "ora.verification_context");
+        const context_attr = h.stringAttr(self.ctx, context_str);
+        attributes.append(self.allocator, c.mlirNamedAttributeGet(context_id, context_attr)) catch {};
+
+        // Add formal verification marker
+        const formal_id = h.identifier(self.ctx, "ora.formal");
+        const formal_attr = c.mlirBoolAttrGet(self.ctx, 1);
+        attributes.append(self.allocator, c.mlirNamedAttributeGet(formal_id, formal_attr)) catch {};
+
+        // Apply all attributes at once
+        if (attributes.items.len > 0) {
+            c.mlirOperationStateAddAttributes(&state, @intCast(attributes.items.len), attributes.items.ptr);
+        }
+
+        const assert_op = c.mlirOperationCreate(&state);
+        h.appendOp(self.block, assert_op);
+    }
+
     /// Lower invariant statements for loop invariants
     pub fn lowerInvariant(self: *const StatementLowerer, invariant: *const lib.ast.Statements.InvariantNode) LoweringError!void {
         const loc = self.fileLoc(invariant.span);
@@ -2332,9 +2534,12 @@ pub const StatementLowerer = struct {
         // Lower the condition expression
         const condition = self.expr_lowerer.lowerExpression(&invariant.condition);
 
-        // Create ora.invariant operation
+        // Create ora.invariant operation using dialect helper
         var state = h.opState("ora.invariant", loc);
         c.mlirOperationStateAddOperands(&state, 1, @ptrCast(&condition));
+
+        // Add verification attributes
+        self.addVerificationAttributes(&state, "invariant", "loop_invariant");
 
         const op = c.mlirOperationCreate(&state);
         h.appendOp(self.block, op);
@@ -2347,9 +2552,12 @@ pub const StatementLowerer = struct {
         // Lower the condition expression
         const condition = self.expr_lowerer.lowerExpression(&requires.condition);
 
-        // Create ora.requires operation
+        // Create ora.requires operation using dialect helper
         var state = h.opState("ora.requires", loc);
         c.mlirOperationStateAddOperands(&state, 1, @ptrCast(&condition));
+
+        // Add verification attributes
+        self.addVerificationAttributes(&state, "requires", "function_precondition");
 
         const op = c.mlirOperationCreate(&state);
         h.appendOp(self.block, op);
@@ -2362,9 +2570,72 @@ pub const StatementLowerer = struct {
         // Lower the condition expression
         const condition = self.expr_lowerer.lowerExpression(&ensures.condition);
 
-        // Create ora.ensures operation
+        // Create ora.ensures operation using dialect helper
         var state = h.opState("ora.ensures", loc);
         c.mlirOperationStateAddOperands(&state, 1, @ptrCast(&condition));
+
+        // Add verification attributes
+        self.addVerificationAttributes(&state, "ensures", "function_postcondition");
+
+        const op = c.mlirOperationCreate(&state);
+        h.appendOp(self.block, op);
+    }
+
+    /// Lower assume statements for formal verification assumptions
+    pub fn lowerAssume(self: *const StatementLowerer, assume: *const lib.ast.Statements.AssumeNode) LoweringError!void {
+        const loc = self.fileLoc(assume.span);
+
+        // Lower the condition expression
+        const condition = self.expr_lowerer.lowerExpression(&assume.condition);
+
+        // Create ora.assume operation with verification attributes
+        var state = h.opState("ora.assume", loc);
+        c.mlirOperationStateAddOperands(&state, 1, @ptrCast(&condition));
+
+        // Add verification attributes
+        self.addVerificationAttributes(&state, "assume", "verification_assumption");
+
+        const op = c.mlirOperationCreate(&state);
+        h.appendOp(self.block, op);
+    }
+
+    /// Lower havoc statements for formal verification
+    pub fn lowerHavoc(self: *const StatementLowerer, havoc: *const lib.ast.Statements.HavocNode) LoweringError!void {
+        const loc = self.fileLoc(havoc.span);
+
+        // Create ora.havoc operation with verification attributes
+        var state = h.opState("ora.havoc", loc);
+
+        // Collect all attributes
+        var attributes = std.ArrayList(c.MlirNamedAttribute){};
+        defer attributes.deinit(self.allocator);
+
+        // Add variable name as attribute
+        const var_attr = h.stringAttr(self.ctx, havoc.variable_name);
+        const var_id = h.identifier(self.ctx, "variable_name");
+        attributes.append(self.allocator, c.mlirNamedAttributeGet(var_id, var_attr)) catch {};
+
+        // Add verification attributes
+        const verification_attr = c.mlirBoolAttrGet(self.ctx, 1);
+        const verification_id = h.identifier(self.ctx, "ora.verification");
+        attributes.append(self.allocator, c.mlirNamedAttributeGet(verification_id, verification_attr)) catch {};
+
+        const type_id = h.identifier(self.ctx, "ora.verification_type");
+        const type_attr = h.stringAttr(self.ctx, "havoc");
+        attributes.append(self.allocator, c.mlirNamedAttributeGet(type_id, type_attr)) catch {};
+
+        const context_id = h.identifier(self.ctx, "ora.verification_context");
+        const context_attr = h.stringAttr(self.ctx, "verification_havoc");
+        attributes.append(self.allocator, c.mlirNamedAttributeGet(context_id, context_attr)) catch {};
+
+        const formal_id = h.identifier(self.ctx, "ora.formal");
+        const formal_attr = c.mlirBoolAttrGet(self.ctx, 1);
+        attributes.append(self.allocator, c.mlirNamedAttributeGet(formal_id, formal_attr)) catch {};
+
+        // Apply all attributes at once
+        if (attributes.items.len > 0) {
+            c.mlirOperationStateAddAttributes(&state, @intCast(attributes.items.len), attributes.items.ptr);
+        }
 
         const op = c.mlirOperationCreate(&state);
         h.appendOp(self.block, op);
@@ -2476,14 +2747,14 @@ pub const StatementLowerer = struct {
                 const min_type = c.mlirValueGetType(value);
                 const min_attr = c.mlirIntegerAttrGet(min_type, @intCast(mv.min));
                 const min_const = self.createConstantValue(min_attr, min_type, loc);
-                
+
                 var cmp_state = h.opState("arith.cmpi", loc);
                 const pred_id = h.identifier(self.ctx, "predicate");
                 const pred_uge_attr = c.mlirIntegerAttrGet(c.mlirIntegerTypeGet(self.ctx, 64), 5); // uge
                 var attrs = [_]c.MlirNamedAttribute{c.mlirNamedAttributeGet(pred_id, pred_uge_attr)};
                 c.mlirOperationStateAddAttributes(&cmp_state, attrs.len, &attrs);
                 c.mlirOperationStateAddOperands(&cmp_state, 2, @ptrCast(&[_]c.MlirValue{ value, min_const }));
-c.mlirOperationStateAddResults(&cmp_state, 1, @ptrCast(&h.boolType(self.ctx)));
+                c.mlirOperationStateAddResults(&cmp_state, 1, @ptrCast(&h.boolType(self.ctx)));
                 const cmp_op = c.mlirOperationCreate(&cmp_state);
                 h.appendOp(self.block, cmp_op);
                 const condition = h.getResult(cmp_op, 0);
@@ -2504,7 +2775,7 @@ c.mlirOperationStateAddResults(&cmp_state, 1, @ptrCast(&h.boolType(self.ctx)));
                 const max_type = c.mlirValueGetType(value);
                 const max_attr = c.mlirIntegerAttrGet(max_type, @intCast(mv.max));
                 const max_const = self.createConstantValue(max_attr, max_type, loc);
-                
+
                 var cmp_state = h.opState("arith.cmpi", loc);
                 const pred_id = h.identifier(self.ctx, "predicate");
                 const pred_ule_attr = c.mlirIntegerAttrGet(c.mlirIntegerTypeGet(self.ctx, 64), 3); // ule

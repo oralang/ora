@@ -41,6 +41,8 @@ pub const StmtNode = union(enum) {
     Invariant: InvariantNode, // Loop invariants
     Requires: RequiresNode,
     Ensures: EnsuresNode,
+    Assume: AssumeNode, // assume statements (formal verification)
+    Havoc: HavocNode, // havoc statements (formal verification)
     Switch: SwitchNode, // switch statements
     Move: MoveNode, // expr from source -> dest : amount
     LabeledBlock: LabeledBlockNode, // label: { statements }
@@ -60,6 +62,8 @@ pub const StmtNode = union(enum) {
             .Invariant => true, // Loop invariants are always specification-only
             .Requires => true, // Preconditions are always specification-only
             .Ensures => true, // Postconditions are always specification-only
+            .Assume => true, // Assume statements are always specification-only
+            .Havoc => true, // Havoc statements are always specification-only
             else => false,
         };
     }
@@ -81,6 +85,8 @@ pub const WhileNode = struct {
     condition: ExprNode,
     body: BlockNode,
     invariants: []ExprNode, // Loop invariants
+    decreases: ?*ExprNode = null, // Termination measure (decreases)
+    increases: ?*ExprNode = null, // Progress measure (increases)
     span: SourceSpan,
 };
 
@@ -109,6 +115,8 @@ pub const ForLoopNode = struct {
     pattern: LoopPattern, // Enhanced from simple var names
     body: BlockNode, // Loop body block
     invariants: []ExprNode, // Loop invariants (formal verification)
+    decreases: ?*ExprNode = null, // Termination measure (decreases)
+    increases: ?*ExprNode = null, // Progress measure (increases)
     span: SourceSpan,
 };
 
@@ -145,6 +153,30 @@ pub const RequiresNode = struct {
 pub const EnsuresNode = struct {
     condition: ExprNode,
     span: SourceSpan,
+};
+
+/// Assume statement: assume a condition for verification
+/// Example: assume(amount > 0);
+pub const AssumeNode = struct {
+    condition: ExprNode,
+    span: SourceSpan,
+
+    /// Metadata: Always specification-only
+    pub fn isSpecificationOnly(_: *const AssumeNode) bool {
+        return true;
+    }
+};
+
+/// Havoc statement: model unknown state for a variable
+/// Example: havoc balance;
+pub const HavocNode = struct {
+    variable_name: []const u8, // Variable to havoc
+    span: SourceSpan,
+
+    /// Metadata: Always specification-only
+    pub fn isSpecificationOnly(_: *const HavocNode) bool {
+        return true;
+    }
 };
 
 /// Error Declaration
@@ -375,6 +407,12 @@ pub fn deinitStmtNode(allocator: std.mem.Allocator, stmt: *StmtNode) void {
         },
         .Assert => |*assert_stmt| {
             expressions.deinitExprNode(allocator, &assert_stmt.condition);
+        },
+        .Assume => |*assume| {
+            expressions.deinitExprNode(allocator, &assume.condition);
+        },
+        .Havoc => {
+            // Havoc only has a variable name (string), no cleanup needed
         },
     }
 }
