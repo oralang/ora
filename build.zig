@@ -101,7 +101,8 @@ pub fn build(b: *std.Build) void {
 
     // Build and link MLIR (required) - only for executable, not library
     const mlir_step = buildMlirLibraries(b, target, optimize);
-    linkMlirLibraries(b, exe, mlir_step, target);
+    const ora_dialect_step = buildOraDialectLibrary(b, mlir_step, target, optimize);
+    linkMlirLibraries(b, exe, mlir_step, ora_dialect_step, target);
 
     // Build and link Z3 (for formal verification) - only for executable
     const z3_step = buildZ3Libraries(b, target, optimize);
@@ -722,10 +723,132 @@ fn buildMlirLibrariesImpl(step: *std.Build.Step, options: std.Build.Step.MakeOpt
     std.log.info("Successfully built MLIR libraries", .{});
 }
 
+/// Build Ora dialect library using CMake
+fn buildOraDialectLibrary(b: *std.Build, mlir_step: *std.Build.Step, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Step {
+    _ = target;
+    _ = optimize;
+
+    const step = b.allocator.create(std.Build.Step) catch @panic("OOM");
+    step.* = std.Build.Step.init(.{
+        .id = .custom,
+        .name = "cmake-build-ora-dialect",
+        .owner = b,
+        .makeFn = buildOraDialectLibraryImpl,
+    });
+    step.dependOn(mlir_step);
+    return step;
+}
+
+/// Implementation of CMake build for Ora dialect library
+fn buildOraDialectLibraryImpl(step: *std.Build.Step, options: std.Build.Step.MakeOptions) anyerror!void {
+    _ = options;
+
+    const b = step.owner;
+    const allocator = b.allocator;
+    const cwd = std.fs.cwd();
+
+    // Create build directory
+    const build_dir = "vendor/ora-dialect-build";
+    cwd.makeDir(build_dir) catch |err| switch (err) {
+        error.PathAlreadyExists => {},
+        else => return err,
+    };
+
+    const install_prefix = "vendor/mlir";
+    const mlir_dir = b.fmt("{s}/lib/cmake/mlir", .{install_prefix});
+
+    // Platform-specific flags
+    const builtin = @import("builtin");
+    var cmake_args = std.array_list.Managed([]const u8).init(allocator);
+    defer cmake_args.deinit();
+
+    // Prefer Ninja generator when available
+    var use_ninja: bool = false;
+    {
+        const probe = std.process.Child.run(.{ .allocator = allocator, .argv = &[_][]const u8{ "ninja", "--version" }, .cwd = "." }) catch null;
+        if (probe) |res| {
+            switch (res.term) {
+                .Exited => |code| {
+                    if (code == 0) use_ninja = true;
+                },
+                else => {},
+            }
+        }
+    }
+
+    try cmake_args.append("cmake");
+    if (use_ninja) {
+        try cmake_args.append("-G");
+        try cmake_args.append("Ninja");
+    }
+    try cmake_args.appendSlice(&[_][]const u8{
+        "-S",
+        "src/mlir/generated",
+        "-B",
+        build_dir,
+        "-DCMAKE_BUILD_TYPE=Release",
+        b.fmt("-DMLIR_DIR={s}", .{mlir_dir}),
+        b.fmt("-DCMAKE_INSTALL_PREFIX={s}", .{install_prefix}),
+    });
+
+    if (builtin.os.tag == .linux) {
+        try cmake_args.append("-DCMAKE_CXX_FLAGS=-stdlib=libc++ -lc++abi");
+        try cmake_args.append("-DCMAKE_CXX_COMPILER=clang++");
+        try cmake_args.append("-DCMAKE_C_COMPILER=clang");
+    } else if (builtin.os.tag == .macos) {
+        try cmake_args.append("-DCMAKE_CXX_FLAGS=-stdlib=libc++");
+    }
+
+    var cfg_child = std.process.Child.init(cmake_args.items, allocator);
+    cfg_child.cwd = ".";
+    cfg_child.stdin_behavior = .Inherit;
+    cfg_child.stdout_behavior = .Inherit;
+    cfg_child.stderr_behavior = .Inherit;
+    const cfg_term = cfg_child.spawnAndWait() catch |err| {
+        std.log.err("Failed to configure Ora dialect CMake: {}", .{err});
+        return err;
+    };
+    switch (cfg_term) {
+        .Exited => |code| if (code != 0) {
+            std.log.err("Ora dialect CMake configure failed with exit code: {}", .{code});
+            return error.CMakeConfigureFailed;
+        },
+        else => {
+            std.log.err("Ora dialect CMake configure did not exit cleanly", .{});
+            return error.CMakeConfigureFailed;
+        },
+    }
+
+    // Build and install
+    var build_args = [_][]const u8{ "cmake", "--build", build_dir, "--parallel", "--target", "install" };
+    var build_child = std.process.Child.init(&build_args, allocator);
+    build_child.cwd = ".";
+    build_child.stdin_behavior = .Inherit;
+    build_child.stdout_behavior = .Inherit;
+    build_child.stderr_behavior = .Inherit;
+    const build_term = build_child.spawnAndWait() catch |err| {
+        std.log.err("Failed to build Ora dialect with CMake: {}", .{err});
+        return err;
+    };
+    switch (build_term) {
+        .Exited => |code| if (code != 0) {
+            std.log.err("Ora dialect CMake build failed with exit code: {}", .{code});
+            return error.CMakeBuildFailed;
+        },
+        else => {
+            std.log.err("Ora dialect CMake build did not exit cleanly", .{});
+            return error.CMakeBuildFailed;
+        },
+    }
+
+    std.log.info("Successfully built Ora dialect library", .{});
+}
+
 /// Link MLIR to the given executable using the installed prefix
-fn linkMlirLibraries(b: *std.Build, exe: *std.Build.Step.Compile, mlir_step: *std.Build.Step, target: std.Build.ResolvedTarget) void {
-    // Depend on MLIR build
+fn linkMlirLibraries(b: *std.Build, exe: *std.Build.Step.Compile, mlir_step: *std.Build.Step, ora_dialect_step: *std.Build.Step, target: std.Build.ResolvedTarget) void {
+    // Depend on MLIR build and Ora dialect build
     exe.step.dependOn(mlir_step);
+    exe.step.dependOn(ora_dialect_step);
 
     const include_path = b.path("vendor/mlir/include");
     const lib_path = b.path("vendor/mlir/lib");
@@ -736,6 +859,7 @@ fn linkMlirLibraries(b: *std.Build, exe: *std.Build.Step.Compile, mlir_step: *st
     exe.addLibraryPath(lib_path);
 
     exe.linkSystemLibrary("MLIR-C");
+    exe.linkSystemLibrary("MLIROraDialectC");
 
     switch (target.result.os.tag) {
         .linux => {

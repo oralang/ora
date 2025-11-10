@@ -32,12 +32,21 @@ pub const OraDialect = struct {
     }
 
     /// Register the Ora dialect with MLIR context
-    /// Currently using unregistered mode due to TableGen compatibility issues
     pub fn register(self: *OraDialect) !void {
-        // For now, we use unregistered mode due to TableGen compatibility issues
-        // This still produces clean MLIR output with ora.* operations
-        // std.log.info("Ora dialect using unregistered mode (produces clean MLIR output)", .{});
-        self.dialect_handle = null;
+        const success = c.oraDialectRegister(self.ctx);
+        if (!success) {
+            std.log.warn("Failed to register Ora dialect, falling back to unregistered mode", .{});
+            self.dialect_handle = null;
+            return;
+        }
+        const handle = c.oraDialectGet(self.ctx);
+        if (handle.ptr == null) {
+            std.log.warn("Ora dialect registered but handle is null", .{});
+            self.dialect_handle = null;
+            return;
+        }
+        self.dialect_handle = handle;
+        std.log.info("Ora dialect successfully registered", .{});
     }
 
     /// Check if the Ora dialect is properly registered

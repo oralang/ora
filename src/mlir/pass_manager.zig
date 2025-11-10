@@ -137,6 +137,16 @@ pub const PassManager = struct {
         };
     }
 
+    /// Enable verification on this pass manager
+    pub fn enableVerifier(self: *PassManager, enable: bool) void {
+        c.mlirPassManagerEnableVerifier(self.pass_manager, enable);
+    }
+
+    /// Enable timing on this pass manager
+    pub fn enableTiming(self: *PassManager) void {
+        c.mlirPassManagerEnableTiming(self.pass_manager);
+    }
+
     pub fn deinit(self: *PassManager) void {
         c.mlirPassManagerDestroy(self.pass_manager);
     }
@@ -157,20 +167,10 @@ pub const PassManager = struct {
 
     /// Add Ora-specific verification passes
     pub fn addOraVerificationPasses(self: *PassManager) void {
-        // Add standard MLIR verification pass first
-        // Note: mlirCreateVerifierPass might not be available in all MLIR versions
-        // For now, we'll use pipeline string parsing instead
-
-        // Add Ora-specific verification passes using pipeline strings
-        // These will be implemented as custom verification logic
-        const ora_verification_pipeline = "builtin.module(ora-type-verify,ora-memory-verify,ora-contract-verify)";
-        const pipeline_ref = c.mlirStringRefCreateFromCString(ora_verification_pipeline);
-
-        const result = c.mlirParsePassPipeline(c.mlirPassManagerGetAsOpPassManager(self.pass_manager), pipeline_ref, null, null);
-
-        if (c.mlirLogicalResultIsFailure(result)) {
-            std.debug.print("WARNING: Failed to parse Ora verification pipeline\n", .{});
-        }
+        // Note: Ora-specific verification passes are not yet implemented
+        // The MLIR built-in verifier (enabled via enableVerifier) is sufficient for now
+        // When we implement custom verification passes, they would be added here
+        _ = self;
     }
 
     /// Add custom passes from a pipeline string
@@ -197,15 +197,6 @@ pub const PassPipelineConfig = struct {
     enable_verification: bool,
     custom_passes: []const []const u8,
     enable_timing: bool,
-    ir_printing: IRPrintingConfig,
-};
-
-/// IR printing configuration
-pub const IRPrintingConfig = struct {
-    print_before_all: bool = false,
-    print_after_all: bool = false,
-    print_after_change: bool = false,
-    print_after_failure: bool = true,
 };
 
 /// Pass result information
@@ -253,10 +244,15 @@ pub const OraPassUtils = struct {
     pub fn createOraPassManager(ctx: c.MlirContext, allocator: std.mem.Allocator, config: PassPipelineConfig) !PassManager {
         var pass_manager = PassManager.init(ctx, allocator);
 
-        // Add verification passes if enabled
-        if (config.enable_verification) {
-            pass_manager.addOraVerificationPasses();
+        // Enable timing if requested
+        if (config.enable_timing) {
+            pass_manager.enableTiming();
         }
+
+        // Note: MLIR verification is enabled by default in PassManager
+        // The --mlir-verify flag is documented but verification happens automatically
+        // Explicitly enabling it with enableVerifier() causes crashes with unregistered operations
+        // TODO: Investigate proper verification of custom dialect operations
 
         // Add optimization passes based on level
         switch (config.optimization_level) {
@@ -303,7 +299,6 @@ pub fn runMLIRPipeline(ctx: c.MlirContext, module: c.MlirModule, config: Pipelin
         .enable_verification = config.verify,
         .custom_passes = &[_][]const u8{},
         .enable_timing = false,
-        .ir_printing = IRPrintingConfig{},
     };
 
     // Create pass manager

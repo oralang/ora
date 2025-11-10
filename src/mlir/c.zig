@@ -15,5 +15,14 @@ pub const c = @cImport({
     @cInclude("mlir-c/RegisterEverything.h");
 
     // Ora dialect C interface
-    // @cInclude("OraDialectC.h"); // Not needed for unregistered mode
+    @cInclude("OraDialectC.h");
 });
+
+// Helper to free string returned from C API
+pub fn freeStringRef(str: c.MlirStringRef) void {
+    if (str.data != null) {
+        // Note: We need mlirStringRefFree or similar - for now use free
+        // The C API should provide a way to free this
+        @import("std").c.free(@ptrCast(str.data));
+    }
+}

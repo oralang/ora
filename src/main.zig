@@ -36,13 +36,8 @@ const ArtifactOptions = struct {
 /// MLIR-related command line options
 const MlirOptions = struct {
     emit_mlir: bool,
-    verify: bool,
-    passes: ?[]const u8,
     opt_level: ?[]const u8,
-    timing: bool,
-    print_ir: bool,
     output_dir: ?[]const u8,
-    use_pipeline: bool,
     validate_before_yul: bool,
 
     fn getOptimizationLevel(self: MlirOptions) OptimizationLevel {
@@ -59,18 +54,6 @@ const MlirOptions = struct {
         if (std.mem.eql(u8, build_default, "aggressive")) return .Aggressive;
 
         return .Basic; // Final fallback
-    }
-
-    fn shouldEnableVerification(self: MlirOptions) bool {
-        return self.verify or build_options.mlir_debug;
-    }
-
-    fn shouldEnableTiming(self: MlirOptions) bool {
-        return self.timing or build_options.mlir_timing;
-    }
-
-    fn getDefaultPasses(self: MlirOptions) ?[]const u8 {
-        return self.passes orelse build_options.mlir_passes;
     }
 
     fn shouldValidateBeforeYul(self: MlirOptions) bool {
@@ -115,16 +98,12 @@ pub fn main() !void {
     var emit_bytecode: bool = false;
     var emit_abi: bool = false;
     var emit_json: bool = false;
+    var emit_cfg: bool = false;
     var analyze_complexity: bool = false;
     var analyze_state: bool = false;
 
     // MLIR options
-    var mlir_verify: bool = false;
-    var mlir_passes: ?[]const u8 = null;
     var mlir_opt_level: ?[]const u8 = null;
-    var mlir_timing: bool = false;
-    var mlir_print_ir: bool = false;
-    var mlir_use_pipeline: bool = false;
     var mlir_validate_before_yul: bool = true; // Default enabled for safety
 
     // Artifact saving options (for --save-all)
@@ -167,6 +146,9 @@ pub fn main() !void {
         } else if (std.mem.eql(u8, args[i], "--json")) {
             emit_json = true;
             i += 1;
+        } else if (std.mem.eql(u8, args[i], "--emit-cfg")) {
+            emit_cfg = true;
+            i += 1;
         } else if (std.mem.eql(u8, args[i], "--analyze-complexity")) {
             analyze_complexity = true;
             i += 1;
@@ -184,32 +166,6 @@ pub fn main() !void {
             mlir_opt_level = "aggressive";
             i += 1;
             // MLIR options
-        } else if (std.mem.eql(u8, args[i], "--mlir-verify")) {
-            mlir_verify = true;
-            i += 1;
-        } else if (std.mem.eql(u8, args[i], "--mlir-passes")) {
-            if (i + 1 >= args.len) {
-                try printUsage();
-                return;
-            }
-            mlir_passes = args[i + 1];
-            i += 2;
-        } else if (std.mem.eql(u8, args[i], "--mlir-opt")) {
-            if (i + 1 >= args.len) {
-                try printUsage();
-                return;
-            }
-            mlir_opt_level = args[i + 1];
-            i += 2;
-        } else if (std.mem.eql(u8, args[i], "--mlir-timing")) {
-            mlir_timing = true;
-            i += 1;
-        } else if (std.mem.eql(u8, args[i], "--mlir-print-ir")) {
-            mlir_print_ir = true;
-            i += 1;
-        } else if (std.mem.eql(u8, args[i], "--mlir-pipeline")) {
-            mlir_use_pipeline = true;
-            i += 1;
         } else if (std.mem.eql(u8, args[i], "--no-validate-mlir")) {
             mlir_validate_before_yul = false;
             i += 1;
@@ -272,20 +228,15 @@ pub fn main() !void {
 
     // Determine compilation mode
     // If no --emit-X flag is set, default to bytecode
-    if (!emit_tokens and !emit_ast and !emit_mlir and !emit_yul and !emit_bytecode) {
+    if (!emit_tokens and !emit_ast and !emit_mlir and !emit_yul and !emit_bytecode and !emit_cfg) {
         emit_bytecode = true; // Default: compile to bytecode
     }
 
     // Create MLIR options structure
     const mlir_options = MlirOptions{
         .emit_mlir = emit_mlir,
-        .verify = mlir_verify,
-        .passes = mlir_passes,
         .opt_level = mlir_opt_level,
-        .timing = mlir_timing,
-        .print_ir = mlir_print_ir,
         .output_dir = output_dir,
-        .use_pipeline = mlir_use_pipeline,
         .validate_before_yul = mlir_validate_before_yul,
     };
 
@@ -298,6 +249,12 @@ pub fn main() !void {
         .save_bytecode = save_bytecode,
         .output_dir = output_dir,
     };
+
+    // Handle CFG generation (uses MLIR's built-in view-op-graph pass)
+    if (emit_cfg) {
+        try runCFGGeneration(allocator, file_path, mlir_options, artifact_options);
+        return;
+    }
 
     // Modern compiler-style behavior: process --emit-X flags
     // Stop at the earliest stage specified, but save later stages if --save-X is set
@@ -338,6 +295,7 @@ fn printUsage() !void {
     try stdout.print("  --emit-tokens          - Stop after lexical analysis (emit tokens)\n", .{});
     try stdout.print("  --emit-ast             - Stop after parsing (emit AST)\n", .{});
     try stdout.print("  --emit-mlir            - Stop after MLIR generation\n", .{});
+    try stdout.print("  --emit-cfg             - Generate control flow graph (Graphviz DOT format)\n", .{});
     try stdout.print("  --emit-yul             - Stop after Yul lowering\n", .{});
     try stdout.print("  --emit-bytecode        - Generate EVM bytecode (default)\n", .{});
     try stdout.print("  --abi                  - Generate contract ABI (JSON format)\n", .{});
@@ -351,11 +309,6 @@ fn printUsage() !void {
     try stdout.print("  -O1, -Obasic           - Basic optimizations\n", .{});
     try stdout.print("  -O2, -Oaggressive      - Aggressive optimizations\n", .{});
     try stdout.print("\nMLIR Options:\n", .{});
-    try stdout.print("  --mlir-verify          - Run MLIR verification passes\n", .{});
-    try stdout.print("  --mlir-passes <passes> - Custom MLIR pass pipeline (comma-separated)\n", .{});
-    try stdout.print("  --mlir-timing          - Enable pass timing statistics\n", .{});
-    try stdout.print("  --mlir-print-ir        - Print IR before and after passes\n", .{});
-    try stdout.print("  --mlir-pipeline        - Use comprehensive MLIR optimization pipeline\n", .{});
     try stdout.print("  --no-validate-mlir     - Disable automatic MLIR validation before Yul (not recommended)\n", .{});
     try stdout.print("\nAnalysis Options:\n", .{});
     try stdout.print("  --analyze-complexity   - Analyze function complexity metrics\n", .{});
@@ -363,17 +316,6 @@ fn printUsage() !void {
     try stdout.print("\nDevelopment/Debug Options:\n", .{});
     try stdout.print("  --save-all             - Save all intermediate artifacts\n", .{});
     try stdout.print("  --verbose              - Verbose output (show each compilation stage)\n", .{});
-    try stdout.print("\nExamples:\n", .{});
-    try stdout.print("  ora contract.ora                      # Compile to bytecode → contract_artifacts/\n", .{});
-    try stdout.print("  ora contract.ora -o build/            # Compile to bytecode → build/\n", .{});
-    try stdout.print("  ora contract.ora -o contract.hex      # Compile to specific file\n", .{});
-    try stdout.print("  ora --emit-ast contract.ora           # Stop at AST → contract_artifacts/ast.json\n", .{});
-    try stdout.print("  ora --emit-mlir -O2 contract.ora      # Generate optimized MLIR\n", .{});
-    try stdout.print("  ora --emit-yul -o out.yul contract.ora  # Compile to Yul\n", .{});
-    try stdout.print("  ora --save-all contract.ora           # Save all stages (tokens, AST, MLIR, Yul, bytecode)\n", .{});
-    try stdout.print("  ora --mlir-verify --mlir-timing -O2 contract.ora  # Compile with verification and timing\n", .{});
-    try stdout.print("  ora --analyze-complexity contract.ora  # Analyze function complexity\n", .{});
-    try stdout.print("  ora --analyze-state contract.ora       # Analyze state changes\n", .{});
     try stdout.flush();
 }
 
@@ -1094,6 +1036,104 @@ fn runJsonOutput(allocator: std.mem.Allocator, file_path: []const u8, mlir_optio
     try stdout.flush();
 }
 
+/// Generate Control Flow Graph using MLIR's built-in view-op-graph pass
+fn runCFGGeneration(allocator: std.mem.Allocator, file_path: []const u8, _: MlirOptions, artifact_options: ArtifactOptions) !void {
+    const mlir = @import("mlir/mod.zig");
+    const cfg_gen = @import("mlir/cfg.zig");
+    const c = @import("mlir/c.zig").c;
+
+    // First generate MLIR
+    var stdout_buffer: [1024]u8 = undefined;
+    var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
+    const stdout = &stdout_writer.interface;
+
+    // Read source file
+    const source = std.fs.cwd().readFileAlloc(allocator, file_path, 1024 * 1024) catch |err| {
+        try stdout.print("Error reading file {s}: {s}\n", .{ file_path, @errorName(err) });
+        return;
+    };
+    defer allocator.free(source);
+
+    // Parse to AST
+    var lexer = lib.Lexer.init(allocator, source);
+    defer lexer.deinit();
+    const tokens = lexer.scanTokens() catch |err| {
+        try stdout.print("Lexer error: {s}\n", .{@errorName(err)});
+        return;
+    };
+    defer allocator.free(tokens);
+
+    var arena = lib.ast_arena.AstArena.init(allocator);
+    defer arena.deinit();
+    var parser = lib.Parser.init(tokens, &arena);
+    parser.setFileId(1);
+    const ast_nodes = parser.parse() catch |err| {
+        try stdout.print("Parser error: {s}\n", .{@errorName(err)});
+        return;
+    };
+
+    // Generate MLIR
+    var mlir_arena = std.heap.ArenaAllocator.init(allocator);
+    defer mlir_arena.deinit();
+    const mlir_allocator = mlir_arena.allocator();
+
+    const h = mlir.createContext(mlir_allocator);
+    defer mlir.destroyContext(h);
+
+    const source_filename = std.fs.path.basename(file_path);
+    var lowering_result = try mlir.lower.lowerFunctionsToModuleWithErrors(h.ctx, ast_nodes, mlir_allocator, source_filename);
+    defer lowering_result.deinit(mlir_allocator);
+
+    if (!lowering_result.success) {
+        try stdout.print("MLIR lowering failed\n", .{});
+        return;
+    }
+
+    // Get MLIR as text by printing the module operation
+    const module_op = c.mlirModuleGetOperation(lowering_result.module);
+    var mlir_text_buffer = std.ArrayList(u8){};
+    defer mlir_text_buffer.deinit(mlir_allocator);
+
+    const PrintCallback = struct {
+        buffer: *std.ArrayList(u8),
+        allocator: std.mem.Allocator,
+        fn callback(message: c.MlirStringRef, userData: ?*anyopaque) callconv(.c) void {
+            const self = @as(*@This(), @ptrCast(@alignCast(userData)));
+            const message_slice = message.data[0..message.length];
+            self.buffer.appendSlice(self.allocator, message_slice) catch {};
+        }
+    };
+
+    var callback = PrintCallback{ .buffer = &mlir_text_buffer, .allocator = mlir_allocator };
+    c.mlirOperationPrint(module_op, PrintCallback.callback, @ptrCast(&callback));
+
+    const mlir_text = try mlir_text_buffer.toOwnedSlice(mlir_allocator);
+    defer mlir_allocator.free(mlir_text);
+
+    // Use MLIR C++ API to generate CFG with dialect properly registered
+    const dot_content = cfg_gen.generateCFG(h.ctx, lowering_result.module, mlir_allocator) catch |err| {
+        try stdout.print("Failed to generate CFG: {s}\n", .{@errorName(err)});
+        try stdout.print("Note: The view-op-graph pass may need the module to be in a specific format.\n", .{});
+        return;
+    };
+    defer mlir_allocator.free(dot_content);
+
+    // Output DOT content
+    try stdout.print("{s}", .{dot_content});
+    try stdout.flush();
+
+    // Save to file if output directory specified
+    if (artifact_options.output_dir) |output_dir| {
+        const base_name = std.fs.path.stem(file_path);
+        const dot_path = try std.fmt.allocPrint(allocator, "{s}/{s}.dot", .{ output_dir, base_name });
+        defer allocator.free(dot_path);
+
+        var dot_file = try std.fs.cwd().createFile(dot_path, .{});
+        defer dot_file.close();
+        try dot_file.writeAll(dot_content);
+    }
+}
+
 // ============================================================================
 // SECTION 6: MLIR Integration & Code Generation
 // ============================================================================
@@ -1137,7 +1177,10 @@ fn runMlirEmitAdvancedWithYul(allocator: std.mem.Allocator, file_path: []const u
     };
 
     // Run state analysis automatically during compilation
-    try runStateAnalysisForContracts(allocator, ast_nodes);
+    // Skip state analysis output when emitting MLIR to keep output clean
+    if (!mlir_options.emit_mlir) {
+        try runStateAnalysisForContracts(allocator, ast_nodes);
+    }
 
     // Generate MLIR with advanced options
     try generateMlirOutput(allocator, ast_nodes, file_path, mlir_options, artifact_options, generate_yul);
@@ -1164,66 +1207,10 @@ fn generateMlirOutput(allocator: std.mem.Allocator, ast_nodes: []lib.AstNode, fi
     const h = mlir.createContext(mlir_allocator);
     defer mlir.destroyContext(h);
 
-    // Choose lowering function based on options
-    var lowering_result = if (mlir_options.passes != null or mlir_options.verify or mlir_options.timing or mlir_options.print_ir) blk: {
-        // Use advanced lowering with passes
-        const mlir_pipeline = @import("mlir/pass_manager.zig");
-        const PassPipelineConfig = mlir_pipeline.PassPipelineConfig;
-        const PassOptimizationLevel = mlir_pipeline.OptimizationLevel;
-        const IRPrintingConfig = mlir_pipeline.IRPrintingConfig;
-
-        const opt_level: PassOptimizationLevel = switch (mlir_options.getOptimizationLevel()) {
-            .None => .None,
-            .Basic => .Basic,
-            .Aggressive => .Aggressive,
-        };
-
-        const ir_config = IRPrintingConfig{
-            .print_before_all = mlir_options.print_ir,
-            .print_after_all = mlir_options.print_ir,
-            .print_after_change = mlir_options.print_ir,
-            .print_after_failure = true,
-        };
-
-        var custom_passes = std.ArrayList([]const u8){};
-        defer custom_passes.deinit(mlir_allocator);
-
-        // Parse custom passes if provided (command-line or build-time default)
-        if (mlir_options.getDefaultPasses()) |passes_str| {
-            var pass_iter = std.mem.splitSequence(u8, passes_str, ",");
-            while (pass_iter.next()) |pass_name| {
-                const trimmed = std.mem.trim(u8, pass_name, " \t");
-                if (trimmed.len > 0) {
-                    try custom_passes.append(mlir_allocator, trimmed);
-                }
-            }
-        }
-
-        const pass_config = PassPipelineConfig{
-            .optimization_level = opt_level,
-            .enable_verification = mlir_options.shouldEnableVerification(),
-            .custom_passes = custom_passes.items,
-            .enable_timing = mlir_options.shouldEnableTiming(),
-            .ir_printing = ir_config,
-        };
-
-        // Extract filename for location tracking
-        const source_filename = std.fs.path.basename(file_path);
-
-        if (mlir_options.getDefaultPasses()) |passes_str| {
-            // Use pipeline string parsing
-            break :blk try mlir.lower.lowerFunctionsToModuleWithPipelineString(h.ctx, ast_nodes, mlir_allocator, passes_str, source_filename);
-        } else {
-            // Use configuration-based approach
-            break :blk try mlir.lower.lowerFunctionsToModuleWithPasses(h.ctx, ast_nodes, mlir_allocator, pass_config, source_filename);
-        }
-    } else blk: {
-        // Extract filename for location tracking
-        const source_filename = std.fs.path.basename(file_path);
-
-        // Use basic lowering
-        break :blk try mlir.lower.lowerFunctionsToModuleWithErrors(h.ctx, ast_nodes, mlir_allocator, source_filename);
-    };
+    // Lower AST to MLIR
+    const lower = @import("mlir/lower.zig");
+    const source_filename = std.fs.path.basename(file_path);
+    var lowering_result = try lower.lowerFunctionsToModuleWithErrors(h.ctx, ast_nodes, mlir_allocator, source_filename);
     defer lowering_result.deinit(mlir_allocator);
 
     // Check for errors first, before proceeding to YUL generation

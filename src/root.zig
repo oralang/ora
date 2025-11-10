@@ -30,11 +30,6 @@ pub const yul_bindings = @import("yul_bindings.zig");
 // Note: MLIR and Z3 are NOT exported from ora_lib because they import ora_lib themselves,
 // which would create circular dependencies. They should be imported directly by main.zig.
 
-// Lossless printer
-pub const lossless_printer = @import("lossless_printer.zig");
-pub const doc_comments = @import("doc_comments.zig");
-pub const doc_attach = @import("doc_attach.zig");
-
 // Re-export key types for convenience
 /// Lexical analyzer for Ora source code
 pub const Lexer = lexer.Lexer;
