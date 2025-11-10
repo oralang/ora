@@ -28,8 +28,8 @@ include(HandleLLVMOptions)
 # Include MLIR headers
 include_directories(${LLVM_INCLUDE_DIRS})
 include_directories(${MLIR_INCLUDE_DIRS})
-include_directories(${PROJECT_BINARY_DIR}/src/mlir/generated)
-include_directories(${PROJECT_SOURCE_DIR}/src/mlir/generated)
+include_directories(${PROJECT_BINARY_DIR})
+include_directories(${PROJECT_SOURCE_DIR})
 
 # Define the Ora dialect library
 # Main dialect library disabled due to TableGen compatibility issues with LLVM 22.0.0git
@@ -67,15 +67,18 @@ add_public_tablegen_target(MLIROraOpsIncGen)
 # add_dependencies(MLIROraDialect MLIROraOpsIncGen)
 
 # Define the Ora dialect C API library
+# Note: We include OraDialect.cpp because OraDialectC.cpp needs the full OraDialect implementation
 add_mlir_dialect_library(MLIROraDialectC
   OraDialectC.cpp
+  OraDialect.cpp
   
   PARTIAL_SOURCES_INTENDED
   
   ADDITIONAL_HEADER_DIRS
-  ${PROJECT_SOURCE_DIR}/src/mlir/generated
+  ${PROJECT_SOURCE_DIR}
   
   DEPENDS
+  MLIROraDialectIncGen
   MLIROraOpsIncGen
   
   LINK_LIBS
@@ -83,6 +86,7 @@ add_mlir_dialect_library(MLIROraDialectC
   MLIRSupport
   MLIRSideEffectInterfaces
   MLIRSymbolInterfaces
+  MLIRPass
 )
 
 # Install the libraries
@@ -93,6 +97,7 @@ install(TARGETS MLIROraDialectC
 install(FILES
   OraDialect.h
   OraDialectC.h
-  ${PROJECT_BINARY_DIR}/src/mlir/generated/OraDialect.h.inc
-  ${PROJECT_BINARY_DIR}/src/mlir/generated/OraOps.h.inc
+  OraGasConstants.h
+  ${PROJECT_BINARY_DIR}/OraDialect.h.inc
+  ${PROJECT_BINARY_DIR}/OraOps.h.inc
   DESTINATION include/Ora)

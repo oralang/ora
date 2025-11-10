@@ -32,12 +32,21 @@ pub const OraDialect = struct {
     }
 
     /// Register the Ora dialect with MLIR context
-    /// Currently using unregistered mode due to TableGen compatibility issues
     pub fn register(self: *OraDialect) !void {
-        // For now, we use unregistered mode due to TableGen compatibility issues
-        // This still produces clean MLIR output with ora.* operations
-        // std.log.info("Ora dialect using unregistered mode (produces clean MLIR output)", .{});
-        self.dialect_handle = null;
+        const success = c.oraDialectRegister(self.ctx);
+        if (!success) {
+            std.log.warn("Failed to register Ora dialect, falling back to unregistered mode", .{});
+            self.dialect_handle = null;
+            return;
+        }
+        const handle = c.oraDialectGet(self.ctx);
+        if (handle.ptr == null) {
+            std.log.warn("Ora dialect registered but handle is null", .{});
+            self.dialect_handle = null;
+            return;
+        }
+        self.dialect_handle = handle;
+        std.log.info("Ora dialect successfully registered", .{});
     }
 
     /// Check if the Ora dialect is properly registered
@@ -86,6 +95,13 @@ pub const OraDialect = struct {
         var init_attrs = [_]c.MlirNamedAttribute{h.namedAttr(self.ctx, "init", init_value)};
         c.mlirOperationStateAddAttributes(&state, init_attrs.len, &init_attrs);
 
+        // Add gas cost attribute (global variable declaration has minimal cost = 0)
+        // Actual access costs are handled by sload/sstore operations
+        const gas_cost_attr = c.mlirIntegerAttrGet(c.mlirIntegerTypeGet(self.ctx, 64), 0);
+        const gas_cost_id = h.identifier(self.ctx, "gas_cost");
+        var gas_attrs = [_]c.MlirNamedAttribute{c.mlirNamedAttributeGet(gas_cost_id, gas_cost_attr)};
+        c.mlirOperationStateAddAttributes(&state, gas_attrs.len, &gas_attrs);
+
         const op = c.mlirOperationCreate(&state);
         return op;
     }
@@ -113,7 +129,15 @@ pub const OraDialect = struct {
         // Add the global name attribute
         const global_attr = h.stringAttr(self.ctx, global_name);
         const global_id = h.identifier(self.ctx, "global");
-        var attrs = [_]c.MlirNamedAttribute{c.mlirNamedAttributeGet(global_id, global_attr)};
+
+        // Add gas cost attribute (SLOAD_COLD = 2100, conservative estimate)
+        const gas_cost_attr = c.mlirIntegerAttrGet(c.mlirIntegerTypeGet(self.ctx, 64), 2100);
+        const gas_cost_id = h.identifier(self.ctx, "gas_cost");
+
+        var attrs = [_]c.MlirNamedAttribute{
+            c.mlirNamedAttributeGet(global_id, global_attr),
+            c.mlirNamedAttributeGet(gas_cost_id, gas_cost_attr),
+        };
         c.mlirOperationStateAddAttributes(&state, attrs.len, &attrs);
 
         // Add result type
@@ -150,7 +174,15 @@ pub const OraDialect = struct {
         // Add the global name attribute
         const global_attr = h.stringAttr(self.ctx, global_name);
         const global_id = h.identifier(self.ctx, "global");
-        var attrs = [_]c.MlirNamedAttribute{c.mlirNamedAttributeGet(global_id, global_attr)};
+
+        // Add gas cost attribute (SSTORE_NEW = 20000, conservative worst-case estimate)
+        const gas_cost_attr = c.mlirIntegerAttrGet(c.mlirIntegerTypeGet(self.ctx, 64), 20000);
+        const gas_cost_id = h.identifier(self.ctx, "gas_cost");
+
+        var attrs = [_]c.MlirNamedAttribute{
+            c.mlirNamedAttributeGet(global_id, global_attr),
+            c.mlirNamedAttributeGet(gas_cost_id, gas_cost_attr),
+        };
         c.mlirOperationStateAddAttributes(&state, attrs.len, &attrs);
 
         const op = c.mlirOperationCreate(&state);
@@ -203,27 +235,6 @@ pub const OraDialect = struct {
         // Add a single region for the contract body
         const region = c.mlirRegionCreate();
         c.mlirOperationStateAddOwnedRegions(&state, 1, @ptrCast(&region));
-
-        const op = c.mlirOperationCreate(&state);
-        return op;
-    }
-
-    /// Create ora.cast operation for type conversions
-    pub fn createCast(
-        self: *OraDialect,
-        input: c.MlirValue,
-        result_type: c.MlirType,
-        loc: c.MlirLocation,
-    ) c.MlirOperation {
-        _ = self; // Mark as used
-        var state = h.opState("ora.cast", loc);
-
-        // Add operands
-        var operands = [_]c.MlirValue{input};
-        c.mlirOperationStateAddOperands(&state, operands.len, &operands);
-
-        // Add result type
-        c.mlirOperationStateAddResults(&state, 1, @ptrCast(&result_type));
 
         const op = c.mlirOperationCreate(&state);
         return op;
@@ -706,7 +717,14 @@ pub const OraDialect = struct {
         // Add value attribute
         const attr = c.mlirIntegerAttrGet(value_type, value);
         const value_id = h.identifier(self.ctx, "value");
-        const attrs = [_]c.MlirNamedAttribute{c.mlirNamedAttributeGet(value_id, attr)};
+
+        // Add gas cost attribute (constants are free = 0)
+        const gas_cost_attr = c.mlirIntegerAttrGet(c.mlirIntegerTypeGet(self.ctx, 64), 0);
+        const gas_cost_id = h.identifier(self.ctx, "gas_cost");
+        var attrs = [_]c.MlirNamedAttribute{
+            c.mlirNamedAttributeGet(value_id, attr),
+            c.mlirNamedAttributeGet(gas_cost_id, gas_cost_attr),
+        };
         c.mlirOperationStateAddAttributes(&state, attrs.len, &attrs);
 
         const op = c.mlirOperationCreate(&state);
@@ -765,8 +783,14 @@ pub const OraDialect = struct {
         self: *OraDialect,
         loc: c.MlirLocation,
     ) c.MlirOperation {
-        _ = self;
         var state = h.opState("func.return", loc);
+
+        // Add gas cost attribute (JUMP = 8, return is similar to jump)
+        const gas_cost_attr = c.mlirIntegerAttrGet(c.mlirIntegerTypeGet(self.ctx, 64), 8);
+        const gas_cost_id = h.identifier(self.ctx, "gas_cost");
+        var attrs = [_]c.MlirNamedAttribute{c.mlirNamedAttributeGet(gas_cost_id, gas_cost_attr)};
+        c.mlirOperationStateAddAttributes(&state, attrs.len, &attrs);
+
         const op = c.mlirOperationCreate(&state);
         return op;
     }
@@ -777,9 +801,15 @@ pub const OraDialect = struct {
         return_value: c.MlirValue,
         loc: c.MlirLocation,
     ) c.MlirOperation {
-        _ = self;
         var state = h.opState("func.return", loc);
         c.mlirOperationStateAddOperands(&state, 1, @ptrCast(&return_value));
+
+        // Add gas cost attribute (JUMP = 8, return is similar to jump)
+        const gas_cost_attr = c.mlirIntegerAttrGet(c.mlirIntegerTypeGet(self.ctx, 64), 8);
+        const gas_cost_id = h.identifier(self.ctx, "gas_cost");
+        var attrs = [_]c.MlirNamedAttribute{c.mlirNamedAttributeGet(gas_cost_id, gas_cost_attr)};
+        c.mlirOperationStateAddAttributes(&state, attrs.len, &attrs);
+
         const op = c.mlirOperationCreate(&state);
         return op;
     }
@@ -789,8 +819,14 @@ pub const OraDialect = struct {
         self: *OraDialect,
         loc: c.MlirLocation,
     ) c.MlirOperation {
-        _ = self;
         var state = h.opState("scf.yield", loc);
+
+        // Add gas cost attribute (yield itself has no cost, but JUMPDEST = 1 at destination)
+        const gas_cost_attr = c.mlirIntegerAttrGet(c.mlirIntegerTypeGet(self.ctx, 64), 1);
+        const gas_cost_id = h.identifier(self.ctx, "gas_cost");
+        var attrs = [_]c.MlirNamedAttribute{c.mlirNamedAttributeGet(gas_cost_id, gas_cost_attr)};
+        c.mlirOperationStateAddAttributes(&state, attrs.len, &attrs);
+
         const op = c.mlirOperationCreate(&state);
         return op;
     }
@@ -801,11 +837,17 @@ pub const OraDialect = struct {
         values: []const c.MlirValue,
         loc: c.MlirLocation,
     ) c.MlirOperation {
-        _ = self;
         var state = h.opState("scf.yield", loc);
         if (values.len > 0) {
             c.mlirOperationStateAddOperands(&state, @intCast(values.len), values.ptr);
         }
+
+        // Add gas cost attribute (yield itself has no cost, but JUMPDEST = 1 at destination)
+        const gas_cost_attr = c.mlirIntegerAttrGet(c.mlirIntegerTypeGet(self.ctx, 64), 1);
+        const gas_cost_id = h.identifier(self.ctx, "gas_cost");
+        var attrs = [_]c.MlirNamedAttribute{c.mlirNamedAttributeGet(gas_cost_id, gas_cost_attr)};
+        c.mlirOperationStateAddAttributes(&state, attrs.len, &attrs);
+
         const op = c.mlirOperationCreate(&state);
         return op;
     }
@@ -901,11 +943,20 @@ pub const OraDialect = struct {
             c.mlirOperationStateAddResults(&state, @intCast(result_types.len), result_types.ptr);
         }
 
+        // Add gas cost attribute (internal function call - minimal cost, similar to JUMPI = 10)
+        // For external calls, this would be CALL_BASE = 700, but internal calls are cheaper
+        const gas_cost_attr = c.mlirIntegerAttrGet(c.mlirIntegerTypeGet(self.ctx, 64), 10);
+        const gas_cost_id = h.identifier(self.ctx, "gas_cost");
+        const gas_attrs = [_]c.MlirNamedAttribute{c.mlirNamedAttributeGet(gas_cost_id, gas_cost_attr)};
+
         // Add callee attribute
         const callee_ref = c.mlirStringRefCreate(callee.ptr, callee.len);
         const callee_attr = c.mlirFlatSymbolRefAttrGet(self.ctx, callee_ref);
         const callee_id = h.identifier(self.ctx, "callee");
-        const attrs = [_]c.MlirNamedAttribute{c.mlirNamedAttributeGet(callee_id, callee_attr)};
+        var attrs = [_]c.MlirNamedAttribute{
+            c.mlirNamedAttributeGet(callee_id, callee_attr),
+            gas_attrs[0],
+        };
         c.mlirOperationStateAddAttributes(&state, attrs.len, &attrs);
 
         const op = c.mlirOperationCreate(&state);
@@ -934,12 +985,18 @@ pub const OraDialect = struct {
         result_types: []const c.MlirType,
         loc: c.MlirLocation,
     ) c.MlirOperation {
-        _ = self;
         var state = h.opState("scf.if", loc);
         c.mlirOperationStateAddOperands(&state, 1, @ptrCast(&condition));
         if (result_types.len > 0) {
             c.mlirOperationStateAddResults(&state, @intCast(result_types.len), result_types.ptr);
         }
+
+        // Add gas cost attribute (JUMPI = 10, conditional branch)
+        const gas_cost_attr = c.mlirIntegerAttrGet(c.mlirIntegerTypeGet(self.ctx, 64), 10);
+        const gas_cost_id = h.identifier(self.ctx, "gas_cost");
+        var attrs = [_]c.MlirNamedAttribute{c.mlirNamedAttributeGet(gas_cost_id, gas_cost_attr)};
+        c.mlirOperationStateAddAttributes(&state, attrs.len, &attrs);
+
         const op = c.mlirOperationCreate(&state);
         return op;
     }
@@ -951,7 +1008,6 @@ pub const OraDialect = struct {
         result_types: []const c.MlirType,
         loc: c.MlirLocation,
     ) c.MlirOperation {
-        _ = self;
         var state = h.opState("scf.while", loc);
         if (operands.len > 0) {
             c.mlirOperationStateAddOperands(&state, @intCast(operands.len), operands.ptr);
@@ -959,13 +1015,21 @@ pub const OraDialect = struct {
         if (result_types.len > 0) {
             c.mlirOperationStateAddResults(&state, @intCast(result_types.len), result_types.ptr);
         }
+
+        // Add gas cost attribute (JUMPI = 10 per loop iteration for the conditional jump)
+        // Note: This is the cost per iteration, actual total depends on loop execution
+        const gas_cost_attr = c.mlirIntegerAttrGet(c.mlirIntegerTypeGet(self.ctx, 64), 10);
+        const gas_cost_id = h.identifier(self.ctx, "gas_cost");
+        var attrs = [_]c.MlirNamedAttribute{c.mlirNamedAttributeGet(gas_cost_id, gas_cost_attr)};
+        c.mlirOperationStateAddAttributes(&state, attrs.len, &attrs);
+
         const op = c.mlirOperationCreate(&state);
         return op;
     }
 
     /// Create scf.for operation
     pub fn createScfFor(
-        self: *OraDialect,
+        self: *const OraDialect,
         lower_bound: c.MlirValue,
         upper_bound: c.MlirValue,
         step: c.MlirValue,
@@ -973,7 +1037,6 @@ pub const OraDialect = struct {
         result_types: []const c.MlirType,
         loc: c.MlirLocation,
     ) c.MlirOperation {
-        _ = self;
         var state = h.opState("scf.for", loc);
 
         // Add bounds and step operands
@@ -989,6 +1052,12 @@ pub const OraDialect = struct {
         if (result_types.len > 0) {
             c.mlirOperationStateAddResults(&state, @intCast(result_types.len), result_types.ptr);
         }
+
+        // Add gas cost attribute (JUMPI = 10 per loop iteration for the conditional jump)
+        const gas_cost_attr = c.mlirIntegerAttrGet(c.mlirIntegerTypeGet(self.ctx, 64), 10);
+        const gas_cost_id = h.identifier(self.ctx, "gas_cost");
+        var attrs = [_]c.MlirNamedAttribute{c.mlirNamedAttributeGet(gas_cost_id, gas_cost_attr)};
+        c.mlirOperationStateAddAttributes(&state, attrs.len, &attrs);
 
         const op = c.mlirOperationCreate(&state);
         return op;
@@ -1104,11 +1173,17 @@ pub const OraDialect = struct {
         result_type: c.MlirType,
         loc: c.MlirLocation,
     ) c.MlirOperation {
-        _ = self;
         var state = h.opState("arith.addi", loc);
         const operands = [_]c.MlirValue{ lhs, rhs };
         c.mlirOperationStateAddOperands(&state, operands.len, &operands);
         c.mlirOperationStateAddResults(&state, 1, @ptrCast(&result_type));
+
+        // Add gas cost attribute (ADD = 3)
+        const gas_cost_attr = c.mlirIntegerAttrGet(c.mlirIntegerTypeGet(self.ctx, 64), 3);
+        const gas_cost_id = h.identifier(self.ctx, "gas_cost");
+        var attrs = [_]c.MlirNamedAttribute{c.mlirNamedAttributeGet(gas_cost_id, gas_cost_attr)};
+        c.mlirOperationStateAddAttributes(&state, attrs.len, &attrs);
+
         const op = c.mlirOperationCreate(&state);
         return op;
     }
@@ -1121,11 +1196,17 @@ pub const OraDialect = struct {
         result_type: c.MlirType,
         loc: c.MlirLocation,
     ) c.MlirOperation {
-        _ = self;
         var state = h.opState("arith.subi", loc);
         const operands = [_]c.MlirValue{ lhs, rhs };
         c.mlirOperationStateAddOperands(&state, operands.len, &operands);
         c.mlirOperationStateAddResults(&state, 1, @ptrCast(&result_type));
+
+        // Add gas cost attribute (SUB = 3)
+        const gas_cost_attr = c.mlirIntegerAttrGet(c.mlirIntegerTypeGet(self.ctx, 64), 3);
+        const gas_cost_id = h.identifier(self.ctx, "gas_cost");
+        var attrs = [_]c.MlirNamedAttribute{c.mlirNamedAttributeGet(gas_cost_id, gas_cost_attr)};
+        c.mlirOperationStateAddAttributes(&state, attrs.len, &attrs);
+
         const op = c.mlirOperationCreate(&state);
         return op;
     }
@@ -1138,11 +1219,17 @@ pub const OraDialect = struct {
         result_type: c.MlirType,
         loc: c.MlirLocation,
     ) c.MlirOperation {
-        _ = self;
         var state = h.opState("arith.muli", loc);
         const operands = [_]c.MlirValue{ lhs, rhs };
         c.mlirOperationStateAddOperands(&state, operands.len, &operands);
         c.mlirOperationStateAddResults(&state, 1, @ptrCast(&result_type));
+
+        // Add gas cost attribute (MUL = 5)
+        const gas_cost_attr = c.mlirIntegerAttrGet(c.mlirIntegerTypeGet(self.ctx, 64), 5);
+        const gas_cost_id = h.identifier(self.ctx, "gas_cost");
+        var attrs = [_]c.MlirNamedAttribute{c.mlirNamedAttributeGet(gas_cost_id, gas_cost_attr)};
+        c.mlirOperationStateAddAttributes(&state, attrs.len, &attrs);
+
         const op = c.mlirOperationCreate(&state);
         return op;
     }
@@ -1155,11 +1242,17 @@ pub const OraDialect = struct {
         result_type: c.MlirType,
         loc: c.MlirLocation,
     ) c.MlirOperation {
-        _ = self;
         var state = h.opState("arith.divsi", loc);
         const operands = [_]c.MlirValue{ lhs, rhs };
         c.mlirOperationStateAddOperands(&state, operands.len, &operands);
         c.mlirOperationStateAddResults(&state, 1, @ptrCast(&result_type));
+
+        // Add gas cost attribute (DIV = 5)
+        const gas_cost_attr = c.mlirIntegerAttrGet(c.mlirIntegerTypeGet(self.ctx, 64), 5);
+        const gas_cost_id = h.identifier(self.ctx, "gas_cost");
+        var attrs = [_]c.MlirNamedAttribute{c.mlirNamedAttributeGet(gas_cost_id, gas_cost_attr)};
+        c.mlirOperationStateAddAttributes(&state, attrs.len, &attrs);
+
         const op = c.mlirOperationCreate(&state);
         return op;
     }
@@ -1172,11 +1265,17 @@ pub const OraDialect = struct {
         result_type: c.MlirType,
         loc: c.MlirLocation,
     ) c.MlirOperation {
-        _ = self;
         var state = h.opState("arith.remsi", loc);
         const operands = [_]c.MlirValue{ lhs, rhs };
         c.mlirOperationStateAddOperands(&state, operands.len, &operands);
         c.mlirOperationStateAddResults(&state, 1, @ptrCast(&result_type));
+
+        // Add gas cost attribute (MOD = 5)
+        const gas_cost_attr = c.mlirIntegerAttrGet(c.mlirIntegerTypeGet(self.ctx, 64), 5);
+        const gas_cost_id = h.identifier(self.ctx, "gas_cost");
+        var attrs = [_]c.MlirNamedAttribute{c.mlirNamedAttributeGet(gas_cost_id, gas_cost_attr)};
+        c.mlirOperationStateAddAttributes(&state, attrs.len, &attrs);
+
         const op = c.mlirOperationCreate(&state);
         return op;
     }

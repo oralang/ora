@@ -46,8 +46,8 @@ pub fn createContext(allocator: std.mem.Allocator) MlirContextHandle {
 
     // Initialize the Ora dialect
     var ora_dialect = @import("dialect.zig").OraDialect.init(ctx, allocator);
-    ora_dialect.register() catch {
-        std.debug.print("Warning: Failed to register Ora dialect\n", .{});
+    ora_dialect.register() catch |err| {
+        std.log.warn("Failed to register Ora dialect: {}", .{err});
     };
 
     return .{
@@ -445,8 +445,8 @@ pub fn lowerFunctionsToModuleWithSemanticTable(ctx: c.MlirContext, nodes: []lib.
 
     // Initialize Ora dialect
     var ora_dialect = @import("dialect.zig").OraDialect.init(ctx, allocator);
-    ora_dialect.register() catch {
-        std.debug.print("Warning: Failed to register Ora dialect\n", .{});
+    ora_dialect.register() catch |err| {
+        std.log.warn("Failed to register Ora dialect: {}", .{err});
     };
 
     const locations = if (source_filename) |fname|
@@ -555,8 +555,8 @@ pub fn lowerFunctionsToModuleWithErrors(ctx: c.MlirContext, nodes: []lib.AstNode
 
     // Initialize Ora dialect
     var ora_dialect = @import("dialect.zig").OraDialect.init(ctx, allocator);
-    ora_dialect.register() catch {
-        std.debug.print("Warning: Failed to register Ora dialect\n", .{});
+    ora_dialect.register() catch |err| {
+        std.log.warn("Failed to register Ora dialect: {}", .{err});
     };
 
     const locations = if (source_filename) |fname|

@@ -66,6 +66,20 @@ extern "C"
         MlirValue value,
         MlirStringRef globalName);
 
+    //===----------------------------------------------------------------------===//
+    // CFG Generation with Registered Dialect
+    //===----------------------------------------------------------------------===//
+
+    /// Generate Control Flow Graph (DOT format) from MLIR module
+    /// Registers the Ora dialect, runs view-op-graph pass with control flow edges, and returns DOT content
+    /// Returns null string ref on failure
+    /// The caller must free the returned string using mlirStringRefFree
+    /// @param includeControlFlow - If true, includes control flow edges (dashed lines showing dominance)
+    MLIR_CAPI_EXPORTED MlirStringRef oraGenerateCFG(
+        MlirContext ctx,
+        MlirModule module,
+        bool includeControlFlow);
+
 #ifdef __cplusplus
 }
 #endif
