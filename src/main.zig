@@ -1124,6 +1124,12 @@ fn runCFGGeneration(allocator: std.mem.Allocator, file_path: []const u8, _: Mlir
 
     // Save to file if output directory specified
     if (artifact_options.output_dir) |output_dir| {
+        // Create output directory if it doesn't exist
+        std.fs.cwd().makeDir(output_dir) catch |err| switch (err) {
+            error.PathAlreadyExists => {},
+            else => return err,
+        };
+
         const base_name = std.fs.path.stem(file_path);
         const dot_path = try std.fmt.allocPrint(allocator, "{s}/{s}.dot", .{ output_dir, base_name });
         defer allocator.free(dot_path);
@@ -1225,43 +1231,7 @@ fn generateMlirOutput(allocator: std.mem.Allocator, ast_nodes: []lib.AstNode, fi
         try stdout.flush();
         std.process.exit(1);
     }
-    // Apply MLIR pipeline if requested
-    var final_module = lowering_result.module;
-    if (mlir_options.use_pipeline) {
-        const mlir_pipeline = @import("mlir/pass_manager.zig");
-        const opt_level = mlir_options.getOptimizationLevel();
-        const pipeline_config = switch (opt_level) {
-            .None => mlir_pipeline.no_opt_config,
-            .Basic => mlir_pipeline.basic_config,
-            .Aggressive => mlir_pipeline.aggressive_config,
-        };
-
-        var pipeline_result = mlir_pipeline.runMLIRPipeline(h.ctx, lowering_result.module, pipeline_config, mlir_allocator) catch |err| {
-            try stdout.print("MLIR pipeline failed: {s}\n", .{@errorName(err)});
-            return;
-        };
-        defer pipeline_result.deinit(mlir_allocator);
-
-        if (!pipeline_result.success) {
-            try stdout.print("MLIR pipeline failed: {s}\n", .{pipeline_result.error_message orelse "Unknown error"});
-            try stdout.flush();
-            std.process.exit(1);
-        }
-
-        // Pipeline optimization completed successfully
-        // The module has been optimized in-place
-        final_module = pipeline_result.optimized_module;
-
-        // Report applied passes (only if generating YUL, otherwise keep output clean)
-        if (generate_yul) {
-            try stdout.print("MLIR pipeline applied {d} passes: ", .{pipeline_result.passes_applied.items.len});
-            for (pipeline_result.passes_applied.items, 0..) |pass, i| {
-                if (i > 0) try stdout.print(", ", .{});
-                try stdout.print("{s}", .{pass});
-            }
-            try stdout.print("\n", .{});
-        }
-    }
+    const final_module = lowering_result.module;
 
     // Convert MLIR to Yul (only if requested)
     if (generate_yul) {

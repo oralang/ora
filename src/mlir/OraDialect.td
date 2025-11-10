@@ -31,7 +31,6 @@ def Ora_Dialect : Dialect {
     - Transient storage (ora.tload, ora.tstore)
     - Constants (ora.string.constant, ora.address.constant, ora.hex.constant, ora.binary.constant)
     - Arithmetic operations (ora.power)
-    - Type conversions (ora.cast)
     - Destructuring (ora.destructure)
     - Enum operations (ora.enum.decl, ora.enum_constant)
     - Struct operations (ora.struct.decl, ora.struct_field_store, ora.struct_instantiate, ora.struct_init)

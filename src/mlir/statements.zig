@@ -799,6 +799,12 @@ pub const StatementLowerer = struct {
         // Add the condition operand
         c.mlirOperationStateAddOperands(&state, 1, @ptrCast(&condition));
 
+        // Add gas cost attribute (JUMPI = 10, conditional branch)
+        const if_gas_cost_attr = c.mlirIntegerAttrGet(c.mlirIntegerTypeGet(self.ctx, 64), 10);
+        const if_gas_cost_id = h.identifier(self.ctx, "gas_cost");
+        var if_gas_attrs = [_]c.MlirNamedAttribute{c.mlirNamedAttributeGet(if_gas_cost_id, if_gas_cost_attr)};
+        c.mlirOperationStateAddAttributes(&state, if_gas_attrs.len, &if_gas_attrs);
+
         // Create then region
         const then_region = c.mlirRegionCreate();
         const then_block = c.mlirBlockCreate(0, null, null);
@@ -996,6 +1002,12 @@ pub const StatementLowerer = struct {
         // Add the condition operand
         c.mlirOperationStateAddOperands(&state, 1, @ptrCast(&condition));
 
+        // Add gas cost attribute (JUMPI = 10, conditional branch)
+        const if2_gas_cost_attr = c.mlirIntegerAttrGet(c.mlirIntegerTypeGet(self.ctx, 64), 10);
+        const if2_gas_cost_id = h.identifier(self.ctx, "gas_cost");
+        var if2_gas_attrs = [_]c.MlirNamedAttribute{c.mlirNamedAttributeGet(if2_gas_cost_id, if2_gas_cost_attr)};
+        c.mlirOperationStateAddAttributes(&state, if2_gas_attrs.len, &if2_gas_attrs);
+
         // Create then region
         const then_region = c.mlirRegionCreate();
         const then_block = c.mlirBlockCreate(0, null, null);
@@ -1111,6 +1123,12 @@ pub const StatementLowerer = struct {
                         var state = h.opState("scf.if", loc);
                         c.mlirOperationStateAddOperands(&state, 1, @ptrCast(&condition));
 
+                        // Add gas cost attribute (JUMPI = 10, conditional branch)
+                        const if3_gas_cost_attr = c.mlirIntegerAttrGet(c.mlirIntegerTypeGet(temp_lowerer.ctx, 64), 10);
+                        const if3_gas_cost_id = h.identifier(temp_lowerer.ctx, "gas_cost");
+                        var if3_gas_attrs = [_]c.MlirNamedAttribute{c.mlirNamedAttributeGet(if3_gas_cost_id, if3_gas_cost_attr)};
+                        c.mlirOperationStateAddAttributes(&state, if3_gas_attrs.len, &if3_gas_attrs);
+
                         const result_type = temp_lowerer.getReturnTypeFromIfStatement(&if_stmt);
                         if (result_type) |ret_type| {
                             c.mlirOperationStateAddResults(&state, 1, @ptrCast(&ret_type));
@@ -1195,6 +1213,12 @@ pub const StatementLowerer = struct {
 
         // Create scf.while operation
         var state = h.opState("scf.while", loc);
+        
+        // Add gas cost attribute (JUMPI = 10 per loop iteration)
+        const gas_cost_attr = c.mlirIntegerAttrGet(c.mlirIntegerTypeGet(self.ctx, 64), 10);
+        const gas_cost_id = h.identifier(self.ctx, "gas_cost");
+        var gas_attrs = [_]c.MlirNamedAttribute{c.mlirNamedAttributeGet(gas_cost_id, gas_cost_attr)};
+        c.mlirOperationStateAddAttributes(&state, gas_attrs.len, &gas_attrs);
 
         // Create before region (condition)
         const before_region = c.mlirRegionCreate();
@@ -1219,7 +1243,14 @@ pub const StatementLowerer = struct {
 
         // Create scf.condition operation in before block
         var cond_state = h.opState("scf.condition", loc);
-        c.mlirOperationStateAddOperands(&cond_state, 1, @ptrCast(&condition));
+            c.mlirOperationStateAddOperands(&cond_state, 1, @ptrCast(&condition));
+        
+        // Add gas cost attribute (scf.condition is part of loop, JUMPI cost is on scf.while)
+        // scf.condition itself has minimal cost (0), but we account for it as part of control flow
+            const cond_gas_cost_attr = c.mlirIntegerAttrGet(c.mlirIntegerTypeGet(self.ctx, 64), 0);
+            const cond_gas_cost_id = h.identifier(self.ctx, "gas_cost");
+            var cond_gas_attrs = [_]c.MlirNamedAttribute{c.mlirNamedAttributeGet(cond_gas_cost_id, cond_gas_cost_attr)};
+        c.mlirOperationStateAddAttributes(&cond_state, cond_gas_attrs.len, &cond_gas_attrs);
         const cond_op = c.mlirOperationCreate(&cond_state);
         h.appendOp(before_block, cond_op);
 
@@ -1764,6 +1795,12 @@ pub const StatementLowerer = struct {
         var if_state = h.opState("scf.if", loc);
         c.mlirOperationStateAddOperands(&if_state, 1, @ptrCast(&case_condition));
 
+                // Add gas cost attribute (JUMPI = 10, conditional branch)
+                const switch_if_gas_cost_attr = c.mlirIntegerAttrGet(c.mlirIntegerTypeGet(self.ctx, 64), 10);
+                const switch_if_gas_cost_id = h.identifier(self.ctx, "gas_cost");
+                var switch_if_gas_attrs = [_]c.MlirNamedAttribute{c.mlirNamedAttributeGet(switch_if_gas_cost_id, switch_if_gas_cost_attr)};
+                c.mlirOperationStateAddAttributes(&if_state, switch_if_gas_attrs.len, &switch_if_gas_attrs);
+
         // Create then region for the case body
         const then_region = c.mlirRegionCreate();
         const then_block = c.mlirBlockCreate(0, null, null);
@@ -2052,17 +2089,10 @@ pub const StatementLowerer = struct {
                 return LoweringError.UndefinedSymbol;
             }
         } else {
-            // For complex field access (e.g., nested structs), use ora.field_store
-            var field_store_state = h.opState("ora.field_store", loc);
-            c.mlirOperationStateAddOperands(&field_store_state, 2, @ptrCast(&[_]c.MlirValue{ updated_struct, target }));
-
-            // Add field name as attribute
-            const field_name_id = h.identifier(self.ctx, "field");
-            const field_name_attr = h.stringAttr(self.ctx, field_access.field);
-            var field_attrs = [_]c.MlirNamedAttribute{c.mlirNamedAttributeGet(field_name_id, field_name_attr)};
-            c.mlirOperationStateAddAttributes(&field_store_state, field_attrs.len, &field_attrs);
-
-            const field_store_op = c.mlirOperationCreate(&field_store_state);
+            // For complex field access (e.g., nested structs), use ora.struct_field_store
+            // Note: This is a simplified approach - for truly nested fields, we may need
+            // to recursively process the field path. For now, treat as simple field store.
+            const field_store_op = self.ora_dialect.createStructFieldStore(target, field_access.field, updated_struct, loc);
             h.appendOp(self.block, field_store_op);
         }
     }
@@ -2083,18 +2113,10 @@ pub const StatementLowerer = struct {
             h.appendOp(self.block, store_op);
         } else {
             // Map indexing or other complex indexing operations
-            // For now, use a generic store operation with ora.map_store attribute
-            var store_state = h.opState("ora.store", loc);
-            c.mlirOperationStateAddOperands(&store_state, 3, @ptrCast(&[_]c.MlirValue{ value, target, index_val }));
-
-            // Add map store attribute
-            const map_store_id = h.identifier(self.ctx, "ora.map_store");
-            const map_store_attr = c.mlirBoolAttrGet(self.ctx, 1);
-            var attrs = [_]c.MlirNamedAttribute{c.mlirNamedAttributeGet(map_store_id, map_store_attr)};
-            c.mlirOperationStateAddAttributes(&store_state, attrs.len, &attrs);
-
-            const store_op = c.mlirOperationCreate(&store_state);
-            h.appendOp(self.block, store_op);
+            // Use ora.map_store directly (registered operation)
+            // Operands: map, key, value
+            const map_store_op = self.ora_dialect.createMapStore(target, index_val, value, loc);
+            h.appendOp(self.block, map_store_op);
         }
     }
 
@@ -2157,6 +2179,12 @@ pub const StatementLowerer = struct {
         // Create scf.while operation
         var while_state = h.opState("scf.while", loc);
 
+        // Add gas cost attribute (JUMPI = 10 per loop iteration)
+        const for_while_gas_cost_attr = c.mlirIntegerAttrGet(c.mlirIntegerTypeGet(self.ctx, 64), 10);
+        const for_while_gas_cost_id = h.identifier(self.ctx, "gas_cost");
+        var for_while_gas_attrs = [_]c.MlirNamedAttribute{c.mlirNamedAttributeGet(for_while_gas_cost_id, for_while_gas_cost_attr)};
+        c.mlirOperationStateAddAttributes(&while_state, for_while_gas_attrs.len, &for_while_gas_attrs);
+
         // Create before region (condition check)
         const before_region = c.mlirRegionCreate();
         const before_block = c.mlirBlockCreate(0, null, null);
@@ -2172,6 +2200,13 @@ pub const StatementLowerer = struct {
 
         var condition_state = h.opState("scf.condition", loc);
         c.mlirOperationStateAddOperands(&condition_state, 1, @ptrCast(&should_continue));
+
+        // Add gas cost attribute (scf.condition is part of loop, JUMPI cost is on scf.while)
+        const for_cond_gas_cost_attr = c.mlirIntegerAttrGet(c.mlirIntegerTypeGet(self.ctx, 64), 0);
+        const for_cond_gas_cost_id = h.identifier(self.ctx, "gas_cost");
+        var for_cond_gas_attrs = [_]c.MlirNamedAttribute{c.mlirNamedAttributeGet(for_cond_gas_cost_id, for_cond_gas_cost_attr)};
+        c.mlirOperationStateAddAttributes(&condition_state, for_cond_gas_attrs.len, &for_cond_gas_attrs);
+
         const condition_op = c.mlirOperationCreate(&condition_state);
         h.appendOp(before_block, condition_op);
 

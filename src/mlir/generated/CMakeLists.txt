@@ -86,6 +86,7 @@ add_mlir_dialect_library(MLIROraDialectC
   MLIRSupport
   MLIRSideEffectInterfaces
   MLIRSymbolInterfaces
+  MLIRPass
 )
 
 # Install the libraries
@@ -96,6 +97,7 @@ install(TARGETS MLIROraDialectC
 install(FILES
   OraDialect.h
   OraDialectC.h
+  OraGasConstants.h
   ${PROJECT_BINARY_DIR}/OraDialect.h.inc
   ${PROJECT_BINARY_DIR}/OraOps.h.inc
   DESTINATION include/Ora)

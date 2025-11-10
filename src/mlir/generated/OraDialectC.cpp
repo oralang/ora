@@ -14,6 +14,7 @@
 #include "mlir/Pass/Pass.h"
 #include "mlir/Pass/PassManager.h"
 #include "mlir/Pass/PassRegistry.h"
+#include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Transforms/ViewOpGraph.h"
 #include "mlir/Transforms/Passes.h"
 #include "llvm/Support/FileSystem.h"
@@ -184,6 +185,10 @@ MlirOperation oraSStoreOpCreate(MlirContext ctx, MlirLocation loc, MlirValue val
 
 //===----------------------------------------------------------------------===//
 // CFG Generation with Registered Dialect
+//===----------------------------------------------------------------------===//
+
+//===----------------------------------------------------------------------===//
+// CFG Generation Implementation
 //===----------------------------------------------------------------------===//
 
 MlirStringRef oraGenerateCFG(MlirContext ctx, MlirModule module, bool includeControlFlow)

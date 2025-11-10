@@ -317,25 +317,6 @@ def Ora_TStoreOp : Ora_Op<"tstore"> {
 }
 
 //===----------------------------------------------------------------------===//
-// Type Conversion Operations
-//===----------------------------------------------------------------------===//
-
-def Ora_CastOp : Ora_PureOp<"cast"> {
-  let summary = "Type conversion operation";
-  let description = [{
-    Converts a value from one type to another.
-    
-    Example:
-    ```mlir
-    %result = ora.cast %input : i256 -> f64
-    ```
-  }];
-  
-  let arguments = (ins AnyType:$input);
-  let results = (outs AnyType:$result);
-}
-
-//===----------------------------------------------------------------------===//
 // Destructuring Operations
 //===----------------------------------------------------------------------===//
 
