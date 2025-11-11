@@ -11,6 +11,9 @@
 #include "mlir/CAPI/Pass.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinOps.h"
+#include "mlir/IR/OpImplementation.h"
+#include "mlir/IR/Dialect.h"
+#include "mlir/IR/AsmPrinter.h"
 #include "mlir/Pass/Pass.h"
 #include "mlir/Pass/PassManager.h"
 #include "mlir/Pass/PassRegistry.h"
@@ -261,6 +264,63 @@ MlirStringRef oraGenerateCFG(MlirContext ctx, MlirModule module, bool includeCon
         result[dotContent.size()] = '\0';
 
         return {result, dotContent.size()};
+    }
+    catch (...)
+    {
+        return {nullptr, 0};
+    }
+}
+
+//===----------------------------------------------------------------------===//
+// MLIR Printing with Custom Assembly Formats
+//===----------------------------------------------------------------------===//
+
+MlirStringRef oraPrintOperation(MlirContext ctx, MlirOperation op)
+{
+    try
+    {
+        MLIRContext *context = unwrap(ctx);
+        Operation *operation = unwrap(op);
+
+        // Register the Ora dialect to ensure custom printers are available
+        if (!oraDialectRegister(ctx))
+        {
+            return {nullptr, 0};
+        }
+
+        // Create a string stream to capture the printed output
+        std::string mlirContent;
+        llvm::raw_string_ostream mlirStream(mlirContent);
+
+        // Use OpPrintingFlags
+        OpPrintingFlags flags;
+        flags.enableDebugInfo(true, false);
+
+        // Print the operation - Operation::print should automatically use custom printers
+        // if the operation name matches a registered operation with hasCustomAssemblyFormat = 1
+        // However, operations created via C API may not be matched correctly.
+        // The print method will use the registered operation's printAssembly if available.
+        operation->print(mlirStream, flags);
+
+        // Flush the stream
+        mlirStream.flush();
+
+        // Check if we got any content
+        if (mlirContent.empty())
+        {
+            return {nullptr, 0};
+        }
+
+        // Allocate memory for the result (caller must free)
+        char *result = (char *)malloc(mlirContent.size() + 1);
+        if (!result)
+        {
+            return {nullptr, 0};
+        }
+        memcpy(result, mlirContent.c_str(), mlirContent.size());
+        result[mlirContent.size()] = '\0';
+
+        return {result, mlirContent.size()};
     }
     catch (...)
     {

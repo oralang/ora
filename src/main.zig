@@ -1328,16 +1328,23 @@ fn generateMlirOutput(allocator: std.mem.Allocator, ast_nodes: []lib.AstNode, fi
 
     defer c.mlirModuleDestroy(lowering_result.module);
 
-    // Output MLIR
-    const callback = struct {
-        fn cb(str: c.MlirStringRef, user: ?*anyopaque) callconv(.c) void {
-            const w: *std.fs.File = @ptrCast(@alignCast(user.?));
-            _ = w.writeAll(str.data[0..str.length]) catch {};
-        }
-    };
-
+    // Output MLIR using C++ API wrapper (ensures custom assembly formats are used)
     // Only output MLIR if explicitly requested with --emit-mlir
     if (mlir_options.emit_mlir) {
+        const module_op = c.mlirModuleGetOperation(lowering_result.module);
+        const mlir_str = c.oraPrintOperation(h.ctx, module_op);
+        defer if (mlir_str.data != null) {
+            const mlir_c = @import("mlir/c.zig");
+            mlir_c.freeStringRef(mlir_str);
+        };
+
+        if (mlir_str.data == null or mlir_str.length == 0) {
+            try stdout.print("Failed to print MLIR\n", .{});
+            return;
+        }
+
+        const mlir_content = mlir_str.data[0..mlir_str.length];
+
         // Determine output destination
         if (mlir_options.output_dir) |output_dir| {
             // Save to file
@@ -1352,30 +1359,11 @@ fn generateMlirOutput(allocator: std.mem.Allocator, ast_nodes: []lib.AstNode, fi
             const output_file = try std.fs.path.join(allocator, &[_][]const u8{ output_dir, filename });
             defer allocator.free(output_file);
 
-            const file = std.fs.cwd().createFile(output_file, .{}) catch |err| {
-                try stdout.print("Error creating output file {s}: {s}\n", .{ output_file, @errorName(err) });
-                return;
-            };
-            defer file.close();
-
-            var file_buffer: [4096]u8 = undefined;
-            const file_writer = file.writer(&file_buffer);
-            const op = c.mlirModuleGetOperation(lowering_result.module);
-            c.mlirOperationPrint(op, callback.cb, @constCast(&file_writer));
-
+            try std.fs.cwd().writeFile(.{ .sub_path = output_file, .data = mlir_content });
             try stdout.print("MLIR saved to {s}\n", .{output_file});
         } else {
             // Print to stdout
-            var stdout_file = std.fs.File.stdout();
-
-            const op = c.mlirModuleGetOperation(lowering_result.module);
-
-            // Create printing flags to enable location information
-            const flags = c.mlirOpPrintingFlagsCreate();
-            defer c.mlirOpPrintingFlagsDestroy(flags);
-            c.mlirOpPrintingFlagsEnableDebugInfo(flags, true, false);
-
-            c.mlirOperationPrintWithFlags(op, flags, callback.cb, @constCast(&stdout_file));
+            try stdout.print("{s}", .{mlir_content});
         }
     }
 
@@ -1395,11 +1383,20 @@ fn generateMlirOutput(allocator: std.mem.Allocator, ast_nodes: []lib.AstNode, fi
         const mlir_file = try std.fmt.allocPrint(allocator, "{s}/mlir.mlir", .{artifact_dir});
         defer allocator.free(mlir_file);
 
-        var file = try std.fs.cwd().createFile(mlir_file, .{});
-        defer file.close();
+        const module_op = c.mlirModuleGetOperation(lowering_result.module);
+        const mlir_str = c.oraPrintOperation(h.ctx, module_op);
+        defer if (mlir_str.data != null) {
+            const mlir_c = @import("mlir/c.zig");
+            mlir_c.freeStringRef(mlir_str);
+        };
 
-        const op = c.mlirModuleGetOperation(lowering_result.module);
-        c.mlirOperationPrint(op, callback.cb, @constCast(&file));
+        if (mlir_str.data == null or mlir_str.length == 0) {
+            try stdout.print("Failed to print MLIR\n", .{});
+            return;
+        }
+
+        const mlir_content = mlir_str.data[0..mlir_str.length];
+        try std.fs.cwd().writeFile(.{ .sub_path = mlir_file, .data = mlir_content });
 
         try stdout.print("Saved MLIR to: {s}\n", .{mlir_file});
     }

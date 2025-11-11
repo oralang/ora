@@ -57,7 +57,7 @@ mlir_tablegen(OraDialect.h.inc -gen-dialect-decls -dialect=ora)
 mlir_tablegen(OraDialect.cpp.inc -gen-dialect-defs -dialect=ora)
 add_public_tablegen_target(MLIROraDialectIncGen)
 
-set(LLVM_TARGET_DEFINITIONS ${PROJECT_SOURCE_DIR}/../OraOpsMinimal.td)
+set(LLVM_TARGET_DEFINITIONS ${PROJECT_SOURCE_DIR}/../OraOps.td)
 mlir_tablegen(OraOps.h.inc -gen-op-decls -I${PROJECT_SOURCE_DIR}/..)
 mlir_tablegen(OraOps.cpp.inc -gen-op-defs -I${PROJECT_SOURCE_DIR}/..)
 add_public_tablegen_target(MLIROraOpsIncGen)

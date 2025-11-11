@@ -41,6 +41,8 @@ def Ora_ContractOp : Ora_Op<"contract"> {
   let arguments = (ins StrAttr:$sym_name);
   let regions = (region AnyRegion:$body);
   
+  let hasCustomAssemblyFormat = 1;
+  
   let extraClassDeclaration = [{
     /// Get the body region
     ::mlir::Region &getBodyRegion() { return getBody(); }
@@ -70,6 +72,8 @@ def Ora_GlobalOp : Ora_Op<"global"> {
     AnyAttr:$init
   );
   
+  let hasCustomAssemblyFormat = 1;
+  
   let extraClassDeclaration = [{
     /// Get the type of the global variable
     ::mlir::Type getGlobalType() { return getTypeAttr().getValue(); }
@@ -95,6 +99,8 @@ def Ora_SLoadOp : Ora_Op<"sload"> {
   let arguments = (ins StrAttr:$global);
   let results = (outs AnyType:$result);
   
+  let assemblyFormat = "$global attr-dict `:` type($result)";
+  
   let extraClassDeclaration = [{
     /// Get the name of the global variable being loaded
     ::llvm::StringRef getGlobalName() { return getGlobal(); }
@@ -115,6 +121,8 @@ def Ora_SStoreOp : Ora_Op<"sstore"> {
   }];
   
   let arguments = (ins AnyType:$value, StrAttr:$global);
+  
+  let assemblyFormat = "$value `,` $global attr-dict `:` type($value)";
   
   let extraClassDeclaration = [{
     /// Get the value being stored
@@ -142,6 +150,8 @@ def Ora_StringConstantOp : Ora_PureOp<"string.constant"> {
   
   let arguments = (ins StrAttr:$value);
   let results = (outs AnyType:$result);
+  
+  let assemblyFormat = "$value attr-dict `:` type($result)";
 }
 
 
@@ -158,6 +168,8 @@ def Ora_HexConstantOp : Ora_PureOp<"hex.constant"> {
   
   let arguments = (ins StrAttr:$value);
   let results = (outs AnyType:$result);
+  
+  let assemblyFormat = "$value attr-dict `:` type($result)";
 }
 
 
@@ -178,6 +190,8 @@ def Ora_PowerOp : Ora_PureOp<"power"> {
   
   let arguments = (ins AnyType:$base, AnyType:$exponent);
   let results = (outs AnyType:$result);
+  
+  let assemblyFormat = "$base `,` $exponent attr-dict `:` type($base) `,` type($exponent) `->` type($result)";
 }
 
 //===----------------------------------------------------------------------===//
@@ -197,6 +211,8 @@ def Ora_ConstOp : Ora_Op<"const"> {
   
   let arguments = (ins StrAttr:$name, AnyAttr:$value);
   let results = (outs AnyType:$result);
+  
+  let assemblyFormat = "$name `:` type($result) `=` $value attr-dict";
 }
 
 def Ora_ImmutableOp : Ora_Op<"immutable"> {
@@ -212,6 +228,8 @@ def Ora_ImmutableOp : Ora_Op<"immutable"> {
   
   let arguments = (ins StrAttr:$name, AnyType:$value);
   let results = (outs AnyType:$result);
+  
+  let assemblyFormat = "$name `:` type($result) `=` $value `:` type($value) attr-dict";
 }
 
 //===----------------------------------------------------------------------===//
@@ -225,7 +243,7 @@ def Ora_IfOp : Ora_Op<"if"> {
     
     Example:
     ```mlir
-    %result = ora.if %condition : i1 -> i256 {
+    %result = ora.if %condition then {
       %then_val = arith.constant 1 : i256
       ora.yield %then_val : i256
     } else {
@@ -237,7 +255,11 @@ def Ora_IfOp : Ora_Op<"if"> {
   
   let arguments = (ins I1:$condition);
   let results = (outs Variadic<AnyType>:$results);
-  let regions = (region SizedRegion<2>:$body);
+  let regions = (region AnyRegion:$thenRegion,
+                        AnyRegion:$elseRegion);
+  
+  // Custom parser/printer for prettier syntax with "then"/"else" keywords
+  let hasCustomAssemblyFormat = 1;
 }
 
 def Ora_YieldOp : Ora_Op<"yield"> {
@@ -252,6 +274,8 @@ def Ora_YieldOp : Ora_Op<"yield"> {
   }];
   
   let arguments = (ins Variadic<AnyType>:$operands);
+  
+  let assemblyFormat = "($operands^ `:` type($operands))? attr-dict";
 }
 
 //===----------------------------------------------------------------------===//
@@ -271,6 +295,8 @@ def Ora_MLoadOp : Ora_Op<"mload"> {
   
   let arguments = (ins StrAttr:$variable);
   let results = (outs AnyType:$result);
+  
+  let assemblyFormat = "$variable attr-dict `:` type($result)";
 }
 
 def Ora_MStoreOp : Ora_Op<"mstore"> {
@@ -285,6 +311,8 @@ def Ora_MStoreOp : Ora_Op<"mstore"> {
   }];
   
   let arguments = (ins AnyType:$value, StrAttr:$variable);
+  
+  let assemblyFormat = "$value `,` $variable attr-dict `:` type($value)";
 }
 
 def Ora_TLoadOp : Ora_Op<"tload"> {
@@ -300,6 +328,8 @@ def Ora_TLoadOp : Ora_Op<"tload"> {
   
   let arguments = (ins StrAttr:$key);
   let results = (outs AnyType:$result);
+  
+  let assemblyFormat = "$key attr-dict `:` type($result)";
 }
 
 def Ora_TStoreOp : Ora_Op<"tstore"> {
@@ -314,6 +344,8 @@ def Ora_TStoreOp : Ora_Op<"tstore"> {
   }];
   
   let arguments = (ins AnyType:$value, StrAttr:$key);
+  
+  let assemblyFormat = "$value `,` $key attr-dict `:` type($value)";
 }
 
 //===----------------------------------------------------------------------===//
@@ -333,6 +365,9 @@ def Ora_DestructureOp : Ora_PureOp<"destructure"> {
   
   let arguments = (ins AnyType:$value, StrAttr:$pattern_type);
   let results = (outs AnyType:$result);
+  
+  // Custom parser/printer needed - type must come before operand
+  // let assemblyFormat = "$value `as` $pattern_type attr-dict `:` type($value) `->` type($result)";
 }
 
 //===----------------------------------------------------------------------===//
@@ -355,6 +390,9 @@ def Ora_EnumDeclOp : Ora_Op<"enum.decl"> {
   
   let arguments = (ins StrAttr:$name, TypeAttr:$repr_type);
   let regions = (region AnyRegion:$variants);
+  
+  // Custom parser/printer needed for type-attr syntax
+  // let assemblyFormat = "$name `:` type-attr($repr_type) region($variants) attr-dict";
 }
 
 def Ora_EnumConstantOp : Ora_PureOp<"enum_constant"> {
@@ -370,6 +408,9 @@ def Ora_EnumConstantOp : Ora_PureOp<"enum_constant"> {
   
   let arguments = (ins StrAttr:$enum_name, StrAttr:$variant_name);
   let results = (outs AnyType:$result);
+  
+  // Custom parser/printer needed for '.' separator
+  // let assemblyFormat = "$enum_name `.` $variant_name attr-dict `:` type($result)";
 }
 
 //===----------------------------------------------------------------------===//
@@ -392,6 +433,9 @@ def Ora_StructDeclOp : Ora_Op<"struct.decl"> {
   
   let arguments = (ins StrAttr:$name);
   let regions = (region AnyRegion:$fields);
+  
+  // Regions need custom parser/printer when combined with attributes
+  // let assemblyFormat = "$name region($fields) attr-dict";
 }
 
 def Ora_StructFieldStoreOp : Ora_Op<"struct_field_store"> {
@@ -405,7 +449,9 @@ def Ora_StructFieldStoreOp : Ora_Op<"struct_field_store"> {
     ```
   }];
   
-  let arguments = (ins AnyType:$struct, StrAttr:$field_name, AnyType:$value);
+  let arguments = (ins AnyType:$struct_value, StrAttr:$field_name, AnyType:$value);
+  
+  let assemblyFormat = "$struct_value `,` $field_name `,` $value attr-dict `:` type($struct_value) `,` type($value)";
 }
 
 def Ora_StructInstantiateOp : Ora_PureOp<"struct_instantiate"> {
@@ -421,6 +467,9 @@ def Ora_StructInstantiateOp : Ora_PureOp<"struct_instantiate"> {
   
   let arguments = (ins StrAttr:$struct_name, Variadic<AnyType>:$field_values);
   let results = (outs AnyType:$result);
+  
+  // Variadic operands with AnyType need custom parser/printer
+  // let assemblyFormat = "$struct_name `(` $field_values `)` attr-dict `:` type($field_values) `->` type($result)";
 }
 
 def Ora_StructInitOp : Ora_PureOp<"struct_init"> {
@@ -436,6 +485,8 @@ def Ora_StructInitOp : Ora_PureOp<"struct_init"> {
   
   let arguments = (ins Variadic<AnyType>:$field_values);
   let results = (outs AnyType:$result);
+  
+  let assemblyFormat = "`{` $field_values `}` attr-dict `:` type($field_values) `->` type($result)";
 }
 
 //===----------------------------------------------------------------------===//
@@ -455,6 +506,8 @@ def Ora_MapGetOp : Ora_PureOp<"map_get"> {
   
   let arguments = (ins AnyType:$map, AnyType:$key);
   let results = (outs AnyType:$result);
+  
+  let assemblyFormat = "$map `,` $key attr-dict `:` type($map) `,` type($key) `->` type($result)";
 }
 
 def Ora_MapStoreOp : Ora_Op<"map_store"> {
@@ -469,6 +522,8 @@ def Ora_MapStoreOp : Ora_Op<"map_store"> {
   }];
   
   let arguments = (ins AnyType:$map, AnyType:$key, AnyType:$value);
+  
+  let assemblyFormat = "$map `,` $key `,` $value attr-dict `:` type($map) `,` type($key) `,` type($value)";
 }
 
 //===----------------------------------------------------------------------===//
@@ -487,6 +542,8 @@ def Ora_RequiresOp : Ora_Op<"requires"> {
   }];
   
   let arguments = (ins I1:$condition);
+  
+  let assemblyFormat = "$condition attr-dict `:` type($condition)";
 }
 
 def Ora_EnsuresOp : Ora_Op<"ensures"> {
@@ -501,6 +558,8 @@ def Ora_EnsuresOp : Ora_Op<"ensures"> {
   }];
   
   let arguments = (ins I1:$condition);
+  
+  let assemblyFormat = "$condition attr-dict `:` type($condition)";
 }
 
 def Ora_InvariantOp : Ora_Op<"invariant"> {
@@ -515,6 +574,8 @@ def Ora_InvariantOp : Ora_Op<"invariant"> {
   }];
   
   let arguments = (ins I1:$condition);
+  
+  let assemblyFormat = "$condition attr-dict `:` type($condition)";
 }
 
 def Ora_AssertOp : Ora_Op<"assert"> {
@@ -529,6 +590,8 @@ def Ora_AssertOp : Ora_Op<"assert"> {
   }];
   
   let arguments = (ins I1:$condition, OptionalAttr<StrAttr>:$message);
+  
+  let assemblyFormat = "$condition (`,` $message^)? attr-dict `:` type($condition)";
 }
 
 def Ora_DecreasesOp : Ora_Op<"decreases"> {
@@ -544,6 +607,8 @@ def Ora_DecreasesOp : Ora_Op<"decreases"> {
   }];
   
   let arguments = (ins AnyType:$measure);
+  
+  let assemblyFormat = "$measure attr-dict `:` type($measure)";
 }
 
 def Ora_IncreasesOp : Ora_Op<"increases"> {
@@ -559,6 +624,8 @@ def Ora_IncreasesOp : Ora_Op<"increases"> {
   }];
   
   let arguments = (ins AnyType:$measure);
+  
+  let assemblyFormat = "$measure attr-dict `:` type($measure)";
 }
 
 def Ora_AssumeOp : Ora_Op<"assume"> {
@@ -574,6 +641,8 @@ def Ora_AssumeOp : Ora_Op<"assume"> {
   }];
   
   let arguments = (ins I1:$condition);
+  
+  let assemblyFormat = "$condition attr-dict `:` type($condition)";
 }
 
 def Ora_HavocOp : Ora_Op<"havoc"> {
@@ -589,6 +658,8 @@ def Ora_HavocOp : Ora_Op<"havoc"> {
   }];
   
   let arguments = (ins StrAttr:$variable_name);
+  
+  let assemblyFormat = "$variable_name attr-dict";
 }
 
 def Ora_OldOp : Ora_PureOp<"old"> {
@@ -604,6 +675,8 @@ def Ora_OldOp : Ora_PureOp<"old"> {
   
   let arguments = (ins AnyType:$value);
   let results = (outs AnyType:$result);
+  
+  let assemblyFormat = "$value attr-dict `:` type($value) `->` type($result)";
 }
 
 //===----------------------------------------------------------------------===//
@@ -622,6 +695,8 @@ def Ora_MoveOp : Ora_Op<"move"> {
   }];
   
   let arguments = (ins AnyType:$amount, AnyType:$source, AnyType:$destination);
+  
+  // let assemblyFormat = "$amount `from` $source `to` $destination attr-dict `:` type($amount) `,` type($source) `,` type($destination)";
 }
 
 //===----------------------------------------------------------------------===//
@@ -640,6 +715,8 @@ def Ora_LogOp : Ora_Op<"log"> {
   }];
   
   let arguments = (ins StrAttr:$event_name, Variadic<AnyType>:$parameters);
+  
+  // let assemblyFormat = "$event_name `(` $parameters `)` attr-dict `:` type($parameters)";
 }
 
 //===----------------------------------------------------------------------===//
@@ -658,6 +735,8 @@ def Ora_LockOp : Ora_Op<"lock"> {
   }];
   
   let arguments = (ins AnyType:$resource);
+  
+  let assemblyFormat = "$resource attr-dict `:` type($resource)";
 }
 
 def Ora_UnlockOp : Ora_Op<"unlock"> {
@@ -672,6 +751,8 @@ def Ora_UnlockOp : Ora_Op<"unlock"> {
   }];
   
   let arguments = (ins AnyType:$resource);
+  
+  let assemblyFormat = "$resource attr-dict `:` type($resource)";
 }
 
 //===----------------------------------------------------------------------===//
@@ -695,6 +776,8 @@ def Ora_TryOp : Ora_Op<"try_catch"> {
   let arguments = (ins AnyType:$try_operation);
   let results = (outs AnyType:$result);
   let regions = (region AnyRegion:$catch_region);
+  
+  // let assemblyFormat = "$try_operation attr-dict `:` type($try_operation) `->` type($result) `catch` region($catch_region)";
 }
 
 //===----------------------------------------------------------------------===//
@@ -717,6 +800,8 @@ def Ora_WhileOp : Ora_Op<"while"> {
   
   let arguments = (ins I1:$condition);
   let regions = (region AnyRegion:$body);
+  
+  let hasCustomAssemblyFormat = 1;
 }
 
 def Ora_ForOp : Ora_Op<"for"> {
@@ -735,6 +820,9 @@ def Ora_ForOp : Ora_Op<"for"> {
   
   let arguments = (ins AnyType:$collection);
   let regions = (region AnyRegion:$body);
+  
+  // Custom parser/printer needed for '|' separator syntax
+  // let assemblyFormat = "$collection `|` `%key` `,` `%value` `|` region($body) attr-dict";
 }
 
 def Ora_BreakOp : Ora_Op<"break"> {
@@ -749,6 +837,9 @@ def Ora_BreakOp : Ora_Op<"break"> {
   }];
   
   let arguments = (ins OptionalAttr<StrAttr>:$label, Variadic<AnyType>:$value);
+  
+  // Optional variadic operands need custom parser/printer
+  // let assemblyFormat = "($label^)? ($value^ `:` type($value))? attr-dict";
 }
 
 def Ora_ContinueOp : Ora_Op<"continue"> {
@@ -763,6 +854,8 @@ def Ora_ContinueOp : Ora_Op<"continue"> {
   }];
   
   let arguments = (ins OptionalAttr<StrAttr>:$label);
+  
+  let assemblyFormat = "($label^)? attr-dict";
 }
 
 //===----------------------------------------------------------------------===//
@@ -781,6 +874,8 @@ def Ora_ReturnOp : Ora_Op<"return"> {
   }];
   
   let arguments = (ins Variadic<AnyType>:$operands);
+  
+  let assemblyFormat = "($operands^ `:` type($operands))? attr-dict";
 }
 
 //===----------------------------------------------------------------------===//
@@ -814,6 +909,9 @@ def Ora_SwitchOp : Ora_Op<"switch"> {
   let arguments = (ins AnyType:$value);
   let results = (outs Variadic<AnyType>:$results);
   let regions = (region VariadicRegion<AnyRegion>:$cases);
+  
+  // VariadicRegion needs custom parser/printer
+  // let assemblyFormat = "$value attr-dict `:` type($value) `->` type($results) region($cases)";
 }
 
 #endif // ORA_OPS

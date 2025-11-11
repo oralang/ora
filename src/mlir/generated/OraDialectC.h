@@ -80,6 +80,18 @@ extern "C"
         MlirModule module,
         bool includeControlFlow);
 
+    //===----------------------------------------------------------------------===//
+    // MLIR Printing with Custom Assembly Formats
+    //===----------------------------------------------------------------------===//
+
+    /// Print an MLIR operation using the C++ API (ensures custom assembly formats are used)
+    /// Registers the Ora dialect and uses OpAsmPrinter which respects custom assembly formats
+    /// Returns null string ref on failure
+    /// The caller must free the returned string using mlirStringRefFree
+    MLIR_CAPI_EXPORTED MlirStringRef oraPrintOperation(
+        MlirContext ctx,
+        MlirOperation op);
+
 #ifdef __cplusplus
 }
 #endif
