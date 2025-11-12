@@ -793,55 +793,36 @@ pub const StatementLowerer = struct {
             return;
         }
 
-        // Create the scf.if operation with proper then/else regions
-        var state = h.opState("scf.if", loc);
+        // Create the ora.if operation using C++ API (enables custom assembly formats)
+        const if_op = self.ora_dialect.createIf(condition, loc);
 
-        // Add the condition operand
-        c.mlirOperationStateAddOperands(&state, 1, @ptrCast(&condition));
+        // Get then and else regions
+        const then_region = c.mlirOperationGetRegion(if_op, 0);
+        const else_region = c.mlirOperationGetRegion(if_op, 1);
+        const then_block = c.mlirRegionGetFirstBlock(then_region);
+        const else_block = c.mlirRegionGetFirstBlock(else_region);
 
-        // Add gas cost attribute (JUMPI = 10, conditional branch)
-        const if_gas_cost_attr = c.mlirIntegerAttrGet(c.mlirIntegerTypeGet(self.ctx, 64), 10);
-        const if_gas_cost_id = h.identifier(self.ctx, "gas_cost");
-        var if_gas_attrs = [_]c.MlirNamedAttribute{c.mlirNamedAttributeGet(if_gas_cost_id, if_gas_cost_attr)};
-        c.mlirOperationStateAddAttributes(&state, if_gas_attrs.len, &if_gas_attrs);
-
-        // Create then region
-        const then_region = c.mlirRegionCreate();
-        const then_block = c.mlirBlockCreate(0, null, null);
-        c.mlirRegionInsertOwnedBlock(then_region, 0, then_block);
-
-        // Create else region (scf.if always requires both regions)
-        const else_region = c.mlirRegionCreate();
-        const else_block = c.mlirBlockCreate(0, null, null);
-        c.mlirRegionInsertOwnedBlock(else_region, 0, else_block);
-
-        // Add both regions to the operation state
-        const regions = [_]c.MlirRegion{ then_region, else_region };
-        c.mlirOperationStateAddOwnedRegions(&state, 2, @ptrCast(&regions));
-
-        const if_op = c.mlirOperationCreate(&state);
-
-        // Lower else branch if present, otherwise add scf.yield to empty region
+        // Lower else branch if present, otherwise add ora.yield to empty region
         if (if_stmt.else_branch) |else_branch| {
             try self.lowerBlockBody(else_branch, else_block);
         } else {
-            // Add scf.yield to empty else region to satisfy MLIR requirements
-            const yield_op = self.ora_dialect.createScfYield(loc);
+            // Add ora.yield to empty else region to satisfy MLIR requirements
+            const yield_op = self.ora_dialect.createYield(&[_]c.MlirValue{}, loc);
             h.appendOp(else_block, yield_op);
         }
 
-        // Lower then branch FIRST (before creating the scf.if operation)
+        // Lower then branch FIRST (before creating the ora.if operation)
         try self.lowerBlockBody(if_stmt.then_branch, then_block);
 
-        // Add scf.yield to then region if it doesn't end with one
+        // Add ora.yield to then region if it doesn't end with one
         if (!self.blockEndsWithYield(then_block)) {
-            const yield_op = self.ora_dialect.createScfYield(loc);
+            const yield_op = self.ora_dialect.createYield(&[_]c.MlirValue{}, loc);
             h.appendOp(then_block, yield_op);
         }
 
-        // Add scf.yield to else region if it doesn't end with one (for non-empty else branches)
+        // Add ora.yield to else region if it doesn't end with one (for non-empty else branches)
         if (if_stmt.else_branch != null and !self.blockEndsWithYield(else_block)) {
-            const yield_op = self.ora_dialect.createScfYield(loc);
+            const yield_op = self.ora_dialect.createYield(&[_]c.MlirValue{}, loc);
             h.appendOp(else_block, yield_op);
         }
 
@@ -1211,50 +1192,19 @@ pub const StatementLowerer = struct {
     pub fn lowerWhile(self: *const StatementLowerer, while_stmt: *const lib.ast.Statements.WhileNode) LoweringError!void {
         const loc = self.fileLoc(while_stmt.span);
 
-        // Create scf.while operation
-        var state = h.opState("scf.while", loc);
-        
-        // Add gas cost attribute (JUMPI = 10 per loop iteration)
-        const gas_cost_attr = c.mlirIntegerAttrGet(c.mlirIntegerTypeGet(self.ctx, 64), 10);
-        const gas_cost_id = h.identifier(self.ctx, "gas_cost");
-        var gas_attrs = [_]c.MlirNamedAttribute{c.mlirNamedAttributeGet(gas_cost_id, gas_cost_attr)};
-        c.mlirOperationStateAddAttributes(&state, gas_attrs.len, &gas_attrs);
-
-        // Create before region (condition)
-        const before_region = c.mlirRegionCreate();
-        const before_block = c.mlirBlockCreate(0, null, null);
-        c.mlirRegionInsertOwnedBlock(before_region, 0, before_block);
-        c.mlirOperationStateAddOwnedRegions(&state, 1, @ptrCast(&before_region));
-
-        // Create after region (body)
-        const after_region = c.mlirRegionCreate();
-        const after_block = c.mlirBlockCreate(0, null, null);
-        c.mlirRegionInsertOwnedBlock(after_region, 0, after_block);
-        c.mlirOperationStateAddOwnedRegions(&state, 1, @ptrCast(&after_region));
-
-        const op = c.mlirOperationCreate(&state);
-        h.appendOp(self.block, op);
-
-        // Lower condition in before region
-        // Create a new statement lowerer for the condition block
-        _ = StatementLowerer.init(self.ctx, before_block, self.type_mapper, self.expr_lowerer, self.param_map, self.storage_map, self.local_var_map, self.locations, self.symbol_table, self.builtin_registry, self.allocator, self.current_function_return_type, self.ora_dialect);
-
+        // Lower condition first (before creating the while operation)
         const condition = self.expr_lowerer.lowerExpression(&while_stmt.condition);
 
-        // Create scf.condition operation in before block
-        var cond_state = h.opState("scf.condition", loc);
-            c.mlirOperationStateAddOperands(&cond_state, 1, @ptrCast(&condition));
-        
-        // Add gas cost attribute (scf.condition is part of loop, JUMPI cost is on scf.while)
-        // scf.condition itself has minimal cost (0), but we account for it as part of control flow
-            const cond_gas_cost_attr = c.mlirIntegerAttrGet(c.mlirIntegerTypeGet(self.ctx, 64), 0);
-            const cond_gas_cost_id = h.identifier(self.ctx, "gas_cost");
-            var cond_gas_attrs = [_]c.MlirNamedAttribute{c.mlirNamedAttributeGet(cond_gas_cost_id, cond_gas_cost_attr)};
-        c.mlirOperationStateAddAttributes(&cond_state, cond_gas_attrs.len, &cond_gas_attrs);
-        const cond_op = c.mlirOperationCreate(&cond_state);
-        h.appendOp(before_block, cond_op);
+        // Create ora.while operation using C++ API (enables custom assembly formats)
+        // Note: ora.while has a simpler structure - condition is an operand, body is a region
+        const op = self.ora_dialect.createWhile(condition, loc);
+        h.appendOp(self.block, op);
 
-        // Lower loop invariants if present
+        // Get body region
+        const body_region = c.mlirOperationGetRegion(op, 0);
+        const body_block = c.mlirRegionGetFirstBlock(body_region);
+
+        // Lower loop invariants if present (in body block)
         for (while_stmt.invariants) |*invariant| {
             const invariant_value = self.expr_lowerer.lowerExpression(invariant);
 
@@ -1263,35 +1213,33 @@ pub const StatementLowerer = struct {
             c.mlirOperationStateAddOperands(&inv_state, 1, @ptrCast(&invariant_value));
             self.addVerificationAttributes(&inv_state, "invariant", "loop_invariant");
             const inv_op = c.mlirOperationCreate(&inv_state);
-            h.appendOp(before_block, inv_op);
+            h.appendOp(body_block, inv_op);
         }
 
         // Lower decreases clause if present
         if (while_stmt.decreases) |decreases_expr| {
             const decreases_value = self.expr_lowerer.lowerExpression(decreases_expr);
-            var dec_state = h.opState("ora.decreases", loc);
-            c.mlirOperationStateAddOperands(&dec_state, 1, @ptrCast(&decreases_value));
-            self.addVerificationAttributes(&dec_state, "decreases", "loop_termination_measure");
-            const dec_op = c.mlirOperationCreate(&dec_state);
-            h.appendOp(before_block, dec_op);
+            const dec_op = self.ora_dialect.createDecreases(decreases_value, loc);
+            // Add verification attributes using C API (after creation)
+            self.addVerificationAttributesToOp(dec_op, "decreases", "loop_termination_measure");
+            h.appendOp(body_block, dec_op);
         }
 
         // Lower increases clause if present
         if (while_stmt.increases) |increases_expr| {
             const increases_value = self.expr_lowerer.lowerExpression(increases_expr);
-            var inc_state = h.opState("ora.increases", loc);
-            c.mlirOperationStateAddOperands(&inc_state, 1, @ptrCast(&increases_value));
-            self.addVerificationAttributes(&inc_state, "increases", "loop_progress_measure");
-            const inc_op = c.mlirOperationCreate(&inc_state);
-            h.appendOp(before_block, inc_op);
+            const inc_op = self.ora_dialect.createIncreases(increases_value, loc);
+            // Add verification attributes using C API (after creation)
+            self.addVerificationAttributesToOp(inc_op, "increases", "loop_progress_measure");
+            h.appendOp(body_block, inc_op);
         }
 
-        // Lower body in after region
-        try self.lowerBlockBody(while_stmt.body, after_block);
+        // Lower body in body region
+        try self.lowerBlockBody(while_stmt.body, body_block);
 
-        // Add scf.yield at end of body to continue loop
-        const yield_op = self.ora_dialect.createScfYield(loc);
-        h.appendOp(after_block, yield_op);
+        // Add ora.yield at end of body to continue loop
+        const yield_op = self.ora_dialect.createYield(&[_]c.MlirValue{}, loc);
+        h.appendOp(body_block, yield_op);
     }
 
     /// Lower for loop statements using scf.for with proper iteration variables
@@ -1400,20 +1348,16 @@ pub const StatementLowerer = struct {
         // Lower decreases clause if present
         if (decreases) |decreases_expr| {
             const decreases_value = self.expr_lowerer.lowerExpression(decreases_expr);
-            var dec_state = h.opState("ora.decreases", loc);
-            c.mlirOperationStateAddOperands(&dec_state, 1, @ptrCast(&decreases_value));
-            self.addVerificationAttributes(&dec_state, "decreases", "loop_termination_measure");
-            const dec_op = c.mlirOperationCreate(&dec_state);
+            const dec_op = self.ora_dialect.createDecreases(decreases_value, loc);
+            self.addVerificationAttributesToOp(dec_op, "decreases", "loop_termination_measure");
             h.appendOp(body_block, dec_op);
         }
 
         // Lower increases clause if present
         if (increases) |increases_expr| {
             const increases_value = self.expr_lowerer.lowerExpression(increases_expr);
-            var inc_state = h.opState("ora.increases", loc);
-            c.mlirOperationStateAddOperands(&inc_state, 1, @ptrCast(&increases_value));
-            self.addVerificationAttributes(&inc_state, "increases", "loop_progress_measure");
-            const inc_op = c.mlirOperationCreate(&inc_state);
+            const inc_op = self.ora_dialect.createIncreases(increases_value, loc);
+            self.addVerificationAttributesToOp(inc_op, "increases", "loop_progress_measure");
             h.appendOp(body_block, inc_op);
         }
 
@@ -1499,20 +1443,16 @@ pub const StatementLowerer = struct {
         // Lower decreases clause if present
         if (decreases) |decreases_expr| {
             const decreases_value = self.expr_lowerer.lowerExpression(decreases_expr);
-            var dec_state = h.opState("ora.decreases", loc);
-            c.mlirOperationStateAddOperands(&dec_state, 1, @ptrCast(&decreases_value));
-            self.addVerificationAttributes(&dec_state, "decreases", "loop_termination_measure");
-            const dec_op = c.mlirOperationCreate(&dec_state);
+            const dec_op = self.ora_dialect.createDecreases(decreases_value, loc);
+            self.addVerificationAttributesToOp(dec_op, "decreases", "loop_termination_measure");
             h.appendOp(body_block, dec_op);
         }
 
         // Lower increases clause if present
         if (increases) |increases_expr| {
             const increases_value = self.expr_lowerer.lowerExpression(increases_expr);
-            var inc_state = h.opState("ora.increases", loc);
-            c.mlirOperationStateAddOperands(&inc_state, 1, @ptrCast(&increases_value));
-            self.addVerificationAttributes(&inc_state, "increases", "loop_progress_measure");
-            const inc_op = c.mlirOperationCreate(&inc_state);
+            const inc_op = self.ora_dialect.createIncreases(increases_value, loc);
+            self.addVerificationAttributesToOp(inc_op, "increases", "loop_progress_measure");
             h.appendOp(body_block, inc_op);
         }
 
@@ -1609,20 +1549,16 @@ pub const StatementLowerer = struct {
         // Lower decreases clause if present
         if (decreases) |decreases_expr| {
             const decreases_value = self.expr_lowerer.lowerExpression(decreases_expr);
-            var dec_state = h.opState("ora.decreases", loc);
-            c.mlirOperationStateAddOperands(&dec_state, 1, @ptrCast(&decreases_value));
-            self.addVerificationAttributes(&dec_state, "decreases", "loop_termination_measure");
-            const dec_op = c.mlirOperationCreate(&dec_state);
+            const dec_op = self.ora_dialect.createDecreases(decreases_value, loc);
+            self.addVerificationAttributesToOp(dec_op, "decreases", "loop_termination_measure");
             h.appendOp(body_block, dec_op);
         }
 
         // Lower increases clause if present
         if (increases) |increases_expr| {
             const increases_value = self.expr_lowerer.lowerExpression(increases_expr);
-            var inc_state = h.opState("ora.increases", loc);
-            c.mlirOperationStateAddOperands(&inc_state, 1, @ptrCast(&increases_value));
-            self.addVerificationAttributes(&inc_state, "increases", "loop_progress_measure");
-            const inc_op = c.mlirOperationCreate(&inc_state);
+            const inc_op = self.ora_dialect.createIncreases(increases_value, loc);
+            self.addVerificationAttributesToOp(inc_op, "increases", "loop_progress_measure");
             h.appendOp(body_block, inc_op);
         }
 
@@ -1795,11 +1731,11 @@ pub const StatementLowerer = struct {
         var if_state = h.opState("scf.if", loc);
         c.mlirOperationStateAddOperands(&if_state, 1, @ptrCast(&case_condition));
 
-                // Add gas cost attribute (JUMPI = 10, conditional branch)
-                const switch_if_gas_cost_attr = c.mlirIntegerAttrGet(c.mlirIntegerTypeGet(self.ctx, 64), 10);
-                const switch_if_gas_cost_id = h.identifier(self.ctx, "gas_cost");
-                var switch_if_gas_attrs = [_]c.MlirNamedAttribute{c.mlirNamedAttributeGet(switch_if_gas_cost_id, switch_if_gas_cost_attr)};
-                c.mlirOperationStateAddAttributes(&if_state, switch_if_gas_attrs.len, &switch_if_gas_attrs);
+        // Add gas cost attribute (JUMPI = 10, conditional branch)
+        const switch_if_gas_cost_attr = c.mlirIntegerAttrGet(c.mlirIntegerTypeGet(self.ctx, 64), 10);
+        const switch_if_gas_cost_id = h.identifier(self.ctx, "gas_cost");
+        var switch_if_gas_attrs = [_]c.MlirNamedAttribute{c.mlirNamedAttributeGet(switch_if_gas_cost_id, switch_if_gas_cost_attr)};
+        c.mlirOperationStateAddAttributes(&if_state, switch_if_gas_attrs.len, &switch_if_gas_attrs);
 
         // Create then region for the case body
         const then_region = c.mlirRegionCreate();
@@ -1934,7 +1870,19 @@ pub const StatementLowerer = struct {
         // Check symbol table first for memory region information
         if (self.symbol_table) |st| {
             if (st.lookupSymbol(ident.name)) |symbol| {
-                const region = std.meta.stringToEnum(lib.ast.Statements.MemoryRegion, symbol.region) orelse lib.ast.Statements.MemoryRegion.Stack;
+                const region = std.meta.stringToEnum(lib.ast.Statements.MemoryRegion, symbol.region) orelse blk: {
+                    // If parsing fails, check storage_map as fallback for storage variables
+                    if (self.storage_map) |sm| {
+                        if (sm.hasStorageVariable(ident.name)) {
+                            // This is a storage variable - handle it directly
+                            const store_op = self.memory_manager.createStorageStore(value, ident.name, loc);
+                            h.appendOp(self.block, store_op);
+                            return;
+                        }
+                    }
+                    // Default to Stack if parsing fails and not in storage_map
+                    break :blk lib.ast.Statements.MemoryRegion.Stack;
+                };
 
                 switch (region) {
                     .Storage => {
@@ -2332,11 +2280,8 @@ pub const StatementLowerer = struct {
         // Lower the path expression
         const path_value = self.expr_lowerer.lowerExpression(&lock_stmt.path);
 
-        // Create ora.lock operation
-        var state = h.opState("ora.lock", loc);
-        c.mlirOperationStateAddOperands(&state, 1, @ptrCast(&path_value));
-
-        const op = c.mlirOperationCreate(&state);
+        // Create ora.lock operation using C++ API wrapper
+        const op = self.ora_dialect.createLock(path_value, loc);
         h.appendOp(self.block, op);
     }
 
@@ -2347,11 +2292,8 @@ pub const StatementLowerer = struct {
         // Lower the path expression
         const path_value = self.expr_lowerer.lowerExpression(&unlock_stmt.path);
 
-        // Create ora.unlock operation
-        var state = h.opState("ora.unlock", loc);
-        c.mlirOperationStateAddOperands(&state, 1, @ptrCast(&path_value));
-
-        const op = c.mlirOperationCreate(&state);
+        // Create ora.unlock operation using C++ API wrapper
+        const op = self.ora_dialect.createUnlock(path_value, loc);
         h.appendOp(self.block, op);
     }
 
@@ -2502,10 +2444,33 @@ pub const StatementLowerer = struct {
         const formal_attr = c.mlirBoolAttrGet(self.ctx, 1);
         attributes.append(self.allocator, c.mlirNamedAttributeGet(formal_id, formal_attr)) catch {};
 
-        // Apply all attributes
+        // Apply all attributes at once
         if (attributes.items.len > 0) {
             c.mlirOperationStateAddAttributes(state, @intCast(attributes.items.len), attributes.items.ptr);
         }
+    }
+
+    /// Add verification attributes to an already-created operation
+    fn addVerificationAttributesToOp(self: *const StatementLowerer, op: c.MlirOperation, verification_type: []const u8, context: []const u8) void {
+        // Add verification marker
+        const verification_attr = c.mlirBoolAttrGet(self.ctx, 1);
+        const verification_name = h.strRef("ora.verification");
+        c.mlirOperationSetAttributeByName(op, verification_name, verification_attr);
+
+        // Add verification type
+        const type_attr = h.stringAttr(self.ctx, verification_type);
+        const type_name = h.strRef("ora.verification_type");
+        c.mlirOperationSetAttributeByName(op, type_name, type_attr);
+
+        // Add verification context
+        const context_attr = h.stringAttr(self.ctx, context);
+        const context_name = h.strRef("ora.verification_context");
+        c.mlirOperationSetAttributeByName(op, context_name, context_attr);
+
+        // Add formal verification marker
+        const formal_attr = c.mlirBoolAttrGet(self.ctx, 1);
+        const formal_name = h.strRef("ora.formal");
+        c.mlirOperationSetAttributeByName(op, formal_name, formal_attr);
     }
 
     /// Lower assert statements for runtime or ghost assertions
@@ -2623,19 +2588,26 @@ pub const StatementLowerer = struct {
         // Lower the condition expression
         const condition = self.expr_lowerer.lowerExpression(&assume.condition);
 
-        // Create ora.assume operation with verification attributes
-        var state = h.opState("ora.assume", loc);
-        c.mlirOperationStateAddOperands(&state, 1, @ptrCast(&condition));
-
-        // Add verification attributes
-        self.addVerificationAttributes(&state, "assume", "verification_assumption");
-
-        const op = c.mlirOperationCreate(&state);
+        // Create ora.assume operation using C++ API wrapper
+        const op = self.ora_dialect.createAssume(condition, loc);
+        // Add verification attributes using C API (after creation)
+        self.addVerificationAttributesToOp(op, "assume", "verification_assumption");
         h.appendOp(self.block, op);
     }
 
     /// Lower havoc statements for formal verification
     pub fn lowerHavoc(self: *const StatementLowerer, havoc: *const lib.ast.Statements.HavocNode) LoweringError!void {
+        const loc = self.fileLoc(havoc.span);
+
+        // Create ora.havoc operation using C++ API wrapper
+        const op = self.ora_dialect.createHavoc(havoc.variable_name, loc);
+        // Add verification attributes using C API (after creation)
+        self.addVerificationAttributesToOp(op, "havoc", "verification_havoc");
+        h.appendOp(self.block, op);
+    }
+
+    /// Lower havoc statements for formal verification (old implementation kept for reference)
+    fn lowerHavocOld(self: *const StatementLowerer, havoc: *const lib.ast.Statements.HavocNode) LoweringError!void {
         const loc = self.fileLoc(havoc.span);
 
         // Create ora.havoc operation with verification attributes

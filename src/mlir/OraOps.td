@@ -12,6 +12,7 @@ include "OraDialect.td"
 include "mlir/IR/OpBase.td"
 include "mlir/IR/BuiltinTypes.td"
 include "mlir/IR/BuiltinAttributes.td"
+include "mlir/IR/SymbolInterfaces.td"
 include "mlir/Interfaces/SideEffectInterfaces.td"
 
 //===----------------------------------------------------------------------===//
@@ -40,6 +41,10 @@ def Ora_ContractOp : Ora_Op<"contract"> {
   
   let arguments = (ins StrAttr:$sym_name);
   let regions = (region AnyRegion:$body);
+  
+  // Contract body contains declarations, not executable code, so no terminator needed
+  // Contract contains symbols (func.func), so it needs SymbolTable trait
+  let traits = [SingleBlock, NoTerminator, SymbolTable];
   
   let hasCustomAssemblyFormat = 1;
   
@@ -131,6 +136,26 @@ def Ora_SStoreOp : Ora_Op<"sstore"> {
     /// Get the name of the global variable being stored to
     ::llvm::StringRef getGlobalName() { return getGlobal(); }
   }];
+}
+
+//===----------------------------------------------------------------------===//
+// Test Operation (Simple Custom Printer Test)
+//===----------------------------------------------------------------------===//
+
+def Ora_TestOp : Ora_Op<"test"> {
+  let summary = "Simple test operation for custom printer";
+  let description = [{
+    A minimal operation to test custom printer functionality.
+    
+    Example:
+    ```mlir
+    ora.test TEST_FORMAT
+    ```
+  }];
+  
+  // No arguments, no results - simplest possible operation
+  // Test with assemblyFormat (declarative format)
+  let assemblyFormat = "`TEST_FORMAT` attr-dict";
 }
 
 //===----------------------------------------------------------------------===//
@@ -262,7 +287,7 @@ def Ora_IfOp : Ora_Op<"if"> {
   let hasCustomAssemblyFormat = 1;
 }
 
-def Ora_YieldOp : Ora_Op<"yield"> {
+def Ora_YieldOp : Ora_Op<"yield", [Terminator]> {
   let summary = "Yield operation";
   let description = [{
     Yields values from a region.

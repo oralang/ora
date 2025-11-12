@@ -99,7 +99,11 @@ pub const ExpressionLowerer = struct {
     pub fn lowerLiteral(self: *const ExpressionLowerer, literal: *const lib.ast.Expressions.LiteralExpr) c.MlirValue {
         return switch (literal.*) {
             .Integer => |int| blk_int: {
-                const ty = c.mlirIntegerTypeGet(self.ctx, constants.DEFAULT_INTEGER_BITS);
+                // Use type_info to get the correct MLIR type (preserves signedness: u256 -> ui256, i256 -> si256)
+                const ty = if (int.type_info.ora_type) |_|
+                    self.type_mapper.toMlirType(int.type_info)
+                else
+                    c.oraIntegerTypeGet(self.ctx, constants.DEFAULT_INTEGER_BITS, false); // Default to unsigned u256
 
                 // Parse the string value to an integer with proper error handling
                 const parsed: i64 = std.fmt.parseInt(i64, int.value, 0) catch |err| blk: {
@@ -121,22 +125,12 @@ pub const ExpressionLowerer = struct {
                 // Use a custom string type or represent as byte array
                 const string_len = string_lit.value.len;
                 const ty = c.mlirIntegerTypeGet(self.ctx, @intCast(string_len * 8)); // 8 bits per character
-                var state = h.opState("ora.string.constant", self.fileLoc(string_lit.span));
-                c.mlirOperationStateAddResults(&state, 1, @ptrCast(&ty));
-
-                // Create string attribute with proper string reference
-                const string_attr = h.stringAttr(self.ctx, string_lit.value);
-
-                const value_id = h.identifier(self.ctx, "value");
-                const length_id = h.identifier(self.ctx, "length");
+                // Create ora.string.constant operation using C++ API wrapper
+                const op = self.ora_dialect.createStringConstant(string_lit.value, ty, self.fileLoc(string_lit.span));
+                // Add length attribute using C API (after creation)
                 const length_attr = h.intAttr(self.ctx, c.mlirIntegerTypeGet(self.ctx, 32), @intCast(string_len));
-
-                var attrs = [_]c.MlirNamedAttribute{
-                    c.mlirNamedAttributeGet(value_id, string_attr),
-                    c.mlirNamedAttributeGet(length_id, length_attr),
-                };
-                c.mlirOperationStateAddAttributes(&state, attrs.len, &attrs);
-                const op = c.mlirOperationCreate(&state);
+                const length_name = h.strRef("length");
+                c.mlirOperationSetAttributeByName(op, length_name, length_attr);
                 h.appendOp(self.block, op);
                 break :blk_string h.getResult(op, 0);
             },
@@ -190,48 +184,8 @@ pub const ExpressionLowerer = struct {
             .Hex => |hex_lit| blk_hex: {
                 // Parse hex literal and create integer constant with hex metadata
                 const ty = c.mlirIntegerTypeGet(self.ctx, constants.DEFAULT_INTEGER_BITS);
-                var state = h.opState("ora.hex.constant", self.fileLoc(hex_lit.span));
-                c.mlirOperationStateAddResults(&state, 1, @ptrCast(&ty));
-
-                // Parse hex value (remove 0x prefix if present) with enhanced error handling
-                const hex_str = if (std.mem.startsWith(u8, hex_lit.value, "0x"))
-                    hex_lit.value[2..]
-                else
-                    hex_lit.value;
-
-                // Validate hex characters
-                for (hex_str) |char| {
-                    if (!((char >= '0' and char <= '9') or (char >= 'a' and char <= 'f') or (char >= 'A' and char <= 'F'))) {
-                        std.debug.print("ERROR: Invalid hex character '{c}' in hex literal '{s}'\n", .{ char, hex_lit.value });
-                        break;
-                    }
-                }
-
-                // Check for overflow (hex string too long for i64)
-                if (hex_str.len > 16) {
-                    std.debug.print("WARNING: Hex literal '{s}' may overflow i64 (length: {d})\n", .{ hex_lit.value, hex_str.len });
-                }
-
-                const parsed: i64 = std.fmt.parseInt(i64, hex_str, 16) catch |err| blk: {
-                    std.debug.print("ERROR: Failed to parse hex literal '{s}': {s}\n", .{ hex_lit.value, @errorName(err) });
-                    break :blk 0;
-                };
-                const attr = c.mlirIntegerAttrGet(ty, parsed);
-
-                const value_id = h.identifier(self.ctx, "value");
-                const hex_id = h.identifier(self.ctx, "ora.hex");
-                const hex_ref = c.mlirStringRefCreate(hex_lit.value.ptr, hex_lit.value.len);
-                const hex_attr = c.mlirStringAttrGet(self.ctx, hex_ref);
-                const length_id = h.identifier(self.ctx, "length");
-                const length_attr = c.mlirIntegerAttrGet(c.mlirIntegerTypeGet(self.ctx, 32), @intCast(hex_str.len));
-
-                var attrs = [_]c.MlirNamedAttribute{
-                    c.mlirNamedAttributeGet(value_id, attr),
-                    c.mlirNamedAttributeGet(hex_id, hex_attr),
-                    c.mlirNamedAttributeGet(length_id, length_attr),
-                };
-                c.mlirOperationStateAddAttributes(&state, attrs.len, &attrs);
-                const op = c.mlirOperationCreate(&state);
+                // Use C++ API wrapper (dialect must be registered)
+                const op = self.ora_dialect.createHexConstant(hex_lit.value, ty, self.fileLoc(hex_lit.span));
                 h.appendOp(self.block, op);
                 break :blk_hex h.getResult(op, 0);
             },
@@ -403,22 +357,10 @@ pub const ExpressionLowerer = struct {
             .StarStar => blk: {
                 // Power operation - implement proper exponentiation using repeated multiplication
                 // For integer exponents, we can use a loop-based approach
-                // For now, create a custom ora.power operation that handles both integer and floating-point cases
-                var state = h.opState("ora.power", self.fileLoc(bin.span));
-                c.mlirOperationStateAddOperands(&state, 2, @ptrCast(&[_]c.MlirValue{ lhs_converted, rhs_converted }));
-                c.mlirOperationStateAddResults(&state, 1, @ptrCast(&result_ty));
-
-                // Add operation type attribute to distinguish from regular multiplication
-                const power_type_id = h.identifier(self.ctx, "operation_type");
-                const power_type_attr = c.mlirStringAttrGet(self.ctx, h.strRef("power"));
-                var attrs = [_]c.MlirNamedAttribute{
-                    c.mlirNamedAttributeGet(power_type_id, power_type_attr),
-                };
-                c.mlirOperationStateAddAttributes(&state, attrs.len, &attrs);
-
-                const op = c.mlirOperationCreate(&state);
-                h.appendOp(self.block, op);
-                break :blk h.getResult(op, 0);
+                // Create ora.power operation using C++ API wrapper
+                const power_op = self.ora_dialect.createPower(lhs_converted, rhs_converted, result_ty, self.fileLoc(bin.span));
+                h.appendOp(self.block, power_op);
+                break :blk h.getResult(power_op, 0);
             },
 
             // Comparison operators - all return i1 (boolean)
@@ -620,35 +562,27 @@ pub const ExpressionLowerer = struct {
 
         if (is_storage_variable) {
             // This is a storage variable - use ora.sload
-            // Storage always holds i256 values in EVM, so we load as i256
+            // Get the correct type from the identifier's type_info (set by type resolver)
+            // This is the authoritative source of type information
             const memory_manager = @import("memory.zig").MemoryManager.init(self.ctx, self.ora_dialect);
-            const i256_type = c.mlirIntegerTypeGet(self.ctx, constants.DEFAULT_INTEGER_BITS);
-            const load_op = memory_manager.createStorageLoad(identifier.name, i256_type, self.fileLoc(identifier.span));
+            const var_type = if (identifier.type_info.ora_type) |_| blk: {
+                // Use type_info if available - this is set by the type resolver and is authoritative
+                break :blk self.type_mapper.toMlirType(identifier.type_info);
+            } else if (self.symbol_table) |st| blk: {
+                // Fallback to symbol table if type_info is not available
+                if (st.lookupSymbol(identifier.name)) |symbol| {
+                    break :blk symbol.type;
+                }
+                // Fallback to u256 if symbol not found
+                break :blk c.oraIntegerTypeGet(self.ctx, constants.DEFAULT_INTEGER_BITS, false);
+            } else blk: {
+                // Fallback to u256 if no symbol table
+                break :blk c.oraIntegerTypeGet(self.ctx, constants.DEFAULT_INTEGER_BITS, false);
+            };
+
+            const load_op = memory_manager.createStorageLoad(identifier.name, var_type, self.fileLoc(identifier.span));
             h.appendOp(self.block, load_op);
-            const loaded_value = h.getResult(load_op, 0);
-
-            // Check if this variable is actually a boolean type
-            // If so, we need to truncate i256 -> i1 for MLIR type safety
-            // Check for boolean variables by common naming patterns
-            // Proper type information available in symbol table for full implementation
-            const is_boolean = std.mem.eql(u8, identifier.name, "paused") or
-                std.mem.eql(u8, identifier.name, "active") or
-                std.mem.eql(u8, identifier.name, "status") or
-                std.mem.eql(u8, identifier.name, "processing");
-
-            if (is_boolean) {
-                // Add truncation: i256 -> i1
-                const i1_type = h.boolType(self.ctx);
-                const loc = self.fileLoc(identifier.span);
-                var trunc_state = h.opState("arith.trunci", loc);
-                c.mlirOperationStateAddOperands(&trunc_state, 1, @ptrCast(&loaded_value));
-                c.mlirOperationStateAddResults(&trunc_state, 1, @ptrCast(&i1_type));
-                const trunc_op = c.mlirOperationCreate(&trunc_state);
-                h.appendOp(self.block, trunc_op);
-                return h.getResult(trunc_op, 0);
-            }
-
-            return loaded_value;
+            return h.getResult(load_op, 0);
         }
 
         // Check if this is a local variable
@@ -842,19 +776,8 @@ pub const ExpressionLowerer = struct {
                 const target_value = self.lowerExpression(field_access.target);
                 const field_name = field_access.field;
 
-                // Create struct field store operation
-                var state = h.opState("ora.struct_field_store", self.fileLoc(assign.span));
-                c.mlirOperationStateAddOperands(&state, 2, @ptrCast(&[_]c.MlirValue{ value, target_value }));
-
-                // Add field name attribute
-                const field_name_attr = h.stringAttr(self.ctx, field_name);
-                const field_name_id = h.identifier(self.ctx, "field_name");
-                var attrs = [_]c.MlirNamedAttribute{
-                    c.mlirNamedAttributeGet(field_name_id, field_name_attr),
-                };
-                c.mlirOperationStateAddAttributes(&state, attrs.len, &attrs);
-
-                const store_op = c.mlirOperationCreate(&state);
+                // Create struct field store operation using C++ API wrapper
+                const store_op = self.ora_dialect.createStructFieldStore(target_value, field_name, value, self.fileLoc(assign.span));
                 h.appendOp(self.block, store_op);
                 return value;
             },
@@ -2012,13 +1935,9 @@ pub const ExpressionLowerer = struct {
 
     /// Create map index load operation (placeholder for now)
     pub fn createMapIndexLoad(self: *const ExpressionLowerer, map: c.MlirValue, key: c.MlirValue, span: lib.ast.SourceSpan) c.MlirValue {
-        // For now, create a placeholder ora.map_get operation
+        // Use C++ API wrapper (dialect must be registered)
         const result_ty = c.mlirIntegerTypeGet(self.ctx, constants.DEFAULT_INTEGER_BITS);
-        var state = h.opState("ora.map_get", self.fileLoc(span));
-        c.mlirOperationStateAddOperands(&state, 2, @ptrCast(&[_]c.MlirValue{ map, key }));
-        c.mlirOperationStateAddResults(&state, 1, @ptrCast(&result_ty));
-
-        const op = c.mlirOperationCreate(&state);
+        const op = self.ora_dialect.createMapGet(map, key, result_ty, self.fileLoc(span));
         h.appendOp(self.block, op);
         return h.getResult(op, 0);
     }
@@ -2255,9 +2174,8 @@ pub const ExpressionLowerer = struct {
         // Struct construction using ora.struct_init operation
         // Full llvm.struct integration deferred until TableGen dialect complete
         const struct_ty = c.mlirIntegerTypeGet(self.ctx, constants.DEFAULT_INTEGER_BITS);
-        var state = h.opState("ora.struct_init", self.fileLoc(span));
 
-        // Add field values as operands
+        // Collect field values
         var field_values = std.ArrayList(c.MlirValue){};
         defer field_values.deinit(std.heap.page_allocator);
 
@@ -2269,15 +2187,10 @@ pub const ExpressionLowerer = struct {
             };
         }
 
-        c.mlirOperationStateAddOperands(&state, @intCast(field_values.items.len), field_values.items.ptr);
-        c.mlirOperationStateAddResults(&state, 1, @ptrCast(&struct_ty));
-
-        // Field names tracked in symbol table for struct metadata
-        // Attribute generation can be added when TableGen dialect is ready
-
-        const op = c.mlirOperationCreate(&state);
-        h.appendOp(self.block, op);
-        return h.getResult(op, 0);
+        // Create ora.struct_init operation using C++ API wrapper
+        const struct_op = self.ora_dialect.createStructInit(field_values.items, struct_ty, self.fileLoc(span));
+        h.appendOp(self.block, struct_op);
+        return h.getResult(struct_op, 0);
     }
 
     /// Create tuple type from element types

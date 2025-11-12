@@ -159,28 +159,29 @@ pub const TypeMapper = struct {
         else if (ora_type.ora_type) |ot|
             ot
         else
-            return c.mlirIntegerTypeGet(self.ctx, constants.DEFAULT_INTEGER_BITS);
+            return c.oraIntegerTypeGet(self.ctx, constants.DEFAULT_INTEGER_BITS, false);
 
         return switch (ora_ty_opt) {
-            // Unsigned integer types - map to appropriate bit widths
-            .u8 => c.mlirIntegerTypeGet(self.ctx, 8),
-            .u16 => c.mlirIntegerTypeGet(self.ctx, 16),
-            .u32 => c.mlirIntegerTypeGet(self.ctx, 32),
-            .u64 => c.mlirIntegerTypeGet(self.ctx, 64),
-            .u128 => c.mlirIntegerTypeGet(self.ctx, 128),
-            .u256 => c.mlirIntegerTypeGet(self.ctx, constants.DEFAULT_INTEGER_BITS),
+            // Unsigned integer types - use Ora dialect types (!ora.int<width, false>)
+            .u8 => c.oraIntegerTypeGet(self.ctx, 8, false),
+            .u16 => c.oraIntegerTypeGet(self.ctx, 16, false),
+            .u32 => c.oraIntegerTypeGet(self.ctx, 32, false),
+            .u64 => c.oraIntegerTypeGet(self.ctx, 64, false),
+            .u128 => c.oraIntegerTypeGet(self.ctx, 128, false),
+            .u256 => c.oraIntegerTypeGet(self.ctx, constants.DEFAULT_INTEGER_BITS, false),
 
-            // Signed integer types - map to appropriate bit widths
-            .i8 => c.mlirIntegerTypeGet(self.ctx, 8),
-            .i16 => c.mlirIntegerTypeGet(self.ctx, 16),
-            .i32 => c.mlirIntegerTypeGet(self.ctx, 32),
-            .i64 => c.mlirIntegerTypeGet(self.ctx, 64),
-            .i128 => c.mlirIntegerTypeGet(self.ctx, 128),
-            .i256 => c.mlirIntegerTypeGet(self.ctx, constants.DEFAULT_INTEGER_BITS),
+            // Signed integer types - use Ora dialect types (!ora.int<width, true>)
+            .i8 => c.oraIntegerTypeGet(self.ctx, 8, true),
+            .i16 => c.oraIntegerTypeGet(self.ctx, 16, true),
+            .i32 => c.oraIntegerTypeGet(self.ctx, 32, true),
+            .i64 => c.oraIntegerTypeGet(self.ctx, 64, true),
+            .i128 => c.oraIntegerTypeGet(self.ctx, 128, true),
+            .i256 => c.oraIntegerTypeGet(self.ctx, constants.DEFAULT_INTEGER_BITS, true),
 
             // Other primitive types
+            // Note: bool uses MLIR's built-in i1 type (not !ora.bool) for compatibility with arith operations
             .bool => c.mlirIntegerTypeGet(self.ctx, 1),
-            .address => c.mlirIntegerTypeGet(self.ctx, 160), // Ethereum address is 20 bytes (160 bits)
+            .address => c.oraAddressTypeGet(self.ctx), // Ethereum address is 20 bytes (160 bits)
             .string => self.mapStringType(),
             .bytes => self.mapBytesType(),
             .void => c.mlirNoneTypeGet(self.ctx),
@@ -206,24 +207,26 @@ pub const TypeMapper = struct {
             .in_range => self.toMlirType(.{ .ora_type = ora_ty_opt.in_range.base.* }),
             .scaled => self.toMlirType(.{ .ora_type = ora_ty_opt.scaled.base.* }),
             .exact => self.toMlirType(.{ .ora_type = ora_ty_opt.exact.* }),
-            .non_zero_address => c.mlirIntegerTypeGet(self.ctx, 160), // Map to address type (160 bits)
+            .non_zero_address => c.mlirIntegerTypeGet(self.ctx, 160), // Map to address type (160 bits) - use built-in for compatibility
         };
     }
 
-    /// Convert primitive integer types with proper bit width
+    /// Convert primitive integer types with proper bit width and signedness
+    /// Uses Ora dialect types (!ora.int<width, isSigned>)
     pub fn mapIntegerType(self: *const TypeMapper, bit_width: u32, is_signed: bool) c.MlirType {
-        _ = is_signed; // For now, we use the same bit width for signed/unsigned
-        return c.mlirIntegerTypeGet(self.ctx, @intCast(bit_width));
+        return c.oraIntegerTypeGet(self.ctx, @intCast(bit_width), is_signed);
     }
 
     /// Convert boolean type
+    /// Uses MLIR's built-in i1 type (not !ora.bool) for compatibility with arith operations
     pub fn mapBoolType(self: *const TypeMapper) c.MlirType {
         return c.mlirIntegerTypeGet(self.ctx, 1);
     }
 
     /// Convert address type (Ethereum address)
+    /// Uses Ora dialect type (!ora.address)
     pub fn mapAddressType(self: *const TypeMapper) c.MlirType {
-        return c.mlirIntegerTypeGet(self.ctx, 160);
+        return c.oraAddressTypeGet(self.ctx);
     }
 
     /// Convert string type - maps to i256 for now (could be pointer type in future)

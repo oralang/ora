@@ -11,9 +11,23 @@
 #include "mlir/IR/TypeUtilities.h"
 #include "llvm/ADT/TypeSwitch.h"
 #include "llvm/ADT/STLExtras.h"
+#include "llvm/Support/raw_ostream.h"
 
 // Include the dialect header which includes operation declarations and dialect definitions
 #include "OraDialect.h"
+
+// The header includes OraTypes.h.inc which has the full class definitions
+// These should be visible when we include OraTypes.cpp.inc
+
+//===----------------------------------------------------------------------===//
+// Include Type Definitions First
+//===----------------------------------------------------------------------===//
+// According to MLIR docs, we need to include the full type definitions
+// before registering them, so the types are fully defined when addTypes<> is called
+// The header (OraDialect.h) already includes OraTypes.h.inc with full class definitions,
+// so the generated parser should be able to see them
+#define GET_TYPEDEF_CLASSES
+#include "OraTypes.cpp.inc"
 
 namespace mlir
 {
@@ -24,17 +38,23 @@ namespace mlir
         // Ora Dialect
         //===----------------------------------------------------------------------===//
 
-        /// Initialize the Ora dialect and add operations
+        /// Initialize the Ora dialect and add operations and types
         void OraDialect::initialize()
         {
             addOperations<
 #define GET_OP_LIST
 #include "OraOps.cpp.inc"
                 >();
+            addTypes<
+#define GET_TYPEDEF_LIST
+#include "OraTypes.cpp.inc"
+                >();
         }
 
-        // Type and attribute parsing/printing use default implementations
-        // These are declared in the header but need implementations
+        // Type parsing/printing is handled by generated code in OraTypes.cpp.inc
+        // (included above with GET_TYPEDEF_CLASSES)
+        // The generated printType/parseType methods are in OraTypes.cpp.inc
+        // Attribute parsing/printing use default implementations
         ::mlir::Attribute OraDialect::parseAttribute(::mlir::DialectAsmParser &parser, ::mlir::Type type) const
         {
             return ::mlir::Dialect::parseAttribute(parser, type);
@@ -45,20 +65,211 @@ namespace mlir
             ::mlir::Dialect::printAttribute(attr, printer);
         }
 
-        ::mlir::Type OraDialect::parseType(::mlir::DialectAsmParser &parser) const
+        // Note: printType and parseType are generated in OraTypes.cpp.inc when GET_TYPEDEF_CLASSES is defined
+        // They call generatedTypePrinter/generatedTypeParser which dispatch to our custom type printers
+
+    } // namespace ora
+} // namespace mlir
+
+//===----------------------------------------------------------------------===//
+// Ora IntegerType Custom Methods
+//===----------------------------------------------------------------------===//
+
+// Define custom methods for IntegerType
+// The types are already defined above (via GET_TYPEDEF_CLASSES), so we can add custom methods
+namespace mlir
+{
+    namespace ora
+    {
+
+        // Note: parseType and printType are handled by generated code
+        // via the declarative assemblyFormat in OraTypes.td
+        // Our Ora types are MLIR types (inherit from Type::TypeBase) and work
+        // directly with MLIR infrastructure - no conversion needed
+
+        //===----------------------------------------------------------------------===//
+        // Custom parse/print implementations for types with hasCustomAssemblyFormat
+        //===----------------------------------------------------------------------===//
+
+        // TupleType: !ora.tuple<type1, type2, ...>
+        ::mlir::Type TupleType::parse(::mlir::AsmParser &parser)
         {
-            return ::mlir::Dialect::parseType(parser);
+            if (parser.parseLess())
+                return {};
+
+            ::llvm::SmallVector<::mlir::Type> elementTypes;
+            if (parser.parseTypeList(elementTypes))
+                return {};
+
+            if (parser.parseGreater())
+                return {};
+
+            return TupleType::get(parser.getContext(), elementTypes);
         }
 
-        void OraDialect::printType(::mlir::Type type, ::mlir::DialectAsmPrinter &printer) const
+        void TupleType::print(::mlir::AsmPrinter &printer) const
         {
-            ::mlir::Dialect::printType(type, printer);
+            printer << "<";
+            auto elementTypes = getElementTypes();
+            for (size_t i = 0; i < elementTypes.size(); ++i)
+            {
+                if (i > 0)
+                    printer << ", ";
+                printer.printType(elementTypes[i]);
+            }
+            printer << ">";
+        }
+
+        // StructType: !ora.struct<"struct_name">
+        ::mlir::Type StructType::parse(::mlir::AsmParser &parser)
+        {
+            if (parser.parseLess())
+                return {};
+
+            std::string name;
+            if (parser.parseString(&name))
+                return {};
+
+            if (parser.parseGreater())
+                return {};
+
+            return StructType::get(parser.getContext(), name);
+        }
+
+        void StructType::print(::mlir::AsmPrinter &printer) const
+        {
+            printer << "<\"";
+            printer << getName();
+            printer << "\">";
+        }
+
+        // EnumType: !ora.enum<"enum_name", repr_type>
+        ::mlir::Type EnumType::parse(::mlir::AsmParser &parser)
+        {
+            if (parser.parseLess())
+                return {};
+
+            std::string name;
+            if (parser.parseString(&name))
+                return {};
+
+            if (parser.parseComma())
+                return {};
+
+            ::mlir::Type reprType;
+            if (parser.parseType(reprType))
+                return {};
+
+            if (parser.parseGreater())
+                return {};
+
+            return EnumType::get(parser.getContext(), name, reprType);
+        }
+
+        void EnumType::print(::mlir::AsmPrinter &printer) const
+        {
+            printer << "<\"";
+            printer << getName();
+            printer << "\", ";
+            printer.printType(getReprType());
+            printer << ">";
+        }
+
+        // ContractType: !ora.contract<"contract_name">
+        ::mlir::Type ContractType::parse(::mlir::AsmParser &parser)
+        {
+            if (parser.parseLess())
+                return {};
+
+            std::string name;
+            if (parser.parseString(&name))
+                return {};
+
+            if (parser.parseGreater())
+                return {};
+
+            return ContractType::get(parser.getContext(), name);
+        }
+
+        void ContractType::print(::mlir::AsmPrinter &printer) const
+        {
+            printer << "<\"";
+            printer << getName();
+            printer << "\">";
+        }
+
+        // FunctionType: !ora.function<param_types, return_type>
+        ::mlir::Type FunctionType::parse(::mlir::AsmParser &parser)
+        {
+            if (parser.parseLess())
+                return {};
+
+            ::llvm::SmallVector<::mlir::Type> paramTypes;
+            if (parser.parseTypeList(paramTypes))
+                return {};
+
+            if (parser.parseComma())
+                return {};
+
+            ::mlir::Type returnType;
+            if (parser.parseType(returnType))
+                return {};
+
+            if (parser.parseGreater())
+                return {};
+
+            return FunctionType::get(parser.getContext(), paramTypes, returnType);
+        }
+
+        void FunctionType::print(::mlir::AsmPrinter &printer) const
+        {
+            printer << "<";
+            auto paramTypes = getParamTypes();
+            for (size_t i = 0; i < paramTypes.size(); ++i)
+            {
+                if (i > 0)
+                    printer << ", ";
+                printer.printType(paramTypes[i]);
+            }
+            printer << ", ";
+            printer.printType(getReturnType());
+            printer << ">";
+        }
+
+        // UnionType: !ora.union<type1, type2, ...>
+        ::mlir::Type UnionType::parse(::mlir::AsmParser &parser)
+        {
+            if (parser.parseLess())
+                return {};
+
+            ::llvm::SmallVector<::mlir::Type> elementTypes;
+            if (parser.parseTypeList(elementTypes))
+                return {};
+
+            if (parser.parseGreater())
+                return {};
+
+            return UnionType::get(parser.getContext(), elementTypes);
+        }
+
+        void UnionType::print(::mlir::AsmPrinter &printer) const
+        {
+            printer << "<";
+            auto elementTypes = getElementTypes();
+            for (size_t i = 0; i < elementTypes.size(); ++i)
+            {
+                if (i > 0)
+                    printer << ", ";
+                printer.printType(elementTypes[i]);
+            }
+            printer << ">";
         }
 
     } // namespace ora
 } // namespace mlir
 
 // Include the generated operation method implementations
+// This must come BEFORE custom print/parse methods so the operation classes are fully defined
 #define GET_OP_CLASSES
 #include "OraOps.cpp.inc"
 
@@ -105,8 +316,8 @@ namespace mlir
             if (parser.parseOptionalAttrDict(result.attributes))
                 return ::mlir::failure();
 
-            // Resolve condition operand
-            if (parser.resolveOperand(condition, ::mlir::IntegerType::get(parser.getContext(), 1), result.operands))
+            // Resolve condition operand - use Ora BoolType
+            if (parser.resolveOperand(condition, BoolType::get(parser.getContext()), result.operands))
                 return ::mlir::failure();
 
             // Add regions
@@ -118,12 +329,14 @@ namespace mlir
 
         void IfOp::print(::mlir::OpAsmPrinter &p)
         {
+            llvm::errs() << "[DEBUG] ========== IfOp::print() called ==========\n";
             // Print condition
             p << " ";
             p << getCondition();
+            p << " ";
 
             // Print "then" keyword and then region
-            p << " then ";
+            p << "then ";
             p.printRegion(getThenRegion());
 
             // Print "else" keyword and else region
@@ -138,8 +351,9 @@ namespace mlir
                                       { p << type; });
             }
 
-            // Print attributes
-            p.printOptionalAttrDict((*this)->getAttrs());
+            // Print attributes (excluding condition which is already printed)
+            SmallVector<StringRef> elidedAttrs;
+            p.printOptionalAttrDict((*this)->getAttrs(), elidedAttrs);
         }
 
         //===----------------------------------------------------------------------===//
@@ -179,6 +393,7 @@ namespace mlir
 
         void WhileOp::print(::mlir::OpAsmPrinter &p)
         {
+            llvm::errs() << "[DEBUG] ========== WhileOp::print() called ==========\n";
             // Print condition
             p << " ";
             p << getCondition();
@@ -223,8 +438,11 @@ namespace mlir
 
         void ContractOp::print(::mlir::OpAsmPrinter &p)
         {
-            // Print @ symbol and symbol name
-            p << " @";
+            llvm::errs() << "[DEBUG] ========== ContractOp::print() called ==========\n";
+            llvm::errs() << "[DEBUG] ContractOp::print() - this pointer: " << (void *)this << "\n";
+            llvm::errs() << "[DEBUG] ContractOp symbol name: " << getSymName() << "\n";
+            // Print symbol name with space before @ (printSymbolName already includes @)
+            p << " ";
             p.printSymbolName(getSymName());
 
             // Print body region
@@ -241,9 +459,15 @@ namespace mlir
 
         ::mlir::ParseResult GlobalOp::parse(::mlir::OpAsmParser &parser, ::mlir::OperationState &result)
         {
+            // Parse format: "name" = init : type
             // Parse symbol name
             ::mlir::StringAttr symName;
             if (parser.parseAttribute(symName, "sym_name", result.attributes))
+                return ::mlir::failure();
+
+            // Parse = init
+            ::mlir::Attribute init;
+            if (parser.parseEqual() || parser.parseAttribute(init, "init", result.attributes))
                 return ::mlir::failure();
 
             // Parse : type
@@ -251,11 +475,6 @@ namespace mlir
             if (parser.parseColonType(type))
                 return ::mlir::failure();
             result.addAttribute("type", ::mlir::TypeAttr::get(type));
-
-            // Parse = init
-            ::mlir::Attribute init;
-            if (parser.parseEqual() || parser.parseAttribute(init, "init", result.attributes))
-                return ::mlir::failure();
 
             // Parse optional attributes
             if (parser.parseOptionalAttrDict(result.attributes))
@@ -266,20 +485,21 @@ namespace mlir
 
         void GlobalOp::print(::mlir::OpAsmPrinter &p)
         {
-            // Print symbol name
+            llvm::errs() << "[DEBUG] ========== GlobalOp::print() called ==========\n";
+            llvm::errs() << "[DEBUG] GlobalOp::print() - this pointer: " << (void *)this << "\n";
+            llvm::errs() << "[DEBUG] GlobalOp symbol name: " << getSymName() << "\n";
+            llvm::errs() << "[DEBUG] GlobalOp type: " << getType() << "\n";
+            // Print format: "name" = init : type
             p << " ";
             p.printAttributeWithoutType(getSymNameAttr());
-
-            // Print : type
+            p << " = ";
+            p.printAttributeWithoutType(getInitAttr());
             p << " : ";
             p << getType();
 
-            // Print = init
-            p << " = ";
-            p.printAttributeWithoutType(getInitAttr());
-
-            // Print attributes
-            p.printOptionalAttrDict((*this)->getAttrs());
+            // Print attributes (excluding sym_name, type, init which are already printed)
+            SmallVector<StringRef> elidedAttrs = {"sym_name", "type", "init"};
+            p.printOptionalAttrDict((*this)->getAttrs(), elidedAttrs);
         }
 
     } // namespace ora

@@ -12,6 +12,7 @@ include "OraDialect.td"
 include "mlir/IR/OpBase.td"
 include "mlir/IR/BuiltinTypes.td"
 include "mlir/IR/BuiltinAttributes.td"
+include "mlir/IR/SymbolInterfaces.td"
 include "mlir/Interfaces/SideEffectInterfaces.td"
 
 //===----------------------------------------------------------------------===//
@@ -40,6 +41,10 @@ def Ora_ContractOp : Ora_Op<"contract"> {
   
   let arguments = (ins StrAttr:$sym_name);
   let regions = (region AnyRegion:$body);
+  
+  // Contract body contains declarations, not executable code, so no terminator needed
+  // Contract contains symbols (func.func), so it needs SymbolTable trait
+  let traits = [SingleBlock, NoTerminator, SymbolTable];
   
   // Custom parser/printer needed for @ symbol prefix
   // let assemblyFormat = "$sym_name region($body) attr-dict";

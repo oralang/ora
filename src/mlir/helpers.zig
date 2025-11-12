@@ -6,7 +6,7 @@
 // the MLIR lowering code.
 //
 // KEY HELPERS:
-//   • String reference creation (used 450+ times)
+//   • String reference creation
 //   • Operation state builders
 //   • Location creation shortcuts
 //   • Type creation shortcuts
