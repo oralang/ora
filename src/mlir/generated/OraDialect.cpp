@@ -329,7 +329,6 @@ namespace mlir
 
         void IfOp::print(::mlir::OpAsmPrinter &p)
         {
-            llvm::errs() << "[DEBUG] ========== IfOp::print() called ==========\n";
             // Print condition
             p << " ";
             p << getCondition();
@@ -393,7 +392,6 @@ namespace mlir
 
         void WhileOp::print(::mlir::OpAsmPrinter &p)
         {
-            llvm::errs() << "[DEBUG] ========== WhileOp::print() called ==========\n";
             // Print condition
             p << " ";
             p << getCondition();
@@ -438,9 +436,6 @@ namespace mlir
 
         void ContractOp::print(::mlir::OpAsmPrinter &p)
         {
-            llvm::errs() << "[DEBUG] ========== ContractOp::print() called ==========\n";
-            llvm::errs() << "[DEBUG] ContractOp::print() - this pointer: " << (void *)this << "\n";
-            llvm::errs() << "[DEBUG] ContractOp symbol name: " << getSymName() << "\n";
             // Print symbol name with space before @ (printSymbolName already includes @)
             p << " ";
             p.printSymbolName(getSymName());
@@ -495,10 +490,6 @@ namespace mlir
 
         void GlobalOp::print(::mlir::OpAsmPrinter &p)
         {
-            llvm::errs() << "[DEBUG] ========== GlobalOp::print() called ==========\n";
-            llvm::errs() << "[DEBUG] GlobalOp::print() - this pointer: " << (void *)this << "\n";
-            llvm::errs() << "[DEBUG] GlobalOp symbol name: " << getSymName() << "\n";
-            llvm::errs() << "[DEBUG] GlobalOp type: " << getType() << "\n";
             // Print format: "name" : type (initializers are handled by storage, not shown in MLIR)
             p << " ";
             p.printAttributeWithoutType(getSymNameAttr());
@@ -511,6 +502,63 @@ namespace mlir
             // Print attributes (excluding sym_name, type, init which are already printed)
             SmallVector<StringRef> elidedAttrs = {"sym_name", "type", "init"};
             p.printOptionalAttrDict((*this)->getAttrs(), elidedAttrs);
+        }
+
+        //===----------------------------------------------------------------------===//
+        // SLoadOp Custom Parser/Printer
+        //===----------------------------------------------------------------------===//
+
+        ::mlir::ParseResult SLoadOp::parse(::mlir::OpAsmParser &parser, ::mlir::OperationState &result)
+        {
+            // Parse format: "global" : type attr-dict
+            ::mlir::StringAttr globalAttr;
+            if (parser.parseAttribute(globalAttr, "global", result.attributes))
+                return ::mlir::failure();
+
+            ::mlir::Type resultType;
+            if (parser.parseColonType(resultType))
+                return ::mlir::failure();
+            result.addTypes(resultType);
+
+            // Parse optional attributes
+            if (parser.parseOptionalAttrDict(result.attributes))
+                return ::mlir::failure();
+
+            return ::mlir::success();
+        }
+
+        void SLoadOp::print(::mlir::OpAsmPrinter &p)
+        {
+            // Print format: "global" : type attr-dict
+            p << " ";
+            p.printAttributeWithoutType(getGlobalAttr());
+            p << " : ";
+            p << getResult().getType();
+
+            // Print attributes, but elide internal result name attributes
+            SmallVector<StringRef> elidedAttrs = {"global", "ora.result_name_0"};
+            p.printOptionalAttrDict((*this)->getAttrs(), elidedAttrs);
+        }
+
+        //===----------------------------------------------------------------------===//
+        // SLoadOp Result Naming (via OpAsmOpInterface)
+        //===----------------------------------------------------------------------===//
+
+        void SLoadOp::getAsmResultNames(::mlir::OpAsmSetValueNameFn setNameFn)
+        {
+            // Check if we have a stored result name attribute (set via oraOperationSetResultName)
+            auto nameAttr = (*this)->getAttrOfType<StringAttr>("ora.result_name_0");
+            if (nameAttr)
+            {
+                // Use the provided name hint
+                setNameFn(getResult(), nameAttr.getValue());
+            }
+            else
+            {
+                // Default: use the global name as the result name hint
+                // MLIR will automatically uniquify if needed (e.g., %balances, %balances2)
+                setNameFn(getResult(), getGlobal());
+            }
         }
 
     } // namespace ora

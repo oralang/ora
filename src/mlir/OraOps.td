@@ -115,7 +115,8 @@ def Ora_GlobalOp : Ora_Op<"global"> {
   }];
 }
 
-def Ora_SLoadOp : Ora_Op<"sload"> {
+def Ora_SLoadOp : Ora_Op<"sload",
+    [DeclareOpInterfaceMethods<OpAsmOpInterface, ["getAsmResultNames"]>]> {
   let summary = "Load value from storage";
   let description = [{
     Loads a value from the specified global storage variable.
@@ -131,7 +132,7 @@ def Ora_SLoadOp : Ora_Op<"sload"> {
   let arguments = (ins StrAttr:$global);
   let results = (outs AnyType:$result);
   
-  let assemblyFormat = "$global `:` type($result) attr-dict";
+  let hasCustomAssemblyFormat = 1;
   
   let extraClassDeclaration = [{
     /// Get the name of the global variable being loaded

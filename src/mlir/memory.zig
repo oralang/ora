@@ -214,6 +214,11 @@ pub const MemoryManager = struct {
     pub fn createStorageLoad(self: *const MemoryManager, var_name: []const u8, result_type: c.MlirType, loc: c.MlirLocation) c.MlirOperation {
         return self.ora_dialect.createSLoad(var_name, result_type, loc);
     }
+    
+    /// Create storage load operation with named result
+    pub fn createStorageLoadWithName(self: *const MemoryManager, var_name: []const u8, result_type: c.MlirType, loc: c.MlirLocation, result_name: ?[]const u8) c.MlirOperation {
+        return self.ora_dialect.createSLoadWithName(var_name, result_type, loc, result_name);
+    }
 
     /// Create memory load operation (ora.mload)
     pub fn createMemoryLoad(self: *const MemoryManager, var_name: []const u8, loc: c.MlirLocation) c.MlirOperation {

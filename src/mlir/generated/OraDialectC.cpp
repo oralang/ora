@@ -94,23 +94,9 @@ MlirOperation oraContractOpCreate(MlirContext ctx, MlirLocation loc, MlirStringR
 
         // Ensure body region has a block (ContractOp requires a region)
         auto &bodyRegion = contractOp.getBody();
-        llvm::errs() << "[DEBUG] ContractOp body region empty: " << bodyRegion.empty() << "\n";
-        llvm::errs() << "[DEBUG] ContractOp num regions: " << contractOp->getNumRegions() << "\n";
         if (bodyRegion.empty())
         {
-            llvm::errs() << "[DEBUG] Creating block in ContractOp body region\n";
             bodyRegion.push_back(new Block());
-            llvm::errs() << "[DEBUG] After creating block, region empty: " << bodyRegion.empty() << "\n";
-        }
-
-        // Verify the operation is registered
-        if (auto opInfo = contractOp->getRegisteredInfo())
-        {
-            llvm::errs() << "[DEBUG] ContractOp is registered: " << opInfo->getStringRef() << "\n";
-        }
-        else
-        {
-            llvm::errs() << "[DEBUG] ContractOp is NOT registered!\n";
         }
 
         // Add gas_cost attribute (contract declaration has no runtime cost = 0)
@@ -159,16 +145,6 @@ MlirOperation oraGlobalOpCreate(MlirContext ctx, MlirLocation loc, MlirStringRef
 
         auto globalOp = builder.create<GlobalOp>(location, nameAttr, typeAttr, initAttr);
 
-        // Verify the operation is registered
-        if (auto opInfo = globalOp->getRegisteredInfo())
-        {
-            llvm::errs() << "[DEBUG] GlobalOp is registered: " << opInfo->getStringRef() << "\n";
-        }
-        else
-        {
-            llvm::errs() << "[DEBUG] GlobalOp is NOT registered!\n";
-        }
-
         // Add gas_cost attribute (global variable declaration has minimal cost = 0)
         // Actual access costs are handled by sload/sstore operations
         auto gasCostAttr = IntegerAttr::get(::mlir::IntegerType::get(context, 64), 0);
@@ -182,7 +158,38 @@ MlirOperation oraGlobalOpCreate(MlirContext ctx, MlirLocation loc, MlirStringRef
     }
 }
 
+void oraOperationSetResultName(MlirOperation op, unsigned resultIndex, MlirStringRef name)
+{
+    try
+    {
+        Operation *operation = unwrap(op);
+        StringRef nameRef = unwrap(name);
+
+        if (resultIndex < operation->getNumResults())
+        {
+            // In MLIR, result names are set through attributes or OpAsmOpInterface
+            // For now, we'll store the name as an attribute that can be used during printing
+            // The actual name display is handled by AsmState during printing
+            auto nameAttr = StringAttr::get(operation->getContext(), nameRef);
+            std::string attrName = "ora.result_name_" + std::to_string(resultIndex);
+            operation->setAttr(attrName, nameAttr);
+
+            // Also try to set it through the result's name if the API exists
+            // Note: OpResult doesn't have setName() directly, names are managed by AsmState
+        }
+    }
+    catch (...)
+    {
+        // Ignore errors - name setting is optional
+    }
+}
+
 MlirOperation oraSLoadOpCreate(MlirContext ctx, MlirLocation loc, MlirStringRef globalName, MlirType resultType)
+{
+    return oraSLoadOpCreateWithName(ctx, loc, globalName, resultType, {nullptr, 0});
+}
+
+MlirOperation oraSLoadOpCreateWithName(MlirContext ctx, MlirLocation loc, MlirStringRef globalName, MlirType resultType, MlirStringRef resultName)
 {
     try
     {
@@ -205,6 +212,14 @@ MlirOperation oraSLoadOpCreate(MlirContext ctx, MlirLocation loc, MlirStringRef 
         // Add gas_cost attribute (SLOAD_COLD = 2100, conservative estimate)
         auto gasCostAttr = IntegerAttr::get(::mlir::IntegerType::get(context, 64), 2100);
         sloadOp->setAttr("gas_cost", gasCostAttr);
+
+        // Set result name if provided (stored as attribute for use during printing)
+        if (resultName.data != nullptr && resultName.length > 0)
+        {
+            StringRef resultNameRef = unwrap(resultName);
+            auto nameAttr = StringAttr::get(context, resultNameRef);
+            sloadOp->setAttr("ora.result_name_0", nameAttr);
+        }
 
         return wrap(sloadOp.getOperation());
     }
@@ -1857,35 +1872,9 @@ MlirStringRef oraPrintOperation(MlirContext ctx, MlirOperation op)
         MLIRContext *context = unwrap(ctx);
         Operation *operation = unwrap(op);
 
-        llvm::errs() << "[DEBUG] oraPrintOperation called for operation: " << operation->getName() << "\n";
-
-        // Check if this is an Ora operation
-        if (operation->getName().getDialectNamespace() == "ora")
-        {
-            llvm::errs() << "[DEBUG] This is an Ora operation: " << operation->getName().getStringRef() << "\n";
-            // Check if the operation has custom assembly format
-            auto *dialect = context->getLoadedDialect("ora");
-            if (dialect)
-            {
-                llvm::errs() << "[DEBUG] Ora dialect is loaded\n";
-                llvm::errs() << "[DEBUG] Dialect pointer: " << (void *)dialect << "\n";
-            }
-            else
-            {
-                llvm::errs() << "[DEBUG] Ora dialect is NOT loaded\n";
-            }
-
-            // Check operation interface
-            llvm::errs() << "[DEBUG] Operation class name: " << operation->getName().getStringRef() << "\n";
-            llvm::errs() << "[DEBUG] Operation has " << operation->getNumOperands() << " operands\n";
-            llvm::errs() << "[DEBUG] Operation has " << operation->getNumResults() << " results\n";
-            llvm::errs() << "[DEBUG] Operation has " << operation->getNumRegions() << " regions\n";
-        }
-
         // Register the Ora dialect to ensure custom printers are available
         if (!oraDialectRegister(ctx))
         {
-            llvm::errs() << "[DEBUG] Failed to register Ora dialect\n";
             return {nullptr, 0};
         }
 
@@ -1908,60 +1897,17 @@ MlirStringRef oraPrintOperation(MlirContext ctx, MlirOperation op)
         // Print locations inline instead of using location references
         // This makes locations appear as loc("file":line:col) instead of loc(#locN)
         flags.useLocalScope();
-        llvm::errs() << "[DEBUG] OpPrintingFlags.printGenericOpFormFlag = " << flags.shouldPrintGenericOpForm() << "\n";
-        llvm::errs() << "[DEBUG] OpPrintingFlags.useLocalScope = " << flags.shouldUseLocalScope() << "\n";
-        llvm::errs() << "[DEBUG] OpPrintingFlags.printDebugInfo = " << flags.shouldPrintDebugInfo() << "\n";
 
         // Create AsmState to ensure custom printers are used
         // AsmState tracks the state of the printer and ensures dialect-specific
         // printers are invoked when operations have hasCustomAssemblyFormat = 1
         // CRITICAL: AsmState must be created with the flags to propagate them to nested operations
         AsmState state(operation, flags);
-        llvm::errs() << "[DEBUG] AsmState created with flags - generic form disabled: " << !flags.shouldPrintGenericOpForm() << "\n";
-
-        llvm::errs() << "[DEBUG] About to call operation->print() with AsmState\n";
-        llvm::errs() << "[DEBUG] Operation name: " << operation->getName() << "\n";
-        llvm::errs() << "[DEBUG] Operation dialect: " << operation->getName().getDialectNamespace() << "\n";
-
-        // Check if operation has custom assembly format
-        auto opName = operation->getName();
-        llvm::errs() << "[DEBUG] Checking if operation has custom assembly format...\n";
-
-        // Check if operation is registered and has custom assembly format
-        if (opName.isRegistered())
-        {
-            llvm::errs() << "[DEBUG] Operation is registered\n";
-            // Try to get the operation info to check for custom assembly format
-            auto opInfo = opName.getRegisteredInfo();
-            if (opInfo)
-            {
-                llvm::errs() << "[DEBUG] Operation info found\n";
-                // Check if it has custom assembly format (this is stored in the operation definition)
-                // We can't directly check this, but we can try to call print and see what happens
-                // MLIR's Operation::print() should automatically call custom print() methods
-                // when hasCustomAssemblyFormat = 1 and printGenericOpForm is false
-            }
-        }
-        else
-        {
-            llvm::errs() << "[DEBUG] Operation is NOT registered!\n";
-        }
-
-        // CRITICAL: Verify flags are correct before printing
-        llvm::errs() << "[DEBUG] Before print - flags.printGenericOpForm = " << flags.shouldPrintGenericOpForm() << "\n";
-        llvm::errs() << "[DEBUG] Before print - state flags should match...\n";
 
         // Print the operation using AsmState - this ensures custom printers are invoked
         // MLIR's Operation::print() should automatically call custom print() methods
         // when hasCustomAssemblyFormat = 1
-        llvm::errs() << "[DEBUG] Calling operation->print() - operation type: " << typeid(*operation).name() << "\n";
         operation->print(mlirStream, state);
-        llvm::errs() << "[DEBUG] operation->print() completed\n";
-        llvm::errs() << "[DEBUG] Printed content length: " << mlirContent.size() << "\n";
-        if (mlirContent.size() > 0)
-        {
-            llvm::errs() << "[DEBUG] First 100 chars of printed content: " << mlirContent.substr(0, 100) << "\n";
-        }
 
         // Flush the stream
         mlirStream.flush();

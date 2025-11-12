@@ -50,6 +50,13 @@ extern "C"
         MlirType type,
         MlirAttribute initValue);
 
+    /// Set the name of an operation result (for meaningful SSA variable names)
+    /// This improves readability of the generated MLIR
+    MLIR_CAPI_EXPORTED void oraOperationSetResultName(
+        MlirOperation op,
+        unsigned resultIndex,
+        MlirStringRef name);
+
     /// Create an ora.sload operation using the registered dialect
     /// Returns null operation if the dialect is not registered or creation fails
     MLIR_CAPI_EXPORTED MlirOperation oraSLoadOpCreate(
@@ -57,6 +64,14 @@ extern "C"
         MlirLocation loc,
         MlirStringRef globalName,
         MlirType resultType);
+
+    /// Create an ora.sload operation with a named result
+    MLIR_CAPI_EXPORTED MlirOperation oraSLoadOpCreateWithName(
+        MlirContext ctx,
+        MlirLocation loc,
+        MlirStringRef globalName,
+        MlirType resultType,
+        MlirStringRef resultName);
 
     /// Create an ora.sstore operation using the registered dialect
     /// Returns null operation if the dialect is not registered or creation fails

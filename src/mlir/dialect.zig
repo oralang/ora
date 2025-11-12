@@ -86,12 +86,24 @@ pub const OraDialect = struct {
         result_type: c.MlirType,
         loc: c.MlirLocation,
     ) c.MlirOperation {
+        return self.createSLoadWithName(global_name, result_type, loc, null);
+    }
+    
+    // Helper function to create ora.sload operation with named result
+    pub fn createSLoadWithName(
+        self: *OraDialect,
+        global_name: []const u8,
+        result_type: c.MlirType,
+        loc: c.MlirLocation,
+        result_name: ?[]const u8,
+    ) c.MlirOperation {
         // Always use C++ API (dialect must be registered)
         if (!self.isRegistered()) {
             @panic("Ora dialect must be registered before creating operations");
         }
         const name_ref = h.strRef(global_name);
-        const op = c.oraSLoadOpCreate(self.ctx, loc, name_ref, result_type);
+        const result_name_ref = if (result_name) |name| h.strRef(name) else c.MlirStringRef{ .data = null, .length = 0 };
+        const op = c.oraSLoadOpCreateWithName(self.ctx, loc, name_ref, result_type, result_name_ref);
         if (op.ptr == null) {
             @panic("Failed to create ora.sload operation");
         }

@@ -1233,6 +1233,24 @@ fn generateMlirOutput(allocator: std.mem.Allocator, ast_nodes: []lib.AstNode, fi
     }
     const final_module = lowering_result.module;
 
+    // Run MLIR verification after generation (when emitting MLIR)
+    if (mlir_options.emit_mlir) {
+        const verification = @import("mlir/verification.zig");
+        var verifier = verification.OraVerification.init(h.ctx, mlir_allocator);
+        defer verifier.deinit();
+
+        const validation_result = try verifier.verifyModule(final_module);
+
+        if (!validation_result.success) {
+            try stdout.print("❌ MLIR validation failed with {d} error(s):\n", .{validation_result.errors.len});
+            for (validation_result.errors) |err| {
+                try stdout.print("  - [{s}] {s}\n", .{ @tagName(err.type), err.message });
+            }
+            try stdout.flush();
+            std.process.exit(1);
+        }
+    }
+
     // Convert MLIR to Yul (only if requested)
     if (generate_yul) {
         // Validate MLIR before Yul lowering (production safety feature)
@@ -1246,7 +1264,7 @@ fn generateMlirOutput(allocator: std.mem.Allocator, ast_nodes: []lib.AstNode, fi
             const validation_result = try verifier.verifyModule(final_module);
 
             if (!validation_result.success) {
-                try stdout.print("❌ MLIR validation failed with {d} error(s):\n", .{validation_result.errors.len});
+                try stdout.print("MLIR validation failed with {d} error(s):\n", .{validation_result.errors.len});
                 for (validation_result.errors) |err| {
                     try stdout.print("  - [{s}] {s}\n", .{ @tagName(err.type), err.message });
                 }
@@ -1254,8 +1272,6 @@ fn generateMlirOutput(allocator: std.mem.Allocator, ast_nodes: []lib.AstNode, fi
                 try stdout.flush();
                 std.process.exit(1);
             }
-
-            try stdout.print("✅ MLIR validation passed\n", .{});
         }
 
         try stdout.print("Converting MLIR to Yul...\n", .{});
@@ -1331,23 +1347,6 @@ fn generateMlirOutput(allocator: std.mem.Allocator, ast_nodes: []lib.AstNode, fi
     // Output MLIR using C++ API wrapper (ensures custom assembly formats are used)
     // Only output MLIR if explicitly requested with --emit-mlir
     if (mlir_options.emit_mlir) {
-        // TEST: Create and print a simple TestOp to verify custom printer works
-        const mlir_mod = @import("mlir/mod.zig");
-        var dialect = mlir_mod.dialect.OraDialect.init(h.ctx, mlir_allocator);
-        try dialect.register();
-        const test_loc = c.mlirLocationUnknownGet(h.ctx);
-        const test_op = dialect.createTest(test_loc);
-        if (test_op.ptr != null) {
-            const test_str = c.oraPrintOperation(h.ctx, test_op);
-            defer if (test_str.data != null) {
-                const mlir_c = @import("mlir/c.zig");
-                mlir_c.freeStringRef(test_str);
-            };
-            if (test_str.data != null and test_str.length > 0) {
-                try stdout.print("[TEST] TestOp output: {s}\n", .{test_str.data[0..test_str.length]});
-            }
-        }
-
         const module_op = c.mlirModuleGetOperation(lowering_result.module);
         const mlir_str = c.oraPrintOperation(h.ctx, module_op);
         defer if (mlir_str.data != null) {

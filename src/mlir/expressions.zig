@@ -580,7 +580,9 @@ pub const ExpressionLowerer = struct {
                 break :blk c.oraIntegerTypeGet(self.ctx, constants.DEFAULT_INTEGER_BITS, false);
             };
 
-            const load_op = memory_manager.createStorageLoad(identifier.name, var_type, self.fileLoc(identifier.span));
+            // Generate meaningful name for the loaded value (e.g., "balances" -> "balances")
+            const result_name = identifier.name;
+            const load_op = memory_manager.createStorageLoadWithName(identifier.name, var_type, self.fileLoc(identifier.span), result_name);
             h.appendOp(self.block, load_op);
             return h.getResult(load_op, 0);
         }
