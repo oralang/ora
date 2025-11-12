@@ -109,6 +109,29 @@ extern "C"
     /// Returns null type if the operation is not an ora.global or if it fails
     MLIR_CAPI_EXPORTED MlirType oraGlobalOpGetType(MlirOperation globalOp);
 
+    /// Convert Ora types to built-in MLIR types for arithmetic operations
+    /// arith.* operations only accept built-in integer types, not dialect types
+    /// Returns the built-in type equivalent (e.g., !ora.int<256, false> -> i256)
+    MLIR_CAPI_EXPORTED MlirType oraTypeToBuiltin(MlirType type);
+
+    /// Check if a type is an Ora integer type
+    MLIR_CAPI_EXPORTED bool oraTypeIsIntegerType(MlirType type);
+
+    /// Check if a type is an Ora address type
+    MLIR_CAPI_EXPORTED bool oraTypeIsAddressType(MlirType type);
+
+    /// Create an ora.addr.to.i160 operation to convert !ora.address to i160
+    MLIR_CAPI_EXPORTED MlirOperation oraAddrToI160OpCreate(
+        MlirContext ctx,
+        MlirLocation loc,
+        MlirValue addr);
+
+    /// Create an Ora map type !ora.map<keyType, valueType>
+    MLIR_CAPI_EXPORTED MlirType oraMapTypeGet(
+        MlirContext ctx,
+        MlirType keyType,
+        MlirType valueType);
+
     /// Create an ora.requires operation using the registered dialect
     MLIR_CAPI_EXPORTED MlirOperation oraRequiresOpCreate(
         MlirContext ctx,

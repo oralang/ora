@@ -1331,6 +1331,23 @@ fn generateMlirOutput(allocator: std.mem.Allocator, ast_nodes: []lib.AstNode, fi
     // Output MLIR using C++ API wrapper (ensures custom assembly formats are used)
     // Only output MLIR if explicitly requested with --emit-mlir
     if (mlir_options.emit_mlir) {
+        // TEST: Create and print a simple TestOp to verify custom printer works
+        const mlir_mod = @import("mlir/mod.zig");
+        var dialect = mlir_mod.dialect.OraDialect.init(h.ctx, mlir_allocator);
+        try dialect.register();
+        const test_loc = c.mlirLocationUnknownGet(h.ctx);
+        const test_op = dialect.createTest(test_loc);
+        if (test_op.ptr != null) {
+            const test_str = c.oraPrintOperation(h.ctx, test_op);
+            defer if (test_str.data != null) {
+                const mlir_c = @import("mlir/c.zig");
+                mlir_c.freeStringRef(test_str);
+            };
+            if (test_str.data != null and test_str.length > 0) {
+                try stdout.print("[TEST] TestOp output: {s}\n", .{test_str.data[0..test_str.length]});
+            }
+        }
+
         const module_op = c.mlirModuleGetOperation(lowering_result.module);
         const mlir_str = c.oraPrintOperation(h.ctx, module_op);
         defer if (mlir_str.data != null) {

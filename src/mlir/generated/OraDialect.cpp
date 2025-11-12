@@ -459,16 +459,26 @@ namespace mlir
 
         ::mlir::ParseResult GlobalOp::parse(::mlir::OpAsmParser &parser, ::mlir::OperationState &result)
         {
-            // Parse format: "name" = init : type
+            // Parse format: "name" : type (for maps) or "name" = init : type (for scalars)
             // Parse symbol name
             ::mlir::StringAttr symName;
             if (parser.parseAttribute(symName, "sym_name", result.attributes))
                 return ::mlir::failure();
 
-            // Parse = init
+            // Parse optional = init (maps don't have initializers)
             ::mlir::Attribute init;
-            if (parser.parseEqual() || parser.parseAttribute(init, "init", result.attributes))
-                return ::mlir::failure();
+            if (succeeded(parser.parseOptionalEqual()))
+            {
+                // Found =, so parse the initializer
+                if (parser.parseAttribute(init, "init", result.attributes))
+                    return ::mlir::failure();
+            }
+            else
+            {
+                // No initializer - use UnitAttr to represent "no initializer"
+                init = ::mlir::UnitAttr::get(parser.getContext());
+                result.addAttribute("init", init);
+            }
 
             // Parse : type
             ::mlir::Type type;
@@ -489,11 +499,12 @@ namespace mlir
             llvm::errs() << "[DEBUG] GlobalOp::print() - this pointer: " << (void *)this << "\n";
             llvm::errs() << "[DEBUG] GlobalOp symbol name: " << getSymName() << "\n";
             llvm::errs() << "[DEBUG] GlobalOp type: " << getType() << "\n";
-            // Print format: "name" = init : type
+            // Print format: "name" : type (initializers are handled by storage, not shown in MLIR)
             p << " ";
             p.printAttributeWithoutType(getSymNameAttr());
-            p << " = ";
-            p.printAttributeWithoutType(getInitAttr());
+
+            // Never print initializers - they are handled by storage
+            // Format: "name" : type {attrs}
             p << " : ";
             p << getType();
 

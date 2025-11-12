@@ -341,21 +341,19 @@ pub const TypeMapper = struct {
         return c.mlirRankedTensorTypeGet(1, &shape, elem_mlir_type, c.mlirAttributeGetNull());
     }
 
-    /// Convert mapping type `map[K, V]` to storage slot reference
+    /// Convert mapping type `map[K, V]` to !ora.map<K, V>
     /// Maps in Ora/EVM are storage-based and use keccak256 for key hashing
     /// The type represents a base storage slot; actual access is via ora.map_get/ora.map_set
     pub fn mapMapType(self: *const TypeMapper, mapping_info: lib.ast.type_info.MapType) c.MlirType {
-        // Maps are represented as i256 storage slot references in EVM
-        // The key and value types are tracked in symbol table for type checking
-        // Actual map access (keccak256 hashing) is handled in Yul lowering
-
-        // Store type metadata for future dialect integration
-        _ = mapping_info.key; // Key type (tracked for type checking)
-        _ = mapping_info.value; // Value type (tracked for type checking)
-
-        // Return storage slot reference (i256 for EVM compatibility)
-        // Future: migrate to !ora.map<K, V> dialect type when TableGen is integrated
-        return c.mlirIntegerTypeGet(self.ctx, constants.DEFAULT_INTEGER_BITS);
+        // Get the key and value types
+        const key_ora_type: ?lib.ast.type_info.OraType = mapping_info.key.*;
+        const value_ora_type: ?lib.ast.type_info.OraType = mapping_info.value.*;
+        
+        const key_type = self.toMlirType(.{ .ora_type = key_ora_type });
+        const value_type = self.toMlirType(.{ .ora_type = value_ora_type });
+        
+        // Create !ora.map<K, V> type
+        return c.oraMapTypeGet(self.ctx, key_type, value_type);
     }
 
     /// Convert double mapping type `doublemap[K1, K2, V]` to storage slot reference
@@ -707,12 +705,27 @@ pub const TypeMapper = struct {
         else
             h.unknownLoc(self.ctx);
 
-        // For integer types, use arith.extui, arith.extsi, or arith.trunci
-        if (c.mlirTypeIsAInteger(value_type) and c.mlirTypeIsAInteger(target_type)) {
-            const value_width = c.mlirIntegerTypeGetWidth(value_type);
-            const target_width = c.mlirIntegerTypeGetWidth(target_type);
+        // Check if we're converting from Ora types to built-in types (or vice versa)
+        // Even if widths are the same, we need to create a conversion operation
+        const value_builtin = c.oraTypeToBuiltin(value_type);
+        const target_builtin = c.oraTypeToBuiltin(target_type);
+        const needs_ora_conversion = !c.mlirTypeEqual(value_type, value_builtin) or !c.mlirTypeEqual(target_type, target_builtin);
 
-            if (value_width < target_width) {
+        // For integer types, use arith.extui, arith.extsi, or arith.trunci
+        if (c.mlirTypeIsAInteger(value_builtin) and c.mlirTypeIsAInteger(target_builtin)) {
+            const value_width = c.mlirIntegerTypeGetWidth(value_builtin);
+            const target_width = c.mlirIntegerTypeGetWidth(target_builtin);
+
+            // If converting from Ora to built-in (or vice versa) with same width, use bitcast
+            if (needs_ora_conversion and value_width == target_width) {
+                // Use bitcast for same-width conversions between Ora and built-in types
+                var op_state = h.opState("arith.bitcast", location);
+                c.mlirOperationStateAddOperands(&op_state, 1, &value);
+                c.mlirOperationStateAddResults(&op_state, 1, &target_type);
+                const op = c.mlirOperationCreate(&op_state);
+                c.mlirBlockAppendOwnedOperation(block, op);
+                return c.mlirOperationGetResult(op, 0);
+            } else if (value_width < target_width) {
                 // Extension - use unsigned extension for now
                 var op_state = h.opState("arith.extui", location);
                 c.mlirOperationStateAddOperands(&op_state, 1, &value);

@@ -348,12 +348,12 @@ pub const ExpressionLowerer = struct {
         }
 
         return switch (bin.operator) {
-            // Arithmetic operators
-            .Plus => self.createArithmeticOp("arith.addi", lhs_converted, rhs_converted, result_ty, bin.span),
-            .Minus => self.createArithmeticOp("arith.subi", lhs_converted, rhs_converted, result_ty, bin.span),
-            .Star => self.createArithmeticOp("arith.muli", lhs_converted, rhs_converted, result_ty, bin.span),
-            .Slash => self.createArithmeticOp("arith.divsi", lhs_converted, rhs_converted, result_ty, bin.span),
-            .Percent => self.createArithmeticOp("arith.remsi", lhs_converted, rhs_converted, result_ty, bin.span),
+            // Arithmetic operators - use ora.add, ora.sub which accept !ora.int<...> types
+            .Plus => self.createArithmeticOp("ora.add", lhs_converted, rhs_converted, result_ty, bin.span),
+            .Minus => self.createArithmeticOp("ora.sub", lhs_converted, rhs_converted, result_ty, bin.span),
+            .Star => self.createArithmeticOp("ora.mul", lhs_converted, rhs_converted, result_ty, bin.span),
+            .Slash => self.createArithmeticOp("ora.div", lhs_converted, rhs_converted, result_ty, bin.span),
+            .Percent => self.createArithmeticOp("ora.rem", lhs_converted, rhs_converted, result_ty, bin.span),
             .StarStar => blk: {
                 // Power operation - implement proper exponentiation using repeated multiplication
                 // For integer exponents, we can use a loop-based approach
@@ -363,7 +363,7 @@ pub const ExpressionLowerer = struct {
                 break :blk h.getResult(power_op, 0);
             },
 
-            // Comparison operators - all return i1 (boolean)
+            // Comparison operators - use ora.cmp which accepts !ora.int<...> types
             .EqualEqual => self.createComparisonOp("eq", lhs_converted, rhs_converted, bin.span),
             .BangEqual => self.createComparisonOp("ne", lhs_converted, rhs_converted, bin.span),
             .Less => self.createComparisonOp("ult", lhs_converted, rhs_converted, bin.span),
@@ -891,9 +891,30 @@ pub const ExpressionLowerer = struct {
 
         // Special handling for specific constants
         if (std.mem.eql(u8, builtin_info.full_path, "std.constants.ZERO_ADDRESS")) {
-            // Create address constant 0x0
-            const addr_ty = c.mlirIntegerTypeGet(self.ctx, 160); // address is 160 bits
-            const op = self.ora_dialect.createArithConstant(0, addr_ty, self.fileLoc(span));
+            // ZERO_ADDRESS should return !ora.address type (not i160)
+            // When used in comparisons, it will be converted to i160 via ora.addr.to.i160
+            // Create ora.address.constant with value 0x0
+            const addr_ty = self.type_mapper.toMlirType(.{
+                .ora_type = builtin_info.return_type,
+            });
+
+            // Use ora.address.constant operation to create zero address
+            var state = h.opState("ora.address.constant", self.fileLoc(span));
+            c.mlirOperationStateAddResults(&state, 1, @ptrCast(&addr_ty));
+
+            // Create integer attribute for value 0
+            const value_attr = h.intAttr(self.ctx, c.mlirIntegerTypeGet(self.ctx, constants.DEFAULT_INTEGER_BITS), 0);
+            const value_id = h.identifier(self.ctx, "value");
+            const address_id = h.identifier(self.ctx, "ora.address");
+            const address_attr = h.stringAttr(self.ctx, "0x0000000000000000000000000000000000000000");
+
+            var attrs = [_]c.MlirNamedAttribute{
+                c.mlirNamedAttributeGet(value_id, value_attr),
+                c.mlirNamedAttributeGet(address_id, address_attr),
+            };
+            c.mlirOperationStateAddAttributes(&state, attrs.len, &attrs);
+
+            const op = c.mlirOperationCreate(&state);
             h.appendOp(self.block, op);
             return h.getResult(op, 0);
         }
@@ -1537,8 +1558,25 @@ pub const ExpressionLowerer = struct {
     }
 
     /// Helper function to create arithmetic operations
+    /// Uses ora.add, ora.sub, etc. which accept !ora.int<...> types directly
     pub fn createArithmeticOp(self: *const ExpressionLowerer, op_name: []const u8, lhs: c.MlirValue, rhs: c.MlirValue, result_ty: c.MlirType, span: lib.ast.SourceSpan) c.MlirValue {
-        var state = c.mlirOperationStateGet(h.strRef(op_name), self.fileLoc(span));
+        // Map arith.* operation names to ora.* operations
+        const ora_op_name = if (std.mem.eql(u8, op_name, "arith.addi"))
+            "ora.add"
+        else if (std.mem.eql(u8, op_name, "arith.subi"))
+            "ora.sub"
+        else if (std.mem.eql(u8, op_name, "arith.muli"))
+            "ora.mul"
+        else if (std.mem.eql(u8, op_name, "arith.divsi"))
+            "ora.div"
+        else if (std.mem.eql(u8, op_name, "arith.remsi"))
+            "ora.rem"
+        else
+            op_name; // Fallback to original name for other operations
+
+        // Use Ora operations that accept !ora.int<...> types directly
+        // No type conversion needed - keep Ora types throughout
+        var state = c.mlirOperationStateGet(h.strRef(ora_op_name), self.fileLoc(span));
         c.mlirOperationStateAddOperands(&state, 2, @ptrCast(&[_]c.MlirValue{ lhs, rhs }));
         c.mlirOperationStateAddResults(&state, 1, @ptrCast(&result_ty));
         const op = c.mlirOperationCreate(&state);
@@ -1547,25 +1585,74 @@ pub const ExpressionLowerer = struct {
     }
 
     /// Helper function to create comparison operations
+    /// Uses ora.cmp which accepts !ora.int<...> types directly
+    /// For address comparisons, still converts to i160
     pub fn createComparisonOp(self: *const ExpressionLowerer, predicate: []const u8, lhs: c.MlirValue, rhs: c.MlirValue, span: lib.ast.SourceSpan) c.MlirValue {
-        var state = h.opState("arith.cmpi", self.fileLoc(span));
-        c.mlirOperationStateAddOperands(&state, 2, @ptrCast(&[_]c.MlirValue{ lhs, rhs }));
-        const bool_ty = h.boolType(self.ctx);
-        c.mlirOperationStateAddResults(&state, 1, @ptrCast(&bool_ty));
+        const lhs_ty = c.mlirValueGetType(lhs);
+        const rhs_ty = c.mlirValueGetType(rhs);
 
-        // Convert string predicate to integer value
-        const predicate_value = self.predicateStringToInt(predicate);
-        const predicate_attr = c.mlirIntegerAttrGet(c.mlirIntegerTypeGet(self.ctx, 64), predicate_value);
-        const predicate_id = h.identifier(self.ctx, "predicate");
-        var attrs = [_]c.MlirNamedAttribute{
-            c.mlirNamedAttributeGet(predicate_id, predicate_attr),
-        };
+        // Check if we're comparing an address to zero
+        // Address comparisons still need i160 conversion
+        const is_lhs_address = c.oraTypeIsAddressType(lhs_ty);
+        const is_rhs_address = c.oraTypeIsAddressType(rhs_ty);
 
-        c.mlirOperationStateAddAttributes(&state, attrs.len, &attrs);
+        // For address comparisons, convert to i160
+        // For integer comparisons, use ora.cmp with Ora types directly
+        const lhs_converted = if (is_lhs_address) blk: {
+            // Use explicit ora.addr.to.i160 for address types
+            const addr_to_i160_op = c.oraAddrToI160OpCreate(self.ctx, self.fileLoc(span), lhs);
+            h.appendOp(self.block, addr_to_i160_op);
+            break :blk h.getResult(addr_to_i160_op, 0);
+        } else lhs;
+        const rhs_converted = if (is_rhs_address) blk: {
+            // Use explicit ora.addr.to.i160 for address types
+            const addr_to_i160_op = c.oraAddrToI160OpCreate(self.ctx, self.fileLoc(span), rhs);
+            h.appendOp(self.block, addr_to_i160_op);
+            break :blk h.getResult(addr_to_i160_op, 0);
+        } else rhs;
 
-        const op = c.mlirOperationCreate(&state);
-        h.appendOp(self.block, op);
-        return h.getResult(op, 0);
+        // If comparing addresses, use arith.cmpi (they're now i160)
+        // Otherwise use ora.cmp for Ora integer types
+        if (is_lhs_address or is_rhs_address) {
+            // Address comparison - use arith.cmpi on i160
+            var state = h.opState("arith.cmpi", self.fileLoc(span));
+            c.mlirOperationStateAddOperands(&state, 2, @ptrCast(&[_]c.MlirValue{ lhs_converted, rhs_converted }));
+            const bool_ty = h.boolType(self.ctx);
+            c.mlirOperationStateAddResults(&state, 1, @ptrCast(&bool_ty));
+
+            // Convert string predicate to integer value
+            const predicate_value = self.predicateStringToInt(predicate);
+            const predicate_attr = c.mlirIntegerAttrGet(c.mlirIntegerTypeGet(self.ctx, 64), predicate_value);
+            const predicate_id = h.identifier(self.ctx, "predicate");
+            var attrs = [_]c.MlirNamedAttribute{
+                c.mlirNamedAttributeGet(predicate_id, predicate_attr),
+            };
+
+            c.mlirOperationStateAddAttributes(&state, attrs.len, &attrs);
+
+            const op = c.mlirOperationCreate(&state);
+            h.appendOp(self.block, op);
+            return h.getResult(op, 0);
+        } else {
+            // Integer comparison - use ora.cmp with Ora types
+            var state = h.opState("ora.cmp", self.fileLoc(span));
+
+            // Add predicate as string attribute
+            const predicate_attr = h.stringAttr(self.ctx, predicate);
+            const predicate_id = h.identifier(self.ctx, "predicate");
+            var attrs = [_]c.MlirNamedAttribute{
+                c.mlirNamedAttributeGet(predicate_id, predicate_attr),
+            };
+            c.mlirOperationStateAddAttributes(&state, attrs.len, &attrs);
+
+            c.mlirOperationStateAddOperands(&state, 2, @ptrCast(&[_]c.MlirValue{ lhs_converted, rhs_converted }));
+            const bool_ty = h.boolType(self.ctx);
+            c.mlirOperationStateAddResults(&state, 1, @ptrCast(&bool_ty));
+
+            const op = c.mlirOperationCreate(&state);
+            h.appendOp(self.block, op);
+            return h.getResult(op, 0);
+        }
     }
 
     /// Convert predicate string to integer value for arith.cmpi
@@ -1623,6 +1710,31 @@ pub const ExpressionLowerer = struct {
         // Use the type_mapper's createConversionOp for proper type conversion semantics
         // It handles: extension (extui/extsi), truncation (trunci), and same-width conversions
         return self.type_mapper.createConversionOp(self.block, value, target_ty, span);
+    }
+
+    /// Check if a value is a zero constant
+    /// This is a simplified check - we check if the value type is i160 and the value is 0
+    /// For more accurate detection, we'd need to trace back to the defining operation
+    fn isZeroConstant(_: *const ExpressionLowerer, value: c.MlirValue) bool {
+        // Simplified approach: check if the value type is i160 (which zero address constants would be)
+        // and assume it's zero if it's a small integer type
+        // This is a heuristic - in practice, we'd need to check the actual constant value
+        // For now, we'll rely on the type system to handle this correctly
+        const value_ty = c.mlirValueGetType(value);
+
+        // Check if it's i160 (zero address would be i160)
+        if (c.mlirTypeIsAInteger(value_ty)) {
+            const width = c.mlirIntegerTypeGetWidth(value_ty);
+            // If it's i160, it could be a zero address constant
+            // We'll be conservative and only treat it as zero if it's explicitly i160
+            // The actual zero detection would require checking the defining operation
+            // For now, return false to be safe - the comparison will work correctly anyway
+            _ = width;
+        }
+
+        // For now, return false - we'll handle zero address comparisons differently
+        // by checking if ZERO_ADDRESS constant is being used
+        return false;
     }
 
     /// Helper function to create a boolean constant

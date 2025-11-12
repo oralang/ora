@@ -1069,6 +1069,20 @@ pub const StatementLowerer = struct {
         // Create a temporary lowerer for this block by copying the current one and changing the block
         var temp_lowerer = self.*;
         temp_lowerer.block = target_block;
+        
+        // Create a new expression lowerer with the target block to ensure constants are created in the correct block
+        const expr_lowerer = @import("expressions.zig").ExpressionLowerer.init(
+            self.ctx,
+            target_block,
+            self.expr_lowerer.type_mapper,
+            self.expr_lowerer.param_map,
+            self.expr_lowerer.storage_map,
+            self.expr_lowerer.local_var_map,
+            self.expr_lowerer.symbol_table,
+            self.expr_lowerer.builtin_registry,
+            self.expr_lowerer.locations,
+            self.expr_lowerer.ora_dialect,
+        );
 
         // Track if we've added a terminator to this block
         var has_terminator = false;
@@ -1084,7 +1098,7 @@ pub const StatementLowerer = struct {
                     const loc = temp_lowerer.fileLoc(ret.span);
 
                     if (ret.value) |e| {
-                        const v = temp_lowerer.expr_lowerer.lowerExpression(&e);
+                        const v = expr_lowerer.lowerExpression(&e);
                         const yield_op = temp_lowerer.ora_dialect.createScfYieldWithValues(&[_]c.MlirValue{v}, loc);
                         h.appendOp(target_block, yield_op);
                     } else {
@@ -1096,7 +1110,7 @@ pub const StatementLowerer = struct {
                 .If => |if_stmt| {
                     // Handle nested if statements with returns
                     const loc = temp_lowerer.fileLoc(if_stmt.span);
-                    const condition = temp_lowerer.expr_lowerer.lowerExpression(&if_stmt.condition);
+                    const condition = expr_lowerer.lowerExpression(&if_stmt.condition);
 
                     // If the nested if has returns, handle it specially
                     if (temp_lowerer.ifStatementHasReturns(&if_stmt)) {

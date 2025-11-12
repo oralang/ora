@@ -55,6 +55,33 @@ def Ora_ContractOp : Ora_Op<"contract"> {
 }
 
 //===----------------------------------------------------------------------===//
+// Type Conversion Operations
+//===----------------------------------------------------------------------===//
+
+def Ora_AddrToI160Op : Ora_PureOp<"addr.to.i160"> {
+  let summary = "Convert Ora address type to i160";
+  let description = [{
+    Converts an Ora address type (!ora.address) to the built-in i160 type.
+    This is needed for address comparisons since arith.cmpi only accepts built-in integer types.
+    
+    Example:
+    ```mlir
+    %a160 = ora.addr.to.i160 %addr : !ora.address -> i160
+    ```
+  }];
+  
+  let arguments = (ins AnyType:$addr);
+  let results = (outs AnyType:$result);
+  
+  let assemblyFormat = "$addr attr-dict `:` type($addr) `->` type($result)";
+  
+  let extraClassDeclaration = [{
+    /// Get the input address value
+    ::mlir::Value getAddress() { return getAddr(); }
+  }];
+}
+
+//===----------------------------------------------------------------------===//
 // Storage Operations
 //===----------------------------------------------------------------------===//
 
@@ -104,7 +131,7 @@ def Ora_SLoadOp : Ora_Op<"sload"> {
   let arguments = (ins StrAttr:$global);
   let results = (outs AnyType:$result);
   
-  let assemblyFormat = "$global attr-dict `:` type($result)";
+  let assemblyFormat = "$global `:` type($result) attr-dict";
   
   let extraClassDeclaration = [{
     /// Get the name of the global variable being loaded
@@ -127,7 +154,7 @@ def Ora_SStoreOp : Ora_Op<"sstore"> {
   
   let arguments = (ins AnyType:$value, StrAttr:$global);
   
-  let assemblyFormat = "$value `,` $global attr-dict `:` type($value)";
+  let assemblyFormat = "$value `,` $global `:` type($value) attr-dict";
   
   let extraClassDeclaration = [{
     /// Get the value being stored
@@ -201,6 +228,115 @@ def Ora_HexConstantOp : Ora_PureOp<"hex.constant"> {
 //===----------------------------------------------------------------------===//
 // Arithmetic Operations
 //===----------------------------------------------------------------------===//
+
+def Ora_AddOp : Ora_PureOp<"add"> {
+  let summary = "Add operation";
+  let description = [{
+    Adds two Ora integer values with proper unsigned semantics and overflow handling.
+    Accepts !ora.int<width, signed> types and preserves the type in the result.
+    
+    Example:
+    ```mlir
+    %result = ora.add %lhs, %rhs : (!ora.int<256, false>, !ora.int<256, false>) -> !ora.int<256, false>
+    ```
+  }];
+  
+  let arguments = (ins AnyType:$lhs, AnyType:$rhs);
+  let results = (outs AnyType:$result);
+  
+  let assemblyFormat = "$lhs `,` $rhs attr-dict `:` type($lhs) `,` type($rhs) `->` type($result)";
+  
+}
+
+def Ora_SubOp : Ora_PureOp<"sub"> {
+  let summary = "Subtract operation";
+  let description = [{
+    Subtracts two Ora integer values with proper unsigned semantics and overflow handling.
+    Accepts !ora.int<width, signed> types and preserves the type in the result.
+    
+    Example:
+    ```mlir
+    %result = ora.sub %lhs, %rhs : (!ora.int<256, false>, !ora.int<256, false>) -> !ora.int<256, false>
+    ```
+  }];
+  
+  let arguments = (ins AnyType:$lhs, AnyType:$rhs);
+  let results = (outs AnyType:$result);
+  
+  let assemblyFormat = "$lhs `,` $rhs attr-dict `:` type($lhs) `,` type($rhs) `->` type($result)";
+}
+
+def Ora_MulOp : Ora_PureOp<"mul"> {
+  let summary = "Multiply operation";
+  let description = [{
+    Multiplies two Ora integer values with proper unsigned semantics and overflow handling.
+    Accepts !ora.int<width, signed> types and preserves the type in the result.
+    
+    Example:
+    ```mlir
+    %result = ora.mul %lhs, %rhs : (!ora.int<256, false>, !ora.int<256, false>) -> !ora.int<256, false>
+    ```
+  }];
+  
+  let arguments = (ins AnyType:$lhs, AnyType:$rhs);
+  let results = (outs AnyType:$result);
+  
+  let assemblyFormat = "$lhs `,` $rhs attr-dict `:` type($lhs) `,` type($rhs) `->` type($result)";
+}
+
+def Ora_DivOp : Ora_PureOp<"div"> {
+  let summary = "Divide operation";
+  let description = [{
+    Divides two Ora integer values with proper unsigned semantics.
+    Accepts !ora.int<width, signed> types and preserves the type in the result.
+    
+    Example:
+    ```mlir
+    %result = ora.div %lhs, %rhs : (!ora.int<256, false>, !ora.int<256, false>) -> !ora.int<256, false>
+    ```
+  }];
+  
+  let arguments = (ins AnyType:$lhs, AnyType:$rhs);
+  let results = (outs AnyType:$result);
+  
+  let assemblyFormat = "$lhs `,` $rhs attr-dict `:` type($lhs) `,` type($rhs) `->` type($result)";
+}
+
+def Ora_RemOp : Ora_PureOp<"rem"> {
+  let summary = "Remainder operation";
+  let description = [{
+    Computes the remainder of dividing two Ora integer values.
+    Accepts !ora.int<width, signed> types and preserves the type in the result.
+    
+    Example:
+    ```mlir
+    %result = ora.rem %lhs, %rhs : (!ora.int<256, false>, !ora.int<256, false>) -> !ora.int<256, false>
+    ```
+  }];
+  
+  let arguments = (ins AnyType:$lhs, AnyType:$rhs);
+  let results = (outs AnyType:$result);
+  
+  let assemblyFormat = "$lhs `,` $rhs attr-dict `:` type($lhs) `,` type($rhs) `->` type($result)";
+}
+
+def Ora_CmpOp : Ora_PureOp<"cmp"> {
+  let summary = "Compare operation";
+  let description = [{
+    Compares two Ora integer values with proper unsigned semantics.
+    Accepts !ora.int<width, signed> types and returns i1 (boolean).
+    
+    Example:
+    ```mlir
+    %result = ora.cmp "eq", %lhs, %rhs : (!ora.int<256, false>, !ora.int<256, false>) -> i1
+    ```
+  }];
+  
+  let arguments = (ins StrAttr:$predicate, AnyType:$lhs, AnyType:$rhs);
+  let results = (outs I1:$result);
+  
+  let assemblyFormat = "$predicate `,` $lhs `,` $rhs attr-dict `:` type($lhs) `,` type($rhs) `->` type($result)";
+}
 
 def Ora_PowerOp : Ora_PureOp<"power"> {
   let summary = "Power operation";

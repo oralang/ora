@@ -18,6 +18,7 @@
 #include "mlir/Pass/PassManager.h"
 #include "mlir/Pass/PassRegistry.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
+#include <sstream>
 #include "mlir/Transforms/ViewOpGraph.h"
 #include "mlir/Transforms/Passes.h"
 #include "llvm/Support/FileSystem.h"
@@ -132,7 +133,6 @@ MlirOperation oraGlobalOpCreate(MlirContext ctx, MlirLocation loc, MlirStringRef
         Location location = unwrap(loc);
         StringRef nameRef = unwrap(name);
         Type typeRef = unwrap(type);
-        Attribute initAttr = unwrap(initValue);
 
         // Check if dialect is registered
         if (!oraDialectIsRegistered(ctx))
@@ -145,6 +145,18 @@ MlirOperation oraGlobalOpCreate(MlirContext ctx, MlirLocation loc, MlirStringRef
         // Create the global operation
         auto nameAttr = StringAttr::get(context, nameRef);
         auto typeAttr = TypeAttr::get(typeRef);
+
+        // Handle optional initializer - use UnitAttr for null (maps don't have initializers)
+        Attribute initAttr;
+        if (mlirAttributeIsNull(initValue))
+        {
+            initAttr = UnitAttr::get(context);
+        }
+        else
+        {
+            initAttr = unwrap(initValue);
+        }
+
         auto globalOp = builder.create<GlobalOp>(location, nameAttr, typeAttr, initAttr);
 
         // Verify the operation is registered
@@ -440,6 +452,128 @@ MlirType oraGlobalOpGetType(MlirOperation globalOp)
         }
 
         return {nullptr};
+    }
+    catch (...)
+    {
+        return {nullptr};
+    }
+}
+
+/// Convert Ora types to built-in MLIR types for arithmetic operations
+/// arith.* operations only accept built-in integer types, not dialect types
+MlirType oraTypeToBuiltin(MlirType type)
+{
+    try
+    {
+        Type mlirType = unwrap(type);
+
+        // Check if it's an Ora integer type
+        if (auto oraIntType = dyn_cast<ora::IntegerType>(mlirType))
+        {
+            // Convert to built-in integer type
+            unsigned width = oraIntType.getWidth();
+            bool isSigned = oraIntType.getIsSigned();
+            return wrap(::mlir::IntegerType::get(mlirType.getContext(), width, isSigned ? ::mlir::IntegerType::Signed : ::mlir::IntegerType::Unsigned));
+        }
+
+        // Check if it's an Ora address type
+        if (auto oraAddrType = dyn_cast<ora::AddressType>(mlirType))
+        {
+            // Convert to i160 (Ethereum address is 20 bytes = 160 bits)
+            return wrap(::mlir::IntegerType::get(mlirType.getContext(), 160));
+        }
+
+        // Check if it's an Ora bool type
+        if (auto oraBoolType = dyn_cast<ora::BoolType>(mlirType))
+        {
+            // Convert to i1
+            return wrap(::mlir::IntegerType::get(mlirType.getContext(), 1));
+        }
+
+        // Not an Ora type, return as-is
+        return type;
+    }
+    catch (...)
+    {
+        return type;
+    }
+}
+
+/// Check if a type is an Ora integer type
+bool oraTypeIsIntegerType(MlirType type)
+{
+    try
+    {
+        Type mlirType = unwrap(type);
+        return dyn_cast<ora::IntegerType>(mlirType) != nullptr;
+    }
+    catch (...)
+    {
+        return false;
+    }
+}
+
+/// Check if a type is an Ora address type
+bool oraTypeIsAddressType(MlirType type)
+{
+    try
+    {
+        Type mlirType = unwrap(type);
+        return dyn_cast<ora::AddressType>(mlirType) != nullptr;
+    }
+    catch (...)
+    {
+        return false;
+    }
+}
+
+/// Create an ora.addr.to.i160 operation to convert !ora.address to i160
+MlirOperation oraAddrToI160OpCreate(MlirContext ctx, MlirLocation loc, MlirValue addr)
+{
+    try
+    {
+        MLIRContext *context = unwrap(ctx);
+        Location location = unwrap(loc);
+        Value addrValue = unwrap(addr);
+
+        if (!oraDialectIsRegistered(ctx))
+        {
+            return {nullptr};
+        }
+
+        OpBuilder builder(context);
+
+        // Create i160 result type
+        auto i160Type = ::mlir::IntegerType::get(context, 160);
+
+        // Create the addr.to.i160 operation
+        auto addrToI160Op = builder.create<ora::AddrToI160Op>(location, i160Type, addrValue);
+
+        return wrap(addrToI160Op.getOperation());
+    }
+    catch (...)
+    {
+        return {nullptr};
+    }
+}
+
+/// Create an Ora map type !ora.map<keyType, valueType>
+MlirType oraMapTypeGet(MlirContext ctx, MlirType keyType, MlirType valueType)
+{
+    try
+    {
+        MLIRContext *context = unwrap(ctx);
+        Type keyTypeRef = unwrap(keyType);
+        Type valueTypeRef = unwrap(valueType);
+
+        if (!oraDialectIsRegistered(ctx))
+        {
+            return {nullptr};
+        }
+
+        // Create the map type
+        auto mapType = ora::MapType::get(context, keyTypeRef, valueTypeRef);
+        return wrap(mapType);
     }
     catch (...)
     {
@@ -1771,6 +1905,9 @@ MlirStringRef oraPrintOperation(MlirContext ctx, MlirOperation op)
         // to generic form if verification fails. This is necessary because
         // verifyOpAndAdjustFlags() will force generic printing if verification fails.
         flags.assumeVerified();
+        // Print locations inline instead of using location references
+        // This makes locations appear as loc("file":line:col) instead of loc(#locN)
+        flags.useLocalScope();
         llvm::errs() << "[DEBUG] OpPrintingFlags.printGenericOpFormFlag = " << flags.shouldPrintGenericOpForm() << "\n";
         llvm::errs() << "[DEBUG] OpPrintingFlags.useLocalScope = " << flags.shouldUseLocalScope() << "\n";
         llvm::errs() << "[DEBUG] OpPrintingFlags.printDebugInfo = " << flags.shouldPrintDebugInfo() << "\n";
@@ -1835,16 +1972,81 @@ MlirStringRef oraPrintOperation(MlirContext ctx, MlirOperation op)
             return {nullptr, 0};
         }
 
+        // Post-process the output to add line breaks for readability
+        // Add blank lines after certain operations to improve readability
+        std::string formattedContent;
+        formattedContent.reserve(mlirContent.size() * 1.1); // Reserve slightly more space
+
+        std::istringstream inputStream(mlirContent);
+        std::string line;
+        std::string prevLine;
+        bool prevWasEmpty = false;
+
+        while (std::getline(inputStream, line))
+        {
+            // Skip empty lines in input (we'll add our own)
+            if (line.empty() || (line.find_first_not_of(" \t") == std::string::npos))
+            {
+                prevWasEmpty = true;
+                continue;
+            }
+
+            // Add blank line after certain patterns for readability
+            bool shouldAddBlankLine = false;
+
+            // Add blank line before comments (if previous line wasn't empty and wasn't already a comment)
+            if (line.find("//") != std::string::npos && line.find("//") < line.length() &&
+                !prevLine.empty() && !prevWasEmpty && prevLine.find("//") == std::string::npos)
+            {
+                shouldAddBlankLine = true;
+            }
+            // Add blank line after return statements (before closing brace or next operation)
+            else if (prevLine.find("return") != std::string::npos &&
+                     prevLine.find("return") < prevLine.length() &&
+                     !line.empty() && line.find("}") == std::string::npos)
+            {
+                shouldAddBlankLine = true;
+            }
+            // Add blank line after scf.if/else blocks close (before next operation)
+            else if (prevLine.find("}") != std::string::npos &&
+                     (prevLine.find("} {gas_cost") != std::string::npos ||
+                      (prevLine.find("}") == prevLine.find_last_of("}") &&
+                       prevLine.find("} else {") == std::string::npos)) &&
+                     !line.empty() && line.find("}") == std::string::npos &&
+                     line.find("func.func") == std::string::npos)
+            {
+                shouldAddBlankLine = true;
+            }
+            // Add blank line after comments (before next operation)
+            else if (prevLine.find("//") != std::string::npos &&
+                     prevLine.find("//") < prevLine.length() &&
+                     !line.empty() && line.find("//") == std::string::npos)
+            {
+                shouldAddBlankLine = true;
+            }
+
+            if (shouldAddBlankLine && !prevLine.empty() && !prevWasEmpty)
+            {
+                formattedContent += "\n";
+            }
+
+            formattedContent += line;
+            formattedContent += "\n";
+
+            prevWasEmpty = false;
+            prevLine = line;
+        }
+
         // Allocate memory for the result (caller must free)
-        char *result = (char *)malloc(mlirContent.size() + 1);
+        char *result = (char *)malloc(formattedContent.size() + 1);
         if (!result)
         {
             return {nullptr, 0};
         }
-        memcpy(result, mlirContent.c_str(), mlirContent.size());
-        result[mlirContent.size()] = '\0';
+        memcpy(result, formattedContent.c_str(), formattedContent.size());
+        result[formattedContent.size()] = '\0';
 
-        return {result, mlirContent.size()};
+        return {result, formattedContent.size()};
     }
     catch (...)
     {
