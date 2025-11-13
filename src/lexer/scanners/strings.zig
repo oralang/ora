@@ -7,15 +7,15 @@
 // ============================================================================
 
 const std = @import("std");
-const LexerError = @import("../lexer.zig").LexerError;
-const SourceRange = @import("../lexer.zig").SourceRange;
-const TokenValue = @import("../lexer.zig").TokenValue;
-const Token = @import("../lexer.zig").Token;
-const TokenType = @import("../lexer.zig").TokenType;
+const LexerError = @import("../../lexer.zig").LexerError;
+const SourceRange = @import("../../lexer.zig").SourceRange;
+const TokenValue = @import("../../lexer.zig").TokenValue;
+const Token = @import("../../lexer.zig").Token;
+const TokenType = @import("../../lexer.zig").TokenType;
 const StringProcessor = @import("../trivia.zig").StringProcessor;
 
 // Forward declaration - Lexer is defined in lexer.zig
-const Lexer = @import("../lexer.zig").Lexer;
+const Lexer = @import("../../lexer.zig").Lexer;
 
 /// Scan a string literal
 pub fn scanString(lexer: *Lexer) LexerError!void {

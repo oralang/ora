@@ -7,17 +7,17 @@
 // ============================================================================
 
 const std = @import("std");
-const LexerError = @import("../lexer.zig").LexerError;
-const SourceRange = @import("../lexer.zig").SourceRange;
-const TokenValue = @import("../lexer.zig").TokenValue;
-const Token = @import("../lexer.zig").Token;
-const isHexDigit = @import("../lexer.zig").isHexDigit;
-const isDigit = @import("../lexer.zig").isDigit;
-const isAlpha = @import("../lexer.zig").isAlpha;
-const isBinaryDigit = @import("../lexer.zig").isBinaryDigit;
+const LexerError = @import("../../lexer.zig").LexerError;
+const SourceRange = @import("../../lexer.zig").SourceRange;
+const TokenValue = @import("../../lexer.zig").TokenValue;
+const Token = @import("../../lexer.zig").Token;
+const isHexDigit = @import("../../lexer.zig").isHexDigit;
+const isDigit = @import("../../lexer.zig").isDigit;
+const isAlpha = @import("../../lexer.zig").isAlpha;
+const isBinaryDigit = @import("../../lexer.zig").isBinaryDigit;
 
 // Forward declaration - Lexer is defined in lexer.zig
-const Lexer = @import("../lexer.zig").Lexer;
+const Lexer = @import("../../lexer.zig").Lexer;
 const ErrorRecovery = @import("../error_recovery.zig").ErrorRecovery;
 
 /// Scan a hex literal (0x... or 0X...)

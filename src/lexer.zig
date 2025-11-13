@@ -929,7 +929,7 @@ pub const Lexer = struct {
     }
 
     /// Record an error during scanning
-    fn recordError(self: *Lexer, error_type: LexerError, message: []const u8) void {
+    pub fn recordError(self: *Lexer, error_type: LexerError, message: []const u8) void {
         if (self.error_recovery) |*recovery| {
             const range = SourceRange{
                 .start_line = self.line,
@@ -1331,11 +1331,11 @@ pub const Lexer = struct {
         }
     }
 
-    fn isAtEnd(self: *Lexer) bool {
+    pub fn isAtEnd(self: *Lexer) bool {
         return self.current >= self.source.len;
     }
 
-    fn advance(self: *Lexer) u8 {
+    pub fn advance(self: *Lexer) u8 {
         const c = self.source[self.current];
         self.current += 1;
         self.column += 1;
@@ -1351,17 +1351,17 @@ pub const Lexer = struct {
         return true;
     }
 
-    fn peek(self: *Lexer) u8 {
+    pub fn peek(self: *Lexer) u8 {
         if (self.isAtEnd()) return 0;
         return self.source[self.current];
     }
 
-    fn peekNext(self: *Lexer) u8 {
+    pub fn peekNext(self: *Lexer) u8 {
         if (self.current + 1 >= self.source.len) return 0;
         return self.source[self.current + 1];
     }
 
-    fn addToken(self: *Lexer, token_type: TokenType) LexerError!void {
+    pub fn addToken(self: *Lexer, token_type: TokenType) LexerError!void {
         const text = self.source[self.start..self.current];
         const range = SourceRange{
             .start_line = self.line,
@@ -1396,7 +1396,7 @@ pub const Lexer = struct {
         });
     }
 
-    fn addTokenWithInterning(self: *Lexer, token_type: TokenType) LexerError!void {
+    pub fn addTokenWithInterning(self: *Lexer, token_type: TokenType) LexerError!void {
         const text = self.source[self.start..self.current];
         const range = SourceRange{
             .start_line = self.line,

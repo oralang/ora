@@ -7,19 +7,19 @@
 // ============================================================================
 
 const std = @import("std");
-const LexerError = @import("../lexer.zig").LexerError;
-const SourceRange = @import("../lexer.zig").SourceRange;
-const Token = @import("../lexer.zig").Token;
-const TokenType = @import("../lexer.zig").TokenType;
-const isAlpha = @import("../lexer.zig").isAlpha;
-const isAlphaNumeric = @import("../lexer.zig").isAlphaNumeric;
+const LexerError = @import("../../lexer.zig").LexerError;
+const SourceRange = @import("../../lexer.zig").SourceRange;
+const Token = @import("../../lexer.zig").Token;
+const TokenType = @import("../../lexer.zig").TokenType;
+const isAlpha = @import("../../lexer.zig").isAlpha;
+const isAlphaNumeric = @import("../../lexer.zig").isAlphaNumeric;
 
 // Forward declaration - Lexer is defined in lexer.zig
-const Lexer = @import("../lexer.zig").Lexer;
+const Lexer = @import("../../lexer.zig").Lexer;
 
 // Import keywords map from lexer.zig
 // Note: We'll need to access it through the lexer module
-const keywords = @import("../lexer.zig").keywords;
+const keywords = @import("../../lexer.zig").keywords;
 
 /// Scan an identifier or keyword
 pub fn scanIdentifier(lexer: *Lexer) LexerError!void {

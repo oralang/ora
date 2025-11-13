@@ -221,7 +221,7 @@ pub const Parser = struct {
     }
 
     /// Sync parser state with sub-parsers
-    fn syncSubParsers(self: *Parser) void {
+    pub fn syncSubParsers(self: *Parser) void {
         self.expr_parser.base.current = self.base.current;
         self.stmt_parser.base.current = self.base.current;
         self.type_parser.base.current = self.base.current;

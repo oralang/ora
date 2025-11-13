@@ -28,6 +28,12 @@ const ParserCommon = common.ParserCommon;
 const ExpressionParser = @import("expression_parser.zig").ExpressionParser;
 const DeclarationParser = @import("declaration_parser.zig").DeclarationParser;
 
+// Import control flow parsers
+const control_flow = @import("statements/control_flow.zig");
+
+// Import spec statement parsers
+const spec = @import("statements/spec.zig");
+
 /// Specialized parser for statements
 pub const StatementParser = struct {
     base: BaseParser,
@@ -43,13 +49,13 @@ pub const StatementParser = struct {
     }
 
     /// Sync sub-parser states with current position
-    fn syncSubParsers(self: *StatementParser) void {
+    pub fn syncSubParsers(self: *StatementParser) void {
         self.expr_parser.base.current = self.base.current;
         self.decl_parser.base.current = self.base.current;
     }
 
     /// Update current position from sub-parser
-    fn updateFromSubParser(self: *StatementParser, new_current: usize) void {
+    pub fn updateFromSubParser(self: *StatementParser, new_current: usize) void {
         self.base.current = new_current;
         self.syncSubParsers();
     }
@@ -123,27 +129,27 @@ pub const StatementParser = struct {
 
         // Assert statements (formal verification)
         if (self.base.match(.Assert)) {
-            return try self.parseAssertStatement();
+            return try spec.parseAssertStatement(self);
         }
 
         // Assume statements (formal verification)
         if (self.base.match(.Assume)) {
-            return try self.parseAssumeStatement();
+            return try spec.parseAssumeStatement(self);
         }
 
         // Havoc statements (formal verification)
         if (self.base.match(.Havoc)) {
-            return try self.parseHavocStatement();
+            return try spec.parseHavocStatement(self);
         }
 
         // Requires statements
         if (self.base.match(.Requires)) {
-            return try self.parseRequiresStatement();
+            return try spec.parseRequiresStatement(self);
         }
 
         // Ensures statements
         if (self.base.match(.Ensures)) {
-            return try self.parseEnsuresStatement();
+            return try spec.parseEnsuresStatement(self);
         }
 
         // Error declarations
@@ -153,37 +159,37 @@ pub const StatementParser = struct {
 
         // Try-catch blocks
         if (self.base.match(.Try)) {
-            return try self.parseTryStatement();
+            return try control_flow.parseTryStatement(self);
         }
 
         // If statements
         if (self.base.match(.If)) {
-            return try self.parseIfStatement();
+            return try control_flow.parseIfStatement(self);
         }
 
         // While statements
         if (self.base.match(.While)) {
-            return try self.parseWhileStatement();
+            return try control_flow.parseWhileStatement(self);
         }
 
         // For statements
         if (self.base.match(.For)) {
-            return try self.parseForStatement();
+            return try control_flow.parseForStatement(self);
         }
 
         // Switch statements
         if (self.base.match(.Switch)) {
-            return try self.parseSwitchStatement();
+            return try control_flow.parseSwitchStatement(self);
         }
 
         // Break statements
         if (self.base.match(.Break)) {
-            return try self.parseBreakStatement();
+            return try control_flow.parseBreakStatement(self);
         }
 
         // Continue statements
         if (self.base.match(.Continue)) {
-            return try self.parseContinueStatement();
+            return try control_flow.parseContinueStatement(self);
         }
 
         // Compound assignment statements (a += b, etc)
@@ -246,7 +252,7 @@ pub const StatementParser = struct {
         return result;
     }
 
-    /// Parse return statement - MIGRATED FROM ORIGINAL
+    /// Parse return statement
     fn parseReturnStatement(self: *StatementParser) common.ParserError!ast.Statements.StmtNode {
         var value: ?ast.Expressions.ExprNode = null;
         if (!self.base.check(.Semicolon) and !self.base.check(.RightBrace)) {
@@ -291,115 +297,7 @@ pub const StatementParser = struct {
         } };
     }
 
-    /// Parse assert statement for formal verification
-    /// Syntax: assert(condition, "optional message");
-    fn parseAssertStatement(self: *StatementParser) common.ParserError!ast.Statements.StmtNode {
-        const assert_token = self.base.previous();
-        _ = try self.base.consume(.LeftParen, "Expected '(' after 'assert'");
-
-        // Parse the condition expression
-        self.syncSubParsers();
-        const condition = try self.expr_parser.parseExpression();
-        self.updateFromSubParser(self.expr_parser.base.current);
-
-        // Parse optional message
-        var message: ?[]const u8 = null;
-        if (self.base.match(.Comma)) {
-            const msg_token = try self.base.consume(.String, "Expected string literal for assert message");
-            message = try self.base.arena.createString(msg_token.lexeme);
-        }
-
-        _ = try self.base.consume(.RightParen, "Expected ')' after assert condition");
-        _ = try self.base.consume(.Semicolon, "Expected ';' after assert statement");
-
-        return ast.Statements.StmtNode{
-            .Assert = ast.Statements.AssertNode{
-                .condition = condition,
-                .message = message,
-                .is_ghost = false, // Runtime assertion by default (ghost context handled elsewhere)
-                .span = ParserCommon.makeSpan(assert_token),
-            },
-        };
-    }
-
-    /// Parse requires statement - MIGRATED FROM ORIGINAL
-    fn parseRequiresStatement(self: *StatementParser) common.ParserError!ast.Statements.StmtNode {
-        const requires_token = self.base.previous();
-        // Only requires(condition) is allowed
-        _ = try self.base.consume(.LeftParen, "Expected '(' after 'requires'");
-        // Use expression parser for requires condition
-        self.syncSubParsers();
-        const condition = try self.expr_parser.parseExpression();
-        self.updateFromSubParser(self.expr_parser.base.current);
-        _ = try self.base.consume(.RightParen, "Expected ')' after requires condition");
-        // Strict: disallow trailing semicolon
-        if (self.base.match(.Semicolon)) {
-            try self.base.errorAtCurrent("Unexpected ';' after requires(...) (no semicolon allowed)");
-            return error.UnexpectedToken;
-        }
-
-        return ast.Statements.StmtNode{ .Requires = ast.Statements.RequiresNode{
-            .condition = condition,
-            .span = ParserCommon.makeSpan(requires_token),
-        } };
-    }
-
-    /// Parse assume statement (formal verification)
-    fn parseAssumeStatement(self: *StatementParser) common.ParserError!ast.Statements.StmtNode {
-        const assume_token = self.base.previous();
-        _ = try self.base.consume(.LeftParen, "Expected '(' after 'assume'");
-
-        // Parse the condition expression
-        self.syncSubParsers();
-        const condition = try self.expr_parser.parseExpression();
-        self.updateFromSubParser(self.expr_parser.base.current);
-
-        _ = try self.base.consume(.RightParen, "Expected ')' after assume condition");
-        _ = try self.base.consume(.Semicolon, "Expected ';' after assume statement");
-
-        return ast.Statements.StmtNode{ .Assume = ast.Statements.AssumeNode{
-            .condition = condition,
-            .span = ParserCommon.makeSpan(assume_token),
-        } };
-    }
-
-    /// Parse havoc statement (formal verification)
-    fn parseHavocStatement(self: *StatementParser) common.ParserError!ast.Statements.StmtNode {
-        const havoc_token = self.base.previous();
-        const var_token = try self.base.consume(.Identifier, "Expected variable name after 'havoc'");
-        _ = try self.base.consume(.Semicolon, "Expected ';' after havoc statement");
-
-        const var_name = try self.base.arena.createString(var_token.lexeme);
-
-        return ast.Statements.StmtNode{ .Havoc = ast.Statements.HavocNode{
-            .variable_name = var_name,
-            .span = ParserCommon.makeSpan(havoc_token),
-        } };
-    }
-
-    /// Parse ensures statement - MIGRATED FROM ORIGINAL
-    fn parseEnsuresStatement(self: *StatementParser) common.ParserError!ast.Statements.StmtNode {
-        const ensures_token = self.base.previous();
-        // Only ensures(condition) is allowed
-        _ = try self.base.consume(.LeftParen, "Expected '(' after 'ensures'");
-        // Use expression parser for ensures condition
-        self.syncSubParsers();
-        const condition = try self.expr_parser.parseExpression();
-        self.updateFromSubParser(self.expr_parser.base.current);
-        _ = try self.base.consume(.RightParen, "Expected ')' after ensures condition");
-        // Strict: disallow trailing semicolon
-        if (self.base.match(.Semicolon)) {
-            try self.base.errorAtCurrent("Unexpected ';' after ensures(...) (no semicolon allowed)");
-            return error.UnexpectedToken;
-        }
-
-        return ast.Statements.StmtNode{ .Ensures = ast.Statements.EnsuresNode{
-            .condition = condition,
-            .span = ParserCommon.makeSpan(ensures_token),
-        } };
-    }
-
-    /// Parse error declaration statement - MIGRATED FROM ORIGINAL
+    /// Parse error declaration statement
     fn parseErrorDeclStatement(self: *StatementParser) common.ParserError!ast.Statements.StmtNode {
         const error_token = self.base.previous();
         const name_token = try self.base.consume(.Identifier, "Expected error name");
@@ -601,7 +499,7 @@ pub const StatementParser = struct {
                 }
                 // Case 2: label: switch (...) { ... }
                 if (self.base.match(.Switch)) {
-                    const switch_stmt = try self.parseSwitchStatement();
+                    const switch_stmt = try control_flow.parseSwitchStatement(self);
                     var stmts = std.ArrayList(ast.Statements.StmtNode){};
                     defer stmts.deinit(self.base.arena.allocator());
                     try stmts.append(self.base.arena.allocator(), switch_stmt);
@@ -636,398 +534,6 @@ pub const StatementParser = struct {
         _ = self.base.match(.Semicolon);
         return ast.Statements.StmtNode{ .Expr = expr };
     }
-
-    /// Parse if statement
-    fn parseIfStatement(self: *StatementParser) common.ParserError!ast.Statements.StmtNode {
-        _ = try self.base.consume(.LeftParen, "Expected '(' after 'if'");
-
-        // Use expression parser for condition
-        self.syncSubParsers();
-        const condition = try self.expr_parser.parseExpression();
-        self.updateFromSubParser(self.expr_parser.base.current);
-
-        _ = try self.base.consume(.RightParen, "Expected ')' after if condition");
-
-        const then_branch = try self.parseBlock();
-
-        var else_branch: ?ast.Statements.BlockNode = null;
-        if (self.base.match(.Else)) {
-            else_branch = try self.parseBlock();
-        }
-
-        return ast.Statements.StmtNode{ .If = ast.Statements.IfNode{
-            .condition = condition,
-            .then_branch = then_branch,
-            .else_branch = else_branch,
-            .span = self.base.spanFromToken(self.base.previous()),
-        } };
-    }
-
-    /// Parse while statement - MIGRATED FROM ORIGINAL
-    fn parseWhileStatement(self: *StatementParser) common.ParserError!ast.Statements.StmtNode {
-        _ = try self.base.consume(.LeftParen, "Expected '(' after 'while'");
-
-        // Use expression parser for condition
-        self.syncSubParsers();
-        const condition = try self.expr_parser.parseExpression();
-        self.updateFromSubParser(self.expr_parser.base.current);
-
-        _ = try self.base.consume(.RightParen, "Expected ')' after while condition");
-
-        // Parse optional loop invariants: invariant(expr) invariant(expr) ...
-        var invariants = std.ArrayList(ast.Expressions.ExprNode){};
-        defer invariants.deinit(self.base.arena.allocator());
-
-        while (self.base.match(.Invariant)) {
-            _ = try self.base.consume(.LeftParen, "Expected '(' after 'invariant'");
-            self.syncSubParsers();
-            const inv_expr = try self.expr_parser.parseExpression();
-            self.updateFromSubParser(self.expr_parser.base.current);
-            _ = try self.base.consume(.RightParen, "Expected ')' after invariant expression");
-            try invariants.append(self.base.arena.allocator(), inv_expr);
-        }
-
-        // Parse optional decreases clause
-        var decreases_expr: ?*ast.Expressions.ExprNode = null;
-        if (self.base.match(.Decreases)) {
-            _ = try self.base.consume(.LeftParen, "Expected '(' after 'decreases'");
-            self.syncSubParsers();
-            const dec_expr = try self.expr_parser.parseExpression();
-            self.updateFromSubParser(self.expr_parser.base.current);
-            _ = try self.base.consume(.RightParen, "Expected ')' after decreases expression");
-            const dec_ptr = try self.base.arena.createNode(ast.Expressions.ExprNode);
-            dec_ptr.* = dec_expr;
-            decreases_expr = dec_ptr;
-        }
-
-        // Parse optional increases clause
-        var increases_expr: ?*ast.Expressions.ExprNode = null;
-        if (self.base.match(.Increases)) {
-            _ = try self.base.consume(.LeftParen, "Expected '(' after 'increases'");
-            self.syncSubParsers();
-            const inc_expr = try self.expr_parser.parseExpression();
-            self.updateFromSubParser(self.expr_parser.base.current);
-            _ = try self.base.consume(.RightParen, "Expected ')' after increases expression");
-            const inc_ptr = try self.base.arena.createNode(ast.Expressions.ExprNode);
-            inc_ptr.* = inc_expr;
-            increases_expr = inc_ptr;
-        }
-
-        const body = try self.parseBlock();
-
-        return ast.Statements.StmtNode{ .While = ast.Statements.WhileNode{
-            .condition = condition,
-            .body = body,
-            .invariants = try invariants.toOwnedSlice(self.base.arena.allocator()),
-            .decreases = decreases_expr,
-            .increases = increases_expr,
-            .span = self.base.spanFromToken(self.base.previous()),
-        } };
-    }
-
-    /// Parse for statement (Zig-style: for (expr) |var1, var2| stmt) - MIGRATED FROM ORIGINAL
-    fn parseForStatement(self: *StatementParser) common.ParserError!ast.Statements.StmtNode {
-        const for_token = self.base.previous();
-
-        _ = try self.base.consume(.LeftParen, "Expected '(' after 'for'");
-
-        // Use expression parser for iterable
-        self.syncSubParsers();
-        const iterable = try self.expr_parser.parseExpression();
-        self.updateFromSubParser(self.expr_parser.base.current);
-
-        _ = try self.base.consume(.RightParen, "Expected ')' after for expression");
-
-        _ = try self.base.consume(.Pipe, "Expected '|' after for expression");
-        const var1_token = try self.base.consume(.Identifier, "Expected loop variable");
-        const var1 = try self.base.arena.createString(var1_token.lexeme);
-
-        var var2: ?[]const u8 = null;
-        if (self.base.match(.Comma)) {
-            const var2_token = try self.base.consume(.Identifier, "Expected second loop variable");
-            var2 = try self.base.arena.createString(var2_token.lexeme);
-        }
-
-        _ = try self.base.consume(.Pipe, "Expected '|' after loop variables");
-
-        // Parse optional loop invariants: invariant(expr) invariant(expr) ...
-        var invariants = std.ArrayList(ast.Expressions.ExprNode){};
-        defer invariants.deinit(self.base.arena.allocator());
-
-        while (self.base.match(.Invariant)) {
-            _ = try self.base.consume(.LeftParen, "Expected '(' after 'invariant'");
-            self.syncSubParsers();
-            const inv_expr = try self.expr_parser.parseExpression();
-            self.updateFromSubParser(self.expr_parser.base.current);
-            _ = try self.base.consume(.RightParen, "Expected ')' after invariant expression");
-            try invariants.append(self.base.arena.allocator(), inv_expr);
-        }
-
-        // Parse optional decreases clause
-        var decreases_expr: ?*ast.Expressions.ExprNode = null;
-        if (self.base.match(.Decreases)) {
-            _ = try self.base.consume(.LeftParen, "Expected '(' after 'decreases'");
-            self.syncSubParsers();
-            const dec_expr = try self.expr_parser.parseExpression();
-            self.updateFromSubParser(self.expr_parser.base.current);
-            _ = try self.base.consume(.RightParen, "Expected ')' after decreases expression");
-            const dec_ptr = try self.base.arena.createNode(ast.Expressions.ExprNode);
-            dec_ptr.* = dec_expr;
-            decreases_expr = dec_ptr;
-        }
-
-        // Parse optional increases clause
-        var increases_expr: ?*ast.Expressions.ExprNode = null;
-        if (self.base.match(.Increases)) {
-            _ = try self.base.consume(.LeftParen, "Expected '(' after 'increases'");
-            self.syncSubParsers();
-            const inc_expr = try self.expr_parser.parseExpression();
-            self.updateFromSubParser(self.expr_parser.base.current);
-            _ = try self.base.consume(.RightParen, "Expected ')' after increases expression");
-            const inc_ptr = try self.base.arena.createNode(ast.Expressions.ExprNode);
-            inc_ptr.* = inc_expr;
-            increases_expr = inc_ptr;
-        }
-
-        const body = try self.parseBlock();
-
-        const pattern = if (var2) |v2|
-            ast.Statements.LoopPattern{ .IndexPair = .{ .item = var1, .index = v2, .span = self.base.spanFromToken(var1_token) } }
-        else
-            ast.Statements.LoopPattern{ .Single = .{ .name = var1, .span = self.base.spanFromToken(var1_token) } };
-
-        return ast.Statements.StmtNode{
-            .ForLoop = ast.Statements.ForLoopNode{
-                .iterable = iterable,
-                .pattern = pattern,
-                .body = body,
-                .invariants = try invariants.toOwnedSlice(self.base.arena.allocator()),
-                .span = self.base.spanFromToken(for_token),
-            },
-        };
-    }
-
-    /// Parse switch statement - MIGRATED FROM ORIGINAL
-    fn parseSwitchStatement(self: *StatementParser) common.ParserError!ast.Statements.StmtNode {
-        const switch_token = self.base.previous();
-
-        // Parse required switch condition: switch (expr)
-        _ = try self.base.consume(.LeftParen, "Expected '(' after 'switch'");
-
-        // Use expression parser for condition
-        self.syncSubParsers();
-        const condition = try self.expr_parser.parseExpression();
-        self.updateFromSubParser(self.expr_parser.base.current);
-
-        _ = try self.base.consume(.RightParen, "Expected ')' after switch condition");
-
-        _ = try self.base.consume(.LeftBrace, "Expected '{' after switch condition");
-
-        var cases = std.ArrayList(ast.Switch.Case){};
-        defer cases.deinit(self.base.arena.allocator());
-
-        var default_case: ?ast.Statements.BlockNode = null;
-
-        // Parse switch arms
-        while (!self.base.check(.RightBrace) and !self.base.isAtEnd()) {
-            if (self.base.match(.Else)) {
-                // Parse else clause
-                _ = try self.base.consume(.Arrow, "Expected '=>' after 'else'");
-
-                // Handle labeled block: Identifier ':' '{' ... '}'
-                if (self.base.check(.Identifier)) {
-                    const cur = self.base.current;
-                    if (cur + 2 < self.base.tokens.len and
-                        self.base.tokens[cur + 1].type == .Colon and
-                        self.base.tokens[cur + 2].type == .LeftBrace)
-                    {
-                        _ = self.base.advance(); // consume Identifier label
-                        _ = self.base.advance(); // ':'
-                        const block = try self.parseBlock();
-                        default_case = block;
-                        break;
-                    }
-                }
-
-                // Handle plain block body
-                if (self.base.check(.LeftBrace)) {
-                    const block = try self.parseBlock();
-                    default_case = block;
-                    break;
-                }
-
-                // Fallback: parse as expression arm and wrap into a block
-                const else_body = try common_parsers.parseSwitchBody(&self.base, &self.expr_parser, .StatementArm);
-                switch (else_body) {
-                    .Block => |block| {
-                        default_case = block;
-                    },
-                    .LabeledBlock => |labeled| {
-                        default_case = labeled.block;
-                    },
-                    .Expression => |expr_ptr| {
-                        var stmts = try self.base.arena.createSlice(ast.Statements.StmtNode, 1);
-                        stmts[0] = ast.Statements.StmtNode{ .Expr = expr_ptr.* };
-                        default_case = ast.Statements.BlockNode{
-                            .statements = stmts,
-                            .span = ParserCommon.makeSpan(self.base.previous()),
-                        };
-                    },
-                }
-                break;
-            }
-
-            // Parse switch pattern using common parser
-            const pattern = try common_parsers.parseSwitchPattern(&self.base, &self.expr_parser);
-            _ = try self.base.consume(.Arrow, "Expected '=>' after switch pattern");
-
-            // Parse switch body: handle labeled blocks, plain blocks, or expression arms
-            const body = blk: {
-                // Labeled block detection: Identifier ':' '{'
-                if (self.base.check(.Identifier)) {
-                    const cur = self.base.current;
-                    if (cur + 2 < self.base.tokens.len and
-                        self.base.tokens[cur + 1].type == .Colon and
-                        self.base.tokens[cur + 2].type == .LeftBrace)
-                    {
-                        const label_tok = self.base.advance(); // Identifier
-                        _ = self.base.advance(); // ':'
-                        const block = try self.parseBlock();
-                        break :blk ast.Switch.Body{ .LabeledBlock = .{
-                            .label = label_tok.lexeme,
-                            .block = block,
-                            .span = ParserCommon.makeSpan(label_tok),
-                        } };
-                    }
-                }
-                if (self.base.check(.LeftBrace)) {
-                    const block = try self.parseBlock();
-                    break :blk ast.Switch.Body{ .Block = block };
-                }
-                // Otherwise parse as an expression arm requiring ';'
-                const b = try common_parsers.parseSwitchBody(&self.base, &self.expr_parser, .StatementArm);
-                break :blk b;
-            };
-
-            const case = ast.Switch.Case{
-                .pattern = pattern,
-                .body = body,
-                .span = ParserCommon.makeSpan(self.base.previous()),
-            };
-
-            try cases.append(self.base.arena.allocator(), case);
-
-            // Optional comma between cases
-            _ = self.base.match(.Comma);
-        }
-
-        _ = try self.base.consume(.RightBrace, "Expected '}' after switch cases");
-
-        return ast.Statements.StmtNode{ .Switch = ast.Statements.SwitchNode{
-            .condition = condition,
-            .cases = try cases.toOwnedSlice(self.base.arena.allocator()),
-            .default_case = default_case,
-            .span = self.base.spanFromToken(switch_token),
-        } };
-    }
-
-    /// Parse break statement - MIGRATED FROM ORIGINAL
-    fn parseBreakStatement(self: *StatementParser) common.ParserError!ast.Statements.StmtNode {
-        const break_token = self.base.previous();
-        var label: ?[]const u8 = null;
-        var value: ?*ast.Expressions.ExprNode = null;
-
-        // Check for labeled break (break :label)
-        if (self.base.match(.Colon)) {
-            const label_token = try self.base.consume(.Identifier, "Expected label after ':' in break statement");
-            label = try self.base.arena.createString(label_token.lexeme);
-        }
-
-        // Check for break with value (break value or break :label value)
-        if (!self.base.check(.Semicolon) and !self.base.isAtEnd()) {
-            // Use expression parser for break value
-            self.syncSubParsers();
-            const expr = try self.expr_parser.parseExpression();
-            self.updateFromSubParser(self.expr_parser.base.current);
-            const expr_ptr = try self.base.arena.createNode(ast.Expressions.ExprNode);
-            expr_ptr.* = expr;
-            value = expr_ptr;
-        }
-
-        _ = self.base.match(.Semicolon);
-
-        return ast.Statements.StmtNode{ .Break = ast.Statements.BreakNode{
-            .label = label,
-            .value = value,
-            .span = ParserCommon.makeSpan(break_token),
-        } };
-    }
-
-    /// Parse continue statement - MIGRATED FROM ORIGINAL
-    fn parseContinueStatement(self: *StatementParser) common.ParserError!ast.Statements.StmtNode {
-        const continue_token = self.base.previous();
-        // Syntax: continue [:label] [value]? ;
-        // If labeled, optional replacement operand expression (value) is allowed.
-
-        // Optional label
-        var label: ?[]const u8 = null;
-        if (self.base.match(.Colon)) {
-            const label_token = try self.base.consume(.Identifier, "Expected label name after ':'");
-            label = try self.base.arena.createString(label_token.lexeme);
-        }
-
-        // Optional value expression before semicolon
-        var value: ?*ast.Expressions.ExprNode = null;
-        if (!self.base.check(.Semicolon) and !self.base.check(.RightBrace)) {
-            self.syncSubParsers();
-            const expr = try self.expr_parser.parseExpression();
-            self.updateFromSubParser(self.expr_parser.base.current);
-            const expr_ptr = try self.base.arena.createNode(ast.Expressions.ExprNode);
-            expr_ptr.* = expr;
-            value = expr_ptr;
-        }
-
-        _ = self.base.match(.Semicolon);
-        return ast.Statements.StmtNode{ .Continue = ast.Statements.ContinueNode{
-            .label = label,
-            .value = value,
-            .span = ParserCommon.makeSpan(continue_token),
-        } };
-    }
-
-    /// Parse try-catch statement
-    fn parseTryStatement(self: *StatementParser) common.ParserError!ast.Statements.StmtNode {
-        const try_token = self.base.previous();
-        const try_block = try self.parseBlock();
-
-        var catch_block: ?ast.Statements.CatchBlock = null;
-        if (self.base.match(.Catch)) {
-            var error_variable: ?[]const u8 = null;
-
-            // Optional catch variable: catch(e) { ... }
-            if (self.base.match(.LeftParen)) {
-                const var_token = try self.base.consumeIdentifierOrKeyword("Expected variable name in catch");
-                error_variable = try self.base.arena.createString(var_token.lexeme);
-                _ = try self.base.consume(.RightParen, "Expected ')' after catch variable");
-            }
-
-            const catch_body = try self.parseBlock();
-            catch_block = ast.Statements.CatchBlock{
-                .error_variable = error_variable,
-                .block = catch_body,
-                .span = ParserCommon.makeSpan(self.base.previous()),
-            };
-        }
-
-        return ast.Statements.StmtNode{ .TryBlock = ast.Statements.TryBlockNode{
-            .try_block = try_block,
-            .catch_block = catch_block,
-            .span = ParserCommon.makeSpan(try_token),
-        } };
-    }
-
-    // Using common parseSwitchPattern from common_parsers.zig
-    // Using common parseSwitchBody from common_parsers.zig
 
     /// Try to parse a compound assignment statement (a += b, a -= b, etc.)
     fn tryParseCompoundAssignmentStatement(self: *StatementParser) common.ParserError!?ast.statements.CompoundAssignmentNode {
