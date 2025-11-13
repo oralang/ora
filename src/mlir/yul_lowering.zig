@@ -649,6 +649,36 @@ fn processOperation(op: c.MlirOperation, ctx: *YulLoweringContext) void {
             ctx.addError(.MlirOperationFailed, "Failed to process ora.try", "check try-catch structure") catch {};
             std.log.err("Error processing ora.try: {}", .{err});
         };
+    } else if (std.mem.eql(u8, op_name, "ora.if")) {
+        processOraIf(op, ctx) catch |err| {
+            ctx.addError(.MlirOperationFailed, "Failed to process ora.if", "check conditional structure") catch {};
+            std.log.err("Error processing ora.if: {}", .{err});
+        };
+    } else if (std.mem.eql(u8, op_name, "ora.while")) {
+        processOraWhile(op, ctx) catch |err| {
+            ctx.addError(.MlirOperationFailed, "Failed to process ora.while", "check while loop structure") catch {};
+            std.log.err("Error processing ora.while: {}", .{err});
+        };
+    } else if (std.mem.eql(u8, op_name, "ora.yield")) {
+        processOraYield(op, ctx) catch |err| {
+            ctx.addError(.MlirOperationFailed, "Failed to process ora.yield", "check yield operation") catch {};
+            std.log.err("Error processing ora.yield: {}", .{err});
+        };
+    } else if (std.mem.eql(u8, op_name, "ora.return")) {
+        processOraReturn(op, ctx) catch |err| {
+            ctx.addError(.MlirOperationFailed, "Failed to process ora.return", "check return operation") catch {};
+            std.log.err("Error processing ora.return: {}", .{err});
+        };
+    } else if (std.mem.eql(u8, op_name, "ora.log")) {
+        processOraLog(op, ctx) catch |err| {
+            ctx.addError(.MlirOperationFailed, "Failed to process ora.log", "check log operation") catch {};
+            std.log.err("Error processing ora.log: {}", .{err});
+        };
+    } else if (std.mem.eql(u8, op_name, "cf.assert")) {
+        processCfAssert(op, ctx) catch |err| {
+            ctx.addError(.MlirOperationFailed, "Failed to process cf.assert", "check assert operation") catch {};
+            std.log.err("Error processing cf.assert: {}", .{err});
+        };
     } else {
         // Handle unprocessed operations - ensure their results get names and emit placeholder code
         // This prevents "undefined identifier" errors
@@ -2028,6 +2058,309 @@ fn processScfYield(_: c.MlirOperation, _: *YulLoweringContext) !void {
     // No direct Yul generation needed here
 }
 
+//===----------------------------------------------------------------------===//
+// Ora Control Flow Operations
+//===----------------------------------------------------------------------===//
+
+fn processOraIf(op: c.MlirOperation, ctx: *YulLoweringContext) !void {
+    // ora.if is similar to scf.if but uses ora.yield instead of scf.yield
+    const condition = c.mlirOperationGetOperand(op, 0);
+    const condition_name = try ctx.getValueName(condition);
+
+    // Check if this ora.if has a result (for conditional expressions)
+    const has_result = c.mlirOperationGetNumResults(op) > 0;
+    var result_name: []const u8 = "";
+    var then_yielded = false;
+    var else_yielded = false;
+
+    if (has_result) {
+        const result = c.mlirOperationGetResult(op, 0);
+        result_name = try ctx.getValueName(result);
+        try ctx.writeIndented("let ");
+        try ctx.write(result_name);
+        try ctx.writeln("");
+    }
+
+    try ctx.writeIndented("if ");
+    try ctx.write(condition_name);
+    try ctx.writeln(" {");
+
+    ctx.indent_level += 1;
+
+    // Process then region (region 0)
+    const then_region = c.mlirOperationGetRegion(op, 0);
+    var then_block = c.mlirRegionGetFirstBlock(then_region);
+    while (!c.mlirBlockIsNull(then_block)) {
+        var current_op = c.mlirBlockGetFirstOperation(then_block);
+        while (!c.mlirOperationIsNull(current_op)) {
+            const op_name = getOperationName(current_op);
+            if (std.mem.eql(u8, op_name, "ora.yield") and has_result) {
+                // Handle yield with result value
+                if (c.mlirOperationGetNumOperands(current_op) > 0) {
+                    const yield_value = c.mlirOperationGetOperand(current_op, 0);
+                    const yield_value_name = try ctx.getValueName(yield_value);
+                    try ctx.writeIndented("");
+                    try ctx.write(result_name);
+                    try ctx.write(" := ");
+                    try ctx.writeln(yield_value_name);
+                    then_yielded = true;
+                }
+            } else if (std.mem.eql(u8, op_name, "ora.return")) {
+                // Early return in then branch
+                try processOraReturn(current_op, ctx);
+                then_yielded = true;
+            } else if (!std.mem.eql(u8, op_name, "ora.yield")) {
+                processOperation(current_op, ctx);
+            }
+            current_op = c.mlirOperationGetNextInBlock(current_op);
+        }
+        then_block = c.mlirBlockGetNextInRegion(then_block);
+    }
+
+    ctx.indent_level -= 1;
+    try ctx.writelnIndented("}");
+
+    // Process else region if it exists (region 1)
+    const num_regions = c.mlirOperationGetNumRegions(op);
+    if (num_regions > 1) {
+        const else_region = c.mlirOperationGetRegion(op, 1);
+        var else_block = c.mlirRegionGetFirstBlock(else_region);
+
+        // Check if else block has content
+        var has_else_content = false;
+        while (!c.mlirBlockIsNull(else_block)) {
+            var current_op = c.mlirBlockGetFirstOperation(else_block);
+            while (!c.mlirOperationIsNull(current_op)) {
+                const op_name = getOperationName(current_op);
+                if (!std.mem.eql(u8, op_name, "ora.yield")) {
+                    has_else_content = true;
+                    break;
+                }
+                current_op = c.mlirOperationGetNextInBlock(current_op);
+            }
+            if (has_else_content) break;
+            else_block = c.mlirBlockGetNextInRegion(else_block);
+        }
+
+        if (has_else_content) {
+            try ctx.writeIndented("if iszero(");
+            try ctx.write(condition_name);
+            try ctx.writeln(") {");
+            ctx.indent_level += 1;
+
+            else_block = c.mlirRegionGetFirstBlock(else_region);
+            while (!c.mlirBlockIsNull(else_block)) {
+                var current_op = c.mlirBlockGetFirstOperation(else_block);
+                while (!c.mlirOperationIsNull(current_op)) {
+                    const op_name = getOperationName(current_op);
+                    if (std.mem.eql(u8, op_name, "ora.yield") and has_result) {
+                        if (c.mlirOperationGetNumOperands(current_op) > 0) {
+                            const yield_value = c.mlirOperationGetOperand(current_op, 0);
+                            const yield_value_name = try ctx.getValueName(yield_value);
+                            try ctx.writeIndented("");
+                            try ctx.write(result_name);
+                            try ctx.write(" := ");
+                            try ctx.writeln(yield_value_name);
+                            else_yielded = true;
+                        }
+                    } else if (std.mem.eql(u8, op_name, "ora.return")) {
+                        try processOraReturn(current_op, ctx);
+                        else_yielded = true;
+                    } else if (!std.mem.eql(u8, op_name, "ora.yield")) {
+                        processOperation(current_op, ctx);
+                    }
+                    current_op = c.mlirOperationGetNextInBlock(current_op);
+                }
+                else_block = c.mlirBlockGetNextInRegion(else_block);
+            }
+
+            ctx.indent_level -= 1;
+            try ctx.writelnIndented("}");
+        }
+    }
+}
+
+fn processOraWhile(op: c.MlirOperation, ctx: *YulLoweringContext) !void {
+    // ora.while has:
+    // - operand 0: condition
+    // - region 0: body
+
+    const condition = c.mlirOperationGetOperand(op, 0);
+    const condition_name = try ctx.getValueName(condition);
+
+    try ctx.writeIndented("for {} ");
+    try ctx.write(condition_name);
+    try ctx.writeln(" {");
+
+    ctx.indent_level += 1;
+
+    // Process the loop body (region 0)
+    const body_region = c.mlirOperationGetRegion(op, 0);
+    var body_block = c.mlirRegionGetFirstBlock(body_region);
+    while (!c.mlirBlockIsNull(body_block)) {
+        var current_op = c.mlirBlockGetFirstOperation(body_block);
+        while (!c.mlirOperationIsNull(current_op)) {
+            const op_name = getOperationName(current_op);
+            if (!std.mem.eql(u8, op_name, "ora.yield")) {
+                processOperation(current_op, ctx);
+            }
+            current_op = c.mlirOperationGetNextInBlock(current_op);
+        }
+        body_block = c.mlirBlockGetNextInRegion(body_block);
+    }
+
+    ctx.indent_level -= 1;
+    try ctx.writelnIndented("}");
+}
+
+fn processOraYield(_: c.MlirOperation, _: *YulLoweringContext) !void {
+    // ora.yield is handled by the parent ora.if/ora.while operation
+    // No direct Yul generation needed here
+}
+
+fn processOraReturn(op: c.MlirOperation, ctx: *YulLoweringContext) !void {
+    // ora.return is similar to func.return
+    // Delegate to processFuncReturn for now (they have the same structure)
+    try processFuncReturn(op, ctx);
+}
+
+//===----------------------------------------------------------------------===//
+// Event Logging
+//===----------------------------------------------------------------------===//
+
+fn processOraLog(op: c.MlirOperation, ctx: *YulLoweringContext) !void {
+    // ora.log has:
+    // - attribute: "event" (event name)
+    // - variadic operands: parameters
+
+    const event_name = getStringAttribute(op, "event") orelse {
+        try ctx.addError(.MalformedAst, "ora.log operation missing event attribute", "add event attribute");
+        return;
+    };
+
+    const num_operands = c.mlirOperationGetNumOperands(op);
+
+    // For now, generate a simple log with all parameters
+    // TODO: Calculate event signature hash, handle indexed parameters, use correct log opcode
+
+    if (num_operands == 0) {
+        // log0 - no topics, no data
+        try ctx.writeIndented("log0(0, 0) // ");
+        try ctx.writeln(event_name);
+        return;
+    }
+
+    // Store parameters in memory starting at offset 0
+    var offset: u32 = 0;
+    for (0..@intCast(num_operands)) |i| {
+        const param = c.mlirOperationGetOperand(op, @intCast(i));
+        const param_name = try ctx.getValueName(param);
+        const offset_str = try std.fmt.allocPrint(ctx.allocator, "{d}", .{offset});
+        defer ctx.allocator.free(offset_str);
+        try ctx.writeIndented("mstore(");
+        try ctx.write(offset_str);
+        try ctx.write(", ");
+        try ctx.write(param_name);
+        try ctx.writeln(")");
+        offset += 32; // Each parameter is 32 bytes (256 bits)
+    }
+
+    // Calculate data size
+    const data_size = num_operands * 32;
+    const data_size_str = try std.fmt.allocPrint(ctx.allocator, "{d}", .{data_size});
+    defer ctx.allocator.free(data_size_str);
+
+    // Generate log based on number of topics
+    // For simplicity, use log1 with event name as topic, all params as data
+    // TODO: Properly calculate event signature hash and handle indexed params
+    if (num_operands == 1) {
+        const param0 = c.mlirOperationGetOperand(op, 0);
+        const param0_name = try ctx.getValueName(param0);
+        try ctx.writeIndented("log1(0, ");
+        try ctx.write(data_size_str);
+        try ctx.write(", 0, "); // topic0 placeholder (should be event signature hash)
+        try ctx.write(param0_name);
+        try ctx.write(") // ");
+        try ctx.writeln(event_name);
+    } else if (num_operands == 2) {
+        const param0 = c.mlirOperationGetOperand(op, 0);
+        const param1 = c.mlirOperationGetOperand(op, 1);
+        const param0_name = try ctx.getValueName(param0);
+        const param1_name = try ctx.getValueName(param1);
+        try ctx.writeIndented("log2(0, ");
+        try ctx.write(data_size_str);
+        try ctx.write(", 0, "); // topic0 placeholder
+        try ctx.write(param0_name);
+        try ctx.write(", ");
+        try ctx.write(param1_name);
+        try ctx.write(") // ");
+        try ctx.writeln(event_name);
+    } else if (num_operands == 3) {
+        const param0 = c.mlirOperationGetOperand(op, 0);
+        const param1 = c.mlirOperationGetOperand(op, 1);
+        const param2 = c.mlirOperationGetOperand(op, 2);
+        const param0_name = try ctx.getValueName(param0);
+        const param1_name = try ctx.getValueName(param1);
+        const param2_name = try ctx.getValueName(param2);
+        try ctx.writeIndented("log3(0, ");
+        try ctx.write(data_size_str);
+        try ctx.write(", 0, "); // topic0 placeholder
+        try ctx.write(param0_name);
+        try ctx.write(", ");
+        try ctx.write(param1_name);
+        try ctx.write(", ");
+        try ctx.write(param2_name);
+        try ctx.write(") // ");
+        try ctx.writeln(event_name);
+    } else {
+        // For 4+ parameters, use log4 with first 3 as topics, rest as data
+        const param0 = c.mlirOperationGetOperand(op, 0);
+        const param1 = c.mlirOperationGetOperand(op, 1);
+        const param2 = c.mlirOperationGetOperand(op, 2);
+        const param0_name = try ctx.getValueName(param0);
+        const param1_name = try ctx.getValueName(param1);
+        const param2_name = try ctx.getValueName(param2);
+        try ctx.writeIndented("log4(0, ");
+        try ctx.write(data_size_str);
+        try ctx.write(", 0, "); // topic0 placeholder
+        try ctx.write(param0_name);
+        try ctx.write(", ");
+        try ctx.write(param1_name);
+        try ctx.write(", ");
+        try ctx.write(param2_name);
+        try ctx.write(") // ");
+        try ctx.writeln(event_name);
+    }
+}
+
+//===----------------------------------------------------------------------===//
+// Standard MLIR Operations
+//===----------------------------------------------------------------------===//
+
+fn processCfAssert(op: c.MlirOperation, ctx: *YulLoweringContext) !void {
+    // cf.assert has:
+    // - operand 0: condition
+    // - optional attribute: message
+
+    const condition = c.mlirOperationGetOperand(op, 0);
+    const condition_name = try ctx.getValueName(condition);
+
+    // Generate: if iszero(condition) { revert(0, 0) }
+    try ctx.writeIndented("if iszero(");
+    try ctx.write(condition_name);
+    try ctx.writeln(") {");
+    ctx.indent_level += 1;
+    try ctx.writeIndented("revert(0, 0)");
+    const message = getStringAttribute(op, "message");
+    if (message) |msg| {
+        try ctx.write(" // ");
+        try ctx.write(msg);
+    }
+    try ctx.writeln("");
+    ctx.indent_level -= 1;
+    try ctx.writelnIndented("}");
+}
+
 fn processFuncCall(op: c.MlirOperation, ctx: *YulLoweringContext) !void {
     // func.call has:
     // - attribute "callee": function name (FlatSymbolRef)
@@ -2412,7 +2745,7 @@ fn processOraStructFieldStore(op: c.MlirOperation, ctx: *YulLoweringContext) !vo
 
 fn processOraMapGet(op: c.MlirOperation, ctx: *YulLoweringContext) !void {
     // ora.map_get has:
-    // - operand 0: map (storage slot)
+    // - operand 0: map (storage slot - should be constant, but may come from ora.sload)
     // - operand 1: key
     // - result: value
 
@@ -2420,9 +2753,34 @@ fn processOraMapGet(op: c.MlirOperation, ctx: *YulLoweringContext) !void {
     const key = c.mlirOperationGetOperand(op, 1);
     const result = c.mlirOperationGetResult(op, 0);
 
-    const map_name = try ctx.getValueName(map);
     const key_name = try ctx.getValueName(key);
     const result_name = try ctx.getValueName(result);
+
+    // Try to get base slot as constant
+    // Check if map operand is a constant value
+    var base_slot: ?u32 = null;
+    const map_value_ptr = @intFromPtr(map.ptr);
+
+    // Check if it's in constant_values (from arith.constant)
+    if (ctx.constant_values.get(map_value_ptr)) |const_val| {
+        // Try to parse as integer
+        if (std.fmt.parseInt(u32, const_val, 10)) |slot| {
+            base_slot = slot;
+        } else |_| {}
+    }
+
+    // Note: We can't trace back to the defining operation using MLIR C API
+    // If the map value is not a constant, we'll use the fallback approach
+    // which generates a runtime sload call. This is less efficient but works correctly.
+
+    // Fallback: use variable name (will generate runtime sload, but at least it works)
+    const map_slot_str = if (base_slot) |slot|
+        try std.fmt.allocPrint(ctx.allocator, "{d}", .{slot})
+    else blk: {
+        const map_name = try ctx.getValueName(map);
+        break :blk try std.fmt.allocPrint(ctx.allocator, "{s}", .{map_name});
+    };
+    defer ctx.allocator.free(map_slot_str);
 
     // Use proper Solidity map storage layout: keccak256(key . slot)
     // This matches how Solidity stores mappings
@@ -2435,9 +2793,9 @@ fn processOraMapGet(op: c.MlirOperation, ctx: *YulLoweringContext) !void {
     try ctx.write(key_name);
     try ctx.writeln(")");
 
-    // Store slot at position 32 (0x20)
+    // Store slot at position 32 (0x20) - use constant if available
     try ctx.writeIndented("mstore(32, ");
-    try ctx.write(map_name);
+    try ctx.write(map_slot_str);
     try ctx.writeln(")");
 
     // Calculate storage slot: keccak256(key . map_slot)
@@ -2447,7 +2805,7 @@ fn processOraMapGet(op: c.MlirOperation, ctx: *YulLoweringContext) !void {
 
 fn processOraMapStore(op: c.MlirOperation, ctx: *YulLoweringContext) !void {
     // ora.map_store has:
-    // - operand 0: map (storage slot)
+    // - operand 0: map (storage slot - should be constant, but may come from ora.sload)
     // - operand 1: key
     // - operand 2: value
 
@@ -2455,9 +2813,34 @@ fn processOraMapStore(op: c.MlirOperation, ctx: *YulLoweringContext) !void {
     const key = c.mlirOperationGetOperand(op, 1);
     const value = c.mlirOperationGetOperand(op, 2);
 
-    const map_name = try ctx.getValueName(map);
     const key_name = try ctx.getValueName(key);
     const value_name = try ctx.getValueName(value);
+
+    // Try to get base slot as constant
+    // Check if map operand is a constant value
+    var base_slot: ?u32 = null;
+    const map_value_ptr = @intFromPtr(map.ptr);
+
+    // Check if it's in constant_values (from arith.constant)
+    if (ctx.constant_values.get(map_value_ptr)) |const_val| {
+        // Try to parse as integer
+        if (std.fmt.parseInt(u32, const_val, 10)) |slot| {
+            base_slot = slot;
+        } else |_| {}
+    }
+
+    // Note: We can't trace back to the defining operation using MLIR C API
+    // If the map value is not a constant, we'll use the fallback approach
+    // which generates a runtime sload call. This is less efficient but works correctly.
+
+    // Fallback: use variable name (will generate runtime sload, but at least it works)
+    const map_slot_str = if (base_slot) |slot|
+        try std.fmt.allocPrint(ctx.allocator, "{d}", .{slot})
+    else blk: {
+        const map_name = try ctx.getValueName(map);
+        break :blk try std.fmt.allocPrint(ctx.allocator, "{s}", .{map_name});
+    };
+    defer ctx.allocator.free(map_slot_str);
 
     // Use proper Solidity map storage layout: keccak256(key . slot)
     // Store key at position 0
@@ -2465,9 +2848,9 @@ fn processOraMapStore(op: c.MlirOperation, ctx: *YulLoweringContext) !void {
     try ctx.write(key_name);
     try ctx.writeln(")");
 
-    // Store slot at position 32 (0x20)
+    // Store slot at position 32 (0x20) - use constant if available
     try ctx.writeIndented("mstore(32, ");
-    try ctx.write(map_name);
+    try ctx.write(map_slot_str);
     try ctx.writeln(")");
 
     // Calculate storage slot and store: sstore(keccak256(key . map_slot), value)

@@ -296,11 +296,34 @@ fn buildSolidityLibrariesImpl(step: *std.Build.Step, options: std.Build.Step.Mak
     const builtin = @import("builtin");
 
     // Create build directory
+    // After macOS/Xcode updates, CMake cache can have stale SDK paths
     const build_dir = "vendor/solidity/build";
     std.fs.cwd().makeDir(build_dir) catch |err| switch (err) {
         error.PathAlreadyExists => {},
         else => return err,
     };
+
+    // Clear CMake cache if it exists to avoid stale SDK paths after system updates
+    // This is critical after macOS/Xcode updates when SDK paths change
+    const cache_file = try std.fmt.allocPrint(allocator, "{s}/CMakeCache.txt", .{build_dir});
+    defer allocator.free(cache_file);
+    if (std.fs.cwd().access(cache_file, .{}) catch null) |_| {
+        std.log.info("Clearing stale CMake cache after macOS/Xcode update", .{});
+        std.fs.cwd().deleteFile(cache_file) catch |err| {
+            std.log.warn("Could not delete CMakeCache.txt: {}", .{err});
+        };
+    }
+
+    // Also clear CMakeFiles directory which may contain cached package configs
+    const cmake_files_dir = try std.fmt.allocPrint(allocator, "{s}/CMakeFiles", .{build_dir});
+    defer allocator.free(cmake_files_dir);
+    if (std.fs.cwd().access(cmake_files_dir, .{}) catch null) |_| {
+        std.log.info("Clearing CMakeFiles directory to remove stale package configs", .{});
+        // Delete the directory recursively
+        std.fs.cwd().deleteTree(cmake_files_dir) catch |err| {
+            std.log.warn("Could not delete CMakeFiles directory: {}", .{err});
+        };
+    }
 
     // Determine platform-specific CMake flags for C++ ABI compatibility
     var cmake_args = std.array_list.Managed([]const u8).init(allocator);
@@ -361,6 +384,38 @@ fn buildSolidityLibrariesImpl(step: *std.Build.Step, options: std.Build.Step.Mak
         std.log.info("Adding Boost paths for Apple Silicon Mac", .{});
         // macOS already uses libc++ by default, but be explicit
         try cmake_args.append("-DCMAKE_CXX_FLAGS=-stdlib=libc++");
+
+        // Fix LibEdit SDK path issue after macOS/Xcode update
+        // Use xcrun to get the actual SDK path and set it explicitly
+        const sdk_path_result = std.process.Child.run(.{
+            .allocator = allocator,
+            .argv = &[_][]const u8{ "xcrun", "--show-sdk-path" },
+            .cwd = ".",
+        }) catch null;
+        if (sdk_path_result) |result| {
+            if (result.term.Exited == 0) {
+                const sdk_path = std.mem.trim(u8, result.stdout, " \n\r\t");
+                if (sdk_path.len > 0) {
+                    const sysroot_flag = try std.fmt.allocPrint(allocator, "-DCMAKE_OSX_SYSROOT={s}", .{sdk_path});
+                    defer allocator.free(sysroot_flag);
+                    try cmake_args.append(sysroot_flag);
+                    std.log.info("Setting CMAKE_OSX_SYSROOT={s}", .{sdk_path});
+                }
+            }
+        }
+
+        // Since we're only building libraries (ONLY_BUILD_SOLIDITY_LIBRARIES=ON),
+        // LibEdit is not needed, but CMake might still try to find it via system package configs.
+        // The system package config may have stale SDK paths after macOS/Xcode updates.
+        // Disable package registry and force CMake to not use cached/stale package configs
+        try cmake_args.append("-DCMAKE_FIND_USE_PACKAGE_REGISTRY=OFF");
+        try cmake_args.append("-DCMAKE_FIND_PACKAGE_NO_PACKAGE_REGISTRY=ON");
+        try cmake_args.append("-DCMAKE_FIND_USE_CMAKE_SYSTEM_PATH=OFF");
+
+        // Force LibEdit to not be found (even if package config exists with stale paths)
+        // This prevents the "imported target includes non-existent path" error
+        try cmake_args.append("-DLibEdit_FOUND=OFF");
+        try cmake_args.append("-DLibEdit_DIR="); // Clear any cached LibEdit directory
 
         // Allow forcing CMake arch when cross-compiling on macOS via env var
         if (std.process.getEnvVarOwned(allocator, "ORA_CMAKE_OSX_ARCH") catch null) |arch| {
@@ -588,6 +643,27 @@ fn buildMlirLibrariesImpl(step: *std.Build.Step, options: std.Build.Step.MakeOpt
         error.PathAlreadyExists => {},
         else => return err,
     };
+
+    // Clear CMake cache if it exists to avoid stale SDK paths after system updates
+    const cache_file = try std.fmt.allocPrint(allocator, "{s}/CMakeCache.txt", .{build_dir});
+    defer allocator.free(cache_file);
+    if (cwd.access(cache_file, .{}) catch null) |_| {
+        std.log.info("Clearing stale MLIR CMake cache after macOS/Xcode update", .{});
+        cwd.deleteFile(cache_file) catch |err| {
+            std.log.warn("Could not delete MLIR CMakeCache.txt: {}", .{err});
+        };
+    }
+
+    // Also clear CMakeFiles directory which may contain cached package configs
+    const cmake_files_dir = try std.fmt.allocPrint(allocator, "{s}/CMakeFiles", .{build_dir});
+    defer allocator.free(cmake_files_dir);
+    if (cwd.access(cmake_files_dir, .{}) catch null) |_| {
+        std.log.info("Clearing MLIR CMakeFiles directory to remove stale package configs", .{});
+        cwd.deleteTree(cmake_files_dir) catch |err| {
+            std.log.warn("Could not delete MLIR CMakeFiles directory: {}", .{err});
+        };
+    }
+
     const install_prefix = "vendor/mlir";
     cwd.makeDir(install_prefix) catch |err| switch (err) {
         error.PathAlreadyExists => {},
@@ -668,6 +744,26 @@ fn buildMlirLibrariesImpl(step: *std.Build.Step, options: std.Build.Step.MakeOpt
         try cmake_args.append("-DCMAKE_C_COMPILER=clang");
     } else if (builtin.os.tag == .macos) {
         try cmake_args.append("-DCMAKE_CXX_FLAGS=-stdlib=libc++");
+
+        // Fix SDK path issue after macOS/Xcode update
+        // Use xcrun to get the actual SDK path and set it explicitly
+        const sdk_path_result = std.process.Child.run(.{
+            .allocator = allocator,
+            .argv = &[_][]const u8{ "xcrun", "--show-sdk-path" },
+            .cwd = ".",
+        }) catch null;
+        if (sdk_path_result) |result| {
+            if (result.term.Exited == 0) {
+                const sdk_path = std.mem.trim(u8, result.stdout, " \n\r\t");
+                if (sdk_path.len > 0) {
+                    const sysroot_flag = try std.fmt.allocPrint(allocator, "-DCMAKE_OSX_SYSROOT={s}", .{sdk_path});
+                    defer allocator.free(sysroot_flag);
+                    try cmake_args.append(sysroot_flag);
+                    std.log.info("Setting MLIR CMAKE_OSX_SYSROOT={s}", .{sdk_path});
+                }
+            }
+        }
+
         if (std.process.getEnvVarOwned(allocator, "ORA_CMAKE_OSX_ARCH") catch null) |arch| {
             defer allocator.free(arch);
             const flag = b.fmt("-DCMAKE_OSX_ARCHITECTURES={s}", .{arch});
@@ -1042,6 +1138,27 @@ fn buildZ3LibrariesImpl(step: *std.Build.Step, options: std.Build.Step.MakeOptio
         error.PathAlreadyExists => {},
         else => return err,
     };
+
+    // Clear CMake cache if it exists to avoid stale SDK paths after system updates
+    const cache_file = try std.fmt.allocPrint(allocator, "{s}/CMakeCache.txt", .{build_dir});
+    defer allocator.free(cache_file);
+    if (cwd.access(cache_file, .{}) catch null) |_| {
+        std.log.info("Clearing stale Z3 CMake cache after macOS/Xcode update", .{});
+        cwd.deleteFile(cache_file) catch |err| {
+            std.log.warn("Could not delete Z3 CMakeCache.txt: {}", .{err});
+        };
+    }
+
+    // Also clear CMakeFiles directory which may contain cached package configs
+    const cmake_files_dir = try std.fmt.allocPrint(allocator, "{s}/CMakeFiles", .{build_dir});
+    defer allocator.free(cmake_files_dir);
+    if (cwd.access(cmake_files_dir, .{}) catch null) |_| {
+        std.log.info("Clearing Z3 CMakeFiles directory to remove stale package configs", .{});
+        cwd.deleteTree(cmake_files_dir) catch |err| {
+            std.log.warn("Could not delete Z3 CMakeFiles directory: {}", .{err});
+        };
+    }
+
     const install_prefix = "vendor/z3-install";
     cwd.makeDir(install_prefix) catch |err| switch (err) {
         error.PathAlreadyExists => {},
@@ -1094,6 +1211,25 @@ fn buildZ3LibrariesImpl(step: *std.Build.Step, options: std.Build.Step.MakeOptio
         try cmake_args.append("-DCMAKE_C_COMPILER=clang");
     } else if (builtin.os.tag == .macos) {
         try cmake_args.append("-DCMAKE_CXX_FLAGS=-stdlib=libc++");
+
+        // Fix SDK path issue after macOS/Xcode update
+        // Use xcrun to get the actual SDK path and set it explicitly
+        const sdk_path_result = std.process.Child.run(.{
+            .allocator = allocator,
+            .argv = &[_][]const u8{ "xcrun", "--show-sdk-path" },
+            .cwd = ".",
+        }) catch null;
+        if (sdk_path_result) |result| {
+            if (result.term.Exited == 0) {
+                const sdk_path = std.mem.trim(u8, result.stdout, " \n\r\t");
+                if (sdk_path.len > 0) {
+                    const sysroot_flag = try std.fmt.allocPrint(allocator, "-DCMAKE_OSX_SYSROOT={s}", .{sdk_path});
+                    defer allocator.free(sysroot_flag);
+                    try cmake_args.append(sysroot_flag);
+                    std.log.info("Setting Z3 CMAKE_OSX_SYSROOT={s}", .{sdk_path});
+                }
+            }
+        }
     }
 
     var cfg_child = std.process.Child.init(cmake_args.items, allocator);
