@@ -94,6 +94,11 @@ const config: Config = {
           position: 'left',
         },
         {
+          to: '/docs/design-documents',
+          label: 'Design Docs',
+          position: 'left',
+        },
+        {
           href: 'https://github.com/oralang/Ora/blob/main/CONTRIBUTING.md',
           label: 'Contributing',
           position: 'right',
@@ -143,6 +148,19 @@ const config: Config = {
             {
               label: 'API Reference',
               to: '/docs/specifications/api',
+            },
+          ],
+        },
+        {
+          title: 'Design Documents',
+          items: [
+            {
+              label: 'Overview',
+              to: '/docs/design-documents',
+            },
+            {
+              label: 'Type System (v0.1)',
+              to: '/docs/design-documents/type-system-v0.1',
             },
           ],
         },
