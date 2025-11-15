@@ -44,6 +44,14 @@ const sidebars: SidebarsConfig = {
         'specifications/api',
       ],
     },
+    {
+      type: 'category',
+      label: 'Design Documents',
+      items: [
+        'design-documents',
+        'design-documents/type-system-v0.1',
+      ],
+    },
   ],
 };
 
