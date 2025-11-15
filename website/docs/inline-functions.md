@@ -367,7 +367,6 @@ Post-ASUKA, the compiler will:
 
 ## See Also
 
-- [Complexity Analysis CLI](../CLI_GUIDE.md#analyze-complexity) - Full CLI reference
-- [Performance Optimization](./performance.md) - General optimization tips
-- [Examples](../examples.md) - More code examples
+- [API Reference](/docs/specifications/api) - Full CLI reference including complexity analysis
+- [Examples](./examples.md) - More code examples
 

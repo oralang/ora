@@ -254,8 +254,6 @@ ora contract.ora
 
 - 📚 [Z3 Documentation](https://github.com/Z3Prover/z3)
 - 📝 [SMT-LIB Standard](https://smtlib.cs.uiowa.edu/)
-- 🎓 [Formal Verification Study Guide](../docs/tech-work/z3-formal-verification/Z3-STUDY-GUIDE.md)
-- 📋 [FV Implementation Plan](../docs/tech-work/z3-formal-verification/00-MASTER-PLAN.md)
 
 ## Best Practices
 
