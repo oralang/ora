@@ -26,7 +26,6 @@ pub const expressions = @import("expressions.zig");
 pub const statements = @import("statements.zig");
 pub const declarations = @import("declarations.zig");
 pub const memory = @import("memory.zig");
-pub const yul_lowering = @import("yul_lowering.zig");
 
 // Re-export commonly used types for convenience
 pub const TypeMapper = types.TypeMapper;

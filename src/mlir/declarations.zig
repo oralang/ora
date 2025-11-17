@@ -328,7 +328,7 @@ pub const DeclarationLowerer = struct {
             switch (child) {
                 .VariableDecl => |var_decl| {
                     // Include ghost variables in storage map for verification
-                    // They will be filtered out during Yul lowering (not in bytecode)
+                    // They will be filtered out during target code generation (not in bytecode)
                     switch (var_decl.region) {
                         .Storage => {
                             // This is a storage variable - add it to the storage map and symbol table
@@ -372,7 +372,7 @@ pub const DeclarationLowerer = struct {
             switch (child) {
                 .Function => |f| {
                     // Include ghost functions in MLIR for verification
-                    // They will be filtered out during Yul lowering (not in bytecode)
+                    // They will be filtered out during target code generation (not in bytecode)
                     var local_var_map = LocalVarMap.init(std.heap.page_allocator);
                     defer local_var_map.deinit();
                     const func_op = self.lowerFunction(&f, &storage_map, &local_var_map);
@@ -380,7 +380,7 @@ pub const DeclarationLowerer = struct {
                 },
                 .VariableDecl => |var_decl| {
                     // Include ghost variables in MLIR for verification
-                    // They will be filtered out during Yul lowering (not in bytecode)
+                    // They will be filtered out during target code generation (not in bytecode)
 
                     switch (var_decl.region) {
                         .Storage => {

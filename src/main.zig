@@ -15,24 +15,6 @@ const std = @import("std");
 const lib = @import("ora_lib");
 const build_options = @import("build_options");
 
-/// Artifact saving options
-const ArtifactOptions = struct {
-    save_tokens: bool,
-    save_ast: bool,
-    save_mlir: bool,
-    save_yul: bool,
-    save_bytecode: bool,
-    output_dir: ?[]const u8,
-
-    fn createOutputDir(self: ArtifactOptions, allocator: std.mem.Allocator, base_name: []const u8) ![]const u8 {
-        if (self.output_dir) |dir| {
-            return try std.fmt.allocPrint(allocator, "{s}/{s}", .{ dir, base_name });
-        } else {
-            return try std.fmt.allocPrint(allocator, "{s}_artifacts", .{base_name});
-        }
-    }
-};
-
 /// MLIR-related command line options
 const MlirOptions = struct {
     emit_mlir: bool,
@@ -106,13 +88,6 @@ pub fn main() !void {
     var mlir_opt_level: ?[]const u8 = null;
     var mlir_validate_before_yul: bool = true; // Default enabled for safety
 
-    // Artifact saving options (for --save-all)
-    var save_tokens: bool = false;
-    var save_ast: bool = false;
-    var save_mlir: bool = false;
-    var save_yul: bool = false;
-    var save_bytecode: bool = false;
-
     // var verbose: bool = false;  // TODO: implement verbose mode
     var i: usize = 1;
 
@@ -169,29 +144,6 @@ pub fn main() !void {
         } else if (std.mem.eql(u8, args[i], "--no-validate-mlir")) {
             mlir_validate_before_yul = false;
             i += 1;
-            // Legacy --save-X flags
-        } else if (std.mem.eql(u8, args[i], "--save-tokens")) {
-            save_tokens = true;
-            i += 1;
-        } else if (std.mem.eql(u8, args[i], "--save-ast")) {
-            save_ast = true;
-            i += 1;
-        } else if (std.mem.eql(u8, args[i], "--save-mlir")) {
-            save_mlir = true;
-            i += 1;
-        } else if (std.mem.eql(u8, args[i], "--save-yul")) {
-            save_yul = true;
-            i += 1;
-        } else if (std.mem.eql(u8, args[i], "--save-bytecode")) {
-            save_bytecode = true;
-            i += 1;
-        } else if (std.mem.eql(u8, args[i], "--save-all")) {
-            save_tokens = true;
-            save_ast = true;
-            save_mlir = true;
-            save_yul = true;
-            save_bytecode = true;
-            i += 1;
             // Debug/verbose
         } else if (std.mem.eql(u8, args[i], "--verbose") or std.mem.eql(u8, args[i], "-v")) {
             // verbose = true;  // TODO: implement verbose mode
@@ -240,43 +192,33 @@ pub fn main() !void {
         .validate_before_yul = mlir_validate_before_yul,
     };
 
-    // Create artifact options structure
-    const artifact_options = ArtifactOptions{
-        .save_tokens = save_tokens,
-        .save_ast = save_ast,
-        .save_mlir = save_mlir,
-        .save_yul = save_yul,
-        .save_bytecode = save_bytecode,
-        .output_dir = output_dir,
-    };
-
     // Handle CFG generation (uses MLIR's built-in view-op-graph pass)
     if (emit_cfg) {
-        try runCFGGeneration(allocator, file_path, mlir_options, artifact_options);
+        try runCFGGeneration(allocator, file_path, mlir_options);
         return;
     }
 
     // Modern compiler-style behavior: process --emit-X flags
-    // Stop at the earliest stage specified, but save later stages if --save-X is set
+    // Stop at the earliest stage specified
 
     if (emit_tokens) {
         // Stop after lexer
-        try runLexer(allocator, file_path, artifact_options);
+        try runLexer(allocator, file_path);
     } else if (emit_ast) {
         // Stop after parser
-        try runParser(allocator, file_path, artifact_options);
+        try runParser(allocator, file_path);
     } else if (emit_abi) {
         // Generate and output ABI (requires parsing to AST)
         try runAbiGeneration(allocator, file_path, emit_json);
     } else if (emit_json) {
         // Full compilation with JSON output
-        try runJsonOutput(allocator, file_path, mlir_options, artifact_options);
+        try runJsonOutput(allocator, file_path, mlir_options);
     } else if (emit_mlir or emit_yul or emit_bytecode) {
         // Run full MLIR pipeline (includes Yul and bytecode if needed)
-        try runMlirEmitAdvancedWithYul(allocator, file_path, mlir_options, artifact_options, emit_yul or emit_bytecode);
+        try runMlirEmitAdvancedWithYul(allocator, file_path, mlir_options, emit_yul or emit_bytecode);
     } else {
         // Default: full compilation
-        try runMlirEmitAdvancedWithYul(allocator, file_path, mlir_options, artifact_options, false);
+        try runMlirEmitAdvancedWithYul(allocator, file_path, mlir_options, false);
     }
 }
 
@@ -314,7 +256,6 @@ fn printUsage() !void {
     try stdout.print("  --analyze-complexity   - Analyze function complexity metrics\n", .{});
     try stdout.print("  --analyze-state        - Analyze storage reads/writes per function\n", .{});
     try stdout.print("\nDevelopment/Debug Options:\n", .{});
-    try stdout.print("  --save-all             - Save all intermediate artifacts\n", .{});
     try stdout.print("  --verbose              - Verbose output (show each compilation stage)\n", .{});
     try stdout.flush();
 }
@@ -324,7 +265,7 @@ fn printUsage() !void {
 // ============================================================================
 
 /// Run lexer on file and display tokens
-fn runLexer(allocator: std.mem.Allocator, file_path: []const u8, artifact_options: ArtifactOptions) !void {
+fn runLexer(allocator: std.mem.Allocator, file_path: []const u8) !void {
     var stdout_buffer: [1024]u8 = undefined;
     var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
     const stdout = &stdout_writer.interface;
@@ -361,182 +302,6 @@ fn runLexer(allocator: std.mem.Allocator, file_path: []const u8, artifact_option
         try stdout.print("[{d:3}] {any}\n", .{ i, token });
     }
 
-    // Save tokens if requested
-    if (artifact_options.save_tokens) {
-        try saveTokens(allocator, file_path, tokens, artifact_options);
-    }
-    try stdout.flush();
-}
-
-// ============================================================================
-// SECTION 4: Artifact Saving Functions
-// ============================================================================
-
-/// Save tokens to file
-fn saveTokens(allocator: std.mem.Allocator, file_path: []const u8, tokens: []const lib.Token, artifact_options: ArtifactOptions) !void {
-    var stdout_buffer: [1024]u8 = undefined;
-    var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
-    const stdout = &stdout_writer.interface;
-
-    // Create output directory
-    const base_name = std.fs.path.stem(file_path);
-    const output_dir = try artifact_options.createOutputDir(allocator, base_name);
-    defer allocator.free(output_dir);
-
-    // Create directory if it doesn't exist
-    std.fs.cwd().makeDir(output_dir) catch |err| switch (err) {
-        error.PathAlreadyExists => {},
-        else => return err,
-    };
-
-    // Write tokens to file
-    const tokens_file = try std.fmt.allocPrint(allocator, "{s}/tokens.txt", .{output_dir});
-    defer allocator.free(tokens_file);
-
-    var file = try std.fs.cwd().createFile(tokens_file, .{});
-    defer file.close();
-
-    try file.writeAll("Ora Compiler - Token Output\n");
-    try file.writeAll("============================\n\n");
-
-    for (tokens, 0..) |token, i| {
-        var file_buffer: [1024]u8 = undefined;
-        const formatted = try std.fmt.bufPrint(file_buffer[0..], "[{d:3}] {any}\n", .{ i, token });
-        try file.writeAll(formatted);
-    }
-
-    try stdout.print("Saved tokens to: {s}\n", .{tokens_file});
-    try stdout.flush();
-}
-
-/// Save AST to file
-fn saveAST(allocator: std.mem.Allocator, file_path: []const u8, ast_nodes: []const lib.ast.AstNode, artifact_options: ArtifactOptions) !void {
-    var stdout_buffer: [1024]u8 = undefined;
-    var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
-    const stdout = &stdout_writer.interface;
-
-    // Create output directory
-    const base_name = std.fs.path.stem(file_path);
-    const output_dir = try artifact_options.createOutputDir(allocator, base_name);
-    defer allocator.free(output_dir);
-
-    // Create directory if it doesn't exist
-    std.fs.cwd().makeDir(output_dir) catch |err| switch (err) {
-        error.PathAlreadyExists => {},
-        else => return err,
-    };
-
-    // Write AST to file
-    const ast_file = try std.fmt.allocPrint(allocator, "{s}/ast.txt", .{output_dir});
-    defer allocator.free(ast_file);
-
-    var file = try std.fs.cwd().createFile(ast_file, .{});
-    defer file.close();
-
-    try file.writeAll("Ora Compiler - AST Output\n");
-    try file.writeAll("=========================\n\n");
-
-    for (ast_nodes, 0..) |node, i| {
-        var file_buffer: [1024]u8 = undefined;
-        const formatted = try std.fmt.bufPrint(file_buffer[0..], "[{d}] ", .{i});
-        try file.writeAll(formatted);
-        var writer_buffer: [1024]u8 = undefined;
-        var file_writer = file.writer(&writer_buffer);
-        try printAstSummary(&file_writer.interface, @constCast(&node), 1);
-        try file.writeAll("\n");
-    }
-
-    try stdout.print("Saved AST to: {s}\n", .{ast_file});
-    try stdout.flush();
-}
-
-/// Save MLIR to file
-fn saveMLIR(allocator: std.mem.Allocator, file_path: []const u8, mlir_text: []const u8, artifact_options: ArtifactOptions) !void {
-    var stdout_buffer: [1024]u8 = undefined;
-    var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
-    const stdout = &stdout_writer.interface;
-
-    // Create output directory
-    const base_name = std.fs.path.stem(file_path);
-    const output_dir = try artifact_options.createOutputDir(allocator, base_name);
-    defer allocator.free(output_dir);
-
-    // Create directory if it doesn't exist
-    std.fs.cwd().makeDir(output_dir) catch |err| switch (err) {
-        error.PathAlreadyExists => {},
-        else => return err,
-    };
-
-    // Write MLIR to file
-    const mlir_file = try std.fmt.allocPrint(allocator, "{s}/mlir.mlir", .{output_dir});
-    defer allocator.free(mlir_file);
-
-    var file = try std.fs.cwd().createFile(mlir_file, .{});
-    defer file.close();
-
-    try file.writeAll(mlir_text);
-
-    try stdout.print("Saved MLIR to: {s}\n", .{mlir_file});
-    try stdout.flush();
-}
-
-/// Save Yul to file
-fn saveYul(allocator: std.mem.Allocator, file_path: []const u8, yul_code: []const u8, artifact_options: ArtifactOptions) !void {
-    var stdout_buffer: [1024]u8 = undefined;
-    var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
-    const stdout = &stdout_writer.interface;
-
-    // Create output directory
-    const base_name = std.fs.path.stem(file_path);
-    const output_dir = try artifact_options.createOutputDir(allocator, base_name);
-    defer allocator.free(output_dir);
-
-    // Create directory if it doesn't exist
-    std.fs.cwd().makeDir(output_dir) catch |err| switch (err) {
-        error.PathAlreadyExists => {},
-        else => return err,
-    };
-
-    // Write Yul to file
-    const yul_file = try std.fmt.allocPrint(allocator, "{s}/yul.yul", .{output_dir});
-    defer allocator.free(yul_file);
-
-    var file = try std.fs.cwd().createFile(yul_file, .{});
-    defer file.close();
-
-    try file.writeAll(yul_code);
-
-    try stdout.print("Saved Yul to: {s}\n", .{yul_file});
-    try stdout.flush();
-}
-
-/// Save bytecode to file
-fn saveBytecode(allocator: std.mem.Allocator, file_path: []const u8, bytecode: []const u8, artifact_options: ArtifactOptions) !void {
-    var stdout_buffer: [1024]u8 = undefined;
-    var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
-    const stdout = &stdout_writer.interface;
-
-    // Create output directory
-    const base_name = std.fs.path.stem(file_path);
-    const output_dir = try artifact_options.createOutputDir(allocator, base_name);
-    defer allocator.free(output_dir);
-
-    // Create directory if it doesn't exist
-    std.fs.cwd().makeDir(output_dir) catch |err| switch (err) {
-        error.PathAlreadyExists => {},
-        else => return err,
-    };
-
-    // Write bytecode to file
-    const bytecode_file = try std.fmt.allocPrint(allocator, "{s}/bytecode.hex", .{output_dir});
-    defer allocator.free(bytecode_file);
-
-    var file = try std.fs.cwd().createFile(bytecode_file, .{});
-    defer file.close();
-
-    try file.writeAll(bytecode);
-
-    try stdout.print("Saved bytecode to: {s}\n", .{bytecode_file});
     try stdout.flush();
 }
 
@@ -545,7 +310,7 @@ fn saveBytecode(allocator: std.mem.Allocator, file_path: []const u8, bytecode: [
 // ============================================================================
 
 /// Run parser on file and display AST
-fn runParser(allocator: std.mem.Allocator, file_path: []const u8, artifact_options: ArtifactOptions) !void {
+fn runParser(allocator: std.mem.Allocator, file_path: []const u8) !void {
     var stdout_buffer: [1024]u8 = undefined;
     var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
     const stdout = &stdout_writer.interface;
@@ -591,11 +356,6 @@ fn runParser(allocator: std.mem.Allocator, file_path: []const u8, artifact_optio
     for (ast_nodes, 0..) |*node, i| {
         try stdout.print("[{d}] ", .{i});
         try printAstSummary(stdout, node, 0);
-    }
-
-    // Save AST if requested
-    if (artifact_options.save_ast) {
-        try saveAST(allocator, file_path, ast_nodes, artifact_options);
     }
 
     try stdout.flush();
@@ -930,7 +690,7 @@ fn runAbiGeneration(allocator: std.mem.Allocator, file_path: []const u8, as_json
 }
 
 /// Generate full JSON output with compilation artifacts
-fn runJsonOutput(allocator: std.mem.Allocator, file_path: []const u8, mlir_options: MlirOptions, artifact_options: ArtifactOptions) !void {
+fn runJsonOutput(allocator: std.mem.Allocator, file_path: []const u8, mlir_options: MlirOptions) !void {
     var stdout_buffer: [1024]u8 = undefined;
     var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
     const stdout = &stdout_writer.interface;
@@ -1014,7 +774,6 @@ fn runJsonOutput(allocator: std.mem.Allocator, file_path: []const u8, mlir_optio
     // TODO: Actually compile to bytecode here
     // For now, just output ABI in JSON format with placeholders
     _ = mlir_options;
-    _ = artifact_options;
 
     const json_output = try std.fmt.allocPrint(allocator,
         \\{{
@@ -1037,7 +796,7 @@ fn runJsonOutput(allocator: std.mem.Allocator, file_path: []const u8, mlir_optio
 }
 
 /// Generate Control Flow Graph using MLIR's built-in view-op-graph pass
-fn runCFGGeneration(allocator: std.mem.Allocator, file_path: []const u8, _: MlirOptions, artifact_options: ArtifactOptions) !void {
+fn runCFGGeneration(allocator: std.mem.Allocator, file_path: []const u8, mlir_options: MlirOptions) !void {
     const mlir = @import("mlir/mod.zig");
     const cfg_gen = @import("mlir/cfg.zig");
     const c = @import("mlir/c.zig").c;
@@ -1123,7 +882,7 @@ fn runCFGGeneration(allocator: std.mem.Allocator, file_path: []const u8, _: Mlir
     try stdout.flush();
 
     // Save to file if output directory specified
-    if (artifact_options.output_dir) |output_dir| {
+    if (mlir_options.output_dir) |output_dir| {
         // Create output directory if it doesn't exist
         std.fs.cwd().makeDir(output_dir) catch |err| switch (err) {
             error.PathAlreadyExists => {},
@@ -1145,11 +904,11 @@ fn runCFGGeneration(allocator: std.mem.Allocator, file_path: []const u8, _: Mlir
 // ============================================================================
 
 /// Advanced MLIR emission with full pass pipeline support
-fn runMlirEmitAdvanced(allocator: std.mem.Allocator, file_path: []const u8, mlir_options: MlirOptions, artifact_options: ArtifactOptions) !void {
-    try runMlirEmitAdvancedWithYul(allocator, file_path, mlir_options, artifact_options, true);
+fn runMlirEmitAdvanced(allocator: std.mem.Allocator, file_path: []const u8, mlir_options: MlirOptions) !void {
+    try runMlirEmitAdvancedWithYul(allocator, file_path, mlir_options, true);
 }
 
-fn runMlirEmitAdvancedWithYul(allocator: std.mem.Allocator, file_path: []const u8, mlir_options: MlirOptions, artifact_options: ArtifactOptions, generate_yul: bool) !void {
+fn runMlirEmitAdvancedWithYul(allocator: std.mem.Allocator, file_path: []const u8, mlir_options: MlirOptions, generate_yul: bool) !void {
     var stdout_buffer: [1024]u8 = undefined;
     var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
     const stdout = &stdout_writer.interface;
@@ -1189,12 +948,12 @@ fn runMlirEmitAdvancedWithYul(allocator: std.mem.Allocator, file_path: []const u
     }
 
     // Generate MLIR with advanced options
-    try generateMlirOutput(allocator, ast_nodes, file_path, mlir_options, artifact_options, generate_yul);
+    try generateMlirOutput(allocator, ast_nodes, file_path, mlir_options, generate_yul);
     try stdout.flush();
 }
 
 /// Generate MLIR output with comprehensive options
-fn generateMlirOutput(allocator: std.mem.Allocator, ast_nodes: []lib.AstNode, file_path: []const u8, mlir_options: MlirOptions, artifact_options: ArtifactOptions, generate_yul: bool) !void {
+fn generateMlirOutput(allocator: std.mem.Allocator, ast_nodes: []lib.AstNode, file_path: []const u8, mlir_options: MlirOptions, generate_yul: bool) !void {
     var stdout_buffer: [1024]u8 = undefined;
     var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
     const stdout = &stdout_writer.interface;
@@ -1274,55 +1033,8 @@ fn generateMlirOutput(allocator: std.mem.Allocator, ast_nodes: []lib.AstNode, fi
             }
         }
 
-        try stdout.print("Converting MLIR to Yul...\n", .{});
-        var yul_result = mlir.yul_lowering.lowerToYul(final_module, h.ctx, allocator) catch |err| {
-            try stdout.print("MLIR to Yul conversion failed: {s}\n", .{@errorName(err)});
-            return;
-        };
-        defer yul_result.deinit();
-
-        if (!yul_result.success) {
-            try stdout.print("MLIR to Yul conversion failed with {d} errors:\n", .{yul_result.errors.len});
-            for (yul_result.errors) |err| {
-                try stdout.print("  - {s}\n", .{err});
-            }
-            try stdout.flush();
-            std.process.exit(1);
-        }
-
-        try stdout.print("Generated Yul code ({d} bytes):\n", .{yul_result.yul_code.len});
-        try stdout.print("{s}\n", .{yul_result.yul_code});
-
-        // Save Yul if requested
-        if (artifact_options.save_yul) {
-            try saveYul(allocator, file_path, yul_result.yul_code, artifact_options);
-        }
-
-        // Compile Yul to bytecode using the existing Yul backend
-        try stdout.print("Compiling Yul to EVM bytecode...\n", .{});
-        var yul_compile_result = lib.yul_bindings.YulCompiler.compile(allocator, yul_result.yul_code) catch |err| {
-            try stdout.print("Yul compilation failed: {s}\n", .{@errorName(err)});
-            return;
-        };
-        defer yul_compile_result.deinit(allocator);
-
-        if (!yul_compile_result.success) {
-            try stdout.print("Yul compilation failed: {?s}\n", .{yul_compile_result.error_message});
-            try stdout.flush();
-            std.process.exit(1);
-        }
-
-        try stdout.print("Successfully compiled to EVM bytecode!\n", .{});
-        if (yul_compile_result.bytecode) |bytecode| {
-            try stdout.print("Bytecode: {s}\n", .{bytecode});
-
-            // Save bytecode if requested
-            if (artifact_options.save_bytecode) {
-                try saveBytecode(allocator, file_path, bytecode, artifact_options);
-            }
-        } else {
-            try stdout.print("No bytecode generated\n", .{});
-        }
+        try stdout.print("Yul code generation is currently disabled (targets moved to _targets_backup)\n", .{});
+        std.process.exit(1);
     }
 
     // Print warnings if any
@@ -1383,39 +1095,6 @@ fn generateMlirOutput(allocator: std.mem.Allocator, ast_nodes: []lib.AstNode, fi
         }
     }
 
-    // Always save MLIR to artifact directory if requested
-    if (artifact_options.save_mlir) {
-        const base_name = std.fs.path.stem(file_path);
-        const artifact_dir = try artifact_options.createOutputDir(allocator, base_name);
-        defer allocator.free(artifact_dir);
-
-        // Create directory if it doesn't exist
-        std.fs.cwd().makeDir(artifact_dir) catch |err| switch (err) {
-            error.PathAlreadyExists => {},
-            else => return err,
-        };
-
-        // Write MLIR to file
-        const mlir_file = try std.fmt.allocPrint(allocator, "{s}/mlir.mlir", .{artifact_dir});
-        defer allocator.free(mlir_file);
-
-        const module_op = c.mlirModuleGetOperation(lowering_result.module);
-        const mlir_str = c.oraPrintOperation(h.ctx, module_op);
-        defer if (mlir_str.data != null) {
-            const mlir_c = @import("mlir/c.zig");
-            mlir_c.freeStringRef(mlir_str);
-        };
-
-        if (mlir_str.data == null or mlir_str.length == 0) {
-            try stdout.print("Failed to print MLIR\n", .{});
-            return;
-        }
-
-        const mlir_content = mlir_str.data[0..mlir_str.length];
-        try std.fs.cwd().writeFile(.{ .sub_path = mlir_file, .data = mlir_content });
-
-        try stdout.print("Saved MLIR to: {s}\n", .{mlir_file});
-    }
     try stdout.flush();
 }
 

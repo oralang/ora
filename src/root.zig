@@ -25,7 +25,8 @@ pub const state_tracker = @import("analysis/state_tracker.zig");
 pub const abi = @import("abi.zig");
 
 // Yul integration (backend compilation target)
-pub const yul_bindings = @import("yul_bindings.zig");
+// Note: yul_bindings is not exported here to avoid module conflicts.
+// Import directly from targets/yul/mod.zig or use yul_bindings.zig directly.
 
 // Note: MLIR and Z3 are NOT exported from ora_lib because they import ora_lib themselves,
 // which would create circular dependencies. They should be imported directly by main.zig.
@@ -79,5 +80,5 @@ pub const OraType = ast.type_info.OraType;
 pub const TypeInfo = ast.type_info.TypeInfo;
 
 // Yul integration types
-/// Yul compiler interface
-pub const YulCompiler = yul_bindings.YulCompiler;
+// Note: YulCompiler is available via direct import of yul_bindings.zig
+// or through the targets/yul/mod.zig module.

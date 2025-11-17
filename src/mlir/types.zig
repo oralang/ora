@@ -348,10 +348,10 @@ pub const TypeMapper = struct {
         // Get the key and value types
         const key_ora_type: ?lib.ast.type_info.OraType = mapping_info.key.*;
         const value_ora_type: ?lib.ast.type_info.OraType = mapping_info.value.*;
-        
+
         const key_type = self.toMlirType(.{ .ora_type = key_ora_type });
         const value_type = self.toMlirType(.{ .ora_type = value_ora_type });
-        
+
         // Create !ora.map<K, V> type
         return c.oraMapTypeGet(self.ctx, key_type, value_type);
     }
@@ -361,7 +361,7 @@ pub const TypeMapper = struct {
     /// Used for complex storage patterns like balances[token][user]
     pub fn mapDoubleMapType(self: *const TypeMapper, double_map_info: lib.ast.type_info.DoubleMapType) c.MlirType {
         // Double maps are represented as i256 storage slot references
-        // The nested key hashing is handled in Yul lowering:
+        // The nested key hashing is handled during target code generation:
         // 1. Hash key2 with base slot → intermediate slot
         // 2. Hash key1 with intermediate slot → final storage location
 
@@ -589,7 +589,7 @@ pub const TypeMapper = struct {
         // - All dialect types map to i256 for EVM compatibility
         // - Type information is preserved in symbol table
         // - Operations use dialect ops (ora.map_get, ora.sload, etc.)
-        // - Yul lowering handles the actual EVM semantics
+        // - Target code generation handles the actual EVM semantics
         //
         // Integration path:
         // 1. Define types in OraDialect.td using TableGen
@@ -602,7 +602,7 @@ pub const TypeMapper = struct {
         _ = param_types; // Type parameters for parameterized types
 
         // Return i256 for EVM compatibility until TableGen integration
-        // All type semantics are enforced through operations and Yul lowering
+        // All type semantics are enforced through operations and target code generation
         return c.mlirIntegerTypeGet(self.ctx, constants.DEFAULT_INTEGER_BITS);
     }
 

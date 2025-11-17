@@ -424,6 +424,24 @@ def Ora_IfOp : Ora_Op<"if"> {
   let hasCustomAssemblyFormat = 1;
 }
 
+def Ora_CastOp : Ora_Op<"cast", [Pure]> {
+  let summary = "Ora type cast";
+  let description = [{
+    Casts a value from one type to another. Used for type conversions
+    during dialect lowering (e.g., Ora types to built-in types).
+    
+    Example:
+    ```mlir
+    %cast = ora.cast %value : !ora.int<256, false> to i256
+    ```
+  }];
+  
+  let arguments = (ins AnyType:$input);
+  let results = (outs AnyType:$result);
+  
+  let assemblyFormat = "$input attr-dict `:` type($input) `to` type($result)";
+}
+
 def Ora_YieldOp : Ora_Op<"yield", [Terminator]> {
   let summary = "Yield operation";
   let description = [{
