@@ -17,6 +17,7 @@ vendor/mlir
 backup/
 vendor/llvm-project/
 docs/tech-work/
+_targets_backup/
 
 # Ora dialect build artifacts (generated during compilation)
 vendor/ora-dialect-build/
