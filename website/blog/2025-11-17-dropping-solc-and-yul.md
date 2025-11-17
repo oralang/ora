@@ -1,6 +1,6 @@
 ---
 slug: dropping-solc-and-yul
-title: Dropping Solidity and Yul: Moving to a Community Open IR
+title: Dropping Solidity and Yul Moving to a Community Open IR
 authors: [axe]
 tags: [announcement, compiler, architecture]
 ---
