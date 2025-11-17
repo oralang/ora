@@ -12,6 +12,7 @@ include "OraDialect.td"
 include "mlir/IR/OpBase.td"
 include "mlir/IR/BuiltinTypes.td"
 include "mlir/IR/BuiltinAttributes.td"
+include "mlir/IR/SymbolInterfaces.td"
 include "mlir/Interfaces/SideEffectInterfaces.td"
 
 //===----------------------------------------------------------------------===//
@@ -40,6 +41,13 @@ def Ora_ContractOp : Ora_Op<"contract"> {
   
   let arguments = (ins StrAttr:$sym_name);
   let regions = (region AnyRegion:$body);
+  
+  // Contract body contains declarations, not executable code, so no terminator needed
+  // Contract contains symbols (func.func), so it needs SymbolTable trait
+  let traits = [SingleBlock, NoTerminator, SymbolTable];
+  
+  // Custom parser/printer needed for @ symbol prefix
+  // let assemblyFormat = "$sym_name region($body) attr-dict";
   
   let extraClassDeclaration = [{
     /// Get the body region
@@ -70,6 +78,9 @@ def Ora_GlobalOp : Ora_Op<"global"> {
     AnyAttr:$init
   );
   
+  // Custom parser/printer needed for type-attr syntax
+  // let assemblyFormat = "$sym_name `:` type-attr($type) `=` $init attr-dict";
+  
   let extraClassDeclaration = [{
     /// Get the type of the global variable
     ::mlir::Type getGlobalType() { return getTypeAttr().getValue(); }
@@ -95,6 +106,9 @@ def Ora_SLoadOp : Ora_Op<"sload"> {
   let arguments = (ins StrAttr:$global);
   let results = (outs AnyType:$result);
   
+  // Custom parser/printer for cleaner syntax
+  // let assemblyFormat = "$global attr-dict `:` type($result)";
+  
   let extraClassDeclaration = [{
     /// Get the name of the global variable being loaded
     ::llvm::StringRef getGlobalName() { return getGlobal(); }
@@ -115,6 +129,9 @@ def Ora_SStoreOp : Ora_Op<"sstore"> {
   }];
   
   let arguments = (ins AnyType:$value, StrAttr:$global);
+  
+  // Custom parser/printer for cleaner syntax
+  // let assemblyFormat = "$value `,` $global attr-dict `:` type($value)";
   
   let extraClassDeclaration = [{
     /// Get the value being stored

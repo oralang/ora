@@ -67,42 +67,15 @@ pub const OraDialect = struct {
         init_value: c.MlirAttribute,
         loc: c.MlirLocation,
     ) c.MlirOperation {
-        // Use unregistered mode (produces clean MLIR output)
-        return self.createGlobalUnregistered(name, value_type, init_value, loc);
-    }
-
-    // Create ora.global using unregistered approach (current implementation)
-    fn createGlobalUnregistered(
-        self: *OraDialect,
-        name: []const u8,
-        value_type: c.MlirType,
-        init_value: c.MlirAttribute,
-        loc: c.MlirLocation,
-    ) c.MlirOperation {
-        // Create a global variable declaration
-        // This will be equivalent to ora.global @name : type = init_value
-        var state = h.opState("ora.global", loc);
-
-        // Add the global name as a symbol attribute
-        const name_attr = h.stringAttr(self.ctx, name);
-        var attrs = [_]c.MlirNamedAttribute{h.namedAttr(self.ctx, "sym_name", name_attr)};
-        c.mlirOperationStateAddAttributes(&state, attrs.len, &attrs);
-
-        // Add the type and initial value
-        c.mlirOperationStateAddResults(&state, 1, @ptrCast(&value_type));
-
-        // Add the initial value attribute
-        var init_attrs = [_]c.MlirNamedAttribute{h.namedAttr(self.ctx, "init", init_value)};
-        c.mlirOperationStateAddAttributes(&state, init_attrs.len, &init_attrs);
-
-        // Add gas cost attribute (global variable declaration has minimal cost = 0)
-        // Actual access costs are handled by sload/sstore operations
-        const gas_cost_attr = c.mlirIntegerAttrGet(c.mlirIntegerTypeGet(self.ctx, 64), 0);
-        const gas_cost_id = h.identifier(self.ctx, "gas_cost");
-        var gas_attrs = [_]c.MlirNamedAttribute{c.mlirNamedAttributeGet(gas_cost_id, gas_cost_attr)};
-        c.mlirOperationStateAddAttributes(&state, gas_attrs.len, &gas_attrs);
-
-        const op = c.mlirOperationCreate(&state);
+        // Always use C++ API (dialect must be registered)
+        if (!self.isRegistered()) {
+            @panic("Ora dialect must be registered before creating operations");
+        }
+        const name_ref = h.strRef(name);
+        const op = c.oraGlobalOpCreate(self.ctx, loc, name_ref, value_type, init_value);
+        if (op.ptr == null) {
+            @panic("Failed to create ora.global operation");
+        }
         return op;
     }
 
@@ -113,37 +86,27 @@ pub const OraDialect = struct {
         result_type: c.MlirType,
         loc: c.MlirLocation,
     ) c.MlirOperation {
-        // Use unregistered mode (produces clean MLIR output)
-        return self.createSLoadUnregistered(global_name, result_type, loc);
+        return self.createSLoadWithName(global_name, result_type, loc, null);
     }
-
-    // Create ora.sload using unregistered approach (current implementation)
-    fn createSLoadUnregistered(
+    
+    // Helper function to create ora.sload operation with named result
+    pub fn createSLoadWithName(
         self: *OraDialect,
         global_name: []const u8,
         result_type: c.MlirType,
         loc: c.MlirLocation,
+        result_name: ?[]const u8,
     ) c.MlirOperation {
-        var state = h.opState("ora.sload", loc);
-
-        // Add the global name attribute
-        const global_attr = h.stringAttr(self.ctx, global_name);
-        const global_id = h.identifier(self.ctx, "global");
-
-        // Add gas cost attribute (SLOAD_COLD = 2100, conservative estimate)
-        const gas_cost_attr = c.mlirIntegerAttrGet(c.mlirIntegerTypeGet(self.ctx, 64), 2100);
-        const gas_cost_id = h.identifier(self.ctx, "gas_cost");
-
-        var attrs = [_]c.MlirNamedAttribute{
-            c.mlirNamedAttributeGet(global_id, global_attr),
-            c.mlirNamedAttributeGet(gas_cost_id, gas_cost_attr),
-        };
-        c.mlirOperationStateAddAttributes(&state, attrs.len, &attrs);
-
-        // Add result type
-        c.mlirOperationStateAddResults(&state, 1, @ptrCast(&result_type));
-
-        const op = c.mlirOperationCreate(&state);
+        // Always use C++ API (dialect must be registered)
+        if (!self.isRegistered()) {
+            @panic("Ora dialect must be registered before creating operations");
+        }
+        const name_ref = h.strRef(global_name);
+        const result_name_ref = if (result_name) |name| h.strRef(name) else c.MlirStringRef{ .data = null, .length = 0 };
+        const op = c.oraSLoadOpCreateWithName(self.ctx, loc, name_ref, result_type, result_name_ref);
+        if (op.ptr == null) {
+            @panic("Failed to create ora.sload operation");
+        }
         return op;
     }
 
@@ -154,138 +117,73 @@ pub const OraDialect = struct {
         global_name: []const u8,
         loc: c.MlirLocation,
     ) c.MlirOperation {
-        // Use unregistered mode (produces clean MLIR output)
-        return self.createSStoreUnregistered(value, global_name, loc);
-    }
-
-    // Create ora.sstore using unregistered approach (current implementation)
-    fn createSStoreUnregistered(
-        self: *OraDialect,
-        value: c.MlirValue,
-        global_name: []const u8,
-        loc: c.MlirLocation,
-    ) c.MlirOperation {
-        var state = h.opState("ora.sstore", loc);
-
-        // Add operands
-        var operands = [_]c.MlirValue{value};
-        c.mlirOperationStateAddOperands(&state, operands.len, &operands);
-
-        // Add the global name attribute
-        const global_attr = h.stringAttr(self.ctx, global_name);
-        const global_id = h.identifier(self.ctx, "global");
-
-        // Add gas cost attribute (SSTORE_NEW = 20000, conservative worst-case estimate)
-        const gas_cost_attr = c.mlirIntegerAttrGet(c.mlirIntegerTypeGet(self.ctx, 64), 20000);
-        const gas_cost_id = h.identifier(self.ctx, "gas_cost");
-
-        var attrs = [_]c.MlirNamedAttribute{
-            c.mlirNamedAttributeGet(global_id, global_attr),
-            c.mlirNamedAttributeGet(gas_cost_id, gas_cost_attr),
-        };
-        c.mlirOperationStateAddAttributes(&state, attrs.len, &attrs);
-
-        const op = c.mlirOperationCreate(&state);
+        // Always use C++ API (dialect must be registered)
+        if (!self.isRegistered()) {
+            @panic("Ora dialect must be registered before creating operations");
+        }
+        const name_ref = h.strRef(global_name);
+        const op = c.oraSStoreOpCreate(self.ctx, loc, value, name_ref);
+        if (op.ptr == null) {
+            @panic("Failed to create ora.sstore operation");
+        }
         return op;
     }
 
-    // Helper function to create ora.contract operation (dual-mode)
+    // Helper function to create ora.contract operation
     pub fn createContract(
         self: *OraDialect,
         name: []const u8,
         loc: c.MlirLocation,
     ) c.MlirOperation {
-        if (self.isRegistered()) {
-            return self.createContractRegistered(name, loc);
-        } else {
-            std.log.warn("Registered ora.contract creation failed, falling back to unregistered", .{});
+        // Always use C++ API (dialect must be registered)
+        if (!self.isRegistered()) {
+            @panic("Ora dialect must be registered before creating operations");
         }
-        return self.createContractUnregistered(name, loc);
-    }
-
-    // Create ora.contract using registered dialect
-    fn createContractRegistered(
-        self: *OraDialect,
-        name: []const u8,
-        loc: c.MlirLocation,
-    ) c.MlirOperation {
-        // Future: Once C++ dialect is linked via TableGen, use:
-        // const name_ref = c.mlirStringRefCreateFromCString(name.ptr);
-        // const region = c.mlirRegionCreate();
-        // return c.oraContractCreate(loc, name_ref, region);
-
-        // For now, fallback to unregistered
-        return self.createContractUnregistered(name, loc);
-    }
-
-    // Create ora.contract using unregistered approach (current implementation)
-    fn createContractUnregistered(
-        self: *OraDialect,
-        name: []const u8,
-        loc: c.MlirLocation,
-    ) c.MlirOperation {
-        var state = h.opState("ora.contract", loc);
-
-        // Add the contract name as a symbol attribute
-        const name_attr = h.stringAttr(self.ctx, name);
-        const name_id = h.identifier(self.ctx, "sym_name");
-        var attrs = [_]c.MlirNamedAttribute{c.mlirNamedAttributeGet(name_id, name_attr)};
-        c.mlirOperationStateAddAttributes(&state, attrs.len, &attrs);
-
-        // Add a single region for the contract body
-        const region = c.mlirRegionCreate();
-        c.mlirOperationStateAddOwnedRegions(&state, 1, @ptrCast(&region));
-
-        const op = c.mlirOperationCreate(&state);
+        const name_ref = h.strRef(name);
+        const op = c.oraContractOpCreate(self.ctx, loc, name_ref);
+        if (op.ptr == null) {
+            @panic("Failed to create ora.contract operation");
+        }
         return op;
     }
 
     /// Create ora.requires operation for preconditions
     pub fn createRequires(
-        _: *OraDialect,
+        self: *OraDialect,
         condition: c.MlirValue,
         loc: c.MlirLocation,
     ) c.MlirOperation {
-        var state = h.opState("ora.requires", loc);
-
-        // Add operands
-        var operands = [_]c.MlirValue{condition};
-        c.mlirOperationStateAddOperands(&state, operands.len, &operands);
-
-        const op = c.mlirOperationCreate(&state);
-        return op;
+        // Always use C++ API (dialect must be registered)
+        if (!self.isRegistered()) {
+            @panic("Ora dialect must be registered before creating operations");
+        }
+        return c.oraRequiresOpCreate(self.ctx, loc, condition);
     }
 
     /// Create ora.ensures operation for postconditions
     pub fn createEnsures(
-        _: *OraDialect,
+        self: *OraDialect,
         condition: c.MlirValue,
         loc: c.MlirLocation,
     ) c.MlirOperation {
-        var state = h.opState("ora.ensures", loc);
-
-        // Add operands
-        var operands = [_]c.MlirValue{condition};
-        c.mlirOperationStateAddOperands(&state, operands.len, &operands);
-
-        const op = c.mlirOperationCreate(&state);
-        return op;
+        // Always use C++ API (dialect must be registered)
+        if (!self.isRegistered()) {
+            @panic("Ora dialect must be registered before creating operations");
+        }
+        return c.oraEnsuresOpCreate(self.ctx, loc, condition);
     }
 
     /// Create ora.invariant operation
     pub fn createInvariant(
-        _: *OraDialect,
+        self: *OraDialect,
         condition: c.MlirValue,
         loc: c.MlirLocation,
     ) c.MlirOperation {
-        var state = h.opState("ora.invariant", loc);
-
-        // Add operands
-        var operands = [_]c.MlirValue{condition};
-        c.mlirOperationStateAddOperands(&state, operands.len, &operands);
-
-        const op = c.mlirOperationCreate(&state);
-        return op;
+        // Always use C++ API (dialect must be registered)
+        if (!self.isRegistered()) {
+            @panic("Ora dialect must be registered before creating operations");
+        }
+        return c.oraInvariantOpCreate(self.ctx, loc, condition);
     }
 
     /// Create ora.assert operation for assertions
@@ -295,68 +193,62 @@ pub const OraDialect = struct {
         loc: c.MlirLocation,
         message: ?[]const u8,
     ) c.MlirOperation {
-        var state = h.opState("ora.assert", loc);
-
-        // Add operands
-        var operands = [_]c.MlirValue{condition};
-        c.mlirOperationStateAddOperands(&state, operands.len, &operands);
-
-        // Add optional message attribute
-        if (message) |msg| {
-            const msg_attr = h.stringAttr(self.ctx, msg);
-            const msg_id = h.identifier(self.ctx, "message");
-            c.mlirOperationStateAddAttributes(&state, 1, &[_]c.MlirNamedAttribute{c.mlirNamedAttributeGet(msg_id, msg_attr)});
+        // Always use C++ API (dialect must be registered)
+        if (!self.isRegistered()) {
+            @panic("Ora dialect must be registered before creating operations");
         }
-
-        const op = c.mlirOperationCreate(&state);
-        return op;
+        const message_ref = if (message) |msg| h.strRef(msg) else c.MlirStringRef{ .data = null, .length = 0 };
+        return c.oraAssertOpCreate(self.ctx, loc, condition, message_ref);
     }
 
     /// Create ora.decreases operation for loop termination measures
     pub fn createDecreases(
-        _: *OraDialect,
+        self: *OraDialect,
         measure: c.MlirValue,
         loc: c.MlirLocation,
     ) c.MlirOperation {
-        var state = h.opState("ora.decreases", loc);
-
-        // Add operands
-        var operands = [_]c.MlirValue{measure};
-        c.mlirOperationStateAddOperands(&state, operands.len, &operands);
-
-        const op = c.mlirOperationCreate(&state);
+        // Always use C++ API (dialect must be registered)
+        if (!self.isRegistered()) {
+            @panic("Ora dialect must be registered before creating operations");
+        }
+        const op = c.oraDecreasesOpCreate(self.ctx, loc, measure);
+        if (op.ptr == null) {
+            @panic("Failed to create ora.decreases operation");
+        }
         return op;
     }
 
     /// Create ora.increases operation for loop progress measures
     pub fn createIncreases(
-        _: *OraDialect,
+        self: *OraDialect,
         measure: c.MlirValue,
         loc: c.MlirLocation,
     ) c.MlirOperation {
-        var state = h.opState("ora.increases", loc);
-
-        // Add operands
-        var operands = [_]c.MlirValue{measure};
-        c.mlirOperationStateAddOperands(&state, operands.len, &operands);
-
-        const op = c.mlirOperationCreate(&state);
+        // Always use C++ API (dialect must be registered)
+        if (!self.isRegistered()) {
+            @panic("Ora dialect must be registered before creating operations");
+        }
+        const op = c.oraIncreasesOpCreate(self.ctx, loc, measure);
+        if (op.ptr == null) {
+            @panic("Failed to create ora.increases operation");
+        }
         return op;
     }
 
     /// Create ora.assume operation for assumptions
     pub fn createAssume(
-        _: *OraDialect,
+        self: *OraDialect,
         condition: c.MlirValue,
         loc: c.MlirLocation,
     ) c.MlirOperation {
-        var state = h.opState("ora.assume", loc);
-
-        // Add operands
-        var operands = [_]c.MlirValue{condition};
-        c.mlirOperationStateAddOperands(&state, operands.len, &operands);
-
-        const op = c.mlirOperationCreate(&state);
+        // Always use C++ API (dialect must be registered)
+        if (!self.isRegistered()) {
+            @panic("Ora dialect must be registered before creating operations");
+        }
+        const op = c.oraAssumeOpCreate(self.ctx, loc, condition);
+        if (op.ptr == null) {
+            @panic("Failed to create ora.assume operation");
+        }
         return op;
     }
 
@@ -366,34 +258,34 @@ pub const OraDialect = struct {
         variable_name: []const u8,
         loc: c.MlirLocation,
     ) c.MlirOperation {
-        var state = h.opState("ora.havoc", loc);
-
-        // Add variable name as attribute
-        const var_attr = h.stringAttr(self.ctx, variable_name);
-        const var_id = h.identifier(self.ctx, "variable_name");
-        c.mlirOperationStateAddAttributes(&state, 1, &[_]c.MlirNamedAttribute{c.mlirNamedAttributeGet(var_id, var_attr)});
-
-        const op = c.mlirOperationCreate(&state);
+        // Always use C++ API (dialect must be registered)
+        if (!self.isRegistered()) {
+            @panic("Ora dialect must be registered before creating operations");
+        }
+        const name_ref = h.strRef(variable_name);
+        const op = c.oraHavocOpCreate(self.ctx, loc, name_ref);
+        if (op.ptr == null) {
+            @panic("Failed to create ora.havoc operation");
+        }
         return op;
     }
 
     /// Create ora.old operation for old value references
     pub fn createOld(
-        _: *OraDialect,
+        self: *OraDialect,
         value: c.MlirValue,
         loc: c.MlirLocation,
     ) c.MlirOperation {
-        var state = h.opState("ora.old", loc);
-
-        // Add operands
-        var operands = [_]c.MlirValue{value};
-        c.mlirOperationStateAddOperands(&state, operands.len, &operands);
-
+        // Always use C++ API (dialect must be registered)
+        if (!self.isRegistered()) {
+            @panic("Ora dialect must be registered before creating operations");
+        }
         // Result type is same as input type
         const input_type = c.mlirValueGetType(value);
-        c.mlirOperationStateAddResults(&state, 1, @ptrCast(&input_type));
-
-        const op = c.mlirOperationCreate(&state);
+        const op = c.oraOldOpCreate(self.ctx, loc, value, input_type);
+        if (op.ptr == null) {
+            @panic("Failed to create ora.old operation");
+        }
         return op;
     }
 
@@ -408,58 +300,68 @@ pub const OraDialect = struct {
         result_type: c.MlirType,
         loc: c.MlirLocation,
     ) c.MlirOperation {
-        var state = h.opState("ora.string.constant", loc);
+        // Always use C++ API (dialect must be registered)
+        if (!self.isRegistered()) {
+            @panic("Ora dialect must be registered before creating operations");
+        }
+        const value_ref = h.strRef(value);
+        const op = c.oraStringConstantOpCreate(self.ctx, loc, value_ref, result_type);
+        if (op.ptr == null) {
+            @panic("Failed to create ora.string.constant operation");
+        }
+        return op;
+    }
 
-        // Add the string value attribute
-        const value_attr = h.stringAttr(self.ctx, value);
-        const value_id = h.identifier(self.ctx, "value");
-        var attrs = [_]c.MlirNamedAttribute{c.mlirNamedAttributeGet(value_id, value_attr)};
-        c.mlirOperationStateAddAttributes(&state, attrs.len, &attrs);
-
-        // Add result type
-        c.mlirOperationStateAddResults(&state, 1, @ptrCast(&result_type));
-
-        const op = c.mlirOperationCreate(&state);
+    /// Create ora.hex.constant operation
+    pub fn createHexConstant(
+        self: *OraDialect,
+        value: []const u8,
+        result_type: c.MlirType,
+        loc: c.MlirLocation,
+    ) c.MlirOperation {
+        // Always use C++ API (dialect must be registered)
+        if (!self.isRegistered()) {
+            @panic("Ora dialect must be registered before creating operations");
+        }
+        const value_ref = h.strRef(value);
+        const op = c.oraHexConstantOpCreate(self.ctx, loc, value_ref, result_type);
+        if (op.ptr == null) {
+            @panic("Failed to create ora.hex.constant operation");
+        }
         return op;
     }
 
     /// Create ora.power operation
     pub fn createPower(
-        _: *OraDialect,
+        self: *OraDialect,
         base: c.MlirValue,
         exponent: c.MlirValue,
         result_type: c.MlirType,
         loc: c.MlirLocation,
     ) c.MlirOperation {
-        var state = h.opState("ora.power", loc);
-
-        // Add operands
-        var operands = [_]c.MlirValue{ base, exponent };
-        c.mlirOperationStateAddOperands(&state, operands.len, &operands);
-
-        // Add result type
-        c.mlirOperationStateAddResults(&state, 1, @ptrCast(&result_type));
-
-        const op = c.mlirOperationCreate(&state);
+        // Always use C++ API (dialect must be registered)
+        if (!self.isRegistered()) {
+            @panic("Ora dialect must be registered before creating operations");
+        }
+        const op = c.oraPowerOpCreate(self.ctx, loc, base, exponent, result_type);
+        if (op.ptr == null) {
+            @panic("Failed to create ora.power operation");
+        }
         return op;
     }
 
     /// Create ora.yield operation
     pub fn createYield(
         self: *OraDialect,
-        operands: []c.MlirValue,
+        operands: []const c.MlirValue,
         loc: c.MlirLocation,
     ) c.MlirOperation {
-        _ = self; // Mark as used
-        var state = h.opState("ora.yield", loc);
-
-        // Add operands
-        if (operands.len > 0) {
-            c.mlirOperationStateAddOperands(&state, operands.len, operands.ptr);
+        // Always use C++ API (dialect must be registered)
+        if (!self.isRegistered()) {
+            @panic("Ora dialect must be registered before creating operations");
         }
-
-        const op = c.mlirOperationCreate(&state);
-        return op;
+        const operands_ptr = if (operands.len > 0) operands.ptr else null;
+        return c.oraYieldOpCreate(self.ctx, loc, operands_ptr, operands.len);
     }
 
     //===----------------------------------------------------------------------===//
@@ -474,22 +376,15 @@ pub const OraDialect = struct {
         result_type: c.MlirType,
         loc: c.MlirLocation,
     ) c.MlirOperation {
-        var state = h.opState("ora.destructure", loc);
-
-        // Add operands
-        var operands = [_]c.MlirValue{value};
-        c.mlirOperationStateAddOperands(&state, operands.len, &operands);
-
-        // Add pattern type attribute
-        const pattern_attr = h.stringAttr(self.ctx, pattern_type);
-        const pattern_id = h.identifier(self.ctx, "pattern_type");
-        var attrs = [_]c.MlirNamedAttribute{c.mlirNamedAttributeGet(pattern_id, pattern_attr)};
-        c.mlirOperationStateAddAttributes(&state, attrs.len, &attrs);
-
-        // Add result type
-        c.mlirOperationStateAddResults(&state, 1, @ptrCast(&result_type));
-
-        const op = c.mlirOperationCreate(&state);
+        // Always use C++ API (dialect must be registered)
+        if (!self.isRegistered()) {
+            @panic("Ora dialect must be registered before creating operations");
+        }
+        const pattern_type_ref = h.strRef(pattern_type);
+        const op = c.oraDestructureOpCreate(self.ctx, loc, value, pattern_type_ref, result_type);
+        if (op.ptr == null) {
+            @panic("Failed to create ora.destructure operation");
+        }
         return op;
     }
 
@@ -504,25 +399,15 @@ pub const OraDialect = struct {
         repr_type: c.MlirType,
         loc: c.MlirLocation,
     ) c.MlirOperation {
-        var state = h.opState("ora.enum.decl", loc);
-
-        // Add enum name attribute
-        const name_attr = h.stringAttr(self.ctx, name);
-        const name_id = h.identifier(self.ctx, "name");
-        var attrs = [_]c.MlirNamedAttribute{c.mlirNamedAttributeGet(name_id, name_attr)};
-        c.mlirOperationStateAddAttributes(&state, attrs.len, &attrs);
-
-        // Add representation type attribute
-        const type_attr = c.mlirTypeAttrGet(repr_type);
-        const type_id = h.identifier(self.ctx, "repr_type");
-        var type_attrs = [_]c.MlirNamedAttribute{c.mlirNamedAttributeGet(type_id, type_attr)};
-        c.mlirOperationStateAddAttributes(&state, type_attrs.len, &type_attrs);
-
-        // Add variants region
-        const region = c.mlirRegionCreate();
-        c.mlirOperationStateAddOwnedRegions(&state, 1, @ptrCast(&region));
-
-        const op = c.mlirOperationCreate(&state);
+        // Always use C++ API (dialect must be registered)
+        if (!self.isRegistered()) {
+            @panic("Ora dialect must be registered before creating operations");
+        }
+        const name_ref = h.strRef(name);
+        const op = c.oraEnumDeclOpCreate(self.ctx, loc, name_ref, repr_type);
+        if (op.ptr == null) {
+            @panic("Failed to create ora.enum.decl operation");
+        }
         return op;
     }
 
@@ -534,25 +419,16 @@ pub const OraDialect = struct {
         result_type: c.MlirType,
         loc: c.MlirLocation,
     ) c.MlirOperation {
-        var state = h.opState("ora.enum_constant", loc);
-
-        // Add enum name attribute
-        const enum_attr = h.stringAttr(self.ctx, enum_name);
-        const enum_id = h.identifier(self.ctx, "enum_name");
-        const enum_named_attr = c.mlirNamedAttributeGet(enum_id, enum_attr);
-
-        // Add variant name attribute
-        const variant_attr = h.stringAttr(self.ctx, variant_name);
-        const variant_id = h.identifier(self.ctx, "variant_name");
-        const variant_named_attr = c.mlirNamedAttributeGet(variant_id, variant_attr);
-
-        var all_attrs = [_]c.MlirNamedAttribute{ enum_named_attr, variant_named_attr };
-        c.mlirOperationStateAddAttributes(&state, all_attrs.len, &all_attrs);
-
-        // Add result type
-        c.mlirOperationStateAddResults(&state, 1, @ptrCast(&result_type));
-
-        const op = c.mlirOperationCreate(&state);
+        // Always use C++ API (dialect must be registered)
+        if (!self.isRegistered()) {
+            @panic("Ora dialect must be registered before creating operations");
+        }
+        const enum_name_ref = h.strRef(enum_name);
+        const variant_name_ref = h.strRef(variant_name);
+        const op = c.oraEnumConstantOpCreate(self.ctx, loc, enum_name_ref, variant_name_ref, result_type);
+        if (op.ptr == null) {
+            @panic("Failed to create ora.enum_constant operation");
+        }
         return op;
     }
 
@@ -562,6 +438,24 @@ pub const OraDialect = struct {
 
     /// Create ora.struct.decl operation
     pub fn createStructDecl(
+        self: *OraDialect,
+        name: []const u8,
+        loc: c.MlirLocation,
+    ) c.MlirOperation {
+        // Always use C++ API (dialect must be registered)
+        if (!self.isRegistered()) {
+            @panic("Ora dialect must be registered before creating operations");
+        }
+        const name_ref = h.strRef(name);
+        const op = c.oraStructDeclOpCreate(self.ctx, loc, name_ref);
+        if (op.ptr == null) {
+            @panic("Failed to create ora.struct.decl operation");
+        }
+        return op;
+    }
+
+    /// Create ora.struct.decl operation (old implementation kept for reference)
+    pub fn createStructDeclOld(
         self: *OraDialect,
         name: []const u8,
         loc: c.MlirLocation,
@@ -590,19 +484,15 @@ pub const OraDialect = struct {
         value: c.MlirValue,
         loc: c.MlirLocation,
     ) c.MlirOperation {
-        var state = h.opState("ora.struct_field_store", loc);
-
-        // Add operands
-        var operands = [_]c.MlirValue{ struct_value, value };
-        c.mlirOperationStateAddOperands(&state, operands.len, &operands);
-
-        // Add field name attribute
-        const field_attr = h.stringAttr(self.ctx, field_name);
-        const field_id = h.identifier(self.ctx, "field_name");
-        var attrs = [_]c.MlirNamedAttribute{c.mlirNamedAttributeGet(field_id, field_attr)};
-        c.mlirOperationStateAddAttributes(&state, attrs.len, &attrs);
-
-        const op = c.mlirOperationCreate(&state);
+        // Always use C++ API (dialect must be registered)
+        if (!self.isRegistered()) {
+            @panic("Ora dialect must be registered before creating operations");
+        }
+        const field_name_ref = h.strRef(field_name);
+        const op = c.oraStructFieldStoreOpCreate(self.ctx, loc, struct_value, field_name_ref, value);
+        if (op.ptr == null) {
+            @panic("Failed to create ora.struct_field_store operation");
+        }
         return op;
     }
 
@@ -614,44 +504,35 @@ pub const OraDialect = struct {
         result_type: c.MlirType,
         loc: c.MlirLocation,
     ) c.MlirOperation {
-        var state = h.opState("ora.struct_instantiate", loc);
-
-        // Add operands
-        if (field_values.len > 0) {
-            c.mlirOperationStateAddOperands(&state, field_values.len, field_values.ptr);
+        // Always use C++ API (dialect must be registered)
+        if (!self.isRegistered()) {
+            @panic("Ora dialect must be registered before creating operations");
         }
-
-        // Add struct name attribute
-        const name_attr = h.stringAttr(self.ctx, struct_name);
-        const name_id = h.identifier(self.ctx, "struct_name");
-        var attrs = [_]c.MlirNamedAttribute{c.mlirNamedAttributeGet(name_id, name_attr)};
-        c.mlirOperationStateAddAttributes(&state, attrs.len, &attrs);
-
-        // Add result type
-        c.mlirOperationStateAddResults(&state, 1, @ptrCast(&result_type));
-
-        const op = c.mlirOperationCreate(&state);
+        const struct_name_ref = h.strRef(struct_name);
+        const field_values_ptr = if (field_values.len > 0) field_values.ptr else null;
+        const op = c.oraStructInstantiateOpCreate(self.ctx, loc, struct_name_ref, field_values_ptr, @intCast(field_values.len), result_type);
+        if (op.ptr == null) {
+            @panic("Failed to create ora.struct_instantiate operation");
+        }
         return op;
     }
 
     /// Create ora.struct_init operation
     pub fn createStructInit(
-        _: *OraDialect,
-        field_values: []c.MlirValue,
+        self: *OraDialect,
+        field_values: []const c.MlirValue,
         result_type: c.MlirType,
         loc: c.MlirLocation,
     ) c.MlirOperation {
-        var state = h.opState("ora.struct_init", loc);
-
-        // Add operands
-        if (field_values.len > 0) {
-            c.mlirOperationStateAddOperands(&state, field_values.len, field_values.ptr);
+        // Always use C++ API (dialect must be registered)
+        if (!self.isRegistered()) {
+            @panic("Ora dialect must be registered before creating operations");
         }
-
-        // Add result type
-        c.mlirOperationStateAddResults(&state, 1, @ptrCast(&result_type));
-
-        const op = c.mlirOperationCreate(&state);
+        const field_values_ptr = if (field_values.len > 0) field_values.ptr else null;
+        const op = c.oraStructInitOpCreate(self.ctx, loc, field_values_ptr, @intCast(field_values.len), result_type);
+        if (op.ptr == null) {
+            @panic("Failed to create ora.struct_init operation");
+        }
         return op;
     }
 
@@ -661,40 +542,224 @@ pub const OraDialect = struct {
 
     /// Create ora.map_get operation
     pub fn createMapGet(
-        _: *OraDialect,
+        self: *OraDialect,
         map: c.MlirValue,
         key: c.MlirValue,
         result_type: c.MlirType,
         loc: c.MlirLocation,
     ) c.MlirOperation {
-        var state = h.opState("ora.map_get", loc);
-
-        // Add operands
-        var operands = [_]c.MlirValue{ map, key };
-        c.mlirOperationStateAddOperands(&state, operands.len, &operands);
-
-        // Add result type
-        c.mlirOperationStateAddResults(&state, 1, @ptrCast(&result_type));
-
-        const op = c.mlirOperationCreate(&state);
+        // Always use C++ API (dialect must be registered)
+        if (!self.isRegistered()) {
+            @panic("Ora dialect must be registered before creating operations");
+        }
+        const op = c.oraMapGetOpCreate(self.ctx, loc, map, key, result_type);
+        if (op.ptr == null) {
+            @panic("Failed to create ora.map_get operation");
+        }
         return op;
     }
 
     /// Create ora.map_store operation
     pub fn createMapStore(
-        _: *OraDialect,
+        self: *OraDialect,
         map: c.MlirValue,
         key: c.MlirValue,
         value: c.MlirValue,
         loc: c.MlirLocation,
     ) c.MlirOperation {
-        var state = h.opState("ora.map_store", loc);
+        // Always use C++ API (dialect must be registered)
+        if (!self.isRegistered()) {
+            @panic("Ora dialect must be registered before creating operations");
+        }
+        const op = c.oraMapStoreOpCreate(self.ctx, loc, map, key, value);
+        if (op.ptr == null) {
+            @panic("Failed to create ora.map_store operation");
+        }
+        return op;
+    }
 
-        // Add operands
-        var operands = [_]c.MlirValue{ map, key, value };
-        c.mlirOperationStateAddOperands(&state, operands.len, &operands);
+    /// Create ora.mload operation
+    pub fn createMLoad(
+        self: *OraDialect,
+        variable_name: []const u8,
+        result_type: c.MlirType,
+        loc: c.MlirLocation,
+    ) c.MlirOperation {
+        // Always use C++ API (dialect must be registered)
+        if (!self.isRegistered()) {
+            @panic("Ora dialect must be registered before creating operations");
+        }
+        const name_ref = h.strRef(variable_name);
+        const op = c.oraMLoadOpCreate(self.ctx, loc, name_ref, result_type);
+        if (op.ptr == null) {
+            @panic("Failed to create ora.mload operation");
+        }
+        return op;
+    }
 
-        const op = c.mlirOperationCreate(&state);
+    /// Create ora.mstore operation
+    pub fn createMStore(
+        self: *OraDialect,
+        value: c.MlirValue,
+        variable_name: []const u8,
+        loc: c.MlirLocation,
+    ) c.MlirOperation {
+        // Always use C++ API (dialect must be registered)
+        if (!self.isRegistered()) {
+            @panic("Ora dialect must be registered before creating operations");
+        }
+        const name_ref = h.strRef(variable_name);
+        const op = c.oraMStoreOpCreate(self.ctx, loc, value, name_ref);
+        if (op.ptr == null) {
+            @panic("Failed to create ora.mstore operation");
+        }
+        return op;
+    }
+
+    /// Create ora.tload operation
+    pub fn createTLoad(
+        self: *OraDialect,
+        key: []const u8,
+        result_type: c.MlirType,
+        loc: c.MlirLocation,
+    ) c.MlirOperation {
+        // Always use C++ API (dialect must be registered)
+        if (!self.isRegistered()) {
+            @panic("Ora dialect must be registered before creating operations");
+        }
+        const key_ref = h.strRef(key);
+        const op = c.oraTLoadOpCreate(self.ctx, loc, key_ref, result_type);
+        if (op.ptr == null) {
+            @panic("Failed to create ora.tload operation");
+        }
+        return op;
+    }
+
+    /// Create ora.tstore operation
+    pub fn createTStore(
+        self: *OraDialect,
+        value: c.MlirValue,
+        key: []const u8,
+        loc: c.MlirLocation,
+    ) c.MlirOperation {
+        // Always use C++ API (dialect must be registered)
+        if (!self.isRegistered()) {
+            @panic("Ora dialect must be registered before creating operations");
+        }
+        const key_ref = h.strRef(key);
+        const op = c.oraTStoreOpCreate(self.ctx, loc, value, key_ref);
+        if (op.ptr == null) {
+            @panic("Failed to create ora.tstore operation");
+        }
+        return op;
+    }
+
+    /// Create ora.continue operation
+    pub fn createContinue(
+        self: *OraDialect,
+        label: ?[]const u8,
+        loc: c.MlirLocation,
+    ) c.MlirOperation {
+        // Always use C++ API (dialect must be registered)
+        if (!self.isRegistered()) {
+            @panic("Ora dialect must be registered before creating operations");
+        }
+        const label_ref = if (label) |l| h.strRef(l) else c.MlirStringRef{ .data = null, .length = 0 };
+        const op = c.oraContinueOpCreate(self.ctx, loc, label_ref);
+        if (op.ptr == null) {
+            @panic("Failed to create ora.continue operation");
+        }
+        return op;
+    }
+
+    /// Create ora.return operation
+    pub fn createReturn(
+        self: *OraDialect,
+        operands: []const c.MlirValue,
+        loc: c.MlirLocation,
+    ) c.MlirOperation {
+        // Always use C++ API (dialect must be registered)
+        if (!self.isRegistered()) {
+            @panic("Ora dialect must be registered before creating operations");
+        }
+        const op = c.oraReturnOpCreate(self.ctx, loc, operands.ptr, @intCast(operands.len));
+        if (op.ptr == null) {
+            @panic("Failed to create ora.return operation");
+        }
+        return op;
+    }
+
+    /// Create ora.const operation
+    pub fn createConst(
+        self: *OraDialect,
+        name: []const u8,
+        value: c.MlirAttribute,
+        result_type: c.MlirType,
+        loc: c.MlirLocation,
+    ) c.MlirOperation {
+        // Always use C++ API (dialect must be registered)
+        if (!self.isRegistered()) {
+            @panic("Ora dialect must be registered before creating operations");
+        }
+        const name_ref = h.strRef(name);
+        const op = c.oraConstOpCreate(self.ctx, loc, name_ref, value, result_type);
+        if (op.ptr == null) {
+            @panic("Failed to create ora.const operation");
+        }
+        return op;
+    }
+
+    /// Create ora.immutable operation
+    pub fn createImmutable(
+        self: *OraDialect,
+        name: []const u8,
+        value: c.MlirValue,
+        result_type: c.MlirType,
+        loc: c.MlirLocation,
+    ) c.MlirOperation {
+        // Always use C++ API (dialect must be registered)
+        if (!self.isRegistered()) {
+            @panic("Ora dialect must be registered before creating operations");
+        }
+        const name_ref = h.strRef(name);
+        const op = c.oraImmutableOpCreate(self.ctx, loc, name_ref, value, result_type);
+        if (op.ptr == null) {
+            @panic("Failed to create ora.immutable operation");
+        }
+        return op;
+    }
+
+    /// Create ora.lock operation
+    pub fn createLock(
+        self: *OraDialect,
+        resource: c.MlirValue,
+        loc: c.MlirLocation,
+    ) c.MlirOperation {
+        // Always use C++ API (dialect must be registered)
+        if (!self.isRegistered()) {
+            @panic("Ora dialect must be registered before creating operations");
+        }
+        const op = c.oraLockOpCreate(self.ctx, loc, resource);
+        if (op.ptr == null) {
+            @panic("Failed to create ora.lock operation");
+        }
+        return op;
+    }
+
+    /// Create ora.unlock operation
+    pub fn createUnlock(
+        self: *OraDialect,
+        resource: c.MlirValue,
+        loc: c.MlirLocation,
+    ) c.MlirOperation {
+        // Always use C++ API (dialect must be registered)
+        if (!self.isRegistered()) {
+            @panic("Ora dialect must be registered before creating operations");
+        }
+        const op = c.oraUnlockOpCreate(self.ctx, loc, resource);
+        if (op.ptr == null) {
+            @panic("Failed to create ora.unlock operation");
+        }
         return op;
     }
 
@@ -978,7 +1043,24 @@ pub const OraDialect = struct {
         return op;
     }
 
-    /// Create scf.if operation
+    /// Create ora.if operation using C++ API (enables custom assembly formats)
+    pub fn createIf(
+        self: *OraDialect,
+        condition: c.MlirValue,
+        loc: c.MlirLocation,
+    ) c.MlirOperation {
+        // Always use C++ API (dialect must be registered)
+        if (!self.isRegistered()) {
+            @panic("Ora dialect must be registered before creating operations");
+        }
+        const op = c.oraIfOpCreate(self.ctx, loc, condition);
+        if (op.ptr == null) {
+            @panic("Failed to create ora.if operation");
+        }
+        return op;
+    }
+
+    /// Create scf.if operation (legacy - for compatibility)
     pub fn createScfIf(
         self: *OraDialect,
         condition: c.MlirValue,
@@ -1001,7 +1083,40 @@ pub const OraDialect = struct {
         return op;
     }
 
-    /// Create scf.while operation
+    /// Create ora.while operation using C++ API (enables custom assembly formats)
+    pub fn createWhile(
+        self: *OraDialect,
+        condition: c.MlirValue,
+        loc: c.MlirLocation,
+    ) c.MlirOperation {
+        // Always use C++ API (dialect must be registered)
+        if (!self.isRegistered()) {
+            @panic("Ora dialect must be registered before creating operations");
+        }
+        const op = c.oraWhileOpCreate(self.ctx, loc, condition);
+        if (op.ptr == null) {
+            @panic("Failed to create ora.while operation");
+        }
+        return op;
+    }
+
+    /// Create ora.test operation (simple test for custom printer)
+    pub fn createTest(
+        self: *OraDialect,
+        loc: c.MlirLocation,
+    ) c.MlirOperation {
+        // Always use C++ API (dialect must be registered)
+        if (!self.isRegistered()) {
+            @panic("Ora dialect must be registered before creating operations");
+        }
+        const op = c.oraTestOpCreate(self.ctx, loc);
+        if (op.ptr == null) {
+            @panic("Failed to create ora.test operation");
+        }
+        return op;
+    }
+
+    /// Create scf.while operation (legacy - for compatibility)
     pub fn createScfWhile(
         self: *OraDialect,
         operands: []const c.MlirValue,
@@ -1277,6 +1392,134 @@ pub const OraDialect = struct {
         c.mlirOperationStateAddAttributes(&state, attrs.len, &attrs);
 
         const op = c.mlirOperationCreate(&state);
+        return op;
+    }
+
+    //===----------------------------------------------------------------------===//
+    // Financial Operations
+    //===----------------------------------------------------------------------===//
+
+    /// Create ora.move operation
+    pub fn createMove(
+        self: *OraDialect,
+        amount: c.MlirValue,
+        source: c.MlirValue,
+        destination: c.MlirValue,
+        loc: c.MlirLocation,
+    ) c.MlirOperation {
+        // Always use C++ API (dialect must be registered)
+        if (!self.isRegistered()) {
+            @panic("Ora dialect must be registered before creating operations");
+        }
+        const op = c.oraMoveOpCreate(self.ctx, loc, amount, source, destination);
+        if (op.ptr == null) {
+            @panic("Failed to create ora.move operation");
+        }
+        return op;
+    }
+
+    //===----------------------------------------------------------------------===//
+    // Event Operations
+    //===----------------------------------------------------------------------===//
+
+    /// Create ora.log operation
+    pub fn createLog(
+        self: *OraDialect,
+        event_name: []const u8,
+        parameters: []const c.MlirValue,
+        loc: c.MlirLocation,
+    ) c.MlirOperation {
+        // Always use C++ API (dialect must be registered)
+        if (!self.isRegistered()) {
+            @panic("Ora dialect must be registered before creating operations");
+        }
+        const event_name_ref = h.strRef(event_name);
+        const parameters_ptr = if (parameters.len > 0) parameters.ptr else null;
+        const op = c.oraLogOpCreate(self.ctx, loc, event_name_ref, parameters_ptr, @intCast(parameters.len));
+        if (op.ptr == null) {
+            @panic("Failed to create ora.log operation");
+        }
+        return op;
+    }
+
+    //===----------------------------------------------------------------------===//
+    // Error Handling Operations
+    //===----------------------------------------------------------------------===//
+
+    /// Create ora.try_catch operation
+    pub fn createTry(
+        self: *OraDialect,
+        try_operation: c.MlirValue,
+        result_type: c.MlirType,
+        loc: c.MlirLocation,
+    ) c.MlirOperation {
+        // Always use C++ API (dialect must be registered)
+        if (!self.isRegistered()) {
+            @panic("Ora dialect must be registered before creating operations");
+        }
+        const op = c.oraTryOpCreate(self.ctx, loc, try_operation, result_type);
+        if (op.ptr == null) {
+            @panic("Failed to create ora.try_catch operation");
+        }
+        return op;
+    }
+
+    //===----------------------------------------------------------------------===//
+    // Loop Operations
+    //===----------------------------------------------------------------------===//
+
+    /// Create ora.for operation
+    pub fn createFor(
+        self: *OraDialect,
+        collection: c.MlirValue,
+        loc: c.MlirLocation,
+    ) c.MlirOperation {
+        // Always use C++ API (dialect must be registered)
+        if (!self.isRegistered()) {
+            @panic("Ora dialect must be registered before creating operations");
+        }
+        const op = c.oraForOpCreate(self.ctx, loc, collection);
+        if (op.ptr == null) {
+            @panic("Failed to create ora.for operation");
+        }
+        return op;
+    }
+
+    /// Create ora.break operation
+    pub fn createBreak(
+        self: *OraDialect,
+        label: ?[]const u8,
+        values: []const c.MlirValue,
+        loc: c.MlirLocation,
+    ) c.MlirOperation {
+        // Always use C++ API (dialect must be registered)
+        if (!self.isRegistered()) {
+            @panic("Ora dialect must be registered before creating operations");
+        }
+        const label_ref = if (label) |l| h.strRef(l) else c.MlirStringRef{ .data = null, .length = 0 };
+        const values_ptr = if (values.len > 0) values.ptr else null;
+        const op = c.oraBreakOpCreate(self.ctx, loc, label_ref, values_ptr, @intCast(values.len));
+        if (op.ptr == null) {
+            @panic("Failed to create ora.break operation");
+        }
+        return op;
+    }
+
+    /// Create ora.switch operation
+    pub fn createSwitch(
+        self: *OraDialect,
+        value: c.MlirValue,
+        result_type: c.MlirType,
+        loc: c.MlirLocation,
+    ) c.MlirOperation {
+        // Always use C++ API (dialect must be registered)
+        if (!self.isRegistered()) {
+            @panic("Ora dialect must be registered before creating operations");
+        }
+        const op = c.oraSwitchOpCreate(self.ctx, loc, value, result_type);
+        if (op.ptr == null) {
+            @panic("Failed to create ora.switch operation");
+        }
         return op;
     }
 };

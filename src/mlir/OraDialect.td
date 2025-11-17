@@ -63,4 +63,11 @@ class Ora_Op<string mnemonic, list<Trait> traits = []> :
 class Ora_PureOp<string mnemonic, list<Trait> traits = []> :
     Ora_Op<mnemonic, !listconcat(traits, [Pure])>;
 
+//===----------------------------------------------------------------------===//
+// Ora Types
+//===----------------------------------------------------------------------===//
+
+// Note: Type definitions are now in OraTypes.td
+// IntegerType and all other types are defined there
+
 #endif // ORA_DIALECT

@@ -328,6 +328,23 @@ pub const SymbolTable = struct {
         }
     }
 
+    /// Update a symbol's type
+    pub fn updateSymbolType(self: *SymbolTable, name: []const u8, type_info: c.MlirType) !void {
+        var scope_idx: usize = self.current_scope;
+        while (true) {
+            if (self.scopes.items[scope_idx].get(name)) |symbol| {
+                var updated_symbol = symbol;
+                updated_symbol.type = type_info;
+                try self.scopes.items[scope_idx].put(name, updated_symbol);
+                return;
+            }
+            if (scope_idx == 0) break;
+            scope_idx -= 1;
+        }
+        // If symbol not found, this is an error - we can't update a non-existent symbol
+        return error.SymbolNotFound;
+    }
+
     /// Check if a symbol exists in any scope
     pub fn hasSymbol(self: *const SymbolTable, name: []const u8) bool {
         return self.lookupSymbol(name) != null;

@@ -276,28 +276,21 @@ pub const DeclarationLowerer = struct {
 
     /// Lower contract declarations with enhanced metadata and inheritance support (Requirements 6.7)
     pub fn lowerContract(self: *const DeclarationLowerer, contract: *const lib.ContractNode) c.MlirOperation {
-        // Create the contract operation
-        var state = h.opState("ora.contract", self.createFileLocation(contract.span));
-
-        // Collect contract attributes
-        var attributes = std.ArrayList(c.MlirNamedAttribute){};
-        defer attributes.deinit(std.heap.page_allocator);
-
-        // Add contract name
+        // Create the contract operation using C++ API
         const name_ref = c.mlirStringRefCreate(contract.name.ptr, contract.name.len);
-        const name_attr = c.mlirStringAttrGet(self.ctx, name_ref);
-        const name_id = h.identifier(self.ctx, "sym_name");
-        attributes.append(std.heap.page_allocator, c.mlirNamedAttributeGet(name_id, name_attr)) catch {};
+        const contract_op = c.oraContractOpCreate(self.ctx, self.createFileLocation(contract.span), name_ref);
+        if (contract_op.ptr == null) {
+            @panic("Failed to create ora.contract operation");
+        }
 
-        // Add inheritance information if present
+        // Set additional attributes using C API (attributes are just metadata)
         if (contract.extends) |base_contract| {
             const extends_ref = c.mlirStringRefCreate(base_contract.ptr, base_contract.len);
             const extends_attr = c.mlirStringAttrGet(self.ctx, extends_ref);
-            const extends_id = h.identifier(self.ctx, "ora.extends");
-            attributes.append(std.heap.page_allocator, c.mlirNamedAttributeGet(extends_id, extends_attr)) catch {};
+            const extends_name = h.strRef("ora.extends");
+            c.mlirOperationSetAttributeByName(contract_op, extends_name, extends_attr);
         }
 
-        // Add interface implementation information
         if (contract.implements.len > 0) {
             // Create array attribute for implemented interfaces
             var interface_attrs = std.ArrayList(c.MlirAttribute){};
@@ -310,42 +303,18 @@ pub const DeclarationLowerer = struct {
             }
 
             const implements_array = c.mlirArrayAttrGet(self.ctx, @intCast(interface_attrs.items.len), interface_attrs.items.ptr);
-            const implements_id = h.identifier(self.ctx, "ora.implements");
-            attributes.append(std.heap.page_allocator, c.mlirNamedAttributeGet(implements_id, implements_array)) catch {};
+            const implements_name = h.strRef("ora.implements");
+            c.mlirOperationSetAttributeByName(contract_op, implements_name, implements_array);
         }
 
-        // Add contract metadata attributes
+        // Add contract metadata attribute
         const contract_attr = c.mlirBoolAttrGet(self.ctx, 1);
-        const contract_id = h.identifier(self.ctx, "ora.contract_decl");
-        attributes.append(std.heap.page_allocator, c.mlirNamedAttributeGet(contract_id, contract_attr)) catch {};
+        const contract_name = h.strRef("ora.contract_decl");
+        c.mlirOperationSetAttributeByName(contract_op, contract_name, contract_attr);
 
-        // Apply all attributes
-        c.mlirOperationStateAddAttributes(&state, @intCast(attributes.items.len), attributes.items.ptr);
-
-        // Create the contract body region
-        const region = c.mlirRegionCreate();
-        const block = c.mlirBlockCreate(0, null, null);
-        c.mlirRegionInsertOwnedBlock(region, 0, block);
-
-        // Create ora.storage region for storage variables
-        const storage_region = c.mlirRegionCreate();
-        const storage_block = c.mlirBlockCreate(0, null, null);
-        c.mlirRegionInsertOwnedBlock(storage_region, 0, storage_block);
-
-        // Create ora.storage operation
-        var storage_state = h.opState("ora.storage", self.createFileLocation(contract.span));
-        const storage_region_for_op = c.mlirRegionCreate();
-        const storage_block_for_op = c.mlirBlockCreate(0, null, null);
-        c.mlirRegionInsertOwnedBlock(storage_region_for_op, 0, storage_block_for_op);
-        c.mlirOperationStateAddOwnedRegions(&storage_state, 1, @ptrCast(&storage_region_for_op));
-        const storage_op = c.mlirOperationCreate(&storage_state);
-
-        // Add both regions to the contract operation
-        const regions = [_]c.MlirRegion{ region, storage_region };
-        c.mlirOperationStateAddOwnedRegions(&state, 2, @ptrCast(&regions));
-
-        // Add storage operation to the main contract block
-        h.appendOp(block, storage_op);
+        // Get the body region from the created operation
+        const region = c.mlirOperationGetRegion(contract_op, 0);
+        const block = c.mlirRegionGetFirstBlock(region);
 
         // Create contract-level symbol management
         var contract_symbol_table = SymbolTable.init(std.heap.page_allocator);
@@ -359,7 +328,7 @@ pub const DeclarationLowerer = struct {
             switch (child) {
                 .VariableDecl => |var_decl| {
                     // Include ghost variables in storage map for verification
-                    // They will be filtered out during Yul lowering (not in bytecode)
+                    // They will be filtered out during target code generation (not in bytecode)
                     switch (var_decl.region) {
                         .Storage => {
                             // This is a storage variable - add it to the storage map and symbol table
@@ -368,6 +337,10 @@ pub const DeclarationLowerer = struct {
                             // Add to contract symbol table for member variable tracking
                             const var_type = self.type_mapper.toMlirType(var_decl.type_info);
                             contract_symbol_table.addSymbol(var_decl.name, var_type, var_decl.region, null) catch {};
+                            // Also populate the actual symbol table used by expression/statement lowerers
+                            if (self.symbol_table) |st| {
+                                st.addSymbol(var_decl.name, var_type, var_decl.region, null) catch {};
+                            }
                         },
                         .Memory => {
                             // Memory variables are allocated in memory space
@@ -399,7 +372,7 @@ pub const DeclarationLowerer = struct {
             switch (child) {
                 .Function => |f| {
                     // Include ghost functions in MLIR for verification
-                    // They will be filtered out during Yul lowering (not in bytecode)
+                    // They will be filtered out during target code generation (not in bytecode)
                     var local_var_map = LocalVarMap.init(std.heap.page_allocator);
                     defer local_var_map.deinit();
                     const func_op = self.lowerFunction(&f, &storage_map, &local_var_map);
@@ -407,13 +380,13 @@ pub const DeclarationLowerer = struct {
                 },
                 .VariableDecl => |var_decl| {
                     // Include ghost variables in MLIR for verification
-                    // They will be filtered out during Yul lowering (not in bytecode)
+                    // They will be filtered out during target code generation (not in bytecode)
 
                     switch (var_decl.region) {
                         .Storage => {
-                            // Create ora.global operation for storage variables in storage region
+                            // Create ora.global operation for storage variables (directly in contract body)
                             const global_op = self.createGlobalDeclaration(&var_decl);
-                            h.appendOp(storage_block_for_op, global_op);
+                            h.appendOp(block, global_op);
                         },
                         .Memory => {
                             // Create ora.memory.global operation for memory variables
@@ -467,8 +440,8 @@ pub const DeclarationLowerer = struct {
             }
         }
 
-        // Create and return the contract operation
-        return c.mlirOperationCreate(&state);
+        // Return the contract operation (already created via C++ API)
+        return contract_op;
     }
 
     /// Lower struct declarations with type definitions and field information (Requirements 7.1)
@@ -868,17 +841,33 @@ pub const DeclarationLowerer = struct {
 
     /// Create global storage variable declaration
     pub fn createGlobalDeclaration(self: *const DeclarationLowerer, var_decl: *const lib.ast.Statements.VariableDeclNode) c.MlirOperation {
-        // Determine the variable type
-        const var_type = if (std.mem.eql(u8, var_decl.name, "status"))
-            h.boolType(self.ctx) // bool -> i1
-        else
-            c.mlirIntegerTypeGet(self.ctx, constants.DEFAULT_INTEGER_BITS); // default to i256
+        // Use the type mapper to get the correct MLIR type (preserves signedness: u256 -> ui256, i256 -> si256)
+        const var_type = self.type_mapper.toMlirType(var_decl.type_info);
 
-        // Determine the initial value
-        const init_attr = if (std.mem.eql(u8, var_decl.name, "status"))
-            c.mlirIntegerAttrGet(h.boolType(self.ctx), 0) // bool -> i1 with value 0 (false)
-        else
-            c.mlirIntegerAttrGet(c.mlirIntegerTypeGet(self.ctx, constants.DEFAULT_INTEGER_BITS), 0); // default to i256 with value 0
+        // The symbol table should already be populated in the first pass with the correct type
+        // (using toMlirType which now returns i1 for booleans)
+        // If it's not correct, that's a separate issue that needs to be fixed at the source
+
+        // Check if this is a map type - maps don't have scalar initializers
+        const is_map_type = if (var_decl.type_info.ora_type) |ora_type| blk: {
+            break :blk ora_type == .map or ora_type == .double_map;
+        } else false;
+
+        // Determine the initial value based on the actual type
+        // Maps don't have initializers - use null attribute
+        const init_attr = if (is_map_type) blk: {
+            // Maps are first-class types, no scalar initializer
+            break :blk c.mlirAttributeGetNull();
+        } else if (var_decl.value) |_| blk: {
+            // If there's an initial value expression, we need to lower it
+            // For now, use a placeholder - the actual value should come from lowering the expression
+            const zero_attr = c.mlirIntegerAttrGet(var_type, 0);
+            break :blk zero_attr;
+        } else blk: {
+            // No initial value - use zero of the correct type
+            const zero_attr = c.mlirIntegerAttrGet(var_type, 0);
+            break :blk zero_attr;
+        };
 
         // Use the dialect helper function to create the global operation
         return self.ora_dialect.createGlobal(var_decl.name, var_type, init_attr, self.createFileLocation(var_decl.span));

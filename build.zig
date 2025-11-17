@@ -21,9 +21,6 @@ pub fn build(b: *std.Build) void {
     const mlir_opt_level = b.option([]const u8, "mlir-opt", "Default MLIR optimization level (none, basic, aggressive)") orelse "basic";
     const enable_mlir_passes = b.option([]const u8, "mlir-passes", "Default MLIR pass pipeline") orelse null;
 
-    // Build Solidity libraries using CMake
-    const cmake_step = buildSolidityLibraries(b, target, optimize);
-
     // This creates a "module", which represents a collection of source files alongside
     // some compilation options, such as optimization mode and linked system libraries.
     // Every executable or library we compile will be based on one or more modules.
@@ -88,16 +85,9 @@ pub fn build(b: *std.Build) void {
     exe.root_module.addOptions("build_options", mlir_options);
     lib_mod.addOptions("build_options", mlir_options);
 
-    // Build and link Yul wrapper
-    const yul_wrapper = buildYulWrapper(b, target, optimize, cmake_step);
-    exe.addObject(yul_wrapper);
-
-    // Add include path for yul_wrapper.h
+    // Add include path
     exe.addIncludePath(b.path("src"));
     lib.addIncludePath(b.path("src"));
-
-    // Link Solidity libraries to the executable
-    linkSolidityLibraries(b, exe, cmake_step, target);
 
     // Build and link MLIR (required) - only for executable, not library
     const mlir_step = buildMlirLibraries(b, target, optimize);
@@ -135,34 +125,6 @@ pub fn build(b: *std.Build) void {
     // This will evaluate the `run` step rather than the default, which is "install".
     const run_step = b.step("run", "Run the app");
     run_step.dependOn(&run_cmd.step);
-
-    // Create yul test executable
-    const yul_test_mod = b.createModule(.{
-        .root_source_file = b.path("examples/demos/yul_test.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    yul_test_mod.addImport("ora_lib", lib_mod);
-
-    const yul_test = b.addExecutable(.{
-        .name = "yul_test",
-        .root_module = yul_test_mod,
-    });
-
-    // Link Yul wrapper and Solidity libraries
-    const yul_test_wrapper = buildYulWrapper(b, target, optimize, cmake_step);
-    yul_test.addObject(yul_test_wrapper);
-
-    // Add include path for yul_wrapper.h
-    yul_test.addIncludePath(b.path("src"));
-
-    linkSolidityLibraries(b, yul_test, cmake_step, target);
-
-    const run_yul_test = b.addRunArtifact(yul_test);
-    run_yul_test.step.dependOn(b.getInstallStep());
-
-    const yul_test_step = b.step("yul-test", "Run the Yul integration test");
-    yul_test_step.dependOn(&run_yul_test.step);
 
     // Create optimization demo executable
     const optimization_demo_mod = b.createModule(.{
@@ -269,289 +231,6 @@ fn runLexerVerbose(step: *std.Build.Step, options: std.Build.Step.MakeOptions) a
     }
 }
 
-/// Build Solidity libraries using CMake
-fn buildSolidityLibraries(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Step {
-    _ = target;
-    _ = optimize;
-
-    const cmake_step = b.allocator.create(std.Build.Step) catch @panic("OOM");
-    cmake_step.* = std.Build.Step.init(.{
-        .id = .custom,
-        .name = "cmake-build-solidity",
-        .owner = b,
-        .makeFn = buildSolidityLibrariesImpl,
-    });
-
-    return cmake_step;
-}
-
-/// Implementation of CMake build for Solidity libraries
-fn buildSolidityLibrariesImpl(step: *std.Build.Step, options: std.Build.Step.MakeOptions) anyerror!void {
-    _ = options;
-
-    const b = step.owner;
-    const allocator = b.allocator;
-
-    // Detect target platform at runtime for CMake configuration
-    const builtin = @import("builtin");
-
-    // Create build directory
-    const build_dir = "vendor/solidity/build";
-    std.fs.cwd().makeDir(build_dir) catch |err| switch (err) {
-        error.PathAlreadyExists => {},
-        else => return err,
-    };
-
-    // Determine platform-specific CMake flags for C++ ABI compatibility
-    var cmake_args = std.array_list.Managed([]const u8).init(allocator);
-    defer cmake_args.deinit();
-
-    // Prefer Ninja generator when available for faster, more parallel builds
-    var use_ninja: bool = false;
-    {
-        const probe = std.process.Child.run(.{ .allocator = allocator, .argv = &[_][]const u8{ "ninja", "--version" }, .cwd = "." }) catch null;
-        if (probe) |res| {
-            switch (res.term) {
-                .Exited => |code| {
-                    if (code == 0) use_ninja = true;
-                },
-                else => {},
-            }
-        }
-        if (!use_ninja) {
-            const probe_alt = std.process.Child.run(.{ .allocator = allocator, .argv = &[_][]const u8{ "ninja-build", "--version" }, .cwd = "." }) catch null;
-            if (probe_alt) |res2| {
-                switch (res2.term) {
-                    .Exited => |code| {
-                        if (code == 0) use_ninja = true;
-                    },
-                    else => {},
-                }
-            }
-        }
-    }
-
-    try cmake_args.append("cmake");
-    if (use_ninja) {
-        try cmake_args.append("-G");
-        try cmake_args.append("Ninja");
-    }
-    try cmake_args.appendSlice(&[_][]const u8{
-        "-S",
-        "vendor/solidity",
-        "-B",
-        build_dir,
-        "-DCMAKE_BUILD_TYPE=Release",
-        "-DONLY_BUILD_SOLIDITY_LIBRARIES=ON",
-        "-DTESTS=OFF",
-    });
-
-    // Add platform-specific flags to ensure consistent C++ ABI
-    if (builtin.os.tag == .linux) {
-        std.log.info("Adding Boost paths for Linux", .{});
-        // Force libc++ usage on Linux to match macOS ABI
-        try cmake_args.append("-DCMAKE_CXX_FLAGS=-stdlib=libc++ -lc++abi");
-        // Ensure the linker uses libc++ and c++abi as well
-        try cmake_args.append("-DCMAKE_EXE_LINKER_FLAGS=-stdlib=libc++ -lc++abi");
-        try cmake_args.append("-DCMAKE_SHARED_LINKER_FLAGS=-stdlib=libc++ -lc++abi");
-        try cmake_args.append("-DCMAKE_MODULE_LINKER_FLAGS=-stdlib=libc++ -lc++abi");
-        try cmake_args.append("-DCMAKE_CXX_COMPILER=clang++");
-        try cmake_args.append("-DCMAKE_C_COMPILER=clang");
-    } else if (builtin.os.tag == .macos) {
-        std.log.info("Adding Boost paths for Apple Silicon Mac", .{});
-        // macOS already uses libc++ by default, but be explicit
-        try cmake_args.append("-DCMAKE_CXX_FLAGS=-stdlib=libc++");
-
-        // Allow forcing CMake arch when cross-compiling on macOS via env var
-        if (std.process.getEnvVarOwned(allocator, "ORA_CMAKE_OSX_ARCH") catch null) |arch| {
-            defer allocator.free(arch);
-            const flag = b.fmt("-DCMAKE_OSX_ARCHITECTURES={s}", .{arch});
-            try cmake_args.append(flag);
-            std.log.info("Using CMAKE_OSX_ARCHITECTURES={s}", .{arch});
-        }
-    } else if (builtin.os.tag == .windows) {
-        std.log.info("Adding Boost paths for Windows", .{});
-        // Windows: Use MSVC and configure Boost paths
-        try cmake_args.append("-DCMAKE_CXX_FLAGS=/std:c++20");
-
-        // Try multiple possible Boost locations for Windows
-        try cmake_args.append("-DCMAKE_PREFIX_PATH=C:/vcpkg/installed/x64-windows;C:/ProgramData/chocolatey/lib/boost-msvc-14.3/lib/native;C:/tools/boost");
-
-        // Set Boost-specific variables for older CMake compatibility
-        try cmake_args.append("-DBoost_USE_STATIC_LIBS=ON");
-        try cmake_args.append("-DBoost_USE_MULTITHREADED=ON");
-        try cmake_args.append("-DBoost_USE_STATIC_RUNTIME=OFF");
-
-        // Suppress CMake developer warnings
-        try cmake_args.append("-Wno-dev");
-    }
-
-    // Configure CMake
-    const cmake_configure = std.process.Child.run(.{
-        .allocator = allocator,
-        .argv = cmake_args.items,
-        .cwd = ".",
-    }) catch |err| {
-        std.log.err("Failed to configure CMake: {}", .{err});
-        return err;
-    };
-
-    if (cmake_configure.term.Exited != 0) {
-        std.log.err("CMake configure failed with exit code: {}", .{cmake_configure.term.Exited});
-        std.log.err("CMake stderr: {s}", .{cmake_configure.stderr});
-        return error.CMakeConfigureFailed;
-    }
-
-    // Build libraries
-    const cmake_build = std.process.Child.run(.{
-        .allocator = allocator,
-        .argv = &[_][]const u8{
-            "cmake",
-            "--build",
-            build_dir,
-            "--parallel",
-            "--target",
-            "solutil",
-            "--target",
-            "langutil",
-            "--target",
-            "smtutil",
-            "--target",
-            "evmasm",
-            "--target",
-            "yul",
-        },
-    }) catch |err| {
-        std.log.err("Failed to build with CMake: {}", .{err});
-        return err;
-    };
-
-    if (cmake_build.term.Exited != 0) {
-        std.log.err("CMake build failed with exit code: {}", .{cmake_build.term.Exited});
-        std.log.err("CMake stderr: {s}", .{cmake_build.stderr});
-        return error.CMakeBuildFailed;
-    }
-
-    std.log.info("Successfully built Solidity libraries", .{});
-}
-
-/// Build the Yul wrapper C++ library
-fn buildYulWrapper(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, cmake_step: *std.Build.Step) *std.Build.Step.Compile {
-    const yul_wrapper_mod = b.createModule(.{
-        .target = target,
-        .optimize = optimize,
-    });
-
-    const yul_wrapper = b.addObject(.{
-        .name = "yul_wrapper",
-        .root_module = yul_wrapper_mod,
-    });
-
-    // Depend on CMake build
-    yul_wrapper.step.dependOn(cmake_step);
-
-    // Add the C++ source file
-    // Configure C++ flags and ensure libc++ on Linux to match CMake configuration
-    var cpp_flags = std.array_list.Managed([]const u8).init(b.allocator);
-    defer cpp_flags.deinit();
-    cpp_flags.appendSlice(&[_][]const u8{
-        "-std=c++20",
-        "-fPIC",
-        "-Wno-deprecated",
-    }) catch @panic("OOM");
-
-    if (target.result.os.tag == .linux) {
-        // Use libc++ headers on Linux to align with CMake's -stdlib=libc++
-        cpp_flags.append("-stdlib=libc++") catch @panic("OOM");
-    }
-
-    yul_wrapper.addCSourceFile(.{
-        .file = b.path("src/yul_wrapper.cpp"),
-        .flags = cpp_flags.items,
-    });
-
-    // Add include directories
-    yul_wrapper.addIncludePath(b.path("src"));
-    yul_wrapper.addIncludePath(b.path("vendor/solidity"));
-    yul_wrapper.addIncludePath(b.path("vendor/solidity/libsolutil"));
-    yul_wrapper.addIncludePath(b.path("vendor/solidity/liblangutil"));
-    yul_wrapper.addIncludePath(b.path("vendor/solidity/libsmtutil"));
-    yul_wrapper.addIncludePath(b.path("vendor/solidity/libevmasm"));
-    yul_wrapper.addIncludePath(b.path("vendor/solidity/libyul"));
-    yul_wrapper.addIncludePath(b.path("vendor/solidity/deps/fmtlib/include"));
-    yul_wrapper.addIncludePath(b.path("vendor/solidity/deps/range-v3/include"));
-    yul_wrapper.addIncludePath(b.path("vendor/solidity/deps/nlohmann-json/include"));
-
-    // Add platform-specific Boost paths
-    addBoostPaths(b, yul_wrapper, target);
-
-    // Link C++ standard library
-    // Use the appropriate C++ stdlib based on the target
-    switch (target.result.os.tag) {
-        .linux => {
-            // On Linux, use libc++ and c++abi to match CMake build
-            yul_wrapper.linkLibCpp();
-            yul_wrapper.linkSystemLibrary("c++abi");
-        },
-        .macos => {
-            // On macOS, use libc++
-            yul_wrapper.linkLibCpp();
-        },
-        else => {
-            // Default to libc++
-            yul_wrapper.linkLibCpp();
-        },
-    }
-
-    return yul_wrapper;
-}
-
-/// Link Solidity libraries to the executable
-fn linkSolidityLibraries(b: *std.Build, exe: *std.Build.Step.Compile, cmake_step: *std.Build.Step, target: std.Build.ResolvedTarget) void {
-    // Make executable depend on CMake build
-    exe.step.dependOn(cmake_step);
-
-    // Add library paths
-    exe.addLibraryPath(b.path("vendor/solidity/build/libsolutil"));
-    exe.addLibraryPath(b.path("vendor/solidity/build/liblangutil"));
-    exe.addLibraryPath(b.path("vendor/solidity/build/libsmtutil"));
-    exe.addLibraryPath(b.path("vendor/solidity/build/libevmasm"));
-    exe.addLibraryPath(b.path("vendor/solidity/build/libyul"));
-
-    // Link libraries (order matters - dependencies first)
-    exe.linkSystemLibrary("solutil");
-    exe.linkSystemLibrary("langutil");
-    exe.linkSystemLibrary("smtutil");
-    exe.linkSystemLibrary("evmasm");
-    exe.linkSystemLibrary("yul");
-
-    // Link C++ standard library
-    // Use the appropriate C++ stdlib based on the target
-    switch (target.result.os.tag) {
-        .linux => {
-            // On Linux, use libc++ and c++abi to match CMake build
-            exe.linkLibCpp();
-            exe.linkSystemLibrary("c++abi");
-        },
-        .macos => {
-            // On macOS, use libc++
-            exe.linkLibCpp();
-        },
-        else => {
-            // Default to libc++
-            exe.linkLibCpp();
-        },
-    }
-
-    // Add include directories for headers
-    exe.addIncludePath(b.path("vendor/solidity"));
-    exe.addIncludePath(b.path("vendor/solidity/libsolutil"));
-    exe.addIncludePath(b.path("vendor/solidity/liblangutil"));
-    exe.addIncludePath(b.path("vendor/solidity/libsmtutil"));
-    exe.addIncludePath(b.path("vendor/solidity/libevmasm"));
-    exe.addIncludePath(b.path("vendor/solidity/libyul"));
-}
-
 /// Build MLIR from vendored llvm-project and install into vendor/mlir
 fn buildMlirLibraries(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Step {
     _ = target;
@@ -588,6 +267,27 @@ fn buildMlirLibrariesImpl(step: *std.Build.Step, options: std.Build.Step.MakeOpt
         error.PathAlreadyExists => {},
         else => return err,
     };
+
+    // Clear CMake cache if it exists to avoid stale SDK paths after system updates
+    const cache_file = try std.fmt.allocPrint(allocator, "{s}/CMakeCache.txt", .{build_dir});
+    defer allocator.free(cache_file);
+    if (cwd.access(cache_file, .{}) catch null) |_| {
+        std.log.info("Clearing stale MLIR CMake cache after macOS/Xcode update", .{});
+        cwd.deleteFile(cache_file) catch |err| {
+            std.log.warn("Could not delete MLIR CMakeCache.txt: {}", .{err});
+        };
+    }
+
+    // Also clear CMakeFiles directory which may contain cached package configs
+    const cmake_files_dir = try std.fmt.allocPrint(allocator, "{s}/CMakeFiles", .{build_dir});
+    defer allocator.free(cmake_files_dir);
+    if (cwd.access(cmake_files_dir, .{}) catch null) |_| {
+        std.log.info("Clearing MLIR CMakeFiles directory to remove stale package configs", .{});
+        cwd.deleteTree(cmake_files_dir) catch |err| {
+            std.log.warn("Could not delete MLIR CMakeFiles directory: {}", .{err});
+        };
+    }
+
     const install_prefix = "vendor/mlir";
     cwd.makeDir(install_prefix) catch |err| switch (err) {
         error.PathAlreadyExists => {},
@@ -668,6 +368,26 @@ fn buildMlirLibrariesImpl(step: *std.Build.Step, options: std.Build.Step.MakeOpt
         try cmake_args.append("-DCMAKE_C_COMPILER=clang");
     } else if (builtin.os.tag == .macos) {
         try cmake_args.append("-DCMAKE_CXX_FLAGS=-stdlib=libc++");
+
+        // Fix SDK path issue after macOS/Xcode update
+        // Use xcrun to get the actual SDK path and set it explicitly
+        const sdk_path_result = std.process.Child.run(.{
+            .allocator = allocator,
+            .argv = &[_][]const u8{ "xcrun", "--show-sdk-path" },
+            .cwd = ".",
+        }) catch null;
+        if (sdk_path_result) |result| {
+            if (result.term.Exited == 0) {
+                const sdk_path = std.mem.trim(u8, result.stdout, " \n\r\t");
+                if (sdk_path.len > 0) {
+                    const sysroot_flag = try std.fmt.allocPrint(allocator, "-DCMAKE_OSX_SYSROOT={s}", .{sdk_path});
+                    defer allocator.free(sysroot_flag);
+                    try cmake_args.append(sysroot_flag);
+                    std.log.info("Setting MLIR CMAKE_OSX_SYSROOT={s}", .{sdk_path});
+                }
+            }
+        }
+
         if (std.process.getEnvVarOwned(allocator, "ORA_CMAKE_OSX_ARCH") catch null) |arch| {
             defer allocator.free(arch);
             const flag = b.fmt("-DCMAKE_OSX_ARCHITECTURES={s}", .{arch});
@@ -846,7 +566,7 @@ fn buildOraDialectLibraryImpl(step: *std.Build.Step, options: std.Build.Step.Mak
 
 /// Link MLIR to the given executable using the installed prefix
 fn linkMlirLibraries(b: *std.Build, exe: *std.Build.Step.Compile, mlir_step: *std.Build.Step, ora_dialect_step: *std.Build.Step, target: std.Build.ResolvedTarget) void {
-    // Depend on MLIR build and Ora dialect build
+    // Depend on MLIR build and dialect builds
     exe.step.dependOn(mlir_step);
     exe.step.dependOn(ora_dialect_step);
 
@@ -1042,6 +762,27 @@ fn buildZ3LibrariesImpl(step: *std.Build.Step, options: std.Build.Step.MakeOptio
         error.PathAlreadyExists => {},
         else => return err,
     };
+
+    // Clear CMake cache if it exists to avoid stale SDK paths after system updates
+    const cache_file = try std.fmt.allocPrint(allocator, "{s}/CMakeCache.txt", .{build_dir});
+    defer allocator.free(cache_file);
+    if (cwd.access(cache_file, .{}) catch null) |_| {
+        std.log.info("Clearing stale Z3 CMake cache after macOS/Xcode update", .{});
+        cwd.deleteFile(cache_file) catch |err| {
+            std.log.warn("Could not delete Z3 CMakeCache.txt: {}", .{err});
+        };
+    }
+
+    // Also clear CMakeFiles directory which may contain cached package configs
+    const cmake_files_dir = try std.fmt.allocPrint(allocator, "{s}/CMakeFiles", .{build_dir});
+    defer allocator.free(cmake_files_dir);
+    if (cwd.access(cmake_files_dir, .{}) catch null) |_| {
+        std.log.info("Clearing Z3 CMakeFiles directory to remove stale package configs", .{});
+        cwd.deleteTree(cmake_files_dir) catch |err| {
+            std.log.warn("Could not delete Z3 CMakeFiles directory: {}", .{err});
+        };
+    }
+
     const install_prefix = "vendor/z3-install";
     cwd.makeDir(install_prefix) catch |err| switch (err) {
         error.PathAlreadyExists => {},
@@ -1094,6 +835,25 @@ fn buildZ3LibrariesImpl(step: *std.Build.Step, options: std.Build.Step.MakeOptio
         try cmake_args.append("-DCMAKE_C_COMPILER=clang");
     } else if (builtin.os.tag == .macos) {
         try cmake_args.append("-DCMAKE_CXX_FLAGS=-stdlib=libc++");
+
+        // Fix SDK path issue after macOS/Xcode update
+        // Use xcrun to get the actual SDK path and set it explicitly
+        const sdk_path_result = std.process.Child.run(.{
+            .allocator = allocator,
+            .argv = &[_][]const u8{ "xcrun", "--show-sdk-path" },
+            .cwd = ".",
+        }) catch null;
+        if (sdk_path_result) |result| {
+            if (result.term.Exited == 0) {
+                const sdk_path = std.mem.trim(u8, result.stdout, " \n\r\t");
+                if (sdk_path.len > 0) {
+                    const sysroot_flag = try std.fmt.allocPrint(allocator, "-DCMAKE_OSX_SYSROOT={s}", .{sdk_path});
+                    defer allocator.free(sysroot_flag);
+                    try cmake_args.append(sysroot_flag);
+                    std.log.info("Setting Z3 CMAKE_OSX_SYSROOT={s}", .{sdk_path});
+                }
+            }
+        }
     }
 
     var cfg_child = std.process.Child.init(cmake_args.items, allocator);
