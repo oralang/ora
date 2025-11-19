@@ -99,6 +99,11 @@ const config: Config = {
           position: 'left',
         },
         {
+          to: '/docs/evm-ir/intro',
+          label: 'EVM IR',
+          position: 'left',
+        },
+        {
           href: 'https://github.com/oralang/Ora/blob/main/CONTRIBUTING.md',
           label: 'Contributing',
           position: 'right',
@@ -148,6 +153,10 @@ const config: Config = {
             {
               label: 'API Reference',
               to: '/docs/specifications/api',
+            },
+            {
+              label: 'EVM IR Specification',
+              to: '/docs/evm-ir/intro',
             },
           ],
         },

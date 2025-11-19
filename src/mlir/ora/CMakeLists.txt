@@ -29,7 +29,7 @@ include(HandleLLVMOptions)
 include_directories(${LLVM_INCLUDE_DIRS})
 include_directories(${MLIR_INCLUDE_DIRS})
 include_directories(${PROJECT_BINARY_DIR})
-include_directories(${PROJECT_SOURCE_DIR})
+include_directories(${PROJECT_SOURCE_DIR}/include)
 
 # Define the Ora dialect library
 # Main dialect library disabled due to TableGen compatibility issues with LLVM 22.0.0git
@@ -52,20 +52,20 @@ include_directories(${PROJECT_SOURCE_DIR})
 # )
 
 # Generate TableGen files
-set(LLVM_TARGET_DEFINITIONS ${PROJECT_SOURCE_DIR}/../OraDialect.td)
-mlir_tablegen(OraDialect.h.inc -gen-dialect-decls -dialect=ora)
-mlir_tablegen(OraDialect.cpp.inc -gen-dialect-defs -dialect=ora)
+set(LLVM_TARGET_DEFINITIONS ${PROJECT_SOURCE_DIR}/td/OraDialect.td)
+mlir_tablegen(OraDialect.h.inc -gen-dialect-decls -dialect=ora -I${PROJECT_SOURCE_DIR}/td)
+mlir_tablegen(OraDialect.cpp.inc -gen-dialect-defs -dialect=ora -I${PROJECT_SOURCE_DIR}/td)
 add_public_tablegen_target(MLIROraDialectIncGen)
 
 # Generate type definitions - need to set LLVM_TARGET_DEFINITIONS to OraTypes.td
-set(LLVM_TARGET_DEFINITIONS ${PROJECT_SOURCE_DIR}/../OraTypes.td)
-mlir_tablegen(OraTypes.h.inc -gen-typedef-decls -typedefs-dialect=ora -I${PROJECT_SOURCE_DIR}/..)
-mlir_tablegen(OraTypes.cpp.inc -gen-typedef-defs -typedefs-dialect=ora -I${PROJECT_SOURCE_DIR}/..)
+set(LLVM_TARGET_DEFINITIONS ${PROJECT_SOURCE_DIR}/td/OraTypes.td)
+mlir_tablegen(OraTypes.h.inc -gen-typedef-decls -typedefs-dialect=ora -I${PROJECT_SOURCE_DIR}/td)
+mlir_tablegen(OraTypes.cpp.inc -gen-typedef-defs -typedefs-dialect=ora -I${PROJECT_SOURCE_DIR}/td)
 add_public_tablegen_target(MLIROraTypesIncGen)
 
-set(LLVM_TARGET_DEFINITIONS ${PROJECT_SOURCE_DIR}/../OraOps.td)
-mlir_tablegen(OraOps.h.inc -gen-op-decls -I${PROJECT_SOURCE_DIR}/..)
-mlir_tablegen(OraOps.cpp.inc -gen-op-defs -I${PROJECT_SOURCE_DIR}/..)
+set(LLVM_TARGET_DEFINITIONS ${PROJECT_SOURCE_DIR}/td/OraOps.td)
+mlir_tablegen(OraOps.h.inc -gen-op-decls -I${PROJECT_SOURCE_DIR}/td)
+mlir_tablegen(OraOps.cpp.inc -gen-op-defs -I${PROJECT_SOURCE_DIR}/td)
 add_public_tablegen_target(MLIROraOpsIncGen)
 
 # Dependencies removed since main dialect library is disabled
@@ -75,13 +75,13 @@ add_public_tablegen_target(MLIROraOpsIncGen)
 # Define the Ora dialect C API library
 # Note: We include OraDialect.cpp because OraDialectC.cpp needs the full OraDialect implementation
 add_mlir_dialect_library(MLIROraDialectC
-  OraDialectC.cpp
-  OraDialect.cpp
+  lib/OraCAPI.cpp
+  lib/OraDialect.cpp
   
   PARTIAL_SOURCES_INTENDED
   
   ADDITIONAL_HEADER_DIRS
-  ${PROJECT_SOURCE_DIR}
+  ${PROJECT_SOURCE_DIR}/include
   
   DEPENDS
   MLIROraDialectIncGen
@@ -102,9 +102,10 @@ install(TARGETS MLIROraDialectC
   EXPORT OraDialectTargets)
 
 install(FILES
-  OraDialect.h
-  OraDialectC.h
-  OraGasConstants.h
+  include/OraDialect.h
+  include/OraDialectC.h
+  include/OraGasConstants.h
   ${PROJECT_BINARY_DIR}/OraDialect.h.inc
+  ${PROJECT_BINARY_DIR}/OraTypes.h.inc
   ${PROJECT_BINARY_DIR}/OraOps.h.inc
   DESTINATION include/Ora)
