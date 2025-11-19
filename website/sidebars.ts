@@ -52,6 +52,21 @@ const sidebars: SidebarsConfig = {
         'design-documents/type-system-v0.1',
       ],
     },
+    {
+      type: 'category',
+      label: 'EVM IR Specification',
+      items: [
+        'evm-ir/intro',
+        'evm-ir/types',
+        'evm-ir/ops',
+        'evm-ir/legalizer',
+        'evm-ir/stackifier',
+        'evm-ir/debug',
+        'evm-ir/abi-lowering',
+        'evm-ir/examples',
+        'evm-ir/appendix',
+      ],
+    },
   ],
 };
 

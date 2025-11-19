@@ -1869,7 +1869,6 @@ MlirStringRef oraPrintOperation(MlirContext ctx, MlirOperation op)
 {
     try
     {
-        MLIRContext *context = unwrap(ctx);
         Operation *operation = unwrap(op);
 
         // Register the Ora dialect to ensure custom printers are available

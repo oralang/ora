@@ -85,14 +85,23 @@ pub fn build(b: *std.Build) void {
     exe.root_module.addOptions("build_options", mlir_options);
     lib_mod.addOptions("build_options", mlir_options);
 
-    // Add include path
+    // Add include paths
     exe.addIncludePath(b.path("src"));
     lib.addIncludePath(b.path("src"));
+
+    // Add Ora dialect include path (for OraCAPI.h)
+    const ora_dialect_include_path = b.path("src/mlir/ora/include");
+    exe.addIncludePath(ora_dialect_include_path);
+
+    // Add EthIR dialect include path
+    const ethir_dialect_include_path = b.path("src/mlir/IR/include");
+    exe.addIncludePath(ethir_dialect_include_path);
 
     // Build and link MLIR (required) - only for executable, not library
     const mlir_step = buildMlirLibraries(b, target, optimize);
     const ora_dialect_step = buildOraDialectLibrary(b, mlir_step, target, optimize);
-    linkMlirLibraries(b, exe, mlir_step, ora_dialect_step, target);
+    const ethir_dialect_step = buildEthIRDialectLibrary(b, mlir_step, target, optimize);
+    linkMlirLibraries(b, exe, mlir_step, ora_dialect_step, ethir_dialect_step, target);
 
     // Build and link Z3 (for formal verification) - only for executable
     const z3_step = buildZ3Libraries(b, target, optimize);
@@ -467,8 +476,10 @@ fn buildOraDialectLibraryImpl(step: *std.Build.Step, options: std.Build.Step.Mak
     const allocator = b.allocator;
     const cwd = std.fs.cwd();
 
-    // Create build directory
+    // Create build directory (clean if it exists to avoid CMake cache conflicts)
     const build_dir = "vendor/ora-dialect-build";
+    // Remove existing build directory to avoid CMake cache conflicts
+    cwd.deleteTree(build_dir) catch {};
     cwd.makeDir(build_dir) catch |err| switch (err) {
         error.PathAlreadyExists => {},
         else => return err,
@@ -503,7 +514,7 @@ fn buildOraDialectLibraryImpl(step: *std.Build.Step, options: std.Build.Step.Mak
     }
     try cmake_args.appendSlice(&[_][]const u8{
         "-S",
-        "src/mlir/generated",
+        "src/mlir/ora",
         "-B",
         build_dir,
         "-DCMAKE_BUILD_TYPE=Release",
@@ -564,22 +575,149 @@ fn buildOraDialectLibraryImpl(step: *std.Build.Step, options: std.Build.Step.Mak
     std.log.info("Successfully built Ora dialect library", .{});
 }
 
+/// Build EthIR dialect library using CMake
+fn buildEthIRDialectLibrary(b: *std.Build, mlir_step: *std.Build.Step, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Step {
+    _ = target;
+    _ = optimize;
+
+    const step = b.allocator.create(std.Build.Step) catch @panic("OOM");
+    step.* = std.Build.Step.init(.{
+        .id = .custom,
+        .name = "cmake-build-ethir-dialect",
+        .owner = b,
+        .makeFn = buildEthIRDialectLibraryImpl,
+    });
+    step.dependOn(mlir_step);
+    return step;
+}
+
+/// Implementation of CMake build for EthIR dialect library
+fn buildEthIRDialectLibraryImpl(step: *std.Build.Step, options: std.Build.Step.MakeOptions) anyerror!void {
+    _ = options;
+
+    const b = step.owner;
+    const allocator = b.allocator;
+    const cwd = std.fs.cwd();
+
+    // Create build directory (clean if it exists to avoid CMake cache conflicts)
+    const build_dir = "vendor/ethir-dialect-build";
+    // Remove existing build directory to avoid CMake cache conflicts
+    cwd.deleteTree(build_dir) catch {};
+    cwd.makeDir(build_dir) catch |err| switch (err) {
+        error.PathAlreadyExists => {},
+        else => return err,
+    };
+
+    const install_prefix = "vendor/mlir";
+    const mlir_dir = b.fmt("{s}/lib/cmake/mlir", .{install_prefix});
+
+    // Platform-specific flags
+    const builtin = @import("builtin");
+    var cmake_args = std.array_list.Managed([]const u8).init(allocator);
+    defer cmake_args.deinit();
+
+    // Prefer Ninja generator when available
+    var use_ninja: bool = false;
+    {
+        const probe = std.process.Child.run(.{ .allocator = allocator, .argv = &[_][]const u8{ "ninja", "--version" }, .cwd = "." }) catch null;
+        if (probe) |res| {
+            switch (res.term) {
+                .Exited => |code| {
+                    if (code == 0) use_ninja = true;
+                },
+                else => {},
+            }
+        }
+    }
+
+    try cmake_args.append("cmake");
+    if (use_ninja) {
+        try cmake_args.append("-G");
+        try cmake_args.append("Ninja");
+    }
+    try cmake_args.appendSlice(&[_][]const u8{
+        "-S",
+        "src/mlir/IR",
+        "-B",
+        build_dir,
+        "-DCMAKE_BUILD_TYPE=Release",
+        b.fmt("-DMLIR_DIR={s}", .{mlir_dir}),
+        b.fmt("-DCMAKE_INSTALL_PREFIX={s}", .{install_prefix}),
+    });
+
+    if (builtin.os.tag == .linux) {
+        try cmake_args.append("-DCMAKE_CXX_FLAGS=-stdlib=libc++ -lc++abi");
+        try cmake_args.append("-DCMAKE_CXX_COMPILER=clang++");
+        try cmake_args.append("-DCMAKE_C_COMPILER=clang");
+    } else if (builtin.os.tag == .macos) {
+        try cmake_args.append("-DCMAKE_CXX_FLAGS=-stdlib=libc++");
+    }
+
+    var cfg_child = std.process.Child.init(cmake_args.items, allocator);
+    cfg_child.cwd = ".";
+    cfg_child.stdin_behavior = .Inherit;
+    cfg_child.stdout_behavior = .Inherit;
+    cfg_child.stderr_behavior = .Inherit;
+    const cfg_term = cfg_child.spawnAndWait() catch |err| {
+        std.log.err("Failed to configure EthIR dialect CMake: {}", .{err});
+        return err;
+    };
+    switch (cfg_term) {
+        .Exited => |code| if (code != 0) {
+            std.log.err("EthIR dialect CMake configure failed with exit code: {}", .{code});
+            return error.CMakeConfigureFailed;
+        },
+        else => {
+            std.log.err("EthIR dialect CMake configure did not exit cleanly", .{});
+            return error.CMakeConfigureFailed;
+        },
+    }
+
+    // Build and install
+    var build_args = [_][]const u8{ "cmake", "--build", build_dir, "--parallel", "--target", "install" };
+    var build_child = std.process.Child.init(&build_args, allocator);
+    build_child.cwd = ".";
+    build_child.stdin_behavior = .Inherit;
+    build_child.stdout_behavior = .Inherit;
+    build_child.stderr_behavior = .Inherit;
+    const build_term = build_child.spawnAndWait() catch |err| {
+        std.log.err("Failed to build EthIR dialect with CMake: {}", .{err});
+        return err;
+    };
+    switch (build_term) {
+        .Exited => |code| if (code != 0) {
+            std.log.err("EthIR dialect CMake build failed with exit code: {}", .{code});
+            return error.CMakeBuildFailed;
+        },
+        else => {
+            std.log.err("EthIR dialect CMake build did not exit cleanly", .{});
+            return error.CMakeBuildFailed;
+        },
+    }
+
+    std.log.info("Successfully built EthIR dialect library", .{});
+}
+
 /// Link MLIR to the given executable using the installed prefix
-fn linkMlirLibraries(b: *std.Build, exe: *std.Build.Step.Compile, mlir_step: *std.Build.Step, ora_dialect_step: *std.Build.Step, target: std.Build.ResolvedTarget) void {
+fn linkMlirLibraries(b: *std.Build, exe: *std.Build.Step.Compile, mlir_step: *std.Build.Step, ora_dialect_step: *std.Build.Step, ethir_dialect_step: *std.Build.Step, target: std.Build.ResolvedTarget) void {
     // Depend on MLIR build and dialect builds
     exe.step.dependOn(mlir_step);
     exe.step.dependOn(ora_dialect_step);
+    exe.step.dependOn(ethir_dialect_step);
 
     const include_path = b.path("vendor/mlir/include");
     const lib_path = b.path("vendor/mlir/lib");
-    const ora_dialect_include_path = b.path("src/mlir/generated");
+    const ora_dialect_include_path = b.path("src/mlir/ora/include");
+    const ethir_dialect_include_path = b.path("src/mlir/IR/include");
 
     exe.addIncludePath(include_path);
     exe.addIncludePath(ora_dialect_include_path);
+    exe.addIncludePath(ethir_dialect_include_path);
     exe.addLibraryPath(lib_path);
 
     exe.linkSystemLibrary("MLIR-C");
     exe.linkSystemLibrary("MLIROraDialectC");
+    exe.linkSystemLibrary("MLIREthIRDialect");
 
     switch (target.result.os.tag) {
         .linux => {

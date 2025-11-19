@@ -20,7 +20,6 @@ const MlirOptions = struct {
     emit_mlir: bool,
     opt_level: ?[]const u8,
     output_dir: ?[]const u8,
-    validate_before_yul: bool,
 
     fn getOptimizationLevel(self: MlirOptions) OptimizationLevel {
         if (self.opt_level) |level| {
@@ -36,11 +35,6 @@ const MlirOptions = struct {
         if (std.mem.eql(u8, build_default, "aggressive")) return .Aggressive;
 
         return .Basic; // Final fallback
-    }
-
-    fn shouldValidateBeforeYul(self: MlirOptions) bool {
-        // Always validate unless explicitly disabled
-        return self.validate_before_yul;
     }
 };
 
@@ -76,8 +70,6 @@ pub fn main() !void {
     var emit_tokens: bool = false;
     var emit_ast: bool = false;
     var emit_mlir: bool = false;
-    var emit_yul: bool = false;
-    var emit_bytecode: bool = false;
     var emit_abi: bool = false;
     var emit_json: bool = false;
     var emit_cfg: bool = false;
@@ -86,9 +78,7 @@ pub fn main() !void {
 
     // MLIR options
     var mlir_opt_level: ?[]const u8 = null;
-    var mlir_validate_before_yul: bool = true; // Default enabled for safety
 
-    // var verbose: bool = false;  // TODO: implement verbose mode
     var i: usize = 1;
 
     while (i < args.len) {
@@ -108,12 +98,6 @@ pub fn main() !void {
             i += 1;
         } else if (std.mem.eql(u8, args[i], "--emit-mlir")) {
             emit_mlir = true;
-            i += 1;
-        } else if (std.mem.eql(u8, args[i], "--emit-yul")) {
-            emit_yul = true;
-            i += 1;
-        } else if (std.mem.eql(u8, args[i], "--emit-bytecode")) {
-            emit_bytecode = true;
             i += 1;
         } else if (std.mem.eql(u8, args[i], "--abi")) {
             emit_abi = true;
@@ -142,11 +126,7 @@ pub fn main() !void {
             i += 1;
             // MLIR options
         } else if (std.mem.eql(u8, args[i], "--no-validate-mlir")) {
-            mlir_validate_before_yul = false;
-            i += 1;
-            // Debug/verbose
-        } else if (std.mem.eql(u8, args[i], "--verbose") or std.mem.eql(u8, args[i], "-v")) {
-            // verbose = true;  // TODO: implement verbose mode
+            // Validation is always enabled for MLIR
             i += 1;
             // Input file
         } else if (input_file == null and !std.mem.startsWith(u8, args[i], "-")) {
@@ -179,9 +159,9 @@ pub fn main() !void {
     }
 
     // Determine compilation mode
-    // If no --emit-X flag is set, default to bytecode
-    if (!emit_tokens and !emit_ast and !emit_mlir and !emit_yul and !emit_bytecode and !emit_cfg) {
-        emit_bytecode = true; // Default: compile to bytecode
+    // If no --emit-X flag is set, default to MLIR generation
+    if (!emit_tokens and !emit_ast and !emit_mlir and !emit_cfg) {
+        emit_mlir = true; // Default: emit MLIR
     }
 
     // Create MLIR options structure
@@ -189,7 +169,6 @@ pub fn main() !void {
         .emit_mlir = emit_mlir,
         .opt_level = mlir_opt_level,
         .output_dir = output_dir,
-        .validate_before_yul = mlir_validate_before_yul,
     };
 
     // Handle CFG generation (uses MLIR's built-in view-op-graph pass)
@@ -213,12 +192,12 @@ pub fn main() !void {
     } else if (emit_json) {
         // Full compilation with JSON output
         try runJsonOutput(allocator, file_path, mlir_options);
-    } else if (emit_mlir or emit_yul or emit_bytecode) {
-        // Run full MLIR pipeline (includes Yul and bytecode if needed)
-        try runMlirEmitAdvancedWithYul(allocator, file_path, mlir_options, emit_yul or emit_bytecode);
+    } else if (emit_mlir) {
+        // Run full MLIR pipeline (Ora MLIR)
+        try runMlirEmitAdvanced(allocator, file_path, mlir_options);
     } else {
-        // Default: full compilation
-        try runMlirEmitAdvancedWithYul(allocator, file_path, mlir_options, false);
+        // Default: emit MLIR
+        try runMlirEmitAdvanced(allocator, file_path, mlir_options);
     }
 }
 
@@ -233,13 +212,11 @@ fn printUsage() !void {
     try stdout.print("Ora Compiler v0.1 - Asuka\n", .{});
     try stdout.print("Usage: ora [options] <file.ora>\n", .{});
     try stdout.print("\nCompilation Control:\n", .{});
-    try stdout.print("  (default)              - Compile to EVM bytecode\n", .{});
+    try stdout.print("  (default)              - Emit MLIR\n", .{});
     try stdout.print("  --emit-tokens          - Stop after lexical analysis (emit tokens)\n", .{});
     try stdout.print("  --emit-ast             - Stop after parsing (emit AST)\n", .{});
-    try stdout.print("  --emit-mlir            - Stop after MLIR generation\n", .{});
+    try stdout.print("  --emit-mlir            - Stop after MLIR generation (default)\n", .{});
     try stdout.print("  --emit-cfg             - Generate control flow graph (Graphviz DOT format)\n", .{});
-    try stdout.print("  --emit-yul             - Stop after Yul lowering\n", .{});
-    try stdout.print("  --emit-bytecode        - Generate EVM bytecode (default)\n", .{});
     try stdout.print("  --abi                  - Generate contract ABI (JSON format)\n", .{});
     try stdout.print("  --json                 - Output in JSON format (for tools)\n", .{});
     try stdout.print("\nOutput Options:\n", .{});
@@ -251,12 +228,10 @@ fn printUsage() !void {
     try stdout.print("  -O1, -Obasic           - Basic optimizations\n", .{});
     try stdout.print("  -O2, -Oaggressive      - Aggressive optimizations\n", .{});
     try stdout.print("\nMLIR Options:\n", .{});
-    try stdout.print("  --no-validate-mlir     - Disable automatic MLIR validation before Yul (not recommended)\n", .{});
+    try stdout.print("  --no-validate-mlir     - Disable automatic MLIR validation (not recommended)\n", .{});
     try stdout.print("\nAnalysis Options:\n", .{});
     try stdout.print("  --analyze-complexity   - Analyze function complexity metrics\n", .{});
     try stdout.print("  --analyze-state        - Analyze storage reads/writes per function\n", .{});
-    try stdout.print("\nDevelopment/Debug Options:\n", .{});
-    try stdout.print("  --verbose              - Verbose output (show each compilation stage)\n", .{});
     try stdout.flush();
 }
 
@@ -905,10 +880,6 @@ fn runCFGGeneration(allocator: std.mem.Allocator, file_path: []const u8, mlir_op
 
 /// Advanced MLIR emission with full pass pipeline support
 fn runMlirEmitAdvanced(allocator: std.mem.Allocator, file_path: []const u8, mlir_options: MlirOptions) !void {
-    try runMlirEmitAdvancedWithYul(allocator, file_path, mlir_options, true);
-}
-
-fn runMlirEmitAdvancedWithYul(allocator: std.mem.Allocator, file_path: []const u8, mlir_options: MlirOptions, generate_yul: bool) !void {
     var stdout_buffer: [1024]u8 = undefined;
     var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
     const stdout = &stdout_writer.interface;
@@ -948,12 +919,12 @@ fn runMlirEmitAdvancedWithYul(allocator: std.mem.Allocator, file_path: []const u
     }
 
     // Generate MLIR with advanced options
-    try generateMlirOutput(allocator, ast_nodes, file_path, mlir_options, generate_yul);
+    try generateMlirOutput(allocator, ast_nodes, file_path, mlir_options);
     try stdout.flush();
 }
 
 /// Generate MLIR output with comprehensive options
-fn generateMlirOutput(allocator: std.mem.Allocator, ast_nodes: []lib.AstNode, file_path: []const u8, mlir_options: MlirOptions, generate_yul: bool) !void {
+fn generateMlirOutput(allocator: std.mem.Allocator, ast_nodes: []lib.AstNode, file_path: []const u8, mlir_options: MlirOptions) !void {
     var stdout_buffer: [1024]u8 = undefined;
     var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
     const stdout = &stdout_writer.interface;
@@ -978,7 +949,7 @@ fn generateMlirOutput(allocator: std.mem.Allocator, ast_nodes: []lib.AstNode, fi
     var lowering_result = try lower.lowerFunctionsToModuleWithErrors(h.ctx, ast_nodes, mlir_allocator, source_filename);
     defer lowering_result.deinit(mlir_allocator);
 
-    // Check for errors first, before proceeding to YUL generation
+    // Check for errors first
     if (!lowering_result.success) {
         try stdout.print("MLIR lowering failed with {d} errors:\n", .{lowering_result.errors.len});
         for (lowering_result.errors) |err| {
@@ -1010,33 +981,6 @@ fn generateMlirOutput(allocator: std.mem.Allocator, ast_nodes: []lib.AstNode, fi
         }
     }
 
-    // Convert MLIR to Yul (only if requested)
-    if (generate_yul) {
-        // Validate MLIR before Yul lowering (production safety feature)
-        if (mlir_options.shouldValidateBeforeYul()) {
-            try stdout.print("Validating MLIR before Yul lowering...\n", .{});
-
-            const verification = @import("mlir/verification.zig");
-            var verifier = verification.OraVerification.init(h.ctx, mlir_allocator);
-            defer verifier.deinit();
-
-            const validation_result = try verifier.verifyModule(final_module);
-
-            if (!validation_result.success) {
-                try stdout.print("MLIR validation failed with {d} error(s):\n", .{validation_result.errors.len});
-                for (validation_result.errors) |err| {
-                    try stdout.print("  - [{s}] {s}\n", .{ @tagName(err.type), err.message });
-                }
-
-                try stdout.flush();
-                std.process.exit(1);
-            }
-        }
-
-        try stdout.print("Yul code generation is currently disabled (targets moved to _targets_backup)\n", .{});
-        std.process.exit(1);
-    }
-
     // Print warnings if any
     if (lowering_result.warnings.len > 0) {
         try stdout.print("MLIR lowering completed with {d} warnings:\n", .{lowering_result.warnings.len});
@@ -1057,7 +1001,6 @@ fn generateMlirOutput(allocator: std.mem.Allocator, ast_nodes: []lib.AstNode, fi
     defer c.mlirModuleDestroy(lowering_result.module);
 
     // Output MLIR using C++ API wrapper (ensures custom assembly formats are used)
-    // Only output MLIR if explicitly requested with --emit-mlir
     if (mlir_options.emit_mlir) {
         const module_op = c.mlirModuleGetOperation(lowering_result.module);
         const mlir_str = c.oraPrintOperation(h.ctx, module_op);
@@ -1082,7 +1025,8 @@ fn generateMlirOutput(allocator: std.mem.Allocator, ast_nodes: []lib.AstNode, fi
             };
 
             const basename = std.fs.path.stem(file_path);
-            const filename = try std.mem.concat(allocator, u8, &[_][]const u8{ basename, ".mlir" });
+            const extension = ".mlir";
+            const filename = try std.mem.concat(allocator, u8, &[_][]const u8{ basename, extension });
             defer allocator.free(filename);
             const output_file = try std.fs.path.join(allocator, &[_][]const u8{ output_dir, filename });
             defer allocator.free(output_file);
