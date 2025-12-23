@@ -300,11 +300,11 @@ pub const OraVerification = struct {
         // Allocate a copy that we can return
         const name_copy = self.allocator.dupe(u8, name_slice) catch {
             // If allocation fails, free the C string and return a fallback
-            @import("std").c.free(@constCast(@ptrCast(name_ref.data)));
+            @import("std").c.free(@ptrCast(@constCast(name_ref.data)));
             return "unknown.operation";
         };
         // Free the C-allocated string
-        @import("std").c.free(@constCast(@ptrCast(name_ref.data)));
+        @import("std").c.free(@ptrCast(@constCast(name_ref.data)));
         return name_copy;
     }
 };

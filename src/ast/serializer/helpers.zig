@@ -143,4 +143,3 @@ pub fn serializeTypeInfo(_: *AstSerializer, type_info: ast.Types.TypeInfo, write
 
     try writer.print("}");
 }
-

@@ -23,6 +23,6 @@ pub fn freeStringRef(str: c.MlirStringRef) void {
     if (str.data != null) {
         // Note: We need mlirStringRefFree or similar - for now use free
         // The C API should provide a way to free this
-        @import("std").c.free(@constCast(@ptrCast(str.data)));
+        @import("std").c.free(@ptrCast(@constCast(str.data)));
     }
 }
