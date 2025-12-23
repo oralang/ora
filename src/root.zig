@@ -18,7 +18,6 @@ pub const ast_visitor = @import("ast/ast_visitor.zig");
 pub const ast_arena = @import("ast/ast_arena.zig");
 pub const ast_builder = @import("ast/ast_builder.zig");
 pub const ast_serializer = @import("ast/ast_serializer.zig");
-pub const typer = @import("typer.zig");
 pub const semantics = @import("semantics.zig");
 pub const state_tracker = @import("analysis/state_tracker.zig");
 pub const abi = @import("abi.zig");
@@ -68,8 +67,6 @@ pub const AstSerializer = ast_serializer.AstSerializer;
 pub const SerializationOptions = ast_serializer.SerializationOptions;
 
 // Core analysis types
-/// Type checker for Ora language
-pub const Typer = typer.Typer;
 /// Type representation (unified AST type info)
 pub const OraType = ast.type_info.OraType;
 pub const TypeInfo = ast.type_info.TypeInfo;
