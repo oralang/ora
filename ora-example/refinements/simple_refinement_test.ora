@@ -1,0 +1,7 @@
+// Simple test to see refinement types in MLIR
+
+contract SimpleRefinementTest {
+    fn test(amount: MinValue<u256, 1000>) {
+        // Simple function to see the type in MLIR
+    }
+}

@@ -73,7 +73,7 @@ enum Direction {
 }
 
 // Enum with different integer types
-enum TokenStandard : u16 {
+enum TokenStandardU16 : u16 {
     ERC20 = 20,
     ERC721 = 721,
     ERC1155 = 1155
@@ -81,13 +81,13 @@ enum TokenStandard : u16 {
 
 
 
-// Enum with explicit string values
-enum ErrorCode : string {
+// Enum with explicit string values (duplicate - renamed)
+enum ErrorCodeString : string {
     InvalidInput = "ERR_INVALID_INPUT",
     InsufficientFunds = "ERR_INSUFFICIENT_FUNDS",
     Unauthorized = "ERR_UNAUTHORIZED"
 }
-// Enum with complex expressionss
+// Enum with complex expressions
 enum AdvancedConfig : u16 {
     Value1 = 10,
     Value2 = (5 + 15),

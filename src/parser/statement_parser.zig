@@ -108,6 +108,28 @@ pub const StatementParser = struct {
             }
         }
 
+        // Check for labeled statement (label: statement)
+        // Only check for labels before control flow statements (for, while)
+        var label: ?[]const u8 = null;
+        if (self.base.check(.Identifier)) {
+            const saved = self.base.current;
+            const label_token = self.base.peek();
+            _ = self.base.advance(); // consume identifier
+            if (self.base.match(.Colon)) {
+                // Check if next token is for or while
+                if (self.base.check(.For) or self.base.check(.While)) {
+                    // This is a label before a loop
+                    label = try self.base.arena.createString(label_token.lexeme);
+                } else {
+                    // Not a label before loop, restore position
+                    self.base.current = saved;
+                }
+            } else {
+                // Not a label, restore position
+                self.base.current = saved;
+            }
+        }
+
         // Variable declarations and destructuring assignments
         if (self.isMemoryRegionKeyword() or self.base.check(.Let) or self.base.check(.Var)) {
             // Check if this is a destructuring assignment (let .{...} = ...)
@@ -169,12 +191,36 @@ pub const StatementParser = struct {
 
         // While statements
         if (self.base.match(.While)) {
-            return try control_flow.parseWhileStatement(self);
+            const while_stmt = try control_flow.parseWhileStatement(self);
+            // Add label if present
+            if (label) |l| {
+                switch (while_stmt) {
+                    .While => |w| {
+                        var w_copy = w;
+                        w_copy.label = l;
+                        return ast.Statements.StmtNode{ .While = w_copy };
+                    },
+                    else => return while_stmt,
+                }
+            }
+            return while_stmt;
         }
 
         // For statements
         if (self.base.match(.For)) {
-            return try control_flow.parseForStatement(self);
+            const for_stmt = try control_flow.parseForStatement(self);
+            // Add label if present
+            if (label) |l| {
+                switch (for_stmt) {
+                    .ForLoop => |fl| {
+                        var fl_copy = fl;
+                        fl_copy.label = l;
+                        return ast.Statements.StmtNode{ .ForLoop = fl_copy };
+                    },
+                    else => return for_stmt,
+                }
+            }
+            return for_stmt;
         }
 
         // Switch statements
@@ -195,11 +241,6 @@ pub const StatementParser = struct {
         // Compound assignment statements (a += b, etc)
         if (try self.tryParseCompoundAssignmentStatement()) |comp_assign| {
             return ast.Statements.StmtNode{ .CompoundAssignment = comp_assign };
-        }
-
-        // Move statements (move amount from src to dest;)
-        if (try self.tryParseMoveStatement()) |move_stmt| {
-            return ast.Statements.StmtNode{ .Move = move_stmt };
         }
 
         // Labeled blocks (label: { statements })
@@ -410,42 +451,6 @@ pub const StatementParser = struct {
         return ast.Statements.DestructuringAssignmentNode{
             .pattern = pattern,
             .value = value_ptr,
-            .span = common.ParserCommon.makeSpan(self.base.previous()),
-        };
-    }
-
-    /// Try to parse move statement: move <amount> from <source> to <dest>;
-    fn tryParseMoveStatement(self: *StatementParser) common.ParserError!?ast.Statements.MoveNode {
-        if (!self.base.match(.Move)) return null;
-
-        // Parse amount expression
-        self.syncSubParsers();
-        const amount = try self.expr_parser.parseExpression();
-        self.updateFromSubParser(self.expr_parser.base.current);
-
-        // Expect 'from'
-        _ = try self.base.consume(.From, "Expected 'from' after move amount");
-
-        // Parse source expression
-        self.syncSubParsers();
-        const source = try self.expr_parser.parseExpression();
-        self.updateFromSubParser(self.expr_parser.base.current);
-
-        // Expect 'to'
-        _ = try self.base.consume(.To, "Expected 'to' after source in move statement");
-
-        // Parse destination expression
-        self.syncSubParsers();
-        const dest = try self.expr_parser.parseExpression();
-        self.updateFromSubParser(self.expr_parser.base.current);
-
-        _ = self.base.match(.Semicolon);
-
-        return ast.Statements.MoveNode{
-            .expr = amount,
-            .source = source,
-            .dest = dest,
-            .amount = amount,
             .span = common.ParserCommon.makeSpan(self.base.previous()),
         };
     }

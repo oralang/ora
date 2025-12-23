@@ -16,7 +16,7 @@ contract BasicControlFlowTest {
     
     // Test while loop
     fn testWhile() -> u256 {
-        let counter: u256 = 0;
+        var counter: u256 = 0;
         while (counter < 5) {
             counter = counter + 1;
         }

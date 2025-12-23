@@ -1,0 +1,36 @@
+// Arithmetic operations test
+contract ArithmeticTest {
+    storage var counter: u256;
+    
+    pub fn init() {
+        counter = 0;
+    }
+    
+    pub fn increment() {
+        counter = counter + 1;
+    }
+    
+    pub fn getCounter() -> u256 {
+        return counter;
+    }
+    
+    pub fn multiply(a: u256, b: u256) -> u256 {
+        return a * b;
+    }
+    
+    pub fn add(a: u256, b: u256) -> u256 {
+        return a + b;
+    }
+    
+    pub fn subtract(a: u256, b: u256) -> u256 {
+        return a - b;
+    }
+    
+    pub fn divide(a: u256, b: u256) -> u256 {
+        return a / b;
+    }
+    
+    pub fn modulo(a: u256, b: u256) -> u256 {
+        return a % b;
+    }
+}

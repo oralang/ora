@@ -1,5 +1,5 @@
 const std = @import("std");
-const SourceSpan = @import("../ast.zig").SourceSpan;
+const SourceSpan = @import("source_span.zig").SourceSpan;
 const TypeInfo = @import("type_info.zig").TypeInfo;
 
 /// Verification attribute types for formal verification constructs

@@ -1,0 +1,78 @@
+// ============================================================================
+// Valid Refinement Type Conversions
+// ============================================================================
+// Tests that should COMPILE - valid type conversions and assignments
+// ============================================================================
+
+contract ValidConversions {
+    // ============================================================================
+    // Base Type to Refinement (with runtime guards)
+    // ============================================================================
+    
+    // u256 can be assigned to MinValue (with guard)
+    fn testBaseToMinValue(value: u256) {
+        let min_value: MinValue<u256, 100> = value; // Guard generated
+    }
+    
+    // u256 can be assigned to MaxValue (with guard)
+    fn testBaseToMaxValue(value: u256) {
+        let max_value: MaxValue<u256, 1000> = value; // Guard generated
+    }
+    
+    // u256 can be assigned to InRange (with guard)
+    fn testBaseToInRange(value: u256) {
+        let in_range: InRange<u256, 0, 10000> = value; // Guard generated
+    }
+    
+    // address can be assigned to NonZeroAddress (with guard)
+    fn testBaseToNonZeroAddress(addr: address) {
+        let non_zero: NonZeroAddress = addr; // Guard generated
+    }
+    
+    // ============================================================================
+    // Refinement to Base Type (no guard needed - subtyping)
+    // ============================================================================
+    
+    // MinValue can be assigned to base type (no guard)
+    fn testMinValueToBase(amount: MinValue<u256, 100>) -> u256 {
+        let base: u256 = amount; // No guard - subtyping
+        return base;
+    }
+    
+    // MaxValue can be assigned to base type (no guard)
+    fn testMaxValueToBase(limit: MaxValue<u256, 1000>) -> u256 {
+        let base: u256 = limit; // No guard - subtyping
+        return base;
+    }
+    
+    // InRange can be assigned to base type (no guard)
+    fn testInRangeToBase(rate: InRange<u256, 0, 10000>) -> u256 {
+        let base: u256 = rate; // No guard - subtyping
+        return base;
+    }
+    
+    // NonZeroAddress can be assigned to address (no guard)
+    fn testNonZeroAddressToBase(addr: NonZeroAddress) -> address {
+        let base: address = addr; // No guard - subtyping
+        return base;
+    }
+    
+    // ============================================================================
+    // Compatible Refinement Types
+    // ============================================================================
+    
+    // InRange can be assigned to MinValue if min matches
+    fn testInRangeToMinValue(rate: InRange<u256, 100, 10000>) {
+        let min_value: MinValue<u256, 100> = rate; // Valid if subtyping works
+    }
+    
+    // InRange can be assigned to MaxValue if max matches
+    fn testInRangeToMaxValue(rate: InRange<u256, 0, 1000>) {
+        let max_value: MaxValue<u256, 1000> = rate; // Valid if subtyping works
+    }
+    
+    // BasisPoints (InRange<u256, 0, 10000>) can be assigned to InRange
+    fn testBasisPointsToInRange(fee: BasisPoints<u256>) {
+        let in_range: InRange<u256, 0, 20000> = fee; // Valid - wider range
+    }
+}

@@ -1,0 +1,304 @@
+#include "patterns/MemRef.h"
+#include "patterns/Naming.h"
+#include "OraToSIRTypeConverter.h"
+#include "OraDebug.h"
+
+#include "SIR/SIRDialect.h"
+
+#include "mlir/IR/BuiltinTypes.h"
+#include "mlir/Dialect/MemRef/IR/MemRef.h"
+#include "mlir/Dialect/Func/IR/FuncOps.h"
+#include "mlir/Transforms/DialectConversion.h"
+#include "llvm/Support/Debug.h"
+#include "llvm/Support/raw_ostream.h"
+#include <map>
+
+#define DEBUG_TYPE "ora-to-sir"
+
+using namespace mlir;
+using namespace ora;
+
+// Debug logging macro
+#define DBG(msg) ORA_DEBUG_PREFIX("OraToSIR", msg)
+
+// Helper: Get or create naming helper for current function
+static SIRNamingHelper &getNamingHelper(Operation *op)
+{
+    // Get the parent function to use as a key for per-function helpers
+    Operation *parentFunc = op->getParentOfType<mlir::func::FuncOp>();
+    if (!parentFunc)
+    {
+        // Fallback to static helper if not in a function
+        static SIRNamingHelper helper;
+        return helper;
+    }
+
+    // Use a map to store per-function helpers (reset counters per function)
+    static std::map<Operation *, SIRNamingHelper> helperMap;
+    auto it = helperMap.find(parentFunc);
+    if (it == helperMap.end())
+    {
+        // First time seeing this function - create new helper with reset counters
+        SIRNamingHelper newHelper;
+        newHelper.reset();
+        helperMap[parentFunc] = newHelper;
+        return helperMap[parentFunc];
+    }
+    return it->second;
+}
+
+// -----------------------------------------------------------------------------
+// Convert memref.alloca → sir.malloc
+// -----------------------------------------------------------------------------
+LogicalResult ConvertMemRefAllocOp::matchAndRewrite(
+    mlir::memref::AllocaOp op,
+    typename mlir::memref::AllocaOp::Adaptor adaptor,
+    ConversionPatternRewriter &rewriter) const
+{
+    DBG("ConvertMemRefAllocOp: matching alloca");
+
+    auto loc = op.getLoc();
+    auto ctx = rewriter.getContext();
+    auto memrefType = op.getType();
+
+    // Get memref shape and element type
+    if (!memrefType.hasStaticShape())
+    {
+        DBG("ConvertMemRefAllocOp: dynamic shape not supported");
+        return failure();
+    }
+
+    // Calculate total size: num_elements * element_size (32 bytes for u256)
+    int64_t numElements = 1;
+    for (int64_t dim : memrefType.getShape())
+    {
+        numElements *= dim;
+    }
+
+    // Element size is always 32 bytes (256 bits) for SIR
+    const uint64_t elementSize = 32;
+    uint64_t totalSize = numElements * elementSize;
+
+    // Create distinct location for allocation block
+    auto allocLoc = mlir::NameLoc::get(
+        mlir::StringAttr::get(ctx, "alloc"),
+        loc);
+
+    // Create size constant
+    auto ui64Type = mlir::IntegerType::get(ctx, 64, mlir::IntegerType::Unsigned);
+    auto sizeAttr = mlir::IntegerAttr::get(ui64Type, totalSize);
+    auto u256Type = sir::U256Type::get(ctx);
+    Value sizeConst = rewriter.create<sir::ConstOp>(allocLoc, u256Type, sizeAttr);
+
+    // Name size constant
+    auto &naming = getNamingHelper(op);
+    naming.nameConst(sizeConst.getDefiningOp(), 0, totalSize, "alloc_size");
+
+    // Create malloc - detect if this is an array allocation (multiple elements)
+    auto ptrType = sir::PtrType::get(ctx, /*addrSpace*/ 1);
+    Value mallocResult = rewriter.create<sir::MallocOp>(allocLoc, ptrType, sizeConst);
+
+    // Determine context: array allocation if numElements > 1
+    SIRNamingHelper::Context allocCtx = (numElements > 1)
+                                            ? SIRNamingHelper::Context::ArrayAllocation
+                                            : SIRNamingHelper::Context::General;
+    naming.nameMalloc(mallocResult.getDefiningOp(), 0, allocCtx);
+
+    // Replace alloca with malloc result
+    rewriter.replaceOp(op, mallocResult);
+    DBG("ConvertMemRefAllocOp: converted alloca to malloc");
+    return success();
+}
+
+// -----------------------------------------------------------------------------
+// Convert memref.load → sir.addptr + sir.load
+// -----------------------------------------------------------------------------
+LogicalResult ConvertMemRefLoadOp::matchAndRewrite(
+    mlir::memref::LoadOp op,
+    typename mlir::memref::LoadOp::Adaptor adaptor,
+    ConversionPatternRewriter &rewriter) const
+{
+    DBG("ConvertMemRefLoadOp: matching load");
+
+    auto loc = op.getLoc();
+    auto ctx = rewriter.getContext();
+
+    // Get the converted memref (type converter should have converted memref to pointer)
+    Value memref = adaptor.getMemref();
+    if (!llvm::isa<sir::PtrType>(memref.getType()))
+    {
+        DBG("ConvertMemRefLoadOp: memref not converted to pointer, type: " << memref.getType());
+        return failure();
+    }
+
+    // Get index (if any)
+    auto indices = adaptor.getIndices();
+    Value basePtr = memref;
+
+    auto &naming = getNamingHelper(op);
+
+    if (!indices.empty())
+    {
+        // Calculate offset: index * element_size (32 bytes)
+        Value index = indices[0];
+        auto u256Type = sir::U256Type::get(ctx);
+
+        // Extract element index for naming
+        int64_t elemIndex = naming.extractElementIndex(index);
+        if (elemIndex < 0)
+        {
+            elemIndex = naming.getNextElemIndex();
+        }
+
+        // Create distinct location for this element block
+        std::string elemLocName = "elem" + std::to_string(elemIndex);
+        auto elemLoc = mlir::NameLoc::get(
+            mlir::StringAttr::get(ctx, elemLocName),
+            loc);
+
+        // Convert index to u256 if needed
+        if (!llvm::isa<sir::U256Type>(index.getType()))
+        {
+            index = rewriter.create<sir::BitcastOp>(elemLoc, u256Type, index);
+        }
+
+        // Create element size constant (32 bytes)
+        auto ui64Type = mlir::IntegerType::get(ctx, 64, mlir::IntegerType::Unsigned);
+        auto elementSizeAttr = mlir::IntegerAttr::get(ui64Type, 32ULL);
+        Value elementSize = rewriter.create<sir::ConstOp>(elemLoc, u256Type, elementSizeAttr);
+        naming.nameConst(elementSize.getDefiningOp(), 0, 32, "elem_size");
+
+        // Calculate offset: index * 32
+        unsigned offsetIndex = naming.getNextOffsetIndex();
+        Value offset = rewriter.create<sir::MulOp>(elemLoc, u256Type, index, elementSize);
+        naming.nameOffset(offset.getDefiningOp(), 0, offsetIndex);
+
+        // Add offset to base pointer
+        auto ptrType = sir::PtrType::get(ctx, /*addrSpace*/ 1);
+        basePtr = rewriter.create<sir::AddPtrOp>(elemLoc, ptrType, memref, offset);
+        naming.nameAddPtr(basePtr.getDefiningOp(), 0, elemIndex);
+    }
+
+    // Load from the pointer
+    auto u256Type = sir::U256Type::get(ctx);
+    int64_t elemIndex = naming.extractElementIndex(indices.empty() ? Value() : indices[0]);
+    if (elemIndex < 0)
+    {
+        elemIndex = naming.getNextElemIndex();
+    }
+
+    // Use element location if we have an index, otherwise use original location
+    Location loadLoc = loc;
+    if (!indices.empty() && elemIndex >= 0)
+    {
+        std::string elemLocName = "elem" + std::to_string(elemIndex);
+        loadLoc = mlir::NameLoc::get(
+            mlir::StringAttr::get(ctx, elemLocName),
+            loc);
+    }
+
+    Value loadResult = rewriter.create<sir::LoadOp>(loadLoc, u256Type, basePtr);
+    naming.nameLoad(loadResult.getDefiningOp(), 0, elemIndex);
+
+    rewriter.replaceOp(op, loadResult);
+    DBG("ConvertMemRefLoadOp: converted load to sir.load");
+    return success();
+}
+
+// -----------------------------------------------------------------------------
+// Convert memref.store → sir.addptr + sir.store
+// -----------------------------------------------------------------------------
+LogicalResult ConvertMemRefStoreOp::matchAndRewrite(
+    mlir::memref::StoreOp op,
+    typename mlir::memref::StoreOp::Adaptor adaptor,
+    ConversionPatternRewriter &rewriter) const
+{
+    DBG("ConvertMemRefStoreOp: matching store");
+
+    auto loc = op.getLoc();
+    auto ctx = rewriter.getContext();
+
+    // Get the converted memref and value (type converter should have converted memref to pointer)
+    Value memref = adaptor.getMemref();
+    Value value = adaptor.getValue();
+
+    if (!llvm::isa<sir::PtrType>(memref.getType()))
+    {
+        DBG("ConvertMemRefStoreOp: memref not converted to pointer, type: " << memref.getType());
+        return failure();
+    }
+
+    // Ensure value is u256
+    auto u256Type = sir::U256Type::get(ctx);
+    if (!llvm::isa<sir::U256Type>(value.getType()))
+    {
+        value = rewriter.create<sir::BitcastOp>(loc, u256Type, value);
+    }
+
+    auto &naming = getNamingHelper(op);
+
+    // Get index (if any)
+    auto indices = adaptor.getIndices();
+    Value storePtr = memref;
+
+    if (!indices.empty())
+    {
+        // Calculate offset: index * element_size (32 bytes)
+        Value index = indices[0];
+
+        // Extract element index for naming
+        int64_t elemIndex = naming.extractElementIndex(index);
+        if (elemIndex < 0)
+        {
+            elemIndex = naming.getNextElemIndex();
+        }
+
+        // Create distinct location for this element block
+        std::string elemLocName = "elem" + std::to_string(elemIndex);
+        auto elemLoc = mlir::NameLoc::get(
+            mlir::StringAttr::get(ctx, elemLocName),
+            loc);
+
+        // Convert index to u256 if needed
+        if (!llvm::isa<sir::U256Type>(index.getType()))
+        {
+            index = rewriter.create<sir::BitcastOp>(elemLoc, u256Type, index);
+        }
+
+        // Create element size constant (32 bytes)
+        auto ui64Type = mlir::IntegerType::get(ctx, 64, mlir::IntegerType::Unsigned);
+        auto elementSizeAttr = mlir::IntegerAttr::get(ui64Type, 32ULL);
+        Value elementSize = rewriter.create<sir::ConstOp>(elemLoc, u256Type, elementSizeAttr);
+        naming.nameConst(elementSize.getDefiningOp(), 0, 32, "elem_size");
+
+        // Calculate offset: index * 32
+        unsigned offsetIndex = naming.getNextOffsetIndex();
+        Value offset = rewriter.create<sir::MulOp>(elemLoc, u256Type, index, elementSize);
+        naming.nameOffset(offset.getDefiningOp(), 0, offsetIndex);
+
+        // Add offset to base pointer
+        auto ptrType = sir::PtrType::get(ctx, /*addrSpace*/ 1);
+        storePtr = rewriter.create<sir::AddPtrOp>(elemLoc, ptrType, memref, offset);
+        naming.nameAddPtr(storePtr.getDefiningOp(), 0, elemIndex);
+    }
+
+    // Store the value - use element location if we have an index
+    Location storeLoc = loc;
+    if (!indices.empty())
+    {
+        int64_t elemIndex = naming.extractElementIndex(indices[0]);
+        if (elemIndex >= 0)
+        {
+            std::string elemLocName = "elem" + std::to_string(elemIndex);
+            storeLoc = mlir::NameLoc::get(
+                mlir::StringAttr::get(ctx, elemLocName),
+                loc);
+        }
+    }
+    rewriter.create<sir::StoreOp>(storeLoc, storePtr, value);
+
+    // Erase the original store operation
+    rewriter.eraseOp(op);
+    DBG("ConvertMemRefStoreOp: converted store to sir.store");
+    return success();
+}

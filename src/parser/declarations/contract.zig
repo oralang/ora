@@ -121,7 +121,7 @@ pub fn parseGhostDeclaration(
     _ = try parser.base.consume(.Ghost, "Expected 'ghost' keyword");
 
     // Ghost can precede: variable declaration, function declaration, or block
-    if (parser.base.check(.Pub) or parser.base.check(.Fn) or parser.base.check(.Inline)) {
+    if (parser.base.check(.Pub) or parser.base.check(.Fn)) {
         // Ghost function
         var fn_node = try parser.parseFunction(type_parser, expr_parser);
 
@@ -207,7 +207,7 @@ pub fn parseContractMember(
     }
 
     // Functions (can be public or private within contracts)
-    if (parser.base.check(.Pub) or parser.base.check(.Fn) or parser.base.check(.Inline)) {
+    if (parser.base.check(.Pub) or parser.base.check(.Fn)) {
         // Parse the function header first (leaves current at '{')
         var fn_node = try parser.parseFunction(type_parser, expr_parser);
 

@@ -1,0 +1,60 @@
+// ============================================================================
+// NonZeroAddress Subtyping Rules
+// ============================================================================
+// Tests that NonZeroAddress is a subtype of address
+// ============================================================================
+
+contract NonZeroAddressSubtyping {
+    // ============================================================================
+    // Valid Subtyping (NonZeroAddress -> address)
+    // ============================================================================
+    
+    // NonZeroAddress should be assignable to address (subtyping)
+    fn testNonZeroAddressToAddress(addr: NonZeroAddress) -> address {
+        return addr; // Valid: NonZeroAddress <: address
+    }
+    
+    // ============================================================================
+    // Function Parameters (Subtyping in)
+    // ============================================================================
+    
+    // Function accepting address should accept NonZeroAddress
+    fn acceptAddress(addr: address) {
+        // Should accept any address, including NonZeroAddress
+    }
+    
+    fn testSubtypingIn() {
+        let non_zero: NonZeroAddress = std.transaction.sender(); // Assuming this works
+        acceptAddress(non_zero); // Valid: NonZeroAddress <: address
+    }
+    
+    // ============================================================================
+    // Return Types (Subtyping out)
+    // ============================================================================
+    
+    // Function returning address can return NonZeroAddress
+    fn returnAddress() -> address {
+        let non_zero: NonZeroAddress = std.transaction.sender(); // Assuming this works
+        return non_zero; // Valid: NonZeroAddress <: address
+    }
+    
+    // ============================================================================
+    // Variable Assignments
+    // ============================================================================
+    
+    fn testVariableAssignment() {
+        let non_zero: NonZeroAddress = std.transaction.sender(); // Assuming this works
+        let addr: address = non_zero; // Valid: NonZeroAddress <: address
+    }
+    
+    // ============================================================================
+    // Invalid: address -> NonZeroAddress (without guard)
+    // ============================================================================
+    // NOTE: This should require a runtime guard or come from trusted source
+    // (e.g., std.transaction.sender, std.msg.sender)
+    
+    fn testAddressToNonZeroAddress(addr: address) {
+        // This should require a guard unless addr comes from trusted source
+        // let non_zero: NonZeroAddress = addr; // Should require guard
+    }
+}

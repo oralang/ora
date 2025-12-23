@@ -1,0 +1,8 @@
+contract Test {
+    pub fn test(b: u256) -> u256 {
+        var counter: u256 = 0;
+        counter = counter + 1 + b;
+        var c: u256 = 2 * 80;
+        return counter;
+    }
+}

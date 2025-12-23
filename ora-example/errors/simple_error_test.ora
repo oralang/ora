@@ -1,0 +1,9 @@
+// Simple test for error resolution
+contract SimpleErrorTest {
+    error TestError;
+    
+    pub fn test() -> !bool | TestError {
+        return TestError;
+    }
+}
+

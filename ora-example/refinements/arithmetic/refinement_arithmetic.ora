@@ -1,0 +1,96 @@
+// ============================================================================
+// Refinement Type Arithmetic
+// ============================================================================
+// Tests how refinement types behave in arithmetic operations
+// ============================================================================
+
+contract RefinementArithmetic {
+    // ============================================================================
+    // MinValue Arithmetic
+    // ============================================================================
+    
+    // MinValue + MinValue = MinValue (preserves minimum)
+    fn testMinValuePlusMinValue(a: MinValue<u256, 100>, b: MinValue<u256, 200>) -> MinValue<u256, 300> {
+        return a + b; // Result >= 300
+    }
+    
+    // MinValue + u256 = MinValue (preserves minimum)
+    fn testMinValuePlusBase(a: MinValue<u256, 100>, b: u256) -> MinValue<u256, 100> {
+        return a + b; // Result >= 100
+    }
+    
+    // MinValue - u256 = ? (may lose refinement if b >= a.min)
+    fn testMinValueMinusBase(a: MinValue<u256, 100>, b: u256) -> u256 {
+        return a - b; // Result type depends on whether b < a.min
+    }
+    
+    // ============================================================================
+    // MaxValue Arithmetic
+    // ============================================================================
+    
+    // MaxValue + MaxValue = MaxValue (preserves maximum)
+    fn testMaxValuePlusMaxValue(a: MaxValue<u256, 500>, b: MaxValue<u256, 300>) -> MaxValue<u256, 800> {
+        return a + b; // Result <= 800
+    }
+    
+    // MaxValue + u256 = MaxValue (preserves maximum)
+    fn testMaxValuePlusBase(a: MaxValue<u256, 500>, b: u256) -> MaxValue<u256, 500> {
+        return a + b; // Result <= 500 (conservative)
+    }
+    
+    // ============================================================================
+    // InRange Arithmetic
+    // ============================================================================
+    
+    // InRange + InRange = InRange (combines ranges)
+    fn testInRangePlusInRange(a: InRange<u256, 10, 100>, b: InRange<u256, 20, 200>) -> InRange<u256, 30, 300> {
+        return a + b; // Result in [30, 300]
+    }
+    
+    // InRange - InRange = InRange (combines ranges)
+    fn testInRangeMinusInRange(a: InRange<u256, 100, 500>, b: InRange<u256, 20, 200>) -> InRange<u256, 0, 480> {
+        return a - b; // Result in [0, 480] (assuming no underflow)
+    }
+    
+    // ============================================================================
+    // BasisPoints Arithmetic
+    // ============================================================================
+    
+    // BasisPoints + BasisPoints = ? (may exceed 10000)
+    fn testBasisPointsPlusBasisPoints(a: BasisPoints<u256>, b: BasisPoints<u256>) -> u256 {
+        return a + b; // Result may exceed 10000, so not BasisPoints
+    }
+    
+    // BasisPoints * BasisPoints = ? (may exceed 10000)
+    fn testBasisPointsTimesBasisPoints(a: BasisPoints<u256>, b: BasisPoints<u256>) -> u256 {
+        return a * b; // Result may exceed 10000, so not BasisPoints
+    }
+    
+    // ============================================================================
+    // Scaled Arithmetic
+    // ============================================================================
+    
+    // Scaled + Scaled (same decimals) = Scaled (preserves scale)
+    fn testScaledPlusScaled(a: Scaled<u256, 18>, b: Scaled<u256, 18>) -> Scaled<u256, 18> {
+        return a + b; // Result has same scale (18 decimals)
+    }
+    
+    // Scaled * Scaled = Scaled (scale doubles)
+    fn testScaledTimesScaled(a: Scaled<u256, 18>, b: Scaled<u256, 6>) -> Scaled<u256, 24> {
+        return a * b; // Result has scale 18 + 6 = 24
+    }
+    
+    // ============================================================================
+    // Mixed Refinement Arithmetic
+    // ============================================================================
+    
+    // MinValue + MaxValue = ? (conservative result)
+    fn testMinValuePlusMaxValue(a: MinValue<u256, 100>, b: MaxValue<u256, 500>) -> u256 {
+        return a + b; // Result type: u256 (conservative, loses refinements)
+    }
+    
+    // InRange + MinValue = InRange (combines constraints)
+    fn testInRangePlusMinValue(rate: InRange<u256, 0, 10000>, amount: MinValue<u256, 100>) -> InRange<u256, 100, 10100> {
+        return rate + amount; // Result in [100, 10100]
+    }
+}

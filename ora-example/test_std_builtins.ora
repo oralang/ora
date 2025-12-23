@@ -3,11 +3,17 @@ contract StdBuiltinsTest {
     storage lastCaller: address;
     storage lastTimestamp: u256;
     
-    // Test basic builtin usage
+    // test basic builtin usage
     pub fn recordInfo() -> bool {
-        let caller = std.msg.sender();
-        let time = std.block.timestamp();
-        
+        var caller: address = std.msg.sender(); // sender should be called caller()? 
+        var txOrigin: address = std.transaction.sender(); // origin should be called origin()?
+        var time: u256 = std.block.timestamp();
+        var value: u256 = std.msg.value();
+        var blockNum: u256 = std.block.number();
+        var coinbase: address = std.block.coinbase();
+        var zeroAddr: address = std.constants.ZERO_ADDRESS;
+        var maxU256: u256 = std.constants.U256_MAX;
+        // ...  
         lastCaller = caller;
         lastTimestamp = time;
         

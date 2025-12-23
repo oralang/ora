@@ -1,0 +1,73 @@
+// ============================================================================
+// Guard Generation for Assignments
+// ============================================================================
+// Tests when guards are generated for variable assignments
+// ============================================================================
+
+contract AssignmentGuards {
+    // ============================================================================
+    // Storage Variable Assignments
+    // ============================================================================
+    
+    storage var owner: NonZeroAddress;
+    storage var total_supply: MaxValue<u256, 1_000_000_000>;
+    storage var min_transfer: MinValue<u256, 1>;
+    storage var fee_rate: BasisPoints<u256>;
+    
+    // Assignment to storage with refinement type should generate guard
+    fn testStorageAssignment(value: u256) {
+        total_supply = value; // Guard required: value <= 1_000_000_000
+        min_transfer = value; // Guard required: value >= 1
+    }
+    
+    // Assignment from trusted builtin should NOT generate guard
+    fn testStorageAssignmentFromBuiltin() {
+        owner = std.transaction.sender(); // No guard - trusted source
+    }
+    
+    // ============================================================================
+    // Local Variable Assignments
+    // ============================================================================
+    
+    // Assignment to local variable with refinement type should generate guard
+    fn testLocalAssignment(value: u256) {
+        let min_value: MinValue<u256, 100> = value; // Guard required
+        let max_value: MaxValue<u256, 1000> = value; // Guard required
+        let in_range: InRange<u256, 0, 10000> = value; // Guard required
+    }
+    
+    // Assignment from compatible refinement (subtyping) should NOT generate guard
+    fn testSubtypingAssignment() {
+        let higher_min: MinValue<u256, 2000> = 2000;
+        let lower_min: MinValue<u256, 1000> = higher_min; // No guard - subtyping
+    }
+    
+    // ============================================================================
+    // Return Statement Guards
+    // ============================================================================
+    
+    // Return value should be checked against function return type
+    fn testReturnGuard(value: u256) -> MinValue<u256, 100> {
+        return value; // Guard required: value >= 100
+    }
+    
+    // Return from compatible refinement should NOT generate guard
+    fn testReturnSubtyping() -> MinValue<u256, 100> {
+        let higher_min: MinValue<u256, 2000> = 2000;
+        return higher_min; // No guard - subtyping
+    }
+    
+    // ============================================================================
+    // Function Parameter Guards
+    // ============================================================================
+    
+    // Function parameters with refinement types should be checked at call site
+    fn testParameterGuard(amount: MinValue<u256, 100>) {
+        // Guard should be generated at call site, not here
+    }
+    
+    fn testCallSiteGuard() {
+        let value: u256 = 50;
+        // testParameterGuard(value); // Guard required at call site: value >= 100
+    }
+}

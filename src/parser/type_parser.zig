@@ -6,7 +6,7 @@
 //
 // SUPPORTED TYPES:
 //   • Primitives: uint, int, bool, address, string, bytes
-//   • Collections: arrays, maps, doublemaps, slices
+//   • Collections: arrays, maps, slices
 //   • Complex: structs, enums, function types, error unions
 //
 // ============================================================================
@@ -92,10 +92,6 @@ pub const TypeParser = struct {
         // Handle complex types
         if (self.base.match(.Map)) {
             return try self.parseMapType(context);
-        }
-
-        if (self.base.match(.DoubleMap)) {
-            return try self.parseDoubleMapType(context);
         }
 
         if (self.base.match(.Slice)) {
@@ -205,44 +201,6 @@ pub const TypeParser = struct {
         };
     }
 
-    /// Parse doublemap type: doublemap[K1, K2, V]
-    fn parseDoubleMapType(self: *TypeParser, context: TypeParseContext) ParserError!TypeInfo {
-        const span = self.base.currentSpan();
-        _ = try self.base.consume(.LeftBracket, "Expected '[' after 'doublemap'");
-
-        const key1_type_info = try self.parseTypeWithContext(context);
-        _ = try self.base.consume(.Comma, "Expected ',' after first key type");
-
-        const key2_type_info = try self.parseTypeWithContext(context);
-        _ = try self.base.consume(.Comma, "Expected ',' after second key type");
-
-        const value_type_info = try self.parseTypeWithContext(context);
-        _ = try self.base.consume(.RightBracket, "Expected ']' after doublemap value type");
-
-        // Create OraType for double mapping
-        const key1_ora_type = try self.base.arena.createNode(OraType);
-        key1_ora_type.* = key1_type_info.ora_type orelse return error.UnresolvedType;
-
-        const key2_ora_type = try self.base.arena.createNode(OraType);
-        key2_ora_type.* = key2_type_info.ora_type orelse return error.UnresolvedType;
-
-        const value_ora_type = try self.base.arena.createNode(OraType);
-        value_ora_type.* = value_type_info.ora_type orelse return error.UnresolvedType;
-
-        const doublemap_type = ast.type_info.DoubleMapType{
-            .key1 = key1_ora_type,
-            .key2 = key2_ora_type,
-            .value = value_ora_type,
-        };
-
-        return TypeInfo{
-            .category = .DoubleMap,
-            .ora_type = OraType{ .double_map = doublemap_type },
-            .source = .explicit,
-            .span = span,
-        };
-    }
-
     /// Parse array types [T; N] and [T]
     fn parseArrayType(self: *TypeParser, context: TypeParseContext) ParserError!TypeInfo {
         const span = self.base.currentSpan();
@@ -282,10 +240,6 @@ pub const TypeParser = struct {
         // Check for complex types
         if (std.mem.eql(u8, type_name, "slice")) {
             return try self.parseSliceType(context);
-        }
-
-        if (std.mem.eql(u8, type_name, "doublemap")) {
-            return try self.parseDoubleMapType(context);
         }
 
         // Check for refinement types (MinValue, MaxValue, InRange, Scaled, Exact, NonZero, BasisPoints)

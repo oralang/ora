@@ -1,0 +1,81 @@
+// ============================================================================
+// Type Mismatch Error Cases
+// ============================================================================
+// These contracts SHOULD FAIL COMPILATION
+// They document invalid type conversions that should be caught
+// ============================================================================
+// NOTE: Comment out the invalid lines to test compilation
+// ============================================================================
+
+contract TypeMismatchErrors {
+    // ============================================================================
+    // Incompatible Refinement Conversions
+    // ============================================================================
+    
+    // ERROR: Cannot convert MinValue to Exact
+    fn testMinValueToExactError(amount: MinValue<u256, 1000>) {
+        // const exact: Exact<u256> = amount; // ERROR: Incompatible refinements
+    }
+    
+    // ERROR: Cannot convert BasisPoints to Exact
+    fn testBasisPointsToExactError(rate: BasisPoints<u256>) {
+        // const exact: Exact<u256> = rate; // ERROR: Incompatible refinements
+    }
+    
+    // ERROR: Cannot convert Exact to MinValue
+    fn testExactToMinValueError(total: Exact<u256>) {
+        // const min_value: MinValue<u256, 100> = total; // ERROR: Incompatible refinements
+    }
+    
+    // ERROR: Cannot convert Scaled to MinValue
+    fn testScaledToMinValueError(amount: Scaled<u256, 18>) {
+        // const min_value: MinValue<u256, 1000> = amount; // ERROR: Incompatible refinements
+    }
+    
+    // ============================================================================
+    // Invalid Subtyping (Narrowing)
+    // ============================================================================
+    
+    // ERROR: Cannot narrow MinValue (lower min to higher min)
+    fn testNarrowMinValueError(amount: MinValue<u256, 100>) {
+        // const higher_min: MinValue<u256, 200> = amount; // ERROR: Narrowing conversion
+    }
+    
+    // ERROR: Cannot narrow MaxValue (higher max to lower max)
+    fn testNarrowMaxValueError(limit: MaxValue<u256, 1000>) {
+        // const lower_max: MaxValue<u256, 500> = limit; // ERROR: Narrowing conversion
+    }
+    
+    // ERROR: Cannot narrow InRange
+    fn testNarrowInRangeError(rate: InRange<u256, 0, 10000>) {
+        // const narrower: InRange<u256, 100, 5000> = rate; // ERROR: Narrowing conversion
+    }
+    
+    // ============================================================================
+    // Base Type Mismatches
+    // ============================================================================
+    
+    // ERROR: Wrong base type (u8 vs u256)
+    fn testWrongBaseTypeError(value: u8) {
+        // const min_value: MinValue<u256, 100> = value; // ERROR: Base type mismatch
+    }
+    
+    // ERROR: Completely different types (address vs u256)
+    fn testCompletelyDifferentTypeError(addr: address) {
+        // const min_value: MinValue<u256, 100> = addr; // ERROR: Type mismatch
+    }
+    
+    // ============================================================================
+    // Invalid Arithmetic Results
+    // ============================================================================
+    
+    // ERROR: Cannot assign arithmetic result that loses refinement
+    fn testArithmeticRefinementLoss(a: MinValue<u256, 100>, b: u256) {
+        // const result: MinValue<u256, 100> = a - b; // ERROR: May lose refinement if b >= 100
+    }
+    
+    // ERROR: BasisPoints arithmetic may exceed bounds
+    fn testBasisPointsOverflow(a: BasisPoints<u256>, b: BasisPoints<u256>) {
+        // const result: BasisPoints<u256> = a + b; // ERROR: May exceed 10000
+    }
+}

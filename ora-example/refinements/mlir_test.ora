@@ -1,0 +1,47 @@
+// Test contract to verify refinement types appear in MLIR output
+
+contract RefinementMLIRTest {
+    // Test MinValue with large u256 value
+    fn testMinValue(amount: MinValue<u256, 1_000_000_000_000_000_000_000_000_000_000_000_000>) {
+        // Should create !ora.min_value<i256, ...> in MLIR
+    }
+
+    // Test MaxValue
+    fn testMaxValue(limit: MaxValue<u256, 100_000_000_000_000_000_000_000_000_000_000_000>) {
+        // Should create !ora.max_value<i256, ...> in MLIR
+    }
+
+    // Test InRange
+    fn testInRange(rate: InRange<u256, 0, 10_000_000_000_000_000_000_000_000_000_000_000>) {
+        // Should create !ora.in_range<i256, ...> in MLIR
+    }
+
+    // Test Scaled
+    fn testScaled(amount: Scaled<u256, 18>) {
+        // Should create !ora.scaled<i256, 18> in MLIR
+    }
+
+    // Test Exact
+    fn testExact(total: Exact<u256>) {
+        // Should create !ora.exact<i256> in MLIR
+    }
+
+    // Test NonZeroAddress
+    fn testNonZeroAddress(recipient: NonZeroAddress) {
+        // Should create !ora.non_zero_address in MLIR
+    }
+
+    // Test variable declarations with refinements
+    fn testVariables() {
+        let min_val: MinValue<u256, 1000> = 2000;
+        let max_val: MaxValue<u256, 10000> = 5000;
+        let range_val: InRange<u256, 100, 500> = 250;
+        let scaled_val: Scaled<u256, 18> = 1_000_000_000_000_000_000;
+        let exact_val: Exact<u256> = 1000;
+    }
+
+    // Test return with refinement
+    fn testReturn() -> MinValue<u256, 1000> {
+        return 2000;
+    }
+}

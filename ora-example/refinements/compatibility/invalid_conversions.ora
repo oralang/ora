@@ -1,0 +1,80 @@
+// ============================================================================
+// Invalid Refinement Type Conversions
+// ============================================================================
+// Tests that should FAIL COMPILATION - invalid type conversions
+// ============================================================================
+// NOTE: These contracts are expected to fail compilation
+// They document what conversions should NOT be allowed
+// ============================================================================
+
+contract InvalidConversions {
+    // ============================================================================
+    // Incompatible Refinement Types
+    // ============================================================================
+    
+    // ERROR: MinValue cannot convert to Exact
+    // MinValue and Exact are incompatible refinements
+    fn testMinValueToExact(amount: MinValue<u256, 1000>) {
+        // const exact: Exact<u256> = amount; // Should FAIL
+    }
+    
+    // ERROR: BasisPoints cannot convert to Exact
+    // BasisPoints (InRange) and Exact are incompatible refinements
+    fn testBasisPointsToExact(rate: BasisPoints<u256>) {
+        // const exact: Exact<u256> = rate; // Should FAIL
+    }
+    
+    // ERROR: Exact cannot convert to MinValue
+    // Exact and MinValue are incompatible refinements
+    fn testExactToMinValue(total: Exact<u256>) {
+        // const min_value: MinValue<u256, 100> = total; // Should FAIL
+    }
+    
+    // ERROR: Scaled cannot convert to MinValue
+    // Scaled and MinValue are incompatible refinements
+    fn testScaledToMinValue(amount: Scaled<u256, 18>) {
+        // const min_value: MinValue<u256, 1000> = amount; // Should FAIL
+    }
+    
+    // ERROR: MinValue cannot convert to Scaled
+    // MinValue and Scaled are incompatible refinements
+    fn testMinValueToScaled(amount: MinValue<u256, 1000>) {
+        // const scaled: Scaled<u256, 18> = amount; // Should FAIL
+    }
+    
+    // ============================================================================
+    // Invalid Subtyping (narrowing conversions)
+    // ============================================================================
+    
+    // ERROR: MinValue<u256, 100> cannot convert to MinValue<u256, 200>
+    // Lower min cannot be assigned to higher min (narrowing)
+    fn testLowerMinToHigherMin(amount: MinValue<u256, 100>) {
+        // const higher_min: MinValue<u256, 200> = amount; // Should FAIL
+    }
+    
+    // ERROR: MaxValue<u256, 1000> cannot convert to MaxValue<u256, 500>
+    // Higher max cannot be assigned to lower max (narrowing)
+    fn testHigherMaxToLowerMax(limit: MaxValue<u256, 1000>) {
+        // const lower_max: MaxValue<u256, 500> = limit; // Should FAIL
+    }
+    
+    // ERROR: InRange<u256, 0, 10000> cannot convert to InRange<u256, 100, 5000>
+    // Wider range cannot be assigned to narrower range (narrowing)
+    fn testWiderRangeToNarrowerRange(rate: InRange<u256, 0, 10000>) {
+        // const narrower: InRange<u256, 100, 5000> = rate; // Should FAIL
+    }
+    
+    // ============================================================================
+    // Invalid Base Type Conversions
+    // ============================================================================
+    
+    // ERROR: u8 cannot convert to MinValue<u256, ...> (different base types)
+    fn testWrongBaseType(value: u8) {
+        // const min_value: MinValue<u256, 100> = value; // Should FAIL - base type mismatch
+    }
+    
+    // ERROR: address cannot convert to MinValue<u256, ...> (completely different types)
+    fn testAddressToMinValue(addr: address) {
+        // const min_value: MinValue<u256, 100> = addr; // Should FAIL - type mismatch
+    }
+}

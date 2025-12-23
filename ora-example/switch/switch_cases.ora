@@ -1,0 +1,49 @@
+contract SwitchCases {
+    pub fn testSwitchStatement(value: u256) -> u256 {
+        switch (value) {
+            0 => { return 10; }
+            1 => { return 20; }
+            2 => { return 30; }
+            else => { return 0; }
+        }
+    }
+
+    pub fn testSwitchExpression(value: u256) -> u256 {
+        return switch (value) {
+            0 => 100,
+            1 => 200,
+            2 => 300,
+            else => 0
+        };
+    }
+
+    pub fn testSwitchWithRanges(value: u256) -> u256 {
+        switch (value) {
+            0...9 => { return 1; }
+            10...99 => { return 2; }
+            100...999 => { return 3; }
+            else => { return 0; }
+        }
+    }
+
+    pub fn testSwitchExpressionWithRanges(value: u256) -> u256 {
+        return switch (value) {
+            0...9 => 10,
+            10...99 => 20,
+            100...999 => 30,
+            else => 0
+        };
+    }
+
+    pub fn testSwitchMultipleCases(value: u256) -> u256 {
+        switch (value) {
+            0 => { return 1; }
+            1 => { return 2; }
+            2 => { return 3; }
+            3 => { return 4; }
+            4 => { return 5; }
+            else => { return 0; }
+        }
+    }
+}
+

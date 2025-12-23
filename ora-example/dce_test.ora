@@ -1,0 +1,13 @@
+contract DCETest {
+    pub fn testDeadCodeElimination() -> u256 {
+        // These should be removed by DCE (unused, folded to constants)
+        var unused1: u256 = 5 + 10;   // Folds to 15, then removed
+        var unused2: u256 = 20 * 3;   // Folds to 60, then removed
+        var unused3: u256 = 100 - 50; // Folds to 50, then removed
+        
+        // This is used (returned)
+        var used: u256 = 42;
+        
+        return used;
+    }
+}

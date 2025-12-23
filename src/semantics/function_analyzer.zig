@@ -17,19 +17,62 @@ const ast = @import("../ast.zig");
 const state = @import("state.zig");
 const expr = @import("expression_analyzer.zig");
 const locals = @import("locals_binder.zig");
-const complexity = @import("../analysis/complexity.zig");
 
-fn copyOraTypeOwned(allocator: std.mem.Allocator, src: ast.Types.OraType) !ast.Types.OraType {
+pub fn copyOraTypeOwned(allocator: std.mem.Allocator, src: ast.Types.OraType) !ast.Types.OraType {
     switch (src) {
         ._union => |members| {
             const new_members = try allocator.alloc(ast.Types.OraType, members.len);
-            @memcpy(new_members, members);
+            for (members, 0..) |member, i| {
+                new_members[i] = try copyOraTypeOwned(allocator, member);
+            }
             return ast.Types.OraType{ ._union = new_members };
         },
         .error_union => |succ_ptr| {
             const new_succ_ptr = try allocator.create(ast.Types.OraType);
-            new_succ_ptr.* = succ_ptr.*;
+            new_succ_ptr.* = try copyOraTypeOwned(allocator, succ_ptr.*);
             return ast.Types.OraType{ .error_union = new_succ_ptr };
+        },
+        .slice => |elem_type_ptr| {
+            const new_elem_type_ptr = try allocator.create(ast.Types.OraType);
+            new_elem_type_ptr.* = try copyOraTypeOwned(allocator, elem_type_ptr.*);
+            return ast.Types.OraType{ .slice = new_elem_type_ptr };
+        },
+        // Refinement types need to copy the base pointer
+        .min_value => |ref| {
+            const new_base = try allocator.create(ast.Types.OraType);
+            new_base.* = try copyOraTypeOwned(allocator, ref.base.*);
+            return ast.Types.OraType{ .min_value = .{ .base = new_base, .min = ref.min } };
+        },
+        .max_value => |ref| {
+            const new_base = try allocator.create(ast.Types.OraType);
+            new_base.* = try copyOraTypeOwned(allocator, ref.base.*);
+            return ast.Types.OraType{ .max_value = .{ .base = new_base, .max = ref.max } };
+        },
+        .in_range => |ref| {
+            const new_base = try allocator.create(ast.Types.OraType);
+            new_base.* = try copyOraTypeOwned(allocator, ref.base.*);
+            return ast.Types.OraType{ .in_range = .{ .base = new_base, .min = ref.min, .max = ref.max } };
+        },
+        .scaled => |s| {
+            const new_base = try allocator.create(ast.Types.OraType);
+            new_base.* = try copyOraTypeOwned(allocator, s.base.*);
+            return ast.Types.OraType{ .scaled = .{ .base = new_base, .decimals = s.decimals } };
+        },
+        .non_zero_address => {
+            // Non-zero address is a simple refinement, no base to copy
+            return src;
+        },
+        .array => |arr| {
+            // Copy the element type recursively
+            const new_elem = try allocator.create(ast.Types.OraType);
+            new_elem.* = try copyOraTypeOwned(allocator, arr.elem.*);
+            return ast.Types.OraType{ .array = .{ .elem = new_elem, .len = arr.len } };
+        },
+        .exact => |e| {
+            // Copy the exact type recursively
+            const new_e = try allocator.create(ast.Types.OraType);
+            new_e.* = try copyOraTypeOwned(allocator, e.*);
+            return ast.Types.OraType{ .exact = new_e };
         },
         else => return src,
     }
@@ -38,7 +81,7 @@ fn copyOraTypeOwned(allocator: std.mem.Allocator, src: ast.Types.OraType) !ast.T
 pub fn collectFunctionSymbols(table: *state.SymbolTable, parent: *state.Scope, f: *const ast.FunctionNode) !void {
     const fn_scope = try table.allocator.create(state.Scope);
     fn_scope.* = state.Scope.init(table.allocator, parent, f.name);
-    try table.scopes.append(fn_scope);
+    try table.scopes.append(table.allocator, fn_scope);
     try table.function_scopes.put(f.name, fn_scope);
     // Parameters
     for (f.parameters) |p| {
@@ -47,13 +90,15 @@ pub fn collectFunctionSymbols(table: *state.SymbolTable, parent: *state.Scope, f
     }
 
     // Create a function symbol type from parameters and return type
-    var param_types = std.ArrayList(ast.Types.OraType).init(table.allocator);
-    defer param_types.deinit();
+    var param_types = std.ArrayListUnmanaged(ast.Types.OraType){};
+    defer param_types.deinit(table.allocator);
     for (f.parameters) |p| {
         if (p.type_info.ora_type) |ot| {
-            try param_types.append(ot);
+            // Copy the type to ensure refinement types are properly owned
+            const copied_type = try copyOraTypeOwned(table.allocator, ot);
+            try param_types.append(table.allocator, copied_type);
         } else {
-            try param_types.append(.u256); // fallback for unknown param types
+            try param_types.append(table.allocator, .u256); // fallback for unknown param types
         }
     }
     const params_slice = try table.allocator.alloc(ast.Types.OraType, param_types.items.len);
@@ -71,16 +116,23 @@ pub fn collectFunctionSymbols(table: *state.SymbolTable, parent: *state.Scope, f
     const fn_type = ast.type_info.FunctionType{ .params = params_slice, .return_type = ret_ptr };
     const new_ti = ast.Types.TypeInfo.fromOraType(.{ .function = fn_type });
     // Record success type of error unions for quick checks
+    // Note: We need to deep-copy the success type if it contains pointers (refinement types)
     if (f.return_type_info) |rt| {
         if (rt.ora_type) |ot| switch (ot) {
-            .error_union => |succ_ptr| try table.function_success_types.put(f.name, @constCast(succ_ptr).*),
+            .error_union => |succ_ptr| {
+                // Deep-copy the success type to ensure refinement types are properly owned
+                const copied_succ = try copyOraTypeOwned(table.allocator, succ_ptr.*);
+                try table.function_success_types.put(f.name, copied_succ);
+            },
             ._union => |members| {
                 var i: usize = 0;
                 while (i < members.len) : (i += 1) {
                     switch (members[i]) {
                         .error_union => |succ_ptr| {
                             // Prefer the first error_union member
-                            try table.function_success_types.put(f.name, @constCast(succ_ptr).*);
+                            // Deep-copy the success type to ensure refinement types are properly owned
+                            const copied_succ = try copyOraTypeOwned(table.allocator, succ_ptr.*);
+                            try table.function_success_types.put(f.name, copied_succ);
                             break;
                         },
                         else => {},
@@ -108,32 +160,19 @@ pub fn collectFunctionSymbols(table: *state.SymbolTable, parent: *state.Scope, f
         if (rt.ora_type) |ot| switch (ot) {
             ._union => |members| {
                 // Collect members that are error tags by name (enum error-type modeling TBD)
-                var list = std.ArrayList([]const u8).init(table.allocator);
-                defer list.deinit();
+                var list = std.ArrayListUnmanaged([]const u8){};
+                defer list.deinit(table.allocator);
                 for (members) |m| switch (m) {
                     .struct_type, .enum_type, .contract_type => |name| {
                         // Tentative: treat named types as allowable error tags by name
-                        try list.append(name);
+                        try list.append(table.allocator, name);
                     },
                     else => {},
                 };
-                const slice = try list.toOwnedSlice();
+                const slice = try list.toOwnedSlice(table.allocator);
                 try table.function_allowed_errors.put(f.name, slice);
             },
             else => {},
         };
-    }
-
-    // Complexity analysis for inline functions
-    if (f.is_inline) {
-        var analyzer = complexity.ComplexityAnalyzer.init(table.allocator);
-        const metrics = analyzer.analyzeFunction(f);
-
-        if (metrics.isComplex()) {
-            // TODO: Add proper warning mechanism when available
-            // For now, we just log to stderr
-            std.debug.print("Warning: Function '{s}' is marked inline but has high complexity ({} nodes). " ++
-                "Consider removing 'inline' modifier or refactoring the function.\n", .{ f.name, metrics.node_count });
-        }
     }
 }

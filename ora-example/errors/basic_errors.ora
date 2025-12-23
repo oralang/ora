@@ -8,6 +8,8 @@ error InsufficientBalance(required: u256, available: u256);
 error InvalidAddress;
 error Unauthorized(caller: address, required: address);
 error InvalidAmount(amount: u256);
+error ZeroValueNotAllowed;
+error ValueTooLarge;
 
 contract ErrorHandlingTest {
     storage var owner: address;
@@ -57,8 +59,8 @@ contract ErrorHandlingTest {
     pub fn safe_transfer(to: address, amount: u256) -> bool {
         try {
             // Attempt transfer
-            let result = transfer(to, amount);
-            return result;
+            var transfer_result: bool = transfer(to, amount);
+            return transfer_result;
         } catch (error) {
             // Handle specific error types
             switch (error) {
@@ -86,16 +88,16 @@ contract ErrorHandlingTest {
     
     // Function with custom error handling logic
     pub fn batch_transfer(recipients: slice[address], amounts: slice[u256]) -> struct { success_count: u256, failed_count: u256 } {
-        let success_count: u256 = 0;
-        let failed_count: u256 = 0;
+        var success_count: u256 = 0;
+        var failed_count: u256 = 0;
         
         for (recipients) |recipient, i| {
-            let amount = amounts[i];
+            var amount: u256 = amounts[i];
             
             // Try transfer and handle errors
             try {
-                let result = transfer(recipient, amount);
-                if (result) {
+                var transfer_result: bool = transfer(recipient, amount);
+                if (transfer_result) {
                     success_count += 1;
                 } else {
                     failed_count += 1;

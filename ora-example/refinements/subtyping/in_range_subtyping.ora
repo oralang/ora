@@ -1,0 +1,71 @@
+// ============================================================================
+// InRange Subtyping Rules
+// ============================================================================
+// Tests that InRange with narrower bounds is a subtype of InRange with wider bounds
+// ============================================================================
+
+contract InRangeSubtyping {
+    // ============================================================================
+    // Valid Subtyping (Widening)
+    // ============================================================================
+    
+    // InRange<u256, 100, 500> should be assignable to InRange<u256, 0, 1000>
+    // Narrower range is a subtype of wider range
+    fn testNarrowerToWider(rate: InRange<u256, 100, 500>) -> InRange<u256, 0, 1000> {
+        return rate; // Valid: [100, 500] ⊆ [0, 1000]
+    }
+    
+    // InRange<u256, 50, 200> should be assignable to InRange<u256, 0, 10000>
+    fn testVeryNarrowToVeryWide(rate: InRange<u256, 50, 200>) -> InRange<u256, 0, 10000> {
+        return rate; // Valid: [50, 200] ⊆ [0, 10000]
+    }
+    
+    // ============================================================================
+    // InRange to MinValue Subtyping
+    // ============================================================================
+    
+    // InRange<u256, 100, 1000> should be assignable to MinValue<u256, 100>
+    // If InRange.min >= MinValue.min, it's valid
+    fn testInRangeToMinValue(rate: InRange<u256, 100, 1000>) -> MinValue<u256, 100> {
+        return rate; // Valid: rate.min (100) >= 100
+    }
+    
+    // InRange<u256, 500, 1000> should be assignable to MinValue<u256, 100>
+    fn testInRangeToLowerMinValue(rate: InRange<u256, 500, 1000>) -> MinValue<u256, 100> {
+        return rate; // Valid: rate.min (500) >= 100
+    }
+    
+    // ============================================================================
+    // InRange to MaxValue Subtyping
+    // ============================================================================
+    
+    // InRange<u256, 0, 500> should be assignable to MaxValue<u256, 500>
+    // If InRange.max <= MaxValue.max, it's valid
+    fn testInRangeToMaxValue(rate: InRange<u256, 0, 500>) -> MaxValue<u256, 500> {
+        return rate; // Valid: rate.max (500) <= 500
+    }
+    
+    // InRange<u256, 0, 200> should be assignable to MaxValue<u256, 1000>
+    fn testInRangeToHigherMaxValue(rate: InRange<u256, 0, 200>) -> MaxValue<u256, 1000> {
+        return rate; // Valid: rate.max (200) <= 1000
+    }
+    
+    // ============================================================================
+    // BasisPoints Subtyping (BasisPoints = InRange<u256, 0, 10000>)
+    // ============================================================================
+    
+    // BasisPoints should be assignable to InRange<u256, 0, 20000>
+    fn testBasisPointsToWiderInRange(fee: BasisPoints<u256>) -> InRange<u256, 0, 20000> {
+        return fee; // Valid: [0, 10000] ⊆ [0, 20000]
+    }
+    
+    // BasisPoints should be assignable to MinValue<u256, 0>
+    fn testBasisPointsToMinValue(fee: BasisPoints<u256>) -> MinValue<u256, 0> {
+        return fee; // Valid: fee.min (0) >= 0
+    }
+    
+    // BasisPoints should be assignable to MaxValue<u256, 20000>
+    fn testBasisPointsToMaxValue(fee: BasisPoints<u256>) -> MaxValue<u256, 20000> {
+        return fee; // Valid: fee.max (10000) <= 20000
+    }
+}

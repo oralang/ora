@@ -1,5 +1,5 @@
 const std = @import("std");
-const SourceSpan = @import("../ast.zig").SourceSpan;
+const SourceSpan = @import("source_span.zig").SourceSpan;
 
 // Forward declaration for expressions
 const expressions = @import("expressions.zig");
@@ -44,7 +44,6 @@ pub const StmtNode = union(enum) {
     Assume: AssumeNode, // assume statements (formal verification)
     Havoc: HavocNode, // havoc statements (formal verification)
     Switch: SwitchNode, // switch statements
-    Move: MoveNode, // expr from source -> dest : amount
     LabeledBlock: LabeledBlockNode, // label: { statements }
 
     // Error handling statements
@@ -72,6 +71,9 @@ pub const StmtNode = union(enum) {
 pub const ReturnNode = struct {
     value: ?ExprNode,
     span: SourceSpan,
+    /// Guard optimization: skip runtime guard if true (set during type resolution)
+    /// True when: constant satisfies constraint, subtyping applies, or trusted builtin
+    skip_guard: bool = false,
 };
 
 pub const IfNode = struct {
@@ -87,6 +89,7 @@ pub const WhileNode = struct {
     invariants: []ExprNode, // Loop invariants
     decreases: ?*ExprNode = null, // Termination measure (decreases)
     increases: ?*ExprNode = null, // Progress measure (increases)
+    label: ?[]const u8 = null, // Optional label for labeled break/continue
     span: SourceSpan,
 };
 
@@ -117,6 +120,7 @@ pub const ForLoopNode = struct {
     invariants: []ExprNode, // Loop invariants (formal verification)
     decreases: ?*ExprNode = null, // Termination measure (decreases)
     increases: ?*ExprNode = null, // Progress measure (increases)
+    label: ?[]const u8 = null, // Optional label for labeled break/continue
     span: SourceSpan,
 };
 
@@ -231,6 +235,9 @@ pub const VariableDeclNode = struct {
     tuple_names: ?[][]const u8, // For tuple unpacking: let (a, b) = expr
     /// Is this a ghost variable? (specification-only)
     is_ghost: bool = false,
+    /// Guard optimization: skip runtime guard if true (set during type resolution)
+    /// True when: constant satisfies constraint, subtyping applies, or trusted builtin
+    skip_guard: bool = false,
 
     /// Metadata: Specification-only if ghost
     pub fn isSpecificationOnly(self: *const VariableDeclNode) bool {
@@ -242,15 +249,6 @@ pub const VariableDeclNode = struct {
 pub const DestructuringAssignmentNode = struct {
     pattern: DestructuringPattern, // Pattern to match (e.g., .{field1, field2})
     value: *ExprNode, // Expression to destructure
-    span: SourceSpan,
-};
-
-/// Move Statement (expr from source -> dest : amount)
-pub const MoveNode = struct {
-    expr: ExprNode, // The expression being moved
-    source: ExprNode, // Source location
-    dest: ExprNode, // Destination location
-    amount: ExprNode, // Amount to move
     span: SourceSpan,
 };
 
@@ -311,12 +309,6 @@ pub fn deinitStmtNode(allocator: std.mem.Allocator, stmt: *StmtNode) void {
             dest_assign.pattern.deinit(allocator);
             expressions.deinitExprNode(allocator, dest_assign.value);
             allocator.destroy(dest_assign.value);
-        },
-        .Move => |*move_stmt| {
-            expressions.deinitExprNode(allocator, &move_stmt.expr);
-            expressions.deinitExprNode(allocator, &move_stmt.source);
-            expressions.deinitExprNode(allocator, &move_stmt.dest);
-            expressions.deinitExprNode(allocator, &move_stmt.amount);
         },
         .Unlock => |*unlock| {
             expressions.deinitExprNode(allocator, &unlock.path);

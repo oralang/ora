@@ -1,39 +1,56 @@
-let integer_literal = 42;
-let hex_literal = 0x2A;
-let binary_literal = 0b101010;
-let string_literal = "hello";
-let boolean_literal = true;
-let address_literal = 0x1234567890123456789012345678901234567890;
+contract BasicExpressionsTest {
+    // Literal expressions
+    pub fn testLiterals() {
+        var integer_literal: u256 = 42;
+        var hex_literal: u256 = 0x2A;
+        var binary_literal: u256 = 42; // 0b101010 = 42
+        var string_literal: string = "hello";
+        var boolean_literal: bool = true;
+        var address_literal: address = 0x1234567890123456789012345678901234567890;
+    }
 
-// Basic arithmetic expressions (will be used in global context)
-let addition = 10 + 20;          // 30
-let subtraction = 20 - 10;       // 10
-let multiplication = 10 * 20;    // 200
-let division = 20 / 10;          // 2
-let modulo = 20 % 10;            // 0
-let exponentiation = 10 ** 2;    // 100
+    // Basic arithmetic expressions
+    pub fn testArithmetic() {
+        var addition: u256 = 10 + 20;          // 30
+        var subtraction: u256 = 20 - 10;       // 10
+        var multiplication: u256 = 10 * 20;    // 200
+        var division: u256 = 20 / 10;          // 2
+        var modulo: u256 = 20 % 10;            // 0
+        var exponentiation: u256 = 10 ** 2;    // 100
+    }
 
-// Unary expressions
-let negative = -10;              // -10
-let boolean_not = !true;         // false
+    // Unary expressions
+    pub fn testUnary() {
+        var negative: i256 = -10;              // -10
+        var boolean_not: bool = !true;         // false
+    }
 
-// Parenthesized expressions
-let parenthesized = (10 + 20) * 2;  // 60
+    // Parenthesized expressions
+    pub fn testParentheses() {
+        var parenthesized: u256 = (10 + 20) * 2;  // 60
+    }
 
-// Precedence test expressions
-let precedence1 = 2 + 3 * 4;        // 14 (not 20)
-let precedence2 = 2 * 3 + 4;        // 10 (not 14)
-let precedence3 = 2 * (3 + 4);      // 14 (not 10)
-let precedence4 = 2 ** 3 ** 2;      // 2^(3^2) = 2^9 = 512 (not (2^3)^2 = 64)
+    // Precedence test expressions
+    pub fn testPrecedence() {
+        var precedence1: u256 = 2 + 3 * 4;        // 14 (not 20)
+        var precedence2: u256 = 2 * 3 + 4;        // 10 (not 14)
+        var precedence3: u256 = 2 * (3 + 4);      // 14 (not 10)
+        var precedence4: u256 = 2 ** 3 ** 2;      // 2^(3^2) = 2^9 = 512 (not (2^3)^2 = 64)
+    }
 
-// Binary expressions with literals
-let logical_and = true && false;  // false
-let logical_or = true || false;   // true
+    // Binary expressions with literals
+    pub fn testLogical() {
+        var logical_and: bool = true && false;  // false
+        var logical_or: bool = true || false;   // true
+    }
 
-// Comparison expressions
-let equal = 10 == 10;            // true
-let not_equal = 10 != 20;        // true
-let greater = 20 > 10;           // true
-let less = 10 < 20;              // true
-let greater_equal = 10 >= 10;    // true
-let less_equal = 10 <= 20;       // true
+    // Comparison expressions
+    pub fn testComparisons() {
+        var equal: bool = 10 == 10;            // true
+        var not_equal: bool = 10 != 20;        // true
+        var greater: bool = 20 > 10;           // true
+        var less: bool = 10 < 20;              // true
+        var greater_equal: bool = 10 >= 10;    // true
+        var less_equal: bool = 10 <= 20;       // true
+    }
+}

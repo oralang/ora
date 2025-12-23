@@ -254,12 +254,12 @@ pub const StructType = struct {
     /// Optimize layout for EVM storage (most critical for gas costs)
     fn optimizeStorageLayout(self: *StructType) void {
         // Sort fields by size for optimal packing (largest first, then pack smaller ones)
-        var field_list = std.ArrayList(StructField).init(self.allocator);
-        defer field_list.deinit();
+        var field_list = std.ArrayList(StructField){};
+        defer field_list.deinit(self.allocator);
 
         // Copy fields and sort by size (descending)
         for (self.fields) |field| {
-            field_list.append(field) catch return;
+            field_list.append(self.allocator, field) catch return;
         }
 
         // Sort fields: largest first, then by type alignment requirements
@@ -346,11 +346,11 @@ pub const StructType = struct {
         var total_offset: u32 = 0;
 
         // Sort by alignment requirements for better packing
-        var field_list = std.ArrayList(StructField).init(self.allocator);
-        defer field_list.deinit();
+        var field_list = std.ArrayList(StructField){};
+        defer field_list.deinit(self.allocator);
 
         for (self.fields) |field| {
-            field_list.append(field) catch return;
+            field_list.append(self.allocator, field) catch return;
         }
 
         std.sort.pdq(StructField, field_list.items, {}, compareFieldsForStack);
@@ -540,7 +540,7 @@ pub fn getTypeAlignment(ora_type: OraType) u32 {
         .Address => 20, // Ethereum addresses are 20 bytes
         .String, .Bytes => 32, // Dynamic types require 32-byte alignment
         .Slice => 32,
-        .Map, .DoubleMap => 32,
+        .Mapping => 32,
         .Struct => |struct_type| struct_type.layout.alignment,
         .Enum => |enum_type| enum_type.layout.alignment,
         .Function => 32,
@@ -587,11 +587,6 @@ pub const OraType = union(enum) {
         key: *OraType,
         value: *OraType,
     },
-    DoubleMap: struct {
-        key1: *OraType,
-        key2: *OraType,
-        value: *OraType,
-    },
 
     // Custom types
     Struct: *StructType,
@@ -626,7 +621,7 @@ pub fn getTypeSize(ora_type: OraType) u32 {
         .U256, .I256 => 32,
         .String, .Bytes => 32, // Dynamic size, stored as pointer
         .Slice => 32, // Dynamic size, stored as pointer
-        .Map, .DoubleMap => 32, // Storage slot reference
+        .Mapping => 32, // Storage slot reference
         .Struct => |struct_type| struct_type.calculateSize(),
         .Enum => |enum_type| enum_type.calculateSize(),
         .Function => 32, // Function pointer
@@ -670,19 +665,20 @@ pub const SymbolTable = struct {
     allocator: std.mem.Allocator,
 
     pub fn init(allocator: std.mem.Allocator, parent: ?*SymbolTable) SymbolTable {
+        const symbols = std.ArrayList(Symbol){};
         return SymbolTable{
-            .symbols = std.ArrayList(Symbol).init(allocator),
+            .symbols = symbols,
             .parent = parent,
             .allocator = allocator,
         };
     }
 
     pub fn deinit(self: *SymbolTable) void {
-        self.symbols.deinit();
+        self.symbols.deinit(self.allocator);
     }
 
     pub fn declare(self: *SymbolTable, symbol: Symbol) !void {
-        try self.symbols.append(symbol);
+        try self.symbols.append(self.allocator, symbol);
     }
 
     pub fn lookup(self: *SymbolTable, name: []const u8) ?Symbol {
@@ -763,16 +759,20 @@ pub const Typer = struct {
     function_params: std.ArrayList([]OraType),
     /// Registry for custom struct types
     struct_types: std.ArrayList(StructType),
+    /// Last undeclared function name (for error reporting)
+    last_undeclared_function: ?[]const u8 = null,
 
     pub fn init(allocator: std.mem.Allocator) Typer {
+        const function_params = std.ArrayList([]OraType){};
+        const struct_types = std.ArrayList(StructType){};
         return Typer{
             .allocator = allocator,
             .global_scope = SymbolTable.init(allocator, null),
             .current_scope = undefined, // Will be fixed in fixSelfReferences
             .current_function = null,
             .type_arena = std.heap.ArenaAllocator.init(allocator),
-            .function_params = std.ArrayList([]OraType).init(allocator),
-            .struct_types = std.ArrayList(StructType).init(allocator),
+            .function_params = function_params,
+            .struct_types = struct_types,
         };
     }
 
@@ -807,7 +807,7 @@ pub const Typer = struct {
         // The actual memory region will be determined when the struct variable is declared
         struct_type.optimizeLayout(.Storage);
 
-        try self.struct_types.append(struct_type);
+        try self.struct_types.append(self.allocator, struct_type);
     }
 
     /// Look up a struct type by name
@@ -887,12 +887,12 @@ pub const Typer = struct {
         for (self.function_params.items) |params| {
             self.allocator.free(params);
         }
-        self.function_params.deinit();
+        self.function_params.deinit(self.allocator);
         // Clean up struct types
         for (self.struct_types.items) |*struct_type| {
             struct_type.deinit();
         }
-        self.struct_types.deinit();
+        self.struct_types.deinit(self.allocator);
     }
 
     /// Type check a list of top-level AST nodes
@@ -912,7 +912,16 @@ pub const Typer = struct {
     fn collectDeclarations(self: *Typer, node: *ast.AstNode) TyperError!void {
         switch (node.*) {
             .Contract => |*contract| {
-                // Create contract scope and collect members
+                // Create contract scope for function visibility
+                var contract_scope = SymbolTable.init(self.allocator, self.current_scope);
+                const prev_scope = self.current_scope;
+                self.current_scope = &contract_scope;
+                defer {
+                    self.current_scope = prev_scope;
+                    contract_scope.deinit();
+                }
+
+                // Collect all members in contract scope
                 for (contract.body) |*member| {
                     try self.collectDeclarations(member);
                 }
@@ -937,7 +946,7 @@ pub const Typer = struct {
                     .name = var_decl.name,
                     .typ = var_type,
                     .region = var_decl.region,
-                    .mutable = var_decl.mutable,
+                    .mutable = var_decl.kind == .Var,
                     .span = var_decl.span,
                     .namespace = null,
                 };
@@ -969,6 +978,21 @@ pub const Typer = struct {
     fn typeCheckNode(self: *Typer, node: *ast.AstNode) TyperError!void {
         switch (node.*) {
             .Contract => |*contract| {
+                // Create contract scope for function visibility (must match collectDeclarations)
+                var contract_scope = SymbolTable.init(self.allocator, self.current_scope);
+                const prev_scope = self.current_scope;
+                self.current_scope = &contract_scope;
+                defer {
+                    self.current_scope = prev_scope;
+                    contract_scope.deinit();
+                }
+
+                // Re-collect declarations in contract scope (functions need to see each other)
+                for (contract.body) |*member| {
+                    try self.collectDeclarations(member);
+                }
+
+                // Type check all members in contract scope
                 for (contract.body) |*member| {
                     try self.typeCheckNode(member);
                 }
@@ -1058,7 +1082,7 @@ pub const Typer = struct {
                         .name = name,
                         .typ = typ,
                         .region = var_decl.region,
-                        .mutable = var_decl.mutable,
+                        .mutable = var_decl.kind == .Var,
                         .span = var_decl.span,
                         .namespace = null, // Tuple variables are local
                     };
@@ -1071,6 +1095,11 @@ pub const Typer = struct {
         } else {
             // Regular variable declaration
             const var_type = try self.convertTypeInfoToOraType(var_decl.type_info);
+
+            // Explicit type required - no type inference
+            if (var_type == .Unknown) {
+                return TyperError.TypeMismatch; // User must explicitly specify type
+            }
 
             // Type check initializer if present
             if (var_decl.value) |init_expr| {
@@ -1088,7 +1117,7 @@ pub const Typer = struct {
                 .name = var_decl.name,
                 .typ = var_type,
                 .region = var_decl.region,
-                .mutable = var_decl.mutable,
+                .mutable = var_decl.kind == .Var,
                 .span = var_decl.span,
                 .namespace = null, // Regular variables are local
             };
@@ -1193,6 +1222,42 @@ pub const Typer = struct {
                     return TyperError.TypeMismatch;
                 }
             },
+            .DestructuringAssignment => |*destruct| {
+                // Type check the expression being destructured
+                _ = try self.typeCheckExpression(destruct.value);
+                // TODO: Verify destructuring pattern matches expression type
+            },
+            .Unlock => |*unlock| {
+                // Type check unlock path
+                _ = try self.typeCheckExpression(&unlock.path);
+            },
+            .Assert => |*assert| {
+                // Assert condition must be boolean
+                const condition_type = try self.typeCheckExpression(&assert.condition);
+                if (!std.meta.eql(condition_type, OraType.Bool)) {
+                    return TyperError.TypeMismatch;
+                }
+            },
+            .Assume => |*assume| {
+                // Assume condition must be boolean
+                const condition_type = try self.typeCheckExpression(&assume.condition);
+                if (!std.meta.eql(condition_type, OraType.Bool)) {
+                    return TyperError.TypeMismatch;
+                }
+            },
+            .Havoc => |*havoc| {
+                // Havoc statements don't need type checking
+                _ = havoc;
+            },
+            .LabeledBlock => |*labeled| {
+                // Type check the labeled block body
+                try self.typeCheckBlock(&labeled.block);
+            },
+            .CompoundAssignment => |*compound| {
+                // Type check both sides of compound assignment
+                _ = try self.typeCheckExpression(compound.target);
+                _ = try self.typeCheckExpression(compound.value);
+            },
             .ForLoop => |*for_loop| {
                 // Type check the iterable expression
                 _ = try self.typeCheckExpression(&for_loop.iterable);
@@ -1291,16 +1356,16 @@ pub const Typer = struct {
             },
             .Tuple => |*tuple| {
                 // Type check tuple expressions
-                var tuple_types = std.ArrayList(OraType).init(self.allocator);
-                defer tuple_types.deinit();
+                var tuple_types = std.ArrayList(OraType){};
+                defer tuple_types.deinit(self.allocator);
 
                 for (tuple.elements) |element| {
                     const element_type = try self.typeCheckExpression(element);
-                    try tuple_types.append(element_type);
+                    try tuple_types.append(self.allocator, element_type);
                 }
 
                 return OraType{ .Tuple = .{
-                    .types = try tuple_types.toOwnedSlice(),
+                    .types = try tuple_types.toOwnedSlice(self.allocator),
                 } };
             },
             .Unary => |*unary| {
@@ -1569,6 +1634,8 @@ pub const Typer = struct {
             .Address => OraType.Address,
             .Hex => OraType.U256, // Hex literals default to U256
             .Binary => OraType.U256, // Binary literals default to U256 like Hex literals
+            .Character => OraType.U8, // Character literals are U8
+            .Bytes => OraType.Bytes,
         };
     }
 
@@ -1654,7 +1721,7 @@ pub const Typer = struct {
             else => return TyperError.InvalidOperation, // Complex callees not supported yet
         };
 
-        // Check if function exists in symbol table
+        // Check if function exists in symbol table (including parent scopes)
         if (self.current_scope.lookup(function_name)) |symbol| {
             switch (symbol.typ) {
                 .Function => |func_type| {
@@ -1690,6 +1757,9 @@ pub const Typer = struct {
             return try self.typeCheckBuiltinCall(call);
         }
 
+        // Function not found - this is an error
+        // Store the function name for better error reporting
+        self.last_undeclared_function = function_name;
         return TyperError.UndeclaredFunction;
     }
 
@@ -1834,14 +1904,14 @@ pub const Typer = struct {
             const common_type = self.commonNumericType(lhs_type, rhs_type);
 
             // Return tuple type (quotient, remainder) both same type
-            var tuple_types = std.ArrayList(OraType).init(self.allocator);
-            defer tuple_types.deinit();
+            var tuple_types = std.ArrayList(OraType){};
+            defer tuple_types.deinit(self.allocator);
 
-            try tuple_types.append(common_type); // quotient
-            try tuple_types.append(common_type); // remainder
+            try tuple_types.append(self.allocator, common_type); // quotient
+            try tuple_types.append(self.allocator, common_type); // remainder
 
             return OraType{ .Tuple = .{
-                .types = try tuple_types.toOwnedSlice(),
+                .types = try tuple_types.toOwnedSlice(self.allocator),
             } };
         }
 
@@ -1851,42 +1921,37 @@ pub const Typer = struct {
 
     /// Convert TypeInfo to OraType
     pub fn convertTypeInfoToOraType(self: *Typer, type_info: ast.Types.TypeInfo) TyperError!OraType {
+        _ = self;
         // If the TypeInfo already has a resolved OraType, convert it to typer's OraType
         if (type_info.ora_type) |ast_ora_type| {
-            return self.convertAstOraTypeToTyperOraType(ast_ora_type);
+            return switch (ast_ora_type) {
+                .bool => OraType.Bool,
+                .address => OraType.Address,
+                .u8 => OraType.U8,
+                .u16 => OraType.U16,
+                .u32 => OraType.U32,
+                .u64 => OraType.U64,
+                .u128 => OraType.U128,
+                .u256 => OraType.U256,
+                .i8 => OraType.I8,
+                .i16 => OraType.I16,
+                .i32 => OraType.I32,
+                .i64 => OraType.I64,
+                .i128 => OraType.I128,
+                .i256 => OraType.I256,
+                .string => OraType.String,
+                .bytes => OraType.Bytes,
+                .void => OraType.Unknown, // Map void to Unknown for now
+                .struct_type => |_| OraType.Unknown, // TODO: Look up actual StructType by name
+                .enum_type => |_| OraType.Unknown, // TODO: Look up actual EnumType by name
+                // For complex types, we'll need more sophisticated conversion
+                // For now, map them to Unknown
+                else => OraType.Unknown,
+            };
         }
 
         // Otherwise, it's unknown
         return OraType.Unknown;
-    }
-
-    /// Convert ast.type_info.OraType to typer.OraType
-    fn convertAstOraTypeToTyperOraType(self: *Typer, ast_ora_type: ast.type_info.OraType) TyperError!OraType {
-        _ = self; // May be needed for complex type conversions
-        return switch (ast_ora_type) {
-            .bool => OraType.Bool,
-            .address => OraType.Address,
-            .u8 => OraType.U8,
-            .u16 => OraType.U16,
-            .u32 => OraType.U32,
-            .u64 => OraType.U64,
-            .u128 => OraType.U128,
-            .u256 => OraType.U256,
-            .i8 => OraType.I8,
-            .i16 => OraType.I16,
-            .i32 => OraType.I32,
-            .i64 => OraType.I64,
-            .i128 => OraType.I128,
-            .i256 => OraType.I256,
-            .string => OraType.String,
-            .bytes => OraType.Bytes,
-            .void => OraType.Unknown, // Map void to Unknown for now
-            .struct_type => |_| OraType.Unknown, // TODO: Look up actual StructType by name
-            .enum_type => |_| OraType.Unknown, // TODO: Look up actual EnumType by name
-            // For complex types, we'll need more sophisticated conversion
-            // For now, map them to Unknown
-            else => OraType.Unknown,
-        };
     }
 
     /// Create function type from function node
@@ -2070,15 +2135,9 @@ pub const Typer = struct {
                 .Slice => |rhs_elem| self.typeEquals(lhs_elem.*, rhs_elem.*),
                 else => false,
             },
-            .Map => |lhs_map| switch (rhs) {
-                .Map => |rhs_map| self.typeEquals(lhs_map.key.*, rhs_map.key.*) and
+            .Mapping => |lhs_map| switch (rhs) {
+                .Mapping => |rhs_map| self.typeEquals(lhs_map.key.*, rhs_map.key.*) and
                     self.typeEquals(lhs_map.value.*, rhs_map.value.*),
-                else => false,
-            },
-            .DoubleMap => |lhs_dmap| switch (rhs) {
-                .DoubleMap => |rhs_dmap| self.typeEquals(lhs_dmap.key1.*, rhs_dmap.key1.*) and
-                    self.typeEquals(lhs_dmap.key2.*, rhs_dmap.key2.*) and
-                    self.typeEquals(lhs_dmap.value.*, rhs_dmap.value.*),
                 else => false,
             },
             .Function => |lhs_func| switch (rhs) {
@@ -2195,7 +2254,7 @@ pub const Typer = struct {
             .Storage => {
                 // Only certain types can be stored in storage
                 switch (typ) {
-                    .Map, .DoubleMap => {}, // OK
+                    .Mapping => {}, // OK
                     .Bool, .Address, .U8, .U16, .U32, .U64, .U128, .U256, .I8, .I16, .I32, .I64, .I128, .I256, .String => {}, // OK
                     .Struct, .Enum => {}, // Custom types are OK in storage
                     else => return TyperError.InvalidMemoryRegion,
@@ -2241,16 +2300,12 @@ pub const Typer = struct {
                 }
                 return TyperError.TypeMismatch;
             },
-            .Map => |mapping| {
+            .Mapping => |mapping| {
                 // Map access requires compatible key type
                 if (self.typesCompatible(index_type, mapping.key.*)) {
                     return mapping.value.*;
                 }
                 return TyperError.TypeMismatch;
-            },
-            .DoubleMap => |_| {
-                // DoubleMap requires special syntax - shouldn't reach here with single index
-                return TyperError.InvalidOperation;
             },
             else => return TyperError.InvalidOperation,
         };

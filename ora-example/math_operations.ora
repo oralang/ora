@@ -1,0 +1,28 @@
+// Test arithmetic operations and storage
+contract MathOperations {
+    storage var counter: u256;
+    storage var total: u256;
+    
+    pub fn add(a: u256, b: u256) -> u256 {
+        var sum : u256 = a + b;
+        return sum;
+    }
+    
+    pub fn multiply(a: u256, b: u256) -> u256 {
+        var product : u256 = a * b;
+        return product;
+    }
+    
+    pub fn incrementCounter() {
+        counter = counter + 1;
+        
+    }
+    
+    pub fn getCounter() -> u256 {
+        return counter;
+    }
+    
+    pub fn accumulate(value: u256) {
+        total = total + value;
+    }
+}

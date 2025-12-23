@@ -86,7 +86,6 @@ pub fn Visitor(comptime Context: type, comptime ReturnType: type) type {
         visitBreak: ?*const fn (*Self, *ast.Statements.BreakNode) ReturnType = null,
         visitContinue: ?*const fn (*Self, *ast.Statements.ContinueNode) ReturnType = null,
         visitUnlock: ?*const fn (*Self, *ast.Statements.UnlockNode) ReturnType = null,
-        visitMove: ?*const fn (*Self, *ast.Statements.MoveNode) ReturnType = null,
         visitDestructuringAssignment: ?*const fn (*Self, *ast.Statements.DestructuringAssignmentNode) ReturnType = null,
         visitLabeledBlockStmt: ?*const fn (*Self, *ast.Statements.LabeledBlockNode) ReturnType = null,
 
@@ -429,11 +428,6 @@ pub fn Visitor(comptime Context: type, comptime ReturnType: type) type {
                     // No dedicated handler; fall through for now
                     _ = switch_stmt;
                 },
-                .Move => |*move_stmt| {
-                    if (self.visitMove) |visitFn| {
-                        return visitFn(self, move_stmt);
-                    }
-                },
                 .LabeledBlock => |*lbl_stmt| {
                     if (self.visitLabeledBlockStmt) |visitFn| {
                         return visitFn(self, lbl_stmt);
@@ -721,12 +715,6 @@ pub fn Visitor(comptime Context: type, comptime ReturnType: type) type {
                     }
                 },
                 .Continue => |_| {},
-                .Move => |*move_stmt| {
-                    _ = self.dispatchExpression(&move_stmt.expr);
-                    _ = self.dispatchExpression(&move_stmt.source);
-                    _ = self.dispatchExpression(&move_stmt.dest);
-                    _ = self.dispatchExpression(&move_stmt.amount);
-                },
                 .DestructuringAssignment => |*dassign| {
                     _ = self.dispatchExpression(dassign.value);
                 },

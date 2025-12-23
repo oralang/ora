@@ -86,6 +86,7 @@ pub const SymbolInfo = struct {
     value: ?c.MlirValue, // For variables that have been assigned values
     span: ?[]const u8, // Source span information
     symbol_kind: SymbolKind, // What kind of symbol this is
+    variable_kind: ?lib.ast.Statements.VariableKind, // var, let, const, immutable (only for variables)
 };
 
 /// Different kinds of symbols that can be stored in the symbol table
@@ -95,6 +96,7 @@ pub const SymbolKind = enum {
     Type,
     Parameter,
     Constant,
+    Error,
 };
 
 /// Function symbol information
@@ -206,7 +208,7 @@ pub const SymbolTable = struct {
     }
 
     /// Add a variable symbol to the current scope
-    pub fn addSymbol(self: *SymbolTable, name: []const u8, type_info: c.MlirType, region: lib.ast.Statements.MemoryRegion, span: ?[]const u8) !void {
+    pub fn addSymbol(self: *SymbolTable, name: []const u8, type_info: c.MlirType, region: lib.ast.Statements.MemoryRegion, span: ?[]const u8, variable_kind: ?lib.ast.Statements.VariableKind) !void {
         const region_str = switch (region) {
             .Storage => "storage",
             .Memory => "memory",
@@ -220,6 +222,7 @@ pub const SymbolTable = struct {
             .value = null,
             .span = span,
             .symbol_kind = .Variable,
+            .variable_kind = variable_kind,
         };
 
         try self.scopes.items[self.current_scope].put(name, symbol_info);
@@ -234,6 +237,7 @@ pub const SymbolTable = struct {
             .value = value,
             .span = span,
             .symbol_kind = .Parameter,
+            .variable_kind = null, // Parameters don't have variable_kind
         };
 
         try self.scopes.items[self.current_scope].put(name, symbol_info);
@@ -301,7 +305,7 @@ pub const SymbolTable = struct {
             scope_idx -= 1;
         }
         // If symbol not found, add it to current scope
-        try self.addSymbol(name, c.mlirValueGetType(value), lib.ast.Statements.MemoryRegion.Stack, null);
+        try self.addSymbol(name, c.mlirValueGetType(value), lib.ast.Statements.MemoryRegion.Stack, null, null);
         if (self.scopes.items[self.current_scope].get(name)) |symbol| {
             var updated_symbol = symbol;
             updated_symbol.value = value;

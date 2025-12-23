@@ -286,20 +286,14 @@ pub const DeclarationParser = struct {
 
         // Regular variable declaration
         const name_token = try self.base.consume(.Identifier, "Expected variable name");
-        var var_type: ast.Types.TypeInfo = undefined;
 
-        // Support both explicit type and type inference
+        // Type annotation is optional if there's an initializer (enables type inference)
+        var var_type: ast.Types.TypeInfo = ast.Types.TypeInfo.unknown();
         if (self.base.match(.Colon)) {
-            // Explicit type: let x: u32 = value
+            // Explicit type annotation provided
             type_parser.base.current = self.base.current;
             var_type = try type_parser.parseTypeWithContext(.Variable);
             self.base.current = type_parser.base.current;
-        } else if (self.base.check(.Equal)) {
-            // Type inference: let x = value
-            var_type = ast.Types.TypeInfo.unknown(); // Will be inferred
-        } else {
-            try self.base.errorAtCurrent("Expected ':' for type annotation or '=' for assignment");
-            return error.ExpectedToken;
         }
 
         // Parse optional initializer
@@ -312,6 +306,10 @@ pub const DeclarationParser = struct {
             const expr_ptr = try self.base.arena.createNode(ast.Expressions.ExprNode);
             expr_ptr.* = expr;
             initializer = expr_ptr;
+        } else if (!var_type.isResolved()) {
+            // No type annotation and no initializer - error
+            try self.base.errorAtCurrent("Variable declaration requires either a type annotation or an initializer");
+            return error.UnexpectedToken;
         }
 
         _ = try self.base.consume(.Semicolon, "Expected ';' after error declaration");

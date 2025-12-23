@@ -1,5 +1,5 @@
 const std = @import("std");
-const SourceSpan = @import("../ast.zig").SourceSpan;
+const SourceSpan = @import("source_span.zig").SourceSpan;
 const TypeInfo = @import("type_info.zig").TypeInfo;
 const CommonTypes = @import("type_info.zig").CommonTypes;
 const statements = @import("statements.zig");
@@ -378,6 +378,9 @@ pub const AssignmentExpr = struct {
     target: *ExprNode,
     value: *ExprNode,
     span: SourceSpan,
+    /// Guard optimization: skip runtime guard if true (set during type resolution)
+    /// True when: constant satisfies constraint, subtyping applies, or trusted builtin
+    skip_guard: bool = false,
 };
 
 /// Compound assignment operators (+=, -=, etc.)
@@ -445,6 +448,7 @@ pub const TryExpr = struct {
 /// Error return expression
 pub const ErrorReturnExpr = struct {
     error_name: []const u8,
+    parameters: ?[]*ExprNode = null, // Optional parameters for error data (e.g., error.TransferFailed(amount))
     span: SourceSpan,
 };
 

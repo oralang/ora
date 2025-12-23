@@ -398,7 +398,6 @@ pub fn getSpanFromStatement(stmt: *const lib.ast.Statements.StmtNode) lib.ast.So
         .Lock => |lock_stmt| lock_stmt.span,
         .Unlock => |unlock_stmt| unlock_stmt.span,
         .Assert => |assert_stmt| assert_stmt.span,
-        .Move => |move_stmt| move_stmt.span,
         .TryBlock => |try_stmt| try_stmt.span,
         .ErrorDecl => |error_decl| error_decl.span,
         .Invariant => |invariant| invariant.span,

@@ -19,7 +19,7 @@
 // ============================================================================
 
 const std = @import("std");
-const SourceSpan = @import("../ast.zig").SourceSpan;
+const SourceSpan = @import("source_span.zig").SourceSpan;
 
 /// Unified type information system for all AST nodes
 /// This replaces the various type enums and provides consistent type representation
@@ -167,7 +167,6 @@ pub const TypeCategory = enum {
     Array,
     Slice,
     Map,
-    DoubleMap,
     Tuple,
     ErrorUnion,
     Result,
@@ -218,7 +217,6 @@ pub const OraType = union(enum) {
     array: struct { elem: *const OraType, len: u64 }, // Fixed-size array [T; N]
     slice: *const OraType, // Element type
     map: MapType, // Key and value types
-    double_map: DoubleMapType, // Two keys and value type
     tuple: []const OraType, // Element types
     function: FunctionType, // Parameter and return types
     error_union: *const OraType, // Success type (!T)
@@ -245,7 +243,7 @@ pub const OraType = union(enum) {
         decimals: u32, // Scale factor (10^decimals)
     },
     exact: *const OraType, // Base integer type (must participate in exact division)
-    non_zero_address: void,         // Address type that cannot be zero address
+    non_zero_address: void, // Address type that cannot be zero address
 
     /// Get the category for this Ora type
     pub fn getCategory(self: OraType) TypeCategory {
@@ -262,7 +260,6 @@ pub const OraType = union(enum) {
             .array => .Array,
             .slice => .Slice,
             .map => .Map,
-            .double_map => .DoubleMap,
             .tuple => .Tuple,
             .function => .Function,
             .error_union => .Error,
@@ -270,11 +267,11 @@ pub const OraType = union(enum) {
             .anonymous_struct => .Struct,
             .module => .Module,
             // Refinement types inherit the category of their base type
-            .min_value => |mv| mv.base.getCategory(),
-            .max_value => |mv| mv.base.getCategory(),
-            .in_range => |ir| ir.base.getCategory(),
-            .scaled => |s| s.base.getCategory(),
-            .exact => |e| e.getCategory(),
+            .min_value => |mv| mv.base.*.getCategory(),
+            .max_value => |mv| mv.base.*.getCategory(),
+            .in_range => |ir| ir.base.*.getCategory(),
+            .scaled => |s| s.base.*.getCategory(),
+            .exact => |e| e.*.getCategory(),
             .non_zero_address => .Address, // NonZeroAddress is an Address type
         };
     }
@@ -347,7 +344,6 @@ pub const OraType = union(enum) {
             .array => "array",
             .slice => "slice",
             .map => "map",
-            .double_map => "double_map",
             .tuple => "tuple",
             .function => "function",
             .error_union => "error_union",
@@ -391,12 +387,6 @@ pub const OraType = union(enum) {
             },
             .map => |am| switch (b) {
                 .map => |bm| equals(@constCast(am.key).*, @constCast(bm.key).*) and equals(@constCast(am.value).*, @constCast(bm.value).*),
-                else => unreachable,
-            },
-            .double_map => |am| switch (b) {
-                .double_map => |bm| equals(@constCast(am.key1).*, @constCast(bm.key1).*) and
-                    equals(@constCast(am.key2).*, @constCast(bm.key2).*) and
-                    equals(@constCast(am.value).*, @constCast(bm.value).*),
                 else => unreachable,
             },
             .tuple => |ats| switch (b) {
@@ -450,33 +440,37 @@ pub const OraType = union(enum) {
                 },
                 else => unreachable,
             },
+            .min_value => |am| switch (b) {
+                .min_value => |bm| equals(@constCast(am.base).*, @constCast(bm.base).*) and (am.min == bm.min),
+                else => false,
+            },
+            .max_value => |am| switch (b) {
+                .max_value => |bm| equals(@constCast(am.base).*, @constCast(bm.base).*) and (am.max == bm.max),
+                else => false,
+            },
+            .in_range => |ar| switch (b) {
+                .in_range => |br| equals(@constCast(ar.base).*, @constCast(br.base).*) and (ar.min == br.min) and (ar.max == br.max),
+                else => false,
+            },
+            .scaled => |as| switch (b) {
+                .scaled => |bs| equals(@constCast(as.base).*, @constCast(bs.base).*) and (as.decimals == bs.decimals),
+                else => false,
+            },
+            .exact => |ae| switch (b) {
+                .exact => |be| equals(@constCast(ae).*, @constCast(be).*),
+                else => false,
+            },
+            .non_zero_address => switch (b) {
+                .non_zero_address => true,
+                else => false,
+            },
             .module => |am| switch (b) {
                 .module => |bm| blk: {
                     if ((am == null) != (bm == null)) break :blk false;
                     if (am == null) break :blk true;
                     break :blk std.mem.eql(u8, am.?, bm.?);
                 },
-                else => unreachable,
-            },
-            .min_value => |am| switch (b) {
-                .min_value => |bm| equals(@constCast(am.base).*, @constCast(bm.base).*) and (am.min == bm.min),
-                else => unreachable,
-            },
-            .max_value => |am| switch (b) {
-                .max_value => |bm| equals(@constCast(am.base).*, @constCast(bm.base).*) and (am.max == bm.max),
-                else => unreachable,
-            },
-            .in_range => |am| switch (b) {
-                .in_range => |bm| equals(@constCast(am.base).*, @constCast(bm.base).*) and (am.min == bm.min) and (am.max == bm.max),
-                else => unreachable,
-            },
-            .scaled => |am| switch (b) {
-                .scaled => |bm| equals(@constCast(am.base).*, @constCast(bm.base).*) and (am.decimals == bm.decimals),
-                else => unreachable,
-            },
-            .exact => |am| switch (b) {
-                .exact => |bm| equals(@constCast(am).*, @constCast(bm).*),
-                else => unreachable,
+                else => false,
             },
         };
     }
@@ -503,14 +497,6 @@ pub const OraType = union(enum) {
                 const k = OraType.hash(@constCast(m.key).*);
                 const v = OraType.hash(@constCast(m.value).*);
                 h.update(std.mem.asBytes(&k));
-                h.update(std.mem.asBytes(&v));
-            },
-            .double_map => |dm| {
-                const k1 = OraType.hash(@constCast(dm.key1).*);
-                const k2 = OraType.hash(@constCast(dm.key2).*);
-                const v = OraType.hash(@constCast(dm.value).*);
-                h.update(std.mem.asBytes(&k1));
-                h.update(std.mem.asBytes(&k2));
                 h.update(std.mem.asBytes(&v));
             },
             .tuple => |ts| {
@@ -620,15 +606,6 @@ pub const OraType = union(enum) {
                 try (@constCast(m.value).*).render(writer);
                 try writer.writeByte(']');
             },
-            .double_map => |dm| {
-                try writer.writeAll("doublemap[");
-                try (@constCast(dm.key1).*).render(writer);
-                try writer.writeAll(", ");
-                try (@constCast(dm.key2).*).render(writer);
-                try writer.writeAll(", ");
-                try (@constCast(dm.value).*).render(writer);
-                try writer.writeByte(']');
-            },
             .tuple => |elems| {
                 try writer.writeByte('(');
                 var first = true;
@@ -732,12 +709,6 @@ pub const OraType = union(enum) {
 /// Complex type definitions
 pub const MapType = struct {
     key: *const OraType,
-    value: *const OraType,
-};
-
-pub const DoubleMapType = struct {
-    key1: *const OraType,
-    key2: *const OraType,
     value: *const OraType,
 };
 
@@ -925,15 +896,6 @@ pub fn deinitTypeInfo(allocator: std.mem.Allocator, type_info: *TypeInfo) void {
                 allocator.destroy(mapping.key);
                 allocator.destroy(mapping.value);
             },
-            .double_map => |double_map| {
-                // Properly handle double_map's keys and value
-                deinitOraType(allocator, @constCast(double_map.key1));
-                deinitOraType(allocator, @constCast(double_map.key2));
-                deinitOraType(allocator, @constCast(double_map.value));
-                allocator.destroy(double_map.key1);
-                allocator.destroy(double_map.key2);
-                allocator.destroy(double_map.value);
-            },
             .tuple => |types| {
                 // Handle tuple elements
                 for (types) |element_type| {
@@ -954,7 +916,15 @@ pub fn deinitTypeInfo(allocator: std.mem.Allocator, type_info: *TypeInfo) void {
                     allocator.destroy(ret_type);
                 }
             },
-            .min_value, .max_value, .in_range => |ref| {
+            .min_value => |ref| {
+                deinitOraType(allocator, @constCast(ref.base));
+                allocator.destroy(ref.base);
+            },
+            .max_value => |ref| {
+                deinitOraType(allocator, @constCast(ref.base));
+                allocator.destroy(ref.base);
+            },
+            .in_range => |ref| {
                 deinitOraType(allocator, @constCast(ref.base));
                 allocator.destroy(ref.base);
             },
@@ -973,7 +943,7 @@ pub fn deinitTypeInfo(allocator: std.mem.Allocator, type_info: *TypeInfo) void {
     }
 }
 
-fn deinitOraType(allocator: std.mem.Allocator, ora_type: *OraType) void {
+pub fn deinitOraType(allocator: std.mem.Allocator, ora_type: *OraType) void {
     // Handle nested type cleanup based on OraType variant
     switch (ora_type.*) {
         .array => |arr| {
@@ -983,6 +953,10 @@ fn deinitOraType(allocator: std.mem.Allocator, ora_type: *OraType) void {
         .slice => |elem_type_ptr| {
             deinitOraType(allocator, @constCast(elem_type_ptr));
             allocator.destroy(elem_type_ptr);
+        },
+        .error_union => |succ_ptr| {
+            deinitOraType(allocator, @constCast(succ_ptr));
+            allocator.destroy(succ_ptr);
         },
         ._union => |types| {
             for (types) |member| {
@@ -1005,26 +979,14 @@ fn deinitOraType(allocator: std.mem.Allocator, ora_type: *OraType) void {
             deinitOraType(allocator, @constCast(mapping.value));
             allocator.destroy(mapping.value);
         },
-        .double_map => |double_map| {
-            // DoubleMapType's keys and value are defined as *const OraType (not optional)
-            deinitOraType(allocator, @constCast(double_map.key1));
-            allocator.destroy(double_map.key1);
-
-            deinitOraType(allocator, @constCast(double_map.key2));
-            allocator.destroy(double_map.key2);
-
-            deinitOraType(allocator, @constCast(double_map.value));
-            allocator.destroy(double_map.value);
-        },
         .function => |function| {
             // FunctionType has params as []const OraType and return_type as ?*const OraType
-            // Only return_type is optional and needs null check
+            // Note: params are handled by deinitTypeInfo, not here, to avoid double-free
+            // Only handle return type here
             if (function.return_type) |return_type| {
                 deinitOraType(allocator, @constCast(return_type));
                 allocator.destroy(return_type);
             }
-
-            // We don't need to deallocate params here as they're handled by the caller
         },
         // String references in structs, enums, and contracts are typically owned by the parser
         .struct_type, .enum_type, .contract_type => {
@@ -1033,7 +995,15 @@ fn deinitOraType(allocator: std.mem.Allocator, ora_type: *OraType) void {
         },
 
         // Refinement types
-        .min_value, .max_value, .in_range => |ref| {
+        .min_value => |ref| {
+            deinitOraType(allocator, @constCast(ref.base));
+            allocator.destroy(ref.base);
+        },
+        .max_value => |ref| {
+            deinitOraType(allocator, @constCast(ref.base));
+            allocator.destroy(ref.base);
+        },
+        .in_range => |ref| {
             deinitOraType(allocator, @constCast(ref.base));
             allocator.destroy(ref.base);
         },

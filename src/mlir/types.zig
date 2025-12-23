@@ -22,9 +22,26 @@ const c = @import("c.zig").c;
 const lib = @import("ora_lib");
 const constants = @import("lower.zig");
 const h = @import("helpers.zig");
+const math = std.math;
 
 /// Type alias for array struct to match AST definition
 const ArrayStruct = struct { elem: *const lib.ast.type_info.OraType, len: u64 };
+
+/// Split u256 into four u64 words for MLIR type parameters
+/// u256 = (high_high << 192) | (high_low << 128) | (low_high << 64) | low_low
+fn splitU256IntoU64Words(x: u256) struct {
+    high_high: u64,
+    high_low: u64,
+    low_high: u64,
+    low_low: u64,
+} {
+    return .{
+        .high_high = @truncate(x >> 192),
+        .high_low = @truncate(x >> 128),
+        .low_high = @truncate(x >> 64),
+        .low_low = @truncate(x),
+    };
+}
 
 /// Advanced type system features for MLIR lowering
 pub const TypeInference = struct {
@@ -154,29 +171,48 @@ pub const TypeMapper = struct {
     /// Supports all primitive types (u8-u256, i8-i256, bool, address, string, bytes, void)
     pub fn toMlirType(self: *const TypeMapper, ora_type: anytype) c.MlirType {
         // Handle both optional and non-optional ora_type field
-        const ora_ty_opt = if (@TypeOf(ora_type.ora_type) == lib.ast.type_info.OraType)
+        const ora_ty_opt: ?lib.ast.type_info.OraType = if (@TypeOf(ora_type.ora_type) == lib.ast.type_info.OraType)
             ora_type.ora_type
         else if (ora_type.ora_type) |ot|
             ot
         else
-            return c.oraIntegerTypeGet(self.ctx, constants.DEFAULT_INTEGER_BITS, false);
+            null;
 
-        return switch (ora_ty_opt) {
-            // Unsigned integer types - use Ora dialect types (!ora.int<width, false>)
-            .u8 => c.oraIntegerTypeGet(self.ctx, 8, false),
-            .u16 => c.oraIntegerTypeGet(self.ctx, 16, false),
-            .u32 => c.oraIntegerTypeGet(self.ctx, 32, false),
-            .u64 => c.oraIntegerTypeGet(self.ctx, 64, false),
-            .u128 => c.oraIntegerTypeGet(self.ctx, 128, false),
-            .u256 => c.oraIntegerTypeGet(self.ctx, constants.DEFAULT_INTEGER_BITS, false),
+        const ora_ty = ora_ty_opt orelse {
+            std.debug.print("[toMlirType] ERROR: ora_type is null - Ora is strongly typed, this should not happen!\n", .{});
+            @panic("toMlirType: ora_type is null - this indicates a type system bug");
+        };
 
-            // Signed integer types - use Ora dialect types (!ora.int<width, true>)
-            .i8 => c.oraIntegerTypeGet(self.ctx, 8, true),
-            .i16 => c.oraIntegerTypeGet(self.ctx, 16, true),
-            .i32 => c.oraIntegerTypeGet(self.ctx, 32, true),
-            .i64 => c.oraIntegerTypeGet(self.ctx, 64, true),
-            .i128 => c.oraIntegerTypeGet(self.ctx, 128, true),
-            .i256 => c.oraIntegerTypeGet(self.ctx, constants.DEFAULT_INTEGER_BITS, true),
+        // Don't print refinement types with {any} as it tries to dereference base pointers
+        // which may point to invalid memory. Print a safe representation instead.
+        switch (ora_ty) {
+            .min_value => |mv| std.debug.print("[toMlirType] Converting Ora type: min_value<min={d}>\n", .{mv.min}),
+            .max_value => |mv| std.debug.print("[toMlirType] Converting Ora type: max_value<max={d}>\n", .{mv.max}),
+            .in_range => |ir| std.debug.print("[toMlirType] Converting Ora type: in_range<min={d}, max={d}>\n", .{ ir.min, ir.max }),
+            .scaled => |s| std.debug.print("[toMlirType] Converting Ora type: scaled<decimals={d}>\n", .{s.decimals}),
+            else => std.debug.print("[toMlirType] Converting Ora type: {any}\n", .{ora_ty}),
+        }
+
+        const result = switch (ora_ty) {
+            // All integer types use builtin MLIR types (iN) - signedness is in operation semantics
+            // u8, i8 → i8
+            .u8 => c.mlirIntegerTypeGet(self.ctx, 8),
+            .i8 => c.mlirIntegerTypeGet(self.ctx, 8),
+            // u16, i16 → i16
+            .u16 => c.mlirIntegerTypeGet(self.ctx, 16),
+            .i16 => c.mlirIntegerTypeGet(self.ctx, 16),
+            // u32, i32 → i32
+            .u32 => c.mlirIntegerTypeGet(self.ctx, 32),
+            .i32 => c.mlirIntegerTypeGet(self.ctx, 32),
+            // u64, i64 → i64
+            .u64 => c.mlirIntegerTypeGet(self.ctx, 64),
+            .i64 => c.mlirIntegerTypeGet(self.ctx, 64),
+            // u128, i128 → i128
+            .u128 => c.mlirIntegerTypeGet(self.ctx, 128),
+            .i128 => c.mlirIntegerTypeGet(self.ctx, 128),
+            // u256, i256 → i256
+            .u256 => c.mlirIntegerTypeGet(self.ctx, constants.DEFAULT_INTEGER_BITS),
+            .i256 => c.mlirIntegerTypeGet(self.ctx, constants.DEFAULT_INTEGER_BITS),
 
             // Other primitive types
             // Note: bool uses MLIR's built-in i1 type (not !ora.bool) for compatibility with arith operations
@@ -187,28 +223,67 @@ pub const TypeMapper = struct {
             .void => c.mlirNoneTypeGet(self.ctx),
 
             // Complex types - comprehensive mapping
-            .struct_type => self.mapStructType(ora_ty_opt.struct_type),
-            .enum_type => self.mapEnumType(ora_ty_opt.enum_type),
-            .contract_type => self.mapContractType(ora_ty_opt.contract_type),
-            .array => self.mapArrayType(ora_ty_opt.array),
-            .slice => self.mapSliceType(ora_ty_opt.slice),
-            .map => self.mapMapType(ora_ty_opt.map),
-            .double_map => self.mapDoubleMapType(ora_ty_opt.double_map),
-            .tuple => self.mapTupleType(ora_ty_opt.tuple),
-            .function => self.mapFunctionType(ora_ty_opt.function),
-            .error_union => self.mapErrorUnionType(ora_ty_opt.error_union),
-            ._union => self.mapUnionType(ora_ty_opt._union),
-            .anonymous_struct => self.mapAnonymousStructType(ora_ty_opt.anonymous_struct),
-            .module => self.mapModuleType(ora_ty_opt.module),
+            .struct_type => self.mapStructType(ora_ty.struct_type),
+            .enum_type => self.mapEnumType(ora_ty.enum_type),
+            .contract_type => self.mapContractType(ora_ty.contract_type),
+            .array => self.mapArrayType(ora_ty.array),
+            .slice => self.mapSliceType(ora_ty.slice),
+            .map => self.mapMapType(ora_ty.map),
+            .tuple => self.mapTupleType(ora_ty.tuple),
+            .function => self.mapFunctionType(ora_ty.function),
+            .error_union => self.mapErrorUnionType(ora_ty.error_union),
+            ._union => self.mapUnionType(ora_ty._union),
+            .anonymous_struct => self.mapAnonymousStructType(ora_ty.anonymous_struct),
+            .module => self.mapModuleType(ora_ty.module),
 
-            // Refinement types - map to base type (refinements are compile-time constraints)
-            .min_value => self.toMlirType(.{ .ora_type = ora_ty_opt.min_value.base.* }),
-            .max_value => self.toMlirType(.{ .ora_type = ora_ty_opt.max_value.base.* }),
-            .in_range => self.toMlirType(.{ .ora_type = ora_ty_opt.in_range.base.* }),
-            .scaled => self.toMlirType(.{ .ora_type = ora_ty_opt.scaled.base.* }),
-            .exact => self.toMlirType(.{ .ora_type = ora_ty_opt.exact.* }),
-            .non_zero_address => c.mlirIntegerTypeGet(self.ctx, 160), // Map to address type (160 bits) - use built-in for compatibility
+            // Refinement types - preserve refinement information in MLIR
+            .min_value => {
+                // Safely access base pointer - if it's invalid, we'll segfault here
+                // This indicates the type was not properly copied or the base pointer points to freed memory
+                const base_ora_type = ora_ty.min_value.base.*;
+                const base_type = self.toMlirType(.{ .ora_type = base_ora_type });
+                const min_words = splitU256IntoU64Words(ora_ty.min_value.min);
+                return c.oraMinValueTypeGet(self.ctx, base_type, min_words.high_high, min_words.high_low, min_words.low_high, min_words.low_low);
+            },
+            .max_value => {
+                const base_ora_type = ora_ty.max_value.base.*;
+                const base_type = self.toMlirType(.{ .ora_type = base_ora_type });
+                const max_words = splitU256IntoU64Words(ora_ty.max_value.max);
+                return c.oraMaxValueTypeGet(self.ctx, base_type, max_words.high_high, max_words.high_low, max_words.low_high, max_words.low_low);
+            },
+            .in_range => {
+                const base_ora_type = ora_ty.in_range.base.*;
+                const base_type = self.toMlirType(.{ .ora_type = base_ora_type });
+                const min_words = splitU256IntoU64Words(ora_ty.in_range.min);
+                const max_words = splitU256IntoU64Words(ora_ty.in_range.max);
+                return c.oraInRangeTypeGet(self.ctx, base_type, min_words.high_high, min_words.high_low, min_words.low_high, min_words.low_low, max_words.high_high, max_words.high_low, max_words.low_high, max_words.low_low);
+            },
+            .scaled => {
+                const base_ora_type = ora_ty.scaled.base.*;
+                const base_type = self.toMlirType(.{ .ora_type = base_ora_type });
+                return c.oraScaledTypeGet(self.ctx, base_type, ora_ty.scaled.decimals);
+            },
+            .exact => {
+                const base_ora_type = ora_ty.exact.*;
+                const base_type = self.toMlirType(.{ .ora_type = base_ora_type });
+                return c.oraExactTypeGet(self.ctx, base_type);
+            },
+            .non_zero_address => c.oraNonZeroAddressTypeGet(self.ctx),
         };
+
+        // Log result type info
+        if (c.mlirTypeIsAInteger(result)) {
+            const width = c.mlirIntegerTypeGetWidth(result);
+            std.debug.print("[toMlirType] Result: i{d}\n", .{width});
+        } else if (c.mlirTypeIsAMemRef(result)) {
+            std.debug.print("[toMlirType] Result: memref\n", .{});
+        } else if (c.mlirTypeIsANone(result)) {
+            std.debug.print("[toMlirType] Result: none (void)\n", .{});
+        } else {
+            std.debug.print("[toMlirType] Result: (other MLIR type)\n", .{});
+        }
+
+        return result;
     }
 
     /// Convert primitive integer types with proper bit width and signedness
@@ -250,15 +325,33 @@ pub const TypeMapper = struct {
 
     /// Convert struct type - uses symbol table to get field layout
     pub fn mapStructType(self: *const TypeMapper, struct_info: anytype) c.MlirType {
-        _ = struct_info;
+        // struct_info is the struct name (string)
+        const struct_name = struct_info;
 
         // Look up struct in symbol table to get its registered MLIR type
         if (self.symbol_table) |st| {
+            // First check if it's actually an enum (sometimes enums are stored as struct_type in AST)
+            if (st.lookupType(struct_name)) |type_sym| {
+                if (type_sym.type_kind == .Enum) {
+                    // This is actually an enum, return its underlying type
+                    return type_sym.mlir_type;
+                } else if (type_sym.type_kind == .Struct) {
+                    // Return the MLIR type that was created during struct registration
+                    return type_sym.mlir_type;
+                }
+            }
+
+            // Fallback: iterate through all types (for backwards compatibility)
+            // NOTE: This fallback should match the struct name, not just return the first struct!
             var type_iter = st.types.iterator();
             while (type_iter.next()) |entry| {
+                // Check if the entry key matches the struct name
+                if (!std.mem.eql(u8, entry.key_ptr.*, struct_name)) {
+                    continue;
+                }
                 const type_symbols = entry.value_ptr.*;
                 for (type_symbols) |type_sym| {
-                    if (type_sym.type_kind == .Struct) {
+                    if (type_sym.type_kind == .Struct and std.mem.eql(u8, type_sym.name, struct_name)) {
                         // Return the MLIR type that was created during struct registration
                         return type_sym.mlir_type;
                     }
@@ -266,16 +359,38 @@ pub const TypeMapper = struct {
             }
         }
 
-        // Fallback: For EVM compatibility, use i256 to represent struct pointer/reference
-        // Actual struct data is stored in memory/storage with field layout tracked separately
+        // Fallback: Try to create the struct type directly (struct may be declared but not yet registered)
+        // This can happen during type resolution before all declarations are processed
+        const struct_name_ref = h.strRef(struct_name);
+        const struct_type = c.oraStructTypeGet(self.ctx, struct_name_ref);
+
+        if (struct_type.ptr != null) {
+            return struct_type;
+        }
+
+        // Last resort: use i256 as fallback (should not happen if struct is properly declared)
+        std.debug.print("WARNING: Struct type '{s}' not found in symbol table and failed to create. Using i256 fallback.\n", .{struct_name});
         return c.mlirIntegerTypeGet(self.ctx, constants.DEFAULT_INTEGER_BITS);
     }
 
-    /// Convert enum type to appropriate integer representation based on variant count
+    /// Convert enum type to appropriate integer representation based on underlying type
     pub fn mapEnumType(self: *const TypeMapper, enum_info: anytype) c.MlirType {
-        _ = enum_info;
+        // enum_info is the enum name (string)
+        const enum_name = enum_info;
 
-        // Look up enum in symbol table to get variant count for optimal sizing
+        // Look up enum in symbol table to get the stored MLIR type (which uses underlying type)
+        if (self.symbol_table) |st| {
+            if (st.lookupType(enum_name)) |type_sym| {
+                if (type_sym.type_kind == .Enum) {
+                    // Return the stored mlir_type which was created using the underlying type
+                    // (e.g., enum Status : u8 -> i8, enum ErrorCode : string -> i256)
+                    return type_sym.mlir_type;
+                }
+            }
+        }
+
+        // Fallback: If enum not found in symbol table, use variant count for sizing
+        // This should rarely happen as enums should be registered before use
         if (self.symbol_table) |st| {
             var type_iter = st.types.iterator();
             while (type_iter.next()) |entry| {
@@ -321,7 +436,6 @@ pub const TypeMapper = struct {
 
         // Create unranked memref type for now (proper ranked memref requires more MLIR C API)
         // In a full implementation with memory space:
-        // return c.mlirMemRefTypeGet(elem_mlir_type, 1, &shape, 0); // 0 = default memory space
         // For now, use shaped tensor type which is simpler
         return c.mlirRankedTensorTypeGet(1, &shape, elem_mlir_type, c.mlirAttributeGetNull());
     }
@@ -354,25 +468,6 @@ pub const TypeMapper = struct {
 
         // Create !ora.map<K, V> type
         return c.oraMapTypeGet(self.ctx, key_type, value_type);
-    }
-
-    /// Convert double mapping type `doublemap[K1, K2, V]` to storage slot reference
-    /// Double maps are nested mappings: keccak256(key1, keccak256(key2, base_slot))
-    /// Used for complex storage patterns like balances[token][user]
-    pub fn mapDoubleMapType(self: *const TypeMapper, double_map_info: lib.ast.type_info.DoubleMapType) c.MlirType {
-        // Double maps are represented as i256 storage slot references
-        // The nested key hashing is handled during target code generation:
-        // 1. Hash key2 with base slot → intermediate slot
-        // 2. Hash key1 with intermediate slot → final storage location
-
-        // Store type metadata for future dialect integration
-        _ = double_map_info.key1; // First key type
-        _ = double_map_info.key2; // Second key type
-        _ = double_map_info.value; // Value type
-
-        // Return storage slot reference (i256 for EVM compatibility)
-        // Future: migrate to !ora.doublemap<K1, K2, V> dialect type
-        return c.mlirIntegerTypeGet(self.ctx, constants.DEFAULT_INTEGER_BITS);
     }
 
     /// Convert tuple type to aggregate representation
@@ -548,7 +643,7 @@ pub const TypeMapper = struct {
     pub fn isComplex(self: *const TypeMapper, ora_type: lib.ast.type_info.OraType) bool {
         _ = self;
         return switch (ora_type) {
-            .struct_type, .enum_type, .contract_type, .array, .slice, .Map, .double_map, .tuple, .function, .error_union, ._union, .anonymous_struct, .module => true,
+            .struct_type, .enum_type, .contract_type, .array, .slice, .Map, .tuple, .function, .error_union, ._union, .anonymous_struct, .module => true,
             else => false,
         };
     }
@@ -579,7 +674,6 @@ pub const TypeMapper = struct {
         // Ora dialect types (future implementation with TableGen):
         // - !ora.slice<T>         → dynamic array with length
         // - !ora.map<K, V>        → storage mapping with keccak256
-        // - !ora.doublemap<K1, K2, V> → nested storage mapping
         // - !ora.enum<name, repr> → named enumeration with integer repr
         // - !ora.error<T>         → result type with error handling
         // - !ora.error_union<Ts>  → sum type for multiple error kinds
@@ -691,62 +785,81 @@ pub const TypeMapper = struct {
     }
 
     /// Create a type conversion operation if needed
-    pub fn createConversionOp(self: *const TypeMapper, block: c.MlirBlock, value: c.MlirValue, target_type: c.MlirType, span: ?lib.ast.SourceSpan) c.MlirValue {
+    /// Note: This function works with Ora types directly in the Ora dialect.
+    /// Conversions between Ora types (e.g., u64 -> u256) are handled here.
+    /// Convert between builtin MLIR types (now using iN types everywhere)
+    pub fn createConversionOp(self: *const TypeMapper, block: c.MlirBlock, value: c.MlirValue, target_type: c.MlirType, _: ?lib.ast.SourceSpan) c.MlirValue {
         const value_type = c.mlirValueGetType(value);
+        const types_equal = c.mlirTypeEqual(value_type, target_type);
 
         // If types are already the same, no conversion needed
-        if (c.mlirTypeEqual(value_type, target_type)) {
+        if (types_equal) {
             return value;
         }
 
-        // Create location for the conversion operation
-        const location = if (span) |s|
-            c.mlirLocationFileLineColGet(self.ctx, h.strRefLit(""), @intCast(s.line), @intCast(s.column))
-        else
-            h.unknownLoc(self.ctx);
+        // Check if types are integers or index types
+        // MLIR index type can be converted to/from integers
+        const value_is_int = c.mlirTypeIsAInteger(value_type);
+        const target_is_int = c.mlirTypeIsAInteger(target_type);
+        const index_ty = c.mlirIndexTypeGet(self.ctx);
+        const value_is_index = c.mlirTypeEqual(value_type, index_ty);
+        const target_is_index = c.mlirTypeEqual(target_type, index_ty);
 
-        // Check if we're converting from Ora types to built-in types (or vice versa)
-        // Even if widths are the same, we need to create a conversion operation
-        const value_builtin = c.oraTypeToBuiltin(value_type);
-        const target_builtin = c.oraTypeToBuiltin(target_type);
-        const needs_ora_conversion = !c.mlirTypeEqual(value_type, value_builtin) or !c.mlirTypeEqual(target_type, target_builtin);
+        // Handle index <-> integer conversions
+        if (value_is_index and target_is_int) {
+            // Convert index to integer: use arith.index_castui to convert index to target integer type
+            const loc = c.mlirLocationUnknownGet(self.ctx);
+            var cast_state = h.opState("arith.index_castui", loc);
+            c.mlirOperationStateAddOperands(&cast_state, 1, @ptrCast(&value));
+            c.mlirOperationStateAddResults(&cast_state, 1, @ptrCast(&target_type));
+            const cast_op = c.mlirOperationCreate(&cast_state);
+            h.appendOp(block, cast_op);
+            return h.getResult(cast_op, 0);
+        } else if (value_is_int and target_is_index) {
+            // Convert integer to index: use arith.index_castui to convert integer to index
+            const loc = c.mlirLocationUnknownGet(self.ctx);
+            var cast_state = h.opState("arith.index_castui", loc);
+            c.mlirOperationStateAddOperands(&cast_state, 1, @ptrCast(&value));
+            c.mlirOperationStateAddResults(&cast_state, 1, @ptrCast(&target_type));
+            const cast_op = c.mlirOperationCreate(&cast_state);
+            h.appendOp(block, cast_op);
+            return h.getResult(cast_op, 0);
+        } else if (value_is_int and target_is_int) {
+            const value_width = c.mlirIntegerTypeGetWidth(value_type);
+            const target_width = c.mlirIntegerTypeGetWidth(target_type);
 
-        // For integer types, use arith.extui, arith.extsi, or arith.trunci
-        if (c.mlirTypeIsAInteger(value_builtin) and c.mlirTypeIsAInteger(target_builtin)) {
-            const value_width = c.mlirIntegerTypeGetWidth(value_builtin);
-            const target_width = c.mlirIntegerTypeGetWidth(target_builtin);
+            // Use unknown location for conversions (span info not available in TypeMapper)
+            const loc = c.mlirLocationUnknownGet(self.ctx);
 
-            // If converting from Ora to built-in (or vice versa) with same width, use bitcast
-            if (needs_ora_conversion and value_width == target_width) {
-                // Use bitcast for same-width conversions between Ora and built-in types
-                var op_state = h.opState("arith.bitcast", location);
-                c.mlirOperationStateAddOperands(&op_state, 1, &value);
-                c.mlirOperationStateAddResults(&op_state, 1, &target_type);
-                const op = c.mlirOperationCreate(&op_state);
-                c.mlirBlockAppendOwnedOperation(block, op);
-                return c.mlirOperationGetResult(op, 0);
+            if (value_width == target_width) {
+                // Same width - use bitcast to ensure exact type match
+                var cast_state = h.opState("arith.bitcast", loc);
+                c.mlirOperationStateAddOperands(&cast_state, 1, @ptrCast(&value));
+                c.mlirOperationStateAddResults(&cast_state, 1, @ptrCast(&target_type));
+                const cast_op = c.mlirOperationCreate(&cast_state);
+                h.appendOp(block, cast_op);
+                return h.getResult(cast_op, 0);
             } else if (value_width < target_width) {
-                // Extension - use unsigned extension for now
-                var op_state = h.opState("arith.extui", location);
-                c.mlirOperationStateAddOperands(&op_state, 1, &value);
-                c.mlirOperationStateAddResults(&op_state, 1, &target_type);
-                const op = c.mlirOperationCreate(&op_state);
-                c.mlirBlockAppendOwnedOperation(block, op);
-                return c.mlirOperationGetResult(op, 0);
-            } else if (value_width > target_width) {
-                // Truncation
-                var op_state = h.opState("arith.trunci", location);
-                c.mlirOperationStateAddOperands(&op_state, 1, &value);
-                c.mlirOperationStateAddResults(&op_state, 1, &target_type);
-                const op = c.mlirOperationCreate(&op_state);
-                c.mlirBlockAppendOwnedOperation(block, op);
-                return c.mlirOperationGetResult(op, 0);
+                // Extend - use arith.extui (zero-extend for unsigned semantics)
+                var ext_state = h.opState("arith.extui", loc);
+                c.mlirOperationStateAddOperands(&ext_state, 1, @ptrCast(&value));
+                c.mlirOperationStateAddResults(&ext_state, 1, @ptrCast(&target_type));
+                const ext_op = c.mlirOperationCreate(&ext_state);
+                h.appendOp(block, ext_op);
+                return h.getResult(ext_op, 0);
+            } else {
+                // Truncate - use arith.trunci
+                var trunc_state = h.opState("arith.trunci", loc);
+                c.mlirOperationStateAddOperands(&trunc_state, 1, @ptrCast(&value));
+                c.mlirOperationStateAddResults(&trunc_state, 1, @ptrCast(&target_type));
+                const trunc_op = c.mlirOperationCreate(&trunc_state);
+                h.appendOp(block, trunc_op);
+                return h.getResult(trunc_op, 0);
             }
         }
 
-        // For other types, return the original value
-        // More sophisticated conversions (struct conversions, error unwrapping, etc.)
-        // are handled by higher-level type checking in the semantics phase
+        // For non-integer types or if conversion fails, return value as-is
+        // This should not happen with our current type system
         return value;
     }
 

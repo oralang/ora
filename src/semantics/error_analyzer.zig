@@ -224,7 +224,7 @@ fn validateErrorCall(
         return;
     }
 
-    // Type checking for error parameters is done in type_resolver.zig
+    // Type checking for error parameters is done in ast/type_resolver/
     // This function only validates parameter count
 }
 

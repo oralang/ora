@@ -24,9 +24,6 @@ pub fn parseFunction(
     type_parser: *TypeParser,
     expr_parser: *ExpressionParser,
 ) !ast.FunctionNode {
-    // Parse inline modifier
-    const is_inline = parser.base.match(.Inline);
-
     // Parse visibility
     const is_pub = parser.base.match(.Pub);
 
@@ -43,11 +40,6 @@ pub fn parseFunction(
     };
     const is_init_fn = std.mem.eql(u8, name_token.lexeme, "init");
 
-    // Disallow inline on init
-    if (is_inline and is_init_fn) {
-        try parser.base.errorAtCurrent("'init' cannot be marked inline");
-        return error.UnexpectedToken;
-    }
     _ = try parser.base.consume(.LeftParen, "Expected '(' after function name");
 
     // Parse parameters with default values support
@@ -181,7 +173,6 @@ pub fn parseFunction(
         .body = body,
         .visibility = if (is_pub) ast.Visibility.Public else ast.Visibility.Private,
         .attributes = &[_]u8{}, // Empty attributes
-        .is_inline = is_inline,
         .requires_clauses = try requires_clauses.toOwnedSlice(parser.base.arena.allocator()),
         .ensures_clauses = try ensures_clauses.toOwnedSlice(parser.base.arena.allocator()),
         .modifies_clause = modifies_clause,

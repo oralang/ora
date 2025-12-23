@@ -35,7 +35,7 @@ const semantics = @import("../semantics.zig");
 const TypeInfo = @import("type_info.zig").TypeInfo;
 const TypeCategory = @import("type_info.zig").TypeCategory;
 const OraType = @import("type_info.zig").OraType;
-const SourceSpan = @import("../ast.zig").SourceSpan;
+const SourceSpan = @import("source_span.zig").SourceSpan;
 
 /// Error types for AST builder operations
 /// These errors are returned when builder operations fail validation or encounter invalid state
@@ -72,7 +72,7 @@ pub const DiagnosticCollector = struct {
     pub fn init(allocator: std.mem.Allocator, max_errors: u32) DiagnosticCollector {
         return DiagnosticCollector{
             .allocator = allocator,
-            .diagnostics = std.ArrayList(semantics.Diagnostic).init(allocator),
+            .diagnostics = std.ArrayList(semantics.Diagnostic){},
             .max_errors = max_errors,
             .error_count = 0,
             .warning_count = 0,
@@ -84,7 +84,7 @@ pub const DiagnosticCollector = struct {
         for (self.diagnostics.items) |diagnostic| {
             self.allocator.free(diagnostic.message);
         }
-        self.diagnostics.deinit();
+        self.diagnostics.deinit(self.allocator);
     }
 
     pub fn addError(self: *DiagnosticCollector, span: ast.SourceSpan, message: []const u8) !void {
@@ -93,33 +93,27 @@ pub const DiagnosticCollector = struct {
         }
 
         const owned_message = try self.allocator.dupe(u8, message);
-        try self.diagnostics.append(semantics.Diagnostic{
+        try self.diagnostics.append(self.allocator, semantics.Diagnostic{
             .message = owned_message,
             .span = span,
-            .severity = .Error,
-            .context = null,
         });
         self.error_count += 1;
     }
 
     pub fn addWarning(self: *DiagnosticCollector, span: ast.SourceSpan, message: []const u8) !void {
         const owned_message = try self.allocator.dupe(u8, message);
-        try self.diagnostics.append(semantics.Diagnostic{
+        try self.diagnostics.append(self.allocator, semantics.Diagnostic{
             .message = owned_message,
             .span = span,
-            .severity = .Warning,
-            .context = null,
         });
         self.warning_count += 1;
     }
 
     pub fn addInfo(self: *DiagnosticCollector, span: ast.SourceSpan, message: []const u8) !void {
         const owned_message = try self.allocator.dupe(u8, message);
-        try self.diagnostics.append(semantics.Diagnostic{
+        try self.diagnostics.append(self.allocator, semantics.Diagnostic{
             .message = owned_message,
             .span = span,
-            .severity = .Info,
-            .context = null,
         });
     }
 
@@ -169,14 +163,14 @@ pub const AstBuilder = struct {
             .diagnostics = DiagnosticCollector.init(arena.allocator(), 100),
             .finalized = false,
             .validation_enabled = true,
-            .built_nodes = std.ArrayList(ast.AstNode).init(arena.allocator()),
+            .built_nodes = std.ArrayList(ast.AstNode){},
             .node_counter = 0,
         };
     }
 
     pub fn deinit(self: *AstBuilder) void {
         self.diagnostics.deinit();
-        self.built_nodes.deinit();
+        self.built_nodes.deinit(self.arena.allocator());
     }
 
     /// Enable or disable validation during construction
@@ -208,7 +202,7 @@ pub const AstBuilder = struct {
 
     /// Add a built node to the collection
     fn addBuiltNode(self: *AstBuilder, node: ast.AstNode) !void {
-        try self.built_nodes.append(node);
+        try self.built_nodes.append(self.arena.allocator(), node);
         self.node_counter += 1;
     }
 
@@ -278,6 +272,12 @@ pub const AstBuilder = struct {
         expr_node.* = ast.Expressions.ExprNode{ .Literal = .{ .String = .{
             .value = owned_value,
             .span = span,
+            .type_info = .{
+                .category = .String,
+                .ora_type = .{ .string = {} },
+                .source = .explicit,
+                .span = span,
+            },
         } } };
 
         if (self.validation_enabled) {
@@ -302,6 +302,7 @@ pub const AstBuilder = struct {
         expr_node.* = ast.Expressions.ExprNode{ .Literal = .{ .Integer = .{
             .value = owned_value,
             .span = span,
+            .type_info = TypeInfo.unknown(),
         } } };
 
         if (self.validation_enabled) {
@@ -319,6 +320,12 @@ pub const AstBuilder = struct {
         expr_node.* = ast.Expressions.ExprNode{ .Literal = .{ .Bool = .{
             .value = value,
             .span = span,
+            .type_info = .{
+                .category = .Bool,
+                .ora_type = .{ .bool = {} },
+                .source = .explicit,
+                .span = span,
+            },
         } } };
 
         if (self.validation_enabled) {
@@ -384,6 +391,7 @@ pub const AstBuilder = struct {
         expr_node.* = ast.Expressions.ExprNode{ .Identifier = .{
             .name = owned_name,
             .span = span,
+            .type_info = TypeInfo.unknown(),
         } };
 
         if (self.validation_enabled) {
@@ -409,6 +417,7 @@ pub const AstBuilder = struct {
             .operator = op,
             .rhs = rhs,
             .span = span,
+            .type_info = TypeInfo.unknown(),
         } };
 
         if (self.validation_enabled) {
@@ -429,6 +438,7 @@ pub const AstBuilder = struct {
             .operator = op,
             .operand = operand,
             .span = span,
+            .type_info = TypeInfo.unknown(),
         } };
 
         if (self.validation_enabled) {
@@ -686,7 +696,7 @@ pub const ContractBuilder = struct {
         return ContractBuilder{
             .builder = builder,
             .contract = contract,
-            .members = std.ArrayList(ast.AstNode).init(builder.arena.allocator()),
+            .members = std.ArrayList(ast.AstNode){},
             .span = .{ .line = 0, .column = 0, .length = 0 },
         };
     }
@@ -714,7 +724,7 @@ pub const ContractBuilder = struct {
             }
         }
 
-        try self.members.append(ast.AstNode{ .Function = function.* });
+        try self.members.append(self.builder.arena.allocator(), ast.AstNode{ .Function = function.* });
         return self;
     }
 
@@ -734,7 +744,7 @@ pub const ContractBuilder = struct {
             }
         }
 
-        try self.members.append(ast.AstNode{ .VariableDecl = variable.* });
+        try self.members.append(self.builder.arena.allocator(), ast.AstNode{ .VariableDecl = variable.* });
         return self;
     }
 
@@ -1291,59 +1301,6 @@ pub const TypeBuilder = struct {
         }
 
         return TypeInfo.explicit(.MapType, map_type, span);
-    }
-
-    /// Create a double mapping type
-    pub fn doubleMapping(self: *const TypeBuilder, key1_type: TypeInfo, key2_type: TypeInfo, value_type: TypeInfo) !TypeInfo {
-        // Create a double mapping type using OraType
-        var double_map_type = OraType{ .double_map = undefined };
-
-        // Store the key and value types
-        const double_map_data = try self.builder.arena.allocator().create(OraType.DoubleMapType);
-
-        // Key1 type
-        const key1_type_ptr = try self.builder.arena.allocator().create(OraType);
-        if (key1_type.ora_type) |kt| {
-            key1_type_ptr.* = kt;
-        } else {
-            key1_type_ptr.* = OraType.Unknown;
-        }
-
-        // Key2 type
-        const key2_type_ptr = try self.builder.arena.allocator().create(OraType);
-        if (key2_type.ora_type) |kt| {
-            key2_type_ptr.* = kt;
-        } else {
-            key2_type_ptr.* = OraType.Unknown;
-        }
-
-        // Value type
-        const value_type_ptr = try self.builder.arena.allocator().create(OraType);
-        if (value_type.ora_type) |vt| {
-            value_type_ptr.* = vt;
-        } else {
-            value_type_ptr.* = OraType.Unknown;
-        }
-
-        double_map_data.* = OraType.DoubleMapType{
-            .key1_type = key1_type_ptr,
-            .key2_type = key2_type_ptr,
-            .value_type = value_type_ptr,
-        };
-
-        double_map_type.double_map = double_map_data;
-
-        // Determine span for the double mapping type
-        var span = SourceSpan{};
-        if (key1_type.span) |ks| {
-            span = ks;
-        } else if (key2_type.span) |ks| {
-            span = ks;
-        } else if (value_type.span) |vs| {
-            span = vs;
-        }
-
-        return TypeInfo.explicit(.DoubleMapType, double_map_type, span);
     }
 
     /// Create a tuple type

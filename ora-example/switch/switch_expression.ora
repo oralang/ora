@@ -11,8 +11,8 @@ enum Role : u8 {
 contract SwitchExpressionTest {
     pub fn test_switch_expression() {
         // Switch expression returning a value
-        let value = 1;
-        let result = switch (value) {
+        var value: u256 = 1;
+        var switch_result: u256 = switch (value) {
             0 => 10,
             1 => 20,
             2 => 30,
@@ -21,21 +21,21 @@ contract SwitchExpressionTest {
     }
     
     pub fn test_switch_with_enum() {
-        let role = Role.Admin;
+        var role: Role = Role.Admin;
         
         // Switch with enum values
-        let permission_level = switch (role) {
+        var permission_level: u256 = switch (role) {
             Role.User => 1,
             Role.Admin => 10,
         };
     }
     
     pub fn test_condition_switch() {
-        let balance = 100;
-        let is_active = true;
+        var balance: u256 = 100;
+        var is_active: bool = true;
         
         // Switch with boolean condition
-        let status = switch (is_active) {
+        var status: string = switch (is_active) {
             false => "Inactive",
             true => "Active",
         };

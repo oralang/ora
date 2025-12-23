@@ -1,0 +1,69 @@
+// ============================================================================
+// Real-World Pattern: Supply Cap
+// ============================================================================
+// Demonstrates proper use of MaxValue for token supply caps
+// ============================================================================
+
+contract SupplyCap {
+    storage var total_supply: MaxValue<u256, 1_000_000_000>; // Max 1 billion
+    storage var balances: map[address, u256];
+    
+    // ============================================================================
+    // Minting with Supply Cap
+    // ============================================================================
+    
+    /// Mint new tokens, respecting supply cap
+    /// Returns new total supply
+    pub fn mint(to: NonZeroAddress, amount: MinValue<u256, 1>) -> !MaxValue<u256, 1_000_000_000> | ExceedsSupplyCap {
+        // Check if minting would exceed cap
+        const new_supply: u256 = total_supply + amount;
+        
+        // MaxValue refinement ensures total_supply <= cap
+        // But arithmetic result (new_supply) is u256, not MaxValue
+        if (new_supply > 1_000_000_000) {
+            return ExceedsSupplyCap;
+        }
+        
+        // Update supply (new_supply is guaranteed <= cap by check above)
+        total_supply = new_supply; // May need type conversion or guard
+        
+        // Update balance
+        balances[to] = balances[to] + amount;
+        
+        return total_supply;
+    }
+    
+    // ============================================================================
+    // Burning Tokens
+    // ============================================================================
+    
+    /// Burn tokens, reducing total supply
+    pub fn burn(amount: MinValue<u256, 1>) -> !MaxValue<u256, 1_000_000_000> | InsufficientBalance {
+        const sender: address = std.msg.sender();
+        const balance: u256 = balances[sender];
+        
+        if (balance < amount) {
+            return InsufficientBalance;
+        }
+        
+        // Burn tokens
+        balances[sender] = balance - amount;
+        
+        // Reduce supply (guaranteed to stay <= cap since we're subtracting)
+        const new_supply: u256 = total_supply - amount;
+        total_supply = new_supply; // May need type conversion
+        
+        return total_supply;
+    }
+    
+    // ============================================================================
+    // View Functions
+    // ============================================================================
+    
+    pub fn getTotalSupply() -> MaxValue<u256, 1_000_000_000> {
+        return total_supply;
+    }
+    
+    error ExceedsSupplyCap;
+    error InsufficientBalance;
+}

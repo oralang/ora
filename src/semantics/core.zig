@@ -49,11 +49,12 @@ pub const SemanticsResult = struct {
 
 pub fn analyzePhase1(allocator: std.mem.Allocator, nodes: []const ast.AstNode) !SemanticsResult {
     var cr = try collect.collectSymbols(allocator, nodes);
-    defer cr.diagnostics.deinit();
+    defer cr.diagnostics.deinit(allocator);
     // Convert simple span list into diagnostics for now
-    var diags = std.ArrayList(Diagnostic).init(allocator);
+    var diags = std.ArrayListUnmanaged(Diagnostic){};
+    defer diags.deinit(allocator);
     for (cr.diagnostics.items) |sp| {
-        try diags.append(.{ .message = "Redeclaration in scope", .span = sp });
+        try diags.append(allocator, .{ .message = "Redeclaration in scope", .span = sp });
     }
     // Build function scopes for top-level functions and contract members
     for (nodes) |*n| switch (n.*) {
@@ -80,7 +81,7 @@ pub fn analyzePhase1(allocator: std.mem.Allocator, nodes: []const ast.AstNode) !
         },
         else => {},
     };
-    return .{ .symbols = cr.table, .diagnostics = try diags.toOwnedSlice() };
+    return .{ .symbols = cr.table, .diagnostics = try diags.toOwnedSlice(allocator) };
 }
 
 // Helper function to check a single function (top-level or contract member)

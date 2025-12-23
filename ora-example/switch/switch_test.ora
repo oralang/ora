@@ -1,0 +1,11 @@
+contract SwitchTest {
+    pub fn testSwitch(value: u256) -> u256 {
+        switch (value) {
+            0 => { return 10; }
+            1 => { return 20; }
+            2 => { return 30; }
+            else => { return 0; }
+        }
+    }
+}
+

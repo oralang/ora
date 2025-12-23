@@ -79,6 +79,73 @@ pub fn scanRawString(lexer: *Lexer) LexerError!void {
     try addRawStringToken(lexer);
 }
 
+/// Scan a hex bytes literal (hex"...")
+pub fn scanHexBytes(lexer: *Lexer) LexerError!void {
+    // Hex bytes literals are like strings but contain only hex characters
+    var hex_content: []const u8 = undefined;
+    const start = lexer.current;
+
+    while (lexer.peek() != '"' and !lexer.isAtEnd()) {
+        if (lexer.peek() == '\n') {
+            lexer.line += 1;
+            lexer.column = 1;
+        }
+        const c = lexer.advance();
+        // Validate hex character
+        if (!((c >= '0' and c <= '9') or (c >= 'a' and c <= 'f') or (c >= 'A' and c <= 'F'))) {
+            if (lexer.hasErrorRecovery()) {
+                const range = SourceRange{
+                    .start_line = lexer.line,
+                    .start_column = lexer.column - 1,
+                    .end_line = lexer.line,
+                    .end_column = lexer.column,
+                    .start_offset = lexer.current - 1,
+                    .end_offset = lexer.current,
+                };
+                lexer.error_recovery.?.recordDetailedError(LexerError.InvalidHexLiteral, range, lexer.source, "Invalid hex character in bytes literal") catch {};
+            }
+        }
+    }
+
+    if (lexer.isAtEnd()) {
+        // Unterminated hex bytes literal
+        if (lexer.hasErrorRecovery()) {
+            lexer.recordError(LexerError.UnterminatedString, "Unterminated hex bytes literal");
+            return;
+        } else {
+            return LexerError.UnterminatedString;
+        }
+    }
+
+    // Consume closing "
+    _ = lexer.advance();
+
+    // Extract hex content (between hex" and ")
+    // start is after the opening quote, current is at the closing quote
+    hex_content = lexer.source[start..lexer.current];
+
+    // Create bytes literal token
+    const range = SourceRange{
+        .start_line = lexer.line,
+        .start_column = lexer.start_column,
+        .end_line = lexer.line,
+        .end_column = lexer.column,
+        .start_offset = lexer.start,
+        .end_offset = lexer.current,
+    };
+
+    const token_value = TokenValue{ .string = hex_content };
+
+    try lexer.tokens.append(lexer.allocator, Token{
+        .type = .BytesLiteral,
+        .lexeme = lexer.source[lexer.start..lexer.current], // Full lexeme including hex" prefix
+        .range = range,
+        .value = token_value,
+        .line = lexer.line,
+        .column = lexer.start_column,
+    });
+}
+
 /// Scan a character literal
 pub fn scanCharacter(lexer: *Lexer) LexerError!void {
     const start_line = lexer.line;

@@ -8,28 +8,15 @@ pub const type_info = @import("ast/type_info.zig");
 pub const ast_visitor = @import("ast/ast_visitor.zig");
 pub const verification = @import("ast/verification.zig");
 
-// Import serializer and type resolver
+// Import serializer
 const ast_serializer = @import("ast/ast_serializer.zig");
 pub const AstSerializer = ast_serializer.AstSerializer;
 
-const type_resolver = @import("ast/type_resolver.zig");
-pub const TypeResolver = type_resolver.TypeResolver;
-pub const TypeResolutionError = type_resolver.TypeResolutionError;
+// Note: TypeResolver is exported from ast/type_resolver/mod.zig directly
+// to avoid circular dependency (ast.zig imports type_resolver, type_resolver imports ast.zig)
 
-/// Source span to track position info in the source code
-pub const SourceSpan = struct {
-    // File identity for multi-file projects (0 = unknown/default)
-    file_id: u32 = 0,
-    // 1-based caret position
-    line: u32,
-    column: u32,
-    // Byte length of the span
-    length: u32,
-    // Start byte offset within file (for precise mapping)
-    byte_offset: u32 = 0,
-    // Optional original slice
-    lexeme: ?[]const u8 = null,
-};
+// Re-export SourceSpan from separate module to break circular dependencies
+pub const SourceSpan = @import("ast/source_span.zig").SourceSpan;
 
 // Namespace groupings for cleaner API
 pub const Expressions = expressions;
@@ -105,7 +92,6 @@ pub const FunctionNode = struct {
     body: Statements.BlockNode,
     visibility: Visibility,
     attributes: []u8, // Placeholder for future function attributes
-    is_inline: bool, // inline functions
     requires_clauses: []*Expressions.ExprNode, // Preconditions (formal verification)
     ensures_clauses: []*Expressions.ExprNode, // Postconditions (formal verification)
     modifies_clause: ?[]*Expressions.ExprNode = null, // Frame conditions - what storage can be modified

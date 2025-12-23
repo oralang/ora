@@ -16,6 +16,7 @@ const BaseParser = common.BaseParser;
 const ParserCommon = common.ParserCommon;
 const ParserError = @import("parser_core.zig").ParserError;
 const ExpressionParser = @import("expression_parser.zig").ExpressionParser;
+const precedence = @import("expressions/precedence.zig");
 
 /// Parse a switch pattern that can be used in both statements and expressions
 pub fn parseSwitchPattern(
@@ -69,12 +70,16 @@ pub fn parseSwitchPattern(
         }
     }
 
-    // General range pattern: parse an expression and if followed by '...'
+    // General range pattern: parse an expression and if followed by '..' or '...'
     // parse another expression to form a Range pattern
+    // Use parsePrimary to avoid parsing ranges (parsePrimary doesn't call parseCall)
     {
         const saved_pos_base = base.current;
         const saved_pos_expr = expr_parser.base.current;
-        const start_expr = expr_parser.parseExpression() catch blk: {
+        // Ensure parsers are in sync before parsing
+        expr_parser.base.current = base.current;
+        // Parse start expression using parsePrimary which doesn't parse ranges
+        const start_expr = expr_parser.parsePrimary() catch blk: {
             base.current = saved_pos_base;
             expr_parser.base.current = saved_pos_expr;
             break :blk null;
@@ -83,10 +88,12 @@ pub fn parseSwitchPattern(
             // Keep base in sync with expr parser after parsing the start expression
             base.current = expr_parser.base.current;
 
-            if (base.match(.DotDotDot)) {
-                // Keep expr parser in sync for parsing the end expression
-                expr_parser.base.current = base.current;
-                const end_expr = try expr_parser.parseExpression();
+            // Check for range operators (.. or ...) using expr_parser.base since that's what we're using
+            const is_inclusive = expr_parser.base.check(.DotDotDot);
+            if (expr_parser.base.match(.DotDot) or expr_parser.base.match(.DotDotDot)) {
+                // Keep base in sync
+                base.current = expr_parser.base.current;
+                const end_expr = try expr_parser.parsePrimary();
                 base.current = expr_parser.base.current;
                 const start_ptr = try base.arena.createNode(ast.Expressions.ExprNode);
                 start_ptr.* = se;
@@ -95,7 +102,7 @@ pub fn parseSwitchPattern(
                 return ast.Switch.Pattern{ .Range = .{
                     .start = start_ptr,
                     .end = end_ptr,
-                    .inclusive = true,
+                    .inclusive = is_inclusive,
                     .span = base.spanFromToken(pattern_token),
                     .type_info = TypeInfo.unknown(),
                 } };

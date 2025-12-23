@@ -1,0 +1,438 @@
+// ============================================================================
+// Type Resolver - Main Orchestrator
+// ============================================================================
+// Phase 5: Pure coordination - delegates to sub-modules
+// ============================================================================
+
+const std = @import("std");
+// Import AST types - no circular dependency since ast.zig no longer imports us
+const ast = @import("../../ast.zig");
+const SourceSpan = @import("../../ast/source_span.zig").SourceSpan;
+const Statements = @import("../statements.zig");
+const TypeInfo = @import("../type_info.zig").TypeInfo;
+const OraType = @import("../type_info.zig").OraType;
+const state = @import("../../semantics/state.zig");
+const SymbolTable = state.SymbolTable;
+const Scope = state.Scope;
+const semantics = @import("../../semantics.zig");
+
+// Type aliases for clarity (use direct references to avoid comptime issues)
+const AstNode = ast.AstNode;
+const FunctionNode = ast.FunctionNode;
+const ContractNode = ast.ContractNode;
+const EnumDeclNode = ast.EnumDeclNode;
+const ConstantNode = ast.ConstantNode;
+
+// Sub-modules
+const core = @import("core/mod.zig");
+const refinements = @import("refinements/mod.zig");
+const validation = @import("validation/mod.zig");
+const utils = @import("utils/mod.zig");
+
+// Re-export core types
+pub const Typed = core.Typed;
+pub const Effect = core.Effect;
+pub const LockDelta = core.LockDelta;
+pub const Obligation = core.Obligation;
+pub const TypeContext = core.TypeContext;
+
+/// Type resolution errors
+pub const TypeResolutionError = error{
+    UnknownType,
+    TypeMismatch,
+    CircularReference,
+    InvalidEnumValue,
+    OutOfMemory,
+    IncompatibleTypes,
+    UndefinedIdentifier,
+    UnresolvedType,
+};
+
+/// Main type resolver orchestrator
+pub const TypeResolver = struct {
+    allocator: std.mem.Allocator,
+    symbol_table: *SymbolTable,
+    current_scope: ?*Scope = null,
+
+    // Sub-systems
+    core_resolver: core.CoreResolver,
+    refinement_system: refinements.RefinementSystem,
+    validation_system: validation.ValidationSystem,
+    utils_system: utils.Utils,
+
+    // Function registry for call resolution
+    function_registry: std.StringHashMap(*FunctionNode),
+
+    pub fn init(allocator: std.mem.Allocator, symbol_table: *SymbolTable) TypeResolver {
+        var utils_sys = utils.Utils.init(allocator);
+        var refinement_sys = refinements.RefinementSystem.init(allocator, &utils_sys);
+        var validation_sys = validation.ValidationSystem.init(&refinement_sys, &utils_sys);
+        const core_res = core.CoreResolver.init(allocator, symbol_table, &validation_sys, &utils_sys, &refinement_sys);
+
+        return TypeResolver{
+            .allocator = allocator,
+            .symbol_table = symbol_table,
+            .current_scope = &symbol_table.root,
+            .core_resolver = core_res,
+            .refinement_system = refinement_sys,
+            .validation_system = validation_sys,
+            .utils_system = utils_sys,
+            .function_registry = std.StringHashMap(*FunctionNode).init(allocator),
+        };
+    }
+
+    pub fn deinit(self: *TypeResolver) void {
+        self.function_registry.deinit();
+        self.core_resolver.deinit();
+        self.refinement_system.deinit();
+        self.validation_system.deinit();
+        self.utils_system.deinit();
+    }
+
+    /// Resolve types for an entire AST (public API)
+    pub fn resolveTypes(self: *TypeResolver, nodes: []AstNode) TypeResolutionError!void {
+        // First pass: Build function registry for argument validation
+        for (nodes) |*node| {
+            try self.registerFunctions(node);
+        }
+
+        // Second pass: Resolve types
+        for (nodes) |*node| {
+            try self.resolveNodeTypes(node, core.TypeContext{});
+        }
+    }
+
+    /// Resolve types for a single node (public API)
+    pub fn resolveNodeTypes(self: *TypeResolver, node: *AstNode, context: core.TypeContext) TypeResolutionError!void {
+        // Update core resolver's current scope and function registry
+        self.core_resolver.current_scope = self.current_scope;
+        // Type-erase function registry to avoid circular dependency
+        self.core_resolver.function_registry = @ptrCast(&self.function_registry);
+
+        switch (node.*) {
+            .EnumDecl => |*enum_decl| {
+                try self.resolveEnumDecl(enum_decl, context);
+            },
+            .Contract => |*contract| {
+                try self.resolveContract(contract, context);
+            },
+            .Function => |*function| {
+                try self.resolveFunction(function, context);
+            },
+            .VariableDecl => |*var_decl| {
+                // Convert to StmtNode for statement resolver
+                var stmt_node = Statements.StmtNode{ .VariableDecl = var_decl.* };
+                _ = try self.core_resolver.resolveStatement(&stmt_node, context);
+            },
+            .Constant => |*constant| {
+                try self.resolveConstant(constant, context);
+            },
+            else => {
+                // Other node types handled elsewhere
+            },
+        }
+    }
+
+    // ============================================================================
+    // Node Type Resolvers
+    // ============================================================================
+
+    fn resolveEnumDecl(
+        self: *TypeResolver,
+        enum_decl: *EnumDeclNode,
+        context: core.TypeContext,
+    ) TypeResolutionError!void {
+        _ = self;
+        _ = context;
+        for (enum_decl.variants) |*variant| {
+            if (variant.value) |*value_expr| {
+                _ = value_expr;
+                // NOTE: We intentionally skip type-resolving enum value
+                // expressions here. Their semantics (including references
+                // between variants) are handled by the enum system itself, and
+                // attempting to resolve identifiers like `Basic` or `Advanced`
+                // via the regular symbol table leads to spurious
+                // UndefinedIdentifier errors during parsing.
+            }
+        }
+    }
+
+    fn resolveConstant(
+        self: *TypeResolver,
+        constant: *ast.ConstantNode,
+        _: core.TypeContext,
+    ) TypeResolutionError!void {
+        // Resolve the constant's value expression
+        var value_typed = try self.core_resolver.synthExpr(constant.value);
+        defer value_typed.deinit(self.allocator);
+
+        // If type is not explicit, infer from value
+        if (!constant.typ.isResolved()) {
+            constant.typ = value_typed.ty;
+        } else {
+            // Type is explicit, check value against it
+            _ = try self.core_resolver.checkExpr(constant.value, constant.typ);
+        }
+
+        // Update symbol table with resolved type
+        const scope = if (self.current_scope) |s| s else &self.symbol_table.root;
+        _ = self.symbol_table.updateSymbolType(scope, constant.name, constant.typ, false) catch {};
+    }
+
+    fn resolveContract(
+        self: *TypeResolver,
+        contract: *ContractNode,
+        context: core.TypeContext,
+    ) TypeResolutionError!void {
+        // Set current scope to contract scope if it exists
+        const prev_scope = self.current_scope;
+        if (self.symbol_table.contract_scopes.get(contract.name)) |contract_scope| {
+            self.current_scope = contract_scope;
+            self.core_resolver.current_scope = contract_scope;
+            std.debug.print("[resolveContract] Set current_scope to contract scope '{s}'\n", .{contract.name});
+        } else {
+            std.debug.print("[resolveContract] WARNING: Contract scope '{s}' not found!\n", .{contract.name});
+        }
+        defer {
+            self.current_scope = prev_scope;
+            self.core_resolver.current_scope = prev_scope;
+        }
+
+        // Resolve constants first, then other members
+        // This ensures constants are available when resolving functions that use them
+        for (contract.body) |*child| {
+            if (child.* == .Constant) {
+                try self.resolveNodeTypes(child, context);
+            }
+        }
+        // Then resolve everything else
+        for (contract.body) |*child| {
+            if (child.* != .Constant) {
+                try self.resolveNodeTypes(child, context);
+            }
+        }
+    }
+
+    fn resolveFunction(
+        self: *TypeResolver,
+        function: *FunctionNode,
+        context: core.TypeContext,
+    ) TypeResolutionError!void {
+        // Parameters should already have explicit types, just validate them
+        for (function.parameters) |*param| {
+            if (!param.type_info.isResolved()) {
+                return TypeResolutionError.UnresolvedType;
+            }
+        }
+
+        // Return type should be explicit or void
+        if (function.return_type_info) |*ret_type| {
+            // Fix custom type names: if parser assumed struct_type but it's actually enum_type
+            if (ret_type.ora_type) |ot| {
+                if (ot == .struct_type) {
+                    const type_name = ot.struct_type;
+                    // Look up symbol to see if it's actually an enum
+                    const root_scope: ?*const Scope = @as(?*const Scope, @ptrCast(&self.symbol_table.root));
+                    const type_symbol = SymbolTable.findUp(root_scope, type_name);
+                    if (type_symbol) |tsym| {
+                        if (tsym.kind == .Enum) {
+                            // Fix: change struct_type to enum_type
+                            ret_type.ora_type = OraType{ .enum_type = type_name };
+                            ret_type.category = .Enum;
+                        } else {
+                            // Use the category from the ora_type
+                            ret_type.category = ot.getCategory();
+                        }
+                    } else {
+                        // Type not found, use category from ora_type
+                        ret_type.category = ot.getCategory();
+                    }
+                } else {
+                    // Use the category from the ora_type
+                    ret_type.category = ot.getCategory();
+                }
+            }
+            if (!ret_type.isResolved()) {
+                return TypeResolutionError.UnresolvedType;
+            }
+        }
+
+        // Get or create function scope for variable declarations
+        const prev_scope = self.current_scope;
+        var func_scope: ?*Scope = null;
+        if (self.symbol_table.function_scopes.get(function.name)) |scope| {
+            func_scope = scope;
+            self.current_scope = scope;
+            self.core_resolver.current_scope = scope;
+        } else {
+            // Create function scope if it doesn't exist
+            // Use current_scope as parent (should be contract scope if inside contract)
+            const parent_scope = self.current_scope;
+            const new_scope = try self.allocator.create(Scope);
+            new_scope.* = Scope.init(self.allocator, parent_scope, function.name);
+            try self.symbol_table.scopes.append(self.allocator, new_scope);
+            try self.symbol_table.function_scopes.put(function.name, new_scope);
+            func_scope = new_scope;
+            self.current_scope = new_scope;
+            self.core_resolver.current_scope = new_scope;
+
+            // Add parameters to function scope
+            for (function.parameters) |*param| {
+                const param_symbol = semantics.state.Symbol{
+                    .name = param.name,
+                    .kind = .Param,
+                    .typ = param.type_info,
+                    .span = param.span,
+                    .mutable = param.is_mutable,
+                    .region = .Stack,
+                };
+                _ = try self.symbol_table.declare(new_scope, param_symbol);
+            }
+        }
+        defer {
+            self.current_scope = prev_scope;
+            self.core_resolver.current_scope = prev_scope;
+        }
+
+        // Create context for function body with return type
+        var func_context = context;
+        func_context.function_return_type = function.return_type_info;
+
+        // Resolve requires/ensures expressions
+        for (function.requires_clauses) |clause| {
+            _ = try self.core_resolver.synthExpr(clause);
+        }
+        for (function.ensures_clauses) |clause| {
+            _ = try self.core_resolver.synthExpr(clause);
+        }
+
+        // Resolve all statements in function body
+        // NOTE: We don't set block scopes here to avoid double-frees during deinit
+        // Variables declared in blocks will be found via findUp from the function scope
+        for (function.body.statements) |*stmt| {
+            _ = try self.core_resolver.resolveStatement(stmt, func_context);
+        }
+        // Note: Function call argument validation happens in synthCall
+        // via function_registry which is set on core_resolver
+
+        // Validate return statements in function body
+        try self.validateReturnStatements(function);
+    }
+
+    /// Validate all return statements in a function
+    fn validateReturnStatements(
+        self: *TypeResolver,
+        function: *FunctionNode,
+    ) TypeResolutionError!void {
+        const expected_return_type = function.return_type_info;
+
+        if (expected_return_type) |ret_ty| {
+            std.debug.print("[validateReturnStatements] Function '{s}' return type: category={s}\n", .{ function.name, @tagName(ret_ty.category) });
+        } else {
+            std.debug.print("[validateReturnStatements] Function '{s}' has no return type\n", .{function.name});
+        }
+
+        // Walk through all statements in the function body
+        for (function.body.statements) |*stmt| {
+            try self.validateReturnInStatement(stmt, expected_return_type);
+        }
+    }
+
+    /// Validate return statement within a statement
+    fn validateReturnInStatement(
+        self: *TypeResolver,
+        stmt: *Statements.StmtNode,
+        expected_return_type: ?TypeInfo,
+    ) TypeResolutionError!void {
+        switch (stmt.*) {
+            .Return => |*ret| {
+                if (ret.value) |*value_expr| {
+                    // Check expression against expected return type
+                    if (expected_return_type) |return_type| {
+                        _ = try self.core_resolver.checkExpr(value_expr, return_type);
+                    } else {
+                        // No return type expected - synthesize
+                        _ = try self.core_resolver.synthExpr(value_expr);
+                    }
+                } else {
+                    // Void return - check if function expects void
+                    if (expected_return_type != null) {
+                        return TypeResolutionError.TypeMismatch;
+                    }
+                }
+            },
+            .If => |*if_stmt| {
+                // Check both branches
+                try self.validateReturnInBlock(&if_stmt.then_branch, expected_return_type);
+                if (if_stmt.else_branch) |*else_branch| {
+                    try self.validateReturnInBlock(else_branch, expected_return_type);
+                }
+            },
+            .While => |*while_stmt| {
+                // Check loop body
+                try self.validateReturnInBlock(&while_stmt.body, expected_return_type);
+            },
+            .ForLoop => |*for_stmt| {
+                // Check loop body
+                try self.validateReturnInBlock(&for_stmt.body, expected_return_type);
+            },
+            .LabeledBlock => |*labeled_block| {
+                try self.validateReturnInBlock(&labeled_block.block, expected_return_type);
+            },
+            .TryBlock => |*try_block| {
+                try self.validateReturnInBlock(&try_block.try_block, expected_return_type);
+                if (try_block.catch_block) |*catch_block| {
+                    try self.validateReturnInBlock(&catch_block.block, expected_return_type);
+                }
+            },
+            else => {
+                // Other statement types don't contain returns
+            },
+        }
+    }
+
+    /// Validate return statements in a block
+    fn validateReturnInBlock(
+        self: *TypeResolver,
+        block: *Statements.BlockNode,
+        expected_return_type: ?TypeInfo,
+    ) TypeResolutionError!void {
+        // Set scope for this block if it exists
+        const prev_scope = self.current_scope;
+        const block_key: usize = @intFromPtr(block);
+        if (self.symbol_table.block_scopes.get(block_key)) |block_scope| {
+            self.current_scope = block_scope;
+            self.core_resolver.current_scope = block_scope;
+        }
+        defer {
+            self.current_scope = prev_scope;
+            self.core_resolver.current_scope = prev_scope;
+        }
+
+        for (block.statements) |*stmt| {
+            try self.validateReturnInStatement(stmt, expected_return_type);
+        }
+    }
+
+    // Note: resolveTopLevelVariable removed - handled in resolveNodeTypes
+
+    // ============================================================================
+    // Function Registry
+    // ============================================================================
+
+    fn registerFunctions(self: *TypeResolver, node: *AstNode) TypeResolutionError!void {
+        switch (node.*) {
+            .Function => |*function| {
+                try self.function_registry.put(function.name, function);
+            },
+            .Contract => |*contract| {
+                for (contract.body) |*child| {
+                    if (child.* == .Function) {
+                        try self.function_registry.put(child.Function.name, &child.Function);
+                    }
+                }
+            },
+            else => {},
+        }
+    }
+};

@@ -1,0 +1,67 @@
+// ============================================================================
+// Base Type Subtyping: Integer Width
+// ============================================================================
+// Rule: Narrower integer types are subtypes of wider types
+// u8 <: u16 <: u32 <: u64 <: u128 <: u256
+// i8 <: i16 <: i32 <: i64 <: i128 <: i256
+// ============================================================================
+
+contract IntegerWidthSubtyping {
+    // ============================================================================
+    // Valid: Narrower to wider (widening)
+    // ============================================================================
+    
+    // u8 should be assignable to u16
+    fn testU8ToU16(value: u8) -> u16 {
+        return value; // Valid: u8 <: u16
+    }
+    
+    // u16 should be assignable to u32
+    fn testU16ToU32(value: u16) -> u32 {
+        return value; // Valid: u16 <: u32
+    }
+    
+    // u32 should be assignable to u64
+    fn testU32ToU64(value: u32) -> u64 {
+        return value; // Valid: u32 <: u64
+    }
+    
+    // u64 should be assignable to u128
+    fn testU64ToU128(value: u64) -> u128 {
+        return value; // Valid: u64 <: u128
+    }
+    
+    // u128 should be assignable to u256
+    fn testU128ToU256(value: u128) -> u256 {
+        return value; // Valid: u128 <: u256
+    }
+    
+    // u8 should be assignable to u256 (transitive)
+    fn testU8ToU256(value: u8) -> u256 {
+        return value; // Valid: u8 <: u16 <: ... <: u256
+    }
+    
+    // ============================================================================
+    // Function Parameters (Subtyping in)
+    // ============================================================================
+    
+    // Function accepting u256 should accept u8
+    fn acceptU256(value: u256) {
+        // Should accept any unsigned integer
+    }
+    
+    fn testSubtypingIn() {
+        let small: u8 = 42;
+        acceptU256(small); // Valid: u8 <: u256
+    }
+    
+    // ============================================================================
+    // Variable Assignments
+    // ============================================================================
+    
+    fn testVariableAssignment() {
+        let small: u8 = 100;
+        let medium: u16 = small; // Valid: u8 <: u16
+        let large: u256 = medium; // Valid: u16 <: u256
+    }
+}

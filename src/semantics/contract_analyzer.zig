@@ -20,7 +20,7 @@ const fun = @import("function_analyzer.zig");
 pub fn collectContractSymbols(table: *state.SymbolTable, root: *state.Scope, c: *const ast.ContractNode) !void {
     const contract_scope = try table.allocator.create(state.Scope);
     contract_scope.* = state.Scope.init(table.allocator, root, c.name);
-    try table.scopes.append(contract_scope);
+    try table.scopes.append(table.allocator, contract_scope);
     try table.contract_scopes.put(c.name, contract_scope);
     for (c.body) |*member| switch (member.*) {
         .Function => |*f| try fun.collectFunctionSymbols(table, contract_scope, f),
@@ -49,6 +49,19 @@ pub fn collectContractSymbols(table: *state.SymbolTable, root: *state.Scope, c: 
             _ = try table.declare(contract_scope, sym);
             // Store error signature (parameters) for validation
             try table.error_signatures.put(err.name, err.parameters);
+        },
+        .Constant => |const_decl| {
+            // Constants are collected but type resolution happens later
+            // Store with type if available, otherwise it will be resolved during type resolution
+            const sym = state.Symbol{
+                .name = const_decl.name,
+                .kind = .Var, // Constants are treated as variables for symbol lookup
+                .typ = if (const_decl.typ.ora_type != null) const_decl.typ else null,
+                .span = const_decl.span,
+                .mutable = false, // Constants are immutable
+                .region = null, // Constants don't have a memory region
+            };
+            _ = try table.declare(contract_scope, sym);
         },
         else => {},
     };

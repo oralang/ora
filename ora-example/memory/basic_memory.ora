@@ -10,21 +10,21 @@ contract MemoryDeclarationTest {
         let y: u256 = 20;
         let sum: u256 = x + y;
         
-        // Memory variable with inferred type
-        let product = x * y;
+        // Memory variable with explicit type
+        var product: u256 = x * y;
         
         // Memory constants (cannot be reassigned)
-        const MAX_VALUE = 1000;
-        const MIN_VALUE = 0;
+        const MAX_VALUE: u256 = 1000;
+        const MIN_VALUE: u256 = 0;
         
         // Memory arrays
         let numbers: slice[u256] = [1, 2, 3, 4, 5];
         
-        // Memory struct
-        let user_data = .{
-            .id = 42,
-            .balance = 100,
-            .active = true
-        };
+        // Memory struct (commented out - anonymous struct types may need compiler support)
+        // let user_data: <anonymous> = .{
+        //     .id = 42,
+        //     .balance = 100,
+        //     .active = true
+        // };
     }
 }

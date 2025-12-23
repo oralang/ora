@@ -6,7 +6,6 @@ The result is a more robust and less ambiguous grammar that will be easier to im
 
 1.  **Unified Variable Declarations:** The conflicting `const_declaration` and `variable_declaration` rules have been merged into a single, unambiguous `variable_declaration` rule. The parser's job is now simpler, and semantic checks (e.g., ensuring `const` is initialized) are correctly deferred to the analysis phase.
 2.  **Strict L-value Assignments:** The left-hand side of assignments (`=`, `+=`, etc.) is now restricted to a new `lvalue` rule, which only permits assignable expressions (like variables or field/index accesses). This prevents syntactically valid but semantically incorrect code like `(a + b) = 5;`.
-3.  **Clearer `move` Statement:** As requested, the `move` statement now uses a more descriptive `move ... from ... to ...` syntax, enhancing readability and intent for financial operations.
 4.  **Standard Logical Operators:** The logical operators have been changed from `&` and `|` to the industry-standard `&&` and `||`. The single `&`, `|`, and `^` are now correctly defined as bitwise operators with the appropriate precedence. This drastically reduces the potential for developer error.
 5.  **Consistent Array Syntax:** The array type syntax has been clarified to better distinguish between fixed-size and dynamic-size arrays, following a more Zig-like convention (`[N]T`).
 6.  **Removed Optional Semicolons:** The optional semicolons in `requires` and `ensures` clauses have been removed to enforce a single, consistent coding style.
@@ -64,11 +63,9 @@ contract_member ::=
 # FUNCTION DECLARATIONS
 # ==========================================
 
-function_declaration ::= inline_modifier? visibility? "fn" function_name "(" parameter_list? ")" return_type? requires_clause* ensures_clause* modifies_clause? block
+function_declaration ::= visibility? "fn" function_name "(" parameter_list? ")" return_type? requires_clause* ensures_clause* modifies_clause? block
 
 function_name ::= identifier | special_function_name
-
-inline_modifier ::= "inline"
 
 visibility ::= "pub"
 
@@ -165,7 +162,6 @@ type ::=
     | error_union_type
     | primitive_type
     | map_type
-    | doublemap_type
     | array_type
     | slice_type
     | anonymous_struct_type
@@ -186,8 +182,6 @@ primitive_type ::=
     | "void"
 
 map_type ::= "map" "[" type "," type "]"
-
-doublemap_type ::= "doublemap" "[" type "," type "," type "]"
 
 # REVISED: Clarify syntax to match implementation: fixed arrays use Rust-style [T; N],
 # dynamic sequences use slice[T].
@@ -210,7 +204,6 @@ statement ::=
     | assignment_statement
     | compound_assignment_statement
     | destructuring_assignment
-    | move_statement
     | expression_statement
     | if_statement
     | while_statement
@@ -241,10 +234,6 @@ destructuring_pattern ::= "." "{" destructuring_field_list "}"
 destructuring_field_list ::= destructuring_field ("," destructuring_field)*
 
 destructuring_field ::= identifier | identifier ":" identifier
-
-# REVISED: Syntax is now clearer for financial operations.
-# "move <amount> from <source_balance> to <destination_balance>;"
-move_statement ::= "move" expression "from" expression "to" expression ";"
 
 expression_statement ::= expression ";"
 

@@ -1,0 +1,11 @@
+contract TestReturnInIf {
+    // Test ora.return inside if statement
+    pub fn testReturnInIf(x: u256) -> u256 {
+        if (x == 0) {
+            return 100;
+        } else {
+            return x + 1;
+        }
+    }
+}
+

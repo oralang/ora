@@ -1,0 +1,72 @@
+// ============================================================================
+// Real-World Pattern: Fee Calculation
+// ============================================================================
+// Demonstrates proper use of BasisPoints and MinValue for fee calculations
+// ============================================================================
+
+contract FeeCalculation {
+    storage var transfer_fee_rate: BasisPoints<u256>;
+    storage var min_transfer: MinValue<u256, 1>;
+    
+    // ============================================================================
+    // Fee Calculation with BasisPoints
+    // ============================================================================
+    
+    /// Calculate fee from amount using basis points
+    /// Returns u256 (not BasisPoints) since result may not be in [0, 10000]
+    fn calculateFee(amount: MinValue<u256, 1>, rate: BasisPoints<u256>) -> u256 {
+        // fee = (amount * rate) / 10000
+        // Note: Cannot use Exact here - need to handle division properly
+        return (amount * rate) / 10000;
+    }
+    
+    /// Calculate total required (amount + fee)
+    /// Returns MinValue since amount is MinValue and fee >= 0
+    fn calculateTotalRequired(amount: MinValue<u256, 1>) -> MinValue<u256, 1> {
+        const fee: u256 = calculateFee(amount, transfer_fee_rate);
+        const total: u256 = amount + fee; // MinValue + u256 = u256 (conservative)
+        
+        // Need to ensure total >= 1 for MinValue<u256, 1>
+        // In practice, this should be guaranteed if amount >= 1 and fee >= 0
+        return total; // May need guard or assertion
+    }
+    
+    // ============================================================================
+    // Transfer with Fee
+    // ============================================================================
+    
+    pub fn transfer(to: NonZeroAddress, amount: MinValue<u256, 1>) -> !bool | InsufficientBalance {
+        // Check minimum transfer
+        if (amount < min_transfer) {
+            return false; // Amount below minimum
+        }
+        
+        // Calculate total required
+        const total_required: u256 = calculateTotalRequired(amount);
+        
+        // Get balance (would need storage map)
+        // const balance = balances[std.msg.sender()];
+        // if (balance < total_required) {
+        //     return InsufficientBalance;
+        // }
+        
+        // Execute transfer (would need implementation)
+        return true;
+    }
+    
+    // ============================================================================
+    // Fee Rate Updates
+    // ============================================================================
+    
+    pub fn setTransferFeeRate(new_rate: BasisPoints<u256>) -> bool {
+        // BasisPoints type ensures new_rate is in [0, 10000]
+        transfer_fee_rate = new_rate; // No guard needed - type ensures validity
+        return true;
+    }
+    
+    pub fn setMinTransfer(new_min: MinValue<u256, 1>) -> bool {
+        // MinValue type ensures new_min >= 1
+        min_transfer = new_min; // No guard needed - type ensures validity
+        return true;
+    }
+}

@@ -84,11 +84,40 @@ pub const ExpressionParser = struct {
         while (true) {
             if (self.base.match(.LeftParen)) {
                 expr = try self.finishCall(expr);
+            } else if (self.base.check(.DotDot) or self.base.check(.DotDotDot)) {
+                // This is a range expression - parse it
+                const start_expr = expr;
+                const is_inclusive = self.base.check(.DotDotDot);
+                _ = self.base.advance(); // Consume DotDot or DotDotDot token
+                // Parse end expression (but don't consume beyond it - stop at closing paren, etc.)
+                // Use parseLogicalOr to avoid consuming too much (stops at comma, paren, etc.)
+                const end_expr = try precedence.parseLogicalOr(self);
+                const start_ptr = try self.base.arena.createNode(ast.Expressions.ExprNode);
+                start_ptr.* = start_expr;
+                const end_ptr = try self.base.arena.createNode(ast.Expressions.ExprNode);
+                end_ptr.* = end_expr;
+                expr = ast.Expressions.ExprNode{
+                    .Range = ast.Expressions.RangeExpr{
+                        .start = start_ptr,
+                        .end = end_ptr,
+                        .inclusive = is_inclusive,
+                        .type_info = ast.Types.TypeInfo.unknown(),
+                        .span = self.base.spanFromToken(self.base.previous()),
+                    },
+                };
+                // Break out of the loop after parsing range - ranges are complete expressions
+                break;
             } else if (self.base.match(.Dot)) {
                 const name_token = try self.base.consume(.Identifier, "Expected property name after '.'");
 
                 // Check if this might be an enum literal (EnumType.VariantName)
                 // But exclude known module/namespace patterns
+                // Also, if followed by '=' (assignment), treat as field access (L-value)
+                const is_assignment_target = self.base.check(.Equal) or
+                    self.base.check(.PlusEqual) or self.base.check(.MinusEqual) or
+                    self.base.check(.StarEqual) or self.base.check(.SlashEqual) or
+                    self.base.check(.PercentEqual);
+
                 if (expr == .Identifier) {
                     const enum_name = expr.Identifier.name;
 
@@ -99,8 +128,10 @@ pub const ExpressionParser = struct {
                         std.mem.eql(u8, enum_name, "block") or
                         std.mem.eql(u8, enum_name, "math");
 
-                    if (is_module_access) {
-                        // Treat as field access for module patterns
+                    // Always treat as field access if it's an assignment target (L-value)
+                    // This allows field assignment like user.balance = value
+                    if (is_module_access or is_assignment_target) {
+                        // Treat as field access for module patterns or assignment targets (L-values)
                         const expr_ptr = try self.base.arena.createNode(ast.Expressions.ExprNode);
                         expr_ptr.* = expr;
                         const field_name = try self.base.arena.createString(name_token.lexeme);
@@ -113,7 +144,7 @@ pub const ExpressionParser = struct {
                             },
                         };
                     } else {
-                        // Treat as potential enum literal
+                        // Treat as potential enum literal (only when NOT an assignment target)
                         const variant_name = try self.base.arena.createString(name_token.lexeme);
                         expr = ast.Expressions.ExprNode{ .EnumLiteral = ast.Expressions.EnumLiteralExpr{
                             .enum_name = enum_name,
@@ -225,6 +256,12 @@ pub const ExpressionParser = struct {
         const name_token = try self.base.consume(.Identifier, "Expected property name after '.'");
 
         // Check if this might be an enum literal (EnumType.VariantName)
+        // But if followed by '=' (assignment), treat as field access (L-value)
+        const is_assignment_target = self.base.check(.Equal) or
+            self.base.check(.PlusEqual) or self.base.check(.MinusEqual) or
+            self.base.check(.StarEqual) or self.base.check(.SlashEqual) or
+            self.base.check(.PercentEqual);
+
         if (target == .Identifier) {
             const enum_name = target.Identifier.name;
 
@@ -235,8 +272,8 @@ pub const ExpressionParser = struct {
                 std.mem.eql(u8, enum_name, "block") or
                 std.mem.eql(u8, enum_name, "math");
 
-            if (!is_module_access) {
-                // Treat as potential enum literal
+            if (!is_module_access and !is_assignment_target) {
+                // Treat as potential enum literal (only if not an assignment target)
                 return ast.Expressions.ExprNode{ .EnumLiteral = ast.Expressions.EnumLiteralExpr{
                     .enum_name = enum_name,
                     .variant_name = name_token.lexeme,
@@ -245,7 +282,7 @@ pub const ExpressionParser = struct {
             }
         }
 
-        // Regular field access
+        // Regular field access (for modules, assignment targets, or complex expressions)
         const expr_ptr = try self.base.arena.createNode(ast.Expressions.ExprNode);
         expr_ptr.* = target;
         return ast.Expressions.ExprNode{ .FieldAccess = ast.Expressions.FieldAccessExpr{
@@ -308,7 +345,7 @@ pub const ExpressionParser = struct {
     // ========================================================================
 
     /// Parse primary expressions (literals, identifiers, parentheses)
-    fn parsePrimary(self: *ExpressionParser) ParserError!ast.Expressions.ExprNode {
+    pub fn parsePrimary(self: *ExpressionParser) ParserError!ast.Expressions.ExprNode {
         // Quantified expressions (forall, exists) - Formal verification
         if (self.base.match(.Forall) or self.base.match(.Exists)) {
             return try complex.parseQuantifiedExpression(self);
@@ -383,6 +420,28 @@ pub const ExpressionParser = struct {
             };
         }
 
+        // Bytes literals (hex"...")
+        if (self.base.match(.BytesLiteral)) {
+            const token = self.base.previous();
+            // Extract hex content from token value (token.value.string contains just the hex content)
+            const hex_content = if (token.value) |val| switch (val) {
+                .string => |s| s,
+                else => token.lexeme,
+            } else token.lexeme;
+            // token.value.string should already contain just the hex digits (no quotes)
+            // But if it doesn't, strip any remaining quotes
+            const clean_content = if (std.mem.endsWith(u8, hex_content, "\""))
+                hex_content[0 .. hex_content.len - 1]
+            else
+                hex_content;
+            const value_copy = try self.base.arena.createString(clean_content);
+            return ast.Expressions.ExprNode{ .Literal = .{ .Bytes = ast.Expressions.BytesLiteral{
+                .value = value_copy,
+                .type_info = ast.Types.TypeInfo.explicit(.Bytes, .bytes, self.base.spanFromToken(token)),
+                .span = self.base.spanFromToken(token),
+            } } };
+        }
+
         // Binary literals
         if (self.base.match(.BinaryLiteral)) {
             const token = self.base.previous();
@@ -419,6 +478,12 @@ pub const ExpressionParser = struct {
                 const field_token = try self.base.consume(.Identifier, "Expected field name after '.'");
 
                 // Check if this might be an enum literal (EnumType.VariantName)
+                // But if followed by '=' (assignment), treat as field access (L-value)
+                const is_assignment_target = self.base.check(.Equal) or
+                    self.base.check(.PlusEqual) or self.base.check(.MinusEqual) or
+                    self.base.check(.StarEqual) or self.base.check(.SlashEqual) or
+                    self.base.check(.PercentEqual);
+
                 if (current_expr == .Identifier) {
                     const enum_name = current_expr.Identifier.name;
 
@@ -429,8 +494,8 @@ pub const ExpressionParser = struct {
                         std.mem.eql(u8, enum_name, "block") or
                         std.mem.eql(u8, enum_name, "math");
 
-                    if (!is_module_access) {
-                        // Treat as potential enum literal
+                    if (!is_module_access and !is_assignment_target) {
+                        // Treat as potential enum literal (only if not an assignment target)
                         const variant_name = try self.base.arena.createString(field_token.lexeme);
                         current_expr = ast.Expressions.ExprNode{ .EnumLiteral = ast.Expressions.EnumLiteralExpr{
                             .enum_name = enum_name,
@@ -566,14 +631,35 @@ pub const ExpressionParser = struct {
             } };
         }
 
-        // Error expressions (error.SomeError)
+        // Error expressions (error.SomeError or error.SomeError(args))
         if (self.base.match(.Error)) {
             const error_token = self.base.previous();
             _ = try self.base.consume(.Dot, "Expected '.' after 'error'");
             const name_token = try self.base.consume(.Identifier, "Expected error name after 'error.'");
 
+            // Check if there are parameters (error.SomeError(args))
+            var parameters: ?[]*ast.Expressions.ExprNode = null;
+            if (self.base.match(.LeftParen)) {
+                var args = std.ArrayList(*ast.Expressions.ExprNode){};
+                defer args.deinit(self.base.arena.allocator());
+
+                if (!self.base.check(.RightParen)) {
+                    repeat: while (true) {
+                        const arg = try self.parseExpression();
+                        const arg_ptr = try self.base.arena.createNode(ast.Expressions.ExprNode);
+                        arg_ptr.* = arg;
+                        try args.append(self.base.arena.allocator(), arg_ptr);
+                        if (!self.base.match(.Comma)) break :repeat;
+                    }
+                }
+
+                _ = try self.base.consume(.RightParen, "Expected ')' after error parameters");
+                parameters = try args.toOwnedSlice(self.base.arena.allocator());
+            }
+
             return ast.Expressions.ExprNode{ .ErrorReturn = ast.Expressions.ErrorReturnExpr{
                 .error_name = name_token.lexeme,
+                .parameters = parameters,
                 .span = self.base.spanFromToken(error_token),
             } };
         }
@@ -639,18 +725,6 @@ pub const ExpressionParser = struct {
             return ast.Expressions.ExprNode{ .Old = ast.Expressions.OldExpr{
                 .expr = expr_ptr,
                 .span = self.base.spanFromToken(old_token),
-            } };
-        }
-
-        // Error expressions (error.SomeError)
-        if (self.base.match(.Error)) {
-            const error_token = self.base.previous();
-            _ = try self.base.consume(.Dot, "Expected '.' after 'error'");
-            const name_token = try self.base.consume(.Identifier, "Expected error name after 'error.'");
-
-            return ast.Expressions.ExprNode{ .ErrorReturn = ast.Expressions.ErrorReturnExpr{
-                .error_name = name_token.lexeme,
-                .span = self.base.spanFromToken(error_token),
             } };
         }
 

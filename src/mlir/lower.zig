@@ -74,6 +74,7 @@ pub const SymbolInfo = struct {
     value: ?c.MlirValue, // For variables that have been assigned values
     span: ?[]const u8, // Source span information
     symbol_kind: SymbolKind, // What kind of symbol this is
+    variable_kind: ?lib.ast.Statements.VariableKind, // var, let, const, immutable (only for variables)
 };
 
 /// Different kinds of symbols that can be stored in the symbol table
@@ -83,6 +84,7 @@ pub const SymbolKind = enum {
     Type,
     Parameter,
     Constant,
+    Error,
 };
 
 /// Function symbol information
@@ -176,6 +178,8 @@ pub const SymbolTable = struct {
     // Separate tables for different symbol kinds
     functions: std.StringHashMap(FunctionSymbol),
     types: std.StringHashMap([]TypeSymbol),
+    // Store constant declarations for lazy value creation
+    constants: std.StringHashMap(*const lib.ast.ConstantNode),
 
     pub fn init(allocator: std.mem.Allocator) SymbolTable {
         var scopes = std.ArrayList(std.StringHashMap(SymbolInfo)){};
@@ -188,6 +192,7 @@ pub const SymbolTable = struct {
             .current_scope = 0,
             .functions = std.StringHashMap(FunctionSymbol).init(allocator),
             .types = std.StringHashMap([]TypeSymbol).init(allocator),
+            .constants = std.StringHashMap(*const lib.ast.ConstantNode).init(allocator),
         };
     }
 
@@ -206,6 +211,9 @@ pub const SymbolTable = struct {
 
         // Clean up type symbols
         var type_iter = self.types.iterator();
+
+        // Constants map doesn't own the AST nodes, just references them
+        self.constants.deinit();
         while (type_iter.next()) |entry| {
             const type_array = entry.value_ptr.*;
             // First deinit the TypeSymbol's internal allocations
@@ -233,13 +241,14 @@ pub const SymbolTable = struct {
     }
 
     /// Add a variable symbol to the current scope
-    pub fn addSymbol(self: *SymbolTable, name: []const u8, type_info: c.MlirType, region: lib.ast.Statements.MemoryRegion, span: ?[]const u8) !void {
+    pub fn addSymbol(self: *SymbolTable, name: []const u8, type_info: c.MlirType, region: lib.ast.Statements.MemoryRegion, span: ?[]const u8, variable_kind: ?lib.ast.Statements.VariableKind) !void {
         const region_str = switch (region) {
             .Storage => "storage",
             .Memory => "memory",
             .TStore => "tstore",
             .Stack => "stack",
         };
+        std.debug.print("[addSymbol] Adding symbol: {s}, variable_kind: {any}, scope: {}\n", .{ name, variable_kind, self.current_scope });
         const symbol_info = SymbolInfo{
             .name = name,
             .type = type_info,
@@ -247,9 +256,11 @@ pub const SymbolTable = struct {
             .value = null,
             .span = span,
             .symbol_kind = .Variable,
+            .variable_kind = variable_kind,
         };
 
         try self.scopes.items[self.current_scope].put(name, symbol_info);
+        std.debug.print("[addSymbol] Symbol added successfully: {s}, stored variable_kind: {any}\n", .{ name, symbol_info.variable_kind });
     }
 
     /// Add a parameter symbol to the current scope
@@ -261,13 +272,14 @@ pub const SymbolTable = struct {
             .value = value,
             .span = span,
             .symbol_kind = .Parameter,
+            .variable_kind = null, // Parameters don't have variable_kind
         };
 
         try self.scopes.items[self.current_scope].put(name, symbol_info);
     }
 
     /// Add a constant symbol to the current scope
-    pub fn addConstant(self: *SymbolTable, name: []const u8, type_info: c.MlirType, value: c.MlirValue, span: ?[]const u8) !void {
+    pub fn addConstant(self: *SymbolTable, name: []const u8, type_info: c.MlirType, value: ?c.MlirValue, span: ?[]const u8) !void {
         const symbol_info = SymbolInfo{
             .name = name,
             .type = type_info,
@@ -275,9 +287,35 @@ pub const SymbolTable = struct {
             .value = value,
             .span = span,
             .symbol_kind = .Constant,
+            .variable_kind = null, // Constants don't have variable_kind (they use symbol_kind)
         };
 
         try self.scopes.items[self.current_scope].put(name, symbol_info);
+    }
+
+    /// Add an error symbol to the current scope
+    pub fn addError(self: *SymbolTable, name: []const u8, type_info: c.MlirType, span: ?[]const u8) !void {
+        const symbol_info = SymbolInfo{
+            .name = name,
+            .type = type_info,
+            .region = "stack", // Errors are stack-based (for error values)
+            .value = null,
+            .span = span,
+            .symbol_kind = .Error,
+            .variable_kind = null, // Errors don't have variable_kind
+        };
+
+        try self.scopes.items[self.current_scope].put(name, symbol_info);
+    }
+
+    /// Register a constant declaration for lazy value creation
+    pub fn registerConstantDecl(self: *SymbolTable, name: []const u8, const_decl: *const lib.ast.ConstantNode) !void {
+        try self.constants.put(name, const_decl);
+    }
+
+    /// Look up a constant declaration
+    pub fn lookupConstantDecl(self: *const SymbolTable, name: []const u8) ?*const lib.ast.ConstantNode {
+        return self.constants.get(name);
     }
 
     /// Add a function symbol to the global function table
@@ -298,11 +336,13 @@ pub const SymbolTable = struct {
         var scope_idx: usize = self.current_scope;
         while (true) {
             if (self.scopes.items[scope_idx].get(name)) |symbol| {
+                std.debug.print("[lookupSymbol] Found symbol: {s} in scope {}, symbol_kind: {s}, variable_kind: {any}\n", .{ name, scope_idx, @tagName(symbol.symbol_kind), symbol.variable_kind });
                 return symbol;
             }
             if (scope_idx == 0) break;
             scope_idx -= 1;
         }
+        std.debug.print("[lookupSymbol] Symbol not found: {s}\n", .{name});
         return null;
     }
 
@@ -311,8 +351,10 @@ pub const SymbolTable = struct {
         var scope_idx: usize = self.current_scope;
         while (true) {
             if (self.scopes.items[scope_idx].get(name)) |symbol| {
+                std.debug.print("[updateSymbolValue] Found symbol: {s} in scope {}, variable_kind before: {any}\n", .{ name, scope_idx, symbol.variable_kind });
                 var updated_symbol = symbol;
                 updated_symbol.value = value;
+                std.debug.print("[updateSymbolValue] variable_kind after: {any}\n", .{updated_symbol.variable_kind});
                 try self.scopes.items[scope_idx].put(name, updated_symbol);
                 return;
             }
@@ -320,7 +362,8 @@ pub const SymbolTable = struct {
             scope_idx -= 1;
         }
         // If symbol not found, add it to current scope
-        try self.addSymbol(name, c.mlirValueGetType(value), lib.ast.Statements.MemoryRegion.Stack, null);
+        std.debug.print("[updateSymbolValue] WARNING: Symbol not found: {s}, adding new symbol with variable_kind=null\n", .{name});
+        try self.addSymbol(name, c.mlirValueGetType(value), lib.ast.Statements.MemoryRegion.Stack, null, null);
         if (self.scopes.items[self.current_scope].get(name)) |symbol| {
             var updated_symbol = symbol;
             updated_symbol.value = value;
@@ -394,13 +437,24 @@ const PassPipelineConfig = @import("pass_manager.zig").PassPipelineConfig;
 /// Enhanced lowering result with error information and pass results
 pub const LoweringResult = struct {
     module: c.MlirModule,
-    errors: []const LoweringError,
-    warnings: []const LoweringWarning,
+    errors: []LoweringError,
+    warnings: []LoweringWarning,
     success: bool,
     pass_result: ?@import("pass_manager.zig").PassResult,
 
     /// Free the allocated errors and warnings
     pub fn deinit(self: *LoweringResult, allocator: std.mem.Allocator) void {
+        // Free deep-copied error messages and suggestions
+        for (self.errors) |err| {
+            allocator.free(err.message);
+            if (err.suggestion) |s| {
+                allocator.free(s);
+            }
+        }
+        // Free deep-copied warning messages
+        for (self.warnings) |warn| {
+            allocator.free(warn.message);
+        }
         allocator.free(self.errors);
         allocator.free(self.warnings);
         if (self.pass_result) |*pr| {
@@ -863,10 +917,13 @@ pub fn lowerFunctionsToModuleWithErrors(ctx: c.MlirContext, nodes: []lib.AstNode
                     if (error_handler.validateMlirOperation(const_op, const_decl.span) catch false) {
                         c.mlirBlockAppendOwnedOperation(body, const_op);
 
-                        // Add constant to symbol table
+                        // Register constant declaration for lazy value creation
+                        symbol_table.registerConstantDecl(const_decl.name, &const_decl) catch {
+                            std.debug.print("ERROR: Failed to register constant declaration: {s}\n", .{const_decl.name});
+                        };
+                        // Add constant to symbol table with null value - will be created lazily when referenced
                         const const_type = type_mapper.toMlirType(const_decl.typ);
-                        const const_result = c.mlirOperationGetResult(const_op, 0);
-                        symbol_table.addConstant(const_decl.name, const_type, const_result, null) catch {
+                        symbol_table.addConstant(const_decl.name, const_type, null, null) catch {
                             std.debug.print("ERROR: Failed to add constant to symbol table: {s}\n", .{const_decl.name});
                         };
                     }
@@ -1031,7 +1088,7 @@ pub fn lowerFunctionsToModuleWithErrors(ctx: c.MlirContext, nodes: []lib.AstNode
                             try error_handler.reportGracefulDegradation("statements within modules", "statement lowering operations", error_handling.getSpanFromStatement(stmt));
                             // Create a placeholder operation to allow compilation to continue
                             const expr_lowerer = ExpressionLowerer.init(ctx, body, &type_mapper, null, null, null, &symbol_table, &builtin_registry, locations, &ora_dialect);
-                            const stmt_lowerer = StatementLowerer.init(ctx, body, &type_mapper, &expr_lowerer, null, null, null, locations, &symbol_table, &builtin_registry, std.heap.page_allocator, null, &ora_dialect);
+                            const stmt_lowerer = StatementLowerer.init(ctx, body, &type_mapper, &expr_lowerer, null, null, null, locations, &symbol_table, &builtin_registry, std.heap.page_allocator, null, null, &ora_dialect, &[_]*lib.ast.Expressions.ExprNode{});
                             stmt_lowerer.lowerStatement(stmt) catch {
                                 try error_handler.reportError(.MlirOperationFailed, error_handling.getSpanFromStatement(stmt), "failed to lower top-level statement", "check statement structure and dependencies");
                                 continue;
@@ -1108,7 +1165,7 @@ pub fn lowerFunctionsToModuleWithErrors(ctx: c.MlirContext, nodes: []lib.AstNode
 
                 // Create a temporary statement lowerer for top-level statements
                 const expr_lowerer = ExpressionLowerer.init(ctx, body, &type_mapper, null, null, null, &symbol_table, null, locations, &ora_dialect);
-                const stmt_lowerer = StatementLowerer.init(ctx, body, &type_mapper, &expr_lowerer, null, null, null, locations, null, &builtin_registry, std.heap.page_allocator, null, &ora_dialect);
+                const stmt_lowerer = StatementLowerer.init(ctx, body, &type_mapper, &expr_lowerer, null, null, null, locations, null, &builtin_registry, std.heap.page_allocator, null, null, &ora_dialect, &[_]*lib.ast.Expressions.ExprNode{});
                 stmt_lowerer.lowerStatement(stmt) catch {
                     try error_handler.reportError(.MlirOperationFailed, error_handling.getSpanFromStatement(stmt), "failed to lower top-level statement", "check statement structure and dependencies");
                     continue;
@@ -1157,11 +1214,42 @@ pub fn lowerFunctionsToModuleWithErrors(ctx: c.MlirContext, nodes: []lib.AstNode
         }
     }
 
+    // Deep-copy errors and warnings out of the error handler before it is deinitialized.
+    const handler_errors = error_handler.getErrors();
+    const handler_warnings = error_handler.getWarnings();
+
+    var errors = try allocator.alloc(LoweringError, handler_errors.len);
+    for (handler_errors, 0..) |e, i| {
+        const msg_copy = try allocator.dupe(u8, e.message);
+        const sugg_copy: ?[]const u8 = if (e.suggestion) |s|
+            try allocator.dupe(u8, s)
+        else
+            null;
+
+        errors[i] = LoweringError{
+            .error_type = e.error_type,
+            .span = e.span,
+            .message = msg_copy,
+            .suggestion = sugg_copy,
+            .context = e.context,
+        };
+    }
+
+    var warnings = try allocator.alloc(LoweringWarning, handler_warnings.len);
+    for (handler_warnings, 0..) |w, i| {
+        const msg_copy = try allocator.dupe(u8, w.message);
+        warnings[i] = LoweringWarning{
+            .warning_type = w.warning_type,
+            .span = w.span,
+            .message = msg_copy,
+        };
+    }
+
     // Create and return the lowering result
     const result = LoweringResult{
         .module = module,
-        .errors = try allocator.dupe(LoweringError, error_handler.getErrors()),
-        .warnings = try allocator.dupe(LoweringWarning, error_handler.getWarnings()),
+        .errors = errors,
+        .warnings = warnings,
         .success = !error_handler.hasErrors(),
         .pass_result = null,
     };

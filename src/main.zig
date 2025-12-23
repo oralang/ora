@@ -18,9 +18,10 @@ const build_options = @import("build_options");
 /// MLIR-related command line options
 const MlirOptions = struct {
     emit_mlir: bool,
+    emit_mlir_sir: bool,
     opt_level: ?[]const u8,
     output_dir: ?[]const u8,
-    validate_before_yul: bool,
+    canonicalize: bool = true,
 
     fn getOptimizationLevel(self: MlirOptions) OptimizationLevel {
         if (self.opt_level) |level| {
@@ -36,11 +37,6 @@ const MlirOptions = struct {
         if (std.mem.eql(u8, build_default, "aggressive")) return .Aggressive;
 
         return .Basic; // Final fallback
-    }
-
-    fn shouldValidateBeforeYul(self: MlirOptions) bool {
-        // Always validate unless explicitly disabled
-        return self.validate_before_yul;
     }
 };
 
@@ -76,19 +72,14 @@ pub fn main() !void {
     var emit_tokens: bool = false;
     var emit_ast: bool = false;
     var emit_mlir: bool = false;
-    var emit_yul: bool = false;
-    var emit_bytecode: bool = false;
-    var emit_abi: bool = false;
-    var emit_json: bool = false;
+    var emit_mlir_sir: bool = false;
     var emit_cfg: bool = false;
-    var analyze_complexity: bool = false;
+    var canonicalize_mlir: bool = true;
     var analyze_state: bool = false;
 
     // MLIR options
     var mlir_opt_level: ?[]const u8 = null;
-    var mlir_validate_before_yul: bool = true; // Default enabled for safety
 
-    // var verbose: bool = false;  // TODO: implement verbose mode
     var i: usize = 1;
 
     while (i < args.len) {
@@ -109,23 +100,12 @@ pub fn main() !void {
         } else if (std.mem.eql(u8, args[i], "--emit-mlir")) {
             emit_mlir = true;
             i += 1;
-        } else if (std.mem.eql(u8, args[i], "--emit-yul")) {
-            emit_yul = true;
-            i += 1;
-        } else if (std.mem.eql(u8, args[i], "--emit-bytecode")) {
-            emit_bytecode = true;
-            i += 1;
-        } else if (std.mem.eql(u8, args[i], "--abi")) {
-            emit_abi = true;
-            i += 1;
-        } else if (std.mem.eql(u8, args[i], "--json")) {
-            emit_json = true;
+        } else if (std.mem.eql(u8, args[i], "--emit-mlir-sir")) {
+            emit_mlir_sir = true;
             i += 1;
         } else if (std.mem.eql(u8, args[i], "--emit-cfg")) {
             emit_cfg = true;
             i += 1;
-        } else if (std.mem.eql(u8, args[i], "--analyze-complexity")) {
-            analyze_complexity = true;
             i += 1;
         } else if (std.mem.eql(u8, args[i], "--analyze-state")) {
             analyze_state = true;
@@ -142,11 +122,10 @@ pub fn main() !void {
             i += 1;
             // MLIR options
         } else if (std.mem.eql(u8, args[i], "--no-validate-mlir")) {
-            mlir_validate_before_yul = false;
+            // Validation is always enabled for MLIR (legacy flag, kept for compatibility)
             i += 1;
-            // Debug/verbose
-        } else if (std.mem.eql(u8, args[i], "--verbose") or std.mem.eql(u8, args[i], "-v")) {
-            // verbose = true;  // TODO: implement verbose mode
+        } else if (std.mem.eql(u8, args[i], "--no-canonicalize")) {
+            canonicalize_mlir = false;
             i += 1;
             // Input file
         } else if (input_file == null and !std.mem.startsWith(u8, args[i], "-")) {
@@ -166,12 +145,6 @@ pub fn main() !void {
 
     const file_path = input_file.?;
 
-    // Handle complexity analysis first (it's a special mode)
-    if (analyze_complexity) {
-        try runComplexityAnalysis(allocator, file_path);
-        return;
-    }
-
     // Handle state analysis (also a special analysis mode)
     if (analyze_state) {
         try runStateAnalysis(allocator, file_path);
@@ -179,17 +152,18 @@ pub fn main() !void {
     }
 
     // Determine compilation mode
-    // If no --emit-X flag is set, default to bytecode
-    if (!emit_tokens and !emit_ast and !emit_mlir and !emit_yul and !emit_bytecode and !emit_cfg) {
-        emit_bytecode = true; // Default: compile to bytecode
+    // If no --emit-X flag is set, default to MLIR generation
+    if (!emit_tokens and !emit_ast and !emit_mlir and !emit_mlir_sir and !emit_cfg) {
+        emit_mlir = true; // Default: emit MLIR
     }
 
     // Create MLIR options structure
     const mlir_options = MlirOptions{
         .emit_mlir = emit_mlir,
+        .emit_mlir_sir = emit_mlir_sir,
         .opt_level = mlir_opt_level,
         .output_dir = output_dir,
-        .validate_before_yul = mlir_validate_before_yul,
+        .canonicalize = canonicalize_mlir,
     };
 
     // Handle CFG generation (uses MLIR's built-in view-op-graph pass)
@@ -207,18 +181,12 @@ pub fn main() !void {
     } else if (emit_ast) {
         // Stop after parser
         try runParser(allocator, file_path);
-    } else if (emit_abi) {
-        // Generate and output ABI (requires parsing to AST)
-        try runAbiGeneration(allocator, file_path, emit_json);
-    } else if (emit_json) {
-        // Full compilation with JSON output
-        try runJsonOutput(allocator, file_path, mlir_options);
-    } else if (emit_mlir or emit_yul or emit_bytecode) {
-        // Run full MLIR pipeline (includes Yul and bytecode if needed)
-        try runMlirEmitAdvancedWithYul(allocator, file_path, mlir_options, emit_yul or emit_bytecode);
+    } else if (emit_mlir) {
+        // Run full MLIR pipeline (Ora MLIR)
+        try runMlirEmitAdvanced(allocator, file_path, mlir_options);
     } else {
-        // Default: full compilation
-        try runMlirEmitAdvancedWithYul(allocator, file_path, mlir_options, false);
+        // Default: emit MLIR
+        try runMlirEmitAdvanced(allocator, file_path, mlir_options);
     }
 }
 
@@ -233,15 +201,12 @@ fn printUsage() !void {
     try stdout.print("Ora Compiler v0.1 - Asuka\n", .{});
     try stdout.print("Usage: ora [options] <file.ora>\n", .{});
     try stdout.print("\nCompilation Control:\n", .{});
-    try stdout.print("  (default)              - Compile to EVM bytecode\n", .{});
+    try stdout.print("  (default)              - Emit MLIR\n", .{});
     try stdout.print("  --emit-tokens          - Stop after lexical analysis (emit tokens)\n", .{});
     try stdout.print("  --emit-ast             - Stop after parsing (emit AST)\n", .{});
-    try stdout.print("  --emit-mlir            - Stop after MLIR generation\n", .{});
+    try stdout.print("  --emit-mlir            - Emit Ora MLIR (default)\n", .{});
+    try stdout.print("  --emit-mlir-sir        - Emit SIR MLIR (after conversion)\n", .{});
     try stdout.print("  --emit-cfg             - Generate control flow graph (Graphviz DOT format)\n", .{});
-    try stdout.print("  --emit-yul             - Stop after Yul lowering\n", .{});
-    try stdout.print("  --emit-bytecode        - Generate EVM bytecode (default)\n", .{});
-    try stdout.print("  --abi                  - Generate contract ABI (JSON format)\n", .{});
-    try stdout.print("  --json                 - Output in JSON format (for tools)\n", .{});
     try stdout.print("\nOutput Options:\n", .{});
     try stdout.print("  -o <file>              - Write output to <file> (e.g., -o out.hex, -o out.mlir)\n", .{});
     try stdout.print("  -o <dir>/              - Write artifacts to <dir>/ (e.g., -o build/)\n", .{});
@@ -251,12 +216,10 @@ fn printUsage() !void {
     try stdout.print("  -O1, -Obasic           - Basic optimizations\n", .{});
     try stdout.print("  -O2, -Oaggressive      - Aggressive optimizations\n", .{});
     try stdout.print("\nMLIR Options:\n", .{});
-    try stdout.print("  --no-validate-mlir     - Disable automatic MLIR validation before Yul (not recommended)\n", .{});
+    try stdout.print("  --no-validate-mlir     - Disable automatic MLIR validation (not recommended)\n", .{});
+    try stdout.print("  --no-canonicalize      - Skip Ora MLIR canonicalization pass\n", .{});
     try stdout.print("\nAnalysis Options:\n", .{});
-    try stdout.print("  --analyze-complexity   - Analyze function complexity metrics\n", .{});
     try stdout.print("  --analyze-state        - Analyze storage reads/writes per function\n", .{});
-    try stdout.print("\nDevelopment/Debug Options:\n", .{});
-    try stdout.print("  --verbose              - Verbose output (show each compilation stage)\n", .{});
     try stdout.flush();
 }
 
@@ -338,17 +301,14 @@ fn runParser(allocator: std.mem.Allocator, file_path: []const u8) !void {
 
     try stdout.print("Lexed {d} tokens\n", .{tokens.len});
 
-    // Run parser
-    var arena = lib.ast_arena.AstArena.init(allocator);
-    defer arena.deinit();
-    var parser = lib.Parser.init(tokens, &arena);
-    parser.setFileId(1);
-    const ast_nodes = parser.parse() catch |err| {
+    // Run parser - use parseWithArena to keep arena alive for AST printing
+    var parse_result = lib.parser.parseWithArena(allocator, tokens) catch |err| {
         try stdout.print("Parser error: {s}\n", .{@errorName(err)});
         try stdout.flush();
         std.process.exit(1);
     };
-    // Note: AST nodes are allocated in arena, so they're automatically freed when arena is deinited
+    defer parse_result.arena.deinit(); // Keep arena alive until after printing
+    const ast_nodes = parse_result.nodes;
 
     try stdout.print("Generated {d} AST nodes\n\n", .{ast_nodes.len});
 
@@ -357,153 +317,6 @@ fn runParser(allocator: std.mem.Allocator, file_path: []const u8) !void {
         try stdout.print("[{d}] ", .{i});
         try printAstSummary(stdout, node, 0);
     }
-
-    try stdout.flush();
-}
-
-/// Run complexity analysis on all functions in the contract
-fn runComplexityAnalysis(allocator: std.mem.Allocator, file_path: []const u8) !void {
-    const complexity = lib.complexity;
-
-    var stdout_buffer: [1024]u8 = undefined;
-    var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
-    const stdout = &stdout_writer.interface;
-
-    // Read source file
-    const source = std.fs.cwd().readFileAlloc(allocator, file_path, 1024 * 1024) catch |err| {
-        try stdout.print("Error reading file {s}: {s}\n", .{ file_path, @errorName(err) });
-        return;
-    };
-    defer allocator.free(source);
-
-    try stdout.print("Analyzing complexity for {s}\n", .{file_path});
-    try stdout.print("==================================================\n", .{});
-
-    // Run lexer
-    var lexer = lib.Lexer.init(allocator, source);
-    defer lexer.deinit();
-
-    const tokens = lexer.scanTokens() catch |err| {
-        try stdout.print("Lexer error: {s}\n", .{@errorName(err)});
-        try stdout.flush();
-        std.process.exit(1);
-    };
-    defer allocator.free(tokens);
-
-    // Run parser
-    var arena = lib.ast_arena.AstArena.init(allocator);
-    defer arena.deinit();
-    var parser = lib.Parser.init(tokens, &arena);
-    parser.setFileId(1);
-    const ast_nodes = parser.parse() catch |err| {
-        try stdout.print("Parser error: {s}\n", .{@errorName(err)});
-        try stdout.flush();
-        std.process.exit(1);
-    };
-
-    try stdout.print("\n", .{});
-
-    // Analyze each function
-    var analyzer = complexity.ComplexityAnalyzer.init(allocator);
-    var function_count: u32 = 0;
-    var total_complexity: u32 = 0;
-    var simple_count: u32 = 0;
-    var moderate_count: u32 = 0;
-    var complex_count: u32 = 0;
-
-    for (ast_nodes) |*node| {
-        switch (node.*) {
-            .Contract => |*contract| {
-                try stdout.print("Contract: {s}\n", .{contract.name});
-                try stdout.print("{s}\n", .{"─" ** 50});
-
-                for (contract.body) |*body_node| {
-                    if (body_node.* == .Function) {
-                        const func = &body_node.Function;
-                        function_count += 1;
-
-                        const metrics = analyzer.analyzeFunction(func);
-                        total_complexity += metrics.node_count;
-
-                        // Categorize
-                        if (metrics.isSimple()) {
-                            simple_count += 1;
-                        } else if (metrics.isComplex()) {
-                            complex_count += 1;
-                        } else {
-                            moderate_count += 1;
-                        }
-
-                        // Format visibility
-                        const visibility = if (func.visibility == .Public) "pub " else "";
-                        const inline_marker = if (func.is_inline) "inline " else "";
-
-                        // Complexity rating
-                        const rating = if (metrics.isSimple())
-                            "✓ Simple"
-                        else if (metrics.isComplex())
-                            "✗ Complex"
-                        else
-                            "○ Moderate";
-
-                        try stdout.print("\n{s}{s}fn {s}()\n", .{ visibility, inline_marker, func.name });
-                        try stdout.print("  Complexity: {s}\n", .{rating});
-                        try stdout.print("  Nodes:      {d}\n", .{metrics.node_count});
-                        try stdout.print("  Statements: {d}\n", .{metrics.statement_count});
-                        try stdout.print("  Max Depth:  {d}\n", .{metrics.max_depth});
-
-                        // Warning for inline functions
-                        if (func.is_inline and metrics.isComplex()) {
-                            try stdout.print("  ⚠️  WARNING: Function marked 'inline' but has high complexity!\n", .{});
-                            try stdout.print("      Consider removing 'inline' or refactoring.\n", .{});
-                        }
-
-                        // Recommendations
-                        if (metrics.isComplex()) {
-                            try stdout.print("  💡 Recommendation: Consider breaking into smaller functions\n", .{});
-                        } else if (metrics.isSimple() and !func.is_inline and func.visibility == .Private) {
-                            try stdout.print("  💡 Tip: This function is a good candidate for 'inline'\n", .{});
-                        }
-                    }
-                }
-            },
-            .Function => |*func| {
-                // Top-level function (rare, but handle it)
-                function_count += 1;
-                const metrics = analyzer.analyzeFunction(func);
-                total_complexity += metrics.node_count;
-
-                if (metrics.isSimple()) {
-                    simple_count += 1;
-                } else if (metrics.isComplex()) {
-                    complex_count += 1;
-                } else {
-                    moderate_count += 1;
-                }
-
-                try stdout.print("\nFunction: {s}\n", .{func.name});
-                try stdout.print("  Nodes:      {d}\n", .{metrics.node_count});
-                try stdout.print("  Statements: {d}\n", .{metrics.statement_count});
-                try stdout.print("  Max Depth:  {d}\n", .{metrics.max_depth});
-            },
-            else => {},
-        }
-    }
-
-    // Summary
-    try stdout.print("\n{s}\n", .{"═" ** 50});
-    try stdout.print("SUMMARY\n", .{});
-    try stdout.print("{s}\n", .{"═" ** 50});
-    try stdout.print("Total Functions:    {d}\n", .{function_count});
-    try stdout.print("  ✓ Simple:         {d} ({d}%)\n", .{ simple_count, if (function_count > 0) simple_count * 100 / function_count else 0 });
-    try stdout.print("  ○ Moderate:       {d} ({d}%)\n", .{ moderate_count, if (function_count > 0) moderate_count * 100 / function_count else 0 });
-    try stdout.print("  ✗ Complex:        {d} ({d}%)\n", .{ complex_count, if (function_count > 0) complex_count * 100 / function_count else 0 });
-    try stdout.print("Average Complexity: {d} nodes/function\n", .{if (function_count > 0) total_complexity / function_count else 0});
-
-    try stdout.print("\nComplexity Thresholds:\n", .{});
-    try stdout.print("  Simple:   < 20 nodes (good for inline)\n", .{});
-    try stdout.print("  Moderate: 20-100 nodes\n", .{});
-    try stdout.print("  Complex:  > 100 nodes (not recommended for inline)\n", .{});
 
     try stdout.flush();
 }
@@ -613,6 +426,33 @@ fn printAstSummary(writer: anytype, node: *lib.AstNode, indent: u32) !void {
         .Function => |*function| {
             const visibility = if (function.visibility == .Public) "pub " else "";
             try writer.print("{s}Function '{s}' ({d} params)\n", .{ visibility, function.name, function.parameters.len });
+            // Print function body statements with indentation
+            for (function.body.statements) |*stmt| {
+                switch (stmt.*) {
+                    .VariableDecl => |*var_decl| {
+                        var stmt_indent: u32 = 0;
+                        while (stmt_indent < indent + 1) : (stmt_indent += 1) {
+                            try writer.print("  ", .{});
+                        }
+                        const mutability = switch (var_decl.kind) {
+                            .Var => "var ",
+                            .Let => "let ",
+                            .Const => "const ",
+                            .Immutable => "immutable ",
+                        };
+                        try writer.print("Variable {s}{s}'{s}'", .{ @tagName(var_decl.region), mutability, var_decl.name });
+                        if (var_decl.type_info.ora_type) |ora_type| {
+                            try writer.print(" : {s}", .{@tagName(ora_type)});
+                        } else if (var_decl.type_info.category != .Unknown) {
+                            try writer.print(" : {s}", .{@tagName(var_decl.type_info.category)});
+                        } else {
+                            try writer.print(" : <unresolved>", .{});
+                        }
+                        try writer.print("\n", .{});
+                    },
+                    else => {},
+                }
+            }
         },
         .VariableDecl => |*var_decl| {
             const mutability = switch (var_decl.kind) {
@@ -621,7 +461,15 @@ fn printAstSummary(writer: anytype, node: *lib.AstNode, indent: u32) !void {
                 .Const => "const ",
                 .Immutable => "immutable ",
             };
-            try writer.print("Variable {s}{s}'{s}'\n", .{ @tagName(var_decl.region), mutability, var_decl.name });
+            try writer.print("Variable {s}{s}'{s}'", .{ @tagName(var_decl.region), mutability, var_decl.name });
+            if (var_decl.type_info.ora_type) |ora_type| {
+                try writer.print(" : {s}", .{@tagName(ora_type)});
+            } else if (var_decl.type_info.category != .Unknown) {
+                try writer.print(" : {s}", .{@tagName(var_decl.type_info.category)});
+            } else {
+                try writer.print(" : <unresolved>", .{});
+            }
+            try writer.print("\n", .{});
         },
         .LogDecl => |*log_decl| {
             try writer.print("Log '{s}' ({d} fields)\n", .{ log_decl.name, log_decl.fields.len });
@@ -630,169 +478,6 @@ fn printAstSummary(writer: anytype, node: *lib.AstNode, indent: u32) !void {
             try writer.print("AST Node\n", .{});
         },
     }
-}
-
-// ============================================================================
-// SECTION 5.5: ABI and JSON Output Generation
-// ============================================================================
-
-/// Generate and output contract ABI
-fn runAbiGeneration(allocator: std.mem.Allocator, file_path: []const u8, as_json: bool) !void {
-    var stdout_buffer: [1024]u8 = undefined;
-    var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
-    const stdout = &stdout_writer.interface;
-
-    // Read and parse source file
-    const source = std.fs.cwd().readFileAlloc(allocator, file_path, 1024 * 1024) catch |err| {
-        try stdout.print("Error reading file {s}: {s}\n", .{ file_path, @errorName(err) });
-        return;
-    };
-    defer allocator.free(source);
-
-    // Lex
-    var lexer = lib.Lexer.init(allocator, source);
-    defer lexer.deinit();
-    const tokens = lexer.scanTokens() catch |err| {
-        try stdout.print("Lexer error: {s}\n", .{@errorName(err)});
-        try stdout.flush();
-        std.process.exit(1);
-    };
-    defer allocator.free(tokens);
-
-    // Parse
-    var arena = lib.ast_arena.AstArena.init(allocator);
-    defer arena.deinit();
-    var parser = lib.Parser.init(tokens, &arena);
-    parser.setFileId(1);
-    const ast_nodes = parser.parse() catch |err| {
-        try stdout.print("Parser error: {s}\n", .{@errorName(err)});
-        try stdout.flush();
-        std.process.exit(1);
-    };
-
-    // Generate ABI
-    var abi_generator = try lib.abi.AbiGenerator.init(allocator);
-    defer abi_generator.deinit();
-    var contract_abi = try abi_generator.generate(ast_nodes);
-    defer contract_abi.deinit();
-
-    // Output ABI
-    if (as_json) {
-        const abi_json = try contract_abi.toJson(allocator);
-        defer allocator.free(abi_json);
-        try stdout.print("{s}", .{abi_json});
-    } else {
-        const abi_json = try contract_abi.toJson(allocator);
-        defer allocator.free(abi_json);
-        try stdout.print("{s}", .{abi_json});
-    }
-    try stdout.flush();
-}
-
-/// Generate full JSON output with compilation artifacts
-fn runJsonOutput(allocator: std.mem.Allocator, file_path: []const u8, mlir_options: MlirOptions) !void {
-    var stdout_buffer: [1024]u8 = undefined;
-    var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
-    const stdout = &stdout_writer.interface;
-
-    // Read and parse source file
-    const source = std.fs.cwd().readFileAlloc(allocator, file_path, 1024 * 1024) catch |err| {
-        const err_json = try std.fmt.allocPrint(allocator,
-            \\{{
-            \\  "success": false,
-            \\  "errors": [
-            \\    {{
-            \\      "type": "FileError",
-            \\      "message": "Error reading file: {s}"
-            \\    }}
-            \\  ]
-            \\}}
-            \\
-        , .{@errorName(err)});
-        defer allocator.free(err_json);
-        try stdout.print("{s}", .{err_json});
-        try stdout.flush();
-        std.process.exit(1);
-    };
-    defer allocator.free(source);
-
-    // Lex
-    var lexer = lib.Lexer.init(allocator, source);
-    defer lexer.deinit();
-    const tokens = lexer.scanTokens() catch |err| {
-        const err_json = try std.fmt.allocPrint(allocator,
-            \\{{
-            \\  "success": false,
-            \\  "errors": [
-            \\    {{
-            \\      "type": "LexerError",
-            \\      "message": "{s}"
-            \\    }}
-            \\  ]
-            \\}}
-            \\
-        , .{@errorName(err)});
-        defer allocator.free(err_json);
-        try stdout.print("{s}", .{err_json});
-        try stdout.flush();
-        std.process.exit(1);
-    };
-    defer allocator.free(tokens);
-
-    // Parse
-    var arena = lib.ast_arena.AstArena.init(allocator);
-    defer arena.deinit();
-    var parser = lib.Parser.init(tokens, &arena);
-    parser.setFileId(1);
-    const ast_nodes = parser.parse() catch |err| {
-        const err_json = try std.fmt.allocPrint(allocator,
-            \\{{
-            \\  "success": false,
-            \\  "errors": [
-            \\    {{
-            \\      "type": "ParseError",
-            \\      "message": "{s}"
-            \\    }}
-            \\  ]
-            \\}}
-            \\
-        , .{@errorName(err)});
-        defer allocator.free(err_json);
-        try stdout.print("{s}", .{err_json});
-        try stdout.flush();
-        std.process.exit(1);
-    };
-
-    // Generate ABI
-    var abi_generator = try lib.abi.AbiGenerator.init(allocator);
-    defer abi_generator.deinit();
-    var contract_abi = try abi_generator.generate(ast_nodes);
-    defer contract_abi.deinit();
-    const abi_json = try contract_abi.toJson(allocator);
-    defer allocator.free(abi_json);
-
-    // TODO: Actually compile to bytecode here
-    // For now, just output ABI in JSON format with placeholders
-    _ = mlir_options;
-
-    const json_output = try std.fmt.allocPrint(allocator,
-        \\{{
-        \\  "success": true,
-        \\  "artifacts": {{
-        \\    "bytecode": "0x",
-        \\    "abi": {s}
-        \\  }},
-        \\  "compiler": {{
-        \\    "version": "0.1.0",
-        \\    "optimization": "basic"
-        \\  }}
-        \\}}
-        \\
-    , .{abi_json});
-    defer allocator.free(json_output);
-
-    try stdout.print("{s}", .{json_output});
-    try stdout.flush();
 }
 
 /// Generate Control Flow Graph using MLIR's built-in view-op-graph pass
@@ -822,11 +507,7 @@ fn runCFGGeneration(allocator: std.mem.Allocator, file_path: []const u8, mlir_op
     };
     defer allocator.free(tokens);
 
-    var arena = lib.ast_arena.AstArena.init(allocator);
-    defer arena.deinit();
-    var parser = lib.Parser.init(tokens, &arena);
-    parser.setFileId(1);
-    const ast_nodes = parser.parse() catch |err| {
+    const ast_nodes = lib.parser.parse(allocator, tokens) catch |err| {
         try stdout.print("Parser error: {s}\n", .{@errorName(err)});
         return;
     };
@@ -869,6 +550,13 @@ fn runCFGGeneration(allocator: std.mem.Allocator, file_path: []const u8, mlir_op
     const mlir_text = try mlir_text_buffer.toOwnedSlice(mlir_allocator);
     defer mlir_allocator.free(mlir_text);
 
+    // Convert Ora MLIR to SIR MLIR before generating CFG
+    if (!c.oraConvertToSIR(h.ctx, lowering_result.module)) {
+        try stdout.print("Error: Ora to SIR conversion failed\n", .{});
+        try stdout.flush();
+        std.process.exit(1);
+    }
+
     // Use MLIR C++ API to generate CFG with dialect properly registered
     const dot_content = cfg_gen.generateCFG(h.ctx, lowering_result.module, mlir_allocator) catch |err| {
         try stdout.print("Failed to generate CFG: {s}\n", .{@errorName(err)});
@@ -905,10 +593,6 @@ fn runCFGGeneration(allocator: std.mem.Allocator, file_path: []const u8, mlir_op
 
 /// Advanced MLIR emission with full pass pipeline support
 fn runMlirEmitAdvanced(allocator: std.mem.Allocator, file_path: []const u8, mlir_options: MlirOptions) !void {
-    try runMlirEmitAdvancedWithYul(allocator, file_path, mlir_options, true);
-}
-
-fn runMlirEmitAdvancedWithYul(allocator: std.mem.Allocator, file_path: []const u8, mlir_options: MlirOptions, generate_yul: bool) !void {
     var stdout_buffer: [1024]u8 = undefined;
     var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
     const stdout = &stdout_writer.interface;
@@ -931,15 +615,14 @@ fn runMlirEmitAdvancedWithYul(allocator: std.mem.Allocator, file_path: []const u
     };
     defer allocator.free(tokens);
 
-    var arena = lib.ast_arena.AstArena.init(allocator);
-    defer arena.deinit();
-    var parser = lib.Parser.init(tokens, &arena);
-    parser.setFileId(1);
-    const ast_nodes = parser.parse() catch |err| {
+    const parse_result = lib.parser.parseWithArena(allocator, tokens) catch |err| {
         try stdout.print("Parser error: {s}\n", .{@errorName(err)});
         try stdout.flush();
         std.process.exit(1);
     };
+    const ast_nodes = parse_result.nodes;
+    var ast_arena = parse_result.arena;
+    defer ast_arena.deinit();
 
     // Run state analysis automatically during compilation
     // Skip state analysis output when emitting MLIR to keep output clean
@@ -948,12 +631,12 @@ fn runMlirEmitAdvancedWithYul(allocator: std.mem.Allocator, file_path: []const u
     }
 
     // Generate MLIR with advanced options
-    try generateMlirOutput(allocator, ast_nodes, file_path, mlir_options, generate_yul);
+    try generateMlirOutput(allocator, ast_nodes, file_path, mlir_options);
     try stdout.flush();
 }
 
 /// Generate MLIR output with comprehensive options
-fn generateMlirOutput(allocator: std.mem.Allocator, ast_nodes: []lib.AstNode, file_path: []const u8, mlir_options: MlirOptions, generate_yul: bool) !void {
+fn generateMlirOutput(allocator: std.mem.Allocator, ast_nodes: []lib.AstNode, file_path: []const u8, mlir_options: MlirOptions) !void {
     var stdout_buffer: [1024]u8 = undefined;
     var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
     const stdout = &stdout_writer.interface;
@@ -972,13 +655,13 @@ fn generateMlirOutput(allocator: std.mem.Allocator, ast_nodes: []lib.AstNode, fi
     const h = mlir.createContext(mlir_allocator);
     defer mlir.destroyContext(h);
 
-    // Lower AST to MLIR
+    // Lower AST to MLIR (type resolution already done in parser.parse())
     const lower = @import("mlir/lower.zig");
     const source_filename = std.fs.path.basename(file_path);
     var lowering_result = try lower.lowerFunctionsToModuleWithErrors(h.ctx, ast_nodes, mlir_allocator, source_filename);
     defer lowering_result.deinit(mlir_allocator);
 
-    // Check for errors first, before proceeding to YUL generation
+    // Check for errors first
     if (!lowering_result.success) {
         try stdout.print("MLIR lowering failed with {d} errors:\n", .{lowering_result.errors.len});
         for (lowering_result.errors) |err| {
@@ -1010,33 +693,6 @@ fn generateMlirOutput(allocator: std.mem.Allocator, ast_nodes: []lib.AstNode, fi
         }
     }
 
-    // Convert MLIR to Yul (only if requested)
-    if (generate_yul) {
-        // Validate MLIR before Yul lowering (production safety feature)
-        if (mlir_options.shouldValidateBeforeYul()) {
-            try stdout.print("Validating MLIR before Yul lowering...\n", .{});
-
-            const verification = @import("mlir/verification.zig");
-            var verifier = verification.OraVerification.init(h.ctx, mlir_allocator);
-            defer verifier.deinit();
-
-            const validation_result = try verifier.verifyModule(final_module);
-
-            if (!validation_result.success) {
-                try stdout.print("MLIR validation failed with {d} error(s):\n", .{validation_result.errors.len});
-                for (validation_result.errors) |err| {
-                    try stdout.print("  - [{s}] {s}\n", .{ @tagName(err.type), err.message });
-                }
-
-                try stdout.flush();
-                std.process.exit(1);
-            }
-        }
-
-        try stdout.print("Yul code generation is currently disabled (targets moved to _targets_backup)\n", .{});
-        std.process.exit(1);
-    }
-
     // Print warnings if any
     if (lowering_result.warnings.len > 0) {
         try stdout.print("MLIR lowering completed with {d} warnings:\n", .{lowering_result.warnings.len});
@@ -1056,22 +712,68 @@ fn generateMlirOutput(allocator: std.mem.Allocator, ast_nodes: []lib.AstNode, fi
 
     defer c.mlirModuleDestroy(lowering_result.module);
 
-    // Output MLIR using C++ API wrapper (ensures custom assembly formats are used)
-    // Only output MLIR if explicitly requested with --emit-mlir
+    // Run canonicalization on Ora MLIR before printing or conversion, unless
+    // explicitly disabled via --no-canonicalize. This keeps the canonicalizer
+    // "online" for normal usage but lets tests or debugging runs opt out if
+    // they hit upstream MLIR issues.
+    if (mlir_options.canonicalize and (mlir_options.emit_mlir or mlir_options.emit_mlir_sir)) {
+        if (!c.oraCanonicalizeOraMLIR(h.ctx, lowering_result.module)) {
+            try stdout.print("Warning: Ora MLIR canonicalization failed\n", .{});
+            try stdout.flush();
+        }
+    }
+
+    // Output Ora MLIR (after canonicalization, before conversion)
     if (mlir_options.emit_mlir) {
-        const module_op = c.mlirModuleGetOperation(lowering_result.module);
-        const mlir_str = c.oraPrintOperation(h.ctx, module_op);
-        defer if (mlir_str.data != null) {
+        try stdout.print("//===----------------------------------------------------------------------===//\n", .{});
+        try stdout.print("// Ora MLIR (after canonicalization, before conversion)\n", .{});
+        try stdout.print("//===----------------------------------------------------------------------===//\n\n", .{});
+        try stdout.flush();
+
+        const module_op_ora = c.mlirModuleGetOperation(lowering_result.module);
+        const mlir_str_ora = c.oraPrintOperation(h.ctx, module_op_ora);
+        defer if (mlir_str_ora.data != null) {
             const mlir_c = @import("mlir/c.zig");
-            mlir_c.freeStringRef(mlir_str);
+            mlir_c.freeStringRef(mlir_str_ora);
         };
 
-        if (mlir_str.data == null or mlir_str.length == 0) {
-            try stdout.print("Failed to print MLIR\n", .{});
+        if (mlir_str_ora.data != null and mlir_str_ora.length > 0) {
+            const mlir_content_ora = mlir_str_ora.data[0..mlir_str_ora.length];
+            try stdout.print("{s}\n", .{mlir_content_ora});
+        }
+        try stdout.flush();
+    }
+
+    // Convert Ora to SIR if emitting SIR MLIR
+    if (mlir_options.emit_mlir_sir) {
+        const conversion_success = c.oraConvertToSIR(h.ctx, lowering_result.module);
+        if (!conversion_success) {
+            try stdout.print("Error: Ora to SIR conversion failed\n", .{});
+            try stdout.flush();
+            std.process.exit(1);
+        }
+    }
+
+    // Output SIR MLIR after conversion
+    if (mlir_options.emit_mlir_sir) {
+        try stdout.print("//===----------------------------------------------------------------------===//\n", .{});
+        try stdout.print("// SIR MLIR (after conversion)\n", .{});
+        try stdout.print("//===----------------------------------------------------------------------===//\n\n", .{});
+        try stdout.flush();
+
+        const module_op_sir = c.mlirModuleGetOperation(lowering_result.module);
+        const mlir_str_sir = c.oraPrintOperation(h.ctx, module_op_sir);
+        defer if (mlir_str_sir.data != null) {
+            const mlir_c = @import("mlir/c.zig");
+            mlir_c.freeStringRef(mlir_str_sir);
+        };
+
+        if (mlir_str_sir.data == null or mlir_str_sir.length == 0) {
+            try stdout.print("Failed to print SIR MLIR\n", .{});
             return;
         }
 
-        const mlir_content = mlir_str.data[0..mlir_str.length];
+        const mlir_content_sir = mlir_str_sir.data[0..mlir_str_sir.length];
 
         // Determine output destination
         if (mlir_options.output_dir) |output_dir| {
@@ -1082,16 +784,19 @@ fn generateMlirOutput(allocator: std.mem.Allocator, ast_nodes: []lib.AstNode, fi
             };
 
             const basename = std.fs.path.stem(file_path);
-            const filename = try std.mem.concat(allocator, u8, &[_][]const u8{ basename, ".mlir" });
+            const extension = ".mlir";
+            const filename = try std.mem.concat(allocator, u8, &[_][]const u8{ basename, extension });
             defer allocator.free(filename);
             const output_file = try std.fs.path.join(allocator, &[_][]const u8{ output_dir, filename });
             defer allocator.free(output_file);
 
-            try std.fs.cwd().writeFile(.{ .sub_path = output_file, .data = mlir_content });
-            try stdout.print("MLIR saved to {s}\n", .{output_file});
+            var mlir_file = try std.fs.cwd().createFile(output_file, .{});
+            defer mlir_file.close();
+            try mlir_file.writeAll(mlir_content_sir);
+            try stdout.print("SIR MLIR saved to {s}\n", .{output_file});
         } else {
             // Print to stdout
-            try stdout.print("{s}", .{mlir_content});
+            try stdout.print("{s}", .{mlir_content_sir});
         }
     }
 

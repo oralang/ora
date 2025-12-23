@@ -39,15 +39,22 @@ pub fn collectSymbols(allocator: std.mem.Allocator, nodes: []const ast.AstNode) 
             if (try table.declare(&table.root, sym)) |_| try diags.append(allocator, f.span);
         },
         .VariableDecl => |v| {
-            const sym = state.Symbol{
-                .name = v.name,
-                .kind = .Var,
-                .typ = v.type_info,
-                .span = v.span,
-                .mutable = (v.kind == .Var),
-                .region = v.region,
-            };
-            if (try table.declare(&table.root, sym)) |_| try diags.append(allocator, v.span);
+            // Only store symbols with non-null ora_type
+            // Our type system doesn't allow nulls - symbols must have types
+            // Unresolved types (null ora_type) will be stored during type resolution phase
+            if (v.type_info.ora_type != null) {
+                const sym = state.Symbol{
+                    .name = v.name,
+                    .kind = .Var,
+                    .typ = v.type_info,
+                    .span = v.span,
+                    .mutable = (v.kind == .Var),
+                    .region = v.region,
+                };
+                if (try table.declare(&table.root, sym)) |_| try diags.append(allocator, v.span);
+            }
+            // If ora_type is null, skip storing during collection phase
+            // It will be stored during type resolution phase with resolved type
         },
         .StructDecl => |s| {
             const sym = state.Symbol{ .name = s.name, .kind = .Struct, .span = s.span };
@@ -72,6 +79,19 @@ pub fn collectSymbols(allocator: std.mem.Allocator, nodes: []const ast.AstNode) 
             if (try table.declare(&table.root, sym)) |_| try diags.append(allocator, err.span);
             // Store error signature (parameters) for validation
             try table.error_signatures.put(err.name, err.parameters);
+        },
+        .Constant => |c| {
+            // Constants are collected but type resolution happens later
+            // Store with type if available, otherwise it will be resolved during type resolution
+            const sym = state.Symbol{
+                .name = c.name,
+                .kind = .Var, // Constants are treated as variables for symbol lookup
+                .typ = if (c.typ.ora_type != null) c.typ else null,
+                .span = c.span,
+                .mutable = false, // Constants are immutable
+                .region = null, // Constants don't have a memory region
+            };
+            if (try table.declare(&table.root, sym)) |_| try diags.append(allocator, c.span);
         },
         .Import => |im| {
             const name = im.alias orelse im.path; // simplistic; refine later

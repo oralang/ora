@@ -1,0 +1,65 @@
+// ============================================================================
+// Invalid Subtyping: Narrowing Conversions
+// ============================================================================
+// These tests SHOULD FAIL COMPILATION
+// Narrowing conversions (widening -> narrowing) are not allowed
+// ============================================================================
+// NOTE: Comment out the invalid lines to test compilation
+// ============================================================================
+
+contract InvalidNarrowingConversions {
+    // ============================================================================
+    // Invalid: Lower min to higher min (narrowing)
+    // ============================================================================
+    
+    // ERROR: MinValue<u256, 100> cannot convert to MinValue<u256, 200>
+    fn testLowerMinToHigherMin(amount: MinValue<u256, 100>) {
+        const higher_min: MinValue<u256, 200> = amount; // ERROR: Narrowing
+    }
+    
+    // ============================================================================
+    // Invalid: Higher max to lower max (narrowing)
+    // ============================================================================
+    
+    // ERROR: MaxValue<u256, 1000> cannot convert to MaxValue<u256, 500>
+    fn testHigherMaxToLowerMax(limit: MaxValue<u256, 1000>) {
+        const lower_max: MaxValue<u256, 500> = limit; // ERROR: Narrowing
+    }
+    
+    // ============================================================================
+    // Invalid: Wider range to narrower range (narrowing)
+    // ============================================================================
+    
+    // ERROR: InRange<u256, 0, 10000> cannot convert to InRange<u256, 100, 5000>
+    fn testWiderRangeToNarrowerRange(rate: InRange<u256, 0, 10000>) {
+        const narrower: InRange<u256, 100, 5000> = rate; // ERROR: Narrowing
+    }
+    
+    // ============================================================================
+    // Invalid: Wider integer to narrower integer (narrowing)
+    // ============================================================================
+    
+    // ERROR: u256 cannot convert to u8 (narrowing, may lose precision)
+    fn testWiderToNarrowerInteger(value: u256) {
+        const small: u8 = value; // ERROR: Narrowing, may overflow
+    }
+    
+    // ERROR: u16 cannot convert to u8
+    fn testU16ToU8(value: u16) {
+        const small: u8 = value; // ERROR: Narrowing
+    }
+    
+    // ============================================================================
+    // Invalid: Base type to refinement (without guard)
+    // ============================================================================
+    
+    // ERROR: address cannot convert to NonZeroAddress without runtime check
+    fn testAddressToNonZeroAddress(addr: address) {
+        const non_zero: NonZeroAddress = addr; // ERROR: Requires guard
+    }
+    
+    // ERROR: u256 cannot convert to MinValue without runtime check
+    fn testU256ToMinValue(value: u256) {
+        const min_value: MinValue<u256, 100> = value; // ERROR: Requires guard
+    }
+}

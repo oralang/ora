@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Validate all Ora example files
+# Validate all Ora example files by checking MLIR generation
 
-set -e
+set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -20,7 +20,7 @@ if [ ! -f "$ORA_BIN" ]; then
 fi
 
 echo "=================================="
-echo "Validating Ora Examples"
+echo "Validating Ora Examples (MLIR Generation)"
 echo "=================================="
 echo ""
 
@@ -33,15 +33,24 @@ while IFS= read -r -d '' file; do
     total=$((total + 1))
     rel_path="${file#$PROJECT_ROOT/}"
     
-    # Run parser
-    if "$ORA_BIN" parse "$file" > /dev/null 2>&1; then
-        echo -e "${GREEN}✓${NC} $rel_path"
-        passed=$((passed + 1))
+    # Run MLIR generation (capture both stdout and stderr)
+    if output=$("$ORA_BIN" --emit-mlir "$file" 2>&1); then
+        # Check for errors in output (even if exit code is 0)
+        if echo "$output" | grep -qiE "(error|Error|failed|Failed|MLIR.*failed|validation failed)"; then
+            echo -e "${RED}✗${NC} $rel_path"
+            failed=$((failed + 1))
+            # Show error details
+            echo "$output" | grep -iE "(error|Error|failed|Failed|MLIR.*failed|validation failed)" | head -5 | sed 's/^/  /'
+        else
+            echo -e "${GREEN}✓${NC} $rel_path"
+            passed=$((passed + 1))
+        fi
     else
+        exit_code=$?
         echo -e "${RED}✗${NC} $rel_path"
         failed=$((failed + 1))
         # Show error details
-        "$ORA_BIN" parse "$file" 2>&1 | grep -E "(error|Error)" | head -3 | sed 's/^/  /'
+        echo "$output" | grep -iE "(error|Error|failed|Failed|MLIR.*failed|validation failed)" | head -5 | sed 's/^/  /' || echo "  (Exit code: $exit_code)"
     fi
 done < <(find "$PROJECT_ROOT/ora-example" -name "*.ora" -print0 | sort -z)
 

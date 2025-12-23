@@ -64,7 +64,7 @@ Links to related documents, issues, or code.
 
 ### Language Design
 
-- **[Type System (v0.1)](./type-system-v0.1)** - Working design document for Ora's type system, including memory regions, affine types, refinement predicates, traits, and comparison with Solidity.
+- **[Type System (v0.1)](./design-documents/type-system-v0.1)** - Working design document for Ora's type system, including memory regions, affine types, refinement predicates, traits, and comparison with Solidity.
 
 ### Coming Soon
 

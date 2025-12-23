@@ -19,6 +19,8 @@ const core = @import("semantics/core.zig");
 
 // Export builtins module for use by MLIR lowering
 pub const builtins = @import("semantics/builtins.zig");
+// Export state module for type resolution
+pub const state = @import("semantics/state.zig");
 
 pub const Diagnostic = struct {
     message: []const u8,

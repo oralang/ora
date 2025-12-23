@@ -118,6 +118,7 @@ pub const Parser = struct {
 
         // Handle const imports (const std = @import("std"))
         if (self.check(.Const)) {
+            _ = self.advance(); // consume 'const'
             const result = try self.getDeclParser().parseConstImport();
             self.updateFromSubParser(self.decl_parser.base.current);
             return result;
@@ -131,7 +132,7 @@ pub const Parser = struct {
         }
 
         // Handle standalone functions (for modules)
-        if (self.check(.Pub) or self.check(.Fn) or self.check(.Inline)) {
+        if (self.check(.Pub) or self.check(.Fn)) {
             // Parse function header with declaration parser
             const hdr = try self.getDeclParser().parseFunction(&self.type_parser, &self.expr_parser);
             self.updateFromSubParser(self.decl_parser.base.current);
@@ -260,6 +261,40 @@ pub const Parser = struct {
 };
 
 /// Convenience function for parsing tokens into AST with type resolution
+/// Returns both the AST nodes and the arena (caller must keep arena alive while using nodes)
+pub fn parseWithArena(allocator: Allocator, tokens: []const Token) ParserError!struct { nodes: []AstNode, arena: ast_arena.AstArena } {
+    var ast_arena_instance = ast_arena.AstArena.init(allocator);
+    // Note: arena is NOT deinitialized here - caller must deinit it
+
+    var parser = Parser.init(tokens, &ast_arena_instance);
+    const nodes = try parser.parse();
+
+    // Collect symbols (errors, functions, structs, etc.) into symbol table before type resolution
+    // Use analyzePhase1 which creates contract scopes and function scopes properly
+    const semantics_core = @import("../semantics/core.zig");
+    var semantics_result = try semantics_core.analyzePhase1(allocator, nodes);
+    defer allocator.free(semantics_result.diagnostics);
+    defer semantics_result.symbols.deinit();
+
+    // Perform type resolution on the parsed AST
+    const TypeResolver = @import("../ast/type_resolver/mod.zig").TypeResolver;
+    var type_resolver = TypeResolver.init(allocator, &semantics_result.symbols);
+    defer type_resolver.deinit();
+    type_resolver.resolveTypes(nodes) catch |err| {
+        // Type resolution errors (especially TypeMismatch) should stop compilation
+        // These indicate invalid type assignments that cannot be safely compiled
+        std.debug.print("error: Type resolution failed: {s}\n", .{@errorName(err)});
+        // Best-effort stack trace in debug builds
+        const trace = @errorReturnTrace();
+        if (trace) |t| std.debug.dumpStackTrace(t.*);
+        return ParserError.TypeResolutionFailed;
+    };
+
+    return .{ .nodes = nodes, .arena = ast_arena_instance };
+}
+
+/// Convenience function for parsing tokens into AST with type resolution
+/// WARNING: For --emit-ast, use parseWithArena instead to keep arena alive
 pub fn parse(allocator: Allocator, tokens: []const Token) ParserError![]AstNode {
     var ast_arena_instance = ast_arena.AstArena.init(allocator);
     defer ast_arena_instance.deinit();
@@ -267,12 +302,25 @@ pub fn parse(allocator: Allocator, tokens: []const Token) ParserError![]AstNode 
     var parser = Parser.init(tokens, &ast_arena_instance);
     const nodes = try parser.parse();
 
+    // Collect symbols (errors, functions, structs, etc.) into symbol table before type resolution
+    // Use analyzePhase1 which creates contract scopes and function scopes properly
+    const semantics_core = @import("../semantics/core.zig");
+    var semantics_result = try semantics_core.analyzePhase1(allocator, nodes);
+    defer allocator.free(semantics_result.diagnostics);
+    defer semantics_result.symbols.deinit();
+
     // Perform type resolution on the parsed AST
-    var type_resolver = ast.TypeResolver.init(allocator);
+    const TypeResolver = @import("../ast/type_resolver/mod.zig").TypeResolver;
+    var type_resolver = TypeResolver.init(allocator, &semantics_result.symbols);
+    defer type_resolver.deinit();
     type_resolver.resolveTypes(nodes) catch |err| {
-        std.debug.print("Type resolution error: {s}\n", .{@errorName(err)});
-        // Type resolution errors are reported but don't prevent returning the AST
-        // Full type checking happens in the semantics phase
+        // Type resolution errors (especially TypeMismatch) should stop compilation
+        // These indicate invalid type assignments that cannot be safely compiled
+        std.debug.print("error: Type resolution failed: {s}\n", .{@errorName(err)});
+        // Best-effort stack trace in debug builds
+        const trace = @errorReturnTrace();
+        if (trace) |t| std.debug.dumpStackTrace(t.*);
+        return ParserError.TypeResolutionFailed;
     };
 
     return nodes;

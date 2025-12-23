@@ -22,7 +22,7 @@ contract StorageTest3 {
         total_users = 0;
         
         // Create owner user
-        let owner_user = User {
+        var owner_user: User = User {
             addr: OWNER_ADDRESS,
             balance: INITIAL_BALANCE,
             active: true
@@ -33,7 +33,7 @@ contract StorageTest3 {
     
     // User management
     fn createUser(account: address, initial_balance: u256) {
-        let new_user = User {
+        var new_user: User = User {
             addr: account,
             balance: initial_balance,
             active: true
@@ -47,13 +47,13 @@ contract StorageTest3 {
     }
     
     fn updateUserBalance(account: address, new_balance: u256) {
-        let user = users[account];
+        var user: User = users[account];
         user.balance = new_balance;
         users[account] = user;
     }
     
     fn deactivateUser(account: address) {
-        let user = users[account];
+        var user: User = users[account];
         user.active = false;
         users[account] = user;
     }

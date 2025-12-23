@@ -15,3 +15,4 @@ pub const DeclarationParser = @import("declaration_parser.zig").DeclarationParse
 
 pub const ParserError = @import("parser_core.zig").ParserError;
 pub const parse = @import("parser_core.zig").parse;
+pub const parseWithArena = @import("parser_core.zig").parseWithArena;

@@ -396,7 +396,15 @@ pub fn parseRangeExpression(parser: *ExpressionParser) ParserError!ast.Expressio
     // Parse start expression
     const start_expr = try parser.parseExpression();
 
-    _ = try parser.base.consume(.DotDotDot, "Expected '...' in range expression");
+    // Accept both .. and ... for range expressions
+    if (parser.base.match(.DotDot)) {
+        // .. range (exclusive end)
+    } else if (parser.base.match(.DotDotDot)) {
+        // ... range (inclusive end)
+    } else {
+        try parser.base.errorAtCurrent("Expected '..' or '...' in range expression");
+        return error.ExpectedToken;
+    }
 
     // Parse end expression
     const end_expr = try parser.parseExpression();

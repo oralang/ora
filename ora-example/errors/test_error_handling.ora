@@ -1,0 +1,47 @@
+// Minimal test contract to reproduce error handling issues
+contract ErrorHandlingTest {
+    storage balances: map[address, u256];
+    
+    error InsufficientBalance;
+    error InvalidAddress;
+    
+    // Simple function that returns an error union
+    pub fn transfer(to: address, amount: u256) -> !bool | InsufficientBalance | InvalidAddress {
+        if (to == std.constants.ZERO_ADDRESS) {
+            return InvalidAddress;
+        }
+        
+        if (amount == 0) {
+            return InsufficientBalance;
+        }
+        
+        return true;
+    }
+    
+    // Function with try-catch that returns inside try block
+    pub fn safe_transfer(to: address, amount: u256) -> bool {
+        try {
+            var transfer_result: bool = transfer(to, amount);
+            return transfer_result;
+        } catch (error) {
+            // Handle specific error types
+            switch (error) {
+                InsufficientBalance => {
+                    return false;
+                },
+                InvalidAddress => {
+                    return false;
+                },
+                else => {
+                    return false;
+                }
+            }
+        }
+    }
+    
+    // Function with return type mismatch (should be caught by our fix)
+    pub fn test_return_type() -> u256 {
+        return true;  // Should convert i1 to i256
+    }
+}
+

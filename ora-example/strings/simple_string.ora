@@ -4,14 +4,14 @@
 contract StringDemo {
     // Basic string usage
     fn stringExample() -> string {
-        let simple = "This is a simple ASCII string";
+        let simple : string = "This is a simple ASCII string";
         
         return simple;
     }
     
     // Using strings with other types
     fn stringWithTypes() -> string {
-        let result = "Example string";
-        return result;
+        var str_value: string = "Example string";
+        return str_value;
     }
 }

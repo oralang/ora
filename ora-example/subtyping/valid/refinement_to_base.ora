@@ -1,0 +1,68 @@
+// ============================================================================
+// Valid Subtyping: Refinement to Base Type
+// ============================================================================
+// Rule: Refinement types are subtypes of their base types
+// No runtime guard needed - this is pure subtyping
+// ============================================================================
+
+contract RefinementToBase {
+    // ============================================================================
+    // MinValue to Base Type
+    // ============================================================================
+    
+    // MinValue can be assigned to base type (no guard)
+    fn testMinValueToBase(amount: MinValue<u256, 100>) -> u256 {
+        return amount; // Valid: MinValue <: u256
+    }
+    
+    // ============================================================================
+    // MaxValue to Base Type
+    // ============================================================================
+    
+    // MaxValue can be assigned to base type (no guard)
+    fn testMaxValueToBase(limit: MaxValue<u256, 1000>) -> u256 {
+        return limit; // Valid: MaxValue <: u256
+    }
+    
+    // ============================================================================
+    // InRange to Base Type
+    // ============================================================================
+    
+    // InRange can be assigned to base type (no guard)
+    fn testInRangeToBase(rate: InRange<u256, 0, 10000>) -> u256 {
+        return rate; // Valid: InRange <: u256
+    }
+    
+    // ============================================================================
+    // NonZeroAddress to address
+    // ============================================================================
+    
+    // NonZeroAddress can be assigned to address (no guard)
+    fn testNonZeroAddressToBase(addr: NonZeroAddress) -> address {
+        return addr; // Valid: NonZeroAddress <: address
+    }
+    
+    // ============================================================================
+    // BasisPoints to Base Type
+    // ============================================================================
+    
+    // BasisPoints can be assigned to base type (no guard)
+    fn testBasisPointsToBase(fee: BasisPoints<u256>) -> u256 {
+        return fee; // Valid: BasisPoints <: u256
+    }
+    
+    // ============================================================================
+    // Variable Assignments
+    // ============================================================================
+    
+    fn testVariableAssignments() {
+        let min_value: MinValue<u256, 100> = 1000;
+        let base: u256 = min_value; // Valid: MinValue <: u256
+        
+        let max_value: MaxValue<u256, 1000> = 500;
+        let base2: u256 = max_value; // Valid: MaxValue <: u256
+        
+        let non_zero: NonZeroAddress = std.transaction.sender();
+        let addr: address = non_zero; // Valid: NonZeroAddress <: address
+    }
+}

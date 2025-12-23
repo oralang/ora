@@ -1,0 +1,17 @@
+contract NamingTest {
+    storage var counter: u256;
+    
+    pub fn testNaming() -> u256 {
+        // Test arithmetic naming (not folded)
+        var a: u256 = counter;        // Load from storage
+        var b: u256 = 20;
+        var sum: u256 = a + b;         // Should be %sum
+        var product: u256 = a * b;     // Should be %product
+        var diff: u256 = a - b;        // Should be %difference
+        var quot: u256 = a / 2;        // Should be %quotient
+        
+        // Use all of them so they're not removed
+        var total: u256 = sum + product + diff + quot;
+        return total;
+    }
+}

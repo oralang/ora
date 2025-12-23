@@ -21,8 +21,8 @@ contract StateTest {
     
     // 3. Readonly function with multiple reads
     pub fn getBalance(account: address) -> u256 {
-        let balance = balances[account];
-        let currentOwner = owner;
+        var balance: u256 = balances[account];
+        var currentOwner: address = owner;
         return balance;
     }
     
@@ -33,14 +33,14 @@ contract StateTest {
     
     // 5. Read-Write function (reads then writes)
     pub fn incrementCounter() {
-        let current = counter;
+        var current: u256 = counter;
         counter = current + 1;
     }
     
     // 6. Complex function with multiple reads and writes
     pub fn transfer(from: address, recipient: address, amount: u256) {
-        let fromBalance = balances[from];
-        let toBalance = balances[recipient];
+        var fromBalance: u256 = balances[from];
+        var toBalance: u256 = balances[recipient];
         
         balances[from] = fromBalance - amount;
         balances[recipient] = toBalance + amount;
@@ -61,7 +61,7 @@ contract StateTest {
     
     // 9. Function with loop reading storage
     pub fn sumBalances(accounts: slice[address]) -> u256 {
-        let total: u256 = 0;
+        var total: u256 = 0;
         for (accounts) |account| {
             total = total + balances[account];
         }
@@ -75,14 +75,14 @@ contract StateTest {
     
     // 11. Function that reads multiple variables
     pub fn getOwnerBalance() -> u256 {
-        let currentOwner = owner;
+        var currentOwner: address = owner;
         return balances[currentOwner];
     }
     
     // 12. Function with nested reads
     pub fn complexRead() -> u256 {
-        let a = counter;
-        let b = config;
+        var a: u256 = counter;
+        var b: u256 = config;
         return a + b;
     }
     
@@ -94,10 +94,10 @@ contract StateTest {
     
     // 14. Mixed stateless and readonly
     pub fn calculateFee(amount: u256) -> u256 {
-        let fee = amount / 100;  // Stateless computation
-        let minFee = config;     // Storage read
-        if (fee < minFee) {
-            return minFee;
+        var fee: u256 = amount / 100;  // Stateless computation
+        var min_fee: u256 = config;     // Storage read
+        if (fee < min_fee) {
+            return min_fee;
         }
         return fee;
     }
@@ -110,8 +110,8 @@ contract StateTest {
     
     // 16. Function that reads and writes multiple variables
     pub fn updateConfigFromCounter() {
-        let currentCounter = counter;  // Read from counter
-        let currentConfig = config;    // Read from config
+        var currentCounter: u256 = counter;  // Read from counter
+        var currentConfig: u256 = config;    // Read from config
         
         config = currentCounter + 1;   // Write to config
         counter = currentConfig * 2;   // Write to counter
@@ -119,7 +119,7 @@ contract StateTest {
     
     // 17. Function with cross-variable logic (read 2, write 2)
     pub fn swapCounterAndConfig() {
-        let temp = counter;            // Read counter
+        var temp: u256 = counter;            // Read counter
         counter = config;              // Read config, Write counter
         config = temp;                 // Write config
     }

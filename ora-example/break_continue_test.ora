@@ -1,0 +1,109 @@
+contract BreakContinueTest {
+    // Test unlabeled break in while loop
+    pub fn testUnlabeledBreak() -> u256 {
+        var counter: u256 = 0;
+        while (true) { // if open condition that can end up in infinite loop, Ora will detect if break exists and is possible to break out of the loop. If not, Ora will report an error.
+            counter = counter + 1; // condition to break out of the loop
+            if (counter > 5) {
+                break; // break out of the loop
+            }
+        }
+        return counter;
+    }
+
+    // Test unlabeled continue in while loop
+    pub fn testUnlabeledContinue() -> u256 {
+        var sum: u256 = 0;
+        var i: u256 = 0;
+        while (i < 10) { // In this case, Ora will detect if is possible to finish the loop eg. i is increamented.
+            i = i + 1;
+            if (i % 2 == 0) {
+                continue;
+            }
+            sum = sum + i;
+        }
+        return sum;
+    }
+
+    // Test labeled break in labeled block
+    pub fn testLabeledBreak() -> u256 {
+        var res: u256 = 0;
+        outer: { // Labeled block
+            res = res + 1;
+            inner: {
+                if (res > 10) {
+                    break :outer; // break out of the labeled block
+                }
+                res = res + 1;
+                break :inner; // break out of the inner labeled block
+            }
+        }
+        return res;
+    }
+
+    // Test labeled continue in labeled block
+    pub fn testLabeledContinue() -> u256 {
+        var res: u256 = 0;
+        outer: {
+            while (res < 10) {
+                res = res + 1;
+                if (res % 2 == 0) {
+                    continue :outer; // continue to the next iteration of the labeled block
+                }
+            }
+        }
+        return res;
+    }
+
+    // Test labeled switch with continue
+    pub fn testLabeledSwitchContinue() -> u256 {
+        var x: u256 = 7;
+        outer: switch (x) { // Labeled switch
+            0 => { return 100; }
+            1...5 => { return x + 1; }
+            else => {
+                continue :outer (0); // continue to the next iteration of the labeled switch
+            }
+        }
+        return x;
+    }
+
+    // Test labeled switch with continue and value replacement
+    pub fn testLabeledSwitchContinueValue() -> u256 {
+        var x: u256 = 15;
+        outer: switch (x) {
+            0...10 => { return x; }
+            11...20 => {
+                continue :outer (5); // we use the label to continue to the next iteration of the labeled switch with a value replacement
+            }
+            else => { return 0; }
+        }
+        return x;
+    }
+
+    // Test break in switch case
+    pub fn testBreakInSwitch() -> u256 {
+        var value: u256 = 2;
+        switch (value) {
+            1 => { return 10; }
+            2 => { 
+                break;
+            }
+            else => { return 0; }
+        }
+        return 30;
+    }
+
+    // Test labeled block with break
+    pub fn testLabeledBlockBreak() -> u256 {
+        var res: u256 = 0;
+        block: {
+            res = 10;
+            if (res > 5) {
+                break :block;
+            }
+            res = 20;
+        }
+        return res;
+    }
+}

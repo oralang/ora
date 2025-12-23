@@ -1,0 +1,103 @@
+// Minimal ERC20 Token Implementation in Ora
+// Using only currently available features
+
+contract SimpleToken {
+    // Storage
+    storage totalSupply: u256;
+    storage balances: map[address, u256];
+    storage allowances: map[address, map[address, u256]];
+    
+    // Constructor - runs once at deployment
+    pub fn init(initialSupply: u256) {
+        var deployer: address = std.msg.sender();
+        totalSupply = initialSupply;
+        balances[deployer] = initialSupply;
+    }
+    
+    // Initialize with supply (can be called after deployment)
+    pub fn initialize(initialSupply: u256) -> bool {
+        var deployer: address = std.msg.sender();
+        totalSupply = initialSupply;
+        balances[deployer] = initialSupply;
+        return true;
+    }
+    
+    // Get total supply
+    pub fn getTotalSupply() -> u256 {
+        return totalSupply;
+    }
+    
+    // Get balance of an account
+    pub fn balanceOf(account: address) -> u256 {
+        return balances[account];
+    }
+    
+    // Transfer tokens from sender to recipient
+    pub fn transfer(recipient: address, amount: u256) -> bool {
+        var sender: address = std.msg.sender();
+        var sender_balance: u256 = balances[sender];
+        
+        // Simple checks without require
+        if (sender_balance < amount) {
+            return false;
+        }
+        
+        if (recipient == std.constants.ZERO_ADDRESS) {
+            return false;
+        }
+        
+        // Perform transfer
+        balances[sender] = sender_balance - amount;
+        var recipient_balance: u256 = balances[recipient];
+        balances[recipient] = recipient_balance + amount;
+        
+        return true;
+    }
+    
+    // Approve spender to spend tokens
+    pub fn approve(spender: address, amount: u256) -> bool {
+        var owner: address = std.msg.sender();
+        
+        if (spender == std.constants.ZERO_ADDRESS) {
+            return false;
+        }
+        
+        allowances[owner][spender] = amount;
+        return true;
+    }
+    
+    // Get allowance
+    pub fn allowance(owner: address, spender: address) -> u256 {
+        return allowances[owner][spender];
+    }
+    
+    // Transfer from one address to another using allowance
+    pub fn transferFrom(sender: address, recipient: address, amount: u256) -> bool {
+        var spender: address = std.msg.sender();
+        
+        var current_allowance: u256 = allowances[sender][spender];
+        if (current_allowance < amount) {
+            return false;
+        }
+        
+        var sender_balance: u256 = balances[sender];
+        if (sender_balance < amount) {
+            return false;
+        }
+        
+        if (recipient == std.constants.ZERO_ADDRESS) {
+            return false;
+        }
+        
+        // Update allowance
+        allowances[sender][spender] = current_allowance - amount;
+        
+        // Perform transfer
+        balances[sender] = sender_balance - amount;
+        var recipient_balance: u256 = balances[recipient];
+        balances[recipient] = recipient_balance + amount;
+        
+        return true;
+    }
+}
+

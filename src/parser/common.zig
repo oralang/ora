@@ -67,6 +67,7 @@ pub const ParserError = error{
     InvalidMemoryRegion,
     InvalidReturnType,
     UnresolvedType,
+    TypeResolutionFailed,
 };
 
 /// Base parser trait that all sub-parsers implement

@@ -77,9 +77,12 @@ pub inline fn i256Type(ctx: c.MlirContext) c.MlirType {
     return intType(ctx, 256);
 }
 
-/// Create i1 type (boolean)
+/// Create i1 type (boolean) - builtin MLIR type for ora.cmp and other operations
 pub inline fn boolType(ctx: c.MlirContext) c.MlirType {
-    return intType(ctx, 1);
+    // Use MLIR C API directly to create builtin i1 type (not Ora type)
+    // ora.cmp requires builtin i1, not !ora.int<1, false>
+    // mlirIntegerTypeGet is from mlir-c/BuiltinTypes.h
+    return c.mlirIntegerTypeGet(ctx, 1);
 }
 
 /// Create and append operation to block in one step

@@ -287,11 +287,25 @@ pub const OraVerification = struct {
     }
 
     /// Get operation name as string
+    /// Note: The returned string is owned by the caller and should be freed
     fn getOperationName(self: *Self, op: c.MlirOperation) []const u8 {
-        _ = self;
-        _ = op;
-        // For now, return a placeholder since MLIR C API string functions may not be available
-        return "ora.operation";
+        const name_ref = c.oraOperationGetName(op);
+        if (name_ref.data == null or name_ref.length == 0) {
+            return "unknown.operation";
+        }
+        // Copy the string to a Zig slice
+        // Note: The C API allocates this, so we need to free it later
+        // For now, we'll create a copy that the caller owns
+        const name_slice = name_ref.data[0..name_ref.length];
+        // Allocate a copy that we can return
+        const name_copy = self.allocator.dupe(u8, name_slice) catch {
+            // If allocation fails, free the C string and return a fallback
+            @import("std").c.free(@constCast(@ptrCast(name_ref.data)));
+            return "unknown.operation";
+        };
+        // Free the C-allocated string
+        @import("std").c.free(@constCast(@ptrCast(name_ref.data)));
+        return name_copy;
     }
 };
 

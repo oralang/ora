@@ -1,0 +1,80 @@
+// ============================================================================
+// Guard Generation for Builtin Functions
+// ============================================================================
+// Tests that guards are skipped for trusted builtins (std.transaction.sender, std.msg.sender)
+// ============================================================================
+
+contract BuiltinGuards {
+    // ============================================================================
+    // NonZeroAddress from Trusted Builtins (No Guard)
+    // ============================================================================
+    
+    // std.transaction.sender() should NOT require guard for NonZeroAddress
+    // EVM guarantees tx.origin is never zero
+    fn testTransactionSenderNoGuard() {
+        let owner: NonZeroAddress = std.transaction.sender(); // No guard needed
+    }
+    
+    // std.msg.sender() should NOT require guard for NonZeroAddress
+    // EVM guarantees msg.sender is never zero
+    fn testMsgSenderNoGuard() {
+        let caller: NonZeroAddress = std.msg.sender(); // No guard needed
+    }
+    
+    // ============================================================================
+    // NonZeroAddress from Runtime Values (Guard Required)
+    // ============================================================================
+    
+    // Regular address parameter should require guard for NonZeroAddress
+    fn testRuntimeAddressGuard(addr: address) {
+        let non_zero: NonZeroAddress = addr; // Guard required
+    }
+    
+    // Address from storage should require guard
+    fn testStorageAddressGuard() {
+        storage var stored_addr: address;
+        let non_zero: NonZeroAddress = stored_addr; // Guard required
+    }
+    
+    // ============================================================================
+    // MinValue Guards
+    // ============================================================================
+    
+    // Literal values should NOT require guard if they meet minimum
+    fn testLiteralMinValueNoGuard() {
+        let min_value: MinValue<u256, 100> = 1000; // No guard - literal >= 100
+    }
+    
+    // Runtime values should require guard
+    fn testRuntimeMinValueGuard(value: u256) {
+        let min_value: MinValue<u256, 100> = value; // Guard required
+    }
+    
+    // ============================================================================
+    // MaxValue Guards
+    // ============================================================================
+    
+    // Literal values should NOT require guard if they meet maximum
+    fn testLiteralMaxValueNoGuard() {
+        let max_value: MaxValue<u256, 1000> = 500; // No guard - literal <= 1000
+    }
+    
+    // Runtime values should require guard
+    fn testRuntimeMaxValueGuard(value: u256) {
+        let max_value: MaxValue<u256, 1000> = value; // Guard required
+    }
+    
+    // ============================================================================
+    // InRange Guards
+    // ============================================================================
+    
+    // Literal values should NOT require guard if they're in range
+    fn testLiteralInRangeNoGuard() {
+        let in_range: InRange<u256, 0, 10000> = 5000; // No guard - literal in range
+    }
+    
+    // Runtime values should require guard
+    fn testRuntimeInRangeGuard(value: u256) {
+        let in_range: InRange<u256, 0, 10000> = value; // Guard required
+    }
+}

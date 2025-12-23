@@ -29,7 +29,7 @@ fn mapBlockScope(table: *state.SymbolTable, block: *const ast.Statements.BlockNo
 fn createChildScope(table: *state.SymbolTable, parent: *state.Scope, name: ?[]const u8) !*state.Scope {
     const sc = try table.allocator.create(state.Scope);
     sc.* = state.Scope.init(table.allocator, parent, name);
-    try table.scopes.append(sc);
+    try table.scopes.append(table.allocator, sc);
     return sc;
 }
 
@@ -139,7 +139,15 @@ fn bindBlock(table: *state.SymbolTable, scope: *state.Scope, block: *const ast.S
                     const catch_scope = try createChildScope(table, scope, scope.name);
                     try mapBlockScope(table, &cb.block, catch_scope);
                     if (cb.error_variable) |ename| {
-                        const sym = state.Symbol{ .name = ename, .kind = .Var, .typ = null, .span = cb.span, .mutable = false };
+                        // Create Error type for catch block error variable
+                        // TODO: Properly infer error type from the try expression's error union
+                        const error_type_info = @import("../ast/type_info.zig").TypeInfo{
+                            .category = .Error,
+                            .ora_type = null,
+                            .source = .inferred,
+                            .span = cb.span,
+                        };
+                        const sym = state.Symbol{ .name = ename, .kind = .Var, .typ = error_type_info, .span = cb.span, .mutable = false };
                         _ = try table.declare(catch_scope, sym);
                     }
                     try bindBlock(table, catch_scope, &cb.block);

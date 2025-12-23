@@ -1,0 +1,45 @@
+// ============================================================================
+// MinValue Subtyping Rules
+// ============================================================================
+// Rule: MinValue<T, HIGHER_MIN> <: MinValue<T, LOWER_MIN>
+// Higher minimum is a subtype of lower minimum (more restrictive -> less restrictive)
+// ============================================================================
+
+contract MinValueSubtyping {
+    // ============================================================================
+    // Valid: Higher min to lower min (widening)
+    // ============================================================================
+    
+    // MinValue<u256, 2000> should be assignable to MinValue<u256, 1000>
+    fn testHigherMinToLowerMin(amount: MinValue<u256, 2000>) -> MinValue<u256, 1000> {
+        return amount; // Valid: 2000 >= 1000
+    }
+    
+    // MinValue<u256, 5000> should be assignable to MinValue<u256, 1>
+    fn testVeryHighMinToLowMin(amount: MinValue<u256, 5000>) -> MinValue<u256, 1> {
+        return amount; // Valid: 5000 >= 1
+    }
+    
+    // ============================================================================
+    // Function Parameters (Subtyping in)
+    // ============================================================================
+    
+    // Function accepting MinValue<u256, 1000> should accept MinValue<u256, 2000>
+    fn acceptMinValue1000(amount: MinValue<u256, 1000>) {
+        // Should accept values >= 1000
+    }
+    
+    fn testSubtypingIn() {
+        let amount: MinValue<u256, 2000> = 2000;
+        acceptMinValue1000(amount); // Valid: 2000 >= 1000
+    }
+    
+    // ============================================================================
+    // Variable Assignments
+    // ============================================================================
+    
+    fn testVariableAssignment() {
+        let higher: MinValue<u256, 5000> = 5000;
+        let lower: MinValue<u256, 1000> = higher; // Valid: 5000 >= 1000
+    }
+}

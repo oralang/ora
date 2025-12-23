@@ -4,7 +4,7 @@ contract StorageTest2 {
     storage var balances: map[address, u256];
     
     // Storage double mapping
-    storage var allowances: doublemap[address, address, u256];
+    storage var allowances: map[address, map[address, u256]];
     
     // Storage slice (dynamic array)
     storage var history: slice[u256];

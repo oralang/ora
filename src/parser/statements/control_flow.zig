@@ -36,7 +36,23 @@ pub fn parseIfStatement(parser: *StatementParser) common.ParserError!ast.Stateme
 
     var else_branch: ?ast.Statements.BlockNode = null;
     if (parser.base.match(.Else)) {
-        else_branch = try parser.parseBlock();
+        // Check for "else if" syntax
+        if (parser.base.match(.If)) {
+            // Parse "else if (condition) { ... }" as a nested if statement
+            // We'll wrap it in a block with a single if statement
+            const nested_if = try parseIfStatement(parser);
+
+            // Create a block containing just this nested if statement
+            var stmts = try parser.base.arena.createSlice(ast.Statements.StmtNode, 1);
+            stmts[0] = nested_if;
+            else_branch = ast.Statements.BlockNode{
+                .statements = stmts,
+                .span = parser.base.spanFromToken(parser.base.previous()),
+            };
+        } else {
+            // Regular else block
+            else_branch = try parser.parseBlock();
+        }
     }
 
     return ast.Statements.StmtNode{ .If = ast.Statements.IfNode{
@@ -105,6 +121,7 @@ pub fn parseWhileStatement(parser: *StatementParser) common.ParserError!ast.Stat
         .invariants = try invariants.toOwnedSlice(parser.base.arena.allocator()),
         .decreases = decreases_expr,
         .increases = increases_expr,
+        .label = null,
         .span = parser.base.spanFromToken(parser.base.previous()),
     } };
 }
@@ -186,6 +203,7 @@ pub fn parseForStatement(parser: *StatementParser) common.ParserError!ast.Statem
             .pattern = pattern,
             .body = body,
             .invariants = try invariants.toOwnedSlice(parser.base.arena.allocator()),
+            .label = null,
             .span = parser.base.spanFromToken(for_token),
         },
     };

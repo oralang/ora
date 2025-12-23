@@ -1,0 +1,55 @@
+// ============================================================================
+// MaxValue Subtyping Rules
+// ============================================================================
+// Tests that MaxValue<u256, LOWER_MAX> is a subtype of MaxValue<u256, HIGHER_MAX>
+// ============================================================================
+
+contract MaxValueSubtyping {
+    // ============================================================================
+    // Valid Subtyping (Widening)
+    // ============================================================================
+    
+    // MaxValue<u256, 500> should be assignable to MaxValue<u256, 1000>
+    // Lower max is a subtype of higher max (more restrictive -> less restrictive)
+    fn testLowerMaxToHigherMax(limit: MaxValue<u256, 500>) -> MaxValue<u256, 1000> {
+        return limit; // Valid: 500 <= 1000
+    }
+    
+    // MaxValue<u256, 100> should be assignable to MaxValue<u256, 10000>
+    fn testVeryLowMaxToHighMax(limit: MaxValue<u256, 100>) -> MaxValue<u256, 10000> {
+        return limit; // Valid: 100 <= 10000
+    }
+    
+    // ============================================================================
+    // Function Parameters (Subtyping in)
+    // ============================================================================
+    
+    // Function accepting MaxValue<u256, 1000> should accept MaxValue<u256, 500>
+    fn acceptMaxValue1000(limit: MaxValue<u256, 1000>) {
+        // Should accept values <= 1000
+    }
+    
+    fn testSubtypingIn() {
+        let limit: MaxValue<u256, 500> = 500;
+        acceptMaxValue1000(limit); // Valid: 500 <= 1000
+    }
+    
+    // ============================================================================
+    // Return Types (Subtyping out)
+    // ============================================================================
+    
+    // Function returning MaxValue<u256, 1000> can return MaxValue<u256, 500>
+    fn returnMaxValue1000() -> MaxValue<u256, 1000> {
+        let limit: MaxValue<u256, 500> = 500;
+        return limit; // Valid: 500 <= 1000
+    }
+    
+    // ============================================================================
+    // Variable Assignments
+    // ============================================================================
+    
+    fn testVariableAssignment() {
+        let lower: MaxValue<u256, 100> = 100;
+        let higher: MaxValue<u256, 1000> = lower; // Valid: 100 <= 1000
+    }
+}

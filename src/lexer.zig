@@ -189,7 +189,6 @@ pub const TokenType = enum {
     Switch,
 
     // Function modifiers
-    Inline,
     Ghost,
     Assert,
 
@@ -198,7 +197,6 @@ pub const TokenType = enum {
 
     // Transfer/shift keywords
     From,
-    Move,
     To,
 
     // Quantifier keywords
@@ -225,7 +223,6 @@ pub const TokenType = enum {
 
     // Collection type keywords
     Map,
-    DoubleMap,
     Slice,
     Bytes,
 
@@ -238,6 +235,7 @@ pub const TokenType = enum {
     BinaryLiteral,
     HexLiteral,
     AddressLiteral,
+    BytesLiteral,
 
     // Symbols and operators
     Plus, // +
@@ -280,6 +278,7 @@ pub const TokenType = enum {
     /// :
     Colon, // :
     Dot, // .
+    DotDot, // .. (range operator)
     DotDotDot, // ... (range operator)
     At, // @
 };
@@ -554,7 +553,6 @@ pub const keywords = std.StaticStringMap(TokenType).initComptime(.{
     .{ "assume", .Assume },
     .{ "havoc", .Havoc },
     .{ "ghost", .Ghost },
-    .{ "inline", .Inline },
     .{ "switch", .Switch },
     .{ "void", .Void },
     .{ "comptime", .Comptime },
@@ -568,7 +566,6 @@ pub const keywords = std.StaticStringMap(TokenType).initComptime(.{
     .{ "try", .Try },
     .{ "catch", .Catch },
     .{ "from", .From },
-    .{ "move", .Move },
     .{ "to", .To },
     .{ "forall", .Forall },
     .{ "exists", .Exists },
@@ -590,7 +587,6 @@ pub const keywords = std.StaticStringMap(TokenType).initComptime(.{
     .{ "address", .Address },
     .{ "string", .String },
     .{ "map", .Map },
-    .{ "doublemap", .DoubleMap },
     .{ "slice", .Slice },
     .{ "bytes", .Bytes },
 });
@@ -1120,11 +1116,17 @@ pub const Lexer = struct {
             ':' => try self.addToken(.Colon),
             '.' => {
                 // Look ahead to distinguish between '.', '..', and '...'
-                if (self.peek() == '.' and self.peekNext() == '.') {
-                    // We have "..." - consume the remaining two dots
-                    _ = self.advance(); // consume second '.'
-                    _ = self.advance(); // consume third '.'
-                    try self.addToken(.DotDotDot);
+                if (self.peek() == '.') {
+                    if (self.peekNext() == '.') {
+                        // We have "..." - consume the remaining two dots
+                        _ = self.advance(); // consume second '.'
+                        _ = self.advance(); // consume third '.'
+                        try self.addToken(.DotDotDot);
+                    } else {
+                        // We have ".." - consume the second dot
+                        _ = self.advance(); // consume second '.'
+                        try self.addToken(.DotDot);
+                    }
                 } else {
                     // Single dot - don't consume any additional characters
                     try self.addToken(.Dot);
@@ -1245,6 +1247,19 @@ pub const Lexer = struct {
                     try identifier_scanners.scanIdentifier(self);
                 }
             },
+            'h' => {
+                // Check for hex bytes literal hex"..."
+                if (self.peek() == 'e' and self.peekNext() == 'x' and self.peekNextNext() == '"') {
+                    // We have "hex" - consume 'e', 'x', and '"'
+                    _ = self.advance(); // consume 'e'
+                    _ = self.advance(); // consume 'x'
+                    _ = self.advance(); // consume '"'
+                    try string_scanners.scanHexBytes(self);
+                } else {
+                    // Regular identifier starting with 'h'
+                    try identifier_scanners.scanIdentifier(self);
+                }
+            },
 
             // Character literals
             '\'' => try string_scanners.scanCharacter(self),
@@ -1359,6 +1374,11 @@ pub const Lexer = struct {
     pub fn peekNext(self: *Lexer) u8 {
         if (self.current + 1 >= self.source.len) return 0;
         return self.source[self.current + 1];
+    }
+
+    pub fn peekNextNext(self: *Lexer) u8 {
+        if (self.current + 2 >= self.source.len) return 0;
+        return self.source[self.current + 2];
     }
 
     pub fn addToken(self: *Lexer, token_type: TokenType) LexerError!void {
@@ -1538,7 +1558,7 @@ pub inline fn isWhitespace(c: u8) bool {
 // Token utility functions for parser use
 pub fn isKeyword(token_type: TokenType) bool {
     return switch (token_type) {
-        .Contract, .Pub, .Fn, .Let, .Var, .Const, .Immutable, .Storage, .Memory, .Tstore, .Init, .Log, .If, .Else, .While, .For, .Break, .Continue, .Return, .Requires, .Ensures, .Invariant, .Old, .Result, .Modifies, .Decreases, .Increases, .Assume, .Havoc, .Switch, .Inline, .Ghost, .Assert, .Void, .Comptime, .As, .Import, .Struct, .Enum, .True, .False, .Error, .Try, .Catch, .From, .Move, .To, .Forall, .Exists, .Where, .U8, .U16, .U32, .U64, .U128, .U256, .I8, .I16, .I32, .I64, .I128, .I256, .Bool, .Address, .String, .Map, .DoubleMap, .Slice, .Bytes => true,
+        .Contract, .Pub, .Fn, .Let, .Var, .Const, .Immutable, .Storage, .Memory, .Tstore, .Init, .Log, .If, .Else, .While, .For, .Break, .Continue, .Return, .Requires, .Ensures, .Invariant, .Old, .Result, .Modifies, .Decreases, .Increases, .Assume, .Havoc, .Switch, .Ghost, .Assert, .Void, .Comptime, .As, .Import, .Struct, .Enum, .True, .False, .Error, .Try, .Catch, .From, .To, .Forall, .Exists, .Where, .U8, .U16, .U32, .U64, .U128, .U256, .I8, .I16, .I32, .I64, .I128, .I256, .Bool, .Address, .String, .Map, .Slice, .Bytes => true,
         else => false,
     };
 }
@@ -1552,14 +1572,14 @@ pub fn isLiteral(token_type: TokenType) bool {
 
 pub fn isOperator(token_type: TokenType) bool {
     return switch (token_type) {
-        .Plus, .Minus, .Star, .Slash, .Percent, .StarStar, .Equal, .EqualEqual, .BangEqual, .Less, .LessEqual, .Greater, .GreaterEqual, .Bang, .Ampersand, .Pipe, .Caret, .LessLess, .GreaterGreater, .PlusEqual, .MinusEqual, .StarEqual, .SlashEqual, .PercentEqual, .AmpersandAmpersand, .PipePipe, .Arrow, .DotDotDot => true,
+        .Plus, .Minus, .Star, .Slash, .Percent, .StarStar, .Equal, .EqualEqual, .BangEqual, .Less, .LessEqual, .Greater, .GreaterEqual, .Bang, .Ampersand, .Pipe, .Caret, .LessLess, .GreaterGreater, .PlusEqual, .MinusEqual, .StarEqual, .SlashEqual, .PercentEqual, .AmpersandAmpersand, .PipePipe, .Arrow, .DotDot, .DotDotDot => true,
         else => false,
     };
 }
 
 pub fn isDelimiter(token_type: TokenType) bool {
     return switch (token_type) {
-        .LeftParen, .RightParen, .LeftBrace, .RightBrace, .LeftBracket, .RightBracket, .Comma, .Semicolon, .Colon, .Dot, .DotDotDot, .At => true,
+        .LeftParen, .RightParen, .LeftBrace, .RightBrace, .LeftBracket, .RightBracket, .Comma, .Semicolon, .Colon, .Dot, .DotDot, .DotDotDot, .At => true,
         else => false,
     };
 }

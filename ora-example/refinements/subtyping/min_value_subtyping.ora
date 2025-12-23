@@ -1,0 +1,60 @@
+// ============================================================================
+// MinValue Subtyping Rules
+// ============================================================================
+// Tests that MinValue<u256, HIGHER_MIN> is a subtype of MinValue<u256, LOWER_MIN>
+// ============================================================================
+
+contract MinValueSubtyping {
+    // ============================================================================
+    // Valid Subtyping (Widening)
+    // ============================================================================
+    
+    // MinValue<u256, 2000> should be assignable to MinValue<u256, 1000>
+    // Higher min is a subtype of lower min (more restrictive -> less restrictive)
+    fn testHigherMinToLowerMin(amount: MinValue<u256, 2000>) -> MinValue<u256, 1000> {
+        return amount; // Valid: 2000 >= 1000
+    }
+    
+    // MinValue<u256, 5000> should be assignable to MinValue<u256, 1>
+    fn testVeryHighMinToLowMin(amount: MinValue<u256, 5000>) -> MinValue<u256, 1> {
+        return amount; // Valid: 5000 >= 1
+    }
+    
+    // MinValue<u256, 100> should be assignable to MinValue<u256, 50>
+    fn testModerateSubtyping(amount: MinValue<u256, 100>) -> MinValue<u256, 50> {
+        return amount; // Valid: 100 >= 50
+    }
+    
+    // ============================================================================
+    // Function Parameters (Subtyping in)
+    // ============================================================================
+    
+    // Function accepting MinValue<u256, 1000> should accept MinValue<u256, 2000>
+    fn acceptMinValue1000(amount: MinValue<u256, 1000>) {
+        // Should accept values >= 1000
+    }
+    
+    fn testSubtypingIn() {
+        let amount: MinValue<u256, 2000> = 2000;
+        acceptMinValue1000(amount); // Valid: 2000 >= 1000
+    }
+    
+    // ============================================================================
+    // Return Types (Subtyping out)
+    // ============================================================================
+    
+    // Function returning MinValue<u256, 1000> can return MinValue<u256, 2000>
+    fn returnMinValue1000() -> MinValue<u256, 1000> {
+        let amount: MinValue<u256, 2000> = 2000;
+        return amount; // Valid: 2000 >= 1000
+    }
+    
+    // ============================================================================
+    // Variable Assignments
+    // ============================================================================
+    
+    fn testVariableAssignment() {
+        let higher: MinValue<u256, 5000> = 5000;
+        let lower: MinValue<u256, 1000> = higher; // Valid: 5000 >= 1000
+    }
+}

@@ -1,0 +1,70 @@
+// ============================================================================
+// Valid Conversions: Base Type to Refinement (with Runtime Guards)
+// ============================================================================
+// Rule: Base types can be assigned to refinement types, but require runtime guards
+// Exception: Trusted builtins (std.transaction.sender, std.msg.sender) don't need guards
+// ============================================================================
+
+contract BaseToRefinement {
+    // ============================================================================
+    // Base Type to MinValue (Guard Required)
+    // ============================================================================
+    
+    // u256 can be assigned to MinValue (with guard)
+    fn testBaseToMinValue(value: u256) {
+        let min_value: MinValue<u256, 100> = value; // Guard generated: value >= 100
+    }
+    
+    // ============================================================================
+    // Base Type to MaxValue (Guard Required)
+    // ============================================================================
+    
+    // u256 can be assigned to MaxValue (with guard)
+    fn testBaseToMaxValue(value: u256) {
+        let max_value: MaxValue<u256, 1000> = value; // Guard generated: value <= 1000
+    }
+    
+    // ============================================================================
+    // Base Type to InRange (Guard Required)
+    // ============================================================================
+    
+    // u256 can be assigned to InRange (with guard)
+    fn testBaseToInRange(value: u256) {
+        let in_range: InRange<u256, 0, 10000> = value; // Guard generated: 0 <= value <= 10000
+    }
+    
+    // ============================================================================
+    // address to NonZeroAddress (Guard Required, except trusted builtins)
+    // ============================================================================
+    
+    // Regular address requires guard
+    fn testAddressToNonZeroAddress(addr: address) {
+        let non_zero: NonZeroAddress = addr; // Guard generated: addr != 0
+    }
+    
+    // Trusted builtins should NOT require guard
+    fn testTrustedBuiltinToNonZeroAddress() {
+        // std.transaction.sender() and std.msg.sender() are guaranteed non-zero
+        let owner: NonZeroAddress = std.transaction.sender(); // No guard needed
+        let caller: NonZeroAddress = std.msg.sender(); // No guard needed
+    }
+    
+    // ============================================================================
+    // Literal Values (No Guard if Constraint Met)
+    // ============================================================================
+    
+    // Literal that meets constraint should not require guard
+    fn testLiteralMinValue() {
+        let min_value: MinValue<u256, 100> = 1000; // No guard: literal >= 100
+    }
+    
+    // Literal that meets constraint should not require guard
+    fn testLiteralMaxValue() {
+        let max_value: MaxValue<u256, 1000> = 500; // No guard: literal <= 1000
+    }
+    
+    // Literal that meets constraint should not require guard
+    fn testLiteralInRange() {
+        let in_range: InRange<u256, 0, 10000> = 5000; // No guard: literal in range
+    }
+}

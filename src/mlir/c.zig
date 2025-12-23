@@ -15,7 +15,7 @@ pub const c = @cImport({
     @cInclude("mlir-c/RegisterEverything.h");
 
     // Ora dialect C interface
-    @cInclude("OraDialectC.h");
+    @cInclude("ora/OraDialectC.h");
 });
 
 // Helper to free string returned from C API

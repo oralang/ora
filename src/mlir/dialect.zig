@@ -88,7 +88,7 @@ pub const OraDialect = struct {
     ) c.MlirOperation {
         return self.createSLoadWithName(global_name, result_type, loc, null);
     }
-    
+
     // Helper function to create ora.sload operation with named result
     pub fn createSLoadWithName(
         self: *OraDialect,
@@ -496,6 +496,48 @@ pub const OraDialect = struct {
         return op;
     }
 
+    /// Create ora.struct_field_extract operation (pure, returns field value)
+    pub fn createStructFieldExtract(
+        self: *OraDialect,
+        struct_value: c.MlirValue,
+        field_name: []const u8,
+        result_type: c.MlirType,
+        loc: c.MlirLocation,
+    ) c.MlirOperation {
+        // Always use C++ API (dialect must be registered)
+        if (!self.isRegistered()) {
+            @panic("Ora dialect must be registered before creating operations");
+        }
+        const field_name_ref = h.strRef(field_name);
+        const op = c.oraStructFieldExtractOpCreate(self.ctx, loc, struct_value, field_name_ref, result_type);
+        if (op.ptr == null) {
+            @panic("Failed to create ora.struct_field_extract operation");
+        }
+        return op;
+    }
+
+    /// Create ora.struct_field_update operation (pure, returns new struct with updated field)
+    pub fn createStructFieldUpdate(
+        self: *OraDialect,
+        struct_value: c.MlirValue,
+        field_name: []const u8,
+        value: c.MlirValue,
+        loc: c.MlirLocation,
+    ) c.MlirOperation {
+        // Always use C++ API (dialect must be registered)
+        // Result type is inferred from struct_value (enforced by SameOperandsAndResultType trait)
+        if (!self.isRegistered()) {
+            @panic("Ora dialect must be registered before creating operations");
+        }
+        const field_name_ref = h.strRef(field_name);
+        const op = c.oraStructFieldUpdateOpCreate(self.ctx, loc, struct_value, field_name_ref, value);
+        if (op.ptr == null) {
+            std.debug.print("ERROR: Failed to create ora.struct_field_update operation for field: {s}\n", .{field_name});
+            @panic("Failed to create ora.struct_field_update operation");
+        }
+        return op;
+    }
+
     /// Create ora.struct_instantiate operation
     pub fn createStructInstantiate(
         self: *OraDialect,
@@ -843,12 +885,12 @@ pub const OraDialect = struct {
         return op;
     }
 
-    /// Create func.return operation with no return value
+    /// Create ora.return operation with no return value
     pub fn createFuncReturn(
         self: *OraDialect,
         loc: c.MlirLocation,
     ) c.MlirOperation {
-        var state = h.opState("func.return", loc);
+        var state = h.opState("ora.return", loc);
 
         // Add gas cost attribute (JUMP = 8, return is similar to jump)
         const gas_cost_attr = c.mlirIntegerAttrGet(c.mlirIntegerTypeGet(self.ctx, 64), 8);
@@ -860,13 +902,13 @@ pub const OraDialect = struct {
         return op;
     }
 
-    /// Create func.return operation with return value
+    /// Create ora.return operation with return value
     pub fn createFuncReturnWithValue(
         self: *OraDialect,
         return_value: c.MlirValue,
         loc: c.MlirLocation,
     ) c.MlirOperation {
-        var state = h.opState("func.return", loc);
+        var state = h.opState("ora.return", loc);
         c.mlirOperationStateAddOperands(&state, 1, @ptrCast(&return_value));
 
         // Add gas cost attribute (JUMP = 8, return is similar to jump)

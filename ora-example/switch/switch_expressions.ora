@@ -12,22 +12,22 @@ enum UserRole : u8 {
 }
 
 contract SwitchTest {
-    storage var result: u256;
+    storage var switch_result: u256;
     
     pub fn test_basic_switch(value: u256) {
         // Basic switch statement with integer values
         switch (value) {
             0 => {
-                result = 10;
+                switch_result = 10;
             },
             1 => {
-                result = 20;
+                switch_result = 20;
             },
             2 => {
-                result = 30;
+                switch_result = 30;
             },
             else => {
-                result = 999;
+                switch_result = 999;
             }
         }
     }

@@ -529,44 +529,6 @@ pub fn serializeStatement(serializer: *AstSerializer, stmt: *const StmtNode, wri
             }
             try expressions.serializeExpression(serializer, &unlock.path, writer, indent + 1, depth + 1);
         },
-        .Move => |*move_stmt| {
-            try helpers.writeField(serializer, writer, "type", "Move", indent + 1, true);
-            if (serializer.options.include_spans) {
-                try helpers.writeSpanField(serializer, writer, &move_stmt.span, indent + 1);
-            }
-            if (serializer.options.pretty_print and !serializer.options.compact_mode) {
-                try writer.print(",\n");
-                try helpers.writeIndent(serializer, writer, indent + 1);
-                try writer.print("\"expr\": ");
-            } else {
-                try writer.print(",\"expr\":");
-            }
-            try expressions.serializeExpression(serializer, &move_stmt.expr, writer, indent + 1, depth + 1);
-            if (serializer.options.pretty_print and !serializer.options.compact_mode) {
-                try writer.print(",\n");
-                try helpers.writeIndent(serializer, writer, indent + 1);
-                try writer.print("\"source\": ");
-            } else {
-                try writer.print(",\"source\":");
-            }
-            try expressions.serializeExpression(serializer, &move_stmt.source, writer, indent + 1, depth + 1);
-            if (serializer.options.pretty_print and !serializer.options.compact_mode) {
-                try writer.print(",\n");
-                try helpers.writeIndent(serializer, writer, indent + 1);
-                try writer.print("\"dest\": ");
-            } else {
-                try writer.print(",\"dest\":");
-            }
-            try expressions.serializeExpression(serializer, &move_stmt.dest, writer, indent + 1, depth + 1);
-            if (serializer.options.pretty_print and !serializer.options.compact_mode) {
-                try writer.print(",\n");
-                try helpers.writeIndent(serializer, writer, indent + 1);
-                try writer.print("\"amount\": ");
-            } else {
-                try writer.print(",\"amount\":");
-            }
-            try expressions.serializeExpression(serializer, &move_stmt.amount, writer, indent + 1, depth + 1);
-        },
         .LabeledBlock => |*labeled| {
             try helpers.writeField(serializer, writer, "type", "LabeledBlock", indent + 1, true);
             try helpers.writeField(serializer, writer, "label", labeled.label, indent + 1, false);
