@@ -39,12 +39,14 @@ pub fn parseAssertStatement(parser: *StatementParser) common.ParserError!ast.Sta
     _ = try parser.base.consume(.RightParen, "Expected ')' after assert condition");
     _ = try parser.base.consume(.Semicolon, "Expected ';' after assert statement");
 
-    return ast.Statements.StmtNode{ .Assert = ast.Statements.AssertNode{
-        .condition = condition,
-        .message = message,
-        .is_ghost = false, // Runtime assertion by default (ghost context handled elsewhere)
-        .span = ParserCommon.makeSpan(assert_token),
-    } };
+    return ast.Statements.StmtNode{
+        .Assert = ast.Statements.AssertNode{
+            .condition = condition,
+            .message = message,
+            .is_ghost = false, // Runtime assertion by default (ghost context handled elsewhere)
+            .span = ParserCommon.makeSpan(assert_token),
+        },
+    };
 }
 
 /// Parse requires statement
@@ -123,4 +125,3 @@ pub fn parseEnsuresStatement(parser: *StatementParser) common.ParserError!ast.St
         .span = ParserCommon.makeSpan(ensures_token),
     } };
 }
-
