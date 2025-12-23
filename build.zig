@@ -99,8 +99,9 @@ pub fn build(b: *std.Build) void {
 
     // Build and link MLIR (required) - only for executable, not library
     const mlir_step = buildMlirLibraries(b, target, optimize);
-    const ora_dialect_step = buildOraDialectLibrary(b, mlir_step, target, optimize);
+    // Build SIR dialect first (Ora dialect depends on it)
     const sir_dialect_step = buildSIRDialectLibrary(b, mlir_step, target, optimize);
+    const ora_dialect_step = buildOraDialectLibrary(b, mlir_step, sir_dialect_step, target, optimize);
     linkMlirLibraries(b, exe, mlir_step, ora_dialect_step, sir_dialect_step, target);
 
     // Build and link Z3 (for formal verification) - only for executable
@@ -574,7 +575,7 @@ fn buildMlirLibrariesImpl(step: *std.Build.Step, options: std.Build.Step.MakeOpt
 }
 
 /// Build Ora dialect library using CMake
-fn buildOraDialectLibrary(b: *std.Build, mlir_step: *std.Build.Step, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Step {
+fn buildOraDialectLibrary(b: *std.Build, mlir_step: *std.Build.Step, sir_dialect_step: *std.Build.Step, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Step {
     _ = target;
     _ = optimize;
 
@@ -586,6 +587,7 @@ fn buildOraDialectLibrary(b: *std.Build, mlir_step: *std.Build.Step, target: std
         .makeFn = buildOraDialectLibraryImpl,
     });
     step.dependOn(mlir_step);
+    step.dependOn(sir_dialect_step); // Ora dialect needs SIR headers
     return step;
 }
 
