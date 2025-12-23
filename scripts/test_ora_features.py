@@ -321,6 +321,10 @@ def main():
     
     print(f"\n✅ Report generated: {args.output}")
     print(f"Summary: {success_count} success, {failed_count} failed out of {len(results)}")
+    
+    # Exit with non-zero code if any tests failed
+    if failed_count > 0:
+        sys.exit(1)
 
 
 if __name__ == "__main__":

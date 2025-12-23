@@ -11,7 +11,7 @@ on:
 
 env:
   # Use the latest stable Zig version
-  ZIG_VERSION: 0.15.1
+  ZIG_VERSION: 0.15.2
 
 jobs:
   lint:
@@ -131,7 +131,7 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest] # windows-latest commented out until Boost issues resolved
-        zig-version: [0.15.1]
+        zig-version: [0.15.2]
     
     steps:
       - name: Checkout code
@@ -234,7 +234,10 @@ jobs:
         shell: bash
         run: |
           echo "🧪 Running unit test suite..."
-          zig build test
+          zig build test || {
+            echo "❌ Unit tests failed"
+            exit 1
+          }
           echo "✅ Unit tests completed"
 
   examples:
@@ -424,6 +427,18 @@ jobs:
           zig build
           echo "✅ Build successful"
 
+      - name: Setup Python
+        shell: bash
+        run: |
+          echo "🐍 Setting up Python..."
+          python3 --version || echo "⚠️  Python3 not found, installing..."
+          # Python3 should be pre-installed on GitHub runners, but verify
+          if ! command -v python3 &> /dev/null; then
+            echo "❌ Python3 is required but not found"
+            exit 1
+          fi
+          echo "✅ Python3 available: $(python3 --version)"
+
       - name: Run end-to-end compilation tests
         shell: bash
         run: |
@@ -434,6 +449,20 @@ jobs:
             ./zig-out/bin/ora compile ora-example/basic_storage.ora || echo "⚠️  basic_storage.ora failed"
           fi
           echo "✅ End-to-end tests completed"
+
+      - name: Run Python feature tests
+        shell: bash
+        run: |
+          echo "🐍 Running Python feature test script..."
+          if [ -f "scripts/test_ora_features.py" ]; then
+            python3 scripts/test_ora_features.py --compiler ./zig-out/bin/ora || {
+              echo "❌ Python feature tests failed"
+              exit 1
+            }
+            echo "✅ Python feature tests completed"
+          else
+            echo "⚠️  test_ora_features.py not found, skipping"
+          fi
 
       - name: Upload test results
         uses: actions/upload-artifact@v4
