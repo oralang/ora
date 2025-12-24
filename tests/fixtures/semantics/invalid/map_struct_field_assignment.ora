@@ -1,0 +1,14 @@
+contract Test {
+    struct Pair {
+        left: u256;
+        right: u256;
+    }
+
+    storage var pairs: map[address, Pair];
+
+    fn setLeft(addr: address, value: u256) {
+        let frozen: u256 = value;
+        frozen = 1;
+        pairs[addr].left = value;
+    }
+}

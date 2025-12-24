@@ -3,7 +3,7 @@
 // ============================================================================
 
 const std = @import("std");
-const c = @import("../c.zig").c;
+const c = @import("mlir_c_api").c;
 const lib = @import("ora_lib");
 const h = @import("../helpers.zig");
 const LocalVarMap = @import("../symbols.zig").LocalVarMap;
@@ -12,6 +12,60 @@ const StorageMap = @import("../memory.zig").StorageMap;
 const DeclarationLowerer = @import("mod.zig").DeclarationLowerer;
 const helpers = @import("helpers.zig");
 const error_handling = @import("../error_handling.zig");
+
+fn lowerContractTypes(self: *const DeclarationLowerer, block: c.MlirBlock, contract: *const lib.ContractNode) void {
+    for (contract.body) |child| {
+        switch (child) {
+            .StructDecl => |struct_decl| {
+                const struct_op = self.lowerStruct(&struct_decl);
+                h.appendOp(block, struct_op);
+
+                if (self.symbol_table) |st| {
+                    if (st.lookupType(struct_decl.name)) |_| {
+                        std.debug.print("WARNING: Duplicate struct type: {s}, skipping\n", .{struct_decl.name});
+                    } else {
+                        const struct_type = self.createStructType(&struct_decl);
+
+                        const allocator = std.heap.page_allocator;
+                        if (allocator.alloc(@import("../lower.zig").TypeSymbol.FieldInfo, struct_decl.fields.len)) |fields_slice| {
+                            var current_offset: usize = 0;
+                            for (struct_decl.fields, 0..) |field, i| {
+                                const field_type = self.type_mapper.toMlirType(field.type_info);
+                                fields_slice[i] = .{
+                                    .name = field.name,
+                                    .field_type = field_type,
+                                    .offset = current_offset,
+                                };
+                                current_offset += 32;
+                            }
+
+                            const type_symbol = @import("../lower.zig").TypeSymbol{
+                                .name = struct_decl.name,
+                                .type_kind = .Struct,
+                                .mlir_type = struct_type,
+                                .fields = fields_slice,
+                                .variants = null,
+                                .allocator = allocator,
+                            };
+
+                            st.addType(struct_decl.name, type_symbol) catch {
+                                allocator.free(fields_slice);
+                                std.debug.print("ERROR: Failed to register struct type: {s}\n", .{struct_decl.name});
+                            };
+                        } else |_| {
+                            std.debug.print("ERROR: Failed to allocate fields slice for struct: {s}\n", .{struct_decl.name});
+                        }
+                    }
+                }
+            },
+            .EnumDecl => |enum_decl| {
+                const enum_op = self.lowerEnum(&enum_decl);
+                h.appendOp(block, enum_op);
+            },
+            else => {},
+        }
+    }
+}
 
 /// Lower contract declarations with enhanced metadata and inheritance support
 pub fn lowerContract(self: *const DeclarationLowerer, contract: *const lib.ContractNode) c.MlirOperation {
@@ -106,70 +160,7 @@ pub fn lowerContract(self: *const DeclarationLowerer, contract: *const lib.Contr
 
     // Second pass: first register all struct/enum types, then process functions and variables
     // This ensures types are available when functions use them
-    for (contract.body) |child| {
-        switch (child) {
-            .StructDecl => |struct_decl| {
-                // Lower struct declarations within contract
-                const struct_op = self.lowerStruct(&struct_decl);
-                h.appendOp(block, struct_op);
-
-                // Register struct type in symbol table so it can be used later
-                if (self.symbol_table) |st| {
-                    // Check if type already exists before allocating
-                    if (st.lookupType(struct_decl.name)) |_| {
-                        std.debug.print("WARNING: Duplicate struct type: {s}, skipping\n", .{struct_decl.name});
-                    } else {
-                        const struct_type = self.createStructType(&struct_decl);
-
-                        // Allocate field info array
-                        const allocator = std.heap.page_allocator;
-                        if (allocator.alloc(@import("../lower.zig").TypeSymbol.FieldInfo, struct_decl.fields.len)) |fields_slice| {
-                            // Calculate field offsets based on cumulative sizes
-                            var current_offset: usize = 0;
-                            for (struct_decl.fields, 0..) |field, i| {
-                                const field_type = self.type_mapper.toMlirType(field.type_info);
-
-                                // Calculate offset: for EVM, each field occupies a storage slot
-                                // In memory/stack, we use byte offsets based on type width
-                                // For simplicity, use slot-based offsets (32 bytes per field in EVM)
-                                fields_slice[i] = .{
-                                    .name = field.name,
-                                    .field_type = field_type,
-                                    .offset = current_offset,
-                                };
-
-                                // Increment offset: in EVM storage, each slot is 32 bytes
-                                current_offset += 32; // EVM storage slot size in bytes
-                            }
-
-                            const type_symbol = @import("../lower.zig").TypeSymbol{
-                                .name = struct_decl.name,
-                                .type_kind = .Struct,
-                                .mlir_type = struct_type,
-                                .fields = fields_slice,
-                                .variants = null,
-                                .allocator = allocator,
-                            };
-
-                            st.addType(struct_decl.name, type_symbol) catch {
-                                // Free the fields_slice if addType fails
-                                allocator.free(fields_slice);
-                                std.debug.print("ERROR: Failed to register struct type: {s}\n", .{struct_decl.name});
-                            };
-                        } else |_| {
-                            std.debug.print("ERROR: Failed to allocate fields slice for struct: {s}\n", .{struct_decl.name});
-                        }
-                    }
-                }
-            },
-            .EnumDecl => |enum_decl| {
-                // Lower enum declarations within contract
-                const enum_op = self.lowerEnum(&enum_decl);
-                h.appendOp(block, enum_op);
-            },
-            else => {},
-        }
-    }
+    lowerContractTypes(self, block, contract);
 
     // Third pass: process functions and variables (after types are registered)
     for (contract.body) |child| {
@@ -208,64 +199,8 @@ pub fn lowerContract(self: *const DeclarationLowerer, contract: *const lib.Contr
                     },
                 }
             },
-            .StructDecl => |struct_decl| {
-                // Lower struct declarations within contract
-                const struct_op = self.lowerStruct(&struct_decl);
-                h.appendOp(block, struct_op);
-
-                // Register struct type in symbol table so it can be used later
-                if (self.symbol_table) |st| {
-                    // Check if type already exists before allocating
-                    if (st.lookupType(struct_decl.name)) |_| {
-                        std.debug.print("WARNING: Duplicate struct type: {s}, skipping\n", .{struct_decl.name});
-                    } else {
-                        const struct_type = self.createStructType(&struct_decl);
-
-                        // Allocate field info array
-                        const allocator = std.heap.page_allocator;
-                        if (allocator.alloc(@import("../lower.zig").TypeSymbol.FieldInfo, struct_decl.fields.len)) |fields_slice| {
-                            // Calculate field offsets based on cumulative sizes
-                            var current_offset: usize = 0;
-                            for (struct_decl.fields, 0..) |field, i| {
-                                const field_type = self.type_mapper.toMlirType(field.type_info);
-
-                                // Calculate offset: for EVM, each field occupies a storage slot
-                                // In memory/stack, we use byte offsets based on type width
-                                // For simplicity, use slot-based offsets (32 bytes per field in EVM)
-                                fields_slice[i] = .{
-                                    .name = field.name,
-                                    .field_type = field_type,
-                                    .offset = current_offset,
-                                };
-
-                                // Increment offset: in EVM storage, each slot is 32 bytes
-                                current_offset += 32; // EVM storage slot size in bytes
-                            }
-
-                            const type_symbol = @import("../lower.zig").TypeSymbol{
-                                .name = struct_decl.name,
-                                .type_kind = .Struct,
-                                .mlir_type = struct_type,
-                                .fields = fields_slice,
-                                .variants = null,
-                                .allocator = allocator,
-                            };
-
-                            st.addType(struct_decl.name, type_symbol) catch {
-                                // Free the fields_slice if addType fails
-                                allocator.free(fields_slice);
-                                std.debug.print("ERROR: Failed to register struct type: {s}\n", .{struct_decl.name});
-                            };
-                        } else |_| {
-                            std.debug.print("ERROR: Failed to allocate fields slice for struct: {s}\n", .{struct_decl.name});
-                        }
-                    }
-                }
-            },
-            .EnumDecl => |enum_decl| {
-                // Lower enum declarations within contract
-                const enum_op = self.lowerEnum(&enum_decl);
-                h.appendOp(block, enum_op);
+            .StructDecl, .EnumDecl => {
+                // Structs/enums are lowered and registered in the second pass.
             },
             .LogDecl => |log_decl| {
                 // Lower log declarations within contract
@@ -311,9 +246,7 @@ pub fn lowerContract(self: *const DeclarationLowerer, contract: *const lib.Contr
             else => {
                 // Report missing node type with context and continue processing
                 if (self.error_handler) |eh| {
-                    // Create a mutable copy for error reporting
-                    var error_handler = @constCast(eh);
-                    error_handler.reportMissingNodeType(@tagName(child), error_handling.getSpanFromAstNode(&child), "contract body") catch {};
+                    eh.reportMissingNodeType(@tagName(child), error_handling.getSpanFromAstNode(&child), "contract body") catch {};
                 } else {
                     std.debug.print("WARNING: Unhandled contract body node type in MLIR lowering: {s}\n", .{@tagName(child)});
                 }

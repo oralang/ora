@@ -21,7 +21,7 @@
 
 const std = @import("std");
 const lib = @import("ora_lib");
-const c = @import("c.zig").c;
+const c = @import("mlir_c_api").c;
 pub const LocationTracker = @import("locations.zig").LocationTracker;
 
 // MLIR constants used throughout the lowering system
@@ -541,6 +541,7 @@ pub fn lowerFunctionsToModuleWithSemanticTable(ctx: c.MlirContext, nodes: []lib.
 
     // Initialize modular components with error handling and symbol table
     var type_mapper = TypeMapper.initWithSymbolTable(ctx, allocator, &symbol_table);
+    type_mapper.setErrorHandler(&error_handler);
     defer type_mapper.deinit();
 
     const decl_lowerer = DeclarationLowerer.withErrorHandlerAndDialectAndSymbolTable(ctx, &type_mapper, locations, &error_handler, &ora_dialect, &symbol_table, &builtin_registry);
@@ -648,6 +649,7 @@ pub fn lowerFunctionsToModuleWithErrors(ctx: c.MlirContext, nodes: []lib.AstNode
 
     // Initialize modular components with error handling and symbol table
     var type_mapper = TypeMapper.initWithSymbolTable(ctx, allocator, &symbol_table);
+    type_mapper.setErrorHandler(&error_handler);
     defer type_mapper.deinit();
 
     const decl_lowerer = DeclarationLowerer.withErrorHandlerAndDialectAndSymbolTable(ctx, &type_mapper, locations, &error_handler, &ora_dialect, &symbol_table, &builtin_registry);
@@ -1076,7 +1078,7 @@ pub fn lowerFunctionsToModuleWithErrors(ctx: c.MlirContext, nodes: []lib.AstNode
                             // Handle expressions within module with graceful degradation
                             try error_handler.reportGracefulDegradation("expressions within modules", "expression capture operations", error_handling.getSpanFromExpression(expr));
                             // Create a placeholder operation to allow compilation to continue
-                            const expr_lowerer = ExpressionLowerer.init(ctx, body, &type_mapper, null, null, null, &symbol_table, &builtin_registry, locations, &ora_dialect);
+                            const expr_lowerer = ExpressionLowerer.init(ctx, body, &type_mapper, null, null, null, &symbol_table, &builtin_registry, &error_handler, locations, &ora_dialect);
                             const expr_value = expr_lowerer.lowerExpression(expr);
                             const expr_op = expr_lowerer.createExpressionCapture(expr_value, error_handling.getSpanFromExpression(expr));
                             if (error_handler.validateMlirOperation(expr_op, error_handling.getSpanFromExpression(expr)) catch false) {
@@ -1087,7 +1089,7 @@ pub fn lowerFunctionsToModuleWithErrors(ctx: c.MlirContext, nodes: []lib.AstNode
                             // Handle statements within modules with graceful degradation
                             try error_handler.reportGracefulDegradation("statements within modules", "statement lowering operations", error_handling.getSpanFromStatement(stmt));
                             // Create a placeholder operation to allow compilation to continue
-                            const expr_lowerer = ExpressionLowerer.init(ctx, body, &type_mapper, null, null, null, &symbol_table, &builtin_registry, locations, &ora_dialect);
+                            const expr_lowerer = ExpressionLowerer.init(ctx, body, &type_mapper, null, null, null, &symbol_table, &builtin_registry, &error_handler, locations, &ora_dialect);
                             const stmt_lowerer = StatementLowerer.init(ctx, body, &type_mapper, &expr_lowerer, null, null, null, locations, &symbol_table, &builtin_registry, std.heap.page_allocator, null, null, &ora_dialect, &[_]*lib.ast.Expressions.ExprNode{});
                             stmt_lowerer.lowerStatement(stmt) catch {
                                 try error_handler.reportError(.MlirOperationFailed, error_handling.getSpanFromStatement(stmt), "failed to lower top-level statement", "check statement structure and dependencies");
@@ -1138,7 +1140,7 @@ pub fn lowerFunctionsToModuleWithErrors(ctx: c.MlirContext, nodes: []lib.AstNode
                 }
 
                 // Create a temporary expression lowerer for top-level expressions
-                const expr_lowerer = ExpressionLowerer.init(ctx, body, &type_mapper, null, null, null, &symbol_table, null, locations, &ora_dialect);
+                const expr_lowerer = ExpressionLowerer.init(ctx, body, &type_mapper, null, null, null, &symbol_table, null, &error_handler, locations, &ora_dialect);
                 const expr_value = expr_lowerer.lowerExpression(expr);
 
                 // For top-level expressions, we need to create a proper operation
@@ -1164,7 +1166,7 @@ pub fn lowerFunctionsToModuleWithErrors(ctx: c.MlirContext, nodes: []lib.AstNode
                 }
 
                 // Create a temporary statement lowerer for top-level statements
-                const expr_lowerer = ExpressionLowerer.init(ctx, body, &type_mapper, null, null, null, &symbol_table, null, locations, &ora_dialect);
+                const expr_lowerer = ExpressionLowerer.init(ctx, body, &type_mapper, null, null, null, &symbol_table, null, &error_handler, locations, &ora_dialect);
                 const stmt_lowerer = StatementLowerer.init(ctx, body, &type_mapper, &expr_lowerer, null, null, null, locations, null, &builtin_registry, std.heap.page_allocator, null, null, &ora_dialect, &[_]*lib.ast.Expressions.ExprNode{});
                 stmt_lowerer.lowerStatement(stmt) catch {
                     try error_handler.reportError(.MlirOperationFailed, error_handling.getSpanFromStatement(stmt), "failed to lower top-level statement", "check statement structure and dependencies");

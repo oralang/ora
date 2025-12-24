@@ -10,7 +10,8 @@
 //===----------------------------------------------------------------------===//
 
 const std = @import("std");
-const c = @import("c.zig").c;
+const c = @import("c.zig");
+const ManagedArrayList = std.array_list.Managed;
 
 /// Type of verification error
 pub const VerificationErrorType = enum {
@@ -80,13 +81,15 @@ pub const Counterexample = struct {
 /// Result of verification pass
 pub const VerificationResult = struct {
     success: bool,
-    errors: std.ArrayList(VerificationError),
+    errors: ManagedArrayList(VerificationError),
+    seen_keys: std.StringHashMap(void),
     allocator: std.mem.Allocator,
 
     pub fn init(allocator: std.mem.Allocator) VerificationResult {
         return .{
             .success = true,
-            .errors = std.ArrayList(VerificationError).init(allocator),
+            .errors = ManagedArrayList(VerificationError).init(allocator),
+            .seen_keys = std.StringHashMap(void).init(allocator),
             .allocator = allocator,
         };
     }
@@ -96,9 +99,29 @@ pub const VerificationResult = struct {
             err.deinit();
         }
         self.errors.deinit();
+        var iter = self.seen_keys.iterator();
+        while (iter.next()) |entry| {
+            self.allocator.free(entry.key_ptr.*);
+        }
+        self.seen_keys.deinit();
     }
 
     pub fn addError(self: *VerificationResult, err: VerificationError) !void {
+        const key = try std.fmt.allocPrint(
+            self.allocator,
+            "{s}|{s}|{d}|{d}|{s}",
+            .{ @tagName(err.error_type), err.file, err.line, err.column, err.message },
+        );
+        errdefer self.allocator.free(key);
+
+        if (self.seen_keys.contains(key)) {
+            self.allocator.free(key);
+            var dup = err;
+            dup.deinit();
+            return;
+        }
+
+        try self.seen_keys.put(key, {});
         self.success = false;
         try self.errors.append(err);
     }

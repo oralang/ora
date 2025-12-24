@@ -12,6 +12,11 @@ const ast = @import("../ast.zig");
 const SourceSpan = ast.SourceSpan;
 const Expressions = ast.Expressions;
 const Statements = ast.Statements;
+const MemoryRegion = ast.Memory.Region;
+const state_mod = @import("../semantics/state.zig");
+const SymbolTable = state_mod.SymbolTable;
+const Scope = state_mod.Scope;
+const Symbol = state_mod.Symbol;
 
 /// Access type for a storage variable
 pub const AccessType = enum {
@@ -181,17 +186,64 @@ pub const ContractStateAnalysis = struct {
         }
         self.warnings.deinit(self.allocator);
     }
+
+    /// Get all storage variables accessed across all functions (for Z3)
+    pub fn getAllStorageVars(self: *const ContractStateAnalysis) std.StringArrayHashMap(void) {
+        var all_vars = std.StringArrayHashMap(void).init(self.allocator);
+        var func_iter = self.functions.iterator();
+        while (func_iter.next()) |entry| {
+            const func_analysis = entry.value_ptr.*;
+            // Collect reads
+            var reads_it = func_analysis.reads_set.iterator();
+            while (reads_it.next()) |read_entry| {
+                _ = all_vars.getOrPut(read_entry.key_ptr.*) catch continue;
+            }
+            // Collect writes
+            var writes_it = func_analysis.writes_set.iterator();
+            while (writes_it.next()) |write_entry| {
+                _ = all_vars.getOrPut(write_entry.key_ptr.*) catch continue;
+            }
+        }
+        return all_vars;
+    }
+
+    /// Check if any function modifies state (for Z3 postcondition checking)
+    pub fn hasStateModifications(self: *const ContractStateAnalysis) bool {
+        var func_iter = self.functions.iterator();
+        while (func_iter.next()) |entry| {
+            if (entry.value_ptr.modifies_state) {
+                return true;
+            }
+        }
+        return false;
+    }
 };
 
 /// Main state tracker
 pub const StateTracker = struct {
     allocator: std.mem.Allocator,
     current_function: ?*FunctionStateAnalysis,
+    /// Optional symbol table for accurate storage variable detection
+    symbol_table: ?*const SymbolTable = null,
+    /// Root scope for symbol lookup (contract scope)
+    root_scope: ?*const Scope = null,
 
     pub fn init(allocator: std.mem.Allocator) StateTracker {
         return .{
             .allocator = allocator,
             .current_function = null,
+            .symbol_table = null,
+            .root_scope = null,
+        };
+    }
+
+    /// Initialize with symbol table for accurate storage detection
+    pub fn initWithSymbols(allocator: std.mem.Allocator, symbol_table: ?*const SymbolTable, root_scope: ?*const Scope) StateTracker {
+        return .{
+            .allocator = allocator,
+            .current_function = null,
+            .symbol_table = symbol_table,
+            .root_scope = root_scope,
         };
     }
 
@@ -260,8 +312,6 @@ pub const StateTracker = struct {
             .Identifier => |ident| {
                 // Check if this is a storage variable access
                 if (self.current_function) |func_analysis| {
-                    // Simple heuristic: storage variables are accessed directly
-                    // In real implementation, consult symbol table
                     if (self.isStorageVariable(ident.name)) {
                         try func_analysis.recordRead(ident.name, ident.span);
                     }
@@ -348,30 +398,69 @@ pub const StateTracker = struct {
         };
     }
 
-    /// Helper: Check if a variable is a storage variable
-    /// TODO: Consult symbol table for accurate information
+    /// Check if a variable is a storage variable using symbol table lookup
     fn isStorageVariable(self: *StateTracker, name: []const u8) bool {
-        _ = self;
-        // Temporary heuristic: common storage variable names
-        // In production, this should query the semantic analyzer's symbol table
-        const storage_vars = [_][]const u8{
-            "balance", "balances", "totalSupply", "allowances", "owner", "name", "symbol",
-            // Test contract variables
-            "counter", "config",   "unusedData",
-        };
-        for (storage_vars) |storage_var| {
-            if (std.mem.eql(u8, name, storage_var)) {
-                return true;
+        // Use symbol table lookup when available
+        if (self.symbol_table) |table| {
+            const scope_to_search: ?*const Scope = if (self.root_scope) |rs| rs else &table.root;
+            if (SymbolTable.findUp(scope_to_search, name)) |symbol| {
+                return symbol.region == .Storage;
             }
+            // Symbol not found in symbol table - not a storage variable
+            return false;
         }
+
+        // Symbol table not available - return false (can't determine accurately)
+        // Callers should provide symbol table via analyzeContractWithSymbols() for accurate results
         return false;
     }
 };
 
 /// Analyze a contract
+/// Builds symbol table from contract AST for accurate storage detection
 pub fn analyzeContract(allocator: std.mem.Allocator, contract: *const ast.ContractNode) !ContractStateAnalysis {
+    // Build symbol table from contract to detect storage variables accurately
+    var symbol_table = SymbolTable.init(allocator);
+    defer symbol_table.deinit();
+
+    // Create contract scope
+    const contract_scope = try allocator.create(Scope);
+    contract_scope.* = Scope.init(allocator, &symbol_table.root, contract.name);
+    try symbol_table.scopes.append(allocator, contract_scope);
+    try symbol_table.contract_scopes.put(contract.name, contract_scope);
+
+    // Collect storage variables from contract body
+    for (contract.body) |*member| {
+        switch (member.*) {
+            .VariableDecl => |var_decl| {
+                if (var_decl.region == .Storage) {
+                    const sym = Symbol{
+                        .name = var_decl.name,
+                        .kind = .Var,
+                        .typ = var_decl.type_info,
+                        .span = var_decl.span,
+                        .mutable = (var_decl.kind == .Var),
+                        .region = .Storage,
+                    };
+                    _ = try symbol_table.declare(contract_scope, sym);
+                }
+            },
+            else => {},
+        }
+    }
+
+    return analyzeContractWithSymbols(allocator, contract, &symbol_table, contract_scope);
+}
+
+/// Analyze a contract with symbol table for accurate storage detection
+pub fn analyzeContractWithSymbols(
+    allocator: std.mem.Allocator,
+    contract: *const ast.ContractNode,
+    symbol_table: ?*const SymbolTable,
+    root_scope: ?*const Scope,
+) !ContractStateAnalysis {
     var contract_analysis = ContractStateAnalysis.init(allocator, contract.name);
-    var tracker = StateTracker.init(allocator);
+    var tracker = StateTracker.initWithSymbols(allocator, symbol_table, root_scope);
 
     for (contract.body) |*node| {
         switch (node.*) {

@@ -4,11 +4,19 @@
 // Common helper functions used across statement lowering modules
 
 const std = @import("std");
-const c = @import("../c.zig").c;
-const c_zig = @import("../c.zig");
+const c = @import("mlir_c_api").c;
+const c_zig = @import("mlir_c_api");
 const h = @import("../helpers.zig");
 const StatementLowerer = @import("statement_lowerer.zig").StatementLowerer;
 const lib = @import("ora_lib");
+
+fn reportRefinementGuardError(self: *const StatementLowerer, span: lib.ast.SourceSpan, message: []const u8, suggestion: ?[]const u8) void {
+    if (self.expr_lowerer.error_handler) |handler| {
+        handler.reportError(.MlirOperationFailed, span, message, suggestion) catch {};
+    } else {
+        std.log.warn("{s}", .{message});
+    }
+}
 
 /// Create an ora.yield operation with optional values
 pub fn createYield(self: *const StatementLowerer, values: []const c.MlirValue, loc: c.MlirLocation) void {
@@ -106,6 +114,11 @@ pub fn insertRefinementGuard(
     span: lib.ast.SourceSpan,
     skip_guard: bool,
 ) StatementLowerer.LoweringError!c.MlirValue {
+    if (c.mlirValueIsNull(value)) {
+        reportRefinementGuardError(self, span, "Refinement guard creation failed: value is null", "Ensure the value is produced before guard insertion.");
+        return value;
+    }
+
     // Optimization: skip guard if flag is set (determined during type resolution)
     if (skip_guard) {
         return value;
@@ -124,7 +137,8 @@ pub fn insertRefinementGuard(
             const min_attr = if (mv.min > std.math.maxInt(i64)) blk: {
                 var min_buf: [100]u8 = undefined;
                 const min_str = std.fmt.bufPrint(&min_buf, "{d}", .{mv.min}) catch {
-                    @panic("Failed to format min_value - buffer too small");
+                    reportRefinementGuardError(self, span, "Refinement guard creation failed: could not format min_value", "Reduce the refinement bound or report a compiler bug.");
+                    return value;
                 };
                 const min_str_ref = h.strRef(min_str);
                 break :blk c.oraIntegerAttrGetFromString(min_type, min_str_ref);
@@ -143,8 +157,9 @@ pub fn insertRefinementGuard(
             const actual_value = if (value_base_type.ptr != null) blk: {
                 // Convert refinement type to base type using ora.refinement_to_base
                 const convert_op = c.oraRefinementToBaseOpCreate(self.ctx, loc, value, self.block);
-                if (convert_op.ptr == null) {
-                    @panic("Failed to create ora.refinement_to_base operation");
+                if (c.mlirOperationIsNull(convert_op)) {
+                    reportRefinementGuardError(self, span, "Refinement guard creation failed: ora.refinement_to_base returned null", "Ensure the Ora dialect is registered before lowering.");
+                    return value;
                 }
                 // Operation is already inserted by oraRefinementToBaseOpCreate, no need to append
                 break :blk h.getResult(convert_op, 0);
@@ -176,7 +191,8 @@ pub fn insertRefinementGuard(
             const max_attr = if (mv.max > std.math.maxInt(i64)) blk: {
                 var max_buf: [100]u8 = undefined;
                 const max_str = std.fmt.bufPrint(&max_buf, "{d}", .{mv.max}) catch {
-                    @panic("Failed to format max_value - buffer too small");
+                    reportRefinementGuardError(self, span, "Refinement guard creation failed: could not format max_value", "Reduce the refinement bound or report a compiler bug.");
+                    return value;
                 };
                 const max_str_ref = h.strRef(max_str);
                 break :blk c.oraIntegerAttrGetFromString(max_type, max_str_ref);
@@ -195,8 +211,9 @@ pub fn insertRefinementGuard(
             const actual_value = if (value_base_type.ptr != null) blk: {
                 // Convert refinement type to base type using ora.refinement_to_base
                 const convert_op = c.oraRefinementToBaseOpCreate(self.ctx, loc, value, self.block);
-                if (convert_op.ptr == null) {
-                    @panic("Failed to create ora.refinement_to_base operation");
+                if (c.mlirOperationIsNull(convert_op)) {
+                    reportRefinementGuardError(self, span, "Refinement guard creation failed: ora.refinement_to_base returned null", "Ensure the Ora dialect is registered before lowering.");
+                    return value;
                 }
                 // Operation is already inserted by oraRefinementToBaseOpCreate, no need to append
                 break :blk h.getResult(convert_op, 0);
@@ -228,7 +245,8 @@ pub fn insertRefinementGuard(
             const min_attr = if (ir.min > std.math.maxInt(i64)) blk: {
                 var min_buf: [100]u8 = undefined;
                 const min_str = std.fmt.bufPrint(&min_buf, "{d}", .{ir.min}) catch {
-                    @panic("Failed to format in_range min - buffer too small");
+                    reportRefinementGuardError(self, span, "Refinement guard creation failed: could not format in_range min", "Reduce the refinement bound or report a compiler bug.");
+                    return value;
                 };
                 const min_str_ref = h.strRef(min_str);
                 break :blk c.oraIntegerAttrGetFromString(op_type, min_str_ref);
@@ -238,7 +256,8 @@ pub fn insertRefinementGuard(
             const max_attr = if (ir.max > std.math.maxInt(i64)) blk: {
                 var max_buf: [100]u8 = undefined;
                 const max_str = std.fmt.bufPrint(&max_buf, "{d}", .{ir.max}) catch {
-                    @panic("Failed to format in_range max - buffer too small");
+                    reportRefinementGuardError(self, span, "Refinement guard creation failed: could not format in_range max", "Reduce the refinement bound or report a compiler bug.");
+                    return value;
                 };
                 const max_str_ref = h.strRef(max_str);
                 break :blk c.oraIntegerAttrGetFromString(op_type, max_str_ref);
@@ -259,8 +278,9 @@ pub fn insertRefinementGuard(
             const actual_value = if (value_base_type.ptr != null) blk: {
                 // Convert refinement type to base type using ora.refinement_to_base
                 const convert_op = c.oraRefinementToBaseOpCreate(self.ctx, loc, value, self.block);
-                if (convert_op.ptr == null) {
-                    @panic("Failed to create ora.refinement_to_base operation");
+                if (c.mlirOperationIsNull(convert_op)) {
+                    reportRefinementGuardError(self, span, "Refinement guard creation failed: ora.refinement_to_base returned null", "Ensure the Ora dialect is registered before lowering.");
+                    return value;
                 }
                 // Operation is already inserted by oraRefinementToBaseOpCreate, no need to append
                 break :blk h.getResult(convert_op, 0);

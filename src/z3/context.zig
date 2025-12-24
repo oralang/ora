@@ -9,7 +9,7 @@
 //===----------------------------------------------------------------------===//
 
 const std = @import("std");
-const c = @import("c.zig").c;
+const c = @import("c.zig");
 
 /// Z3 Context wrapper for RAII-style resource management
 pub const Context = struct {

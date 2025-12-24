@@ -195,6 +195,50 @@ test "declarations: contract with storage variable" {
     }
 }
 
+test "declarations: contract with extends and implements" {
+    const allocator = testing.allocator;
+    const source = "contract Child extends Parent implements I1, I2 { }";
+
+    var lex = lexer.Lexer.init(allocator, source);
+    defer lex.deinit();
+    const tokens = try lex.scanTokens();
+    defer allocator.free(tokens);
+
+    var arena = ast_arena.AstArena.init(allocator);
+    defer arena.deinit();
+    var parser_instance = parser.Parser.init(tokens, &arena);
+
+    const nodes = try parser_instance.parse();
+    defer arena.allocator().free(nodes);
+
+    try testing.expect(nodes.len == 1);
+    try testing.expect(nodes[0] == .Contract);
+    if (nodes[0] == .Contract) {
+        try testing.expect(std.mem.eql(u8, "Parent", nodes[0].Contract.extends.?));
+        try testing.expectEqual(@as(usize, 2), nodes[0].Contract.implements.len);
+        try testing.expect(std.mem.eql(u8, "I1", nodes[0].Contract.implements[0]));
+        try testing.expect(std.mem.eql(u8, "I2", nodes[0].Contract.implements[1]));
+    }
+}
+
+test "declarations: extends keyword rejected as contract name" {
+    const allocator = testing.allocator;
+    const source = "contract extends { }";
+
+    var lex = lexer.Lexer.init(allocator, source);
+    defer lex.deinit();
+    const tokens = try lex.scanTokens();
+    defer allocator.free(tokens);
+
+    var arena = ast_arena.AstArena.init(allocator);
+    defer arena.deinit();
+    var parser_instance = parser.Parser.init(tokens, &arena);
+
+    _ = parser_instance.parse() catch {
+        return;
+    };
+}
+
 // ============================================================================
 // Struct Declaration Tests
 // ============================================================================

@@ -19,7 +19,7 @@
 //   • Expression validation
 //   • Block walking
 //
-// NOTE: Unknown identifier checking currently disabled (see ENABLE_UNKNOWN_WALKER).
+// NOTE: Unknown identifier checking is enabled in semantics/core.zig.
 //
 // ============================================================================
 
@@ -28,6 +28,7 @@ const ast = @import("../ast.zig");
 const DEBUG_SEMANTICS: bool = false;
 const state = @import("state.zig");
 const expr = @import("expression_analyzer.zig");
+const builtins = @import("../semantics.zig").builtins;
 const locals = @import("locals_binder.zig");
 const MemoryRegion = @import("../ast.zig").Memory.Region;
 
@@ -74,7 +75,15 @@ fn walkBlockForUnknowns(issues: *std.ArrayList(ast.SourceSpan), table: *state.Sy
     for (block.statements) |stmt| {
         switch (stmt) {
             .Expr => |e| try visitExprForUnknowns(issues, table, scope, e),
+            .VariableDecl => |v| {
+                if (v.value) |val| try visitExprForUnknowns(issues, table, scope, val.*);
+            },
+            .DestructuringAssignment => |da| try visitExprForUnknowns(issues, table, scope, da.value.*),
             .Return => |r| if (r.value) |v| try visitExprForUnknowns(issues, table, scope, v),
+            .CompoundAssignment => |ca| {
+                try visitExprForUnknowns(issues, table, scope, ca.target);
+                try visitExprForUnknowns(issues, table, scope, ca.value);
+            },
             .If => |iff| {
                 try visitExprForUnknowns(issues, table, scope, iff.condition);
                 const then_scope = resolveBlockScope(table, scope, &iff.then_branch);
@@ -102,6 +111,50 @@ fn walkBlockForUnknowns(issues: *std.ArrayList(ast.SourceSpan), table: *state.Sy
                     try walkBlockForUnknowns(issues, table, catch_scope, &cb.block);
                 }
             },
+            .Log => |log| {
+                for (log.args) |arg| try visitExprForUnknowns(issues, table, scope, arg);
+            },
+            .Lock => |lock| try visitExprForUnknowns(issues, table, scope, lock.path),
+            .Unlock => |unlock| try visitExprForUnknowns(issues, table, scope, unlock.path),
+            .Assert => |assert_stmt| try visitExprForUnknowns(issues, table, scope, assert_stmt.condition),
+            .Invariant => |inv| try visitExprForUnknowns(issues, table, scope, inv.condition),
+            .Requires => |req| try visitExprForUnknowns(issues, table, scope, req.condition),
+            .Ensures => |ens| try visitExprForUnknowns(issues, table, scope, ens.condition),
+            .Assume => |assume| try visitExprForUnknowns(issues, table, scope, assume.condition),
+            .Havoc => |havoc| try visitExprForUnknowns(issues, table, scope, havoc.condition),
+            .Break => |br| if (br.value) |val| try visitExprForUnknowns(issues, table, scope, val.*),
+            .Continue => |cont| if (cont.value) |val| try visitExprForUnknowns(issues, table, scope, val.*),
+            .Switch => |sw| {
+                try visitExprForUnknowns(issues, table, scope, sw.condition);
+                for (sw.cases) |*case| {
+                    switch (case.pattern) {
+                        .Range => |r| {
+                            try visitExprForUnknowns(issues, table, scope, r.start.*);
+                            try visitExprForUnknowns(issues, table, scope, r.end.*);
+                        },
+                        else => {},
+                    }
+                    switch (case.body) {
+                        .Expression => |expr_ptr| try visitExprForUnknowns(issues, table, scope, expr_ptr.*),
+                        .Block => |*blk| {
+                            const case_scope = resolveBlockScope(table, scope, blk);
+                            try walkBlockForUnknowns(issues, table, case_scope, blk);
+                        },
+                        .LabeledBlock => |*lb| {
+                            const case_scope = resolveBlockScope(table, scope, &lb.block);
+                            try walkBlockForUnknowns(issues, table, case_scope, &lb.block);
+                        },
+                    }
+                }
+                if (sw.default_case) |*defb| {
+                    const def_scope = resolveBlockScope(table, scope, defb);
+                    try walkBlockForUnknowns(issues, table, def_scope, defb);
+                }
+            },
+            .LabeledBlock => |lb| {
+                const inner_scope = resolveBlockScope(table, scope, &lb.block);
+                try walkBlockForUnknowns(issues, table, inner_scope, &lb.block);
+            },
             // No plain Block variant in StmtNode; ignore
             else => {},
         }
@@ -123,7 +176,7 @@ fn visitExprForUnknowns(issues: *std.ArrayList(ast.SourceSpan), table: *state.Sy
     if (!table.isScopeKnown(scope)) return; // Defensive guard
     switch (expr_node) {
         .Identifier => |id| {
-            if (table.isScopeKnown(scope) and state.SymbolTable.findUp(scope, id.name) != null) {
+            if (table.isScopeKnown(scope) and table.safeFindUp(scope, id.name) != null) {
                 // ok
             } else {
                 try issues.append(id.span);
@@ -143,6 +196,14 @@ fn visitExprForUnknowns(issues: *std.ArrayList(ast.SourceSpan), table: *state.Sy
             try visitExprForUnknowns(issues, table, scope, ca.value.*);
         },
         .Call => |c| {
+            if (builtins.isMemberAccessChain(c.callee)) {
+                const path = builtins.getMemberAccessPath(table.allocator, c.callee) catch "";
+                defer if (path.len > 0) table.allocator.free(path);
+                if (path.len > 0 and table.builtin_registry.lookup(path) != null) {
+                    for (c.arguments) |arg| try visitExprForUnknowns(issues, table, scope, arg.*);
+                    return;
+                }
+            }
             try visitExprForUnknowns(issues, table, scope, c.callee.*);
             for (c.arguments) |arg| try visitExprForUnknowns(issues, table, scope, arg.*);
         },
@@ -150,7 +211,14 @@ fn visitExprForUnknowns(issues: *std.ArrayList(ast.SourceSpan), table: *state.Sy
             try visitExprForUnknowns(issues, table, scope, ix.target.*);
             try visitExprForUnknowns(issues, table, scope, ix.index.*);
         },
-        .FieldAccess => |fa| try visitExprForUnknowns(issues, table, scope, fa.target.*),
+        .FieldAccess => |fa| {
+            if (builtins.isMemberAccessChain(&expr_node)) {
+                const path = builtins.getMemberAccessPath(table.allocator, &expr_node) catch "";
+                defer if (path.len > 0) table.allocator.free(path);
+                if (path.len > 0 and table.builtin_registry.lookup(path) != null) return;
+            }
+            try visitExprForUnknowns(issues, table, scope, fa.target.*);
+        },
         .Cast => |c| try visitExprForUnknowns(issues, table, scope, c.operand.*),
         .Comptime => |ct| {
             _ = ct; // Skip deeper traversal for comptime blocks in unknowns walker
@@ -173,6 +241,7 @@ fn visitExprForUnknowns(issues: *std.ArrayList(ast.SourceSpan), table: *state.Sy
             try visitExprForUnknowns(issues, table, scope, si.struct_name.*);
             for (si.fields) |f| try visitExprForUnknowns(issues, table, scope, f.value.*);
         },
+        .Destructuring => |d| try visitExprForUnknowns(issues, table, scope, d.value.*),
         .Quantified => |q| {
             if (q.condition) |cond| try visitExprForUnknowns(issues, table, scope, cond.*);
             try visitExprForUnknowns(issues, table, scope, q.body.*);

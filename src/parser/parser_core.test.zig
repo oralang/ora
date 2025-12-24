@@ -11,6 +11,7 @@ const lexer = ora_root.lexer;
 const parser = ora_root.parser;
 const ast = ora_root.ast;
 const ast_arena = ora_root.ast_arena;
+const diagnostics = ora_root.parser.diagnostics;
 
 // ============================================================================
 // Empty Input Tests
@@ -205,6 +206,9 @@ test "parser_core: unexpected token recovery" {
     const allocator = testing.allocator;
     // Invalid syntax - should recover and continue
     const source = "contract Test { invalid syntax here } contract Valid { }";
+    const prev_diag = diagnostics.enable_stderr_diagnostics;
+    diagnostics.enable_stderr_diagnostics = false;
+    defer diagnostics.enable_stderr_diagnostics = prev_diag;
 
     var lex = lexer.Lexer.init(allocator, source);
     defer lex.deinit();
@@ -231,6 +235,9 @@ test "parser_core: incomplete contract" {
     const allocator = testing.allocator;
     // Missing closing brace
     const source = "contract Test {";
+    const prev_diag = diagnostics.enable_stderr_diagnostics;
+    diagnostics.enable_stderr_diagnostics = false;
+    defer diagnostics.enable_stderr_diagnostics = prev_diag;
 
     var lex = lexer.Lexer.init(allocator, source);
     defer lex.deinit();

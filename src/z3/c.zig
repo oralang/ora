@@ -70,24 +70,54 @@ pub const Z3_mk_bvult = c.Z3_mk_bvult;
 pub const Z3_mk_bvugt = c.Z3_mk_bvugt;
 pub const Z3_mk_bvule = c.Z3_mk_bvule;
 pub const Z3_mk_bvuge = c.Z3_mk_bvuge;
+pub const Z3_mk_bvslt = c.Z3_mk_bvslt;
+pub const Z3_mk_bvsle = c.Z3_mk_bvsle;
+pub const Z3_mk_bvsgt = c.Z3_mk_bvsgt;
+pub const Z3_mk_bvsge = c.Z3_mk_bvsge;
+pub const Z3_mk_bvand = c.Z3_mk_bvand;
+pub const Z3_mk_bvor = c.Z3_mk_bvor;
+pub const Z3_mk_bvxor = c.Z3_mk_bvxor;
+pub const Z3_mk_bvshl = c.Z3_mk_bvshl;
+pub const Z3_mk_bvashr = c.Z3_mk_bvashr;
+pub const Z3_mk_bvlshr = c.Z3_mk_bvlshr;
 
 // Constants and variables
 pub const Z3_mk_const = c.Z3_mk_const;
 pub const Z3_mk_int_symbol = c.Z3_mk_int_symbol;
 pub const Z3_mk_string_symbol = c.Z3_mk_string_symbol;
 pub const Z3_mk_unsigned_int64 = c.Z3_mk_unsigned_int64;
+pub const Z3_mk_numeral = c.Z3_mk_numeral;
+pub const Z3_mk_func_decl = c.Z3_mk_func_decl;
+pub const Z3_mk_app = c.Z3_mk_app;
 
 // Boolean operations
 pub const Z3_mk_and = c.Z3_mk_and;
 pub const Z3_mk_or = c.Z3_mk_or;
 pub const Z3_mk_not = c.Z3_mk_not;
+pub const Z3_mk_xor = c.Z3_mk_xor;
 pub const Z3_mk_implies = c.Z3_mk_implies;
 pub const Z3_mk_ite = c.Z3_mk_ite;
+pub const Z3_mk_true = c.Z3_mk_true;
+pub const Z3_mk_false = c.Z3_mk_false;
+pub const Z3_mk_eq = c.Z3_mk_eq;
+pub const Z3_mk_extract = c.Z3_mk_extract;
+pub const Z3_mk_bool_sort = c.Z3_mk_bool_sort;
+
+// Sort queries
+pub const Z3_get_sort = c.Z3_get_sort;
+pub const Z3_get_sort_kind = c.Z3_get_sort_kind;
+pub const Z3_get_bv_sort_size = c.Z3_get_bv_sort_size;
+
+// Sort kind constants
+pub const Z3_BOOL_SORT = c.Z3_BOOL_SORT;
+pub const Z3_BV_SORT = c.Z3_BV_SORT;
+pub const Z3_ARRAY_SORT = c.Z3_ARRAY_SORT;
 
 // Model evaluation
 pub const Z3_model_inc_ref = c.Z3_model_inc_ref;
 pub const Z3_model_dec_ref = c.Z3_model_dec_ref;
 pub const Z3_model_eval = c.Z3_model_eval;
+pub const Z3_model_to_string = c.Z3_model_to_string;
 pub const Z3_get_numeral_string = c.Z3_get_numeral_string;
 
 // Array operations (for storage maps)

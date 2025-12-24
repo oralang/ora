@@ -3,7 +3,7 @@
 // ============================================================================
 
 const std = @import("std");
-const c = @import("../c.zig").c;
+const c = @import("mlir_c_api").c;
 const lib = @import("ora_lib");
 const h = @import("../helpers.zig");
 const LocalVarMap = @import("../symbols.zig").LocalVarMap;
@@ -73,13 +73,13 @@ pub fn lowerQuantifiedExpression(self: *const DeclarationLowerer, quantified: *c
     // Lower the condition if present
     if (quantified.condition) |condition| {
         const const_local_var_map = if (local_var_map) |lvm| @as(*const LocalVarMap, lvm) else null;
-        const expr_lowerer = ExpressionLowerer.init(self.ctx, condition_block, self.type_mapper, param_map, storage_map, const_local_var_map, self.symbol_table, self.builtin_registry, self.locations, self.ora_dialect);
+        const expr_lowerer = ExpressionLowerer.init(self.ctx, condition_block, self.type_mapper, param_map, storage_map, const_local_var_map, self.symbol_table, self.builtin_registry, self.error_handler, self.locations, self.ora_dialect);
         _ = expr_lowerer.lowerExpression(condition);
     }
 
     // Lower the body expression
     const const_local_var_map = if (local_var_map) |lvm| @as(*const LocalVarMap, lvm) else null;
-    const expr_lowerer = ExpressionLowerer.init(self.ctx, body_block, self.type_mapper, param_map, storage_map, const_local_var_map, self.symbol_table, self.builtin_registry, self.locations, self.ora_dialect);
+    const expr_lowerer = ExpressionLowerer.init(self.ctx, body_block, self.type_mapper, param_map, storage_map, const_local_var_map, self.symbol_table, self.builtin_registry, self.error_handler, self.locations, self.ora_dialect);
     _ = expr_lowerer.lowerExpression(quantified.body);
 
     // Create the quantified operation

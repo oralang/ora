@@ -27,15 +27,10 @@ const stmt = @import("statement_analyzer.zig");
 const logs = @import("log_analyzer.zig");
 const errors = @import("error_analyzer.zig");
 const expr = @import("expression_analyzer.zig");
-// TODO(semantics): Re-enable unknown-identifier walker when scope mapping is fully hardened.
-// Current crash root cause: walking identifiers while some nested block/function scopes
-// are not yet recorded leads to invalid parent chains in findUp().
-// Hardening plan:
-//  - Ensure all function/block scopes are registered before Phase 2
-//  - Add defensive parent-chain validation in SymbolTable.findUp
-//  - Consider constraining unknowns to current + function scope first
-const ENABLE_UNKNOWN_WALKER: bool = false;
+// Unknown-identifier checking: safe by default using safeFindUp() and scope guards.
+const ENABLE_UNKNOWN_WALKER: bool = true;
 const locals = @import("locals_binder.zig");
+const ManagedArrayList = std.array_list.Managed;
 
 pub const Diagnostic = struct {
     message: []const u8,
@@ -89,7 +84,7 @@ fn checkFunction(
     allocator: std.mem.Allocator,
     symbols: *state.SymbolTable,
     f: *const ast.FunctionNode,
-    diags: *std.ArrayList(Diagnostic),
+    diags: *ManagedArrayList(Diagnostic),
 ) !void {
     const scope = symbols.function_scopes.get(f.name) orelse return;
 
@@ -130,7 +125,7 @@ fn checkFunction(
 
 // Phase 2 scaffolding: type-check and validation will be added here, orchestrating analyzers.
 pub fn analyzePhase2(allocator: std.mem.Allocator, nodes: []const ast.AstNode, symbols: *state.SymbolTable) ![]Diagnostic {
-    var diags = std.ArrayList(Diagnostic).init(allocator);
+    var diags = ManagedArrayList(Diagnostic).init(allocator);
 
     // Check all functions (top-level and contract members)
     for (nodes) |*n| switch (n.*) {

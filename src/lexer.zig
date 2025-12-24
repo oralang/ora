@@ -144,6 +144,8 @@ pub const TokenType = enum {
 
     // Keywords
     Contract,
+    Extends,
+    Implements,
     Pub,
     Fn,
     Let,
@@ -524,6 +526,8 @@ pub const LexerFeature = enum {
 /// Keywords map for efficient lookup
 pub const keywords = std.StaticStringMap(TokenType).initComptime(.{
     .{ "contract", .Contract },
+    .{ "extends", .Extends },
+    .{ "implements", .Implements },
     .{ "pub", .Pub },
     .{ "fn", .Fn },
     .{ "let", .Let },
@@ -1558,7 +1562,7 @@ pub inline fn isWhitespace(c: u8) bool {
 // Token utility functions for parser use
 pub fn isKeyword(token_type: TokenType) bool {
     return switch (token_type) {
-        .Contract, .Pub, .Fn, .Let, .Var, .Const, .Immutable, .Storage, .Memory, .Tstore, .Init, .Log, .If, .Else, .While, .For, .Break, .Continue, .Return, .Requires, .Ensures, .Invariant, .Old, .Result, .Modifies, .Decreases, .Increases, .Assume, .Havoc, .Switch, .Ghost, .Assert, .Void, .Comptime, .As, .Import, .Struct, .Enum, .True, .False, .Error, .Try, .Catch, .From, .To, .Forall, .Exists, .Where, .U8, .U16, .U32, .U64, .U128, .U256, .I8, .I16, .I32, .I64, .I128, .I256, .Bool, .Address, .String, .Map, .Slice, .Bytes => true,
+        .Contract, .Extends, .Implements, .Pub, .Fn, .Let, .Var, .Const, .Immutable, .Storage, .Memory, .Tstore, .Init, .Log, .If, .Else, .While, .For, .Break, .Continue, .Return, .Requires, .Ensures, .Invariant, .Old, .Result, .Modifies, .Decreases, .Increases, .Assume, .Havoc, .Switch, .Ghost, .Assert, .Void, .Comptime, .As, .Import, .Struct, .Enum, .True, .False, .Error, .Try, .Catch, .From, .To, .Forall, .Exists, .Where, .U8, .U16, .U32, .U64, .U128, .U256, .I8, .I16, .I32, .I64, .I128, .I256, .Bool, .Address, .String, .Map, .Slice, .Bytes => true,
         else => false,
     };
 }

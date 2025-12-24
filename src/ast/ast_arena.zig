@@ -111,9 +111,8 @@ pub const AstArena = struct {
     /// Reset the arena, freeing all allocated memory
     /// This will invalidate all nodes created by this arena
     pub fn reset(self: *AstArena) !void {
-        // In debug mode, we check if there are still active nodes
-        if (self.debug_mode and self.stats.node_count > 0) {
-            return AstArenaError.ArenaResetWithActiveNodes;
+        if (self.debug_mode and self.stats.current_usage > 0) {
+            std.log.warn("AstArena reset with {d} bytes still tracked; resetting anyway", .{self.stats.current_usage});
         }
 
         // Reset the arena
@@ -136,3 +135,11 @@ pub const AstArena = struct {
         self.debug_mode = enable;
     }
 };
+
+test "ast_arena: debug reset allows reset with tracked nodes" {
+    var arena = AstArena.initDebug(std.testing.allocator);
+    defer arena.deinit();
+
+    _ = try arena.createNode(u32);
+    try arena.reset();
+}

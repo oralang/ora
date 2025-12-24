@@ -3,7 +3,7 @@
 // ============================================================================
 
 const std = @import("std");
-const c = @import("../c.zig").c;
+const c = @import("mlir_c_api").c;
 const lib = @import("ora_lib");
 const h = @import("../helpers.zig");
 const constants = @import("../lower.zig");
@@ -59,7 +59,7 @@ pub fn lowerConstDecl(self: *const DeclarationLowerer, const_decl: *const lib.as
 
     // Lower the constant value expression
     // Create a temporary expression lowerer to lower the constant value
-    const expr_lowerer = ExpressionLowerer.init(self.ctx, block, self.type_mapper, null, null, null, self.symbol_table, self.builtin_registry, self.locations, self.ora_dialect);
+    const expr_lowerer = ExpressionLowerer.init(self.ctx, block, self.type_mapper, null, null, null, self.symbol_table, self.builtin_registry, self.error_handler, self.locations, self.ora_dialect);
     const const_value = expr_lowerer.lowerExpression(const_decl.value);
 
     // Add a yield to terminate the region (required for regions)

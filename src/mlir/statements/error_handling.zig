@@ -4,13 +4,44 @@
 // Error handling operations: try/catch, error declarations
 
 const std = @import("std");
-const c = @import("../c.zig").c;
+const c = @import("mlir_c_api").c;
 const lib = @import("ora_lib");
 const h = @import("../helpers.zig");
 const StatementLowerer = @import("statement_lowerer.zig").StatementLowerer;
 const LoweringError = StatementLowerer.LoweringError;
 const helpers = @import("helpers.zig");
 const return_stmt = @import("return.zig");
+
+fn getLastOperation(block: c.MlirBlock) c.MlirOperation {
+    var op = c.mlirBlockGetFirstOperation(block);
+    var last: c.MlirOperation = c.MlirOperation{};
+    while (!c.mlirOperationIsNull(op)) {
+        last = op;
+        op = c.mlirOperationGetNextInBlock(op);
+    }
+    return last;
+}
+
+fn findTryCatchOperandAfter(block: c.MlirBlock, last_before: c.MlirOperation) ?c.MlirValue {
+    var op = if (c.mlirOperationIsNull(last_before))
+        c.mlirBlockGetFirstOperation(block)
+    else
+        c.mlirOperationGetNextInBlock(last_before);
+
+    var last_try_operand: ?c.MlirValue = null;
+    while (!c.mlirOperationIsNull(op)) {
+        const name_id = c.mlirOperationGetName(op);
+        const name_ref = c.mlirIdentifierStr(name_id);
+        if (name_ref.length > 0 and std.mem.eql(u8, name_ref.data[0..name_ref.length], "ora.try_catch")) {
+            if (c.mlirOperationGetNumOperands(op) > 0) {
+                last_try_operand = c.mlirOperationGetOperand(op, 0);
+            }
+        }
+        op = c.mlirOperationGetNextInBlock(op);
+    }
+
+    return last_try_operand;
+}
 
 /// Lower try-catch statements with exception handling
 pub fn lowerTryBlock(self: *const StatementLowerer, try_stmt: *const lib.ast.Statements.TryBlockNode) LoweringError!void {
@@ -47,25 +78,27 @@ pub fn lowerTryBlock(self: *const StatementLowerer, try_stmt: *const lib.ast.Sta
     try_lowerer.try_return_flag_memref = return_flag_memref;
     try_lowerer.try_return_value_memref = return_value_memref;
 
+    const last_before_try = getLastOperation(self.block);
+
     // Lower the try block body with the flag and memrefs set
     _ = try try_lowerer.lowerBlockBody(try_stmt.try_block, self.block);
 
     // If there's a catch block, lower it after the try block
     if (try_stmt.catch_block) |catch_block| {
         // If there's an error variable, create a placeholder value and add it to LocalVarMap
-        // TODO: Properly implement ora.try_catch to get the actual error value from the try operation
         if (catch_block.error_variable) |error_var_name| {
-            // Create a placeholder error value (u256 for now - error types need proper implementation)
-            const error_type = c.mlirIntegerTypeGet(self.ctx, 256);
-            var error_const_state = h.opState("arith.constant", loc);
-            const error_const_attr = c.mlirIntegerAttrGet(error_type, 0);
-            const error_value_id = h.identifier(self.ctx, "value");
-            var error_attrs = [_]c.MlirNamedAttribute{c.mlirNamedAttributeGet(error_value_id, error_const_attr)};
-            c.mlirOperationStateAddAttributes(&error_const_state, error_attrs.len, &error_attrs);
-            c.mlirOperationStateAddResults(&error_const_state, 1, @ptrCast(&error_type));
-            const error_const_op = c.mlirOperationCreate(&error_const_state);
-            h.appendOp(self.block, error_const_op);
-            const error_value = h.getResult(error_const_op, 0);
+            const error_value = findTryCatchOperandAfter(self.block, last_before_try) orelse blk: {
+                const error_type = c.mlirIntegerTypeGet(self.ctx, 256);
+                var error_const_state = h.opState("arith.constant", loc);
+                const error_const_attr = c.mlirIntegerAttrGet(error_type, 0);
+                const error_value_id = h.identifier(self.ctx, "value");
+                var error_attrs = [_]c.MlirNamedAttribute{c.mlirNamedAttributeGet(error_value_id, error_const_attr)};
+                c.mlirOperationStateAddAttributes(&error_const_state, error_attrs.len, &error_attrs);
+                c.mlirOperationStateAddResults(&error_const_state, 1, @ptrCast(&error_type));
+                const error_const_op = c.mlirOperationCreate(&error_const_state);
+                h.appendOp(self.block, error_const_op);
+                break :blk h.getResult(error_const_op, 0);
+            };
 
             // Add error variable to LocalVarMap so it can be referenced in the catch block
             if (self.local_var_map) |lvm| {

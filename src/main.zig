@@ -14,6 +14,7 @@
 const std = @import("std");
 const lib = @import("ora_lib");
 const build_options = @import("build_options");
+const cli_args = @import("cli/args.zig");
 
 /// MLIR-related command line options
 const MlirOptions = struct {
@@ -22,6 +23,7 @@ const MlirOptions = struct {
     opt_level: ?[]const u8,
     output_dir: ?[]const u8,
     canonicalize: bool = true,
+    verify_z3: bool = false,
 
     fn getOptimizationLevel(self: MlirOptions) OptimizationLevel {
         if (self.opt_level) |level| {
@@ -64,78 +66,22 @@ pub fn main() !void {
         return;
     }
 
-    // Parse arguments with compiler-style CLI
-    var output_dir: ?[]const u8 = null;
-    var input_file: ?[]const u8 = null;
+    const parsed = cli_args.parseArgs(args[1..]) catch {
+        try printUsage();
+        return;
+    };
 
-    // Compilation stage control (--emit-X flags)
-    var emit_tokens: bool = false;
-    var emit_ast: bool = false;
-    var emit_mlir: bool = false;
-    var emit_mlir_sir: bool = false;
-    var emit_cfg: bool = false;
-    var canonicalize_mlir: bool = true;
-    var analyze_state: bool = false;
-
-    // MLIR options
-    var mlir_opt_level: ?[]const u8 = null;
-
-    var i: usize = 1;
-
-    while (i < args.len) {
-        if (std.mem.eql(u8, args[i], "-o") or std.mem.eql(u8, args[i], "--output-dir")) {
-            if (i + 1 >= args.len) {
-                try printUsage();
-                return;
-            }
-            output_dir = args[i + 1];
-            i += 2;
-            // New --emit-X flags
-        } else if (std.mem.eql(u8, args[i], "--emit-tokens")) {
-            emit_tokens = true;
-            i += 1;
-        } else if (std.mem.eql(u8, args[i], "--emit-ast")) {
-            emit_ast = true;
-            i += 1;
-        } else if (std.mem.eql(u8, args[i], "--emit-mlir")) {
-            emit_mlir = true;
-            i += 1;
-        } else if (std.mem.eql(u8, args[i], "--emit-mlir-sir")) {
-            emit_mlir_sir = true;
-            i += 1;
-        } else if (std.mem.eql(u8, args[i], "--emit-cfg")) {
-            emit_cfg = true;
-            i += 1;
-            i += 1;
-        } else if (std.mem.eql(u8, args[i], "--analyze-state")) {
-            analyze_state = true;
-            i += 1;
-            // Optimization level flags (-O0, -O1, -O2)
-        } else if (std.mem.eql(u8, args[i], "-O0") or std.mem.eql(u8, args[i], "-Onone")) {
-            mlir_opt_level = "none";
-            i += 1;
-        } else if (std.mem.eql(u8, args[i], "-O1") or std.mem.eql(u8, args[i], "-Obasic")) {
-            mlir_opt_level = "basic";
-            i += 1;
-        } else if (std.mem.eql(u8, args[i], "-O2") or std.mem.eql(u8, args[i], "-Oaggressive")) {
-            mlir_opt_level = "aggressive";
-            i += 1;
-            // MLIR options
-        } else if (std.mem.eql(u8, args[i], "--no-validate-mlir")) {
-            // Validation is always enabled for MLIR (legacy flag, kept for compatibility)
-            i += 1;
-        } else if (std.mem.eql(u8, args[i], "--no-canonicalize")) {
-            canonicalize_mlir = false;
-            i += 1;
-            // Input file
-        } else if (input_file == null and !std.mem.startsWith(u8, args[i], "-")) {
-            input_file = args[i];
-            i += 1;
-        } else {
-            try printUsage();
-            return;
-        }
-    }
+    const output_dir: ?[]const u8 = parsed.output_dir;
+    const input_file: ?[]const u8 = parsed.input_file;
+    const emit_tokens: bool = parsed.emit_tokens;
+    const emit_ast: bool = parsed.emit_ast;
+    var emit_mlir: bool = parsed.emit_mlir;
+    const emit_mlir_sir: bool = parsed.emit_mlir_sir;
+    const emit_cfg: bool = parsed.emit_cfg;
+    const canonicalize_mlir: bool = parsed.canonicalize_mlir;
+    const analyze_state: bool = parsed.analyze_state;
+    const verify_z3: bool = parsed.verify_z3;
+    const mlir_opt_level: ?[]const u8 = parsed.mlir_opt_level;
 
     // Require input file
     if (input_file == null) {
@@ -164,6 +110,7 @@ pub fn main() !void {
         .opt_level = mlir_opt_level,
         .output_dir = output_dir,
         .canonicalize = canonicalize_mlir,
+        .verify_z3 = verify_z3,
     };
 
     // Handle CFG generation (uses MLIR's built-in view-op-graph pass)
@@ -220,6 +167,7 @@ fn printUsage() !void {
     try stdout.print("  --no-canonicalize      - Skip Ora MLIR canonicalization pass\n", .{});
     try stdout.print("\nAnalysis Options:\n", .{});
     try stdout.print("  --analyze-state        - Analyze storage reads/writes per function\n", .{});
+    try stdout.print("  --verify               - Run Z3 verification on MLIR annotations\n", .{});
     try stdout.flush();
 }
 
@@ -484,7 +432,7 @@ fn printAstSummary(writer: anytype, node: *lib.AstNode, indent: u32) !void {
 fn runCFGGeneration(allocator: std.mem.Allocator, file_path: []const u8, mlir_options: MlirOptions) !void {
     const mlir = @import("mlir/mod.zig");
     const cfg_gen = @import("mlir/cfg.zig");
-    const c = @import("mlir/c.zig").c;
+    const c = @import("mlir_c_api").c;
 
     // First generate MLIR
     var stdout_buffer: [1024]u8 = undefined;
@@ -643,7 +591,7 @@ fn generateMlirOutput(allocator: std.mem.Allocator, ast_nodes: []lib.AstNode, fi
 
     // Import MLIR modules directly (NOT through ora_lib to avoid circular dependencies)
     const mlir = @import("mlir/mod.zig");
-    const c = @import("mlir/c.zig").c;
+    const c = @import("mlir_c_api").c;
 
     // Create arena allocator for MLIR lowering phase
     // This arena will be freed after MLIR generation completes
@@ -693,6 +641,30 @@ fn generateMlirOutput(allocator: std.mem.Allocator, ast_nodes: []lib.AstNode, fi
         }
     }
 
+    // Run Z3 verification pass (formal verification)
+    if (mlir_options.verify_z3) {
+        const z3_verification = @import("z3/verification.zig");
+        var verifier = try z3_verification.VerificationPass.init(mlir_allocator);
+        defer verifier.deinit();
+
+        var verification_result = try verifier.runVerificationPass(final_module);
+        defer verification_result.deinit();
+
+        if (!verification_result.success) {
+            try stdout.print("❌ Z3 verification failed with {d} error(s):\n", .{verification_result.errors.items.len});
+            for (verification_result.errors.items) |err| {
+                try stdout.print("  - {s}\n", .{err.message});
+                if (err.counterexample) |ce| {
+                    if (ce.variables.get("__model")) |model| {
+                        try stdout.print("    Model: {s}\n", .{model});
+                    }
+                }
+            }
+            try stdout.flush();
+            std.process.exit(1);
+        }
+    }
+
     // Print warnings if any
     if (lowering_result.warnings.len > 0) {
         try stdout.print("MLIR lowering completed with {d} warnings:\n", .{lowering_result.warnings.len});
@@ -733,7 +705,7 @@ fn generateMlirOutput(allocator: std.mem.Allocator, ast_nodes: []lib.AstNode, fi
         const module_op_ora = c.mlirModuleGetOperation(lowering_result.module);
         const mlir_str_ora = c.oraPrintOperation(h.ctx, module_op_ora);
         defer if (mlir_str_ora.data != null) {
-            const mlir_c = @import("mlir/c.zig");
+            const mlir_c = @import("mlir_c_api");
             mlir_c.freeStringRef(mlir_str_ora);
         };
 
@@ -764,7 +736,7 @@ fn generateMlirOutput(allocator: std.mem.Allocator, ast_nodes: []lib.AstNode, fi
         const module_op_sir = c.mlirModuleGetOperation(lowering_result.module);
         const mlir_str_sir = c.oraPrintOperation(h.ctx, module_op_sir);
         defer if (mlir_str_sir.data != null) {
-            const mlir_c = @import("mlir/c.zig");
+            const mlir_c = @import("mlir_c_api");
             mlir_c.freeStringRef(mlir_str_sir);
         };
 

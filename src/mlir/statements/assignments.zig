@@ -4,7 +4,7 @@
 // Assignment operations: simple assignments, compound assignments, destructuring
 
 const std = @import("std");
-const c = @import("../c.zig").c;
+const c = @import("mlir_c_api").c;
 const lib = @import("ora_lib");
 const h = @import("../helpers.zig");
 const constants = @import("../lower.zig");
@@ -12,6 +12,21 @@ const StatementLowerer = @import("statement_lowerer.zig").StatementLowerer;
 const LoweringError = StatementLowerer.LoweringError;
 const MemoryManager = @import("../memory.zig").MemoryManager;
 const helpers = @import("helpers.zig");
+const error_handling = @import("../error_handling.zig");
+
+fn reportAssignmentError(
+    self: *const StatementLowerer,
+    span: lib.ast.SourceSpan,
+    error_type: error_handling.ErrorType,
+    message: []const u8,
+    suggestion: ?[]const u8,
+) void {
+    if (self.expr_lowerer.error_handler) |handler| {
+        handler.reportError(error_type, span, message, suggestion) catch {};
+    } else {
+        std.debug.print("ERROR: {s}\n", .{message});
+    }
+}
 
 /// Lower expression statements (including assignments)
 pub fn lowerExpressionStatement(self: *const StatementLowerer, expr: *const lib.ast.Statements.ExprNode) LoweringError!void {
@@ -66,6 +81,13 @@ pub fn lowerLValueAssignment(self: *const StatementLowerer, target: *const lib.a
         },
         else => {
             std.debug.print("ERROR: Unsupported lvalue type for assignment: {s}\n", .{@tagName(target.*)});
+            reportAssignmentError(
+                self,
+                span,
+                .UnsupportedFeature,
+                "Unsupported assignment target; expected identifier, field access, or index",
+                null,
+            );
             return LoweringError.InvalidLValue;
         },
     }
@@ -163,6 +185,13 @@ pub fn lowerIdentifierAssignment(self: *const StatementLowerer, ident: *const li
                                 // Only check variable_kind for variables - parameters and constants are handled differently
                                 if (symbol.symbol_kind != .Variable) {
                                     std.debug.print("[ASSIGN Stack] Symbol is not a variable (kind: {any}), cannot assign\n", .{symbol.symbol_kind});
+                                    reportAssignmentError(
+                                        self,
+                                        ident.span,
+                                        .TypeMismatch,
+                                        "Cannot assign to non-variable symbol",
+                                        "Ensure the assignment target is a mutable variable.",
+                                    );
                                     return LoweringError.InvalidLValue;
                                 }
 
@@ -173,16 +202,37 @@ pub fn lowerIdentifierAssignment(self: *const StatementLowerer, ident: *const li
                                         // If it's not a memref, this is a bug - scalar Var variables should always be memrefs
                                         std.debug.print("ERROR: Scalar Var variable '{s}' is not memref-backed - this should not happen\n", .{ident.name});
                                         std.debug.print("  Variable should have been created as memref in lowerStackVariableDecl\n", .{});
-                                        @panic("Scalar Var variable not memref-backed - assignment will create SSA dominance issues");
+                                        reportAssignmentError(
+                                            self,
+                                            ident.span,
+                                            .InternalError,
+                                            "Mutable variable is not memref-backed; assignment would break SSA dominance",
+                                            "This is a compiler bug. Please report with a minimal repro.",
+                                        );
+                                        return LoweringError.InvalidLValue;
                                     } else {
                                         // It's an immutable variable (let/const) - can't reassign
                                         std.debug.print("ERROR: Cannot assign to immutable variable: {s} (kind: {any})\n", .{ ident.name, kind });
+                                        reportAssignmentError(
+                                            self,
+                                            ident.span,
+                                            .TypeMismatch,
+                                            "Cannot assign to immutable variable",
+                                            "Declare the variable with 'var' if it needs to be reassigned.",
+                                        );
                                         return LoweringError.InvalidLValue;
                                     }
                                 } else {
                                     std.debug.print("[ASSIGN Stack] variable_kind is null for: {s}\n", .{ident.name});
                                     // No variable_kind - assume immutable for safety
                                     std.debug.print("ERROR: Cannot assign to immutable variable: {s} (no mutability info)\n", .{ident.name});
+                                    reportAssignmentError(
+                                        self,
+                                        ident.span,
+                                        .TypeMismatch,
+                                        "Cannot assign to immutable variable",
+                                        "Declare the variable with 'var' if it needs to be reassigned.",
+                                    );
                                     return LoweringError.InvalidLValue;
                                 }
                             }
@@ -190,6 +240,13 @@ pub fn lowerIdentifierAssignment(self: *const StatementLowerer, ident: *const li
                     }
                     // Variable not found in map
                     std.debug.print("ERROR: Variable not found for assignment: {s}\n", .{ident.name});
+                    reportAssignmentError(
+                        self,
+                        ident.span,
+                        .UndefinedSymbol,
+                        "Assignment target is not defined in the current scope",
+                        "Declare the variable before assigning to it.",
+                    );
                     return LoweringError.InvalidLValue;
                 },
             }
@@ -236,12 +293,19 @@ pub fn lowerFieldAccessAssignment(self: *const StatementLowerer, field_access: *
                 const actual_type = c.mlirValueGetType(target);
 
                 // Check if the actual type is an address (this is wrong - we need a struct)
-                if (c.oraTypeIsAddressType(actual_type)) {
-                    std.debug.print("ERROR: Variable '{s}' is address type but should be struct type for field access\n", .{ident.name});
-                    std.debug.print("  This likely means a map load returned !ora.address instead of the struct type\n", .{});
-                    std.debug.print("  Expected struct type: {any}\n", .{expected_struct_type});
-                    @panic("Cannot update field on address type - map load returned wrong type");
-                }
+                    if (c.oraTypeIsAddressType(actual_type)) {
+                        std.debug.print("ERROR: Variable '{s}' is address type but should be struct type for field access\n", .{ident.name});
+                        std.debug.print("  This likely means a map load returned !ora.address instead of the struct type\n", .{});
+                        std.debug.print("  Expected struct type: {any}\n", .{expected_struct_type});
+                        reportAssignmentError(
+                            self,
+                            field_access.span,
+                            .TypeMismatch,
+                            "Cannot assign to field on address-typed value; expected struct value",
+                            "Ensure the target expression resolves to a struct type before assigning to a field.",
+                        );
+                        return LoweringError.TypeMismatch;
+                    }
 
                 // If the actual type doesn't match the expected struct type, we have a problem
                 // This can happen if map loads return i256 instead of struct types
@@ -253,7 +317,14 @@ pub fn lowerFieldAccessAssignment(self: *const StatementLowerer, field_access: *
                     // Try to convert the value to the correct struct type
                     // But this won't work if it's actually i256 - we need to fix the map load
                     // For now, error out with a clear message
-                    @panic("Cannot update field on non-struct type - map load likely returned wrong type");
+                    reportAssignmentError(
+                        self,
+                        field_access.span,
+                        .TypeMismatch,
+                        "Cannot assign to field on non-struct value; expected struct type",
+                        "Check map/field types and ensure loads return the struct type, not a scalar.",
+                    );
+                    return LoweringError.TypeMismatch;
                 }
             }
         }
@@ -282,7 +353,14 @@ pub fn lowerFieldAccessAssignment(self: *const StatementLowerer, field_access: *
         if (c.oraTypeIsAddressType(actual_type)) {
             std.debug.print("ERROR: Field access target is address type but should be struct type\n", .{});
             std.debug.print("  This likely means a map load returned !ora.address instead of the struct type\n", .{});
-            @panic("Cannot update field on address type - map load returned wrong type");
+            reportAssignmentError(
+                self,
+                field_access.span,
+                .TypeMismatch,
+                "Cannot assign to field on address-typed value; expected struct value",
+                "Ensure the target expression resolves to a struct type before assigning to a field.",
+            );
+            return LoweringError.TypeMismatch;
         }
     }
 

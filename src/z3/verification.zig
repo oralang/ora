@@ -13,12 +13,14 @@
 //===----------------------------------------------------------------------===//
 
 const std = @import("std");
-const c = @import("c.zig").c;
+const z3 = @import("c.zig");
+const mlir = @import("mlir_c_api").c;
 const lib = @import("ora_lib");
 const Context = @import("context.zig").Context;
 const Solver = @import("solver.zig").Solver;
 const Encoder = @import("encoder.zig").Encoder;
 const errors = @import("errors.zig");
+const ManagedArrayList = std.array_list.Managed;
 
 /// Verification annotation extracted from AST
 pub const VerificationAnnotation = struct {
@@ -80,10 +82,18 @@ pub const VerificationPass = struct {
     function_annotations: std.StringHashMap(FunctionAnnotations),
 
     /// List of loop invariants (with their locations)
-    loop_invariants: std.ArrayList(LoopInvariants),
+    loop_invariants: ManagedArrayList(LoopInvariants),
 
     /// Current function being processed (for MLIR extraction)
     current_function_name: ?[]const u8 = null,
+
+    /// Encoded annotations collected from MLIR
+    encoded_annotations: ManagedArrayList(EncodedAnnotation),
+
+    /// Storage for duplicated function names
+    function_name_storage: ManagedArrayList([]const u8),
+    /// Storage for duplicated location file names
+    location_storage: ManagedArrayList([]const u8),
 
     pub fn init(allocator: std.mem.Allocator) !VerificationPass {
         var context = try Context.init(allocator);
@@ -100,7 +110,10 @@ pub const VerificationPass = struct {
             .encoder = encoder,
             .allocator = allocator,
             .function_annotations = std.StringHashMap(FunctionAnnotations).init(allocator),
-            .loop_invariants = std.ArrayList(LoopInvariants).init(allocator),
+            .loop_invariants = ManagedArrayList(LoopInvariants).init(allocator),
+            .encoded_annotations = ManagedArrayList(EncodedAnnotation).init(allocator),
+            .function_name_storage = ManagedArrayList([]const u8).init(allocator),
+            .location_storage = ManagedArrayList([]const u8).init(allocator),
         };
     }
 
@@ -111,6 +124,15 @@ pub const VerificationPass = struct {
         }
         self.function_annotations.deinit();
         self.loop_invariants.deinit();
+        for (self.function_name_storage.items) |name| {
+            self.allocator.free(name);
+        }
+        self.function_name_storage.deinit();
+        for (self.location_storage.items) |name| {
+            self.allocator.free(name);
+        }
+        self.location_storage.deinit();
+        self.encoded_annotations.deinit();
         self.encoder.deinit();
         self.solver.deinit();
         self.context.deinit();
@@ -210,98 +232,278 @@ pub const VerificationPass = struct {
 
     /// Extract verification annotations from MLIR module
     /// This walks MLIR operations looking for ora.requires, ora.ensures, ora.invariant
-    pub fn extractAnnotationsFromMLIR(self: *VerificationPass, mlir_module: c.MlirModule) !void {
+    pub fn extractAnnotationsFromMLIR(self: *VerificationPass, mlir_module: mlir.MlirModule) !void {
         // Get the module operation
-        const module_op = c.mlirModuleGetOperation(mlir_module);
+        const module_op = mlir.mlirModuleGetOperation(mlir_module);
 
         // Walk all regions in the module
-        const num_regions = c.mlirOperationGetNumRegions(module_op);
+        const num_regions = mlir.mlirOperationGetNumRegions(module_op);
         for (0..@intCast(num_regions)) |region_idx| {
-            const region = c.mlirOperationGetRegion(module_op, @intCast(region_idx));
+            const region = mlir.mlirOperationGetRegion(module_op, @intCast(region_idx));
             try self.walkMLIRRegion(region);
         }
     }
 
     /// Walk an MLIR region to find verification operations
-    fn walkMLIRRegion(self: *VerificationPass, region: c.MlirRegion) !void {
+    fn walkMLIRRegion(self: *VerificationPass, region: mlir.MlirRegion) !void {
         // Get first block in region
-        var current_block = c.mlirRegionGetFirstBlock(region);
+        var current_block = mlir.mlirRegionGetFirstBlock(region);
 
-        while (!c.mlirBlockIsNull(current_block)) {
+        while (!mlir.mlirBlockIsNull(current_block)) {
             // Walk operations in this block
-            var current_op = c.mlirBlockGetFirstOperation(current_block);
+            var current_op = mlir.mlirBlockGetFirstOperation(current_block);
 
-            while (!c.mlirOperationIsNull(current_op)) {
+            while (!mlir.mlirOperationIsNull(current_op)) {
+                const op_name = self.getMLIROperationName(current_op);
+                const prev_function = self.current_function_name;
+                if (std.mem.eql(u8, op_name, "func.func")) {
+                    if (try self.getFunctionNameFromOp(current_op)) |fn_name| {
+                        self.current_function_name = fn_name;
+                    }
+                }
+
                 try self.processMLIROperation(current_op);
 
                 // Walk nested regions (for functions, if statements, etc.)
-                const num_regions = c.mlirOperationGetNumRegions(current_op);
+                const num_regions = mlir.mlirOperationGetNumRegions(current_op);
                 for (0..@intCast(num_regions)) |region_idx| {
-                    const nested_region = c.mlirOperationGetRegion(current_op, @intCast(region_idx));
+                    const nested_region = mlir.mlirOperationGetRegion(current_op, @intCast(region_idx));
                     try self.walkMLIRRegion(nested_region);
                 }
 
-                current_op = c.mlirOperationGetNextInBlock(current_op);
+                if (std.mem.eql(u8, op_name, "func.func")) {
+                    self.current_function_name = prev_function;
+                }
+
+                current_op = mlir.mlirOperationGetNextInBlock(current_op);
             }
 
-            current_block = c.mlirBlockGetNextInRegion(current_block);
+            current_block = mlir.mlirBlockGetNextInRegion(current_block);
         }
     }
 
     /// Process a single MLIR operation to extract verification annotations
-    fn processMLIROperation(self: *VerificationPass, op: c.MlirOperation) !void {
+    fn processMLIROperation(self: *VerificationPass, op: mlir.MlirOperation) !void {
         const op_name = self.getMLIROperationName(op);
-
-        // Track function entry to associate annotations with functions
-        if (std.mem.eql(u8, op_name, "func.func")) {
-            // Extract function name from attributes
-            // TODO: Get function name from func.func operation
-            // For now, we'll track it when we encounter requires/ensures
-        }
 
         // Check for verification operations
         if (std.mem.eql(u8, op_name, "ora.requires")) {
             // Extract requires condition
             // Get the condition operand (should be the first and only operand)
-            const num_operands = c.mlirOperationGetNumOperands(op);
+            const num_operands = mlir.mlirOperationGetNumOperands(op);
             if (num_operands >= 1) {
-                const condition_value = c.mlirOperationGetOperand(op, 0);
-                _ = condition_value; // Will be used when encoding to Z3 (z3-2)
-                // TODO: Encode condition_value to Z3 AST and store it
-                // This will be completed when we implement VCG (z3-2)
+                const condition_value = mlir.mlirOperationGetOperand(op, 0);
+                try self.recordEncodedAnnotation(op, .Requires, condition_value);
             }
         } else if (std.mem.eql(u8, op_name, "ora.ensures")) {
             // Extract ensures condition
-            const num_operands = c.mlirOperationGetNumOperands(op);
+            const num_operands = mlir.mlirOperationGetNumOperands(op);
             if (num_operands >= 1) {
-                const condition_value = c.mlirOperationGetOperand(op, 0);
-                _ = condition_value; // Will be used when encoding to Z3 (z3-2)
-                // TODO: Encode condition_value to Z3 AST and store it
+                const condition_value = mlir.mlirOperationGetOperand(op, 0);
+                try self.recordEncodedAnnotation(op, .Ensures, condition_value);
             }
         } else if (std.mem.eql(u8, op_name, "ora.invariant")) {
             // Extract invariant condition
-            const num_operands = c.mlirOperationGetNumOperands(op);
+            const num_operands = mlir.mlirOperationGetNumOperands(op);
             if (num_operands >= 1) {
-                const condition_value = c.mlirOperationGetOperand(op, 0);
-                _ = condition_value; // Will be used when encoding to Z3 (z3-2)
-                // TODO: Encode condition_value to Z3 AST and store it
+                const condition_value = mlir.mlirOperationGetOperand(op, 0);
+                try self.recordEncodedAnnotation(op, .LoopInvariant, condition_value);
             }
         }
     }
 
     /// Get MLIR operation name as string
-    fn getMLIROperationName(_: *VerificationPass, op: c.MlirOperation) []const u8 {
-        const op_name = c.mlirOperationGetName(op);
-        const op_name_str = c.mlirIdentifierStr(op_name);
+    fn getMLIROperationName(_: *VerificationPass, op: mlir.MlirOperation) []const u8 {
+        const op_name = mlir.mlirOperationGetName(op);
+        const op_name_str = mlir.mlirIdentifierStr(op_name);
         // Create a slice from the MLIR string reference
         // Note: This is safe as long as the MLIR context is alive
         return op_name_str.data[0..op_name_str.length];
     }
 
-    // TODO: Implement verification methods
-    // - verifyArithmeticSafety
-    // - verifyBounds
-    // - verifyStorageConsistency
-    // - verifyUserInvariants
-    // - runVerificationPass
+    fn getFunctionNameFromOp(self: *VerificationPass, op: mlir.MlirOperation) !?[]const u8 {
+        const name_attr = mlir.mlirOperationGetAttributeByName(op, mlir.mlirStringRefCreate("sym_name", 8));
+        if (mlir.mlirAttributeIsNull(name_attr)) return null;
+        const name_ref = mlir.mlirStringAttrGetValue(name_attr);
+        if (name_ref.data == null or name_ref.length == 0) return null;
+        const name_slice = name_ref.data[0..name_ref.length];
+        const dup = try self.allocator.dupe(u8, name_slice);
+        try self.function_name_storage.append(dup);
+        return dup;
+    }
+
+    fn recordEncodedAnnotation(
+        self: *VerificationPass,
+        op: mlir.MlirOperation,
+        kind: VerificationAnnotation.AnnotationKind,
+        condition_value: mlir.MlirValue,
+    ) !void {
+        const function_name = self.current_function_name orelse "unknown";
+        const encoded = try self.encoder.encodeValue(condition_value);
+        const loc = try self.getLocationInfo(op);
+        try self.encoded_annotations.append(.{
+            .function_name = function_name,
+            .kind = kind,
+            .condition = encoded,
+            .file = loc.file,
+            .line = loc.line,
+            .column = loc.column,
+        });
+    }
+
+    pub fn runVerificationPass(self: *VerificationPass, mlir_module: mlir.MlirModule) !errors.VerificationResult {
+        try self.extractAnnotationsFromMLIR(mlir_module);
+        var result = errors.VerificationResult.init(self.allocator);
+
+        var by_function = std.StringHashMap(ManagedArrayList(EncodedAnnotation)).init(self.allocator);
+        defer {
+            var it = by_function.iterator();
+            while (it.next()) |entry| {
+                entry.value_ptr.deinit();
+            }
+            by_function.deinit();
+        }
+
+        for (self.encoded_annotations.items) |ann| {
+            const entry = try by_function.getOrPut(ann.function_name);
+            if (!entry.found_existing) {
+                entry.value_ptr.* = ManagedArrayList(EncodedAnnotation).init(self.allocator);
+            }
+            try entry.value_ptr.append(ann);
+        }
+
+        var it = by_function.iterator();
+        while (it.next()) |entry| {
+            const fn_name = entry.key_ptr.*;
+            const annotations = entry.value_ptr.items;
+            if (annotations.len == 0) continue;
+
+            self.solver.reset();
+            for (annotations) |ann| {
+                self.solver.assert(ann.condition);
+            }
+
+            const status = self.solver.check();
+            switch (status) {
+                z3.Z3_L_TRUE => {
+                    std.debug.print("verification: {s} -> SAT\n", .{fn_name});
+                },
+                z3.Z3_L_FALSE => {
+                    std.debug.print("verification: {s} -> UNSAT\n", .{fn_name});
+                    const counterexample = self.buildCounterexample();
+                    try result.addError(.{
+                        .error_type = .InvariantViolation,
+                        .message = try std.fmt.allocPrint(self.allocator, "verification failed (UNSAT) in {s}", .{fn_name}),
+                        .file = try self.allocator.dupe(u8, self.firstLocationFile(annotations)),
+                        .line = self.firstLocationLine(annotations),
+                        .column = self.firstLocationColumn(annotations),
+                        .counterexample = counterexample,
+                        .allocator = self.allocator,
+                    });
+                    return result;
+                },
+                else => {
+                    std.debug.print("verification: {s} -> UNKNOWN\n", .{fn_name});
+                    const counterexample = self.buildCounterexample();
+                    try result.addError(.{
+                        .error_type = .Unknown,
+                        .message = try std.fmt.allocPrint(self.allocator, "verification result unknown in {s}", .{fn_name}),
+                        .file = try self.allocator.dupe(u8, self.firstLocationFile(annotations)),
+                        .line = self.firstLocationLine(annotations),
+                        .column = self.firstLocationColumn(annotations),
+                        .counterexample = counterexample,
+                        .allocator = self.allocator,
+                    });
+                    return result;
+                },
+            }
+        }
+
+        return result;
+    }
+
+    fn getLocationInfo(self: *VerificationPass, op: mlir.MlirOperation) !struct { file: []const u8, line: u32, column: u32 } {
+        const loc = mlir.mlirOperationGetLocation(op);
+        if (mlir.mlirLocationIsNull(loc)) {
+            return .{ .file = "", .line = 0, .column = 0 };
+        }
+
+        var buffer = ManagedArrayList(u8).init(self.allocator);
+        defer buffer.deinit();
+        const collector = LocationCollector{ .buffer = &buffer };
+        mlir.mlirLocationPrint(loc, LocationCollector.callback, @ptrCast(@constCast(&collector)));
+        const loc_str = try buffer.toOwnedSlice();
+        defer self.allocator.free(loc_str);
+
+        const parsed = parseLocationString(loc_str);
+        if (parsed.file.len == 0) {
+            return .{ .file = "", .line = 0, .column = 0 };
+        }
+        const file_copy = try self.allocator.dupe(u8, parsed.file);
+        try self.location_storage.append(file_copy);
+        return .{ .file = file_copy, .line = parsed.line, .column = parsed.column };
+    }
+
+    fn firstLocationFile(self: *const VerificationPass, annotations: []const EncodedAnnotation) []const u8 {
+        _ = self;
+        return if (annotations.len > 0) annotations[0].file else "";
+    }
+
+    fn firstLocationLine(self: *const VerificationPass, annotations: []const EncodedAnnotation) u32 {
+        _ = self;
+        return if (annotations.len > 0) annotations[0].line else 0;
+    }
+
+    fn firstLocationColumn(self: *const VerificationPass, annotations: []const EncodedAnnotation) u32 {
+        _ = self;
+        return if (annotations.len > 0) annotations[0].column else 0;
+    }
+
+    fn buildCounterexample(self: *VerificationPass) ?errors.Counterexample {
+        const model = self.solver.getModel() orelse return null;
+        const model_str = z3.Z3_model_to_string(self.context.ctx, model);
+        if (model_str == null) return null;
+
+        var ce = errors.Counterexample.init(self.allocator);
+        const model_slice = std.mem.span(model_str);
+        const key = "__model";
+        ce.addVariable(key, model_slice) catch {
+            ce.deinit();
+            return null;
+        };
+        return ce;
+    }
 };
+
+const EncodedAnnotation = struct {
+    function_name: []const u8,
+    kind: VerificationAnnotation.AnnotationKind,
+    condition: z3.Z3_ast,
+    file: []const u8,
+    line: u32,
+    column: u32,
+};
+
+const LocationCollector = struct {
+    buffer: *ManagedArrayList(u8),
+
+    fn callback(str: mlir.MlirStringRef, user_data: ?*anyopaque) callconv(.c) void {
+        if (user_data == null) return;
+        const self: *LocationCollector = @ptrCast(@alignCast(user_data));
+        _ = self.buffer.appendSlice(str.data[0..str.length]) catch {};
+    }
+};
+
+fn parseLocationString(loc: []const u8) struct { file: []const u8, line: u32, column: u32 } {
+    const last = std.mem.lastIndexOfScalar(u8, loc, ':') orelse return .{ .file = "", .line = 0, .column = 0 };
+    const before_last = loc[0..last];
+    const second_last = std.mem.lastIndexOfScalar(u8, before_last, ':') orelse return .{ .file = "", .line = 0, .column = 0 };
+
+    const file = before_last[0..second_last];
+    const line_str = before_last[second_last + 1 ..];
+    const col_str = loc[last + 1 ..];
+
+    const line = std.fmt.parseInt(u32, line_str, 10) catch 0;
+    const column = std.fmt.parseInt(u32, col_str, 10) catch 0;
+    return .{ .file = file, .line = line, .column = column };
+}

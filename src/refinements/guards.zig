@@ -15,7 +15,7 @@
 // ============================================================================
 
 const std = @import("std");
-const c = @import("mlir/c_api.zig");
+const c = @import("mlir_c_api").c;
 const h = @import("mlir/helpers.zig");
 const lib = @import("../ast.zig");
 const OraType = lib.Types.OraType;
@@ -27,13 +27,13 @@ pub const GuardContext = struct {
     block: c.MlirBlock,
     expr_lowerer: *const anyopaque, // ExpressionLowerer - avoid circular dependency
     ora_dialect: *const anyopaque, // OraDialect - avoid circular dependency
+    filename: ?[]const u8 = null,
 
     /// Create a file location from a span
     fn fileLoc(self: *const GuardContext, span: lib.SourceSpan) c.MlirLocation {
-        _ = span; // TODO: Use span to create proper location
-        // This should delegate to the actual location manager
-        // For now, return a null location
-        return c.mlirLocationUnknownGet(self.ctx);
+        const fname = if (self.filename) |name| name else "input.ora";
+        const fname_ref = c.mlirStringRefCreate(fname.ptr, fname.len);
+        return c.mlirLocationFileLineColGet(self.ctx, fname_ref, span.line, span.column);
     }
 };
 

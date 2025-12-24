@@ -18,10 +18,11 @@
 // ============================================================================
 
 const std = @import("std");
-const c = @import("c.zig").c;
+const c = @import("mlir_c_api").c;
 const lib = @import("ora_lib");
 const constants = @import("lower.zig");
 const h = @import("helpers.zig");
+const ErrorHandler = @import("error_handling.zig").ErrorHandler;
 const math = std.math;
 
 /// Type alias for array struct to match AST definition
@@ -146,12 +147,14 @@ pub const TypeMapper = struct {
     ctx: c.MlirContext,
     inference_ctx: TypeInference.InferenceContext,
     symbol_table: ?*@import("lower.zig").SymbolTable,
+    error_handler: ?*ErrorHandler,
 
     pub fn init(ctx: c.MlirContext, allocator: std.mem.Allocator) TypeMapper {
         return .{
             .ctx = ctx,
             .inference_ctx = TypeInference.InferenceContext.init(allocator),
             .symbol_table = null,
+            .error_handler = null,
         };
     }
 
@@ -160,6 +163,7 @@ pub const TypeMapper = struct {
             .ctx = ctx,
             .inference_ctx = TypeInference.InferenceContext.init(allocator),
             .symbol_table = symbol_table,
+            .error_handler = null,
         };
     }
 
@@ -167,9 +171,18 @@ pub const TypeMapper = struct {
         self.inference_ctx.deinit();
     }
 
+    pub fn setErrorHandler(self: *TypeMapper, error_handler: ?*ErrorHandler) void {
+        self.error_handler = error_handler;
+    }
+
     /// Convert any Ora type to its corresponding MLIR type
     /// Supports all primitive types (u8-u256, i8-i256, bool, address, string, bytes, void)
     pub fn toMlirType(self: *const TypeMapper, ora_type: anytype) c.MlirType {
+        const span_opt: ?lib.ast.SourceSpan = if (@hasField(@TypeOf(ora_type), "span"))
+            ora_type.span
+        else
+            null;
+
         // Handle both optional and non-optional ora_type field
         const ora_ty_opt: ?lib.ast.type_info.OraType = if (@TypeOf(ora_type.ora_type) == lib.ast.type_info.OraType)
             ora_type.ora_type
@@ -179,8 +192,17 @@ pub const TypeMapper = struct {
             null;
 
         const ora_ty = ora_ty_opt orelse {
-            std.debug.print("[toMlirType] ERROR: ora_type is null - Ora is strongly typed, this should not happen!\n", .{});
-            @panic("toMlirType: ora_type is null - this indicates a type system bug");
+            if (self.error_handler) |handler| {
+                handler.reportError(
+                    .InternalError,
+                    span_opt,
+                    "Missing Ora type during MLIR lowering",
+                    "Ensure type resolution runs before MLIR lowering.",
+                ) catch {};
+            } else {
+                std.debug.print("[toMlirType] ERROR: ora_type is null - Ora is strongly typed, this should not happen!\n", .{});
+            }
+            return c.mlirIntegerTypeGet(self.ctx, constants.DEFAULT_INTEGER_BITS);
         };
 
         // Don't print refinement types with {any} as it tries to dereference base pointers

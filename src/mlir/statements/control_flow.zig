@@ -4,7 +4,7 @@
 // If, while, for, and switch statement lowering
 
 const std = @import("std");
-const c = @import("../c.zig").c;
+const c = @import("mlir_c_api").c;
 const lib = @import("ora_lib");
 const h = @import("../helpers.zig");
 const constants = @import("../lower.zig");
@@ -175,6 +175,7 @@ fn lowerBlockBodyWithYield(self: *const StatementLowerer, block_body: lib.ast.St
         self.expr_lowerer.local_var_map,
         self.expr_lowerer.symbol_table,
         self.expr_lowerer.builtin_registry,
+        self.expr_lowerer.error_handler,
         self.expr_lowerer.locations,
         self.ora_dialect,
     );
@@ -399,6 +400,7 @@ pub fn lowerWhile(self: *const StatementLowerer, while_stmt: *const lib.ast.Stat
         self.expr_lowerer.local_var_map,
         self.expr_lowerer.symbol_table,
         self.expr_lowerer.builtin_registry,
+        self.expr_lowerer.error_handler,
         self.expr_lowerer.locations,
         self.ora_dialect,
     );
@@ -552,6 +554,7 @@ fn lowerSimpleForLoop(
         self.expr_lowerer.local_var_map,
         self.expr_lowerer.symbol_table,
         self.expr_lowerer.builtin_registry,
+        self.expr_lowerer.error_handler,
         self.expr_lowerer.locations,
         self.ora_dialect,
     );
@@ -698,6 +701,7 @@ fn lowerIndexedForLoop(
         self.expr_lowerer.local_var_map,
         self.expr_lowerer.symbol_table,
         self.expr_lowerer.builtin_registry,
+        self.expr_lowerer.error_handler,
         self.expr_lowerer.locations,
         self.ora_dialect,
     );
@@ -966,7 +970,7 @@ pub fn lowerSwitch(self: *const StatementLowerer, switch_stmt: *const lib.ast.St
         const case_block = c.mlirBlockCreate(0, null, null);
         c.mlirRegionInsertOwnedBlock(case_region, 0, case_block);
 
-        const case_expr_lowerer = ExpressionLowerer.init(self.ctx, case_block, self.type_mapper, self.expr_lowerer.param_map, self.expr_lowerer.storage_map, self.expr_lowerer.local_var_map, self.expr_lowerer.symbol_table, self.expr_lowerer.builtin_registry, self.expr_lowerer.locations, self.ora_dialect);
+        const case_expr_lowerer = ExpressionLowerer.init(self.ctx, case_block, self.type_mapper, self.expr_lowerer.param_map, self.expr_lowerer.storage_map, self.expr_lowerer.local_var_map, self.expr_lowerer.symbol_table, self.expr_lowerer.builtin_registry, self.expr_lowerer.error_handler, self.expr_lowerer.locations, self.ora_dialect);
 
         switch (case.pattern) {
             .Literal => |lit| {
@@ -1113,7 +1117,7 @@ pub fn lowerSwitch(self: *const StatementLowerer, switch_stmt: *const lib.ast.St
 
         const default_has_return = helpers.blockHasReturn(self, default_block);
         if (default_has_return) {
-            const default_expr_lowerer = ExpressionLowerer.init(self.ctx, default_block_mlir, self.type_mapper, self.expr_lowerer.param_map, self.expr_lowerer.storage_map, self.expr_lowerer.local_var_map, self.expr_lowerer.symbol_table, self.expr_lowerer.builtin_registry, self.expr_lowerer.locations, self.ora_dialect);
+            const default_expr_lowerer = ExpressionLowerer.init(self.ctx, default_block_mlir, self.type_mapper, self.expr_lowerer.param_map, self.expr_lowerer.storage_map, self.expr_lowerer.local_var_map, self.expr_lowerer.symbol_table, self.expr_lowerer.builtin_registry, self.expr_lowerer.error_handler, self.expr_lowerer.locations, self.ora_dialect);
             stmt_loop: for (default_block.statements) |stmt| {
                 switch (stmt) {
                     .Return => |ret| {
@@ -1307,7 +1311,7 @@ pub fn lowerSwitchCases(self: *const StatementLowerer, cases: []const lib.ast.Ex
     const case_condition = switch (case.pattern) {
         .Literal => |lit| blk: {
             // Create case value constant in target_block (where it will be used)
-            const case_expr_lowerer = ExpressionLowerer.init(self.ctx, target_block, self.type_mapper, self.expr_lowerer.param_map, self.expr_lowerer.storage_map, self.expr_lowerer.local_var_map, self.expr_lowerer.symbol_table, self.expr_lowerer.builtin_registry, self.expr_lowerer.locations, self.ora_dialect);
+            const case_expr_lowerer = ExpressionLowerer.init(self.ctx, target_block, self.type_mapper, self.expr_lowerer.param_map, self.expr_lowerer.storage_map, self.expr_lowerer.local_var_map, self.expr_lowerer.symbol_table, self.expr_lowerer.builtin_registry, self.expr_lowerer.error_handler, self.expr_lowerer.locations, self.ora_dialect);
             const case_value = case_expr_lowerer.lowerLiteral(&lit.value);
             var cmp_state = h.opState("ora.cmp", loc);
 
@@ -1325,7 +1329,7 @@ pub fn lowerSwitchCases(self: *const StatementLowerer, cases: []const lib.ast.Ex
         },
         .Range => |range| blk: {
             // Create range values in target_block (where they will be used)
-            const case_expr_lowerer = ExpressionLowerer.init(self.ctx, target_block, self.type_mapper, self.expr_lowerer.param_map, self.expr_lowerer.storage_map, self.expr_lowerer.local_var_map, self.expr_lowerer.symbol_table, self.expr_lowerer.builtin_registry, self.expr_lowerer.locations, self.ora_dialect);
+            const case_expr_lowerer = ExpressionLowerer.init(self.ctx, target_block, self.type_mapper, self.expr_lowerer.param_map, self.expr_lowerer.storage_map, self.expr_lowerer.local_var_map, self.expr_lowerer.symbol_table, self.expr_lowerer.builtin_registry, self.expr_lowerer.error_handler, self.expr_lowerer.locations, self.ora_dialect);
             const start_val = case_expr_lowerer.lowerExpression(range.start);
             const end_val = case_expr_lowerer.lowerExpression(range.end);
 
@@ -1488,7 +1492,7 @@ pub fn lowerSwitchCases(self: *const StatementLowerer, cases: []const lib.ast.Ex
     switch (case.body) {
         .Expression => |expr| {
             std.debug.print("[lowerSwitchCases] Case body is Expression\n", .{});
-            const case_expr_lowerer = ExpressionLowerer.init(self.ctx, then_block, self.type_mapper, self.expr_lowerer.param_map, self.expr_lowerer.storage_map, self.expr_lowerer.local_var_map, self.expr_lowerer.symbol_table, self.expr_lowerer.builtin_registry, self.expr_lowerer.locations, self.ora_dialect);
+            const case_expr_lowerer = ExpressionLowerer.init(self.ctx, then_block, self.type_mapper, self.expr_lowerer.param_map, self.expr_lowerer.storage_map, self.expr_lowerer.local_var_map, self.expr_lowerer.symbol_table, self.expr_lowerer.builtin_registry, self.expr_lowerer.error_handler, self.expr_lowerer.locations, self.ora_dialect);
             _ = case_expr_lowerer.lowerExpression(expr);
             // Add appropriate yield - scf.if always uses scf.yield (even for labeled switches)
             if (result_type) |ret_type| {
@@ -1510,7 +1514,7 @@ pub fn lowerSwitchCases(self: *const StatementLowerer, cases: []const lib.ast.Ex
                 std.debug.print("[lowerSwitchCases] Labeled switch with return - storing return value and flag\n", .{});
                 var temp_lowerer = self.*;
                 temp_lowerer.block = then_block;
-                const expr_lowerer = ExpressionLowerer.init(self.ctx, then_block, self.type_mapper, self.expr_lowerer.param_map, self.expr_lowerer.storage_map, self.expr_lowerer.local_var_map, self.expr_lowerer.symbol_table, self.expr_lowerer.builtin_registry, self.expr_lowerer.locations, self.ora_dialect);
+                const expr_lowerer = ExpressionLowerer.init(self.ctx, then_block, self.type_mapper, self.expr_lowerer.param_map, self.expr_lowerer.storage_map, self.expr_lowerer.local_var_map, self.expr_lowerer.symbol_table, self.expr_lowerer.builtin_registry, self.expr_lowerer.error_handler, self.expr_lowerer.locations, self.ora_dialect);
                 var has_terminator = false;
                 for (block.statements) |stmt| {
                     if (has_terminator) break;
@@ -1612,7 +1616,7 @@ pub fn lowerSwitchCases(self: *const StatementLowerer, cases: []const lib.ast.Ex
                 std.debug.print("[lowerSwitchCases] Labeled switch with return - storing return value and flag\n", .{});
                 var temp_lowerer = self.*;
                 temp_lowerer.block = then_block;
-                const expr_lowerer = ExpressionLowerer.init(self.ctx, then_block, self.type_mapper, self.expr_lowerer.param_map, self.expr_lowerer.storage_map, self.expr_lowerer.local_var_map, self.expr_lowerer.symbol_table, self.expr_lowerer.builtin_registry, self.expr_lowerer.locations, self.ora_dialect);
+                const expr_lowerer = ExpressionLowerer.init(self.ctx, then_block, self.type_mapper, self.expr_lowerer.param_map, self.expr_lowerer.storage_map, self.expr_lowerer.local_var_map, self.expr_lowerer.symbol_table, self.expr_lowerer.builtin_registry, self.expr_lowerer.error_handler, self.expr_lowerer.locations, self.ora_dialect);
                 var has_terminator = false;
                 for (labeled.block.statements) |stmt| {
                     if (has_terminator) break;

@@ -29,10 +29,8 @@ pub fn parseContract(
     const name_token = try parser.base.consume(.Identifier, "Expected contract name");
 
     // Parse optional inheritance: contract Child extends Parent
-    // TODO: Add Extends and Implements tokens to lexer for proper keyword support
     var extends: ?[]const u8 = null;
-    if (parser.base.check(.Identifier) and std.mem.eql(u8, parser.base.peek().lexeme, "extends")) {
-        _ = parser.base.advance(); // consume "extends"
+    if (parser.base.match(.Extends)) {
         const parent_token = try parser.base.consume(.Identifier, "Expected parent contract name after 'extends'");
         extends = parent_token.lexeme;
     }
@@ -41,8 +39,7 @@ pub fn parseContract(
     var implements = std.ArrayList([]const u8){};
     defer implements.deinit(parser.base.arena.allocator());
 
-    if (parser.base.check(.Identifier) and std.mem.eql(u8, parser.base.peek().lexeme, "implements")) {
-        _ = parser.base.advance(); // consume "implements"
+    if (parser.base.match(.Implements)) {
         // Parse comma-separated list of interface names
         repeat: while (true) {
             const interface_token = try parser.base.consume(.Identifier, "Expected interface name");

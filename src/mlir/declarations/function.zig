@@ -3,7 +3,7 @@
 // ============================================================================
 
 const std = @import("std");
-const c = @import("../c.zig").c;
+const c = @import("mlir_c_api").c;
 const lib = @import("ora_lib");
 const h = @import("../helpers.zig");
 const TypeMapper = @import("../types.zig").TypeMapper;
@@ -218,11 +218,16 @@ pub fn lowerFunction(self: *const DeclarationLowerer, func: *const lib.FunctionN
 
         // Report to error handler if available
         if (self.error_handler) |eh| {
-            var error_handler = @constCast(eh);
-            error_handler.reportError(.MlirOperationFailed, func.span, error_message, suggestion) catch {};
+            eh.reportError(.MlirOperationFailed, func.span, error_message, suggestion) catch {};
         }
 
-        return c.mlirOperationCreate(&state);
+        // Ensure a terminator exists for void functions even on error.
+        if (func.return_type_info == null) {
+            const return_op = self.ora_dialect.createFuncReturn(helpers.createFileLocation(self, func.span));
+            h.appendOp(block, return_op);
+        }
+
+        return func_op;
     };
 
     // Ensures clauses are now handled before each return statement (see return.zig)
@@ -276,7 +281,7 @@ pub fn lowerFunction(self: *const DeclarationLowerer, func: *const lib.FunctionN
 fn lowerFunctionBody(self: *const DeclarationLowerer, func: *const lib.FunctionNode, block: c.MlirBlock, param_map: *const ParamMap, storage_map: ?*const StorageMap, local_var_map: ?*LocalVarMap) LoweringError!void {
     // Create a statement lowerer for this function
     const const_local_var_map = if (local_var_map) |lvm| @as(*const LocalVarMap, lvm) else null;
-    const expr_lowerer = ExpressionLowerer.init(self.ctx, block, self.type_mapper, param_map, storage_map, const_local_var_map, self.symbol_table, self.builtin_registry, self.locations, self.ora_dialect);
+    const expr_lowerer = ExpressionLowerer.init(self.ctx, block, self.type_mapper, param_map, storage_map, const_local_var_map, self.symbol_table, self.builtin_registry, self.error_handler, self.locations, self.ora_dialect);
 
     // Get the function's return type
     const function_return_type = if (func.return_type_info) |ret_info|
@@ -294,7 +299,7 @@ fn lowerFunctionBody(self: *const DeclarationLowerer, func: *const lib.FunctionN
 /// Lower requires clauses as precondition assertions with enhanced verification metadata (Requirements 6.4)
 fn lowerRequiresClauses(self: *const DeclarationLowerer, requires_clauses: []*lib.ast.Expressions.ExprNode, block: c.MlirBlock, param_map: *const ParamMap, storage_map: ?*const StorageMap, local_var_map: ?*LocalVarMap) LoweringError!void {
     const const_local_var_map = if (local_var_map) |lvm| @as(*const LocalVarMap, lvm) else null;
-    const expr_lowerer = ExpressionLowerer.init(self.ctx, block, self.type_mapper, param_map, storage_map, const_local_var_map, self.symbol_table, self.builtin_registry, self.locations, self.ora_dialect);
+    const expr_lowerer = ExpressionLowerer.init(self.ctx, block, self.type_mapper, param_map, storage_map, const_local_var_map, self.symbol_table, self.builtin_registry, self.error_handler, self.locations, self.ora_dialect);
 
     for (requires_clauses, 0..) |clause, i| {
         // Lower the requires expression
@@ -353,7 +358,7 @@ fn lowerRequiresClauses(self: *const DeclarationLowerer, requires_clauses: []*li
 /// Lower ensures clauses as postcondition assertions with enhanced verification metadata (Requirements 6.5)
 fn lowerEnsuresClauses(self: *const DeclarationLowerer, ensures_clauses: []*lib.ast.Expressions.ExprNode, block: c.MlirBlock, param_map: *const ParamMap, storage_map: ?*const StorageMap, local_var_map: ?*LocalVarMap) LoweringError!void {
     const const_local_var_map = if (local_var_map) |lvm| @as(*const LocalVarMap, lvm) else null;
-    const expr_lowerer = ExpressionLowerer.init(self.ctx, block, self.type_mapper, param_map, storage_map, const_local_var_map, self.symbol_table, self.builtin_registry, self.locations, self.ora_dialect);
+    const expr_lowerer = ExpressionLowerer.init(self.ctx, block, self.type_mapper, param_map, storage_map, const_local_var_map, self.symbol_table, self.builtin_registry, self.error_handler, self.locations, self.ora_dialect);
 
     for (ensures_clauses, 0..) |clause, i| {
         // Lower the ensures expression

@@ -4,7 +4,7 @@
 // Formal verification operations: assert, invariant, requires, ensures, assume, havoc
 
 const std = @import("std");
-const c = @import("../c.zig").c;
+const c = @import("mlir_c_api").c;
 const lib = @import("ora_lib");
 const h = @import("../helpers.zig");
 const h_helpers = @import("../helpers.zig");

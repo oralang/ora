@@ -4,7 +4,7 @@
 // Lowering for identifiers, field access, and indexing operations
 
 const std = @import("std");
-const c = @import("../c.zig").c;
+const c = @import("mlir_c_api").c;
 const lib = @import("ora_lib");
 const constants = @import("../lower.zig");
 const h = @import("../helpers.zig");
@@ -27,15 +27,19 @@ pub fn lowerIdentifier(
     }
 
     if (self.param_map) |pm| {
-        if (pm.getParamIndex(identifier.name)) |param_index| {
-            if (pm.getBlockArgument(identifier.name)) |block_arg| {
-                return block_arg;
-            } else {
-                std.debug.print("FATAL ERROR: Function parameter '{s}' at index {d} not found - compilation aborted\n", .{ identifier.name, param_index });
-                @panic("Missing function parameter - formal verification violated");
+            if (pm.getParamIndex(identifier.name)) |param_index| {
+                if (pm.getBlockArgument(identifier.name)) |block_arg| {
+                    return block_arg;
+                } else {
+                    std.debug.print("FATAL ERROR: Function parameter '{s}' at index {d} not found - compilation aborted\n", .{ identifier.name, param_index });
+                    return self.reportLoweringError(
+                        identifier.span,
+                        "missing function parameter during MLIR lowering",
+                        "check parameter mapping and verify function signature lowering",
+                    );
+                }
             }
         }
-    }
 
     var is_storage_variable = false;
     if (self.storage_map) |sm| {
@@ -586,7 +590,11 @@ pub fn createMapIndexLoad(
         const test_value_type = c.oraMapTypeGetValueType(map_type_check);
         if (test_value_type.ptr == null) {
             std.debug.print("ERROR: createMapIndexLoad called on tensor/shaped type - should use tensor.extract instead\n", .{});
-            @panic("Cannot use ora.map_get on tensor - use tensor.extract");
+            return self.reportLoweringError(
+                span,
+                "cannot use ora.map_get on tensor - use tensor.extract",
+                "use array indexing or tensor.extract for shaped types",
+            );
         }
     }
 

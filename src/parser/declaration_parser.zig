@@ -439,25 +439,16 @@ pub const DeclarationParser = struct {
         return self.parseErrorDecl(type_parser);
     }
 
-    /// Parse block (temporary - should delegate to statement parser)
+    /// Parse block by delegating to StatementParser
     fn parseBlock(self: *DeclarationParser) !ast.Statements.BlockNode {
-        _ = try self.base.consume(.LeftBrace, "Expected '{'");
+        var stmt_parser = StatementParser.init(self.base.tokens, self.base.arena);
+        stmt_parser.base.current = self.base.current;
+        stmt_parser.base.file_id = self.base.file_id;
+        stmt_parser.syncSubParsers();
 
-        var statements = std.ArrayList(ast.Statements.StmtNode).init(self.base.arena.allocator());
-        defer statements.deinit();
-
-        while (!self.base.check(.RightBrace) and !self.base.isAtEnd()) {
-            // Statement parsing should be handled by statement_parser.zig
-            // This is a placeholder until proper integration is implemented
-            _ = self.base.advance();
-        }
-
-        const end_token = try self.base.consume(.RightBrace, "Expected '}' after block");
-
-        return ast.Statements.BlockNode{
-            .statements = try statements.toOwnedSlice(self.base.arena.allocator()),
-            .span = self.base.spanFromToken(end_token),
-        };
+        const block = try stmt_parser.parseBlock();
+        self.base.current = stmt_parser.base.current;
+        return block;
     }
 
     /// Check if current token is a memory region keyword

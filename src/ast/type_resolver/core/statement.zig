@@ -302,8 +302,9 @@ fn resolveIf(
     context: TypeContext,
 ) TypeResolutionError!Typed {
     // Resolve condition (should be bool)
-    _ = try expression.synthExpr(self, &if_stmt.condition);
-    // TODO: Validate condition is bool type
+    var condition_typed = try expression.synthExpr(self, &if_stmt.condition);
+    defer condition_typed.deinit(self.allocator);
+    try validateBoolCondition(condition_typed.ty);
 
     // Resolve then branch statements
     // NOTE: We don't set block scopes here to avoid double-frees during deinit
@@ -328,7 +329,9 @@ fn resolveWhile(
     context: TypeContext,
 ) TypeResolutionError!Typed {
     // Resolve condition
-    _ = try expression.synthExpr(self, &while_stmt.condition);
+    var condition_typed = try expression.synthExpr(self, &while_stmt.condition);
+    defer condition_typed.deinit(self.allocator);
+    try validateBoolCondition(condition_typed.ty);
 
     // Resolve body
     // NOTE: We don't set block scopes here to avoid double-frees during deinit
@@ -440,6 +443,19 @@ fn resolveFor(
     }
 
     return Typed.init(TypeInfo.unknown(), Effect.pure(), self.allocator);
+}
+
+fn validateBoolCondition(condition_type: TypeInfo) TypeResolutionError!void {
+    if (!condition_type.isResolved()) {
+        return TypeResolutionError.UnresolvedType;
+    }
+    if (condition_type.ora_type) |ot| {
+        if (ot != .bool) {
+            return TypeResolutionError.TypeMismatch;
+        }
+    } else if (condition_type.category != .Bool) {
+        return TypeResolutionError.TypeMismatch;
+    }
 }
 
 fn resolveTryBlock(

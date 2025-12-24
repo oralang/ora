@@ -8,7 +8,7 @@
 // ============================================================================
 
 const std = @import("std");
-const c = @import("../c.zig").c;
+const c = @import("mlir_c_api").c;
 const lib = @import("ora_lib");
 const TypeMapper = @import("../types.zig").TypeMapper;
 const LocationTracker = @import("../locations.zig").LocationTracker;
@@ -18,7 +18,7 @@ pub const DeclarationLowerer = struct {
     ctx: c.MlirContext,
     type_mapper: *const TypeMapper,
     locations: LocationTracker,
-    error_handler: ?*const @import("../error_handling.zig").ErrorHandler,
+    error_handler: ?*@import("../error_handling.zig").ErrorHandler,
     ora_dialect: *@import("../dialect.zig").OraDialect,
     symbol_table: ?*@import("../lower.zig").SymbolTable = null,
     builtin_registry: ?*const lib.semantics.builtins.BuiltinRegistry = null,
@@ -33,7 +33,7 @@ pub const DeclarationLowerer = struct {
         };
     }
 
-    pub fn withErrorHandler(ctx: c.MlirContext, type_mapper: *const TypeMapper, locations: LocationTracker, error_handler: *const @import("../error_handling.zig").ErrorHandler, ora_dialect: *@import("../dialect.zig").OraDialect) DeclarationLowerer {
+    pub fn withErrorHandler(ctx: c.MlirContext, type_mapper: *const TypeMapper, locations: LocationTracker, error_handler: *@import("../error_handling.zig").ErrorHandler, ora_dialect: *@import("../dialect.zig").OraDialect) DeclarationLowerer {
         return .{
             .ctx = ctx,
             .type_mapper = type_mapper,
@@ -43,7 +43,7 @@ pub const DeclarationLowerer = struct {
         };
     }
 
-    pub fn withErrorHandlerAndDialect(ctx: c.MlirContext, type_mapper: *const TypeMapper, locations: LocationTracker, error_handler: *const @import("../error_handling.zig").ErrorHandler, ora_dialect: *@import("../dialect.zig").OraDialect) DeclarationLowerer {
+    pub fn withErrorHandlerAndDialect(ctx: c.MlirContext, type_mapper: *const TypeMapper, locations: LocationTracker, error_handler: *@import("../error_handling.zig").ErrorHandler, ora_dialect: *@import("../dialect.zig").OraDialect) DeclarationLowerer {
         return .{
             .ctx = ctx,
             .type_mapper = type_mapper,
@@ -53,7 +53,7 @@ pub const DeclarationLowerer = struct {
         };
     }
 
-    pub fn withErrorHandlerAndDialectAndSymbolTable(ctx: c.MlirContext, type_mapper: *const TypeMapper, locations: LocationTracker, error_handler: *const @import("../error_handling.zig").ErrorHandler, ora_dialect: *@import("../dialect.zig").OraDialect, symbol_table: *@import("../lower.zig").SymbolTable, builtin_registry: ?*const lib.semantics.builtins.BuiltinRegistry) DeclarationLowerer {
+    pub fn withErrorHandlerAndDialectAndSymbolTable(ctx: c.MlirContext, type_mapper: *const TypeMapper, locations: LocationTracker, error_handler: *@import("../error_handling.zig").ErrorHandler, ora_dialect: *@import("../dialect.zig").OraDialect, symbol_table: *@import("../lower.zig").SymbolTable, builtin_registry: ?*const lib.semantics.builtins.BuiltinRegistry) DeclarationLowerer {
         return .{
             .ctx = ctx,
             .type_mapper = type_mapper,

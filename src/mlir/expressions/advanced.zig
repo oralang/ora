@@ -4,7 +4,7 @@
 // Lowering for advanced expressions: casts, comptime, tuples, switch, etc.
 
 const std = @import("std");
-const c = @import("../c.zig").c;
+const c = @import("mlir_c_api").c;
 const lib = @import("ora_lib");
 const constants = @import("../lower.zig");
 const h = @import("../helpers.zig");
@@ -224,7 +224,7 @@ pub fn lowerSwitchExpression(
         const case_block = c.mlirBlockCreate(0, null, null);
         c.mlirRegionInsertOwnedBlock(case_region, 0, case_block);
 
-        const case_expr_lowerer = ExpressionLowerer.init(self.ctx, case_block, self.type_mapper, self.param_map, self.storage_map, self.local_var_map, self.symbol_table, self.builtin_registry, self.locations, self.ora_dialect);
+        const case_expr_lowerer = ExpressionLowerer.init(self.ctx, case_block, self.type_mapper, self.param_map, self.storage_map, self.local_var_map, self.symbol_table, self.builtin_registry, self.error_handler, self.locations, self.ora_dialect);
 
         switch (case.pattern) {
             .Literal => |lit| {
@@ -407,7 +407,7 @@ pub fn lowerSwitchExpression(
         const default_block_mlir = c.mlirBlockCreate(0, null, null);
         c.mlirRegionInsertOwnedBlock(default_region, 0, default_block_mlir);
 
-        const default_expr_lowerer = ExpressionLowerer.init(self.ctx, default_block_mlir, self.type_mapper, self.param_map, self.storage_map, self.local_var_map, self.symbol_table, self.builtin_registry, self.locations, self.ora_dialect);
+        const default_expr_lowerer = ExpressionLowerer.init(self.ctx, default_block_mlir, self.type_mapper, self.param_map, self.storage_map, self.local_var_map, self.symbol_table, self.builtin_registry, self.error_handler, self.locations, self.ora_dialect);
 
         var default_has_return = false;
         for (default_block.statements) |stmt| {
@@ -667,7 +667,11 @@ pub fn lowerStructInstantiation(
         .Identifier => |*id| id.name,
         else => {
             std.debug.print("ERROR: Struct instantiation struct_name must be an identifier\n", .{});
-            @panic("Invalid struct instantiation");
+            return self.reportLoweringError(
+                struct_inst.span,
+                "invalid struct instantiation target",
+                "use a struct identifier when instantiating a struct",
+            );
         },
     };
 

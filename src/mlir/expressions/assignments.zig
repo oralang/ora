@@ -4,7 +4,7 @@
 // Lowering for assignments and compound assignments
 
 const std = @import("std");
-const c = @import("../c.zig").c;
+const c = @import("mlir_c_api").c;
 const lib = @import("ora_lib");
 const constants = @import("../lower.zig");
 const h = @import("../helpers.zig");
@@ -104,7 +104,11 @@ pub fn lowerAssignment(
                                 .{},
                             );
                             std.debug.print("  Expected struct type: {any}\n", .{expected_struct_type});
-                            @panic("Cannot update field on address type - map load returned wrong type");
+                            return self.reportLoweringError(
+                                assign.span,
+                                "cannot update field on address type - map load returned wrong type",
+                                "check map value type and struct layout for field access",
+                            );
                         }
 
                         if (!c.mlirTypeEqual(target_type, expected_struct_type)) {
@@ -117,7 +121,11 @@ pub fn lowerAssignment(
                                 "  This likely means a map load returned wrong type instead of the struct type\n",
                                 .{},
                             );
-                            @panic("Cannot update field on non-struct type - map load likely returned wrong type");
+                            return self.reportLoweringError(
+                                assign.span,
+                                "cannot update field on non-struct type - map load likely returned wrong type",
+                                "check map value type and struct layout for field access",
+                            );
                         }
                     }
                 }
@@ -131,7 +139,11 @@ pub fn lowerAssignment(
                         "  This likely means a map load returned !ora.address instead of the struct type\n",
                         .{},
                     );
-                    @panic("Cannot update field on address type - map load returned wrong type");
+                    return self.reportLoweringError(
+                        assign.span,
+                        "cannot update field on address type - map load returned wrong type",
+                        "check map value type and struct layout for field access",
+                    );
                 }
             }
 
@@ -317,7 +329,12 @@ pub fn storeLValue(
                                 .{},
                             );
                             std.debug.print("  Expected struct type: {any}\n", .{expected_struct_type});
-                            @panic("Cannot update field on address type - map load returned wrong type");
+                            _ = self.reportLoweringError(
+                                span,
+                                "cannot update field on address type - map load returned wrong type",
+                                "check map value type and struct layout for field access",
+                            );
+                            return;
                         }
 
                         if (!c.mlirTypeEqual(target_type, expected_struct_type)) {
@@ -330,7 +347,12 @@ pub fn storeLValue(
                                 "  This likely means a map load returned wrong type instead of the struct type\n",
                                 .{},
                             );
-                            @panic("Cannot update field on non-struct type - map load likely returned wrong type");
+                            _ = self.reportLoweringError(
+                                span,
+                                "cannot update field on non-struct type - map load likely returned wrong type",
+                                "check map value type and struct layout for field access",
+                            );
+                            return;
                         }
                     }
                 }
@@ -344,7 +366,12 @@ pub fn storeLValue(
                         "  This likely means a map load returned !ora.address instead of the struct type\n",
                         .{},
                     );
-                    @panic("Cannot update field on address type - map load returned wrong type");
+                    _ = self.reportLoweringError(
+                        span,
+                        "cannot update field on address type - map load returned wrong type",
+                        "check map value type and struct layout for field access",
+                    );
+                    return;
                 }
             }
 

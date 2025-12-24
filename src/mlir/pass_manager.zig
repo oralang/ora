@@ -14,7 +14,7 @@
 // ============================================================================
 
 const std = @import("std");
-const c = @import("c.zig").c;
+const c = @import("mlir_c_api").c;
 const lib = @import("ora_lib");
 const verification = @import("verification.zig");
 

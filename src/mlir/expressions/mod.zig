@@ -21,7 +21,7 @@
 // ============================================================================
 
 const std = @import("std");
-const c = @import("../c.zig").c;
+const c = @import("mlir_c_api").c;
 const lib = @import("ora_lib");
 const constants = @import("../lower.zig");
 const h = @import("../helpers.zig");
@@ -40,6 +40,7 @@ const expr_access = @import("access.zig");
 const expr_calls = @import("calls.zig");
 const expr_assignments = @import("assignments.zig");
 const expr_advanced = @import("advanced.zig");
+const ErrorHandler = @import("../error_handling.zig").ErrorHandler;
 
 /// Expression lowering system for converting Ora expressions to MLIR operations
 pub const ExpressionLowerer = struct {
@@ -52,9 +53,10 @@ pub const ExpressionLowerer = struct {
     local_var_map: ?*const LocalVarMap,
     symbol_table: ?*const SymbolTable,
     builtin_registry: ?*const builtins.BuiltinRegistry,
+    error_handler: ?*ErrorHandler,
     locations: LocationTracker,
     ora_dialect: *OraDialect,
-    pub fn init(ctx: c.MlirContext, block: c.MlirBlock, type_mapper: *const TypeMapper, param_map: ?*const ParamMap, storage_map: ?*const StorageMap, local_var_map: ?*const LocalVarMap, symbol_table: ?*const SymbolTable, builtin_registry: ?*const builtins.BuiltinRegistry, locations: LocationTracker, ora_dialect: *OraDialect) ExpressionLowerer {
+    pub fn init(ctx: c.MlirContext, block: c.MlirBlock, type_mapper: *const TypeMapper, param_map: ?*const ParamMap, storage_map: ?*const StorageMap, local_var_map: ?*const LocalVarMap, symbol_table: ?*const SymbolTable, builtin_registry: ?*const builtins.BuiltinRegistry, error_handler: ?*ErrorHandler, locations: LocationTracker, ora_dialect: *OraDialect) ExpressionLowerer {
         return .{
             .ctx = ctx,
             .block = block,
@@ -64,6 +66,7 @@ pub const ExpressionLowerer = struct {
             .local_var_map = local_var_map,
             .symbol_table = symbol_table,
             .builtin_registry = builtin_registry,
+            .error_handler = error_handler,
             .locations = locations,
             .ora_dialect = ora_dialect,
         };
@@ -176,6 +179,14 @@ pub const ExpressionLowerer = struct {
     /// Create an error placeholder value with diagnostic information
     pub fn createErrorPlaceholder(self: *const ExpressionLowerer, span: lib.ast.SourceSpan, error_msg: []const u8) c.MlirValue {
         return expr_helpers.createErrorPlaceholder(self.ctx, self.block, self.locations, span, error_msg);
+    }
+
+    pub fn reportLoweringError(self: *const ExpressionLowerer, span: lib.ast.SourceSpan, message: []const u8, suggestion: ?[]const u8) c.MlirValue {
+        if (self.error_handler) |handler| {
+            handler.reportError(.InternalError, span, message, suggestion) catch {};
+            return self.createErrorPlaceholder(span, message);
+        }
+        @panic(message);
     }
 
     /// Lower assignment expressions

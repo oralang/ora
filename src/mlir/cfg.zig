@@ -7,7 +7,7 @@
 // ============================================================================
 
 const std = @import("std");
-const c = @import("c.zig").c;
+const c = @import("mlir_c_api").c;
 
 /// Generate CFG from MLIR module using MLIR's built-in pass
 /// This uses the view-op-graph pass which generates Graphviz DOT format

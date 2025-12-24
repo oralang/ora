@@ -791,6 +791,10 @@ pub const TraversalStrategy = enum {
     BreadthFirst,
 };
 
+pub const TraversalError = error{
+    MissingAllocator,
+};
+
 /// Generic traversal function that accepts any visitor and strategy
 pub fn traverse(
     comptime VisitorType: type,
@@ -806,10 +810,28 @@ pub fn traverse(
             if (allocator) |alloc| {
                 _ = try visitor.walkBreadthFirst(node, alloc);
             } else {
-                @panic("Breadth-first traversal requires an allocator");
+                return TraversalError.MissingAllocator;
             }
         },
     }
+}
+
+test "ast_visitor: breadth-first traversal requires allocator" {
+    const Ctx = struct {
+        count: usize = 0,
+    };
+    var ctx = Ctx{};
+    var visitor = Visitor(Ctx, void){ .context = &ctx };
+
+    var node = ast.AstNode{
+        .Contract = ast.ContractNode{
+            .name = "Test",
+            .body = &[_]ast.AstNode{},
+            .span = ast.SourceSpan{ .line = 1, .column = 1, .length = 1 },
+        },
+    };
+
+    try std.testing.expectError(TraversalError.MissingAllocator, traverse(@TypeOf(visitor), &visitor, &node, .BreadthFirst, null));
 }
 
 /// Specialized visitor types for common use cases

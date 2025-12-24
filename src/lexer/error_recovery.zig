@@ -641,37 +641,10 @@ pub const ErrorRecovery = struct {
     pub fn groupErrors(self: *ErrorRecovery) !std.ArrayList(DiagnosticGroup) {
         var groups = std.ArrayList(DiagnosticGroup){};
 
-        // If we have fewer than 2 errors, just return individual groups
-        if (self.errors.items.len < 2) {
-            for (self.errors.items) |diagnostic| {
-                const related = std.ArrayList(LexerDiagnostic){};
-                try groups.append(self.allocator, .{
-                    .primary = diagnostic,
-                    .related = related,
-                });
-            }
+        if (self.errors.items.len == 0) {
             return groups;
         }
 
-        // For testing purposes, create at least one group with related errors
-        if (self.errors.items.len >= 2) {
-            var related = std.ArrayList(LexerDiagnostic){};
-
-            // Add all but the first error as related
-            for (self.errors.items[1..]) |diagnostic| {
-                try related.append(self.allocator, diagnostic);
-            }
-
-            // Add the group with the first error as primary
-            try groups.append(self.allocator, .{
-                .primary = self.errors.items[0],
-                .related = related,
-            });
-
-            return groups;
-        }
-
-        // This code is unreachable but included for completeness
         var processed = std.AutoHashMap(usize, void).init(self.allocator);
         defer processed.deinit();
 

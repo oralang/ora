@@ -111,12 +111,44 @@ pub const AstSerializer = struct {
 
     /// Serialize with streaming support for large ASTs
     pub fn serializeStreaming(self: *AstSerializer, nodes: []const AstNode, writer: anytype, chunk_size: usize) SerializationError!void {
+        const pretty = self.options.pretty_print and !self.options.compact_mode;
+        const stride = if (chunk_size == 0) nodes.len else chunk_size;
+        var wrote_any = false;
+
+        if (pretty) {
+            try writer.print("{\n");
+            try self.writeIndent(writer, 1);
+            try writer.print("\"type\": \"AST\",\n");
+            try self.writeIndent(writer, 1);
+            try writer.print("\"nodes\": [\n");
+        } else {
+            try writer.print("{\"type\":\"AST\",\"nodes\":[");
+        }
+
         var i: usize = 0;
         while (i < nodes.len) {
-            const end = @min(i + chunk_size, nodes.len);
-            const chunk = nodes[i..end];
-            try self.serialize(chunk, writer);
+            const end = @min(i + stride, nodes.len);
+            for (nodes[i..end]) |*node| {
+                if (wrote_any) {
+                    if (pretty) {
+                        try writer.print(",\n");
+                    } else {
+                        try writer.print(",");
+                    }
+                }
+                try self.serializeAstNode(node, writer, if (pretty) 2 else 0, 1);
+                wrote_any = true;
+            }
             i = end;
+        }
+
+        if (pretty) {
+            if (nodes.len > 0) try writer.print("\n");
+            try self.writeIndent(writer, 1);
+            try writer.print("]\n");
+            try writer.print("}\n");
+        } else {
+            try writer.print("]}");
         }
     }
 
@@ -344,4 +376,51 @@ test "AstSerializer without spans" {
     // Should not include span information
     try testing.expect(std.mem.indexOf(u8, result, "span") == null);
     try testing.expect(std.mem.indexOf(u8, result, "TestContract") != null);
+}
+
+test "AstSerializer streaming output is valid JSON" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const contract_a = AstNode{
+        .Contract = ast.ContractNode{
+            .name = "Alpha",
+            .body = &[_]AstNode{},
+            .span = SourceSpan{ .line = 1, .column = 1, .length = 5 },
+        },
+    };
+    const contract_b = AstNode{
+        .Contract = ast.ContractNode{
+            .name = "Beta",
+            .body = &[_]AstNode{},
+            .span = SourceSpan{ .line = 2, .column = 1, .length = 4 },
+        },
+    };
+    const nodes = [_]AstNode{ contract_a, contract_b };
+
+    var serializer = AstSerializer.init(allocator, .{});
+    defer serializer.deinit();
+
+    var list = std.ArrayList(u8){};
+    defer list.deinit(allocator);
+
+    try serializer.serializeStreaming(&nodes, list.writer(allocator), 1);
+    const output = try list.toOwnedSlice(allocator);
+    defer allocator.free(output);
+
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, output, .{});
+    defer parsed.deinit();
+
+    const root = parsed.value;
+    switch (root) {
+        .object => |obj| {
+            const nodes_value = obj.get("nodes") orelse return error.TestExpectedEqual;
+            switch (nodes_value) {
+                .array => |arr| try testing.expectEqual(@as(usize, 2), arr.items.len),
+                else => return error.TestExpectedEqual,
+            }
+        },
+        else => return error.TestExpectedEqual,
+    }
 }
