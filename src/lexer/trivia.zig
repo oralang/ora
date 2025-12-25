@@ -38,7 +38,7 @@ pub const StringPool = struct {
     }
 
     pub fn deinit(self: *StringPool) void {
-        // Free all interned strings
+        // free all interned strings
         var iterator = self.strings.iterator();
         while (iterator.next()) |entry| {
             self.allocator.free(entry.value_ptr.*);
@@ -50,15 +50,15 @@ pub const StringPool = struct {
     pub fn intern(self: *StringPool, string: []const u8) ![]const u8 {
         const hash_value = StringPool.hash(string);
 
-        // Check if string is already interned
+        // check if string is already interned
         if (self.strings.get(hash_value)) |interned_string| {
-            // Verify it's actually the same string (handle hash collisions)
+            // verify it's actually the same string (handle hash collisions)
             if (std.mem.eql(u8, interned_string, string)) {
                 return interned_string;
             }
         }
 
-        // String not found, create a copy and store it
+        // string not found, create a copy and store it
         const owned_string = try self.allocator.dupe(u8, string);
         try self.strings.put(hash_value, owned_string);
         return owned_string;
@@ -76,7 +76,7 @@ pub const StringPool = struct {
 
     /// Clear all interned strings
     pub fn clear(self: *StringPool) void {
-        // Free all interned strings
+        // free all interned strings
         var iterator = self.strings.iterator();
         while (iterator.next()) |entry| {
             self.allocator.free(entry.value_ptr.*);
@@ -111,14 +111,14 @@ pub const StringProcessor = struct {
 
         var i: usize = 0;
         while (i < raw_string.len) {
-            // Check for non-ASCII characters
+            // check for non-ASCII characters
             if (raw_string[i] > 127) {
                 return LexerError.InvalidCharacterInString;
             }
 
             if (raw_string[i] == '\\') {
                 if (i + 1 >= raw_string.len) {
-                    // Trailing backslash at end of string is invalid
+                    // trailing backslash at end of string is invalid
                     return LexerError.InvalidEscapeSequence;
                 }
                 const escaped_char = try StringProcessor.processEscapeSequence(raw_string[i + 1 ..]);
@@ -141,47 +141,47 @@ pub const StringProcessor = struct {
         }
 
         switch (sequence[0]) {
-            // Simplified set of escape sequences for smart contract language
+            // simplified set of escape sequences for smart contract language
             'n' => return .{ .char = '\n', .consumed = 1 }, // Newline
             't' => return .{ .char = '\t', .consumed = 1 }, // Tab
             '\\' => return .{ .char = '\\', .consumed = 1 }, // Backslash
             '"' => return .{ .char = '"', .consumed = 1 }, // Double quote
 
-            // All other escape sequences are invalid in our simplified string model
+            // all other escape sequences are invalid in our simplified string model
             else => return LexerError.InvalidEscapeSequence,
         }
     }
 
     /// Validate a character literal and extract its value with enhanced error handling
     pub fn processCharacterLiteral(raw_char: []const u8) LexerError!u8 {
-        // Check for empty character literal
+        // check for empty character literal
         if (raw_char.len == 0) {
             return LexerError.EmptyCharacterLiteral;
         }
 
-        // Handle simple single character literal
+        // handle simple single character literal
         if (raw_char.len == 1) {
             const char = raw_char[0];
-            // Validate that it's a printable character or common whitespace
+            // validate that it's a printable character or common whitespace
             if ((char >= 32 and char <= 126) or char == '\t' or char == '\n' or char == '\r') {
                 return char;
             }
-            // Allow null character explicitly
+            // allow null character explicitly
             if (char == 0) {
                 return char;
             }
-            // Reject control characters and invalid bytes
+            // reject control characters and invalid bytes
             return LexerError.InvalidCharacterLiteral;
         }
 
-        // Handle escape sequences
+        // handle escape sequences
         if (raw_char.len >= 2 and raw_char[0] == '\\') {
             const escaped = StringProcessor.processEscapeSequence(raw_char[1..]) catch |err| {
-                // Provide more specific error context for escape sequences
+                // provide more specific error context for escape sequences
                 return err;
             };
 
-            // Validate that the escape sequence consumed the entire remaining content
+            // validate that the escape sequence consumed the entire remaining content
             if (escaped.consumed + 1 != raw_char.len) {
                 return LexerError.InvalidCharacterLiteral;
             }
@@ -189,21 +189,21 @@ pub const StringProcessor = struct {
             return escaped.char;
         }
 
-        // Multiple characters without escape sequence
+        // multiple characters without escape sequence
         return LexerError.InvalidCharacterLiteral;
     }
 
     /// Validate and process a raw string literal (future feature)
     pub fn processRawString(self: *StringProcessor, raw_string: []const u8) LexerError![]u8 {
-        // For now, just return a copy of the raw string
-        // This will be enhanced when raw string literals are implemented
+        // for now, just return a copy of the raw string
+        // this will be enhanced when raw string literals are implemented
         return self.allocator.dupe(u8, raw_string);
     }
 };
 
 /// Capture leading trivia (whitespace and comments) before the next token
 pub fn captureLeadingTrivia(lexer: *Lexer) !void {
-    // Consume whitespace and comments, recording them as trivia pieces
+    // consume whitespace and comments, recording them as trivia pieces
     while (!lexer.isAtEnd()) {
         const c = lexer.peek();
         if (isWhitespace(c)) {
@@ -233,12 +233,12 @@ pub fn captureLeadingTrivia(lexer: *Lexer) !void {
             if (is_doc) _ = lexer.advance(); // consume third '/'
             while (lexer.peek() != '\n' and !lexer.isAtEnd()) _ = lexer.advance();
             const span = SourceRange{ .start_line = lexer.line, .start_column = start_col, .end_line = lexer.line, .end_column = lexer.column, .start_offset = start_off, .end_offset = lexer.current };
-            // Treat entire '//' to line end as line comment trivia
+            // treat entire '//' to line end as line comment trivia
             try lexer.trivia.append(lexer.allocator, TriviaPiece{ .kind = if (is_doc) .DocLineComment else .LineComment, .span = span });
             continue;
         }
         if (c == '/' and lexer.current + 1 < lexer.source.len and lexer.source[lexer.current + 1] == '*') {
-            // Capture block comment trivia only if it is properly closed; otherwise
+            // capture block comment trivia only if it is properly closed; otherwise
             // leave it to the main scanner to report UnterminatedComment.
             if (tryCaptureClosedBlockCommentTrivia(lexer)) {
                 continue;
@@ -284,7 +284,7 @@ pub fn tryCaptureClosedBlockCommentTrivia(lexer: *Lexer) bool {
         lexer.trivia.append(lexer.allocator, TriviaPiece{ .kind = if (is_doc) .DocBlockComment else .BlockComment, .span = span }) catch return false;
         return true;
     }
-    // Not closed; restore and let main scanner handle error
+    // not closed; restore and let main scanner handle error
     lexer.current = save_current;
     lexer.line = save_line;
     lexer.column = save_column;

@@ -19,26 +19,26 @@ pub fn inferArithmeticResultType(
     lhs_type: ?TypeInfo,
     rhs_type: ?TypeInfo,
 ) ?TypeInfo {
-    // Only handle arithmetic operators
+    // only handle arithmetic operators
     if (lhs_type == null or rhs_type == null) return null;
 
     const lhs = lhs_type.?;
     const rhs = rhs_type.?;
 
-    // Both must have ora_type
+    // both must have ora_type
     const lhs_ora = lhs.ora_type orelse return null;
     const rhs_ora = rhs.ora_type orelse return null;
 
-    // Both must have compatible base types
+    // both must have compatible base types
     const lhs_base = extract.extractBaseType(lhs_ora) orelse return null;
     const rhs_base = extract.extractBaseType(rhs_ora) orelse return null;
 
-    // Base types must be compatible (same type)
+    // base types must be compatible (same type)
     if (!OraType.equals(lhs_base, rhs_base)) {
         return null;
     }
 
-    // Infer result type based on operator and refinement types
+    // infer result type based on operator and refinement types
     return switch (operator) {
         .Plus => inferAdditionResultType(lhs_ora, rhs_ora, lhs.span),
         .Minus => inferSubtractionResultType(lhs_ora, rhs_ora, lhs.span),
@@ -57,7 +57,7 @@ pub fn inferAdditionResultType(
     return switch (lhs_ora) {
         .scaled => |lhs_s| switch (rhs_ora) {
             .scaled => |rhs_s| {
-                // Scaled<T, D> + Scaled<T, D> = Scaled<T, D> (preserve scale)
+                // scaled<T, D> + Scaled<T, D> = Scaled<T, D> (preserve scale)
                 if (!OraType.equals(lhs_s.base.*, rhs_s.base.*) or lhs_s.decimals != rhs_s.decimals) {
                     return null; // Different scales cannot be added directly
                 }
@@ -73,7 +73,7 @@ pub fn inferAdditionResultType(
         },
         .min_value => |lhs_mv| switch (rhs_ora) {
             .min_value => |rhs_mv| {
-                // MinValue<u256, 100> + MinValue<u256, 50> = MinValue<u256, 150>
+                // minValue<u256, 100> + MinValue<u256, 50> = MinValue<u256, 150>
                 const result_min = lhs_mv.min + rhs_mv.min;
                 const min_value_type = OraType{
                     .min_value = .{
@@ -87,7 +87,7 @@ pub fn inferAdditionResultType(
         },
         .max_value => |lhs_mv| switch (rhs_ora) {
             .max_value => |rhs_mv| {
-                // MaxValue<u256, 1000> + MaxValue<u256, 500> = MaxValue<u256, 1500>
+                // maxValue<u256, 1000> + MaxValue<u256, 500> = MaxValue<u256, 1500>
                 const result_max = lhs_mv.max + rhs_mv.max;
                 const max_value_type = OraType{
                     .max_value = .{
@@ -101,7 +101,7 @@ pub fn inferAdditionResultType(
         },
         .in_range => |lhs_ir| switch (rhs_ora) {
             .in_range => |rhs_ir| {
-                // InRange<u256, 10, 100> + InRange<u256, 20, 200> = InRange<u256, 30, 300>
+                // inRange<u256, 10, 100> + InRange<u256, 20, 200> = InRange<u256, 30, 300>
                 if (!OraType.equals(lhs_ir.base.*, rhs_ir.base.*)) {
                     return null;
                 }
@@ -131,7 +131,7 @@ pub fn inferSubtractionResultType(
     return switch (lhs_ora) {
         .scaled => |lhs_s| switch (rhs_ora) {
             .scaled => |rhs_s| {
-                // Scaled<T, D> - Scaled<T, D> = Scaled<T, D> (preserve scale)
+                // scaled<T, D> - Scaled<T, D> = Scaled<T, D> (preserve scale)
                 if (!OraType.equals(lhs_s.base.*, rhs_s.base.*) or lhs_s.decimals != rhs_s.decimals) {
                     return null;
                 }
@@ -147,7 +147,7 @@ pub fn inferSubtractionResultType(
         },
         .min_value => |lhs_mv| switch (rhs_ora) {
             .min_value => |rhs_mv| {
-                // MinValue<u256, 100> - MinValue<u256, 50> = MinValue<u256, 50> (conservative)
+                // minValue<u256, 100> - MinValue<u256, 50> = MinValue<u256, 50> (conservative)
                 if (!OraType.equals(lhs_mv.base.*, rhs_mv.base.*)) {
                     return null;
                 }
@@ -161,7 +161,7 @@ pub fn inferSubtractionResultType(
                 return TypeInfo.inferred(TypeCategory.Integer, min_value_type, span orelse SourceSpan{ .line = 0, .column = 0, .length = 0 });
             },
             .max_value => |rhs_mv| {
-                // MinValue<u256, 100> - MaxValue<u256, 50> = MinValue<u256, 50> (conservative)
+                // minValue<u256, 100> - MaxValue<u256, 50> = MinValue<u256, 50> (conservative)
                 if (!OraType.equals(lhs_mv.base.*, rhs_mv.base.*)) {
                     return null;
                 }
@@ -178,7 +178,7 @@ pub fn inferSubtractionResultType(
         },
         .max_value => |lhs_mv| switch (rhs_ora) {
             .min_value => |rhs_mv| {
-                // MaxValue<u256, 1000> - MinValue<u256, 100> = MaxValue<u256, 900>
+                // maxValue<u256, 1000> - MinValue<u256, 100> = MaxValue<u256, 900>
                 if (!OraType.equals(lhs_mv.base.*, rhs_mv.base.*)) {
                     return null;
                 }
@@ -192,7 +192,7 @@ pub fn inferSubtractionResultType(
                 return TypeInfo.inferred(TypeCategory.Integer, max_value_type, span orelse SourceSpan{ .line = 0, .column = 0, .length = 0 });
             },
             .max_value => |rhs_mv| {
-                // MaxValue<u256, 1000> - MaxValue<u256, 500> = MaxValue<u256, 500> (conservative)
+                // maxValue<u256, 1000> - MaxValue<u256, 500> = MaxValue<u256, 500> (conservative)
                 if (!OraType.equals(lhs_mv.base.*, rhs_mv.base.*)) {
                     return null;
                 }
@@ -209,7 +209,7 @@ pub fn inferSubtractionResultType(
         },
         .in_range => |lhs_ir| switch (rhs_ora) {
             .in_range => |rhs_ir| {
-                // InRange<u256, 10, 100> - InRange<u256, 20, 200> = InRange<u256, 0, 80>
+                // inRange<u256, 10, 100> - InRange<u256, 20, 200> = InRange<u256, 0, 80>
                 if (!OraType.equals(lhs_ir.base.*, rhs_ir.base.*)) {
                     return null;
                 }
@@ -239,7 +239,7 @@ pub fn inferMultiplicationResultType(
     return switch (lhs_ora) {
         .scaled => |lhs_s| switch (rhs_ora) {
             .scaled => |rhs_s| {
-                // Scaled<T, D1> * Scaled<T, D2> = Scaled<T, D1 + D2> (scale doubles)
+                // scaled<T, D1> * Scaled<T, D2> = Scaled<T, D1 + D2> (scale doubles)
                 if (!OraType.equals(lhs_s.base.*, rhs_s.base.*)) {
                     return null;
                 }
@@ -255,7 +255,7 @@ pub fn inferMultiplicationResultType(
         },
         .min_value => |lhs_mv| switch (rhs_ora) {
             .min_value => |rhs_mv| {
-                // MinValue<u256, 100> * MinValue<u256, 50> = MinValue<u256, 5000>
+                // minValue<u256, 100> * MinValue<u256, 50> = MinValue<u256, 5000>
                 if (!OraType.equals(lhs_mv.base.*, rhs_mv.base.*)) {
                     return null;
                 }
@@ -272,7 +272,7 @@ pub fn inferMultiplicationResultType(
         },
         .max_value => |lhs_mv| switch (rhs_ora) {
             .max_value => |rhs_mv| {
-                // MaxValue<u256, 1000> * MaxValue<u256, 500> = MaxValue<u256, 500000>
+                // maxValue<u256, 1000> * MaxValue<u256, 500> = MaxValue<u256, 500000>
                 if (!OraType.equals(lhs_mv.base.*, rhs_mv.base.*)) {
                     return null;
                 }
@@ -289,7 +289,7 @@ pub fn inferMultiplicationResultType(
         },
         .in_range => |lhs_ir| switch (rhs_ora) {
             .in_range => |rhs_ir| {
-                // InRange<u256, 10, 100> * InRange<u256, 20, 200> = InRange<u256, 200, 20000>
+                // inRange<u256, 10, 100> * InRange<u256, 20, 200> = InRange<u256, 200, 20000>
                 if (!OraType.equals(lhs_ir.base.*, rhs_ir.base.*)) {
                     return null;
                 }

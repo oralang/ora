@@ -72,10 +72,10 @@ pub const AstArena = struct {
     /// Create a new node of the given type
     /// The node is allocated in the arena and tracked in statistics
     pub fn createNode(self: *AstArena, comptime T: type) !*T {
-        // Allocate memory for the node
+        // allocate memory for the node
         const node = try self.arena.allocator().create(T);
 
-        // Update statistics
+        // update statistics
         self.stats.allocation_count += 1;
         self.stats.node_count += 1;
         self.stats.current_usage += @sizeOf(T);
@@ -88,7 +88,7 @@ pub const AstArena = struct {
     pub fn createSlice(self: *AstArena, comptime T: type, count: usize) ![]T {
         const slice = try self.arena.allocator().alloc(T, count);
 
-        // Update statistics
+        // update statistics
         self.stats.allocation_count += 1;
         self.stats.current_usage += @sizeOf(T) * count;
         self.stats.peak_usage = @max(self.stats.peak_usage, self.stats.current_usage);
@@ -100,7 +100,7 @@ pub const AstArena = struct {
     pub fn createString(self: *AstArena, string: []const u8) ![]const u8 {
         const dup = try self.arena.allocator().dupe(u8, string);
 
-        // Update statistics
+        // update statistics
         self.stats.allocation_count += 1;
         self.stats.current_usage += string.len;
         self.stats.peak_usage = @max(self.stats.peak_usage, self.stats.current_usage);
@@ -115,11 +115,11 @@ pub const AstArena = struct {
             std.log.warn("AstArena reset with {d} bytes still tracked; resetting anyway", .{self.stats.current_usage});
         }
 
-        // Reset the arena
+        // reset the arena
         self.arena.deinit();
         self.arena = std.heap.ArenaAllocator.init(self.arena.child_allocator);
 
-        // Update statistics
+        // update statistics
         self.stats.current_usage = 0;
         self.stats.node_count = 0;
         self.stats.reset_count += 1;

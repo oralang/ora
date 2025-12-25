@@ -44,7 +44,7 @@ pub fn extractIntegerValue(literal: *const ast.Expressions.LiteralExpr) ?u256 {
 
 /// Extract integer value from an IntegerLiteral
 fn extractIntegerLiteralValue(int_lit: ast.Expressions.IntegerLiteral) ?u256 {
-    // Parse the string value to u256
+    // parse the string value to u256
     return std.fmt.parseInt(u256, int_lit.value, 0) catch null;
 }
 
@@ -64,11 +64,11 @@ fn evaluateLiteral(lit: *ast.Expressions.LiteralExpr) ConstantValue {
 
 /// Evaluate a binary expression
 fn evaluateBinary(bin: *ast.Expressions.BinaryExpr) ConstantValue {
-    // Recursively evaluate left and right operands
+    // recursively evaluate left and right operands
     const lhs_result = evaluateConstantExpressionRecursive(bin.lhs) catch return ConstantValue.Error;
     const rhs_result = evaluateConstantExpressionRecursive(bin.rhs) catch return ConstantValue.Error;
 
-    // Both operands must be constants
+    // both operands must be constants
     const lhs_val = switch (lhs_result) {
         .Integer => |v| v,
         else => return ConstantValue.NotConstant,
@@ -78,9 +78,9 @@ fn evaluateBinary(bin: *ast.Expressions.BinaryExpr) ConstantValue {
         else => return ConstantValue.NotConstant,
     };
 
-    // Evaluate based on operator
+    // evaluate based on operator
     return switch (bin.operator) {
-        // Arithmetic operations
+        // arithmetic operations
         .Plus => arithmeticAdd(lhs_val, rhs_val),
         .Minus => arithmeticSub(lhs_val, rhs_val),
         .Star => arithmeticMul(lhs_val, rhs_val),
@@ -88,7 +88,7 @@ fn evaluateBinary(bin: *ast.Expressions.BinaryExpr) ConstantValue {
         .Percent => arithmeticMod(lhs_val, rhs_val),
         .StarStar => arithmeticPow(lhs_val, rhs_val),
 
-        // Comparison operations (return boolean, but we only support integers for now)
+        // comparison operations (return boolean, but we only support integers for now)
         .EqualEqual,
         .BangEqual,
         .Less,
@@ -105,14 +105,14 @@ fn evaluateBinary(bin: *ast.Expressions.BinaryExpr) ConstantValue {
         .Comma,
         => ConstantValue.NotConstant, // Not constant expressions
 
-        // Note: We only evaluate arithmetic operations as constants
-        // Comparison and logical operations are runtime checks
+        // note: We only evaluate arithmetic operations as constants
+        // comparison and logical operations are runtime checks
     };
 }
 
 /// Evaluate a unary expression
 fn evaluateUnary(unary: *ast.Expressions.UnaryExpr) ConstantValue {
-    // Recursively evaluate operand
+    // recursively evaluate operand
     const operand_result = evaluateConstantExpressionRecursive(unary.operand) catch return ConstantValue.Error;
 
     const operand_val = switch (operand_result) {
@@ -122,9 +122,9 @@ fn evaluateUnary(unary: *ast.Expressions.UnaryExpr) ConstantValue {
 
     return switch (unary.operator) {
         .Minus => {
-            // Unary minus: for unsigned types, this is a compile-time error or runtime behavior
-            // In Ora, unary minus on u256 would wrap around (2's complement)
-            // For constant evaluation, we can compute the wrapped value
+            // unary minus: for unsigned types, this is a compile-time error or runtime behavior
+            // in Ora, unary minus on u256 would wrap around (2's complement)
+            // for constant evaluation, we can compute the wrapped value
             const result = @as(u256, 0) -% operand_val; // Wrapping subtraction
             return ConstantValue{ .Integer = result };
         },
@@ -147,36 +147,36 @@ fn evaluateConstantExpressionRecursive(expr: *ast.Expressions.ExprNode) !Constan
 // ============================================================================
 
 fn arithmeticAdd(lhs: u256, rhs: u256) ConstantValue {
-    // Check for overflow
+    // check for overflow
     const result = lhs +% rhs;
     if (result < lhs) {
-        // Overflow occurred
+        // overflow occurred
         return ConstantValue.Error;
     }
     return ConstantValue{ .Integer = result };
 }
 
 fn arithmeticSub(lhs: u256, rhs: u256) ConstantValue {
-    // Check for underflow
+    // check for underflow
     if (rhs > lhs) {
-        // Underflow occurred
+        // underflow occurred
         return ConstantValue.Error;
     }
     return ConstantValue{ .Integer = lhs - rhs };
 }
 
 fn arithmeticMul(lhs: u256, rhs: u256) ConstantValue {
-    // Check for overflow
+    // check for overflow
     const result = lhs *% rhs;
     if (rhs != 0 and result / rhs != lhs) {
-        // Overflow occurred
+        // overflow occurred
         return ConstantValue.Error;
     }
     return ConstantValue{ .Integer = result };
 }
 
 fn arithmeticDiv(lhs: u256, rhs: u256) ConstantValue {
-    // Check for division by zero
+    // check for division by zero
     if (rhs == 0) {
         return ConstantValue.Error;
     }
@@ -184,7 +184,7 @@ fn arithmeticDiv(lhs: u256, rhs: u256) ConstantValue {
 }
 
 fn arithmeticMod(lhs: u256, rhs: u256) ConstantValue {
-    // Check for division by zero
+    // check for division by zero
     if (rhs == 0) {
         return ConstantValue.Error;
     }
@@ -192,8 +192,8 @@ fn arithmeticMod(lhs: u256, rhs: u256) ConstantValue {
 }
 
 fn arithmeticPow(base: u256, exponent: u256) ConstantValue {
-    // For constant evaluation, we only handle small exponents
-    // Large exponents would cause overflow and are not practical for compile-time evaluation
+    // for constant evaluation, we only handle small exponents
+    // large exponents would cause overflow and are not practical for compile-time evaluation
     if (exponent == 0) {
         return ConstantValue{ .Integer = 1 };
     }
@@ -201,20 +201,20 @@ fn arithmeticPow(base: u256, exponent: u256) ConstantValue {
         return ConstantValue{ .Integer = base };
     }
 
-    // For exponent > 1, check if result would overflow
-    // Simple check: if base > 1 and exponent > 256, it's likely to overflow
+    // for exponent > 1, check if result would overflow
+    // simple check: if base > 1 and exponent > 256, it's likely to overflow
     if (base > 1 and exponent > 256) {
         return ConstantValue.Error;
     }
 
-    // Compute power iteratively with overflow checking
+    // compute power iteratively with overflow checking
     var result: u256 = 1;
     var exp: u256 = exponent;
     var b: u256 = base;
 
     while (exp > 0) {
         if (exp & 1 == 1) {
-            // Check overflow before multiplying
+            // check overflow before multiplying
             const mul_result = arithmeticMul(result, b);
             switch (mul_result) {
                 .Integer => |v| result = v,
@@ -223,7 +223,7 @@ fn arithmeticPow(base: u256, exponent: u256) ConstantValue {
         }
         exp >>= 1;
         if (exp > 0) {
-            // Check overflow before squaring
+            // check overflow before squaring
             const mul_result = arithmeticMul(b, b);
             switch (mul_result) {
                 .Integer => |v| b = v,

@@ -19,17 +19,17 @@ pub fn isAssignable(
     refinement_system: *refinements.RefinementSystem,
     utils_sys: *utils.Utils,
 ) bool {
-    // Exact match
+    // exact match
     if (target_type.ora_type != null and value_type.ora_type != null) {
         if (OraType.equals(target_type.ora_type.?, value_type.ora_type.?)) {
             return true;
         }
     }
 
-    // Check if value_type is a subtype of target_type (widening allowed)
-    // This is unidirectional: value_type <: target_type
+    // check if value_type is a subtype of target_type (widening allowed)
+    // this is unidirectional: value_type <: target_type
     if (target_type.ora_type != null and value_type.ora_type != null) {
-        // Check refinement subtyping (value_type <: target_type)
+        // check refinement subtyping (value_type <: target_type)
         if (refinement_system.checkSubtype(
             value_type.ora_type.?,
             target_type.ora_type.?,
@@ -39,14 +39,14 @@ pub fn isAssignable(
         }
     }
 
-    // For numeric types, check base type compatibility (widening only)
+    // for numeric types, check base type compatibility (widening only)
     const target_is_numeric = isNumericType(target_type);
     const value_is_numeric = isNumericType(value_type);
     if (target_is_numeric and value_is_numeric) {
-        // If target has ora_type but value doesn't, allow if categories match
-        // This handles integer literals (category=Integer, no ora_type) assigned to typed variables
+        // if target has ora_type but value doesn't, allow if categories match
+        // this handles integer literals (category=Integer, no ora_type) assigned to typed variables
         if (target_type.ora_type != null and value_type.ora_type == null) {
-            // Integer literal can be assigned to any integer type
+            // integer literal can be assigned to any integer type
             return true;
         }
 
@@ -54,23 +54,23 @@ pub fn isAssignable(
             const target_base = utils_sys.extractBaseType(target_type.ora_type.?);
             const value_base = utils_sys.extractBaseType(value_type.ora_type.?);
             if (target_base != null and value_base != null) {
-                // Only allow widening: value_base <: target_base
-                // This means value_base must be narrower or equal to target_base
+                // only allow widening: value_base <: target_base
+                // this means value_base must be narrower or equal to target_base
                 if (compat.isBaseTypeCompatible(value_base.?, target_base.?)) {
                     return true;
                 }
             }
         }
-        // If target has no ora_type but value does, also allow (reverse case)
+        // if target has no ora_type but value does, also allow (reverse case)
         if (target_type.ora_type == null and value_type.ora_type != null) {
             return true;
         }
-        // If we can't extract base types, reject to be safe
+        // if we can't extract base types, reject to be safe
         return false;
     }
 
-    // Handle error unions and other special cases
-    // Success type is compatible with ErrorUnion (e.g., bool is compatible with !bool | Error1)
+    // handle error unions and other special cases
+    // success type is compatible with ErrorUnion (e.g., bool is compatible with !bool | Error1)
     if (target_type.category == .ErrorUnion) {
         if (target_type.ora_type) |target_ora| {
             if (target_ora == .error_union) {
@@ -84,7 +84,7 @@ pub fn isAssignable(
                     return true;
                 }
             } else if (target_ora == ._union) {
-                // Error union with explicit errors: !T | Error1 | Error2
+                // error union with explicit errors: !T | Error1 | Error2
                 if (target_ora._union.len > 0) {
                     const first_type = target_ora._union[0];
                     if (first_type == .error_union) {
@@ -103,19 +103,19 @@ pub fn isAssignable(
         }
     }
 
-    // Error category is compatible with ErrorUnion category
+    // error category is compatible with ErrorUnion category
     if (value_type.category == .Error and target_type.category == .ErrorUnion) {
         return true;
     }
 
-    // Enum category is compatible with ErrorUnion category (for error.X expressions)
+    // enum category is compatible with ErrorUnion category (for error.X expressions)
     if (value_type.category == .Enum and target_type.category == .ErrorUnion) {
         return true;
     }
 
-    // Same category without ora_type - only allow if categories match exactly
+    // same category without ora_type - only allow if categories match exactly
     if (target_type.category == value_type.category) {
-        // If both have no ora_type, allow if categories match
+        // if both have no ora_type, allow if categories match
         if (target_type.ora_type == null and value_type.ora_type == null) {
             return true;
         }
@@ -126,16 +126,16 @@ pub fn isAssignable(
 
 /// Check if a type is numeric
 fn isNumericType(type_info: TypeInfo) bool {
-    // Check category first
+    // check category first
     if (type_info.category != .Integer) {
         return false;
     }
 
-    // If we have ora_type, check if it's an integer type
+    // if we have ora_type, check if it's an integer type
     if (type_info.ora_type) |ora_type| {
         return ora_type.isInteger();
     }
 
-    // Category is Integer but no ora_type - assume numeric
+    // category is Integer but no ora_type - assume numeric
     return true;
 }

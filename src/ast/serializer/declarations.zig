@@ -60,7 +60,7 @@ pub fn serializeFunction(serializer: *AstSerializer, function: *const ast.Functi
         try helpers.writeSpanField(serializer, writer, &function.span, indent + 1);
     }
 
-    // Parameters
+    // parameters
     if (serializer.options.pretty_print and !serializer.options.compact_mode) {
         try writer.print(",\n");
         try helpers.writeIndent(serializer, writer, indent + 1);
@@ -93,7 +93,7 @@ pub fn serializeFunction(serializer: *AstSerializer, function: *const ast.Functi
         try writer.print("null");
     }
 
-    // Requires clauses
+    // requires clauses
     if (function.requires_clauses.len > 0) {
         if (serializer.options.pretty_print and !serializer.options.compact_mode) {
             try writer.print(",\n");
@@ -120,7 +120,7 @@ pub fn serializeFunction(serializer: *AstSerializer, function: *const ast.Functi
         }
     }
 
-    // Ensures clauses
+    // ensures clauses
     if (function.ensures_clauses.len > 0) {
         if (serializer.options.pretty_print and !serializer.options.compact_mode) {
             try writer.print(",\n");
@@ -147,7 +147,7 @@ pub fn serializeFunction(serializer: *AstSerializer, function: *const ast.Functi
         }
     }
 
-    // Function body
+    // function body
     if (serializer.options.pretty_print and !serializer.options.compact_mode) {
         try writer.print(",\n");
         try helpers.writeIndent(serializer, writer, indent + 1);
@@ -265,7 +265,7 @@ pub fn serializeStructDecl(serializer: *AstSerializer, struct_decl: *const ast.S
 pub fn serializeEnumDecl(serializer: *AstSerializer, enum_decl: *const ast.EnumDeclNode, writer: anytype, indent: u32, depth: u32) SerializationError!void {
     try helpers.writeField(serializer, writer, "type", "EnumDecl", indent + 1, true);
     try helpers.writeField(serializer, writer, "name", enum_decl.name, indent + 1, false);
-    // Check if any variants have explicit values
+    // check if any variants have explicit values
     var has_explicit_values = false;
     for (enum_decl.variants) |variant| {
         if (variant.value != null) {
@@ -275,7 +275,7 @@ pub fn serializeEnumDecl(serializer: *AstSerializer, enum_decl: *const ast.EnumD
     }
     try helpers.writeBoolField(serializer, writer, "has_explicit_values", has_explicit_values, indent + 1);
 
-    // Serialize the underlying type if present
+    // serialize the underlying type if present
     if (enum_decl.underlying_type_info) |underlying_type_info| {
         try writer.print(",\n");
         try helpers.writeIndent(serializer, writer, indent + 1);
@@ -307,33 +307,33 @@ pub fn serializeEnumDecl(serializer: *AstSerializer, enum_decl: *const ast.EnumD
                 try helpers.writeIndent(serializer, writer, indent + 3);
                 try writer.print("\"value\": ");
 
-                // Special handling for integer literals in enum variants to include enum's underlying type
+                // special handling for integer literals in enum variants to include enum's underlying type
                 if (value.* == .Literal and value.Literal == .Integer and enum_decl.underlying_type_info != null) {
-                    // Start object
+                    // start object
                     try writer.print("{\n");
                     try helpers.writeIndent(serializer, writer, indent + 4);
                     try writer.print("\"type\": \"Literal\",\n");
                     try helpers.writeIndent(serializer, writer, indent + 4);
 
-                    // Always use "Integer" for literal_type consistency
+                    // always use "Integer" for literal_type consistency
                     try writer.print("\"literal_type\": \"Integer\",\n");
 
-                    // Include type information
+                    // include type information
                     try helpers.writeIndent(serializer, writer, indent + 4);
                     try writer.print("\"type_info\": ");
                     try serializer.serializeTypeInfo(value.Literal.Integer.type_info, writer);
                     try writer.print(",\n");
 
-                    // Write the value
+                    // write the value
                     try helpers.writeIndent(serializer, writer, indent + 4);
                     try writer.print("\"value\": \"");
                     try writer.print(value.Literal.Integer.value);
                     try writer.print("\"");
 
-                    // Include span if needed
+                    // include span if needed
                     if (serializer.options.include_spans) {
                         try writer.print(",\n");
-                        // Custom span field handling for enum variant integer literals
+                        // custom span field handling for enum variant integer literals
                         try helpers.writeIndent(serializer, writer, indent + 4);
                         try writer.print("\"span\": {\n");
                         try helpers.writeIndent(serializer, writer, indent + 5);
@@ -352,12 +352,12 @@ pub fn serializeEnumDecl(serializer: *AstSerializer, enum_decl: *const ast.EnumD
                         try writer.print("}");
                     }
 
-                    // End object
+                    // end object
                     try writer.print("\n");
                     try helpers.writeIndent(serializer, writer, indent + 3);
                     try writer.print("}");
                 } else {
-                    // Regular expression serialization for non-integer or complex expressions
+                    // regular expression serialization for non-integer or complex expressions
                     try serializer.serializeExpression(value, writer, indent + 3, depth + 1);
                 }
             }
@@ -376,24 +376,24 @@ pub fn serializeEnumDecl(serializer: *AstSerializer, enum_decl: *const ast.EnumD
             if (variant.value) |*value| {
                 try writer.print(",\"value\":");
 
-                // Special handling for integer literals in enum variants to include enum's underlying type
+                // special handling for integer literals in enum variants to include enum's underlying type
                 if (value.* == .Literal and value.Literal == .Integer and enum_decl.underlying_type_info != null) {
                     try writer.print("{\"type\":\"Literal\",");
 
-                    // Always use "Integer" for literal_type consistency
+                    // always use "Integer" for literal_type consistency
                     try writer.print("\"literal_type\":\"Integer\",");
 
-                    // Include type information
+                    // include type information
                     try writer.print("\"type_info\":");
                     try serializer.serializeTypeInfo(value.Literal.Integer.type_info, writer);
                     try writer.print(",");
 
-                    // Write the value
+                    // write the value
                     try writer.print("\"value\":\"");
                     try writer.print(value.Literal.Integer.value);
                     try writer.print("\"");
 
-                    // Include span if needed
+                    // include span if needed
                     if (serializer.options.include_spans) {
                         const span = &value.Literal.Integer.span;
                         try writer.print(",\"span\":{\"line\":");
@@ -413,12 +413,12 @@ pub fn serializeEnumDecl(serializer: *AstSerializer, enum_decl: *const ast.EnumD
 
                     try writer.print("}");
                 } else {
-                    // Regular expression serialization for non-integer or complex expressions
+                    // regular expression serialization for non-integer or complex expressions
                     try serializer.serializeExpression(value, writer, 0, depth + 1);
                 }
             }
 
-            // Include span for the variant itself
+            // include span for the variant itself
             if (serializer.options.include_spans) {
                 try writer.print(",\"span\":{\"line\":");
                 try writer.print("{d}", .{variant.span.line});

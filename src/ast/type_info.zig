@@ -81,10 +81,10 @@ pub const TypeInfo = struct {
     pub fn isCompatibleWith(self: TypeInfo, other: TypeInfo) bool {
         if (!self.isResolved() or !other.isResolved()) return false;
 
-        // Same types are always compatible
+        // same types are always compatible
         if (std.meta.eql(self.ora_type.?, other.ora_type.?)) return true;
 
-        // Integer types can be compatible based on size and signedness
+        // integer types can be compatible based on size and signedness
         return switch (self.ora_type.?) {
             .u8, .u16, .u32, .u64, .u128, .u256 => switch (other.ora_type.?) {
                 .u8, .u16, .u32, .u64, .u128, .u256 => true, // Unsigned integers
@@ -126,11 +126,11 @@ pub const TypeInfo = struct {
     pub fn equals(a: TypeInfo, b: TypeInfo) bool {
         const ao = a.ora_type;
         const bo = b.ora_type;
-        // If both have concrete OraTypes, compare structurally regardless of category
+        // if both have concrete OraTypes, compare structurally regardless of category
         if (ao != null and bo != null) {
             return OraType.equals(ao.?, bo.?);
         }
-        // Fallback to category comparison when OraType is missing
+        // fallback to category comparison when OraType is missing
         if (a.category != b.category) return false;
         if ((ao == null) != (bo == null)) return false;
         if (ao == null) return true;
@@ -151,7 +151,7 @@ pub const TypeInfo = struct {
 
 /// Generic type categories for high-level classification
 pub const TypeCategory = enum {
-    // Primitive categories
+    // primitive categories
     Integer,
     String,
     Bool,
@@ -159,7 +159,7 @@ pub const TypeCategory = enum {
     Hex,
     Bytes,
 
-    // Complex type categories
+    // complex type categories
     Struct,
     Enum,
     Contract, // Contract type category
@@ -172,7 +172,7 @@ pub const TypeCategory = enum {
     Result,
     Union,
 
-    // Special categories
+    // special categories
     Void,
     Error,
     Module,
@@ -187,7 +187,7 @@ pub const TypeCategory = enum {
 
 /// Specific Ora language types
 pub const OraType = union(enum) {
-    // Unsigned integer types
+    // unsigned integer types
     u8: void,
     u16: void,
     u32: void,
@@ -195,7 +195,7 @@ pub const OraType = union(enum) {
     u128: void,
     u256: void,
 
-    // Signed integer types
+    // signed integer types
     i8: void,
     i16: void,
     i32: void,
@@ -203,14 +203,14 @@ pub const OraType = union(enum) {
     i128: void,
     i256: void,
 
-    // Other primitive types
+    // other primitive types
     bool: void,
     string: void,
     address: void,
     bytes: void,
     void: void,
 
-    // Complex types with additional data
+    // complex types with additional data
     struct_type: []const u8, // Struct name
     enum_type: []const u8, // Enum name
     contract_type: []const u8, // Contract name
@@ -224,7 +224,7 @@ pub const OraType = union(enum) {
     anonymous_struct: []const AnonymousStructFieldType, // struct { field: T, ... }
     module: ?[]const u8, // Optional module name
 
-    // Refinement types
+    // refinement types
     min_value: struct {
         base: *const OraType, // Base integer type
         min: u256, // Minimum value (compile-time constant)
@@ -266,7 +266,7 @@ pub const OraType = union(enum) {
             ._union => .Union,
             .anonymous_struct => .Struct,
             .module => .Module,
-            // Refinement types inherit the category of their base type
+            // refinement types inherit the category of their base type
             .min_value => |mv| mv.base.*.getCategory(),
             .max_value => |mv| mv.base.*.getCategory(),
             .in_range => |ir| ir.base.*.getCategory(),
@@ -280,7 +280,7 @@ pub const OraType = union(enum) {
     pub fn isInteger(self: OraType) bool {
         return switch (self) {
             .u8, .u16, .u32, .u64, .u128, .u256, .i8, .i16, .i32, .i64, .i128, .i256 => true,
-            // Refinement types: check the base type
+            // refinement types: check the base type
             .min_value => |mv| mv.base.isInteger(),
             .max_value => |mv| mv.base.isInteger(),
             .in_range => |ir| ir.base.isInteger(),
@@ -294,7 +294,7 @@ pub const OraType = union(enum) {
     pub fn isUnsignedInteger(self: OraType) bool {
         return switch (self) {
             .u8, .u16, .u32, .u64, .u128, .u256 => true,
-            // Refinement types: check the base type
+            // refinement types: check the base type
             .min_value => |mv| mv.base.isUnsignedInteger(),
             .max_value => |mv| mv.base.isUnsignedInteger(),
             .in_range => |ir| ir.base.isUnsignedInteger(),
@@ -308,7 +308,7 @@ pub const OraType = union(enum) {
     pub fn isSignedInteger(self: OraType) bool {
         return switch (self) {
             .i8, .i16, .i32, .i64, .i128, .i256 => true,
-            // Refinement types: check the base type
+            // refinement types: check the base type
             .min_value => |mv| mv.base.isSignedInteger(),
             .max_value => |mv| mv.base.isSignedInteger(),
             .in_range => |ir| ir.base.isSignedInteger(),
@@ -350,7 +350,7 @@ pub const OraType = union(enum) {
             ._union => "union",
             .anonymous_struct => "struct",
             .module => "module",
-            // Refinement types - use render() for proper formatting
+            // refinement types - use render() for proper formatting
             .min_value, .max_value, .in_range, .scaled, .exact, .non_zero_address => "refinement",
         };
     }
@@ -875,14 +875,14 @@ pub fn deinitTypeInfo(allocator: std.mem.Allocator, type_info: *TypeInfo) void {
                 allocator.destroy(ptr);
             },
             ._union => |types| {
-                // Free each union member type (by value in slice)
+                // free each union member type (by value in slice)
                 for (types) |member| {
                     deinitOraType(allocator, @constCast(&member));
                 }
                 allocator.free(types);
             },
             .anonymous_struct => |fields| {
-                // Free each field's allocated type pointer
+                // free each field's allocated type pointer
                 for (fields) |field| {
                     deinitOraType(allocator, @constCast(field.typ));
                     allocator.destroy(field.typ);
@@ -890,27 +890,27 @@ pub fn deinitTypeInfo(allocator: std.mem.Allocator, type_info: *TypeInfo) void {
                 allocator.free(fields);
             },
             .map => |mapping| {
-                // Properly handle map's key and value
+                // properly handle map's key and value
                 deinitOraType(allocator, @constCast(mapping.key));
                 deinitOraType(allocator, @constCast(mapping.value));
                 allocator.destroy(mapping.key);
                 allocator.destroy(mapping.value);
             },
             .tuple => |types| {
-                // Handle tuple elements
+                // handle tuple elements
                 for (types) |element_type| {
                     deinitOraType(allocator, @constCast(&element_type));
                 }
                 allocator.free(types);
             },
             .function => |func| {
-                // Handle function parameters
+                // handle function parameters
                 for (func.params) |param| {
                     deinitOraType(allocator, @constCast(&param));
                 }
                 allocator.free(func.params);
 
-                // Handle optional return type safely
+                // handle optional return type safely
                 if (func.return_type) |ret_type| {
                     deinitOraType(allocator, @constCast(ret_type));
                     allocator.destroy(ret_type);
@@ -937,14 +937,14 @@ pub fn deinitTypeInfo(allocator: std.mem.Allocator, type_info: *TypeInfo) void {
                 allocator.destroy(e);
             },
             else => {
-                // Primitive types don't need cleanup
+                // primitive types don't need cleanup
             },
         }
     }
 }
 
 pub fn deinitOraType(allocator: std.mem.Allocator, ora_type: *OraType) void {
-    // Handle nested type cleanup based on OraType variant
+    // handle nested type cleanup based on OraType variant
     switch (ora_type.*) {
         .array => |arr| {
             deinitOraType(allocator, @constCast(arr.elem));
@@ -972,7 +972,7 @@ pub fn deinitOraType(allocator: std.mem.Allocator, ora_type: *OraType) void {
             allocator.free(fields);
         },
         .map => |mapping| {
-            // MapType's key and value are defined as *const OraType (not optional)
+            // mapType's key and value are defined as *const OraType (not optional)
             deinitOraType(allocator, @constCast(mapping.key));
             allocator.destroy(mapping.key);
 
@@ -980,21 +980,21 @@ pub fn deinitOraType(allocator: std.mem.Allocator, ora_type: *OraType) void {
             allocator.destroy(mapping.value);
         },
         .function => |function| {
-            // FunctionType has params as []const OraType and return_type as ?*const OraType
-            // Note: params are handled by deinitTypeInfo, not here, to avoid double-free
-            // Only handle return type here
+            // functionType has params as []const OraType and return_type as ?*const OraType
+            // note: params are handled by deinitTypeInfo, not here, to avoid double-free
+            // only handle return type here
             if (function.return_type) |return_type| {
                 deinitOraType(allocator, @constCast(return_type));
                 allocator.destroy(return_type);
             }
         },
-        // String references in structs, enums, and contracts are typically owned by the parser
+        // string references in structs, enums, and contracts are typically owned by the parser
         .struct_type, .enum_type, .contract_type => {
-            // No additional cleanup for these string references
-            // They're typically owned by the parser, not by OraType
+            // no additional cleanup for these string references
+            // they're typically owned by the parser, not by OraType
         },
 
-        // Refinement types
+        // refinement types
         .min_value => |ref| {
             deinitOraType(allocator, @constCast(ref.base));
             allocator.destroy(ref.base);
@@ -1015,7 +1015,7 @@ pub fn deinitOraType(allocator: std.mem.Allocator, ora_type: *OraType) void {
             deinitOraType(allocator, @constCast(e));
             allocator.destroy(e);
         },
-        // Other primitive types don't need cleanup
+        // other primitive types don't need cleanup
         else => {},
     }
 }

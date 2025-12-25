@@ -237,13 +237,13 @@ test "expressions: binary expression structure" {
 
     try testing.expect(expr.* == .Binary);
     if (expr.* == .Binary) {
-        // Check lhs structure
+        // check lhs structure
         try testing.expect(expr.Binary.lhs.* == .Literal);
         if (expr.Binary.lhs.* == .Literal and expr.Binary.lhs.Literal == .Integer) {
             try testing.expect(std.mem.eql(u8, "10", expr.Binary.lhs.Literal.Integer.value));
         }
 
-        // Check rhs structure
+        // check rhs structure
         try testing.expect(expr.Binary.rhs.* == .Literal);
         if (expr.Binary.rhs.* == .Literal and expr.Binary.rhs.Literal == .Integer) {
             try testing.expect(std.mem.eql(u8, "20", expr.Binary.rhs.Literal.Integer.value));
@@ -290,7 +290,7 @@ test "expressions: type info present in expressions" {
     const expr = try builder.identifier("x", span);
 
     try testing.expect(expr.* == .Identifier);
-    // Type info should be present (even if unknown initially)
+    // type info should be present (even if unknown initially)
     _ = expr.Identifier.type_info;
 }
 
@@ -312,7 +312,7 @@ test "expressions: binary expression has type info" {
 
     try testing.expect(expr.* == .Binary);
     if (expr.* == .Binary) {
-        // Type info should be present
+        // type info should be present
         _ = expr.Binary.type_info;
     }
 }

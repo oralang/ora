@@ -24,7 +24,7 @@ const ErrorRecovery = @import("../error_recovery.zig").ErrorRecovery;
 pub fn scanHexLiteral(lexer: *Lexer) LexerError!void {
     var digit_count: u32 = 0;
 
-    // Scan hex digits and underscores
+    // scan hex digits and underscores
     while (!lexer.isAtEnd()) {
         const c = lexer.peek();
         if (isHexDigit(c)) {
@@ -38,21 +38,21 @@ pub fn scanHexLiteral(lexer: *Lexer) LexerError!void {
     }
 
     if (digit_count == 0) {
-        // Invalid hex literal (just "0x")
+        // invalid hex literal (just "0x")
         return LexerError.InvalidHexLiteral;
     }
 
-    // Check if the next character would make this invalid
+    // check if the next character would make this invalid
     // (e.g., "0xG" should be invalid, not "0x" + "G")
     if (!lexer.isAtEnd()) {
         const next_char = lexer.peek();
         if (isAlpha(next_char) and !isHexDigit(next_char)) {
-            // Invalid hex literal with non-hex letters
+            // invalid hex literal with non-hex letters
             return LexerError.InvalidHexLiteral;
         }
     }
 
-    // Check if it's an address (40 hex digits)
+    // check if it's an address (40 hex digits)
     if (digit_count == 40) {
         try addAddressToken(lexer);
     } else {
@@ -69,7 +69,7 @@ pub fn scanBinaryLiteral(lexer: *Lexer) LexerError!void {
     var invalid_char_pos: ?u32 = null;
     var invalid_char: ?u8 = null;
 
-    // Scan binary digits and underscores with enhanced validation
+    // scan binary digits and underscores with enhanced validation
     while (!lexer.isAtEnd()) {
         const c = lexer.peek();
 
@@ -79,15 +79,15 @@ pub fn scanBinaryLiteral(lexer: *Lexer) LexerError!void {
             first_char = false;
             _ = lexer.advance();
         } else if (c == '_') {
-            // Enhanced underscore validation
+            // enhanced underscore validation
             if (first_char) {
-                // Binary literal cannot start with underscore after 0b
+                // binary literal cannot start with underscore after 0b
                 invalid_char_pos = lexer.current;
                 invalid_char = c;
                 break;
             }
             if (last_was_underscore) {
-                // Consecutive underscores not allowed
+                // consecutive underscores not allowed
                 invalid_char_pos = lexer.current;
                 invalid_char = c;
                 break;
@@ -97,7 +97,7 @@ pub fn scanBinaryLiteral(lexer: *Lexer) LexerError!void {
             first_char = false;
             _ = lexer.advance();
         } else {
-            // Check if this is an invalid character that should be part of the literal
+            // check if this is an invalid character that should be part of the literal
             if (isDigit(c) or isAlpha(c)) {
                 invalid_char_pos = lexer.current;
                 invalid_char = c;
@@ -106,9 +106,9 @@ pub fn scanBinaryLiteral(lexer: *Lexer) LexerError!void {
         }
     }
 
-    // Enhanced error handling with specific error messages
+    // enhanced error handling with specific error messages
     if (digit_count == 0) {
-        // Invalid binary literal (just "0b" or "0b_") - use error recovery if enabled
+        // invalid binary literal (just "0b" or "0b_") - use error recovery if enabled
         if (lexer.hasErrorRecovery()) {
             const range = SourceRange{
                 .start_line = lexer.line,
@@ -128,7 +128,7 @@ pub fn scanBinaryLiteral(lexer: *Lexer) LexerError!void {
 
             try lexer.error_recovery.?.recordDetailedErrorWithSuggestion(LexerError.InvalidBinaryLiteral, range, lexer.source, message, suggestion);
 
-            // Skip to next token boundary for recovery
+            // skip to next token boundary for recovery
             lexer.current = ErrorRecovery.findNextTokenBoundary(lexer.source, lexer.current);
             return; // Skip adding the token
         } else {
@@ -136,7 +136,7 @@ pub fn scanBinaryLiteral(lexer: *Lexer) LexerError!void {
         }
     }
 
-    // Check for trailing underscore
+    // check for trailing underscore
     if (last_was_underscore) {
         if (lexer.hasErrorRecovery()) {
             const range = SourceRange{
@@ -153,7 +153,7 @@ pub fn scanBinaryLiteral(lexer: *Lexer) LexerError!void {
 
             try lexer.error_recovery.?.recordDetailedErrorWithSuggestion(LexerError.InvalidBinaryLiteral, range, lexer.source, message, suggestion);
 
-            // Skip to next token boundary for recovery
+            // skip to next token boundary for recovery
             lexer.current = ErrorRecovery.findNextTokenBoundary(lexer.source, lexer.current);
             return; // Skip adding the token
         } else {
@@ -161,7 +161,7 @@ pub fn scanBinaryLiteral(lexer: *Lexer) LexerError!void {
         }
     }
 
-    // Check for invalid characters found during scanning
+    // check for invalid characters found during scanning
     if (invalid_char_pos != null and invalid_char != null) {
         if (lexer.hasErrorRecovery()) {
             const range = SourceRange{
@@ -194,7 +194,7 @@ pub fn scanBinaryLiteral(lexer: *Lexer) LexerError!void {
 
             try lexer.error_recovery.?.recordDetailedErrorWithSuggestion(LexerError.InvalidBinaryLiteral, range, lexer.source, message, suggestion);
 
-            // Skip to next token boundary for recovery
+            // skip to next token boundary for recovery
             lexer.current = ErrorRecovery.findNextTokenBoundary(lexer.source, lexer.current);
             return; // Skip adding the token
         } else {
@@ -202,12 +202,12 @@ pub fn scanBinaryLiteral(lexer: *Lexer) LexerError!void {
         }
     }
 
-    // Check if the next character would make this invalid (lookahead validation)
+    // check if the next character would make this invalid (lookahead validation)
     // (e.g., "0b12" should be invalid, not "0b1" + "2")
     if (!lexer.isAtEnd()) {
         const next_char = lexer.peek();
         if (isDigit(next_char) or isAlpha(next_char)) {
-            // Invalid binary literal with non-binary digits - use error recovery if enabled
+            // invalid binary literal with non-binary digits - use error recovery if enabled
             if (lexer.hasErrorRecovery()) {
                 const range = SourceRange{
                     .start_line = lexer.line,
@@ -228,7 +228,7 @@ pub fn scanBinaryLiteral(lexer: *Lexer) LexerError!void {
 
                 try lexer.error_recovery.?.recordDetailedErrorWithSuggestion(LexerError.InvalidBinaryLiteral, range, lexer.source, message, suggestion);
 
-                // Skip to next token boundary for recovery
+                // skip to next token boundary for recovery
                 lexer.current = ErrorRecovery.findNextTokenBoundary(lexer.source, lexer.current);
                 return; // Skip adding the token
             } else {
@@ -242,12 +242,12 @@ pub fn scanBinaryLiteral(lexer: *Lexer) LexerError!void {
 
 /// Scan a decimal number literal
 pub fn scanNumber(lexer: *Lexer) LexerError!void {
-    // Scan integer part
+    // scan integer part
     while (isDigit(lexer.peek()) or lexer.peek() == '_') {
         _ = lexer.advance();
     }
 
-    // Check for scientific notation
+    // check for scientific notation
     if (lexer.peek() == 'e' or lexer.peek() == 'E') {
         _ = lexer.advance();
         if (lexer.peek() == '+' or lexer.peek() == '-') {
@@ -263,7 +263,7 @@ pub fn scanNumber(lexer: *Lexer) LexerError!void {
 
 /// Add a binary literal token
 pub fn addBinaryToken(lexer: *Lexer) LexerError!void {
-    // Strip 0b/0B prefix from binary literal
+    // strip 0b/0B prefix from binary literal
     const text = lexer.source[lexer.start + 2 .. lexer.current];
     const range = SourceRange{
         .start_line = lexer.line,
@@ -274,7 +274,7 @@ pub fn addBinaryToken(lexer: *Lexer) LexerError!void {
         .end_offset = lexer.current,
     };
 
-    // Convert binary string to integer value with overflow checking
+    // convert binary string to integer value with overflow checking
     const binary_value = parseBinaryToInteger(text) catch |err| {
         return err;
     };
@@ -286,7 +286,7 @@ pub fn addBinaryToken(lexer: *Lexer) LexerError!void {
         .lexeme = lexer.source[lexer.start..lexer.current], // Full lexeme including 0b prefix
         .range = range,
         .value = token_value,
-        // Legacy fields for backward compatibility
+        // legacy fields for backward compatibility
         .line = lexer.line,
         .column = lexer.start_column,
     });
@@ -303,41 +303,41 @@ pub fn parseBinaryToInteger(binary_str: []const u8) LexerError!u256 {
     var underscore_count: u32 = 0;
     var last_was_underscore = false;
 
-    // Enhanced validation during parsing
+    // enhanced validation during parsing
     for (binary_str, 0..) |c, i| {
         if (c == '_') {
-            // Enhanced underscore validation
+            // enhanced underscore validation
             underscore_count += 1;
 
-            // Check for leading underscore
+            // check for leading underscore
             if (i == 0) {
                 return LexerError.InvalidBinaryLiteral;
             }
 
-            // Check for consecutive underscores
+            // check for consecutive underscores
             if (last_was_underscore) {
                 return LexerError.InvalidBinaryLiteral;
             }
 
-            // Check for trailing underscore (will be caught at end)
+            // check for trailing underscore (will be caught at end)
             last_was_underscore = true;
             continue; // Skip underscores used as separators
         }
 
-        // Reset underscore flag
+        // reset underscore flag
         last_was_underscore = false;
 
-        // Validate binary digit
+        // validate binary digit
         if (c != '0' and c != '1') {
             return LexerError.InvalidBinaryLiteral;
         }
 
-        // Check for overflow before processing (u256 has 256 bits)
+        // check for overflow before processing (u256 has 256 bits)
         if (bit_count >= 256) {
             return LexerError.NumberTooLarge;
         }
 
-        // Shift left and add new bit with overflow checking
+        // shift left and add new bit with overflow checking
         const overflow = @mulWithOverflow(result, 2);
         if (overflow[1] != 0) {
             return LexerError.NumberTooLarge;
@@ -355,17 +355,17 @@ pub fn parseBinaryToInteger(binary_str: []const u8) LexerError!u256 {
         bit_count += 1;
     }
 
-    // Check for trailing underscore
+    // check for trailing underscore
     if (last_was_underscore) {
         return LexerError.InvalidBinaryLiteral;
     }
 
-    // Final validation
+    // final validation
     if (bit_count == 0) {
         return LexerError.InvalidBinaryLiteral;
     }
 
-    // Additional validation: ensure we have meaningful content
+    // additional validation: ensure we have meaningful content
     // (not just underscores)
     if (bit_count == 0 and underscore_count > 0) {
         return LexerError.InvalidBinaryLiteral;
@@ -386,7 +386,7 @@ pub fn addIntegerToken(lexer: *Lexer) LexerError!void {
         .end_offset = lexer.current,
     };
 
-    // Convert decimal string to integer value with overflow checking
+    // convert decimal string to integer value with overflow checking
     const integer_value = parseDecimalToInteger(text) catch |err| {
         return err;
     };
@@ -398,7 +398,7 @@ pub fn addIntegerToken(lexer: *Lexer) LexerError!void {
         .lexeme = text,
         .range = range,
         .value = token_value,
-        // Legacy fields for backward compatibility
+        // legacy fields for backward compatibility
         .line = lexer.line,
         .column = lexer.start_column,
     });
@@ -415,22 +415,22 @@ pub fn parseDecimalToInteger(decimal_str: []const u8) LexerError!u256 {
 
     for (decimal_str) |c| {
         if (c == '_') {
-            // Skip underscores used as separators
+            // skip underscores used as separators
             continue;
         }
 
         if (!isDigit(c)) {
-            // This handles scientific notation and other non-digit characters
-            // For now, we'll just skip them (scientific notation parsing would be more complex)
+            // this handles scientific notation and other non-digit characters
+            // for now, we'll just skip them (scientific notation parsing would be more complex)
             continue;
         }
 
-        // Check for overflow (u256 max is about 78 decimal digits)
+        // check for overflow (u256 max is about 78 decimal digits)
         if (digit_count >= 78) {
             return LexerError.NumberTooLarge;
         }
 
-        // Shift left by multiplying by 10 and add new digit
+        // shift left by multiplying by 10 and add new digit
         const overflow = @mulWithOverflow(result, 10);
         if (overflow[1] != 0) {
             return LexerError.NumberTooLarge;
@@ -452,7 +452,7 @@ pub fn parseDecimalToInteger(decimal_str: []const u8) LexerError!u256 {
 
 /// Add a hex literal token
 pub fn addHexToken(lexer: *Lexer) LexerError!void {
-    // Strip 0x/0X prefix from hex literal
+    // strip 0x/0X prefix from hex literal
     const text = lexer.source[lexer.start + 2 .. lexer.current];
     const range = SourceRange{
         .start_line = lexer.line,
@@ -463,7 +463,7 @@ pub fn addHexToken(lexer: *Lexer) LexerError!void {
         .end_offset = lexer.current,
     };
 
-    // Convert hex string to integer value with overflow checking
+    // convert hex string to integer value with overflow checking
     const hex_value = parseHexToInteger(text) catch |err| {
         return err;
     };
@@ -475,7 +475,7 @@ pub fn addHexToken(lexer: *Lexer) LexerError!void {
         .lexeme = lexer.source[lexer.start..lexer.current], // Full lexeme including 0x prefix
         .range = range,
         .value = token_value,
-        // Legacy fields for backward compatibility
+        // legacy fields for backward compatibility
         .line = lexer.line,
         .column = lexer.start_column,
     });
@@ -483,7 +483,7 @@ pub fn addHexToken(lexer: *Lexer) LexerError!void {
 
 /// Add an address literal token
 pub fn addAddressToken(lexer: *Lexer) LexerError!void {
-    // Strip 0x/0X prefix from address literal
+    // strip 0x/0X prefix from address literal
     const text = lexer.source[lexer.start + 2 .. lexer.current];
     const range = SourceRange{
         .start_line = lexer.line,
@@ -494,7 +494,7 @@ pub fn addAddressToken(lexer: *Lexer) LexerError!void {
         .end_offset = lexer.current,
     };
 
-    // Convert address string to byte array
+    // convert address string to byte array
     const address_bytes = parseAddressToBytes(text) catch |err| {
         return err;
     };
@@ -506,7 +506,7 @@ pub fn addAddressToken(lexer: *Lexer) LexerError!void {
         .lexeme = lexer.source[lexer.start..lexer.current], // Full lexeme including 0x prefix
         .range = range,
         .value = token_value,
-        // Legacy fields for backward compatibility
+        // legacy fields for backward compatibility
         .line = lexer.line,
         .column = lexer.start_column,
     });
@@ -523,7 +523,7 @@ pub fn parseHexToInteger(hex_str: []const u8) LexerError!u256 {
 
     for (hex_str) |c| {
         if (c == '_') {
-            // Skip underscores used as separators
+            // skip underscores used as separators
             continue;
         }
 
@@ -531,19 +531,19 @@ pub fn parseHexToInteger(hex_str: []const u8) LexerError!u256 {
             return LexerError.InvalidHexLiteral;
         }
 
-        // Check for overflow (u256 has 256 bits, so max 64 hex digits)
+        // check for overflow (u256 has 256 bits, so max 64 hex digits)
         if (digit_count >= 64) {
             return LexerError.NumberTooLarge;
         }
 
-        // Shift left by 4 bits and add new hex digit
+        // shift left by 4 bits and add new hex digit
         const overflow = @mulWithOverflow(result, 16);
         if (overflow[1] != 0) {
             return LexerError.NumberTooLarge;
         }
         result = overflow[0];
 
-        // Convert hex digit to value
+        // convert hex digit to value
         const digit_value: u8 = switch (c) {
             '0'...'9' => c - '0',
             'a'...'f' => c - 'a' + 10,

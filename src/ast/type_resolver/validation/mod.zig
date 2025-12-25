@@ -29,7 +29,7 @@ pub const ValidationSystem = struct {
 
     pub fn deinit(self: *ValidationSystem) void {
         _ = self;
-        // Phase 2: No cleanup needed
+        // phase 2: No cleanup needed
     }
 
     /// Check if source type is assignable to destination type

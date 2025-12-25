@@ -139,10 +139,10 @@ pub const StringProcessor = trivia.StringProcessor;
 
 /// Token types for Ora
 pub const TokenType = enum {
-    // End of file
+    // end of file
     Eof,
 
-    // Keywords
+    // keywords
     Contract,
     Extends,
     Implements,
@@ -182,31 +182,31 @@ pub const TokenType = enum {
     True,
     False,
 
-    // Error handling keywords
+    // error handling keywords
     Error,
     Try,
     Catch,
 
-    // Control flow keywords
+    // control flow keywords
     Switch,
 
-    // Function modifiers
+    // function modifiers
     Ghost,
     Assert,
 
-    // Type keywords
+    // type keywords
     Void,
 
-    // Transfer/shift keywords
+    // transfer/shift keywords
     From,
     To,
 
-    // Quantifier keywords
+    // quantifier keywords
     Forall,
     Exists,
     Where,
 
-    // Primitive type keywords
+    // primitive type keywords
     U8,
     U16,
     U32,
@@ -223,12 +223,12 @@ pub const TokenType = enum {
     Address,
     String,
 
-    // Collection type keywords
+    // collection type keywords
     Map,
     Slice,
     Bytes,
 
-    // Identifiers and literals
+    // identifiers and literals
     Identifier,
     StringLiteral,
     RawStringLiteral,
@@ -239,7 +239,7 @@ pub const TokenType = enum {
     AddressLiteral,
     BytesLiteral,
 
-    // Symbols and operators
+    // symbols and operators
     Plus, // +
     Minus, // -
     Star, // *
@@ -268,7 +268,7 @@ pub const TokenType = enum {
     PercentEqual, // %=
     Arrow, // ->
 
-    // Delimiters
+    // delimiters
     LeftParen, // (
     RightParen, // )
     LeftBrace, // {
@@ -290,14 +290,14 @@ pub const Token = struct {
     type: TokenType,
     lexeme: []const u8,
     range: SourceRange,
-    // For literals, store processed value separately from raw lexeme
+    // for literals, store processed value separately from raw lexeme
     value: ?TokenValue = null,
 
-    // Line and column for convenience
+    // line and column for convenience
     line: u32,
     column: u32,
 
-    // Lossless parsing trivia attachment (leading trivia captured; trailing optional)
+    // lossless parsing trivia attachment (leading trivia captured; trailing optional)
     leading_trivia_start: u32 = 0,
     leading_trivia_len: u32 = 0,
     trailing_trivia_start: u32 = 0,
@@ -357,23 +357,23 @@ pub const LexerPerformance = struct {
 
 /// Lexer configuration options
 pub const LexerConfig = struct {
-    // Error recovery configuration
+    // error recovery configuration
     enable_error_recovery: bool = true,
     max_errors: u32 = 100,
     enable_suggestions: bool = true,
 
-    // Resynchronization after errors
+    // resynchronization after errors
     enable_resync: bool = true,
     resync_max_lookahead: u32 = 256,
 
-    // String processing configuration
+    // string processing configuration
     enable_string_interning: bool = true,
     string_pool_initial_capacity: u32 = 256,
 
-    // Performance monitoring configuration
+    // performance monitoring configuration
     enable_performance_monitoring: bool = false,
 
-    // Feature toggles
+    // feature toggles
     enable_raw_strings: bool = true,
     enable_character_literals: bool = true,
     enable_binary_literals: bool = true,
@@ -381,12 +381,12 @@ pub const LexerConfig = struct {
     enable_address_validation: bool = true,
     enable_number_overflow_checking: bool = true,
 
-    // Diagnostic configuration
+    // diagnostic configuration
     enable_diagnostic_grouping: bool = true,
     enable_diagnostic_filtering: bool = true,
     minimum_diagnostic_severity: DiagnosticSeverity = .Error,
 
-    // Strict mode for production use
+    // strict mode for production use
     strict_mode: bool = false,
 
     /// Create default configuration
@@ -448,7 +448,7 @@ pub const LexerConfig = struct {
             return LexerConfigError.StringPoolCapacityTooLarge;
         }
 
-        // Validate feature combinations
+        // validate feature combinations
         if (self.enable_suggestions and !self.enable_error_recovery) {
             return LexerConfigError.SuggestionsRequireErrorRecovery;
         }
@@ -472,7 +472,7 @@ pub const LexerConfig = struct {
         try writer.writeAll("Lexer Configuration:\n");
         try writer.writeAll("==================\n");
 
-        // Error recovery settings
+        // error recovery settings
         try writer.print("Error Recovery: {any}\n", .{self.enable_error_recovery});
         if (self.enable_error_recovery) {
             try writer.print("  Max Errors: {d}\n", .{self.max_errors});
@@ -480,13 +480,13 @@ pub const LexerConfig = struct {
             try writer.print("  Resync: {any} (max lookahead {d})\n", .{ self.enable_resync, self.resync_max_lookahead });
         }
 
-        // String processing settings
+        // string processing settings
         try writer.print("String Interning: {any}\n", .{self.enable_string_interning});
         if (self.enable_string_interning) {
             try writer.print("  Initial Capacity: {d}\n", .{self.string_pool_initial_capacity});
         }
 
-        // Feature toggles
+        // feature toggles
         try writer.print("Raw Strings: {any}\n", .{self.enable_raw_strings});
         try writer.print("Character Literals: {any}\n", .{self.enable_character_literals});
         try writer.print("Binary Literals: {any}\n", .{self.enable_binary_literals});
@@ -494,12 +494,12 @@ pub const LexerConfig = struct {
         try writer.print("Address Validation: {any}\n", .{self.enable_address_validation});
         try writer.print("Number Overflow Checking: {any}\n", .{self.enable_number_overflow_checking});
 
-        // Diagnostic settings
+        // diagnostic settings
         try writer.print("Diagnostic Grouping: {any}\n", .{self.enable_diagnostic_grouping});
         try writer.print("Diagnostic Filtering: {any}\n", .{self.enable_diagnostic_filtering});
         try writer.print("Minimum Severity: {any}\n", .{self.minimum_diagnostic_severity});
 
-        // General settings
+        // general settings
         try writer.print("Strict Mode: {any}\n", .{self.strict_mode});
         try writer.print("Performance Monitoring: {any}\n", .{self.enable_performance_monitoring});
 
@@ -612,17 +612,17 @@ pub const Lexer = struct {
     last_bad_char: ?u8, // Track the character that caused an error
     allocator: Allocator,
 
-    // Arena allocator for string processing - all processed strings live here
+    // arena allocator for string processing - all processed strings live here
     arena: std.heap.ArenaAllocator,
 
-    // Error recovery system
+    // error recovery system
     error_recovery: ?ErrorRecovery,
     config: LexerConfig,
 
-    // String interning system
+    // string interning system
     string_pool: ?StringPool,
 
-    // Performance monitoring
+    // performance monitoring
     performance: ?LexerPerformance,
 
     pub fn init(allocator: Allocator, source: []const u8) Lexer {
@@ -647,23 +647,23 @@ pub const Lexer = struct {
 
     /// Initialize lexer with custom configuration
     pub fn initWithConfig(allocator: Allocator, source: []const u8, config: LexerConfig) LexerConfigError!Lexer {
-        // Validate configuration first
+        // validate configuration first
         try config.validate();
 
         var lexer = Lexer.init(allocator, source);
         lexer.config = config;
 
-        // Initialize optional components based on configuration
+        // initialize optional components based on configuration
         if (config.enable_error_recovery) {
             lexer.error_recovery = ErrorRecovery.init(allocator, config.max_errors);
         }
 
         if (config.enable_string_interning) {
             lexer.string_pool = trivia.StringPool.init(allocator);
-            // Pre-allocate capacity if specified
+            // pre-allocate capacity if specified
             if (config.string_pool_initial_capacity > 0) {
                 lexer.string_pool.?.strings.ensureTotalCapacity(config.string_pool_initial_capacity) catch {
-                    // If allocation fails, continue with default capacity
+                    // if allocation fails, continue with default capacity
                 };
             }
         }
@@ -676,10 +676,10 @@ pub const Lexer = struct {
     }
 
     pub fn deinit(self: *Lexer) void {
-        // Free the arena - this automatically frees all processed strings
+        // free the arena - this automatically frees all processed strings
         self.arena.deinit();
 
-        // Free other components
+        // free other components
         self.tokens.deinit(self.allocator);
         self.trivia.deinit(self.allocator);
         if (self.error_recovery) |*recovery| {
@@ -778,20 +778,20 @@ pub const Lexer = struct {
 
     /// Update lexer configuration (only affects future operations)
     pub fn updateConfig(self: *Lexer, new_config: LexerConfig) LexerConfigError!void {
-        // Validate new configuration
+        // validate new configuration
         try new_config.validate();
 
-        // Update configuration
+        // update configuration
         self.config = new_config;
 
-        // Reinitialize components if needed
+        // reinitialize components if needed
         if (new_config.enable_error_recovery and self.error_recovery == null) {
             self.error_recovery = ErrorRecovery.init(self.allocator, new_config.max_errors);
         } else if (!new_config.enable_error_recovery and self.error_recovery != null) {
             self.error_recovery.?.deinit();
             self.error_recovery = null;
         } else if (new_config.enable_error_recovery and self.error_recovery != null) {
-            // Update max errors if changed
+            // update max errors if changed
             self.error_recovery.?.max_errors = new_config.max_errors;
         }
 
@@ -858,7 +858,7 @@ pub const Lexer = struct {
     }
 
     // ========================================================================
-    // UTILITY METHODS
+    // utility METHODS
     // ========================================================================
 
     /// Check if lexer has any errors
@@ -940,10 +940,10 @@ pub const Lexer = struct {
                 .end_offset = self.current,
             };
             recovery.recordDetailedError(error_type, range, self.source, message) catch {
-                // If we can't record more errors, we've hit the limit
+                // if we can't record more errors, we've hit the limit
                 return;
             };
-            // Attempt resynchronization if enabled and appropriate for this error
+            // attempt resynchronization if enabled and appropriate for this error
             if (self.config.enable_resync and shouldResyncOnError(error_type)) {
                 self.resyncToBoundary(self.config.resync_max_lookahead);
             }
@@ -962,7 +962,7 @@ pub const Lexer = struct {
                 .end_offset = self.current,
             };
             recovery.recordDetailedErrorWithSuggestion(error_type, range, self.source, message, suggestion) catch {
-                // If we can't record more errors, we've hit the limit
+                // if we can't record more errors, we've hit the limit
                 return;
             };
             if (self.config.enable_resync and shouldResyncOnError(error_type)) {
@@ -976,14 +976,14 @@ pub const Lexer = struct {
         var walked: u32 = 0;
         while (!self.isAtEnd() and walked < max_lookahead) {
             const c = self.peek();
-            // Hard boundaries: newline, braces, parens, brackets, statement delimiters
+            // hard boundaries: newline, braces, parens, brackets, statement delimiters
             if (c == '\n' or c == '{' or c == '}' or c == '(' or c == ')' or c == '[' or c == ']' or c == ';' or c == ',' or c == ':') {
                 break;
             }
             _ = self.advance();
             walked += 1;
         }
-        // Do not consume the boundary; allow normal scanning to handle it
+        // do not consume the boundary; allow normal scanning to handle it
     }
 
     /// Decide whether a boundary resync is appropriate for the given error
@@ -999,7 +999,7 @@ pub const Lexer = struct {
     /// Intern a string if string interning is enabled, otherwise return the original
     fn internString(self: *Lexer, string: []const u8) LexerError![]const u8 {
         if (self.string_pool) |*pool| {
-            // Track performance metrics if enabled
+            // track performance metrics if enabled
             if (self.performance) |*perf| {
                 const hash_value = trivia.StringPool.hash(string);
                 if (pool.strings.get(hash_value)) |interned_string| {
@@ -1022,21 +1022,21 @@ pub const Lexer = struct {
 
     /// Tokenize the entire source
     pub fn scanTokens(self: *Lexer) LexerError![]Token {
-        // Pre-allocate capacity based on source length estimate (1 token per ~8 characters)
+        // pre-allocate capacity based on source length estimate (1 token per ~8 characters)
         const estimated_tokens = @max(32, self.source.len / 8);
         try self.tokens.ensureTotalCapacity(self.allocator, estimated_tokens);
 
         while (!self.isAtEnd()) {
             self.start = self.current;
             self.start_column = self.column;
-            // Capture leading trivia for the next token
+            // capture leading trivia for the next token
             const trivia_start = self.trivia.items.len;
             try trivia.captureLeadingTrivia(self);
             const trivia_len: u32 = @intCast(self.trivia.items.len - trivia_start);
             self.start = self.current;
             self.start_column = self.column;
             if (self.isAtEnd()) break;
-            // Debug: print current position and character
+            // debug: print current position and character
 
             //if (self.current < self.source.len) {
             //    const current_char = self.source[self.current];
@@ -1044,22 +1044,22 @@ pub const Lexer = struct {
             //}
 
             self.scanToken() catch |err| {
-                // If error recovery is enabled, continue scanning
+                // if error recovery is enabled, continue scanning
                 if (self.hasErrorRecovery()) {
-                    // Record the error and continue
+                    // record the error and continue
                     self.recordError(err, "Lexer error occurred");
-                    // For localized errors (e.g., unexpected char), advancing one char is sufficient.
-                    // Long-span errors will trigger boundary resync inside recordError.
+                    // for localized errors (e.g., unexpected char), advancing one char is sufficient.
+                    // long-span errors will trigger boundary resync inside recordError.
                     if (!self.isAtEnd()) {
                         _ = self.advance();
                     }
                 } else {
-                    // If no error recovery, re-raise the error
+                    // if no error recovery, re-raise the error
                     return err;
                 }
             };
 
-            // Attach captured trivia as leading trivia for the token we just added
+            // attach captured trivia as leading trivia for the token we just added
             if (self.tokens.items.len > 0 and trivia_len > 0) {
                 var last = &self.tokens.items[self.tokens.items.len - 1];
                 last.leading_trivia_start = @as(u32, @intCast(trivia_start));
@@ -1067,7 +1067,7 @@ pub const Lexer = struct {
             }
         }
 
-        // Add EOF token
+        // add EOF token
         const eof_range = SourceRange{
             .start_line = self.line,
             .start_column = self.column,
@@ -1077,7 +1077,7 @@ pub const Lexer = struct {
             .end_offset = self.current,
         };
 
-        // Track performance metrics for EOF token if enabled
+        // track performance metrics for EOF token if enabled
         if (self.performance) |*perf| {
             perf.tokens_scanned += 1;
         }
@@ -1087,7 +1087,7 @@ pub const Lexer = struct {
             .lexeme = "",
             .range = eof_range,
             .value = null,
-            // Legacy fields for backward compatibility
+            // legacy fields for backward compatibility
             .line = self.line,
             .column = self.column,
         });
@@ -1096,19 +1096,19 @@ pub const Lexer = struct {
     }
 
     fn scanToken(self: *Lexer) LexerError!void {
-        // Track performance metrics if enabled
+        // track performance metrics if enabled
         if (self.performance) |*perf| {
             perf.characters_processed += 1;
         }
 
         const c = self.advance();
 
-        // Whitespace/comments are handled by captureLeadingTrivia()
+        // whitespace/comments are handled by captureLeadingTrivia()
         if (isWhitespace(c)) return; // should be rare due to captureLeadingTrivia
 
         switch (c) {
 
-            // Single character tokens
+            // single character tokens
             '(' => try self.addToken(.LeftParen),
             ')' => try self.addToken(.RightParen),
             '{' => try self.addToken(.LeftBrace),
@@ -1119,27 +1119,27 @@ pub const Lexer = struct {
             ';' => try self.addToken(.Semicolon),
             ':' => try self.addToken(.Colon),
             '.' => {
-                // Look ahead to distinguish between '.', '..', and '...'
+                // look ahead to distinguish between '.', '..', and '...'
                 if (self.peek() == '.') {
                     if (self.peekNext() == '.') {
-                        // We have "..." - consume the remaining two dots
+                        // we have "..." - consume the remaining two dots
                         _ = self.advance(); // consume second '.'
                         _ = self.advance(); // consume third '.'
                         try self.addToken(.DotDotDot);
                     } else {
-                        // We have ".." - consume the second dot
+                        // we have ".." - consume the second dot
                         _ = self.advance(); // consume second '.'
                         try self.addToken(.DotDot);
                     }
                 } else {
-                    // Single dot - don't consume any additional characters
+                    // single dot - don't consume any additional characters
                     try self.addToken(.Dot);
                 }
             },
             '@' => try identifier_scanners.scanAtDirective(self),
             '^' => try self.addToken(.Caret),
 
-            // Operators that might have compound forms
+            // operators that might have compound forms
             '+' => {
                 if (self.match('=')) {
                     try self.addToken(.PlusEqual);
@@ -1167,13 +1167,13 @@ pub const Lexer = struct {
             },
             '/' => {
                 if (self.match('/')) {
-                    // Single-line comment already captured by captureLeadingTrivia
+                    // single-line comment already captured by captureLeadingTrivia
                     while (self.peek() != '\n' and !self.isAtEnd()) {
                         _ = self.advance();
                     }
                     return; // do not emit token
                 } else if (self.match('*')) {
-                    // Multi-line comment already captured by captureLeadingTrivia
+                    // multi-line comment already captured by captureLeadingTrivia
                     try self.scanMultiLineComment();
                     return; // do not emit token
                 } else if (self.match('=')) {
@@ -1197,7 +1197,7 @@ pub const Lexer = struct {
                 }
             },
             '=' => {
-                // Support '=>' fat arrow used in switch arms and quantified expressions
+                // support '=>' fat arrow used in switch arms and quantified expressions
                 if (self.match('>')) {
                     try self.addToken(.Arrow);
                 } else if (self.match('=')) {
@@ -1239,36 +1239,36 @@ pub const Lexer = struct {
                 }
             },
 
-            // String literals
+            // string literals
             '"' => try string_scanners.scanString(self),
             'r' => {
-                // Check for raw string literal r"..."
+                // check for raw string literal r"..."
                 if (self.peek() == '"') {
                     _ = self.advance(); // consume the "
                     try string_scanners.scanRawString(self);
                 } else {
-                    // Regular identifier starting with 'r'
+                    // regular identifier starting with 'r'
                     try identifier_scanners.scanIdentifier(self);
                 }
             },
             'h' => {
-                // Check for hex bytes literal hex"..."
+                // check for hex bytes literal hex"..."
                 if (self.peek() == 'e' and self.peekNext() == 'x' and self.peekNextNext() == '"') {
-                    // We have "hex" - consume 'e', 'x', and '"'
+                    // we have "hex" - consume 'e', 'x', and '"'
                     _ = self.advance(); // consume 'e'
                     _ = self.advance(); // consume 'x'
                     _ = self.advance(); // consume '"'
                     try string_scanners.scanHexBytes(self);
                 } else {
-                    // Regular identifier starting with 'h'
+                    // regular identifier starting with 'h'
                     try identifier_scanners.scanIdentifier(self);
                 }
             },
 
-            // Character literals
+            // character literals
             '\'' => try string_scanners.scanCharacter(self),
 
-            // Number literals (including hex and addresses)
+            // number literals (including hex and addresses)
             '0' => {
                 if (self.match('x') or self.match('X')) {
                     try number_scanners.scanHexLiteral(self);
@@ -1285,7 +1285,7 @@ pub const Lexer = struct {
                 } else if (isAlpha(c)) {
                     try identifier_scanners.scanIdentifier(self);
                 } else {
-                    // Invalid character - use error recovery if enabled
+                    // invalid character - use error recovery if enabled
                     self.last_bad_char = c;
                     if (self.hasErrorRecovery()) {
                         var message_buf: [128]u8 = undefined;
@@ -1294,7 +1294,7 @@ pub const Lexer = struct {
                         else
                             std.fmt.bufPrint(&message_buf, "Unexpected character (ASCII {})", .{c}) catch "Unexpected character";
 
-                        // Get suggestion for this error
+                        // get suggestion for this error
                         const context = self.source[self.current - 1 .. @min(self.current + 3, self.source.len)];
                         if (ErrorRecovery.suggestFix(LexerError.UnexpectedCharacter, context)) |suggestion| {
                             self.recordErrorWithSuggestion(LexerError.UnexpectedCharacter, message, suggestion);
@@ -1302,10 +1302,10 @@ pub const Lexer = struct {
                             self.recordError(LexerError.UnexpectedCharacter, message);
                         }
 
-                        // Use error recovery to find next safe boundary
+                        // use error recovery to find next safe boundary
                         const next_boundary = ErrorRecovery.findNextTokenBoundary(self.source, self.current);
                         if (next_boundary > self.current) {
-                            // Skip to the next safe boundary
+                            // skip to the next safe boundary
                             while (self.current < next_boundary and !self.isAtEnd()) {
                                 if (self.peek() == '\n') {
                                     self.line += 1;
@@ -1314,7 +1314,7 @@ pub const Lexer = struct {
                                 _ = self.advance();
                             }
                         }
-                        // Continue scanning after recovery
+                        // continue scanning after recovery
                     } else {
                         return LexerError.UnexpectedCharacter;
                     }
@@ -1345,7 +1345,7 @@ pub const Lexer = struct {
         }
 
         if (nesting > 0) {
-            // Unclosed comment
+            // unclosed comment
             return LexerError.UnterminatedComment;
         }
     }
@@ -1396,7 +1396,7 @@ pub const Lexer = struct {
             .end_offset = self.current,
         };
 
-        // Create token value for boolean literals
+        // create token value for boolean literals
         var token_value: ?TokenValue = null;
         if (token_type == .True) {
             token_value = TokenValue{ .boolean = true };
@@ -1404,7 +1404,7 @@ pub const Lexer = struct {
             token_value = TokenValue{ .boolean = false };
         }
 
-        // Track performance metrics if enabled
+        // track performance metrics if enabled
         if (self.performance) |*perf| {
             perf.tokens_scanned += 1;
         }
@@ -1414,7 +1414,7 @@ pub const Lexer = struct {
             .lexeme = text,
             .range = range,
             .value = token_value,
-            // Legacy fields for backward compatibility
+            // legacy fields for backward compatibility
             .line = self.line,
             .column = self.start_column,
         });
@@ -1431,10 +1431,10 @@ pub const Lexer = struct {
             .end_offset = self.current,
         };
 
-        // Intern the string for identifiers and keywords to reduce memory usage
+        // intern the string for identifiers and keywords to reduce memory usage
         const interned_text = try self.internString(text);
 
-        // Create token value for boolean literals
+        // create token value for boolean literals
         var token_value: ?TokenValue = null;
         if (token_type == .True) {
             token_value = TokenValue{ .boolean = true };
@@ -1442,7 +1442,7 @@ pub const Lexer = struct {
             token_value = TokenValue{ .boolean = false };
         }
 
-        // Track performance metrics if enabled
+        // track performance metrics if enabled
         if (self.performance) |*perf| {
             perf.tokens_scanned += 1;
         }
@@ -1452,7 +1452,7 @@ pub const Lexer = struct {
             .lexeme = interned_text,
             .range = range,
             .value = token_value,
-            // Legacy fields for backward compatibility
+            // legacy fields for backward compatibility
             .line = self.line,
             .column = self.start_column,
         });
@@ -1491,26 +1491,26 @@ const CHAR_IDENTIFIER_CONTINUE = 0x40;
 const char_table: [256]u8 = blk: {
     var table: [256]u8 = [_]u8{0} ** 256;
 
-    // Digits
+    // digits
     for ('0'..'9' + 1) |c| {
         table[c] |= CHAR_DIGIT | CHAR_HEX | CHAR_IDENTIFIER_CONTINUE;
     }
 
-    // Binary digits
+    // binary digits
     table['0'] |= CHAR_BINARY;
     table['1'] |= CHAR_BINARY;
 
-    // Lowercase letters
+    // lowercase letters
     for ('a'..'z' + 1) |c| {
         table[c] |= CHAR_ALPHA | CHAR_IDENTIFIER_START | CHAR_IDENTIFIER_CONTINUE;
     }
 
-    // Uppercase letters
+    // uppercase letters
     for ('A'..'Z' + 1) |c| {
         table[c] |= CHAR_ALPHA | CHAR_IDENTIFIER_START | CHAR_IDENTIFIER_CONTINUE;
     }
 
-    // Hex digits
+    // hex digits
     for ('a'..'f' + 1) |c| {
         table[c] |= CHAR_HEX;
     }
@@ -1518,10 +1518,10 @@ const char_table: [256]u8 = blk: {
         table[c] |= CHAR_HEX;
     }
 
-    // Underscore
+    // underscore
     table['_'] |= CHAR_ALPHA | CHAR_IDENTIFIER_START | CHAR_IDENTIFIER_CONTINUE;
 
-    // Whitespace
+    // whitespace
     table[' '] |= CHAR_WHITESPACE;
     table['\t'] |= CHAR_WHITESPACE;
     table['\r'] |= CHAR_WHITESPACE;

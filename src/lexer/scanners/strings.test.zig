@@ -36,8 +36,8 @@ test "strings: empty string" {
 
 test "strings: escape sequences" {
     const allocator = testing.allocator;
-    // Only test supported escape sequences: \n, \t, \\
-    // Note: \" might have parsing edge cases, so test separately
+    // only test supported escape sequences: \n, \t, \\
+    // note: \" might have parsing edge cases, so test separately
     const test_cases = [_][]const u8{
         "\"\\n\"", // newline
         "\"\\t\"", // tab
@@ -101,16 +101,16 @@ test "strings: unterminated string" {
     var lex = lexer.Lexer.init(allocator, source);
     defer lex.deinit();
 
-    // Lexer may use error recovery, which doesn't throw errors
-    // Instead, it records errors and continues
+    // lexer may use error recovery, which doesn't throw errors
+    // instead, it records errors and continues
     const tokens = lex.scanTokens() catch |err| {
-        // If error recovery is disabled, we get an error
+        // if error recovery is disabled, we get an error
         try testing.expectEqual(lexer.LexerError.UnterminatedString, err);
         return;
     };
     defer allocator.free(tokens);
 
-    // With error recovery enabled (default), lexer continues and may produce tokens
-    // Verify we got some tokens (even if error recovery produced placeholder tokens)
+    // with error recovery enabled (default), lexer continues and may produce tokens
+    // verify we got some tokens (even if error recovery produced placeholder tokens)
     try testing.expect(tokens.len > 0);
 }

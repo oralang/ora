@@ -29,7 +29,7 @@ pub fn Visitor(comptime Context: type, comptime ReturnType: type) type {
 
         context: *Context,
 
-        // Node visit functions - all optional to allow selective visiting
+        // node visit functions - all optional to allow selective visiting
         visitModule: ?*const fn (*Self, *ast.ModuleNode) ReturnType = null,
         visitContract: ?*const fn (*Self, *ast.ContractNode) ReturnType = null,
         visitFunction: ?*const fn (*Self, *ast.FunctionNode) ReturnType = null,
@@ -45,7 +45,7 @@ pub fn Visitor(comptime Context: type, comptime ReturnType: type) type {
         visitStatementNode: ?*const fn (*Self, *ast.Statements.StmtNode) ReturnType = null,
         visitTryBlock: ?*const fn (*Self, *ast.Statements.TryBlockNode) ReturnType = null,
 
-        // Expression-specific visit functions
+        // expression-specific visit functions
         visitIdentifier: ?*const fn (*Self, *ast.Expressions.IdentifierExpr) ReturnType = null,
         visitLiteral: ?*const fn (*Self, *ast.Expressions.LiteralExpr) ReturnType = null,
         visitBinary: ?*const fn (*Self, *ast.Expressions.BinaryExpr) ReturnType = null,
@@ -73,7 +73,7 @@ pub fn Visitor(comptime Context: type, comptime ReturnType: type) type {
         visitDestructuring: ?*const fn (*Self, *ast.Expressions.DestructuringExpr) ReturnType = null,
         visitLabeledBlockExpr: ?*const fn (*Self, *ast.Expressions.LabeledBlockExpr) ReturnType = null,
 
-        // Statement-specific visit functions
+        // statement-specific visit functions
         visitReturn: ?*const fn (*Self, *ast.Statements.ReturnNode) ReturnType = null,
         visitIf: ?*const fn (*Self, *ast.Statements.IfNode) ReturnType = null,
         visitWhile: ?*const fn (*Self, *ast.Statements.WhileNode) ReturnType = null,
@@ -89,21 +89,21 @@ pub fn Visitor(comptime Context: type, comptime ReturnType: type) type {
         visitDestructuringAssignment: ?*const fn (*Self, *ast.Statements.DestructuringAssignmentNode) ReturnType = null,
         visitLabeledBlockStmt: ?*const fn (*Self, *ast.Statements.LabeledBlockNode) ReturnType = null,
 
-        // Traversal control hooks
+        // traversal control hooks
         shouldVisitChildren: ?*const fn (*Self, *ast.AstNode) bool = null,
         preVisit: ?*const fn (*Self, *ast.AstNode) void = null,
         postVisit: ?*const fn (*Self, *ast.AstNode) void = null,
 
         /// Main visit function that dispatches to appropriate handlers
         pub fn visit(self: *Self, node: *ast.AstNode) ReturnType {
-            // Pre-visit hook
+            // pre-visit hook
             if (self.preVisit) |preVisitFn| {
                 preVisitFn(self, node);
             }
 
             const result = self.visitNode(node);
 
-            // Post-visit hook
+            // post-visit hook
             if (self.postVisit) |postVisitFn| {
                 postVisitFn(self, node);
             }
@@ -182,18 +182,18 @@ pub fn Visitor(comptime Context: type, comptime ReturnType: type) type {
                 },
             }
 
-            // Default return value if no handler is set
+            // default return value if no handler is set
             return if (ReturnType == void) {} else @as(ReturnType, undefined);
         }
 
         /// Visit expression nodes with detailed dispatch
         fn dispatchExpression(self: *Self, expr: *ast.Expressions.ExprNode) ReturnType {
-            // Call general expression handler first if available
+            // call general expression handler first if available
             if (self.visitExpressionNode) |visitFn| {
                 return visitFn(self, expr);
             }
 
-            // Then dispatch to specific expression handlers
+            // then dispatch to specific expression handlers
             switch (expr.*) {
                 .Identifier => |*identifier| {
                     if (self.visitIdentifier) |visitFn| {
@@ -305,7 +305,7 @@ pub fn Visitor(comptime Context: type, comptime ReturnType: type) type {
                         return visitFn(self, range_expr);
                     }
                 },
-                // Handle additional expression types without specific visitors
+                // handle additional expression types without specific visitors
                 .Quantified => |*quantified| {
                     if (self.visitQuantified) |visitFn| {
                         return visitFn(self, quantified);
@@ -333,12 +333,12 @@ pub fn Visitor(comptime Context: type, comptime ReturnType: type) type {
 
         /// Visit statement nodes with detailed dispatch
         fn dispatchStatement(self: *Self, stmt: *ast.Statements.StmtNode) ReturnType {
-            // Call general statement handler first if available
+            // call general statement handler first if available
             if (self.visitStatementNode) |visitFn| {
                 return visitFn(self, stmt);
             }
 
-            // Then dispatch to specific statement handlers
+            // then dispatch to specific statement handlers
             switch (stmt.*) {
                 .Expr => |*expr| {
                     return self.dispatchExpression(expr);
@@ -408,7 +408,7 @@ pub fn Visitor(comptime Context: type, comptime ReturnType: type) type {
                         return visitFn(self, try_block);
                     }
                 },
-                // Handle additional statement types
+                // handle additional statement types
                 .DestructuringAssignment => |*dassign| {
                     if (self.visitDestructuringAssignment) |visitFn| {
                         return visitFn(self, dassign);
@@ -425,7 +425,7 @@ pub fn Visitor(comptime Context: type, comptime ReturnType: type) type {
                     }
                 },
                 .Switch => |*switch_stmt| {
-                    // No dedicated handler; fall through for now
+                    // no dedicated handler; fall through for now
                     _ = switch_stmt;
                 },
                 .LabeledBlock => |*lbl_stmt| {
@@ -434,7 +434,7 @@ pub fn Visitor(comptime Context: type, comptime ReturnType: type) type {
                     }
                 },
                 .CompoundAssignment => {
-                    // No specific handler for compound assignment statements yet
+                    // no specific handler for compound assignment statements yet
                 },
             }
 
@@ -443,10 +443,10 @@ pub fn Visitor(comptime Context: type, comptime ReturnType: type) type {
 
         /// Pre-order traversal (visit node before children)
         pub fn walkPreOrder(self: *Self, node: *ast.AstNode) ReturnType {
-            // Visit current node first
+            // visit current node first
             const result = self.visit(node);
 
-            // Then visit children if allowed
+            // then visit children if allowed
             if (self.shouldVisitChildren == null or self.shouldVisitChildren.?(self, node)) {
                 self.visitChildren(node);
             }
@@ -456,12 +456,12 @@ pub fn Visitor(comptime Context: type, comptime ReturnType: type) type {
 
         /// Post-order traversal (visit children before node)
         pub fn walkPostOrder(self: *Self, node: *ast.AstNode) ReturnType {
-            // Visit children first if allowed
+            // visit children first if allowed
             if (self.shouldVisitChildren == null or self.shouldVisitChildren.?(self, node)) {
                 self.visitChildren(node);
             }
 
-            // Then visit current node
+            // then visit current node
             return self.visit(node);
         }
 
@@ -477,7 +477,7 @@ pub fn Visitor(comptime Context: type, comptime ReturnType: type) type {
                 const current = queue.orderedRemove(0);
                 result = self.visit(current);
 
-                // Add children to queue if allowed
+                // add children to queue if allowed
                 if (self.shouldVisitChildren == null or self.shouldVisitChildren.?(self, current)) {
                     try self.addChildrenToQueue(current, &queue);
                 }
@@ -512,12 +512,12 @@ pub fn Visitor(comptime Context: type, comptime ReturnType: type) type {
                     _ = self.walkPreOrder(&block_node);
                 },
                 .Constant => |*constant| {
-                    // Visit the constant's value expression
+                    // visit the constant's value expression
                     var expr_node = ast.AstNode{ .Expression = constant.value };
                     _ = self.walkPreOrder(&expr_node);
                 },
                 .VariableDecl => |*var_decl| {
-                    // Visit the variable's initializer if present
+                    // visit the variable's initializer if present
                     if (var_decl.value) |value| {
                         var expr_node = ast.AstNode{ .Expression = value };
                         _ = self.walkPreOrder(&expr_node);
@@ -544,7 +544,7 @@ pub fn Visitor(comptime Context: type, comptime ReturnType: type) type {
                     }
                 },
                 else => {
-                    // Other node types don't have children or are handled elsewhere
+                    // other node types don't have children or are handled elsewhere
                 },
             }
         }
@@ -620,7 +620,7 @@ pub fn Visitor(comptime Context: type, comptime ReturnType: type) type {
                 },
                 .SwitchExpression => |*switch_expr| {
                     _ = self.dispatchExpression(switch_expr.condition);
-                    // Skip complex switch case handling for now
+                    // skip complex switch case handling for now
                 },
                 .Range => |*range_expr| {
                     _ = self.dispatchExpression(range_expr.start);
@@ -645,7 +645,7 @@ pub fn Visitor(comptime Context: type, comptime ReturnType: type) type {
                     _ = self.dispatchExpression(destruct.value);
                 },
                 else => {
-                    // Leaf nodes (literals, identifiers, etc.) have no children
+                    // leaf nodes (literals, identifiers, etc.) have no children
                 },
             }
         }
@@ -657,10 +657,10 @@ pub fn Visitor(comptime Context: type, comptime ReturnType: type) type {
                     _ = self.dispatchExpression(expr);
                 },
                 .VariableDecl => |_| {
-                    // Skip value handling for now
+                    // skip value handling for now
                 },
                 .Return => |_| {
-                    // Skip value handling for now
+                    // skip value handling for now
                 },
                 .If => |*if_stmt| {
                     _ = self.dispatchExpression(&if_stmt.condition);
@@ -723,7 +723,7 @@ pub fn Visitor(comptime Context: type, comptime ReturnType: type) type {
                     _ = self.walkPreOrder(&block_node);
                 },
                 else => {
-                    // Other statements have no children or are handled elsewhere
+                    // other statements have no children or are handled elsewhere
                 },
             }
         }
@@ -739,7 +739,7 @@ pub fn Visitor(comptime Context: type, comptime ReturnType: type) type {
                     }
                 },
                 .Function => |*function| {
-                    // Add requires/ensures clauses as expression nodes
+                    // add requires/ensures clauses as expression nodes
                     for (function.requires_clauses) |*clause| {
                         const expr_node = try queue.allocator.create(ast.AstNode);
                         expr_node.* = ast.AstNode{ .Expression = clause.* };
@@ -772,7 +772,7 @@ pub fn Visitor(comptime Context: type, comptime ReturnType: type) type {
                     }
                 },
                 else => {
-                    // Other node types handled in expression/statement specific methods
+                    // other node types handled in expression/statement specific methods
                 },
             }
         }
@@ -843,7 +843,7 @@ pub const MutableVisitor = struct {
     modification_count: u32 = 0,
     error_count: u32 = 0,
 
-    // Modification functions - all optional, covering all AST node types
+    // modification functions - all optional, covering all AST node types
     modifyContract: ?*const fn (*Self, *ast.ContractNode) anyerror!void = null,
     modifyFunction: ?*const fn (*Self, *ast.FunctionNode) anyerror!void = null,
     modifyVariableDecl: ?*const fn (*Self, *ast.Statements.VariableDeclNode) anyerror!void = null,
@@ -857,13 +857,13 @@ pub const MutableVisitor = struct {
     modifyStatement: ?*const fn (*Self, *ast.Statements.StmtNode) anyerror!void = null,
     modifyTryBlock: ?*const fn (*Self, *ast.Statements.TryBlockNode) anyerror!void = null,
 
-    // Replacement functions - return new node or null to keep original
+    // replacement functions - return new node or null to keep original
     replaceExpression: ?*const fn (*Self, *ast.Expressions.ExprNode) anyerror!?*ast.Expressions.ExprNode = null,
     replaceStatement: ?*const fn (*Self, *ast.Statements.StmtNode) anyerror!?*ast.Statements.StmtNode = null,
     replaceContract: ?*const fn (*Self, *ast.ContractNode) anyerror!?*ast.ContractNode = null,
     replaceFunction: ?*const fn (*Self, *ast.FunctionNode) anyerror!?*ast.FunctionNode = null,
 
-    // Error handling
+    // error handling
     onError: ?*const fn (*Self, []const u8, ?ast.SourceSpan) void = null,
 
     pub fn init(allocator: std.mem.Allocator) Self {
@@ -892,7 +892,7 @@ pub const MutableVisitor = struct {
                     };
                     self.modification_count += 1;
                 }
-                // Visit children
+                // visit children
                 for (contract.body) |*child| {
                     try self.visitAndModify(child);
                 }
@@ -915,7 +915,7 @@ pub const MutableVisitor = struct {
                     };
                     self.modification_count += 1;
                 }
-                // Visit function body
+                // visit function body
                 var block_node = ast.AstNode{ .Block = function.body };
                 try self.visitAndModify(&block_node);
             },
@@ -930,7 +930,7 @@ pub const MutableVisitor = struct {
                     };
                     self.modification_count += 1;
                 }
-                // Visit initializer if present
+                // visit initializer if present
                 if (var_decl.value) |*value| {
                     var expr_node = ast.AstNode{ .Expression = value.* };
                     try self.visitAndModify(&expr_node);
@@ -1053,7 +1053,7 @@ pub const MutableVisitor = struct {
     }
 
     fn visitAndModifyExpression(self: *Self, expr: *ast.Expressions.ExprNode) anyerror!void {
-        // Try replacement first
+        // try replacement first
         if (self.replaceExpression) |replaceFn| {
             if (try replaceFn(self, expr)) |new_expr| {
                 expr.* = new_expr.*;
@@ -1061,12 +1061,12 @@ pub const MutableVisitor = struct {
             }
         }
 
-        // Apply modifications
+        // apply modifications
         if (self.modifyExpression) |modifyFn| {
             try modifyFn(self, expr);
         }
 
-        // Visit children
+        // visit children
         switch (expr.*) {
             .Binary => |*binary| {
                 try self.visitAndModifyExpression(binary.lhs);
@@ -1086,13 +1086,13 @@ pub const MutableVisitor = struct {
                 try self.visitAndModifyExpression(assignment.value);
             },
             else => {
-                // Leaf nodes or other expressions
+                // leaf nodes or other expressions
             },
         }
     }
 
     fn visitAndModifyStatement(self: *Self, stmt: *ast.Statements.StmtNode) anyerror!void {
-        // Try replacement first
+        // try replacement first
         if (self.replaceStatement) |replaceFn| {
             if (try replaceFn(self, stmt)) |new_stmt| {
                 stmt.* = new_stmt.*;
@@ -1100,12 +1100,12 @@ pub const MutableVisitor = struct {
             }
         }
 
-        // Apply modifications
+        // apply modifications
         if (self.modifyStatement) |modifyFn| {
             try modifyFn(self, stmt);
         }
 
-        // Visit children
+        // visit children
         switch (stmt.*) {
             .Expr => |*expr| {
                 try self.visitAndModifyExpression(expr);
@@ -1125,7 +1125,7 @@ pub const MutableVisitor = struct {
                 try self.visitAndModify(&body_node);
             },
             else => {
-                // Other statement types
+                // other statement types
             },
         }
     }
@@ -1140,21 +1140,21 @@ pub const QueryVisitor = struct {
     search_count: u32 = 0,
     max_results: ?u32 = null,
 
-    // Query predicates
+    // query predicates
     predicate: ?*const fn (*ast.AstNode) bool = null,
     node_type_filter: ?std.meta.Tag(ast.AstNode) = null,
 
-    // Specific search functions
+    // specific search functions
     findByName: ?[]const u8 = null,
     findByType: ?std.meta.Tag(ast.Expressions.ExprNode) = null,
     findBySpan: ?ast.SourceSpan = null,
 
-    // Advanced search options
+    // advanced search options
     case_sensitive: bool = true,
     exact_match: bool = true,
     include_children: bool = true,
 
-    // Search statistics
+    // search statistics
     nodes_visited: u32 = 0,
     matches_found: u32 = 0,
 
@@ -1206,12 +1206,12 @@ pub const QueryVisitor = struct {
     }
 
     fn searchRecursive(self: *Self, node: *ast.AstNode) std.mem.Allocator.Error!void {
-        // Check if this node matches our criteria
+        // check if this node matches our criteria
         if (self.matches(node)) {
             try self.results.append(node);
         }
 
-        // Search children
+        // search children
         switch (node.*) {
             .Contract => |*contract| {
                 for (contract.body) |*child| {
@@ -1286,17 +1286,17 @@ pub const QueryVisitor = struct {
     }
 
     fn matches(self: *Self, node: *ast.AstNode) bool {
-        // Check custom predicate first
+        // check custom predicate first
         if (self.predicate) |pred| {
             if (!pred(node)) return false;
         }
 
-        // Check node type filter
+        // check node type filter
         if (self.node_type_filter) |filter| {
             if (std.meta.activeTag(node.*) != filter) return false;
         }
 
-        // Check name-based search
+        // check name-based search
         if (self.findByName) |name| {
             switch (node.*) {
                 .Contract => |*contract| return std.mem.eql(u8, contract.name, name),
@@ -1312,7 +1312,7 @@ pub const QueryVisitor = struct {
             }
         }
 
-        // Check expression type filter
+        // check expression type filter
         if (self.findByType) |expr_type| {
             switch (node.*) {
                 .Expression => |*expr| return std.meta.activeTag(expr.*) == expr_type,
@@ -1331,7 +1331,7 @@ pub const TransformVisitor = struct {
     allocator: std.mem.Allocator,
     errors: std.ArrayList(TransformError),
 
-    // Transformation functions
+    // transformation functions
     transformContract: ?*const fn (*Self, *ast.ContractNode) anyerror!?*ast.ContractNode = null,
     transformFunction: ?*const fn (*Self, *ast.FunctionNode) anyerror!?*ast.FunctionNode = null,
     transformExpression: ?*const fn (*Self, *ast.Expressions.ExprNode) anyerror!?*ast.Expressions.ExprNode = null,
@@ -1384,7 +1384,7 @@ pub const TransformVisitor = struct {
                         return new_node;
                     }
                 }
-                // Transform children
+                // transform children
                 var new_body = std.ArrayList(ast.AstNode).init(self.allocator);
                 for (contract.body) |*child| {
                     const transformed_child = try self.transformRecursive(child);
@@ -1410,7 +1410,7 @@ pub const TransformVisitor = struct {
                         return new_node;
                     }
                 }
-                // Return copy of original function for now
+                // return copy of original function for now
                 const new_node = try self.allocator.create(ast.AstNode);
                 new_node.* = node.*;
                 return new_node;
@@ -1422,7 +1422,7 @@ pub const TransformVisitor = struct {
                 return try self.transformStatementRecursive(stmt);
             },
             else => {
-                // Return copy of original node
+                // return copy of original node
                 const new_node = try self.allocator.create(ast.AstNode);
                 new_node.* = node.*;
                 return new_node;
@@ -1439,7 +1439,7 @@ pub const TransformVisitor = struct {
             }
         }
 
-        // Transform children and create new expression
+        // transform children and create new expression
         switch (expr.*) {
             .Binary => |*binary| {
                 const lhs_node = try self.transformExpressionRecursive(binary.lhs);
@@ -1461,7 +1461,7 @@ pub const TransformVisitor = struct {
                 return new_node;
             },
             else => {
-                // Return copy of original expression
+                // return copy of original expression
                 const new_node = try self.allocator.create(ast.AstNode);
                 new_node.* = ast.AstNode{ .Expression = expr.* };
                 return new_node;
@@ -1478,7 +1478,7 @@ pub const TransformVisitor = struct {
             }
         }
 
-        // Return copy of original statement for now
+        // return copy of original statement for now
         const new_node = try self.allocator.create(ast.AstNode);
         new_node.* = ast.AstNode{ .Statement = stmt.* };
         return new_node;
@@ -1501,7 +1501,7 @@ pub const ValidationVisitor = struct {
     errors: std.ArrayList(ValidationError),
     warnings: std.ArrayList(ValidationWarning),
 
-    // Validation functions
+    // validation functions
     validateContract: ?*const fn (*Self, *ast.ContractNode) anyerror!void = null,
     validateFunction: ?*const fn (*Self, *ast.FunctionNode) anyerror!void = null,
     validateExpression: ?*const fn (*Self, *ast.Expressions.ExprNode) anyerror!void = null,
@@ -1563,7 +1563,7 @@ pub const ValidationVisitor = struct {
                 if (self.validateContract) |validateFn| {
                     try validateFn(self, contract);
                 }
-                // Validate children
+                // validate children
                 for (contract.body) |*child| {
                     try self.validateRecursive(child);
                 }
@@ -1572,7 +1572,7 @@ pub const ValidationVisitor = struct {
                 if (self.validateFunction) |validateFn| {
                     try validateFn(self, function);
                 }
-                // Validate function body
+                // validate function body
                 var block_node = ast.AstNode{ .Block = function.body };
                 try self.validateRecursive(&block_node);
             },
@@ -1674,7 +1674,7 @@ pub const AnyVisitor = struct {
                     const transformed = try self.transform(node);
                     return transformed != null;
                 } else {
-                    // For generic visitors, assume void return means success
+                    // for generic visitors, assume void return means success
                     _ = self.visit(node);
                     return true;
                 }
@@ -1977,7 +1977,7 @@ pub const VisitorPipeline = struct {
                             break;
                         },
                         .Fallback => {
-                            // Could implement fallback logic here
+                            // could implement fallback logic here
                             break;
                         },
                         .Abort => {
@@ -1991,7 +1991,7 @@ pub const VisitorPipeline = struct {
                     }
                 };
 
-                // If we get here, the stage succeeded
+                // if we get here, the stage succeeded
                 stage_result.success = true;
                 stage_result.visitor_results = stage.chain.getResults();
                 break;

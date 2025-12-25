@@ -59,7 +59,7 @@ pub const OraDialect = struct {
         return "ora";
     }
 
-    // Helper function to create ora.global operation
+    // helper function to create ora.global operation
     pub fn createGlobal(
         self: *OraDialect,
         name: []const u8,
@@ -67,7 +67,7 @@ pub const OraDialect = struct {
         init_value: c.MlirAttribute,
         loc: c.MlirLocation,
     ) c.MlirOperation {
-        // Always use C++ API (dialect must be registered)
+        // always use C++ API (dialect must be registered)
         if (!self.isRegistered()) {
             @panic("Ora dialect must be registered before creating operations");
         }
@@ -79,7 +79,7 @@ pub const OraDialect = struct {
         return op;
     }
 
-    // Helper function to create ora.sload operation
+    // helper function to create ora.sload operation
     pub fn createSLoad(
         self: *OraDialect,
         global_name: []const u8,
@@ -89,7 +89,7 @@ pub const OraDialect = struct {
         return self.createSLoadWithName(global_name, result_type, loc, null);
     }
 
-    // Helper function to create ora.sload operation with named result
+    // helper function to create ora.sload operation with named result
     pub fn createSLoadWithName(
         self: *OraDialect,
         global_name: []const u8,
@@ -97,7 +97,7 @@ pub const OraDialect = struct {
         loc: c.MlirLocation,
         result_name: ?[]const u8,
     ) c.MlirOperation {
-        // Always use C++ API (dialect must be registered)
+        // always use C++ API (dialect must be registered)
         if (!self.isRegistered()) {
             @panic("Ora dialect must be registered before creating operations");
         }
@@ -110,14 +110,14 @@ pub const OraDialect = struct {
         return op;
     }
 
-    // Helper function to create ora.sstore operation
+    // helper function to create ora.sstore operation
     pub fn createSStore(
         self: *OraDialect,
         value: c.MlirValue,
         global_name: []const u8,
         loc: c.MlirLocation,
     ) c.MlirOperation {
-        // Always use C++ API (dialect must be registered)
+        // always use C++ API (dialect must be registered)
         if (!self.isRegistered()) {
             @panic("Ora dialect must be registered before creating operations");
         }
@@ -129,13 +129,13 @@ pub const OraDialect = struct {
         return op;
     }
 
-    // Helper function to create ora.contract operation
+    // helper function to create ora.contract operation
     pub fn createContract(
         self: *OraDialect,
         name: []const u8,
         loc: c.MlirLocation,
     ) c.MlirOperation {
-        // Always use C++ API (dialect must be registered)
+        // always use C++ API (dialect must be registered)
         if (!self.isRegistered()) {
             @panic("Ora dialect must be registered before creating operations");
         }
@@ -153,7 +153,7 @@ pub const OraDialect = struct {
         condition: c.MlirValue,
         loc: c.MlirLocation,
     ) c.MlirOperation {
-        // Always use C++ API (dialect must be registered)
+        // always use C++ API (dialect must be registered)
         if (!self.isRegistered()) {
             @panic("Ora dialect must be registered before creating operations");
         }
@@ -166,7 +166,7 @@ pub const OraDialect = struct {
         condition: c.MlirValue,
         loc: c.MlirLocation,
     ) c.MlirOperation {
-        // Always use C++ API (dialect must be registered)
+        // always use C++ API (dialect must be registered)
         if (!self.isRegistered()) {
             @panic("Ora dialect must be registered before creating operations");
         }
@@ -179,7 +179,7 @@ pub const OraDialect = struct {
         condition: c.MlirValue,
         loc: c.MlirLocation,
     ) c.MlirOperation {
-        // Always use C++ API (dialect must be registered)
+        // always use C++ API (dialect must be registered)
         if (!self.isRegistered()) {
             @panic("Ora dialect must be registered before creating operations");
         }
@@ -193,7 +193,7 @@ pub const OraDialect = struct {
         loc: c.MlirLocation,
         message: ?[]const u8,
     ) c.MlirOperation {
-        // Always use C++ API (dialect must be registered)
+        // always use C++ API (dialect must be registered)
         if (!self.isRegistered()) {
             @panic("Ora dialect must be registered before creating operations");
         }
@@ -207,7 +207,7 @@ pub const OraDialect = struct {
         measure: c.MlirValue,
         loc: c.MlirLocation,
     ) c.MlirOperation {
-        // Always use C++ API (dialect must be registered)
+        // always use C++ API (dialect must be registered)
         if (!self.isRegistered()) {
             @panic("Ora dialect must be registered before creating operations");
         }
@@ -224,7 +224,7 @@ pub const OraDialect = struct {
         measure: c.MlirValue,
         loc: c.MlirLocation,
     ) c.MlirOperation {
-        // Always use C++ API (dialect must be registered)
+        // always use C++ API (dialect must be registered)
         if (!self.isRegistered()) {
             @panic("Ora dialect must be registered before creating operations");
         }
@@ -241,7 +241,7 @@ pub const OraDialect = struct {
         condition: c.MlirValue,
         loc: c.MlirLocation,
     ) c.MlirOperation {
-        // Always use C++ API (dialect must be registered)
+        // always use C++ API (dialect must be registered)
         if (!self.isRegistered()) {
             @panic("Ora dialect must be registered before creating operations");
         }
@@ -258,7 +258,7 @@ pub const OraDialect = struct {
         variable_name: []const u8,
         loc: c.MlirLocation,
     ) c.MlirOperation {
-        // Always use C++ API (dialect must be registered)
+        // always use C++ API (dialect must be registered)
         if (!self.isRegistered()) {
             @panic("Ora dialect must be registered before creating operations");
         }
@@ -276,11 +276,11 @@ pub const OraDialect = struct {
         value: c.MlirValue,
         loc: c.MlirLocation,
     ) c.MlirOperation {
-        // Always use C++ API (dialect must be registered)
+        // always use C++ API (dialect must be registered)
         if (!self.isRegistered()) {
             @panic("Ora dialect must be registered before creating operations");
         }
-        // Result type is same as input type
+        // result type is same as input type
         const input_type = c.mlirValueGetType(value);
         const op = c.oraOldOpCreate(self.ctx, loc, value, input_type);
         if (op.ptr == null) {
@@ -290,7 +290,7 @@ pub const OraDialect = struct {
     }
 
     //===----------------------------------------------------------------------===//
-    // Phase 1 Operations - Constants
+    // phase 1 Operations - Constants
     //===----------------------------------------------------------------------===//
 
     /// Create ora.string.constant operation
@@ -300,7 +300,7 @@ pub const OraDialect = struct {
         result_type: c.MlirType,
         loc: c.MlirLocation,
     ) c.MlirOperation {
-        // Always use C++ API (dialect must be registered)
+        // always use C++ API (dialect must be registered)
         if (!self.isRegistered()) {
             @panic("Ora dialect must be registered before creating operations");
         }
@@ -319,7 +319,7 @@ pub const OraDialect = struct {
         result_type: c.MlirType,
         loc: c.MlirLocation,
     ) c.MlirOperation {
-        // Always use C++ API (dialect must be registered)
+        // always use C++ API (dialect must be registered)
         if (!self.isRegistered()) {
             @panic("Ora dialect must be registered before creating operations");
         }
@@ -339,7 +339,7 @@ pub const OraDialect = struct {
         result_type: c.MlirType,
         loc: c.MlirLocation,
     ) c.MlirOperation {
-        // Always use C++ API (dialect must be registered)
+        // always use C++ API (dialect must be registered)
         if (!self.isRegistered()) {
             @panic("Ora dialect must be registered before creating operations");
         }
@@ -356,7 +356,7 @@ pub const OraDialect = struct {
         operands: []const c.MlirValue,
         loc: c.MlirLocation,
     ) c.MlirOperation {
-        // Always use C++ API (dialect must be registered)
+        // always use C++ API (dialect must be registered)
         if (!self.isRegistered()) {
             @panic("Ora dialect must be registered before creating operations");
         }
@@ -365,7 +365,7 @@ pub const OraDialect = struct {
     }
 
     //===----------------------------------------------------------------------===//
-    // Destructuring Operations
+    // destructuring Operations
     //===----------------------------------------------------------------------===//
 
     /// Create ora.destructure operation
@@ -376,7 +376,7 @@ pub const OraDialect = struct {
         result_type: c.MlirType,
         loc: c.MlirLocation,
     ) c.MlirOperation {
-        // Always use C++ API (dialect must be registered)
+        // always use C++ API (dialect must be registered)
         if (!self.isRegistered()) {
             @panic("Ora dialect must be registered before creating operations");
         }
@@ -389,7 +389,7 @@ pub const OraDialect = struct {
     }
 
     //===----------------------------------------------------------------------===//
-    // Enum Operations
+    // enum Operations
     //===----------------------------------------------------------------------===//
 
     /// Create ora.enum.decl operation
@@ -399,7 +399,7 @@ pub const OraDialect = struct {
         repr_type: c.MlirType,
         loc: c.MlirLocation,
     ) c.MlirOperation {
-        // Always use C++ API (dialect must be registered)
+        // always use C++ API (dialect must be registered)
         if (!self.isRegistered()) {
             @panic("Ora dialect must be registered before creating operations");
         }
@@ -419,7 +419,7 @@ pub const OraDialect = struct {
         result_type: c.MlirType,
         loc: c.MlirLocation,
     ) c.MlirOperation {
-        // Always use C++ API (dialect must be registered)
+        // always use C++ API (dialect must be registered)
         if (!self.isRegistered()) {
             @panic("Ora dialect must be registered before creating operations");
         }
@@ -433,7 +433,7 @@ pub const OraDialect = struct {
     }
 
     //===----------------------------------------------------------------------===//
-    // Struct Operations
+    // struct Operations
     //===----------------------------------------------------------------------===//
 
     /// Create ora.struct.decl operation
@@ -442,7 +442,7 @@ pub const OraDialect = struct {
         name: []const u8,
         loc: c.MlirLocation,
     ) c.MlirOperation {
-        // Always use C++ API (dialect must be registered)
+        // always use C++ API (dialect must be registered)
         if (!self.isRegistered()) {
             @panic("Ora dialect must be registered before creating operations");
         }
@@ -462,13 +462,13 @@ pub const OraDialect = struct {
     ) c.MlirOperation {
         var state = h.opState("ora.struct.decl", loc);
 
-        // Add struct name attribute
+        // add struct name attribute
         const name_attr = h.stringAttr(self.ctx, name);
         const name_id = h.identifier(self.ctx, "name");
         var attrs = [_]c.MlirNamedAttribute{c.mlirNamedAttributeGet(name_id, name_attr)};
         c.mlirOperationStateAddAttributes(&state, attrs.len, &attrs);
 
-        // Add fields region
+        // add fields region
         const region = c.mlirRegionCreate();
         c.mlirOperationStateAddOwnedRegions(&state, 1, @ptrCast(&region));
 
@@ -484,7 +484,7 @@ pub const OraDialect = struct {
         value: c.MlirValue,
         loc: c.MlirLocation,
     ) c.MlirOperation {
-        // Always use C++ API (dialect must be registered)
+        // always use C++ API (dialect must be registered)
         if (!self.isRegistered()) {
             @panic("Ora dialect must be registered before creating operations");
         }
@@ -504,7 +504,7 @@ pub const OraDialect = struct {
         result_type: c.MlirType,
         loc: c.MlirLocation,
     ) c.MlirOperation {
-        // Always use C++ API (dialect must be registered)
+        // always use C++ API (dialect must be registered)
         if (!self.isRegistered()) {
             @panic("Ora dialect must be registered before creating operations");
         }
@@ -524,8 +524,8 @@ pub const OraDialect = struct {
         value: c.MlirValue,
         loc: c.MlirLocation,
     ) c.MlirOperation {
-        // Always use C++ API (dialect must be registered)
-        // Result type is inferred from struct_value (enforced by SameOperandsAndResultType trait)
+        // always use C++ API (dialect must be registered)
+        // result type is inferred from struct_value (enforced by SameOperandsAndResultType trait)
         if (!self.isRegistered()) {
             @panic("Ora dialect must be registered before creating operations");
         }
@@ -546,7 +546,7 @@ pub const OraDialect = struct {
         result_type: c.MlirType,
         loc: c.MlirLocation,
     ) c.MlirOperation {
-        // Always use C++ API (dialect must be registered)
+        // always use C++ API (dialect must be registered)
         if (!self.isRegistered()) {
             @panic("Ora dialect must be registered before creating operations");
         }
@@ -566,7 +566,7 @@ pub const OraDialect = struct {
         result_type: c.MlirType,
         loc: c.MlirLocation,
     ) c.MlirOperation {
-        // Always use C++ API (dialect must be registered)
+        // always use C++ API (dialect must be registered)
         if (!self.isRegistered()) {
             @panic("Ora dialect must be registered before creating operations");
         }
@@ -579,7 +579,7 @@ pub const OraDialect = struct {
     }
 
     //===----------------------------------------------------------------------===//
-    // Map Operations
+    // map Operations
     //===----------------------------------------------------------------------===//
 
     /// Create ora.map_get operation
@@ -590,7 +590,7 @@ pub const OraDialect = struct {
         result_type: c.MlirType,
         loc: c.MlirLocation,
     ) c.MlirOperation {
-        // Always use C++ API (dialect must be registered)
+        // always use C++ API (dialect must be registered)
         if (!self.isRegistered()) {
             @panic("Ora dialect must be registered before creating operations");
         }
@@ -609,7 +609,7 @@ pub const OraDialect = struct {
         value: c.MlirValue,
         loc: c.MlirLocation,
     ) c.MlirOperation {
-        // Always use C++ API (dialect must be registered)
+        // always use C++ API (dialect must be registered)
         if (!self.isRegistered()) {
             @panic("Ora dialect must be registered before creating operations");
         }
@@ -627,7 +627,7 @@ pub const OraDialect = struct {
         result_type: c.MlirType,
         loc: c.MlirLocation,
     ) c.MlirOperation {
-        // Always use C++ API (dialect must be registered)
+        // always use C++ API (dialect must be registered)
         if (!self.isRegistered()) {
             @panic("Ora dialect must be registered before creating operations");
         }
@@ -646,7 +646,7 @@ pub const OraDialect = struct {
         variable_name: []const u8,
         loc: c.MlirLocation,
     ) c.MlirOperation {
-        // Always use C++ API (dialect must be registered)
+        // always use C++ API (dialect must be registered)
         if (!self.isRegistered()) {
             @panic("Ora dialect must be registered before creating operations");
         }
@@ -665,7 +665,7 @@ pub const OraDialect = struct {
         result_type: c.MlirType,
         loc: c.MlirLocation,
     ) c.MlirOperation {
-        // Always use C++ API (dialect must be registered)
+        // always use C++ API (dialect must be registered)
         if (!self.isRegistered()) {
             @panic("Ora dialect must be registered before creating operations");
         }
@@ -684,7 +684,7 @@ pub const OraDialect = struct {
         key: []const u8,
         loc: c.MlirLocation,
     ) c.MlirOperation {
-        // Always use C++ API (dialect must be registered)
+        // always use C++ API (dialect must be registered)
         if (!self.isRegistered()) {
             @panic("Ora dialect must be registered before creating operations");
         }
@@ -702,7 +702,7 @@ pub const OraDialect = struct {
         label: ?[]const u8,
         loc: c.MlirLocation,
     ) c.MlirOperation {
-        // Always use C++ API (dialect must be registered)
+        // always use C++ API (dialect must be registered)
         if (!self.isRegistered()) {
             @panic("Ora dialect must be registered before creating operations");
         }
@@ -720,7 +720,7 @@ pub const OraDialect = struct {
         operands: []const c.MlirValue,
         loc: c.MlirLocation,
     ) c.MlirOperation {
-        // Always use C++ API (dialect must be registered)
+        // always use C++ API (dialect must be registered)
         if (!self.isRegistered()) {
             @panic("Ora dialect must be registered before creating operations");
         }
@@ -739,7 +739,7 @@ pub const OraDialect = struct {
         result_type: c.MlirType,
         loc: c.MlirLocation,
     ) c.MlirOperation {
-        // Always use C++ API (dialect must be registered)
+        // always use C++ API (dialect must be registered)
         if (!self.isRegistered()) {
             @panic("Ora dialect must be registered before creating operations");
         }
@@ -759,7 +759,7 @@ pub const OraDialect = struct {
         result_type: c.MlirType,
         loc: c.MlirLocation,
     ) c.MlirOperation {
-        // Always use C++ API (dialect must be registered)
+        // always use C++ API (dialect must be registered)
         if (!self.isRegistered()) {
             @panic("Ora dialect must be registered before creating operations");
         }
@@ -777,7 +777,7 @@ pub const OraDialect = struct {
         resource: c.MlirValue,
         loc: c.MlirLocation,
     ) c.MlirOperation {
-        // Always use C++ API (dialect must be registered)
+        // always use C++ API (dialect must be registered)
         if (!self.isRegistered()) {
             @panic("Ora dialect must be registered before creating operations");
         }
@@ -794,7 +794,7 @@ pub const OraDialect = struct {
         resource: c.MlirValue,
         loc: c.MlirLocation,
     ) c.MlirOperation {
-        // Always use C++ API (dialect must be registered)
+        // always use C++ API (dialect must be registered)
         if (!self.isRegistered()) {
             @panic("Ora dialect must be registered before creating operations");
         }
@@ -806,7 +806,7 @@ pub const OraDialect = struct {
     }
 
     // ============================================================================
-    // Standard MLIR Operations (arith.*, func.*, etc.)
+    // standard MLIR Operations (arith.*, func.*, etc.)
     // ============================================================================
 
     /// Create arith.constant operation for integer values
@@ -818,14 +818,14 @@ pub const OraDialect = struct {
     ) c.MlirOperation {
         var state = h.opState("arith.constant", loc);
 
-        // Add result type
+        // add result type
         c.mlirOperationStateAddResults(&state, 1, @ptrCast(&value_type));
 
-        // Add value attribute
+        // add value attribute
         const attr = c.mlirIntegerAttrGet(value_type, value);
         const value_id = h.identifier(self.ctx, "value");
 
-        // Add gas cost attribute (constants are free = 0)
+        // add gas cost attribute (constants are free = 0)
         const gas_cost_attr = c.mlirIntegerAttrGet(c.mlirIntegerTypeGet(self.ctx, 64), 0);
         const gas_cost_id = h.identifier(self.ctx, "gas_cost");
         var attrs = [_]c.MlirNamedAttribute{
@@ -859,15 +859,15 @@ pub const OraDialect = struct {
     ) c.MlirOperation {
         var state = h.opState("arith.constant", loc);
 
-        // Add result type
+        // add result type
         c.mlirOperationStateAddResults(&state, 1, @ptrCast(&value_type));
 
-        // Add value attribute
+        // add value attribute
         const attr = c.mlirIntegerAttrGet(value_type, value);
         const value_id = h.identifier(self.ctx, "value");
         const attrs = [_]c.MlirNamedAttribute{c.mlirNamedAttributeGet(value_id, attr)};
 
-        // Combine with custom attributes
+        // combine with custom attributes
         var all_attrs: [16]c.MlirNamedAttribute = undefined;
         var attr_count: usize = 1;
         all_attrs[0] = attrs[0];
@@ -892,7 +892,7 @@ pub const OraDialect = struct {
     ) c.MlirOperation {
         var state = h.opState("ora.return", loc);
 
-        // Add gas cost attribute (JUMP = 8, return is similar to jump)
+        // add gas cost attribute (JUMP = 8, return is similar to jump)
         const gas_cost_attr = c.mlirIntegerAttrGet(c.mlirIntegerTypeGet(self.ctx, 64), 8);
         const gas_cost_id = h.identifier(self.ctx, "gas_cost");
         var attrs = [_]c.MlirNamedAttribute{c.mlirNamedAttributeGet(gas_cost_id, gas_cost_attr)};
@@ -911,7 +911,7 @@ pub const OraDialect = struct {
         var state = h.opState("ora.return", loc);
         c.mlirOperationStateAddOperands(&state, 1, @ptrCast(&return_value));
 
-        // Add gas cost attribute (JUMP = 8, return is similar to jump)
+        // add gas cost attribute (JUMP = 8, return is similar to jump)
         const gas_cost_attr = c.mlirIntegerAttrGet(c.mlirIntegerTypeGet(self.ctx, 64), 8);
         const gas_cost_id = h.identifier(self.ctx, "gas_cost");
         var attrs = [_]c.MlirNamedAttribute{c.mlirNamedAttributeGet(gas_cost_id, gas_cost_attr)};
@@ -928,7 +928,7 @@ pub const OraDialect = struct {
     ) c.MlirOperation {
         var state = h.opState("scf.yield", loc);
 
-        // Add gas cost attribute (yield itself has no cost, but JUMPDEST = 1 at destination)
+        // add gas cost attribute (yield itself has no cost, but JUMPDEST = 1 at destination)
         const gas_cost_attr = c.mlirIntegerAttrGet(c.mlirIntegerTypeGet(self.ctx, 64), 1);
         const gas_cost_id = h.identifier(self.ctx, "gas_cost");
         var attrs = [_]c.MlirNamedAttribute{c.mlirNamedAttributeGet(gas_cost_id, gas_cost_attr)};
@@ -949,7 +949,7 @@ pub const OraDialect = struct {
             c.mlirOperationStateAddOperands(&state, @intCast(values.len), values.ptr);
         }
 
-        // Add gas cost attribute (yield itself has no cost, but JUMPDEST = 1 at destination)
+        // add gas cost attribute (yield itself has no cost, but JUMPDEST = 1 at destination)
         const gas_cost_attr = c.mlirIntegerAttrGet(c.mlirIntegerTypeGet(self.ctx, 64), 1);
         const gas_cost_id = h.identifier(self.ctx, "gas_cost");
         var attrs = [_]c.MlirNamedAttribute{c.mlirNamedAttributeGet(gas_cost_id, gas_cost_attr)};
@@ -1014,7 +1014,7 @@ pub const OraDialect = struct {
         c.mlirOperationStateAddOperands(&state, 1, @ptrCast(&aggregate));
         c.mlirOperationStateAddResults(&state, 1, @ptrCast(&result_type));
 
-        // Add indices attribute - create array of integer attributes
+        // add indices attribute - create array of integer attributes
         var index_attrs = std.ArrayList(c.MlirAttribute){};
         defer index_attrs.deinit(self.allocator);
         for (indices) |index| {
@@ -1040,23 +1040,23 @@ pub const OraDialect = struct {
     ) c.MlirOperation {
         var state = h.opState("func.call", loc);
 
-        // Add operands
+        // add operands
         if (operands.len > 0) {
             c.mlirOperationStateAddOperands(&state, @intCast(operands.len), operands.ptr);
         }
 
-        // Add result types
+        // add result types
         if (result_types.len > 0) {
             c.mlirOperationStateAddResults(&state, @intCast(result_types.len), result_types.ptr);
         }
 
-        // Add gas cost attribute (internal function call - minimal cost, similar to JUMPI = 10)
-        // For external calls, this would be CALL_BASE = 700, but internal calls are cheaper
+        // add gas cost attribute (internal function call - minimal cost, similar to JUMPI = 10)
+        // for external calls, this would be CALL_BASE = 700, but internal calls are cheaper
         const gas_cost_attr = c.mlirIntegerAttrGet(c.mlirIntegerTypeGet(self.ctx, 64), 10);
         const gas_cost_id = h.identifier(self.ctx, "gas_cost");
         const gas_attrs = [_]c.MlirNamedAttribute{c.mlirNamedAttributeGet(gas_cost_id, gas_cost_attr)};
 
-        // Add callee attribute
+        // add callee attribute
         const callee_ref = c.mlirStringRefCreate(callee.ptr, callee.len);
         const callee_attr = c.mlirFlatSymbolRefAttrGet(self.ctx, callee_ref);
         const callee_id = h.identifier(self.ctx, "callee");
@@ -1091,7 +1091,7 @@ pub const OraDialect = struct {
         condition: c.MlirValue,
         loc: c.MlirLocation,
     ) c.MlirOperation {
-        // Always use C++ API (dialect must be registered)
+        // always use C++ API (dialect must be registered)
         if (!self.isRegistered()) {
             @panic("Ora dialect must be registered before creating operations");
         }
@@ -1115,7 +1115,7 @@ pub const OraDialect = struct {
             c.mlirOperationStateAddResults(&state, @intCast(result_types.len), result_types.ptr);
         }
 
-        // Add gas cost attribute (JUMPI = 10, conditional branch)
+        // add gas cost attribute (JUMPI = 10, conditional branch)
         const gas_cost_attr = c.mlirIntegerAttrGet(c.mlirIntegerTypeGet(self.ctx, 64), 10);
         const gas_cost_id = h.identifier(self.ctx, "gas_cost");
         var attrs = [_]c.MlirNamedAttribute{c.mlirNamedAttributeGet(gas_cost_id, gas_cost_attr)};
@@ -1131,7 +1131,7 @@ pub const OraDialect = struct {
         condition: c.MlirValue,
         loc: c.MlirLocation,
     ) c.MlirOperation {
-        // Always use C++ API (dialect must be registered)
+        // always use C++ API (dialect must be registered)
         if (!self.isRegistered()) {
             @panic("Ora dialect must be registered before creating operations");
         }
@@ -1147,7 +1147,7 @@ pub const OraDialect = struct {
         self: *OraDialect,
         loc: c.MlirLocation,
     ) c.MlirOperation {
-        // Always use C++ API (dialect must be registered)
+        // always use C++ API (dialect must be registered)
         if (!self.isRegistered()) {
             @panic("Ora dialect must be registered before creating operations");
         }
@@ -1173,8 +1173,8 @@ pub const OraDialect = struct {
             c.mlirOperationStateAddResults(&state, @intCast(result_types.len), result_types.ptr);
         }
 
-        // Add gas cost attribute (JUMPI = 10 per loop iteration for the conditional jump)
-        // Note: This is the cost per iteration, actual total depends on loop execution
+        // add gas cost attribute (JUMPI = 10 per loop iteration for the conditional jump)
+        // note: This is the cost per iteration, actual total depends on loop execution
         const gas_cost_attr = c.mlirIntegerAttrGet(c.mlirIntegerTypeGet(self.ctx, 64), 10);
         const gas_cost_id = h.identifier(self.ctx, "gas_cost");
         var attrs = [_]c.MlirNamedAttribute{c.mlirNamedAttributeGet(gas_cost_id, gas_cost_attr)};
@@ -1196,21 +1196,21 @@ pub const OraDialect = struct {
     ) c.MlirOperation {
         var state = h.opState("scf.for", loc);
 
-        // Add bounds and step operands
+        // add bounds and step operands
         const bounds_operands = [_]c.MlirValue{ lower_bound, upper_bound, step };
         c.mlirOperationStateAddOperands(&state, bounds_operands.len, &bounds_operands);
 
-        // Add init args if any
+        // add init args if any
         if (init_args.len > 0) {
             c.mlirOperationStateAddOperands(&state, @intCast(init_args.len), init_args.ptr);
         }
 
-        // Add result types if any
+        // add result types if any
         if (result_types.len > 0) {
             c.mlirOperationStateAddResults(&state, @intCast(result_types.len), result_types.ptr);
         }
 
-        // Add gas cost attribute (JUMPI = 10 per loop iteration for the conditional jump)
+        // add gas cost attribute (JUMPI = 10 per loop iteration for the conditional jump)
         const gas_cost_attr = c.mlirIntegerAttrGet(c.mlirIntegerTypeGet(self.ctx, 64), 10);
         const gas_cost_id = h.identifier(self.ctx, "gas_cost");
         var attrs = [_]c.MlirNamedAttribute{c.mlirNamedAttributeGet(gas_cost_id, gas_cost_attr)};
@@ -1230,10 +1230,10 @@ pub const OraDialect = struct {
         _ = self;
         var state = h.opState("scf.condition", loc);
 
-        // Add condition operand
+        // add condition operand
         c.mlirOperationStateAddOperands(&state, 1, @ptrCast(&condition));
 
-        // Add args if any
+        // add args if any
         if (args.len > 0) {
             c.mlirOperationStateAddOperands(&state, @intCast(args.len), args.ptr);
         }
@@ -1252,7 +1252,7 @@ pub const OraDialect = struct {
     ) c.MlirOperation {
         var state = h.opState("memref.load", loc);
 
-        // Add operands: memref + indices
+        // add operands: memref + indices
         var operands = std.ArrayList(c.MlirValue){};
         defer operands.deinit(self.allocator);
         operands.append(self.allocator, memref) catch unreachable;
@@ -1261,7 +1261,7 @@ pub const OraDialect = struct {
         }
         c.mlirOperationStateAddOperands(&state, @intCast(operands.items.len), operands.items.ptr);
 
-        // Add result type
+        // add result type
         c.mlirOperationStateAddResults(&state, 1, @ptrCast(&result_type));
 
         const op = c.mlirOperationCreate(&state);
@@ -1278,7 +1278,7 @@ pub const OraDialect = struct {
     ) c.MlirOperation {
         var state = h.opState("memref.store", loc);
 
-        // Add operands: value + memref + indices
+        // add operands: value + memref + indices
         var operands = std.ArrayList(c.MlirValue){};
         defer operands.deinit(self.allocator);
         operands.append(self.allocator, value) catch unreachable;
@@ -1335,7 +1335,7 @@ pub const OraDialect = struct {
         c.mlirOperationStateAddOperands(&state, operands.len, &operands);
         c.mlirOperationStateAddResults(&state, 1, @ptrCast(&result_type));
 
-        // Add gas cost attribute (ADD = 3)
+        // add gas cost attribute (ADD = 3)
         const gas_cost_attr = c.mlirIntegerAttrGet(c.mlirIntegerTypeGet(self.ctx, 64), 3);
         const gas_cost_id = h.identifier(self.ctx, "gas_cost");
         var attrs = [_]c.MlirNamedAttribute{c.mlirNamedAttributeGet(gas_cost_id, gas_cost_attr)};
@@ -1358,7 +1358,7 @@ pub const OraDialect = struct {
         c.mlirOperationStateAddOperands(&state, operands.len, &operands);
         c.mlirOperationStateAddResults(&state, 1, @ptrCast(&result_type));
 
-        // Add gas cost attribute (SUB = 3)
+        // add gas cost attribute (SUB = 3)
         const gas_cost_attr = c.mlirIntegerAttrGet(c.mlirIntegerTypeGet(self.ctx, 64), 3);
         const gas_cost_id = h.identifier(self.ctx, "gas_cost");
         var attrs = [_]c.MlirNamedAttribute{c.mlirNamedAttributeGet(gas_cost_id, gas_cost_attr)};
@@ -1381,7 +1381,7 @@ pub const OraDialect = struct {
         c.mlirOperationStateAddOperands(&state, operands.len, &operands);
         c.mlirOperationStateAddResults(&state, 1, @ptrCast(&result_type));
 
-        // Add gas cost attribute (MUL = 5)
+        // add gas cost attribute (MUL = 5)
         const gas_cost_attr = c.mlirIntegerAttrGet(c.mlirIntegerTypeGet(self.ctx, 64), 5);
         const gas_cost_id = h.identifier(self.ctx, "gas_cost");
         var attrs = [_]c.MlirNamedAttribute{c.mlirNamedAttributeGet(gas_cost_id, gas_cost_attr)};
@@ -1404,7 +1404,7 @@ pub const OraDialect = struct {
         c.mlirOperationStateAddOperands(&state, operands.len, &operands);
         c.mlirOperationStateAddResults(&state, 1, @ptrCast(&result_type));
 
-        // Add gas cost attribute (DIV = 5)
+        // add gas cost attribute (DIV = 5)
         const gas_cost_attr = c.mlirIntegerAttrGet(c.mlirIntegerTypeGet(self.ctx, 64), 5);
         const gas_cost_id = h.identifier(self.ctx, "gas_cost");
         var attrs = [_]c.MlirNamedAttribute{c.mlirNamedAttributeGet(gas_cost_id, gas_cost_attr)};
@@ -1427,7 +1427,7 @@ pub const OraDialect = struct {
         c.mlirOperationStateAddOperands(&state, operands.len, &operands);
         c.mlirOperationStateAddResults(&state, 1, @ptrCast(&result_type));
 
-        // Add gas cost attribute (MOD = 5)
+        // add gas cost attribute (MOD = 5)
         const gas_cost_attr = c.mlirIntegerAttrGet(c.mlirIntegerTypeGet(self.ctx, 64), 5);
         const gas_cost_id = h.identifier(self.ctx, "gas_cost");
         var attrs = [_]c.MlirNamedAttribute{c.mlirNamedAttributeGet(gas_cost_id, gas_cost_attr)};
@@ -1438,7 +1438,7 @@ pub const OraDialect = struct {
     }
 
     //===----------------------------------------------------------------------===//
-    // Financial Operations
+    // financial Operations
     //===----------------------------------------------------------------------===//
 
     /// Create ora.move operation
@@ -1449,7 +1449,7 @@ pub const OraDialect = struct {
         destination: c.MlirValue,
         loc: c.MlirLocation,
     ) c.MlirOperation {
-        // Always use C++ API (dialect must be registered)
+        // always use C++ API (dialect must be registered)
         if (!self.isRegistered()) {
             @panic("Ora dialect must be registered before creating operations");
         }
@@ -1461,7 +1461,7 @@ pub const OraDialect = struct {
     }
 
     //===----------------------------------------------------------------------===//
-    // Event Operations
+    // event Operations
     //===----------------------------------------------------------------------===//
 
     /// Create ora.log operation
@@ -1471,7 +1471,7 @@ pub const OraDialect = struct {
         parameters: []const c.MlirValue,
         loc: c.MlirLocation,
     ) c.MlirOperation {
-        // Always use C++ API (dialect must be registered)
+        // always use C++ API (dialect must be registered)
         if (!self.isRegistered()) {
             @panic("Ora dialect must be registered before creating operations");
         }
@@ -1485,7 +1485,7 @@ pub const OraDialect = struct {
     }
 
     //===----------------------------------------------------------------------===//
-    // Error Handling Operations
+    // error Handling Operations
     //===----------------------------------------------------------------------===//
 
     /// Create ora.try_catch operation
@@ -1495,7 +1495,7 @@ pub const OraDialect = struct {
         result_type: c.MlirType,
         loc: c.MlirLocation,
     ) c.MlirOperation {
-        // Always use C++ API (dialect must be registered)
+        // always use C++ API (dialect must be registered)
         if (!self.isRegistered()) {
             @panic("Ora dialect must be registered before creating operations");
         }
@@ -1507,7 +1507,7 @@ pub const OraDialect = struct {
     }
 
     //===----------------------------------------------------------------------===//
-    // Loop Operations
+    // loop Operations
     //===----------------------------------------------------------------------===//
 
     /// Create ora.for operation
@@ -1516,7 +1516,7 @@ pub const OraDialect = struct {
         collection: c.MlirValue,
         loc: c.MlirLocation,
     ) c.MlirOperation {
-        // Always use C++ API (dialect must be registered)
+        // always use C++ API (dialect must be registered)
         if (!self.isRegistered()) {
             @panic("Ora dialect must be registered before creating operations");
         }
@@ -1534,7 +1534,7 @@ pub const OraDialect = struct {
         values: []const c.MlirValue,
         loc: c.MlirLocation,
     ) c.MlirOperation {
-        // Always use C++ API (dialect must be registered)
+        // always use C++ API (dialect must be registered)
         if (!self.isRegistered()) {
             @panic("Ora dialect must be registered before creating operations");
         }
@@ -1554,7 +1554,7 @@ pub const OraDialect = struct {
         result_type: c.MlirType,
         loc: c.MlirLocation,
     ) c.MlirOperation {
-        // Always use C++ API (dialect must be registered)
+        // always use C++ API (dialect must be registered)
         if (!self.isRegistered()) {
             @panic("Ora dialect must be registered before creating operations");
         }

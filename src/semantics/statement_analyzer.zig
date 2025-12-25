@@ -45,7 +45,7 @@ pub fn checkFunctionBody(
     f: *const ast.FunctionNode,
 ) ![]const ast.SourceSpan {
     var issues = std.ArrayList(ast.SourceSpan).init(allocator);
-    // Walk blocks recursively and check returns using the provided function scope
+    // walk blocks recursively and check returns using the provided function scope
     try walkBlock(&issues, table, scope, &f.body, f.return_type_info);
     return try issues.toOwnedSlice();
 }
@@ -155,7 +155,7 @@ fn walkBlockForUnknowns(issues: *std.ArrayList(ast.SourceSpan), table: *state.Sy
                 const inner_scope = resolveBlockScope(table, scope, &lb.block);
                 try walkBlockForUnknowns(issues, table, inner_scope, &lb.block);
             },
-            // No plain Block variant in StmtNode; ignore
+            // no plain Block variant in StmtNode; ignore
             else => {},
         }
     }
@@ -225,9 +225,9 @@ fn visitExprForUnknowns(issues: *std.ArrayList(ast.SourceSpan), table: *state.Sy
         },
         .Tuple => |t| for (t.elements) |el| try visitExprForUnknowns(issues, table, scope, el.*),
         .SwitchExpression => {
-            // Condition expression
+            // condition expression
             if (expr_node == .SwitchExpression) try visitExprForUnknowns(issues, table, scope, expr_node.SwitchExpression.condition.*);
-            // Semantic checks: pattern compatibility against condition type
+            // semantic checks: pattern compatibility against condition type
             const cond_ti = expr.inferExprType(table, scope, expr_node.SwitchExpression.condition.*);
             try checkSwitchPatterns(issues, table, scope, cond_ti, expr_node.SwitchExpression.cases);
         },
@@ -274,7 +274,7 @@ fn inferExprRegion(table: *state.SymbolTable, scope: *state.Scope, e: ast.Expres
                     break :blk sym.region orelse MemoryRegion.Stack;
                 }
             }
-            // Fallback: check root symbols for top-level variables (e.g., storage vars)
+            // fallback: check root symbols for top-level variables (e.g., storage vars)
             if (table.root.findInCurrent(id.name)) |idx_root| {
                 const rsym = table.root.symbols.items[idx_root];
                 break :blk rsym.region orelse MemoryRegion.Stack;
@@ -326,10 +326,10 @@ fn checkSwitchPatterns(
     defer seen_literals.deinit();
     var seen_enum_variants = std.StringHashMap(void).init(table.allocator);
     defer seen_enum_variants.deinit();
-    // Track numeric ranges precisely to detect overlaps
+    // track numeric ranges precisely to detect overlaps
     var numeric_ranges = std.ArrayList(struct { start: u128, end: u128, span: ast.SourceSpan }).init(table.allocator);
     defer numeric_ranges.deinit();
-    // If condition is enum, seed coverage map
+    // if condition is enum, seed coverage map
     if (cond_type.ora_type) |ot| switch (ot) {
         .enum_type => |ename| {
             enum_coverage = .{ .name = ename, .covered = std.StringHashMap(void).init(table.allocator) };
@@ -344,12 +344,12 @@ fn checkSwitchPatterns(
                 if (!seen_else) {
                     seen_else = true;
                 } else {
-                    // Duplicate else
+                    // duplicate else
                     try issues.append(case.span);
                 }
             },
             .Literal => |lit| {
-                // Best-effort: if condition has an ora_type, require literal category compatibility
+                // best-effort: if condition has an ora_type, require literal category compatibility
                 if (cond_type.ora_type) |ot| switch (lit.value) {
                     .Integer => if (!ot.isInteger()) try issues.append(lit.span),
                     .Bool => if (ot.getCategory() != .Bool) try issues.append(lit.span),
@@ -359,7 +359,7 @@ fn checkSwitchPatterns(
                     .Character => if (!ot.isUnsignedInteger()) try issues.append(lit.span),
                     .Bytes => if (!ot.isUnsignedInteger()) try issues.append(lit.span),
                 };
-                // Duplicate literal detection (key by category + value when available)
+                // duplicate literal detection (key by category + value when available)
                 const key: []const u8 = switch (lit.value) {
                     .Integer => lit.value.Integer.value,
                     .String => lit.value.String.value,
@@ -383,7 +383,7 @@ fn checkSwitchPatterns(
             .EnumValue => |ev| {
                 if (cond_type.ora_type) |ot| switch (ot) {
                     .enum_type => |ename| {
-                        // If pattern provided a qualified enum name, it must match the condition's enum
+                        // if pattern provided a qualified enum name, it must match the condition's enum
                         if (ev.enum_name.len != 0 and !std.mem.eql(u8, ev.enum_name, ename)) {
                             try issues.append(ev.span);
                         }
@@ -392,7 +392,7 @@ fn checkSwitchPatterns(
                                 _ = try ec.covered.put(ev.variant_name, {});
                             }
                         }
-                        // Duplicate enum variant detection (by variant name)
+                        // duplicate enum variant detection (by variant name)
                         if (seen_enum_variants.contains(ev.variant_name)) {
                             try issues.append(ev.span);
                         } else {
@@ -403,7 +403,7 @@ fn checkSwitchPatterns(
                 };
             },
             .Range => |rg| {
-                // Both endpoints must be orderable and compatible with condition type
+                // both endpoints must be orderable and compatible with condition type
                 const st = expr.inferExprType(table, scope, rg.start.*);
                 const et = expr.inferExprType(table, scope, rg.end.*);
                 if (cond_type.ora_type != null) {
@@ -411,7 +411,7 @@ fn checkSwitchPatterns(
                     const ok_end = ast.Types.TypeInfo.equals(et, cond_type) or ast.Types.TypeInfo.isCompatibleWith(et, cond_type);
                     if (!ok_start or !ok_end) try issues.append(rg.span);
                 }
-                // Precise overlap detection for integer-like literal ranges
+                // precise overlap detection for integer-like literal ranges
                 const parseU128FromLiteral = struct {
                     fn stripPrefixDigits(s: []const u8, base: u8) []const u8 {
                         if (base == 16) {
@@ -455,7 +455,7 @@ fn checkSwitchPatterns(
                     if (end_val_opt) |ev| {
                         const smin: u128 = if (sv <= ev) sv else ev;
                         const smax: u128 = if (sv <= ev) ev else sv;
-                        // Overlap if max(starts) <= min(ends)
+                        // overlap if max(starts) <= min(ends)
                         var i: usize = 0;
                         while (i < numeric_ranges.items.len) : (i += 1) {
                             const prev = numeric_ranges.items[i];
@@ -471,20 +471,20 @@ fn checkSwitchPatterns(
                 }
             },
         }
-        // If we've seen else, no further cases allowed
+        // if we've seen else, no further cases allowed
         if (seen_else and case.pattern != .Else) {
             try issues.append(case.span);
         }
     }
-    // Enum exhaustiveness: if no else, ensure all variants are covered by enum values (ignore ranges for now)
+    // enum exhaustiveness: if no else, ensure all variants are covered by enum values (ignore ranges for now)
     if (!seen_else) {
         if (enum_coverage) |*ec| {
             if (table.enum_variants.get(ec.name)) |all| {
                 var i: usize = 0;
                 while (i < all.len) : (i += 1) {
                     if (!ec.covered.contains(all[i])) {
-                        // Missing variant
-                        // Use first case span if available to report; otherwise nothing
+                        // missing variant
+                        // use first case span if available to report; otherwise nothing
                         if (cases.len > 0) try issues.append(cases[0].span);
                         break;
                     }
@@ -492,7 +492,7 @@ fn checkSwitchPatterns(
             }
         }
     }
-    // Note: else positioning enforced in parser; here we could validate if needed.
+    // note: else positioning enforced in parser; here we could validate if needed.
 }
 
 fn checkSwitchExpressionResultTypes(
@@ -513,13 +513,13 @@ fn checkSwitchExpressionResultTypes(
                 }
             },
             .Block, .LabeledBlock => {
-                // Switch expressions should not contain block bodies; parser prevents this, but double-check
+                // switch expressions should not contain block bodies; parser prevents this, but double-check
                 try issues.append(case.span);
             },
         }
     }
     if (sw.default_case) |*defb| {
-        // Default is synthesized as a block with a single expression statement; check its type
+        // default is synthesized as a block with a single expression statement; check its type
         if (defb.statements.len > 0) {
             const first = defb.statements[0];
             if (first == .Expr) {
@@ -530,7 +530,7 @@ fn checkSwitchExpressionResultTypes(
                     try issues.append(defb.span);
                 }
             } else {
-                // Non-expression in default for switch expression is invalid
+                // non-expression in default for switch expression is invalid
                 try issues.append(defb.span);
             }
         }
@@ -582,7 +582,7 @@ fn checkExpr(issues: *std.ArrayList(ast.SourceSpan), table: *state.SymbolTable, 
                 else => {},
             };
             if (!ok_try) try issues.append(t.span);
-            // Recurse
+            // recurse
             try checkExpr(issues, table, scope, t.expr.*);
         },
         .ErrorReturn => |_| {},
@@ -651,7 +651,7 @@ fn walkBlock(issues: *std.ArrayList(ast.SourceSpan), table: *state.SymbolTable, 
                     if (!isRegionAssignmentAllowed(tr, sr, .{ .Identifier = .{ .name = v.name, .type_info = ast.Types.TypeInfo.unknown(), .span = v.span } })) {
                         try issues.append(v.span);
                     }
-                    // New: forbid composite-type bulk copies into storage
+                    // new: forbid composite-type bulk copies into storage
                     if (isStorageLike(tr) and isStorageLike(sr)) {
                         const declared_ti = v.type_info;
                         if (!isLeafValueType(declared_ti)) try issues.append(v.span);
@@ -661,13 +661,13 @@ fn walkBlock(issues: *std.ArrayList(ast.SourceSpan), table: *state.SymbolTable, 
             .Expr => |e| {
                 switch (e) {
                     .Assignment => |a| {
-                        // LHS must be an lvalue: Identifier, FieldAccess, Index
+                        // lhs must be an lvalue: Identifier, FieldAccess, Index
                         const lhs_is_lvalue = switch (a.target.*) {
                             .Identifier, .FieldAccess, .Index => true,
                             else => false,
                         };
                         if (!lhs_is_lvalue) try issues.append(a.span);
-                        // Mutability: reject writes to non-mutable bindings when target is an Identifier
+                        // mutability: reject writes to non-mutable bindings when target is an Identifier
                         if (a.target.* == .Identifier) {
                             const name = a.target.Identifier.name;
                             if (table.isScopeKnown(scope)) {
@@ -676,25 +676,25 @@ fn walkBlock(issues: *std.ArrayList(ast.SourceSpan), table: *state.SymbolTable, 
                                 }
                             }
                         }
-                        // Type compatibility (best-effort)
+                        // type compatibility (best-effort)
                         const lt = expr.inferExprType(table, scope, a.target.*);
                         const rt = expr.inferExprType(table, scope, a.value.*);
                         if (lt.ora_type != null and rt.ora_type != null and !ast.Types.TypeInfo.equals(lt, rt)) {
                             try issues.append(a.span);
                         }
-                        // Recurse into RHS for error checks
+                        // recurse into RHS for error checks
                         try checkExpr(issues, table, scope, a.value.*);
-                        // Region transition validation
+                        // region transition validation
                         const tr = inferExprRegion(table, scope, a.target.*);
                         const sr = inferExprRegion(table, scope, a.value.*);
                         if (!isRegionAssignmentAllowed(tr, sr, a.target.*)) {
                             try issues.append(a.span);
                         }
-                        // New: forbid storage-to-storage bulk copy of composite types only when assigning identifiers (whole value)
+                        // new: forbid storage-to-storage bulk copy of composite types only when assigning identifiers (whole value)
                         if (isStorageLike(tr) and isStorageLike(sr) and a.target.* == .Identifier) {
                             if (!isLeafValueType(lt)) try issues.append(a.span);
                         }
-                        // Explicit root-scope storage-to-storage bulk copy guard (identifiers)
+                        // explicit root-scope storage-to-storage bulk copy guard (identifiers)
                         if (a.target.* == .Identifier and a.value.* == .Identifier) {
                             if (table.root.findInCurrent(a.target.Identifier.name)) |idx_t| {
                                 if (table.root.findInCurrent(a.value.Identifier.name)) |idx_s| {
@@ -708,13 +708,13 @@ fn walkBlock(issues: *std.ArrayList(ast.SourceSpan), table: *state.SymbolTable, 
                         }
                     },
                     .CompoundAssignment => |ca| {
-                        // LHS must be an lvalue
+                        // lhs must be an lvalue
                         const lhs_is_lvalue = switch (ca.target.*) {
                             .Identifier, .FieldAccess, .Index => true,
                             else => false,
                         };
                         if (!lhs_is_lvalue) try issues.append(ca.span);
-                        // Mutability: reject writes to non-mutable bindings when target is an Identifier
+                        // mutability: reject writes to non-mutable bindings when target is an Identifier
                         if (ca.target.* == .Identifier) {
                             const name = ca.target.Identifier.name;
                             if (table.isScopeKnown(scope)) {
@@ -723,7 +723,7 @@ fn walkBlock(issues: *std.ArrayList(ast.SourceSpan), table: *state.SymbolTable, 
                                 }
                             }
                         }
-                        // Numeric-only first cut
+                        // numeric-only first cut
                         const lt = expr.inferExprType(table, scope, ca.target.*);
                         const rt = expr.inferExprType(table, scope, ca.value.*);
                         if (lt.ora_type) |lot| {
@@ -733,19 +733,19 @@ fn walkBlock(issues: *std.ArrayList(ast.SourceSpan), table: *state.SymbolTable, 
                             if (!rot.isInteger()) try issues.append(ca.span);
                         }
                         try checkExpr(issues, table, scope, ca.value.*);
-                        // Region transition validation for compound assignment
+                        // region transition validation for compound assignment
                         const tr2 = inferExprRegion(table, scope, ca.target.*);
                         const sr2 = inferExprRegion(table, scope, ca.value.*);
                         if (!isRegionAssignmentAllowed(tr2, sr2, ca.target.*)) {
                             try issues.append(ca.span);
                         }
-                        // New: compound ops must target leaf types in storage when targeting identifiers (bulk not allowed)
+                        // new: compound ops must target leaf types in storage when targeting identifiers (bulk not allowed)
                         if (isStorageLike(tr2) and isStorageLike(sr2) and ca.target.* == .Identifier) {
                             if (!isLeafValueType(lt)) try issues.append(ca.span);
                         }
                     },
                     else => {
-                        // General expression: traverse for error rules
+                        // general expression: traverse for error rules
                         try checkExpr(issues, table, scope, e);
                     },
                 }
@@ -756,7 +756,7 @@ fn walkBlock(issues: *std.ArrayList(ast.SourceSpan), table: *state.SymbolTable, 
                         const vt = expr.inferExprType(table, scope, v);
                         var ok = ast.Types.TypeInfo.equals(vt, rt) or ast.Types.TypeInfo.isCompatibleWith(vt, rt);
                         if (!ok) {
-                            // Allow returning T when expected is !T (success case)
+                            // allow returning T when expected is !T (success case)
                             if (rt.ora_type) |rot| switch (rot) {
                                 .error_union => |succ_ptr| {
                                     const succ = ast.Types.TypeInfo.fromOraType(@constCast(succ_ptr).*);
@@ -779,7 +779,7 @@ fn walkBlock(issues: *std.ArrayList(ast.SourceSpan), table: *state.SymbolTable, 
                                 },
                                 else => {},
                             };
-                            // Allow returning error.SomeError when return type includes that error tag
+                            // allow returning error.SomeError when return type includes that error tag
                             if (!ok and v == .ErrorReturn) {
                                 if (scope.name) |fn_name| {
                                     if (table.function_allowed_errors.get(fn_name)) |allowed| {
@@ -797,7 +797,7 @@ fn walkBlock(issues: *std.ArrayList(ast.SourceSpan), table: *state.SymbolTable, 
                             }
                         }
                         if (!ok) {
-                            // Debug log to understand mismatches (fixture debugging aid)
+                            // debug log to understand mismatches (fixture debugging aid)
                             var vbuf: [256]u8 = undefined;
                             var rbuf: [256]u8 = undefined;
                             var vstream = std.io.fixedBufferStream(&vbuf);
@@ -820,12 +820,12 @@ fn walkBlock(issues: *std.ArrayList(ast.SourceSpan), table: *state.SymbolTable, 
                             try issues.append(r.span);
                         }
                     } else {
-                        // Void return only allowed when function is void
+                        // void return only allowed when function is void
                         const void_ok = (rt.ora_type != null and rt.ora_type.? == .void);
                         if (!void_ok) try issues.append(r.span);
                     }
                 } else {
-                    // No declared return type -> treat as void; returning a value is an issue
+                    // no declared return type -> treat as void; returning a value is an issue
                     if (r.value != null) try issues.append(r.span);
                 }
             },
@@ -853,7 +853,7 @@ fn walkBlock(issues: *std.ArrayList(ast.SourceSpan), table: *state.SymbolTable, 
                     try walkBlock(issues, table, catch_scope, &cb.block, ret_type);
                 }
             },
-            // No plain Block variant in StmtNode
+            // no plain Block variant in StmtNode
             else => {},
         }
     }

@@ -36,7 +36,7 @@ pub const Context = struct {
         const cfg = c.Z3_mk_config() orelse return error.Z3InitFailed;
         errdefer c.Z3_del_config(cfg);
 
-        // Set timeout
+        // set timeout
         const timeout_str = try std.fmt.allocPrintZ(allocator, "{d}", .{timeout_ms});
         defer allocator.free(timeout_str);
         c.Z3_set_param_value(cfg, "timeout", timeout_str.ptr);
@@ -67,6 +67,6 @@ test "Context init and deinit" {
     var ctx = try Context.init(testing.allocator);
     defer ctx.deinit();
 
-    // Context should be non-null
+    // context should be non-null
     try testing.expect(ctx.ctx != null);
 }

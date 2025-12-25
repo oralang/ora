@@ -34,13 +34,13 @@ const helpers = @import("helpers.zig");
 /// Context for labeled control flow (switch, while, for, blocks)
 pub const LabelContext = struct {
     label: []const u8,
-    // For labeled switches with continue support
+    // for labeled switches with continue support
     continue_flag_memref: ?c.MlirValue = null,
     value_memref: ?c.MlirValue = null,
-    // For labeled switches with return support
+    // for labeled switches with return support
     return_flag_memref: ?c.MlirValue = null,
     return_value_memref: ?c.MlirValue = null,
-    // Label type for context-aware handling
+    // label type for context-aware handling
     label_type: enum { Switch, While, For, Block } = .Block,
 };
 

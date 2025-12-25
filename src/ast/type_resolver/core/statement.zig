@@ -43,7 +43,7 @@ pub fn resolveStatement(
         .Switch => |*switch_stmt| resolveSwitch(self, switch_stmt, context),
         .Log => |*log_stmt| resolveLog(self, log_stmt, context),
         else => {
-            // Unhandled statement types - return unknown
+            // unhandled statement types - return unknown
             return Typed.init(TypeInfo.unknown(), Effect.pure(), self.allocator);
         },
     };
@@ -58,104 +58,104 @@ fn resolveVariableDecl(
     var_decl: *ast.Statements.VariableDeclNode,
     _: TypeContext,
 ) TypeResolutionError!Typed {
-    // Fix custom type names: if parser assumed struct_type but it's actually enum_type
+    // fix custom type names: if parser assumed struct_type but it's actually enum_type
     if (var_decl.type_info.ora_type) |ot| {
         if (ot == .struct_type) {
             const type_name = ot.struct_type;
-            // Look up symbol to see if it's actually an enum
-            // Search from root scope to find type declarations
+            // look up symbol to see if it's actually an enum
+            // search from root scope to find type declarations
             const symbol = SymbolTable.findUp(@as(?*const Scope, @ptrCast(&self.symbol_table.root)), type_name);
             if (symbol) |sym| {
                 if (sym.kind == .Enum) {
-                    // Fix: change struct_type to enum_type
+                    // fix: change struct_type to enum_type
                     var_decl.type_info.ora_type = OraType{ .enum_type = type_name };
                     var_decl.type_info.category = .Enum;
                 }
             }
         }
-        // Ensure category matches ora_type if present (fixes refinement types)
+        // ensure category matches ora_type if present (fixes refinement types)
         var_decl.type_info.category = ot.getCategory();
     }
 
     if (var_decl.value) |value_expr| {
-        // Ensure category matches ora_type if present (fixes refinement types)
+        // ensure category matches ora_type if present (fixes refinement types)
         if (var_decl.type_info.ora_type) |ot| {
             var_decl.type_info.category = ot.getCategory();
         }
-        // If type is unknown, infer it from the initializer expression
+        // if type is unknown, infer it from the initializer expression
         if (!var_decl.type_info.isResolved()) {
-            // Synthesize type from expression
+            // synthesize type from expression
             const typed = try expression.synthExpr(self, value_expr);
 
-            // Assign inferred type to variable
+            // assign inferred type to variable
             var_decl.type_info = typed.ty;
         } else {
-            // Type is explicit, check expression against it
+            // type is explicit, check expression against it
             _ = try expression.checkExpr(self, value_expr, var_decl.type_info);
 
-            // Validate refinement types if present
+            // validate refinement types if present
             if (var_decl.type_info.ora_type) |target_ora_type| {
-                // Validate refinement type structure
+                // validate refinement type structure
                 try self.refinement_system.validate(target_ora_type);
 
-                // Validate constant literal values against refinement constraints
+                // validate constant literal values against refinement constraints
                 try validateLiteralAgainstRefinement(self, value_expr, target_ora_type);
 
-                // Check guard optimizations: skip guard if optimization applies
+                // check guard optimizations: skip guard if optimization applies
                 var_decl.skip_guard = shouldSkipGuard(self, value_expr, target_ora_type);
             }
         }
     } else {
-        // No initializer - type must be explicit
+        // no initializer - type must be explicit
         if (!var_decl.type_info.isResolved()) {
             return TypeResolutionError.UnresolvedType;
         }
     }
 
-    // Add variable to symbol table AFTER type is resolved
-    // Ensure type is resolved - if it has ora_type, derive category if needed
+    // add variable to symbol table AFTER type is resolved
+    // ensure type is resolved - if it has ora_type, derive category if needed
     var final_type = var_decl.type_info;
     if (final_type.ora_type) |ot| {
-        // Ensure category matches the ora_type (refinement types inherit base category)
+        // ensure category matches the ora_type (refinement types inherit base category)
         const derived_category = ot.getCategory();
-        // Always update category to match ora_type to ensure isResolved() works
+        // always update category to match ora_type to ensure isResolved() works
         final_type.category = derived_category;
-        // Also update the original type_info to ensure it's resolved
+        // also update the original type_info to ensure it's resolved
         var_decl.type_info.category = derived_category;
     }
 
-    // Type should be resolved now - if not, there's a bug
+    // type should be resolved now - if not, there's a bug
     if (!final_type.isResolved()) {
         return TypeResolutionError.UnresolvedType;
     }
 
-    // Copy the type if it contains pointers (refinement types, slices, etc.)
+    // copy the type if it contains pointers (refinement types, slices, etc.)
     // to ensure it's properly owned by the symbol table
-    // Ensure final_type has ora_type before proceeding
+    // ensure final_type has ora_type before proceeding
     if (final_type.ora_type == null) {
         return TypeResolutionError.UnresolvedType;
     }
     var stored_type = final_type;
     var typ_owned_flag = false;
     const ot = final_type.ora_type.?;
-    // Check if this type needs copying (has pointers)
+    // check if this type needs copying (has pointers)
     const needs_copy = switch (ot) {
         .min_value, .max_value, .in_range, .scaled, .exact, .slice, .error_union, .array, .map, .tuple, .anonymous_struct, ._union, .function => true,
         else => false,
     };
 
-    // Only set typ_owned = true if we're storing in a function scope, not a block scope
-    // Block scopes are temporary and shouldn't own types (they point to arena memory)
+    // only set typ_owned = true if we're storing in a function scope, not a block scope
+    // block scopes are temporary and shouldn't own types (they point to arena memory)
     const is_function_scope = if (self.current_scope) |scope|
         self.symbol_table.isFunctionScope(scope)
     else
         false;
 
     if (needs_copy and is_function_scope) {
-        // Import copyOraTypeOwned from function_analyzer
+        // import copyOraTypeOwned from function_analyzer
         const copyOraTypeOwned = @import("../../../semantics/function_analyzer.zig").copyOraTypeOwned;
         if (copyOraTypeOwned(self.allocator, ot)) |copied_ora_type| {
-            // Derive category from the copied type to ensure it's correct
+            // derive category from the copied type to ensure it's correct
             const derived_category = copied_ora_type.getCategory();
             stored_type = TypeInfo{
                 .category = derived_category,
@@ -165,26 +165,26 @@ fn resolveVariableDecl(
             };
             typ_owned_flag = true;
         } else |_| {
-            // If copying fails, we cannot safely store this type as it may contain pointers to temporary memory
-            // This should be rare (usually only out of memory), but we need to handle it
-            // We cannot proceed without copying refinement types safely
+            // if copying fails, we cannot safely store this type as it may contain pointers to temporary memory
+            // this should be rare (usually only out of memory), but we need to handle it
+            // we cannot proceed without copying refinement types safely
             return TypeResolutionError.UnresolvedType;
         }
     } else {
-        // No copying needed, or we're in a block scope (don't own types in block scopes)
-        // Ensure category is correct
+        // no copying needed, or we're in a block scope (don't own types in block scopes)
+        // ensure category is correct
         stored_type.category = ot.getCategory();
     }
 
-    // Final check: ensure stored type is resolved
-    // Double-check that ora_type is set and category matches
+    // final check: ensure stored type is resolved
+    // double-check that ora_type is set and category matches
     if (stored_type.ora_type) |stored_ot| {
         stored_type.category = stored_ot.getCategory();
     }
     if (!stored_type.isResolved()) {
         return TypeResolutionError.UnresolvedType;
     }
-    // Final verification before storing
+    // final verification before storing
     if (stored_type.ora_type == null) {
         std.debug.print("[resolveVariableDecl] CRITICAL: Variable '{s}' has null ora_type before storing!\n", .{var_decl.name});
         return TypeResolutionError.UnresolvedType;
@@ -199,10 +199,10 @@ fn resolveVariableDecl(
         .typ_owned = typ_owned_flag,
     };
 
-    // Track if we successfully stored the type to avoid leaks
+    // track if we successfully stored the type to avoid leaks
     var type_stored = false;
     errdefer {
-        // If we allocated a type but failed to store it, deallocate it
+        // if we allocated a type but failed to store it, deallocate it
         if (typ_owned_flag and !type_stored) {
             if (stored_type.ora_type) |*ora_type| {
                 const type_info = @import("../../type_info.zig");
@@ -212,14 +212,14 @@ fn resolveVariableDecl(
     }
 
     if (self.current_scope) |scope| {
-        // Find the actual scope where the symbol is stored (could be in a block scope)
-        // This ensures we update it in the correct scope
+        // find the actual scope where the symbol is stored (could be in a block scope)
+        // this ensures we update it in the correct scope
         const semantics_state = @import("../../../semantics/state.zig");
         if (semantics_state.SymbolTable.findScopeContaining(scope, var_decl.name)) |found| {
-            // Found the symbol - update it in the scope where it's actually stored
+            // found the symbol - update it in the scope where it's actually stored
             const old_symbol = &found.scope.symbols.items[found.idx];
             const type_info = @import("../../type_info.zig");
-            // Only deallocate if the old type was owned AND has a valid ora_type
+            // only deallocate if the old type was owned AND has a valid ora_type
             if (old_symbol.typ_owned) {
                 if (old_symbol.typ) |*old_typ| {
                     if (old_typ.ora_type != null) {
@@ -227,30 +227,30 @@ fn resolveVariableDecl(
                     }
                 }
             }
-            // Only set typ_owned=true if this scope is a function scope
-            // Block scopes should never own types (they point to arena memory)
+            // only set typ_owned=true if this scope is a function scope
+            // block scopes should never own types (they point to arena memory)
             old_symbol.typ = stored_type;
             old_symbol.typ_owned = typ_owned_flag and self.symbol_table.isFunctionScope(found.scope);
             type_stored = true;
         } else {
-            // Symbol doesn't exist yet - declare it in the current scope
-            // Only set typ_owned if we're in a function scope
+            // symbol doesn't exist yet - declare it in the current scope
+            // only set typ_owned if we're in a function scope
             var new_symbol = symbol;
             new_symbol.typ_owned = typ_owned_flag and self.symbol_table.isFunctionScope(scope);
             if (self.symbol_table.declare(scope, new_symbol)) |_| {
-                // Duplicate declaration - this shouldn't happen if findScopeContaining worked
-                // But handle it gracefully
+                // duplicate declaration - this shouldn't happen if findScopeContaining worked
+                // but handle it gracefully
                 type_stored = true;
             } else |_| {
-                // Failed to declare - this is an error
+                // failed to declare - this is an error
                 return TypeResolutionError.UnresolvedType;
             }
         }
     } else {
-        // No current scope - this shouldn't happen during normal resolution
-        // But handle it gracefully by not storing the type
+        // no current scope - this shouldn't happen during normal resolution
+        // but handle it gracefully by not storing the type
         std.debug.print("[resolveVariableDecl] WARNING: No current scope for variable '{s}'\n", .{var_decl.name});
-        // Deallocate the copied type since we can't store it
+        // deallocate the copied type since we can't store it
         if (typ_owned_flag) {
             if (stored_type.ora_type) |*ora_type| {
                 const type_info = @import("../../type_info.zig");
@@ -260,8 +260,8 @@ fn resolveVariableDecl(
         }
     }
 
-    // CRITICAL: If we copied a type but didn't store it, we have a leak
-    // This should never happen, but if it does, we need to clean up
+    // critical: If we copied a type but didn't store it, we have a leak
+    // this should never happen, but if it does, we need to clean up
     if (typ_owned_flag and !type_stored) {
         std.debug.print("[resolveVariableDecl] CRITICAL: Variable '{s}' - copied type was not stored! Deallocating to prevent leak.\n", .{var_decl.name});
         if (stored_type.ora_type) |*ora_type| {
@@ -279,16 +279,16 @@ fn resolveReturn(
     context: TypeContext,
 ) TypeResolutionError!Typed {
     if (ret.value) |*value_expr| {
-        // Check expression against expected return type
+        // check expression against expected return type
         if (context.function_return_type) |return_type| {
             _ = try expression.checkExpr(self, value_expr, return_type);
 
-            // Check guard optimizations: skip guard if optimization applies
+            // check guard optimizations: skip guard if optimization applies
             if (return_type.ora_type) |target_ora_type| {
                 ret.skip_guard = shouldSkipGuard(self, value_expr, target_ora_type);
             }
         } else {
-            // No return type expected - synthesize
+            // no return type expected - synthesize
             _ = try expression.synthExpr(self, value_expr);
         }
     }
@@ -301,19 +301,19 @@ fn resolveIf(
     if_stmt: *ast.Statements.IfNode,
     context: TypeContext,
 ) TypeResolutionError!Typed {
-    // Resolve condition (should be bool)
+    // resolve condition (should be bool)
     var condition_typed = try expression.synthExpr(self, &if_stmt.condition);
     defer condition_typed.deinit(self.allocator);
     try validateBoolCondition(condition_typed.ty);
 
-    // Resolve then branch statements
-    // NOTE: We don't set block scopes here to avoid double-frees during deinit
-    // Variables declared in blocks will be found via findUp from the function scope
+    // resolve then branch statements
+    // note: We don't set block scopes here to avoid double-frees during deinit
+    // variables declared in blocks will be found via findUp from the function scope
     for (if_stmt.then_branch.statements) |*stmt| {
         _ = try resolveStatement(self, stmt, context);
     }
 
-    // Resolve else branch if present
+    // resolve else branch if present
     if (if_stmt.else_branch) |*else_branch| {
         for (else_branch.statements) |*stmt| {
             _ = try resolveStatement(self, stmt, context);
@@ -328,14 +328,14 @@ fn resolveWhile(
     while_stmt: *ast.Statements.WhileNode,
     context: TypeContext,
 ) TypeResolutionError!Typed {
-    // Resolve condition
+    // resolve condition
     var condition_typed = try expression.synthExpr(self, &while_stmt.condition);
     defer condition_typed.deinit(self.allocator);
     try validateBoolCondition(condition_typed.ty);
 
-    // Resolve body
-    // NOTE: We don't set block scopes here to avoid double-frees during deinit
-    // Variables declared in blocks will be found via findUp from the function scope
+    // resolve body
+    // note: We don't set block scopes here to avoid double-frees during deinit
+    // variables declared in blocks will be found via findUp from the function scope
     for (while_stmt.body.statements) |*stmt| {
         _ = try resolveStatement(self, stmt, context);
     }
@@ -348,17 +348,17 @@ fn resolveFor(
     for_stmt: *ast.Statements.ForLoopNode,
     context: TypeContext,
 ) TypeResolutionError!Typed {
-    // Resolve iterable expression to get its type
+    // resolve iterable expression to get its type
     var iterable_typed = try expression.synthExpr(self, &for_stmt.iterable);
     defer iterable_typed.deinit(self.allocator);
 
-    // Determine element type from iterable type
+    // determine element type from iterable type
     const element_type: TypeInfo = if (iterable_typed.ty.ora_type) |iterable_ora_type| blk: {
         const elem_type = switch (iterable_ora_type) {
             .array => |arr| arr.elem.*,
             .slice => |elem_ptr| elem_ptr.*,
             .map => |m| m.value.*,
-            // For range-style loops (integer), element type is the same as iterable
+            // for range-style loops (integer), element type is the same as iterable
             else => iterable_ora_type,
         };
         const elem_category = elem_type.getCategory();
@@ -369,42 +369,42 @@ fn resolveFor(
             .span = for_stmt.span,
         };
     } else if (iterable_typed.ty.category == .Integer) blk: {
-        // Range expressions with integer literals (e.g., 0..20) resolve to Integer category
+        // range expressions with integer literals (e.g., 0..20) resolve to Integer category
         // but have null ora_type. Infer u256 as the element type.
         break :blk CommonTypes.u256_type();
     } else TypeInfo.unknown();
 
-    // Resolve loop pattern variables and update their types in symbol table
-    // Loop variables are declared in the body scope, not the function scope
+    // resolve loop pattern variables and update their types in symbol table
+    // loop variables are declared in the body scope, not the function scope
     const body_scope_key: usize = @intFromPtr(&for_stmt.body);
     const body_scope = self.symbol_table.block_scopes.get(body_scope_key) orelse self.current_scope;
 
     if (body_scope) |scope| {
         switch (for_stmt.pattern) {
             .Single => |s| {
-                // Update the symbol type for the loop variable
-                // Loop variables are typically simple types, not owned
+                // update the symbol type for the loop variable
+                // loop variables are typically simple types, not owned
                 if (element_type.ora_type != null) {
                     _ = self.symbol_table.updateSymbolType(scope, s.name, element_type, false) catch {
-                        // Symbol might not exist yet, that's okay - it will be created during lowering
+                        // symbol might not exist yet, that's okay - it will be created during lowering
                     };
                 }
             },
             .IndexPair => |p| {
-                // Update item variable type
-                // Loop variables are typically simple types, not owned
+                // update item variable type
+                // loop variables are typically simple types, not owned
                 if (element_type.ora_type != null) {
                     _ = self.symbol_table.updateSymbolType(scope, p.item, element_type, false) catch {};
                 }
-                // Index variable is always u256 (or mlir index type) - simple type, not owned
+                // index variable is always u256 (or mlir index type) - simple type, not owned
                 const index_type = CommonTypes.u256_type();
                 _ = self.symbol_table.updateSymbolType(scope, p.index, index_type, false) catch {};
             },
             .Destructured => |d| {
-                // For destructuring, we need to extract field types from the element type
-                // This is complex and depends on the destructuring pattern
-                // For now, use element type for all fields (simplified)
-                // Loop variables are typically simple types, not owned
+                // for destructuring, we need to extract field types from the element type
+                // this is complex and depends on the destructuring pattern
+                // for now, use element type for all fields (simplified)
+                // loop variables are typically simple types, not owned
                 if (element_type.ora_type != null) {
                     switch (d.pattern) {
                         .Struct => |fields| {
@@ -428,8 +428,8 @@ fn resolveFor(
         }
     }
 
-    // Resolve loop body
-    // Set current_scope to body_scope so loop variables can be found
+    // resolve loop body
+    // set current_scope to body_scope so loop variables can be found
     const prev_scope = self.current_scope;
     if (body_scope) |bs| {
         self.current_scope = bs;
@@ -463,7 +463,7 @@ fn resolveTryBlock(
     try_block: *ast.Statements.TryBlockNode,
     context: TypeContext,
 ) TypeResolutionError!Typed {
-    // Resolve try block statements
+    // resolve try block statements
     const prev_scope = self.current_scope;
     const try_block_key: usize = @intFromPtr(&try_block.try_block);
     if (self.symbol_table.block_scopes.get(try_block_key)) |try_scope| {
@@ -477,9 +477,9 @@ fn resolveTryBlock(
         _ = try resolveStatement(self, stmt, context);
     }
 
-    // Resolve catch block if present
+    // resolve catch block if present
     if (try_block.catch_block) |*catch_block| {
-        // Set scope for catch block so error variable is accessible
+        // set scope for catch block so error variable is accessible
         const catch_block_key: usize = @intFromPtr(&catch_block.block);
         if (self.symbol_table.block_scopes.get(catch_block_key)) |catch_scope| {
             self.current_scope = catch_scope;
@@ -511,11 +511,11 @@ fn resolveBreak(
     break_stmt: *ast.Statements.BreakNode,
     context: TypeContext,
 ) TypeResolutionError!Typed {
-    // If break has a value expression, synthesize its type
+    // if break has a value expression, synthesize its type
     if (break_stmt.value) |value_expr| {
         _ = try expression.synthExpr(self, value_expr);
-        // TODO: Validate that break value type matches expected type from labeled block/switch
-        // This requires tracking the expected type from the enclosing labeled block or switch expression
+        // todo: Validate that break value type matches expected type from labeled block/switch
+        // this requires tracking the expected type from the enclosing labeled block or switch expression
     }
     _ = context; // Context may contain expected break value type in the future
     return Typed.init(TypeInfo.unknown(), Effect.pure(), self.allocator);
@@ -526,10 +526,10 @@ fn resolveContinue(
     continue_stmt: *ast.Statements.ContinueNode,
     context: TypeContext,
 ) TypeResolutionError!Typed {
-    // If continue has a value expression (for labeled switch continue), synthesize its type
+    // if continue has a value expression (for labeled switch continue), synthesize its type
     if (continue_stmt.value) |value_expr| {
         _ = try expression.synthExpr(self, value_expr);
-        // TODO: Validate that continue value type matches expected type from labeled switch
+        // todo: Validate that continue value type matches expected type from labeled switch
     }
     _ = context; // Context may contain expected continue value type in the future
     return Typed.init(TypeInfo.unknown(), Effect.pure(), self.allocator);
@@ -540,18 +540,18 @@ fn resolveSwitch(
     switch_stmt: *ast.Statements.SwitchNode,
     context: TypeContext,
 ) TypeResolutionError!Typed {
-    // Synthesize type of the switch condition expression
+    // synthesize type of the switch condition expression
     var condition_typed = try expression.synthExpr(self, &switch_stmt.condition);
     defer condition_typed.deinit(self.allocator);
 
     const condition_type = condition_typed.ty;
 
-    // Validate that case patterns match the condition type
+    // validate that case patterns match the condition type
     for (switch_stmt.cases) |*case| {
         try validateSwitchPattern(self, &case.pattern, condition_type, case.span);
     }
 
-    // Resolve types for each case body
+    // resolve types for each case body
     for (switch_stmt.cases) |*case| {
         switch (case.body) {
             .Expression => |case_expr| {
@@ -570,7 +570,7 @@ fn resolveSwitch(
         }
     }
 
-    // Resolve types for default case if present
+    // resolve types for default case if present
     if (switch_stmt.default_case) |*default_block| {
         for (default_block.statements) |*default_stmt| {
             _ = try resolveStatement(self, default_stmt, context);
@@ -588,22 +588,22 @@ fn validateSwitchPattern(
     pattern_span: ast.SourceSpan,
 ) TypeResolutionError!void {
     if (!condition_type.isResolved()) {
-        // Condition type not resolved - skip validation
+        // condition type not resolved - skip validation
         return;
     }
 
     switch (pattern.*) {
         .Else => {
-            // Else patterns are always valid
+            // else patterns are always valid
         },
         .Literal => |lit| {
-            // Validate literal type matches condition type category
+            // validate literal type matches condition type category
             const lit_type_info = getLiteralTypeInfo(lit.value);
             if (!lit_type_info.isResolved()) {
                 return TypeResolutionError.TypeMismatch;
             }
 
-            // Check category compatibility
+            // check category compatibility
             if (lit_type_info.category != condition_type.category) {
                 std.debug.print(
                     "[type_resolver] Switch pattern type mismatch: pattern category {s}, condition category {s}\n",
@@ -612,11 +612,11 @@ fn validateSwitchPattern(
                 return TypeResolutionError.TypeMismatch;
             }
 
-            // For integer types, check base type compatibility
+            // for integer types, check base type compatibility
             if (lit_type_info.category == .Integer and condition_type.category == .Integer) {
                 if (lit_type_info.ora_type != null and condition_type.ora_type != null) {
                     const compat = @import("../validation/compatibility.zig");
-                    // Pattern literal type should be assignable to condition type
+                    // pattern literal type should be assignable to condition type
                     if (!compat.isBaseTypeCompatible(lit_type_info.ora_type.?, condition_type.ora_type.?)) {
                         std.debug.print(
                             "[type_resolver] Switch pattern integer type mismatch\n",
@@ -628,13 +628,13 @@ fn validateSwitchPattern(
             }
         },
         .Range => |range| {
-            // Validate range endpoints are compatible with condition type
+            // validate range endpoints are compatible with condition type
             var start_typed = try expression.synthExpr(self, range.start);
             defer start_typed.deinit(self.allocator);
             var end_typed = try expression.synthExpr(self, range.end);
             defer end_typed.deinit(self.allocator);
 
-            // Both endpoints must be assignable to condition type
+            // both endpoints must be assignable to condition type
             if (!self.validation.isAssignable(condition_type, start_typed.ty)) {
                 std.debug.print(
                     "[type_resolver] Switch range start type mismatch\n",
@@ -651,11 +651,11 @@ fn validateSwitchPattern(
             }
         },
         .EnumValue => |ev| {
-            // Validate enum value matches condition enum type
+            // validate enum value matches condition enum type
             if (condition_type.ora_type) |cond_ora_type| {
                 switch (cond_ora_type) {
                     .enum_type => |enum_name| {
-                        // If pattern provided a qualified enum name, it must match
+                        // if pattern provided a qualified enum name, it must match
                         if (ev.enum_name.len != 0 and !std.mem.eql(u8, ev.enum_name, enum_name)) {
                             std.debug.print(
                                 "[type_resolver] Switch enum pattern enum name mismatch: got {s}, expected {s}\n",
@@ -761,7 +761,7 @@ fn resolveLog(
 ) TypeResolutionError!Typed {
     _ = context;
 
-    // Synthesize types for all log arguments
+    // synthesize types for all log arguments
     var arg_types = try self.allocator.alloc(TypeInfo, log_stmt.args.len);
     defer self.allocator.free(arg_types);
 
@@ -771,7 +771,7 @@ fn resolveLog(
         arg_types[i] = arg_typed.ty;
     }
 
-    // Validate log signature (event name exists, argument count matches, types match)
+    // validate log signature (event name exists, argument count matches, types match)
     const sig_fields_opt = self.symbol_table.log_signatures.get(log_stmt.event_name);
     if (sig_fields_opt == null) {
         std.debug.print(
@@ -782,7 +782,7 @@ fn resolveLog(
     }
     const sig_fields = sig_fields_opt.?;
 
-    // Arity check: argument count must match field count
+    // arity check: argument count must match field count
     if (sig_fields.len != log_stmt.args.len) {
         std.debug.print(
             "[type_resolver] Log argument count mismatch: got {d}, expected {d} for log {s}\n",
@@ -791,9 +791,9 @@ fn resolveLog(
         return TypeResolutionError.TypeMismatch;
     }
 
-    // Type check each argument against corresponding field type
+    // type check each argument against corresponding field type
     for (sig_fields, arg_types, 0..) |field, arg_type, i| {
-        // Check if argument type is assignable to field type
+        // check if argument type is assignable to field type
         if (!self.validation.isAssignable(field.type_info, arg_type)) {
             const got_str = formatTypeInfo(arg_type, self.allocator) catch "unknown";
             const expected_str = formatTypeInfo(field.type_info, self.allocator) catch "unknown";
@@ -818,7 +818,7 @@ pub fn shouldSkipGuard(
     value_expr: *ast.Expressions.ExprNode,
     target_ora_type: ast.type_info.OraType,
 ) bool {
-    // Optimization 1: Check if value is a compile-time constant that satisfies the constraint
+    // optimization 1: Check if value is a compile-time constant that satisfies the constraint
     const constant_result = self.utils.evaluateConstantExpression(value_expr) catch return false;
     if (constant_result) |constant_value| {
         if (constantSatisfiesRefinement(constant_value, target_ora_type)) {
@@ -826,7 +826,7 @@ pub fn shouldSkipGuard(
         }
     }
 
-    // Optimization 2: Check if source type is a subtype of target type (source <: target)
+    // optimization 2: Check if source type is a subtype of target type (source <: target)
     const value_type_info = getExpressionTypeInfo(value_expr);
     if (value_type_info.ora_type) |source_ora_type| {
         const compat = @import("../validation/compatibility.zig");
@@ -839,8 +839,8 @@ pub fn shouldSkipGuard(
         }
     }
 
-    // Optimization 3: Check if value comes from trusted builtin (std.transaction.sender, std.msg.sender)
-    // These are guaranteed by EVM semantics to be non-zero addresses
+    // optimization 3: Check if value comes from trusted builtin (std.transaction.sender, std.msg.sender)
+    // these are guaranteed by EVM semantics to be non-zero addresses
     if (target_ora_type == .non_zero_address) {
         if (isTrustedBuiltin(value_expr)) {
             return true; // Trusted builtin - skip guard
@@ -890,20 +890,20 @@ fn isTrustedBuiltin(expr: *ast.Expressions.ExprNode) bool {
         .Call => |call| {
             if (call.callee.* == .FieldAccess) {
                 const fa = &call.callee.FieldAccess;
-                // Check if field is "sender"
+                // check if field is "sender"
                 if (!std.mem.eql(u8, fa.field, "sender")) {
                     return false;
                 }
-                // Check if target is std.transaction or std.msg
+                // check if target is std.transaction or std.msg
                 if (fa.target.* == .FieldAccess) {
                     const inner_fa = &fa.target.FieldAccess;
-                    // Check if inner field is "transaction" or "msg"
+                    // check if inner field is "transaction" or "msg"
                     const is_transaction = std.mem.eql(u8, inner_fa.field, "transaction");
                     const is_msg = std.mem.eql(u8, inner_fa.field, "msg");
                     if (!is_transaction and !is_msg) {
                         return false;
                     }
-                    // Check if base is "std"
+                    // check if base is "std"
                     if (inner_fa.target.* == .Identifier) {
                         return std.mem.eql(u8, inner_fa.target.Identifier.name, "std");
                     }
@@ -922,18 +922,18 @@ fn validateLiteralAgainstRefinement(
     expr: *ast.Expressions.ExprNode,
     target_ora_type: ast.type_info.OraType,
 ) TypeResolutionError!void {
-    // Evaluate the constant expression
+    // evaluate the constant expression
     const constant_result = self.utils.evaluateConstantExpression(expr) catch {
-        // Evaluation error (e.g., overflow) - let runtime guard handle it
+        // evaluation error (e.g., overflow) - let runtime guard handle it
         return;
     };
 
     const constant_value = constant_result orelse {
-        // Not a compile-time constant - let runtime guard handle it
+        // not a compile-time constant - let runtime guard handle it
         return;
     };
 
-    // Validate against refinement constraints
+    // validate against refinement constraints
     switch (target_ora_type) {
         .min_value => |mv| {
             if (constant_value < mv.min) {
@@ -951,21 +951,21 @@ fn validateLiteralAgainstRefinement(
             }
         },
         .non_zero_address => {
-            // For addresses, check if value is zero
-            // Note: This assumes the constant is an address value
-            // In practice, address literals are hex strings, so this might not apply
-            // But if we have a numeric constant representing an address, check it
+            // for addresses, check if value is zero
+            // note: This assumes the constant is an address value
+            // in practice, address literals are hex strings, so this might not apply
+            // but if we have a numeric constant representing an address, check it
             if (constant_value == 0) {
                 return TypeResolutionError.TypeMismatch;
             }
         },
         .scaled, .exact => {
-            // Scaled and Exact don't have simple value constraints
-            // They're validated at operation time (division, arithmetic)
-            // No compile-time validation needed
+            // scaled and Exact don't have simple value constraints
+            // they're validated at operation time (division, arithmetic)
+            // no compile-time validation needed
         },
         else => {
-            // Not a refinement type, nothing to validate
+            // not a refinement type, nothing to validate
         },
     }
 }

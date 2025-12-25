@@ -53,7 +53,7 @@ pub const FunctionAnnotations = struct {
     }
 
     pub fn deinit(self: *FunctionAnnotations) void {
-        // Note: We don't own the ExprNode pointers, they're from AST arena
+        // note: We don't own the ExprNode pointers, they're from AST arena
         _ = self;
     }
 };
@@ -139,20 +139,20 @@ pub const VerificationPass = struct {
     }
 
     //===----------------------------------------------------------------------===//
-    // Annotation Extraction from AST
+    // annotation Extraction from AST
     //===----------------------------------------------------------------------===//
 
     /// Extract verification annotations from AST module
     pub fn extractAnnotationsFromAST(self: *VerificationPass, module: *lib.ast.AstNode) !void {
         switch (module.*) {
             .Module => |*mod| {
-                // Walk all top-level declarations
+                // walk all top-level declarations
                 for (mod.declarations) |*decl| {
                     try self.extractAnnotationsFromDeclaration(decl);
                 }
             },
             else => {
-                // Not a module, try to extract from the node directly
+                // not a module, try to extract from the node directly
                 try self.extractAnnotationsFromDeclaration(module);
             },
         }
@@ -162,18 +162,18 @@ pub const VerificationPass = struct {
     fn extractAnnotationsFromDeclaration(self: *VerificationPass, decl: *lib.ast.AstNode) !void {
         switch (decl.*) {
             .Contract => |*contract| {
-                // Extract annotations from contract members
+                // extract annotations from contract members
                 for (contract.body) |*member| {
                     try self.extractAnnotationsFromDeclaration(member);
                 }
             },
             .Function => |*function| {
-                // Include ghost functions in verification (they're specification-only)
-                // Ghost functions are used for verification but not compiled to bytecode
+                // include ghost functions in verification (they're specification-only)
+                // ghost functions are used for verification but not compiled to bytecode
                 try self.extractFunctionAnnotations(function);
             },
             else => {
-                // Other declaration types don't have verification annotations
+                // other declaration types don't have verification annotations
             },
         }
     }
@@ -182,20 +182,20 @@ pub const VerificationPass = struct {
     fn extractFunctionAnnotations(self: *VerificationPass, function: *lib.ast.FunctionNode) !void {
         const function_name = function.name;
 
-        // Create function annotations entry
+        // create function annotations entry
         var annotations = FunctionAnnotations.init(self.allocator, function_name);
 
-        // Extract requires clauses
+        // extract requires clauses
         if (function.requires_clauses.len > 0) {
             annotations.requires = try self.allocator.dupe(*lib.ast.Expressions.ExprNode, function.requires_clauses);
         }
 
-        // Extract ensures clauses
+        // extract ensures clauses
         if (function.ensures_clauses.len > 0) {
             annotations.ensures = try self.allocator.dupe(*lib.ast.Expressions.ExprNode, function.ensures_clauses);
         }
 
-        // Store in map
+        // store in map
         const name_copy = try self.allocator.dupe(u8, function_name);
         try self.function_annotations.put(name_copy, annotations);
     }
@@ -227,16 +227,16 @@ pub const VerificationPass = struct {
     }
 
     //===----------------------------------------------------------------------===//
-    // Annotation Extraction from MLIR
+    // annotation Extraction from MLIR
     //===----------------------------------------------------------------------===//
 
     /// Extract verification annotations from MLIR module
     /// This walks MLIR operations looking for ora.requires, ora.ensures, ora.invariant
     pub fn extractAnnotationsFromMLIR(self: *VerificationPass, mlir_module: mlir.MlirModule) !void {
-        // Get the module operation
+        // get the module operation
         const module_op = mlir.mlirModuleGetOperation(mlir_module);
 
-        // Walk all regions in the module
+        // walk all regions in the module
         const num_regions = mlir.mlirOperationGetNumRegions(module_op);
         for (0..@intCast(num_regions)) |region_idx| {
             const region = mlir.mlirOperationGetRegion(module_op, @intCast(region_idx));
@@ -246,11 +246,11 @@ pub const VerificationPass = struct {
 
     /// Walk an MLIR region to find verification operations
     fn walkMLIRRegion(self: *VerificationPass, region: mlir.MlirRegion) !void {
-        // Get first block in region
+        // get first block in region
         var current_block = mlir.mlirRegionGetFirstBlock(region);
 
         while (!mlir.mlirBlockIsNull(current_block)) {
-            // Walk operations in this block
+            // walk operations in this block
             var current_op = mlir.mlirBlockGetFirstOperation(current_block);
 
             while (!mlir.mlirOperationIsNull(current_op)) {
@@ -264,7 +264,7 @@ pub const VerificationPass = struct {
 
                 try self.processMLIROperation(current_op);
 
-                // Walk nested regions (for functions, if statements, etc.)
+                // walk nested regions (for functions, if statements, etc.)
                 const num_regions = mlir.mlirOperationGetNumRegions(current_op);
                 for (0..@intCast(num_regions)) |region_idx| {
                     const nested_region = mlir.mlirOperationGetRegion(current_op, @intCast(region_idx));
@@ -286,24 +286,24 @@ pub const VerificationPass = struct {
     fn processMLIROperation(self: *VerificationPass, op: mlir.MlirOperation) !void {
         const op_name = self.getMLIROperationName(op);
 
-        // Check for verification operations
+        // check for verification operations
         if (std.mem.eql(u8, op_name, "ora.requires")) {
-            // Extract requires condition
-            // Get the condition operand (should be the first and only operand)
+            // extract requires condition
+            // get the condition operand (should be the first and only operand)
             const num_operands = mlir.mlirOperationGetNumOperands(op);
             if (num_operands >= 1) {
                 const condition_value = mlir.mlirOperationGetOperand(op, 0);
                 try self.recordEncodedAnnotation(op, .Requires, condition_value);
             }
         } else if (std.mem.eql(u8, op_name, "ora.ensures")) {
-            // Extract ensures condition
+            // extract ensures condition
             const num_operands = mlir.mlirOperationGetNumOperands(op);
             if (num_operands >= 1) {
                 const condition_value = mlir.mlirOperationGetOperand(op, 0);
                 try self.recordEncodedAnnotation(op, .Ensures, condition_value);
             }
         } else if (std.mem.eql(u8, op_name, "ora.invariant")) {
-            // Extract invariant condition
+            // extract invariant condition
             const num_operands = mlir.mlirOperationGetNumOperands(op);
             if (num_operands >= 1) {
                 const condition_value = mlir.mlirOperationGetOperand(op, 0);
@@ -316,8 +316,8 @@ pub const VerificationPass = struct {
     fn getMLIROperationName(_: *VerificationPass, op: mlir.MlirOperation) []const u8 {
         const op_name = mlir.mlirOperationGetName(op);
         const op_name_str = mlir.mlirIdentifierStr(op_name);
-        // Create a slice from the MLIR string reference
-        // Note: This is safe as long as the MLIR context is alive
+        // create a slice from the MLIR string reference
+        // note: This is safe as long as the MLIR context is alive
         return op_name_str.data[0..op_name_str.length];
     }
 

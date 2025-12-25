@@ -95,6 +95,6 @@ test "identifiers: invalid @ directive" {
         return;
     };
 
-    // If lexer is lenient and produces tokens, free them
+    // if lexer is lenient and produces tokens, free them
     allocator.free(tokens);
 }

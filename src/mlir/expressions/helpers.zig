@@ -96,16 +96,16 @@ pub fn createComparisonOp(ctx: c.MlirContext, block: c.MlirBlock, locations: Loc
     } else rhs;
 
     if (is_lhs_address or is_rhs_address) {
-        // Both operands should be converted to i160 for comparison
-        // Ensure both are the same type (i160)
+        // both operands should be converted to i160 for comparison
+        // ensure both are the same type (i160)
         const i160_ty = c.mlirIntegerTypeGet(ctx, 160);
         const lhs_final = if (is_lhs_address) lhs_converted else blk: {
-            // Convert non-address to i160 if needed
+            // convert non-address to i160 if needed
             const lhs_ty_inner = c.mlirValueGetType(lhs);
             if (c.mlirTypeEqual(lhs_ty_inner, i160_ty)) {
                 break :blk lhs;
             } else {
-                // Convert to i160 using arith.extui or arith.trunci
+                // convert to i160 using arith.extui or arith.trunci
                 const lhs_width = c.mlirIntegerTypeGetWidth(lhs_ty_inner);
                 if (lhs_width < 160) {
                     var ext_state = h.opState("arith.extui", loc);
@@ -125,12 +125,12 @@ pub fn createComparisonOp(ctx: c.MlirContext, block: c.MlirBlock, locations: Loc
             }
         };
         const rhs_final = if (is_rhs_address) rhs_converted else blk: {
-            // Convert non-address to i160 if needed
+            // convert non-address to i160 if needed
             const rhs_ty_inner = c.mlirValueGetType(rhs);
             if (c.mlirTypeEqual(rhs_ty_inner, i160_ty)) {
                 break :blk rhs;
             } else {
-                // Convert to i160 using arith.extui or arith.trunci
+                // convert to i160 using arith.extui or arith.trunci
                 const rhs_width = c.mlirIntegerTypeGetWidth(rhs_ty_inner);
                 if (rhs_width < 160) {
                     var ext_state = h.opState("arith.extui", loc);

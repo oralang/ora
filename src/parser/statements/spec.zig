@@ -24,12 +24,12 @@ pub fn parseAssertStatement(parser: *StatementParser) common.ParserError!ast.Sta
     const assert_token = parser.base.previous();
     _ = try parser.base.consume(.LeftParen, "Expected '(' after 'assert'");
 
-    // Parse the condition expression
+    // parse the condition expression
     parser.syncSubParsers();
     const condition = try parser.expr_parser.parseExpression();
     parser.updateFromSubParser(parser.expr_parser.base.current);
 
-    // Optional message: assert(condition, "message")
+    // optional message: assert(condition, "message")
     var message: ?[]const u8 = null;
     if (parser.base.match(.Comma)) {
         const msg_token = try parser.base.consume(.StringLiteral, "Expected string message after ',' in assert");
@@ -52,14 +52,14 @@ pub fn parseAssertStatement(parser: *StatementParser) common.ParserError!ast.Sta
 /// Parse requires statement
 pub fn parseRequiresStatement(parser: *StatementParser) common.ParserError!ast.Statements.StmtNode {
     const requires_token = parser.base.previous();
-    // Only requires(condition) is allowed
+    // only requires(condition) is allowed
     _ = try parser.base.consume(.LeftParen, "Expected '(' after 'requires'");
-    // Use expression parser for requires condition
+    // use expression parser for requires condition
     parser.syncSubParsers();
     const condition = try parser.expr_parser.parseExpression();
     parser.updateFromSubParser(parser.expr_parser.base.current);
     _ = try parser.base.consume(.RightParen, "Expected ')' after requires condition");
-    // Strict: disallow trailing semicolon
+    // strict: disallow trailing semicolon
     if (parser.base.match(.Semicolon)) {
         try parser.base.errorAtCurrent("Unexpected ';' after requires(...) (no semicolon allowed)");
         return error.UnexpectedToken;
@@ -76,7 +76,7 @@ pub fn parseAssumeStatement(parser: *StatementParser) common.ParserError!ast.Sta
     const assume_token = parser.base.previous();
     _ = try parser.base.consume(.LeftParen, "Expected '(' after 'assume'");
 
-    // Parse the condition expression
+    // parse the condition expression
     parser.syncSubParsers();
     const condition = try parser.expr_parser.parseExpression();
     parser.updateFromSubParser(parser.expr_parser.base.current);
@@ -107,14 +107,14 @@ pub fn parseHavocStatement(parser: *StatementParser) common.ParserError!ast.Stat
 /// Parse ensures statement
 pub fn parseEnsuresStatement(parser: *StatementParser) common.ParserError!ast.Statements.StmtNode {
     const ensures_token = parser.base.previous();
-    // Only ensures(condition) is allowed
+    // only ensures(condition) is allowed
     _ = try parser.base.consume(.LeftParen, "Expected '(' after 'ensures'");
-    // Use expression parser for ensures condition
+    // use expression parser for ensures condition
     parser.syncSubParsers();
     const condition = try parser.expr_parser.parseExpression();
     parser.updateFromSubParser(parser.expr_parser.base.current);
     _ = try parser.base.consume(.RightParen, "Expected ')' after ensures condition");
-    // Strict: disallow trailing semicolon
+    // strict: disallow trailing semicolon
     if (parser.base.match(.Semicolon)) {
         try parser.base.errorAtCurrent("Unexpected ';' after ensures(...) (no semicolon allowed)");
         return error.UnexpectedToken;

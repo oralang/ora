@@ -55,17 +55,17 @@ pub const ErrorContext = struct {
         _ = fmt;
         _ = options;
 
-        // Show line number and source line
+        // show line number and source line
         try writer.print("   {d} | {s}\n", .{ self.line_number, self.source_line });
 
-        // Show error indicator with carets
+        // show error indicator with carets
         try writer.writeAll("     | ");
         var i: u32 = 1;
         while (i < self.column_start) : (i += 1) {
             try writer.writeAll(" ");
         }
 
-        // Draw carets under the problematic area
+        // draw carets under the problematic area
         const caret_count = @max(1, self.column_end - self.column_start);
         var j: u32 = 0;
         while (j < caret_count) : (j += 1) {
@@ -113,7 +113,7 @@ pub const LexerDiagnostic = struct {
         const context = try extractSourceContext(allocator, source, range);
         const template = getErrorTemplate(error_type);
 
-        // Allocate owned copy of the message
+        // allocate owned copy of the message
         const owned_message = try allocator.dupe(u8, message);
         var diagnostic = LexerDiagnostic.init(error_type, range, owned_message);
         diagnostic.message_owned = true; // Mark message as owned
@@ -127,12 +127,12 @@ pub const LexerDiagnostic = struct {
         _ = fmt;
         _ = options;
 
-        // Use template if available, otherwise use basic message
+        // use template if available, otherwise use basic message
         if (self.template) |template| {
             try writer.print("{s}: {s}", .{ @tagName(self.severity), template.title });
             try writer.print("\n  --> {d}:{d}\n", .{ self.range.start_line, self.range.start_column });
 
-            // Show source context if available
+            // show source context if available
             if (self.context) |context| {
                 try writer.writeAll("\n");
                 try context.format("", .{}, writer);
@@ -156,7 +156,7 @@ pub const LexerDiagnostic = struct {
 
 /// Extract source context for error reporting
 pub fn extractSourceContext(allocator: Allocator, source: []const u8, range: SourceRange) !ErrorContext {
-    // Find the start of the line containing the error
+    // find the start of the line containing the error
     var line_start: u32 = 0;
     var current_line: u32 = 1;
     var i: u32 = 0;
@@ -169,13 +169,13 @@ pub fn extractSourceContext(allocator: Allocator, source: []const u8, range: Sou
         i += 1;
     }
 
-    // Find the end of the line
+    // find the end of the line
     var line_end = line_start;
     while (line_end < source.len and source[line_end] != '\n') {
         line_end += 1;
     }
 
-    // Extract the source line
+    // extract the source line
     const source_line = try allocator.dupe(u8, source[line_start..line_end]);
 
     return ErrorContext{
@@ -282,7 +282,7 @@ pub const ErrorRecovery = struct {
     }
 
     pub fn deinit(self: *ErrorRecovery) void {
-        // Free allocated diagnostic messages and context
+        // free allocated diagnostic messages and context
         for (self.errors.items) |diagnostic| {
             if (diagnostic.suggestion_owned and diagnostic.suggestion != null) {
                 self.allocator.free(diagnostic.suggestion.?);
@@ -303,7 +303,7 @@ pub const ErrorRecovery = struct {
             return LexerError.TooManyErrors;
         }
 
-        // Allocate owned copy of the message
+        // allocate owned copy of the message
         const owned_message = try self.allocator.dupe(u8, message);
         var diagnostic = LexerDiagnostic.init(error_type, range, owned_message);
         diagnostic.message_owned = true; // Mark message as owned
@@ -316,7 +316,7 @@ pub const ErrorRecovery = struct {
             return LexerError.TooManyErrors;
         }
 
-        // Allocate owned copies of message and suggestion
+        // allocate owned copies of message and suggestion
         const owned_message = try self.allocator.dupe(u8, message);
         const owned_suggestion = try self.allocator.dupe(u8, suggestion);
         var diagnostic = LexerDiagnostic.init(error_type, range, owned_message).withSuggestion(owned_suggestion);
@@ -356,20 +356,20 @@ pub const ErrorRecovery = struct {
             return LexerError.TooManyErrors;
         }
 
-        // Create a deep copy of the diagnostic to avoid double-free issues
+        // create a deep copy of the diagnostic to avoid double-free issues
         var new_diagnostic = diagnostic;
 
-        // Copy message if owned
+        // copy message if owned
         if (diagnostic.message_owned) {
             new_diagnostic.message = try self.allocator.dupe(u8, diagnostic.message);
         }
 
-        // Copy suggestion if owned
+        // copy suggestion if owned
         if (diagnostic.suggestion_owned and diagnostic.suggestion != null) {
             new_diagnostic.suggestion = try self.allocator.dupe(u8, diagnostic.suggestion.?);
         }
 
-        // Copy context if present
+        // copy context if present
         if (diagnostic.context != null) {
             const context = diagnostic.context.?;
             const source_line = try self.allocator.dupe(u8, context.source_line);
@@ -468,19 +468,19 @@ pub const ErrorRecovery = struct {
 
         const writer = buffer.writer(allocator);
 
-        // Summary header
+        // summary header
         try writer.print("Diagnostic Summary ({d} errors)\n", .{self.errors.items.len});
         try writer.writeAll("=" ** 50);
         try writer.writeAll("\n\n");
 
-        // Group by error type
+        // group by error type
         var type_groups = self.getErrorsByType();
         defer type_groups.deinit();
 
         for (type_groups.items) |group| {
             try writer.print("{s}: {d} occurrences\n", .{ @errorName(group.error_type), group.count });
 
-            // Find first occurrence for details
+            // find first occurrence for details
             for (self.errors.items) |diagnostic| {
                 if (diagnostic.error_type == group.error_type) {
                     try writer.print("  First occurrence: {d}:{d}\n", .{ diagnostic.range.start_line, diagnostic.range.start_column });
@@ -494,7 +494,7 @@ pub const ErrorRecovery = struct {
             try writer.writeAll("\n");
         }
 
-        // Severity breakdown
+        // severity breakdown
         try writer.writeAll("Severity Breakdown:\n");
         try writer.writeAll("-" ** 20);
         try writer.writeAll("\n");
@@ -528,12 +528,12 @@ pub const ErrorRecovery = struct {
 
         const writer = buffer.writer(allocator);
 
-        // Report header
+        // report header
         try writer.print("Diagnostic Report ({d} issues found)\n", .{self.errors.items.len});
         try writer.writeAll("=" ** 50);
         try writer.writeAll("\n\n");
 
-        // Group errors for better organization
+        // group errors for better organization
         var groups = try self.groupErrors();
         defer {
             for (groups.items) |*group| {
@@ -543,16 +543,16 @@ pub const ErrorRecovery = struct {
             groups.deinit(self.allocator);
         }
 
-        // Print each group
+        // print each group
         for (groups.items, 0..) |group, i| {
             const primary = group.primary;
 
-            // Group header
+            // group header
             try writer.print("Issue #{d}: {s}\n", .{ i + 1, @errorName(primary.error_type) });
             try writer.writeAll("-" ** 40);
             try writer.writeAll("\n");
 
-            // Primary error details
+            // primary error details
             try writer.print("Location: {d}:{d}\n", .{ primary.range.start_line, primary.range.start_column });
 
             if (primary.template) |template| {
@@ -564,14 +564,14 @@ pub const ErrorRecovery = struct {
                 try writer.print("Message: {s}\n", .{primary.message});
             }
 
-            // Source context
+            // source context
             if (primary.context) |context| {
                 try writer.writeAll("\nSource context:\n");
                 try context.format("", .{}, writer);
                 try writer.writeAll("\n");
             }
 
-            // Related errors
+            // related errors
             if (group.related.items.len > 0) {
                 try writer.print("\nRelated issues ({d} similar problems):\n", .{group.related.items.len});
 
@@ -585,7 +585,7 @@ pub const ErrorRecovery = struct {
                 }
             }
 
-            // Suggestions
+            // suggestions
             if (primary.suggestion) |suggestion| {
                 try writer.print("\nSuggestion: {s}\n", .{suggestion});
             }
@@ -614,7 +614,7 @@ pub const ErrorRecovery = struct {
         var related = std.ArrayList(LexerDiagnostic){};
 
         for (self.errors.items) |other| {
-            // Skip self by comparing memory addresses
+            // skip self by comparing memory addresses
             if (std.mem.eql(u8, diagnostic.message, other.message) and
                 diagnostic.range.start_line == other.range.start_line and
                 diagnostic.range.start_column == other.range.start_column) continue;
@@ -648,18 +648,18 @@ pub const ErrorRecovery = struct {
         var processed = std.AutoHashMap(usize, void).init(self.allocator);
         defer processed.deinit();
 
-        // Process all errors
+        // process all errors
         for (self.errors.items, 0..) |diagnostic, i| {
-            // Skip if already processed as part of another group
+            // skip if already processed as part of another group
             if (processed.contains(i)) continue;
 
-            // Mark this error as processed
+            // mark this error as processed
             try processed.put(i, {});
 
-            // Create a new group with this error as primary
+            // create a new group with this error as primary
             var related = std.ArrayList(LexerDiagnostic){};
 
-            // Find related errors (same type or nearby location)
+            // find related errors (same type or nearby location)
             for (self.errors.items, 0..) |other, j| {
                 if (i == j) continue; // Skip self
                 if (processed.contains(j)) continue; // Skip already processed
@@ -678,7 +678,7 @@ pub const ErrorRecovery = struct {
                 }
             }
 
-            // Add the group
+            // add the group
             try groups.append(self.allocator, .{
                 .primary = diagnostic,
                 .related = related,
@@ -690,7 +690,7 @@ pub const ErrorRecovery = struct {
 
     /// Clear all collected errors
     pub fn clear(self: *ErrorRecovery) void {
-        // Free allocated diagnostic messages and context
+        // free allocated diagnostic messages and context
         for (self.errors.items) |diagnostic| {
             if (diagnostic.suggestion_owned and diagnostic.suggestion != null) {
                 self.allocator.free(diagnostic.suggestion.?);
@@ -711,29 +711,29 @@ pub const ErrorRecovery = struct {
 
         var pos = current;
 
-        // Skip to next whitespace, newline, or known token start character
+        // skip to next whitespace, newline, or known token start character
         while (pos < source.len) {
             const c = source[pos];
 
-            // Stop at whitespace or newline (safe boundaries)
+            // stop at whitespace or newline (safe boundaries)
             if (std.ascii.isWhitespace(c)) {
                 return pos;
             }
 
-            // Stop at common token start characters
+            // stop at common token start characters
             switch (c) {
                 '(', ')', '{', '}', '[', ']', ';', ',', '.', ':', '=', '+', '-', '*', '/', '%', '!', '<', '>', '&', '|', '^', '~' => {
                     return pos;
                 },
-                // Stop at quote characters (string boundaries)
+                // stop at quote characters (string boundaries)
                 '"', '\'' => {
                     return pos;
                 },
-                // Stop at digits (number boundaries)
+                // stop at digits (number boundaries)
                 '0'...'9' => {
                     return pos;
                 },
-                // Stop at letters (identifier boundaries)
+                // stop at letters (identifier boundaries)
                 'a'...'z', 'A'...'Z', '_' => {
                     return pos;
                 },

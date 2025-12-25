@@ -41,18 +41,18 @@ pub const OraVerification = struct {
 
     /// Run all verification passes on a module
     pub fn verifyModule(self: *Self, module: c.MlirModule) !VerificationResult {
-        // Reset error handler for new verification run
+        // reset error handler for new verification run
         self.error_handler = ErrorHandler.init(self.allocator);
 
         const module_op = c.mlirModuleGetOperation(module);
 
-        // Run all verification passes
+        // run all verification passes
         try self.verifyTypes(module_op);
         try self.verifyMemoryOperations(module_op);
         try self.verifyContracts(module_op);
         try self.verifySemantics(module_op);
 
-        // Convert ErrorHandler errors to VerificationResult
+        // convert ErrorHandler errors to VerificationResult
         const errors = self.error_handler.getErrors();
         var verification_errors = std.ArrayList(VerificationError){};
         defer verification_errors.deinit(self.allocator);
@@ -83,27 +83,27 @@ pub const OraVerification = struct {
 
     /// Verify types in all operations
     fn verifyTypes(self: *Self, op: c.MlirOperation) !void {
-        // Get operation name
+        // get operation name
         const op_name = self.getOperationName(op);
 
-        // Basic verification for ora.* operations
+        // basic verification for ora.* operations
         if (std.mem.startsWith(u8, op_name, "ora.")) {
             try self.verifyOraOperationTypes(op, op_name);
         }
 
-        // Recursively verify regions
+        // recursively verify regions
         const num_regions = c.mlirOperationGetNumRegions(op);
         for (0..@intCast(num_regions)) |region_idx| {
             const region = c.mlirOperationGetRegion(op, @intCast(region_idx));
-            // Note: We can't traverse blocks due to missing MLIR C API functions
-            // This is a limitation of the current C API bindings
+            // note: We can't traverse blocks due to missing MLIR C API functions
+            // this is a limitation of the current C API bindings
             _ = region;
         }
     }
 
     /// Verify types for specific Ora operations
     fn verifyOraOperationTypes(self: *Self, op: c.MlirOperation, op_name: []const u8) !void {
-        // Basic verification for common Ora operations
+        // basic verification for common Ora operations
         if (std.mem.eql(u8, op_name, "ora.contract")) {
             try self.verifyContractOperation(op);
         } else if (std.mem.eql(u8, op_name, "ora.global")) {
@@ -118,12 +118,12 @@ pub const OraVerification = struct {
             try self.verifyMStoreOperation(op);
         }
 
-        // Basic operand/result count verification
+        // basic operand/result count verification
         _ = c.mlirOperationGetNumOperands(op);
         const num_results = c.mlirOperationGetNumResults(op);
 
-        // Result count verification skipped to avoid false positives
-        // Operation-specific result validation handled by MLIR verifier
+        // result count verification skipped to avoid false positives
+        // operation-specific result validation handled by MLIR verifier
         _ = num_results;
     }
 
@@ -132,12 +132,12 @@ pub const OraVerification = struct {
         _ = c.mlirOperationGetNumOperands(op);
         const num_results = c.mlirOperationGetNumResults(op);
 
-        // Contract should have at least one result (the contract instance)
+        // contract should have at least one result (the contract instance)
         if (num_results == 0) {
             try self.error_handler.reportError(.MlirOperationFailed, null, "Contract operation must have at least one result", "add result to contract operation");
         }
 
-        // Contract should have at least one region (the body)
+        // contract should have at least one region (the body)
         const num_regions = c.mlirOperationGetNumRegions(op);
         if (num_regions == 0) {
             try self.error_handler.reportError(.MlirOperationFailed, null, "Contract operation must have at least one region", "add region to contract operation");
@@ -149,7 +149,7 @@ pub const OraVerification = struct {
         _ = c.mlirOperationGetNumOperands(op);
         const num_results = c.mlirOperationGetNumResults(op);
 
-        // Global should have exactly one result
+        // global should have exactly one result
         if (num_results != 1) {
             try self.error_handler.reportError(.MlirOperationFailed, null, "Global operation must have exactly one result", "ensure global operation has exactly one result");
         }
@@ -160,7 +160,7 @@ pub const OraVerification = struct {
         const num_operands = c.mlirOperationGetNumOperands(op);
         const num_results = c.mlirOperationGetNumResults(op);
 
-        // SLoad should have exactly one operand (address) and one result (value)
+        // sLoad should have exactly one operand (address) and one result (value)
         if (num_operands != 1) {
             try self.error_handler.reportError(.MlirOperationFailed, null, "SLoad operation must have exactly one operand (address)", "ensure sload has exactly one address operand");
         }
@@ -174,7 +174,7 @@ pub const OraVerification = struct {
         const num_operands = c.mlirOperationGetNumOperands(op);
         const num_results = c.mlirOperationGetNumResults(op);
 
-        // SStore should have exactly two operands (address, value) and no results
+        // sStore should have exactly two operands (address, value) and no results
         if (num_operands != 2) {
             try self.error_handler.reportError(.MlirOperationFailed, null, "SStore operation must have exactly two operands (address, value)", "ensure sstore has exactly two operands");
         }
@@ -188,7 +188,7 @@ pub const OraVerification = struct {
         const num_operands = c.mlirOperationGetNumOperands(op);
         const num_results = c.mlirOperationGetNumResults(op);
 
-        // MLoad should have exactly one operand (address) and one result (value)
+        // mLoad should have exactly one operand (address) and one result (value)
         if (num_operands != 1) {
             try self.error_handler.reportError(.MlirOperationFailed, null, "MLoad operation must have exactly one operand (address)", "ensure mload has exactly one address operand");
         }
@@ -202,7 +202,7 @@ pub const OraVerification = struct {
         const num_operands = c.mlirOperationGetNumOperands(op);
         const num_results = c.mlirOperationGetNumResults(op);
 
-        // MStore should have exactly two operands (address, value) and no results
+        // mStore should have exactly two operands (address, value) and no results
         if (num_operands != 2) {
             try self.error_handler.reportError(.MlirOperationFailed, null, "MStore operation must have exactly two operands (address, value)", "ensure mstore has exactly two operands");
         }
@@ -213,59 +213,59 @@ pub const OraVerification = struct {
 
     /// Verify memory operations for consistency
     fn verifyMemoryOperations(self: *Self, op: c.MlirOperation) !void {
-        // Basic memory safety checks
+        // basic memory safety checks
         const op_name = self.getOperationName(op);
 
-        // Check for memory operation patterns
+        // check for memory operation patterns
         if (std.mem.eql(u8, op_name, "ora.mload") or std.mem.eql(u8, op_name, "ora.mstore")) {
-            // Memory operations should have proper operand types
+            // memory operations should have proper operand types
             const num_operands = c.mlirOperationGetNumOperands(op);
             if (num_operands > 0) {
-                // Memory address type checking delegated to MLIR type system
-                // For now, just verify operand count
+                // memory address type checking delegated to MLIR type system
+                // for now, just verify operand count
             }
         }
 
-        // Recursively check regions
+        // recursively check regions
         const num_regions = c.mlirOperationGetNumRegions(op);
         for (0..@intCast(num_regions)) |region_idx| {
             const region = c.mlirOperationGetRegion(op, @intCast(region_idx));
-            // Note: We can't traverse blocks due to missing MLIR C API functions
+            // note: We can't traverse blocks due to missing MLIR C API functions
             _ = region;
         }
     }
 
     /// Verify function contracts and invariants
     fn verifyContracts(self: *Self, op: c.MlirOperation) !void {
-        // Basic contract verification
+        // basic contract verification
         const op_name = self.getOperationName(op);
 
-        // Check for contract-related operations
+        // check for contract-related operations
         if (std.mem.eql(u8, op_name, "ora.requires") or std.mem.eql(u8, op_name, "ora.ensures")) {
-            // Contract operations should have exactly one operand (the condition)
+            // contract operations should have exactly one operand (the condition)
             const num_operands = c.mlirOperationGetNumOperands(op);
             if (num_operands != 1) {
                 try self.error_handler.reportError(.MlirOperationFailed, null, "Contract operation must have exactly one operand (condition)", "ensure contract has exactly one condition operand");
             }
         }
 
-        // Recursively check regions
+        // recursively check regions
         const num_regions = c.mlirOperationGetNumRegions(op);
         for (0..@intCast(num_regions)) |region_idx| {
             const region = c.mlirOperationGetRegion(op, @intCast(region_idx));
-            // Note: We can't traverse blocks due to missing MLIR C API functions
+            // note: We can't traverse blocks due to missing MLIR C API functions
             _ = region;
         }
     }
 
     /// Verify Ora-specific semantics
     fn verifySemantics(self: *Self, op: c.MlirOperation) !void {
-        // Basic semantic verification
+        // basic semantic verification
         const op_name = self.getOperationName(op);
 
-        // Check for semantic consistency
+        // check for semantic consistency
         if (std.mem.eql(u8, op_name, "ora.if")) {
-            // If operation should have exactly one operand (condition) and at least one region
+            // if operation should have exactly one operand (condition) and at least one region
             const num_operands = c.mlirOperationGetNumOperands(op);
             const num_regions = c.mlirOperationGetNumRegions(op);
 
@@ -277,11 +277,11 @@ pub const OraVerification = struct {
             }
         }
 
-        // Recursively check regions
+        // recursively check regions
         const num_regions = c.mlirOperationGetNumRegions(op);
         for (0..@intCast(num_regions)) |region_idx| {
             const region = c.mlirOperationGetRegion(op, @intCast(region_idx));
-            // Note: We can't traverse blocks due to missing MLIR C API functions
+            // note: We can't traverse blocks due to missing MLIR C API functions
             _ = region;
         }
     }
@@ -293,17 +293,17 @@ pub const OraVerification = struct {
         if (name_ref.data == null or name_ref.length == 0) {
             return "unknown.operation";
         }
-        // Copy the string to a Zig slice
-        // Note: The C API allocates this, so we need to free it later
-        // For now, we'll create a copy that the caller owns
+        // copy the string to a Zig slice
+        // note: The C API allocates this, so we need to free it later
+        // for now, we'll create a copy that the caller owns
         const name_slice = name_ref.data[0..name_ref.length];
-        // Allocate a copy that we can return
+        // allocate a copy that we can return
         const name_copy = self.allocator.dupe(u8, name_slice) catch {
-            // If allocation fails, free the C string and return a fallback
+            // if allocation fails, free the C string and return a fallback
             @import("std").c.free(@ptrCast(@constCast(name_ref.data)));
             return "unknown.operation";
         };
-        // Free the C-allocated string
+        // free the C-allocated string
         @import("std").c.free(@ptrCast(@constCast(name_ref.data)));
         return name_copy;
     }

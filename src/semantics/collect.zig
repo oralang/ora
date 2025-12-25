@@ -27,21 +27,21 @@ pub fn collectSymbols(allocator: std.mem.Allocator, nodes: []const ast.AstNode) 
     var table = state.SymbolTable.init(allocator);
     var diags = std.ArrayList(ast.SourceSpan){};
 
-    // Top-level declarations
+    // top-level declarations
     for (nodes) |node| switch (node) {
         .Contract => |c| {
             const sym = state.Symbol{ .name = c.name, .kind = .Contract, .span = c.span };
             if (try table.declare(&table.root, sym)) |_| try diags.append(allocator, c.span);
-            // Member scopes and symbols are handled in contract_analyzer
+            // member scopes and symbols are handled in contract_analyzer
         },
         .Function => |f| {
             const sym = state.Symbol{ .name = f.name, .kind = .Function, .span = f.span };
             if (try table.declare(&table.root, sym)) |_| try diags.append(allocator, f.span);
         },
         .VariableDecl => |v| {
-            // Only store symbols with non-null ora_type
-            // Our type system doesn't allow nulls - symbols must have types
-            // Unresolved types (null ora_type) will be stored during type resolution phase
+            // only store symbols with non-null ora_type
+            // our type system doesn't allow nulls - symbols must have types
+            // unresolved types (null ora_type) will be stored during type resolution phase
             if (v.type_info.ora_type != null) {
                 const sym = state.Symbol{
                     .name = v.name,
@@ -53,19 +53,19 @@ pub fn collectSymbols(allocator: std.mem.Allocator, nodes: []const ast.AstNode) 
                 };
                 if (try table.declare(&table.root, sym)) |_| try diags.append(allocator, v.span);
             }
-            // If ora_type is null, skip storing during collection phase
-            // It will be stored during type resolution phase with resolved type
+            // if ora_type is null, skip storing during collection phase
+            // it will be stored during type resolution phase with resolved type
         },
         .StructDecl => |s| {
             const sym = state.Symbol{ .name = s.name, .kind = .Struct, .span = s.span };
             if (try table.declare(&table.root, sym)) |_| try diags.append(allocator, s.span);
-            // Store struct fields for type resolution
+            // store struct fields for type resolution
             try table.struct_fields.put(s.name, s.fields);
         },
         .EnumDecl => |e| {
             const sym = state.Symbol{ .name = e.name, .kind = .Enum, .span = e.span };
             if (try table.declare(&table.root, sym)) |_| try diags.append(allocator, e.span);
-            // Record enum variants for coverage checks (direct slice copy)
+            // record enum variants for coverage checks (direct slice copy)
             const slice = try allocator.alloc([]const u8, e.variants.len);
             for (e.variants, 0..) |v, i| slice[i] = v.name;
             try table.enum_variants.put(e.name, slice);
@@ -77,12 +77,12 @@ pub fn collectSymbols(allocator: std.mem.Allocator, nodes: []const ast.AstNode) 
         .ErrorDecl => |err| {
             const sym = state.Symbol{ .name = err.name, .kind = .Error, .span = err.span };
             if (try table.declare(&table.root, sym)) |_| try diags.append(allocator, err.span);
-            // Store error signature (parameters) for validation
+            // store error signature (parameters) for validation
             try table.error_signatures.put(err.name, err.parameters);
         },
         .Constant => |c| {
-            // Constants are collected but type resolution happens later
-            // Store with type if available, otherwise it will be resolved during type resolution
+            // constants are collected but type resolution happens later
+            // store with type if available, otherwise it will be resolved during type resolution
             const sym = state.Symbol{
                 .name = c.name,
                 .kind = .Var, // Constants are treated as variables for symbol lookup

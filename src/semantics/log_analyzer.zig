@@ -23,22 +23,22 @@ pub fn checkLogStatement(
     log_stmt: *const ast.Statements.LogNode,
 ) ![]const ast.SourceSpan {
     var issues = std.ArrayList(ast.SourceSpan).init(allocator);
-    // Resolve log declaration by name
+    // resolve log declaration by name
     const sig_fields_opt = symbols.log_signatures.get(log_stmt.event_name);
     if (sig_fields_opt == null) {
-        // Unknown log name
+        // unknown log name
         try issues.append(log_stmt.span);
         return try issues.toOwnedSlice();
     }
     const sig_fields = sig_fields_opt.?;
 
-    // Arity check
+    // arity check
     if (sig_fields.len != log_stmt.args.len) {
         try issues.append(log_stmt.span);
         return try issues.toOwnedSlice();
     }
 
-    // Type check each argument
+    // type check each argument
     var i: usize = 0;
     while (i < sig_fields.len) : (i += 1) {
         const field = sig_fields[i];
@@ -78,7 +78,7 @@ fn walkBlockForLogs(
                 for (spans) |sp| try issues.append(sp);
             },
             .Expr => |e| {
-                // Dive into expression statements only if they contain blocks (e.g., labeled blocks)
+                // dive into expression statements only if they contain blocks (e.g., labeled blocks)
                 switch (e) {
                     .LabeledBlock => |lb| try walkBlockForLogs(issues, symbols, scope, &lb.block),
                     .Comptime => |ct| try walkBlockForLogs(issues, symbols, scope, &ct.block),
@@ -95,7 +95,7 @@ fn walkBlockForLogs(
                 try walkBlockForLogs(issues, symbols, scope, &tb.try_block);
                 if (tb.catch_block) |cb| try walkBlockForLogs(issues, symbols, scope, &cb.block);
             },
-            // No plain Block variant in StmtNode
+            // no plain Block variant in StmtNode
             .Switch => |sw| {
                 for (sw.cases) |*case| switch (case.body) {
                     .Block => |*blk| try walkBlockForLogs(issues, symbols, scope, blk),

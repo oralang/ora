@@ -162,7 +162,7 @@ test "ast_builder: unary negation" {
     const span_op = ast.SourceSpan{ .line = 1, .column = 1, .length = 2, .byte_offset = 0 };
 
     const operand = try builder.identifier("x", span_operand);
-    // Use UnaryOp enum value directly (ast.Operators.Unary is an alias for ast.Expressions.UnaryOp)
+    // use UnaryOp enum value directly (ast.Operators.Unary is an alias for ast.Expressions.UnaryOp)
     const expr = try builder.unary(.Minus, operand, span_op);
 
     try testing.expect(expr.* == .Unary);
@@ -179,7 +179,7 @@ test "ast_builder: nested binary expression" {
     var builder = ast_builder.AstBuilder.init(&arena);
     defer builder.deinit();
 
-    // Build: a + b * c
+    // build: a + b * c
     const span_a = ast.SourceSpan{ .line = 1, .column = 1, .length = 1, .byte_offset = 0 };
     const span_b = ast.SourceSpan{ .line = 1, .column = 5, .length = 1, .byte_offset = 4 };
     const span_c = ast.SourceSpan{ .line = 1, .column = 9, .length = 1, .byte_offset = 8 };
@@ -195,7 +195,7 @@ test "ast_builder: nested binary expression" {
     try testing.expect(add.* == .Binary);
     if (add.* == .Binary) {
         try testing.expectEqual(ast.Expressions.BinaryOp.Plus, add.Binary.operator);
-        // Right side should be multiplication
+        // right side should be multiplication
         if (add.Binary.rhs.* == .Binary) {
             try testing.expectEqual(ast.Expressions.BinaryOp.Star, add.Binary.rhs.Binary.operator);
         } else {
@@ -238,7 +238,7 @@ test "ast_builder: arena allocation" {
     const expr1 = try builder.integerLiteral("123", span);
     const expr2 = try builder.integerLiteral("456", span);
 
-    // Both expressions should be valid and allocated from the arena
+    // both expressions should be valid and allocated from the arena
     try testing.expect(expr1.* == .Literal);
     try testing.expect(expr2.* == .Literal);
 }
@@ -257,6 +257,6 @@ test "ast_builder: node counter" {
     const span = ast.SourceSpan{ .line = 1, .column = 1, .length = 3, .byte_offset = 0 };
     _ = try builder.integerLiteral("123", span);
 
-    // Node counter should increment (though nodes aren't added to built_nodes automatically)
-    // The counter tracks nodes created through the builder's methods
+    // node counter should increment (though nodes aren't added to built_nodes automatically)
+    // the counter tracks nodes created through the builder's methods
 }

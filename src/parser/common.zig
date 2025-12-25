@@ -86,7 +86,7 @@ pub const BaseParser = struct {
         };
     }
 
-    // Common token manipulation methods
+    // common token manipulation methods
     pub fn match(self: *BaseParser, token_type: lexer.TokenType) bool {
         if (self.check(token_type)) {
             _ = self.advance();
@@ -125,7 +125,7 @@ pub const BaseParser = struct {
         const current_token = self.peek();
         Diag.print("Parser error at line {}, column {}: {s} (expected {s}, got {s})\n", .{ current_token.line, current_token.column, message, @tagName(token_type), @tagName(current_token.type) });
 
-        // Add more context with the lexeme if available
+        // add more context with the lexeme if available
         if (current_token.lexeme.len > 0) {
             Diag.print("   Found: '{s}'\n", .{current_token.lexeme});
         }
@@ -136,7 +136,7 @@ pub const BaseParser = struct {
     pub fn errorAtCurrent(self: *BaseParser, message: []const u8) !void {
         const current_token = self.peek();
         Diag.print("Parser error at line {}, column {}: {s}\n", .{ current_token.line, current_token.column, message });
-        // Add more context with the lexeme if available
+        // add more context with the lexeme if available
         if (current_token.lexeme.len > 0) {
             Diag.print("   Found: '{s}'\n", .{current_token.lexeme});
         }
@@ -152,7 +152,7 @@ pub const BaseParser = struct {
 
         std.debug.print("Parser error at line {}, column {}: {s} (got {s})\n", .{ current_token.line, current_token.column, message, @tagName(current_token.type) });
 
-        // Add more context with the lexeme if available
+        // add more context with the lexeme if available
         if (current_token.lexeme.len > 0) {
             std.debug.print("   Found: '{s}'\n", .{current_token.lexeme});
         }

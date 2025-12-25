@@ -80,7 +80,7 @@ pub const DiagnosticCollector = struct {
     }
 
     pub fn deinit(self: *DiagnosticCollector) void {
-        // Free diagnostic messages
+        // free diagnostic messages
         for (self.diagnostics.items) |diagnostic| {
             self.allocator.free(diagnostic.message);
         }
@@ -130,7 +130,7 @@ pub const DiagnosticCollector = struct {
     }
 
     pub fn clear(self: *DiagnosticCollector) void {
-        // Free existing diagnostic messages
+        // free existing diagnostic messages
         for (self.diagnostics.items) |diagnostic| {
             self.allocator.free(diagnostic.message);
         }
@@ -229,27 +229,27 @@ pub const AstBuilder = struct {
         const T = @TypeOf(value);
 
         if (T == []const u8) {
-            // String literal - store as owned string in arena
+            // string literal - store as owned string in arena
             const owned_value = try self.arena.createString(value);
             expr_node.* = ast.Expressions.ExprNode{ .Literal = .{ .String = .{
                 .value = owned_value,
                 .span = span,
             } } };
         } else if (T == bool) {
-            // Boolean literal - store boolean value directly
+            // boolean literal - store boolean value directly
             expr_node.* = ast.Expressions.ExprNode{ .Literal = .{ .Bool = .{
                 .value = value,
                 .span = span,
             } } };
         } else if (comptime @typeInfo(T) == .int) {
-            // Integer literal - convert to string for consistent storage format
+            // integer literal - convert to string for consistent storage format
             const value_str = try std.fmt.allocPrint(self.arena.allocator(), "{}", .{value});
             expr_node.* = ast.Expressions.ExprNode{ .Literal = .{ .Integer = .{
                 .value = value_str,
                 .span = span,
             } } };
         } else {
-            // Unsupported literal type - report error
+            // unsupported literal type - report error
             const type_name = @typeName(T);
             const error_msg = try std.fmt.allocPrint(self.arena.allocator(), "Unsupported literal type: {s}", .{type_name});
             try self.diagnostics.addError(span, error_msg);
@@ -291,7 +291,7 @@ pub const AstBuilder = struct {
     pub fn integerLiteral(self: *AstBuilder, value: []const u8, span: ast.SourceSpan) !*ast.Expressions.ExprNode {
         if (self.finalized) return BuilderError.BuilderFinalized;
 
-        // Validate integer format
+        // validate integer format
         if (value.len == 0) {
             try self.diagnostics.addError(span, "Empty integer literal");
             return BuilderError.ValidationFailed;
@@ -339,7 +339,7 @@ pub const AstBuilder = struct {
     pub fn addressLiteral(self: *AstBuilder, value: []const u8, span: ast.SourceSpan) !*ast.Expressions.ExprNode {
         if (self.finalized) return BuilderError.BuilderFinalized;
 
-        // Basic address validation (should be hex string)
+        // basic address validation (should be hex string)
         if (value.len < 2 or !std.mem.startsWith(u8, value, "0x")) {
             try self.diagnostics.addError(span, "Address literal must start with '0x'");
             return BuilderError.ValidationFailed;
@@ -363,7 +363,7 @@ pub const AstBuilder = struct {
     pub fn hexLiteral(self: *AstBuilder, value: []const u8, span: ast.SourceSpan) !*ast.Expressions.ExprNode {
         if (self.finalized) return BuilderError.BuilderFinalized;
 
-        // Basic hex validation
+        // basic hex validation
         if (value.len < 2 or !std.mem.startsWith(u8, value, "0x")) {
             try self.diagnostics.addError(span, "Hex literal must start with '0x'");
             return BuilderError.ValidationFailed;
@@ -407,9 +407,9 @@ pub const AstBuilder = struct {
     pub fn binary(self: *AstBuilder, lhs: *ast.Expressions.ExprNode, op: ast.Operators.Binary, rhs: *ast.Expressions.ExprNode, span: ast.SourceSpan) !*ast.Expressions.ExprNode {
         if (self.finalized) return BuilderError.BuilderFinalized;
 
-        // Basic validation - ensure operands are provided
-        // Note: In Zig, we can't directly compare pointers to undefined at runtime
-        // More comprehensive validation would be done by TypeValidator integration
+        // basic validation - ensure operands are provided
+        // note: In Zig, we can't directly compare pointers to undefined at runtime
+        // more comprehensive validation would be done by TypeValidator integration
 
         const expr_node = try self.arena.createNode(ast.Expressions.ExprNode);
         expr_node.* = ast.Expressions.ExprNode{ .Binary = .{
@@ -431,7 +431,7 @@ pub const AstBuilder = struct {
     pub fn unary(self: *AstBuilder, op: ast.Operators.Unary, operand: *ast.Expressions.ExprNode, span: ast.SourceSpan) !*ast.Expressions.ExprNode {
         if (self.finalized) return BuilderError.BuilderFinalized;
 
-        // Note: In Zig, we can't directly compare pointers to undefined at runtime
+        // note: In Zig, we can't directly compare pointers to undefined at runtime
 
         const expr_node = try self.arena.createNode(ast.Expressions.ExprNode);
         expr_node.* = ast.Expressions.ExprNode{ .Unary = .{
@@ -454,10 +454,10 @@ pub const AstBuilder = struct {
     pub fn assignment(self: *AstBuilder, target: *ast.Expressions.ExprNode, value: *ast.Expressions.ExprNode, span: ast.SourceSpan) !*ast.Expressions.ExprNode {
         if (self.finalized) return BuilderError.BuilderFinalized;
 
-        // Basic operand validation
-        // Note: In Zig, we can't directly compare pointers to undefined at runtime
+        // basic operand validation
+        // note: In Zig, we can't directly compare pointers to undefined at runtime
 
-        // Validate that target is assignable (only certain expression types can be assigned to)
+        // validate that target is assignable (only certain expression types can be assigned to)
         switch (target.*) {
             .Identifier, .FieldAccess, .Index => {}, // Valid assignment targets
             else => {
@@ -484,9 +484,9 @@ pub const AstBuilder = struct {
     pub fn compoundAssignment(self: *AstBuilder, target: *ast.Expressions.ExprNode, op: ast.Operators.Compound, value: *ast.Expressions.ExprNode, span: ast.SourceSpan) !*ast.Expressions.ExprNode {
         if (self.finalized) return BuilderError.BuilderFinalized;
 
-        // Note: In Zig, we can't directly compare pointers to undefined at runtime
+        // note: In Zig, we can't directly compare pointers to undefined at runtime
 
-        // Validate that target is assignable
+        // validate that target is assignable
         switch (target.*) {
             .Identifier, .FieldAccess, .Index => {}, // Valid assignment targets
             else => {
@@ -510,7 +510,7 @@ pub const AstBuilder = struct {
         return expr_node;
     }
 
-    // Statement building
+    // statement building
     pub fn stmt(self: *AstBuilder) StatementBuilder {
         return StatementBuilder.init(self);
     }
@@ -533,7 +533,7 @@ pub const AstBuilder = struct {
         return block_node;
     }
 
-    // Type building
+    // type building
     pub fn typeBuilder(self: *AstBuilder) TypeBuilder {
         return TypeBuilder.init(self);
     }
@@ -592,7 +592,7 @@ pub const AstBuilder = struct {
         return self.unary(.Bang, operand, span);
     }
 
-    // Validation methods
+    // validation methods
     fn validateExpression(self: *AstBuilder, expr_node: *ast.Expressions.ExprNode, span: ast.SourceSpan) !void {
         if (!self.validation_enabled) return;
         _ = expr_node;
@@ -607,9 +607,9 @@ pub const AstBuilder = struct {
 
     fn validateNode(self: *AstBuilder, node: *ast.AstNode) !void {
         if (self.validator) |validator| {
-            // Simplified validation until proper integration with TypeValidator
+            // simplified validation until proper integration with TypeValidator
             _ = try validator.validateNode(node);
-            // Real implementation would check for errors and report them
+            // real implementation would check for errors and report them
         }
     }
 
@@ -619,18 +619,18 @@ pub const AstBuilder = struct {
     pub fn build(self: *AstBuilder) ![]ast.AstNode {
         if (self.finalized) return BuilderError.BuilderFinalized;
 
-        // Perform final validation if enabled
+        // perform final validation if enabled
         if (self.validation_enabled) {
-            // Check for any accumulated errors from construction
+            // check for any accumulated errors from construction
             if (self.diagnostics.hasErrors()) {
                 return BuilderError.ValidationFailed;
             }
 
-            // Perform comprehensive validation on all built nodes
-            // Note: Built nodes validation is currently skipped until TypeValidator integration
+            // perform comprehensive validation on all built nodes
+            // note: Built nodes validation is currently skipped until TypeValidator integration
             if (!self.validation_enabled) return;
 
-            // Final check after comprehensive validation
+            // final check after comprehensive validation
             if (self.diagnostics.hasErrors()) {
                 return BuilderError.ValidationFailed;
             }
@@ -638,7 +638,7 @@ pub const AstBuilder = struct {
 
         self.finalized = true;
 
-        // Return a copy of the built nodes in arena memory
+        // return a copy of the built nodes in arena memory
         const result = try self.arena.createSlice(ast.AstNode, self.built_nodes.items.len);
         @memcpy(result, self.built_nodes.items);
         return result;
@@ -650,10 +650,10 @@ pub const AstBuilder = struct {
 
         if (!self.validation_enabled) return;
 
-        // Clear previous validation errors
+        // clear previous validation errors
         self.diagnostics.clear();
 
-        // Skip validation until TypeValidator is properly integrated
+        // skip validation until TypeValidator is properly integrated
         if (!self.validation_enabled) return;
 
         if (self.diagnostics.hasErrors()) {
@@ -710,7 +710,7 @@ pub const ContractBuilder = struct {
 
     /// Add a function to the contract with validation
     pub fn addFunction(self: *ContractBuilder, function: *ast.FunctionNode) !*ContractBuilder {
-        // Validate function name uniqueness
+        // validate function name uniqueness
         for (self.members.items) |member| {
             switch (member) {
                 .Function => |existing_func| {
@@ -730,7 +730,7 @@ pub const ContractBuilder = struct {
 
     /// Add a variable declaration to the contract with validation
     pub fn addVariable(self: *ContractBuilder, variable: *ast.Statements.VariableDeclNode) !*ContractBuilder {
-        // Validate variable name uniqueness
+        // validate variable name uniqueness
         for (self.members.items) |member| {
             switch (member) {
                 .VariableDecl => |existing_var| {
@@ -750,7 +750,7 @@ pub const ContractBuilder = struct {
 
     /// Add a struct declaration to the contract with validation
     pub fn addStruct(self: *ContractBuilder, struct_decl: *ast.StructDeclNode) !*ContractBuilder {
-        // Validate struct name uniqueness
+        // validate struct name uniqueness
         for (self.members.items) |member| {
             switch (member) {
                 .StructDecl => |existing_struct| {
@@ -770,7 +770,7 @@ pub const ContractBuilder = struct {
 
     /// Add an enum declaration to the contract with validation
     pub fn addEnum(self: *ContractBuilder, enum_decl: *ast.EnumDeclNode) !*ContractBuilder {
-        // Validate enum name uniqueness
+        // validate enum name uniqueness
         for (self.members.items) |member| {
             switch (member) {
                 .EnumDecl => |existing_enum| {
@@ -790,7 +790,7 @@ pub const ContractBuilder = struct {
 
     /// Add a log declaration to the contract with validation
     pub fn addLog(self: *ContractBuilder, log_decl: *ast.LogDeclNode) !*ContractBuilder {
-        // Validate log name uniqueness
+        // validate log name uniqueness
         for (self.members.items) |member| {
             switch (member) {
                 .LogDecl => |existing_log| {
@@ -810,7 +810,7 @@ pub const ContractBuilder = struct {
 
     /// Add an error declaration to the contract with validation
     pub fn addError(self: *ContractBuilder, error_decl: *ast.Statements.ErrorDeclNode) !*ContractBuilder {
-        // Validate error name uniqueness
+        // validate error name uniqueness
         for (self.members.items) |member| {
             switch (member) {
                 .ErrorDecl => |existing_error| {
@@ -843,20 +843,20 @@ pub const ContractBuilder = struct {
 
     /// Build the contract with comprehensive validation
     pub fn build(self: *ContractBuilder) !*ast.ContractNode {
-        // Validate that contract has at least one member
+        // validate that contract has at least one member
         if (self.members.items.len == 0) {
             try self.builder.diagnostics.addError(self.span, "Contract must have at least one member");
             return BuilderError.ValidationFailed;
         }
 
-        // Convert members to owned slice
+        // convert members to owned slice
         const owned_members = try self.builder.arena.createSlice(ast.AstNode, self.members.items.len);
         @memcpy(owned_members, self.members.items);
         self.contract.body = owned_members;
 
-        // Contract validation is skipped until TypeValidator is properly integrated
+        // contract validation is skipped until TypeValidator is properly integrated
 
-        // Add the contract to the builder's built nodes
+        // add the contract to the builder's built nodes
         try self.builder.addBuiltNode(ast.AstNode{ .Contract = self.contract.* });
 
         return self.contract;
@@ -878,7 +878,7 @@ pub const ExpressionBuilder = struct {
 
     /// Create a function call expression with validation
     pub fn call(self: *const ExpressionBuilder, callee: *ast.Expressions.ExprNode, args: []ast.Expressions.ExprNode, span: ast.SourceSpan) !*ast.Expressions.ExprNode {
-        // Note: In Zig, we can't directly compare pointers to undefined at runtime
+        // note: In Zig, we can't directly compare pointers to undefined at runtime
 
         const expr = try self.builder.arena.createNode(ast.Expressions.ExprNode);
         const owned_args = try self.builder.arena.createSlice(ast.Expressions.ExprNode, args.len);
@@ -899,7 +899,7 @@ pub const ExpressionBuilder = struct {
 
     /// Create a field access expression with validation
     pub fn fieldAccess(self: *const ExpressionBuilder, target: *ast.Expressions.ExprNode, field: []const u8, span: ast.SourceSpan) !*ast.Expressions.ExprNode {
-        // Note: In Zig, we can't directly compare pointers to undefined at runtime
+        // note: In Zig, we can't directly compare pointers to undefined at runtime
 
         if (field.len == 0) {
             try self.builder.diagnostics.addError(span, "Field name cannot be empty");
@@ -924,7 +924,7 @@ pub const ExpressionBuilder = struct {
 
     /// Create an index expression with validation
     pub fn index(self: *const ExpressionBuilder, target: *ast.Expressions.ExprNode, index_expr: *ast.Expressions.ExprNode, span: ast.SourceSpan) !*ast.Expressions.ExprNode {
-        // Note: In Zig, we can't directly compare pointers to undefined at runtime
+        // note: In Zig, we can't directly compare pointers to undefined at runtime
 
         const expr = try self.builder.arena.createNode(ast.Expressions.ExprNode);
 
@@ -958,7 +958,7 @@ pub const ExpressionBuilder = struct {
 
     /// Internal method to create cast expressions with specific cast types
     fn castWithType(self: *const ExpressionBuilder, expr_node: *ast.Expressions.ExprNode, target_type: TypeInfo, cast_type: ast.CastType, span: ast.SourceSpan) !*ast.Expressions.ExprNode {
-        // Note: In Zig, we can't directly compare pointers to undefined at runtime
+        // note: In Zig, we can't directly compare pointers to undefined at runtime
 
         const expr = try self.builder.arena.createNode(ast.Expressions.ExprNode);
 
@@ -1003,7 +1003,7 @@ pub const ExpressionBuilder = struct {
 
     /// Create a try expression for error handling
     pub fn tryExpr(self: *const ExpressionBuilder, expr_node: *ast.Expressions.ExprNode, span: ast.SourceSpan) !*ast.Expressions.ExprNode {
-        // Note: In Zig, we can't directly compare pointers to undefined at runtime
+        // note: In Zig, we can't directly compare pointers to undefined at runtime
 
         const expr = try self.builder.arena.createNode(ast.Expressions.ExprNode);
 
@@ -1043,7 +1043,7 @@ pub const ExpressionBuilder = struct {
 
     /// Create a struct instantiation expression
     pub fn structInstantiation(self: *const ExpressionBuilder, struct_name: *ast.Expressions.ExprNode, fields: []ast.Expressions.StructInstantiationField, span: ast.SourceSpan) !*ast.Expressions.ExprNode {
-        // Note: In Zig, we can't directly compare pointers to undefined at runtime
+        // note: In Zig, we can't directly compare pointers to undefined at runtime
 
         const expr = try self.builder.arena.createNode(ast.Expressions.ExprNode);
         const owned_fields = try self.builder.arena.createSlice(ast.Expressions.StructInstantiationField, fields.len);
@@ -1102,7 +1102,7 @@ pub const StatementBuilder = struct {
 
     /// Create a return statement with validation
     pub fn returnStmt(_: *const StatementBuilder, value: ?*ast.Expressions.ExprNode, span: ast.SourceSpan) !ast.Statements.StmtNode {
-        // No validation needed for this simple statement
+        // no validation needed for this simple statement
 
         return ast.Statements.StmtNode{ .Return = .{
             .value = if (value) |v| v.* else null,
@@ -1112,10 +1112,10 @@ pub const StatementBuilder = struct {
 
     /// Create an if statement with control flow validation
     pub fn ifStmt(self: *const StatementBuilder, condition: *ast.Expressions.ExprNode, then_branch: ast.Statements.BlockNode, else_branch: ?ast.Statements.BlockNode, span: ast.SourceSpan) !ast.Statements.StmtNode {
-        // Validate condition
-        // Note: In Zig, we can't directly compare pointers to undefined at runtime
+        // validate condition
+        // note: In Zig, we can't directly compare pointers to undefined at runtime
 
-        // Validate that then_branch has at least one statement
+        // validate that then_branch has at least one statement
         if (then_branch.statements.len == 0) {
             try self.builder.diagnostics.addError(span, "If statement then branch cannot be empty");
             return BuilderError.ValidationFailed;
@@ -1136,15 +1136,15 @@ pub const StatementBuilder = struct {
 
     /// Create a while statement with loop invariants
     pub fn whileStmtWithInvariants(self: *const StatementBuilder, condition: *ast.Expressions.ExprNode, body: ast.Statements.BlockNode, invariants: []ast.Expressions.ExprNode, span: ast.SourceSpan) !ast.Statements.StmtNode {
-        // Note: In Zig, we can't directly compare pointers to undefined at runtime
+        // note: In Zig, we can't directly compare pointers to undefined at runtime
 
-        // Validate that body has at least one statement
+        // validate that body has at least one statement
         if (body.statements.len == 0) {
             try self.builder.diagnostics.addError(span, "While loop body cannot be empty");
             return BuilderError.ValidationFailed;
         }
 
-        // Create owned invariants slice
+        // create owned invariants slice
         const owned_invariants = try self.builder.arena.createSlice(ast.Expressions.ExprNode, invariants.len);
         @memcpy(owned_invariants, invariants);
 
@@ -1200,7 +1200,7 @@ pub const StatementBuilder = struct {
     /// Create a requires statement (precondition)
     pub fn requiresStmt(self: *const StatementBuilder, condition: *ast.Expressions.ExprNode, span: ast.SourceSpan) !ast.Statements.StmtNode {
         _ = self;
-        // Note: In Zig, we can't directly compare pointers to undefined at runtime
+        // note: In Zig, we can't directly compare pointers to undefined at runtime
 
         return ast.Statements.StmtNode{ .Requires = .{
             .condition = condition.*,
@@ -1240,16 +1240,16 @@ pub const TypeBuilder = struct {
 
     /// Create a primitive type reference
     pub fn primitive(_: *const TypeBuilder, prim_type: TypeInfo) TypeInfo {
-        // No builder state needed for primitive types
+        // no builder state needed for primitive types
         return prim_type;
     }
 
     /// Create a slice type with element type validation
     pub fn slice(self: *const TypeBuilder, element_type: TypeInfo) !TypeInfo {
-        // Create a slice type using OraType
+        // create a slice type using OraType
         var slice_type = OraType{ .Slice = undefined };
 
-        // Store the element type
+        // store the element type
         const elem_type_ptr = try self.builder.arena.allocator().create(OraType);
         if (element_type.ora_type) |et| {
             elem_type_ptr.* = et;
@@ -1263,13 +1263,13 @@ pub const TypeBuilder = struct {
 
     /// Create a mapping type with key-value type validation
     pub fn mapping(self: *const TypeBuilder, key_type: TypeInfo, value_type: TypeInfo) !TypeInfo {
-        // Create a mapping type using OraType
+        // create a mapping type using OraType
         var map_type = OraType{ .map = undefined };
 
-        // Store the key and value types
+        // store the key and value types
         const mapping_data = try self.builder.arena.allocator().create(OraType.MapType);
 
-        // Key type
+        // key type
         const key_type_ptr = try self.builder.arena.allocator().create(OraType);
         if (key_type.ora_type) |kt| {
             key_type_ptr.* = kt;
@@ -1277,7 +1277,7 @@ pub const TypeBuilder = struct {
             key_type_ptr.* = OraType.Unknown;
         }
 
-        // Value type
+        // value type
         const value_type_ptr = try self.builder.arena.allocator().create(OraType);
         if (value_type.ora_type) |vt| {
             value_type_ptr.* = vt;
@@ -1292,7 +1292,7 @@ pub const TypeBuilder = struct {
 
         map_type.map = mapping_data;
 
-        // Determine span for the mapping type
+        // determine span for the mapping type
         var span = SourceSpan{};
         if (key_type.span) |ks| {
             span = ks;
@@ -1306,13 +1306,13 @@ pub const TypeBuilder = struct {
     /// Create a tuple type
     pub fn tuple(self: *const TypeBuilder, types: []TypeInfo) !TypeInfo {
         if (types.len == 0) {
-            // For now, allow empty tuples - this might be changed based on language requirements
+            // for now, allow empty tuples - this might be changed based on language requirements
         }
 
-        // Create a tuple type using OraType
+        // create a tuple type using OraType
         var tuple_type = OraType{ .tuple = undefined };
 
-        // Extract and store the OraTypes from each TypeInfo
+        // extract and store the OraTypes from each TypeInfo
         const ora_types = try self.builder.arena.allocator().alloc(OraType, types.len);
         for (types, 0..) |type_info, i| {
             if (type_info.ora_type) |ot| {
@@ -1324,7 +1324,7 @@ pub const TypeBuilder = struct {
 
         tuple_type.tuple = ora_types;
 
-        // Determine span for the tuple type
+        // determine span for the tuple type
         var span = SourceSpan{};
         for (types) |type_info| {
             if (type_info.span) |s| {
@@ -1338,10 +1338,10 @@ pub const TypeBuilder = struct {
 
     /// Create an error union type (!T)
     pub fn errorUnion(self: *const TypeBuilder, success_type: TypeInfo) !TypeInfo {
-        // Create an error union type using OraType
+        // create an error union type using OraType
         var error_union_type = OraType{ .error_union = undefined };
 
-        // Store the success type
+        // store the success type
         const success_type_ptr = try self.builder.arena.allocator().create(OraType);
         if (success_type.ora_type) |st| {
             success_type_ptr.* = st;
@@ -1351,24 +1351,24 @@ pub const TypeBuilder = struct {
 
         error_union_type.error_union = success_type_ptr;
 
-        // Use the span from the success type if available
+        // use the span from the success type if available
         const span = success_type.span orelse SourceSpan{};
 
         return TypeInfo.explicit(.ErrorUnionType, error_union_type, span);
     }
 
-    // Result[T,E] removed; prefer error unions '!T | E'.
+    // result[T,E] removed; prefer error unions '!T | E'.
 
     /// Create a custom type identifier with validation
     pub fn identifier(self: *const TypeBuilder, name: []const u8, span: ?SourceSpan) !TypeInfo {
         if (name.len == 0) {
-            // This would need a span for proper error reporting, but we don't have one here
-            // For now, we'll allow it and let validation catch it later
+            // this would need a span for proper error reporting, but we don't have one here
+            // for now, we'll allow it and let validation catch it later
         }
 
         const owned_name = try self.builder.arena.createString(name);
 
-        // Create a struct/enum type using OraType
+        // create a struct/enum type using OraType
         const struct_type = OraType{ .struct_type = owned_name };
 
         return TypeInfo.explicit(.Struct, struct_type, span orelse SourceSpan{});

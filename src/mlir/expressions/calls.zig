@@ -46,14 +46,14 @@ pub fn processNormalCall(
     var args = std.ArrayList(c.MlirValue){};
     defer args.deinit(std.heap.page_allocator);
 
-    // Get function name and parameter types for type conversion
+    // get function name and parameter types for type conversion
     var function_name: ?[]const u8 = null;
     var param_types: ?[]const c.MlirType = null;
 
     switch (call.callee.*) {
         .Identifier => |ident| {
             function_name = ident.name;
-            // Look up function signature from symbol table
+            // look up function signature from symbol table
             if (self.symbol_table) |sym_table| {
                 if (sym_table.lookupFunction(ident.name)) |func_symbol| {
                     param_types = func_symbol.param_types;
@@ -61,23 +61,23 @@ pub fn processNormalCall(
             }
         },
         .FieldAccess => {
-            // Method calls - parameter types lookup not yet implemented
-            // For now, skip conversion for method calls
+            // method calls - parameter types lookup not yet implemented
+            // for now, skip conversion for method calls
         },
         else => {},
     }
 
-    // Lower arguments and convert to match parameter types if needed
+    // lower arguments and convert to match parameter types if needed
     for (call.arguments, 0..) |arg, i| {
         var arg_value = self.lowerExpression(arg);
 
-        // Convert argument to match parameter type if function signature is available
+        // convert argument to match parameter type if function signature is available
         if (param_types) |params| {
             if (i < params.len) {
                 const expected_param_type = params[i];
                 const arg_type = c.mlirValueGetType(arg_value);
 
-                // Convert if types don't match (handles subtyping conversions like u8 -> u256)
+                // convert if types don't match (handles subtyping conversions like u8 -> u256)
                 if (!c.mlirTypeEqual(arg_type, expected_param_type)) {
                     const error_handling = @import("../error_handling.zig");
                     const arg_span = error_handling.getSpanFromExpression(arg);

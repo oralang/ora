@@ -31,7 +31,7 @@ pub fn lowerBinary(
     const lhs_converted = self.convertToType(lhs, result_ty, bin.span);
     const rhs_converted = self.convertToType(rhs, result_ty, bin.span);
 
-    // Check for Exact<T> division/modulo guard
+    // check for Exact<T> division/modulo guard
     if (bin.operator == .Slash or bin.operator == .Percent) {
         const lhs_type_info = extractTypeInfo(bin.lhs);
         const rhs_type_info = extractTypeInfo(bin.rhs);
@@ -217,10 +217,10 @@ fn lowerCommaOp(
     _: c.MlirType,
     _: lib.ast.SourceSpan,
 ) c.MlirValue {
-    // Comma expression: evaluate both sides, return the right-hand side
-    // The left-hand side is evaluated for side effects but its value is discarded
-    // We just need to ensure both are evaluated, then return the right-hand side
-    // No need for ora.sequence - just return rhs (lhs is already evaluated)
+    // comma expression: evaluate both sides, return the right-hand side
+    // the left-hand side is evaluated for side effects but its value is discarded
+    // we just need to ensure both are evaluated, then return the right-hand side
+    // no need for ora.sequence - just return rhs (lhs is already evaluated)
     return rhs;
 }
 

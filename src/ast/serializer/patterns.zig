@@ -77,7 +77,7 @@ pub fn serializeSwitchCase(serializer: *AstSerializer, case: *const ast.Switch.C
         try helpers.writeSpanField(serializer, writer, &case.span, indent + 1);
     }
 
-    // Serialize the pattern
+    // serialize the pattern
     if (serializer.options.pretty_print and !serializer.options.compact_mode) {
         try writer.print(",\n");
         try helpers.writeIndent(serializer, writer, indent + 1);
@@ -87,7 +87,7 @@ pub fn serializeSwitchCase(serializer: *AstSerializer, case: *const ast.Switch.C
     }
     try serializeSwitchPattern(serializer, &case.pattern, writer, indent + 1);
 
-    // Serialize the body
+    // serialize the body
     if (serializer.options.pretty_print and !serializer.options.compact_mode) {
         try writer.print(",\n");
         try helpers.writeIndent(serializer, writer, indent + 1);

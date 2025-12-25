@@ -17,57 +17,57 @@ pub fn validateRefinementType(
 ) TypeResolutionError!void {
     switch (ora_type) {
         .min_value => |mv| {
-            // Base type must be an integer type
+            // base type must be an integer type
             if (!mv.base.isInteger()) {
                 return TypeResolutionError.TypeMismatch;
             }
-            // Recursively validate base type
+            // recursively validate base type
             try validateRefinementType(cfg, registry, mv.base.*);
         },
         .max_value => |mv| {
-            // Base type must be an integer type
+            // base type must be an integer type
             if (!mv.base.isInteger()) {
                 return TypeResolutionError.TypeMismatch;
             }
-            // Recursively validate base type
+            // recursively validate base type
             try validateRefinementType(cfg, registry, mv.base.*);
         },
         .in_range => |ir| {
-            // Base type must be an integer type
+            // base type must be an integer type
             if (!ir.base.isInteger()) {
                 return TypeResolutionError.TypeMismatch;
             }
-            // MIN <= MAX already validated in parser, but double-check
+            // min <= MAX already validated in parser, but double-check
             if (ir.min > ir.max) {
                 return TypeResolutionError.TypeMismatch;
             }
-            // Recursively validate base type
+            // recursively validate base type
             try validateRefinementType(cfg, registry, ir.base.*);
         },
         .scaled => |s| {
-            // Base type must be an integer type
+            // base type must be an integer type
             if (!s.base.isInteger()) {
                 return TypeResolutionError.TypeMismatch;
             }
-            // Note: Removed hardcoded decimals > 77 constraint
-            // If needed, add to RefinementConfig
-            // Recursively validate base type
+            // note: Removed hardcoded decimals > 77 constraint
+            // if needed, add to RefinementConfig
+            // recursively validate base type
             try validateRefinementType(cfg, registry, s.base.*);
         },
         .exact => |e| {
-            // Base type must be an integer type
+            // base type must be an integer type
             if (!e.isInteger()) {
                 return TypeResolutionError.TypeMismatch;
             }
-            // Recursively validate base type
+            // recursively validate base type
             try validateRefinementType(cfg, registry, e.*);
         },
         .non_zero_address => {
-            // NonZeroAddress is always valid - it's a refinement of address type
-            // No base type to validate
+            // nonZeroAddress is always valid - it's a refinement of address type
+            // no base type to validate
         },
         else => {
-            // Not a refinement type, no validation needed
+            // not a refinement type, no validation needed
         },
     }
 }

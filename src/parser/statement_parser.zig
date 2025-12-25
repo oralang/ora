@@ -62,17 +62,17 @@ pub const StatementParser = struct {
 
     /// Parse statement
     pub fn parseStatement(self: *StatementParser) common.ParserError!ast.Statements.StmtNode {
-        // Check for @lock annotation before variable declarations
+        // check for @lock annotation before variable declarations
         if (try self.tryParseLockAnnotation()) |var_decl| {
             return ast.Statements.StmtNode{ .VariableDecl = var_decl };
         }
 
-        // Check for @unlock annotation
+        // check for @unlock annotation
         if (try self.tryParseUnlockAnnotation()) |unlock_stmt| {
             return ast.Statements.StmtNode{ .Unlock = unlock_stmt };
         }
 
-        // Standalone @lock statement: @lock(expr);
+        // standalone @lock statement: @lock(expr);
         if (self.base.check(.At)) {
             const saved = self.base.current;
             _ = self.base.advance(); // consume '@'
@@ -86,113 +86,113 @@ pub const StatementParser = struct {
                 _ = self.base.match(.Semicolon);
                 return ast.Statements.StmtNode{ .Lock = .{ .path = path_expr, .span = ParserCommon.makeSpan(self.base.previous()) } };
             }
-            // Not a lock statement; restore and continue
+            // not a lock statement; restore and continue
             self.base.current = saved;
         }
 
-        // If an unknown @ directive appears, report it and recover
+        // if an unknown @ directive appears, report it and recover
         if (self.base.check(.At)) {
             const saved = self.base.current;
             _ = self.base.advance();
-            // Known statements handled above: @lock, @unlock
+            // known statements handled above: @lock, @unlock
             if (!(self.base.check(.Identifier) and (std.mem.eql(u8, self.base.peek().lexeme, "lock") or std.mem.eql(u8, self.base.peek().lexeme, "unlock")))) {
                 _ = self.base.errorAtCurrent("Unknown @ directive; only @lock/@unlock statements are supported here") catch {};
-                // Recover to next statement boundary
+                // recover to next statement boundary
                 while (!self.base.isAtEnd() and !self.base.check(.Semicolon) and !self.base.check(.RightBrace)) {
                     _ = self.base.advance();
                 }
                 _ = self.base.match(.Semicolon);
             } else {
-                // Restore for normal handling if it's a known directive
+                // restore for normal handling if it's a known directive
                 self.base.current = saved;
             }
         }
 
-        // Check for labeled statement (label: statement)
-        // Only check for labels before control flow statements (for, while)
+        // check for labeled statement (label: statement)
+        // only check for labels before control flow statements (for, while)
         var label: ?[]const u8 = null;
         if (self.base.check(.Identifier)) {
             const saved = self.base.current;
             const label_token = self.base.peek();
             _ = self.base.advance(); // consume identifier
             if (self.base.match(.Colon)) {
-                // Check if next token is for or while
+                // check if next token is for or while
                 if (self.base.check(.For) or self.base.check(.While)) {
-                    // This is a label before a loop
+                    // this is a label before a loop
                     label = try self.base.arena.createString(label_token.lexeme);
                 } else {
-                    // Not a label before loop, restore position
+                    // not a label before loop, restore position
                     self.base.current = saved;
                 }
             } else {
-                // Not a label, restore position
+                // not a label, restore position
                 self.base.current = saved;
             }
         }
 
-        // Variable declarations and destructuring assignments
+        // variable declarations and destructuring assignments
         if (self.isMemoryRegionKeyword() or self.base.check(.Let) or self.base.check(.Var)) {
-            // Check if this is a destructuring assignment (let .{...} = ...)
+            // check if this is a destructuring assignment (let .{...} = ...)
             if (try self.tryParseDestructuringAssignment()) |dest_assign| {
                 return ast.Statements.StmtNode{ .DestructuringAssignment = dest_assign };
             }
             return ast.Statements.StmtNode{ .VariableDecl = try self.parseVariableDecl() };
         }
 
-        // Return statements
+        // return statements
         if (self.base.match(.Return)) {
             return try self.parseReturnStatement();
         }
 
-        // Log statements
+        // log statements
         if (self.base.match(.Log)) {
             return try self.parseLogStatement();
         }
 
-        // Assert statements (formal verification)
+        // assert statements (formal verification)
         if (self.base.match(.Assert)) {
             return try spec.parseAssertStatement(self);
         }
 
-        // Assume statements (formal verification)
+        // assume statements (formal verification)
         if (self.base.match(.Assume)) {
             return try spec.parseAssumeStatement(self);
         }
 
-        // Havoc statements (formal verification)
+        // havoc statements (formal verification)
         if (self.base.match(.Havoc)) {
             return try spec.parseHavocStatement(self);
         }
 
-        // Requires statements
+        // requires statements
         if (self.base.match(.Requires)) {
             return try spec.parseRequiresStatement(self);
         }
 
-        // Ensures statements
+        // ensures statements
         if (self.base.match(.Ensures)) {
             return try spec.parseEnsuresStatement(self);
         }
 
-        // Error declarations
+        // error declarations
         if (self.base.match(.Error)) {
             return try self.parseErrorDeclStatement();
         }
 
-        // Try-catch blocks
+        // try-catch blocks
         if (self.base.match(.Try)) {
             return try control_flow.parseTryStatement(self);
         }
 
-        // If statements
+        // if statements
         if (self.base.match(.If)) {
             return try control_flow.parseIfStatement(self);
         }
 
-        // While statements
+        // while statements
         if (self.base.match(.While)) {
             const while_stmt = try control_flow.parseWhileStatement(self);
-            // Add label if present
+            // add label if present
             if (label) |l| {
                 switch (while_stmt) {
                     .While => |w| {
@@ -206,10 +206,10 @@ pub const StatementParser = struct {
             return while_stmt;
         }
 
-        // For statements
+        // for statements
         if (self.base.match(.For)) {
             const for_stmt = try control_flow.parseForStatement(self);
-            // Add label if present
+            // add label if present
             if (label) |l| {
                 switch (for_stmt) {
                     .ForLoop => |fl| {
@@ -223,32 +223,32 @@ pub const StatementParser = struct {
             return for_stmt;
         }
 
-        // Switch statements
+        // switch statements
         if (self.base.match(.Switch)) {
             return try control_flow.parseSwitchStatement(self);
         }
 
-        // Break statements
+        // break statements
         if (self.base.match(.Break)) {
             return try control_flow.parseBreakStatement(self);
         }
 
-        // Continue statements
+        // continue statements
         if (self.base.match(.Continue)) {
             return try control_flow.parseContinueStatement(self);
         }
 
-        // Compound assignment statements (a += b, etc)
+        // compound assignment statements (a += b, etc)
         if (try self.tryParseCompoundAssignmentStatement()) |comp_assign| {
             return ast.Statements.StmtNode{ .CompoundAssignment = comp_assign };
         }
 
-        // Labeled blocks (label: { statements })
+        // labeled blocks (label: { statements })
         if (try self.tryParseLabeledBlock()) |labeled_block| {
             return ast.Statements.StmtNode{ .LabeledBlock = labeled_block };
         }
 
-        // Expression statements (fallback)
+        // expression statements (fallback)
         return try self.parseExpressionStatement();
     }
 
@@ -259,7 +259,7 @@ pub const StatementParser = struct {
         var statements = std.ArrayList(ast.Statements.StmtNode){};
         defer statements.deinit(self.base.arena.allocator());
         errdefer {
-            // Clean up statements on error
+            // clean up statements on error
             for (statements.items) |*stmt| {
                 ast.deinitStmtNode(self.base.arena.allocator(), stmt);
             }
@@ -280,8 +280,8 @@ pub const StatementParser = struct {
 
     /// Parse variable declaration - DELEGATE TO DECLARATION PARSER
     fn parseVariableDecl(self: *StatementParser) !ast.Statements.VariableDeclNode {
-        // Delegate to declaration parser
-        // Create temporary TypeParser - this is part of circular deps that need fixing
+        // delegate to declaration parser
+        // create temporary TypeParser - this is part of circular deps that need fixing
         var type_parser = @import("type_parser.zig").TypeParser.init(self.base.tokens, self.base.arena);
         type_parser.base.current = self.base.current;
         type_parser.base.file_id = self.base.file_id;
@@ -319,7 +319,7 @@ pub const StatementParser = struct {
 
         if (!self.base.check(.RightParen)) {
             repeat: while (true) {
-                // Use expression parser for log arguments
+                // use expression parser for log arguments
                 self.syncSubParsers();
                 const arg = try self.expr_parser.parseExpression();
                 self.updateFromSubParser(self.expr_parser.base.current);
@@ -363,10 +363,10 @@ pub const StatementParser = struct {
             if (self.base.check(.Identifier) and std.mem.eql(u8, self.base.peek().lexeme, "lock")) {
                 _ = self.base.advance(); // consume "lock"
 
-                // Check if this is followed by a variable declaration
+                // check if this is followed by a variable declaration
                 if (self.isMemoryRegionKeyword() or self.base.check(.Let) or self.base.check(.Var)) {
-                    // Delegate to declaration parser (get TypeParser from parent)
-                    // For now, create temporary parsers - this is part of circular deps that need fixing
+                    // delegate to declaration parser (get TypeParser from parent)
+                    // for now, create temporary parsers - this is part of circular deps that need fixing
                     self.base.current = saved_pos;
                     var type_parser = @import("type_parser.zig").TypeParser.init(self.base.tokens, self.base.arena);
                     type_parser.base.current = self.base.current;
@@ -381,7 +381,7 @@ pub const StatementParser = struct {
                 }
             }
 
-            // Not @lock or not followed by variable declaration, restore position
+            // not @lock or not followed by variable declaration, restore position
             self.base.current = saved_pos;
         }
         return null;
@@ -391,16 +391,16 @@ pub const StatementParser = struct {
     fn tryParseDestructuringAssignment(self: *StatementParser) common.ParserError!?ast.Statements.DestructuringAssignmentNode {
         const saved_pos = self.base.current;
 
-        // Parse memory region and variable kind
-        // Parse declaration keyword and region quickly, we don't need the value here
+        // parse memory region and variable kind
+        // parse declaration keyword and region quickly, we don't need the value here
         if (!(self.base.match(.Let) or self.base.match(.Var) or self.base.match(.Storage) or self.base.match(.Memory) or self.base.match(.Tstore))) {
             self.base.current = saved_pos;
             return null;
         }
 
-        // Check for destructuring pattern (starts with .{)
+        // check for destructuring pattern (starts with .{)
         if (!self.base.check(.Dot)) {
-            // Not a destructuring assignment, restore position
+            // not a destructuring assignment, restore position
             self.base.current = saved_pos;
             return null;
         }
@@ -408,7 +408,7 @@ pub const StatementParser = struct {
         _ = self.base.advance(); // consume '.'
         _ = try self.base.consume(.LeftBrace, "Expected '{' after '.' in destructuring pattern");
 
-        // Parse struct destructuring fields
+        // parse struct destructuring fields
         var fields = std.ArrayList(ast.Expressions.StructDestructureField){};
         defer fields.deinit(self.base.arena.allocator());
 
@@ -417,7 +417,7 @@ pub const StatementParser = struct {
                 const field_name_token = try self.base.consume(.Identifier, "Expected field name in destructuring pattern");
                 var variable_name = try self.base.arena.createString(field_name_token.lexeme);
 
-                // Check for field renaming (field: variable)
+                // check for field renaming (field: variable)
                 if (self.base.match(.Colon)) {
                     const var_name_token = try self.base.consume(.Identifier, "Expected variable name after ':' in destructuring pattern");
                     variable_name = try self.base.arena.createString(var_name_token.lexeme);
@@ -436,7 +436,7 @@ pub const StatementParser = struct {
         _ = try self.base.consume(.RightBrace, "Expected '}' after destructuring fields");
         _ = try self.base.consume(.Equal, "Expected '=' after destructuring pattern");
 
-        // Parse the value expression
+        // parse the value expression
         self.syncSubParsers();
         const value_expr = try self.expr_parser.parseExpression();
         self.updateFromSubParser(self.expr_parser.base.current);
@@ -466,7 +466,7 @@ pub const StatementParser = struct {
 
                 _ = try self.base.consume(.LeftParen, "Expected '(' after @unlock");
 
-                // Parse the path expression
+                // parse the path expression
                 self.syncSubParsers();
                 const path_expr = try self.expr_parser.parseExpression();
                 self.updateFromSubParser(self.expr_parser.base.current);
@@ -480,7 +480,7 @@ pub const StatementParser = struct {
                 };
             }
 
-            // Not @unlock, restore position
+            // not @unlock, restore position
             self.base.current = saved_pos;
         }
         return null;
@@ -493,7 +493,7 @@ pub const StatementParser = struct {
             const label_token = self.base.advance(); // consume identifier
 
             if (self.base.match(.Colon)) {
-                // Case 1: label: { ... }
+                // case 1: label: { ... }
                 if (self.base.check(.LeftBrace)) {
                     const block = try self.parseBlock();
                     return ast.Statements.LabeledBlockNode{
@@ -502,7 +502,7 @@ pub const StatementParser = struct {
                         .span = common.ParserCommon.makeSpan(label_token),
                     };
                 }
-                // Case 2: label: switch (...) { ... }
+                // case 2: label: switch (...) { ... }
                 if (self.base.match(.Switch)) {
                     const switch_stmt = try control_flow.parseSwitchStatement(self);
                     var stmts = std.ArrayList(ast.Statements.StmtNode){};
@@ -519,12 +519,12 @@ pub const StatementParser = struct {
                         .span = common.ParserCommon.makeSpan(label_token),
                     };
                 }
-                // Unknown after label:, restore
+                // unknown after label:, restore
                 self.base.current = saved_pos;
                 return null;
             }
 
-            // Not a labeled block, restore position
+            // not a labeled block, restore position
             self.base.current = saved_pos;
         }
         return null;
@@ -532,7 +532,7 @@ pub const StatementParser = struct {
 
     /// Parse expression statement (fallback)
     fn parseExpressionStatement(self: *StatementParser) common.ParserError!ast.Statements.StmtNode {
-        // Use integrated expression parser for expression statements
+        // use integrated expression parser for expression statements
         self.syncSubParsers();
         const expr = try self.expr_parser.parseExpression();
         self.updateFromSubParser(self.expr_parser.base.current);
@@ -544,22 +544,22 @@ pub const StatementParser = struct {
     fn tryParseCompoundAssignmentStatement(self: *StatementParser) common.ParserError!?ast.statements.CompoundAssignmentNode {
         const saved_pos = self.base.current;
 
-        // We need to parse a potential lvalue first
+        // we need to parse a potential lvalue first
         self.syncSubParsers();
         if (self.base.isAtEnd()) return null;
 
-        // Parse the left-hand side (must be a valid lvalue)
+        // parse the left-hand side (must be a valid lvalue)
         const lhs = try self.expr_parser.parseExpression();
         self.updateFromSubParser(self.expr_parser.base.current);
 
-        // Check if the next token is a compound operator
+        // check if the next token is a compound operator
         if (self.base.match(.PlusEqual) or self.base.match(.MinusEqual) or
             self.base.match(.StarEqual) or self.base.match(.SlashEqual) or
             self.base.match(.PercentEqual))
         {
             const op_token = self.base.previous();
 
-            // Map the token type to CompoundAssignmentOp
+            // map the token type to CompoundAssignmentOp
             const compound_op: ast.Operators.Compound = switch (op_token.type) {
                 .PlusEqual => .PlusEqual,
                 .MinusEqual => .MinusEqual,
@@ -569,15 +569,15 @@ pub const StatementParser = struct {
                 else => unreachable, // We already checked these token types
             };
 
-            // Parse the right-hand side
+            // parse the right-hand side
             self.syncSubParsers();
             const rhs = try self.expr_parser.parseExpression();
             self.updateFromSubParser(self.expr_parser.base.current);
 
-            // Expect a semicolon
+            // expect a semicolon
             _ = try self.base.consume(.Semicolon, "Expected ';' after compound assignment");
 
-            // Create lhs and rhs pointers
+            // create lhs and rhs pointers
             const lhs_ptr = try self.base.arena.createNode(ast.Expressions.ExprNode);
             lhs_ptr.* = lhs;
             const rhs_ptr = try self.base.arena.createNode(ast.Expressions.ExprNode);
@@ -591,7 +591,7 @@ pub const StatementParser = struct {
             };
         }
 
-        // If we didn't find a compound assignment, restore position and return null
+        // if we didn't find a compound assignment, restore position and return null
         self.base.current = saved_pos;
         return null;
     }

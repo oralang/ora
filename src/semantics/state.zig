@@ -101,13 +101,13 @@ pub const SymbolTable = struct {
 
     pub fn deinit(self: *SymbolTable) void {
         const type_info_mod = @import("../ast/type_info.zig");
-        // Deinit types in root symbols
+        // deinit types in root symbols
         for (self.root.symbols.items) |*s| {
             if (s.typ_owned) {
                 if (s.typ) |*ti| type_info_mod.deinitTypeInfo(self.allocator, ti);
             }
         }
-        // Deinit types in child scopes then deinit the scope containers
+        // deinit types in child scopes then deinit the scope containers
         for (self.scopes.items) |sc| {
             for (sc.symbols.items) |*sym| {
                 if (sym.typ_owned) {
@@ -127,7 +127,7 @@ pub const SymbolTable = struct {
             self.allocator.free(slice_ptr.*);
         }
         self.function_allowed_errors.deinit();
-        // Deallocate types stored in function_success_types (may contain pointers for refinement types)
+        // deallocate types stored in function_success_types (may contain pointers for refinement types)
         var fst_it = self.function_success_types.iterator();
         while (fst_it.next()) |entry| {
             type_info_mod.deinitOraType(self.allocator, @constCast(&entry.value_ptr.*));
@@ -135,16 +135,16 @@ pub const SymbolTable = struct {
         self.function_success_types.deinit();
         var bs_it = self.block_scopes.valueIterator();
         while (bs_it.next()) |_| {
-            // Scopes themselves are owned by self.scopes; nothing to free per entry
+            // scopes themselves are owned by self.scopes; nothing to free per entry
         }
         self.block_scopes.deinit();
-        // Free enum variant name slices
+        // free enum variant name slices
         var ev_it = self.enum_variants.valueIterator();
         while (ev_it.next()) |slice_ptr| {
             self.allocator.free(slice_ptr.*);
         }
         self.enum_variants.deinit();
-        // Note: struct_fields values are direct references to AST nodes, not owned copies
+        // note: struct_fields values are direct references to AST nodes, not owned copies
         self.struct_fields.deinit();
         self.builtin_registry.deinit();
         self.root.deinit(self.allocator);
@@ -182,15 +182,15 @@ pub const SymbolTable = struct {
     /// Find the scope containing a symbol by name, searching from the given scope down into nested scopes first, then up
     /// This is needed when current_scope is set to a block scope but the symbol might be in a nested block scope
     fn findScopeContainingRecursive(scope: ?*Scope, name: []const u8) ?struct { scope: *Scope, idx: usize } {
-        // First check current scope
+        // first check current scope
         if (scope) |s| {
             if (s.findInCurrent(name)) |idx| {
                 return .{ .scope = s, .idx = idx };
             }
-            // TODO: Search down into nested scopes if we track them
-            // For now, just search up
+            // todo: Search down into nested scopes if we track them
+            // for now, just search up
         }
-        // Fall back to searching up
+        // fall back to searching up
         return findScopeContaining(scope, name);
     }
 
@@ -201,49 +201,49 @@ pub const SymbolTable = struct {
     pub fn updateSymbolType(self: *SymbolTable, scope: ?*Scope, name: []const u8, new_type: TypeInfo, new_typ_owned: bool) !void {
         const type_info = @import("../ast/type_info.zig");
 
-        // First check the current scope (in case symbol is in a nested block scope)
+        // first check the current scope (in case symbol is in a nested block scope)
         if (scope) |s| {
             if (s.findInCurrent(name)) |idx| {
-                // Found in current scope - update it
+                // found in current scope - update it
                 const old_symbol = &s.symbols.items[idx];
-                // Only deallocate if the old type was owned AND has a valid ora_type
-                // Skip deallocation if old type is null or points to arena memory (ora_type null)
+                // only deallocate if the old type was owned AND has a valid ora_type
+                // skip deallocation if old type is null or points to arena memory (ora_type null)
                 if (old_symbol.typ_owned) {
                     if (old_symbol.typ) |*old_typ| {
-                        // Only deallocate if old type has a valid ora_type (not pointing to arena)
+                        // only deallocate if old type has a valid ora_type (not pointing to arena)
                         if (old_typ.ora_type != null) {
                             type_info.deinitTypeInfo(self.allocator, old_typ);
                         }
                     }
                 }
                 old_symbol.typ = new_type;
-                // Only set typ_owned=true if this scope is a function scope, not a block scope
+                // only set typ_owned=true if this scope is a function scope, not a block scope
                 old_symbol.typ_owned = new_typ_owned and isFunctionScope(self, s);
                 return;
             }
         }
 
-        // Find the scope containing the symbol (searches up from given scope)
+        // find the scope containing the symbol (searches up from given scope)
         if (findScopeContaining(scope, name)) |found| {
-            // Found the symbol in a parent scope - deallocate old type if it was owned
+            // found the symbol in a parent scope - deallocate old type if it was owned
             const old_symbol = &found.scope.symbols.items[found.idx];
-            // Only deallocate if the old type was owned AND has a valid ora_type
+            // only deallocate if the old type was owned AND has a valid ora_type
             if (old_symbol.typ_owned) {
                 if (old_symbol.typ) |*old_typ| {
-                    // Only deallocate if old type has a valid ora_type (not pointing to arena)
+                    // only deallocate if old type has a valid ora_type (not pointing to arena)
                     if (old_typ.ora_type != null) {
                         type_info.deinitTypeInfo(self.allocator, old_typ);
                     }
                 }
             }
-            // Update the symbol with new type and ownership flag
-            // Only set typ_owned=true if this scope is a function scope, not a block scope
+            // update the symbol with new type and ownership flag
+            // only set typ_owned=true if this scope is a function scope, not a block scope
             old_symbol.typ = new_type;
             old_symbol.typ_owned = new_typ_owned and isFunctionScope(self, found.scope);
             return;
         }
 
-        // Symbol not found - this can happen if:
+        // symbol not found - this can happen if:
         // 1. The symbol was stored in a nested scope below the given scope (locals_binder case)
         // 2. The symbol was never stored (skipped in collectSymbols due to null ora_type)
         return error.SymbolNotFound;
@@ -261,7 +261,7 @@ pub const SymbolTable = struct {
     /// Check if a scope is a function scope (not a block scope)
     pub fn isFunctionScope(self: *const SymbolTable, scope: ?*Scope) bool {
         if (scope) |s| {
-            // Check if this scope is in function_scopes
+            // check if this scope is in function_scopes
             var it = self.function_scopes.iterator();
             while (it.next()) |entry| {
                 if (entry.value_ptr.* == s) return true;

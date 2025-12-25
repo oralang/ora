@@ -31,7 +31,7 @@ pub fn collectContractSymbols(table: *state.SymbolTable, root: *state.Scope, c: 
         .StructDecl => |s| {
             const sym = state.Symbol{ .name = s.name, .kind = .Struct, .span = s.span };
             _ = try table.declare(contract_scope, sym);
-            // Store struct fields for type resolution
+            // store struct fields for type resolution
             try table.struct_fields.put(s.name, s.fields);
         },
         .EnumDecl => |e| {
@@ -41,18 +41,18 @@ pub fn collectContractSymbols(table: *state.SymbolTable, root: *state.Scope, c: 
         .LogDecl => |l| {
             const sym = state.Symbol{ .name = l.name, .kind = .Log, .span = l.span };
             _ = try table.declare(contract_scope, sym);
-            // Record log signature for semantic checks
+            // record log signature for semantic checks
             try table.log_signatures.put(l.name, l.fields);
         },
         .ErrorDecl => |err| {
             const sym = state.Symbol{ .name = err.name, .kind = .Error, .span = err.span };
             _ = try table.declare(contract_scope, sym);
-            // Store error signature (parameters) for validation
+            // store error signature (parameters) for validation
             try table.error_signatures.put(err.name, err.parameters);
         },
         .Constant => |const_decl| {
-            // Constants are collected but type resolution happens later
-            // Store with type if available, otherwise it will be resolved during type resolution
+            // constants are collected but type resolution happens later
+            // store with type if available, otherwise it will be resolved during type resolution
             const sym = state.Symbol{
                 .name = const_decl.name,
                 .kind = .Var, // Constants are treated as variables for symbol lookup

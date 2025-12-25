@@ -522,7 +522,7 @@ pub fn serializeExpression(serializer: *AstSerializer, expr: *const ExprNode, wr
             }
             try serializer.serializeTypeInfo(quantified.variable_type, writer);
 
-            // Serialize optional condition
+            // serialize optional condition
             if (quantified.condition) |condition| {
                 if (serializer.options.pretty_print and !serializer.options.compact_mode) {
                     try writer.print(",\n");
@@ -705,7 +705,7 @@ pub fn serializeLiteral(serializer: *AstSerializer, literal: *const ast.Expressi
         .Integer => |*int_lit| {
             try helpers.writeField(serializer, writer, "literal_type", "Integer", indent, false);
             try helpers.writeField(serializer, writer, "value", int_lit.value, indent, false);
-            // Include the integer type information
+            // include the integer type information
             try writer.print(",\n");
             try helpers.writeIndent(serializer, writer, indent);
             try writer.print("\"type_info\": ");

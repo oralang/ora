@@ -240,13 +240,13 @@ test "statements: if statement structure" {
     const stmt = try stmt_builder.ifStmt(condition, then_block, null, span_if);
 
     try testing.expect(stmt == .If);
-    // Check condition structure
+    // check condition structure
     try testing.expect(stmt.If.condition == .Literal);
     if (stmt.If.condition == .Literal and stmt.If.condition.Literal == .Bool) {
         try testing.expect(stmt.If.condition.Literal.Bool.value == true);
     }
 
-    // Check then branch structure
+    // check then branch structure
     try testing.expect(stmt.If.then_branch.statements.len == 1);
 }
 
@@ -270,10 +270,10 @@ test "statements: while loop structure" {
     const stmt = try stmt_builder.whileStmt(condition, body, span_while);
 
     try testing.expect(stmt == .While);
-    // Check condition structure
+    // check condition structure
     try testing.expect(stmt.While.condition == .Literal);
 
-    // Check body structure
+    // check body structure
     try testing.expect(stmt.While.body.statements.len == 1);
 }
 

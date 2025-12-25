@@ -28,10 +28,10 @@ pub const ExprAnalysis = struct {
 pub fn inferExprType(table: *state.SymbolTable, scope: *state.Scope, expr: ast.Expressions.ExprNode) ast.Types.TypeInfo {
     return switch (expr) {
         .Identifier => |id| blk: {
-            // Check if this is the 'std' namespace itself
+            // check if this is the 'std' namespace itself
             if (std.mem.eql(u8, id.name, "std")) {
                 // 'std' by itself is not a value - it's a namespace
-                // Return unknown (this should be an error in proper usage)
+                // return unknown (this should be an error in proper usage)
                 break :blk ast.Types.TypeInfo.unknown();
             }
 
@@ -53,38 +53,38 @@ pub fn inferExprType(table: *state.SymbolTable, scope: *state.Scope, expr: ast.E
             .Bytes => ast.Types.TypeInfo.fromOraType(.bytes),
         },
         .FieldAccess => |fa| blk_fa: {
-            // Check if this is a builtin constant (e.g., std.constants.ZERO_ADDRESS)
-            // Build the path and check if it's a builtin
+            // check if this is a builtin constant (e.g., std.constants.ZERO_ADDRESS)
+            // build the path and check if it's a builtin
             if (fa.target.* == .Identifier) {
                 const base = fa.target.Identifier.name;
                 if (std.mem.eql(u8, base, "std")) {
-                    // This is std.something - build the full path
+                    // this is std.something - build the full path
                     const path = std.fmt.allocPrint(table.allocator, "{s}.{s}", .{ base, fa.field }) catch break :blk_fa ast.Types.TypeInfo.unknown();
                     defer table.allocator.free(path);
 
                     if (table.builtin_registry.lookup(path)) |builtin_info| {
-                        // It's a builtin (constant or partial namespace)
+                        // it's a builtin (constant or partial namespace)
                         if (!builtin_info.is_call) {
-                            // It's a constant - return its type
+                            // it's a constant - return its type
                             break :blk_fa ast.Types.TypeInfo.fromOraType(builtin_info.return_type);
                         }
-                        // It's a function - this is a partial access, should be followed by ()
-                        // For now, treat as unknown (will be handled in Call case)
+                        // it's a function - this is a partial access, should be followed by ()
+                        // for now, treat as unknown (will be handled in Call case)
                         break :blk_fa ast.Types.TypeInfo.unknown();
                     }
                 }
             } else if (fa.target.* == .FieldAccess) {
-                // Multi-level access like std.block.timestamp
-                // Try to build the full path
+                // multi-level access like std.block.timestamp
+                // try to build the full path
                 const path = builtins.getMemberAccessPath(table.allocator, &expr) catch break :blk_fa ast.Types.TypeInfo.unknown();
                 defer table.allocator.free(path);
 
                 if (table.builtin_registry.lookup(path)) |builtin_info| {
                     if (!builtin_info.is_call) {
-                        // It's a constant
+                        // it's a constant
                         break :blk_fa ast.Types.TypeInfo.fromOraType(builtin_info.return_type);
                     }
-                    // It's a function - treat as unknown until called
+                    // it's a function - treat as unknown until called
                     break :blk_fa ast.Types.TypeInfo.unknown();
                 }
             }
@@ -113,31 +113,31 @@ pub fn inferExprType(table: *state.SymbolTable, scope: *state.Scope, expr: ast.E
             } else break :blk_idx ast.Types.TypeInfo.unknown();
         },
         .Call => |c| blk_call: {
-            // Check if this is a builtin call (e.g., std.block.timestamp())
+            // check if this is a builtin call (e.g., std.block.timestamp())
             if (builtins.isMemberAccessChain(c.callee)) {
                 const path = builtins.getMemberAccessPath(table.allocator, c.callee) catch break :blk_call ast.Types.TypeInfo.unknown();
                 defer table.allocator.free(path);
 
                 if (table.builtin_registry.lookup(path)) |builtin_info| {
-                    // Validate it's callable
+                    // validate it's callable
                     if (!builtin_info.is_call) {
-                        // Error: trying to call a constant
-                        // For now, return unknown (semantic validation will catch this properly later)
+                        // error: trying to call a constant
+                        // for now, return unknown (semantic validation will catch this properly later)
                         break :blk_call ast.Types.TypeInfo.unknown();
                     }
 
-                    // Validate parameter count
+                    // validate parameter count
                     if (c.arguments.len != builtin_info.param_types.len) {
-                        // Error: wrong number of arguments
+                        // error: wrong number of arguments
                         break :blk_call ast.Types.TypeInfo.unknown();
                     }
 
-                    // Return the builtin's return type
+                    // return the builtin's return type
                     break :blk_call ast.Types.TypeInfo.fromOraType(builtin_info.return_type);
                 }
             }
 
-            // Prefer direct function symbol lookup for simple identifiers
+            // prefer direct function symbol lookup for simple identifiers
             if (c.callee.* == .Identifier and table.isScopeKnown(scope)) {
                 const fname = c.callee.Identifier.name;
                 if (table.safeFindUp(scope, fname)) |sym| {
@@ -152,7 +152,7 @@ pub fn inferExprType(table: *state.SymbolTable, scope: *state.Scope, expr: ast.E
                     }
                 }
             }
-            // Fallback to callee type inference
+            // fallback to callee type inference
             const callee_ti = inferExprType(table, scope, c.callee.*);
             if (callee_ti.ora_type) |ot| switch (ot) {
                 .function => |fnty| {
@@ -163,7 +163,7 @@ pub fn inferExprType(table: *state.SymbolTable, scope: *state.Scope, expr: ast.E
             } else break :blk_call ast.Types.TypeInfo.unknown();
         },
         .EnumLiteral => |el| {
-            // Treat as the enum's type
+            // treat as the enum's type
             return ast.Types.TypeInfo.fromOraType(.{ .enum_type = el.enum_name });
         },
         .Cast => |c| c.target_type,
@@ -197,7 +197,7 @@ pub fn inferExprType(table: *state.SymbolTable, scope: *state.Scope, expr: ast.E
 pub const SpecContext = enum { None, Requires, Ensures, Invariant };
 
 pub fn validateSpecUsage(_allocator: std.mem.Allocator, expr_node: *ast.Expressions.ExprNode, ctx: SpecContext) !?ast.SourceSpan {
-    // Validate current node
+    // validate current node
     switch (expr_node.*) {
         .Quantified => |*q| {
             _ = q;
@@ -210,7 +210,7 @@ pub fn validateSpecUsage(_allocator: std.mem.Allocator, expr_node: *ast.Expressi
         else => {},
     }
 
-    // Recurse into common children
+    // recurse into common children
     switch (expr_node.*) {
         .Binary => |*b| {
             if (try validateSpecUsage(_allocator, b.lhs, ctx)) |sp| return sp;

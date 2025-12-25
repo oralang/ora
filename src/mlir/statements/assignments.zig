@@ -38,7 +38,7 @@ pub fn lowerExpressionStatement(self: *const StatementLowerer, expr: *const lib.
             try lowerCompoundAssignmentExpr(self, &compound);
         },
         else => {
-            // Lower other expression statements
+            // lower other expression statements
             _ = self.expr_lowerer.lowerExpression(expr);
         },
     }
@@ -46,22 +46,22 @@ pub fn lowerExpressionStatement(self: *const StatementLowerer, expr: *const lib.
 
 /// Lower assignment expressions with comprehensive lvalue resolution
 pub fn lowerAssignmentExpression(self: *const StatementLowerer, assign: *const lib.ast.Expressions.AssignmentExpr) LoweringError!void {
-    // Lower the value expression first
+    // lower the value expression first
     var value = self.expr_lowerer.lowerExpression(assign.value);
 
-    // Insert refinement guard if target type is a refinement type
-    // Get type from target identifier if it's an identifier
+    // insert refinement guard if target type is a refinement type
+    // get type from target identifier if it's an identifier
     if (assign.target.* == .Identifier) {
         const ident = &assign.target.Identifier;
         if (ident.type_info.ora_type) |target_ora_type| {
-            // Use skip_guard flag (set during type resolution if optimization applies)
+            // use skip_guard flag (set during type resolution if optimization applies)
             // skip_guard is set in synthAssignment when: constant satisfies constraint,
             // subtyping applies, or value comes from trusted builtin
             value = try helpers.insertRefinementGuard(self, value, target_ora_type, assign.span, assign.skip_guard);
         }
     }
 
-    // Resolve the lvalue and generate appropriate store operation
+    // resolve the lvalue and generate appropriate store operation
     try lowerLValueAssignment(self, assign.target, value, getExpressionSpan(assign.target));
 }
 
@@ -95,39 +95,39 @@ pub fn lowerLValueAssignment(self: *const StatementLowerer, target: *const lib.a
 
 /// Lower identifier assignments
 pub fn lowerIdentifierAssignment(self: *const StatementLowerer, ident: *const lib.ast.Expressions.IdentifierExpr, value: c.MlirValue, loc: c.MlirLocation) LoweringError!void {
-    // Check symbol table first for memory region information
+    // check symbol table first for memory region information
     if (self.symbol_table) |st| {
         std.debug.print("[lowerIdentifierAssignment] Looking up symbol: {s}\n", .{ident.name});
         if (st.lookupSymbol(ident.name)) |symbol| {
-            // Store variable_kind early to avoid shadowing issues in nested scopes
+            // store variable_kind early to avoid shadowing issues in nested scopes
             const var_kind = symbol.variable_kind;
             std.debug.print("[lowerIdentifierAssignment] Symbol found: {s}, variable_kind: {any}, symbol_kind: {any}\n", .{ ident.name, var_kind, symbol.symbol_kind });
 
-            // Only variables have variable_kind - parameters and constants don't
+            // only variables have variable_kind - parameters and constants don't
             if (symbol.symbol_kind != .Variable) {
                 std.debug.print("[lowerIdentifierAssignment] Symbol is not a variable (kind: {any}), skipping variable_kind check\n", .{symbol.symbol_kind});
             }
             const region = std.meta.stringToEnum(lib.ast.Statements.MemoryRegion, symbol.region) orelse blk: {
-                // If parsing fails, check storage_map as fallback for storage variables
+                // if parsing fails, check storage_map as fallback for storage variables
                 if (self.storage_map) |sm| {
                     if (sm.hasStorageVariable(ident.name)) {
-                        // This is a storage variable - handle it directly
+                        // this is a storage variable - handle it directly
                         const store_op = self.memory_manager.createStorageStore(value, ident.name, loc);
                         h.appendOp(self.block, store_op);
                         return;
                     }
                 }
-                // Default to Stack if parsing fails and not in storage_map
+                // default to Stack if parsing fails and not in storage_map
                 break :blk lib.ast.Statements.MemoryRegion.Stack;
             };
 
             switch (region) {
                 .Storage => {
-                    // Storage always holds i256 values in EVM
-                    // If value is i1 (boolean), extend it to i256
+                    // storage always holds i256 values in EVM
+                    // if value is i1 (boolean), extend it to i256
                     const value_type = c.mlirValueGetType(value);
                     const actual_value = if (c.mlirTypeIsAInteger(value_type) and c.mlirIntegerTypeGetWidth(value_type) == 1) blk: {
-                        // This is i1, need to extend to i256
+                        // this is i1, need to extend to i256
                         const i256_type = c.mlirIntegerTypeGet(self.ctx, constants.DEFAULT_INTEGER_BITS);
                         var ext_state = h.opState("arith.extui", loc);
                         c.mlirOperationStateAddOperands(&ext_state, 1, @ptrCast(&value));
@@ -144,7 +144,7 @@ pub fn lowerIdentifierAssignment(self: *const StatementLowerer, ident: *const li
                     return;
                 },
                 .Memory => {
-                    // For memory variables, we need the memref address
+                    // for memory variables, we need the memref address
                     if (self.local_var_map) |lvm| {
                         if (lvm.getLocalVar(ident.name)) |memref| {
                             const store_op = self.memory_manager.createStoreOp(value, memref, region, loc);
@@ -159,17 +159,17 @@ pub fn lowerIdentifierAssignment(self: *const StatementLowerer, ident: *const li
                     return;
                 },
                 .Stack => {
-                    // For stack variables, check if we have a memref (mutable aggregate var) or direct SSA value (scalar var or let/const)
+                    // for stack variables, check if we have a memref (mutable aggregate var) or direct SSA value (scalar var or let/const)
                     if (self.local_var_map) |lvm| {
                         if (lvm.getLocalVar(ident.name)) |var_value| {
-                            // Check if this is a memref type (mutable aggregate variable)
+                            // check if this is a memref type (mutable aggregate variable)
                             const var_type = c.mlirValueGetType(var_value);
                             if (c.mlirTypeIsAMemRef(var_type)) {
-                                // It's a memref (aggregate) - ensure value type matches element type
+                                // it's a memref (aggregate) - ensure value type matches element type
                                 const element_type = c.mlirShapedTypeGetElementType(var_type);
                                 const value_type = c.mlirValueGetType(value);
                                 std.debug.print("[ASSIGN Stack] Variable: {s}, value_type != element_type: {}, value_is_ora: {}, element_is_ora: {}\n", .{ ident.name, !c.mlirTypeEqual(value_type, element_type), c.oraTypeIsIntegerType(value_type), c.oraTypeIsIntegerType(element_type) });
-                                // Always convert to ensure type compatibility
+                                // always convert to ensure type compatibility
                                 const store_value = self.expr_lowerer.convertToType(value, element_type, ident.span);
                                 const store_value_type = c.mlirValueGetType(store_value);
                                 std.debug.print("[ASSIGN Stack] After conversion: types_equal: {}, store_value_is_ora: {}, element_is_ora: {}\n", .{ c.mlirTypeEqual(store_value_type, element_type), c.oraTypeIsIntegerType(store_value_type), c.oraTypeIsIntegerType(element_type) });
@@ -177,12 +177,12 @@ pub fn lowerIdentifierAssignment(self: *const StatementLowerer, ident: *const li
                                 h.appendOp(self.block, store_op);
                                 return;
                             } else {
-                                // It's an SSA value - check if it's mutable (var) or immutable (let/const)
-                                // Use the variable_kind we stored earlier
+                                // it's an SSA value - check if it's mutable (var) or immutable (let/const)
+                                // use the variable_kind we stored earlier
                                 std.debug.print("[ASSIGN Stack] SSA value found, checking variable_kind for: {s}\n", .{ident.name});
                                 std.debug.print("[ASSIGN Stack] Symbol variable_kind: {any}, symbol_kind: {any}\n", .{ var_kind, symbol.symbol_kind });
 
-                                // Only check variable_kind for variables - parameters and constants are handled differently
+                                // only check variable_kind for variables - parameters and constants are handled differently
                                 if (symbol.symbol_kind != .Variable) {
                                     std.debug.print("[ASSIGN Stack] Symbol is not a variable (kind: {any}), cannot assign\n", .{symbol.symbol_kind});
                                     reportAssignmentError(
@@ -198,8 +198,8 @@ pub fn lowerIdentifierAssignment(self: *const StatementLowerer, ident: *const li
                                 if (var_kind) |kind| {
                                     std.debug.print("[ASSIGN Stack] Kind is: {any}\n", .{kind});
                                     if (kind == .Var) {
-                                        // Scalar mutable variable (Var) should be memref-backed
-                                        // If it's not a memref, this is a bug - scalar Var variables should always be memrefs
+                                        // scalar mutable variable (Var) should be memref-backed
+                                        // if it's not a memref, this is a bug - scalar Var variables should always be memrefs
                                         std.debug.print("ERROR: Scalar Var variable '{s}' is not memref-backed - this should not happen\n", .{ident.name});
                                         std.debug.print("  Variable should have been created as memref in lowerStackVariableDecl\n", .{});
                                         reportAssignmentError(
@@ -211,7 +211,7 @@ pub fn lowerIdentifierAssignment(self: *const StatementLowerer, ident: *const li
                                         );
                                         return LoweringError.InvalidLValue;
                                     } else {
-                                        // It's an immutable variable (let/const) - can't reassign
+                                        // it's an immutable variable (let/const) - can't reassign
                                         std.debug.print("ERROR: Cannot assign to immutable variable: {s} (kind: {any})\n", .{ ident.name, kind });
                                         reportAssignmentError(
                                             self,
@@ -224,7 +224,7 @@ pub fn lowerIdentifierAssignment(self: *const StatementLowerer, ident: *const li
                                     }
                                 } else {
                                     std.debug.print("[ASSIGN Stack] variable_kind is null for: {s}\n", .{ident.name});
-                                    // No variable_kind - assume immutable for safety
+                                    // no variable_kind - assume immutable for safety
                                     std.debug.print("ERROR: Cannot assign to immutable variable: {s} (no mutability info)\n", .{ident.name});
                                     reportAssignmentError(
                                         self,
@@ -238,7 +238,7 @@ pub fn lowerIdentifierAssignment(self: *const StatementLowerer, ident: *const li
                             }
                         }
                     }
-                    // Variable not found in map
+                    // variable not found in map
                     std.debug.print("ERROR: Variable not found for assignment: {s}\n", .{ident.name});
                     reportAssignmentError(
                         self,
@@ -253,7 +253,7 @@ pub fn lowerIdentifierAssignment(self: *const StatementLowerer, ident: *const li
         }
     }
 
-    // Fallback: check storage map
+    // fallback: check storage map
     if (self.storage_map) |sm| {
         if (sm.hasStorageVariable(ident.name)) {
             const store_op = self.memory_manager.createStorageStore(value, ident.name, loc);
@@ -262,7 +262,7 @@ pub fn lowerIdentifierAssignment(self: *const StatementLowerer, ident: *const li
         }
     }
 
-    // Fallback: check local variable map
+    // fallback: check local variable map
     if (self.local_var_map) |lvm| {
         if (lvm.hasLocalVar(ident.name)) {
             lvm.addLocalVar(ident.name, value) catch {
@@ -277,22 +277,22 @@ pub fn lowerIdentifierAssignment(self: *const StatementLowerer, ident: *const li
 
 /// Lower field access assignments (struct.field = value)
 pub fn lowerFieldAccessAssignment(self: *const StatementLowerer, field_access: *const lib.ast.Expressions.FieldAccessExpr, value: c.MlirValue, loc: c.MlirLocation) LoweringError!void {
-    // Lower the target expression to get the struct
+    // lower the target expression to get the struct
     var target = self.expr_lowerer.lowerExpression(field_access.target);
     var target_type = c.mlirValueGetType(target);
 
-    // If the target is a local variable, ensure we have the correct struct type
-    // The target should be a struct SSA value, not i256 or address
+    // if the target is a local variable, ensure we have the correct struct type
+    // the target should be a struct SSA value, not i256 or address
     if (field_access.target.* == .Identifier) {
         const ident = field_access.target.Identifier;
 
-        // Check if we have type info that says this should be a struct
+        // check if we have type info that says this should be a struct
         if (ident.type_info.ora_type) |ora_type| {
             if (ora_type == .struct_type) {
                 const expected_struct_type = self.expr_lowerer.type_mapper.toMlirType(ident.type_info);
                 const actual_type = c.mlirValueGetType(target);
 
-                // Check if the actual type is an address (this is wrong - we need a struct)
+                // check if the actual type is an address (this is wrong - we need a struct)
                     if (c.oraTypeIsAddressType(actual_type)) {
                         std.debug.print("ERROR: Variable '{s}' is address type but should be struct type for field access\n", .{ident.name});
                         std.debug.print("  This likely means a map load returned !ora.address instead of the struct type\n", .{});
@@ -307,16 +307,16 @@ pub fn lowerFieldAccessAssignment(self: *const StatementLowerer, field_access: *
                         return LoweringError.TypeMismatch;
                     }
 
-                // If the actual type doesn't match the expected struct type, we have a problem
-                // This can happen if map loads return i256 instead of struct types
+                // if the actual type doesn't match the expected struct type, we have a problem
+                // this can happen if map loads return i256 instead of struct types
                 if (!c.mlirTypeEqual(actual_type, expected_struct_type)) {
                     std.debug.print("ERROR: Variable '{s}' should be struct type but got: {any}\n", .{ ident.name, actual_type });
                     std.debug.print("  Expected struct type: {any}\n", .{expected_struct_type});
                     std.debug.print("  This likely means a map load returned wrong type instead of the struct type\n", .{});
 
-                    // Try to convert the value to the correct struct type
-                    // But this won't work if it's actually i256 - we need to fix the map load
-                    // For now, error out with a clear message
+                    // try to convert the value to the correct struct type
+                    // but this won't work if it's actually i256 - we need to fix the map load
+                    // for now, error out with a clear message
                     reportAssignmentError(
                         self,
                         field_access.span,
@@ -329,12 +329,12 @@ pub fn lowerFieldAccessAssignment(self: *const StatementLowerer, field_access: *
             }
         }
 
-        // If the target is stored as memref (shouldn't happen for structs now, but check anyway)
+        // if the target is stored as memref (shouldn't happen for structs now, but check anyway)
         if (self.local_var_map) |var_map| {
             if (var_map.getLocalVar(ident.name)) |var_value| {
                 const var_type = c.mlirValueGetType(var_value);
                 if (c.mlirTypeIsAMemRef(var_type)) {
-                    // Load the struct from memref
+                    // load the struct from memref
                     const element_type = c.mlirShapedTypeGetElementType(var_type);
                     var load_state = h.opState("memref.load", loc);
                     c.mlirOperationStateAddOperands(&load_state, 1, @ptrCast(&var_value));
@@ -347,7 +347,7 @@ pub fn lowerFieldAccessAssignment(self: *const StatementLowerer, field_access: *
             }
         }
     } else {
-        // For non-identifier targets (e.g., nested field access or map loads),
+        // for non-identifier targets (e.g., nested field access or map loads),
         // check if the target is an address type and error if so
         const actual_type = c.mlirValueGetType(target);
         if (c.oraTypeIsAddressType(actual_type)) {
@@ -364,11 +364,11 @@ pub fn lowerFieldAccessAssignment(self: *const StatementLowerer, field_access: *
         }
     }
 
-    // Look up actual field index from struct definition in symbol table
+    // look up actual field index from struct definition in symbol table
     var field_idx: i64 = 0;
     var struct_name: ?[]const u8 = null;
     if (self.symbol_table) |st| {
-        // Iterate through all struct types to find matching field
+        // iterate through all struct types to find matching field
         var type_iter = st.types.iterator();
         while (type_iter.next()) |entry| {
             const type_symbols = entry.value_ptr.*;
@@ -388,36 +388,36 @@ pub fn lowerFieldAccessAssignment(self: *const StatementLowerer, field_access: *
         }
     }
 
-    // Use ora.struct_field_update (pure operation, works with !ora.struct types)
-    // Result type is automatically inferred from input struct type (SameOperandsAndResultType trait)
+    // use ora.struct_field_update (pure operation, works with !ora.struct types)
+    // result type is automatically inferred from input struct type (SameOperandsAndResultType trait)
     const update_op = self.ora_dialect.createStructFieldUpdate(target, field_access.field, value, loc);
     h.appendOp(self.block, update_op);
     const updated_struct = h.getResult(update_op, 0);
 
-    // For structs, we always use SSA values (not memrefs)
-    // Rebind the symbol to the new struct value
+    // for structs, we always use SSA values (not memrefs)
+    // rebind the symbol to the new struct value
     if (field_access.target.* == .Identifier) {
         const ident = field_access.target.Identifier;
         if (self.local_var_map) |var_map| {
-            // Rebind the local variable to the updated struct value
+            // rebind the local variable to the updated struct value
             // addLocalVar will overwrite if the variable already exists
             var_map.addLocalVar(ident.name, updated_struct) catch {
                 std.debug.print("WARNING: Failed to update local variable after field assignment: {s}\n", .{ident.name});
             };
         }
-        // Also update symbol table
+        // also update symbol table
         if (self.symbol_table) |st| {
             st.updateSymbolValue(ident.name, updated_struct) catch {
                 std.debug.print("WARNING: Failed to update symbol table after field assignment: {s}\n", .{ident.name});
             };
         }
     } else {
-        // For complex field access (e.g., nested structs: user.address.street = value)
-        // We need to handle this by updating the nested struct, then updating the parent
-        // For now, this is a limitation - complex nested field updates need more work
-        // But we should NOT use struct_field_store for locals (canonical SSA style)
+        // for complex field access (e.g., nested structs: user.address.street = value)
+        // we need to handle this by updating the nested struct, then updating the parent
+        // for now, this is a limitation - complex nested field updates need more work
+        // but we should NOT use struct_field_store for locals (canonical SSA style)
         std.debug.print("WARNING: Complex field access assignment not fully supported for SSA structs: {s}\n", .{field_access.field});
-        // TODO: Handle nested field updates properly:
+        // todo: Handle nested field updates properly:
         // 1. Extract nested struct from parent
         // 2. Update nested struct field
         // 3. Update parent struct with new nested struct
@@ -427,23 +427,23 @@ pub fn lowerFieldAccessAssignment(self: *const StatementLowerer, field_access: *
 
 /// Lower array/map index assignments (arr[index] = value)
 pub fn lowerIndexAssignment(self: *const StatementLowerer, index_expr: *const lib.ast.Expressions.IndexExpr, value: c.MlirValue, loc: c.MlirLocation) LoweringError!void {
-    // Lower the target expression to get the array/map
+    // lower the target expression to get the array/map
     const target = self.expr_lowerer.lowerExpression(index_expr.target);
     const index_val = self.expr_lowerer.lowerExpression(index_expr.index);
     const target_type = c.mlirValueGetType(target);
 
-    // Determine the type of indexing operation
+    // determine the type of indexing operation
     if (c.mlirTypeIsAMemRef(target_type)) {
-        // Array indexing using memref.store
-        // Convert index to index type for memref operations
+        // array indexing using memref.store
+        // convert index to index type for memref operations
         const index_index = self.expr_lowerer.convertIndexToIndexType(index_val, index_expr.span);
         var store_state = h.opState("memref.store", loc);
         c.mlirOperationStateAddOperands(&store_state, 3, @ptrCast(&[_]c.MlirValue{ value, target, index_index }));
         const store_op = c.mlirOperationCreate(&store_state);
         h.appendOp(self.block, store_op);
     } else {
-        // Map indexing or other complex indexing operations
-        // Use ora.map_store directly (registered operation)
+        // map indexing or other complex indexing operations
+        // use ora.map_store directly (registered operation)
         const map_store_op = self.ora_dialect.createMapStore(target, index_val, value, loc);
         h.appendOp(self.block, map_store_op);
     }
@@ -453,10 +453,10 @@ pub fn lowerIndexAssignment(self: *const StatementLowerer, index_expr: *const li
 pub fn lowerDestructuringAssignment(self: *const StatementLowerer, assignment: *const lib.ast.Statements.DestructuringAssignmentNode) LoweringError!void {
     const loc = self.fileLoc(assignment.span);
 
-    // Lower the value expression to destructure
+    // lower the value expression to destructure
     const value = self.expr_lowerer.lowerExpression(assignment.value);
 
-    // Handle different destructuring patterns
+    // handle different destructuring patterns
     try lowerDestructuringPattern(self, assignment.pattern, value, loc);
 }
 
@@ -464,16 +464,16 @@ pub fn lowerDestructuringAssignment(self: *const StatementLowerer, assignment: *
 pub fn lowerDestructuringPattern(self: *const StatementLowerer, pattern: lib.ast.Expressions.DestructuringPattern, value: c.MlirValue, loc: c.MlirLocation) LoweringError!void {
     switch (pattern) {
         .Struct => |fields| {
-            // Extract each field from the struct value
+            // extract each field from the struct value
             for (fields, 0..) |field, i| {
-                // Create llvm.extractvalue operation for each field
+                // create llvm.extractvalue operation for each field
                 const result_ty = c.mlirIntegerTypeGet(self.ctx, constants.DEFAULT_INTEGER_BITS);
                 const indices = [_]u32{@intCast(i)};
                 const extract_op = self.ora_dialect.createLlvmExtractvalue(value, &indices, result_ty, loc);
                 h.appendOp(self.block, extract_op);
                 const field_value = h.getResult(extract_op, 0);
 
-                // Assign the extracted value to the field variable
+                // assign the extracted value to the field variable
                 if (self.local_var_map) |lvm| {
                     lvm.addLocalVar(field.name, field_value) catch {
                         std.debug.print("ERROR: Failed to add destructured field to map: {s}\n", .{field.name});
@@ -481,7 +481,7 @@ pub fn lowerDestructuringPattern(self: *const StatementLowerer, pattern: lib.ast
                     };
                 }
 
-                // Update symbol table
+                // update symbol table
                 if (self.symbol_table) |st| {
                     st.updateSymbolValue(field.name, field_value) catch {
                         std.debug.print("WARNING: Failed to update symbol for destructured field: {s}\n", .{field.name});
@@ -490,16 +490,16 @@ pub fn lowerDestructuringPattern(self: *const StatementLowerer, pattern: lib.ast
             }
         },
         .Tuple => |elements| {
-            // Similar to struct destructuring but for tuple elements
+            // similar to struct destructuring but for tuple elements
             for (elements, 0..) |element_name, i| {
-                // Create llvm.extractvalue operation for each tuple element
+                // create llvm.extractvalue operation for each tuple element
                 const result_ty = c.mlirIntegerTypeGet(self.ctx, constants.DEFAULT_INTEGER_BITS);
                 const indices = [_]u32{@intCast(i)};
                 const extract_op = self.ora_dialect.createLlvmExtractvalue(value, &indices, result_ty, loc);
                 h.appendOp(self.block, extract_op);
                 const element_value = h.getResult(extract_op, 0);
 
-                // Assign the extracted value to the element variable
+                // assign the extracted value to the element variable
                 if (self.local_var_map) |lvm| {
                     lvm.addLocalVar(element_name, element_value) catch {
                         std.debug.print("ERROR: Failed to add destructured element to map: {s}\n", .{element_name});
@@ -507,7 +507,7 @@ pub fn lowerDestructuringPattern(self: *const StatementLowerer, pattern: lib.ast
                     };
                 }
 
-                // Update symbol table
+                // update symbol table
                 if (self.symbol_table) |st| {
                     st.updateSymbolValue(element_name, element_value) catch {
                         std.debug.print("WARNING: Failed to update symbol for destructured element: {s}\n", .{element_name});
@@ -516,10 +516,10 @@ pub fn lowerDestructuringPattern(self: *const StatementLowerer, pattern: lib.ast
             }
         },
         .Array => |elements| {
-            // Extract each element from the array value
+            // extract each element from the array value
             for (elements, 0..) |element_name, i| {
-                // Create memref.load operation for each array element
-                // First, create index constant
+                // create memref.load operation for each array element
+                // first, create index constant
                 const index_ty = c.mlirIntegerTypeGet(self.ctx, constants.DEFAULT_INTEGER_BITS);
                 var index_state = h.opState("arith.constant", loc);
                 c.mlirOperationStateAddResults(&index_state, 1, @ptrCast(&index_ty));
@@ -531,12 +531,12 @@ pub fn lowerDestructuringPattern(self: *const StatementLowerer, pattern: lib.ast
                 h.appendOp(self.block, index_op);
                 const index_value = h.getResult(index_op, 0);
 
-                // Create memref.load operation
+                // create memref.load operation
                 var load_state = h.opState("memref.load", loc);
                 const operands = [_]c.MlirValue{ value, index_value };
                 c.mlirOperationStateAddOperands(&load_state, operands.len, &operands);
 
-                // Add result type
+                // add result type
                 const result_ty = c.mlirIntegerTypeGet(self.ctx, constants.DEFAULT_INTEGER_BITS);
                 c.mlirOperationStateAddResults(&load_state, 1, @ptrCast(&result_ty));
 
@@ -544,7 +544,7 @@ pub fn lowerDestructuringPattern(self: *const StatementLowerer, pattern: lib.ast
                 h.appendOp(self.block, load_op);
                 const element_value = h.getResult(load_op, 0);
 
-                // Assign the extracted value to the element variable
+                // assign the extracted value to the element variable
                 if (self.local_var_map) |lvm| {
                     lvm.addLocalVar(element_name, element_value) catch {
                         std.debug.print("ERROR: Failed to add destructured element to map: {s}\n", .{element_name});
@@ -552,7 +552,7 @@ pub fn lowerDestructuringPattern(self: *const StatementLowerer, pattern: lib.ast
                     };
                 }
 
-                // Update symbol table
+                // update symbol table
                 if (self.symbol_table) |st| {
                     st.updateSymbolValue(element_name, element_value) catch {
                         std.debug.print("WARNING: Failed to update symbol for destructured element: {s}\n", .{element_name});
@@ -565,35 +565,35 @@ pub fn lowerDestructuringPattern(self: *const StatementLowerer, pattern: lib.ast
 
 /// Lower expression-level compound assignment expressions
 pub fn lowerCompoundAssignmentExpr(self: *const StatementLowerer, assignment: *const lib.ast.Expressions.CompoundAssignmentExpr) LoweringError!void {
-    // Compound assignments delegated to expression lowering
-    // Expression-level handling managed by binary operation lowering
+    // compound assignments delegated to expression lowering
+    // expression-level handling managed by binary operation lowering
     _ = self;
     _ = assignment;
 }
 
 /// Lower compound assignment statements
 pub fn lowerCompoundAssignment(self: *const StatementLowerer, assignment: *const lib.ast.Statements.CompoundAssignmentNode) LoweringError!void {
-    // Compound assignment to storage variables
-    // Complex target expressions (field access, indices) handled by lowerAssignableExpression
+    // compound assignment to storage variables
+    // complex target expressions (field access, indices) handled by lowerAssignableExpression
     if (assignment.target.* == .Identifier) {
         const ident = assignment.target.Identifier;
 
         if (self.storage_map) |sm| {
             _ = sm; // Use the variable to avoid warning
 
-            // Define result type for arithmetic operations
+            // define result type for arithmetic operations
             const result_ty = c.mlirIntegerTypeGet(self.ctx, constants.DEFAULT_INTEGER_BITS);
 
-            // Load current value from storage using ora.sload
+            // load current value from storage using ora.sload
             const memory_manager = MemoryManager.init(self.ctx, self.ora_dialect);
             const load_op = memory_manager.createStorageLoad(ident.name, result_ty, self.fileLoc(ident.span));
             h.appendOp(self.block, load_op);
             const current_value = h.getResult(load_op, 0);
 
-            // Lower the right-hand side expression
+            // lower the right-hand side expression
             const rhs_value = self.expr_lowerer.lowerExpression(assignment.value);
 
-            // Perform the compound operation
+            // perform the compound operation
             var new_value: c.MlirValue = undefined;
             switch (assignment.operator) {
                 .PlusEqual => {
@@ -628,17 +628,17 @@ pub fn lowerCompoundAssignment(self: *const StatementLowerer, assignment: *const
                 },
             }
 
-            // Store the result back to storage using ora.sstore
+            // store the result back to storage using ora.sstore
             const store_op = memory_manager.createStorageStore(new_value, ident.name, self.fileLoc(ident.span));
             h.appendOp(self.block, store_op);
         } else {
-            // No storage map - fall back to placeholder
+            // no storage map - fall back to placeholder
             var state = h.opState("ora.compound_assign", self.fileLoc(ident.span));
             const op = c.mlirOperationCreate(&state);
             h.appendOp(self.block, op);
         }
     } else {
-        // For now, skip non-identifier compound assignments
+        // for now, skip non-identifier compound assignments
     }
 }
 
@@ -670,7 +670,7 @@ fn getExpressionSpan(expr: *const lib.ast.Expressions.ExprNode) lib.ast.SourceSp
         .Old => |old| return old.span,
         .Tuple => |tuple| return tuple.span,
         else => {
-            // Default span for unknown expressions
+            // default span for unknown expressions
             return lib.ast.SourceSpan{ .line = 0, .column = 0, .length = 0 };
         },
     }

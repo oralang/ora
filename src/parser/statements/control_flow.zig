@@ -25,7 +25,7 @@ const StatementParser = @import("../statement_parser.zig").StatementParser;
 pub fn parseIfStatement(parser: *StatementParser) common.ParserError!ast.Statements.StmtNode {
     _ = try parser.base.consume(.LeftParen, "Expected '(' after 'if'");
 
-    // Use expression parser for condition
+    // use expression parser for condition
     parser.syncSubParsers();
     const condition = try parser.expr_parser.parseExpression();
     parser.updateFromSubParser(parser.expr_parser.base.current);
@@ -36,13 +36,13 @@ pub fn parseIfStatement(parser: *StatementParser) common.ParserError!ast.Stateme
 
     var else_branch: ?ast.Statements.BlockNode = null;
     if (parser.base.match(.Else)) {
-        // Check for "else if" syntax
+        // check for "else if" syntax
         if (parser.base.match(.If)) {
-            // Parse "else if (condition) { ... }" as a nested if statement
-            // We'll wrap it in a block with a single if statement
+            // parse "else if (condition) { ... }" as a nested if statement
+            // we'll wrap it in a block with a single if statement
             const nested_if = try parseIfStatement(parser);
 
-            // Create a block containing just this nested if statement
+            // create a block containing just this nested if statement
             var stmts = try parser.base.arena.createSlice(ast.Statements.StmtNode, 1);
             stmts[0] = nested_if;
             else_branch = ast.Statements.BlockNode{
@@ -50,7 +50,7 @@ pub fn parseIfStatement(parser: *StatementParser) common.ParserError!ast.Stateme
                 .span = parser.base.spanFromToken(parser.base.previous()),
             };
         } else {
-            // Regular else block
+            // regular else block
             else_branch = try parser.parseBlock();
         }
     }
@@ -67,14 +67,14 @@ pub fn parseIfStatement(parser: *StatementParser) common.ParserError!ast.Stateme
 pub fn parseWhileStatement(parser: *StatementParser) common.ParserError!ast.Statements.StmtNode {
     _ = try parser.base.consume(.LeftParen, "Expected '(' after 'while'");
 
-    // Use expression parser for condition
+    // use expression parser for condition
     parser.syncSubParsers();
     const condition = try parser.expr_parser.parseExpression();
     parser.updateFromSubParser(parser.expr_parser.base.current);
 
     _ = try parser.base.consume(.RightParen, "Expected ')' after while condition");
 
-    // Parse optional loop invariants: invariant(expr) invariant(expr) ...
+    // parse optional loop invariants: invariant(expr) invariant(expr) ...
     var invariants = std.ArrayList(ast.Expressions.ExprNode){};
     defer invariants.deinit(parser.base.arena.allocator());
 
@@ -87,7 +87,7 @@ pub fn parseWhileStatement(parser: *StatementParser) common.ParserError!ast.Stat
         try invariants.append(parser.base.arena.allocator(), inv_expr);
     }
 
-    // Parse optional decreases clause
+    // parse optional decreases clause
     var decreases_expr: ?*ast.Expressions.ExprNode = null;
     if (parser.base.match(.Decreases)) {
         _ = try parser.base.consume(.LeftParen, "Expected '(' after 'decreases'");
@@ -100,7 +100,7 @@ pub fn parseWhileStatement(parser: *StatementParser) common.ParserError!ast.Stat
         decreases_expr = dec_ptr;
     }
 
-    // Parse optional increases clause
+    // parse optional increases clause
     var increases_expr: ?*ast.Expressions.ExprNode = null;
     if (parser.base.match(.Increases)) {
         _ = try parser.base.consume(.LeftParen, "Expected '(' after 'increases'");
@@ -132,7 +132,7 @@ pub fn parseForStatement(parser: *StatementParser) common.ParserError!ast.Statem
 
     _ = try parser.base.consume(.LeftParen, "Expected '(' after 'for'");
 
-    // Use expression parser for iterable
+    // use expression parser for iterable
     parser.syncSubParsers();
     const iterable = try parser.expr_parser.parseExpression();
     parser.updateFromSubParser(parser.expr_parser.base.current);
@@ -151,7 +151,7 @@ pub fn parseForStatement(parser: *StatementParser) common.ParserError!ast.Statem
 
     _ = try parser.base.consume(.Pipe, "Expected '|' after loop variables");
 
-    // Parse optional loop invariants: invariant(expr) invariant(expr) ...
+    // parse optional loop invariants: invariant(expr) invariant(expr) ...
     var invariants = std.ArrayList(ast.Expressions.ExprNode){};
     defer invariants.deinit(parser.base.arena.allocator());
 
@@ -164,7 +164,7 @@ pub fn parseForStatement(parser: *StatementParser) common.ParserError!ast.Statem
         try invariants.append(parser.base.arena.allocator(), inv_expr);
     }
 
-    // Parse optional decreases clause
+    // parse optional decreases clause
     var decreases_expr: ?*ast.Expressions.ExprNode = null;
     if (parser.base.match(.Decreases)) {
         _ = try parser.base.consume(.LeftParen, "Expected '(' after 'decreases'");
@@ -177,7 +177,7 @@ pub fn parseForStatement(parser: *StatementParser) common.ParserError!ast.Statem
         decreases_expr = dec_ptr;
     }
 
-    // Parse optional increases clause
+    // parse optional increases clause
     var increases_expr: ?*ast.Expressions.ExprNode = null;
     if (parser.base.match(.Increases)) {
         _ = try parser.base.consume(.LeftParen, "Expected '(' after 'increases'");
@@ -213,10 +213,10 @@ pub fn parseForStatement(parser: *StatementParser) common.ParserError!ast.Statem
 pub fn parseSwitchStatement(parser: *StatementParser) common.ParserError!ast.Statements.StmtNode {
     const switch_token = parser.base.previous();
 
-    // Parse required switch condition: switch (expr)
+    // parse required switch condition: switch (expr)
     _ = try parser.base.consume(.LeftParen, "Expected '(' after 'switch'");
 
-    // Use expression parser for condition
+    // use expression parser for condition
     parser.syncSubParsers();
     const condition = try parser.expr_parser.parseExpression();
     parser.updateFromSubParser(parser.expr_parser.base.current);
@@ -230,13 +230,13 @@ pub fn parseSwitchStatement(parser: *StatementParser) common.ParserError!ast.Sta
 
     var default_case: ?ast.Statements.BlockNode = null;
 
-    // Parse switch arms
+    // parse switch arms
     while (!parser.base.check(.RightBrace) and !parser.base.isAtEnd()) {
         if (parser.base.match(.Else)) {
-            // Parse else clause
+            // parse else clause
             _ = try parser.base.consume(.Arrow, "Expected '=>' after 'else'");
 
-            // Handle labeled block: Identifier ':' '{' ... '}'
+            // handle labeled block: Identifier ':' '{' ... '}'
             if (parser.base.check(.Identifier)) {
                 const cur = parser.base.current;
                 if (cur + 2 < parser.base.tokens.len and
@@ -251,14 +251,14 @@ pub fn parseSwitchStatement(parser: *StatementParser) common.ParserError!ast.Sta
                 }
             }
 
-            // Handle plain block body
+            // handle plain block body
             if (parser.base.check(.LeftBrace)) {
                 const block = try parser.parseBlock();
                 default_case = block;
                 break;
             }
 
-            // Fallback: parse as expression arm and wrap into a block
+            // fallback: parse as expression arm and wrap into a block
             const else_body = try common_parsers.parseSwitchBody(&parser.base, &parser.expr_parser, .StatementArm);
             switch (else_body) {
                 .Block => |block| {
@@ -279,13 +279,13 @@ pub fn parseSwitchStatement(parser: *StatementParser) common.ParserError!ast.Sta
             break;
         }
 
-        // Parse switch pattern using common parser
+        // parse switch pattern using common parser
         const pattern = try common_parsers.parseSwitchPattern(&parser.base, &parser.expr_parser);
         _ = try parser.base.consume(.Arrow, "Expected '=>' after switch pattern");
 
-        // Parse switch body: handle labeled blocks, plain blocks, or expression arms
+        // parse switch body: handle labeled blocks, plain blocks, or expression arms
         const body = blk: {
-            // Labeled block detection: Identifier ':' '{'
+            // labeled block detection: Identifier ':' '{'
             if (parser.base.check(.Identifier)) {
                 const cur = parser.base.current;
                 if (cur + 2 < parser.base.tokens.len and
@@ -306,7 +306,7 @@ pub fn parseSwitchStatement(parser: *StatementParser) common.ParserError!ast.Sta
                 const block = try parser.parseBlock();
                 break :blk ast.Switch.Body{ .Block = block };
             }
-            // Otherwise parse as an expression arm requiring ';'
+            // otherwise parse as an expression arm requiring ';'
             const b = try common_parsers.parseSwitchBody(&parser.base, &parser.expr_parser, .StatementArm);
             break :blk b;
         };
@@ -319,7 +319,7 @@ pub fn parseSwitchStatement(parser: *StatementParser) common.ParserError!ast.Sta
 
         try cases.append(parser.base.arena.allocator(), case);
 
-        // Optional comma between cases
+        // optional comma between cases
         _ = parser.base.match(.Comma);
     }
 
@@ -339,15 +339,15 @@ pub fn parseBreakStatement(parser: *StatementParser) common.ParserError!ast.Stat
     var label: ?[]const u8 = null;
     var value: ?*ast.Expressions.ExprNode = null;
 
-    // Check for labeled break (break :label)
+    // check for labeled break (break :label)
     if (parser.base.match(.Colon)) {
         const label_token = try parser.base.consume(.Identifier, "Expected label after ':' in break statement");
         label = try parser.base.arena.createString(label_token.lexeme);
     }
 
-    // Check for break with value (break value or break :label value)
+    // check for break with value (break value or break :label value)
     if (!parser.base.check(.Semicolon) and !parser.base.isAtEnd()) {
-        // Use expression parser for break value
+        // use expression parser for break value
         parser.syncSubParsers();
         const expr = try parser.expr_parser.parseExpression();
         parser.updateFromSubParser(parser.expr_parser.base.current);
@@ -368,17 +368,17 @@ pub fn parseBreakStatement(parser: *StatementParser) common.ParserError!ast.Stat
 /// Parse continue statement
 pub fn parseContinueStatement(parser: *StatementParser) common.ParserError!ast.Statements.StmtNode {
     const continue_token = parser.base.previous();
-    // Syntax: continue [:label] [value]? ;
-    // If labeled, optional replacement operand expression (value) is allowed.
+    // syntax: continue [:label] [value]? ;
+    // if labeled, optional replacement operand expression (value) is allowed.
 
-    // Optional label
+    // optional label
     var label: ?[]const u8 = null;
     if (parser.base.match(.Colon)) {
         const label_token = try parser.base.consume(.Identifier, "Expected label name after ':'");
         label = try parser.base.arena.createString(label_token.lexeme);
     }
 
-    // Optional value expression before semicolon
+    // optional value expression before semicolon
     var value: ?*ast.Expressions.ExprNode = null;
     if (!parser.base.check(.Semicolon) and !parser.base.check(.RightBrace)) {
         parser.syncSubParsers();
@@ -406,7 +406,7 @@ pub fn parseTryStatement(parser: *StatementParser) common.ParserError!ast.Statem
     if (parser.base.match(.Catch)) {
         var error_variable: ?[]const u8 = null;
 
-        // Optional catch variable: catch(e) { ... }
+        // optional catch variable: catch(e) { ... }
         if (parser.base.match(.LeftParen)) {
             const var_token = try parser.base.consumeIdentifierOrKeyword("Expected variable name in catch");
             error_variable = try parser.base.arena.createString(var_token.lexeme);

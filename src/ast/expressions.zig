@@ -1,3 +1,11 @@
+// ============================================================================
+// AST Expressions
+// ============================================================================
+//
+// expression node definitions for the Ora AST.
+//
+// ============================================================================
+
 const std = @import("std");
 const SourceSpan = @import("source_span.zig").SourceSpan;
 const TypeInfo = @import("type_info.zig").TypeInfo;
@@ -8,7 +16,7 @@ const verification = @import("verification.zig");
 
 /// Binary and unary operators
 pub const BinaryOp = enum {
-    // Arithmetic
+    // arithmetic
     Plus,
     Minus,
     Star,
@@ -16,7 +24,7 @@ pub const BinaryOp = enum {
     Percent,
     StarStar, // **
 
-    // Comparison
+    // comparison
     EqualEqual,
     BangEqual,
     Less,
@@ -24,18 +32,18 @@ pub const BinaryOp = enum {
     Greater,
     GreaterEqual,
 
-    // Logical
+    // logical
     And, // &&
     Or, // ||
 
-    // Bitwise
+    // bitwise
     BitwiseAnd, // &
     BitwiseOr, // |
     BitwiseXor, // ^
     LeftShift, // <<
     RightShift, // >>
 
-    // Comma operator
+    // comma operator
     Comma, // ,
 };
 
@@ -113,33 +121,33 @@ pub const ExprNode = union(enum) {
     Tuple: TupleExpr, // tuple expressions (a, b, c)
     SwitchExpression: SwitchExprNode, // switch expressions (switch (x) { case y: ... default: ... })
 
-    // Error handling expressions
+    // error handling expressions
     Try: TryExpr, // try expression
     ErrorReturn: ErrorReturnExpr, // error.SomeError
     ErrorCast: ErrorCastExpr, // value as !T (value as !T)
 
-    // Shift operations
+    // shift operations
     Shift: ShiftExpr, // mapping from source -> dest : amount
 
-    // Struct instantiation
+    // struct instantiation
     StructInstantiation: StructInstantiationExpr, // StructName { field1: value1, field2: value2 }
 
-    // Anonymous struct literals
+    // anonymous struct literals
     AnonymousStruct: AnonymousStructExpr, // .{ field1: value1, field2: value2 }
 
-    // Range expressions
+    // range expressions
     Range: RangeExpr, // 1...1000 or 0..periods
 
-    // Labeled block expressions
+    // labeled block expressions
     LabeledBlock: LabeledBlockExpr, // label: { ... break :label value; }
 
-    // Destructuring expressions
+    // destructuring expressions
     Destructuring: DestructuringExpr, // let .{ balance, locked_until } = account
 
-    // Enum literal expressions
+    // enum literal expressions
     EnumLiteral: EnumLiteralExpr, // EnumName.VariantName
 
-    // Array literal expressions
+    // array literal expressions
     ArrayLiteral: ArrayLiteralExpr, // [1, 2, 3] or []
 
     /// Check if this expression is specification-only (not compiled to bytecode)
@@ -257,21 +265,21 @@ pub const LiteralExpr = union(enum) {
 };
 
 pub const IntegerType = enum {
-    // Unsigned integer types
+    // unsigned integer types
     U8,
     U16,
     U32,
     U64,
     U128,
     U256,
-    // Signed integer types
+    // signed integer types
     I8,
     I16,
     I32,
     I64,
     I128,
     I256,
-    // Used when type is not yet determined
+    // used when type is not yet determined
     Unknown,
 };
 
@@ -280,16 +288,16 @@ pub const IntegerLiteral = struct {
     type_info: TypeInfo, // Unified type information
     span: SourceSpan,
 
-    // Check if the value fits within the specified type
+    // check if the value fits within the specified type
     pub fn checkRange(self: *const IntegerLiteral) bool {
         const ora_type = self.type_info.ora_type orelse return true; // Cannot check range for unknown type
 
-        // For the parsing context, we don't expect standalone negative literals here
+        // for the parsing context, we don't expect standalone negative literals here
         // as they would be parsed as unary minus operations in the AST.
-        // This function is for checking if a value fits within a type's range.
+        // this function is for checking if a value fits within a type's range.
         if (std.fmt.parseInt(u256, self.value, 0)) |val| {
             return switch (ora_type) {
-                // Unsigned types - just check upper bound
+                // unsigned types - just check upper bound
                 .u8 => val <= std.math.maxInt(u8),
                 .u16 => val <= std.math.maxInt(u16),
                 .u32 => val <= std.math.maxInt(u32),
@@ -297,7 +305,7 @@ pub const IntegerLiteral = struct {
                 .u128 => val <= std.math.maxInt(u128),
                 .u256 => true, // All values fit in u256
 
-                // Signed types - check if value fits within positive range
+                // signed types - check if value fits within positive range
                 .i8 => val <= @as(u256, @intCast(std.math.maxInt(i8))),
                 .i16 => val <= @as(u256, @intCast(std.math.maxInt(i16))),
                 .i32 => val <= @as(u256, @intCast(std.math.maxInt(i32))),
@@ -307,11 +315,11 @@ pub const IntegerLiteral = struct {
                 else => false, // Non-integer types
             };
         } else |_| {
-            // Could not parse as an unsigned integer
-            // This could be due to:
+            // could not parse as an unsigned integer
+            // this could be due to:
             // 1. Malformed number
             // 2. Out of range for u256
-            // In either case, we should consider it an error for our purposes
+            // in either case, we should consider it an error for our purposes
             return false;
         }
     }
@@ -520,10 +528,10 @@ pub fn createIdentifier(allocator: std.mem.Allocator, name: []const u8, span: So
 
 /// Create an identifier expression with explicit arena allocation
 pub fn createIdentifierInArena(arena: *AstArena, name: []const u8, span: SourceSpan) !*ExprNode {
-    // Ensure the name is in the arena
+    // ensure the name is in the arena
     const name_copy = try arena.createString(name);
 
-    // Create the node in the arena
+    // create the node in the arena
     const node = try arena.createNode(ExprNode);
     node.* = ExprNode{ .Identifier = IdentifierExpr{
         .name = name_copy,
@@ -547,7 +555,7 @@ pub fn createBinaryExpr(allocator: std.mem.Allocator, lhs: *ExprNode, op: Binary
 
 /// Create a binary expression with explicit arena allocation
 pub fn createBinaryExprInArena(arena: *AstArena, lhs: *ExprNode, op: BinaryOp, rhs: *ExprNode, span: SourceSpan) !*ExprNode {
-    // Create the node in the arena
+    // create the node in the arena
     const node = try arena.createNode(ExprNode);
     node.* = ExprNode{ .Binary = BinaryExpr{
         .lhs = lhs,
@@ -700,11 +708,11 @@ pub fn isValidLValue(expr: *const ExprNode) bool {
     return switch (expr.*) {
         .Identifier => true, // Simple identifier (x)
         .FieldAccess => |field_access| {
-            // Field access (x.y) - target must also be valid L-value
+            // field access (x.y) - target must also be valid L-value
             return isValidLValue(field_access.target);
         },
         .Index => |index_expr| {
-            // Array/map indexing (x[y]) - target must be valid L-value
+            // array/map indexing (x[y]) - target must be valid L-value
             return isValidLValue(index_expr.target);
         },
         else => false, // All other expressions are not valid L-values
@@ -800,7 +808,7 @@ pub fn deinitExprNode(allocator: std.mem.Allocator, expr: *ExprNode) void {
         },
         .SwitchExpression => |*sw| {
             deinitExprNode(allocator, sw.condition);
-            // Deinit patterns and bodies per case
+            // deinit patterns and bodies per case
             for (sw.cases) |*case| {
                 switch (case.pattern) {
                     .Literal => {},

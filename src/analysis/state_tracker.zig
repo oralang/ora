@@ -69,19 +69,19 @@ pub const StateWarning = struct {
 pub const FunctionStateAnalysis = struct {
     function_name: []const u8,
 
-    // Storage tracking
+    // storage tracking
     storage_accesses: std.StringHashMap(AccessInfo),
 
-    // Computed properties
+    // computed properties
     is_stateless: bool, // No storage/memory access (pure computation)
     is_readonly: bool, // Only reads, no writes
     modifies_state: bool, // Has storage writes
 
-    // Quick lookup sets (using StringArrayHashMap with void values as a set)
+    // quick lookup sets (using StringArrayHashMap with void values as a set)
     reads_set: std.StringArrayHashMap(void),
     writes_set: std.StringArrayHashMap(void),
 
-    // Memory
+    // memory
     allocator: std.mem.Allocator,
 
     pub fn init(allocator: std.mem.Allocator, function_name: []const u8) FunctionStateAnalysis {
@@ -110,14 +110,14 @@ pub const FunctionStateAnalysis = struct {
         try self.reads_set.put(var_name, {});
 
         if (self.storage_accesses.getPtr(var_name)) |existing| {
-            // Update existing (getPtr gives us a mutable pointer)
+            // update existing (getPtr gives us a mutable pointer)
             existing.read_count += 1;
             existing.last_access_span = span;
             if (existing.access_type == .Write) {
                 existing.access_type = .ReadWrite;
             }
         } else {
-            // New read
+            // new read
             try self.storage_accesses.put(var_name, .{
                 .access_type = .Read,
                 .first_access_span = span,
@@ -137,14 +137,14 @@ pub const FunctionStateAnalysis = struct {
         try self.writes_set.put(var_name, {});
 
         if (self.storage_accesses.getPtr(var_name)) |existing| {
-            // Update existing (getPtr gives us a mutable pointer)
+            // update existing (getPtr gives us a mutable pointer)
             existing.write_count += 1;
             existing.last_access_span = span;
             if (existing.access_type == .Read) {
                 existing.access_type = .ReadWrite;
             }
         } else {
-            // New write
+            // new write
             try self.storage_accesses.put(var_name, .{
                 .access_type = .Write,
                 .first_access_span = span,
@@ -180,7 +180,7 @@ pub const ContractStateAnalysis = struct {
         }
         self.functions.deinit();
 
-        // Free warning messages
+        // free warning messages
         for (self.warnings.items) |warning| {
             self.allocator.free(warning.message);
         }
@@ -193,12 +193,12 @@ pub const ContractStateAnalysis = struct {
         var func_iter = self.functions.iterator();
         while (func_iter.next()) |entry| {
             const func_analysis = entry.value_ptr.*;
-            // Collect reads
+            // collect reads
             var reads_it = func_analysis.reads_set.iterator();
             while (reads_it.next()) |read_entry| {
                 _ = all_vars.getOrPut(read_entry.key_ptr.*) catch continue;
             }
-            // Collect writes
+            // collect writes
             var writes_it = func_analysis.writes_set.iterator();
             while (writes_it.next()) |write_entry| {
                 _ = all_vars.getOrPut(write_entry.key_ptr.*) catch continue;
@@ -252,12 +252,12 @@ pub const StateTracker = struct {
         var analysis = FunctionStateAnalysis.init(self.allocator, func.name);
         self.current_function = &analysis;
 
-        // Skip ghost functions (specification-only)
+        // skip ghost functions (specification-only)
         if (func.is_ghost) {
             return analysis;
         }
 
-        // Visit function body
+        // visit function body
         try self.visitBlock(&func.body);
 
         self.current_function = null;
@@ -310,7 +310,7 @@ pub const StateTracker = struct {
     fn visitExpression(self: *StateTracker, expr: *const Expressions.ExprNode) anyerror!void {
         switch (expr.*) {
             .Identifier => |ident| {
-                // Check if this is a storage variable access
+                // check if this is a storage variable access
                 if (self.current_function) |func_analysis| {
                     if (self.isStorageVariable(ident.name)) {
                         try func_analysis.recordRead(ident.name, ident.span);
@@ -331,11 +331,11 @@ pub const StateTracker = struct {
                 }
             },
             .Index => |index| {
-                // Map/array access: balances[sender]
+                // map/array access: balances[sender]
                 try self.visitExpression(index.target);
                 try self.visitExpression(index.index);
 
-                // Record as storage access if base is storage
+                // record as storage access if base is storage
                 if (self.current_function) |func_analysis| {
                     const base_name = try self.getBaseName(index.target);
                     if (self.isStorageVariable(base_name)) {
@@ -347,18 +347,18 @@ pub const StateTracker = struct {
                 try self.visitExpression(field.target);
             },
             .Assignment => |assign| {
-                // Left side is a write
+                // left side is a write
                 try self.visitExpressionForWrite(assign.target);
-                // Right side is a read
+                // right side is a read
                 try self.visitExpression(assign.value);
             },
             .CompoundAssignment => |compound| {
-                // Compound assignment (+=, -=, etc.) is both read and write
-                // First, read the current value (implicit in +=, etc.)
+                // compound assignment (+=, -=, etc.) is both read and write
+                // first, read the current value (implicit in +=, etc.)
                 try self.visitExpression(compound.target);
-                // Then write the new value
+                // then write the new value
                 try self.visitExpressionForWrite(compound.target);
-                // And read the RHS
+                // and read the RHS
                 try self.visitExpression(compound.value);
             },
             else => {},
@@ -376,7 +376,7 @@ pub const StateTracker = struct {
                 }
             },
             .Index => |index| {
-                // Map/array write: balances[sender] = value
+                // map/array write: balances[sender] = value
                 if (self.current_function) |func_analysis| {
                     const base_name = try self.getBaseName(index.target);
                     if (self.isStorageVariable(base_name)) {
@@ -400,18 +400,18 @@ pub const StateTracker = struct {
 
     /// Check if a variable is a storage variable using symbol table lookup
     fn isStorageVariable(self: *StateTracker, name: []const u8) bool {
-        // Use symbol table lookup when available
+        // use symbol table lookup when available
         if (self.symbol_table) |table| {
             const scope_to_search: ?*const Scope = if (self.root_scope) |rs| rs else &table.root;
             if (SymbolTable.findUp(scope_to_search, name)) |symbol| {
                 return symbol.region == .Storage;
             }
-            // Symbol not found in symbol table - not a storage variable
+            // symbol not found in symbol table - not a storage variable
             return false;
         }
 
-        // Symbol table not available - return false (can't determine accurately)
-        // Callers should provide symbol table via analyzeContractWithSymbols() for accurate results
+        // symbol table not available - return false (can't determine accurately)
+        // callers should provide symbol table via analyzeContractWithSymbols() for accurate results
         return false;
     }
 };
@@ -419,17 +419,17 @@ pub const StateTracker = struct {
 /// Analyze a contract
 /// Builds symbol table from contract AST for accurate storage detection
 pub fn analyzeContract(allocator: std.mem.Allocator, contract: *const ast.ContractNode) !ContractStateAnalysis {
-    // Build symbol table from contract to detect storage variables accurately
+    // build symbol table from contract to detect storage variables accurately
     var symbol_table = SymbolTable.init(allocator);
     defer symbol_table.deinit();
 
-    // Create contract scope
+    // create contract scope
     const contract_scope = try allocator.create(Scope);
     contract_scope.* = Scope.init(allocator, &symbol_table.root, contract.name);
     try symbol_table.scopes.append(allocator, contract_scope);
     try symbol_table.contract_scopes.put(contract.name, contract_scope);
 
-    // Collect storage variables from contract body
+    // collect storage variables from contract body
     for (contract.body) |*member| {
         switch (member.*) {
             .VariableDecl => |var_decl| {
@@ -472,7 +472,7 @@ pub fn analyzeContractWithSymbols(
         }
     }
 
-    // Generate warnings based on analysis
+    // generate warnings based on analysis
     try generateWarnings(allocator, &contract_analysis);
 
     return contract_analysis;
@@ -480,39 +480,39 @@ pub fn analyzeContractWithSymbols(
 
 /// Generate warnings for potential issues
 fn generateWarnings(allocator: std.mem.Allocator, analysis: *ContractStateAnalysis) !void {
-    // PHASE 1: Contract-level dead store analysis
-    // Collect all reads and writes across ALL functions
+    // phase 1: Contract-level dead store analysis
+    // collect all reads and writes across ALL functions
     var contract_reads = std.StringArrayHashMap(void).init(allocator);
     defer contract_reads.deinit();
     var contract_writes = std.StringArrayHashMap(void).init(allocator);
     defer contract_writes.deinit();
 
-    // Build contract-wide read/write sets
+    // build contract-wide read/write sets
     var func_iter = analysis.functions.iterator();
     while (func_iter.next()) |entry| {
         const func_analysis = entry.value_ptr.*;
 
-        // Collect reads
+        // collect reads
         var reads_it = func_analysis.reads_set.iterator();
         while (reads_it.next()) |read_entry| {
             try contract_reads.put(read_entry.key_ptr.*, {});
         }
 
-        // Collect writes
+        // collect writes
         var writes_it = func_analysis.writes_set.iterator();
         while (writes_it.next()) |write_entry| {
             try contract_writes.put(write_entry.key_ptr.*, {});
         }
     }
 
-    // Find variables written but NEVER read by ANY function (true dead stores)
+    // find variables written but NEVER read by ANY function (true dead stores)
     var writes_iter = contract_writes.iterator();
     while (writes_iter.next()) |write_entry| {
         const var_name = write_entry.key_ptr.*;
 
-        // Check if this variable is NEVER read by any function
+        // check if this variable is NEVER read by any function
         if (!contract_reads.contains(var_name)) {
-            // Find which function(s) write to this variable
+            // find which function(s) write to this variable
             var func_iter2 = analysis.functions.iterator();
             while (func_iter2.next()) |entry| {
                 const func_name = entry.key_ptr.*;
@@ -535,17 +535,17 @@ fn generateWarnings(allocator: std.mem.Allocator, analysis: *ContractStateAnalys
         }
     }
 
-    // PHASE 2: Per-function missing check analysis
+    // phase 2: Per-function missing check analysis
     func_iter = analysis.functions.iterator();
     while (func_iter.next()) |entry| {
         const func_name = entry.key_ptr.*;
         const func_analysis = entry.value_ptr.*;
 
-        // Check if this is a constructor (init function)
+        // check if this is a constructor (init function)
         const is_constructor = std.mem.eql(u8, func_name, "init");
 
         if (is_constructor) {
-            // Constructor-specific warning: unvalidated parameters
+            // constructor-specific warning: unvalidated parameters
             if (func_analysis.modifies_state) {
                 const message = try std.fmt.allocPrint(allocator, "Constructor 'init' stores parameters without validation (consider adding checks)", .{});
 
@@ -560,7 +560,7 @@ fn generateWarnings(allocator: std.mem.Allocator, analysis: *ContractStateAnalys
                 });
             }
         } else {
-            // Regular function warning: modifies state without reads (potential missing checks)
+            // regular function warning: modifies state without reads (potential missing checks)
             if (func_analysis.modifies_state and func_analysis.reads_set.count() == 0) {
                 const message = try std.fmt.allocPrint(allocator, "Function '{s}' modifies storage without reading any state (consider adding validation)", .{func_name});
 
@@ -620,7 +620,7 @@ pub fn printAnalysis(writer: anytype, analysis: *const ContractStateAnalysis) !v
         try writer.print("├─ Readonly: {}\n", .{func_analysis.is_readonly});
         try writer.print("├─ Modifies State: {}\n", .{func_analysis.modifies_state});
 
-        // Print reads
+        // print reads
         try writer.print("├─ Reads: ", .{});
         var reads_it = func_analysis.reads_set.iterator();
         var first = true;
@@ -634,7 +634,7 @@ pub fn printAnalysis(writer: anytype, analysis: *const ContractStateAnalysis) !v
         }
         try writer.print("\n", .{});
 
-        // Print writes
+        // print writes
         try writer.print("└─ Writes: ", .{});
         var writes_it = func_analysis.writes_set.iterator();
         first = true;
@@ -649,7 +649,7 @@ pub fn printAnalysis(writer: anytype, analysis: *const ContractStateAnalysis) !v
         try writer.print("\n\n", .{});
     }
 
-    // Print warnings if any
+    // print warnings if any
     if (analysis.warnings.items.len > 0) {
         try writer.print("⚠️  Warnings ({d}):\n\n", .{analysis.warnings.items.len});
         for (analysis.warnings.items) |warning| {

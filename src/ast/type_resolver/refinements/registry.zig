@@ -23,7 +23,7 @@ pub const RefinementConfig = struct {
 /// Context for obligation generation
 pub const ObligationContext = struct {
     source_span: SourceSpan,
-    // Phase 0: Minimal, will expand in Phase 1
+    // phase 0: Minimal, will expand in Phase 1
 };
 
 /// Refinement handler interface
@@ -32,7 +32,7 @@ pub const RefinementHandler = struct {
 
     validate: *const fn (cfg: *const RefinementConfig, ty: *const OraType) TypeResolutionError!void,
 
-    // Optional: returns refined result; null means "fall back to base arithmetic"
+    // optional: returns refined result; null means "fall back to base arithmetic"
     inferArithmetic: ?*const fn (
         cfg: *const RefinementConfig,
         op: BinaryOp,
@@ -48,7 +48,7 @@ pub const RefinementHandler = struct {
 
     extractBase: *const fn (ty: OraType) ?OraType,
 
-    // Optional hook to generate obligations
+    // optional hook to generate obligations
     obligationsForUse: ?*const fn (
         cfg: *const RefinementConfig,
         context: ObligationContext,

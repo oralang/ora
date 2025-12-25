@@ -1,3 +1,11 @@
+// ============================================================================
+// AST Verification Utilities
+// ============================================================================
+//
+// helpers for verification annotations on AST nodes.
+//
+// ============================================================================
+
 const std = @import("std");
 const SourceSpan = @import("source_span.zig").SourceSpan;
 const TypeInfo = @import("type_info.zig").TypeInfo;
@@ -50,9 +58,9 @@ pub const VerificationAttribute = struct {
     }
 
     pub fn deinit(self: *VerificationAttribute, allocator: std.mem.Allocator) void {
-        // Only free strings if they were allocated (not string literals)
-        // For now, we'll skip freeing to avoid crashes with string literals
-        // In a real implementation, we'd track whether strings were allocated
+        // only free strings if they were allocated (not string literals)
+        // for now, we'll skip freeing to avoid crashes with string literals
+        // in a real implementation, we'd track whether strings were allocated
         _ = allocator;
         _ = self;
     }
@@ -88,9 +96,9 @@ pub const QuantifiedMetadata = struct {
     }
 
     pub fn deinit(self: *QuantifiedMetadata, allocator: std.mem.Allocator) void {
-        // Only free strings if they were allocated (not string literals)
-        // For now, we'll skip freeing to avoid crashes with string literals
-        // In a real implementation, we'd track whether strings were allocated
+        // only free strings if they were allocated (not string literals)
+        // for now, we'll skip freeing to avoid crashes with string literals
+        // in a real implementation, we'd track whether strings were allocated
         _ = allocator;
         _ = self;
     }
@@ -120,9 +128,9 @@ pub const VerificationContext = struct {
     }
 
     pub fn deinit(self: *VerificationContext) void {
-        // Only free strings if they were allocated (not string literals)
-        // For now, we'll skip freeing to avoid crashes with string literals
-        // In a real implementation, we'd track whether strings were allocated
+        // only free strings if they were allocated (not string literals)
+        // for now, we'll skip freeing to avoid crashes with string literals
+        // in a real implementation, we'd track whether strings were allocated
         self.scope_stack.deinit();
         self.current_attributes.deinit();
     }

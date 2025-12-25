@@ -65,7 +65,7 @@ pub const DeclarationLowerer = struct {
         };
     }
 
-    // Re-export all lowering functions from submodules
+    // re-export all lowering functions from submodules
     pub const lowerFunction = @import("function.zig").lowerFunction;
     pub const lowerContract = @import("contract.zig").lowerContract;
     pub const lowerStruct = @import("types.zig").lowerStruct;

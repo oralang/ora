@@ -28,7 +28,7 @@ pub fn scanString(lexer: *Lexer) LexerError!void {
     }
 
     if (lexer.isAtEnd()) {
-        // Unterminated string - record detailed error with accurate span
+        // unterminated string - record detailed error with accurate span
         const start_offset = lexer.start;
         const start_line = lexer.line;
         const start_column = lexer.start_column;
@@ -48,14 +48,14 @@ pub fn scanString(lexer: *Lexer) LexerError!void {
         }
     }
 
-    // Consume closing "
+    // consume closing "
     _ = lexer.advance();
     try addStringToken(lexer);
 }
 
 /// Scan a raw string literal
 pub fn scanRawString(lexer: *Lexer) LexerError!void {
-    // Raw strings don't process escape sequences, so we scan until we find the closing "
+    // raw strings don't process escape sequences, so we scan until we find the closing "
     while (lexer.peek() != '"' and !lexer.isAtEnd()) {
         if (lexer.peek() == '\n') {
             lexer.line += 1;
@@ -65,7 +65,7 @@ pub fn scanRawString(lexer: *Lexer) LexerError!void {
     }
 
     if (lexer.isAtEnd()) {
-        // Unterminated raw string - use error recovery if enabled
+        // unterminated raw string - use error recovery if enabled
         if (lexer.hasErrorRecovery()) {
             lexer.recordError(LexerError.UnterminatedRawString, "Unterminated raw string literal");
             return; // Skip adding the token
@@ -74,14 +74,14 @@ pub fn scanRawString(lexer: *Lexer) LexerError!void {
         }
     }
 
-    // Consume closing "
+    // consume closing "
     _ = lexer.advance();
     try addRawStringToken(lexer);
 }
 
 /// Scan a hex bytes literal (hex"...")
 pub fn scanHexBytes(lexer: *Lexer) LexerError!void {
-    // Hex bytes literals are like strings but contain only hex characters
+    // hex bytes literals are like strings but contain only hex characters
     var hex_content: []const u8 = undefined;
     const start = lexer.current;
 
@@ -91,7 +91,7 @@ pub fn scanHexBytes(lexer: *Lexer) LexerError!void {
             lexer.column = 1;
         }
         const c = lexer.advance();
-        // Validate hex character
+        // validate hex character
         if (!((c >= '0' and c <= '9') or (c >= 'a' and c <= 'f') or (c >= 'A' and c <= 'F'))) {
             if (lexer.hasErrorRecovery()) {
                 const range = SourceRange{
@@ -108,7 +108,7 @@ pub fn scanHexBytes(lexer: *Lexer) LexerError!void {
     }
 
     if (lexer.isAtEnd()) {
-        // Unterminated hex bytes literal
+        // unterminated hex bytes literal
         if (lexer.hasErrorRecovery()) {
             lexer.recordError(LexerError.UnterminatedString, "Unterminated hex bytes literal");
             return;
@@ -117,14 +117,14 @@ pub fn scanHexBytes(lexer: *Lexer) LexerError!void {
         }
     }
 
-    // Consume closing "
+    // consume closing "
     _ = lexer.advance();
 
-    // Extract hex content (between hex" and ")
+    // extract hex content (between hex" and ")
     // start is after the opening quote, current is at the closing quote
     hex_content = lexer.source[start..lexer.current];
 
-    // Create bytes literal token
+    // create bytes literal token
     const range = SourceRange{
         .start_line = lexer.line,
         .start_column = lexer.start_column,
@@ -151,13 +151,13 @@ pub fn scanCharacter(lexer: *Lexer) LexerError!void {
     const start_line = lexer.line;
     const start_column = lexer.column;
 
-    // Enhanced character literal scanning with proper escape sequence handling
+    // enhanced character literal scanning with proper escape sequence handling
     while (lexer.peek() != '\'' and !lexer.isAtEnd()) {
         if (lexer.peek() == '\\') {
-            // Handle escape sequence - advance past the backslash
+            // handle escape sequence - advance past the backslash
             _ = lexer.advance();
             if (!lexer.isAtEnd()) {
-                // Advance past the escaped character
+                // advance past the escaped character
                 if (lexer.peek() == '\n') {
                     lexer.line += 1;
                     lexer.column = 1;
@@ -174,7 +174,7 @@ pub fn scanCharacter(lexer: *Lexer) LexerError!void {
     }
 
     if (lexer.isAtEnd()) {
-        // Create proper error range for unterminated character literal
+        // create proper error range for unterminated character literal
         const range = SourceRange{
             .start_line = start_line,
             .start_column = start_column,
@@ -184,7 +184,7 @@ pub fn scanCharacter(lexer: *Lexer) LexerError!void {
             .end_offset = lexer.current,
         };
 
-        // Use error recovery if enabled
+        // use error recovery if enabled
         if (lexer.config.enable_error_recovery and lexer.error_recovery != null) {
             try lexer.error_recovery.?.recordDetailedError(LexerError.InvalidCharacterLiteral, range, lexer.source, "Character literal is missing closing single quote");
             return;
@@ -193,14 +193,14 @@ pub fn scanCharacter(lexer: *Lexer) LexerError!void {
         }
     }
 
-    // Consume closing '
+    // consume closing '
     _ = lexer.advance();
     try addCharacterToken(lexer);
 }
 
 /// Add a string literal token
 pub fn addStringToken(lexer: *Lexer) LexerError!void {
-    // Strip surrounding quotes from string literal
+    // strip surrounding quotes from string literal
     const text = lexer.source[lexer.start + 1 .. lexer.current - 1];
     const range = SourceRange{
         .start_line = lexer.line,
@@ -211,10 +211,10 @@ pub fn addStringToken(lexer: *Lexer) LexerError!void {
         .end_offset = lexer.current,
     };
 
-    // Process escape sequences in the string content using arena allocator
+    // process escape sequences in the string content using arena allocator
     var string_processor = StringProcessor.init(lexer.arena.allocator());
     const processed_text = string_processor.processString(text) catch |err| {
-        // Use error recovery if enabled for better error reporting
+        // use error recovery if enabled for better error reporting
         if (lexer.config.enable_error_recovery and lexer.error_recovery != null) {
             const error_message = switch (err) {
                 LexerError.InvalidEscapeSequence => "Invalid escape sequence in string literal",
@@ -225,7 +225,7 @@ pub fn addStringToken(lexer: *Lexer) LexerError!void {
 
             try lexer.error_recovery.?.recordDetailedErrorWithSuggestion(err, range, lexer.source, error_message, suggestion);
 
-            // Return a default empty string for error recovery
+            // return a default empty string for error recovery
             const token_value = TokenValue{ .string = "" };
             try lexer.tokens.append(lexer.allocator, Token{
                 .type = .StringLiteral,
@@ -243,7 +243,7 @@ pub fn addStringToken(lexer: *Lexer) LexerError!void {
 
     const token_value = TokenValue{ .string = processed_text };
 
-    // Track performance metrics if enabled
+    // track performance metrics if enabled
     if (lexer.performance) |*perf| {
         perf.tokens_scanned += 1;
     }
@@ -253,7 +253,7 @@ pub fn addStringToken(lexer: *Lexer) LexerError!void {
         .lexeme = processed_text, // Content with escape sequences processed
         .range = range,
         .value = token_value,
-        // Legacy fields for backward compatibility
+        // legacy fields for backward compatibility
         .line = lexer.line,
         .column = lexer.start_column,
     });
@@ -261,8 +261,8 @@ pub fn addStringToken(lexer: *Lexer) LexerError!void {
 
 /// Add a raw string literal token
 pub fn addRawStringToken(lexer: *Lexer) LexerError!void {
-    // Strip surrounding r" and " from raw string literal
-    // The lexeme includes the 'r' prefix, so we need to skip r" at start and " at end
+    // strip surrounding r" and " from raw string literal
+    // the lexeme includes the 'r' prefix, so we need to skip r" at start and " at end
     const text = lexer.source[lexer.start + 2 .. lexer.current - 1];
     const range = SourceRange{
         .start_line = lexer.line,
@@ -273,7 +273,7 @@ pub fn addRawStringToken(lexer: *Lexer) LexerError!void {
         .end_offset = lexer.current,
     };
 
-    // Raw strings don't process escape sequences, store content as-is
+    // raw strings don't process escape sequences, store content as-is
     const token_value = TokenValue{ .string = text };
 
     try lexer.tokens.append(lexer.allocator, Token{
@@ -281,7 +281,7 @@ pub fn addRawStringToken(lexer: *Lexer) LexerError!void {
         .lexeme = text, // Content without r" and "
         .range = range,
         .value = token_value,
-        // Legacy fields for backward compatibility
+        // legacy fields for backward compatibility
         .line = lexer.line,
         .column = lexer.start_column,
     });
@@ -289,7 +289,7 @@ pub fn addRawStringToken(lexer: *Lexer) LexerError!void {
 
 /// Add a character literal token
 pub fn addCharacterToken(lexer: *Lexer) LexerError!void {
-    // Strip surrounding single quotes from character literal
+    // strip surrounding single quotes from character literal
     const text = lexer.source[lexer.start + 1 .. lexer.current - 1];
     const range = SourceRange{
         .start_line = lexer.line,
@@ -300,9 +300,9 @@ pub fn addCharacterToken(lexer: *Lexer) LexerError!void {
         .end_offset = lexer.current,
     };
 
-    // Process the character literal using StringProcessor with enhanced error handling
+    // process the character literal using StringProcessor with enhanced error handling
     const char_value = StringProcessor.processCharacterLiteral(text) catch |err| {
-        // Use error recovery if enabled for better error reporting
+        // use error recovery if enabled for better error reporting
         if (lexer.config.enable_error_recovery and lexer.error_recovery != null) {
             const error_message = switch (err) {
                 LexerError.EmptyCharacterLiteral => "Character literal cannot be empty",
@@ -324,7 +324,7 @@ pub fn addCharacterToken(lexer: *Lexer) LexerError!void {
                 try lexer.error_recovery.?.recordDetailedError(err, range, lexer.source, error_message);
             }
 
-            // Return a default character value for error recovery
+            // return a default character value for error recovery
             const token_value = TokenValue{ .character = 0 };
             try lexer.tokens.append(lexer.allocator, Token{
                 .type = .CharacterLiteral,
@@ -347,7 +347,7 @@ pub fn addCharacterToken(lexer: *Lexer) LexerError!void {
         .lexeme = text, // Content without quotes
         .range = range,
         .value = token_value,
-        // Legacy fields for backward compatibility
+        // legacy fields for backward compatibility
         .line = lexer.line,
         .column = lexer.start_column,
     });

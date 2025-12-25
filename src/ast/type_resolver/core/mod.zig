@@ -40,8 +40,8 @@ pub const Typed = struct {
     }
 
     pub fn deinit(self: *Typed, allocator: std.mem.Allocator) void {
-        // Obligations are currently empty arrays, no cleanup needed
-        // TODO: When obligations are implemented, add cleanup:
+        // obligations are currently empty arrays, no cleanup needed
+        // todo: When obligations are implemented, add cleanup:
         // for (self.obligations) |*ob| {
         //     ob.deinit(allocator);
         // }
@@ -109,7 +109,7 @@ pub const LockDelta = struct {
     }
 
     pub fn emptyWithAllocator(allocator: std.mem.Allocator) LockDelta {
-        // Returns empty delta (no locks)
+        // returns empty delta (no locks)
         return LockDelta{
             .locked_slots = SlotSet.init(allocator),
         };
@@ -185,10 +185,10 @@ pub const CoreResolver = struct {
     validation: *validation.ValidationSystem,
     utils: *utils.Utils,
     refinement_system: *refinements.RefinementSystem,
-    // Optional: function registry for argument validation (set by TypeResolver)
-    // Type-erased to avoid circular dependency with ast.zig
+    // optional: function registry for argument validation (set by TypeResolver)
+    // type-erased to avoid circular dependency with ast.zig
     function_registry: ?*std.StringHashMap(*anyopaque) = null,
-    // Builtin registry for resolving std.* constants and functions
+    // builtin registry for resolving std.* constants and functions
     builtin_registry: ?*const semantics.builtins.BuiltinRegistry = null,
 
     pub fn init(
@@ -211,7 +211,7 @@ pub const CoreResolver = struct {
 
     pub fn deinit(self: *CoreResolver) void {
         _ = self;
-        // No cleanup needed - sub-systems handle their own cleanup
+        // no cleanup needed - sub-systems handle their own cleanup
     }
 
     /// Synthesize (infer) type for an expression

@@ -23,7 +23,7 @@ const keywords = @import("../../lexer.zig").keywords;
 
 /// Scan an identifier or keyword
 pub fn scanIdentifier(lexer: *Lexer) LexerError!void {
-    // Validate that identifier starts with a valid character
+    // validate that identifier starts with a valid character
     if (!isAlpha(lexer.source[lexer.start])) {
         lexer.last_bad_char = lexer.source[lexer.start];
         return LexerError.UnexpectedCharacter;
@@ -33,17 +33,17 @@ pub fn scanIdentifier(lexer: *Lexer) LexerError!void {
         _ = lexer.advance();
     }
 
-    // Check if it's a keyword
+    // check if it's a keyword
     const text = lexer.source[lexer.start..lexer.current];
     const token_type = keywords.get(text) orelse .Identifier;
 
-    // Use string interning for identifiers and keywords
+    // use string interning for identifiers and keywords
     try lexer.addTokenWithInterning(token_type);
 }
 
 /// Scan an @ directive (built-in functions or import)
 pub fn scanAtDirective(lexer: *Lexer) LexerError!void {
-    // Check if the next character is a letter (start of identifier)
+    // check if the next character is a letter (start of identifier)
     if (!isAlpha(lexer.peek())) {
         // '@' followed by non-letter - this is an unexpected character
         if (lexer.hasErrorRecovery()) {
@@ -55,15 +55,15 @@ pub fn scanAtDirective(lexer: *Lexer) LexerError!void {
         }
     }
 
-    // Scan the identifier after '@'
+    // scan the identifier after '@'
     while (isAlphaNumeric(lexer.peek())) {
         _ = lexer.advance();
     }
 
-    // Get the directive/function name (without the '@')
+    // get the directive/function name (without the '@')
     const directive_name = lexer.source[lexer.start + 1 .. lexer.current];
 
-    // Check if we have an empty identifier (shouldn't happen due to isAlpha check above)
+    // check if we have an empty identifier (shouldn't happen due to isAlpha check above)
     if (directive_name.len == 0) {
         if (lexer.hasErrorRecovery()) {
             const message = "Unexpected character '@'";
@@ -74,10 +74,10 @@ pub fn scanAtDirective(lexer: *Lexer) LexerError!void {
         }
     }
 
-    // Check if it's an import directive
+    // check if it's an import directive
     if (std.mem.eql(u8, directive_name, "import")) {
-        // For @import, produce separate tokens: @ and import
-        // First, add the @ token
+        // for @import, produce separate tokens: @ and import
+        // first, add the @ token
         const at_text = lexer.source[lexer.start .. lexer.start + 1];
         const at_range = SourceRange{
             .start_line = lexer.line,
@@ -96,7 +96,7 @@ pub fn scanAtDirective(lexer: *Lexer) LexerError!void {
             .column = lexer.start_column,
         });
 
-        // Then, add the import token
+        // then, add the import token
         const import_text = lexer.source[lexer.start + 1 .. lexer.current];
         const import_range = SourceRange{
             .start_line = lexer.line,
@@ -117,7 +117,7 @@ pub fn scanAtDirective(lexer: *Lexer) LexerError!void {
         return;
     }
 
-    // Check if it's a valid built-in function
+    // check if it's a valid built-in function
     const is_valid_builtin = std.mem.eql(u8, directive_name, "divTrunc") or
         std.mem.eql(u8, directive_name, "divFloor") or
         std.mem.eql(u8, directive_name, "divCeil") or
@@ -125,7 +125,7 @@ pub fn scanAtDirective(lexer: *Lexer) LexerError!void {
         std.mem.eql(u8, directive_name, "divMod");
 
     if (!is_valid_builtin) {
-        // Invalid directive/function - record error and continue
+        // invalid directive/function - record error and continue
         if (lexer.hasErrorRecovery()) {
             const message = std.fmt.allocPrint(lexer.allocator, "Invalid directive or built-in function '@{s}'", .{directive_name}) catch "Invalid directive or built-in function";
             defer lexer.allocator.free(message);
@@ -141,7 +141,7 @@ pub fn scanAtDirective(lexer: *Lexer) LexerError!void {
 
             if (lexer.error_recovery) |*recovery| {
                 recovery.recordDetailedError(LexerError.InvalidBuiltinFunction, range, lexer.source, message) catch {
-                    // If we can't record more errors, we've hit the limit
+                    // if we can't record more errors, we've hit the limit
                     return;
                 };
             }
@@ -150,6 +150,6 @@ pub fn scanAtDirective(lexer: *Lexer) LexerError!void {
         }
     }
 
-    // For built-in functions, add the @ token (same as before)
+    // for built-in functions, add the @ token (same as before)
     try lexer.addToken(.At);
 }

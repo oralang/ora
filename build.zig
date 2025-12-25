@@ -1,57 +1,75 @@
+// ============================================================================
+// Build Script
+// ============================================================================
+//
+// build configuration for the Ora compiler, tests, and toolchain integration.
+//
+// ============================================================================
+
 const std = @import("std");
 
 // Although this function looks imperative, note that its job is to
 // declaratively construct a build graph that will be executed by an external
 // runner.
 pub fn build(b: *std.Build) void {
-    // Standard target options allows the person running `zig build` to choose
+    // standard target options allows the person running `zig build` to choose
     // what target to build for. Here we do not override the defaults, which
     // means any target is allowed, and the default is native. Other options
     // for restricting supported target set are available.
     const target = b.standardTargetOptions(.{});
 
-    // Standard optimization options allow the person running `zig build` to select
+    // standard optimization options allow the person running `zig build` to select
     // between Debug, ReleaseSafe, ReleaseFast, and ReleaseSmall. Here we do not
     // set a preferred release mode, allowing the user to decide how to optimize.
     const optimize = b.standardOptimizeOption(.{});
 
-    // MLIR-specific build options
+    // mlir-specific build options
     const enable_mlir_debug = b.option(bool, "mlir-debug", "Enable MLIR debug features and verification passes") orelse false;
     const enable_mlir_timing = b.option(bool, "mlir-timing", "Enable MLIR pass timing by default") orelse false;
     const mlir_opt_level = b.option([]const u8, "mlir-opt", "Default MLIR optimization level (none, basic, aggressive)") orelse "basic";
     const enable_mlir_passes = b.option([]const u8, "mlir-passes", "Default MLIR pass pipeline") orelse null;
 
-    // This creates a "module", which represents a collection of source files alongside
+    // this creates a "module", which represents a collection of source files alongside
     // some compilation options, such as optimization mode and linked system libraries.
-    // Every executable or library we compile will be based on one or more modules.
+    // every executable or library we compile will be based on one or more modules.
     const lib_mod = b.createModule(.{
         // `root_source_file` is the Zig "entry point" of the module. If a module
         // only contains e.g. external object files, you can make this `null`.
-        // In this case the main source file is merely a path, however, in more
+        // in this case the main source file is merely a path, however, in more
         // complicated build scripts, this could be a generated file.
         .root_source_file = b.path("src/root.zig"),
         .target = target,
         .optimize = optimize,
     });
 
-    // We will also create a module for our other entry point, 'main.zig'.
+    // we will also create a module for our other entry point, 'main.zig'.
     const exe_mod = b.createModule(.{
         // `root_source_file` is the Zig "entry point" of the module. If a module
         // only contains e.g. external object files, you can make this `null`.
-        // In this case the main source file is merely a path, however, in more
+        // in this case the main source file is merely a path, however, in more
         // complicated build scripts, this could be a generated file.
         .root_source_file = b.path("src/main.zig"),
         .target = target,
         .optimize = optimize,
     });
+    const mlir_c_mod = b.createModule(.{
+        .root_source_file = b.path("src/mlir/c.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    mlir_c_mod.addIncludePath(b.path("vendor/mlir/include"));
+    mlir_c_mod.addIncludePath(b.path("src/mlir/ora/include"));
+    mlir_c_mod.addIncludePath(b.path("src/mlir/IR/include"));
 
-    // Modules can depend on one another using the `std.Build.Module.addImport` function.
-    // This is what allows Zig source code to use `@import("foo")` where 'foo' is not a
+    // modules can depend on one another using the `std.Build.Module.addImport` function.
+    // this is what allows Zig source code to use `@import("foo")` where 'foo' is not a
     // file path. In this case, we set up `exe_mod` to import `lib_mod`.
     exe_mod.addImport("ora_lib", lib_mod);
+    exe_mod.addImport("mlir_c_api", mlir_c_mod);
+    lib_mod.addImport("mlir_c_api", mlir_c_mod);
 
-    // Now, we will create a static library based on the module we created above.
-    // This creates a `std.Build.Step.Compile`, which is the build step responsible
+    // now, we will create a static library based on the module we created above.
+    // this creates a `std.Build.Step.Compile`, which is the build step responsible
     // for actually invoking the compiler.
     const lib = b.addLibrary(.{
         .linkage = .static,
@@ -59,19 +77,19 @@ pub fn build(b: *std.Build) void {
         .root_module = lib_mod,
     });
 
-    // This declares intent for the library to be installed into the standard
+    // this declares intent for the library to be installed into the standard
     // location when the user invokes the "install" step (the default step when
     // running `zig build`).
     b.installArtifact(lib);
 
-    // This creates another `std.Build.Step.Compile`, but this one builds an executable
+    // this creates another `std.Build.Step.Compile`, but this one builds an executable
     // rather than a static library.
     const exe = b.addExecutable(.{
         .name = "ora",
         .root_module = exe_mod,
     });
 
-    // Add MLIR build options as compile-time constants
+    // add MLIR build options as compile-time constants
     const mlir_options = b.addOptions();
     mlir_options.addOption(bool, "mlir_debug", enable_mlir_debug);
     mlir_options.addOption(bool, "mlir_timing", enable_mlir_timing);
@@ -85,58 +103,58 @@ pub fn build(b: *std.Build) void {
     exe.root_module.addOptions("build_options", mlir_options);
     lib_mod.addOptions("build_options", mlir_options);
 
-    // Add include paths
+    // add include paths
     exe.addIncludePath(b.path("src"));
     lib.addIncludePath(b.path("src"));
 
-    // Add Ora dialect include path (for OraCAPI.h)
+    // add Ora dialect include path (for OraCAPI.h)
     const ora_dialect_include_path = b.path("src/mlir/ora/include");
     exe.addIncludePath(ora_dialect_include_path);
 
-    // Add SIR dialect include path
+    // add SIR dialect include path
     const sir_dialect_include_path = b.path("src/mlir/IR/include");
     exe.addIncludePath(sir_dialect_include_path);
 
-    // Build and link MLIR (required) - only for executable, not library
+    // build and link MLIR (required) - only for executable, not library
     const mlir_step = buildMlirLibraries(b, target, optimize);
-    // Build SIR dialect first (Ora dialect depends on it)
+    // build SIR dialect first (Ora dialect depends on it)
     const sir_dialect_step = buildSIRDialectLibrary(b, mlir_step, target, optimize);
     const ora_dialect_step = buildOraDialectLibrary(b, mlir_step, sir_dialect_step, target, optimize);
     linkMlirLibraries(b, exe, mlir_step, ora_dialect_step, sir_dialect_step, target);
 
-    // Build and link Z3 (for formal verification) - only for executable
+    // build and link Z3 (for formal verification) - only for executable
     const z3_step = buildZ3Libraries(b, target, optimize);
     linkZ3Libraries(b, exe, z3_step, target);
 
-    // This declares intent for the executable to be installed into the
+    // this declares intent for the executable to be installed into the
     // standard location when the user invokes the "install" step (the default
     // step when running `zig build`).
     b.installArtifact(exe);
 
-    // This *creates* a Run step in the build graph, to be executed when another
+    // this *creates* a Run step in the build graph, to be executed when another
     // step is evaluated that depends on it. The next line below will establish
     // such a dependency.
     const run_cmd = b.addRunArtifact(exe);
 
-    // By making the run step depend on the install step, it will be run from the
+    // by making the run step depend on the install step, it will be run from the
     // installation directory rather than directly from within the cache directory.
-    // This is not necessary, however, if the application depends on other installed
+    // this is not necessary, however, if the application depends on other installed
     // files, this ensures they will be present and in the expected location.
     run_cmd.step.dependOn(b.getInstallStep());
 
-    // This allows the user to pass arguments to the application in the build
+    // this allows the user to pass arguments to the application in the build
     // command itself, like this: `zig build run -- arg1 arg2 etc`
     if (b.args) |args| {
         run_cmd.addArgs(args);
     }
 
-    // This creates a build step. It will be visible in the `zig build --help` menu,
+    // this creates a build step. It will be visible in the `zig build --help` menu,
     // and can be selected like this: `zig build run`
-    // This will evaluate the `run` step rather than the default, which is "install".
+    // this will evaluate the `run` step rather than the default, which is "install".
     const run_step = b.step("run", "Run the app");
     run_step.dependOn(&run_cmd.step);
 
-    // Create optimization demo executable
+    // create optimization demo executable
     const optimization_demo_mod = b.createModule(.{
         .root_source_file = b.path("examples/demos/optimization_demo.zig"),
         .target = target,
@@ -155,7 +173,7 @@ pub fn build(b: *std.Build) void {
     const optimization_demo_step = b.step("optimization-demo", "Run the optimization demo");
     optimization_demo_step.dependOn(&run_optimization_demo.step);
 
-    // Create formal verification demo executable
+    // create formal verification demo executable
     const formal_verification_demo_mod = b.createModule(.{
         .root_source_file = b.path("examples/demos/formal_verification_demo.zig"),
         .target = target,
@@ -174,22 +192,22 @@ pub fn build(b: *std.Build) void {
     const formal_verification_demo_step = b.step("formal-verification-demo", "Run the formal verification demo");
     formal_verification_demo_step.dependOn(&run_formal_verification_demo.step);
 
-    // MLIR-specific build steps
+    // mlir-specific build steps
     const mlir_debug_step = b.step("mlir-debug", "Build with MLIR debug features enabled");
     mlir_debug_step.dependOn(b.getInstallStep());
 
     const mlir_release_step = b.step("mlir-release", "Build with aggressive MLIR optimizations");
     mlir_release_step.dependOn(b.getInstallStep());
 
-    // Add step to test MLIR functionality
+    // add step to test MLIR functionality
     const test_mlir_step = b.step("test-mlir", "Run MLIR-specific tests");
     test_mlir_step.dependOn(b.getInstallStep());
 
-    // Test suite - Unit tests are co-located with source files
-    // Tests are added to build.zig as they are created (e.g., src/lexer.test.zig)
+    // test suite - Unit tests are co-located with source files
+    // tests are added to build.zig as they are created (e.g., src/lexer.test.zig)
     const test_step = b.step("test", "Run all tests");
 
-    // Lexer tests
+    // lexer tests
     const lexer_test_mod = b.createModule(.{
         .root_source_file = b.path("src/lexer.test.zig"),
         .target = target,
@@ -199,7 +217,46 @@ pub fn build(b: *std.Build) void {
     const lexer_tests = b.addTest(.{ .root_module = lexer_test_mod });
     test_step.dependOn(&b.addRunArtifact(lexer_tests).step);
 
-    // Scanner tests - Numbers
+    // lexer error recovery tests
+    const error_recovery_test_mod = b.createModule(.{
+        .root_source_file = b.path("src/lexer/error_recovery.test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    error_recovery_test_mod.addImport("ora_root", lib_mod);
+    const error_recovery_tests = b.addTest(.{ .root_module = error_recovery_test_mod });
+    test_step.dependOn(&b.addRunArtifact(error_recovery_tests).step);
+
+    // semantics locals binder tests
+    const locals_binder_test_mod = b.createModule(.{
+        .root_source_file = b.path("src/semantics/locals_binder.test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    locals_binder_test_mod.addImport("ora_root", lib_mod);
+    const locals_binder_tests = b.addTest(.{ .root_module = locals_binder_test_mod });
+    test_step.dependOn(&b.addRunArtifact(locals_binder_tests).step);
+
+    // cli argument parsing tests
+    const cli_args_test_mod = b.createModule(.{
+        .root_source_file = b.path("src/cli/args.test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const cli_args_tests = b.addTest(.{ .root_module = cli_args_test_mod });
+    test_step.dependOn(&b.addRunArtifact(cli_args_tests).step);
+
+    // ABI tests
+    const abi_test_mod = b.createModule(.{
+        .root_source_file = b.path("src/abi.test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    abi_test_mod.addImport("ora_root", lib_mod);
+    const abi_tests = b.addTest(.{ .root_module = abi_test_mod });
+    test_step.dependOn(&b.addRunArtifact(abi_tests).step);
+
+    // scanner tests - Numbers
     const numbers_test_mod = b.createModule(.{
         .root_source_file = b.path("src/lexer/scanners/numbers.test.zig"),
         .target = target,
@@ -209,7 +266,7 @@ pub fn build(b: *std.Build) void {
     const numbers_tests = b.addTest(.{ .root_module = numbers_test_mod });
     test_step.dependOn(&b.addRunArtifact(numbers_tests).step);
 
-    // Scanner tests - Strings
+    // scanner tests - Strings
     const strings_test_mod = b.createModule(.{
         .root_source_file = b.path("src/lexer/scanners/strings.test.zig"),
         .target = target,
@@ -219,7 +276,7 @@ pub fn build(b: *std.Build) void {
     const strings_tests = b.addTest(.{ .root_module = strings_test_mod });
     test_step.dependOn(&b.addRunArtifact(strings_tests).step);
 
-    // Scanner tests - Identifiers
+    // scanner tests - Identifiers
     const identifiers_test_mod = b.createModule(.{
         .root_source_file = b.path("src/lexer/scanners/identifiers.test.zig"),
         .target = target,
@@ -229,7 +286,7 @@ pub fn build(b: *std.Build) void {
     const identifiers_tests = b.addTest(.{ .root_module = identifiers_test_mod });
     test_step.dependOn(&b.addRunArtifact(identifiers_tests).step);
 
-    // Parser tests - Expression Parser
+    // parser tests - Expression Parser
     const expression_parser_test_mod = b.createModule(.{
         .root_source_file = b.path("src/parser/expression_parser.test.zig"),
         .target = target,
@@ -239,7 +296,7 @@ pub fn build(b: *std.Build) void {
     const expression_parser_tests = b.addTest(.{ .root_module = expression_parser_test_mod });
     test_step.dependOn(&b.addRunArtifact(expression_parser_tests).step);
 
-    // AST tests - AST Builder
+    // ast tests - AST Builder
     const ast_builder_test_mod = b.createModule(.{
         .root_source_file = b.path("src/ast/ast_builder.test.zig"),
         .target = target,
@@ -249,7 +306,7 @@ pub fn build(b: *std.Build) void {
     const ast_builder_tests = b.addTest(.{ .root_module = ast_builder_test_mod });
     test_step.dependOn(&b.addRunArtifact(ast_builder_tests).step);
 
-    // Parser tests - Statement Parser
+    // parser tests - Statement Parser
     const statement_parser_test_mod = b.createModule(.{
         .root_source_file = b.path("src/parser/statement_parser.test.zig"),
         .target = target,
@@ -259,7 +316,7 @@ pub fn build(b: *std.Build) void {
     const statement_parser_tests = b.addTest(.{ .root_module = statement_parser_test_mod });
     test_step.dependOn(&b.addRunArtifact(statement_parser_tests).step);
 
-    // Parser tests - Parser Core
+    // parser tests - Parser Core
     const parser_core_test_mod = b.createModule(.{
         .root_source_file = b.path("src/parser/parser_core.test.zig"),
         .target = target,
@@ -269,7 +326,7 @@ pub fn build(b: *std.Build) void {
     const parser_core_tests = b.addTest(.{ .root_module = parser_core_test_mod });
     test_step.dependOn(&b.addRunArtifact(parser_core_tests).step);
 
-    // Parser tests - Declaration Parser
+    // parser tests - Declaration Parser
     const declaration_parser_test_mod = b.createModule(.{
         .root_source_file = b.path("src/parser/declaration_parser.test.zig"),
         .target = target,
@@ -279,7 +336,7 @@ pub fn build(b: *std.Build) void {
     const declaration_parser_tests = b.addTest(.{ .root_module = declaration_parser_test_mod });
     test_step.dependOn(&b.addRunArtifact(declaration_parser_tests).step);
 
-    // Parser tests - Type Parser
+    // parser tests - Type Parser
     const type_parser_test_mod = b.createModule(.{
         .root_source_file = b.path("src/parser/type_parser.test.zig"),
         .target = target,
@@ -289,7 +346,45 @@ pub fn build(b: *std.Build) void {
     const type_parser_tests = b.addTest(.{ .root_module = type_parser_test_mod });
     test_step.dependOn(&b.addRunArtifact(type_parser_tests).step);
 
-    // AST tests - Expressions
+    // z3 encoder tests (requires MLIR + Z3)
+    const z3_encoder_test_mod = b.createModule(.{
+        .root_source_file = b.path("src/z3/encoder.test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    z3_encoder_test_mod.addImport("mlir_c_api", mlir_c_mod);
+    const z3_encoder_tests = b.addTest(.{ .root_module = z3_encoder_test_mod });
+    linkMlirLibraries(b, z3_encoder_tests, mlir_step, ora_dialect_step, sir_dialect_step, target);
+    linkZ3Libraries(b, z3_encoder_tests, z3_step, target);
+    test_step.dependOn(&b.addRunArtifact(z3_encoder_tests).step);
+
+    // mlir type mapper tests
+    const mlir_types_test_mod = b.createModule(.{
+        .root_source_file = b.path("src/mlir/types.test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    mlir_types_test_mod.addImport("ora_lib", lib_mod);
+    mlir_types_test_mod.addImport("mlir_c_api", mlir_c_mod);
+    const mlir_types_tests = b.addTest(.{ .root_module = mlir_types_test_mod });
+    linkMlirLibraries(b, mlir_types_tests, mlir_step, ora_dialect_step, sir_dialect_step, target);
+    test_step.dependOn(&b.addRunArtifact(mlir_types_tests).step);
+    test_mlir_step.dependOn(&b.addRunArtifact(mlir_types_tests).step);
+
+    // refinement guard tests (MLIR)
+    const refinement_guard_test_mod = b.createModule(.{
+        .root_source_file = b.path("src/mlir/refinements.test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    refinement_guard_test_mod.addImport("ora_lib", lib_mod);
+    refinement_guard_test_mod.addImport("mlir_c_api", mlir_c_mod);
+    const refinement_guard_tests = b.addTest(.{ .root_module = refinement_guard_test_mod });
+    linkMlirLibraries(b, refinement_guard_tests, mlir_step, ora_dialect_step, sir_dialect_step, target);
+    test_step.dependOn(&b.addRunArtifact(refinement_guard_tests).step);
+    test_mlir_step.dependOn(&b.addRunArtifact(refinement_guard_tests).step);
+
+    // ast tests - Expressions
     const ast_expressions_test_mod = b.createModule(.{
         .root_source_file = b.path("src/ast/expressions.test.zig"),
         .target = target,
@@ -299,7 +394,7 @@ pub fn build(b: *std.Build) void {
     const ast_expressions_tests = b.addTest(.{ .root_module = ast_expressions_test_mod });
     test_step.dependOn(&b.addRunArtifact(ast_expressions_tests).step);
 
-    // AST tests - Statements
+    // ast tests - Statements
     const ast_statements_test_mod = b.createModule(.{
         .root_source_file = b.path("src/ast/statements.test.zig"),
         .target = target,
@@ -309,8 +404,8 @@ pub fn build(b: *std.Build) void {
     const ast_statements_tests = b.addTest(.{ .root_module = ast_statements_test_mod });
     test_step.dependOn(&b.addRunArtifact(ast_statements_tests).step);
 
-    // Unit tests will be added here as they are created.
-    // Example pattern:
+    // unit tests will be added here as they are created.
+    // example pattern:
     // const lexer_test_mod = b.createModule(.{
     //     .root_source_file = b.path("src/lexer.test.zig"),
     //     .target = target,
@@ -384,7 +479,7 @@ fn buildMlirLibrariesImpl(step: *std.Build.Step, options: std.Build.Step.MakeOpt
     const b = step.owner;
     const allocator = b.allocator;
 
-    // Ensure submodule exists
+    // ensure submodule exists
     const cwd = std.fs.cwd();
     _ = cwd.openDir("vendor/llvm-project", .{ .iterate = false }) catch {
         std.log.err("Missing submodule: vendor/llvm-project. Add it and pin a commit.", .{});
@@ -392,14 +487,14 @@ fn buildMlirLibrariesImpl(step: *std.Build.Step, options: std.Build.Step.MakeOpt
         return error.SubmoduleMissing;
     };
 
-    // Create build and install directories
+    // create build and install directories
     const build_dir = "vendor/llvm-project/build-mlir";
     cwd.makeDir(build_dir) catch |err| switch (err) {
         error.PathAlreadyExists => {},
         else => return err,
     };
 
-    // Clear CMake cache if it exists to avoid stale SDK paths after system updates
+    // clear CMake cache if it exists to avoid stale SDK paths after system updates
     const cache_file = try std.fmt.allocPrint(allocator, "{s}/CMakeCache.txt", .{build_dir});
     defer allocator.free(cache_file);
     if (cwd.access(cache_file, .{}) catch null) |_| {
@@ -409,7 +504,7 @@ fn buildMlirLibrariesImpl(step: *std.Build.Step, options: std.Build.Step.MakeOpt
         };
     }
 
-    // Also clear CMakeFiles directory which may contain cached package configs
+    // also clear CMakeFiles directory which may contain cached package configs
     const cmake_files_dir = try std.fmt.allocPrint(allocator, "{s}/CMakeFiles", .{build_dir});
     defer allocator.free(cmake_files_dir);
     if (cwd.access(cmake_files_dir, .{}) catch null) |_| {
@@ -425,12 +520,12 @@ fn buildMlirLibrariesImpl(step: *std.Build.Step, options: std.Build.Step.MakeOpt
         else => return err,
     };
 
-    // Platform-specific flags
+    // platform-specific flags
     const builtin = @import("builtin");
     var cmake_args = std.array_list.Managed([]const u8).init(allocator);
     defer cmake_args.deinit();
 
-    // Prefer Ninja generator when available for faster, more parallel builds
+    // prefer Ninja generator when available for faster, more parallel builds
     var use_ninja: bool = false;
     {
         const probe = std.process.Child.run(.{ .allocator = allocator, .argv = &[_][]const u8{ "ninja", "--version" }, .cwd = "." }) catch null;
@@ -500,8 +595,8 @@ fn buildMlirLibrariesImpl(step: *std.Build.Step, options: std.Build.Step.MakeOpt
     } else if (builtin.os.tag == .macos) {
         try cmake_args.append("-DCMAKE_CXX_FLAGS=-stdlib=libc++");
 
-        // Fix SDK path issue after macOS/Xcode update
-        // Use xcrun to get the actual SDK path and set it explicitly
+        // fix SDK path issue after macOS/Xcode update
+        // use xcrun to get the actual SDK path and set it explicitly
         const sdk_path_result = std.process.Child.run(.{
             .allocator = allocator,
             .argv = &[_][]const u8{ "xcrun", "--show-sdk-path" },
@@ -549,7 +644,7 @@ fn buildMlirLibrariesImpl(step: *std.Build.Step, options: std.Build.Step.MakeOpt
         },
     }
 
-    // Build and install MLIR (with sparse checkout and minimal flags above this is lightweight)
+    // build and install MLIR (with sparse checkout and minimal flags above this is lightweight)
     var build_args = [_][]const u8{ "cmake", "--build", build_dir, "--parallel", "--target", "install" };
     var build_child = std.process.Child.init(&build_args, allocator);
     build_child.cwd = ".";
@@ -599,9 +694,9 @@ fn buildOraDialectLibraryImpl(step: *std.Build.Step, options: std.Build.Step.Mak
     const allocator = b.allocator;
     const cwd = std.fs.cwd();
 
-    // Create build directory (clean if it exists to avoid CMake cache conflicts)
+    // create build directory (clean if it exists to avoid CMake cache conflicts)
     const build_dir = "vendor/ora-dialect-build";
-    // Remove existing build directory to avoid CMake cache conflicts
+    // remove existing build directory to avoid CMake cache conflicts
     cwd.deleteTree(build_dir) catch {};
     cwd.makeDir(build_dir) catch |err| switch (err) {
         error.PathAlreadyExists => {},
@@ -611,12 +706,12 @@ fn buildOraDialectLibraryImpl(step: *std.Build.Step, options: std.Build.Step.Mak
     const install_prefix = "vendor/mlir";
     const mlir_dir = b.fmt("{s}/lib/cmake/mlir", .{install_prefix});
 
-    // Platform-specific flags
+    // platform-specific flags
     const builtin = @import("builtin");
     var cmake_args = std.array_list.Managed([]const u8).init(allocator);
     defer cmake_args.deinit();
 
-    // Prefer Ninja generator when available
+    // prefer Ninja generator when available
     var use_ninja: bool = false;
     {
         const probe = std.process.Child.run(.{ .allocator = allocator, .argv = &[_][]const u8{ "ninja", "--version" }, .cwd = "." }) catch null;
@@ -673,7 +768,7 @@ fn buildOraDialectLibraryImpl(step: *std.Build.Step, options: std.Build.Step.Mak
         },
     }
 
-    // Build and install
+    // build and install
     var build_args = [_][]const u8{ "cmake", "--build", build_dir, "--parallel", "--target", "install" };
     var build_child = std.process.Child.init(&build_args, allocator);
     build_child.cwd = ".";
@@ -722,9 +817,9 @@ fn buildSIRDialectLibraryImpl(step: *std.Build.Step, options: std.Build.Step.Mak
     const allocator = b.allocator;
     const cwd = std.fs.cwd();
 
-    // Create build directory (clean if it exists to avoid CMake cache conflicts)
+    // create build directory (clean if it exists to avoid CMake cache conflicts)
     const build_dir = "vendor/sir-dialect-build";
-    // Remove existing build directory to avoid CMake cache conflicts
+    // remove existing build directory to avoid CMake cache conflicts
     cwd.deleteTree(build_dir) catch {};
     cwd.makeDir(build_dir) catch |err| switch (err) {
         error.PathAlreadyExists => {},
@@ -734,12 +829,12 @@ fn buildSIRDialectLibraryImpl(step: *std.Build.Step, options: std.Build.Step.Mak
     const install_prefix = "vendor/mlir";
     const mlir_dir = b.fmt("{s}/lib/cmake/mlir", .{install_prefix});
 
-    // Platform-specific flags
+    // platform-specific flags
     const builtin = @import("builtin");
     var cmake_args = std.array_list.Managed([]const u8).init(allocator);
     defer cmake_args.deinit();
 
-    // Prefer Ninja generator when available
+    // prefer Ninja generator when available
     var use_ninja: bool = false;
     {
         const probe = std.process.Child.run(.{ .allocator = allocator, .argv = &[_][]const u8{ "ninja", "--version" }, .cwd = "." }) catch null;
@@ -796,7 +891,7 @@ fn buildSIRDialectLibraryImpl(step: *std.Build.Step, options: std.Build.Step.Mak
         },
     }
 
-    // Build and install
+    // build and install
     var build_args = [_][]const u8{ "cmake", "--build", build_dir, "--parallel", "--target", "install" };
     var build_child = std.process.Child.init(&build_args, allocator);
     build_child.cwd = ".";
@@ -823,7 +918,7 @@ fn buildSIRDialectLibraryImpl(step: *std.Build.Step, options: std.Build.Step.Mak
 
 /// Link MLIR to the given executable using the installed prefix
 fn linkMlirLibraries(b: *std.Build, exe: *std.Build.Step.Compile, mlir_step: *std.Build.Step, ora_dialect_step: *std.Build.Step, sir_dialect_step: *std.Build.Step, target: std.Build.ResolvedTarget) void {
-    // Depend on MLIR build and dialect builds
+    // depend on MLIR build and dialect builds
     exe.step.dependOn(mlir_step);
     exe.step.dependOn(ora_dialect_step);
     exe.step.dependOn(sir_dialect_step);
@@ -866,7 +961,7 @@ fn createExampleTestStep(b: *std.Build, exe: *std.Build.Step.Compile) *std.Build
         .makeFn = runExampleTests,
     });
 
-    // Depend on the main executable being built
+    // depend on the main executable being built
     test_step.dependOn(&exe.step);
 
     return test_step;
@@ -881,14 +976,14 @@ fn runExampleTests(step: *std.Build.Step, options: std.Build.Step.MakeOptions) a
 
     std.log.info("Testing all .ora example files...", .{});
 
-    // Get examples directory
+    // get examples directory
     var examples_dir = std.fs.cwd().openDir("ora-example", .{ .iterate = true }) catch |err| {
         std.log.err("Failed to open examples directory: {}", .{err});
         return err;
     };
     defer examples_dir.close();
 
-    // Iterate through all .ora files
+    // iterate through all .ora files
     var walker = examples_dir.walk(allocator) catch |err| {
         std.log.err("Failed to walk examples directory: {}", .{err});
         return err;
@@ -902,14 +997,14 @@ fn runExampleTests(step: *std.Build.Step, options: std.Build.Step.MakeOptions) a
         std.log.err("Failed to get next file: {}", .{err});
         return err;
     }) |entry| {
-        // Skip non-.ora files
+        // skip non-.ora files
         if (entry.kind != .file) continue;
         if (!std.mem.endsWith(u8, entry.basename, ".ora")) continue;
 
         const file_path = b.fmt("ora-example/{s}", .{entry.path});
         std.log.info("Testing: {s}", .{file_path});
 
-        // Test each compilation phase
+        // test each compilation phase
         const phases = [_][]const u8{ "lex", "parse", "analyze", "compile" };
 
         for (phases) |phase| {
@@ -984,7 +1079,7 @@ fn buildZ3LibrariesImpl(step: *std.Build.Step, options: std.Build.Step.MakeOptio
     const b = step.owner;
     const allocator = b.allocator;
 
-    // Check if Z3 is installed on the system
+    // check if Z3 is installed on the system
     const z3_check = std.process.Child.run(.{
         .allocator = allocator,
         .argv = &[_][]const u8{ "z3", "--version" },
@@ -996,7 +1091,7 @@ fn buildZ3LibrariesImpl(step: *std.Build.Step, options: std.Build.Step.MakeOptio
             .Exited => |code| {
                 if (code == 0) {
                     std.log.info("Z3 found on system: {s}", .{res.stdout});
-                    // Z3 is installed, we'll link to it
+                    // z3 is installed, we'll link to it
                     return;
                 }
             },
@@ -1004,7 +1099,7 @@ fn buildZ3LibrariesImpl(step: *std.Build.Step, options: std.Build.Step.MakeOptio
         }
     }
 
-    // Z3 not found on system, try to build from vendor
+    // z3 not found on system, try to build from vendor
     std.log.info("Z3 not found on system, checking vendor/z3...", .{});
 
     const cwd = std.fs.cwd();
@@ -1017,14 +1112,14 @@ fn buildZ3LibrariesImpl(step: *std.Build.Step, options: std.Build.Step.MakeOptio
         return;
     };
 
-    // Create build and install directories
+    // create build and install directories
     const build_dir = "vendor/z3/build-release";
     cwd.makeDir(build_dir) catch |err| switch (err) {
         error.PathAlreadyExists => {},
         else => return err,
     };
 
-    // Clear CMake cache if it exists to avoid stale SDK paths after system updates
+    // clear CMake cache if it exists to avoid stale SDK paths after system updates
     const cache_file = try std.fmt.allocPrint(allocator, "{s}/CMakeCache.txt", .{build_dir});
     defer allocator.free(cache_file);
     if (cwd.access(cache_file, .{}) catch null) |_| {
@@ -1034,7 +1129,7 @@ fn buildZ3LibrariesImpl(step: *std.Build.Step, options: std.Build.Step.MakeOptio
         };
     }
 
-    // Also clear CMakeFiles directory which may contain cached package configs
+    // also clear CMakeFiles directory which may contain cached package configs
     const cmake_files_dir = try std.fmt.allocPrint(allocator, "{s}/CMakeFiles", .{build_dir});
     defer allocator.free(cmake_files_dir);
     if (cwd.access(cmake_files_dir, .{}) catch null) |_| {
@@ -1050,12 +1145,12 @@ fn buildZ3LibrariesImpl(step: *std.Build.Step, options: std.Build.Step.MakeOptio
         else => return err,
     };
 
-    // Platform-specific flags
+    // platform-specific flags
     const builtin = @import("builtin");
     var cmake_args = std.array_list.Managed([]const u8).init(allocator);
     defer cmake_args.deinit();
 
-    // Prefer Ninja generator when available
+    // prefer Ninja generator when available
     var use_ninja: bool = false;
     {
         const probe = std.process.Child.run(.{ .allocator = allocator, .argv = &[_][]const u8{ "ninja", "--version" }, .cwd = "." }) catch null;
@@ -1097,8 +1192,8 @@ fn buildZ3LibrariesImpl(step: *std.Build.Step, options: std.Build.Step.MakeOptio
     } else if (builtin.os.tag == .macos) {
         try cmake_args.append("-DCMAKE_CXX_FLAGS=-stdlib=libc++");
 
-        // Fix SDK path issue after macOS/Xcode update
-        // Use xcrun to get the actual SDK path and set it explicitly
+        // fix SDK path issue after macOS/Xcode update
+        // use xcrun to get the actual SDK path and set it explicitly
         const sdk_path_result = std.process.Child.run(.{
             .allocator = allocator,
             .argv = &[_][]const u8{ "xcrun", "--show-sdk-path" },
@@ -1137,7 +1232,7 @@ fn buildZ3LibrariesImpl(step: *std.Build.Step, options: std.Build.Step.MakeOptio
         },
     }
 
-    // Build and install Z3
+    // build and install Z3
     var build_args = [_][]const u8{ "cmake", "--build", build_dir, "--parallel", "--target", "install" };
     var build_child = std.process.Child.init(&build_args, allocator);
     build_child.cwd = ".";
@@ -1164,10 +1259,10 @@ fn buildZ3LibrariesImpl(step: *std.Build.Step, options: std.Build.Step.MakeOptio
 
 /// Link Z3 to the given executable
 fn linkZ3Libraries(b: *std.Build, exe: *std.Build.Step.Compile, z3_step: *std.Build.Step, target: std.Build.ResolvedTarget) void {
-    // Depend on Z3 build
+    // depend on Z3 build
     exe.step.dependOn(z3_step);
 
-    // Try system-installed Z3 first
+    // try system-installed Z3 first
     const z3_check = std.process.Child.run(.{
         .allocator = b.allocator,
         .argv = &[_][]const u8{ "z3", "--version" },
@@ -1188,10 +1283,10 @@ fn linkZ3Libraries(b: *std.Build, exe: *std.Build.Step.Compile, z3_step: *std.Bu
 
     if (using_system_z3) {
         std.log.info("Linking against system Z3", .{});
-        // Add system Z3 paths based on platform
+        // add system Z3 paths based on platform
         switch (target.result.os.tag) {
             .macos => {
-                // Homebrew paths
+                // homebrew paths
                 if (target.result.cpu.arch == .aarch64) {
                     exe.addIncludePath(.{ .cwd_relative = "/opt/homebrew/include" });
                     exe.addLibraryPath(.{ .cwd_relative = "/opt/homebrew/lib" });
@@ -1214,7 +1309,7 @@ fn linkZ3Libraries(b: *std.Build, exe: *std.Build.Step.Compile, z3_step: *std.Bu
             },
         }
     } else {
-        // Use vendored Z3 if available
+        // use vendored Z3 if available
         const cwd = std.fs.cwd();
         _ = cwd.openDir("vendor/z3-install", .{ .iterate = false }) catch {
             std.log.warn("Z3 not available - formal verification features will be disabled", .{});
@@ -1228,10 +1323,10 @@ fn linkZ3Libraries(b: *std.Build, exe: *std.Build.Step.Compile, z3_step: *std.Bu
         exe.addLibraryPath(lib_path);
     }
 
-    // Link Z3 library
+    // link Z3 library
     exe.linkSystemLibrary("z3");
 
-    // Link C++ standard library (Z3 is C++)
+    // link C++ standard library (Z3 is C++)
     switch (target.result.os.tag) {
         .linux => {
             exe.linkLibCpp();
@@ -1252,12 +1347,12 @@ fn addBoostPaths(b: *std.Build, compile_step: *std.Build.Step.Compile, target: s
     const target_info = target.result;
     const host_info = @import("builtin").target;
 
-    // Determine if we're cross-compiling
+    // determine if we're cross-compiling
     const is_cross_compiling = target_info.os.tag != host_info.os.tag or
         target_info.cpu.arch != host_info.cpu.arch;
 
-    // For cross-compilation, use host system paths where dependencies are installed
-    // For native compilation, use target system paths
+    // for cross-compilation, use host system paths where dependencies are installed
+    // for native compilation, use target system paths
     const os_to_use = if (is_cross_compiling) host_info.os.tag else target_info.os.tag;
     const arch_to_use = if (is_cross_compiling) host_info.cpu.arch else target_info.cpu.arch;
 
@@ -1267,47 +1362,47 @@ fn addBoostPaths(b: *std.Build, compile_step: *std.Build.Step.Compile, target: s
 
     switch (os_to_use) {
         .macos => {
-            // Check if Apple Silicon or Intel Mac
+            // check if Apple Silicon or Intel Mac
             if (arch_to_use == .aarch64) {
-                // Apple Silicon - Homebrew installs to /opt/homebrew
+                // apple Silicon - Homebrew installs to /opt/homebrew
                 std.log.info("Adding Boost paths for Apple Silicon Mac", .{});
                 compile_step.addSystemIncludePath(.{ .cwd_relative = "/opt/homebrew/include" });
                 compile_step.addLibraryPath(.{ .cwd_relative = "/opt/homebrew/lib" });
             } else {
-                // Intel Mac - Homebrew installs to /usr/local
+                // intel Mac - Homebrew installs to /usr/local
                 std.log.info("Adding Boost paths for Intel Mac", .{});
                 compile_step.addSystemIncludePath(.{ .cwd_relative = "/usr/local/include" });
                 compile_step.addLibraryPath(.{ .cwd_relative = "/usr/local/lib" });
             }
         },
         .linux => {
-            // Linux - check common package manager locations
+            // linux - check common package manager locations
             std.log.info("Adding Boost paths for Linux", .{});
             compile_step.addSystemIncludePath(.{ .cwd_relative = "/usr/include" });
             compile_step.addSystemIncludePath(.{ .cwd_relative = "/usr/local/include" });
             compile_step.addLibraryPath(.{ .cwd_relative = "/usr/lib" });
             compile_step.addLibraryPath(.{ .cwd_relative = "/usr/local/lib" });
 
-            // Also check for x86_64-linux-gnu paths (common on Ubuntu)
+            // also check for x86_64-linux-gnu paths (common on Ubuntu)
             if (arch_to_use == .x86_64) {
                 compile_step.addLibraryPath(.{ .cwd_relative = "/usr/lib/x86_64-linux-gnu" });
             }
         },
         .windows => {
-            // Windows - typically vcpkg or manual installation
+            // windows - typically vcpkg or manual installation
             std.log.info("Adding Boost paths for Windows", .{});
-            // Check for vcpkg installation
+            // check for vcpkg installation
             if (std.process.hasEnvVarConstant("VCPKG_ROOT")) {
                 compile_step.addSystemIncludePath(.{ .cwd_relative = "C:/vcpkg/installed/x64-windows/include" });
                 compile_step.addLibraryPath(.{ .cwd_relative = "C:/vcpkg/installed/x64-windows/lib" });
             } else {
-                // Default paths for manual installation
+                // default paths for manual installation
                 compile_step.addSystemIncludePath(.{ .cwd_relative = "C:/boost/include" });
                 compile_step.addLibraryPath(.{ .cwd_relative = "C:/boost/lib" });
             }
         },
         else => {
-            // Fallback for other platforms
+            // fallback for other platforms
             std.log.warn("Unknown platform for Boost paths - using default system paths", .{});
             compile_step.addSystemIncludePath(.{ .cwd_relative = "/usr/include" });
             compile_step.addSystemIncludePath(.{ .cwd_relative = "/usr/local/include" });
@@ -1316,7 +1411,7 @@ fn addBoostPaths(b: *std.Build, compile_step: *std.Build.Step.Compile, target: s
         },
     }
 
-    // Try to check if Boost is available via environment variable
+    // try to check if Boost is available via environment variable
     const boost_root = std.process.getEnvVarOwned(b.allocator, "BOOST_ROOT") catch null;
     if (boost_root) |root| {
         defer b.allocator.free(root);

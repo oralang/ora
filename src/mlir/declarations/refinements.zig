@@ -36,22 +36,22 @@ pub fn insertRefinementGuard(
 
     switch (ora_type) {
         .min_value => |mv| {
-            // Generate: require(value >= min)
+            // generate: require(value >= min)
             const value_type = c.mlirValueGetType(value);
-            // Extract base type from refinement type for operations
+            // extract base type from refinement type for operations
             const base_type = c.oraRefinementTypeGetBaseType(value_type);
             const min_type = if (base_type.ptr != null) base_type else value_type;
-            // Convert value from refinement type to base type if needed
+            // convert value from refinement type to base type if needed
             const actual_value = if (base_type.ptr != null) blk: {
                 const convert_op = c.oraRefinementToBaseOpCreate(self.ctx, loc, value, block);
                 if (c.mlirOperationIsNull(convert_op)) {
                     reportRefinementGuardError(self, span, "Refinement guard creation failed: ora.refinement_to_base returned null", "Ensure the Ora dialect is registered before lowering.");
                     return;
                 }
-                // Operation is already inserted by oraRefinementToBaseOpCreate, no need to append
+                // operation is already inserted by oraRefinementToBaseOpCreate, no need to append
                 break :blk h.getResult(convert_op, 0);
             } else value;
-            // For u256 values, create attribute from string to support full precision
+            // for u256 values, create attribute from string to support full precision
             const min_attr = if (mv.min > std.math.maxInt(i64)) blk: {
                 var min_buf: [100]u8 = undefined;
                 const min_str = std.fmt.bufPrint(&min_buf, "{d}", .{mv.min}) catch {
@@ -88,22 +88,22 @@ pub fn insertRefinementGuard(
             h.appendOp(block, assert_op);
         },
         .max_value => |mv| {
-            // Generate: require(value <= max)
+            // generate: require(value <= max)
             const value_type = c.mlirValueGetType(value);
-            // Extract base type from refinement type for operations
+            // extract base type from refinement type for operations
             const base_type = c.oraRefinementTypeGetBaseType(value_type);
             const max_type = if (base_type.ptr != null) base_type else value_type;
-            // Convert value from refinement type to base type if needed
+            // convert value from refinement type to base type if needed
             const actual_value = if (base_type.ptr != null) blk: {
                 const convert_op = c.oraRefinementToBaseOpCreate(self.ctx, loc, value, block);
                 if (c.mlirOperationIsNull(convert_op)) {
                     reportRefinementGuardError(self, span, "Refinement guard creation failed: ora.refinement_to_base returned null", "Ensure the Ora dialect is registered before lowering.");
                     return;
                 }
-                // Operation is already inserted by oraRefinementToBaseOpCreate, no need to append
+                // operation is already inserted by oraRefinementToBaseOpCreate, no need to append
                 break :blk h.getResult(convert_op, 0);
             } else value;
-            // For u256 values, create attribute from string to support full precision
+            // for u256 values, create attribute from string to support full precision
             const max_attr = if (mv.max > std.math.maxInt(i64)) blk: {
                 var max_buf: [100]u8 = undefined;
                 const max_str = std.fmt.bufPrint(&max_buf, "{d}", .{mv.max}) catch {
@@ -140,22 +140,22 @@ pub fn insertRefinementGuard(
             h.appendOp(block, assert_op);
         },
         .in_range => |ir| {
-            // Generate: require(min <= value <= max)
+            // generate: require(min <= value <= max)
             const value_type = c.mlirValueGetType(value);
-            // Extract base type from refinement type for operations
+            // extract base type from refinement type for operations
             const base_type = c.oraRefinementTypeGetBaseType(value_type);
             const op_type = if (base_type.ptr != null) base_type else value_type;
-            // Convert value from refinement type to base type if needed
+            // convert value from refinement type to base type if needed
             const actual_value = if (base_type.ptr != null) blk: {
                 const convert_op = c.oraRefinementToBaseOpCreate(self.ctx, loc, value, block);
                 if (c.mlirOperationIsNull(convert_op)) {
                     reportRefinementGuardError(self, span, "Refinement guard creation failed: ora.refinement_to_base returned null", "Ensure the Ora dialect is registered before lowering.");
                     return;
                 }
-                // Operation is already inserted by oraRefinementToBaseOpCreate, no need to append
+                // operation is already inserted by oraRefinementToBaseOpCreate, no need to append
                 break :blk h.getResult(convert_op, 0);
             } else value;
-            // For u256 values, create attributes from strings to support full precision
+            // for u256 values, create attributes from strings to support full precision
             const min_attr = if (ir.min > std.math.maxInt(i64)) blk: {
                 var min_buf: [100]u8 = undefined;
                 const min_str = std.fmt.bufPrint(&min_buf, "{d}", .{ir.min}) catch {
@@ -181,7 +181,7 @@ pub fn insertRefinementGuard(
             const min_const = helpers.createConstant(self, block, min_attr, op_type, loc);
             const max_const = helpers.createConstant(self, block, max_attr, op_type, loc);
 
-            // Check: value >= min
+            // check: value >= min
             var min_cmp_state = h.opState("arith.cmpi", loc);
             const pred_id = h.identifier(self.ctx, "predicate");
             const pred_uge_attr = c.mlirIntegerAttrGet(c.mlirIntegerTypeGet(self.ctx, 64), 9); // uge
@@ -193,7 +193,7 @@ pub fn insertRefinementGuard(
             h.appendOp(block, min_cmp_op);
             const min_check = h.getResult(min_cmp_op, 0);
 
-            // Check: value <= max
+            // check: value <= max
             var max_cmp_state = h.opState("arith.cmpi", loc);
             const pred_ule_attr = c.mlirIntegerAttrGet(c.mlirIntegerTypeGet(self.ctx, 64), 7); // ule
             var max_attrs = [_]c.MlirNamedAttribute{c.mlirNamedAttributeGet(pred_id, pred_ule_attr)};
@@ -204,7 +204,7 @@ pub fn insertRefinementGuard(
             h.appendOp(block, max_cmp_op);
             const max_check = h.getResult(max_cmp_op, 0);
 
-            // Combine: min_check && max_check
+            // combine: min_check && max_check
             var and_state = h.opState("arith.andi", loc);
             c.mlirOperationStateAddOperands(&and_state, 2, @ptrCast(&[_]c.MlirValue{ min_check, max_check }));
             c.mlirOperationStateAddResults(&and_state, 1, @ptrCast(&h.boolType(self.ctx)));
@@ -224,11 +224,11 @@ pub fn insertRefinementGuard(
             h.appendOp(block, assert_op);
         },
         .exact, .scaled => {
-            // Exact and Scaled guards are inserted at specific operations (division, arithmetic)
-            // No parameter guard needed
+            // exact and Scaled guards are inserted at specific operations (division, arithmetic)
+            // no parameter guard needed
         },
         else => {
-            // Not a refinement type, no guard needed
+            // not a refinement type, no guard needed
         },
     }
 }

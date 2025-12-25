@@ -23,16 +23,16 @@ pub fn parseSwitchPattern(
     base: *BaseParser,
     expr_parser: *ExpressionParser,
 ) ParserError!ast.Switch.Pattern {
-    // Ensure expression parser starts from the same cursor as base
+    // ensure expression parser starts from the same cursor as base
     expr_parser.base.current = base.current;
     const pattern_token = base.peek();
 
-    // Check for else pattern
+    // check for else pattern
     if (base.match(.Else)) {
         return ast.Switch.Pattern{ .Else = base.spanFromToken(pattern_token) };
     }
 
-    // Add support for explicit enum patterns with ranges: EnumName.Start...EnumName.End
+    // add support for explicit enum patterns with ranges: EnumName.Start...EnumName.End
     if (base.check(.Identifier)) {
         const saved_pos = base.current;
         _ = base.advance(); // Consume identifier
@@ -41,10 +41,10 @@ pub fn parseSwitchPattern(
             _ = base.advance(); // Consume variant name
 
             if (base.match(.DotDotDot)) {
-                // This is an enum range pattern: EnumName.Start...EnumName.End
+                // this is an enum range pattern: EnumName.Start...EnumName.End
                 base.current = saved_pos; // Restore position
 
-                // Use the range expression parser
+                // use the range expression parser
                 const range_expr = try expr_parser.parseRangeExpression();
 
                 if (range_expr == .Range) {
@@ -61,37 +61,37 @@ pub fn parseSwitchPattern(
                     return error.ExpectedRangeExpression;
                 }
             } else {
-                // Not a range, restore position to after the first token
+                // not a range, restore position to after the first token
                 base.current = saved_pos;
             }
         } else {
-            // Not an enum pattern, restore position
+            // not an enum pattern, restore position
             base.current = saved_pos;
         }
     }
 
-    // General range pattern: parse an expression and if followed by '..' or '...'
+    // general range pattern: parse an expression and if followed by '..' or '...'
     // parse another expression to form a Range pattern
-    // Use parsePrimary to avoid parsing ranges (parsePrimary doesn't call parseCall)
+    // use parsePrimary to avoid parsing ranges (parsePrimary doesn't call parseCall)
     {
         const saved_pos_base = base.current;
         const saved_pos_expr = expr_parser.base.current;
-        // Ensure parsers are in sync before parsing
+        // ensure parsers are in sync before parsing
         expr_parser.base.current = base.current;
-        // Parse start expression using parsePrimary which doesn't parse ranges
+        // parse start expression using parsePrimary which doesn't parse ranges
         const start_expr = expr_parser.parsePrimary() catch blk: {
             base.current = saved_pos_base;
             expr_parser.base.current = saved_pos_expr;
             break :blk null;
         };
         if (start_expr) |se| {
-            // Keep base in sync with expr parser after parsing the start expression
+            // keep base in sync with expr parser after parsing the start expression
             base.current = expr_parser.base.current;
 
-            // Check for range operators (.. or ...) using expr_parser.base since that's what we're using
+            // check for range operators (.. or ...) using expr_parser.base since that's what we're using
             const is_inclusive = expr_parser.base.check(.DotDotDot);
             if (expr_parser.base.match(.DotDot) or expr_parser.base.match(.DotDotDot)) {
-                // Keep base in sync
+                // keep base in sync
                 base.current = expr_parser.base.current;
                 const end_expr = try expr_parser.parsePrimary();
                 base.current = expr_parser.base.current;
@@ -107,14 +107,14 @@ pub fn parseSwitchPattern(
                     .type_info = TypeInfo.unknown(),
                 } };
             } else {
-                // Not a range; restore and continue with other pattern kinds
+                // not a range; restore and continue with other pattern kinds
                 base.current = saved_pos_base;
                 expr_parser.base.current = saved_pos_expr;
             }
         }
     }
 
-    // Check for enum value pattern (EnumName.VariantName)
+    // check for enum value pattern (EnumName.VariantName)
     if (base.check(.Identifier)) {
         const first_token = base.advance();
 
@@ -127,8 +127,8 @@ pub fn parseSwitchPattern(
                 .span = base.spanFromToken(first_token),
             } };
         } else {
-            // Single identifier - parsed as enum variant without explicit enum name
-            // Type resolution happens in semantics phase
+            // single identifier - parsed as enum variant without explicit enum name
+            // type resolution happens in semantics phase
             return ast.Switch.Pattern{ .EnumValue = .{
                 .enum_name = "",
                 .variant_name = first_token.lexeme,
@@ -137,7 +137,7 @@ pub fn parseSwitchPattern(
         }
     }
 
-    // Check for literal patterns
+    // check for literal patterns
     if (base.check(.IntegerLiteral) or base.check(.StringLiteral) or
         base.check(.BinaryLiteral) or base.check(.True) or base.check(.False))
     {
@@ -182,17 +182,17 @@ pub fn parseSwitchPattern(
         } };
     }
 
-    // Default case or other patterns (underscore)
+    // default case or other patterns (underscore)
     if (base.check(.Identifier)) {
         const saved_pos = base.current;
         const token = base.advance();
 
-        // Check if the identifier is a single underscore
+        // check if the identifier is a single underscore
         if (std.mem.eql(u8, token.lexeme, "_")) {
             return ast.Switch.Pattern{ .Else = base.spanFromToken(token) };
         }
 
-        // Not an underscore, rewind
+        // not an underscore, rewind
         base.current = saved_pos;
     }
 
@@ -208,10 +208,10 @@ pub fn parseSwitchBody(
     expr_parser: *ExpressionParser,
     mode: SwitchBodyMode,
 ) ParserError!ast.Switch.Body {
-    // Ensure expression parser starts from the same cursor as base
+    // ensure expression parser starts from the same cursor as base
     expr_parser.base.current = base.current;
 
-    // Check for a labeled block: Identifier ":" "{" ... "}"
+    // check for a labeled block: Identifier ":" "{" ... "}"
     if (base.check(.Identifier)) {
         const saved_pos = base.current;
         const label_token = base.advance();
@@ -221,14 +221,14 @@ pub fn parseSwitchBody(
                 return ParserError.UnexpectedToken;
             }
 
-            // Parse the block content
+            // parse the block content
             _ = base.advance(); // consume '{'
 
             var statements = std.ArrayList(ast.Statements.StmtNode){};
             defer statements.deinit(base.arena.allocator());
 
             while (!base.check(.RightBrace) and !base.isAtEnd()) {
-                // Parse statements as expressions for now; optional semicolons
+                // parse statements as expressions for now; optional semicolons
                 const e = try expr_parser.parseExpression();
                 base.current = expr_parser.base.current;
                 try statements.append(base.arena.allocator(), ast.Statements.StmtNode{ .Expr = e });
@@ -241,7 +241,7 @@ pub fn parseSwitchBody(
                 .statements = try base.arena.createSlice(ast.Statements.StmtNode, statements.items.len),
                 .span = base.spanFromToken(label_token),
             };
-            // Copy statements into the allocated slice
+            // copy statements into the allocated slice
             for (statements.items, 0..) |stmt, i| block.statements[i] = stmt;
 
             return ast.Switch.Body{ .LabeledBlock = .{
@@ -250,13 +250,13 @@ pub fn parseSwitchBody(
                 .span = base.spanFromToken(label_token),
             } };
         } else {
-            // Not a labeled block; rewind
+            // not a labeled block; rewind
             base.current = saved_pos;
             expr_parser.base.current = saved_pos;
         }
     }
 
-    // Check for a block body
+    // check for a block body
     if (base.match(.LeftBrace)) {
         if (mode == .ExpressionArm) {
             try base.errorAtCurrent("Block body not allowed in switch expression arm");
@@ -265,15 +265,15 @@ pub fn parseSwitchBody(
         var statements = std.ArrayList(ast.Statements.StmtNode){};
         defer statements.deinit(base.arena.allocator());
 
-        // Parse statements inside the block
+        // parse statements inside the block
         while (!base.check(.RightBrace) and !base.isAtEnd()) {
-            // If using ExpressionParser, the statement will be an expression statement
+            // if using ExpressionParser, the statement will be an expression statement
             const e = try expr_parser.parseExpression();
-            // Keep base and expr parser in sync after expression parse
+            // keep base and expr parser in sync after expression parse
             base.current = expr_parser.base.current;
             try statements.append(base.arena.allocator(), ast.Statements.StmtNode{ .Expr = e });
 
-            // Consume optional semicolon
+            // consume optional semicolon
             _ = base.match(.Semicolon);
         }
 
@@ -285,9 +285,9 @@ pub fn parseSwitchBody(
         } };
     }
 
-    // Single expression body
+    // single expression body
     const expr = try expr_parser.parseExpression();
-    // Keep base and expr parser in sync after expression parse
+    // keep base and expr parser in sync after expression parse
     base.current = expr_parser.base.current;
     if (mode == .StatementArm) {
         _ = try base.consume(.Semicolon, "Expected ';' after switch statement arm expression");

@@ -80,7 +80,7 @@ pub const AstSerializer = struct {
     }
 
     pub fn deinit(_: *AstSerializer) void {
-        // Nothing to clean up at the moment
+        // nothing to clean up at the moment
     }
 
     /// Serialize AST nodes to a writer
@@ -176,7 +176,7 @@ pub const AstSerializer = struct {
             try writer.print("]\n");
             try writer.print("}\n");
         } else {
-            // Compact mode
+            // compact mode
             try writer.print("{\"type\":\"AST\",\"nodes\":[");
             for (nodes, 0..) |*node, i| {
                 if (i > 0) try writer.print(",");
@@ -187,14 +187,14 @@ pub const AstSerializer = struct {
     }
 
     fn serializeAstNode(self: *AstSerializer, node: *const AstNode, writer: anytype, indent: u32, depth: u32) SerializationError!void {
-        // Check depth limit before serializing
+        // check depth limit before serializing
         if (self.options.max_depth) |max_depth| {
             if (depth >= max_depth) {
                 return SerializationError.MaxDepthExceeded;
             }
         }
 
-        // Check for custom formatter (disabled for now)
+        // check for custom formatter (disabled for now)
         // if (self.options.custom_formatters) |formatters| {
         //     const node_type = @tagName(node.*);
         //     if (formatters.get(node_type)) |formatter| {
@@ -236,10 +236,10 @@ pub const AstSerializer = struct {
     }
 
     // ========================================================================
-    // TYPE SERIALIZATION
+    // type SERIALIZATION
     // ========================================================================
-    // Pattern serializers moved to serializer/patterns.zig
-    // Type serializers remain here
+    // pattern serializers moved to serializer/patterns.zig
+    // type serializers remain here
     // ========================================================================
     fn serializeParameter(self: *AstSerializer, param: *const ast.ParameterNode, writer: anytype, indent: u32) SerializationError!void {
         return helpers.serializeParameter(self, param, writer, indent);
@@ -249,7 +249,7 @@ pub const AstSerializer = struct {
         return helpers.serializeTypeInfo(self, type_info, writer);
     }
 
-    // Helper functions for writing formatted output - delegate to helpers module
+    // helper functions for writing formatted output - delegate to helpers module
     fn writeIndent(self: *AstSerializer, writer: anytype, level: u32) SerializationError!void {
         return helpers.writeIndent(self, writer, level);
     }
@@ -266,7 +266,7 @@ pub const AstSerializer = struct {
         return helpers.writeSpanField(self, writer, span, indent);
     }
 
-    // Pattern serializers - delegate to patterns module
+    // pattern serializers - delegate to patterns module
     fn serializeLoopPattern(self: *AstSerializer, pattern: *const ast.Statements.LoopPattern, writer: anytype, indent: u32) SerializationError!void {
         return patterns.serializeLoopPattern(self, pattern, writer, indent);
     }
@@ -287,13 +287,13 @@ pub const AstSerializer = struct {
         return patterns.serializeDestructuringPattern(self, pattern, writer, indent);
     }
 
-    // Custom formatter functionality has been removed as it's not needed in the current implementation
-    // If custom formatters are needed in the future, they should be implemented using a proper
-    // HashMap with node type as key and formatter function as value
+    // custom formatter functionality has been removed as it's not needed in the current implementation
+    // if custom formatters are needed in the future, they should be implemented using a proper
+    // hashMap with node type as key and formatter function as value
 
-    // Statistics functionality removed as it's not used in the current implementation
+    // statistics functionality removed as it's not used in the current implementation
 
-    // SerializationStats has been removed as it's not used in the current implementation
+    // serializationStats has been removed as it's not used in the current implementation
 };
 
 // Tests
@@ -304,7 +304,7 @@ test "AstSerializer basic functionality" {
     defer arena.deinit();
     const allocator = arena.allocator();
 
-    // Create a simple AST node for testing
+    // create a simple AST node for testing
     const contract = AstNode{
         .Contract = ast.ContractNode{
             .name = "TestContract",
@@ -321,7 +321,7 @@ test "AstSerializer basic functionality" {
     const result = try serializer.serializeToString(&nodes);
     defer allocator.free(result);
 
-    // Basic validation that JSON was generated
+    // basic validation that JSON was generated
     try testing.expect(std.mem.indexOf(u8, result, "TestContract") != null);
     try testing.expect(std.mem.indexOf(u8, result, "Contract") != null);
 }
@@ -347,7 +347,7 @@ test "AstSerializer compact mode" {
     const result = try serializer.serializeToString(&nodes);
     defer allocator.free(result);
 
-    // Compact mode should not have newlines or extra spaces
+    // compact mode should not have newlines or extra spaces
     try testing.expect(std.mem.indexOf(u8, result, "\n") == null);
     try testing.expect(std.mem.indexOf(u8, result, "TestContract") != null);
 }
@@ -373,7 +373,7 @@ test "AstSerializer without spans" {
     const result = try serializer.serializeToString(&nodes);
     defer allocator.free(result);
 
-    // Should not include span information
+    // should not include span information
     try testing.expect(std.mem.indexOf(u8, result, "span") == null);
     try testing.expect(std.mem.indexOf(u8, result, "TestContract") != null);
 }

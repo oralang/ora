@@ -45,7 +45,7 @@ pub const ErrorHandler = struct {
     }
 
     pub fn deinit(self: *ErrorHandler) void {
-        // Free individual error messages and suggestions
+        // free individual error messages and suggestions
         for (self.errors.items) |*err| {
             self.allocator.free(err.message);
             if (err.suggestion) |suggestion| {
@@ -53,7 +53,7 @@ pub const ErrorHandler = struct {
             }
         }
 
-        // Free individual warning messages
+        // free individual warning messages
         for (self.warnings.items) |*warn| {
             self.allocator.free(warn.message);
         }
@@ -103,7 +103,7 @@ pub const ErrorHandler = struct {
         };
         try self.errors.append(self.allocator, error_info);
 
-        // If we've exceeded max errors and recovery is disabled, panic
+        // if we've exceeded max errors and recovery is disabled, panic
         if (!self.error_recovery_mode and self.error_count >= self.max_errors) {
             @panic("Too many errors during MLIR lowering - compilation aborted");
         }
@@ -184,17 +184,17 @@ pub const ErrorHandler = struct {
 
     /// Format and print all errors and warnings
     pub fn printDiagnostics(self: *ErrorHandler, writer: anytype) !void {
-        // Print errors
+        // print errors
         for (self.errors.items) |err| {
             try self.printError(writer, err);
         }
 
-        // Print warnings
+        // print warnings
         for (self.warnings.items) |warn| {
             try self.printWarning(writer, warn);
         }
 
-        // Print summary
+        // print summary
         if (self.errors.items.len > 0 or self.warnings.items.len > 0) {
             try writer.print("\nDiagnostics Summary:\n", .{});
             try writer.print("  Errors: {d}\n", .{self.errors.items.len});
@@ -244,22 +244,22 @@ pub const ErrorHandler = struct {
 
     /// Validate an AST node with comprehensive error reporting
     pub fn validateAstNode(_: *ErrorHandler, _: anytype, _: ?lib.ast.SourceSpan) !bool {
-        // Basic validation - always return true for now
-        // This can be enhanced with specific validation logic
+        // basic validation - always return true for now
+        // this can be enhanced with specific validation logic
         return true;
     }
 
     /// Validate an MLIR operation with comprehensive error reporting
     pub fn validateMlirOperation(_: *ErrorHandler, _: c.MlirOperation, _: ?lib.ast.SourceSpan) !bool {
-        // Basic validation - always return true for now
-        // This can be enhanced with MLIR operation validation
+        // basic validation - always return true for now
+        // this can be enhanced with MLIR operation validation
         return true;
     }
 
     /// Validate memory region access with comprehensive error reporting
     pub fn validateMemoryRegion(_: *ErrorHandler, _: lib.ast.Statements.MemoryRegion, _: []const u8, _: ?lib.ast.SourceSpan) !bool {
-        // Basic validation - always return true for now
-        // This can be enhanced with memory region validation
+        // basic validation - always return true for now
+        // this can be enhanced with memory region validation
         return true;
     }
 };

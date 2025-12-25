@@ -36,7 +36,7 @@ pub const ParserError = common.ParserError;
 pub const Parser = struct {
     base: common.BaseParser,
 
-    // Sub-parsers
+    // sub-parsers
     expr_parser: ExpressionParser,
     stmt_parser: StatementParser,
     type_parser: TypeParser,
@@ -96,10 +96,10 @@ pub const Parser = struct {
 
     /// Parse a top-level declaration
     fn parseTopLevel(self: *Parser) ParserError!AstNode {
-        // Sync parser state with sub-parsers
+        // sync parser state with sub-parsers
         self.syncSubParsers();
 
-        // Handle imports (@import("path"))
+        // handle imports (@import("path"))
         if (self.check(.At)) {
             _ = self.advance(); // consume '@'
             if (self.check(.Import)) {
@@ -108,7 +108,7 @@ pub const Parser = struct {
                 return result;
             } else {
                 self.errorAtCurrent("Unknown @ directive at top-level; only @import is supported") catch {};
-                // Attempt to recover: skip to next semicolon or newline-like boundary
+                // attempt to recover: skip to next semicolon or newline-like boundary
                 while (!self.isAtEnd() and !self.check(.Semicolon) and !self.check(.RightBrace)) {
                     _ = self.advance();
                 }
@@ -116,7 +116,7 @@ pub const Parser = struct {
             }
         }
 
-        // Handle const imports (const std = @import("std"))
+        // handle const imports (const std = @import("std"))
         if (self.check(.Const)) {
             _ = self.advance(); // consume 'const'
             const result = try self.getDeclParser().parseConstImport();
@@ -124,19 +124,19 @@ pub const Parser = struct {
             return result;
         }
 
-        // Handle contracts
+        // handle contracts
         if (self.match(.Contract)) {
             const result = try self.getDeclParser().parseContract(&self.type_parser, &self.expr_parser);
             self.updateFromSubParser(self.decl_parser.base.current);
             return result;
         }
 
-        // Handle standalone functions (for modules)
+        // handle standalone functions (for modules)
         if (self.check(.Pub) or self.check(.Fn)) {
-            // Parse function header with declaration parser
+            // parse function header with declaration parser
             const hdr = try self.getDeclParser().parseFunction(&self.type_parser, &self.expr_parser);
             self.updateFromSubParser(self.decl_parser.base.current);
-            // Now parse the body with StatementParser; it will consume '{' itself
+            // now parse the body with StatementParser; it will consume '{' itself
             const body = try self.getStmtParser().parseBlock();
             self.updateFromSubParser(self.stmt_parser.base.current);
             var func_full = hdr;
@@ -144,35 +144,35 @@ pub const Parser = struct {
             return AstNode{ .Function = func_full };
         }
 
-        // Handle variable declarations
+        // handle variable declarations
         if (self.isMemoryRegionKeyword() or self.check(.Let) or self.check(.Var)) {
             const var_decl = try self.getDeclParser().parseVariableDecl(&self.type_parser, &self.expr_parser);
             self.updateFromSubParser(self.decl_parser.base.current);
             return AstNode{ .VariableDecl = var_decl };
         }
 
-        // Handle struct declarations
+        // handle struct declarations
         if (self.match(.Struct)) {
             const result = try self.getDeclParser().parseStruct(&self.type_parser);
             self.updateFromSubParser(self.decl_parser.base.current);
             return result;
         }
 
-        // Handle enum declarations
+        // handle enum declarations
         if (self.match(.Enum)) {
             const result = try self.getDeclParser().parseEnum(&self.type_parser, &self.expr_parser);
             self.updateFromSubParser(self.decl_parser.base.current);
             return result;
         }
 
-        // Handle log declarations
+        // handle log declarations
         if (self.match(.Log)) {
             const result = try self.getDeclParser().parseLogDecl(&self.type_parser);
             self.updateFromSubParser(self.decl_parser.base.current);
             return result;
         }
 
-        // Handle error declarations
+        // handle error declarations
         if (self.match(.Error)) {
             const err_decl = try self.getDeclParser().parseErrorDeclTopLevel(&self.type_parser);
             self.updateFromSubParser(self.decl_parser.base.current);
@@ -183,7 +183,7 @@ pub const Parser = struct {
         return error.UnexpectedToken;
     }
 
-    // Token manipulation methods - delegate to base parser
+    // token manipulation methods - delegate to base parser
     pub fn match(self: *Parser, token_type: TokenType) bool {
         return self.base.match(token_type);
     }
@@ -264,27 +264,27 @@ pub const Parser = struct {
 /// Returns both the AST nodes and the arena (caller must keep arena alive while using nodes)
 pub fn parseWithArena(allocator: Allocator, tokens: []const Token) ParserError!struct { nodes: []AstNode, arena: ast_arena.AstArena } {
     var ast_arena_instance = ast_arena.AstArena.init(allocator);
-    // Note: arena is NOT deinitialized here - caller must deinit it
+    // note: arena is NOT deinitialized here - caller must deinit it
 
     var parser = Parser.init(tokens, &ast_arena_instance);
     const nodes = try parser.parse();
 
-    // Collect symbols (errors, functions, structs, etc.) into symbol table before type resolution
-    // Use analyzePhase1 which creates contract scopes and function scopes properly
+    // collect symbols (errors, functions, structs, etc.) into symbol table before type resolution
+    // use analyzePhase1 which creates contract scopes and function scopes properly
     const semantics_core = @import("../semantics/core.zig");
     var semantics_result = try semantics_core.analyzePhase1(allocator, nodes);
     defer allocator.free(semantics_result.diagnostics);
     defer semantics_result.symbols.deinit();
 
-    // Perform type resolution on the parsed AST
+    // perform type resolution on the parsed AST
     const TypeResolver = @import("../ast/type_resolver/mod.zig").TypeResolver;
     var type_resolver = TypeResolver.init(allocator, &semantics_result.symbols);
     defer type_resolver.deinit();
     type_resolver.resolveTypes(nodes) catch |err| {
-        // Type resolution errors (especially TypeMismatch) should stop compilation
-        // These indicate invalid type assignments that cannot be safely compiled
+        // type resolution errors (especially TypeMismatch) should stop compilation
+        // these indicate invalid type assignments that cannot be safely compiled
         std.debug.print("error: Type resolution failed: {s}\n", .{@errorName(err)});
-        // Best-effort stack trace in debug builds
+        // best-effort stack trace in debug builds
         const trace = @errorReturnTrace();
         if (trace) |t| std.debug.dumpStackTrace(t.*);
         return ParserError.TypeResolutionFailed;
@@ -302,22 +302,22 @@ pub fn parse(allocator: Allocator, tokens: []const Token) ParserError![]AstNode 
     var parser = Parser.init(tokens, &ast_arena_instance);
     const nodes = try parser.parse();
 
-    // Collect symbols (errors, functions, structs, etc.) into symbol table before type resolution
-    // Use analyzePhase1 which creates contract scopes and function scopes properly
+    // collect symbols (errors, functions, structs, etc.) into symbol table before type resolution
+    // use analyzePhase1 which creates contract scopes and function scopes properly
     const semantics_core = @import("../semantics/core.zig");
     var semantics_result = try semantics_core.analyzePhase1(allocator, nodes);
     defer allocator.free(semantics_result.diagnostics);
     defer semantics_result.symbols.deinit();
 
-    // Perform type resolution on the parsed AST
+    // perform type resolution on the parsed AST
     const TypeResolver = @import("../ast/type_resolver/mod.zig").TypeResolver;
     var type_resolver = TypeResolver.init(allocator, &semantics_result.symbols);
     defer type_resolver.deinit();
     type_resolver.resolveTypes(nodes) catch |err| {
-        // Type resolution errors (especially TypeMismatch) should stop compilation
-        // These indicate invalid type assignments that cannot be safely compiled
+        // type resolution errors (especially TypeMismatch) should stop compilation
+        // these indicate invalid type assignments that cannot be safely compiled
         std.debug.print("error: Type resolution failed: {s}\n", .{@errorName(err)});
-        // Best-effort stack trace in debug builds
+        // best-effort stack trace in debug builds
         const trace = @errorReturnTrace();
         if (trace) |t| std.debug.dumpStackTrace(t.*);
         return ParserError.TypeResolutionFailed;

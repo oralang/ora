@@ -595,7 +595,7 @@ pub fn lowerTry(
     const expr_ty = c.mlirValueGetType(expr_value);
     const loc = self.fileLoc(try_expr.span);
 
-    // Use the C++ API which automatically creates the catch region
+    // use the C++ API which automatically creates the catch region
     const op = self.ora_dialect.createTry(expr_value, expr_ty, loc);
     h.appendOp(self.block, op);
     return h.getResult(op, 0);

@@ -70,7 +70,7 @@ pub const DeclarationParser = struct {
         const name_token = try self.base.consume(.Identifier, "Expected namespace name");
         _ = try self.base.consume(.Equal, "Expected '=' after namespace name");
 
-        // Parse @import("path")
+        // parse @import("path")
         _ = try self.base.consume(.At, "Expected '@' before import");
         _ = try self.base.consume(.Import, "Expected 'import' after '@'");
         _ = try self.base.consume(.LeftParen, "Expected '(' after 'import'");
@@ -90,7 +90,7 @@ pub const DeclarationParser = struct {
 
     /// Parse top-level import declaration - unified entry point
     pub fn parseImportDeclaration(self: *DeclarationParser) !ast.AstNode {
-        // Handle different import patterns:
+        // handle different import patterns:
         // 1. @import("path") - direct import
         // 2. const name = @import("path") - aliased import
 
@@ -166,7 +166,7 @@ pub const DeclarationParser = struct {
 
         if (!self.base.check(.RightParen)) {
             repeat: while (true) {
-                // Optional 'indexed' modifier for searchable fields
+                // optional 'indexed' modifier for searchable fields
                 const is_indexed = if (self.base.check(.Identifier) and std.mem.eql(u8, self.base.peek().lexeme, "indexed")) blk: {
                     _ = self.base.advance();
                     break :blk true;
@@ -175,7 +175,7 @@ pub const DeclarationParser = struct {
                 const field_name = try self.base.consumeIdentifierOrKeyword("Expected field name");
                 _ = try self.base.consume(.Colon, "Expected ':' after field name");
 
-                // Use type parser
+                // use type parser
                 type_parser.base.current = self.base.current;
                 const field_type = try type_parser.parseTypeWithContext(.LogField);
                 self.base.current = type_parser.base.current;
@@ -254,13 +254,13 @@ pub const DeclarationParser = struct {
             if (self.base.check(.Identifier) and std.mem.eql(u8, self.base.peek().lexeme, "lock")) {
                 _ = self.base.advance(); // consume "lock"
 
-                // Check if this is followed by a variable declaration
+                // check if this is followed by a variable declaration
                 if (self.isMemoryRegionKeyword() or self.base.check(.Let) or self.base.check(.Var)) {
                     return try self.parseVariableDeclWithLock(type_parser, expr_parser, true);
                 }
             }
 
-            // Not @lock or not followed by variable declaration, restore position
+            // not @lock or not followed by variable declaration, restore position
             self.base.current = saved_pos;
         }
         return null;
@@ -273,33 +273,33 @@ pub const DeclarationParser = struct {
         expr_parser: *ExpressionParser,
         is_locked: bool,
     ) !ast.Statements.VariableDeclNode {
-        // Parse memory region and variable kind together
+        // parse memory region and variable kind together
         const region_and_kind = try self.parseMemoryRegionAndKind();
         const region = region_and_kind.region;
         const kind = region_and_kind.kind;
 
-        // Tuple unpacking is not supported; use struct destructuring: let .{ a, b } = expr;
+        // tuple unpacking is not supported; use struct destructuring: let .{ a, b } = expr;
         if (self.base.check(.LeftParen)) {
             try self.base.errorAtCurrent("Tuple destructuring is not supported; use '.{ ... }' instead");
             return error.UnexpectedToken;
         }
 
-        // Regular variable declaration
+        // regular variable declaration
         const name_token = try self.base.consume(.Identifier, "Expected variable name");
 
-        // Type annotation is optional if there's an initializer (enables type inference)
+        // type annotation is optional if there's an initializer (enables type inference)
         var var_type: ast.Types.TypeInfo = ast.Types.TypeInfo.unknown();
         if (self.base.match(.Colon)) {
-            // Explicit type annotation provided
+            // explicit type annotation provided
             type_parser.base.current = self.base.current;
             var_type = try type_parser.parseTypeWithContext(.Variable);
             self.base.current = type_parser.base.current;
         }
 
-        // Parse optional initializer
+        // parse optional initializer
         var initializer: ?*ast.Expressions.ExprNode = null;
         if (self.base.match(.Equal)) {
-            // Use expression parser
+            // use expression parser
             expr_parser.base.current = self.base.current;
             const expr = try expr_parser.parseExpression();
             self.base.current = expr_parser.base.current;
@@ -307,7 +307,7 @@ pub const DeclarationParser = struct {
             expr_ptr.* = expr;
             initializer = expr_ptr;
         } else if (!var_type.isResolved()) {
-            // No type annotation and no initializer - error
+            // no type annotation and no initializer - error
             try self.base.errorAtCurrent("Variable declaration requires either a type annotation or an initializer");
             return error.UnexpectedToken;
         }
@@ -328,7 +328,7 @@ pub const DeclarationParser = struct {
 
     /// Parse memory region and variable kind together
     fn parseMemoryRegionAndKind(self: *DeclarationParser) !struct { region: ast.Memory.Region, kind: ast.Memory.VariableKind } {
-        // Handle const and immutable as special cases (they define both region and kind)
+        // handle const and immutable as special cases (they define both region and kind)
         if (self.base.match(.Const)) {
             return .{ .region = .Stack, .kind = .Const };
         }
@@ -336,7 +336,7 @@ pub const DeclarationParser = struct {
             return .{ .region = .Stack, .kind = .Immutable };
         }
 
-        // Parse explicit memory region qualifiers
+        // parse explicit memory region qualifiers
         var region: ast.Memory.Region = .Stack; // Default to stack
         if (self.base.match(.Storage)) {
             region = .Storage;
@@ -346,16 +346,16 @@ pub const DeclarationParser = struct {
             region = .TStore;
         }
 
-        // Parse variable kind (var/let) - required for non-const/immutable variables
+        // parse variable kind (var/let) - required for non-const/immutable variables
         var kind: ast.Memory.VariableKind = undefined;
         if (self.base.match(.Var)) {
             kind = .Var;
         } else if (self.base.match(.Let)) {
             kind = .Let;
         } else {
-            // If no explicit var/let, default based on context
-            // For storage/memory/tstore without explicit kind, default to var (mutable)
-            // For stack without explicit kind, default to let (immutable)
+            // if no explicit var/let, default based on context
+            // for storage/memory/tstore without explicit kind, default to var (mutable)
+            // for stack without explicit kind, default to let (immutable)
             kind = if (region == .Stack) .Let else .Var;
         }
 
@@ -369,25 +369,25 @@ pub const DeclarationParser = struct {
         type_parser: *TypeParser,
         expr_parser: *ExpressionParser,
     ) !ast.ConstantNode {
-        // Consume the 'const' keyword
+        // consume the 'const' keyword
         _ = try self.base.consume(.Const, "Expected 'const' keyword");
 
-        // Parse constant name
+        // parse constant name
         const name_token = try self.base.consume(.Identifier, "Expected constant name");
 
-        // Parse type annotation
+        // parse type annotation
         _ = try self.base.consume(.Colon, "Expected ':' after constant name");
         type_parser.base.current = self.base.current;
         const const_type = try type_parser.parseTypeWithContext(.Variable);
         self.base.current = type_parser.base.current;
 
-        // Parse initializer
+        // parse initializer
         _ = try self.base.consume(.Equal, "Expected '=' after constant type");
         expr_parser.base.current = self.base.current;
         const value_expr = try expr_parser.parseExpression();
         self.base.current = expr_parser.base.current;
 
-        // Create the value expression node
+        // create the value expression node
         const value_ptr = try self.base.arena.createNode(ast.Expressions.ExprNode);
         value_ptr.* = value_expr;
 
@@ -407,7 +407,7 @@ pub const DeclarationParser = struct {
     pub fn parseErrorDecl(self: *DeclarationParser, type_parser: *TypeParser) !ast.Statements.ErrorDeclNode {
         const name_token = try self.base.consume(.Identifier, "Expected error name");
 
-        // Parse optional parameter list
+        // parse optional parameter list
         var parameters: ?[]ast.ParameterNode = null;
         if (self.base.match(.LeftParen)) {
             var params = std.ArrayList(ast.ParameterNode){};

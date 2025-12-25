@@ -28,7 +28,7 @@ pub fn validateErrors(
 ) !ErrorValidationResult {
     var diags = std.ArrayList(ast.SourceSpan).init(allocator);
 
-    // Walk AST and validate error usage
+    // walk AST and validate error usage
     for (nodes) |node| {
         try validateNodeErrors(allocator, table, node, &diags);
     }
@@ -50,7 +50,7 @@ fn validateNodeErrors(
             }
         },
         .Function => |*function| {
-            // Validate function body for error returns
+            // validate function body for error returns
             try validateFunctionErrors(table, function, diags);
         },
         else => {},
@@ -63,12 +63,12 @@ fn validateFunctionErrors(
     function: *const ast.FunctionNode,
     diags: *std.ArrayList(ast.SourceSpan),
 ) !void {
-    // Validate function return type contains valid error names
+    // validate function return type contains valid error names
     if (function.return_type_info) |ret_type| {
         try validateErrorUnionType(table, ret_type, diags);
     }
 
-    // Walk function body and validate error returns
+    // walk function body and validate error returns
     try validateBlockErrors(table, &function.body, diags);
 }
 
@@ -138,38 +138,38 @@ fn validateExpressionErrors(
 ) !void {
     switch (expr.*) {
         .ErrorReturn => |*error_return| {
-            // Validate that the error is declared (error.SomeError syntax)
+            // validate that the error is declared (error.SomeError syntax)
             if (state.SymbolTable.findUp(null, error_return.error_name)) |symbol| {
                 if (symbol.kind != .Error) {
                     try diags.append(error_return.span);
                 }
-                // Check if error has parameters (shouldn't use error.X syntax for errors with params)
+                // check if error has parameters (shouldn't use error.X syntax for errors with params)
                 if (table.error_signatures.get(error_return.error_name)) |params| {
                     if (params != null and params.?.len > 0) {
-                        // Error has parameters but used error.X syntax (should use ErrorName(args))
+                        // error has parameters but used error.X syntax (should use ErrorName(args))
                         try diags.append(error_return.span);
                     }
                 }
             } else {
-                // Error not found
+                // error not found
                 try diags.append(error_return.span);
             }
         },
         .Call => |*call| {
-            // Check if this is an error call (ErrorName(args))
+            // check if this is an error call (ErrorName(args))
             if (call.callee.* == .Identifier) {
                 const callee_name = call.callee.Identifier.name;
 
-                // Check if callee is an error
+                // check if callee is an error
                 if (state.SymbolTable.findUp(null, callee_name)) |symbol| {
                     if (symbol.kind == .Error) {
-                        // This is an error call - validate parameters
+                        // this is an error call - validate parameters
                         try validateErrorCall(table, callee_name, call.arguments, call.span, diags);
                     }
                 }
             }
 
-            // Validate call arguments (may contain error expressions)
+            // validate call arguments (may contain error expressions)
             for (call.arguments) |*arg| {
                 try validateExpressionErrors(table, arg, diags);
             }
@@ -199,7 +199,7 @@ fn validateErrorCall(
     const error_params = table.error_signatures.get(error_name);
 
     if (error_params == null) {
-        // Error not found in signatures (shouldn't happen if symbol exists, but check anyway)
+        // error not found in signatures (shouldn't happen if symbol exists, but check anyway)
         try diags.append(span);
         return;
     }
@@ -207,25 +207,25 @@ fn validateErrorCall(
     const params = error_params.?;
 
     if (params == null) {
-        // Error has no parameters
+        // error has no parameters
         if (arguments.len > 0) {
-            // But arguments were provided
+            // but arguments were provided
             try diags.append(span);
         }
         return;
     }
 
-    // Error has parameters - validate count and types
+    // error has parameters - validate count and types
     const param_list = params.?;
 
     if (arguments.len != param_list.len) {
-        // Argument count mismatch
+        // argument count mismatch
         try diags.append(span);
         return;
     }
 
-    // Type checking for error parameters is done in ast/type_resolver/
-    // This function only validates parameter count
+    // type checking for error parameters is done in ast/type_resolver/
+    // this function only validates parameter count
 }
 
 /// Validate error union type contains only declared errors
@@ -237,48 +237,48 @@ fn validateErrorUnionType(
     if (type_info.ora_type) |ora_type| {
         switch (ora_type) {
             .error_union => |success_type| {
-                // Simple error union !T - no error names to validate
+                // simple error union !T - no error names to validate
                 _ = success_type;
             },
             ._union => |union_types| {
-                // Error union with explicit errors: !T | Error1 | Error2
-                // First type should be error_union, rest should be error types
+                // error union with explicit errors: !T | Error1 | Error2
+                // first type should be error_union, rest should be error types
                 for (union_types, 0..) |union_type, i| {
                     if (i == 0) {
-                        // First should be error_union
+                        // first should be error_union
                         switch (union_type) {
                             .error_union => {},
                             else => {
-                                // Invalid: first type in union should be error_union
+                                // invalid: first type in union should be error_union
                                 if (type_info.span) |span| {
                                     try diags.append(span);
                                 }
                             },
                         }
                     } else {
-                        // Subsequent types should be error type names
+                        // subsequent types should be error type names
                         switch (union_type) {
                             .struct_type => |error_name| {
-                                // Check if this is actually an error name
-                                // First check in symbol table for error declarations
+                                // check if this is actually an error name
+                                // first check in symbol table for error declarations
                                 if (table.error_signatures.get(error_name)) |_| {
-                                    // Found in error signatures - it's a valid error
+                                    // found in error signatures - it's a valid error
                                 } else if (state.SymbolTable.findUp(null, error_name)) |symbol| {
                                     if (symbol.kind != .Error) {
-                                        // Not an error type
+                                        // not an error type
                                         if (type_info.span) |span| {
                                             try diags.append(span);
                                         }
                                     }
                                 } else {
-                                    // Error name not found
+                                    // error name not found
                                     if (type_info.span) |span| {
                                         try diags.append(span);
                                     }
                                 }
                             },
                             else => {
-                                // Invalid: should be an error type name
+                                // invalid: should be an error type name
                                 if (type_info.span) |span| {
                                     try diags.append(span);
                                 }
@@ -288,7 +288,7 @@ fn validateErrorUnionType(
                 }
             },
             else => {
-                // Not an error union type, nothing to validate
+                // not an error union type, nothing to validate
             },
         }
     }

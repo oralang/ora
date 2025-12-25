@@ -41,7 +41,7 @@ pub const RefinementSystem = struct {
             .utils = utils_sys,
         };
 
-        // Phase 1: Register built-in refinement handlers
+        // phase 1: Register built-in refinement handlers
         registerBuiltinHandlers(&system) catch |err| {
             std.debug.panic("Failed to register refinement handlers: {s}\n", .{@errorName(err)});
         };
@@ -83,7 +83,7 @@ pub const RefinementSystem = struct {
 
 /// Register all built-in refinement type handlers
 fn registerBuiltinHandlers(system: *RefinementSystem) !void {
-    // MinValue handler
+    // minValue handler
     const min_value_id = try system.registry.register(RefinementHandler{
         .name = "MinValue",
         .validate = validateMinValue,
@@ -94,7 +94,7 @@ fn registerBuiltinHandlers(system: *RefinementSystem) !void {
     });
     _ = min_value_id;
 
-    // MaxValue handler
+    // maxValue handler
     const max_value_id = try system.registry.register(RefinementHandler{
         .name = "MaxValue",
         .validate = validateMaxValue,
@@ -105,7 +105,7 @@ fn registerBuiltinHandlers(system: *RefinementSystem) !void {
     });
     _ = max_value_id;
 
-    // InRange handler
+    // inRange handler
     const in_range_id = try system.registry.register(RefinementHandler{
         .name = "InRange",
         .validate = validateInRange,
@@ -116,7 +116,7 @@ fn registerBuiltinHandlers(system: *RefinementSystem) !void {
     });
     _ = in_range_id;
 
-    // Scaled handler
+    // scaled handler
     const scaled_id = try system.registry.register(RefinementHandler{
         .name = "Scaled",
         .validate = validateScaled,
@@ -127,7 +127,7 @@ fn registerBuiltinHandlers(system: *RefinementSystem) !void {
     });
     _ = scaled_id;
 
-    // Exact handler
+    // exact handler
     const exact_id = try system.registry.register(RefinementHandler{
         .name = "Exact",
         .validate = validateExact,
@@ -138,7 +138,7 @@ fn registerBuiltinHandlers(system: *RefinementSystem) !void {
     });
     _ = exact_id;
 
-    // NonZeroAddress handler
+    // nonZeroAddress handler
     const non_zero_address_id = try system.registry.register(RefinementHandler{
         .name = "NonZeroAddress",
         .validate = validateNonZeroAddress,
@@ -302,7 +302,7 @@ fn validateScaled(cfg: *const RefinementConfig, ty: *const OraType) TypeResoluti
             if (!s.base.isInteger()) {
                 return TypeResolutionError.TypeMismatch;
             }
-            // Note: No hardcoded decimals > 77 constraint
+            // note: No hardcoded decimals > 77 constraint
         },
         else => return TypeResolutionError.TypeMismatch,
     }

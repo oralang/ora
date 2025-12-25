@@ -69,14 +69,14 @@ fn lowerContractTypes(self: *const DeclarationLowerer, block: c.MlirBlock, contr
 
 /// Lower contract declarations with enhanced metadata and inheritance support
 pub fn lowerContract(self: *const DeclarationLowerer, contract: *const lib.ContractNode) c.MlirOperation {
-    // Create the contract operation using C++ API
+    // create the contract operation using C++ API
     const name_ref = c.mlirStringRefCreate(contract.name.ptr, contract.name.len);
     const contract_op = c.oraContractOpCreate(self.ctx, helpers.createFileLocation(self, contract.span), name_ref);
     if (contract_op.ptr == null) {
         @panic("Failed to create ora.contract operation");
     }
 
-    // Set additional attributes using C API (attributes are just metadata)
+    // set additional attributes using C API (attributes are just metadata)
     if (contract.extends) |base_contract| {
         const extends_ref = c.mlirStringRefCreate(base_contract.ptr, base_contract.len);
         const extends_attr = c.mlirStringAttrGet(self.ctx, extends_ref);
@@ -85,7 +85,7 @@ pub fn lowerContract(self: *const DeclarationLowerer, contract: *const lib.Contr
     }
 
     if (contract.implements.len > 0) {
-        // Create array attribute for implemented interfaces
+        // create array attribute for implemented interfaces
         var interface_attrs = std.ArrayList(c.MlirAttribute){};
         defer interface_attrs.deinit(std.heap.page_allocator);
 
@@ -100,119 +100,119 @@ pub fn lowerContract(self: *const DeclarationLowerer, contract: *const lib.Contr
         c.mlirOperationSetAttributeByName(contract_op, implements_name, implements_array);
     }
 
-    // Add contract metadata attribute
+    // add contract metadata attribute
     const contract_attr = c.mlirBoolAttrGet(self.ctx, 1);
     const contract_name = h.strRef("ora.contract_decl");
     c.mlirOperationSetAttributeByName(contract_op, contract_name, contract_attr);
 
-    // Get the body region from the created operation
+    // get the body region from the created operation
     const region = c.mlirOperationGetRegion(contract_op, 0);
     const block = c.mlirRegionGetFirstBlock(region);
 
-    // Create contract-level symbol management
+    // create contract-level symbol management
     var contract_symbol_table = SymbolTable.init(std.heap.page_allocator);
     defer contract_symbol_table.deinit();
 
-    // First pass: collect all storage variables and create a shared StorageMap
+    // first pass: collect all storage variables and create a shared StorageMap
     var storage_map = StorageMap.init(std.heap.page_allocator);
     defer storage_map.deinit();
 
     for (contract.body) |child| {
         switch (child) {
             .VariableDecl => |var_decl| {
-                // Include ghost variables in storage map for verification
-                // They will be filtered out during target code generation (not in bytecode)
+                // include ghost variables in storage map for verification
+                // they will be filtered out during target code generation (not in bytecode)
                 switch (var_decl.region) {
                     .Storage => {
-                        // This is a storage variable - add it to the storage map and symbol table
-                        // Ghost variables are included for verification purposes
+                        // this is a storage variable - add it to the storage map and symbol table
+                        // ghost variables are included for verification purposes
                         _ = storage_map.getOrCreateAddress(var_decl.name) catch {};
-                        // Add to contract symbol table for member variable tracking
+                        // add to contract symbol table for member variable tracking
                         const var_type = self.type_mapper.toMlirType(var_decl.type_info);
                         contract_symbol_table.addSymbol(var_decl.name, var_type, var_decl.region, null, var_decl.kind) catch {};
-                        // Also populate the actual symbol table used by expression/statement lowerers
+                        // also populate the actual symbol table used by expression/statement lowerers
                         if (self.symbol_table) |st| {
                             st.addSymbol(var_decl.name, var_type, var_decl.region, null, var_decl.kind) catch {};
                         }
                     },
                     .Memory => {
-                        // Memory variables are allocated in memory space
+                        // memory variables are allocated in memory space
                     },
                     .TStore => {
-                        // Transient storage variables are allocated in transient storage space
+                        // transient storage variables are allocated in transient storage space
                     },
                     .Stack => {
-                        // Stack variables at contract level are not allowed in Ora
+                        // stack variables at contract level are not allowed in Ora
                         std.debug.print("WARNING: Stack variable at contract level: {s}\n", .{var_decl.name});
                     },
                 }
             },
             .Function => |_| {
-                // Functions are processed in the second pass - skip in first pass
-                // This avoids creating operations before the state is fully configured
+                // functions are processed in the second pass - skip in first pass
+                // this avoids creating operations before the state is fully configured
             },
             .ContractInvariant => {
-                // Skip contract invariants (specification-only)
+                // skip contract invariants (specification-only)
             },
             else => {},
         }
     }
 
-    // Second pass: first register all struct/enum types, then process functions and variables
-    // This ensures types are available when functions use them
+    // second pass: first register all struct/enum types, then process functions and variables
+    // this ensures types are available when functions use them
     lowerContractTypes(self, block, contract);
 
-    // Third pass: process functions and variables (after types are registered)
+    // third pass: process functions and variables (after types are registered)
     for (contract.body) |child| {
         switch (child) {
             .Function => |f| {
-                // Include ghost functions in MLIR for verification
-                // They will be filtered out during target code generation (not in bytecode)
+                // include ghost functions in MLIR for verification
+                // they will be filtered out during target code generation (not in bytecode)
                 var local_var_map = LocalVarMap.init(std.heap.page_allocator);
                 defer local_var_map.deinit();
                 const func_op = self.lowerFunction(&f, &storage_map, &local_var_map);
                 h.appendOp(block, func_op);
             },
             .VariableDecl => |var_decl| {
-                // Include ghost variables in MLIR for verification
-                // They will be filtered out during target code generation (not in bytecode)
+                // include ghost variables in MLIR for verification
+                // they will be filtered out during target code generation (not in bytecode)
 
                 switch (var_decl.region) {
                     .Storage => {
-                        // Create ora.global operation for storage variables (directly in contract body)
+                        // create ora.global operation for storage variables (directly in contract body)
                         const global_op = self.createGlobalDeclaration(&var_decl);
                         h.appendOp(block, global_op);
                     },
                     .Memory => {
-                        // Create ora.memory.global operation for memory variables
+                        // create ora.memory.global operation for memory variables
                         const memory_global_op = self.createMemoryGlobalDeclaration(&var_decl);
                         h.appendOp(block, memory_global_op);
                     },
                     .TStore => {
-                        // Create ora.tstore.global operation for transient storage variables
+                        // create ora.tstore.global operation for transient storage variables
                         const tstore_global_op = self.createTStoreGlobalDeclaration(&var_decl);
                         h.appendOp(block, tstore_global_op);
                     },
                     .Stack => {
-                        // Stack variables at contract level are not allowed
-                        // This should have been caught in the first pass
+                        // stack variables at contract level are not allowed
+                        // this should have been caught in the first pass
                     },
                 }
             },
             .StructDecl, .EnumDecl => {
-                // Structs/enums are lowered and registered in the second pass.
+                // structs/enums are lowered and registered in the second pass.
             },
             .LogDecl => |log_decl| {
-                // Lower log declarations within contract
+                // lower log declarations within contract
                 const log_op = self.lowerLogDecl(&log_decl);
                 h.appendOp(block, log_op);
             },
             .ErrorDecl => |error_decl| {
-                // Lower error declarations within contract
+                // lower error declarations within contract
                 const error_op = self.lowerErrorDecl(&error_decl);
                 h.appendOp(block, error_op);
 
-                // Register error in symbol table so it can be referenced
+                // register error in symbol table so it can be referenced
                 if (self.symbol_table) |st| {
                     const error_type = self.createErrorType(&error_decl);
                     st.addError(error_decl.name, error_type, null) catch {
@@ -221,30 +221,30 @@ pub fn lowerContract(self: *const DeclarationLowerer, contract: *const lib.Contr
                 }
             },
             .Constant => |const_decl| {
-                // Lower constant declarations within contract
-                // Lower the constant declaration operation (for metadata/documentation)
+                // lower constant declarations within contract
+                // lower the constant declaration operation (for metadata/documentation)
                 const const_op = self.lowerConstDecl(&const_decl);
                 h.appendOp(block, const_op);
 
-                // Register constant declaration for lazy value creation
-                // Constants are created lazily when referenced to avoid cross-region issues
+                // register constant declaration for lazy value creation
+                // constants are created lazily when referenced to avoid cross-region issues
                 if (self.symbol_table) |st| {
                     const const_type = self.type_mapper.toMlirType(const_decl.typ);
-                    // Register the constant declaration so we can create its value when referenced
+                    // register the constant declaration so we can create its value when referenced
                     st.registerConstantDecl(const_decl.name, &const_decl) catch {
                         std.debug.print("ERROR: Failed to register constant declaration: {s}\n", .{const_decl.name});
                     };
-                    // Add to symbol table with null value - will be created lazily when referenced
+                    // add to symbol table with null value - will be created lazily when referenced
                     st.addConstant(const_decl.name, const_type, null, null) catch {
                         std.debug.print("ERROR: Failed to add constant to symbol table: {s}\n", .{const_decl.name});
                     };
                 }
             },
             .ContractInvariant => {
-                // Skip contract invariants (specification-only)
+                // skip contract invariants (specification-only)
             },
             else => {
-                // Report missing node type with context and continue processing
+                // report missing node type with context and continue processing
                 if (self.error_handler) |eh| {
                     eh.reportMissingNodeType(@tagName(child), error_handling.getSpanFromAstNode(&child), "contract body") catch {};
                 } else {
@@ -254,6 +254,6 @@ pub fn lowerContract(self: *const DeclarationLowerer, contract: *const lib.Contr
         }
     }
 
-    // Return the contract operation (already created via C++ API)
+    // return the contract operation (already created via C++ API)
     return contract_op;
 }

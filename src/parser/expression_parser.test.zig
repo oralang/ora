@@ -32,7 +32,7 @@ test "expressions: integer literal" {
 
     const expr = try expr_parser.parseExpression();
 
-    // Check if it's a literal expression
+    // check if it's a literal expression
     try testing.expect(expr == .Literal);
 }
 
@@ -51,7 +51,7 @@ test "expressions: string literal" {
 
     const expr = try expr_parser.parseExpression();
 
-    // Check if it's a literal expression
+    // check if it's a literal expression
     try testing.expect(expr == .Literal);
 }
 
@@ -70,7 +70,7 @@ test "expressions: boolean literal true" {
 
     const expr = try expr_parser.parseExpression();
 
-    // Check if it's a literal expression
+    // check if it's a literal expression
     try testing.expect(expr == .Literal);
 }
 
@@ -89,7 +89,7 @@ test "expressions: boolean literal false" {
 
     const expr = try expr_parser.parseExpression();
 
-    // Check if it's a literal expression
+    // check if it's a literal expression
     try testing.expect(expr == .Literal);
 }
 
@@ -260,11 +260,11 @@ test "expressions: precedence - multiplication before addition" {
 
     const expr = try expr_parser.parseExpression();
 
-    // Should parse as: a + (b * c)
+    // should parse as: a + (b * c)
     try testing.expect(expr == .Binary);
     if (expr == .Binary) {
         try testing.expectEqual(ast.Expressions.BinaryOp.Plus, expr.Binary.operator);
-        // Right side should be multiplication
+        // right side should be multiplication
         if (expr.Binary.rhs.* == .Binary) {
             try testing.expectEqual(ast.Expressions.BinaryOp.Star, expr.Binary.rhs.Binary.operator);
         } else {
@@ -288,7 +288,7 @@ test "expressions: precedence - addition before comparison" {
 
     const expr = try expr_parser.parseExpression();
 
-    // Should parse as: (a + b) < c
+    // should parse as: (a + b) < c
     try testing.expect(expr == .Binary);
     if (expr == .Binary) {
         try testing.expectEqual(ast.Expressions.BinaryOp.Less, expr.Binary.operator);
@@ -360,11 +360,11 @@ test "expressions: parentheses override precedence" {
 
     const expr = try expr_parser.parseExpression();
 
-    // Should parse as: (a + b) * c
+    // should parse as: (a + b) * c
     try testing.expect(expr == .Binary);
     if (expr == .Binary) {
         try testing.expectEqual(ast.Expressions.BinaryOp.Star, expr.Binary.operator);
-        // Left side should be addition (in parentheses)
+        // left side should be addition (in parentheses)
         if (expr.Binary.lhs.* == .Binary) {
             try testing.expectEqual(ast.Expressions.BinaryOp.Plus, expr.Binary.lhs.Binary.operator);
         } else {
@@ -412,8 +412,8 @@ test "expressions: function call with args" {
 
     try testing.expect(expr == .Call);
     if (expr == .Call) {
-        // Verify we got a call expression with arguments
-        // The parser should produce at least 2 arguments for "foo(a, b)"
+        // verify we got a call expression with arguments
+        // the parser should produce at least 2 arguments for "foo(a, b)"
         try testing.expect(expr.Call.arguments.len >= 1);
     }
 }

@@ -13,8 +13,8 @@ const c = @import("mlir_c_api").c;
 /// This uses the view-op-graph pass which generates Graphviz DOT format
 /// The dialect will be registered automatically via the C++ API
 pub fn generateCFG(ctx: c.MlirContext, module: c.MlirModule, allocator: std.mem.Allocator) ![]const u8 {
-    // Use the C++ API function that registers the dialect and generates CFG
-    // Include control flow edges to show dominance relationships
+    // use the C++ API function that registers the dialect and generates CFG
+    // include control flow edges to show dominance relationships
     const dot_string_ref = c.oraGenerateCFG(ctx, module, true);
 
     if (dot_string_ref.data == null) {
@@ -27,11 +27,11 @@ pub fn generateCFG(ctx: c.MlirContext, module: c.MlirModule, allocator: std.mem.
         return error.CFGGenerationFailed;
     }
 
-    // Copy the string to Zig-managed memory
+    // copy the string to Zig-managed memory
     const dot_content = try allocator.dupe(u8, dot_string_ref.data[0..dot_string_ref.length]);
 
-    // Free the C-allocated string
-    // Note: The C API should provide mlirStringRefFree, but for now we'll use free
+    // free the C-allocated string
+    // note: The C API should provide mlirStringRefFree, but for now we'll use free
     const c_allocator = std.heap.c_allocator;
     c_allocator.free(dot_string_ref.data[0..dot_string_ref.length]);
 

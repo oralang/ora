@@ -46,7 +46,7 @@ pub const VerificationError = errors.VerificationError;
 
 /// Check if Z3 is available at runtime
 pub fn isZ3Available() bool {
-    // Try to create a Z3 context
+    // try to create a Z3 context
     const cfg = c.Z3_mk_config();
     if (cfg == null) return false;
     defer c.Z3_del_config(cfg);

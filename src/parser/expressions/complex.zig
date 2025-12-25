@@ -29,7 +29,7 @@ const Token = @import("../../lexer.zig").Token;
 pub fn parseSwitchExpression(parser: *ExpressionParser) ParserError!ast.Expressions.ExprNode {
     const switch_token = parser.base.previous();
 
-    // Parse required switch condition: switch (expr)
+    // parse required switch condition: switch (expr)
     _ = try parser.base.consume(.LeftParen, "Expected '(' after 'switch'");
     const condition = try parser.parseExpression();
     _ = try parser.base.consume(.RightParen, "Expected ')' after switch condition");
@@ -43,49 +43,49 @@ pub fn parseSwitchExpression(parser: *ExpressionParser) ParserError!ast.Expressi
 
     var default_case: ?ast.Statements.BlockNode = null;
 
-    // Parse switch arms
+    // parse switch arms
     while (!parser.base.check(.RightBrace) and !parser.base.isAtEnd()) {
         if (parser.base.match(.Else)) {
-            // Parse else clause
+            // parse else clause
             _ = try parser.base.consume(.Arrow, "Expected '=>' after 'else'");
-            // For switch expressions, else body must be an expression
+            // for switch expressions, else body must be an expression
             const else_expr = try parser.parseExpressionNoComma();
             const expr_ptr = try parser.base.arena.createNode(ast.Expressions.ExprNode);
             expr_ptr.* = else_expr;
-            // Synthesize a block node with a single expression statement
+            // synthesize a block node with a single expression statement
             var stmts = try parser.base.arena.createSlice(ast.Statements.StmtNode, 1);
             stmts[0] = ast.Statements.StmtNode{ .Expr = expr_ptr.* };
             default_case = ast.Statements.BlockNode{
                 .statements = stmts,
                 .span = parser.base.spanFromToken(parser.base.previous()),
             };
-            // Optional trailing comma after else arm
+            // optional trailing comma after else arm
             _ = parser.base.match(.Comma);
             break;
         }
 
-        // Parse pattern for switch expression using common parser
+        // parse pattern for switch expression using common parser
         const pattern = try common_parsers.parseSwitchPattern(&parser.base, parser);
 
-        // Sync parser state defensively before consuming '=>' and parsing the arm body
+        // sync parser state defensively before consuming '=>' and parsing the arm body
         const sync_pos = parser.base.current;
         parser.base.current = sync_pos;
 
         _ = try parser.base.consume(.Arrow, "Expected '=>' after switch pattern");
-        // Defensive: if cursor drifted, ensure any stray '=>' is consumed
+        // defensive: if cursor drifted, ensure any stray '=>' is consumed
         if (parser.base.check(.Arrow)) {
             _ = parser.base.advance();
         }
 
-        // Parse body directly as an expression for switch expressions.
-        // IMPORTANT: Do not allow the comma operator to swallow the next case.
+        // parse body directly as an expression for switch expressions.
+        // important: Do not allow the comma operator to swallow the next case.
         const before_idx = parser.base.current;
         const arm_expr = try parser.parseExpressionNoComma();
         const expr_ptr2 = try parser.base.arena.createNode(ast.Expressions.ExprNode);
         expr_ptr2.* = arm_expr;
         const body = ast.Switch.Body{ .Expression = expr_ptr2 };
 
-        // Create switch case
+        // create switch case
         const case = ast.Switch.Case{
             .pattern = pattern,
             .body = body,
@@ -94,9 +94,9 @@ pub fn parseSwitchExpression(parser: *ExpressionParser) ParserError!ast.Expressi
 
         try cases.append(parser.base.arena.allocator(), case);
 
-        // Optional comma between cases
+        // optional comma between cases
         _ = parser.base.match(.Comma);
-        // Defensive: if parser did not advance and next is '=>', consume it
+        // defensive: if parser did not advance and next is '=>', consume it
         if (parser.base.check(.Arrow) and parser.base.current == before_idx) {
             _ = parser.base.advance();
             _ = parser.base.match(.Comma);
@@ -121,14 +121,14 @@ pub fn parseBuiltinFunction(parser: *ExpressionParser) ParserError!ast.Expressio
     const at_token = parser.base.previous();
     const name_token = try parser.base.consume(.Identifier, "Expected builtin function name after '@'");
 
-    // Check if it's a valid builtin function
+    // check if it's a valid builtin function
     const builtin_name = name_token.lexeme;
 
-    // Handle @cast(Type, expr)
+    // handle @cast(Type, expr)
     if (std.mem.eql(u8, builtin_name, "cast")) {
         _ = try parser.base.consume(.LeftParen, "Expected '(' after builtin function name");
 
-        // Parse target type via TypeParser
+        // parse target type via TypeParser
         var type_parser = TypeParser.init(parser.base.tokens, parser.base.arena);
         type_parser.base.current = parser.base.current;
         const target_type = try type_parser.parseType();
@@ -136,7 +136,7 @@ pub fn parseBuiltinFunction(parser: *ExpressionParser) ParserError!ast.Expressio
 
         _ = try parser.base.consume(.Comma, "Expected ',' after type in @cast");
 
-        // Parse operand expression
+        // parse operand expression
         const operand_expr = try parser.parseExpression();
         _ = try parser.base.consume(.RightParen, "Expected ')' after @cast arguments");
 
@@ -151,7 +151,7 @@ pub fn parseBuiltinFunction(parser: *ExpressionParser) ParserError!ast.Expressio
         } };
     }
 
-    // Handle other builtin functions
+    // handle other builtin functions
     if (std.mem.eql(u8, builtin_name, "divTrunc") or
         std.mem.eql(u8, builtin_name, "divFloor") or
         std.mem.eql(u8, builtin_name, "divCeil") or
@@ -179,10 +179,10 @@ pub fn parseBuiltinFunction(parser: *ExpressionParser) ParserError!ast.Expressio
 
         _ = try parser.base.consume(.RightParen, "Expected ')' after arguments");
 
-        // Create the builtin function call
+        // create the builtin function call
         const full_name = try std.fmt.allocPrint(parser.base.arena.allocator(), "@{s}", .{builtin_name});
 
-        // Create identifier for the function name
+        // create identifier for the function name
         const name_expr = try parser.base.arena.createNode(ast.Expressions.ExprNode);
         name_expr.* = ast.Expressions.ExprNode{ .Identifier = ast.Expressions.IdentifierExpr{
             .name = full_name,
@@ -208,7 +208,7 @@ pub fn parseBuiltinFunction(parser: *ExpressionParser) ParserError!ast.Expressio
 pub fn parseParenthesizedOrTuple(parser: *ExpressionParser) ParserError!ast.Expressions.ExprNode {
     const paren_token = parser.base.previous();
 
-    // Check for empty tuple
+    // check for empty tuple
     if (parser.base.check(.RightParen)) {
         _ = parser.base.advance();
         var empty_elements = std.ArrayList(*ast.Expressions.ExprNode){};
@@ -222,17 +222,17 @@ pub fn parseParenthesizedOrTuple(parser: *ExpressionParser) ParserError!ast.Expr
 
     const first_expr = try parser.parseExpression();
 
-    // Check if it's a tuple (has comma)
+    // check if it's a tuple (has comma)
     if (parser.base.match(.Comma)) {
         var elements = std.ArrayList(*ast.Expressions.ExprNode){};
         defer elements.deinit(parser.base.arena.allocator());
 
-        // Convert first_expr to pointer
+        // convert first_expr to pointer
         const first_ptr = try parser.base.arena.createNode(ast.Expressions.ExprNode);
         first_ptr.* = first_expr;
         try elements.append(parser.base.arena.allocator(), first_ptr);
 
-        // Handle trailing comma case: (a,)
+        // handle trailing comma case: (a,)
         if (!parser.base.check(.RightParen)) {
             repeat: while (true) {
                 const element = try parser.parseExpression();
@@ -252,7 +252,7 @@ pub fn parseParenthesizedOrTuple(parser: *ExpressionParser) ParserError!ast.Expr
             .span = parser.base.spanFromToken(paren_token),
         } };
     } else {
-        // Single parenthesized expression
+        // single parenthesized expression
         _ = try parser.base.consume(.RightParen, "Expected ')' after expression");
         return first_expr;
     }
@@ -265,7 +265,7 @@ pub fn parseStructInstantiation(parser: *ExpressionParser, name_token: Token) Pa
     var fields = std.ArrayList(ast.Expressions.StructInstantiationField){};
     defer fields.deinit(parser.base.arena.allocator());
 
-    // Parse field initializers (field_name: value)
+    // parse field initializers (field_name: value)
     while (!parser.base.check(.RightBrace) and !parser.base.isAtEnd()) {
         const field_name = try parser.base.consumeIdentifierOrKeyword("Expected field name in struct instantiation");
         _ = try parser.base.consume(.Colon, "Expected ':' after field name in struct instantiation");
@@ -280,10 +280,10 @@ pub fn parseStructInstantiation(parser: *ExpressionParser, name_token: Token) Pa
             .span = parser.base.spanFromToken(field_name),
         });
 
-        // Optional comma (but don't require it for last field)
+        // optional comma (but don't require it for last field)
         if (!parser.base.check(.RightBrace)) {
             if (!parser.base.match(.Comma)) {
-                // No comma found, but we're not at the end, so this is an error
+                // no comma found, but we're not at the end, so this is an error
                 return error.ExpectedToken;
             }
         } else {
@@ -293,7 +293,7 @@ pub fn parseStructInstantiation(parser: *ExpressionParser, name_token: Token) Pa
 
     _ = try parser.base.consume(.RightBrace, "Expected '}' after struct instantiation fields");
 
-    // Create the struct name identifier
+    // create the struct name identifier
     const struct_name_ptr = try parser.base.arena.createNode(ast.Expressions.ExprNode);
     struct_name_ptr.* = ast.Expressions.ExprNode{ .Identifier = ast.Expressions.IdentifierExpr{
         .name = name_token.lexeme,
@@ -316,9 +316,9 @@ pub fn parseAnonymousStructLiteral(parser: *ExpressionParser) ParserError!ast.Ex
     var fields = std.ArrayList(ast.Expressions.AnonymousStructField){};
     defer fields.deinit(parser.base.arena.allocator());
 
-    // Parse field initializers (.{ .field = value, ... })
+    // parse field initializers (.{ .field = value, ... })
     while (!parser.base.check(.RightBrace) and !parser.base.isAtEnd()) {
-        // Enforce leading dot before each field name
+        // enforce leading dot before each field name
         _ = try parser.base.consume(.Dot, "Expected '.' before field name in anonymous struct literal");
         const field_name = try parser.base.consume(.Identifier, "Expected field name in anonymous struct literal");
         _ = try parser.base.consume(.Equal, "Expected '=' after field name in anonymous struct literal");
@@ -333,10 +333,10 @@ pub fn parseAnonymousStructLiteral(parser: *ExpressionParser) ParserError!ast.Ex
             .span = parser.base.spanFromToken(field_name),
         });
 
-        // Optional comma (but don't require it for last field)
+        // optional comma (but don't require it for last field)
         if (!parser.base.check(.RightBrace)) {
             if (!parser.base.match(.Comma)) {
-                // No comma found, but we're not at the end, so this is an error
+                // no comma found, but we're not at the end, so this is an error
                 return error.ExpectedToken;
             }
         } else {
@@ -359,17 +359,17 @@ pub fn parseArrayLiteral(parser: *ExpressionParser) ParserError!ast.Expressions.
     var elements = std.ArrayList(*ast.Expressions.ExprNode){};
     defer elements.deinit(parser.base.arena.allocator());
 
-    // Parse array elements
+    // parse array elements
     while (!parser.base.check(.RightBracket) and !parser.base.isAtEnd()) {
         const element = try precedence.parseAssignment(parser);
         const element_ptr = try parser.base.arena.createNode(ast.Expressions.ExprNode);
         element_ptr.* = element;
         try elements.append(parser.base.arena.allocator(), element_ptr);
 
-        // Optional comma (but don't require it for last element)
+        // optional comma (but don't require it for last element)
         if (!parser.base.check(.RightBracket)) {
             if (!parser.base.match(.Comma)) {
-                // No comma found, but we're not at the end, so this is an error
+                // no comma found, but we're not at the end, so this is an error
                 return error.ExpectedToken;
             }
         } else {
@@ -393,10 +393,10 @@ pub fn parseArrayLiteral(parser: *ExpressionParser) ParserError!ast.Expressions.
 pub fn parseRangeExpression(parser: *ExpressionParser) ParserError!ast.Expressions.ExprNode {
     const start_token = parser.base.peek();
 
-    // Parse start expression
+    // parse start expression
     const start_expr = try parser.parseExpression();
 
-    // Accept both .. and ... for range expressions
+    // accept both .. and ... for range expressions
     if (parser.base.match(.DotDot)) {
         // .. range (exclusive end)
     } else if (parser.base.match(.DotDotDot)) {
@@ -406,10 +406,10 @@ pub fn parseRangeExpression(parser: *ExpressionParser) ParserError!ast.Expressio
         return error.ExpectedToken;
     }
 
-    // Parse end expression
+    // parse end expression
     const end_expr = try parser.parseExpression();
 
-    // Create pointers to the expressions
+    // create pointers to the expressions
     const start_ptr = try parser.base.arena.createNode(ast.Expressions.ExprNode);
     start_ptr.* = start_expr;
     const end_ptr = try parser.base.arena.createNode(ast.Expressions.ExprNode);
@@ -432,27 +432,27 @@ pub fn parseRangeExpression(parser: *ExpressionParser) ParserError!ast.Expressio
 pub fn parseQuantifiedExpression(parser: *ExpressionParser) ParserError!ast.Expressions.ExprNode {
     const quant_token = parser.base.previous();
 
-    // Determine quantifier type
+    // determine quantifier type
     const quantifier: ast.Expressions.QuantifierType = if (std.mem.eql(u8, quant_token.lexeme, "forall"))
         .Forall
     else
         .Exists;
 
-    // Parse variable name
+    // parse variable name
     const var_token = try parser.base.consume(.Identifier, "Expected variable name after quantifier");
     const variable = try parser.base.arena.createString(var_token.lexeme);
 
-    // Expect ":"
+    // expect ":"
     _ = try parser.base.consume(.Colon, "Expected ':' after variable name");
 
-    // Parse variable type
+    // parse variable type
     const type_parser = TypeParser.init(parser.base.tokens, parser.base.arena);
     var type_parser_mut = type_parser;
     type_parser_mut.base.current = parser.base.current;
     const variable_type = try type_parser_mut.parseType();
     parser.base.current = type_parser_mut.base.current;
 
-    // Parse optional where clause
+    // parse optional where clause
     var condition: ?*ast.Expressions.ExprNode = null;
     if (parser.base.match(.Where)) {
         const cond_expr = try parser.parseExpression();
@@ -461,11 +461,11 @@ pub fn parseQuantifiedExpression(parser: *ExpressionParser) ParserError!ast.Expr
         condition = cond_ptr;
     }
 
-    // Expect "=>" (parsed as two tokens: = and >)
+    // expect "=>" (parsed as two tokens: = and >)
     _ = try parser.base.consume(.Equal, "Expected '=>' after quantifier condition");
     _ = try parser.base.consume(.Greater, "Expected '>' after '=' in '=>'");
 
-    // Parse body expression
+    // parse body expression
     const body_expr = try parser.parseExpression();
     const body_ptr = try parser.base.arena.createNode(ast.Expressions.ExprNode);
     body_ptr.* = body_expr;

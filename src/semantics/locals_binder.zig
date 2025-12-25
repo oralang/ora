@@ -199,9 +199,9 @@ fn findErrorUnionInBlock(table: *state.SymbolTable, scope: *state.Scope, block: 
 }
 
 pub fn bindFunctionLocals(table: *state.SymbolTable, fn_scope: *state.Scope, f: *const ast.FunctionNode) !void {
-    // Associate the function body block with the function scope
+    // associate the function body block with the function scope
     try mapBlockScope(table, &f.body, fn_scope);
-    // Walk the body and create nested scopes for blocks; declare locals into their owning scope
+    // walk the body and create nested scopes for blocks; declare locals into their owning scope
     try bindBlock(table, fn_scope, &f.body);
 }
 
@@ -264,7 +264,7 @@ fn bindForPattern(table: *state.SymbolTable, scope: *state.Scope, pattern: ast.s
 }
 
 fn bindBlock(table: *state.SymbolTable, scope: *state.Scope, block: *const ast.Statements.BlockNode) !void {
-    // Declare direct local variable declarations in this block
+    // declare direct local variable declarations in this block
     for (block.statements) |stmt| {
         switch (stmt) {
             .VariableDecl => |v| try declareVar(table, scope, v),
@@ -292,7 +292,7 @@ fn bindBlock(table: *state.SymbolTable, scope: *state.Scope, block: *const ast.S
             .ForLoop => |fl| {
                 const body_scope = try createChildScope(table, scope, scope.name);
                 try mapBlockScope(table, &fl.body, body_scope);
-                // Bind the loop variables in the body scope
+                // bind the loop variables in the body scope
                 try bindForPattern(table, body_scope, fl.pattern);
                 try bindBlock(table, body_scope, &fl.body);
             },
@@ -323,7 +323,7 @@ fn bindBlock(table: *state.SymbolTable, scope: *state.Scope, block: *const ast.S
                 try bindBlock(table, inner_scope, &lb.block);
             },
             .Switch => |sw| {
-                // Each case with a block gets its own scope
+                // each case with a block gets its own scope
                 for (sw.cases) |*case| {
                     switch (case.body) {
                         .Block => |*blk| {

@@ -49,7 +49,7 @@ pub const Solver = struct {
         c.Z3_solver_reset(self.context.ctx, self.solver);
     }
 
-    // TODO: Add methods for:
+    // todo: Add methods for:
     // - push/pop (incremental solving)
     // - timeout management
     // - unsat core extraction

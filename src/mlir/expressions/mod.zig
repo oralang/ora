@@ -215,21 +215,21 @@ pub const ExpressionLowerer = struct {
             .ora_type = builtin_info.return_type,
         });
 
-        // Special handling for specific constants
+        // special handling for specific constants
         if (std.mem.eql(u8, builtin_info.full_path, "std.constants.ZERO_ADDRESS")) {
-            // ZERO_ADDRESS should return !ora.address type (not i160)
-            // When used in comparisons, it will be converted to i160 via ora.addr.to.i160
-            // Create arith.constant as i160, then convert to !ora.address
+            // zero_address should return !ora.address type (not i160)
+            // when used in comparisons, it will be converted to i160 via ora.addr.to.i160
+            // create arith.constant as i160, then convert to !ora.address
             const addr_ty = self.type_mapper.toMlirType(.{
                 .ora_type = builtin_info.return_type,
             });
 
-            // Create constant as i160 (both attribute and result type must match)
+            // create constant as i160 (both attribute and result type must match)
             const i160_ty = c.mlirIntegerTypeGet(self.ctx, 160);
             var state = h.opState("arith.constant", self.fileLoc(span));
             c.mlirOperationStateAddResults(&state, 1, @ptrCast(&i160_ty)); // Result type is i160
 
-            // Create integer attribute for value 0 (using i160 type for attribute)
+            // create integer attribute for value 0 (using i160 type for attribute)
             const value_attr = c.mlirIntegerAttrGet(i160_ty, 0);
             const value_id = h.identifier(self.ctx, "value");
             const gas_cost_attr = c.mlirIntegerAttrGet(c.mlirIntegerTypeGet(self.ctx, 64), 0);
@@ -245,7 +245,7 @@ pub const ExpressionLowerer = struct {
             h.appendOp(self.block, const_op);
             const i160_value = h.getResult(const_op, 0);
 
-            // Convert i160 to !ora.address using arith.bitcast (same width, different type)
+            // convert i160 to !ora.address using arith.bitcast (same width, different type)
             var bitcast_state = h.opState("arith.bitcast", self.fileLoc(span));
             c.mlirOperationStateAddOperands(&bitcast_state, 1, @ptrCast(&i160_value));
             c.mlirOperationStateAddResults(&bitcast_state, 1, @ptrCast(&addr_ty)); // Result type is !ora.address
@@ -255,7 +255,7 @@ pub const ExpressionLowerer = struct {
         }
 
         if (std.mem.eql(u8, builtin_info.full_path, "std.constants.U256_MAX")) {
-            // Create i256 constant -1 (all 1s in two's complement = max unsigned)
+            // create i256 constant -1 (all 1s in two's complement = max unsigned)
             const op = self.ora_dialect.createArithConstant(-1, ty, self.fileLoc(span));
             h.appendOp(self.block, op);
             return h.getResult(op, 0);
@@ -279,7 +279,7 @@ pub const ExpressionLowerer = struct {
             return h.getResult(op, 0);
         }
 
-        // Fallback: return 0
+        // fallback: return 0
         const op = self.ora_dialect.createArithConstant(0, ty, self.fileLoc(span));
         h.appendOp(self.block, op);
         return h.getResult(op, 0);
@@ -404,23 +404,23 @@ pub const ExpressionLowerer = struct {
     /// This is a simplified check - we check if the value type is i160 and the value is 0
     /// For more accurate detection, we'd need to trace back to the defining operation
     fn isZeroConstant(_: *const ExpressionLowerer, value: c.MlirValue) bool {
-        // Simplified approach: check if the value type is i160 (which zero address constants would be)
+        // simplified approach: check if the value type is i160 (which zero address constants would be)
         // and assume it's zero if it's a small integer type
-        // This is a heuristic - in practice, we'd need to check the actual constant value
-        // For now, we'll rely on the type system to handle this correctly
+        // this is a heuristic - in practice, we'd need to check the actual constant value
+        // for now, we'll rely on the type system to handle this correctly
         const value_ty = c.mlirValueGetType(value);
 
-        // Check if it's i160 (zero address would be i160)
+        // check if it's i160 (zero address would be i160)
         if (c.mlirTypeIsAInteger(value_ty)) {
             const width = c.mlirIntegerTypeGetWidth(value_ty);
-            // If it's i160, it could be a zero address constant
-            // We'll be conservative and only treat it as zero if it's explicitly i160
-            // The actual zero detection would require checking the defining operation
-            // For now, return false to be safe - the comparison will work correctly anyway
+            // if it's i160, it could be a zero address constant
+            // we'll be conservative and only treat it as zero if it's explicitly i160
+            // the actual zero detection would require checking the defining operation
+            // for now, return false to be safe - the comparison will work correctly anyway
             _ = width;
         }
 
-        // For now, return false - we'll handle zero address comparisons differently
+        // for now, return false - we'll handle zero address comparisons differently
         // by checking if ZERO_ADDRESS constant is being used
         return false;
     }

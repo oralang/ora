@@ -15,15 +15,15 @@ pub fn areTypesCompatible(
     type2: TypeInfo,
     refinement_system: *refinements.RefinementSystem,
 ) bool {
-    // For primitive types with ora_type, check exact match or subtyping
+    // for primitive types with ora_type, check exact match or subtyping
     // (Refinement types can have different categories but same base, so check ora_type first)
     if (type1.ora_type != null and type2.ora_type != null) {
         const t1_ora = type1.ora_type.?;
         const t2_ora = type2.ora_type.?;
 
-        // Enums vs their named type: treat OraType.enum_type "Status" as
+        // enums vs their named type: treat OraType.enum_type "Status" as
         // compatible with custom type references that currently use
-        // OraType.struct_type "Status". This lets us type-check expressions
+        // oraType.struct_type "Status". This lets us type-check expressions
         // like `Status.Active` against variables of type `Status` even though
         // the parser initially represents `Status` as a struct_type.
         switch (t1_ora) {
@@ -42,20 +42,20 @@ pub fn areTypesCompatible(
             else => {},
         }
 
-        // Check refinement subtyping (handles both directions)
+        // check refinement subtyping (handles both directions)
         if (refinement_system.checkSubtype(t1_ora, t2_ora, isBaseTypeCompatible) or
             refinement_system.checkSubtype(t2_ora, t1_ora, isBaseTypeCompatible))
         {
             return true;
         }
-        // Check exact match
+        // check exact match
         if (OraType.equals(t1_ora, t2_ora)) {
             return true;
         }
     }
 
-    // Error category is compatible with ErrorUnion category
-    // This allows error returns (category .Error) to be compatible with ErrorUnion return types
+    // error category is compatible with ErrorUnion category
+    // this allows error returns (category .Error) to be compatible with ErrorUnion return types
     if (type1.category == .Error and type2.category == .ErrorUnion) {
         return true;
     }
@@ -63,8 +63,8 @@ pub fn areTypesCompatible(
         return true;
     }
 
-    // Enum category is compatible with ErrorUnion category (for error.X expressions)
-    // This allows error enum literals to be compatible with ErrorUnion return types
+    // enum category is compatible with ErrorUnion category (for error.X expressions)
+    // this allows error enum literals to be compatible with ErrorUnion return types
     if (type1.category == .Enum and type2.category == .ErrorUnion) {
         return true;
     }
@@ -72,8 +72,8 @@ pub fn areTypesCompatible(
         return true;
     }
 
-    // Success type is compatible with ErrorUnion (e.g., bool is compatible with !bool | Error1)
-    // Check if type2 (value) matches the success type of type1's (target) ErrorUnion
+    // success type is compatible with ErrorUnion (e.g., bool is compatible with !bool | Error1)
+    // check if type2 (value) matches the success type of type1's (target) ErrorUnion
     if (type1.category == .ErrorUnion) {
         if (type1.ora_type) |type1_ora| {
             if (type1_ora == .error_union) {
@@ -87,7 +87,7 @@ pub fn areTypesCompatible(
                     return true;
                 }
             } else if (type1_ora == ._union) {
-                // Error union with explicit errors: !T | Error1 | Error2
+                // error union with explicit errors: !T | Error1 | Error2
                 if (type1_ora._union.len > 0) {
                     const first_type = type1_ora._union[0];
                     if (first_type == .error_union) {
@@ -106,24 +106,24 @@ pub fn areTypesCompatible(
         }
     }
 
-    // Same category is usually compatible
+    // same category is usually compatible
     if (type1.category != type2.category) {
         return false;
     }
 
-    // For custom types (structs, enums, etc.), check by category match
-    // Custom type matching is handled by category comparison above
+    // for custom types (structs, enums, etc.), check by category match
+    // custom type matching is handled by category comparison above
 
-    // Categories match and no specific type info - consider compatible
+    // categories match and no specific type info - consider compatible
     return true;
 }
 
 /// Check if base types are compatible (handles width subtyping)
 pub fn isBaseTypeCompatible(source: OraType, target: OraType) bool {
-    // Direct match
+    // direct match
     if (OraType.equals(source, target)) return true;
 
-    // Width subtyping: u8 <: u16 <: u32 <: u64 <: u128 <: u256
+    // width subtyping: u8 <: u16 <: u32 <: u64 <: u128 <: u256
     const width_order = [_]OraType{ .u8, .u16, .u32, .u64, .u128, .u256 };
     const signed_width_order = [_]OraType{ .i8, .i16, .i32, .i64, .i128, .i256 };
 
@@ -134,7 +134,7 @@ pub fn isBaseTypeCompatible(source: OraType, target: OraType) bool {
 
     if (source_idx) |s_idx| {
         if (target_idx) |t_idx| {
-            // Same sign category, check if source is narrower than target
+            // same sign category, check if source is narrower than target
             return s_idx <= t_idx;
         }
     }

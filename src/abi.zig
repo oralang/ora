@@ -1,5 +1,14 @@
+// ============================================================================
+// ABI Support
+// ============================================================================
+//
+// ABI type modeling and encoding helpers.
+//
+// ============================================================================
+
 const std = @import("std");
 const lib = @import("root.zig");
+const state_tracker = @import("analysis/state_tracker.zig");
 
 /// ABI Type - Ethereum ABI types
 pub const AbiType = union(enum) {
@@ -43,8 +52,31 @@ pub const AbiParameter = struct {
 
     pub fn deinit(self: *AbiParameter) void {
         _ = self;
-        // Types are managed by the generator
+        // types are managed by the generator
     }
+};
+
+/// ABI effect kinds for Ora metadata
+pub const AbiEffectKind = enum {
+    Reads,
+    Writes,
+    Emits,
+    Calls,
+    Value,
+};
+
+/// ABI effect entry
+pub const AbiEffect = struct {
+    kind: AbiEffectKind,
+    path: ?[]const u8 = null,
+};
+
+/// ABI gas estimate metadata
+pub const GasEstimate = struct {
+    units: []const u8 = "gas",
+    estimated: u64,
+    reads: u64,
+    writes: u64,
 };
 
 /// ABI Function
@@ -52,7 +84,8 @@ pub const AbiFunction = struct {
     name: []const u8,
     inputs: []AbiParameter,
     outputs: []AbiParameter,
-    state_mutability: []const u8, // "pure", "view", "nonpayable", "payable"
+    effects: []AbiEffect,
+    gas_estimate: ?GasEstimate,
     function_type: []const u8, // "function", "constructor", "fallback", "receive"
     allocator: std.mem.Allocator,
 
@@ -65,6 +98,7 @@ pub const AbiFunction = struct {
             output.deinit();
         }
         self.allocator.free(self.outputs);
+        self.allocator.free(self.effects);
     }
 };
 
@@ -93,7 +127,7 @@ pub const ContractAbi = struct {
             try writer.print("    \"type\": \"{s}\",\n", .{func.function_type});
             try writer.print("    \"name\": \"{s}\",\n", .{func.name});
 
-            // Inputs
+            // inputs
             try writer.writeAll("    \"inputs\": [\n");
             for (func.inputs, 0..) |input, j| {
                 const type_str = try input.type.format(allocator);
@@ -109,7 +143,7 @@ pub const ContractAbi = struct {
             }
             try writer.writeAll("    ],\n");
 
-            // Outputs
+            // outputs
             try writer.writeAll("    \"outputs\": [\n");
             for (func.outputs, 0..) |output, j| {
                 const type_str = try output.type.format(allocator);
@@ -124,7 +158,98 @@ pub const ContractAbi = struct {
             }
             try writer.writeAll("    ],\n");
 
-            try writer.print("    \"stateMutability\": \"{s}\"\n", .{func.state_mutability});
+            if (func.effects.len > 0 or func.gas_estimate != null) {
+                try writer.writeAll("    \"ora\": {\n");
+                if (func.effects.len > 0) {
+                    try writer.writeAll("      \"effects\": [\n");
+                    for (func.effects, 0..) |effect, j| {
+                        try writer.writeAll("        { ");
+                        try writer.print("\"kind\": \"{s}\"", .{@tagName(effect.kind)});
+                        if (effect.path) |path| {
+                            try writer.print(", \"path\": \"{s}\"", .{path});
+                        }
+                        if (j < func.effects.len - 1) {
+                            try writer.writeAll(" },\n");
+                        } else {
+                            try writer.writeAll(" }\n");
+                        }
+                    }
+                    try writer.writeAll("      ]");
+                    if (func.gas_estimate != null) {
+                        try writer.writeAll(",\n");
+                    } else {
+                        try writer.writeAll("\n");
+                    }
+                }
+                if (func.gas_estimate) |estimate| {
+                    try writer.writeAll("      \"gasEstimate\": {\n");
+                    try writer.print("        \"units\": \"{s}\",\n", .{estimate.units});
+                    try writer.print("        \"estimated\": {d},\n", .{estimate.estimated});
+                    try writer.print("        \"reads\": {d},\n", .{estimate.reads});
+                    try writer.print("        \"writes\": {d}\n", .{estimate.writes});
+                    try writer.writeAll("      }\n");
+                }
+                try writer.writeAll("    }\n");
+            } else {
+                try writer.writeAll("    \"ora\": { }\n");
+            }
+
+            if (i < self.functions.len - 1) {
+                try writer.writeAll("  },\n");
+            } else {
+                try writer.writeAll("  }\n");
+            }
+        }
+
+        try writer.writeAll("]\n");
+        return buffer.toOwnedSlice(allocator);
+    }
+
+    /// Generate Solidity-compatible JSON representation
+    pub fn toSolidityJson(self: *const ContractAbi, allocator: std.mem.Allocator) ![]const u8 {
+        var buffer = try std.ArrayList(u8).initCapacity(allocator, 1024);
+        defer buffer.deinit(allocator);
+        const writer = buffer.writer(allocator);
+
+        try writer.writeAll("[\n");
+
+        for (self.functions, 0..) |func, i| {
+            try writer.writeAll("  {\n");
+            try writer.print("    \"type\": \"{s}\",\n", .{func.function_type});
+            try writer.print("    \"name\": \"{s}\",\n", .{func.name});
+
+            // inputs
+            try writer.writeAll("    \"inputs\": [\n");
+            for (func.inputs, 0..) |input, j| {
+                const type_str = try input.type.format(allocator);
+                defer allocator.free(type_str);
+                try writer.writeAll("      {\n");
+                try writer.print("        \"name\": \"{s}\",\n", .{input.name});
+                try writer.print("        \"type\": \"{s}\"\n", .{type_str});
+                if (j < func.inputs.len - 1) {
+                    try writer.writeAll("      },\n");
+                } else {
+                    try writer.writeAll("      }\n");
+                }
+            }
+            try writer.writeAll("    ],\n");
+
+            // outputs
+            try writer.writeAll("    \"outputs\": [\n");
+            for (func.outputs, 0..) |output, j| {
+                const type_str = try output.type.format(allocator);
+                defer allocator.free(type_str);
+                try writer.writeAll("      {\n");
+                try writer.print("        \"type\": \"{s}\"\n", .{type_str});
+                if (j < func.outputs.len - 1) {
+                    try writer.writeAll("      },\n");
+                } else {
+                    try writer.writeAll("      }\n");
+                }
+            }
+            try writer.writeAll("    ],\n");
+
+            try writer.print("    \"stateMutability\": \"{s}\"\n", .{mapSolidityStateMutability(&func)});
 
             if (i < self.functions.len - 1) {
                 try writer.writeAll("  },\n");
@@ -176,28 +301,31 @@ pub const AbiGenerator = struct {
     fn processNode(self: *AbiGenerator, node: lib.AstNode) !void {
         switch (node) {
             .Contract => |contract| {
+                var analysis = try state_tracker.analyzeContract(self.allocator, &contract);
+                defer analysis.deinit();
                 for (contract.body) |body_node| {
-                    try self.processBodyNode(body_node);
+                    try self.processBodyNode(body_node, &analysis);
                 }
             },
             else => {},
         }
     }
 
-    fn processBodyNode(self: *AbiGenerator, node: lib.AstNode) !void {
+    fn processBodyNode(self: *AbiGenerator, node: lib.AstNode, analysis: *const state_tracker.ContractStateAnalysis) !void {
         switch (node) {
             .Function => |func| {
-                // Only include public functions in ABI
+                // only include public functions in ABI
                 if (func.visibility == .Public) {
-                    try self.addFunction(func);
+                    const func_analysis = analysis.functions.get(func.name);
+                    try self.addFunction(func, func_analysis);
                 }
             },
             else => {},
         }
     }
 
-    fn addFunction(self: *AbiGenerator, func: lib.FunctionNode) !void {
-        // Convert parameters to ABI inputs
+    fn addFunction(self: *AbiGenerator, func: lib.FunctionNode, func_analysis: ?state_tracker.FunctionStateAnalysis) !void {
+        // convert parameters to ABI inputs
         var inputs = std.ArrayList(AbiParameter).initCapacity(self.allocator, func.parameters.len) catch |err| {
             std.debug.print("Failed to allocate inputs array: {}\n", .{err});
             return err;
@@ -214,7 +342,7 @@ pub const AbiGenerator = struct {
             try inputs.append(self.allocator, param_abi);
         }
 
-        // Convert return type to ABI outputs
+        // convert return type to ABI outputs
         var outputs = std.ArrayList(AbiParameter).initCapacity(self.allocator, 1) catch |err| {
             std.debug.print("Failed to allocate outputs array: {}\n", .{err});
             return err;
@@ -231,18 +359,56 @@ pub const AbiGenerator = struct {
             try outputs.append(self.allocator, output_abi);
         }
 
-        // Determine state mutability (simplified for now)
-        const state_mutability = "nonpayable"; // TODO: Analyze function body for state changes
+        var effects = std.ArrayList(AbiEffect).initCapacity(self.allocator, 0) catch |err| {
+            std.debug.print("Failed to allocate effects array: {}\n", .{err});
+            return err;
+        };
+        defer effects.deinit(self.allocator);
+        const gas_estimate = try self.buildEffectsAndGas(func_analysis, &effects);
 
         const func_abi = AbiFunction{
             .name = func.name,
             .inputs = try inputs.toOwnedSlice(self.allocator),
             .outputs = try outputs.toOwnedSlice(self.allocator),
-            .state_mutability = state_mutability,
+            .effects = try effects.toOwnedSlice(self.allocator),
+            .gas_estimate = gas_estimate,
             .function_type = "function",
             .allocator = self.allocator,
         };
         try self.functions.append(self.allocator, func_abi);
+    }
+
+    fn buildEffectsAndGas(self: *AbiGenerator, func_analysis: ?state_tracker.FunctionStateAnalysis, effects: *std.ArrayList(AbiEffect)) !?GasEstimate {
+        if (func_analysis == null) {
+            return null;
+        }
+        const analysis = func_analysis.?;
+
+        var total_reads: u64 = 0;
+        var total_writes: u64 = 0;
+
+        var reads_it = analysis.reads_set.iterator();
+        while (reads_it.next()) |entry| {
+            try effects.append(self.allocator, .{ .kind = .Reads, .path = entry.key_ptr.* });
+        }
+
+        var writes_it = analysis.writes_set.iterator();
+        while (writes_it.next()) |entry| {
+            try effects.append(self.allocator, .{ .kind = .Writes, .path = entry.key_ptr.* });
+        }
+
+        var access_it = analysis.storage_accesses.iterator();
+        while (access_it.next()) |entry| {
+            total_reads += entry.value_ptr.read_count;
+            total_writes += entry.value_ptr.write_count;
+        }
+
+        const estimate = (total_reads * 2100) + (total_writes * 20000);
+        return GasEstimate{
+            .estimated = estimate,
+            .reads = total_reads,
+            .writes = total_writes,
+        };
     }
 
     fn convertType(self: *AbiGenerator, type_info: lib.ast.type_info.TypeInfo) !AbiType {
@@ -271,3 +437,23 @@ pub const AbiGenerator = struct {
         return AbiType{ .uint = 256 }; // Default fallback
     }
 };
+
+fn mapSolidityStateMutability(func: *const AbiFunction) []const u8 {
+    var has_reads = false;
+    var has_writes = false;
+    var has_value = false;
+
+    for (func.effects) |effect| {
+        switch (effect.kind) {
+            .Reads => has_reads = true,
+            .Writes => has_writes = true,
+            .Value => has_value = true,
+            else => {},
+        }
+    }
+
+    if (has_value) return "payable";
+    if (has_writes) return "nonpayable";
+    if (has_reads) return "view";
+    return "pure";
+}

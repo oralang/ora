@@ -36,7 +36,7 @@ fn isLValue(expr: ast.Expressions.ExprNode) bool {
         .Identifier => true,
         .FieldAccess => true,
         .IndexAccess => true,
-        // Optionally allow pointer deref or storage paths if modeled
+        // optionally allow pointer deref or storage paths if modeled
         else => false,
     };
 }
@@ -75,10 +75,10 @@ pub fn validateLValues(allocator: std.mem.Allocator, nodes: []const ast.AstNode)
 // Runs collection (phase 1) then checks (phase 2) and returns combined diagnostics with symbols
 pub fn analyze(allocator: std.mem.Allocator, nodes: []const ast.AstNode) !core.SemanticsResult {
     var p1 = try core.analyzePhase1(allocator, nodes);
-    // Phase2 uses the same symbol table by reference
+    // phase2 uses the same symbol table by reference
     const p2_diags = try core.analyzePhase2(allocator, nodes, &p1.symbols);
 
-    // Combine diagnostics deterministically in encounter order (phase1 then phase2)
+    // combine diagnostics deterministically in encounter order (phase1 then phase2)
     var combined = std.ArrayList(core.Diagnostic).init(allocator);
     defer combined.deinit();
 

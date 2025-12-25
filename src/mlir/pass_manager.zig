@@ -153,11 +153,11 @@ pub const PassManager = struct {
 
     /// Add standard MLIR optimization passes
     pub fn addStandardOptimizationPasses(self: *PassManager) void {
-        // Use comprehensive optimization pipeline
+        // use comprehensive optimization pipeline
         const pipeline_str = "builtin.module(canonicalize,cse,sccp,symbol-dce,mem2reg,loop-invariant-code-motion,cf-cfg-simplification)";
         const pipeline_ref = c.mlirStringRefCreateFromCString(pipeline_str);
 
-        // Parse and add the pipeline
+        // parse and add the pipeline
         const result = c.mlirParsePassPipeline(c.mlirPassManagerGetAsOpPassManager(self.pass_manager), pipeline_ref, null, null);
 
         if (c.mlirLogicalResultIsFailure(result)) {
@@ -167,9 +167,9 @@ pub const PassManager = struct {
 
     /// Add Ora-specific verification passes
     pub fn addOraVerificationPasses(self: *PassManager) void {
-        // Note: Ora-specific verification passes are not yet implemented
-        // The MLIR built-in verifier (enabled via enableVerifier) is sufficient for now
-        // When we implement custom verification passes, they would be added here
+        // note: Ora-specific verification passes are not yet implemented
+        // the MLIR built-in verifier (enabled via enableVerifier) is sufficient for now
+        // when we implement custom verification passes, they would be added here
         _ = self;
     }
 
@@ -244,20 +244,20 @@ pub const OraPassUtils = struct {
     pub fn createOraPassManager(ctx: c.MlirContext, allocator: std.mem.Allocator, config: PassPipelineConfig) !PassManager {
         var pass_manager = PassManager.init(ctx, allocator);
 
-        // Enable timing if requested
+        // enable timing if requested
         if (config.enable_timing) {
             pass_manager.enableTiming();
         }
 
-        // Note: MLIR verification is enabled by default in PassManager
-        // The --mlir-verify flag is documented but verification happens automatically
-        // Explicitly enabling it with enableVerifier() causes crashes with unregistered operations
-        // TODO: Investigate proper verification of custom dialect operations
+        // note: MLIR verification is enabled by default in PassManager
+        // the --mlir-verify flag is documented but verification happens automatically
+        // explicitly enabling it with enableVerifier() causes crashes with unregistered operations
+        // todo: Investigate proper verification of custom dialect operations
 
-        // Add optimization passes based on level
+        // add optimization passes based on level
         switch (config.optimization_level) {
             .None => {
-                // Only add verification if enabled
+                // only add verification if enabled
             },
             .Basic => {
                 const basic_pipeline = "builtin.module(canonicalize,cse,mem2reg)";
@@ -269,7 +269,7 @@ pub const OraPassUtils = struct {
             },
         }
 
-        // Add custom passes if provided
+        // add custom passes if provided
         for (config.custom_passes) |pass_name| {
             const pass_pipeline = try std.fmt.allocPrint(allocator, "builtin.module({s})", .{pass_name});
             defer allocator.free(pass_pipeline);
@@ -285,7 +285,7 @@ pub fn runMLIRPipeline(ctx: c.MlirContext, module: c.MlirModule, config: Pipelin
     var result = PipelineResult.init(allocator);
     defer result.deinit(allocator);
 
-    // Convert PipelineConfig to PassPipelineConfig
+    // convert PipelineConfig to PassPipelineConfig
     const pass_config = PassPipelineConfig{
         .optimization_level = if (config.custom_pipeline != null) .None else blk: {
             if (config.canonicalize and config.cse and config.sccp and config.mem2reg and config.licm) {
@@ -301,11 +301,11 @@ pub fn runMLIRPipeline(ctx: c.MlirContext, module: c.MlirModule, config: Pipelin
         .enable_timing = false,
     };
 
-    // Create pass manager
+    // create pass manager
     var pass_manager = try OraPassUtils.createOraPassManager(ctx, allocator, pass_config);
     defer pass_manager.deinit();
 
-    // Run passes
+    // run passes
     const success = try pass_manager.run(module);
     result.success = success;
 

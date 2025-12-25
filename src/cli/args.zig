@@ -12,6 +12,8 @@ pub const CliOptions = struct {
     emit_mlir: bool = false,
     emit_mlir_sir: bool = false,
     emit_cfg: bool = false,
+    emit_abi: bool = false,
+    emit_abi_solidity: bool = false,
     canonicalize_mlir: bool = true,
     analyze_state: bool = false,
     verify_z3: bool = false,
@@ -47,6 +49,12 @@ pub fn parseArgs(args: []const []const u8) ParseError!CliOptions {
             i += 1;
         } else if (std.mem.eql(u8, arg, "--emit-cfg")) {
             opts.emit_cfg = true;
+            i += 1;
+        } else if (std.mem.eql(u8, arg, "--emit-abi")) {
+            opts.emit_abi = true;
+            i += 1;
+        } else if (std.mem.eql(u8, arg, "--emit-abi-solidity")) {
+            opts.emit_abi_solidity = true;
             i += 1;
         } else if (std.mem.eql(u8, arg, "--verify")) {
             opts.verify_z3 = true;

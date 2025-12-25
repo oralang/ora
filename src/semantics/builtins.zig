@@ -66,7 +66,7 @@ pub const BuiltinRegistry = struct {
     /// Register all built-in functions and constants
     fn registerAllBuiltins(self: *BuiltinRegistry) !void {
         // ===================================================================
-        // BLOCK DATA
+        // block DATA
         // ===================================================================
 
         try self.register(.{
@@ -133,7 +133,7 @@ pub const BuiltinRegistry = struct {
         });
 
         // ===================================================================
-        // TRANSACTION DATA (tx.*)
+        // transaction DATA (tx.*)
         // ===================================================================
 
         try self.register(.{
@@ -155,7 +155,7 @@ pub const BuiltinRegistry = struct {
         });
 
         // ===================================================================
-        // MESSAGE DATA (msg.*)
+        // message DATA (msg.*)
         // ===================================================================
 
         try self.register(.{
@@ -186,7 +186,7 @@ pub const BuiltinRegistry = struct {
         });
 
         // ===================================================================
-        // CONSTANTS
+        // constants
         // ===================================================================
 
         try self.register(.{
@@ -291,7 +291,7 @@ pub fn getMemberAccessPath(allocator: std.mem.Allocator, expr: *const ast.Expres
         }
     }
 
-    // Join with dots
+    // join with dots
     return std.mem.join(allocator, ".", parts.items);
 }
 

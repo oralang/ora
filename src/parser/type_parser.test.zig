@@ -233,7 +233,7 @@ test "types: custom struct type" {
     const allocator = testing.allocator;
     const type_info = try parseTypeFromSource(allocator, "Point");
 
-    // Custom types are assumed to be structs initially
+    // custom types are assumed to be structs initially
     try testing.expectEqual(TypeCategory.Struct, type_info.category);
 }
 
@@ -241,6 +241,6 @@ test "types: custom enum type" {
     const allocator = testing.allocator;
     const type_info = try parseTypeFromSource(allocator, "Status");
 
-    // Custom types are assumed to be structs initially (will be resolved later)
+    // custom types are assumed to be structs initially (will be resolved later)
     try testing.expectEqual(TypeCategory.Struct, type_info.category);
 }

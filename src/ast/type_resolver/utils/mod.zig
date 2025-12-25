@@ -22,7 +22,7 @@ pub const Utils = struct {
 
     pub fn deinit(self: *Utils) void {
         _ = self;
-        // Phase 1: No cleanup needed
+        // phase 1: No cleanup needed
     }
 
     /// Extract base type from a refined type

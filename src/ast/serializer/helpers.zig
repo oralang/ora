@@ -56,14 +56,14 @@ pub fn writeSpanField(serializer: *AstSerializer, writer: anytype, span: *const 
         try writer.print(",\n");
         try writeIndent(serializer, writer, indent);
 
-        // If lexeme is available and include_lexemes option is enabled, include it in the output
+        // if lexeme is available and include_lexemes option is enabled, include it in the output
         if (serializer.options.include_lexemes and span.lexeme != null) {
             try writer.print("\"span\": {{\"line\": {d}, \"column\": {d}, \"length\": {d}, \"lexeme\": \"{s}\"}}", .{ span.line, span.column, span.length, span.lexeme.? });
         } else {
             try writer.print("\"span\": {{\"line\": {d}, \"column\": {d}, \"length\": {d}}}", .{ span.line, span.column, span.length });
         }
     } else {
-        // Compact mode
+        // compact mode
         if (serializer.options.include_lexemes and span.lexeme != null) {
             try writer.print(",\"span\":{{\"line\":{d},\"column\":{d},\"length\":{d},\"lexeme\":\"{s}\"}}", .{ span.line, span.column, span.length, span.lexeme.? });
         } else {
@@ -102,17 +102,17 @@ pub fn serializeParameter(serializer: *AstSerializer, param: *const ast.Paramete
 pub fn serializeTypeInfo(_: *AstSerializer, type_info: ast.Types.TypeInfo, writer: anytype) SerializationError!void {
     try writer.print("{");
 
-    // Write category
+    // write category
     try writer.print("\"category\":\"");
     try writer.print(@tagName(type_info.category));
     try writer.print("\"");
 
-    // Write source
+    // write source
     try writer.print(",\"source\":\"");
     try writer.print(@tagName(type_info.source));
     try writer.print("\"");
 
-    // Write ORA type if present
+    // write ORA type if present
     if (type_info.ora_type) |ora_type| {
         try writer.print(",\"ora_type\":");
 
@@ -133,7 +133,7 @@ pub fn serializeTypeInfo(_: *AstSerializer, type_info: ast.Types.TypeInfo, write
                 try writer.print("\"}");
             },
             else => {
-                // For simple types just use the tag name
+                // for simple types just use the tag name
                 try writer.print("\"");
                 try writer.print(@tagName(ora_type));
                 try writer.print("\"");

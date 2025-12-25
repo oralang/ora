@@ -123,8 +123,8 @@ test "statements: return without value" {
     const stmt = try stmt_parser.parseStatement();
 
     try testing.expect(stmt == .Return);
-    // Return without value - value field may be optional or a special variant
-    // Check that it's a return statement
+    // return without value - value field may be optional or a special variant
+    // check that it's a return statement
 }
 
 test "statements: return with value" {
@@ -234,7 +234,7 @@ test "statements: while loop" {
     const stmt = try stmt_parser.parseStatement();
 
     try testing.expect(stmt == .While);
-    // While loop - verify it's a while statement
+    // while loop - verify it's a while statement
 }
 
 test "statements: for loop" {
@@ -253,7 +253,7 @@ test "statements: for loop" {
     const stmt = try stmt_parser.parseStatement();
 
     try testing.expect(stmt == .ForLoop);
-    // For loop - verify it's a for loop statement
+    // for loop - verify it's a for loop statement
 }
 
 test "statements: break statement" {

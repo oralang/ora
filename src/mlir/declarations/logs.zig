@@ -11,20 +11,20 @@ const helpers = @import("helpers.zig");
 
 /// Lower log declarations with event type definitions and indexed field information (Requirements 7.3)
 pub fn lowerLogDecl(self: *const DeclarationLowerer, log_decl: *const lib.ast.LogDeclNode) c.MlirOperation {
-    // Create ora.log.decl operation
+    // create ora.log.decl operation
     var state = h.opState("ora.log.decl", helpers.createFileLocation(self, log_decl.span));
 
-    // Collect log attributes
+    // collect log attributes
     var attributes = std.ArrayList(c.MlirNamedAttribute){};
     defer attributes.deinit(std.heap.page_allocator);
 
-    // Add log name
+    // add log name
     const name_ref = c.mlirStringRefCreate(log_decl.name.ptr, log_decl.name.len);
     const name_attr = c.mlirStringAttrGet(self.ctx, name_ref);
     const name_id = h.identifier(self.ctx, "sym_name");
     attributes.append(std.heap.page_allocator, c.mlirNamedAttributeGet(name_id, name_attr)) catch {};
 
-    // Create field information as attributes
+    // create field information as attributes
     var field_names = std.ArrayList(c.MlirAttribute){};
     defer field_names.deinit(std.heap.page_allocator);
     var field_types = std.ArrayList(c.MlirAttribute){};
@@ -33,22 +33,22 @@ pub fn lowerLogDecl(self: *const DeclarationLowerer, log_decl: *const lib.ast.Lo
     defer field_indexed.deinit(std.heap.page_allocator);
 
     for (log_decl.fields) |field| {
-        // Add field name
+        // add field name
         const field_name_ref = c.mlirStringRefCreate(field.name.ptr, field.name.len);
         const field_name_attr = c.mlirStringAttrGet(self.ctx, field_name_ref);
         field_names.append(std.heap.page_allocator, field_name_attr) catch {};
 
-        // Add field type
+        // add field type
         const field_type = self.type_mapper.toMlirType(field.type_info);
         const field_type_attr = c.mlirTypeAttrGet(field_type);
         field_types.append(std.heap.page_allocator, field_type_attr) catch {};
 
-        // Add indexed flag
+        // add indexed flag
         const indexed_attr = c.mlirBoolAttrGet(self.ctx, if (field.indexed) 1 else 0);
         field_indexed.append(std.heap.page_allocator, indexed_attr) catch {};
     }
 
-    // Add field arrays as attributes
+    // add field arrays as attributes
     if (field_names.items.len > 0) {
         const field_names_array = c.mlirArrayAttrGet(self.ctx, @intCast(field_names.items.len), field_names.items.ptr);
         const field_names_id = h.identifier(self.ctx, "ora.field_names");
@@ -63,12 +63,12 @@ pub fn lowerLogDecl(self: *const DeclarationLowerer, log_decl: *const lib.ast.Lo
         attributes.append(std.heap.page_allocator, c.mlirNamedAttributeGet(field_indexed_id, field_indexed_array)) catch {};
     }
 
-    // Add log declaration marker
+    // add log declaration marker
     const log_decl_attr = c.mlirBoolAttrGet(self.ctx, 1);
     const log_decl_id = h.identifier(self.ctx, "ora.log_decl");
     attributes.append(std.heap.page_allocator, c.mlirNamedAttributeGet(log_decl_id, log_decl_attr)) catch {};
 
-    // Apply all attributes
+    // apply all attributes
     c.mlirOperationStateAddAttributes(&state, @intCast(attributes.items.len), attributes.items.ptr);
 
     return c.mlirOperationCreate(&state);
@@ -76,20 +76,20 @@ pub fn lowerLogDecl(self: *const DeclarationLowerer, log_decl: *const lib.ast.Lo
 
 /// Lower error declarations with error type definitions (Requirements 7.4)
 pub fn lowerErrorDecl(self: *const DeclarationLowerer, error_decl: *const lib.ast.Statements.ErrorDeclNode) c.MlirOperation {
-    // Create ora.error.decl operation
+    // create ora.error.decl operation
     var state = h.opState("ora.error.decl", helpers.createFileLocation(self, error_decl.span));
 
-    // Collect error attributes
+    // collect error attributes
     var attributes = std.ArrayList(c.MlirNamedAttribute){};
     defer attributes.deinit(std.heap.page_allocator);
 
-    // Add error name
+    // add error name
     const name_ref = c.mlirStringRefCreate(error_decl.name.ptr, error_decl.name.len);
     const name_attr = c.mlirStringAttrGet(self.ctx, name_ref);
     const name_id = h.identifier(self.ctx, "sym_name");
     attributes.append(std.heap.page_allocator, c.mlirNamedAttributeGet(name_id, name_attr)) catch {};
 
-    // Add error parameters if present
+    // add error parameters if present
     if (error_decl.parameters) |params| {
         var param_names = std.ArrayList(c.MlirAttribute){};
         defer param_names.deinit(std.heap.page_allocator);
@@ -97,18 +97,18 @@ pub fn lowerErrorDecl(self: *const DeclarationLowerer, error_decl: *const lib.as
         defer param_types.deinit(std.heap.page_allocator);
 
         for (params) |param| {
-            // Add parameter name
+            // add parameter name
             const param_name_ref = c.mlirStringRefCreate(param.name.ptr, param.name.len);
             const param_name_attr = c.mlirStringAttrGet(self.ctx, param_name_ref);
             param_names.append(std.heap.page_allocator, param_name_attr) catch {};
 
-            // Add parameter type
+            // add parameter type
             const param_type = self.type_mapper.toMlirType(param.type_info);
             const param_type_attr = c.mlirTypeAttrGet(param_type);
             param_types.append(std.heap.page_allocator, param_type_attr) catch {};
         }
 
-        // Add parameter arrays as attributes
+        // add parameter arrays as attributes
         if (param_names.items.len > 0) {
             const param_names_array = c.mlirArrayAttrGet(self.ctx, @intCast(param_names.items.len), param_names.items.ptr);
             const param_names_id = h.identifier(self.ctx, "ora.param_names");
@@ -120,15 +120,15 @@ pub fn lowerErrorDecl(self: *const DeclarationLowerer, error_decl: *const lib.as
         }
     }
 
-    // Add error declaration marker
+    // add error declaration marker
     const error_decl_attr = c.mlirBoolAttrGet(self.ctx, 1);
     const error_decl_id = h.identifier(self.ctx, "ora.error_decl");
     attributes.append(std.heap.page_allocator, c.mlirNamedAttributeGet(error_decl_id, error_decl_attr)) catch {};
 
-    // Apply all attributes
+    // apply all attributes
     c.mlirOperationStateAddAttributes(&state, @intCast(attributes.items.len), attributes.items.ptr);
 
-    // Create the error type and add it as a result
+    // create the error type and add it as a result
     const error_type = self.createErrorType(error_decl);
     c.mlirOperationStateAddResults(&state, 1, @ptrCast(&error_type));
 

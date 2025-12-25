@@ -116,7 +116,7 @@ test "literals: string literals" {
     defer allocator.free(tokens);
 
     try testing.expectEqual(lexer.TokenType.StringLiteral, tokens[0].type);
-    // Lexeme contains the string content (without quotes)
+    // lexeme contains the string content (without quotes)
     try testing.expect(std.mem.indexOf(u8, tokens[0].lexeme, "hello") != null);
 }
 
@@ -169,7 +169,7 @@ test "errors: unterminated string" {
         return;
     };
 
-    // Should not reach here
+    // should not reach here
     allocator.free(tokens);
     try testing.expect(false);
 }
@@ -202,7 +202,7 @@ test "edge cases: whitespace only" {
     const tokens = try lex.scanTokens();
     defer allocator.free(tokens);
 
-    // Should have at least EOF (whitespace is trivia)
+    // should have at least EOF (whitespace is trivia)
     try testing.expect(tokens.len >= 1);
     try testing.expectEqual(lexer.TokenType.Eof, tokens[tokens.len - 1].type);
 }

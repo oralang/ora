@@ -157,7 +157,7 @@ pub const SymbolTable = struct {
     scopes: std.ArrayList(std.StringHashMap(SymbolInfo)),
     current_scope: usize,
 
-    // Separate tables for different symbol kinds
+    // separate tables for different symbol kinds
     functions: std.StringHashMap(FunctionSymbol),
     types: std.StringHashMap(TypeSymbol),
 
@@ -181,7 +181,7 @@ pub const SymbolTable = struct {
         }
         self.scopes.deinit(self.allocator);
 
-        // Clean up function symbols
+        // clean up function symbols
         var func_iter = self.functions.iterator();
         while (func_iter.next()) |entry| {
             entry.value_ptr.deinit();
@@ -304,7 +304,7 @@ pub const SymbolTable = struct {
             if (scope_idx == 0) break;
             scope_idx -= 1;
         }
-        // If symbol not found, add it to current scope
+        // if symbol not found, add it to current scope
         try self.addSymbol(name, c.mlirValueGetType(value), lib.ast.Statements.MemoryRegion.Stack, null, null);
         if (self.scopes.items[self.current_scope].get(name)) |symbol| {
             var updated_symbol = symbol;

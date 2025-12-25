@@ -52,9 +52,9 @@ pub fn parseComma(parser: *ExpressionParser) ParserError!ast.Expressions.ExprNod
 pub fn parseAssignment(parser: *ExpressionParser) ParserError!ast.Expressions.ExprNode {
     const expr = try parseLogicalOr(parser);
 
-    // Simple assignment
+    // simple assignment
     if (parser.base.match(.Equal)) {
-        // Validate that the left side is a valid L-value
+        // validate that the left side is a valid L-value
         ast.expressions.validateLValue(&expr) catch |err| {
             const error_msg = switch (err) {
                 ast.expressions.LValueError.LiteralNotAssignable => "Cannot assign to literal value",
@@ -80,13 +80,13 @@ pub fn parseAssignment(parser: *ExpressionParser) ParserError!ast.Expressions.Ex
         } };
     }
 
-    // Compound assignments
+    // compound assignments
     if (parser.base.match(.PlusEqual) or parser.base.match(.MinusEqual) or parser.base.match(.StarEqual) or
         parser.base.match(.SlashEqual) or parser.base.match(.PercentEqual))
     {
         const op_token = parser.base.previous();
 
-        // Validate that the left side is a valid L-value
+        // validate that the left side is a valid L-value
         ast.expressions.validateLValue(&expr) catch |err| {
             const error_msg = switch (err) {
                 ast.expressions.LValueError.LiteralNotAssignable => "Cannot assign to literal value",
@@ -481,6 +481,6 @@ pub fn parseUnary(parser: *ExpressionParser) ParserError!ast.Expressions.ExprNod
         };
     }
 
-    // Delegate to parseCall in the main expression parser
+    // delegate to parseCall in the main expression parser
     return parser.parseCall();
 }

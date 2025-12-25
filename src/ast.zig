@@ -1,3 +1,11 @@
+// ============================================================================
+// AST Module
+// ============================================================================
+//
+// aggregation layer for AST types, visitors, serializers, and utilities.
+//
+// ============================================================================
+
 const std = @import("std");
 const testing = std.testing;
 
@@ -149,8 +157,8 @@ pub const ImportNode = struct {
     alias: ?[]const u8,
     span: SourceSpan,
 
-    // Current implementation supports basic import patterns
-    // See ora-example/imports/basic_imports.ora for supported syntax
+    // current implementation supports basic import patterns
+    // see ora-example/imports/basic_imports.ora for supported syntax
 };
 
 pub const LogDeclNode = struct {
@@ -187,10 +195,10 @@ pub const ConstantNode = struct {
 
 // Unified AST Node type that the visitor expects
 pub const AstNode = union(enum) {
-    // Top-level program structure
+    // top-level program structure
     Module: ModuleNode,
 
-    // Top-level declarations that exist in Ora
+    // top-level declarations that exist in Ora
     Contract: ContractNode,
     Function: FunctionNode,
     Constant: ConstantNode,
@@ -202,7 +210,7 @@ pub const AstNode = union(enum) {
     ErrorDecl: Statements.ErrorDeclNode,
     ContractInvariant: ContractInvariant, // Formal verification invariants
 
-    // Structural nodes - use pointers to break circular dependency
+    // structural nodes - use pointers to break circular dependency
     Block: Statements.BlockNode,
     Expression: *Expressions.ExprNode, // Use pointer to break circular dependency
     Statement: *Statements.StmtNode, // Use pointer to break circular dependency
@@ -288,10 +296,10 @@ pub fn deinitAstNode(allocator: std.mem.Allocator, node: *AstNode) void {
             allocator.free(log_decl.fields);
         },
         .Import => {
-            // No dynamic allocations to free
+            // no dynamic allocations to free
         },
         .ErrorDecl => |*error_decl| {
-            // Clean up parameters if present
+            // clean up parameters if present
             if (error_decl.parameters) |params| {
                 for (params) |*param| {
                     if (param.default_value) |default_val| {

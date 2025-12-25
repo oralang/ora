@@ -71,14 +71,14 @@ pub fn createVariablePlaceholder(self: *const DeclarationLowerer, var_decl: *con
     const loc = self.createFileLocation(var_decl.span);
     var state = h.opState("ora.variable_placeholder", loc);
 
-    // Add variable name as attribute
+    // add variable name as attribute
     const name_ref = c.mlirStringRefCreate(var_decl.name.ptr, var_decl.name.len);
     const name_attr = c.mlirStringAttrGet(self.ctx, name_ref);
     const name_id = h.identifier(self.ctx, "name");
     var attrs = [_]c.MlirNamedAttribute{c.mlirNamedAttributeGet(name_id, name_attr)};
     c.mlirOperationStateAddAttributes(&state, attrs.len, &attrs);
 
-    // Add placeholder type
+    // add placeholder type
     const placeholder_ty = c.mlirIntegerTypeGet(self.ctx, 32);
     c.mlirOperationStateAddResults(&state, 1, @ptrCast(&placeholder_ty));
 
@@ -90,7 +90,7 @@ pub fn createModulePlaceholder(self: *const DeclarationLowerer, module_decl: *co
     const loc = self.createFileLocation(module_decl.span);
     var state = h.opState("ora.module_placeholder", loc);
 
-    // Add module name as attribute
+    // add module name as attribute
     if (module_decl.name) |name| {
         const name_ref = c.mlirStringRefCreate(name.ptr, name.len);
         const name_attr = c.mlirStringAttrGet(self.ctx, name_ref);
@@ -124,7 +124,7 @@ pub fn oraTypeToString(self: *const DeclarationLowerer, type_info: lib.ast.Types
             .string => try std.fmt.allocPrint(allocator, "!ora.string", .{}),
             .bytes => try std.fmt.allocPrint(allocator, "!ora.bytes", .{}),
             .void => try std.fmt.allocPrint(allocator, "!ora.void", .{}),
-            // For complex types, use simplified representation for now
+            // for complex types, use simplified representation for now
             .struct_type => |name| try std.fmt.allocPrint(allocator, "!ora.struct<\"{s}\">", .{name}),
             .enum_type => |name| try std.fmt.allocPrint(allocator, "!ora.enum<\"{s}\">", .{name}),
             .contract_type => |name| try std.fmt.allocPrint(allocator, "!ora.contract<\"{s}\">", .{name}),
@@ -136,7 +136,7 @@ pub fn oraTypeToString(self: *const DeclarationLowerer, type_info: lib.ast.Types
 
 /// Enhanced function type creation with parameter default values (Requirements 6.3)
 pub fn createFunctionType(self: *const DeclarationLowerer, func: *const lib.FunctionNode) c.MlirType {
-    // Create parameter types array
+    // create parameter types array
     var param_types = std.ArrayList(c.MlirType){};
     defer param_types.deinit(std.heap.page_allocator);
 
@@ -145,12 +145,12 @@ pub fn createFunctionType(self: *const DeclarationLowerer, func: *const lib.Func
         param_types.append(std.heap.page_allocator, param_type) catch {};
     }
 
-    // Create function type
+    // create function type
     if (func.return_type_info) |ret_info| {
         const result_type = self.type_mapper.toMlirType(ret_info);
         return c.mlirFunctionTypeGet(self.ctx, @intCast(param_types.items.len), if (param_types.items.len > 0) param_types.items.ptr else null, 1, @ptrCast(&result_type));
     } else {
-        // Functions with no return type should have 0 result types, not a 'none' type
+        // functions with no return type should have 0 result types, not a 'none' type
         return c.mlirFunctionTypeGet(self.ctx, @intCast(param_types.items.len), if (param_types.items.len > 0) param_types.items.ptr else null, 0, null);
     }
 }

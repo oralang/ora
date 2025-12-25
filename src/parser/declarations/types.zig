@@ -26,7 +26,7 @@ pub fn parseStruct(parser: *DeclarationParser, type_parser: *TypeParser) !ast.As
     defer fields.deinit(parser.base.arena.allocator());
 
     while (!parser.base.check(.RightBrace) and !parser.base.isAtEnd()) {
-        // Skip any field attributes/annotations for now
+        // skip any field attributes/annotations for now
         while (parser.base.match(.At)) {
             _ = try parser.base.consume(.Identifier, "Expected annotation name after '@'");
             if (parser.base.match(.LeftParen)) {
@@ -46,7 +46,7 @@ pub fn parseStruct(parser: *DeclarationParser, type_parser: *TypeParser) !ast.As
         const field_name = try parser.base.consumeIdentifierOrKeyword("Expected field name");
         _ = try parser.base.consume(.Colon, "Expected ':' after field name");
 
-        // Use type parser with complete type information
+        // use type parser with complete type information
         type_parser.base.current = parser.base.current;
         const field_type = try type_parser.parseTypeWithContext(.StructField);
         parser.base.current = type_parser.base.current;
@@ -77,13 +77,13 @@ pub fn parseEnumVariantValue(
     expr_parser: *ExpressionParser,
     underlying_type: ?ast.Types.TypeInfo,
 ) !ast.Expressions.ExprNode {
-    // Use the expression parser but stop at comma level to avoid enum separator confusion
-    // This ensures proper operator precedence and left-associativity
+    // use the expression parser but stop at comma level to avoid enum separator confusion
+    // this ensures proper operator precedence and left-associativity
     expr_parser.base.current = parser.base.current;
     var expr = try expr_parser.parseLogicalOr();
     parser.base.current = expr_parser.base.current;
 
-    // If this is a simple literal and we have an underlying type for the enum,
+    // if this is a simple literal and we have an underlying type for the enum,
     // apply the enum's underlying type immediately. For complex expressions, leave as unknown
     // and let the semantic analyzer resolve with the enum type constraint.
     if (expr == .Literal and underlying_type != null) {
@@ -117,8 +117,8 @@ pub fn parseEnumVariantValue(
             },
         }
     }
-    // For complex expressions, we leave them as-is with unknown types
-    // The semantic analyzer will resolve them with the enum type constraint
+    // for complex expressions, we leave them as-is with unknown types
+    // the semantic analyzer will resolve them with the enum type constraint
 
     return expr;
 }
@@ -131,10 +131,10 @@ pub fn parseEnum(
 ) !ast.AstNode {
     const name_token = try parser.base.consume(.Identifier, "Expected enum name");
 
-    // Parse optional underlying type: enum Status : u8 { ... }
+    // parse optional underlying type: enum Status : u8 { ... }
     var base_type: ?ast.Types.TypeInfo = null; // No default - let type system infer
     if (parser.base.match(.Colon)) {
-        // Use type parser for underlying type
+        // use type parser for underlying type
         type_parser.base.current = parser.base.current;
         base_type = try type_parser.parseTypeWithContext(.EnumUnderlying);
         parser.base.current = type_parser.base.current;
@@ -145,42 +145,42 @@ pub fn parseEnum(
     var variants = std.ArrayList(ast.EnumVariant){};
     defer variants.deinit(parser.base.arena.allocator());
 
-    // Track if any variants have explicit values
+    // track if any variants have explicit values
     var has_explicit_values = false;
 
-    // Track the current implicit value, starting from 0
+    // track the current implicit value, starting from 0
     var next_implicit_value: u32 = 0;
 
-    // Parse all enum variants
+    // parse all enum variants
     while (!parser.base.check(.RightBrace) and !parser.base.isAtEnd()) {
         const variant_name = try parser.base.consume(.Identifier, "Expected variant name");
 
-        // Parse optional explicit value assignment: VariantName = value
+        // parse optional explicit value assignment: VariantName = value
         var value: ?ast.Expressions.ExprNode = null;
         if (parser.base.match(.Equal)) {
             has_explicit_values = true; // Mark that we have at least one explicit value
 
-            // Use our dedicated enum variant value parser to ensure complex expressions
+            // use our dedicated enum variant value parser to ensure complex expressions
             // like (1 + 2) * 3 are parsed correctly without misinterpreting operators
             // as enum variant separators
             const expr = try parseEnumVariantValue(parser, expr_parser, base_type);
             value = expr;
 
-            // If this is an integer literal, we need to update the next_implicit_value
+            // if this is an integer literal, we need to update the next_implicit_value
             if (expr == .Literal and expr.Literal == .Integer) {
-                // Try to parse the integer value to determine the next implicit value
+                // try to parse the integer value to determine the next implicit value
                 const int_str = expr.Literal.Integer.value;
                 if (std.fmt.parseInt(u32, int_str, 0)) |int_val| {
-                    // Set the next implicit value to one more than this explicit value
+                    // set the next implicit value to one more than this explicit value
                     next_implicit_value = int_val + 1;
                 } else |_| {
-                    // If we can't parse it (e.g., it's a complex expression),
+                    // if we can't parse it (e.g., it's a complex expression),
                     // just continue with the current next_implicit_value
                 }
             }
         } else {
-            // Create an implicit value for this variant
-            // We always add integer values even when not explicitly assigned
+            // create an implicit value for this variant
+            // we always add integer values even when not explicitly assigned
             const int_literal = ast.expressions.IntegerLiteral{
                 .value = try std.fmt.allocPrint(parser.base.arena.allocator(), "{d}", .{next_implicit_value}),
                 .type_info = if (base_type) |bt| blk: {
@@ -188,7 +188,7 @@ pub fn parseEnum(
                     type_info.source = .inferred; // Mark as inferred since compiler generated this
                     break :blk type_info;
                 } else blk: {
-                    // Default to u32 for enum values if no underlying type specified
+                    // default to u32 for enum values if no underlying type specified
                     var type_info = ast.Types.TypeInfo.fromOraType(.u32);
                     type_info.source = .inferred;
                     break :blk type_info;
@@ -196,25 +196,25 @@ pub fn parseEnum(
                 .span = parser.base.spanFromToken(variant_name),
             };
 
-            // Create an ExprNode with the integer literal (no need to store in arena)
+            // create an ExprNode with the integer literal (no need to store in arena)
             value = ast.Expressions.ExprNode{ .Literal = .{ .Integer = int_literal } };
 
-            // Increment the implicit value for the next variant
+            // increment the implicit value for the next variant
             next_implicit_value += 1;
         }
 
-        // Add the variant to our list
+        // add the variant to our list
         try variants.append(parser.base.arena.allocator(), ast.EnumVariant{
             .name = variant_name.lexeme,
             .value = value,
             .span = parser.base.spanFromToken(variant_name),
         });
 
-        // Check for comma separator or end of enum body
+        // check for comma separator or end of enum body
         if (parser.base.check(.RightBrace)) {
             break; // No more variants
         } else if (!parser.base.match(.Comma)) {
-            // If not a comma and not the end, it's an error
+            // if not a comma and not the end, it's an error
             try parser.base.errorAtCurrent("Expected ',' between enum variants");
             return error.ExpectedToken;
         }
@@ -222,7 +222,7 @@ pub fn parseEnum(
 
     _ = try parser.base.consume(.RightBrace, "Expected '}' after enum variants");
 
-    // Create and return the enum declaration node
+    // create and return the enum declaration node
     return ast.AstNode{
         .EnumDecl = ast.EnumDeclNode{
             .name = name_token.lexeme,

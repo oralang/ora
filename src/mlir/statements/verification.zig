@@ -21,27 +21,27 @@ pub fn addVerificationAttributes(
     var attributes = std.ArrayList(c.MlirNamedAttribute){};
     defer attributes.deinit(self.allocator);
 
-    // Add verification marker
+    // add verification marker
     const verification_attr = c.mlirBoolAttrGet(self.ctx, 1);
     const verification_id = h.identifier(self.ctx, "ora.verification");
     attributes.append(self.allocator, c.mlirNamedAttributeGet(verification_id, verification_attr)) catch {};
 
-    // Add verification type
+    // add verification type
     const type_id = h.identifier(self.ctx, "ora.verification_type");
     const type_attr = h.stringAttr(self.ctx, verification_type);
     attributes.append(self.allocator, c.mlirNamedAttributeGet(type_id, type_attr)) catch {};
 
-    // Add verification context
+    // add verification context
     const context_id = h.identifier(self.ctx, "ora.verification_context");
     const context_attr = h.stringAttr(self.ctx, context);
     attributes.append(self.allocator, c.mlirNamedAttributeGet(context_id, context_attr)) catch {};
 
-    // Add formal verification marker
+    // add formal verification marker
     const formal_id = h.identifier(self.ctx, "ora.formal");
     const formal_attr = c.mlirBoolAttrGet(self.ctx, 1);
     attributes.append(self.allocator, c.mlirNamedAttributeGet(formal_id, formal_attr)) catch {};
 
-    // Apply all attributes
+    // apply all attributes
     if (attributes.items.len > 0) {
         c.mlirOperationStateAddAttributes(state, @intCast(attributes.items.len), attributes.items.ptr);
     }
@@ -54,22 +54,22 @@ pub fn addVerificationAttributesToOp(
     verification_type: []const u8,
     context: []const u8,
 ) void {
-    // Add verification marker
+    // add verification marker
     const verification_attr = c.mlirBoolAttrGet(self.ctx, 1);
     const verification_name = h.strRef("ora.verification");
     c.mlirOperationSetAttributeByName(op, verification_name, verification_attr);
 
-    // Add verification type
+    // add verification type
     const type_name = h.strRef("ora.verification_type");
     const type_attr = h.stringAttr(self.ctx, verification_type);
     c.mlirOperationSetAttributeByName(op, type_name, type_attr);
 
-    // Add verification context
+    // add verification context
     const context_name = h.strRef("ora.verification_context");
     const context_attr = h.stringAttr(self.ctx, context);
     c.mlirOperationSetAttributeByName(op, context_name, context_attr);
 
-    // Add formal verification marker
+    // add formal verification marker
     const formal_attr = c.mlirBoolAttrGet(self.ctx, 1);
     const formal_name = h.strRef("ora.formal");
     c.mlirOperationSetAttributeByName(op, formal_name, formal_attr);
@@ -83,7 +83,7 @@ pub fn lowerAssert(self: *const StatementLowerer, assert_stmt: *const lib.ast.St
     var state = h.opState("ora.assert", loc);
     c.mlirOperationStateAddOperands(&state, 1, @ptrCast(&condition));
 
-    // Add optional message attribute
+    // add optional message attribute
     if (assert_stmt.message) |msg| {
         const msg_attr = h.stringAttr(self.ctx, msg);
         const msg_id = h.identifier(self.ctx, "message");
@@ -91,7 +91,7 @@ pub fn lowerAssert(self: *const StatementLowerer, assert_stmt: *const lib.ast.St
         c.mlirOperationStateAddAttributes(&state, attrs.len, &attrs);
     }
 
-    // Add verification attributes
+    // add verification attributes
     const context_str = if (assert_stmt.is_ghost) "ghost_assertion" else "runtime_assertion";
     addVerificationAttributes(self, &state, "assert", context_str);
 

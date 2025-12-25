@@ -37,14 +37,14 @@ pub const MlirContextHandle = struct {
 pub fn createContext(allocator: std.mem.Allocator) MlirContextHandle {
     const ctx = c.mlirContextCreate();
 
-    // Register all standard MLIR dialects
+    // register all standard MLIR dialects
     const registry = c.mlirDialectRegistryCreate();
     c.mlirRegisterAllDialects(registry);
     c.mlirContextAppendDialectRegistry(ctx, registry);
     c.mlirDialectRegistryDestroy(registry);
     c.mlirContextLoadAllAvailableDialects(ctx);
 
-    // Initialize the Ora dialect
+    // initialize the Ora dialect
     var ora_dialect = @import("dialect.zig").OraDialect.init(ctx, allocator);
     ora_dialect.register() catch |err| {
         std.log.warn("Failed to register Ora dialect: {}", .{err});
@@ -175,10 +175,10 @@ pub const SymbolTable = struct {
     scopes: std.ArrayList(std.StringHashMap(SymbolInfo)),
     current_scope: usize,
 
-    // Separate tables for different symbol kinds
+    // separate tables for different symbol kinds
     functions: std.StringHashMap(FunctionSymbol),
     types: std.StringHashMap([]TypeSymbol),
-    // Store constant declarations for lazy value creation
+    // store constant declarations for lazy value creation
     constants: std.StringHashMap(*const lib.ast.ConstantNode),
 
     pub fn init(allocator: std.mem.Allocator) SymbolTable {
@@ -202,23 +202,23 @@ pub const SymbolTable = struct {
         }
         self.scopes.deinit(self.allocator);
 
-        // Clean up function symbols
+        // clean up function symbols
         var func_iter = self.functions.iterator();
         while (func_iter.next()) |entry| {
             entry.value_ptr.deinit();
         }
         self.functions.deinit();
 
-        // Clean up type symbols
+        // clean up type symbols
         var type_iter = self.types.iterator();
 
-        // Constants map doesn't own the AST nodes, just references them
+        // constants map doesn't own the AST nodes, just references them
         self.constants.deinit();
         while (type_iter.next()) |entry| {
             const type_array = entry.value_ptr.*;
-            // First deinit the TypeSymbol's internal allocations
+            // first deinit the TypeSymbol's internal allocations
             type_array[0].deinit();
-            // Then free the array itself
+            // then free the array itself
             self.allocator.free(type_array);
         }
         self.types.deinit();
@@ -361,7 +361,7 @@ pub const SymbolTable = struct {
             if (scope_idx == 0) break;
             scope_idx -= 1;
         }
-        // If symbol not found, add it to current scope
+        // if symbol not found, add it to current scope
         std.debug.print("[updateSymbolValue] WARNING: Symbol not found: {s}, adding new symbol with variable_kind=null\n", .{name});
         try self.addSymbol(name, c.mlirValueGetType(value), lib.ast.Statements.MemoryRegion.Stack, null, null);
         if (self.scopes.items[self.current_scope].get(name)) |symbol| {
@@ -384,7 +384,7 @@ pub const SymbolTable = struct {
             if (scope_idx == 0) break;
             scope_idx -= 1;
         }
-        // If symbol not found, this is an error - we can't update a non-existent symbol
+        // if symbol not found, this is an error - we can't update a non-existent symbol
         return error.SymbolNotFound;
     }
 
@@ -444,14 +444,14 @@ pub const LoweringResult = struct {
 
     /// Free the allocated errors and warnings
     pub fn deinit(self: *LoweringResult, allocator: std.mem.Allocator) void {
-        // Free deep-copied error messages and suggestions
+        // free deep-copied error messages and suggestions
         for (self.errors) |err| {
             allocator.free(err.message);
             if (err.suggestion) |s| {
                 allocator.free(s);
             }
         }
-        // Free deep-copied warning messages
+        // free deep-copied warning messages
         for (self.warnings) |warn| {
             allocator.free(warn.message);
         }
@@ -467,9 +467,9 @@ pub const LoweringResult = struct {
 /// Note: Type registration (enums, structs) is now handled in the MLIR lowering phase
 /// This function only handles variable and function symbols from semantic analysis
 pub fn convertSemanticSymbolTable(semantic_table: *const lib.semantics.state.SymbolTable, mlir_table: *SymbolTable, ctx: c.MlirContext, allocator: std.mem.Allocator) !void {
-    // Note: Type registration (enums, structs) is now handled directly in the MLIR lowering phase
+    // note: Type registration (enums, structs) is now handled directly in the MLIR lowering phase
     // where we have access to the MLIR context and can create proper MLIR types.
-    // This function is kept for future use if we need to convert other semantic symbols.
+    // this function is kept for future use if we need to convert other semantic symbols.
     _ = semantic_table;
     _ = mlir_table;
     _ = ctx;
@@ -495,13 +495,13 @@ fn getNodeSpan(node: *const lib.AstNode) ?lib.ast.SourceSpan {
 /// Main entry point for lowering Ora AST nodes to MLIR module with semantic analysis symbol table
 /// This function uses the semantic analysis symbol table for type resolution
 pub fn lowerFunctionsToModuleWithSemanticTable(ctx: c.MlirContext, nodes: []lib.AstNode, allocator: std.mem.Allocator, semantic_table: *const lib.semantics.state.SymbolTable, source_filename: ?[]const u8) !LoweringResult {
-    // Create location tracker to get proper module location
+    // create location tracker to get proper module location
     const location_tracker = if (source_filename) |fname|
         LocationTracker.initWithFilename(ctx, fname)
     else
         LocationTracker.init(ctx);
 
-    // Use first node's location if available, otherwise unknown (module wrapper has no single location)
+    // use first node's location if available, otherwise unknown (module wrapper has no single location)
     const loc = if (nodes.len > 0)
         location_tracker.createLocation(getNodeSpan(&nodes[0]))
     else
@@ -510,11 +510,11 @@ pub fn lowerFunctionsToModuleWithSemanticTable(ctx: c.MlirContext, nodes: []lib.
     const module = c.mlirModuleCreateEmpty(loc);
     _ = c.mlirModuleGetBody(module);
 
-    // Initialize error handler
+    // initialize error handler
     var error_handler = ErrorHandler.init(allocator);
     defer error_handler.deinit();
 
-    // Initialize Ora dialect
+    // initialize Ora dialect
     var ora_dialect = @import("dialect.zig").OraDialect.init(ctx, allocator);
     ora_dialect.register() catch |err| {
         std.log.warn("Failed to register Ora dialect: {}", .{err});
@@ -525,21 +525,21 @@ pub fn lowerFunctionsToModuleWithSemanticTable(ctx: c.MlirContext, nodes: []lib.
     else
         LocationTracker.init(ctx);
 
-    // Create global symbol table and storage map for the module
+    // create global symbol table and storage map for the module
     var symbol_table = SymbolTable.init(allocator);
     defer symbol_table.deinit();
 
-    // Convert semantic analysis symbol table to MLIR symbol table
+    // convert semantic analysis symbol table to MLIR symbol table
     try convertSemanticSymbolTable(semantic_table, &symbol_table, ctx, allocator);
 
-    // Create builtin registry for standard library functions
+    // create builtin registry for standard library functions
     var builtin_registry = lib.semantics.builtins.BuiltinRegistry.init(allocator) catch {
         std.debug.print("FATAL: Failed to initialize builtin registry\n", .{});
         @panic("Builtin registry initialization failed");
     };
     defer builtin_registry.deinit();
 
-    // Initialize modular components with error handling and symbol table
+    // initialize modular components with error handling and symbol table
     var type_mapper = TypeMapper.initWithSymbolTable(ctx, allocator, &symbol_table);
     type_mapper.setErrorHandler(&error_handler);
     defer type_mapper.deinit();
@@ -549,8 +549,8 @@ pub fn lowerFunctionsToModuleWithSemanticTable(ctx: c.MlirContext, nodes: []lib.
     var global_storage_map = StorageMap.init(allocator);
     defer global_storage_map.deinit();
 
-    // Process all declarations (enums, structs, functions, contracts)
-    // Note: Type declarations are already registered from semantic analysis
+    // process all declarations (enums, structs, functions, contracts)
+    // note: Type declarations are already registered from semantic analysis
     for (nodes) |node| {
         switch (node) {
             .Function => |func| {
@@ -587,15 +587,15 @@ pub fn lowerFunctionsToModuleWithSemanticTable(ctx: c.MlirContext, nodes: []lib.
                 try decl_lowerer.lowerTryBlock(try_block);
             },
             .EnumDecl, .StructDecl => {
-                // Skip enum and struct declarations - already processed in semantic analysis
+                // skip enum and struct declarations - already processed in semantic analysis
             },
             .ContractInvariant => {
-                // Skip contract invariants - specification-only, don't generate code
+                // skip contract invariants - specification-only, don't generate code
             },
         }
     }
 
-    // Collect errors and warnings
+    // collect errors and warnings
     const errors = try error_handler.getErrors();
     const warnings = try error_handler.getWarnings();
 
@@ -621,11 +621,11 @@ pub fn lowerFunctionsToModuleWithErrors(ctx: c.MlirContext, nodes: []lib.AstNode
     const module = c.mlirModuleCreateEmpty(loc);
     const body = c.mlirModuleGetBody(module);
 
-    // Initialize error handler
+    // initialize error handler
     var error_handler = ErrorHandler.init(allocator);
     defer error_handler.deinit();
 
-    // Initialize Ora dialect
+    // initialize Ora dialect
     var ora_dialect = @import("dialect.zig").OraDialect.init(ctx, allocator);
     ora_dialect.register() catch |err| {
         std.log.warn("Failed to register Ora dialect: {}", .{err});
@@ -636,18 +636,18 @@ pub fn lowerFunctionsToModuleWithErrors(ctx: c.MlirContext, nodes: []lib.AstNode
     else
         LocationTracker.init(ctx);
 
-    // Create global symbol table and storage map for the module
+    // create global symbol table and storage map for the module
     var symbol_table = SymbolTable.init(allocator);
     defer symbol_table.deinit();
 
-    // Create builtin registry for standard library functions
+    // create builtin registry for standard library functions
     var builtin_registry = lib.semantics.builtins.BuiltinRegistry.init(allocator) catch {
         std.debug.print("FATAL: Failed to initialize builtin registry\n", .{});
         @panic("Builtin registry initialization failed");
     };
     defer builtin_registry.deinit();
 
-    // Initialize modular components with error handling and symbol table
+    // initialize modular components with error handling and symbol table
     var type_mapper = TypeMapper.initWithSymbolTable(ctx, allocator, &symbol_table);
     type_mapper.setErrorHandler(&error_handler);
     defer type_mapper.deinit();
@@ -657,7 +657,7 @@ pub fn lowerFunctionsToModuleWithErrors(ctx: c.MlirContext, nodes: []lib.AstNode
     var global_storage_map = StorageMap.init(allocator);
     defer global_storage_map.deinit();
 
-    // First pass: Process all type declarations (enums, structs) to register them in symbol table
+    // first pass: Process all type declarations (enums, structs) to register them in symbol table
     for (nodes) |node| {
         switch (node) {
             .EnumDecl => |enum_decl| {
@@ -670,25 +670,25 @@ pub fn lowerFunctionsToModuleWithErrors(ctx: c.MlirContext, nodes: []lib.AstNode
                     if (error_handler.validateMlirOperation(enum_op, enum_decl.span) catch false) {
                         c.mlirBlockAppendOwnedOperation(body, enum_op);
 
-                        // Register enum type in symbol table
+                        // register enum type in symbol table
                         const enum_type = decl_lowerer.createEnumType(&enum_decl);
 
-                        // Allocate variant info array directly
+                        // allocate variant info array directly
                         const variants_slice = allocator.alloc(@import("lower.zig").TypeSymbol.VariantInfo, enum_decl.variants.len) catch {
                             std.debug.print("ERROR: Failed to allocate variants slice for enum: {s}\n", .{enum_decl.name});
                             continue;
                         };
 
                         for (enum_decl.variants, 0..) |variant, i| {
-                            // Use index as value for implicit enum variants
-                            // Explicit value evaluation handled by constant expression evaluator
+                            // use index as value for implicit enum variants
+                            // explicit value evaluation handled by constant expression evaluator
                             variants_slice[i] = .{
                                 .name = variant.name,
                                 .value = null, // Will be set to index during symbol table creation
                             };
                         }
 
-                        // Check if type already exists before allocating
+                        // check if type already exists before allocating
                         if (symbol_table.lookupType(enum_decl.name)) |_| {
                             std.debug.print("WARNING: Duplicate enum type: {s}, skipping\n", .{enum_decl.name});
                             allocator.free(variants_slice);
@@ -705,7 +705,7 @@ pub fn lowerFunctionsToModuleWithErrors(ctx: c.MlirContext, nodes: []lib.AstNode
                         };
 
                         symbol_table.addType(enum_decl.name, type_symbol) catch {
-                            // Free the variants_slice if addType fails
+                            // free the variants_slice if addType fails
                             allocator.free(variants_slice);
                             std.debug.print("ERROR: Failed to register enum type: {s}\n", .{enum_decl.name});
                         };
@@ -722,35 +722,35 @@ pub fn lowerFunctionsToModuleWithErrors(ctx: c.MlirContext, nodes: []lib.AstNode
                     if (error_handler.validateMlirOperation(struct_op, struct_decl.span) catch false) {
                         c.mlirBlockAppendOwnedOperation(body, struct_op);
 
-                        // Register struct type in symbol table
+                        // register struct type in symbol table
                         const struct_type = decl_lowerer.createStructType(&struct_decl);
 
-                        // Allocate field info array directly
+                        // allocate field info array directly
                         const fields_slice = allocator.alloc(@import("lower.zig").TypeSymbol.FieldInfo, struct_decl.fields.len) catch {
                             std.debug.print("ERROR: Failed to allocate fields slice for struct: {s}\n", .{struct_decl.name});
                             continue;
                         };
 
-                        // Calculate field offsets based on cumulative sizes
+                        // calculate field offsets based on cumulative sizes
                         var current_offset: usize = 0;
                         for (struct_decl.fields, 0..) |field, i| {
                             const field_type = decl_lowerer.type_mapper.toMlirType(field.type_info);
 
-                            // Calculate offset: for EVM, each field occupies a storage slot
-                            // In memory/stack, we use byte offsets based on type width
-                            // For simplicity, use slot-based offsets (32 bytes per field in EVM)
+                            // calculate offset: for EVM, each field occupies a storage slot
+                            // in memory/stack, we use byte offsets based on type width
+                            // for simplicity, use slot-based offsets (32 bytes per field in EVM)
                             fields_slice[i] = .{
                                 .name = field.name,
                                 .field_type = field_type,
                                 .offset = current_offset,
                             };
 
-                            // Increment offset: in EVM storage, each slot is 32 bytes
-                            // For proper layout, this should consider actual type sizes
+                            // increment offset: in EVM storage, each slot is 32 bytes
+                            // for proper layout, this should consider actual type sizes
                             current_offset += 32; // EVM storage slot size in bytes
                         }
 
-                        // Check if type already exists before allocating
+                        // check if type already exists before allocating
                         if (symbol_table.lookupType(struct_decl.name)) |_| {
                             std.debug.print("WARNING: Duplicate struct type: {s}, skipping\n", .{struct_decl.name});
                             allocator.free(fields_slice);
@@ -767,7 +767,7 @@ pub fn lowerFunctionsToModuleWithErrors(ctx: c.MlirContext, nodes: []lib.AstNode
                         };
 
                         symbol_table.addType(struct_decl.name, type_symbol) catch {
-                            // Free the fields_slice if addType fails
+                            // free the fields_slice if addType fails
                             allocator.free(fields_slice);
                             std.debug.print("ERROR: Failed to register struct type: {s}\n", .{struct_decl.name});
                         };
@@ -775,20 +775,20 @@ pub fn lowerFunctionsToModuleWithErrors(ctx: c.MlirContext, nodes: []lib.AstNode
                 }
             },
             else => {
-                // Skip non-type declarations in first pass
+                // skip non-type declarations in first pass
             },
         }
     }
 
-    // Second pass: Process all other declarations (functions, contracts, etc.)
+    // second pass: Process all other declarations (functions, contracts, etc.)
     for (nodes) |node| {
         switch (node) {
             .Function => |func| {
-                // Set error context for function lowering
+                // set error context for function lowering
                 try error_handler.pushContext(ErrorContext.function(func.name));
                 defer error_handler.popContext();
 
-                // Validate function AST node
+                // validate function AST node
                 const is_valid = error_handler.validateAstNode(func, func.span) catch {
                     try error_handler.reportError(.MalformedAst, func.span, "function validation failed", "check function structure");
                     continue; // Skip malformed function
@@ -797,23 +797,23 @@ pub fn lowerFunctionsToModuleWithErrors(ctx: c.MlirContext, nodes: []lib.AstNode
                     continue; // Skip malformed function
                 }
 
-                // Lower function declaration using the modular declaration lowerer
+                // lower function declaration using the modular declaration lowerer
                 var local_var_map = LocalVarMap.init(allocator);
                 defer local_var_map.deinit();
 
                 const func_op = decl_lowerer.lowerFunction(&func, &global_storage_map, &local_var_map);
 
-                // Validate the created MLIR operation
+                // validate the created MLIR operation
                 if (error_handler.validateMlirOperation(func_op, func.span) catch false) {
                     c.mlirBlockAppendOwnedOperation(body, func_op);
                 }
             },
             .Contract => |contract| {
-                // Set error context for contract lowering
+                // set error context for contract lowering
                 try error_handler.pushContext(ErrorContext.contract(contract.name));
                 defer error_handler.popContext();
 
-                // Validate contract AST node
+                // validate contract AST node
                 const contract_valid = error_handler.validateAstNode(contract, contract.span) catch {
                     try error_handler.reportError(.MalformedAst, contract.span, "contract validation failed", "check contract structure");
                     continue; // Skip malformed contract
@@ -822,16 +822,16 @@ pub fn lowerFunctionsToModuleWithErrors(ctx: c.MlirContext, nodes: []lib.AstNode
                     continue; // Skip malformed contract
                 }
 
-                // Lower contract declaration using the modular declaration lowerer
+                // lower contract declaration using the modular declaration lowerer
                 const contract_op = decl_lowerer.lowerContract(&contract);
 
-                // Validate the created MLIR operation
+                // validate the created MLIR operation
                 if (error_handler.validateMlirOperation(contract_op, contract.span) catch false) {
                     c.mlirBlockAppendOwnedOperation(body, contract_op);
                 }
             },
             .VariableDecl => |var_decl| {
-                // Validate variable declaration
+                // validate variable declaration
                 const var_valid = error_handler.validateAstNode(var_decl, var_decl.span) catch {
                     try error_handler.reportError(.MalformedAst, var_decl.span, "variable declaration validation failed", "check variable structure");
                     continue; // Skip malformed variable declaration
@@ -840,17 +840,17 @@ pub fn lowerFunctionsToModuleWithErrors(ctx: c.MlirContext, nodes: []lib.AstNode
                     continue; // Skip malformed variable declaration
                 }
 
-                // Validate memory region
+                // validate memory region
                 const is_valid = error_handler.validateMemoryRegion(var_decl.region, "variable declaration", var_decl.span) catch false;
                 if (!is_valid) {
                     continue; // Skip invalid memory region
                 }
 
-                // Lower global variable declarations
+                // lower global variable declarations
                 switch (var_decl.region) {
                     .Storage => {
                         if (var_decl.kind == .Immutable) {
-                            // Handle immutable storage variables
+                            // handle immutable storage variables
                             const immutable_op = decl_lowerer.lowerImmutableDecl(&var_decl);
                             if (error_handler.validateMlirOperation(immutable_op, var_decl.span) catch false) {
                                 c.mlirBlockAppendOwnedOperation(body, immutable_op);
@@ -865,7 +865,7 @@ pub fn lowerFunctionsToModuleWithErrors(ctx: c.MlirContext, nodes: []lib.AstNode
                     },
                     .Memory => {
                         if (var_decl.kind == .Immutable) {
-                            // Handle immutable memory variables
+                            // handle immutable memory variables
                             const immutable_op = decl_lowerer.lowerImmutableDecl(&var_decl);
                             if (error_handler.validateMlirOperation(immutable_op, var_decl.span) catch false) {
                                 c.mlirBlockAppendOwnedOperation(body, immutable_op);
@@ -879,7 +879,7 @@ pub fn lowerFunctionsToModuleWithErrors(ctx: c.MlirContext, nodes: []lib.AstNode
                     },
                     .TStore => {
                         if (var_decl.kind == .Immutable) {
-                            // Handle immutable transient storage variables
+                            // handle immutable transient storage variables
                             const immutable_op = decl_lowerer.lowerImmutableDecl(&var_decl);
                             if (error_handler.validateMlirOperation(immutable_op, var_decl.span) catch false) {
                                 c.mlirBlockAppendOwnedOperation(body, immutable_op);
@@ -892,7 +892,7 @@ pub fn lowerFunctionsToModuleWithErrors(ctx: c.MlirContext, nodes: []lib.AstNode
                         }
                     },
                     .Stack => {
-                        // Stack variables at module level are not allowed
+                        // stack variables at module level are not allowed
                         try error_handler.reportError(.InvalidMemoryRegion, var_decl.span, "stack variables are not allowed at module level", "use 'storage', 'memory', or 'tstore' instead");
                     },
                 }
@@ -919,11 +919,11 @@ pub fn lowerFunctionsToModuleWithErrors(ctx: c.MlirContext, nodes: []lib.AstNode
                     if (error_handler.validateMlirOperation(const_op, const_decl.span) catch false) {
                         c.mlirBlockAppendOwnedOperation(body, const_op);
 
-                        // Register constant declaration for lazy value creation
+                        // register constant declaration for lazy value creation
                         symbol_table.registerConstantDecl(const_decl.name, &const_decl) catch {
                             std.debug.print("ERROR: Failed to register constant declaration: {s}\n", .{const_decl.name});
                         };
-                        // Add constant to symbol table with null value - will be created lazily when referenced
+                        // add constant to symbol table with null value - will be created lazily when referenced
                         const const_type = type_mapper.toMlirType(const_decl.typ);
                         symbol_table.addConstant(const_decl.name, const_type, null, null) catch {
                             std.debug.print("ERROR: Failed to add constant to symbol table: {s}\n", .{const_decl.name});
@@ -956,15 +956,15 @@ pub fn lowerFunctionsToModuleWithErrors(ctx: c.MlirContext, nodes: []lib.AstNode
                 }
             },
             .ContractInvariant => {
-                // Skip contract invariants - they are specification-only and don't generate code
+                // skip contract invariants - they are specification-only and don't generate code
                 continue;
             },
             .Module => |module_node| {
-                // Set error context for module lowering
+                // set error context for module lowering
                 try error_handler.pushContext(ErrorContext.module(module_node.name orelse "unnamed"));
                 defer error_handler.popContext();
 
-                // Validate module AST node
+                // validate module AST node
                 const module_valid = error_handler.validateAstNode(module_node, module_node.span) catch {
                     try error_handler.reportError(.MalformedAst, module_node.span, "module validation failed", "check module structure");
                     continue;
@@ -973,7 +973,7 @@ pub fn lowerFunctionsToModuleWithErrors(ctx: c.MlirContext, nodes: []lib.AstNode
                     continue;
                 }
 
-                // Process module imports first
+                // process module imports first
                 for (module_node.imports) |import| {
                     const import_valid = error_handler.validateAstNode(import, import.span) catch {
                         try error_handler.reportError(.MalformedAst, import.span, "import validation failed", "check import structure");
@@ -987,15 +987,15 @@ pub fn lowerFunctionsToModuleWithErrors(ctx: c.MlirContext, nodes: []lib.AstNode
                     }
                 }
 
-                // Process module declarations recursively
+                // process module declarations recursively
                 for (module_node.declarations) |decl| {
-                    // Recursively process module declarations
-                    // This creates a proper module structure in MLIR
-                    // Note: We can't call lowerModule on individual declarations
-                    // Instead, we need to handle them based on their type
+                    // recursively process module declarations
+                    // this creates a proper module structure in MLIR
+                    // note: We can't call lowerModule on individual declarations
+                    // instead, we need to handle them based on their type
                     switch (decl) {
                         .Function => |func| {
-                            // Create a local variable map for this function
+                            // create a local variable map for this function
                             var local_var_map = LocalVarMap.init(allocator);
                             defer local_var_map.deinit();
 
@@ -1011,9 +1011,9 @@ pub fn lowerFunctionsToModuleWithErrors(ctx: c.MlirContext, nodes: []lib.AstNode
                             }
                         },
                         .VariableDecl => |var_decl| {
-                            // Handle variable declarations within module with graceful degradation
+                            // handle variable declarations within module with graceful degradation
                             try error_handler.reportGracefulDegradation("variable declarations within modules", "global variable declarations", var_decl.span);
-                            // Create a placeholder operation to allow compilation to continue
+                            // create a placeholder operation to allow compilation to continue
                             const placeholder_op = decl_lowerer.createVariablePlaceholder(&var_decl);
                             if (error_handler.validateMlirOperation(placeholder_op, var_decl.span) catch false) {
                                 c.mlirBlockAppendOwnedOperation(body, placeholder_op);
@@ -1056,13 +1056,13 @@ pub fn lowerFunctionsToModuleWithErrors(ctx: c.MlirContext, nodes: []lib.AstNode
                             }
                         },
                         .ContractInvariant => {
-                            // Skip contract invariants - they are specification-only
+                            // skip contract invariants - they are specification-only
                             continue;
                         },
                         .Module => |nested_module| {
-                            // Recursively handle nested modules with graceful degradation
+                            // recursively handle nested modules with graceful degradation
                             try error_handler.reportGracefulDegradation("nested modules", "flat module structure", nested_module.span);
-                            // Create a placeholder operation to allow compilation to continue
+                            // create a placeholder operation to allow compilation to continue
                             const placeholder_op = decl_lowerer.createModulePlaceholder(&nested_module);
                             if (error_handler.validateMlirOperation(placeholder_op, nested_module.span) catch false) {
                                 c.mlirBlockAppendOwnedOperation(body, placeholder_op);
@@ -1075,9 +1075,9 @@ pub fn lowerFunctionsToModuleWithErrors(ctx: c.MlirContext, nodes: []lib.AstNode
                             }
                         },
                         .Expression => |expr| {
-                            // Handle expressions within module with graceful degradation
+                            // handle expressions within module with graceful degradation
                             try error_handler.reportGracefulDegradation("expressions within modules", "expression capture operations", error_handling.getSpanFromExpression(expr));
-                            // Create a placeholder operation to allow compilation to continue
+                            // create a placeholder operation to allow compilation to continue
                             const expr_lowerer = ExpressionLowerer.init(ctx, body, &type_mapper, null, null, null, &symbol_table, &builtin_registry, &error_handler, locations, &ora_dialect);
                             const expr_value = expr_lowerer.lowerExpression(expr);
                             const expr_op = expr_lowerer.createExpressionCapture(expr_value, error_handling.getSpanFromExpression(expr));
@@ -1086,9 +1086,9 @@ pub fn lowerFunctionsToModuleWithErrors(ctx: c.MlirContext, nodes: []lib.AstNode
                             }
                         },
                         .Statement => |stmt| {
-                            // Handle statements within modules with graceful degradation
+                            // handle statements within modules with graceful degradation
                             try error_handler.reportGracefulDegradation("statements within modules", "statement lowering operations", error_handling.getSpanFromStatement(stmt));
-                            // Create a placeholder operation to allow compilation to continue
+                            // create a placeholder operation to allow compilation to continue
                             const expr_lowerer = ExpressionLowerer.init(ctx, body, &type_mapper, null, null, null, &symbol_table, &builtin_registry, &error_handler, locations, &ora_dialect);
                             const stmt_lowerer = StatementLowerer.init(ctx, body, &type_mapper, &expr_lowerer, null, null, null, locations, &symbol_table, &builtin_registry, std.heap.page_allocator, null, null, &ora_dialect, &[_]*lib.ast.Expressions.ExprNode{});
                             stmt_lowerer.lowerStatement(stmt) catch {
@@ -1106,11 +1106,11 @@ pub fn lowerFunctionsToModuleWithErrors(ctx: c.MlirContext, nodes: []lib.AstNode
                 }
             },
             .Block => |block| {
-                // Set error context for block lowering
+                // set error context for block lowering
                 try error_handler.pushContext(ErrorContext.block("top-level"));
                 defer error_handler.popContext();
 
-                // Validate block AST node
+                // validate block AST node
                 const block_valid = error_handler.validateAstNode(block, block.span) catch {
                     try error_handler.reportError(.MalformedAst, block.span, "block validation failed", "check block structure");
                     continue;
@@ -1119,18 +1119,18 @@ pub fn lowerFunctionsToModuleWithErrors(ctx: c.MlirContext, nodes: []lib.AstNode
                     continue;
                 }
 
-                // Lower top-level block using the declaration lowerer
+                // lower top-level block using the declaration lowerer
                 const block_op = decl_lowerer.lowerBlock(&block);
                 if (error_handler.validateMlirOperation(block_op, block.span) catch false) {
                     c.mlirBlockAppendOwnedOperation(body, block_op);
                 }
             },
             .Expression => |expr| {
-                // Set error context for expression lowering
+                // set error context for expression lowering
                 try error_handler.pushContext(ErrorContext.expression());
                 defer error_handler.popContext();
 
-                // Validate expression AST node
+                // validate expression AST node
                 const expr_valid = error_handler.validateAstNode(expr, error_handling.getSpanFromExpression(expr)) catch {
                     try error_handler.reportError(.MalformedAst, error_handling.getSpanFromExpression(expr), "expression validation failed", "check expression structure");
                     continue;
@@ -1139,24 +1139,24 @@ pub fn lowerFunctionsToModuleWithErrors(ctx: c.MlirContext, nodes: []lib.AstNode
                     continue;
                 }
 
-                // Create a temporary expression lowerer for top-level expressions
+                // create a temporary expression lowerer for top-level expressions
                 const expr_lowerer = ExpressionLowerer.init(ctx, body, &type_mapper, null, null, null, &symbol_table, null, &error_handler, locations, &ora_dialect);
                 const expr_value = expr_lowerer.lowerExpression(expr);
 
-                // For top-level expressions, we need to create a proper operation
-                // This could be a constant or a call to a function that evaluates the expression
-                // For now, we'll create a simple operation that captures the expression value
+                // for top-level expressions, we need to create a proper operation
+                // this could be a constant or a call to a function that evaluates the expression
+                // for now, we'll create a simple operation that captures the expression value
                 const expr_op = expr_lowerer.createExpressionCapture(expr_value, error_handling.getSpanFromExpression(expr));
                 if (error_handler.validateMlirOperation(expr_op, error_handling.getSpanFromExpression(expr)) catch false) {
                     c.mlirBlockAppendOwnedOperation(body, expr_op);
                 }
             },
             .Statement => |stmt| {
-                // Set error context for statement lowering
+                // set error context for statement lowering
                 try error_handler.pushContext(ErrorContext.statement());
                 defer error_handler.popContext();
 
-                // Validate statement AST node
+                // validate statement AST node
                 const stmt_valid = error_handler.validateAstNode(stmt, error_handling.getSpanFromStatement(stmt)) catch {
                     try error_handler.reportError(.MalformedAst, error_handling.getSpanFromStatement(stmt), "statement validation failed", "check statement structure");
                     continue;
@@ -1165,7 +1165,7 @@ pub fn lowerFunctionsToModuleWithErrors(ctx: c.MlirContext, nodes: []lib.AstNode
                     continue;
                 }
 
-                // Create a temporary statement lowerer for top-level statements
+                // create a temporary statement lowerer for top-level statements
                 const expr_lowerer = ExpressionLowerer.init(ctx, body, &type_mapper, null, null, null, &symbol_table, null, &error_handler, locations, &ora_dialect);
                 const stmt_lowerer = StatementLowerer.init(ctx, body, &type_mapper, &expr_lowerer, null, null, null, locations, null, &builtin_registry, std.heap.page_allocator, null, null, &ora_dialect, &[_]*lib.ast.Expressions.ExprNode{});
                 stmt_lowerer.lowerStatement(stmt) catch {
@@ -1174,11 +1174,11 @@ pub fn lowerFunctionsToModuleWithErrors(ctx: c.MlirContext, nodes: []lib.AstNode
                 };
             },
             .TryBlock => |try_block| {
-                // Set error context for try block lowering
+                // set error context for try block lowering
                 try error_handler.pushContext(ErrorContext.try_block("top-level"));
                 defer error_handler.popContext();
 
-                // Validate try block AST node
+                // validate try block AST node
                 const try_block_valid = error_handler.validateAstNode(try_block, try_block.span) catch {
                     try error_handler.reportError(.MalformedAst, try_block.span, "try block validation failed", "check try block structure");
                     continue;
@@ -1187,28 +1187,28 @@ pub fn lowerFunctionsToModuleWithErrors(ctx: c.MlirContext, nodes: []lib.AstNode
                     continue;
                 }
 
-                // Lower top-level try block using the declaration lowerer
+                // lower top-level try block using the declaration lowerer
                 const try_block_op = decl_lowerer.lowerTryBlock(&try_block);
                 if (error_handler.validateMlirOperation(try_block_op, try_block.span) catch false) {
                     c.mlirBlockAppendOwnedOperation(body, try_block_op);
                 }
             },
             .EnumDecl => |enum_decl| {
-                // Already handled in the first pass, but ensure MLIR type is created
+                // already handled in the first pass, but ensure MLIR type is created
                 const enum_type = decl_lowerer.createEnumType(&enum_decl);
                 if (symbol_table.lookupType(enum_decl.name)) |type_symbol| {
-                    // Note: We can't modify the type_symbol here as it's const
-                    // The MLIR type should have been set during the first pass
+                    // note: We can't modify the type_symbol here as it's const
+                    // the MLIR type should have been set during the first pass
                     _ = enum_type;
                     _ = type_symbol;
                 }
             },
             .StructDecl => |struct_decl| {
-                // Already handled in the first pass, but ensure MLIR type is created
+                // already handled in the first pass, but ensure MLIR type is created
                 const struct_type = decl_lowerer.createStructType(&struct_decl);
                 if (symbol_table.lookupType(struct_decl.name)) |type_symbol| {
-                    // Note: We can't modify the type_symbol here as it's const
-                    // The MLIR type should have been set during the first pass
+                    // note: We can't modify the type_symbol here as it's const
+                    // the MLIR type should have been set during the first pass
                     _ = struct_type;
                     _ = type_symbol;
                 }
@@ -1216,7 +1216,7 @@ pub fn lowerFunctionsToModuleWithErrors(ctx: c.MlirContext, nodes: []lib.AstNode
         }
     }
 
-    // Deep-copy errors and warnings out of the error handler before it is deinitialized.
+    // deep-copy errors and warnings out of the error handler before it is deinitialized.
     const handler_errors = error_handler.getErrors();
     const handler_warnings = error_handler.getWarnings();
 
@@ -1247,7 +1247,7 @@ pub fn lowerFunctionsToModuleWithErrors(ctx: c.MlirContext, nodes: []lib.AstNode
         };
     }
 
-    // Create and return the lowering result
+    // create and return the lowering result
     const result = LoweringResult{
         .module = module,
         .errors = errors,
@@ -1261,38 +1261,38 @@ pub fn lowerFunctionsToModuleWithErrors(ctx: c.MlirContext, nodes: []lib.AstNode
 
 /// Main entry point with pass management support
 pub fn lowerFunctionsToModuleWithPasses(ctx: c.MlirContext, nodes: []lib.AstNode, allocator: std.mem.Allocator, pass_config: ?PassPipelineConfig, source_filename: ?[]const u8) !LoweringResult {
-    // First, perform the basic lowering
+    // first, perform the basic lowering
     var lowering_result = try lowerFunctionsToModuleWithErrors(ctx, nodes, allocator, source_filename);
 
-    // If lowering failed, return early
+    // if lowering failed, return early
     if (!lowering_result.success) {
         return lowering_result;
     }
 
-    // Apply passes if configuration is provided
+    // apply passes if configuration is provided
     if (pass_config) |config| {
-        // Create pass manager with configuration
+        // create pass manager with configuration
         var pm = try pass_manager.OraPassUtils.createOraPassManager(ctx, allocator, config);
         defer pm.deinit();
 
-        // Note: IR printing configuration is handled in createOraPassManager
+        // note: IR printing configuration is handled in createOraPassManager
 
-        // Run the passes
+        // run the passes
         const pass_result = try pm.run(lowering_result.module);
 
-        // Verify the module after passes
+        // verify the module after passes
         if (pass_result) {
             var verifier = verification.OraVerification.init(ctx, allocator);
             defer verifier.deinit();
             const verification_result = try verifier.verifyModule(lowering_result.module);
             if (!verification_result.success) {
-                // Create a new error for verification failure
+                // create a new error for verification failure
                 var error_handler = ErrorHandler.init(allocator);
                 defer error_handler.deinit();
 
                 try error_handler.reportError(.MlirOperationFailed, null, "module verification failed after pass execution", "check pass configuration and module structure");
 
-                // Update the result with verification error
+                // update the result with verification error
                 const verification_errors = try allocator.dupe(LoweringError, error_handler.getErrors());
                 const combined_errors = try allocator.alloc(LoweringError, lowering_result.errors.len + verification_errors.len);
                 std.mem.copyForwards(LoweringError, combined_errors[0..lowering_result.errors.len], lowering_result.errors);
@@ -1301,7 +1301,7 @@ pub fn lowerFunctionsToModuleWithPasses(ctx: c.MlirContext, nodes: []lib.AstNode
                 lowering_result.errors = combined_errors;
                 lowering_result.success = false;
             } else {
-                // Run Ora-specific verification (temporarily disabled due to C API issues)
+                // run Ora-specific verification (temporarily disabled due to C API issues)
                 // const ora_verification_result = pass_manager.runOraVerification(lowering_result.module) catch |err| {
                 //     // Create a new error for Ora verification failure
                 //     var error_handler = ErrorHandler.init(allocator);
@@ -1342,7 +1342,7 @@ pub fn lowerFunctionsToModuleWithPasses(ctx: c.MlirContext, nodes: []lib.AstNode
             }
         }
 
-        // Update the result with pass information
+        // update the result with pass information
         lowering_result.pass_result = .{
             .success = pass_result,
             .error_message = null,
@@ -1366,17 +1366,17 @@ pub fn lowerFunctionsToModule(ctx: c.MlirContext, nodes: []lib.AstNode) c.MlirMo
 
     const result = lowerFunctionsToModuleWithErrors(ctx, nodes, arena.allocator()) catch |err| {
         std.debug.print("Error during MLIR lowering: {s}\n", .{@errorName(err)});
-        // Return empty module on error
+        // return empty module on error
         const loc = c.mlirLocationUnknownGet(ctx);
         return c.mlirModuleCreateEmpty(loc);
     };
 
-    // Print diagnostics if there are any errors or warnings
+    // print diagnostics if there are any errors or warnings
     if (result.errors.len > 0 or result.warnings.len > 0) {
         var error_handler = ErrorHandler.init(arena.allocator());
         defer error_handler.deinit();
 
-        // Add errors and warnings back to handler for printing
+        // add errors and warnings back to handler for printing
         for (result.errors) |err| {
             error_handler.errors.append(err) catch {};
         }
@@ -1404,24 +1404,24 @@ pub fn lowerFunctionsToModuleRelease(ctx: c.MlirContext, nodes: []lib.AstNode, a
 
 /// Convenience function with custom pass pipeline string
 pub fn lowerFunctionsToModuleWithPipelineString(ctx: c.MlirContext, nodes: []lib.AstNode, allocator: std.mem.Allocator, pipeline_str: []const u8, source_filename: ?[]const u8) !LoweringResult {
-    // First, perform the basic lowering
+    // first, perform the basic lowering
     var lowering_result = try lowerFunctionsToModuleWithErrors(ctx, nodes, allocator, source_filename);
 
-    // If lowering failed, return early
+    // if lowering failed, return early
     if (!lowering_result.success) {
         return lowering_result;
     }
 
-    // Create pass manager and parse pipeline string
+    // create pass manager and parse pipeline string
     var pm = PassManager.init(ctx, allocator);
     defer pm.deinit();
 
     try @import("pass_manager.zig").OraPassUtils.parsePipelineString(&pm, pipeline_str);
 
-    // Run the passes
+    // run the passes
     const pass_success = try pm.run(lowering_result.module);
 
-    // Update the result
+    // update the result
     lowering_result.pass_result = .{
         .success = pass_success,
         .error_message = null,

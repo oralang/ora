@@ -61,21 +61,21 @@ pub fn convertValueToType(
 ) c.MlirValue {
     const value_type = c.mlirValueGetType(value);
 
-    // If types already match, return as-is
+    // if types already match, return as-is
     if (c.mlirTypeEqual(value_type, target_type)) {
         return value;
     }
 
-    // Try TypeMapper conversion first
+    // try TypeMapper conversion first
     const converted = self.type_mapper.createConversionOp(self.block, value, target_type, span);
     const converted_type = c.mlirValueGetType(converted);
 
-    // Check if conversion succeeded
+    // check if conversion succeeded
     if (c.mlirTypeEqual(converted_type, target_type)) {
         return converted;
     }
 
-    // Fallback: try bitcast for same-width integer types
+    // fallback: try bitcast for same-width integer types
     const value_builtin = c.oraTypeToBuiltin(value_type);
     const target_builtin = c.oraTypeToBuiltin(target_type);
 
@@ -93,14 +93,14 @@ pub fn convertValueToType(
         }
     }
 
-    // Return converted value (may fail verification, but best effort)
+    // return converted value (may fail verification, but best effort)
     return converted;
 }
 
 /// Ensure a value is materialized (convert unrealized_conversion_cast if needed)
 pub fn ensureValue(_: *const StatementLowerer, val: c.MlirValue, _: c.MlirLocation) c.MlirValue {
-    // For now, just return the value as-is
-    // TODO: Check for unrealized_conversion_cast if mlirValueGetDefiningOp becomes available
+    // for now, just return the value as-is
+    // todo: Check for unrealized_conversion_cast if mlirValueGetDefiningOp becomes available
     return val;
 }
 
@@ -119,7 +119,7 @@ pub fn insertRefinementGuard(
         return value;
     }
 
-    // Optimization: skip guard if flag is set (determined during type resolution)
+    // optimization: skip guard if flag is set (determined during type resolution)
     if (skip_guard) {
         return value;
     }
@@ -128,12 +128,12 @@ pub fn insertRefinementGuard(
 
     switch (ora_type) {
         .min_value => |mv| {
-            // Generate: require(value >= min)
+            // generate: require(value >= min)
             const value_type = c.mlirValueGetType(value);
-            // Extract base type from refinement type for operations
+            // extract base type from refinement type for operations
             const base_type = c.oraRefinementTypeGetBaseType(value_type);
             const min_type = if (base_type.ptr != null) base_type else value_type;
-            // For u256 values, create attribute from string to support full precision
+            // for u256 values, create attribute from string to support full precision
             const min_attr = if (mv.min > std.math.maxInt(i64)) blk: {
                 var min_buf: [100]u8 = undefined;
                 const min_str = std.fmt.bufPrint(&min_buf, "{d}", .{mv.min}) catch {
@@ -152,16 +152,16 @@ pub fn insertRefinementGuard(
             const pred_uge_attr = c.mlirIntegerAttrGet(c.mlirIntegerTypeGet(self.ctx, 64), 5); // uge
             var attrs = [_]c.MlirNamedAttribute{c.mlirNamedAttributeGet(pred_id, pred_uge_attr)};
             c.mlirOperationStateAddAttributes(&cmp_state, attrs.len, &attrs);
-            // Extract base type from value if it's a refinement type
+            // extract base type from value if it's a refinement type
             const value_base_type = c.oraRefinementTypeGetBaseType(value_type);
             const actual_value = if (value_base_type.ptr != null) blk: {
-                // Convert refinement type to base type using ora.refinement_to_base
+                // convert refinement type to base type using ora.refinement_to_base
                 const convert_op = c.oraRefinementToBaseOpCreate(self.ctx, loc, value, self.block);
                 if (c.mlirOperationIsNull(convert_op)) {
                     reportRefinementGuardError(self, span, "Refinement guard creation failed: ora.refinement_to_base returned null", "Ensure the Ora dialect is registered before lowering.");
                     return value;
                 }
-                // Operation is already inserted by oraRefinementToBaseOpCreate, no need to append
+                // operation is already inserted by oraRefinementToBaseOpCreate, no need to append
                 break :blk h.getResult(convert_op, 0);
             } else value;
             c.mlirOperationStateAddOperands(&cmp_state, 2, @ptrCast(&[_]c.MlirValue{ actual_value, min_const }));
@@ -182,12 +182,12 @@ pub fn insertRefinementGuard(
             h.appendOp(self.block, assert_op);
         },
         .max_value => |mv| {
-            // Generate: require(value <= max)
+            // generate: require(value <= max)
             const value_type = c.mlirValueGetType(value);
-            // Extract base type from refinement type for operations
+            // extract base type from refinement type for operations
             const base_type = c.oraRefinementTypeGetBaseType(value_type);
             const max_type = if (base_type.ptr != null) base_type else value_type;
-            // For u256 values, create attribute from string to support full precision
+            // for u256 values, create attribute from string to support full precision
             const max_attr = if (mv.max > std.math.maxInt(i64)) blk: {
                 var max_buf: [100]u8 = undefined;
                 const max_str = std.fmt.bufPrint(&max_buf, "{d}", .{mv.max}) catch {
@@ -206,16 +206,16 @@ pub fn insertRefinementGuard(
             const pred_ule_attr = c.mlirIntegerAttrGet(c.mlirIntegerTypeGet(self.ctx, 64), 3); // ule
             var attrs = [_]c.MlirNamedAttribute{c.mlirNamedAttributeGet(pred_id, pred_ule_attr)};
             c.mlirOperationStateAddAttributes(&cmp_state, attrs.len, &attrs);
-            // Extract base type from value if it's a refinement type
+            // extract base type from value if it's a refinement type
             const value_base_type = c.oraRefinementTypeGetBaseType(value_type);
             const actual_value = if (value_base_type.ptr != null) blk: {
-                // Convert refinement type to base type using ora.refinement_to_base
+                // convert refinement type to base type using ora.refinement_to_base
                 const convert_op = c.oraRefinementToBaseOpCreate(self.ctx, loc, value, self.block);
                 if (c.mlirOperationIsNull(convert_op)) {
                     reportRefinementGuardError(self, span, "Refinement guard creation failed: ora.refinement_to_base returned null", "Ensure the Ora dialect is registered before lowering.");
                     return value;
                 }
-                // Operation is already inserted by oraRefinementToBaseOpCreate, no need to append
+                // operation is already inserted by oraRefinementToBaseOpCreate, no need to append
                 break :blk h.getResult(convert_op, 0);
             } else value;
             c.mlirOperationStateAddOperands(&cmp_state, 2, @ptrCast(&[_]c.MlirValue{ actual_value, max_const }));
@@ -236,12 +236,12 @@ pub fn insertRefinementGuard(
             h.appendOp(self.block, assert_op);
         },
         .in_range => |ir| {
-            // Generate: require(min <= value <= max)
+            // generate: require(min <= value <= max)
             const value_type = c.mlirValueGetType(value);
-            // Extract base type from refinement type for operations
+            // extract base type from refinement type for operations
             const base_type = c.oraRefinementTypeGetBaseType(value_type);
             const op_type = if (base_type.ptr != null) base_type else value_type;
-            // For u256 values, create attributes from strings to support full precision
+            // for u256 values, create attributes from strings to support full precision
             const min_attr = if (ir.min > std.math.maxInt(i64)) blk: {
                 var min_buf: [100]u8 = undefined;
                 const min_str = std.fmt.bufPrint(&min_buf, "{d}", .{ir.min}) catch {
@@ -267,22 +267,22 @@ pub fn insertRefinementGuard(
             const min_const = createConstantValue(self, min_attr, op_type, loc);
             const max_const = createConstantValue(self, max_attr, op_type, loc);
 
-            // Check: value >= min
+            // check: value >= min
             var min_cmp_state = h.opState("arith.cmpi", loc);
             const pred_id = h.identifier(self.ctx, "predicate");
             const pred_uge_attr = c.mlirIntegerAttrGet(c.mlirIntegerTypeGet(self.ctx, 64), 5);
             var min_attrs = [_]c.MlirNamedAttribute{c.mlirNamedAttributeGet(pred_id, pred_uge_attr)};
             c.mlirOperationStateAddAttributes(&min_cmp_state, min_attrs.len, &min_attrs);
-            // Extract base type from value if it's a refinement type
+            // extract base type from value if it's a refinement type
             const value_base_type = c.oraRefinementTypeGetBaseType(value_type);
             const actual_value = if (value_base_type.ptr != null) blk: {
-                // Convert refinement type to base type using ora.refinement_to_base
+                // convert refinement type to base type using ora.refinement_to_base
                 const convert_op = c.oraRefinementToBaseOpCreate(self.ctx, loc, value, self.block);
                 if (c.mlirOperationIsNull(convert_op)) {
                     reportRefinementGuardError(self, span, "Refinement guard creation failed: ora.refinement_to_base returned null", "Ensure the Ora dialect is registered before lowering.");
                     return value;
                 }
-                // Operation is already inserted by oraRefinementToBaseOpCreate, no need to append
+                // operation is already inserted by oraRefinementToBaseOpCreate, no need to append
                 break :blk h.getResult(convert_op, 0);
             } else value;
             c.mlirOperationStateAddOperands(&min_cmp_state, 2, @ptrCast(&[_]c.MlirValue{ actual_value, min_const }));
@@ -291,7 +291,7 @@ pub fn insertRefinementGuard(
             h.appendOp(self.block, min_cmp_op);
             const min_check = h.getResult(min_cmp_op, 0);
 
-            // Check: value <= max
+            // check: value <= max
             var max_cmp_state = h.opState("arith.cmpi", loc);
             const pred_ule_attr = c.mlirIntegerAttrGet(c.mlirIntegerTypeGet(self.ctx, 64), 3);
             var max_attrs = [_]c.MlirNamedAttribute{c.mlirNamedAttributeGet(pred_id, pred_ule_attr)};
@@ -302,7 +302,7 @@ pub fn insertRefinementGuard(
             h.appendOp(self.block, max_cmp_op);
             const max_check = h.getResult(max_cmp_op, 0);
 
-            // Combine: min_check && max_check
+            // combine: min_check && max_check
             var and_state = h.opState("arith.andi", loc);
             c.mlirOperationStateAddOperands(&and_state, 2, @ptrCast(&[_]c.MlirValue{ min_check, max_check }));
             c.mlirOperationStateAddResults(&and_state, 1, @ptrCast(&h.boolType(self.ctx)));
@@ -322,11 +322,11 @@ pub fn insertRefinementGuard(
             h.appendOp(self.block, assert_op);
         },
         .exact, .scaled => {
-            // Exact and Scaled guards are inserted at specific operations (division, arithmetic)
-            // No initialization guard needed
+            // exact and Scaled guards are inserted at specific operations (division, arithmetic)
+            // no initialization guard needed
         },
         else => {
-            // Not a refinement type, no guard needed
+            // not a refinement type, no guard needed
         },
     }
 
@@ -347,18 +347,18 @@ pub fn createConstantValue(self: *const StatementLowerer, attr: c.MlirAttribute,
 
 /// Check if a block ends with a proper terminator (ora.yield, scf.yield, ora.return, func.return, etc.)
 pub fn blockEndsWithTerminator(_: *const StatementLowerer, block: c.MlirBlock) bool {
-    // Get the last operation in the block
+    // get the last operation in the block
     const last_op = c.mlirBlockGetTerminator(block);
     if (c.mlirOperationIsNull(last_op)) {
         return false;
     }
 
-    // Check if it's a proper terminator operation
+    // check if it's a proper terminator operation
     const op_name_ref = c.oraOperationGetName(last_op);
     const name_str = op_name_ref.data;
     const name_len = op_name_ref.length;
 
-    // TODO: Check for common terminator operations - Hacky for now, but it works.
+    // todo: Check for common terminator operations - Hacky for now, but it works.
     const terminator_names = [_][]const u8{
         "ora.yield",
         "scf.yield",
@@ -387,8 +387,8 @@ pub fn blockEndsWithTerminator(_: *const StatementLowerer, block: c.MlirBlock) b
 
 /// Check if a block ends with ora.break (which is NOT a terminator)
 pub fn blockEndsWithBreak(_: *const StatementLowerer, block: c.MlirBlock) bool {
-    // Get the last operation in the block (not necessarily a terminator)
-    // Iterate through operations to find the last one
+    // get the last operation in the block (not necessarily a terminator)
+    // iterate through operations to find the last one
     var op = c.mlirBlockGetFirstOperation(block);
     var last_op: c.MlirOperation = c.MlirOperation{};
 
@@ -416,19 +416,19 @@ pub fn blockEndsWithBreak(_: *const StatementLowerer, block: c.MlirBlock) bool {
         const name_slice = name_str[0..name_len];
         std.debug.print("[blockEndsWithBreak] Last op name: {s}\n", .{name_slice});
         const result = std.mem.eql(u8, name_slice, "ora.break");
-        // Free the string returned from oraOperationGetName
+        // free the string returned from oraOperationGetName
         c_zig.freeStringRef(op_name_ref);
         return result;
     }
 
-    // Free the string returned from oraOperationGetName
+    // free the string returned from oraOperationGetName
     c_zig.freeStringRef(op_name_ref);
     return false;
 }
 
 /// Check if a block ends with ora.continue (which is NOT a terminator for if regions)
 pub fn blockEndsWithContinue(_: *const StatementLowerer, block: c.MlirBlock) bool {
-    // Get the last operation in the block (not necessarily a terminator)
+    // get the last operation in the block (not necessarily a terminator)
     var op = c.mlirBlockGetFirstOperation(block);
     var last_op: c.MlirOperation = c.MlirOperation{};
 
@@ -483,17 +483,17 @@ pub fn blockEndsWithYield(_: *const StatementLowerer, block: c.MlirBlock) bool {
     const result = (name_len == 9 and std.mem.eql(u8, name_str[0..9], "scf.yield")) or
         (name_len == 9 and std.mem.eql(u8, name_str[0..9], "ora.yield"));
 
-    // Free the string returned from oraOperationGetName
+    // free the string returned from oraOperationGetName
     c_zig.freeStringRef(op_name_ref);
     return result;
 }
 
 /// Check if an if statement contains return statements
 pub fn ifStatementHasReturns(_: *const StatementLowerer, if_stmt: *const lib.ast.Statements.IfNode) bool {
-    // Check then branch
+    // check then branch
     for (if_stmt.then_branch.statements) |stmt| {
         if (stmt == .Return) return true;
-        // Check nested if statements
+        // check nested if statements
         if (stmt == .If) {
             const nested_if = &stmt.If;
             for (nested_if.then_branch.statements) |nested_stmt| {
@@ -507,11 +507,11 @@ pub fn ifStatementHasReturns(_: *const StatementLowerer, if_stmt: *const lib.ast
         }
     }
 
-    // Check else branch if present
+    // check else branch if present
     if (if_stmt.else_branch) |else_branch| {
         for (else_branch.statements) |stmt| {
             if (stmt == .Return) return true;
-            // Check nested if statements
+            // check nested if statements
             if (stmt == .If) {
                 const nested_if = &stmt.If;
                 for (nested_if.then_branch.statements) |nested_stmt| {
@@ -533,7 +533,7 @@ pub fn ifStatementHasReturns(_: *const StatementLowerer, if_stmt: *const lib.ast
 pub fn blockHasReturn(self: *const StatementLowerer, block: lib.ast.Statements.BlockNode) bool {
     for (block.statements) |stmt| {
         if (stmt == .Return) return true;
-        // Check nested if statements recursively
+        // check nested if statements recursively
         if (stmt == .If) {
             if (ifStatementHasReturns(self, &stmt.If)) return true;
         }
@@ -543,9 +543,9 @@ pub fn blockHasReturn(self: *const StatementLowerer, block: lib.ast.Statements.B
 
 /// Create a default value for a given MLIR type
 pub fn createDefaultValueForType(self: *const StatementLowerer, mlir_type: c.MlirType, loc: c.MlirLocation) StatementLowerer.LoweringError!c.MlirValue {
-    // Check if it's an integer type
+    // check if it's an integer type
     if (c.mlirTypeIsAInteger(mlir_type)) {
-        // Create a constant 0 value
+        // create a constant 0 value
         var const_state = h.opState("arith.constant", loc);
         const value_attr = c.mlirIntegerAttrGet(mlir_type, 0);
         const value_id = h.identifier(self.ctx, "value");
@@ -557,7 +557,7 @@ pub fn createDefaultValueForType(self: *const StatementLowerer, mlir_type: c.Mli
         return h.getResult(const_op, 0);
     }
 
-    // For other types, create a zero constant (simplified)
+    // for other types, create a zero constant (simplified)
     var const_state = h.opState("arith.constant", loc);
     const constants = @import("../lower.zig");
     const zero_type = c.mlirIntegerTypeGet(self.ctx, constants.DEFAULT_INTEGER_BITS);
@@ -573,6 +573,6 @@ pub fn createDefaultValueForType(self: *const StatementLowerer, mlir_type: c.Mli
 
 /// Get the return type from an if statement's return statements
 pub fn getReturnTypeFromIfStatement(self: *const StatementLowerer, _: *const lib.ast.Statements.IfNode) ?c.MlirType {
-    // Use the function's return type instead of trying to infer from individual returns
+    // use the function's return type instead of trying to infer from individual returns
     return self.current_function_return_type;
 }

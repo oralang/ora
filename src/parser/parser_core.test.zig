@@ -33,7 +33,7 @@ test "parser_core: empty input" {
     const nodes = try parser_instance.parse();
     defer arena.allocator().free(nodes);
 
-    // Empty input should produce empty AST
+    // empty input should produce empty AST
     try testing.expect(nodes.len == 0);
 }
 
@@ -53,7 +53,7 @@ test "parser_core: whitespace only" {
     const nodes = try parser_instance.parse();
     defer arena.allocator().free(nodes);
 
-    // Whitespace-only input should produce empty AST
+    // whitespace-only input should produce empty AST
     try testing.expect(nodes.len == 0);
 }
 
@@ -204,7 +204,7 @@ test "parser_core: import statement" {
 
 test "parser_core: unexpected token recovery" {
     const allocator = testing.allocator;
-    // Invalid syntax - should recover and continue
+    // invalid syntax - should recover and continue
     const source = "contract Test { invalid syntax here } contract Valid { }";
     const prev_diag = diagnostics.enable_stderr_diagnostics;
     diagnostics.enable_stderr_diagnostics = false;
@@ -219,21 +219,21 @@ test "parser_core: unexpected token recovery" {
     defer arena.deinit();
     var parser_instance = parser.Parser.init(tokens, &arena);
 
-    // Parser should attempt to recover and parse what it can
-    // This may error or produce partial results depending on error recovery
+    // parser should attempt to recover and parse what it can
+    // this may error or produce partial results depending on error recovery
     const nodes = parser_instance.parse() catch {
-        // Expected - parser should handle errors gracefully
+        // expected - parser should handle errors gracefully
         return;
     };
     defer arena.allocator().free(nodes);
 
-    // If parsing succeeded, we should have at least one contract
+    // if parsing succeeded, we should have at least one contract
     // (parser may have recovered and skipped invalid parts)
 }
 
 test "parser_core: incomplete contract" {
     const allocator = testing.allocator;
-    // Missing closing brace
+    // missing closing brace
     const source = "contract Test {";
     const prev_diag = diagnostics.enable_stderr_diagnostics;
     diagnostics.enable_stderr_diagnostics = false;
@@ -248,12 +248,12 @@ test "parser_core: incomplete contract" {
     defer arena.deinit();
     var parser_instance = parser.Parser.init(tokens, &arena);
 
-    // Should error on incomplete contract
+    // should error on incomplete contract
     const nodes = parser_instance.parse() catch {
-        // Expected error
+        // expected error
         return;
     };
     defer arena.allocator().free(nodes);
 
-    // If it didn't error, that's also acceptable (error recovery)
+    // if it didn't error, that's also acceptable (error recovery)
 }

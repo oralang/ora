@@ -1,3 +1,11 @@
+// ============================================================================
+// AST Statements
+// ============================================================================
+//
+// statement node definitions for the Ora AST.
+//
+// ============================================================================
+
 const std = @import("std");
 const SourceSpan = @import("source_span.zig").SourceSpan;
 
@@ -46,11 +54,11 @@ pub const StmtNode = union(enum) {
     Switch: SwitchNode, // switch statements
     LabeledBlock: LabeledBlockNode, // label: { statements }
 
-    // Error handling statements
+    // error handling statements
     ErrorDecl: ErrorDeclNode, // error MyError;
     TryBlock: TryBlockNode, // try { ... } catch { ... }
 
-    // Compound assignment statements
+    // compound assignment statements
     CompoundAssignment: CompoundAssignmentNode, // a += b, a -= b, etc.
 
     /// Check if this statement is specification-only (not compiled to bytecode)
@@ -231,7 +239,7 @@ pub const VariableDeclNode = struct {
     type_info: @import("type_info.zig").TypeInfo, // Unified type information
     value: ?*ExprNode,
     span: SourceSpan,
-    // Tuple unpacking support
+    // tuple unpacking support
     tuple_names: ?[][]const u8, // For tuple unpacking: let (a, b) = expr
     /// Is this a ghost variable? (specification-only)
     is_ghost: bool = false,
@@ -296,7 +304,7 @@ pub fn deinitStmtNode(allocator: std.mem.Allocator, stmt: *StmtNode) void {
             expressions.deinitExprNode(allocator, expr);
         },
         .VariableDecl => |*var_decl| {
-            // TypeInfo doesn't need explicit cleanup like TypeRef did
+            // typeInfo doesn't need explicit cleanup like TypeRef did
             if (var_decl.value) |value| {
                 expressions.deinitExprNode(allocator, value);
                 allocator.destroy(value);
@@ -355,7 +363,7 @@ pub fn deinitStmtNode(allocator: std.mem.Allocator, stmt: *StmtNode) void {
             expressions.deinitExprNode(allocator, &ens.condition);
         },
         .ErrorDecl => |*error_decl| {
-            // Clean up parameters if present
+            // clean up parameters if present
             if (error_decl.parameters) |params| {
                 for (params) |*param| {
                     if (param.default_value) |default_val| {
@@ -385,7 +393,7 @@ pub fn deinitStmtNode(allocator: std.mem.Allocator, stmt: *StmtNode) void {
             }
         },
         .Continue => {
-            // Continue statements only have a span and optional label, no cleanup needed
+            // continue statements only have a span and optional label, no cleanup needed
         },
         .ForLoop => |*for_loop| {
             expressions.deinitExprNode(allocator, &for_loop.iterable);
@@ -404,7 +412,7 @@ pub fn deinitStmtNode(allocator: std.mem.Allocator, stmt: *StmtNode) void {
             expressions.deinitExprNode(allocator, &assume.condition);
         },
         .Havoc => {
-            // Havoc only has a variable name (string), no cleanup needed
+            // havoc only has a variable name (string), no cleanup needed
         },
     }
 }
@@ -421,5 +429,5 @@ pub const CompoundAssignmentNode = struct {
 pub fn deinitBlockNode(allocator: std.mem.Allocator, block: *BlockNode) void {
     _ = allocator;
     _ = block;
-    // Implementation will be moved to main ast.zig
+    // implementation will be moved to main ast.zig
 }

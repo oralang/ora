@@ -35,7 +35,7 @@ pub const Encoder = struct {
     }
 
     //===----------------------------------------------------------------------===//
-    // Type Encoding
+    // type Encoding
     //===----------------------------------------------------------------------===//
 
     /// Encode MLIR type to Z3 sort
@@ -52,19 +52,19 @@ pub const Encoder = struct {
     }
 
     //===----------------------------------------------------------------------===//
-    // Constant Encoding
+    // constant Encoding
     //===----------------------------------------------------------------------===//
 
     /// Encode integer constant to Z3 bitvector
     pub fn encodeIntegerConstant(self: *Encoder, value: u256, width: u32) EncodeError!z3.Z3_ast {
         const sort = self.mkBitVectorSort(width);
-        // Z3_mk_unsigned_int64 only handles 64-bit, so we need to handle larger values
-        // For u256, we'll need to use Z3_mk_numeral with string representation
+        // z3_mk_unsigned_int64 only handles 64-bit, so we need to handle larger values
+        // for u256, we'll need to use Z3_mk_numeral with string representation
         if (width <= 64) {
             return z3.Z3_mk_unsigned_int64(self.context.ctx, @intCast(value), sort);
         } else {
-            // For larger bitvectors, use string representation
-            // Format as decimal string for Z3_mk_numeral
+            // for larger bitvectors, use string representation
+            // format as decimal string for Z3_mk_numeral
             const value_str = try std.fmt.allocPrint(self.allocator, "{d}", .{value});
             defer self.allocator.free(value_str);
             const value_z = try self.allocator.dupeZ(u8, value_str);
@@ -79,7 +79,7 @@ pub const Encoder = struct {
     }
 
     //===----------------------------------------------------------------------===//
-    // Variable Encoding
+    // variable Encoding
     //===----------------------------------------------------------------------===//
 
     /// Create Z3 variable (uninterpreted constant) from name and sort
@@ -92,7 +92,7 @@ pub const Encoder = struct {
     }
 
     //===----------------------------------------------------------------------===//
-    // Arithmetic Operations
+    // arithmetic Operations
     //===----------------------------------------------------------------------===//
 
     /// Encode arithmetic operation (add, sub, mul, div, rem)
@@ -160,24 +160,24 @@ pub const ArithmeticOp = enum {
 
     /// Check for overflow in addition (u256 + u256 can overflow)
     pub fn checkAddOverflow(self: *Encoder, lhs: z3.Z3_ast, rhs: z3.Z3_ast) z3.Z3_ast {
-        // Overflow occurs when result < lhs (unsigned comparison)
+        // overflow occurs when result < lhs (unsigned comparison)
         const result = z3.Z3_mk_bv_add(self.context.ctx, lhs, rhs);
         return z3.Z3_mk_bvult(self.context.ctx, result, lhs);
     }
 
     /// Check for underflow in subtraction (u256 - u256 can underflow)
     pub fn checkSubUnderflow(self: *Encoder, lhs: z3.Z3_ast, rhs: z3.Z3_ast) z3.Z3_ast {
-        // Underflow occurs when rhs > lhs
+        // underflow occurs when rhs > lhs
         return z3.Z3_mk_bvult(self.context.ctx, lhs, rhs);
     }
 
     /// Check for overflow in multiplication
     pub fn checkMulOverflow(self: *Encoder, lhs: z3.Z3_ast, rhs: z3.Z3_ast) z3.Z3_ast {
-        // For multiplication, we need to check if the high bits are non-zero
-        // This is more complex - for now, we'll use a conservative check
-        // TODO: Implement proper multiplication overflow detection
-        // For u256, multiplication overflow occurs when the result doesn't fit in 256 bits
-        // We can check this by computing the full-width result and checking high bits
+        // for multiplication, we need to check if the high bits are non-zero
+        // this is more complex - for now, we'll use a conservative check
+        // todo: Implement proper multiplication overflow detection
+        // for u256, multiplication overflow occurs when the result doesn't fit in 256 bits
+        // we can check this by computing the full-width result and checking high bits
         _ = lhs;
         _ = rhs;
         return z3.Z3_mk_false(self.context.ctx); // Placeholder - needs proper implementation
@@ -185,19 +185,19 @@ pub const ArithmeticOp = enum {
 
     /// Check for division by zero
     pub fn checkDivByZero(self: *Encoder, divisor: z3.Z3_ast) z3.Z3_ast {
-        // Create zero constant of same width as divisor
+        // create zero constant of same width as divisor
         const sort = z3.Z3_get_sort(self.context.ctx, divisor);
         const zero = z3.Z3_mk_unsigned_int64(self.context.ctx, 0, sort);
         return z3.Z3_mk_eq(self.context.ctx, divisor, zero);
     }
 
-    // Helper function to get sort from Z3 AST
+    // helper function to get sort from Z3 AST
     fn getSort(self: *Encoder, ast: z3.Z3_ast) z3.Z3_sort {
         return z3.Z3_get_sort(self.context.ctx, ast);
     }
 
     //===----------------------------------------------------------------------===//
-    // Comparison Operations
+    // comparison Operations
     //===----------------------------------------------------------------------===//
 
     /// Encode comparison operation
@@ -228,7 +228,7 @@ pub const ArithmeticOp = enum {
     };
 
     //===----------------------------------------------------------------------===//
-    // Boolean Operations
+    // boolean Operations
     //===----------------------------------------------------------------------===//
 
     /// Encode boolean AND
@@ -238,7 +238,7 @@ pub const ArithmeticOp = enum {
         if (args.len == 2) {
             return z3.Z3_mk_and(self.context.ctx, 2, args.ptr);
         }
-        // For more than 2 arguments, chain them
+        // for more than 2 arguments, chain them
         var result = z3.Z3_mk_and(self.context.ctx, 2, args[0..2].ptr);
         var i: usize = 2;
         while (i < args.len) : (i += 1) {
@@ -255,7 +255,7 @@ pub const ArithmeticOp = enum {
         if (args.len == 2) {
             return z3.Z3_mk_or(self.context.ctx, 2, args.ptr);
         }
-        // For more than 2 arguments, chain them
+        // for more than 2 arguments, chain them
         var result = z3.Z3_mk_or(self.context.ctx, 2, args[0..2].ptr);
         var i: usize = 2;
         while (i < args.len) : (i += 1) {
@@ -281,7 +281,7 @@ pub const ArithmeticOp = enum {
     }
 
     //===----------------------------------------------------------------------===//
-    // Array/Storage Operations
+    // array/Storage Operations
     //===----------------------------------------------------------------------===//
 
     /// Create array sort (for storage maps: address -> value)
@@ -300,21 +300,21 @@ pub const ArithmeticOp = enum {
     }
 
     //===----------------------------------------------------------------------===//
-    // MLIR Operation Encoding
+    // mlir Operation Encoding
     //===----------------------------------------------------------------------===//
 
     /// Encode an MLIR operation to Z3 AST
     /// This is the main entry point for encoding MLIR operations
     pub fn encodeOperation(self: *Encoder, mlir_op: mlir.MlirOperation) EncodeError!z3.Z3_ast {
-        // Get operation name
+        // get operation name
         const op_name_id = mlir.mlirOperationGetName(mlir_op);
         const op_name_str = mlir.mlirIdentifierStr(op_name_id);
         const op_name = op_name_str.data[0..op_name_str.length];
 
-        // Get number of operands
+        // get number of operands
         const num_operands = mlir.mlirOperationGetNumOperands(mlir_op);
 
-        // Encode operands recursively
+        // encode operands recursively
         const num_ops: usize = @intCast(num_operands);
         var operands = try self.allocator.alloc(z3.Z3_ast, num_ops);
         defer self.allocator.free(operands);
@@ -324,13 +324,13 @@ pub const ArithmeticOp = enum {
             operands[i] = try self.encodeValue(operand_value);
         }
 
-        // Dispatch based on operation name
+        // dispatch based on operation name
         return try self.dispatchOperation(op_name, operands, mlir_op);
     }
 
     /// Encode an MLIR value to Z3 AST (with caching)
     pub fn encodeValue(self: *Encoder, mlir_value: mlir.MlirValue) EncodeError!z3.Z3_ast {
-        // Check cache first
+        // check cache first
         const value_id = @intFromPtr(mlir_value.ptr);
         if (self.value_map.get(value_id)) |cached| {
             return cached;
@@ -348,14 +348,14 @@ pub const ArithmeticOp = enum {
             }
         }
 
-        // If no defining operation, create a fresh variable
+        // if no defining operation, create a fresh variable
         const value_type = mlir.mlirValueGetType(mlir_value);
         const sort = try self.encodeMLIRType(value_type);
         const var_name = try std.fmt.allocPrint(self.allocator, "v_{d}", .{value_id});
         defer self.allocator.free(var_name);
         const encoded = try self.mkVariable(var_name, sort);
 
-        // Cache the result
+        // cache the result
         try self.value_map.put(value_id, encoded);
         return encoded;
     }
@@ -375,7 +375,7 @@ pub const ArithmeticOp = enum {
             return self.mkBitVectorSort(@intCast(width));
         }
 
-        // Check if it's a builtin integer type
+        // check if it's a builtin integer type
         if (mlir.mlirTypeIsAInteger(mlir_type)) {
             const width = mlir.mlirIntegerTypeGetWidth(mlir_type);
             if (width == 1) {
@@ -391,20 +391,20 @@ pub const ArithmeticOp = enum {
             return self.mkArraySort(key_sort, value_sort);
         }
 
-        // Default to 256-bit bitvector for EVM
+        // default to 256-bit bitvector for EVM
         return self.mkBitVectorSort(256);
     }
 
     /// Dispatch operation to appropriate encoder based on operation name
     fn dispatchOperation(self: *Encoder, op_name: []const u8, operands: []const z3.Z3_ast, mlir_op: mlir.MlirOperation) EncodeError!z3.Z3_ast {
-        // Comparison operations
+        // comparison operations
         if (std.mem.eql(u8, op_name, "arith.cmpi")) {
-            // Get predicate from attributes
+            // get predicate from attributes
             const predicate = self.getCmpPredicate(mlir_op);
             return try self.encodeCmpOp(predicate, operands);
         }
 
-        // Constant operations
+        // constant operations
         if (std.mem.eql(u8, op_name, "arith.constant")) {
             const value = self.getConstantValue(mlir_op);
             const value_type = mlir.mlirOperationGetResult(mlir_op, 0);
@@ -438,7 +438,7 @@ pub const ArithmeticOp = enum {
             return self.encodeShiftOp(shift_op, operands[0], operands[1]);
         }
 
-        // Arithmetic operations
+        // arithmetic operations
         if (std.mem.startsWith(u8, op_name, "arith.")) {
             return try self.encodeArithOp(op_name, operands);
         }
@@ -463,10 +463,10 @@ pub const ArithmeticOp = enum {
             return self.encodeArithmeticOp(arith_op, operands[0], operands[1]);
         }
 
-        // Storage operations
+        // storage operations
         if (std.mem.eql(u8, op_name, "ora.sload")) {
             if (operands.len >= 1) {
-                // Storage load: select from storage array
+                // storage load: select from storage array
                 const storage_var = operands[0];
                 const key = operands[0]; // TODO: Get actual key from operation
                 return self.encodeStorageLoad(storage_var, key);
@@ -475,7 +475,7 @@ pub const ArithmeticOp = enum {
 
         if (std.mem.eql(u8, op_name, "ora.sstore")) {
             if (operands.len >= 2) {
-                // Storage store: update storage array
+                // storage store: update storage array
                 const storage_var = operands[0];
                 const key = operands[0]; // TODO: Get actual key from operation
                 const value = operands[1];
@@ -514,7 +514,7 @@ pub const ArithmeticOp = enum {
             }
         }
 
-        // Control flow
+        // control flow
         if (std.mem.eql(u8, op_name, "scf.if")) {
             if (operands.len >= 1) {
                 const condition = operands[0];
@@ -524,7 +524,7 @@ pub const ArithmeticOp = enum {
             }
         }
 
-        // Unsupported operation - caller may treat as unknown symbol.
+        // unsupported operation - caller may treat as unknown symbol.
         return error.UnsupportedOperation;
     }
 
@@ -584,51 +584,51 @@ pub const ArithmeticOp = enum {
 
     /// Get comparison predicate from MLIR operation
     fn getCmpPredicate(_: *Encoder, mlir_op: mlir.MlirOperation) u32 {
-        // Extract predicate from arith.cmpi attributes
-        // The predicate attribute contains the comparison type (eq, ne, ult, ule, ugt, uge, etc.)
+        // extract predicate from arith.cmpi attributes
+        // the predicate attribute contains the comparison type (eq, ne, ult, ule, ugt, uge, etc.)
         const attr_name_ref = mlir.MlirStringRef{ .data = "predicate".ptr, .length = "predicate".len };
         const attr = mlir.mlirOperationGetAttributeByName(mlir_op, attr_name_ref);
         if (mlir.mlirAttributeIsNull(attr)) {
-            // Default to eq (0) if predicate is missing
+            // default to eq (0) if predicate is missing
             return 0;
         }
 
-        // Get the integer value of the predicate
+        // get the integer value of the predicate
         const predicate = mlir.mlirIntegerAttrGetValueSInt(attr);
-        // MLIR predicate values: 0=eq, 1=ne, 2=slt, 3=sle, 4=sgt, 5=sge, 6=ult, 7=ule, 8=ugt, 9=uge
-        // We use unsigned comparisons for EVM (u256), so map signed to unsigned if needed
-        // Predicate values are always non-negative, so safe to cast
+        // mlir predicate values: 0=eq, 1=ne, 2=slt, 3=sle, 4=sgt, 5=sge, 6=ult, 7=ule, 8=ugt, 9=uge
+        // we use unsigned comparisons for EVM (u256), so map signed to unsigned if needed
+        // predicate values are always non-negative, so safe to cast
         return @intCast(predicate);
     }
 
     /// Get constant value from MLIR constant operation
     fn getConstantValue(_: *Encoder, mlir_op: mlir.MlirOperation) u256 {
-        // Extract constant value from arith.constant attributes
-        // The value attribute contains the integer constant
+        // extract constant value from arith.constant attributes
+        // the value attribute contains the integer constant
         const attr_name_ref = mlir.MlirStringRef{ .data = "value".ptr, .length = "value".len };
         const attr = mlir.mlirOperationGetAttributeByName(mlir_op, attr_name_ref);
         if (mlir.mlirAttributeIsNull(attr)) {
-            // Return 0 if value attribute is missing
+            // return 0 if value attribute is missing
             return 0;
         }
 
-        // Get the integer value (signed, but we'll interpret as unsigned for u256)
+        // get the integer value (signed, but we'll interpret as unsigned for u256)
         const int_value = mlir.mlirIntegerAttrGetValueSInt(attr);
 
-        // Handle negative values (for boolean true = -1 in MLIR, but we want 1)
+        // handle negative values (for boolean true = -1 in MLIR, but we want 1)
         if (int_value < 0) {
-            // For boolean values, -1 means true, convert to 1
+            // for boolean values, -1 means true, convert to 1
             if (int_value == -1) {
                 return 1;
             }
-            // For other negative values, this represents a large unsigned value
-            // Convert i64 to u64 first (two's complement), then to u256
+            // for other negative values, this represents a large unsigned value
+            // convert i64 to u64 first (two's complement), then to u256
             const u64_value: u64 = @bitCast(@as(i64, int_value));
             return @intCast(u64_value);
         }
 
-        // Convert signed to unsigned (non-negative values)
-        // For values that fit in i64, cast directly
+        // convert signed to unsigned (non-negative values)
+        // for values that fit in i64, cast directly
         return @intCast(@as(i64, int_value));
     }
 
@@ -692,13 +692,13 @@ pub const ArithmeticOp = enum {
 
     /// Encode MLIR storage load (ora.sload)
     pub fn encodeStorageLoad(self: *Encoder, storage_var: z3.Z3_ast, key: z3.Z3_ast) z3.Z3_ast {
-        // Storage is modeled as an array: address -> value
+        // storage is modeled as an array: address -> value
         return self.encodeSelect(storage_var, key);
     }
 
     /// Encode MLIR storage store (ora.sstore)
     pub fn encodeStorageStore(self: *Encoder, storage_var: z3.Z3_ast, key: z3.Z3_ast, value: z3.Z3_ast) z3.Z3_ast {
-        // Storage is modeled as an array: address -> value
+        // storage is modeled as an array: address -> value
         return self.encodeStore(storage_var, key, value);
     }
 
@@ -709,7 +709,7 @@ pub const ArithmeticOp = enum {
                 if (else_expr) |else_val| {
                     return self.encodeIte(condition, then_val, else_val);
                 } else {
-                    // If without else - return then value or undefined
+                    // if without else - return then value or undefined
                     return then_val;
                 }
             } else {
@@ -721,7 +721,7 @@ pub const ArithmeticOp = enum {
     }
 
     //===----------------------------------------------------------------------===//
-    // Error Types
+    // error Types
     //===----------------------------------------------------------------------===//
 
     pub const EncodingError = error{

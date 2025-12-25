@@ -24,12 +24,12 @@ pub fn parseFunction(
     type_parser: *TypeParser,
     expr_parser: *ExpressionParser,
 ) !ast.FunctionNode {
-    // Parse visibility
+    // parse visibility
     const is_pub = parser.base.match(.Pub);
 
     _ = try parser.base.consume(.Fn, "Expected 'fn'");
 
-    // Allow both regular identifiers and 'init' keyword as function names
+    // allow both regular identifiers and 'init' keyword as function names
     const name_token = if (parser.base.check(.Identifier))
         parser.base.advance()
     else if (parser.base.check(.Init))
@@ -42,11 +42,11 @@ pub fn parseFunction(
 
     _ = try parser.base.consume(.LeftParen, "Expected '(' after function name");
 
-    // Parse parameters with default values support
+    // parse parameters with default values support
     var params = std.ArrayList(ast.ParameterNode){};
     defer params.deinit(parser.base.arena.allocator());
     errdefer {
-        // Clean up parameters on error
+        // clean up parameters on error
         for (params.items) |*param| {
             if (param.default_value) |default_val| {
                 ast.deinitExprNode(parser.base.arena.allocator(), default_val);
@@ -66,7 +66,7 @@ pub fn parseFunction(
 
     _ = try parser.base.consume(.RightParen, "Expected ')' after parameters");
 
-    // Parse optional return type using arrow syntax: fn foo(...) -> Type
+    // parse optional return type using arrow syntax: fn foo(...) -> Type
     var return_type_info: ?ast.Types.TypeInfo = null;
     if (parser.base.check(.Arrow)) {
         if (is_init_fn) {
@@ -74,21 +74,21 @@ pub fn parseFunction(
             return error.UnexpectedToken;
         }
         _ = parser.base.advance(); // consume '->'
-        // Use type parser
+        // use type parser
         type_parser.base.current = parser.base.current;
         const parsed_type = try type_parser.parseReturnType();
         parser.base.current = type_parser.base.current;
         return_type_info = parsed_type;
     }
 
-    // Parse requires clauses
+    // parse requires clauses
     var requires_clauses = std.ArrayList(*ast.Expressions.ExprNode){};
     defer requires_clauses.deinit(parser.base.arena.allocator());
 
     while (parser.base.match(.Requires)) {
         _ = try parser.base.consume(.LeftParen, "Expected '(' after 'requires'");
 
-        // Parse the condition expression
+        // parse the condition expression
         expr_parser.base.current = parser.base.current;
         const condition = try expr_parser.parseExpression();
         parser.base.current = expr_parser.base.current;
@@ -99,20 +99,20 @@ pub fn parseFunction(
             return error.UnexpectedToken;
         }
 
-        // Store the expression in arena
+        // store the expression in arena
         const condition_ptr = try parser.base.arena.createNode(ast.Expressions.ExprNode);
         condition_ptr.* = condition;
         try requires_clauses.append(parser.base.arena.allocator(), condition_ptr);
     }
 
-    // Parse ensures clauses
+    // parse ensures clauses
     var ensures_clauses = std.ArrayList(*ast.Expressions.ExprNode){};
     defer ensures_clauses.deinit(parser.base.arena.allocator());
 
     while (parser.base.match(.Ensures)) {
         _ = try parser.base.consume(.LeftParen, "Expected '(' after 'ensures'");
 
-        // Parse the condition expression
+        // parse the condition expression
         expr_parser.base.current = parser.base.current;
         const condition = try expr_parser.parseExpression();
         parser.base.current = expr_parser.base.current;
@@ -123,13 +123,13 @@ pub fn parseFunction(
             return error.UnexpectedToken;
         }
 
-        // Store the expression in arena
+        // store the expression in arena
         const condition_ptr = try parser.base.arena.createNode(ast.Expressions.ExprNode);
         condition_ptr.* = condition;
         try ensures_clauses.append(parser.base.arena.allocator(), condition_ptr);
     }
 
-    // Parse modifies clause (frame conditions)
+    // parse modifies clause (frame conditions)
     var modifies_clause: ?[]*ast.Expressions.ExprNode = null;
     if (parser.base.match(.Modifies)) {
         _ = try parser.base.consume(.LeftParen, "Expected '(' after 'modifies'");
@@ -137,7 +137,7 @@ pub fn parseFunction(
         var modifies_list = std.ArrayList(*ast.Expressions.ExprNode){};
         defer modifies_list.deinit(parser.base.arena.allocator());
 
-        // Parse expression list (comma-separated)
+        // parse expression list (comma-separated)
         if (!parser.base.check(.RightParen)) {
             repeat: while (true) {
                 expr_parser.base.current = parser.base.current;
@@ -161,9 +161,9 @@ pub fn parseFunction(
         modifies_clause = try modifies_list.toOwnedSlice(parser.base.arena.allocator());
     }
 
-    // Parse function body - delegate to statement parser
-    // Placeholder body: parser_core will parse the real block with StatementParser
-    // Do not consume any tokens here; leave current at '{'
+    // parse function body - delegate to statement parser
+    // placeholder body: parser_core will parse the real block with StatementParser
+    // do not consume any tokens here; leave current at '{'
     const body = ast.Statements.BlockNode{ .statements = &[_]ast.Statements.StmtNode{}, .span = parser.base.currentSpan() };
 
     return ast.FunctionNode{
@@ -184,7 +184,7 @@ pub fn parseFunction(
 pub fn parseParameter(parser: *DeclarationParser, type_parser: *TypeParser) !ast.ParameterNode {
     const name_token = try parser.base.consumeIdentifierOrKeyword("Expected parameter name");
     _ = try parser.base.consume(.Colon, "Expected ':' after parameter name");
-    // Use type parser
+    // use type parser
     type_parser.base.current = parser.base.current;
     const param_type = try type_parser.parseTypeWithContext(.Parameter);
     parser.base.current = type_parser.base.current;
@@ -204,7 +204,7 @@ pub fn parseParameterWithDefaults(
     type_parser: *TypeParser,
     expr_parser: *ExpressionParser,
 ) !ast.ParameterNode {
-    // Check for mutable parameter modifier (mut param_name)
+    // check for mutable parameter modifier (mut param_name)
     const is_mutable = if (parser.base.check(.Identifier) and std.mem.eql(u8, parser.base.peek().lexeme, "mut")) blk: {
         _ = parser.base.advance(); // consume "mut"
         break :blk true;
@@ -213,20 +213,20 @@ pub fn parseParameterWithDefaults(
     const name_token = try parser.base.consumeIdentifierOrKeyword("Expected parameter name");
     _ = try parser.base.consume(.Colon, "Expected ':' after parameter name");
 
-    // Use type parser
+    // use type parser
     type_parser.base.current = parser.base.current;
     const param_type = try type_parser.parseTypeWithContext(.Parameter);
     parser.base.current = type_parser.base.current;
 
-    // Parse optional default value
+    // parse optional default value
     var default_value: ?*ast.Expressions.ExprNode = null;
     if (parser.base.match(.Equal)) {
-        // Parse default value expression
+        // parse default value expression
         expr_parser.base.current = parser.base.current;
         const expr = try expr_parser.parseExpression();
         parser.base.current = expr_parser.base.current;
 
-        // Store in arena
+        // store in arena
         const expr_ptr = try parser.base.arena.createNode(ast.Expressions.ExprNode);
         expr_ptr.* = expr;
         default_value = expr_ptr;

@@ -232,7 +232,7 @@ pub fn serializeStatement(serializer: *AstSerializer, stmt: *const StmtNode, wri
                 try helpers.writeSpanField(serializer, writer, &for_loop.span, indent + 1);
             }
 
-            // Serialize the iterable expression
+            // serialize the iterable expression
             if (serializer.options.pretty_print and !serializer.options.compact_mode) {
                 try writer.print(",\n");
                 try helpers.writeIndent(serializer, writer, indent + 1);
@@ -242,7 +242,7 @@ pub fn serializeStatement(serializer: *AstSerializer, stmt: *const StmtNode, wri
             }
             try expressions.serializeExpression(serializer, &for_loop.iterable, writer, indent + 1, depth + 1);
 
-            // Serialize the loop pattern
+            // serialize the loop pattern
             if (serializer.options.pretty_print and !serializer.options.compact_mode) {
                 try writer.print(",\n");
                 try helpers.writeIndent(serializer, writer, indent + 1);
@@ -252,7 +252,7 @@ pub fn serializeStatement(serializer: *AstSerializer, stmt: *const StmtNode, wri
             }
             try patterns.serializeLoopPattern(serializer, &for_loop.pattern, writer, indent + 1);
 
-            // Serialize the loop body
+            // serialize the loop body
             if (serializer.options.pretty_print and !serializer.options.compact_mode) {
                 try writer.print(",\n");
                 try helpers.writeIndent(serializer, writer, indent + 1);
@@ -268,7 +268,7 @@ pub fn serializeStatement(serializer: *AstSerializer, stmt: *const StmtNode, wri
                 try helpers.writeSpanField(serializer, writer, &switch_stmt.span, indent + 1);
             }
 
-            // Serialize the switch condition
+            // serialize the switch condition
             if (serializer.options.pretty_print and !serializer.options.compact_mode) {
                 try writer.print(",\n");
                 try helpers.writeIndent(serializer, writer, indent + 1);
@@ -278,7 +278,7 @@ pub fn serializeStatement(serializer: *AstSerializer, stmt: *const StmtNode, wri
             }
             try expressions.serializeExpression(serializer, &switch_stmt.condition, writer, indent + 1, depth + 1);
 
-            // Serialize switch cases
+            // serialize switch cases
             if (serializer.options.pretty_print and !serializer.options.compact_mode) {
                 try writer.print(",\n");
                 try helpers.writeIndent(serializer, writer, indent + 1);
@@ -316,7 +316,7 @@ pub fn serializeStatement(serializer: *AstSerializer, stmt: *const StmtNode, wri
                 try writer.print("]");
             }
 
-            // Serialize default case if present
+            // serialize default case if present
             if (switch_stmt.default_case) |*default_case| {
                 if (serializer.options.pretty_print and !serializer.options.compact_mode) {
                     try writer.print(",\n");
@@ -334,12 +334,12 @@ pub fn serializeStatement(serializer: *AstSerializer, stmt: *const StmtNode, wri
                 try helpers.writeSpanField(serializer, writer, &break_node.span, indent + 1);
             }
 
-            // Serialize optional label
+            // serialize optional label
             if (break_node.label) |label| {
                 try helpers.writeField(serializer, writer, "label", label, indent + 1, false);
             }
 
-            // Serialize optional value
+            // serialize optional value
             if (break_node.value) |value| {
                 if (serializer.options.pretty_print and !serializer.options.compact_mode) {
                     try writer.print(",\n");
@@ -460,7 +460,7 @@ pub fn serializeStatement(serializer: *AstSerializer, stmt: *const StmtNode, wri
                 try helpers.writeSpanField(serializer, writer, &compound.span, indent + 1);
             }
 
-            // Serialize the target expression
+            // serialize the target expression
             if (serializer.options.pretty_print and !serializer.options.compact_mode) {
                 try writer.print(",\n");
                 try helpers.writeIndent(serializer, writer, indent + 1);
@@ -470,7 +470,7 @@ pub fn serializeStatement(serializer: *AstSerializer, stmt: *const StmtNode, wri
             }
             try expressions.serializeExpression(serializer, compound.target, writer, indent + 1, depth + 1);
 
-            // Serialize the operator
+            // serialize the operator
             if (serializer.options.pretty_print and !serializer.options.compact_mode) {
                 try writer.print(",\n");
                 try helpers.writeIndent(serializer, writer, indent + 1);
@@ -483,7 +483,7 @@ pub fn serializeStatement(serializer: *AstSerializer, stmt: *const StmtNode, wri
                 try writer.print("\"");
             }
 
-            // Serialize the value expression
+            // serialize the value expression
             if (serializer.options.pretty_print and !serializer.options.compact_mode) {
                 try writer.print(",\n");
                 try helpers.writeIndent(serializer, writer, indent + 1);
