@@ -122,19 +122,19 @@ ContractInvariant = "invariant" Identifier "(" Expression ")" ";" ;
 # ==========================================
 
 Type =
-    ErrorPrefixType
-  | ErrorUnionType
-  | PrimitiveType
+    ErrorUnionType
+  | PlainType ;
+
+PlainType =
+    PrimitiveType
   | MapType
   | ArrayType
   | SliceType
   | AnonymousStructType
   | Identifier ;
 
-ErrorPrefixType = "!" Type ;
-
-# Note: Error unions are expressed explicitly as !T | E1 | E2 ...
-ErrorUnionType = "!" Type { "|" Type } ;
+# Error unions are expressed as !T | E1 | E2 ...
+ErrorUnionType = "!" PlainType { "|" PlainType } ;
 
 PrimitiveType =
     "u8" | "u16" | "u32" | "u64" | "u128" | "u256"
@@ -173,6 +173,7 @@ Statement =
   | UnlockStatement
   | TryStatement
   | AssertStatement
+  | LabeledBlock
   | Block ;
 
 AssignmentStatement         = LValue "="  Expression ";" ;
@@ -190,7 +191,8 @@ IfStatement    = "if"    "(" Expression ")" Statement [ "else" Statement ] ;
 
 # Formal verification: Loop invariants
 WhileStatement = "while" "(" Expression ")" { InvariantClause } Statement ;
-ForStatement = "for" "(" Expression ")" "|" Identifier [ "," Identifier ] "|" { InvariantClause } Statement ;
+ForStatement = "for" "(" Expression ")" "|" ForPattern "|" { InvariantClause } Statement ;
+ForPattern = Identifier [ "," Identifier ] | DestructuringPattern ;
 InvariantClause = "invariant" "(" Expression ")" ;
 
 ReturnStatement   = "return" [ Expression ] ";" ;
@@ -204,7 +206,7 @@ UnlockStatement = "@" "unlock" "(" Expression ")" ";" ;
 # Formal verification: Assertions
 AssertStatement = "assert" "(" Expression [ "," StringLiteral ] ")" ";" ;
 
-TryStatement = "try" Expression [ "catch" [ "|" Identifier "|" ] Block ] ;
+TryStatement = "try" Block [ "catch" [ "(" Identifier ")" ] Block ] ;
 
 Block        = "{" { Statement } "}" ;
 LabeledBlock = Identifier ":" Block ;
@@ -250,7 +252,9 @@ UnaryExpression   = { ( "!" | "-" | "+" ) } PostfixExpression ;
 PostfixExpression = PrimaryExpression { PostfixOperator } ;
 
 # Valid assignment target
-LValue = PostfixExpression ;
+LValue = LValueAtom { LValueSuffix } ;
+LValueAtom = Identifier | "(" LValue ")" ;
+LValueSuffix = "." Identifier | "[" Expression "]" ;
 
 PostfixOperator =
     "." Identifier
@@ -261,6 +265,7 @@ PrimaryExpression =
     Literal
   | Identifier
   | "(" Expression ")"
+  | TryExpression
   | OldExpression
   | ComptimeExpression
   | CastExpression
@@ -309,3 +314,4 @@ Letter   = ? any alphabetic character ? ;
 Digit    = ? '0' .. '9' ? ;
 HexDigit = ? Digit | 'a'..'f' | 'A'..'F' ? ;
 Character = ? any valid Unicode character ? ;
+TryExpression = "try" Expression ;

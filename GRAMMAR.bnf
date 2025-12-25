@@ -1,71 +1,37 @@
-Of course. I have performed a careful revision of the grammar, applying the fixes we discussed and improving clarity and consistency while keeping the core "explicit and secure" philosophy intact.
-
-The result is a more robust and less ambiguous grammar that will be easier to implement in a parser and more intuitive for developers.
-
-### Summary of Key Changes:
-
-1.  **Unified Variable Declarations:** The conflicting `const_declaration` and `variable_declaration` rules have been merged into a single, unambiguous `variable_declaration` rule. The parser's job is now simpler, and semantic checks (e.g., ensuring `const` is initialized) are correctly deferred to the analysis phase.
-2.  **Strict L-value Assignments:** The left-hand side of assignments (`=`, `+=`, etc.) is now restricted to a new `lvalue` rule, which only permits assignable expressions (like variables or field/index accesses). This prevents syntactically valid but semantically incorrect code like `(a + b) = 5;`.
-4.  **Standard Logical Operators:** The logical operators have been changed from `&` and `|` to the industry-standard `&&` and `||`. The single `&`, `|`, and `^` are now correctly defined as bitwise operators with the appropriate precedence. This drastically reduces the potential for developer error.
-5.  **Consistent Array Syntax:** The array type syntax has been clarified to better distinguish between fixed-size and dynamic-size arrays, following a more Zig-like convention (`[N]T`).
-6.  **Removed Optional Semicolons:** The optional semicolons in `requires` and `ensures` clauses have been removed to enforce a single, consistent coding style.
-
-Here is the complete, revised grammar.
-
-***
-
-# Ora Language Grammar (BNF)
-# Version: 0.2.0 (Revised)
-# Description: Formal grammar specification for the Ora smart contract language
-
-# ==========================================
-# TOP-LEVEL PROGRAM STRUCTURE
-# ==========================================
+# Ora Language Grammar (BNF/EBNF)
+# Version: 0.2.0
+# Description: BNF form aligned with GRAMMAR.ebnf
 
 program ::= top_level_declaration*
 
-top_level_declaration ::=
-    | contract_declaration
-    | function_declaration
-    | const_declaration
-    | struct_declaration
-    | enum_declaration
-    | log_declaration
-    | import_declaration
-    | error_declaration
-    | ghost_declaration
+top_level_declaration ::= contract_declaration
+                        | function_declaration
+                        | variable_declaration
+                        | struct_declaration
+                        | enum_declaration
+                        | log_declaration
+                        | import_declaration
+                        | error_declaration
+                        | ghost_declaration
 
-# ==========================================
-# IMPORT DECLARATIONS
-# ==========================================
-
-import_declaration ::=
-    | "@" "import" "(" string_literal ")" ";"
-    | "const" identifier "=" "@" "import" "(" string_literal ")" ";"
-
-# ==========================================
-# CONTRACT DECLARATIONS
-# ==========================================
+import_declaration ::= "@" "import" "(" string_literal ")" ";"
+                     | "const" identifier "=" "@" "import" "(" string_literal ")" ";"
 
 contract_declaration ::= "contract" identifier "{" contract_member* "}"
 
-contract_member ::=
-    | variable_declaration
-    | function_declaration
-    | log_declaration
-    | struct_declaration
-    | enum_declaration
-    | error_declaration
-    | ghost_declaration
-    | contract_invariant
+contract_member ::= variable_declaration
+                  | function_declaration
+                  | log_declaration
+                  | struct_declaration
+                  | enum_declaration
+                  | error_declaration
+                  | ghost_declaration
+                  | contract_invariant
 
-# ==========================================
-# FUNCTION DECLARATIONS
-# ==========================================
+function_declaration ::= visibility? "fn" function_name "(" parameter_list? ")" return_type?
+                         requires_clause* ensures_clause* block
 
-function_declaration ::= visibility? "fn" function_name "(" parameter_list? ")" return_type? requires_clause* ensures_clause* modifies_clause? block
-
-function_name ::= identifier | special_function_name
+function_name ::= identifier | "init"
 
 visibility ::= "pub"
 
@@ -75,59 +41,25 @@ parameter ::= identifier ":" type
 
 return_type ::= "->" type
 
-# REVISED: Semicolon removed for consistency.
 requires_clause ::= "requires" "(" expression ")"
 
-# REVISED: Semicolon removed for consistency.
 ensures_clause ::= "ensures" "(" expression ")"
 
-# Frame conditions - what storage can be modified
-modifies_clause ::= "modifies" "(" expression_list ")"
-
-# Loop termination/progress measures
-decreases_clause ::= "decreases" "(" expression ")"
-increases_clause ::= "increases" "(" expression ")"
-
-# Formal verification with quantifiers
-quantified_expression ::= quantifier identifier ":" type ("where" expression)? "=>" expression
-
-quantifier ::= "forall" | "exists"
-
-# ==========================================
-# VARIABLE DECLARATIONS
-# ==========================================
-
-# REVISED: Unified 'const_declaration' and 'variable_declaration' into a single rule
-# to resolve parsing ambiguity.
-# SEMANTIC NOTE: The compiler's analysis phase must enforce that 'const' and 'immutable'
-# declarations include an initializer.
 variable_declaration ::= memory_region? variable_kind identifier (":" type)? ("=" expression)? ";"
 
 memory_region ::= "storage" | "memory" | "tstore"
 
 variable_kind ::= "var" | "let" | "const" | "immutable"
 
-# ==========================================
-# STRUCT DECLARATIONS
-# ==========================================
-
 struct_declaration ::= "struct" identifier "{" struct_member* "}"
 
 struct_member ::= identifier ":" type ";"
-
-# ==========================================
-# ENUM DECLARATIONS
-# ==========================================
 
 enum_declaration ::= "enum" identifier (":" type)? "{" enum_member_list? "}"
 
 enum_member_list ::= enum_member ("," enum_member)* ","?
 
 enum_member ::= identifier ("=" expression)?
-
-# ==========================================
-# LOG DECLARATIONS (EVENTS)
-# ==========================================
 
 log_declaration ::= "log" identifier "(" log_parameter_list? ")" ";"
 
@@ -137,57 +69,32 @@ log_parameter ::= indexed_modifier? identifier ":" type
 
 indexed_modifier ::= "indexed"
 
-# ==========================================
-# ERROR DECLARATIONS
-# ==========================================
-
 error_declaration ::= "error" identifier ("(" parameter_list? ")")? ";"
 
-# ==========================================
-# FORMAL VERIFICATION DECLARATIONS
-# ==========================================
-
-# Ghost declarations (specification-only code)
 ghost_declaration ::= "ghost" (variable_declaration | function_declaration | block)
 
-# Contract invariants (class invariants)
 contract_invariant ::= "invariant" identifier "(" expression ")" ";"
 
-# ==========================================
-# TYPE SYSTEM
-# ==========================================
+type ::= error_union_type | plain_type
 
-type ::= 
-    | error_prefix_type
-    | error_union_type
-    | primitive_type
-    | map_type
-    | array_type
-    | slice_type
-    | anonymous_struct_type
-    | identifier
+plain_type ::= primitive_type
+             | map_type
+             | array_type
+             | slice_type
+             | anonymous_struct_type
+             | identifier
 
-error_prefix_type ::= "!" type
+error_union_type ::= "!" plain_type ("|" plain_type)*
 
-# An error union is just a normal union, can be simplified later
-error_union_type ::= "!" type ("|" type)+
-
-primitive_type ::=
-    | "u8" | "u16" | "u32" | "u64" | "u128" | "u256"
-    | "i8" | "i16" | "i32" | "i64" | "i128" | "i256"
-    | "bool"
-    | "address"
-    | "string"
-    | "bytes"
-    | "void"
+primitive_type ::= "u8" | "u16" | "u32" | "u64" | "u128" | "u256"
+                 | "i8" | "i16" | "i32" | "i64" | "i128" | "i256"
+                 | "bool" | "address" | "string" | "bytes" | "void"
 
 map_type ::= "map" "[" type "," type "]"
 
-# REVISED: Clarify syntax to match implementation: fixed arrays use Rust-style [T; N],
-# dynamic sequences use slice[T].
-array_type ::= "[" type ";" integer_literal "]"   # Fixed-size array, e.g., [u256; 4]
+array_type ::= "[" type ";" integer_literal "]"
 
-slice_type ::= "slice" "[" type "]"               # Dynamic sequence, e.g., slice[u256]
+slice_type ::= "slice" "[" type "]"
 
 anonymous_struct_type ::= "struct" "{" anonymous_struct_field_list "}"
 
@@ -195,34 +102,28 @@ anonymous_struct_field_list ::= anonymous_struct_field ("," anonymous_struct_fie
 
 anonymous_struct_field ::= identifier ":" type
 
-# ==========================================
-# STATEMENTS
-# ==========================================
+statement ::= variable_declaration
+            | assignment_statement
+            | compound_assignment_statement
+            | destructuring_assignment
+            | expression_statement
+            | if_statement
+            | while_statement
+            | for_statement
+            | switch_statement
+            | return_statement
+            | break_statement
+            | continue_statement
+            | log_statement
+            | lock_statement
+            | unlock_statement
+            | try_statement
+            | assert_statement
+            | labeled_block
+            | block
 
-statement ::=
-    | variable_declaration
-    | assignment_statement
-    | compound_assignment_statement
-    | destructuring_assignment
-    | expression_statement
-    | if_statement
-    | while_statement
-    | for_statement
-    | switch_statement
-    | return_statement
-    | break_statement
-    | continue_statement
-    | log_statement
-    | lock_statement
-    | unlock_statement
-    | try_statement
-    | assert_statement
-    | block
-
-# REVISED: LHS of assignment now restricted to a valid 'lvalue'.
 assignment_statement ::= lvalue "=" expression ";"
 
-# REVISED: LHS of compound assignment now restricted to a valid 'lvalue'.
 compound_assignment_statement ::= lvalue compound_operator expression ";"
 
 compound_operator ::= "+=" | "-=" | "*=" | "/=" | "%="
@@ -233,17 +134,17 @@ destructuring_pattern ::= "." "{" destructuring_field_list "}"
 
 destructuring_field_list ::= destructuring_field ("," destructuring_field)*
 
-destructuring_field ::= identifier | identifier ":" identifier
+destructuring_field ::= identifier | (identifier ":" identifier)
 
 expression_statement ::= expression ";"
 
 if_statement ::= "if" "(" expression ")" statement ("else" statement)?
 
-# Formal verification: Loop invariants and termination
-while_statement ::= "while" "(" expression ")" invariant_clause* decreases_clause? increases_clause? statement
+while_statement ::= "while" "(" expression ")" invariant_clause* statement
 
-# NOTE: This is a foreach-style loop, e.g., for (my_map) |key, value| { ... }
-for_statement ::= "for" "(" expression ")" "|" identifier ("," identifier)? "|" invariant_clause* decreases_clause? increases_clause? statement
+for_statement ::= "for" "(" expression ")" "|" for_pattern "|" invariant_clause* statement
+
+for_pattern ::= identifier ("," identifier)? | destructuring_pattern
 
 invariant_clause ::= "invariant" "(" expression ")"
 
@@ -259,48 +160,29 @@ lock_statement ::= "@" "lock" "(" expression ")" ";"
 
 unlock_statement ::= "@" "unlock" "(" expression ")" ";"
 
-# Formal verification: Assertions and assumptions
 assert_statement ::= "assert" "(" expression ("," string_literal)? ")" ";"
-assume_statement ::= "assume" "(" expression ")" ";"
-havoc_statement ::= "havoc" identifier ";"
 
-try_statement ::= "try" expression ("catch" ("|" identifier "|")? block)?
+try_statement ::= "try" block ("catch" ("(" identifier ")")? block)?
+
+try_expression ::= "try" expression
 
 block ::= "{" statement* "}"
 
 labeled_block ::= identifier ":" block
 
-# ==========================================
-# SWITCH STATEMENTS AND EXPRESSIONS
-# ==========================================
-
 switch_statement ::= "switch" "(" expression ")" "{" switch_arm* "}"
 
 switch_expression ::= "switch" "(" expression ")" "{" switch_expr_arm* "}"
-
-# NOTE: The conditional "guard clause" switch can be modeled as a single
-# switch on `true` and is removed for grammar simplicity.
-# e.g., `switch (true) { case1 => ..., case2 => ... }`
 
 switch_arm ::= switch_pattern "=>" switch_body ","?
 
 switch_expr_arm ::= switch_pattern "=>" expression ","?
 
-switch_pattern ::=
-    | expression  # Allows literals, identifiers, enum variants (e.g., Status.Active)
-    | range_pattern
-    | "else"
+switch_pattern ::= expression | range_pattern | "else"
 
 range_pattern ::= expression "..." expression
 
 switch_body ::= expression ";" | block
-
-# ==========================================
-# EXPRESSIONS
-# ==========================================
-
-# REVISED: Expression precedence chain updated to include standard logical (&&, ||),
-# bitwise (&, |, ^), and shift (<<, >>) operators correctly.
 
 expression ::= assignment_expression
 
@@ -332,27 +214,26 @@ unary_expression ::= ("!" | "-" | "+")* postfix_expression
 
 postfix_expression ::= primary_expression postfix_operator*
 
-# NEW: Defines valid targets for assignment. Primarily consists of identifiers,
-# field accesses (x.y), and array/map indexes (x[y]).
-lvalue ::= postfix_expression
+postfix_operator ::= "." identifier | "[" expression "]" | "(" expression_list? ")"
 
-postfix_operator ::=
-    | "." identifier
-    | "[" expression "]"
-    | "(" expression_list? ")" # Function call
+lvalue ::= lvalue_atom lvalue_suffix*
 
-primary_expression ::=
-    | literal
-    | identifier
-    | "(" expression ")"
-    | old_expression
-    | comptime_expression
-    | cast_expression
-    | error_expression
-    | quantified_expression
-    | anonymous_struct_literal
-    | switch_expression
-    | array_literal # Added for completeness
+lvalue_atom ::= identifier | "(" lvalue ")"
+
+lvalue_suffix ::= "." identifier | "[" expression "]"
+
+primary_expression ::= literal
+                     | identifier
+                     | "(" expression ")"
+                     | try_expression
+                     | old_expression
+                     | comptime_expression
+                     | cast_expression
+                     | error_expression
+                     | quantified_expression
+                     | anonymous_struct_literal
+                     | switch_expression
+                     | array_literal
 
 array_literal ::= "[" expression_list? "]"
 
@@ -362,9 +243,12 @@ comptime_expression ::= "comptime" block
 
 cast_expression ::= "@" "cast" "(" type "," expression ")"
 
-error_expression ::= "error" "." identifier
+error_expression ::= "error" "." identifier ("(" expression_list? ")")?
 
-# NOTE: Syntax is `.{ .field1 = value1, .field2 = value2 }`
+quantified_expression ::= quantifier identifier ":" type ("where" expression)? "=>" expression
+
+quantifier ::= "forall" | "exists"
+
 anonymous_struct_literal ::= "." "{" anonymous_struct_literal_field_list? "}"
 
 anonymous_struct_literal_field_list ::= anonymous_struct_literal_field ("," anonymous_struct_literal_field)* ","?
@@ -373,32 +257,24 @@ anonymous_struct_literal_field ::= "." identifier "=" expression
 
 expression_list ::= expression ("," expression)*
 
-# ==========================================
-# LITERALS
-# ==========================================
+literal ::= integer_literal | string_literal | boolean_literal | address_literal | hex_literal
 
-literal ::=
-    | integer_literal
-    | character_literal
-    | string_literal
-    | boolean_literal
-    | address_literal
-    | hex_literal
-    | binary_literal
+integer_literal ::= digit (digit | "_")*
 
-integer_literal ::= [0-9_]+
-character_literal ::= '\'' (\\.|[^'\\]) '\''
-string_literal ::= "\"" (\\.|[^"\\])* "\"" # Allows escaped quotes
+string_literal ::= '"' ("\\" ('"' | "\\") | (character - '"' - "\\"))* '"'
+
 boolean_literal ::= "true" | "false"
-address_literal ::= "0x" [0-9a-fA-F]{40}
-hex_literal ::= "0x" [0-9a-fA-F]+
-binary_literal ::= "0b" [0-1_]+
 
-# LEXER NOTE: `address_literal` must have higher priority than `hex_literal`.
+address_literal ::= "0x" hex_digit+
 
-# ==========================================
-# IDENTIFIERS
-# ==========================================
+hex_literal ::= "0x" hex_digit+
 
-identifier ::= [a-zA-Z_][a-zA-Z0-9_]*
-special_function_name ::= "init"
+identifier ::= (letter | "_") (letter | digit | "_")*
+
+letter ::= ? alphabetic character ?
+
+digit ::= ? '0' .. '9' ?
+
+hex_digit ::= ? digit | 'a'..'f' | 'A'..'F' ?
+
+character ::= ? any valid Unicode character ?
