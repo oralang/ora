@@ -15,6 +15,7 @@ const std = @import("std");
 const lib = @import("ora_lib");
 const build_options = @import("build_options");
 const cli_args = @import("cli/args.zig");
+const ManagedArrayList = std.array_list.Managed;
 
 /// MLIR-related command line options
 const MlirOptions = struct {
@@ -867,7 +868,7 @@ fn generateMlirOutput(allocator: std.mem.Allocator, ast_nodes: []lib.AstNode, fi
 }
 
 test "simple test" {
-    var list = std.ArrayList(i32).init(std.testing.allocator);
+    var list = ManagedArrayList(i32).init(std.testing.allocator);
     defer list.deinit(); // Try commenting this out and see if zig detects the memory leak!
     try list.append(42);
     try std.testing.expectEqual(@as(i32, 42), list.pop());

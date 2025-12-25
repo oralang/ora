@@ -26,7 +26,7 @@ test "catch variable uses error union type from try expression" {
     const allocator = testing.allocator;
     const source =
         \\error Foo;
-        \\fn mayFail() !u256 {
+        \\fn mayFail() -> !u256 {
         \\  return error.Foo;
         \\}
         \\fn caller() {

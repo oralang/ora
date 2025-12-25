@@ -51,26 +51,151 @@ pub const Typed = struct {
     }
 };
 
+pub fn takeEffect(typed: *Typed) Effect {
+    const eff = typed.eff;
+    typed.eff = Effect.pure();
+    return eff;
+}
+
 /// Effect of an expression/statement
 pub const Effect = union(enum) {
     Pure,
+    Reads: SlotSet,
     Writes: SlotSet,
+    ReadsWrites: struct {
+        reads: SlotSet,
+        writes: SlotSet,
+    },
 
     pub fn pure() Effect {
         return .Pure;
+    }
+
+    pub fn reads(slots: SlotSet) Effect {
+        return .{ .Reads = slots };
     }
 
     pub fn writes(slots: SlotSet) Effect {
         return .{ .Writes = slots };
     }
 
+    pub fn readsWrites(read_slots: SlotSet, write_slots: SlotSet) Effect {
+        return .{ .ReadsWrites = .{ .reads = read_slots, .writes = write_slots } };
+    }
+
     pub fn deinit(self: *Effect, allocator: std.mem.Allocator) void {
         switch (self.*) {
             .Pure => {},
+            .Reads => |*slots| slots.deinit(allocator),
             .Writes => |*slots| slots.deinit(allocator),
+            .ReadsWrites => |*rw| {
+                rw.reads.deinit(allocator);
+                rw.writes.deinit(allocator);
+            },
         }
     }
 };
+
+pub fn combineEffects(
+    eff1: Effect,
+    eff2: Effect,
+    allocator: std.mem.Allocator,
+) Effect {
+    const SlotSetOps = struct {
+        fn copy(alloc: std.mem.Allocator, set: SlotSet) SlotSet {
+            var out = SlotSet.init(alloc);
+            for (set.slots.items) |slot| {
+                out.add(alloc, slot) catch {};
+            }
+            return out;
+        }
+
+        fn merge(alloc: std.mem.Allocator, a: SlotSet, b: SlotSet) SlotSet {
+            var out = @This().copy(alloc, a);
+            for (b.slots.items) |slot| {
+                if (!out.contains(slot)) {
+                    out.add(alloc, slot) catch {};
+                }
+            }
+            return out;
+        }
+    };
+
+    return switch (eff1) {
+        .Pure => switch (eff2) {
+            .Pure => Effect.pure(),
+            .Reads => |r| Effect.reads(SlotSetOps.copy(allocator, r)),
+            .Writes => |w| Effect.writes(SlotSetOps.copy(allocator, w)),
+            .ReadsWrites => |rw| Effect.readsWrites(
+                SlotSetOps.copy(allocator, rw.reads),
+                SlotSetOps.copy(allocator, rw.writes),
+            ),
+        },
+        .Reads => |r1| switch (eff2) {
+            .Pure => Effect.reads(SlotSetOps.copy(allocator, r1)),
+            .Reads => Effect.reads(SlotSetOps.merge(allocator, r1, eff2.Reads)),
+            .Writes => Effect.readsWrites(
+                SlotSetOps.copy(allocator, r1),
+                SlotSetOps.copy(allocator, eff2.Writes),
+            ),
+            .ReadsWrites => |rw2| Effect.readsWrites(
+                SlotSetOps.merge(allocator, r1, rw2.reads),
+                SlotSetOps.copy(allocator, rw2.writes),
+            ),
+        },
+        .Writes => |w1| switch (eff2) {
+            .Pure => Effect.writes(SlotSetOps.copy(allocator, w1)),
+            .Writes => Effect.writes(SlotSetOps.merge(allocator, w1, eff2.Writes)),
+            .Reads => Effect.readsWrites(
+                SlotSetOps.copy(allocator, eff2.Reads),
+                SlotSetOps.copy(allocator, w1),
+            ),
+            .ReadsWrites => |rw2| Effect.readsWrites(
+                SlotSetOps.copy(allocator, rw2.reads),
+                SlotSetOps.merge(allocator, w1, rw2.writes),
+            ),
+        },
+        .ReadsWrites => |rw1| switch (eff2) {
+            .Pure => Effect.readsWrites(
+                SlotSetOps.copy(allocator, rw1.reads),
+                SlotSetOps.copy(allocator, rw1.writes),
+            ),
+            .Reads => |r2| Effect.readsWrites(
+                SlotSetOps.merge(allocator, rw1.reads, r2),
+                SlotSetOps.copy(allocator, rw1.writes),
+            ),
+            .Writes => |w2| Effect.readsWrites(
+                SlotSetOps.copy(allocator, rw1.reads),
+                SlotSetOps.merge(allocator, rw1.writes, w2),
+            ),
+            .ReadsWrites => |rw2| Effect.readsWrites(
+                SlotSetOps.merge(allocator, rw1.reads, rw2.reads),
+                SlotSetOps.merge(allocator, rw1.writes, rw2.writes),
+            ),
+        },
+    };
+}
+
+pub fn consumeEffects(
+    allocator: std.mem.Allocator,
+    eff1: Effect,
+    eff2: Effect,
+) Effect {
+    const combined = combineEffects(eff1, eff2, allocator);
+    var tmp1 = eff1;
+    var tmp2 = eff2;
+    tmp1.deinit(allocator);
+    tmp2.deinit(allocator);
+    return combined;
+}
+
+pub fn mergeEffects(
+    allocator: std.mem.Allocator,
+    acc: *Effect,
+    next: Effect,
+) void {
+    acc.* = consumeEffects(allocator, acc.*, next);
+}
 
 /// Set of storage slots (for effect tracking)
 pub const SlotSet = struct {

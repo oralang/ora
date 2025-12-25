@@ -7,6 +7,7 @@
 // ============================================================================
 
 const std = @import("std");
+const ManagedArrayList = std.array_list.Managed;
 const SourceSpan = @import("source_span.zig").SourceSpan;
 const TypeInfo = @import("type_info.zig").TypeInfo;
 
@@ -112,17 +113,17 @@ pub const VerificationContext = struct {
     /// Current verification mode
     mode: VerificationMode,
     /// Stack of verification scopes
-    scope_stack: std.ArrayList(VerificationScope),
+    scope_stack: ManagedArrayList(VerificationScope),
     /// Current verification attributes
-    current_attributes: std.ArrayList(VerificationAttribute),
+    current_attributes: ManagedArrayList(VerificationAttribute),
     /// Allocator
     allocator: std.mem.Allocator,
 
     pub fn init(allocator: std.mem.Allocator) VerificationContext {
         return VerificationContext{
             .mode = .None,
-            .scope_stack = std.ArrayList(VerificationScope).init(allocator),
-            .current_attributes = std.ArrayList(VerificationAttribute).init(allocator),
+            .scope_stack = ManagedArrayList(VerificationScope).init(allocator),
+            .current_attributes = ManagedArrayList(VerificationAttribute).init(allocator),
             .allocator = allocator,
         };
     }

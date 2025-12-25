@@ -15,6 +15,8 @@ const state = @import("../../semantics/state.zig");
 const SymbolTable = state.SymbolTable;
 const Scope = state.Scope;
 const semantics = @import("../../semantics.zig");
+const FunctionEffect = semantics.state.FunctionEffect;
+const mergeEffects = core.mergeEffects;
 
 // Type aliases for clarity (use direct references to avoid comptime issues)
 const AstNode = ast.AstNode;
@@ -40,6 +42,7 @@ pub const TypeContext = core.TypeContext;
 pub const TypeResolutionError = error{
     UnknownType,
     TypeMismatch,
+    RegionMismatch,
     CircularReference,
     InvalidEnumValue,
     OutOfMemory,
@@ -122,7 +125,8 @@ pub const TypeResolver = struct {
             .VariableDecl => |*var_decl| {
                 // convert to StmtNode for statement resolver
                 var stmt_node = Statements.StmtNode{ .VariableDecl = var_decl.* };
-                _ = try self.core_resolver.resolveStatement(&stmt_node, context);
+                var typed = try self.core_resolver.resolveStatement(&stmt_node, context);
+                defer typed.deinit(self.allocator);
             },
             .Constant => |*constant| {
                 try self.resolveConstant(constant, context);
@@ -171,7 +175,8 @@ pub const TypeResolver = struct {
             constant.typ = value_typed.ty;
         } else {
             // type is explicit, check value against it
-            _ = try self.core_resolver.checkExpr(constant.value, constant.typ);
+            var checked = try self.core_resolver.checkExpr(constant.value, constant.typ);
+            defer checked.deinit(self.allocator);
         }
 
         // update symbol table with resolved type
@@ -278,13 +283,14 @@ pub const TypeResolver = struct {
 
             // add parameters to function scope
             for (function.parameters) |*param| {
+                param.type_info.region = .Calldata;
                 const param_symbol = semantics.state.Symbol{
                     .name = param.name,
                     .kind = .Param,
                     .typ = param.type_info,
                     .span = param.span,
                     .mutable = param.is_mutable,
-                    .region = .Stack,
+                    .region = .Calldata,
                 };
                 _ = try self.symbol_table.declare(new_scope, param_symbol);
             }
@@ -300,20 +306,35 @@ pub const TypeResolver = struct {
 
         // resolve requires/ensures expressions
         for (function.requires_clauses) |clause| {
-            _ = try self.core_resolver.synthExpr(clause);
+            var typed = try self.core_resolver.synthExpr(clause);
+            defer typed.deinit(self.allocator);
         }
         for (function.ensures_clauses) |clause| {
-            _ = try self.core_resolver.synthExpr(clause);
+            var typed = try self.core_resolver.synthExpr(clause);
+            defer typed.deinit(self.allocator);
         }
 
         // resolve all statements in function body
         // note: We don't set block scopes here to avoid double-frees during deinit
         // variables declared in blocks will be found via findUp from the function scope
+        var func_effect = Effect.pure();
         for (function.body.statements) |*stmt| {
-            _ = try self.core_resolver.resolveStatement(stmt, func_context);
+            var typed = try self.core_resolver.resolveStatement(stmt, func_context);
+            defer typed.deinit(self.allocator);
+            const eff = core.takeEffect(&typed);
+            mergeEffects(self.allocator, &func_effect, eff);
         }
         // note: Function call argument validation happens in synthCall
         // via function_registry which is set on core_resolver
+
+        const stored_effect = functionEffectFromCore(self.allocator, func_effect);
+        if (self.symbol_table.function_effects.getPtr(function.name)) |existing| {
+            existing.deinit(self.allocator);
+            existing.* = stored_effect;
+        } else {
+            try self.symbol_table.function_effects.put(function.name, stored_effect);
+        }
+        func_effect.deinit(self.allocator);
 
         // validate return statements in function body
         try self.validateReturnStatements(function);
@@ -349,14 +370,16 @@ pub const TypeResolver = struct {
                 if (ret.value) |*value_expr| {
                     // check expression against expected return type
                     if (expected_return_type) |return_type| {
-                        _ = try self.core_resolver.checkExpr(value_expr, return_type);
+                        var checked = try self.core_resolver.checkExpr(value_expr, return_type);
+                        defer checked.deinit(self.allocator);
                     } else {
                         // no return type expected - synthesize
-                        _ = try self.core_resolver.synthExpr(value_expr);
+                        var typed = try self.core_resolver.synthExpr(value_expr);
+                        defer typed.deinit(self.allocator);
                     }
                 } else {
                     // void return - check if function expects void
-                    if (expected_return_type != null) {
+                    if (expected_return_type != null and expected_return_type.?.category != .Void) {
                         return TypeResolutionError.TypeMismatch;
                     }
                 }
@@ -389,6 +412,40 @@ pub const TypeResolver = struct {
                 // other statement types don't contain returns
             },
         }
+    }
+
+    fn functionEffectFromCore(
+        allocator: std.mem.Allocator,
+        eff: Effect,
+    ) FunctionEffect {
+        return switch (eff) {
+            .Pure => FunctionEffect.pure(),
+            .Reads => |slots| blk: {
+                var list = std.ArrayList([]const u8){};
+                for (slots.slots.items) |slot| {
+                    list.append(allocator, slot) catch {};
+                }
+                break :blk FunctionEffect.reads(list);
+            },
+            .Writes => |slots| blk: {
+                var list = std.ArrayList([]const u8){};
+                for (slots.slots.items) |slot| {
+                    list.append(allocator, slot) catch {};
+                }
+                break :blk FunctionEffect.writes(list);
+            },
+            .ReadsWrites => |rw| blk: {
+                var reads = std.ArrayList([]const u8){};
+                for (rw.reads.slots.items) |slot| {
+                    reads.append(allocator, slot) catch {};
+                }
+                var writes = std.ArrayList([]const u8){};
+                for (rw.writes.slots.items) |slot| {
+                    writes.append(allocator, slot) catch {};
+                }
+                break :blk FunctionEffect.readsWrites(reads, writes);
+            },
+        };
     }
 
     /// Validate return statements in a block

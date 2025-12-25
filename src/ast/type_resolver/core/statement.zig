@@ -16,6 +16,9 @@ const semantics = @import("../../../semantics.zig");
 const TypeResolutionError = @import("../mod.zig").TypeResolutionError;
 const Typed = @import("mod.zig").Typed;
 const Effect = @import("mod.zig").Effect;
+const SlotSet = @import("mod.zig").SlotSet;
+const mergeEffects = @import("mod.zig").mergeEffects;
+const takeEffect = @import("mod.zig").takeEffect;
 const TypeContext = @import("mod.zig").TypeContext;
 const validation = @import("../validation/mod.zig");
 const refinements = @import("../refinements/mod.zig");
@@ -77,6 +80,7 @@ fn resolveVariableDecl(
         var_decl.type_info.category = ot.getCategory();
     }
 
+    var init_effect = Effect.pure();
     if (var_decl.value) |value_expr| {
         // ensure category matches ora_type if present (fixes refinement types)
         if (var_decl.type_info.ora_type) |ot| {
@@ -85,13 +89,17 @@ fn resolveVariableDecl(
         // if type is unknown, infer it from the initializer expression
         if (!var_decl.type_info.isResolved()) {
             // synthesize type from expression
-            const typed = try expression.synthExpr(self, value_expr);
+            var typed = try expression.synthExpr(self, value_expr);
+            defer typed.deinit(self.allocator);
+            init_effect = takeEffect(&typed);
 
             // assign inferred type to variable
             var_decl.type_info = typed.ty;
         } else {
             // type is explicit, check expression against it
-            _ = try expression.checkExpr(self, value_expr, var_decl.type_info);
+            var checked = try expression.checkExpr(self, value_expr, var_decl.type_info);
+            defer checked.deinit(self.allocator);
+            init_effect = takeEffect(&checked);
 
             // validate refinement types if present
             if (var_decl.type_info.ora_type) |target_ora_type| {
@@ -123,6 +131,8 @@ fn resolveVariableDecl(
         // also update the original type_info to ensure it's resolved
         var_decl.type_info.category = derived_category;
     }
+    var_decl.type_info.region = var_decl.region;
+    final_type.region = var_decl.region;
 
     // type should be resolved now - if not, there's a bug
     if (!final_type.isResolved()) {
@@ -162,6 +172,7 @@ fn resolveVariableDecl(
                 .ora_type = copied_ora_type,
                 .source = final_type.source,
                 .span = final_type.span,
+                .region = var_decl.region,
             };
             typ_owned_flag = true;
         } else |_| {
@@ -174,6 +185,7 @@ fn resolveVariableDecl(
         // no copying needed, or we're in a block scope (don't own types in block scopes)
         // ensure category is correct
         stored_type.category = ot.getCategory();
+        stored_type.region = var_decl.region;
     }
 
     // final check: ensure stored type is resolved
@@ -270,7 +282,15 @@ fn resolveVariableDecl(
         }
     }
 
-    return Typed.init(var_decl.type_info, Effect.pure(), self.allocator);
+    var combined_eff = init_effect;
+    if (var_decl.value != null and var_decl.region == .Storage) {
+        var slots = SlotSet.init(self.allocator);
+        try slots.add(self.allocator, var_decl.name);
+        const write_eff = Effect.writes(slots);
+        mergeEffects(self.allocator, &combined_eff, write_eff);
+    }
+
+    return Typed.init(var_decl.type_info, combined_eff, self.allocator);
 }
 
 fn resolveReturn(
@@ -278,10 +298,13 @@ fn resolveReturn(
     ret: *ast.Statements.ReturnNode,
     context: TypeContext,
 ) TypeResolutionError!Typed {
+    var ret_effect = Effect.pure();
     if (ret.value) |*value_expr| {
         // check expression against expected return type
         if (context.function_return_type) |return_type| {
-            _ = try expression.checkExpr(self, value_expr, return_type);
+            var checked = try expression.checkExpr(self, value_expr, return_type);
+            defer checked.deinit(self.allocator);
+            ret_effect = takeEffect(&checked);
 
             // check guard optimizations: skip guard if optimization applies
             if (return_type.ora_type) |target_ora_type| {
@@ -289,11 +312,13 @@ fn resolveReturn(
             }
         } else {
             // no return type expected - synthesize
-            _ = try expression.synthExpr(self, value_expr);
+            var typed = try expression.synthExpr(self, value_expr);
+            defer typed.deinit(self.allocator);
+            ret_effect = takeEffect(&typed);
         }
     }
 
-    return Typed.init(TypeInfo.unknown(), Effect.pure(), self.allocator);
+    return Typed.init(TypeInfo.unknown(), ret_effect, self.allocator);
 }
 
 fn resolveIf(
@@ -305,22 +330,29 @@ fn resolveIf(
     var condition_typed = try expression.synthExpr(self, &if_stmt.condition);
     defer condition_typed.deinit(self.allocator);
     try validateBoolCondition(condition_typed.ty);
+    var combined_eff = takeEffect(&condition_typed);
 
     // resolve then branch statements
     // note: We don't set block scopes here to avoid double-frees during deinit
     // variables declared in blocks will be found via findUp from the function scope
     for (if_stmt.then_branch.statements) |*stmt| {
-        _ = try resolveStatement(self, stmt, context);
+        var stmt_typed = try resolveStatement(self, stmt, context);
+        defer stmt_typed.deinit(self.allocator);
+        const eff = takeEffect(&stmt_typed);
+        mergeEffects(self.allocator, &combined_eff, eff);
     }
 
     // resolve else branch if present
     if (if_stmt.else_branch) |*else_branch| {
         for (else_branch.statements) |*stmt| {
-            _ = try resolveStatement(self, stmt, context);
+            var stmt_typed = try resolveStatement(self, stmt, context);
+            defer stmt_typed.deinit(self.allocator);
+            const eff = takeEffect(&stmt_typed);
+            mergeEffects(self.allocator, &combined_eff, eff);
         }
     }
 
-    return Typed.init(TypeInfo.unknown(), Effect.pure(), self.allocator);
+    return Typed.init(TypeInfo.unknown(), combined_eff, self.allocator);
 }
 
 fn resolveWhile(
@@ -332,15 +364,19 @@ fn resolveWhile(
     var condition_typed = try expression.synthExpr(self, &while_stmt.condition);
     defer condition_typed.deinit(self.allocator);
     try validateBoolCondition(condition_typed.ty);
+    var combined_eff = takeEffect(&condition_typed);
 
     // resolve body
     // note: We don't set block scopes here to avoid double-frees during deinit
     // variables declared in blocks will be found via findUp from the function scope
     for (while_stmt.body.statements) |*stmt| {
-        _ = try resolveStatement(self, stmt, context);
+        var stmt_typed = try resolveStatement(self, stmt, context);
+        defer stmt_typed.deinit(self.allocator);
+        const eff = takeEffect(&stmt_typed);
+        mergeEffects(self.allocator, &combined_eff, eff);
     }
 
-    return Typed.init(TypeInfo.unknown(), Effect.pure(), self.allocator);
+    return Typed.init(TypeInfo.unknown(), combined_eff, self.allocator);
 }
 
 fn resolveFor(
@@ -351,6 +387,7 @@ fn resolveFor(
     // resolve iterable expression to get its type
     var iterable_typed = try expression.synthExpr(self, &for_stmt.iterable);
     defer iterable_typed.deinit(self.allocator);
+    var combined_eff = takeEffect(&iterable_typed);
 
     // determine element type from iterable type
     const element_type: TypeInfo = if (iterable_typed.ty.ora_type) |iterable_ora_type| blk: {
@@ -439,10 +476,13 @@ fn resolveFor(
     }
 
     for (for_stmt.body.statements) |*stmt| {
-        _ = try resolveStatement(self, stmt, context);
+        var stmt_typed = try resolveStatement(self, stmt, context);
+        defer stmt_typed.deinit(self.allocator);
+        const eff = takeEffect(&stmt_typed);
+        mergeEffects(self.allocator, &combined_eff, eff);
     }
 
-    return Typed.init(TypeInfo.unknown(), Effect.pure(), self.allocator);
+    return Typed.init(TypeInfo.unknown(), combined_eff, self.allocator);
 }
 
 fn validateBoolCondition(condition_type: TypeInfo) TypeResolutionError!void {
@@ -473,8 +513,12 @@ fn resolveTryBlock(
         self.current_scope = prev_scope;
     }
 
+    var combined_eff = Effect.pure();
     for (try_block.try_block.statements) |*stmt| {
-        _ = try resolveStatement(self, stmt, context);
+        var stmt_typed = try resolveStatement(self, stmt, context);
+        defer stmt_typed.deinit(self.allocator);
+        const eff = takeEffect(&stmt_typed);
+        mergeEffects(self.allocator, &combined_eff, eff);
     }
 
     // resolve catch block if present
@@ -489,11 +533,14 @@ fn resolveTryBlock(
         }
 
         for (catch_block.block.statements) |*stmt| {
-            _ = try resolveStatement(self, stmt, context);
+            var stmt_typed = try resolveStatement(self, stmt, context);
+            defer stmt_typed.deinit(self.allocator);
+            const eff = takeEffect(&stmt_typed);
+            mergeEffects(self.allocator, &combined_eff, eff);
         }
     }
 
-    return Typed.init(TypeInfo.unknown(), Effect.pure(), self.allocator);
+    return Typed.init(TypeInfo.unknown(), combined_eff, self.allocator);
 }
 
 fn resolveExpressionStmt(
@@ -502,8 +549,7 @@ fn resolveExpressionStmt(
     context: TypeContext,
 ) TypeResolutionError!Typed {
     _ = context;
-    _ = try expression.synthExpr(self, expr_stmt);
-    return Typed.init(TypeInfo.unknown(), Effect.pure(), self.allocator);
+    return try expression.synthExpr(self, expr_stmt);
 }
 
 fn resolveBreak(
@@ -513,9 +559,12 @@ fn resolveBreak(
 ) TypeResolutionError!Typed {
     // if break has a value expression, synthesize its type
     if (break_stmt.value) |value_expr| {
-        _ = try expression.synthExpr(self, value_expr);
+        var typed = try expression.synthExpr(self, value_expr);
+        defer typed.deinit(self.allocator);
+        const eff = takeEffect(&typed);
         // todo: Validate that break value type matches expected type from labeled block/switch
         // this requires tracking the expected type from the enclosing labeled block or switch expression
+        return Typed.init(TypeInfo.unknown(), eff, self.allocator);
     }
     _ = context; // Context may contain expected break value type in the future
     return Typed.init(TypeInfo.unknown(), Effect.pure(), self.allocator);
@@ -528,8 +577,11 @@ fn resolveContinue(
 ) TypeResolutionError!Typed {
     // if continue has a value expression (for labeled switch continue), synthesize its type
     if (continue_stmt.value) |value_expr| {
-        _ = try expression.synthExpr(self, value_expr);
+        var typed = try expression.synthExpr(self, value_expr);
+        defer typed.deinit(self.allocator);
+        const eff = takeEffect(&typed);
         // todo: Validate that continue value type matches expected type from labeled switch
+        return Typed.init(TypeInfo.unknown(), eff, self.allocator);
     }
     _ = context; // Context may contain expected continue value type in the future
     return Typed.init(TypeInfo.unknown(), Effect.pure(), self.allocator);
@@ -543,6 +595,7 @@ fn resolveSwitch(
     // synthesize type of the switch condition expression
     var condition_typed = try expression.synthExpr(self, &switch_stmt.condition);
     defer condition_typed.deinit(self.allocator);
+    var combined_eff = takeEffect(&condition_typed);
 
     const condition_type = condition_typed.ty;
 
@@ -555,16 +608,25 @@ fn resolveSwitch(
     for (switch_stmt.cases) |*case| {
         switch (case.body) {
             .Expression => |case_expr| {
-                _ = try expression.synthExpr(self, case_expr);
+                var case_typed = try expression.synthExpr(self, case_expr);
+                defer case_typed.deinit(self.allocator);
+                const eff = takeEffect(&case_typed);
+                mergeEffects(self.allocator, &combined_eff, eff);
             },
             .Block => |*case_block| {
                 for (case_block.statements) |*case_stmt| {
-                    _ = try resolveStatement(self, case_stmt, context);
+                    var stmt_typed = try resolveStatement(self, case_stmt, context);
+                    defer stmt_typed.deinit(self.allocator);
+                    const eff = takeEffect(&stmt_typed);
+                    mergeEffects(self.allocator, &combined_eff, eff);
                 }
             },
             .LabeledBlock => |*labeled| {
                 for (labeled.block.statements) |*case_stmt| {
-                    _ = try resolveStatement(self, case_stmt, context);
+                    var stmt_typed = try resolveStatement(self, case_stmt, context);
+                    defer stmt_typed.deinit(self.allocator);
+                    const eff = takeEffect(&stmt_typed);
+                    mergeEffects(self.allocator, &combined_eff, eff);
                 }
             },
         }
@@ -573,11 +635,14 @@ fn resolveSwitch(
     // resolve types for default case if present
     if (switch_stmt.default_case) |*default_block| {
         for (default_block.statements) |*default_stmt| {
-            _ = try resolveStatement(self, default_stmt, context);
+            var stmt_typed = try resolveStatement(self, default_stmt, context);
+            defer stmt_typed.deinit(self.allocator);
+            const eff = takeEffect(&stmt_typed);
+            mergeEffects(self.allocator, &combined_eff, eff);
         }
     }
 
-    return Typed.init(TypeInfo.unknown(), Effect.pure(), self.allocator);
+    return Typed.init(TypeInfo.unknown(), combined_eff, self.allocator);
 }
 
 /// Validate that a switch pattern matches the condition type
@@ -765,10 +830,13 @@ fn resolveLog(
     var arg_types = try self.allocator.alloc(TypeInfo, log_stmt.args.len);
     defer self.allocator.free(arg_types);
 
+    var combined_eff = Effect.pure();
     for (log_stmt.args, 0..) |*arg, i| {
         var arg_typed = try expression.synthExpr(self, arg);
         defer arg_typed.deinit(self.allocator);
         arg_types[i] = arg_typed.ty;
+        const eff = takeEffect(&arg_typed);
+        mergeEffects(self.allocator, &combined_eff, eff);
     }
 
     // validate log signature (event name exists, argument count matches, types match)
@@ -805,7 +873,7 @@ fn resolveLog(
         }
     }
 
-    return Typed.init(TypeInfo.unknown(), Effect.pure(), self.allocator);
+    return Typed.init(TypeInfo.unknown(), combined_eff, self.allocator);
 }
 
 // Helpers

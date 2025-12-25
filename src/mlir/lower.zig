@@ -23,6 +23,7 @@ const std = @import("std");
 const lib = @import("ora_lib");
 const c = @import("mlir_c_api").c;
 pub const LocationTracker = @import("locations.zig").LocationTracker;
+const FunctionEffect = lib.semantics.state.FunctionEffect;
 
 // MLIR constants used throughout the lowering system
 pub const DEFAULT_INTEGER_BITS: u32 = 256;
@@ -180,6 +181,8 @@ pub const SymbolTable = struct {
     types: std.StringHashMap([]TypeSymbol),
     // store constant declarations for lazy value creation
     constants: std.StringHashMap(*const lib.ast.ConstantNode),
+    // function effect summaries from semantic analysis
+    function_effects: std.StringHashMap(FunctionEffect),
 
     pub fn init(allocator: std.mem.Allocator) SymbolTable {
         var scopes = std.ArrayList(std.StringHashMap(SymbolInfo)){};
@@ -193,6 +196,7 @@ pub const SymbolTable = struct {
             .functions = std.StringHashMap(FunctionSymbol).init(allocator),
             .types = std.StringHashMap([]TypeSymbol).init(allocator),
             .constants = std.StringHashMap(*const lib.ast.ConstantNode).init(allocator),
+            .function_effects = std.StringHashMap(FunctionEffect).init(allocator),
         };
     }
 
@@ -214,6 +218,11 @@ pub const SymbolTable = struct {
 
         // constants map doesn't own the AST nodes, just references them
         self.constants.deinit();
+        var fe_it = self.function_effects.valueIterator();
+        while (fe_it.next()) |eff| {
+            eff.deinit(self.allocator);
+        }
+        self.function_effects.deinit();
         while (type_iter.next()) |entry| {
             const type_array = entry.value_ptr.*;
             // first deinit the TypeSymbol's internal allocations
@@ -246,6 +255,7 @@ pub const SymbolTable = struct {
             .Storage => "storage",
             .Memory => "memory",
             .TStore => "tstore",
+            .Calldata => "calldata",
             .Stack => "stack",
         };
         std.debug.print("[addSymbol] Adding symbol: {s}, variable_kind: {any}, scope: {}\n", .{ name, variable_kind, self.current_scope });
@@ -268,7 +278,7 @@ pub const SymbolTable = struct {
         const symbol_info = SymbolInfo{
             .name = name,
             .type = type_info,
-            .region = "stack", // Parameters are stack-based
+            .region = "calldata", // Parameters are calldata by default
             .value = value,
             .span = span,
             .symbol_kind = .Parameter,
@@ -470,10 +480,46 @@ pub fn convertSemanticSymbolTable(semantic_table: *const lib.semantics.state.Sym
     // note: Type registration (enums, structs) is now handled directly in the MLIR lowering phase
     // where we have access to the MLIR context and can create proper MLIR types.
     // this function is kept for future use if we need to convert other semantic symbols.
-    _ = semantic_table;
-    _ = mlir_table;
     _ = ctx;
-    _ = allocator;
+    var it = semantic_table.function_effects.iterator();
+    while (it.next()) |entry| {
+        const name = entry.key_ptr.*;
+        const eff = entry.value_ptr.*;
+        const stored = switch (eff) {
+            .Pure => FunctionEffect.pure(),
+            .Reads => |slots| blk: {
+                var list = std.ArrayList([]const u8){};
+                for (slots.items) |slot| {
+                    list.append(allocator, slot) catch {};
+                }
+                break :blk FunctionEffect.reads(list);
+            },
+            .Writes => |slots| blk: {
+                var list = std.ArrayList([]const u8){};
+                for (slots.items) |slot| {
+                    list.append(allocator, slot) catch {};
+                }
+                break :blk FunctionEffect.writes(list);
+            },
+            .ReadsWrites => |rw| blk: {
+                var reads = std.ArrayList([]const u8){};
+                for (rw.reads.items) |slot| {
+                    reads.append(allocator, slot) catch {};
+                }
+                var writes = std.ArrayList([]const u8){};
+                for (rw.writes.items) |slot| {
+                    writes.append(allocator, slot) catch {};
+                }
+                break :blk FunctionEffect.readsWrites(reads, writes);
+            },
+        };
+        if (mlir_table.function_effects.getPtr(name)) |existing| {
+            existing.deinit(allocator);
+            existing.* = stored;
+        } else {
+            try mlir_table.function_effects.put(name, stored);
+        }
+    }
 }
 
 /// Helper to get span from AstNode
@@ -508,7 +554,7 @@ pub fn lowerFunctionsToModuleWithSemanticTable(ctx: c.MlirContext, nodes: []lib.
         location_tracker.getUnknownLocation();
 
     const module = c.mlirModuleCreateEmpty(loc);
-    _ = c.mlirModuleGetBody(module);
+    const body = c.mlirModuleGetBody(module);
 
     // initialize error handler
     var error_handler = ErrorHandler.init(allocator);
@@ -549,42 +595,158 @@ pub fn lowerFunctionsToModuleWithSemanticTable(ctx: c.MlirContext, nodes: []lib.
     var global_storage_map = StorageMap.init(allocator);
     defer global_storage_map.deinit();
 
+    const appendModuleVarDecl = struct {
+        fn run(
+            decls: *const DeclarationLowerer,
+            var_decl: *const lib.ast.Statements.VariableDeclNode,
+            storage_map: *StorageMap,
+            block: c.MlirBlock,
+        ) void {
+            switch (var_decl.region) {
+                .Storage => {
+                    if (var_decl.kind == .Immutable) {
+                        const immutable_op = decls.lowerImmutableDecl(var_decl);
+                        c.mlirBlockAppendOwnedOperation(block, immutable_op);
+                    } else {
+                        const global_op = decls.createGlobalDeclaration(var_decl);
+                        c.mlirBlockAppendOwnedOperation(block, global_op);
+                    }
+                    _ = storage_map.getOrCreateAddress(var_decl.name) catch {};
+                },
+                .Memory => {
+                    if (var_decl.kind == .Immutable) {
+                        const immutable_op = decls.lowerImmutableDecl(var_decl);
+                        c.mlirBlockAppendOwnedOperation(block, immutable_op);
+                    } else {
+                        const memory_global_op = decls.createMemoryGlobalDeclaration(var_decl);
+                        c.mlirBlockAppendOwnedOperation(block, memory_global_op);
+                    }
+                },
+                .TStore => {
+                    if (var_decl.kind == .Immutable) {
+                        const immutable_op = decls.lowerImmutableDecl(var_decl);
+                        c.mlirBlockAppendOwnedOperation(block, immutable_op);
+                    } else {
+                        const tstore_global_op = decls.createTStoreGlobalDeclaration(var_decl);
+                        c.mlirBlockAppendOwnedOperation(block, tstore_global_op);
+                    }
+                },
+                .Stack => {
+                    std.debug.print("WARNING: stack variable at module level: {s}\n", .{var_decl.name});
+                },
+                .Calldata => {
+                    std.debug.print("WARNING: calldata variable at module level: {s}\n", .{var_decl.name});
+                },
+            }
+        }
+    }.run;
+
     // process all declarations (enums, structs, functions, contracts)
     // note: Type declarations are already registered from semantic analysis
     for (nodes) |node| {
         switch (node) {
             .Function => |func| {
-                try decl_lowerer.lowerFunction(func, &global_storage_map);
+                var local_var_map = LocalVarMap.init(allocator);
+                defer local_var_map.deinit();
+                const func_op = decl_lowerer.lowerFunction(&func, &global_storage_map, &local_var_map);
+                c.mlirBlockAppendOwnedOperation(body, func_op);
             },
             .Contract => |contract| {
-                try decl_lowerer.lowerContract(contract, &global_storage_map);
+                const contract_op = decl_lowerer.lowerContract(&contract);
+                c.mlirBlockAppendOwnedOperation(body, contract_op);
             },
             .VariableDecl => |var_decl| {
-                try decl_lowerer.lowerVariableDecl(var_decl, &global_storage_map);
+                appendModuleVarDecl(&decl_lowerer, &var_decl, &global_storage_map, body);
             },
             .Import => |import_decl| {
-                try decl_lowerer.lowerImport(import_decl);
+                const import_op = decl_lowerer.lowerImport(&import_decl);
+                c.mlirBlockAppendOwnedOperation(body, import_op);
             },
             .Constant => |const_decl| {
-                try decl_lowerer.lowerConstant(const_decl);
+                const const_op = decl_lowerer.lowerConstDecl(&const_decl);
+                c.mlirBlockAppendOwnedOperation(body, const_op);
             },
             .LogDecl => |log_decl| {
-                try decl_lowerer.lowerLogDecl(log_decl);
+                const log_op = decl_lowerer.lowerLogDecl(&log_decl);
+                c.mlirBlockAppendOwnedOperation(body, log_op);
             },
             .ErrorDecl => |error_decl| {
-                try decl_lowerer.lowerErrorDecl(error_decl);
+                const error_op = decl_lowerer.lowerErrorDecl(&error_decl);
+                c.mlirBlockAppendOwnedOperation(body, error_op);
+            },
+            .Module => |module_node| {
+                // lower module imports
+                for (module_node.imports) |import_decl| {
+                    const import_op = decl_lowerer.lowerImport(&import_decl);
+                    c.mlirBlockAppendOwnedOperation(body, import_op);
+                }
+
+                // lower module declarations
+                for (module_node.declarations) |decl| {
+                    switch (decl) {
+                        .Function => |func| {
+                            var local_var_map = LocalVarMap.init(allocator);
+                            defer local_var_map.deinit();
+                            const func_op = decl_lowerer.lowerFunction(&func, &global_storage_map, &local_var_map);
+                            c.mlirBlockAppendOwnedOperation(body, func_op);
+                        },
+                        .Contract => |contract| {
+                            const contract_op = decl_lowerer.lowerContract(&contract);
+                            c.mlirBlockAppendOwnedOperation(body, contract_op);
+                        },
+                        .VariableDecl => |var_decl| {
+                            appendModuleVarDecl(&decl_lowerer, &var_decl, &global_storage_map, body);
+                        },
+                        .Import => |import_decl| {
+                            const import_op = decl_lowerer.lowerImport(&import_decl);
+                            c.mlirBlockAppendOwnedOperation(body, import_op);
+                        },
+                        .Constant => |const_decl| {
+                            const const_op = decl_lowerer.lowerConstDecl(&const_decl);
+                            c.mlirBlockAppendOwnedOperation(body, const_op);
+                        },
+                        .LogDecl => |log_decl| {
+                            const log_op = decl_lowerer.lowerLogDecl(&log_decl);
+                            c.mlirBlockAppendOwnedOperation(body, log_op);
+                        },
+                        .ErrorDecl => |error_decl| {
+                            const error_op = decl_lowerer.lowerErrorDecl(&error_decl);
+                            c.mlirBlockAppendOwnedOperation(body, error_op);
+                        },
+                        .Block => |block| {
+                            const block_op = decl_lowerer.lowerBlock(&block);
+                            c.mlirBlockAppendOwnedOperation(body, block_op);
+                        },
+                        .TryBlock => |try_block| {
+                            const try_op = decl_lowerer.lowerTryBlock(&try_block);
+                            c.mlirBlockAppendOwnedOperation(body, try_op);
+                        },
+                        .Expression, .Statement => {
+                            // expressions/statements are not lowered in this path
+                        },
+                        .EnumDecl, .StructDecl => {
+                            // skip enum and struct declarations - already processed in semantic analysis
+                        },
+                        .ContractInvariant => {
+                            // skip contract invariants - specification-only, don't generate code
+                        },
+                        .Module => |nested_module| {
+                            const placeholder_op = decl_lowerer.createModulePlaceholder(&nested_module);
+                            c.mlirBlockAppendOwnedOperation(body, placeholder_op);
+                        },
+                    }
+                }
             },
             .Block => |block| {
-                try decl_lowerer.lowerBlock(block);
-            },
-            .Expression => |expr| {
-                try decl_lowerer.lowerExpression(expr);
-            },
-            .Statement => |stmt| {
-                try decl_lowerer.lowerStatement(stmt);
+                const block_op = decl_lowerer.lowerBlock(&block);
+                c.mlirBlockAppendOwnedOperation(body, block_op);
             },
             .TryBlock => |try_block| {
-                try decl_lowerer.lowerTryBlock(try_block);
+                const try_op = decl_lowerer.lowerTryBlock(&try_block);
+                c.mlirBlockAppendOwnedOperation(body, try_op);
+            },
+            .Expression, .Statement => {
+                // top-level expressions/statements are not lowered in this path
             },
             .EnumDecl, .StructDecl => {
                 // skip enum and struct declarations - already processed in semantic analysis
@@ -595,15 +757,42 @@ pub fn lowerFunctionsToModuleWithSemanticTable(ctx: c.MlirContext, nodes: []lib.
         }
     }
 
-    // collect errors and warnings
-    const errors = try error_handler.getErrors();
-    const warnings = try error_handler.getWarnings();
+    // deep-copy errors and warnings out of the error handler before it is deinitialized.
+    const handler_errors = error_handler.getErrors();
+    const handler_warnings = error_handler.getWarnings();
+
+    var errors = try allocator.alloc(LoweringError, handler_errors.len);
+    for (handler_errors, 0..) |e, i| {
+        const msg_copy = try allocator.dupe(u8, e.message);
+        const sugg_copy: ?[]const u8 = if (e.suggestion) |s|
+            try allocator.dupe(u8, s)
+        else
+            null;
+
+        errors[i] = LoweringError{
+            .error_type = e.error_type,
+            .span = e.span,
+            .message = msg_copy,
+            .suggestion = sugg_copy,
+            .context = e.context,
+        };
+    }
+
+    var warnings = try allocator.alloc(LoweringWarning, handler_warnings.len);
+    for (handler_warnings, 0..) |w, i| {
+        const msg_copy = try allocator.dupe(u8, w.message);
+        warnings[i] = LoweringWarning{
+            .warning_type = w.warning_type,
+            .span = w.span,
+            .message = msg_copy,
+        };
+    }
 
     const result = LoweringResult{
         .module = module,
         .errors = errors,
         .warnings = warnings,
-        .success = errors.len == 0,
+        .success = handler_errors.len == 0,
         .pass_result = null,
     };
 

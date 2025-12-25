@@ -77,6 +77,7 @@ pub const MemoryManager = struct {
             .Storage => 1, // storage=1
             .Memory => 0, // memory=0
             .TStore => 2, // tstore=2
+            .Calldata => 0, // calldata=0 (read-only)
             .Stack => 0, // stack=0 (default to memory space)
         };
     }
@@ -93,6 +94,7 @@ pub const MemoryManager = struct {
             .Storage => "storage",
             .Memory => "memory",
             .TStore => "tstore",
+            .Calldata => "calldata",
             .Stack => "stack",
         };
         const region_ref = c.mlirStringRefCreate(region_str.ptr, region_str.len);
@@ -115,6 +117,14 @@ pub const MemoryManager = struct {
             .TStore => {
                 // transient storage variables use ora.tstore.global operations
                 return self.createGlobalTStoreDeclaration(var_name, var_type, loc);
+            },
+            .Calldata => {
+                // calldata is read-only and cannot be allocated
+                std.debug.print("ERROR: Calldata variables cannot be allocated\n", .{});
+                var state = h.opState("ora.error", loc);
+                const error_ty = c.mlirIntegerTypeGet(self.ctx, 32);
+                c.mlirOperationStateAddResults(&state, 1, @ptrCast(&error_ty));
+                return c.mlirOperationCreate(&state);
             },
             .Stack => {
                 // stack variables use regular memref.alloca
@@ -159,6 +169,14 @@ pub const MemoryManager = struct {
                 c.mlirOperationStateAddResults(&state, 1, @ptrCast(&error_ty));
                 return c.mlirOperationCreate(&state);
             },
+            .Calldata => {
+                // calldata is read-only
+                std.debug.print("ERROR: Cannot store to calldata\n", .{});
+                var state = h.opState("ora.error", loc);
+                const error_ty = c.mlirIntegerTypeGet(self.ctx, 32);
+                c.mlirOperationStateAddResults(&state, 1, @ptrCast(&error_ty));
+                return c.mlirOperationCreate(&state);
+            },
             .Stack => {
                 // stack uses regular memref.store
                 const indices = [_]c.MlirValue{};
@@ -198,6 +216,13 @@ pub const MemoryManager = struct {
                 // transient storage uses ora.tload
                 std.debug.print("ERROR: Use createTStoreLoad for transient storage variables\n", .{});
                 // create a placeholder error operation
+                var state = h.opState("ora.error", loc);
+                c.mlirOperationStateAddResults(&state, 1, @ptrCast(&result_type));
+                return c.mlirOperationCreate(&state);
+            },
+            .Calldata => {
+                // calldata should not use load ops in lowering
+                std.debug.print("ERROR: Calldata loads should use SSA values\n", .{});
                 var state = h.opState("ora.error", loc);
                 c.mlirOperationStateAddResults(&state, 1, @ptrCast(&result_type));
                 return c.mlirOperationCreate(&state);
@@ -309,6 +334,13 @@ pub const MemoryManager = struct {
                 const result_ty = c.mlirIntegerTypeGet(self.ctx, constants.DEFAULT_INTEGER_BITS);
                 return self.ora_dialect.createTLoad(var_name, result_ty, loc);
             },
+            .Calldata => {
+                std.debug.print("ERROR: Calldata should not use createLoadOperation\n", .{});
+                var state = h.opState("ora.error", loc);
+                const error_ty = c.mlirIntegerTypeGet(self.ctx, 32);
+                c.mlirOperationStateAddResults(&state, 1, @ptrCast(&error_ty));
+                return c.mlirOperationCreate(&state);
+            },
             .Stack => {
                 // for stack variables, we return the value directly from our local variable map
                 // this is handled differently in the identifier lowering
@@ -355,6 +387,13 @@ pub const MemoryManager = struct {
             .TStore => {
                 // generate ora.tstore for transient storage variables
                 return self.ora_dialect.createTStore(value, var_name, loc);
+            },
+            .Calldata => {
+                std.debug.print("ERROR: Cannot store to calldata\n", .{});
+                var state = h.opState("ora.error", loc);
+                const error_ty = c.mlirIntegerTypeGet(self.ctx, 32);
+                c.mlirOperationStateAddResults(&state, 1, @ptrCast(&error_ty));
+                return c.mlirOperationCreate(&state);
             },
             .Stack => {
                 // for stack variables, we store the value directly in our local variable map
@@ -435,6 +474,10 @@ pub const MemoryManager = struct {
                 // transient storage variables can be read and written
                 return access_type == .Read or access_type == .Write;
             },
+            .Calldata => {
+                // calldata is read-only
+                return access_type == .Read;
+            },
             .Stack => {
                 // stack variables can be read and written
                 return access_type == .Read or access_type == .Write;
@@ -449,6 +492,7 @@ pub const MemoryManager = struct {
             .Storage => true, // Storage is persistent across transactions
             .TStore => true, // Transient storage is persistent within transaction
             .Memory => false, // Memory is cleared between calls
+            .Calldata => false, // Calldata is per-call input
             .Stack => false, // Stack is function-local
         };
     }
@@ -460,6 +504,7 @@ pub const MemoryManager = struct {
             .Storage => true, // Storage access costs gas
             .TStore => true, // Transient storage access costs gas
             .Memory => false, // Memory access is free
+            .Calldata => false, // Calldata access handled by call data
             .Stack => false, // Stack access is free
         };
     }

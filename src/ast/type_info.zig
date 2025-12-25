@@ -20,6 +20,7 @@
 
 const std = @import("std");
 const SourceSpan = @import("source_span.zig").SourceSpan;
+const MemoryRegion = @import("region.zig").MemoryRegion;
 
 /// Unified type information system for all AST nodes
 /// This replaces the various type enums and provides consistent type representation
@@ -28,6 +29,7 @@ pub const TypeInfo = struct {
     ora_type: ?OraType,
     source: TypeSource,
     span: ?SourceSpan, // Where the type was determined/declared
+    region: ?MemoryRegion = null, // Located type region (if known)
 
     /// Create unknown type info (used during parsing)
     pub fn unknown() TypeInfo {
@@ -36,6 +38,7 @@ pub const TypeInfo = struct {
             .ora_type = null,
             .source = .unknown,
             .span = null,
+            .region = null,
         };
     }
 
@@ -46,6 +49,7 @@ pub const TypeInfo = struct {
             .ora_type = ora_type,
             .source = .explicit,
             .span = span,
+            .region = null,
         };
     }
 
@@ -56,6 +60,7 @@ pub const TypeInfo = struct {
             .ora_type = ora_type,
             .source = .inferred,
             .span = span,
+            .region = null,
         };
     }
 
@@ -120,7 +125,14 @@ pub const TypeInfo = struct {
             .ora_type = ora_type,
             .source = .inferred,
             .span = null,
+            .region = null,
         };
+    }
+
+    pub fn withRegion(self: TypeInfo, region: MemoryRegion) TypeInfo {
+        var updated = self;
+        updated.region = region;
+        return updated;
     }
 
     pub fn equals(a: TypeInfo, b: TypeInfo) bool {
@@ -701,6 +713,9 @@ pub const OraType = union(enum) {
                 try writer.writeAll("Exact<");
                 try (@constCast(e).*).render(writer);
                 try writer.writeByte('>');
+            },
+            .non_zero_address => {
+                try writer.writeAll("NonZeroAddress");
             },
         }
     }

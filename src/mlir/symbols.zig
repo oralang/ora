@@ -213,6 +213,7 @@ pub const SymbolTable = struct {
             .Storage => "storage",
             .Memory => "memory",
             .TStore => "tstore",
+            .Calldata => "calldata",
             .Stack => "stack",
         };
         const symbol_info = SymbolInfo{
@@ -233,7 +234,7 @@ pub const SymbolTable = struct {
         const symbol_info = SymbolInfo{
             .name = name,
             .type = type_info,
-            .region = "stack", // Parameters are stack-based
+            .region = "calldata", // Parameters are calldata by default
             .value = value,
             .span = span,
             .symbol_kind = .Parameter,

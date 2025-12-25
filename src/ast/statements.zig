@@ -273,13 +273,9 @@ pub const LabeledBlockNode = struct {
     span: SourceSpan,
 };
 
+const region = @import("region.zig");
 /// Memory regions matching Ora specification
-pub const MemoryRegion = enum {
-    Stack, // let/var (default)
-    Memory, // memory let/memory var
-    Storage, // storage let/storage var
-    TStore, // tstore let/tstore var
-};
+pub const MemoryRegion = region.MemoryRegion;
 
 /// Variable kinds for different mutability and initialization semantics
 pub const VariableKind = enum {

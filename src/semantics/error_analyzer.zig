@@ -15,9 +15,10 @@
 const std = @import("std");
 const ast = @import("../ast.zig");
 const state = @import("state.zig");
+const ManagedArrayList = std.array_list.Managed;
 
 pub const ErrorValidationResult = struct {
-    diagnostics: std.ArrayList(ast.SourceSpan),
+    diagnostics: ManagedArrayList(ast.SourceSpan),
 };
 
 /// Validate error declarations and error usage
@@ -25,8 +26,8 @@ pub fn validateErrors(
     allocator: std.mem.Allocator,
     table: *state.SymbolTable,
     nodes: []const ast.AstNode,
-) !ErrorValidationResult {
-    var diags = std.ArrayList(ast.SourceSpan).init(allocator);
+) std.mem.Allocator.Error!ErrorValidationResult {
+    var diags = ManagedArrayList(ast.SourceSpan).init(allocator);
 
     // walk AST and validate error usage
     for (nodes) |node| {
@@ -41,8 +42,8 @@ fn validateNodeErrors(
     allocator: std.mem.Allocator,
     table: *state.SymbolTable,
     node: ast.AstNode,
-    diags: *std.ArrayList(ast.SourceSpan),
-) !void {
+    diags: *ManagedArrayList(ast.SourceSpan),
+) std.mem.Allocator.Error!void {
     switch (node) {
         .Contract => |*contract| {
             for (contract.body) |*member| {
@@ -61,8 +62,8 @@ fn validateNodeErrors(
 fn validateFunctionErrors(
     table: *state.SymbolTable,
     function: *const ast.FunctionNode,
-    diags: *std.ArrayList(ast.SourceSpan),
-) !void {
+    diags: *ManagedArrayList(ast.SourceSpan),
+) std.mem.Allocator.Error!void {
     // validate function return type contains valid error names
     if (function.return_type_info) |ret_type| {
         try validateErrorUnionType(table, ret_type, diags);
@@ -76,8 +77,8 @@ fn validateFunctionErrors(
 fn validateBlockErrors(
     table: *state.SymbolTable,
     block: *const ast.Statements.BlockNode,
-    diags: *std.ArrayList(ast.SourceSpan),
-) !void {
+    diags: *ManagedArrayList(ast.SourceSpan),
+) std.mem.Allocator.Error!void {
     for (block.statements) |*stmt| {
         try validateStatementErrors(table, stmt, diags);
     }
@@ -87,29 +88,42 @@ fn validateBlockErrors(
 fn validateStatementErrors(
     table: *state.SymbolTable,
     stmt: *const ast.Statements.StmtNode,
-    diags: *std.ArrayList(ast.SourceSpan),
-) !void {
+    diags: *ManagedArrayList(ast.SourceSpan),
+) std.mem.Allocator.Error!void {
     switch (stmt.*) {
+        .Expr => |*expr| {
+            try validateExpressionErrors(table, expr, diags);
+        },
         .Return => |*ret| {
             if (ret.value) |*value| {
                 try validateExpressionErrors(table, value, diags);
             }
         },
         .If => |*if_stmt| {
-            try validateBlockErrors(table, &if_stmt.then_block, diags);
-            if (if_stmt.else_block) |*else_block| {
+            try validateExpressionErrors(table, &if_stmt.condition, diags);
+            try validateBlockErrors(table, &if_stmt.then_branch, diags);
+            if (if_stmt.else_branch) |*else_block| {
                 try validateBlockErrors(table, else_block, diags);
             }
         },
         .While => |*while_stmt| {
+            try validateExpressionErrors(table, &while_stmt.condition, diags);
             try validateBlockErrors(table, &while_stmt.body, diags);
         },
         .ForLoop => |*for_stmt| {
+            try validateExpressionErrors(table, &for_stmt.iterable, diags);
             try validateBlockErrors(table, &for_stmt.body, diags);
         },
         .Switch => |*switch_stmt| {
             for (switch_stmt.cases) |*case| {
-                try validateBlockErrors(table, &case.block, diags);
+                switch (case.body) {
+                    .Expression => |expr_ptr| try validateExpressionErrors(table, expr_ptr, diags),
+                    .Block => |*blk| try validateBlockErrors(table, blk, diags),
+                    .LabeledBlock => |*lb| try validateBlockErrors(table, &lb.block, diags),
+                }
+            }
+            if (switch_stmt.default_case) |*default_block| {
+                try validateBlockErrors(table, default_block, diags);
             }
         },
         .TryBlock => |*try_block| {
@@ -119,11 +133,12 @@ fn validateStatementErrors(
             }
         },
         .VariableDecl => |*var_decl| {
-            if (var_decl.value) |*value| {
+            if (var_decl.value) |value| {
                 try validateExpressionErrors(table, value, diags);
             }
         },
-        .Assignment => |*assignment| {
+        .CompoundAssignment => |*assignment| {
+            try validateExpressionErrors(table, assignment.target, diags);
             try validateExpressionErrors(table, assignment.value, diags);
         },
         else => {},
@@ -134,8 +149,8 @@ fn validateStatementErrors(
 fn validateExpressionErrors(
     table: *state.SymbolTable,
     expr: *const ast.Expressions.ExprNode,
-    diags: *std.ArrayList(ast.SourceSpan),
-) !void {
+    diags: *ManagedArrayList(ast.SourceSpan),
+) std.mem.Allocator.Error!void {
     switch (expr.*) {
         .ErrorReturn => |*error_return| {
             // validate that the error is declared (error.SomeError syntax)
@@ -170,7 +185,7 @@ fn validateExpressionErrors(
             }
 
             // validate call arguments (may contain error expressions)
-            for (call.arguments) |*arg| {
+            for (call.arguments) |arg| {
                 try validateExpressionErrors(table, arg, diags);
             }
         },
@@ -192,10 +207,10 @@ fn validateExpressionErrors(
 fn validateErrorCall(
     table: *state.SymbolTable,
     error_name: []const u8,
-    arguments: []const ast.Expressions.ExprNode,
+    arguments: []const *ast.Expressions.ExprNode,
     span: ast.SourceSpan,
-    diags: *std.ArrayList(ast.SourceSpan),
-) !void {
+    diags: *ManagedArrayList(ast.SourceSpan),
+) std.mem.Allocator.Error!void {
     const error_params = table.error_signatures.get(error_name);
 
     if (error_params == null) {
@@ -232,8 +247,8 @@ fn validateErrorCall(
 fn validateErrorUnionType(
     table: *state.SymbolTable,
     type_info: ast.Types.TypeInfo,
-    diags: *std.ArrayList(ast.SourceSpan),
-) !void {
+    diags: *ManagedArrayList(ast.SourceSpan),
+) std.mem.Allocator.Error!void {
     if (type_info.ora_type) |ora_type| {
         switch (ora_type) {
             .error_union => |success_type| {

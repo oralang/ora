@@ -65,6 +65,8 @@ pub const AstArenaError = ast_arena.AstArenaError;
 pub const AstSerializer = ast_serializer.AstSerializer;
 /// Serialization options for customizing output
 pub const SerializationOptions = ast_serializer.SerializationOptions;
+/// Type resolver entry point
+pub const TypeResolver = @import("ast/type_resolver/mod.zig").TypeResolver;
 
 // Core analysis types
 /// Type representation (unified AST type info)

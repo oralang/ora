@@ -31,6 +31,7 @@ const expr = @import("expression_analyzer.zig");
 const builtins = @import("../semantics.zig").builtins;
 const locals = @import("locals_binder.zig");
 const MemoryRegion = @import("../ast.zig").Memory.Region;
+const ManagedArrayList = std.array_list.Managed;
 
 // ============================================================================
 // SECTION 1: Entry Points
@@ -44,7 +45,7 @@ pub fn checkFunctionBody(
     scope: *state.Scope,
     f: *const ast.FunctionNode,
 ) ![]const ast.SourceSpan {
-    var issues = std.ArrayList(ast.SourceSpan).init(allocator);
+    var issues = ManagedArrayList(ast.SourceSpan).init(allocator);
     // walk blocks recursively and check returns using the provided function scope
     try walkBlock(&issues, table, scope, &f.body, f.return_type_info);
     return try issues.toOwnedSlice();
@@ -56,7 +57,7 @@ pub fn collectUnknownIdentifierSpans(
     scope: *state.Scope,
     f: *const ast.FunctionNode,
 ) ![]const ast.SourceSpan {
-    var issues = std.ArrayList(ast.SourceSpan).init(allocator);
+    var issues = ManagedArrayList(ast.SourceSpan).init(allocator);
     try walkBlockForUnknowns(&issues, table, scope, &f.body);
     return try issues.toOwnedSlice();
 }
@@ -71,7 +72,7 @@ fn resolveBlockScope(table: *state.SymbolTable, default_scope: *state.Scope, blo
 // SECTION 2: Unknown Identifier Checking
 // ============================================================================
 
-fn walkBlockForUnknowns(issues: *std.ArrayList(ast.SourceSpan), table: *state.SymbolTable, scope: *state.Scope, block: *const ast.Statements.BlockNode) !void {
+fn walkBlockForUnknowns(issues: *ManagedArrayList(ast.SourceSpan), table: *state.SymbolTable, scope: *state.Scope, block: *const ast.Statements.BlockNode) !void {
     for (block.statements) |stmt| {
         switch (stmt) {
             .Expr => |e| try visitExprForUnknowns(issues, table, scope, e),
@@ -81,8 +82,8 @@ fn walkBlockForUnknowns(issues: *std.ArrayList(ast.SourceSpan), table: *state.Sy
             .DestructuringAssignment => |da| try visitExprForUnknowns(issues, table, scope, da.value.*),
             .Return => |r| if (r.value) |v| try visitExprForUnknowns(issues, table, scope, v),
             .CompoundAssignment => |ca| {
-                try visitExprForUnknowns(issues, table, scope, ca.target);
-                try visitExprForUnknowns(issues, table, scope, ca.value);
+                try visitExprForUnknowns(issues, table, scope, ca.target.*);
+                try visitExprForUnknowns(issues, table, scope, ca.value.*);
             },
             .If => |iff| {
                 try visitExprForUnknowns(issues, table, scope, iff.condition);
@@ -121,7 +122,7 @@ fn walkBlockForUnknowns(issues: *std.ArrayList(ast.SourceSpan), table: *state.Sy
             .Requires => |req| try visitExprForUnknowns(issues, table, scope, req.condition),
             .Ensures => |ens| try visitExprForUnknowns(issues, table, scope, ens.condition),
             .Assume => |assume| try visitExprForUnknowns(issues, table, scope, assume.condition),
-            .Havoc => |havoc| try visitExprForUnknowns(issues, table, scope, havoc.condition),
+            .Havoc => |_| {},
             .Break => |br| if (br.value) |val| try visitExprForUnknowns(issues, table, scope, val.*),
             .Continue => |cont| if (cont.value) |val| try visitExprForUnknowns(issues, table, scope, val.*),
             .Switch => |sw| {
@@ -172,7 +173,7 @@ fn isLeafValueType(ti: ast.Types.TypeInfo) bool {
     return false;
 }
 
-fn visitExprForUnknowns(issues: *std.ArrayList(ast.SourceSpan), table: *state.SymbolTable, scope: *state.Scope, expr_node: ast.Expressions.ExprNode) !void {
+fn visitExprForUnknowns(issues: *ManagedArrayList(ast.SourceSpan), table: *state.SymbolTable, scope: *state.Scope, expr_node: ast.Expressions.ExprNode) !void {
     if (!table.isScopeKnown(scope)) return; // Defensive guard
     switch (expr_node) {
         .Identifier => |id| {
@@ -300,6 +301,7 @@ fn isElementLevelTarget(target: ast.Expressions.ExprNode) bool {
 }
 
 fn isRegionAssignmentAllowed(target_region: MemoryRegion, source_region: MemoryRegion, target_node: ast.Expressions.ExprNode) bool {
+    if (target_region == .Calldata) return false;
     if (isStorageLike(target_region)) {
         if (isStorageLike(source_region)) {
             return isElementLevelTarget(target_node);
@@ -314,7 +316,7 @@ fn isRegionAssignmentAllowed(target_region: MemoryRegion, source_region: MemoryR
 // ============================================================================
 
 fn checkSwitchPatterns(
-    issues: *std.ArrayList(ast.SourceSpan),
+    issues: *ManagedArrayList(ast.SourceSpan),
     table: *state.SymbolTable,
     scope: *state.Scope,
     cond_type: ast.Types.TypeInfo,
@@ -327,7 +329,7 @@ fn checkSwitchPatterns(
     var seen_enum_variants = std.StringHashMap(void).init(table.allocator);
     defer seen_enum_variants.deinit();
     // track numeric ranges precisely to detect overlaps
-    var numeric_ranges = std.ArrayList(struct { start: u128, end: u128, span: ast.SourceSpan }).init(table.allocator);
+    var numeric_ranges = ManagedArrayList(struct { start: u128, end: u128, span: ast.SourceSpan }).init(table.allocator);
     defer numeric_ranges.deinit();
     // if condition is enum, seed coverage map
     if (cond_type.ora_type) |ot| switch (ot) {
@@ -496,7 +498,7 @@ fn checkSwitchPatterns(
 }
 
 fn checkSwitchExpressionResultTypes(
-    issues: *std.ArrayList(ast.SourceSpan),
+    issues: *ManagedArrayList(ast.SourceSpan),
     table: *state.SymbolTable,
     scope: *state.Scope,
     sw: *const ast.Expressions.SwitchExprNode,
@@ -541,7 +543,7 @@ fn checkSwitchExpressionResultTypes(
 // SECTION 5: Expression Validation (Assignments, Mutability)
 // ============================================================================
 
-fn checkExpr(issues: *std.ArrayList(ast.SourceSpan), table: *state.SymbolTable, scope: *state.Scope, e: ast.Expressions.ExprNode) !void {
+fn checkExpr(issues: *ManagedArrayList(ast.SourceSpan), table: *state.SymbolTable, scope: *state.Scope, e: ast.Expressions.ExprNode) !void {
     switch (e) {
         .Call => |c| {
             if (scope.name) |caller_fn| {
@@ -640,7 +642,7 @@ fn checkExpr(issues: *std.ArrayList(ast.SourceSpan), table: *state.SymbolTable, 
 // SECTION 6: Block Walking & Statement Checking
 // ============================================================================
 
-fn walkBlock(issues: *std.ArrayList(ast.SourceSpan), table: *state.SymbolTable, scope: *state.Scope, block: *const ast.Statements.BlockNode, ret_type: ?ast.Types.TypeInfo) !void {
+fn walkBlock(issues: *ManagedArrayList(ast.SourceSpan), table: *state.SymbolTable, scope: *state.Scope, block: *const ast.Statements.BlockNode, ret_type: ?ast.Types.TypeInfo) !void {
     for (block.statements) |stmt| {
         switch (stmt) {
             .VariableDecl => |v| {

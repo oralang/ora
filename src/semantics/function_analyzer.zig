@@ -85,7 +85,9 @@ pub fn collectFunctionSymbols(table: *state.SymbolTable, parent: *state.Scope, f
     try table.function_scopes.put(f.name, fn_scope);
     // parameters
     for (f.parameters) |p| {
-        const sym = state.Symbol{ .name = p.name, .kind = .Param, .typ = p.type_info, .span = p.span, .mutable = p.is_mutable };
+        var param_type = p.type_info;
+        param_type.region = .Calldata;
+        const sym = state.Symbol{ .name = p.name, .kind = .Param, .typ = param_type, .span = p.span, .mutable = p.is_mutable, .region = .Calldata };
         _ = try table.declare(fn_scope, sym);
     }
 

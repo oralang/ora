@@ -85,6 +85,10 @@ pub fn lowerVariableDecl(self: *const StatementLowerer, var_decl: *const lib.ast
         .TStore => {
             try lowerTStoreVariableDecl(self, var_decl, mlir_type, loc);
         },
+        .Calldata => {
+            std.debug.print("ERROR: Calldata variables are not allowed: {s}\n", .{var_decl.name});
+            return LoweringError.InvalidMemoryRegion;
+        },
     }
 }
 

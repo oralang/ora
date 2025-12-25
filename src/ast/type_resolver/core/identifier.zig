@@ -84,6 +84,7 @@ pub fn resolveIdentifierType(
                 return TypeResolutionError.UnresolvedType;
             }
             id.type_info = resolved_typ;
+            id.type_info.region = found_symbol.region;
         } else {
             // symbol found but no type - handle special cases
             if (found_symbol.kind == .Error) {

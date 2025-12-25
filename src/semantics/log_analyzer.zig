@@ -15,6 +15,7 @@ const std = @import("std");
 const ast = @import("../ast.zig");
 const state = @import("state.zig");
 const expr = @import("expression_analyzer.zig");
+const ManagedArrayList = std.array_list.Managed;
 
 pub fn checkLogStatement(
     allocator: std.mem.Allocator,
@@ -22,7 +23,7 @@ pub fn checkLogStatement(
     scope: *state.Scope,
     log_stmt: *const ast.Statements.LogNode,
 ) ![]const ast.SourceSpan {
-    var issues = std.ArrayList(ast.SourceSpan).init(allocator);
+    var issues = ManagedArrayList(ast.SourceSpan).init(allocator);
     // resolve log declaration by name
     const sig_fields_opt = symbols.log_signatures.get(log_stmt.event_name);
     if (sig_fields_opt == null) {
@@ -59,13 +60,13 @@ pub fn checkLogsInFunction(
     scope: *state.Scope,
     f: *const ast.FunctionNode,
 ) ![]const ast.SourceSpan {
-    var issues = std.ArrayList(ast.SourceSpan).init(allocator);
+    var issues = ManagedArrayList(ast.SourceSpan).init(allocator);
     try walkBlockForLogs(&issues, symbols, scope, &f.body);
     return try issues.toOwnedSlice();
 }
 
 fn walkBlockForLogs(
-    issues: *std.ArrayList(ast.SourceSpan),
+    issues: *ManagedArrayList(ast.SourceSpan),
     symbols: *state.SymbolTable,
     scope: *state.Scope,
     block: *const ast.Statements.BlockNode,

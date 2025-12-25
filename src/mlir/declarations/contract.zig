@@ -145,6 +145,10 @@ pub fn lowerContract(self: *const DeclarationLowerer, contract: *const lib.Contr
                         // stack variables at contract level are not allowed in Ora
                         std.debug.print("WARNING: Stack variable at contract level: {s}\n", .{var_decl.name});
                     },
+                    .Calldata => {
+                        // calldata variables at contract level are not allowed
+                        std.debug.print("WARNING: Calldata variable at contract level: {s}\n", .{var_decl.name});
+                    },
                 }
             },
             .Function => |_| {
@@ -196,6 +200,9 @@ pub fn lowerContract(self: *const DeclarationLowerer, contract: *const lib.Contr
                     .Stack => {
                         // stack variables at contract level are not allowed
                         // this should have been caught in the first pass
+                    },
+                    .Calldata => {
+                        // calldata variables at contract level are not allowed
                     },
                 }
             },

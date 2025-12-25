@@ -14,6 +14,7 @@
 // ============================================================================
 
 const std = @import("std");
+const ManagedArrayList = std.array_list.Managed;
 const c = @import("mlir_c_api").c;
 const lib = @import("ora_lib");
 const verification = @import("verification.zig");
@@ -203,7 +204,7 @@ pub const PassPipelineConfig = struct {
 pub const PassResult = struct {
     success: bool,
     error_message: ?[]const u8,
-    passes_run: std.ArrayList([]const u8),
+    passes_run: ManagedArrayList([]const u8),
     timing_info: ?[]const u8,
     allocator: std.mem.Allocator,
 
@@ -211,14 +212,14 @@ pub const PassResult = struct {
         return PassResult{
             .success = false,
             .error_message = null,
-            .passes_run = std.ArrayList([]const u8).init(allocator),
+            .passes_run = ManagedArrayList([]const u8).init(allocator),
             .timing_info = null,
             .allocator = allocator,
         };
     }
 
     pub fn deinit(self: *PassResult) void {
-        self.passes_run.deinit(self.allocator);
+        self.passes_run.deinit();
         if (self.error_message) |msg| {
             self.allocator.free(msg);
         }

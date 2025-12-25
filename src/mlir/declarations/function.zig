@@ -69,6 +69,74 @@ pub fn lowerFunction(self: *const DeclarationLowerer, func: *const lib.FunctionN
     const visibility_id = h.identifier(self.ctx, "ora.visibility");
     attributes.append(std.heap.page_allocator, c.mlirNamedAttributeGet(visibility_id, visibility_attr)) catch {};
 
+    // add function effect metadata (pure/writes + slot list)
+    if (self.symbol_table) |table| {
+        if (table.function_effects.get(func.name)) |eff| {
+            switch (eff) {
+                .Pure => {
+                    const effect_attr = c.mlirStringAttrGet(self.ctx, h.strRef("pure"));
+                    const effect_id = h.identifier(self.ctx, "ora.effect");
+                    attributes.append(std.heap.page_allocator, c.mlirNamedAttributeGet(effect_id, effect_attr)) catch {};
+                },
+                .Reads => |slots| {
+                    const effect_attr = c.mlirStringAttrGet(self.ctx, h.strRef("reads"));
+                    const effect_id = h.identifier(self.ctx, "ora.effect");
+                    attributes.append(std.heap.page_allocator, c.mlirNamedAttributeGet(effect_id, effect_attr)) catch {};
+
+                    var slot_attrs = std.ArrayList(c.MlirAttribute){};
+                    defer slot_attrs.deinit(std.heap.page_allocator);
+                    for (slots.items) |slot| {
+                        const slot_attr = c.mlirStringAttrGet(self.ctx, h.strRef(slot));
+                        slot_attrs.append(std.heap.page_allocator, slot_attr) catch {};
+                    }
+                    const slots_attr = c.mlirArrayAttrGet(self.ctx, @intCast(slot_attrs.items.len), slot_attrs.items.ptr);
+                    const slots_id = h.identifier(self.ctx, "ora.read_slots");
+                    attributes.append(std.heap.page_allocator, c.mlirNamedAttributeGet(slots_id, slots_attr)) catch {};
+                },
+                .Writes => |slots| {
+                    const effect_attr = c.mlirStringAttrGet(self.ctx, h.strRef("writes"));
+                    const effect_id = h.identifier(self.ctx, "ora.effect");
+                    attributes.append(std.heap.page_allocator, c.mlirNamedAttributeGet(effect_id, effect_attr)) catch {};
+
+                    var slot_attrs = std.ArrayList(c.MlirAttribute){};
+                    defer slot_attrs.deinit(std.heap.page_allocator);
+                    for (slots.items) |slot| {
+                        const slot_attr = c.mlirStringAttrGet(self.ctx, h.strRef(slot));
+                        slot_attrs.append(std.heap.page_allocator, slot_attr) catch {};
+                    }
+                    const slots_attr = c.mlirArrayAttrGet(self.ctx, @intCast(slot_attrs.items.len), slot_attrs.items.ptr);
+                    const slots_id = h.identifier(self.ctx, "ora.write_slots");
+                    attributes.append(std.heap.page_allocator, c.mlirNamedAttributeGet(slots_id, slots_attr)) catch {};
+                },
+                .ReadsWrites => |rw| {
+                    const effect_attr = c.mlirStringAttrGet(self.ctx, h.strRef("readwrites"));
+                    const effect_id = h.identifier(self.ctx, "ora.effect");
+                    attributes.append(std.heap.page_allocator, c.mlirNamedAttributeGet(effect_id, effect_attr)) catch {};
+
+                    var read_attrs = std.ArrayList(c.MlirAttribute){};
+                    defer read_attrs.deinit(std.heap.page_allocator);
+                    for (rw.reads.items) |slot| {
+                        const slot_attr = c.mlirStringAttrGet(self.ctx, h.strRef(slot));
+                        read_attrs.append(std.heap.page_allocator, slot_attr) catch {};
+                    }
+                    const read_slots_attr = c.mlirArrayAttrGet(self.ctx, @intCast(read_attrs.items.len), read_attrs.items.ptr);
+                    const read_slots_id = h.identifier(self.ctx, "ora.read_slots");
+                    attributes.append(std.heap.page_allocator, c.mlirNamedAttributeGet(read_slots_id, read_slots_attr)) catch {};
+
+                    var write_attrs = std.ArrayList(c.MlirAttribute){};
+                    defer write_attrs.deinit(std.heap.page_allocator);
+                    for (rw.writes.items) |slot| {
+                        const slot_attr = c.mlirStringAttrGet(self.ctx, h.strRef(slot));
+                        write_attrs.append(std.heap.page_allocator, slot_attr) catch {};
+                    }
+                    const write_slots_attr = c.mlirArrayAttrGet(self.ctx, @intCast(write_attrs.items.len), write_attrs.items.ptr);
+                    const write_slots_id = h.identifier(self.ctx, "ora.write_slots");
+                    attributes.append(std.heap.page_allocator, c.mlirNamedAttributeGet(write_slots_id, write_slots_attr)) catch {};
+                },
+            }
+        }
+    }
+
     // add special function name attributes
     if (std.mem.eql(u8, func.name, "init")) {
         const init_attr = c.mlirBoolAttrGet(self.ctx, 1);

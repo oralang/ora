@@ -21,6 +21,7 @@
 
 const std = @import("std");
 const ast = @import("../ast.zig");
+const ManagedArrayList = std.array_list.Managed;
 
 /// Generic visitor interface with flexible traversal strategies
 pub fn Visitor(comptime Context: type, comptime ReturnType: type) type {
@@ -467,7 +468,7 @@ pub fn Visitor(comptime Context: type, comptime ReturnType: type) type {
 
         /// Breadth-first traversal
         pub fn walkBreadthFirst(self: *Self, node: *ast.AstNode, allocator: std.mem.Allocator) !ReturnType {
-            var queue = std.ArrayList(*ast.AstNode).init(allocator);
+            var queue = ManagedArrayList(*ast.AstNode).init(allocator);
             defer queue.deinit();
 
             try queue.append(node);
@@ -729,7 +730,7 @@ pub fn Visitor(comptime Context: type, comptime ReturnType: type) type {
         }
 
         /// Add children to queue for breadth-first traversal
-        fn addChildrenToQueue(self: *Self, node: *ast.AstNode, queue: *std.ArrayList(*ast.AstNode)) !void {
+        fn addChildrenToQueue(self: *Self, node: *ast.AstNode, queue: *ManagedArrayList(*ast.AstNode)) !void {
             _ = self; // Suppress unused parameter warning
 
             switch (node.*) {
@@ -1136,7 +1137,7 @@ pub const QueryVisitor = struct {
     const Self = @This();
 
     allocator: std.mem.Allocator,
-    results: std.ArrayList(*ast.AstNode),
+    results: ManagedArrayList(*ast.AstNode),
     search_count: u32 = 0,
     max_results: ?u32 = null,
 
@@ -1161,7 +1162,7 @@ pub const QueryVisitor = struct {
     pub fn init(allocator: std.mem.Allocator) Self {
         return Self{
             .allocator = allocator,
-            .results = std.ArrayList(*ast.AstNode).init(allocator),
+            .results = ManagedArrayList(*ast.AstNode).init(allocator),
         };
     }
 
@@ -1329,7 +1330,7 @@ pub const TransformVisitor = struct {
     const Self = @This();
 
     allocator: std.mem.Allocator,
-    errors: std.ArrayList(TransformError),
+    errors: ManagedArrayList(TransformError),
 
     // transformation functions
     transformContract: ?*const fn (*Self, *ast.ContractNode) anyerror!?*ast.ContractNode = null,
@@ -1353,7 +1354,7 @@ pub const TransformVisitor = struct {
     pub fn init(allocator: std.mem.Allocator) Self {
         return Self{
             .allocator = allocator,
-            .errors = std.ArrayList(TransformError).init(allocator),
+            .errors = ManagedArrayList(TransformError).init(allocator),
         };
     }
 
@@ -1385,7 +1386,7 @@ pub const TransformVisitor = struct {
                     }
                 }
                 // transform children
-                var new_body = std.ArrayList(ast.AstNode).init(self.allocator);
+                var new_body = ManagedArrayList(ast.AstNode).init(self.allocator);
                 for (contract.body) |*child| {
                     const transformed_child = try self.transformRecursive(child);
                     try new_body.append(transformed_child.*);
@@ -1498,8 +1499,8 @@ pub const ValidationVisitor = struct {
     const Self = @This();
 
     allocator: std.mem.Allocator,
-    errors: std.ArrayList(ValidationError),
-    warnings: std.ArrayList(ValidationWarning),
+    errors: ManagedArrayList(ValidationError),
+    warnings: ManagedArrayList(ValidationWarning),
 
     // validation functions
     validateContract: ?*const fn (*Self, *ast.ContractNode) anyerror!void = null,
@@ -1534,8 +1535,8 @@ pub const ValidationVisitor = struct {
     pub fn init(allocator: std.mem.Allocator) Self {
         return Self{
             .allocator = allocator,
-            .errors = std.ArrayList(ValidationError).init(allocator),
-            .warnings = std.ArrayList(ValidationWarning).init(allocator),
+            .errors = ManagedArrayList(ValidationError).init(allocator),
+            .warnings = ManagedArrayList(ValidationWarning).init(allocator),
         };
     }
 
@@ -1712,12 +1713,12 @@ pub const VisitorChain = struct {
     const Self = @This();
 
     allocator: std.mem.Allocator,
-    visitors: std.ArrayList(AnyVisitor),
+    visitors: ManagedArrayList(AnyVisitor),
     early_exit_on_error: bool,
     continue_on_error: bool,
     error_count: u32,
     success_count: u32,
-    results: std.ArrayList(VisitorResult),
+    results: ManagedArrayList(VisitorResult),
 
     pub const VisitorResult = struct {
         visitor_name: []const u8,
@@ -1729,12 +1730,12 @@ pub const VisitorChain = struct {
     pub fn init(allocator: std.mem.Allocator) Self {
         return Self{
             .allocator = allocator,
-            .visitors = std.ArrayList(AnyVisitor).init(allocator),
+            .visitors = ManagedArrayList(AnyVisitor).init(allocator),
             .early_exit_on_error = false,
             .continue_on_error = true,
             .error_count = 0,
             .success_count = 0,
-            .results = std.ArrayList(VisitorResult).init(allocator),
+            .results = ManagedArrayList(VisitorResult).init(allocator),
         };
     }
 
@@ -1835,7 +1836,7 @@ pub const VisitorChain = struct {
 
     /// Filter results by success/failure
     pub fn getSuccessfulResults(self: *const Self, allocator: std.mem.Allocator) ![]VisitorResult {
-        var successful = std.ArrayList(VisitorResult).init(allocator);
+        var successful = ManagedArrayList(VisitorResult).init(allocator);
         for (self.results.items) |result| {
             if (result.success) {
                 try successful.append(result);
@@ -1845,7 +1846,7 @@ pub const VisitorChain = struct {
     }
 
     pub fn getFailedResults(self: *const Self, allocator: std.mem.Allocator) ![]VisitorResult {
-        var failed = std.ArrayList(VisitorResult).init(allocator);
+        var failed = ManagedArrayList(VisitorResult).init(allocator);
         for (self.results.items) |result| {
             if (!result.success) {
                 try failed.append(result);
@@ -1860,7 +1861,7 @@ pub const VisitorPipeline = struct {
     const Self = @This();
 
     allocator: std.mem.Allocator,
-    stages: std.ArrayList(PipelineStage),
+    stages: ManagedArrayList(PipelineStage),
     recovery_strategies: std.HashMap([]const u8, RecoveryStrategy),
     global_error_handler: ?*const fn ([]const u8, ?ast.SourceSpan) void,
 
@@ -1897,7 +1898,7 @@ pub const VisitorPipeline = struct {
     pub fn init(allocator: std.mem.Allocator) Self {
         return Self{
             .allocator = allocator,
-            .stages = std.ArrayList(PipelineStage).init(allocator),
+            .stages = ManagedArrayList(PipelineStage).init(allocator),
             .recovery_strategies = std.HashMap([]const u8, RecoveryStrategy).init(allocator),
         };
     }
@@ -1943,10 +1944,10 @@ pub const VisitorPipeline = struct {
             .stage_results = &[_]StageResult{},
         };
 
-        var errors = std.ArrayList([]const u8).init(self.allocator);
+        var errors = ManagedArrayList([]const u8).init(self.allocator);
         defer errors.deinit();
 
-        var stage_results = std.ArrayList(StageResult).init(self.allocator);
+        var stage_results = ManagedArrayList(StageResult).init(self.allocator);
         defer stage_results.deinit();
 
         for (self.stages.items) |*stage| {

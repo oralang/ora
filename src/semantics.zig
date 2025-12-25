@@ -16,6 +16,7 @@
 const std = @import("std");
 const ast = @import("ast.zig");
 const core = @import("semantics/core.zig");
+const ManagedArrayList = std.array_list.Managed;
 
 // Export builtins module for use by MLIR lowering
 pub const builtins = @import("semantics/builtins.zig");
@@ -42,7 +43,7 @@ fn isLValue(expr: ast.Expressions.ExprNode) bool {
 }
 
 pub fn validateLValues(allocator: std.mem.Allocator, nodes: []const ast.AstNode) !AnalysisResult {
-    var diags = std.ArrayList(Diagnostic).init(allocator);
+    var diags = ManagedArrayList(Diagnostic).init(allocator);
     defer diags.deinit();
 
     for (nodes) |node| {
@@ -79,7 +80,7 @@ pub fn analyze(allocator: std.mem.Allocator, nodes: []const ast.AstNode) !core.S
     const p2_diags = try core.analyzePhase2(allocator, nodes, &p1.symbols);
 
     // combine diagnostics deterministically in encounter order (phase1 then phase2)
-    var combined = std.ArrayList(core.Diagnostic).init(allocator);
+    var combined = ManagedArrayList(core.Diagnostic).init(allocator);
     defer combined.deinit();
 
     for (p1.diagnostics) |d| try combined.append(d);

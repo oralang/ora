@@ -21,6 +21,11 @@ const TypeResolutionError = @import("../mod.zig").TypeResolutionError;
 const Typed = @import("mod.zig").Typed;
 const Effect = @import("mod.zig").Effect;
 const LockDelta = @import("mod.zig").LockDelta;
+const SlotSet = @import("mod.zig").SlotSet;
+const combineEffects = @import("mod.zig").combineEffects;
+const mergeEffects = @import("mod.zig").mergeEffects;
+const takeEffect = @import("mod.zig").takeEffect;
+const MemoryRegion = @import("../../region.zig").MemoryRegion;
 const TypeContext = @import("mod.zig").TypeContext;
 const validation = @import("../validation/mod.zig");
 const refinements = @import("../refinements/mod.zig");
@@ -275,7 +280,8 @@ fn synthAssignment(
     }
 
     // check that value is assignable to target
-    const value_typed = try synthExpr(self, assign.value);
+    var value_typed = try synthExpr(self, assign.value);
+    defer value_typed.deinit(self.allocator);
 
     if (!self.validation.isAssignable(target_type, value_typed.ty)) {
         const got_str = formatTypeInfo(value_typed.ty, self.allocator) catch "unknown";
@@ -298,8 +304,23 @@ fn synthAssignment(
         assign.skip_guard = statement_mod.shouldSkipGuard(self, assign.value, target_ora_type);
     }
 
-    // assignment expressions return the target type (the assigned value's type)
-    return Typed.init(target_type, Effect.pure(), self.allocator);
+    const target_region = inferExprRegion(self, assign.target);
+    const source_region = inferExprRegion(self, assign.value);
+    if (!isRegionAssignmentAllowed(target_region, source_region, assign.target)) {
+        return TypeResolutionError.RegionMismatch;
+    }
+
+    // compute write effect if target is a storage slot
+    var write_eff = Effect.pure();
+    if (resolveStorageSlot(self, assign.target)) |slot_name| {
+        var slots = SlotSet.init(self.allocator);
+        try slots.add(self.allocator, slot_name);
+        write_eff = Effect.writes(slots);
+    }
+
+    const combined_eff = combineEffects(value_typed.eff, write_eff, self.allocator);
+    write_eff.deinit(self.allocator);
+    return Typed.init(target_type, combined_eff, self.allocator);
 }
 
 fn synthCast(
@@ -312,7 +333,8 @@ fn synthCast(
     }
 
     // infer operand type
-    const operand_typed = try synthExpr(self, cast.operand);
+    var operand_typed = try synthExpr(self, cast.operand);
+    defer operand_typed.deinit(self.allocator);
 
     // conservative rule: cast is allowed only if operand is assignable to target
     if (!self.validation.isAssignable(cast.target_type, operand_typed.ty)) {
@@ -326,7 +348,8 @@ fn synthCast(
     }
 
     // cast expression yields the target type
-    return Typed.init(cast.target_type, Effect.pure(), self.allocator);
+    const eff = takeEffect(&operand_typed);
+    return Typed.init(cast.target_type, eff, self.allocator);
 }
 
 fn synthRange(
@@ -336,8 +359,10 @@ fn synthRange(
     const compat = @import("../validation/compatibility.zig");
 
     // infer start/end types
-    const start_typed = try synthExpr(self, range.start);
-    const end_typed = try synthExpr(self, range.end);
+    var start_typed = try synthExpr(self, range.start);
+    defer start_typed.deinit(self.allocator);
+    var end_typed = try synthExpr(self, range.end);
+    defer end_typed.deinit(self.allocator);
 
     // require integer categories
     if (start_typed.ty.category != .Integer or end_typed.ty.category != .Integer) {
@@ -369,7 +394,8 @@ fn synthRange(
     // store type on AST node for downstream passes
     range.type_info = chosen;
 
-    return Typed.init(chosen, Effect.pure(), self.allocator);
+    const combined_eff = combineEffects(start_typed.eff, end_typed.eff, self.allocator);
+    return Typed.init(chosen, combined_eff, self.allocator);
 }
 
 fn synthErrorReturn(
@@ -421,7 +447,8 @@ fn synthTry(
                     .source = .inferred,
                     .span = try_expr.span,
                 };
-                return Typed.init(success_type, Effect.pure(), self.allocator);
+                const eff = takeEffect(&inner_typed);
+                return Typed.init(success_type, eff, self.allocator);
             } else if (ora_ty == ._union) {
                 // error union with explicit errors: !T | Error1 | Error2
                 // first type should be error_union, extract its success type
@@ -436,7 +463,8 @@ fn synthTry(
                             .source = .inferred,
                             .span = try_expr.span,
                         };
-                        return Typed.init(success_type, Effect.pure(), self.allocator);
+                        const eff = takeEffect(&inner_typed);
+                        return Typed.init(success_type, eff, self.allocator);
                     }
                 }
             }
@@ -444,7 +472,8 @@ fn synthTry(
     }
 
     // if inner expression is not an ErrorUnion, return unknown (should be caught by validation)
-    return Typed.init(TypeInfo.unknown(), Effect.pure(), self.allocator);
+    const eff = takeEffect(&inner_typed);
+    return Typed.init(TypeInfo.unknown(), eff, self.allocator);
 }
 
 fn synthIdentifier(
@@ -453,7 +482,17 @@ fn synthIdentifier(
 ) TypeResolutionError!Typed {
     // use identifier resolution module
     try @import("identifier.zig").resolveIdentifierType(self, id);
-    return Typed.init(id.type_info, Effect.pure(), self.allocator);
+    var eff = Effect.pure();
+    if (self.current_scope) |scope| {
+        if (SymbolTable.findUp(scope, id.name)) |sym| {
+            if (sym.region == .Storage) {
+                var slots = SlotSet.init(self.allocator);
+                try slots.add(self.allocator, sym.name);
+                eff = Effect.reads(slots);
+            }
+        }
+    }
+    return Typed.init(id.type_info, eff, self.allocator);
 }
 
 fn synthBinary(
@@ -534,9 +573,10 @@ fn synthUnary(
 
     unary.type_info = result_type;
     const empty_delta = LockDelta.emptyWithAllocator(self.allocator);
+    const eff = takeEffect(&operand_typed);
     return Typed{
         .ty = result_type,
-        .eff = operand_typed.eff,
+        .eff = eff,
         .lock_delta = empty_delta,
         .obligations = &.{},
     };
@@ -547,11 +587,16 @@ fn synthCall(
     call: *ast.Expressions.CallExpr,
 ) TypeResolutionError!Typed {
     // resolve callee expression (to ensure it's typed)
-    _ = try synthExpr(self, call.callee);
+    var callee_typed = try synthExpr(self, call.callee);
+    defer callee_typed.deinit(self.allocator);
 
     // resolve all argument types
+    var combined_eff = takeEffect(&callee_typed);
     for (call.arguments) |arg| {
-        _ = try synthExpr(self, arg);
+        var arg_typed = try synthExpr(self, arg);
+        defer arg_typed.deinit(self.allocator);
+        const eff = takeEffect(&arg_typed);
+        mergeEffects(self.allocator, &combined_eff, eff);
     }
 
     // if callee is an identifier, look up the function
@@ -570,11 +615,11 @@ fn synthCall(
                     // found in function registry - use return type
                     if (function.return_type_info) |ret_info| {
                         call.type_info = ret_info;
-                        return Typed.init(ret_info, Effect.pure(), self.allocator);
+                        return Typed.init(ret_info, combined_eff, self.allocator);
                     } else {
                         // no return type - return unknown
                         call.type_info = TypeInfo.unknown();
-                        return Typed.init(TypeInfo.unknown(), Effect.pure(), self.allocator);
+                        return Typed.init(TypeInfo.unknown(), combined_eff, self.allocator);
                     }
                 }
             }
@@ -647,11 +692,11 @@ fn synthCall(
 
                     if (return_type) |ret_ty| {
                         call.type_info = ret_ty;
-                        return Typed.init(ret_ty, Effect.pure(), self.allocator);
+                        return Typed.init(ret_ty, combined_eff, self.allocator);
                     } else {
                         // fallback: use the function type itself (shouldn't happen)
                         call.type_info = typ;
-                        return Typed.init(typ, Effect.pure(), self.allocator);
+                        return Typed.init(typ, combined_eff, self.allocator);
                     }
                 } else {
                     return TypeResolutionError.UnresolvedType;
@@ -669,7 +714,7 @@ fn synthCall(
                 .span = call.span,
             };
             call.type_info = error_ty;
-            return Typed.init(error_ty, Effect.pure(), self.allocator);
+            return Typed.init(error_ty, combined_eff, self.allocator);
         } else {
             return TypeResolutionError.TypeMismatch; // Not a function or error
         }
@@ -745,7 +790,9 @@ fn synthFieldAccess(
                         if (std.mem.eql(u8, field.name, fa.field)) {
                             // found the field! Use its type
                             fa.type_info = field.type_info;
-                            return Typed.init(field.type_info, Effect.pure(), self.allocator);
+                            fa.type_info.region = base_typed.ty.region;
+                            const eff = takeEffect(&base_typed);
+                            return Typed.init(field.type_info, eff, self.allocator);
                         }
                     }
                     // field not found in struct
@@ -774,13 +821,16 @@ fn synthIndex(
     const target_type = target_typed.ty;
 
     // for array types, extract the element type
+    const combined_eff = combineEffects(target_typed.eff, index_typed.eff, self.allocator);
     if (target_type.category == .Array) {
         // extract element type from ora_type
         if (target_type.ora_type) |ora_ty| {
             if (ora_ty == .array) {
                 const elem_ora_type = ora_ty.array.elem.*;
                 const elem_type_info = TypeInfo.inferred(elem_ora_type.getCategory(), elem_ora_type, null);
-                return Typed.init(elem_type_info, Effect.pure(), self.allocator);
+                var updated = elem_type_info;
+                updated.region = target_typed.ty.region;
+                return Typed.init(updated, combined_eff, self.allocator);
             }
         }
     }
@@ -791,13 +841,80 @@ fn synthIndex(
             if (ora_ty == .map) {
                 const value_ora_type = ora_ty.map.value.*;
                 const value_type_info = TypeInfo.inferred(value_ora_type.getCategory(), value_ora_type, null);
-                return Typed.init(value_type_info, Effect.pure(), self.allocator);
+                var updated = value_type_info;
+                updated.region = target_typed.ty.region;
+                return Typed.init(updated, combined_eff, self.allocator);
             }
         }
     }
 
     // fallback: unknown type
-    return Typed.init(TypeInfo.unknown(), Effect.pure(), self.allocator);
+    return Typed.init(TypeInfo.unknown(), combined_eff, self.allocator);
+}
+
+fn inferExprRegion(self: *CoreResolver, expr: *ast.Expressions.ExprNode) MemoryRegion {
+    return switch (expr.*) {
+        .Identifier => |id| id.type_info.region orelse blk: {
+            if (self.current_scope) |scope| {
+                if (SymbolTable.findUp(scope, id.name)) |sym| {
+                    break :blk sym.region orelse MemoryRegion.Stack;
+                }
+            }
+            break :blk MemoryRegion.Stack;
+        },
+        .FieldAccess => |fa| inferExprRegion(self, fa.target),
+        .Index => |ix| inferExprRegion(self, ix.target),
+        .Call => MemoryRegion.Stack,
+        else => MemoryRegion.Stack,
+    };
+}
+
+fn isStorageLike(r: MemoryRegion) bool {
+    return r == .Storage or r == .TStore;
+}
+
+fn isElementLevelTarget(target: *ast.Expressions.ExprNode) bool {
+    return switch (target.*) {
+        .FieldAccess, .Index => true,
+        else => false,
+    };
+}
+
+fn isRegionAssignmentAllowed(target_region: MemoryRegion, source_region: MemoryRegion, target_node: *ast.Expressions.ExprNode) bool {
+    if (target_region == .Calldata) return false;
+    if (isStorageLike(target_region)) {
+        if (isStorageLike(source_region)) {
+            return isElementLevelTarget(target_node);
+        }
+        return true;
+    }
+    return true;
+}
+
+fn resolveStorageSlot(
+    self: *CoreResolver,
+    target: *ast.Expressions.ExprNode,
+) ?[]const u8 {
+    const base_name = findBaseIdentifier(target) orelse return null;
+    if (self.current_scope) |scope| {
+        if (self.symbol_table.safeFindUp(scope, base_name)) |sym| {
+            if (sym.region == .Storage) return sym.name;
+        }
+    }
+    if (self.symbol_table.root.findInCurrent(base_name)) |idx| {
+        const sym = self.symbol_table.root.symbols.items[idx];
+        if (sym.region == .Storage) return sym.name;
+    }
+    return null;
+}
+
+fn findBaseIdentifier(expr: *const ast.Expressions.ExprNode) ?[]const u8 {
+    return switch (expr.*) {
+        .Identifier => |id| id.name,
+        .FieldAccess => |fa| findBaseIdentifier(fa.target),
+        .Index => |ix| findBaseIdentifier(ix.target),
+        else => null,
+    };
 }
 
 // ============================================================================
@@ -904,38 +1021,6 @@ fn validateBinaryOperator(
 }
 
 // Function argument validation moved to mod.zig to avoid circular dependency
-
-// ============================================================================
-// Effect Helpers
-// ============================================================================
-
-fn combineEffects(
-    eff1: Effect,
-    eff2: Effect,
-    allocator: std.mem.Allocator,
-) Effect {
-    const SlotSet = @import("mod.zig").SlotSet;
-    return switch (eff1) {
-        .Pure => eff2,
-        .Writes => |s1| switch (eff2) {
-            .Pure => eff1,
-            .Writes => |s2| {
-                // combine slot sets - create new combined set
-                // note: s1 and s2 will be cleaned up by their Typed.deinit calls
-                var combined = SlotSet.init(allocator);
-                for (s1.slots.items) |slot| {
-                    combined.add(allocator, slot) catch {};
-                }
-                for (s2.slots.items) |slot| {
-                    if (!combined.contains(slot)) {
-                        combined.add(allocator, slot) catch {};
-                    }
-                }
-                return Effect.writes(combined);
-            },
-        },
-    };
-}
 
 /// Format TypeInfo for error messages, including refinement details
 fn formatTypeInfo(type_info: TypeInfo, allocator: std.mem.Allocator) ![]const u8 {

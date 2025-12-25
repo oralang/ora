@@ -158,6 +158,16 @@ pub fn lowerIdentifierAssignment(self: *const StatementLowerer, ident: *const li
                     h.appendOp(self.block, store_op);
                     return;
                 },
+                .Calldata => {
+                    reportAssignmentError(
+                        self,
+                        ident.span,
+                        .InvalidMemoryRegion,
+                        "Cannot assign to calldata parameter",
+                        "Copy into a local variable if mutation is required.",
+                    );
+                    return LoweringError.InvalidLValue;
+                },
                 .Stack => {
                     // for stack variables, check if we have a memref (mutable aggregate var) or direct SSA value (scalar var or let/const)
                     if (self.local_var_map) |lvm| {

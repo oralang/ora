@@ -42,6 +42,44 @@ pub const Symbol = struct {
     typ_owned: bool = false,
 };
 
+pub const FunctionEffect = union(enum) {
+    Pure,
+    Reads: std.ArrayList([]const u8),
+    Writes: std.ArrayList([]const u8),
+    ReadsWrites: struct {
+        reads: std.ArrayList([]const u8),
+        writes: std.ArrayList([]const u8),
+    },
+
+    pub fn pure() FunctionEffect {
+        return .Pure;
+    }
+
+    pub fn reads(list: std.ArrayList([]const u8)) FunctionEffect {
+        return .{ .Reads = list };
+    }
+
+    pub fn writes(list: std.ArrayList([]const u8)) FunctionEffect {
+        return .{ .Writes = list };
+    }
+
+    pub fn readsWrites(read_slots: std.ArrayList([]const u8), write_slots: std.ArrayList([]const u8)) FunctionEffect {
+        return .{ .ReadsWrites = .{ .reads = read_slots, .writes = write_slots } };
+    }
+
+    pub fn deinit(self: *FunctionEffect, allocator: std.mem.Allocator) void {
+        switch (self.*) {
+            .Pure => {},
+            .Reads => |*slots| slots.deinit(allocator),
+            .Writes => |*slots| slots.deinit(allocator),
+            .ReadsWrites => |*rw| {
+                rw.reads.deinit(allocator);
+                rw.writes.deinit(allocator);
+            },
+        }
+    }
+};
+
 pub const Scope = struct {
     name: ?[]const u8 = null,
     symbols: std.ArrayList(Symbol),
@@ -71,6 +109,7 @@ pub const SymbolTable = struct {
     error_signatures: std.StringHashMap(?[]const ast.ParameterNode), // error name → parameters (null if no params)
     function_allowed_errors: std.StringHashMap([][]const u8),
     function_success_types: std.StringHashMap(ast.Types.OraType),
+    function_effects: std.StringHashMap(FunctionEffect),
     block_scopes: std.AutoHashMap(usize, *Scope),
     enum_variants: std.StringHashMap([][]const u8),
     struct_fields: std.StringHashMap([]const ast.StructField), // struct name → fields
@@ -92,6 +131,7 @@ pub const SymbolTable = struct {
             .error_signatures = std.StringHashMap(?[]const ast.ParameterNode).init(allocator),
             .function_allowed_errors = std.StringHashMap([][]const u8).init(allocator),
             .function_success_types = std.StringHashMap(ast.Types.OraType).init(allocator),
+            .function_effects = std.StringHashMap(FunctionEffect).init(allocator),
             .block_scopes = std.AutoHashMap(usize, *Scope).init(allocator),
             .enum_variants = std.StringHashMap([][]const u8).init(allocator),
             .struct_fields = std.StringHashMap([]const ast.StructField).init(allocator),
@@ -133,6 +173,11 @@ pub const SymbolTable = struct {
             type_info_mod.deinitOraType(self.allocator, @constCast(&entry.value_ptr.*));
         }
         self.function_success_types.deinit();
+        var fe_it = self.function_effects.valueIterator();
+        while (fe_it.next()) |eff| {
+            eff.deinit(self.allocator);
+        }
+        self.function_effects.deinit();
         var bs_it = self.block_scopes.valueIterator();
         while (bs_it.next()) |_| {
             // scopes themselves are owned by self.scopes; nothing to free per entry
