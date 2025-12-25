@@ -22,3 +22,5 @@ _targets_backup/
 # Ora dialect build artifacts (generated during compilation)
 vendor/ora-dialect-build/
 vendor/sir-dialect-build/
+
+docs/issues/
