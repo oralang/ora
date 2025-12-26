@@ -18,6 +18,7 @@ const ManagedArrayList = std.array_list.Managed;
 const c = @import("mlir_c_api").c;
 const lib = @import("ora_lib");
 const verification = @import("verification.zig");
+const log = @import("log");
 
 /// MLIR Pipeline Configuration
 pub const PipelineConfig = struct {
@@ -162,7 +163,7 @@ pub const PassManager = struct {
         const result = c.mlirParsePassPipeline(c.mlirPassManagerGetAsOpPassManager(self.pass_manager), pipeline_ref, null, null);
 
         if (c.mlirLogicalResultIsFailure(result)) {
-            std.debug.print("WARNING: Failed to parse standard optimization pipeline\n", .{});
+            log.warn("Failed to parse standard optimization pipeline\n", .{});
         }
     }
 

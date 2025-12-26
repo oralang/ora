@@ -10,62 +10,63 @@ const h = @import("../helpers.zig");
 const StatementLowerer = @import("statement_lowerer.zig").StatementLowerer;
 const LoweringError = StatementLowerer.LoweringError;
 const helpers = @import("helpers.zig");
+const log = @import("log");
 
 /// Lower variable declarations with region-specific handling
 pub fn lowerVariableDecl(self: *const StatementLowerer, var_decl: *const lib.ast.Statements.VariableDeclNode) LoweringError!void {
     const loc = self.fileLoc(var_decl.span);
 
     // print variable type info before lowering
-    std.debug.print("[BEFORE MLIR] Variable: {s}\n", .{var_decl.name});
-    std.debug.print("  isResolved: {any}\n", .{var_decl.type_info.isResolved()});
-    std.debug.print("  category: {s}\n", .{@tagName(var_decl.type_info.category)});
-    std.debug.print("  source: {s}\n", .{@tagName(var_decl.type_info.source)});
+    log.debug("[BEFORE MLIR] Variable: {s}\n", .{var_decl.name});
+    log.debug("  isResolved: {any}\n", .{var_decl.type_info.isResolved()});
+    log.debug("  category: {s}\n", .{@tagName(var_decl.type_info.category)});
+    log.debug("  source: {s}\n", .{@tagName(var_decl.type_info.source)});
     if (var_decl.type_info.ora_type) |ora_type| {
-        std.debug.print("  ora_type: present ({s})\n", .{@tagName(ora_type)});
+        log.debug("  ora_type: present ({s})\n", .{@tagName(ora_type)});
     } else {
-        std.debug.print("  ora_type: null\n", .{});
+        log.debug("  ora_type: null\n", .{});
     }
     if (var_decl.value) |value| {
-        std.debug.print("  has initializer: true\n", .{});
+        log.debug("  has initializer: true\n", .{});
         switch (value.*) {
             .Binary => |*b| {
-                std.debug.print("  initializer type: Binary\n", .{});
-                std.debug.print("    binary.isResolved: {any}\n", .{b.type_info.isResolved()});
+                log.debug("  initializer type: Binary\n", .{});
+                log.debug("    binary.isResolved: {any}\n", .{b.type_info.isResolved()});
                 if (b.type_info.ora_type) |bt| {
-                    std.debug.print("    binary.ora_type: present ({s})\n", .{@tagName(bt)});
+                    log.debug("    binary.ora_type: present ({s})\n", .{@tagName(bt)});
                 } else {
-                    std.debug.print("    binary.ora_type: null\n", .{});
+                    log.debug("    binary.ora_type: null\n", .{});
                 }
                 // check if operands are in symbol table
                 if (b.lhs.* == .Identifier) {
                     const lhs_name = b.lhs.Identifier.name;
                     const lhs_found = if (self.symbol_table) |st| st.lookupSymbol(lhs_name) != null else false;
-                    std.debug.print("    binary.lhs ({s}) in symbol table: {any}\n", .{ lhs_name, lhs_found });
+                    log.debug("    binary.lhs ({s}) in symbol table: {any}\n", .{ lhs_name, lhs_found });
                 }
                 if (b.rhs.* == .Identifier) {
                     const rhs_name = b.rhs.Identifier.name;
                     const rhs_found = if (self.symbol_table) |st| st.lookupSymbol(rhs_name) != null else false;
-                    std.debug.print("    binary.rhs ({s}) in symbol table: {any}\n", .{ rhs_name, rhs_found });
+                    log.debug("    binary.rhs ({s}) in symbol table: {any}\n", .{ rhs_name, rhs_found });
                 }
             },
             else => {
-                std.debug.print("  initializer type: {s}\n", .{@tagName(value.*)});
+                log.debug("  initializer type: {s}\n", .{@tagName(value.*)});
             },
         }
     } else {
-        std.debug.print("  has initializer: false\n", .{});
+        log.debug("  has initializer: false\n", .{});
     }
 
     // use type from AST - types should have been copied during type resolution
     // if base pointers are invalid, it means the arena was freed too early
     const mlir_type = self.type_mapper.toMlirType(var_decl.type_info);
 
-    std.debug.print("[lowerVariableDecl] {s}: region={any}, kind={any}\n", .{ var_decl.name, var_decl.region, var_decl.kind });
+    log.debug("[lowerVariableDecl] {s}: region={any}, kind={any}\n", .{ var_decl.name, var_decl.region, var_decl.kind });
 
     // add symbol to symbol table if available
     if (self.symbol_table) |st| {
         st.addSymbol(var_decl.name, mlir_type, var_decl.region, null, var_decl.kind) catch {
-            std.debug.print("ERROR: Failed to add symbol to table: {s}\n", .{var_decl.name});
+            log.debug("ERROR: Failed to add symbol to table: {s}\n", .{var_decl.name});
             return LoweringError.OutOfMemory;
         };
     }
@@ -73,7 +74,7 @@ pub fn lowerVariableDecl(self: *const StatementLowerer, var_decl: *const lib.ast
     // handle variable declarations based on memory region
     switch (var_decl.region) {
         .Stack => {
-            std.debug.print("[lowerVariableDecl] Calling lowerStackVariableDecl for: {s}\n", .{var_decl.name});
+            log.debug("[lowerVariableDecl] Calling lowerStackVariableDecl for: {s}\n", .{var_decl.name});
             try lowerStackVariableDecl(self, var_decl, mlir_type, loc);
         },
         .Storage => {
@@ -86,7 +87,7 @@ pub fn lowerVariableDecl(self: *const StatementLowerer, var_decl: *const lib.ast
             try lowerTStoreVariableDecl(self, var_decl, mlir_type, loc);
         },
         .Calldata => {
-            std.debug.print("ERROR: Calldata variables are not allowed: {s}\n", .{var_decl.name});
+            log.debug("ERROR: Calldata variables are not allowed: {s}\n", .{var_decl.name});
             return LoweringError.InvalidMemoryRegion;
         },
     }
@@ -101,10 +102,10 @@ fn isAggregateType(ora_type: ?lib.ast.type_info.OraType) bool {
             .struct_type, .tuple, .anonymous_struct => false, // These are SSA values
             else => false,
         };
-        std.debug.print("[isAggregateType] type={any}, result={}\n", .{ ty, result });
+        log.debug("[isAggregateType] type={any}, result={}\n", .{ ty, result });
         return result;
     }
-    std.debug.print("[isAggregateType] type=null, result=false\n", .{});
+    log.debug("[isAggregateType] type=null, result=false\n", .{});
     return false;
 }
 
@@ -131,16 +132,16 @@ pub fn lowerStackVariableDecl(self: *const StatementLowerer, var_decl: *const li
     const is_scalar = isScalarValueType(var_decl.type_info.ora_type);
     const needs_memref = (var_decl.kind == .Var) and (is_aggregate or is_scalar);
 
-    std.debug.print(
+    log.debug(
         "[lowerStackVariableDecl] {s}: kind={any}, is_aggregate={}, is_scalar={}, needs_memref={}\n",
         .{ var_decl.name, var_decl.kind, is_aggregate, is_scalar, needs_memref },
     );
 
     if (needs_memref) {
-        std.debug.print("[lowerStackVariableDecl] Creating memref-backed local: {s}\n", .{var_decl.name});
+        log.debug("[lowerStackVariableDecl] Creating memref-backed local: {s}\n", .{var_decl.name});
 
         const ora_type = var_decl.type_info.ora_type orelse {
-            std.debug.print("[lowerStackVariableDecl] ERROR: ora_type is null for aggregate variable {s}\n", .{var_decl.name});
+            log.debug("[lowerStackVariableDecl] ERROR: ora_type is null for aggregate variable {s}\n", .{var_decl.name});
             @panic("lowerStackVariableDecl: ora_type is null for aggregate - this indicates a type system bug");
         };
 
@@ -160,7 +161,7 @@ pub fn lowerStackVariableDecl(self: *const StatementLowerer, var_decl: *const li
 
         // initialize the variable if there's an initializer
         if (var_decl.value) |init_expr| {
-            var init_value = self.expr_lowerer.lowerExpression(&init_expr.*);
+            var init_value = helpers.lowerValueWithImplicitTry(self, &init_expr.*, var_decl.type_info);
 
             // insert refinement guard for variable initialization (skip if optimized)
             init_value = try helpers.insertRefinementGuard(self, init_value, ora_type, var_decl.span, var_decl.skip_guard);
@@ -189,7 +190,7 @@ pub fn lowerStackVariableDecl(self: *const StatementLowerer, var_decl: *const li
         // store the memref in the local variable map
         if (self.local_var_map) |lvm| {
             lvm.addLocalVar(var_decl.name, memref) catch {
-                std.debug.print("ERROR: Failed to add local variable memref to map: {s}\n", .{var_decl.name});
+                log.debug("ERROR: Failed to add local variable memref to map: {s}\n", .{var_decl.name});
                 return LoweringError.OutOfMemory;
             };
         }
@@ -197,17 +198,17 @@ pub fn lowerStackVariableDecl(self: *const StatementLowerer, var_decl: *const li
         // update symbol table with the memref
         if (self.symbol_table) |st| {
             st.updateSymbolValue(var_decl.name, memref) catch {
-                std.debug.print("WARNING: Failed to update symbol value: {s}\n", .{var_decl.name});
+                log.debug("WARNING: Failed to update symbol value: {s}\n", .{var_decl.name});
             };
         }
     } else {
         // scalar mutable (var) or immutable (let/const) - use SSA values
-        std.debug.print("[lowerStackVariableDecl] Creating SSA value for: {s}\n", .{var_decl.name});
+        log.debug("[lowerStackVariableDecl] Creating SSA value for: {s}\n", .{var_decl.name});
         var init_value: c.MlirValue = undefined;
 
         if (var_decl.value) |init_expr| {
             // lower the initializer expression
-            init_value = self.expr_lowerer.lowerExpression(&init_expr.*);
+            init_value = helpers.lowerValueWithImplicitTry(self, &init_expr.*, var_decl.type_info);
 
             // ensure the initializer value matches the declared type
             // this is critical for structs - if map load returns i256, convert it to struct type
@@ -232,7 +233,7 @@ pub fn lowerStackVariableDecl(self: *const StatementLowerer, var_decl: *const li
         // store the local variable in our map for later reference
         if (self.local_var_map) |lvm| {
             lvm.addLocalVar(var_decl.name, init_value) catch {
-                std.debug.print("ERROR: Failed to add local variable to map: {s}\n", .{var_decl.name});
+                log.debug("ERROR: Failed to add local variable to map: {s}\n", .{var_decl.name});
                 return LoweringError.OutOfMemory;
             };
         }
@@ -240,7 +241,7 @@ pub fn lowerStackVariableDecl(self: *const StatementLowerer, var_decl: *const li
         // update symbol table with the value
         if (self.symbol_table) |st| {
             st.updateSymbolValue(var_decl.name, init_value) catch {
-                std.debug.print("WARNING: Failed to update symbol value: {s}\n", .{var_decl.name});
+                log.debug("WARNING: Failed to update symbol value: {s}\n", .{var_decl.name});
             };
         }
     }
@@ -251,7 +252,7 @@ pub fn lowerStorageVariableDecl(self: *const StatementLowerer, var_decl: *const 
     // storage variables are typically handled at the contract level
     // if there's an initializer, we need to generate a store operation
     if (var_decl.value) |init_expr| {
-        const init_value = self.expr_lowerer.lowerExpression(&init_expr.*);
+        const init_value = helpers.lowerValueWithImplicitTry(self, &init_expr.*, var_decl.type_info);
 
         // generate storage store operation
         const store_op = self.memory_manager.createStorageStore(init_value, var_decl.name, loc);
@@ -261,7 +262,7 @@ pub fn lowerStorageVariableDecl(self: *const StatementLowerer, var_decl: *const 
     // ensure storage variable is registered
     if (self.storage_map) |sm| {
         _ = @constCast(sm).addStorageVariable(var_decl.name, var_decl.span) catch {
-            std.debug.print("WARNING: Failed to register storage variable: {s}\n", .{var_decl.name});
+            log.debug("WARNING: Failed to register storage variable: {s}\n", .{var_decl.name});
         };
     }
 }
@@ -275,7 +276,7 @@ pub fn lowerMemoryVariableDecl(self: *const StatementLowerer, var_decl: *const l
 
     if (var_decl.value) |init_expr| {
         // lower initializer and store to memory
-        const init_value = self.expr_lowerer.lowerExpression(&init_expr.*);
+        const init_value = helpers.lowerValueWithImplicitTry(self, &init_expr.*, var_decl.type_info);
 
         const store_op = self.memory_manager.createStoreOp(init_value, alloca_result, var_decl.region, loc);
         h.appendOp(self.block, store_op);
@@ -284,7 +285,7 @@ pub fn lowerMemoryVariableDecl(self: *const StatementLowerer, var_decl: *const l
     // store the memory reference in local variable map
     if (self.local_var_map) |lvm| {
         lvm.addLocalVar(var_decl.name, alloca_result) catch {
-            std.debug.print("ERROR: Failed to add memory variable to map: {s}\n", .{var_decl.name});
+            log.debug("ERROR: Failed to add memory variable to map: {s}\n", .{var_decl.name});
             return LoweringError.OutOfMemory;
         };
     }
@@ -309,7 +310,7 @@ pub fn lowerTStoreVariableDecl(self: *const StatementLowerer, var_decl: *const l
     // store the transient storage variable in local variable map
     if (self.local_var_map) |lvm| {
         lvm.addLocalVar(var_decl.name, init_value) catch {
-            std.debug.print("ERROR: Failed to add transient storage variable to map: {s}\n", .{var_decl.name});
+            log.debug("ERROR: Failed to add transient storage variable to map: {s}\n", .{var_decl.name});
             return LoweringError.OutOfMemory;
         };
     }
@@ -317,7 +318,7 @@ pub fn lowerTStoreVariableDecl(self: *const StatementLowerer, var_decl: *const l
     // update symbol table with the value
     if (self.symbol_table) |st| {
         st.updateSymbolValue(var_decl.name, init_value) catch {
-            std.debug.print("WARNING: Failed to update transient storage symbol value: {s}\n", .{var_decl.name});
+            log.debug("WARNING: Failed to update transient storage symbol value: {s}\n", .{var_decl.name});
         };
     }
 }

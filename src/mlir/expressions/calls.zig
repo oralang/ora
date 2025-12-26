@@ -13,6 +13,7 @@ const LocationTracker = @import("../locations.zig").LocationTracker;
 const OraDialect = @import("../dialect.zig").OraDialect;
 const builtins = lib.semantics.builtins;
 const expr_helpers = @import("helpers.zig");
+const log = @import("log");
 
 /// ExpressionLowerer type (forward declaration)
 const ExpressionLowerer = @import("mod.zig").ExpressionLowerer;
@@ -87,7 +88,7 @@ pub fn processNormalCall(
         }
 
         args.append(std.heap.page_allocator, arg_value) catch {
-            std.debug.print("WARNING: Failed to append argument to function call\n", .{});
+            log.warn("Failed to append argument to function call\n", .{});
             return self.createErrorPlaceholder(call.span, "Failed to append argument");
         };
     }
@@ -100,7 +101,7 @@ pub fn processNormalCall(
             return createMethodCall(self, field_access, args.items, call.span);
         },
         else => {
-            std.debug.print("ERROR: Unsupported callee expression type\n", .{});
+            log.err("Unsupported callee expression type\n", .{});
             return self.createErrorPlaceholder(call.span, "Unsupported callee type");
         },
     }
@@ -113,7 +114,7 @@ pub fn lowerBuiltinCall(
     call: *const lib.ast.Expressions.CallExpr,
 ) c.MlirValue {
     const op_name = std.fmt.allocPrint(std.heap.page_allocator, "ora.evm.{s}", .{builtin_info.evm_opcode}) catch {
-        std.debug.print("FATAL: Failed to allocate opcode name for builtin call\n", .{});
+        log.err("Failed to allocate opcode name for builtin call\n", .{});
         return self.createErrorPlaceholder(call.span, "Failed to create builtin call");
     };
     defer std.heap.page_allocator.free(op_name);
@@ -140,10 +141,25 @@ pub fn createDirectFunctionCall(
     args: []c.MlirValue,
     span: lib.ast.SourceSpan,
 ) c.MlirValue {
-    const result_ty = c.mlirIntegerTypeGet(self.ctx, constants.DEFAULT_INTEGER_BITS);
-    const result_types = [_]c.MlirType{result_ty};
+    var result_types_buf: [1]c.MlirType = undefined;
+    var result_types: []const c.MlirType = &[_]c.MlirType{};
 
-    const op = self.ora_dialect.createFuncCall(function_name, args, &result_types, self.fileLoc(span));
+    if (self.symbol_table) |sym_table| {
+        if (sym_table.lookupFunction(function_name)) |func_symbol| {
+            if (!c.mlirTypeIsNull(func_symbol.return_type)) {
+                result_types_buf[0] = func_symbol.return_type;
+                result_types = result_types_buf[0..1];
+            }
+        }
+    }
+
+    if (result_types.len == 0) {
+        const result_ty = c.mlirIntegerTypeGet(self.ctx, constants.DEFAULT_INTEGER_BITS);
+        result_types_buf[0] = result_ty;
+        result_types = result_types_buf[0..1];
+    }
+
+    const op = self.ora_dialect.createFuncCall(function_name, args, result_types, self.fileLoc(span));
     h.appendOp(self.block, op);
     return h.getResult(op, 0);
 }
@@ -165,12 +181,12 @@ pub fn createMethodCall(
     defer all_operands.deinit(std.heap.page_allocator);
 
     all_operands.append(std.heap.page_allocator, target) catch {
-        std.debug.print("WARNING: Failed to append target to method call\n", .{});
+        log.warn("Failed to append target to method call\n", .{});
         return self.createErrorPlaceholder(span, "Failed to append target");
     };
     for (args) |arg| {
         all_operands.append(std.heap.page_allocator, arg) catch {
-            std.debug.print("WARNING: Failed to append argument to method call\n", .{});
+            log.warn("Failed to append argument to method call\n", .{});
             return self.createErrorPlaceholder(span, "Failed to append argument");
         };
     }

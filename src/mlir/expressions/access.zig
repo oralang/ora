@@ -12,6 +12,7 @@ const TypeMapper = @import("../types.zig").TypeMapper;
 const LocationTracker = @import("../locations.zig").LocationTracker;
 const OraDialect = @import("../dialect.zig").OraDialect;
 const expr_helpers = @import("helpers.zig");
+const log = @import("log");
 
 /// ExpressionLowerer type (forward declaration)
 const ExpressionLowerer = @import("mod.zig").ExpressionLowerer;
@@ -22,7 +23,7 @@ pub fn lowerIdentifier(
     identifier: *const lib.ast.Expressions.IdentifierExpr,
 ) c.MlirValue {
     if (std.mem.eql(u8, identifier.name, "std")) {
-        std.debug.print("WARNING: 'std' namespace accessed directly without member - this is a bug\n", .{});
+        log.debug("WARNING: 'std' namespace accessed directly without member - this is a bug\n", .{});
         return self.createConstant(0, identifier.span);
     }
 
@@ -31,7 +32,7 @@ pub fn lowerIdentifier(
                 if (pm.getBlockArgument(identifier.name)) |block_arg| {
                     return block_arg;
                 } else {
-                    std.debug.print("FATAL ERROR: Function parameter '{s}' at index {d} not found - compilation aborted\n", .{ identifier.name, param_index });
+                    log.debug("FATAL ERROR: Function parameter '{s}' at index {d} not found - compilation aborted\n", .{ identifier.name, param_index });
                     return self.reportLoweringError(
                         identifier.span,
                         "missing function parameter during MLIR lowering",
@@ -62,12 +63,12 @@ pub fn lowerIdentifier(
         };
 
         const result_name = identifier.name;
-        std.debug.print("[lowerIdentifier] Loading storage variable '{s}' with type {any}\n", .{ identifier.name, var_type });
+        log.debug("[lowerIdentifier] Loading storage variable '{s}' with type {any}\n", .{ identifier.name, var_type });
         const load_op = memory_manager.createStorageLoadWithName(identifier.name, var_type, self.fileLoc(identifier.span), result_name);
         h.appendOp(self.block, load_op);
         const result = h.getResult(load_op, 0);
         const actual_type = c.mlirValueGetType(result);
-        std.debug.print("[lowerIdentifier] Storage load for '{s}' returned type {any}\n", .{ identifier.name, actual_type });
+        log.debug("[lowerIdentifier] Storage load for '{s}' returned type {any}\n", .{ identifier.name, actual_type });
         return result;
     }
 
@@ -98,7 +99,7 @@ pub fn lowerIdentifier(
                 return local_var_ref;
             }
 
-            std.debug.print("[lowerIdentifier] Returning scalar SSA value: {any}\n", .{local_var_ref});
+            log.debug("[lowerIdentifier] Returning scalar SSA value: {any}\n", .{local_var_ref});
             return local_var_ref;
         }
     }
@@ -129,20 +130,20 @@ pub fn lowerIdentifier(
             }
 
             if (symbol.symbol_kind == .Constant) {
-                std.debug.print("[lowerIdentifier] Found constant: {s}, creating value in current block\n", .{identifier.name});
+                log.debug("[lowerIdentifier] Found constant: {s}, creating value in current block\n", .{identifier.name});
 
                 if (st.lookupConstantDecl(identifier.name)) |const_decl| {
                     const const_value = self.lowerExpression(const_decl.value);
-                    std.debug.print("[lowerIdentifier] Created constant value for: {s}\n", .{identifier.name});
+                    log.debug("[lowerIdentifier] Created constant value for: {s}\n", .{identifier.name});
                     return const_value;
                 } else {
-                    std.debug.print("WARNING: Constant '{s}' declaration not found\n", .{identifier.name});
+                    log.debug("WARNING: Constant '{s}' declaration not found\n", .{identifier.name});
                 }
             }
         }
 
         if (st.lookupType(identifier.name)) |type_symbol| {
-            std.debug.print("[lowerIdentifier] Found type: {s}, type_kind: {any}\n", .{ identifier.name, type_symbol.type_kind });
+            log.debug("[lowerIdentifier] Found type: {s}, type_kind: {any}\n", .{ identifier.name, type_symbol.type_kind });
             const type_val = c.mlirIntegerTypeGet(self.ctx, constants.DEFAULT_INTEGER_BITS);
             const zero_const = c.mlirIntegerTypeGet(self.ctx, constants.DEFAULT_INTEGER_BITS);
             var state = h.opState("arith.constant", self.fileLoc(identifier.span));
@@ -185,7 +186,7 @@ pub fn lowerIdentifier(
 
     // if identifier is still undefined, return error placeholder instead of panicking
     // this allows compilation to continue and report errors more gracefully
-    std.debug.print("ERROR: Undefined identifier '{s}' at {d}:{d}\n", .{ identifier.name, identifier.span.line, identifier.span.column });
+    log.debug("ERROR: Undefined identifier '{s}' at {d}:{d}\n", .{ identifier.name, identifier.span.line, identifier.span.column });
     return self.createErrorPlaceholder(identifier.span, "Undefined identifier");
 }
 
@@ -207,11 +208,11 @@ pub fn lowerIndex(
         // try to get the result type from the target's AST type info if it's an identifier
         if (index.target.* == .Identifier) {
             const ident = index.target.Identifier;
-            std.debug.print("[lowerIndex] Target is identifier: {s}\n", .{ident.name});
+            log.debug("[lowerIndex] Target is identifier: {s}\n", .{ident.name});
             if (ident.type_info.ora_type) |ora_type| {
-                std.debug.print("[lowerIndex] Identifier has ora_type\n", .{});
+                log.debug("[lowerIndex] Identifier has ora_type\n", .{});
                 if (ora_type == .map) {
-                    std.debug.print("[lowerIndex] Type is map, extracting value type\n", .{});
+                    log.debug("[lowerIndex] Type is map, extracting value type\n", .{});
                     // extract the value type from the map type
                     const value_ora_type = ora_type.map.value.*;
                     const value_type_info = lib.ast.Types.TypeInfo{
@@ -227,38 +228,38 @@ pub fn lowerIndex(
                         .span = null,
                     };
                     result_type = self.type_mapper.toMlirType(value_type_info);
-                    std.debug.print("[lowerIndex] Extracted result_type from AST\n", .{});
+                    log.debug("[lowerIndex] Extracted result_type from AST\n", .{});
                 }
             }
         }
 
         // fallback to extracting from MLIR map type
         if (result_type == null) {
-            std.debug.print("[lowerIndex] Falling back to MLIR map type extraction\n", .{});
-            std.debug.print("[lowerIndex] Target MLIR type: {any}\n", .{target_type});
+            log.debug("[lowerIndex] Falling back to MLIR map type extraction\n", .{});
+            log.debug("[lowerIndex] Target MLIR type: {any}\n", .{target_type});
             const extracted_value_type = c.oraMapTypeGetValueType(target_type);
             if (extracted_value_type.ptr != null) {
-                std.debug.print("[lowerIndex] Extracted value type from MLIR map type: {any}\n", .{extracted_value_type});
+                log.debug("[lowerIndex] Extracted value type from MLIR map type: {any}\n", .{extracted_value_type});
                 result_type = extracted_value_type;
             } else {
-                std.debug.print("[lowerIndex] WARNING: Could not extract value type from MLIR map type\n", .{});
+                log.debug("[lowerIndex] WARNING: Could not extract value type from MLIR map type\n", .{});
             }
         }
 
         // debug: Print what result_type we're using
         if (result_type) |rt| {
-            std.debug.print("[lowerIndex] Final result_type for map_get: {any}\n", .{rt});
+            log.debug("[lowerIndex] Final result_type for map_get: {any}\n", .{rt});
         } else {
-            std.debug.print("[lowerIndex] WARNING: result_type is null, will use fallback\n", .{});
+            log.debug("[lowerIndex] WARNING: result_type is null, will use fallback\n", .{});
         }
 
         // verify the map type's value type matches our expected result_type
         const map_value_type = c.oraMapTypeGetValueType(target_type);
         if (map_value_type.ptr != null) {
-            std.debug.print("[lowerIndex] Map type's value type: {any}\n", .{map_value_type});
+            log.debug("[lowerIndex] Map type's value type: {any}\n", .{map_value_type});
             if (result_type) |rt| {
                 if (!c.mlirTypeEqual(map_value_type, rt)) {
-                    std.debug.print("[lowerIndex] WARNING: Map value type {any} doesn't match expected result_type {any}\n", .{ map_value_type, rt });
+                    log.debug("[lowerIndex] WARNING: Map value type {any} doesn't match expected result_type {any}\n", .{ map_value_type, rt });
                 }
             }
         }
@@ -394,7 +395,7 @@ pub fn createPseudoFieldAccess(
     if (std.mem.eql(u8, field_name, "length")) {
         return createLengthAccess(self, target, span);
     } else {
-        std.debug.print("WARNING: Unknown pseudo-field '{s}'\n", .{field_name});
+        log.debug("WARNING: Unknown pseudo-field '{s}'\n", .{field_name});
         return self.createErrorPlaceholder(span, "Unknown pseudo-field");
     }
 }
@@ -589,7 +590,7 @@ pub fn createMapIndexLoad(
         // try to extract value type - if it fails, it's likely a tensor, not a map
         const test_value_type = c.oraMapTypeGetValueType(map_type_check);
         if (test_value_type.ptr == null) {
-            std.debug.print("ERROR: createMapIndexLoad called on tensor/shaped type - should use tensor.extract instead\n", .{});
+            log.debug("ERROR: createMapIndexLoad called on tensor/shaped type - should use tensor.extract instead\n", .{});
             return self.reportLoweringError(
                 span,
                 "cannot use ora.map_get on tensor - use tensor.extract",
@@ -600,31 +601,31 @@ pub fn createMapIndexLoad(
 
     var result_ty: c.MlirType = undefined;
     if (result_type) |ty| {
-        std.debug.print("[createMapIndexLoad] Using provided result_type\n", .{});
+        log.debug("[createMapIndexLoad] Using provided result_type\n", .{});
         result_ty = ty;
     } else {
-        std.debug.print("[createMapIndexLoad] Extracting value type from map type\n", .{});
+        log.debug("[createMapIndexLoad] Extracting value type from map type\n", .{});
         const map_type = c.mlirValueGetType(map);
         const extracted_value_type = c.oraMapTypeGetValueType(map_type);
         if (extracted_value_type.ptr != null) {
-            std.debug.print("[createMapIndexLoad] Extracted value type from map\n", .{});
+            log.debug("[createMapIndexLoad] Extracted value type from map\n", .{});
             result_ty = extracted_value_type;
         } else {
-            std.debug.print("WARNING: createMapIndexLoad: Could not extract value type from map, defaulting to i256.\n", .{});
+            log.debug("WARNING: createMapIndexLoad: Could not extract value type from map, defaulting to i256.\n", .{});
             result_ty = c.mlirIntegerTypeGet(self.ctx, constants.DEFAULT_INTEGER_BITS);
         }
     }
-    std.debug.print("[createMapIndexLoad] Creating ora.map_get with result_type: {any}\n", .{result_ty});
+    log.debug("[createMapIndexLoad] Creating ora.map_get with result_type: {any}\n", .{result_ty});
 
     // verify map type's value type matches our expected result_type
     const map_type_verify = c.mlirValueGetType(map);
     const map_value_type = c.oraMapTypeGetValueType(map_type_verify);
     if (map_value_type.ptr != null) {
-        std.debug.print("[createMapIndexLoad] Map type's value type: {any}\n", .{map_value_type});
+        log.debug("[createMapIndexLoad] Map type's value type: {any}\n", .{map_value_type});
         if (!c.mlirTypeEqual(map_value_type, result_ty)) {
-            std.debug.print("[createMapIndexLoad] ERROR: Map value type {any} doesn't match expected result_type {any}\n", .{ map_value_type, result_ty });
-            std.debug.print("[createMapIndexLoad] This will cause ora.map_get to return the wrong type!\n", .{});
-            std.debug.print("[createMapIndexLoad] Using map_value_type instead of result_type to avoid type mismatch\n", .{});
+            log.debug("[createMapIndexLoad] ERROR: Map value type {any} doesn't match expected result_type {any}\n", .{ map_value_type, result_ty });
+            log.debug("[createMapIndexLoad] This will cause ora.map_get to return the wrong type!\n", .{});
+            log.debug("[createMapIndexLoad] Using map_value_type instead of result_type to avoid type mismatch\n", .{});
             // use the map's value type instead of the expected result_type to avoid type mismatch
             result_ty = map_value_type;
         }
@@ -634,12 +635,12 @@ pub fn createMapIndexLoad(
     h.appendOp(self.block, op);
     const result = h.getResult(op, 0);
     const actual_result_type = c.mlirValueGetType(result);
-    std.debug.print("[createMapIndexLoad] ora.map_get created, actual result type: {any}\n", .{actual_result_type});
+    log.debug("[createMapIndexLoad] ora.map_get created, actual result type: {any}\n", .{actual_result_type});
 
     // check if map_get returned the wrong type
     if (!c.mlirTypeEqual(actual_result_type, result_ty)) {
-        std.debug.print("[createMapIndexLoad] ERROR: map_get returned {any} but we requested {any}\n", .{ actual_result_type, result_ty });
-        std.debug.print("[createMapIndexLoad] This is a bug - ora.map_get should respect the result_type parameter\n", .{});
+        log.debug("[createMapIndexLoad] ERROR: map_get returned {any} but we requested {any}\n", .{ actual_result_type, result_ty });
+        log.debug("[createMapIndexLoad] This is a bug - ora.map_get should respect the result_type parameter\n", .{});
         // for now, return the result as-is - the type system will catch this error later
     }
 

@@ -37,7 +37,6 @@ void SIRNamingHelper::nameMalloc(Operation *op, unsigned resultIndex, Context ct
         name = "ret_ptr";
         break;
     case Context::General:
-    default:
         name = "base";
         break;
     }
@@ -242,4 +241,3 @@ unsigned SIRNamingHelper::getNextIndexNum()
 {
     return nextIndexNum++;
 }
-

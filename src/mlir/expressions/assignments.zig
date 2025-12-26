@@ -14,6 +14,7 @@ const OraDialect = @import("../dialect.zig").OraDialect;
 const expr_helpers = @import("helpers.zig");
 const expr_access = @import("access.zig");
 const expr_operators = @import("operators.zig");
+const log = @import("log");
 
 /// ExpressionLowerer type (forward declaration)
 const ExpressionLowerer = @import("mod.zig").ExpressionLowerer;
@@ -40,18 +41,18 @@ pub fn lowerAssignment(
                     if (c.mlirTypeIsAMemRef(var_type)) {
                         const element_type = c.mlirShapedTypeGetElementType(var_type);
                         const value_type = c.mlirValueGetType(value);
-                        std.debug.print("[ASSIGN Expression] Variable: {s}, value_type != element_type: {}, value_is_ora: {}, element_is_ora: {}\n", .{ ident.name, !c.mlirTypeEqual(value_type, element_type), c.oraTypeIsIntegerType(value_type), c.oraTypeIsIntegerType(element_type) });
+                        log.debug("[ASSIGN Expression] Variable: {s}, value_type != element_type: {}, value_is_ora: {}, element_is_ora: {}\n", .{ ident.name, !c.mlirTypeEqual(value_type, element_type), c.oraTypeIsIntegerType(value_type), c.oraTypeIsIntegerType(element_type) });
                         if (!c.mlirTypeEqual(value_type, element_type)) {
-                            std.debug.print("[ASSIGN Expression] Converting (types not equal)\n", .{});
+                            log.debug("[ASSIGN Expression] Converting (types not equal)\n", .{});
                             store_value = self.convertToType(value, element_type, assign.span);
                         } else if (c.oraTypeIsIntegerType(value_type) and c.oraTypeIsIntegerType(element_type)) {
-                            std.debug.print("[ASSIGN Expression] Converting (Ora types, explicit cast)\n", .{});
+                            log.debug("[ASSIGN Expression] Converting (Ora types, explicit cast)\n", .{});
                             store_value = self.convertToType(value, element_type, assign.span);
                         } else {
-                            std.debug.print("[ASSIGN Expression] No conversion needed\n", .{});
+                            log.debug("[ASSIGN Expression] No conversion needed\n", .{});
                         }
                         const store_value_type = c.mlirValueGetType(store_value);
-                        std.debug.print("[ASSIGN Expression] After conversion: types_equal: {}\n", .{c.mlirTypeEqual(store_value_type, element_type)});
+                        log.debug("[ASSIGN Expression] After conversion: types_equal: {}\n", .{c.mlirTypeEqual(store_value_type, element_type)});
                     }
                     var store_state = h.opState("memref.store", self.fileLoc(assign.span));
                     c.mlirOperationStateAddOperands(&store_state, 2, @ptrCast(&[_]c.MlirValue{ store_value, local_var_ref }));
@@ -95,15 +96,15 @@ pub fn lowerAssignment(
                         const expected_struct_type = self.type_mapper.toMlirType(ident.type_info);
 
                         if (c.oraTypeIsAddressType(target_type)) {
-                            std.debug.print(
+                            log.debug(
                                 "ERROR [lowerAssignment]: Variable '{s}' is address type but should be struct type for field access\n",
                                 .{ident.name},
                             );
-                            std.debug.print(
+                            log.debug(
                                 "  This likely means a map load returned !ora.address instead of the struct type\n",
                                 .{},
                             );
-                            std.debug.print("  Expected struct type: {any}\n", .{expected_struct_type});
+                            log.debug("  Expected struct type: {any}\n", .{expected_struct_type});
                             return self.reportLoweringError(
                                 assign.span,
                                 "cannot update field on address type - map load returned wrong type",
@@ -112,12 +113,12 @@ pub fn lowerAssignment(
                         }
 
                         if (!c.mlirTypeEqual(target_type, expected_struct_type)) {
-                            std.debug.print(
+                            log.debug(
                                 "ERROR [lowerAssignment]: Variable '{s}' should be struct type but got: {any}\n",
                                 .{ ident.name, target_type },
                             );
-                            std.debug.print("  Expected struct type: {any}\n", .{expected_struct_type});
-                            std.debug.print(
+                            log.debug("  Expected struct type: {any}\n", .{expected_struct_type});
+                            log.debug(
                                 "  This likely means a map load returned wrong type instead of the struct type\n",
                                 .{},
                             );
@@ -131,11 +132,11 @@ pub fn lowerAssignment(
                 }
             } else {
                 if (c.oraTypeIsAddressType(target_type)) {
-                    std.debug.print(
+                    log.debug(
                         "ERROR [lowerAssignment]: Field access target is address type but should be struct type\n",
                         .{},
                     );
-                    std.debug.print(
+                    log.debug(
                         "  This likely means a map load returned !ora.address instead of the struct type\n",
                         .{},
                     );
@@ -173,7 +174,7 @@ pub fn lowerAssignment(
             return value;
         },
         else => {
-            std.debug.print("ERROR: Invalid assignment target\n", .{});
+            log.err("Invalid assignment target\n", .{});
             return value;
         },
     }
@@ -255,7 +256,7 @@ pub fn lowerLValue(
             }
         },
         else => blk: {
-            std.debug.print("ERROR: Invalid lvalue expression type\n", .{});
+            log.err("Invalid lvalue expression type\n", .{});
             break :blk self.createErrorPlaceholder(lib.ast.SourceSpan{ .line = 0, .column = 0, .length = 0, .byte_offset = 0 }, "Invalid lvalue");
         },
     };
@@ -277,18 +278,18 @@ pub fn storeLValue(
                     if (c.mlirTypeIsAMemRef(var_type)) {
                         const element_type = c.mlirShapedTypeGetElementType(var_type);
                         const value_type = c.mlirValueGetType(value);
-                        std.debug.print("[storeLValue] Variable: {s}, value_type != element_type: {}, value_is_ora: {}, element_is_ora: {}\n", .{ ident.name, !c.mlirTypeEqual(value_type, element_type), c.oraTypeIsIntegerType(value_type), c.oraTypeIsIntegerType(element_type) });
+                        log.debug("[storeLValue] Variable: {s}, value_type != element_type: {}, value_is_ora: {}, element_is_ora: {}\n", .{ ident.name, !c.mlirTypeEqual(value_type, element_type), c.oraTypeIsIntegerType(value_type), c.oraTypeIsIntegerType(element_type) });
                         if (!c.mlirTypeEqual(value_type, element_type)) {
-                            std.debug.print("[storeLValue] Converting (types not equal)\n", .{});
+                            log.debug("[storeLValue] Converting (types not equal)\n", .{});
                             store_value = self.convertToType(value, element_type, span);
                         } else if (c.oraTypeIsIntegerType(value_type) and c.oraTypeIsIntegerType(element_type)) {
-                            std.debug.print("[storeLValue] Converting (Ora types, explicit cast)\n", .{});
+                            log.debug("[storeLValue] Converting (Ora types, explicit cast)\n", .{});
                             store_value = self.convertToType(value, element_type, span);
                         } else {
-                            std.debug.print("[storeLValue] No conversion needed\n", .{});
+                            log.debug("[storeLValue] No conversion needed\n", .{});
                         }
                         const store_value_type = c.mlirValueGetType(store_value);
-                        std.debug.print("[storeLValue] After conversion: types_equal: {}\n", .{c.mlirTypeEqual(store_value_type, element_type)});
+                        log.debug("[storeLValue] After conversion: types_equal: {}\n", .{c.mlirTypeEqual(store_value_type, element_type)});
                     }
                     var store_state = h.opState("memref.store", self.fileLoc(span));
                     c.mlirOperationStateAddOperands(&store_state, 2, @ptrCast(&[_]c.MlirValue{ store_value, local_var_ref }));
@@ -307,7 +308,7 @@ pub fn storeLValue(
                 }
             }
 
-            std.debug.print("ERROR: Cannot store to undefined variable: {s}\n", .{ident.name});
+            log.err("Cannot store to undefined variable: {s}\n", .{ident.name});
         },
         .FieldAccess => |field| {
             const target_val = self.lowerExpression(field.target);
@@ -320,15 +321,15 @@ pub fn storeLValue(
                         const expected_struct_type = self.type_mapper.toMlirType(ident.type_info);
 
                         if (c.oraTypeIsAddressType(target_type)) {
-                            std.debug.print(
+                            log.debug(
                                 "ERROR [storeLValue]: Variable '{s}' is address type but should be struct type for field access\n",
                                 .{ident.name},
                             );
-                            std.debug.print(
+                            log.debug(
                                 "  This likely means a map load returned !ora.address instead of the struct type\n",
                                 .{},
                             );
-                            std.debug.print("  Expected struct type: {any}\n", .{expected_struct_type});
+                            log.debug("  Expected struct type: {any}\n", .{expected_struct_type});
                             _ = self.reportLoweringError(
                                 span,
                                 "cannot update field on address type - map load returned wrong type",
@@ -338,12 +339,12 @@ pub fn storeLValue(
                         }
 
                         if (!c.mlirTypeEqual(target_type, expected_struct_type)) {
-                            std.debug.print(
+                            log.debug(
                                 "ERROR [storeLValue]: Variable '{s}' should be struct type but got: {any}\n",
                                 .{ ident.name, target_type },
                             );
-                            std.debug.print("  Expected struct type: {any}\n", .{expected_struct_type});
-                            std.debug.print(
+                            log.debug("  Expected struct type: {any}\n", .{expected_struct_type});
+                            log.debug(
                                 "  This likely means a map load returned wrong type instead of the struct type\n",
                                 .{},
                             );
@@ -358,11 +359,11 @@ pub fn storeLValue(
                 }
             } else {
                 if (c.oraTypeIsAddressType(target_type)) {
-                    std.debug.print(
+                    log.debug(
                         "ERROR [storeLValue]: Field access target is address type but should be struct type\n",
                         .{},
                     );
-                    std.debug.print(
+                    log.debug(
                         "  This likely means a map load returned !ora.address instead of the struct type\n",
                         .{},
                     );
@@ -398,7 +399,7 @@ pub fn storeLValue(
             }
         },
         else => {
-            std.debug.print("ERROR: Invalid lvalue for assignment\n", .{});
+            log.err("Invalid lvalue for assignment\n", .{});
         },
     }
 }

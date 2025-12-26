@@ -12,6 +12,7 @@ const TypeMapper = @import("../types.zig").TypeMapper;
 const LocationTracker = @import("../locations.zig").LocationTracker;
 const OraDialect = @import("../dialect.zig").OraDialect;
 const expr_helpers = @import("helpers.zig");
+const log = @import("log");
 
 /// Lower literal expressions
 pub fn lowerLiteral(
@@ -54,14 +55,14 @@ fn lowerIntegerLiteral(
         if (char < '0' or char > '9') continue;
 
         if (digit_count >= 78) {
-            std.debug.print("ERROR: Integer literal '{s}' is too large for u256\n", .{int.value});
+            log.err("Integer literal '{s}' is too large for u256\n", .{int.value});
             parsed = 0;
             break;
         }
 
         const mul_overflow = @mulWithOverflow(parsed, 10);
         if (mul_overflow[1] != 0) {
-            std.debug.print("ERROR: Integer literal '{s}' overflow during multiplication\n", .{int.value});
+            log.err("Integer literal '{s}' overflow during multiplication\n", .{int.value});
             parsed = 0;
             break;
         }
@@ -70,7 +71,7 @@ fn lowerIntegerLiteral(
         const digit_value = char - '0';
         const add_overflow = @addWithOverflow(parsed, digit_value);
         if (add_overflow[1] != 0) {
-            std.debug.print("ERROR: Integer literal '{s}' overflow during addition\n", .{int.value});
+            log.err("Integer literal '{s}' overflow during addition\n", .{int.value});
             parsed = 0;
             break;
         }
@@ -97,7 +98,7 @@ fn lowerIntegerLiteral(
         const attr = c.oraIntegerAttrGetFromString(ty, value_str_ref);
 
         if (c.mlirAttributeIsNull(attr)) {
-            std.debug.print("ERROR: Failed to create integer attribute from string '{s}'\n", .{int.value});
+            log.err("Failed to create integer attribute from string '{s}'\n", .{int.value});
             const fallback_attr = c.mlirIntegerAttrGet(ty, 0);
             const value_id = h.identifier(ctx, "value");
             const gas_cost_attr = c.mlirIntegerAttrGet(c.mlirIntegerTypeGet(ctx, 64), 0);
@@ -171,12 +172,12 @@ fn lowerAddressLiteral(
         addr_lit.value;
 
     if (addr_str.len != 40) {
-        std.debug.print("ERROR: Invalid address length '{d}' (expected 40 hex characters): {s}\n", .{ addr_str.len, addr_lit.value });
+        log.err("Invalid address length '{d}' (expected 40 hex characters): {s}\n", .{ addr_str.len, addr_lit.value });
     }
 
     for (addr_str) |char| {
         if (!((char >= '0' and char <= '9') or (char >= 'a' and char <= 'f') or (char >= 'A' and char <= 'F'))) {
-            std.debug.print("ERROR: Invalid hex character '{c}' in address '{s}'\n", .{ char, addr_lit.value });
+            log.err("Invalid hex character '{c}' in address '{s}'\n", .{ char, addr_lit.value });
             break;
         }
     }
@@ -209,7 +210,7 @@ fn lowerAddressLiteral(
     } else {
         var decimal_buf: [80]u8 = undefined;
         const decimal_str = std.fmt.bufPrint(&decimal_buf, "{}", .{parsed}) catch {
-            std.debug.print("ERROR: Failed to format address as decimal\n", .{});
+            log.err("Failed to format address as decimal\n", .{});
             const fallback_attr = c.mlirIntegerAttrGet(i160_ty, 0);
             const value_id = h.identifier(ctx, "value");
             const gas_cost_attr = c.mlirIntegerAttrGet(c.mlirIntegerTypeGet(ctx, 64), 0);
@@ -227,7 +228,7 @@ fn lowerAddressLiteral(
         const attr = c.oraIntegerAttrGetFromString(i160_ty, addr_str_ref);
 
         if (c.mlirAttributeIsNull(attr)) {
-            std.debug.print("ERROR: Failed to create address attribute from string '{s}'\n", .{addr_lit.value});
+            log.err("Failed to create address attribute from string '{s}'\n", .{addr_lit.value});
             const fallback_attr = c.mlirIntegerAttrGet(i160_ty, 0);
             const value_id = h.identifier(ctx, "value");
             const gas_cost_attr = c.mlirIntegerAttrGet(c.mlirIntegerTypeGet(ctx, 64), 0);
@@ -288,17 +289,17 @@ fn lowerBinaryLiteral(
 
     for (bin_str) |char| {
         if (char != '0' and char != '1') {
-            std.debug.print("ERROR: Invalid binary character '{c}' in binary literal '{s}'\n", .{ char, bin_lit.value });
+            log.err("Invalid binary character '{c}' in binary literal '{s}'\n", .{ char, bin_lit.value });
             break;
         }
     }
 
     if (bin_str.len > 64) {
-        std.debug.print("WARNING: Binary literal '{s}' may overflow i64 (length: {d})\n", .{ bin_lit.value, bin_str.len });
+        log.warn("Binary literal '{s}' may overflow i64 (length: {d})\n", .{ bin_lit.value, bin_str.len });
     }
 
     const parsed: i64 = std.fmt.parseInt(i64, bin_str, 2) catch |err| blk: {
-        std.debug.print("ERROR: Failed to parse binary literal '{s}': {s}\n", .{ bin_lit.value, @errorName(err) });
+        log.err("Failed to parse binary literal '{s}': {s}\n", .{ bin_lit.value, @errorName(err) });
         break :blk 0;
     };
     const attr = c.mlirIntegerAttrGet(ty, parsed);
@@ -332,7 +333,7 @@ fn lowerCharacterLiteral(
     const loc = locations.createLocation(char_lit.span);
 
     if (char_lit.value > 127) {
-        std.debug.print("ERROR: Invalid character value '{d}' (not ASCII)\n", .{char_lit.value});
+        log.err("Invalid character value '{d}' (not ASCII)\n", .{char_lit.value});
         return expr_helpers.createConstant(ctx, block, ora_dialect, locations, 0, char_lit.span);
     }
 
@@ -362,19 +363,19 @@ fn lowerBytesLiteral(
         bytes_lit.value;
 
     if (bytes_str.len % 2 != 0) {
-        std.debug.print("ERROR: Invalid bytes length '{d}' (must be even number of hex digits): {s}\n", .{ bytes_str.len, bytes_lit.value });
+        log.err("Invalid bytes length '{d}' (must be even number of hex digits): {s}\n", .{ bytes_str.len, bytes_lit.value });
         return expr_helpers.createConstant(ctx, block, ora_dialect, locations, 0, bytes_lit.span);
     }
 
     for (bytes_str) |char| {
         if (!((char >= '0' and char <= '9') or (char >= 'a' and char <= 'f') or (char >= 'A' and char <= 'F'))) {
-            std.debug.print("ERROR: Invalid hex character '{c}' in bytes '{s}'\n", .{ char, bytes_lit.value });
+            log.err("Invalid hex character '{c}' in bytes '{s}'\n", .{ char, bytes_lit.value });
             return expr_helpers.createConstant(ctx, block, ora_dialect, locations, 0, bytes_lit.span);
         }
     }
 
     const parsed: i64 = std.fmt.parseInt(i64, bytes_str, 16) catch |err| {
-        std.debug.print("ERROR: Failed to parse bytes literal '{s}': {s}\n", .{ bytes_lit.value, @errorName(err) });
+        log.err("Failed to parse bytes literal '{s}': {s}\n", .{ bytes_lit.value, @errorName(err) });
         return expr_helpers.createConstant(ctx, block, ora_dialect, locations, 0, bytes_lit.span);
     };
 

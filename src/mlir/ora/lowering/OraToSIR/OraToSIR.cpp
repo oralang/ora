@@ -942,9 +942,8 @@ namespace mlir
                     funcPM.addPass(mlir::createCanonicalizerPass());
                     DBG("  Added canonicalize pass");
                     
-                    // Then run DCE to remove dead code
-                    funcPM.addPass(mlir::createRemoveDeadValuesPass());
-                    DBG("  Added remove-dead-values pass");
+                    // DCE is temporarily disabled because it can invalidate
+                    // func.call operands in Ora IR, producing null operands.
                     
                     // Run the pass manager on this function
                     if (failed(runPipeline(funcPM, funcOp)))

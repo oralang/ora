@@ -15,6 +15,7 @@ const std = @import("std");
 const lib = @import("ora_lib");
 const build_options = @import("build_options");
 const cli_args = @import("cli/args.zig");
+const log = @import("log");
 const ManagedArrayList = std.array_list.Managed;
 
 /// MLIR-related command line options
@@ -84,7 +85,10 @@ pub fn main() !void {
     const canonicalize_mlir: bool = parsed.canonicalize_mlir;
     const analyze_state: bool = parsed.analyze_state;
     const verify_z3: bool = parsed.verify_z3;
+    const debug_enabled: bool = parsed.debug;
     const mlir_opt_level: ?[]const u8 = parsed.mlir_opt_level;
+
+    log.setDebugEnabled(debug_enabled);
 
     // require input file
     if (input_file == null) {
@@ -179,6 +183,7 @@ fn printUsage() !void {
     try stdout.print("\nAnalysis Options:\n", .{});
     try stdout.print("  --analyze-state        - Analyze storage reads/writes per function\n", .{});
     try stdout.print("  --verify               - Run Z3 verification on MLIR annotations\n", .{});
+    try stdout.print("  --debug                - Enable compiler debug output\n", .{});
     try stdout.flush();
 }
 
@@ -789,11 +794,6 @@ fn generateMlirOutput(allocator: std.mem.Allocator, ast_nodes: []lib.AstNode, fi
 
     // output Ora MLIR (after canonicalization, before conversion)
     if (mlir_options.emit_mlir) {
-        try stdout.print("//===----------------------------------------------------------------------===//\n", .{});
-        try stdout.print("// Ora MLIR (after canonicalization, before conversion)\n", .{});
-        try stdout.print("//===----------------------------------------------------------------------===//\n\n", .{});
-        try stdout.flush();
-
         const module_op_ora = c.mlirModuleGetOperation(lowering_result.module);
         const mlir_str_ora = c.oraPrintOperation(h.ctx, module_op_ora);
         defer if (mlir_str_ora.data != null) {

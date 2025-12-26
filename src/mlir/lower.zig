@@ -22,6 +22,7 @@
 const std = @import("std");
 const lib = @import("ora_lib");
 const c = @import("mlir_c_api").c;
+const log = @import("log");
 pub const LocationTracker = @import("locations.zig").LocationTracker;
 const FunctionEffect = lib.semantics.state.FunctionEffect;
 
@@ -258,7 +259,7 @@ pub const SymbolTable = struct {
             .Calldata => "calldata",
             .Stack => "stack",
         };
-        std.debug.print("[addSymbol] Adding symbol: {s}, variable_kind: {any}, scope: {}\n", .{ name, variable_kind, self.current_scope });
+        log.debug("[addSymbol] Adding symbol: {s}, variable_kind: {any}, scope: {}\n", .{ name, variable_kind, self.current_scope });
         const symbol_info = SymbolInfo{
             .name = name,
             .type = type_info,
@@ -270,7 +271,7 @@ pub const SymbolTable = struct {
         };
 
         try self.scopes.items[self.current_scope].put(name, symbol_info);
-        std.debug.print("[addSymbol] Symbol added successfully: {s}, stored variable_kind: {any}\n", .{ name, symbol_info.variable_kind });
+        log.debug("[addSymbol] Symbol added successfully: {s}, stored variable_kind: {any}\n", .{ name, symbol_info.variable_kind });
     }
 
     /// Add a parameter symbol to the current scope
@@ -346,13 +347,13 @@ pub const SymbolTable = struct {
         var scope_idx: usize = self.current_scope;
         while (true) {
             if (self.scopes.items[scope_idx].get(name)) |symbol| {
-                std.debug.print("[lookupSymbol] Found symbol: {s} in scope {}, symbol_kind: {s}, variable_kind: {any}\n", .{ name, scope_idx, @tagName(symbol.symbol_kind), symbol.variable_kind });
+                log.debug("[lookupSymbol] Found symbol: {s} in scope {}, symbol_kind: {s}, variable_kind: {any}\n", .{ name, scope_idx, @tagName(symbol.symbol_kind), symbol.variable_kind });
                 return symbol;
             }
             if (scope_idx == 0) break;
             scope_idx -= 1;
         }
-        std.debug.print("[lookupSymbol] Symbol not found: {s}\n", .{name});
+        log.debug("[lookupSymbol] Symbol not found: {s}\n", .{name});
         return null;
     }
 
@@ -361,10 +362,10 @@ pub const SymbolTable = struct {
         var scope_idx: usize = self.current_scope;
         while (true) {
             if (self.scopes.items[scope_idx].get(name)) |symbol| {
-                std.debug.print("[updateSymbolValue] Found symbol: {s} in scope {}, variable_kind before: {any}\n", .{ name, scope_idx, symbol.variable_kind });
+                log.debug("[updateSymbolValue] Found symbol: {s} in scope {}, variable_kind before: {any}\n", .{ name, scope_idx, symbol.variable_kind });
                 var updated_symbol = symbol;
                 updated_symbol.value = value;
-                std.debug.print("[updateSymbolValue] variable_kind after: {any}\n", .{updated_symbol.variable_kind});
+                log.debug("[updateSymbolValue] variable_kind after: {any}\n", .{updated_symbol.variable_kind});
                 try self.scopes.items[scope_idx].put(name, updated_symbol);
                 return;
             }
@@ -372,7 +373,7 @@ pub const SymbolTable = struct {
             scope_idx -= 1;
         }
         // if symbol not found, add it to current scope
-        std.debug.print("[updateSymbolValue] WARNING: Symbol not found: {s}, adding new symbol with variable_kind=null\n", .{name});
+        log.debug("[updateSymbolValue] WARNING: Symbol not found: {s}, adding new symbol with variable_kind=null\n", .{name});
         try self.addSymbol(name, c.mlirValueGetType(value), lib.ast.Statements.MemoryRegion.Stack, null, null);
         if (self.scopes.items[self.current_scope].get(name)) |symbol| {
             var updated_symbol = symbol;
@@ -580,7 +581,7 @@ pub fn lowerFunctionsToModuleWithSemanticTable(ctx: c.MlirContext, nodes: []lib.
 
     // create builtin registry for standard library functions
     var builtin_registry = lib.semantics.builtins.BuiltinRegistry.init(allocator) catch {
-        std.debug.print("FATAL: Failed to initialize builtin registry\n", .{});
+        log.debug("FATAL: Failed to initialize builtin registry\n", .{});
         @panic("Builtin registry initialization failed");
     };
     defer builtin_registry.deinit();
@@ -632,10 +633,10 @@ pub fn lowerFunctionsToModuleWithSemanticTable(ctx: c.MlirContext, nodes: []lib.
                     }
                 },
                 .Stack => {
-                    std.debug.print("WARNING: stack variable at module level: {s}\n", .{var_decl.name});
+                    log.debug("WARNING: stack variable at module level: {s}\n", .{var_decl.name});
                 },
                 .Calldata => {
-                    std.debug.print("WARNING: calldata variable at module level: {s}\n", .{var_decl.name});
+                    log.debug("WARNING: calldata variable at module level: {s}\n", .{var_decl.name});
                 },
             }
         }
@@ -831,7 +832,7 @@ pub fn lowerFunctionsToModuleWithErrors(ctx: c.MlirContext, nodes: []lib.AstNode
 
     // create builtin registry for standard library functions
     var builtin_registry = lib.semantics.builtins.BuiltinRegistry.init(allocator) catch {
-        std.debug.print("FATAL: Failed to initialize builtin registry\n", .{});
+        log.debug("FATAL: Failed to initialize builtin registry\n", .{});
         @panic("Builtin registry initialization failed");
     };
     defer builtin_registry.deinit();
@@ -864,7 +865,7 @@ pub fn lowerFunctionsToModuleWithErrors(ctx: c.MlirContext, nodes: []lib.AstNode
 
                         // allocate variant info array directly
                         const variants_slice = allocator.alloc(@import("lower.zig").TypeSymbol.VariantInfo, enum_decl.variants.len) catch {
-                            std.debug.print("ERROR: Failed to allocate variants slice for enum: {s}\n", .{enum_decl.name});
+                            log.debug("ERROR: Failed to allocate variants slice for enum: {s}\n", .{enum_decl.name});
                             continue;
                         };
 
@@ -879,7 +880,7 @@ pub fn lowerFunctionsToModuleWithErrors(ctx: c.MlirContext, nodes: []lib.AstNode
 
                         // check if type already exists before allocating
                         if (symbol_table.lookupType(enum_decl.name)) |_| {
-                            std.debug.print("WARNING: Duplicate enum type: {s}, skipping\n", .{enum_decl.name});
+                            log.debug("WARNING: Duplicate enum type: {s}, skipping\n", .{enum_decl.name});
                             allocator.free(variants_slice);
                             continue;
                         }
@@ -896,7 +897,7 @@ pub fn lowerFunctionsToModuleWithErrors(ctx: c.MlirContext, nodes: []lib.AstNode
                         symbol_table.addType(enum_decl.name, type_symbol) catch {
                             // free the variants_slice if addType fails
                             allocator.free(variants_slice);
-                            std.debug.print("ERROR: Failed to register enum type: {s}\n", .{enum_decl.name});
+                            log.debug("ERROR: Failed to register enum type: {s}\n", .{enum_decl.name});
                         };
                     }
                 }
@@ -916,7 +917,7 @@ pub fn lowerFunctionsToModuleWithErrors(ctx: c.MlirContext, nodes: []lib.AstNode
 
                         // allocate field info array directly
                         const fields_slice = allocator.alloc(@import("lower.zig").TypeSymbol.FieldInfo, struct_decl.fields.len) catch {
-                            std.debug.print("ERROR: Failed to allocate fields slice for struct: {s}\n", .{struct_decl.name});
+                            log.debug("ERROR: Failed to allocate fields slice for struct: {s}\n", .{struct_decl.name});
                             continue;
                         };
 
@@ -941,7 +942,7 @@ pub fn lowerFunctionsToModuleWithErrors(ctx: c.MlirContext, nodes: []lib.AstNode
 
                         // check if type already exists before allocating
                         if (symbol_table.lookupType(struct_decl.name)) |_| {
-                            std.debug.print("WARNING: Duplicate struct type: {s}, skipping\n", .{struct_decl.name});
+                            log.debug("WARNING: Duplicate struct type: {s}, skipping\n", .{struct_decl.name});
                             allocator.free(fields_slice);
                             continue;
                         }
@@ -958,7 +959,7 @@ pub fn lowerFunctionsToModuleWithErrors(ctx: c.MlirContext, nodes: []lib.AstNode
                         symbol_table.addType(struct_decl.name, type_symbol) catch {
                             // free the fields_slice if addType fails
                             allocator.free(fields_slice);
-                            std.debug.print("ERROR: Failed to register struct type: {s}\n", .{struct_decl.name});
+                            log.debug("ERROR: Failed to register struct type: {s}\n", .{struct_decl.name});
                         };
                     }
                 }
@@ -1084,6 +1085,10 @@ pub fn lowerFunctionsToModuleWithErrors(ctx: c.MlirContext, nodes: []lib.AstNode
                         // stack variables at module level are not allowed
                         try error_handler.reportError(.InvalidMemoryRegion, var_decl.span, "stack variables are not allowed at module level", "use 'storage', 'memory', or 'tstore' instead");
                     },
+                    .Calldata => {
+                        // calldata variables at module level are not allowed
+                        try error_handler.reportError(.InvalidMemoryRegion, var_decl.span, "calldata variables are not allowed at module level", "use calldata as function parameters instead");
+                    },
                 }
             },
             .Import => |import_decl| {
@@ -1110,12 +1115,12 @@ pub fn lowerFunctionsToModuleWithErrors(ctx: c.MlirContext, nodes: []lib.AstNode
 
                         // register constant declaration for lazy value creation
                         symbol_table.registerConstantDecl(const_decl.name, &const_decl) catch {
-                            std.debug.print("ERROR: Failed to register constant declaration: {s}\n", .{const_decl.name});
+                            log.debug("ERROR: Failed to register constant declaration: {s}\n", .{const_decl.name});
                         };
                         // add constant to symbol table with null value - will be created lazily when referenced
                         const const_type = type_mapper.toMlirType(const_decl.typ);
                         symbol_table.addConstant(const_decl.name, const_type, null, null) catch {
-                            std.debug.print("ERROR: Failed to add constant to symbol table: {s}\n", .{const_decl.name});
+                            log.debug("ERROR: Failed to add constant to symbol table: {s}\n", .{const_decl.name});
                         };
                     }
                 }
@@ -1554,7 +1559,7 @@ pub fn lowerFunctionsToModule(ctx: c.MlirContext, nodes: []lib.AstNode) c.MlirMo
     defer arena.deinit();
 
     const result = lowerFunctionsToModuleWithErrors(ctx, nodes, arena.allocator()) catch |err| {
-        std.debug.print("Error during MLIR lowering: {s}\n", .{@errorName(err)});
+        log.debug("Error during MLIR lowering: {s}\n", .{@errorName(err)});
         // return empty module on error
         const loc = c.mlirLocationUnknownGet(ctx);
         return c.mlirModuleCreateEmpty(loc);

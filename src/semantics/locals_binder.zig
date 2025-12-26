@@ -265,14 +265,14 @@ fn bindForPattern(table: *state.SymbolTable, scope: *state.Scope, pattern: ast.s
 
 fn bindBlock(table: *state.SymbolTable, scope: *state.Scope, block: *const ast.Statements.BlockNode) !void {
     // declare direct local variable declarations in this block
-    for (block.statements) |stmt| {
-        switch (stmt) {
+    for (block.statements) |*stmt| {
+        switch (stmt.*) {
             .VariableDecl => |v| try declareVar(table, scope, v),
             .DestructuringAssignment => |_| {},
             .Return => |_| {},
             .Expr => |_| {},
             .CompoundAssignment => |_| {},
-            .If => |iff| {
+            .If => |*iff| {
                 // then branch
                 const then_scope = try createChildScope(table, scope, scope.name);
                 try mapBlockScope(table, &iff.then_branch, then_scope);
@@ -284,23 +284,23 @@ fn bindBlock(table: *state.SymbolTable, scope: *state.Scope, block: *const ast.S
                     try bindBlock(table, else_scope, eb);
                 }
             },
-            .While => |wh| {
+            .While => |*wh| {
                 const body_scope = try createChildScope(table, scope, scope.name);
                 try mapBlockScope(table, &wh.body, body_scope);
                 try bindBlock(table, body_scope, &wh.body);
             },
-            .ForLoop => |fl| {
+            .ForLoop => |*fl| {
                 const body_scope = try createChildScope(table, scope, scope.name);
                 try mapBlockScope(table, &fl.body, body_scope);
                 // bind the loop variables in the body scope
                 try bindForPattern(table, body_scope, fl.pattern);
                 try bindBlock(table, body_scope, &fl.body);
             },
-            .TryBlock => |tb| {
+            .TryBlock => |*tb| {
                 const try_scope = try createChildScope(table, scope, scope.name);
                 try mapBlockScope(table, &tb.try_block, try_scope);
                 try bindBlock(table, try_scope, &tb.try_block);
-                if (tb.catch_block) |cb| {
+                if (tb.catch_block) |*cb| {
                     const catch_scope = try createChildScope(table, scope, scope.name);
                     try mapBlockScope(table, &cb.block, catch_scope);
                     if (cb.error_variable) |ename| {
@@ -317,12 +317,12 @@ fn bindBlock(table: *state.SymbolTable, scope: *state.Scope, block: *const ast.S
                     try bindBlock(table, catch_scope, &cb.block);
                 }
             },
-            .LabeledBlock => |lb| {
+            .LabeledBlock => |*lb| {
                 const inner_scope = try createChildScope(table, scope, scope.name);
                 try mapBlockScope(table, &lb.block, inner_scope);
                 try bindBlock(table, inner_scope, &lb.block);
             },
-            .Switch => |sw| {
+            .Switch => |*sw| {
                 // each case with a block gets its own scope
                 for (sw.cases) |*case| {
                     switch (case.body) {

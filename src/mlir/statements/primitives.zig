@@ -18,7 +18,7 @@ pub fn lowerLog(self: *const StatementLowerer, log_stmt: *const lib.ast.Statemen
     // add event name as attribute
     const event_ref = c.mlirStringRefCreate(log_stmt.event_name.ptr, log_stmt.event_name.len);
     const event_attr = c.mlirStringAttrGet(self.ctx, event_ref);
-    const event_id = h.identifier(self.ctx, "event");
+    const event_id = h.identifier(self.ctx, "event_name");
     var attrs = [_]c.MlirNamedAttribute{c.mlirNamedAttributeGet(event_id, event_attr)};
     c.mlirOperationStateAddAttributes(&state, attrs.len, &attrs);
 

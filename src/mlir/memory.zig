@@ -21,6 +21,7 @@ const c = @import("mlir_c_api").c;
 const lib = @import("ora_lib");
 const constants = @import("lower.zig");
 const h = @import("helpers.zig"); // Import helpers
+const log = @import("log");
 
 // Storage variable mapping for contract storage
 pub const StorageMap = struct {
@@ -120,7 +121,7 @@ pub const MemoryManager = struct {
             },
             .Calldata => {
                 // calldata is read-only and cannot be allocated
-                std.debug.print("ERROR: Calldata variables cannot be allocated\n", .{});
+                log.err("Calldata variables cannot be allocated\n", .{});
                 var state = h.opState("ora.error", loc);
                 const error_ty = c.mlirIntegerTypeGet(self.ctx, 32);
                 c.mlirOperationStateAddResults(&state, 1, @ptrCast(&error_ty));
@@ -138,7 +139,7 @@ pub const MemoryManager = struct {
         switch (storage_type) {
             .Storage => {
                 // storage uses ora.sstore - address should be variable name
-                std.debug.print("ERROR: Use createStorageStore for storage variables\n", .{});
+                log.err("Use createStorageStore for storage variables\n", .{});
                 // create a placeholder error operation
                 var state = h.opState("ora.error", loc);
                 const error_ty = c.mlirIntegerTypeGet(self.ctx, 32);
@@ -162,7 +163,7 @@ pub const MemoryManager = struct {
             },
             .TStore => {
                 // transient storage uses ora.tstore
-                std.debug.print("ERROR: Use createTStoreStore for transient storage variables\n", .{});
+                log.err("Use createTStoreStore for transient storage variables\n", .{});
                 // create a placeholder error operation
                 var state = h.opState("ora.error", loc);
                 const error_ty = c.mlirIntegerTypeGet(self.ctx, 32);
@@ -171,7 +172,7 @@ pub const MemoryManager = struct {
             },
             .Calldata => {
                 // calldata is read-only
-                std.debug.print("ERROR: Cannot store to calldata\n", .{});
+                log.err("Cannot store to calldata\n", .{});
                 var state = h.opState("ora.error", loc);
                 const error_ty = c.mlirIntegerTypeGet(self.ctx, 32);
                 c.mlirOperationStateAddResults(&state, 1, @ptrCast(&error_ty));
@@ -190,7 +191,7 @@ pub const MemoryManager = struct {
         switch (storage_type) {
             .Storage => {
                 // storage uses ora.sload - address should be variable name
-                std.debug.print("ERROR: Use createStorageLoad for storage variables\n", .{});
+                log.err("Use createStorageLoad for storage variables\n", .{});
                 // create a placeholder error operation
                 var state = h.opState("ora.error", loc);
                 c.mlirOperationStateAddResults(&state, 1, @ptrCast(&result_type));
@@ -214,7 +215,7 @@ pub const MemoryManager = struct {
             },
             .TStore => {
                 // transient storage uses ora.tload
-                std.debug.print("ERROR: Use createTStoreLoad for transient storage variables\n", .{});
+                log.err("Use createTStoreLoad for transient storage variables\n", .{});
                 // create a placeholder error operation
                 var state = h.opState("ora.error", loc);
                 c.mlirOperationStateAddResults(&state, 1, @ptrCast(&result_type));
@@ -222,7 +223,7 @@ pub const MemoryManager = struct {
             },
             .Calldata => {
                 // calldata should not use load ops in lowering
-                std.debug.print("ERROR: Calldata loads should use SSA values\n", .{});
+                log.err("Calldata loads should use SSA values\n", .{});
                 var state = h.opState("ora.error", loc);
                 c.mlirOperationStateAddResults(&state, 1, @ptrCast(&result_type));
                 return c.mlirOperationCreate(&state);
@@ -335,7 +336,7 @@ pub const MemoryManager = struct {
                 return self.ora_dialect.createTLoad(var_name, result_ty, loc);
             },
             .Calldata => {
-                std.debug.print("ERROR: Calldata should not use createLoadOperation\n", .{});
+                log.err("Calldata should not use createLoadOperation\n", .{});
                 var state = h.opState("ora.error", loc);
                 const error_ty = c.mlirIntegerTypeGet(self.ctx, 32);
                 c.mlirOperationStateAddResults(&state, 1, @ptrCast(&error_ty));
@@ -344,7 +345,7 @@ pub const MemoryManager = struct {
             .Stack => {
                 // for stack variables, we return the value directly from our local variable map
                 // this is handled differently in the identifier lowering
-                std.debug.print("ERROR: Stack variables should not use createLoadOperation\n", .{});
+                log.err("Stack variables should not use createLoadOperation\n", .{});
                 // create a placeholder error operation
                 var state = h.opState("ora.error", loc);
                 const error_ty = c.mlirIntegerTypeGet(self.ctx, 32);
@@ -389,7 +390,7 @@ pub const MemoryManager = struct {
                 return self.ora_dialect.createTStore(value, var_name, loc);
             },
             .Calldata => {
-                std.debug.print("ERROR: Cannot store to calldata\n", .{});
+                log.err("Cannot store to calldata\n", .{});
                 var state = h.opState("ora.error", loc);
                 const error_ty = c.mlirIntegerTypeGet(self.ctx, 32);
                 c.mlirOperationStateAddResults(&state, 1, @ptrCast(&error_ty));
@@ -398,7 +399,7 @@ pub const MemoryManager = struct {
             .Stack => {
                 // for stack variables, we store the value directly in our local variable map
                 // this is handled differently in the assignment lowering
-                std.debug.print("ERROR: Stack variables should not use createStoreOperation\n", .{});
+                log.err("Stack variables should not use createStoreOperation\n", .{});
                 // create a placeholder error operation
                 var state = h.opState("ora.error", loc);
                 const error_ty = c.mlirIntegerTypeGet(self.ctx, 32);

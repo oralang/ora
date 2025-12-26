@@ -9,6 +9,37 @@ const c_zig = @import("mlir_c_api");
 const h = @import("../helpers.zig");
 const StatementLowerer = @import("statement_lowerer.zig").StatementLowerer;
 const lib = @import("ora_lib");
+const log = @import("log");
+
+fn isErrorUnionTypeInfo(ti: lib.ast.Types.TypeInfo) bool {
+    if (ti.category == .ErrorUnion) return true;
+    if (ti.ora_type) |ot| switch (ot) {
+        .error_union => return true,
+        ._union => |members| return members.len > 0 and members[0] == .error_union,
+        else => {},
+    };
+    return false;
+}
+
+/// Lower a value expression, inserting an implicit try inside try blocks when appropriate.
+pub fn lowerValueWithImplicitTry(
+    self: *const StatementLowerer,
+    expr: *const lib.ast.Expressions.ExprNode,
+    expected_type: ?lib.ast.Types.TypeInfo,
+) c.MlirValue {
+    if (self.in_try_block) {
+        if (expr.* == .Call) {
+            const call = expr.Call;
+            if (isErrorUnionTypeInfo(call.type_info)) {
+                if (expected_type == null or !isErrorUnionTypeInfo(expected_type.?)) {
+                    var try_expr = lib.ast.Expressions.TryExpr{ .expr = @constCast(expr), .span = call.span };
+                    return self.expr_lowerer.lowerTry(&try_expr);
+                }
+            }
+        }
+    }
+    return self.expr_lowerer.lowerExpression(expr);
+}
 
 fn reportRefinementGuardError(self: *const StatementLowerer, span: lib.ast.SourceSpan, message: []const u8, suggestion: ?[]const u8) void {
     if (self.expr_lowerer.error_handler) |handler| {
@@ -405,7 +436,7 @@ pub fn blockEndsWithBreak(_: *const StatementLowerer, block: c.MlirBlock) bool {
     const name_str = op_name_ref.data;
     const name_len = op_name_ref.length;
 
-    std.debug.print("[blockEndsWithBreak] Last op name length: {}, checking for 'ora.break'\n", .{name_len});
+    log.debug("[blockEndsWithBreak] Last op name length: {}, checking for 'ora.break'\n", .{name_len});
 
     if (name_str == null or name_len == 0) {
         c_zig.freeStringRef(op_name_ref);
@@ -414,7 +445,7 @@ pub fn blockEndsWithBreak(_: *const StatementLowerer, block: c.MlirBlock) bool {
 
     if (name_len == 9) {
         const name_slice = name_str[0..name_len];
-        std.debug.print("[blockEndsWithBreak] Last op name: {s}\n", .{name_slice});
+        log.debug("[blockEndsWithBreak] Last op name: {s}\n", .{name_slice});
         const result = std.mem.eql(u8, name_slice, "ora.break");
         // free the string returned from oraOperationGetName
         c_zig.freeStringRef(op_name_ref);
@@ -445,7 +476,7 @@ pub fn blockEndsWithContinue(_: *const StatementLowerer, block: c.MlirBlock) boo
     const name_str = op_name_ref.data;
     const name_len = op_name_ref.length;
 
-    std.debug.print("[blockEndsWithContinue] Last op name length: {}, checking for 'ora.continue'\n", .{name_len});
+    log.debug("[blockEndsWithContinue] Last op name length: {}, checking for 'ora.continue'\n", .{name_len});
 
     if (name_str == null or name_len == 0) {
         c_zig.freeStringRef(op_name_ref);
@@ -454,7 +485,7 @@ pub fn blockEndsWithContinue(_: *const StatementLowerer, block: c.MlirBlock) boo
 
     if (name_len == 12) {
         const name_slice = name_str[0..name_len];
-        std.debug.print("[blockEndsWithContinue] Last op name: {s}\n", .{name_slice});
+        log.debug("[blockEndsWithContinue] Last op name: {s}\n", .{name_slice});
         const result = std.mem.eql(u8, name_slice, "ora.continue");
         c_zig.freeStringRef(op_name_ref);
         return result;

@@ -9,6 +9,7 @@ const h = @import("../helpers.zig");
 const constants = @import("../lower.zig");
 const DeclarationLowerer = @import("mod.zig").DeclarationLowerer;
 const helpers = @import("helpers.zig");
+const log = @import("log");
 
 /// Lower struct declarations with type definitions and field information (Requirements 7.1)
 pub fn lowerStruct(self: *const DeclarationLowerer, struct_decl: *const lib.ast.StructDeclNode) c.MlirOperation {
@@ -159,7 +160,7 @@ pub fn createStructType(self: *const DeclarationLowerer, struct_decl: *const lib
     }
 
     // fallback: should not happen if struct type creation works correctly
-    std.debug.print("WARNING: Failed to create struct type '{s}', using i256 fallback\n", .{struct_decl.name});
+    log.warn("Failed to create struct type '{s}', using i256 fallback\n", .{struct_decl.name});
     return c.mlirIntegerTypeGet(self.ctx, constants.DEFAULT_INTEGER_BITS);
 }
 

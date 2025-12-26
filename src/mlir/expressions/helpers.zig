@@ -12,6 +12,7 @@ const h = @import("../helpers.zig");
 const TypeMapper = @import("../types.zig").TypeMapper;
 const LocationTracker = @import("../locations.zig").LocationTracker;
 const OraDialect = @import("../dialect.zig").OraDialect;
+const log = @import("log");
 
 /// Create a constant value
 pub fn createConstant(ctx: c.MlirContext, block: c.MlirBlock, ora_dialect: *OraDialect, locations: LocationTracker, value: i64, span: lib.ast.SourceSpan) c.MlirValue {
@@ -197,7 +198,7 @@ pub fn predicateStringToInt(predicate: []const u8) i64 {
     if (std.mem.eql(u8, predicate, "ule")) return 7;
     if (std.mem.eql(u8, predicate, "ugt")) return 8;
     if (std.mem.eql(u8, predicate, "uge")) return 9;
-    std.debug.print("WARNING: Unknown predicate '{s}', defaulting to 'eq' (0)\n", .{predicate});
+    log.warn("Unknown predicate '{s}', defaulting to 'eq' (0)\n", .{predicate});
     return 0;
 }
 

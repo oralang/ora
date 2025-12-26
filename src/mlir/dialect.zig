@@ -15,6 +15,7 @@
 const std = @import("std");
 const c = @import("mlir_c_api").c;
 const h = @import("helpers.zig");
+const log = @import("log");
 
 /// Ora MLIR Dialect implementation
 /// This provides runtime registration and operation creation for the Ora dialect
@@ -35,18 +36,18 @@ pub const OraDialect = struct {
     pub fn register(self: *OraDialect) !void {
         const success = c.oraDialectRegister(self.ctx);
         if (!success) {
-            std.log.warn("Failed to register Ora dialect, falling back to unregistered mode", .{});
+            log.warn("Failed to register Ora dialect, falling back to unregistered mode\n", .{});
             self.dialect_handle = null;
             return;
         }
         const handle = c.oraDialectGet(self.ctx);
         if (handle.ptr == null) {
-            std.log.warn("Ora dialect registered but handle is null", .{});
+            log.warn("Ora dialect registered but handle is null\n", .{});
             self.dialect_handle = null;
             return;
         }
         self.dialect_handle = handle;
-        std.log.info("Ora dialect successfully registered", .{});
+        log.debug("Ora dialect successfully registered\n", .{});
     }
 
     /// Check if the Ora dialect is properly registered
@@ -532,7 +533,7 @@ pub const OraDialect = struct {
         const field_name_ref = h.strRef(field_name);
         const op = c.oraStructFieldUpdateOpCreate(self.ctx, loc, struct_value, field_name_ref, value);
         if (op.ptr == null) {
-            std.debug.print("ERROR: Failed to create ora.struct_field_update operation for field: {s}\n", .{field_name});
+            log.err("Failed to create ora.struct_field_update operation for field: {s}\n", .{field_name});
             @panic("Failed to create ora.struct_field_update operation");
         }
         return op;
@@ -1487,6 +1488,90 @@ pub const OraDialect = struct {
     //===----------------------------------------------------------------------===//
     // error Handling Operations
     //===----------------------------------------------------------------------===//
+
+    /// Create ora.error.ok operation
+    pub fn createErrorOk(
+        self: *OraDialect,
+        value: c.MlirValue,
+        result_type: c.MlirType,
+        loc: c.MlirLocation,
+    ) c.MlirOperation {
+        if (!self.isRegistered()) {
+            @panic("Ora dialect must be registered before creating operations");
+        }
+        const op = c.oraErrorOkOpCreate(self.ctx, loc, value, result_type);
+        if (op.ptr == null) {
+            @panic("Failed to create ora.error.ok operation");
+        }
+        return op;
+    }
+
+    /// Create ora.error.err operation
+    pub fn createErrorErr(
+        self: *OraDialect,
+        value: c.MlirValue,
+        result_type: c.MlirType,
+        loc: c.MlirLocation,
+    ) c.MlirOperation {
+        if (!self.isRegistered()) {
+            @panic("Ora dialect must be registered before creating operations");
+        }
+        const op = c.oraErrorErrOpCreate(self.ctx, loc, value, result_type);
+        if (op.ptr == null) {
+            @panic("Failed to create ora.error.err operation");
+        }
+        return op;
+    }
+
+    /// Create ora.error.is_error operation
+    pub fn createErrorIsError(
+        self: *OraDialect,
+        value: c.MlirValue,
+        loc: c.MlirLocation,
+    ) c.MlirOperation {
+        if (!self.isRegistered()) {
+            @panic("Ora dialect must be registered before creating operations");
+        }
+        const op = c.oraErrorIsErrorOpCreate(self.ctx, loc, value);
+        if (op.ptr == null) {
+            @panic("Failed to create ora.error.is_error operation");
+        }
+        return op;
+    }
+
+    /// Create ora.error.unwrap operation
+    pub fn createErrorUnwrap(
+        self: *OraDialect,
+        value: c.MlirValue,
+        result_type: c.MlirType,
+        loc: c.MlirLocation,
+    ) c.MlirOperation {
+        if (!self.isRegistered()) {
+            @panic("Ora dialect must be registered before creating operations");
+        }
+        const op = c.oraErrorUnwrapOpCreate(self.ctx, loc, value, result_type);
+        if (op.ptr == null) {
+            @panic("Failed to create ora.error.unwrap operation");
+        }
+        return op;
+    }
+
+    /// Create ora.error.get_error operation
+    pub fn createErrorGetError(
+        self: *OraDialect,
+        value: c.MlirValue,
+        result_type: c.MlirType,
+        loc: c.MlirLocation,
+    ) c.MlirOperation {
+        if (!self.isRegistered()) {
+            @panic("Ora dialect must be registered before creating operations");
+        }
+        const op = c.oraErrorGetErrorOpCreate(self.ctx, loc, value, result_type);
+        if (op.ptr == null) {
+            @panic("Failed to create ora.error.get_error operation");
+        }
+        return op;
+    }
 
     /// Create ora.try_catch operation
     pub fn createTry(

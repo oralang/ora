@@ -509,7 +509,6 @@ LogicalResult ConvertMapStoreOp::matchAndRewrite(
     // Get the map operand, key, and value
     // Use original map operand (before conversion) to find the global name
     Value originalMapOperand = op.getMap();
-    Value mapOperand = adaptor.getMap(); // Converted operand
     Value key = adaptor.getKey();
     Value value = adaptor.getValue();
 

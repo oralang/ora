@@ -617,6 +617,44 @@ MlirType oraStructTypeGet(MlirContext ctx, MlirStringRef structName)
     }
 }
 
+MlirType oraErrorUnionTypeGet(MlirContext ctx, MlirType successType)
+{
+    try
+    {
+        MLIRContext *context = unwrap(ctx);
+        Type successTypeRef = unwrap(successType);
+
+        if (!oraDialectIsRegistered(ctx))
+        {
+            return {nullptr};
+        }
+
+        auto errorUnionType = ora::ErrorUnionType::get(context, successTypeRef);
+        return wrap(errorUnionType);
+    }
+    catch (...)
+    {
+        return {nullptr};
+    }
+}
+
+MlirType oraErrorUnionTypeGetSuccessType(MlirType errorUnionType)
+{
+    try
+    {
+        Type mlirType = unwrap(errorUnionType);
+        if (auto errorUnion = dyn_cast<ora::ErrorUnionType>(mlirType))
+        {
+            return wrap(errorUnion.getSuccessType());
+        }
+        return {nullptr};
+    }
+    catch (...)
+    {
+        return {nullptr};
+    }
+}
+
 //===----------------------------------------------------------------------===//
 // Refinement Type Creation
 //===----------------------------------------------------------------------===//
@@ -2029,6 +2067,106 @@ MlirOperation oraLogOpCreate(MlirContext ctx, MlirLocation loc, MlirStringRef ev
         auto gasCostAttr = builder.getI64IntegerAttr(375 + (numParameters * 375));
         op->setAttr("gas_cost", gasCostAttr);
 
+        return wrap(op.getOperation());
+    }
+    catch (...)
+    {
+        return {nullptr};
+    }
+}
+
+MlirOperation oraErrorOkOpCreate(MlirContext ctx, MlirLocation loc, MlirValue value, MlirType resultType)
+{
+    try
+    {
+        MLIRContext *context = unwrap(ctx);
+        Location location = unwrap(loc);
+        Value valueRef = unwrap(value);
+        Type resultTy = unwrap(resultType);
+
+        OpBuilder builder(context);
+
+        auto op = builder.create<ora::ErrorOkOp>(location, resultTy, valueRef);
+        return wrap(op.getOperation());
+    }
+    catch (...)
+    {
+        return {nullptr};
+    }
+}
+
+MlirOperation oraErrorErrOpCreate(MlirContext ctx, MlirLocation loc, MlirValue value, MlirType resultType)
+{
+    try
+    {
+        MLIRContext *context = unwrap(ctx);
+        Location location = unwrap(loc);
+        Value valueRef = unwrap(value);
+        Type resultTy = unwrap(resultType);
+
+        OpBuilder builder(context);
+
+        auto op = builder.create<ora::ErrorErrOp>(location, resultTy, valueRef);
+        return wrap(op.getOperation());
+    }
+    catch (...)
+    {
+        return {nullptr};
+    }
+}
+
+MlirOperation oraErrorIsErrorOpCreate(MlirContext ctx, MlirLocation loc, MlirValue value)
+{
+    try
+    {
+        MLIRContext *context = unwrap(ctx);
+        Location location = unwrap(loc);
+        Value valueRef = unwrap(value);
+
+        OpBuilder builder(context);
+
+        auto resultTy = builder.getI1Type();
+        auto op = builder.create<ora::ErrorIsErrorOp>(location, resultTy, valueRef);
+        return wrap(op.getOperation());
+    }
+    catch (...)
+    {
+        return {nullptr};
+    }
+}
+
+MlirOperation oraErrorUnwrapOpCreate(MlirContext ctx, MlirLocation loc, MlirValue value, MlirType resultType)
+{
+    try
+    {
+        MLIRContext *context = unwrap(ctx);
+        Location location = unwrap(loc);
+        Value valueRef = unwrap(value);
+        Type resultTy = unwrap(resultType);
+
+        OpBuilder builder(context);
+
+        auto op = builder.create<ora::ErrorUnwrapOp>(location, resultTy, valueRef);
+        return wrap(op.getOperation());
+    }
+    catch (...)
+    {
+        return {nullptr};
+    }
+}
+
+MlirOperation oraErrorGetErrorOpCreate(MlirContext ctx, MlirLocation loc, MlirValue value, MlirType resultType)
+{
+    try
+    {
+        MLIRContext *context = unwrap(ctx);
+        Location location = unwrap(loc);
+        Value valueRef = unwrap(value);
+        Type resultTy = unwrap(resultType);
+
+        OpBuilder builder(context);
+
+        auto op = builder.create<ora::ErrorGetErrorOp>(location, resultTy, valueRef);
         return wrap(op.getOperation());
     }
     catch (...)

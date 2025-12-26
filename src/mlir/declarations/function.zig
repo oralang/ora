@@ -16,6 +16,7 @@ const LoweringError = StatementLowerer.LoweringError;
 const DeclarationLowerer = @import("mod.zig").DeclarationLowerer;
 const helpers = @import("helpers.zig");
 const refinements = @import("refinements.zig");
+const log = @import("log");
 
 /// Lower function declarations with enhanced features
 pub fn lowerFunction(self: *const DeclarationLowerer, func: *const lib.FunctionNode, contract_storage_map: ?*StorageMap, local_var_map: ?*LocalVarMap) c.MlirOperation {
@@ -31,7 +32,7 @@ pub fn lowerFunction(self: *const DeclarationLowerer, func: *const lib.FunctionN
     var param_types_buf: [16]c.MlirType = undefined; // Support up to 16 parameters
     const param_types = if (func.parameters.len <= 16) param_types_buf[0..func.parameters.len] else blk: {
         break :blk std.heap.page_allocator.alloc(c.MlirType, func.parameters.len) catch {
-            std.debug.print("FATAL: Failed to allocate parameter types\n", .{});
+            log.err("Failed to allocate parameter types\n", .{});
             @panic("Allocation failure");
         };
     };
@@ -197,7 +198,7 @@ pub fn lowerFunction(self: *const DeclarationLowerer, func: *const lib.FunctionN
     var param_locs_buf: [16]c.MlirLocation = undefined;
     const param_locs = if (func.parameters.len <= 16) param_locs_buf[0..func.parameters.len] else blk: {
         break :blk std.heap.page_allocator.alloc(c.MlirLocation, func.parameters.len) catch {
-            std.debug.print("FATAL: Failed to allocate parameter locations\n", .{});
+            log.err("Failed to allocate parameter locations\n", .{});
             @panic("Allocation failure");
         };
     };
@@ -227,10 +228,10 @@ pub fn lowerFunction(self: *const DeclarationLowerer, func: *const lib.FunctionN
             @memcpy(allocated, param_types);
             sym_table.addFunction(func.name, func_op, allocated, return_type) catch {
                 sym_table.allocator.free(allocated);
-                std.debug.print("WARNING: Failed to add function {s} to symbol table\n", .{func.name});
+                log.warn("Failed to add function {s} to symbol table\n", .{func.name});
             };
         } else |_| {
-            std.debug.print("WARNING: Failed to allocate parameter types for function {s}\n", .{func.name});
+            log.warn("Failed to allocate parameter types for function {s}\n", .{func.name});
             // continue without adding to symbol table if allocation fails
         }
     }
@@ -243,7 +244,7 @@ pub fn lowerFunction(self: *const DeclarationLowerer, func: *const lib.FunctionN
         // insert refinement type guards for parameters
         if (param.type_info.ora_type) |ora_type| {
             refinements.insertRefinementGuard(self, block, block_arg, ora_type, param.span) catch |err| {
-                std.debug.print("Error inserting refinement guard for parameter {s}: {s}\n", .{ param.name, @errorName(err) });
+                log.err("inserting refinement guard for parameter {s}: {s}\n", .{ param.name, @errorName(err) });
             };
         }
     }
@@ -251,7 +252,7 @@ pub fn lowerFunction(self: *const DeclarationLowerer, func: *const lib.FunctionN
     // add precondition assertions for requires clauses
     if (func.requires_clauses.len > 0) {
         lowerRequiresClauses(self, func.requires_clauses, block, &param_map, contract_storage_map, local_var_map orelse &local_vars) catch |err| {
-            std.debug.print("Error lowering requires clauses: {s}\n", .{@errorName(err)});
+            log.err("lowering requires clauses: {s}\n", .{@errorName(err)});
         };
     }
 
@@ -315,7 +316,7 @@ pub fn lowerFunction(self: *const DeclarationLowerer, func: *const lib.FunctionN
     // set attributes on function arguments
     for (func.parameters, 0..) |param, i| {
         const type_str = helpers.oraTypeToString(self, param.type_info, std.heap.page_allocator) catch {
-            std.debug.print("WARNING: Failed to convert parameter type to string for {s}\n", .{param.name});
+            log.warn("Failed to convert parameter type to string for {s}\n", .{param.name});
             continue;
         };
         defer std.heap.page_allocator.free(type_str);
@@ -323,14 +324,14 @@ pub fn lowerFunction(self: *const DeclarationLowerer, func: *const lib.FunctionN
         const type_attr = c.mlirStringAttrGet(self.ctx, h.strRef(type_str));
         const success = c.oraFuncSetArgAttr(func_op, @intCast(i), ora_type_attr_name, type_attr);
         if (!success) {
-            std.debug.print("WARNING: Failed to set ora.type attribute on parameter {s}\n", .{param.name});
+            log.warn("Failed to set ora.type attribute on parameter {s}\n", .{param.name});
         }
     }
 
     // set attribute on function return value (if present)
     if (func.return_type_info) |ret_info| {
         const type_str = helpers.oraTypeToString(self, ret_info, std.heap.page_allocator) catch {
-            std.debug.print("WARNING: Failed to convert return type to string\n", .{});
+            log.warn("Failed to convert return type to string\n", .{});
             return func_op;
         };
         defer std.heap.page_allocator.free(type_str);
@@ -338,7 +339,7 @@ pub fn lowerFunction(self: *const DeclarationLowerer, func: *const lib.FunctionN
         const type_attr = c.mlirStringAttrGet(self.ctx, h.strRef(type_str));
         const success = c.oraFuncSetResultAttr(func_op, 0, ora_type_attr_name, type_attr);
         if (!success) {
-            std.debug.print("WARNING: Failed to set ora.type attribute on return value\n", .{});
+            log.warn("Failed to set ora.type attribute on return value\n", .{});
         }
     }
 
@@ -349,7 +350,7 @@ pub fn lowerFunction(self: *const DeclarationLowerer, func: *const lib.FunctionN
 fn lowerFunctionBody(self: *const DeclarationLowerer, func: *const lib.FunctionNode, block: c.MlirBlock, param_map: *const ParamMap, storage_map: ?*const StorageMap, local_var_map: ?*LocalVarMap) LoweringError!void {
     // create a statement lowerer for this function
     const const_local_var_map = if (local_var_map) |lvm| @as(*const LocalVarMap, lvm) else null;
-    const expr_lowerer = ExpressionLowerer.init(self.ctx, block, self.type_mapper, param_map, storage_map, const_local_var_map, self.symbol_table, self.builtin_registry, self.error_handler, self.locations, self.ora_dialect);
+    var expr_lowerer = ExpressionLowerer.init(self.ctx, block, self.type_mapper, param_map, storage_map, const_local_var_map, self.symbol_table, self.builtin_registry, self.error_handler, self.locations, self.ora_dialect);
 
     // get the function's return type
     const function_return_type = if (func.return_type_info) |ret_info|
@@ -358,6 +359,8 @@ fn lowerFunctionBody(self: *const DeclarationLowerer, func: *const lib.FunctionN
         null;
 
     const function_return_type_info = if (func.return_type_info) |ret_info| ret_info else null;
+    expr_lowerer.current_function_return_type = function_return_type;
+    expr_lowerer.current_function_return_type_info = function_return_type_info;
     const stmt_lowerer = StatementLowerer.init(self.ctx, block, self.type_mapper, &expr_lowerer, param_map, storage_map, local_var_map, self.locations, self.symbol_table, self.builtin_registry, std.heap.page_allocator, function_return_type, function_return_type_info, self.ora_dialect, func.ensures_clauses);
 
     // lower the function body

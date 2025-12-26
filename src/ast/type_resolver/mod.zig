@@ -30,6 +30,7 @@ const core = @import("core/mod.zig");
 const refinements = @import("refinements/mod.zig");
 const validation = @import("validation/mod.zig");
 const utils = @import("utils/mod.zig");
+const log = @import("log");
 
 // Re-export core types
 pub const Typed = core.Typed;
@@ -49,6 +50,7 @@ pub const TypeResolutionError = error{
     IncompatibleTypes,
     UndefinedIdentifier,
     UnresolvedType,
+    ErrorUnionOutsideTry,
 };
 
 /// Main type resolver orchestrator
@@ -194,9 +196,9 @@ pub const TypeResolver = struct {
         if (self.symbol_table.contract_scopes.get(contract.name)) |contract_scope| {
             self.current_scope = contract_scope;
             self.core_resolver.current_scope = contract_scope;
-            std.debug.print("[resolveContract] Set current_scope to contract scope '{s}'\n", .{contract.name});
+            log.debug("[resolveContract] Set current_scope to contract scope '{s}'\n", .{contract.name});
         } else {
-            std.debug.print("[resolveContract] WARNING: Contract scope '{s}' not found!\n", .{contract.name});
+            log.debug("[resolveContract] WARNING: Contract scope '{s}' not found!\n", .{contract.name});
         }
         defer {
             self.current_scope = prev_scope;
@@ -348,9 +350,9 @@ pub const TypeResolver = struct {
         const expected_return_type = function.return_type_info;
 
         if (expected_return_type) |ret_ty| {
-            std.debug.print("[validateReturnStatements] Function '{s}' return type: category={s}\n", .{ function.name, @tagName(ret_ty.category) });
+            log.debug("[validateReturnStatements] Function '{s}' return type: category={s}\n", .{ function.name, @tagName(ret_ty.category) });
         } else {
-            std.debug.print("[validateReturnStatements] Function '{s}' has no return type\n", .{function.name});
+            log.debug("[validateReturnStatements] Function '{s}' has no return type\n", .{function.name});
         }
 
         // walk through all statements in the function body

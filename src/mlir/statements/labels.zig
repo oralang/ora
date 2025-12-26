@@ -10,6 +10,7 @@ const LabelContext = @import("statement_lowerer.zig").LabelContext;
 const LoweringError = StatementLowerer.LoweringError;
 const helpers = @import("helpers.zig");
 const control_flow = @import("control_flow.zig");
+const log = @import("log");
 
 /// Lower break statements with label support
 pub fn lowerBreak(self: *const StatementLowerer, break_stmt: *const lib.ast.Statements.BreakNode) LoweringError!void {
@@ -147,7 +148,7 @@ pub fn lowerLabeledBlock(self: *const StatementLowerer, labeled_block: *const li
 
 /// Lower labeled switch with continue support using scf.while
 fn lowerLabeledSwitch(self: *const StatementLowerer, labeled_block: *const lib.ast.Statements.LabeledBlockNode) LoweringError!void {
-    std.debug.print("[lowerLabeledSwitch] Starting labeled switch lowering\n", .{});
+    log.debug("[lowerLabeledSwitch] Starting labeled switch lowering\n", .{});
     const loc = self.fileLoc(labeled_block.span);
     const h = @import("../helpers.zig");
 
@@ -244,22 +245,22 @@ fn lowerLabeledSwitch(self: *const StatementLowerer, labeled_block: *const lib.a
     const switch_value = h.getResult(load_value, 0);
 
     // lower switch cases with label context
-    std.debug.print("[lowerLabeledSwitch] Lowering switch cases with label context\n", .{});
+    log.debug("[lowerLabeledSwitch] Lowering switch cases with label context\n", .{});
     try lowerSwitchCasesWithLabel(self, switch_stmt.cases, switch_value, 0, after_block, loc, switch_stmt.default_case, labeled_block.label, continue_flag_memref, value_memref, return_flag_memref, return_value_memref);
 
     // check if after_block already has a terminator (e.g., ora.return from a case)
     // only add yield if there's no terminator
     // note: scf.while's after region must end with scf.yield (not ora.yield!)
     const has_terminator = helpers.blockEndsWithTerminator(self, after_block);
-    std.debug.print("[lowerLabeledSwitch] after_block has_terminator={}\n", .{has_terminator});
+    log.debug("[lowerLabeledSwitch] after_block has_terminator={}\n", .{has_terminator});
     if (!has_terminator) {
-        std.debug.print("[lowerLabeledSwitch] Adding scf.yield to after_block (scf.while requires scf.yield)\n", .{});
+        log.debug("[lowerLabeledSwitch] Adding scf.yield to after_block (scf.while requires scf.yield)\n", .{});
         // scf.while's after region must end with scf.yield to continue the loop
         var yield_state = h.opState("scf.yield", loc);
         const yield_op = c.mlirOperationCreate(&yield_state);
         h.appendOp(after_block, yield_op);
     } else {
-        std.debug.print("[lowerLabeledSwitch] after_block already has terminator, skipping yield\n", .{});
+        log.debug("[lowerLabeledSwitch] after_block already has terminator, skipping yield\n", .{});
     }
 
     // add regions and create while operation
@@ -320,7 +321,7 @@ fn lowerSwitchCasesWithLabel(
     return_flag_memref: c.MlirValue,
     return_value_memref: c.MlirValue,
 ) LoweringError!void {
-    std.debug.print("[lowerSwitchCasesWithLabel] Starting, label={s}, case_idx={}, total_cases={}\n", .{ label, case_idx, cases.len });
+    log.debug("[lowerSwitchCasesWithLabel] Starting, label={s}, case_idx={}, total_cases={}\n", .{ label, case_idx, cases.len });
     // create label context for labeled switch
     const label_ctx = LabelContext{
         .label = label,

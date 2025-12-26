@@ -23,6 +23,7 @@ const TypeContext = @import("mod.zig").TypeContext;
 const validation = @import("../validation/mod.zig");
 const refinements = @import("../refinements/mod.zig");
 const utils = @import("../utils/mod.zig");
+const log = @import("log");
 
 const CoreResolver = @import("mod.zig").CoreResolver;
 const expression = @import("expression.zig");
@@ -198,7 +199,7 @@ fn resolveVariableDecl(
     }
     // final verification before storing
     if (stored_type.ora_type == null) {
-        std.debug.print("[resolveVariableDecl] CRITICAL: Variable '{s}' has null ora_type before storing!\n", .{var_decl.name});
+        log.debug("[resolveVariableDecl] CRITICAL: Variable '{s}' has null ora_type before storing!\n", .{var_decl.name});
         return TypeResolutionError.UnresolvedType;
     }
     const symbol = semantics.state.Symbol{
@@ -261,7 +262,7 @@ fn resolveVariableDecl(
     } else {
         // no current scope - this shouldn't happen during normal resolution
         // but handle it gracefully by not storing the type
-        std.debug.print("[resolveVariableDecl] WARNING: No current scope for variable '{s}'\n", .{var_decl.name});
+        log.debug("[resolveVariableDecl] WARNING: No current scope for variable '{s}'\n", .{var_decl.name});
         // deallocate the copied type since we can't store it
         if (typ_owned_flag) {
             if (stored_type.ora_type) |*ora_type| {
@@ -275,7 +276,7 @@ fn resolveVariableDecl(
     // critical: If we copied a type but didn't store it, we have a leak
     // this should never happen, but if it does, we need to clean up
     if (typ_owned_flag and !type_stored) {
-        std.debug.print("[resolveVariableDecl] CRITICAL: Variable '{s}' - copied type was not stored! Deallocating to prevent leak.\n", .{var_decl.name});
+        log.debug("[resolveVariableDecl] CRITICAL: Variable '{s}' - copied type was not stored! Deallocating to prevent leak.\n", .{var_decl.name});
         if (stored_type.ora_type) |*ora_type| {
             const type_info = @import("../../type_info.zig");
             type_info.deinitOraType(self.allocator, @constCast(ora_type));
@@ -503,6 +504,8 @@ fn resolveTryBlock(
     try_block: *ast.Statements.TryBlockNode,
     context: TypeContext,
 ) TypeResolutionError!Typed {
+    const prev_try = self.in_try_block;
+
     // resolve try block statements
     const prev_scope = self.current_scope;
     const try_block_key: usize = @intFromPtr(&try_block.try_block);
@@ -514,6 +517,10 @@ fn resolveTryBlock(
     }
 
     var combined_eff = Effect.pure();
+    self.in_try_block = true;
+    defer {
+        self.in_try_block = prev_try;
+    }
     for (try_block.try_block.statements) |*stmt| {
         var stmt_typed = try resolveStatement(self, stmt, context);
         defer stmt_typed.deinit(self.allocator);
@@ -532,6 +539,7 @@ fn resolveTryBlock(
             self.current_scope = prev_scope;
         }
 
+        self.in_try_block = false;
         for (catch_block.block.statements) |*stmt| {
             var stmt_typed = try resolveStatement(self, stmt, context);
             defer stmt_typed.deinit(self.allocator);
@@ -670,7 +678,7 @@ fn validateSwitchPattern(
 
             // check category compatibility
             if (lit_type_info.category != condition_type.category) {
-                std.debug.print(
+                log.debug(
                     "[type_resolver] Switch pattern type mismatch: pattern category {s}, condition category {s}\n",
                     .{ @tagName(lit_type_info.category), @tagName(condition_type.category) },
                 );
@@ -683,7 +691,7 @@ fn validateSwitchPattern(
                     const compat = @import("../validation/compatibility.zig");
                     // pattern literal type should be assignable to condition type
                     if (!compat.isBaseTypeCompatible(lit_type_info.ora_type.?, condition_type.ora_type.?)) {
-                        std.debug.print(
+                        log.debug(
                             "[type_resolver] Switch pattern integer type mismatch\n",
                             .{},
                         );
@@ -701,14 +709,14 @@ fn validateSwitchPattern(
 
             // both endpoints must be assignable to condition type
             if (!self.validation.isAssignable(condition_type, start_typed.ty)) {
-                std.debug.print(
+                log.debug(
                     "[type_resolver] Switch range start type mismatch\n",
                     .{},
                 );
                 return TypeResolutionError.TypeMismatch;
             }
             if (!self.validation.isAssignable(condition_type, end_typed.ty)) {
-                std.debug.print(
+                log.debug(
                     "[type_resolver] Switch range end type mismatch\n",
                     .{},
                 );
@@ -722,7 +730,7 @@ fn validateSwitchPattern(
                     .enum_type => |enum_name| {
                         // if pattern provided a qualified enum name, it must match
                         if (ev.enum_name.len != 0 and !std.mem.eql(u8, ev.enum_name, enum_name)) {
-                            std.debug.print(
+                            log.debug(
                                 "[type_resolver] Switch enum pattern enum name mismatch: got {s}, expected {s}\n",
                                 .{ ev.enum_name, enum_name },
                             );
@@ -730,7 +738,7 @@ fn validateSwitchPattern(
                         }
                     },
                     else => {
-                        std.debug.print(
+                        log.debug(
                             "[type_resolver] Switch enum pattern used with non-enum condition\n",
                             .{},
                         );
@@ -738,7 +746,7 @@ fn validateSwitchPattern(
                     },
                 }
             } else {
-                std.debug.print(
+                log.debug(
                     "[type_resolver] Switch enum pattern used with unresolved condition type\n",
                     .{},
                 );
@@ -842,7 +850,7 @@ fn resolveLog(
     // validate log signature (event name exists, argument count matches, types match)
     const sig_fields_opt = self.symbol_table.log_signatures.get(log_stmt.event_name);
     if (sig_fields_opt == null) {
-        std.debug.print(
+        log.debug(
             "[type_resolver] Unknown log event: {s}\n",
             .{log_stmt.event_name},
         );
@@ -852,7 +860,7 @@ fn resolveLog(
 
     // arity check: argument count must match field count
     if (sig_fields.len != log_stmt.args.len) {
-        std.debug.print(
+        log.debug(
             "[type_resolver] Log argument count mismatch: got {d}, expected {d} for log {s}\n",
             .{ log_stmt.args.len, sig_fields.len, log_stmt.event_name },
         );
@@ -865,7 +873,7 @@ fn resolveLog(
         if (!self.validation.isAssignable(field.type_info, arg_type)) {
             const got_str = formatTypeInfo(arg_type, self.allocator) catch "unknown";
             const expected_str = formatTypeInfo(field.type_info, self.allocator) catch "unknown";
-            std.debug.print(
+            log.debug(
                 "[type_resolver] Log argument {d} type mismatch for {s}: got {s}, expected {s}\n",
                 .{ i, log_stmt.event_name, got_str, expected_str },
             );

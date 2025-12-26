@@ -26,8 +26,8 @@ const ExpressionParser = @import("expression_parser.zig").ExpressionParser;
 const StatementParser = @import("statement_parser.zig").StatementParser;
 const TypeParser = @import("type_parser.zig").TypeParser;
 const DeclarationParser = @import("declaration_parser.zig").DeclarationParser;
-const Diag = @import("diagnostics.zig");
 const common = @import("common.zig");
+const log = @import("log");
 
 /// Parser errors with detailed diagnostics (alias common.ParserError for consistency)
 pub const ParserError = common.ParserError;
@@ -283,7 +283,10 @@ pub fn parseWithArena(allocator: Allocator, tokens: []const Token) ParserError!s
     type_resolver.resolveTypes(nodes) catch |err| {
         // type resolution errors (especially TypeMismatch) should stop compilation
         // these indicate invalid type assignments that cannot be safely compiled
-        std.debug.print("error: Type resolution failed: {s}\n", .{@errorName(err)});
+        log.err("Type resolution failed: {s}\n", .{@errorName(err)});
+        if (err == @import("../ast/type_resolver/mod.zig").TypeResolutionError.ErrorUnionOutsideTry) {
+            log.help("use `try` to unwrap error unions or wrap the code in a try/catch block\n", .{});
+        }
         // best-effort stack trace in debug builds
         const trace = @errorReturnTrace();
         if (trace) |t| std.debug.dumpStackTrace(t.*);
@@ -316,7 +319,10 @@ pub fn parse(allocator: Allocator, tokens: []const Token) ParserError![]AstNode 
     type_resolver.resolveTypes(nodes) catch |err| {
         // type resolution errors (especially TypeMismatch) should stop compilation
         // these indicate invalid type assignments that cannot be safely compiled
-        std.debug.print("error: Type resolution failed: {s}\n", .{@errorName(err)});
+        log.err("Type resolution failed: {s}\n", .{@errorName(err)});
+        if (err == @import("../ast/type_resolver/mod.zig").TypeResolutionError.ErrorUnionOutsideTry) {
+            log.help("use `try` to unwrap error unions or wrap the code in a try/catch block\n", .{});
+        }
         // best-effort stack trace in debug builds
         const trace = @errorReturnTrace();
         if (trace) |t| std.debug.dumpStackTrace(t.*);

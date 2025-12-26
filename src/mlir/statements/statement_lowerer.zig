@@ -19,6 +19,7 @@ const LocalVarMap = @import("../lower.zig").LocalVarMap;
 const LocationTracker = @import("../lower.zig").LocationTracker;
 const MemoryManager = @import("../memory.zig").MemoryManager;
 const SymbolTable = @import("../lower.zig").SymbolTable;
+const log = @import("log");
 
 // Import implementation modules
 const control_flow = @import("control_flow.zig");
@@ -99,14 +100,14 @@ pub const StatementLowerer = struct {
                 try return_stmt.lowerReturn(self, &ret);
             },
             .VariableDecl => |var_decl| {
-                std.debug.print("[statement_lowerer] Processing VariableDecl: {s}, region={any}\n", .{ var_decl.name, var_decl.region });
-                std.debug.print("[BEFORE MLIR] Variable: {s}\n", .{var_decl.name});
-                std.debug.print("  category: {s}\n", .{@tagName(var_decl.type_info.category)});
-                std.debug.print("  source: {s}\n", .{@tagName(var_decl.type_info.source)});
+                log.debug("[statement_lowerer] Processing VariableDecl: {s}, region={any}\n", .{ var_decl.name, var_decl.region });
+                log.debug("[BEFORE MLIR] Variable: {s}\n", .{var_decl.name});
+                log.debug("  category: {s}\n", .{@tagName(var_decl.type_info.category)});
+                log.debug("  source: {s}\n", .{@tagName(var_decl.type_info.source)});
                 if (var_decl.type_info.ora_type) |_| {
-                    std.debug.print("  ora_type: present\n", .{});
+                    log.debug("  ora_type: present\n", .{});
                 } else {
-                    std.debug.print("  ora_type: NULL\n", .{});
+                    log.debug("  ora_type: NULL\n", .{});
                 }
                 try variables.lowerVariableDecl(self, &var_decl);
             },
@@ -228,11 +229,14 @@ pub const StatementLowerer = struct {
     pub fn lowerBlockBody(self: *const StatementLowerer, b: lib.ast.Statements.BlockNode, block: c.MlirBlock) LoweringError!bool {
         if (self.symbol_table) |st| {
             st.pushScope() catch {
-                std.debug.print("WARNING: Failed to push scope for block\n", .{});
+                log.debug("WARNING: Failed to push scope for block\n", .{});
             };
         }
 
-        const expr_lowerer = ExpressionLowerer.init(self.ctx, block, self.type_mapper, self.param_map, self.storage_map, self.local_var_map, self.symbol_table, self.builtin_registry, self.expr_lowerer.error_handler, self.locations, self.ora_dialect);
+        var expr_lowerer = ExpressionLowerer.init(self.ctx, block, self.type_mapper, self.param_map, self.storage_map, self.local_var_map, self.symbol_table, self.builtin_registry, self.expr_lowerer.error_handler, self.locations, self.ora_dialect);
+        expr_lowerer.current_function_return_type = self.current_function_return_type;
+        expr_lowerer.current_function_return_type_info = self.current_function_return_type_info;
+        expr_lowerer.in_try_block = self.in_try_block;
 
         var has_terminator = false;
 

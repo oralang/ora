@@ -14,6 +14,7 @@ const OraDialect = @import("../dialect.zig").OraDialect;
 const expr_helpers = @import("helpers.zig");
 const expr_access = @import("access.zig");
 const expr_literals = @import("literals.zig");
+const log = @import("log");
 
 /// ExpressionLowerer type (forward declaration)
 const ExpressionLowerer = @import("mod.zig").ExpressionLowerer;
@@ -224,7 +225,10 @@ pub fn lowerSwitchExpression(
         const case_block = c.mlirBlockCreate(0, null, null);
         c.mlirRegionInsertOwnedBlock(case_region, 0, case_block);
 
-        const case_expr_lowerer = ExpressionLowerer.init(self.ctx, case_block, self.type_mapper, self.param_map, self.storage_map, self.local_var_map, self.symbol_table, self.builtin_registry, self.error_handler, self.locations, self.ora_dialect);
+        var case_expr_lowerer = ExpressionLowerer.init(self.ctx, case_block, self.type_mapper, self.param_map, self.storage_map, self.local_var_map, self.symbol_table, self.builtin_registry, self.error_handler, self.locations, self.ora_dialect);
+        case_expr_lowerer.current_function_return_type = self.current_function_return_type;
+        case_expr_lowerer.current_function_return_type_info = self.current_function_return_type_info;
+        case_expr_lowerer.in_try_block = self.in_try_block;
 
         switch (case.pattern) {
             .Literal => |lit| {
@@ -407,7 +411,10 @@ pub fn lowerSwitchExpression(
         const default_block_mlir = c.mlirBlockCreate(0, null, null);
         c.mlirRegionInsertOwnedBlock(default_region, 0, default_block_mlir);
 
-        const default_expr_lowerer = ExpressionLowerer.init(self.ctx, default_block_mlir, self.type_mapper, self.param_map, self.storage_map, self.local_var_map, self.symbol_table, self.builtin_registry, self.error_handler, self.locations, self.ora_dialect);
+        var default_expr_lowerer = ExpressionLowerer.init(self.ctx, default_block_mlir, self.type_mapper, self.param_map, self.storage_map, self.local_var_map, self.symbol_table, self.builtin_registry, self.error_handler, self.locations, self.ora_dialect);
+        default_expr_lowerer.current_function_return_type = self.current_function_return_type;
+        default_expr_lowerer.current_function_return_type_info = self.current_function_return_type_info;
+        default_expr_lowerer.in_try_block = self.in_try_block;
 
         var default_has_return = false;
         for (default_block.statements) |stmt| {
@@ -592,13 +599,73 @@ pub fn lowerTry(
     try_expr: *const lib.ast.Expressions.TryExpr,
 ) c.MlirValue {
     const expr_value = self.lowerExpression(try_expr.expr);
+    if (c.mlirValueIsNull(expr_value)) {
+        if (self.error_handler) |handler| {
+            handler.reportError(.InternalError, try_expr.span, "failed to lower try operand", "check the called expression inside the try block") catch {};
+        }
+        return self.createErrorPlaceholder(try_expr.span, "failed to lower try operand");
+    }
     const expr_ty = c.mlirValueGetType(expr_value);
+    var result_type = expr_ty;
+    const success_ty = c.oraErrorUnionTypeGetSuccessType(expr_ty);
+    if (!c.mlirTypeIsNull(success_ty)) {
+        result_type = success_ty;
+    }
     const loc = self.fileLoc(try_expr.span);
+    const should_propagate = if (self.in_try_block)
+        false
+    else if (self.current_function_return_type_info) |ret_info|
+        isErrorUnionType(ret_info)
+    else
+        false;
 
     // use the C++ API which automatically creates the catch region
-    const op = self.ora_dialect.createTry(expr_value, expr_ty, loc);
+    const op = self.ora_dialect.createTry(expr_value, result_type, loc);
     h.appendOp(self.block, op);
+
+    // ensure the catch region has a terminator to avoid empty block errors
+    const catch_region = c.mlirOperationGetRegion(op, 0);
+    const catch_block = c.mlirRegionGetFirstBlock(catch_region);
+    if (!c.mlirBlockIsNull(catch_block)) {
+        const first_op = c.mlirBlockGetFirstOperation(catch_block);
+        if (c.mlirOperationIsNull(first_op)) {
+            if (should_propagate) {
+                const return_op = self.ora_dialect.createFuncReturnWithValue(expr_value, loc);
+                h.appendOp(catch_block, return_op);
+            } else {
+                if (!self.in_try_block) {
+                    if (self.error_handler) |handler| {
+                        handler.reportError(.TypeMismatch, try_expr.span, "try expression requires an error union return type", "change the function return type to '!T' or use try/catch block") catch {};
+                    }
+                }
+                var catch_lowerer = self.*;
+                catch_lowerer.block = catch_block;
+                if (c.mlirTypeEqual(result_type, c.mlirNoneTypeGet(self.ctx))) {
+                    const yield_op = self.ora_dialect.createYield(&[_]c.MlirValue{}, loc);
+                    h.appendOp(catch_block, yield_op);
+                } else {
+                    const default_val = catch_lowerer.createDefaultValueForType(result_type, loc) catch {
+                        const yield_op = self.ora_dialect.createYield(&[_]c.MlirValue{}, loc);
+                        h.appendOp(catch_block, yield_op);
+                        return h.getResult(op, 0);
+                    };
+                    const yield_op = self.ora_dialect.createYield(&[_]c.MlirValue{default_val}, loc);
+                    h.appendOp(catch_block, yield_op);
+                }
+            }
+        }
+    }
     return h.getResult(op, 0);
+}
+
+fn isErrorUnionType(ti: lib.ast.Types.TypeInfo) bool {
+    if (ti.category == .ErrorUnion) return true;
+    if (ti.ora_type) |ot| switch (ot) {
+        .error_union => return true,
+        ._union => |members| return members.len > 0 and members[0] == .error_union,
+        else => {},
+    };
+    return false;
 }
 
 /// Lower error return expressions
@@ -666,7 +733,7 @@ pub fn lowerStructInstantiation(
     const struct_name_str = switch (struct_inst.struct_name.*) {
         .Identifier => |*id| id.name,
         else => {
-            std.debug.print("ERROR: Struct instantiation struct_name must be an identifier\n", .{});
+            log.err("Struct instantiation struct_name must be an identifier\n", .{});
             return self.reportLoweringError(
                 struct_inst.span,
                 "invalid struct instantiation target",
@@ -760,7 +827,7 @@ pub fn lowerLabeledBlock(
 
     for (labeled_block.block.statements) |stmt| {
         stmt_lowerer.lowerStatement(&stmt) catch |err| {
-            std.debug.print("Error lowering statement in labeled block: {s}\n", .{@errorName(err)});
+            log.err("lowering statement in labeled block: {s}\n", .{@errorName(err)});
             return self.createConstant(0, labeled_block.span);
         };
     }
@@ -982,7 +1049,7 @@ pub fn createInitializedStruct(
     for (fields) |field| {
         const field_val = self.lowerExpression(field.value);
         field_values.append(std.heap.page_allocator, field_val) catch {
-            std.debug.print("WARNING: Failed to append field value to struct initialization\n", .{});
+            log.warn("Failed to append field value to struct initialization\n", .{});
             return self.createErrorPlaceholder(span, "Failed to append field value");
         };
     }
@@ -1129,6 +1196,6 @@ pub fn createSwitchIfChain(
     _ = self;
     _ = cases;
     _ = span;
-    std.debug.print("WARNING: createSwitchIfChain called but not fully implemented - using condition as fallback\n", .{});
+    log.warn("createSwitchIfChain called but not fully implemented - using condition as fallback\n", .{});
     return condition;
 }

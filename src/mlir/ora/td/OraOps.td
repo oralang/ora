@@ -1060,6 +1060,102 @@ def Ora_UnlockOp : Ora_Op<"unlock"> {
 // Error Handling Operations
 //===----------------------------------------------------------------------===//
 
+def Ora_ErrorOkOp : Ora_PureOp<"error.ok"> {
+  let summary = "Construct a successful error union value";
+  let description = [{
+    Wraps a success value into an !ora.error_union<T>.
+    
+    Example:
+    ```mlir
+    %ok = ora.error.ok %value : i256 -> !ora.error_union<i256>
+    ```
+  }];
+  
+  let arguments = (ins AnyType:$value);
+  let results = (outs AnyType:$result);
+  
+  let assemblyFormat = "$value attr-dict `:` type($value) `->` type($result)";
+  
+  let extraClassDeclaration = [{
+    ::mlir::Value getSuccessValue() { return getValue(); }
+  }];
+}
+
+def Ora_ErrorErrOp : Ora_PureOp<"error.err"> {
+  let summary = "Construct an error error-union value";
+  let description = [{
+    Wraps an error payload into an !ora.error_union<T>.
+    The result type specifies the success type parameter.
+    
+    Example:
+    ```mlir
+    %err = ora.error.err %code : i256 -> !ora.error_union<i256>
+    ```
+  }];
+  
+  let arguments = (ins AnyType:$value);
+  let results = (outs AnyType:$result);
+  
+  let assemblyFormat = "$value attr-dict `:` type($value) `->` type($result)";
+  
+  let extraClassDeclaration = [{
+    ::mlir::Value getErrorValue() { return getValue(); }
+  }];
+}
+
+def Ora_ErrorIsErrorOp : Ora_PureOp<"error.is_error"> {
+  let summary = "Check whether an error union holds an error";
+  let description = [{
+    Returns true if the error union contains an error payload.
+    
+    Example:
+    ```mlir
+    %is_err = ora.error.is_error %value : !ora.error_union<i256> -> i1
+    ```
+  }];
+  
+  let arguments = (ins AnyType:$value);
+  let results = (outs I1:$result);
+  
+  let assemblyFormat = "$value attr-dict `:` type($value) `->` type($result)";
+}
+
+def Ora_ErrorUnwrapOp : Ora_PureOp<"error.unwrap"> {
+  let summary = "Unwrap a success value from an error union";
+  let description = [{
+    Extracts the success value from an !ora.error_union<T>.
+    Behavior is undefined if the value contains an error payload.
+    
+    Example:
+    ```mlir
+    %value = ora.error.unwrap %result : !ora.error_union<i256> -> i256
+    ```
+  }];
+  
+  let arguments = (ins AnyType:$value);
+  let results = (outs AnyType:$result);
+  
+  let assemblyFormat = "$value attr-dict `:` type($value) `->` type($result)";
+}
+
+def Ora_ErrorGetErrorOp : Ora_PureOp<"error.get_error"> {
+  let summary = "Extract the error payload from an error union";
+  let description = [{
+    Extracts the error payload from an !ora.error_union<T>.
+    Behavior is undefined if the value contains a success payload.
+    
+    Example:
+    ```mlir
+    %code = ora.error.get_error %result : !ora.error_union<i256> -> i256
+    ```
+  }];
+  
+  let arguments = (ins AnyType:$value);
+  let results = (outs AnyType:$result);
+  
+  let assemblyFormat = "$value attr-dict `:` type($value) `->` type($result)";
+}
+
 def Ora_TryOp : Ora_Op<"try_catch"> {
   let summary = "Try-catch operation";
   let description = [{

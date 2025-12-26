@@ -52,6 +52,12 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    const log_mod = b.createModule(.{
+        .root_source_file = b.path("src/logging.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
     const mlir_c_mod = b.createModule(.{
         .root_source_file = b.path("src/mlir/c.zig"),
         .target = target,
@@ -66,7 +72,9 @@ pub fn build(b: *std.Build) void {
     // file path. In this case, we set up `exe_mod` to import `lib_mod`.
     exe_mod.addImport("ora_lib", lib_mod);
     exe_mod.addImport("mlir_c_api", mlir_c_mod);
+    exe_mod.addImport("log", log_mod);
     lib_mod.addImport("mlir_c_api", mlir_c_mod);
+    lib_mod.addImport("log", log_mod);
 
     // now, we will create a static library based on the module we created above.
     // this creates a `std.Build.Step.Compile`, which is the build step responsible
@@ -383,6 +391,19 @@ pub fn build(b: *std.Build) void {
     linkMlirLibraries(b, refinement_guard_tests, mlir_step, ora_dialect_step, sir_dialect_step, target);
     test_step.dependOn(&b.addRunArtifact(refinement_guard_tests).step);
     test_mlir_step.dependOn(&b.addRunArtifact(refinement_guard_tests).step);
+
+    // MLIR effect metadata tests
+    const mlir_effects_test_mod = b.createModule(.{
+        .root_source_file = b.path("src/mlir/effects.test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    mlir_effects_test_mod.addImport("ora_lib", lib_mod);
+    mlir_effects_test_mod.addImport("mlir_c_api", mlir_c_mod);
+    const mlir_effects_tests = b.addTest(.{ .root_module = mlir_effects_test_mod });
+    linkMlirLibraries(b, mlir_effects_tests, mlir_step, ora_dialect_step, sir_dialect_step, target);
+    test_step.dependOn(&b.addRunArtifact(mlir_effects_tests).step);
+    test_mlir_step.dependOn(&b.addRunArtifact(mlir_effects_tests).step);
 
     // ast tests - Expressions
     const ast_expressions_test_mod = b.createModule(.{

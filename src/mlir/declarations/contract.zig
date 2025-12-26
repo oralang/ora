@@ -12,6 +12,7 @@ const StorageMap = @import("../memory.zig").StorageMap;
 const DeclarationLowerer = @import("mod.zig").DeclarationLowerer;
 const helpers = @import("helpers.zig");
 const error_handling = @import("../error_handling.zig");
+const log = @import("log");
 
 fn lowerContractTypes(self: *const DeclarationLowerer, block: c.MlirBlock, contract: *const lib.ContractNode) void {
     for (contract.body) |child| {
@@ -22,7 +23,7 @@ fn lowerContractTypes(self: *const DeclarationLowerer, block: c.MlirBlock, contr
 
                 if (self.symbol_table) |st| {
                     if (st.lookupType(struct_decl.name)) |_| {
-                        std.debug.print("WARNING: Duplicate struct type: {s}, skipping\n", .{struct_decl.name});
+                        log.warn("Duplicate struct type: {s}, skipping\n", .{struct_decl.name});
                     } else {
                         const struct_type = self.createStructType(&struct_decl);
 
@@ -50,10 +51,10 @@ fn lowerContractTypes(self: *const DeclarationLowerer, block: c.MlirBlock, contr
 
                             st.addType(struct_decl.name, type_symbol) catch {
                                 allocator.free(fields_slice);
-                                std.debug.print("ERROR: Failed to register struct type: {s}\n", .{struct_decl.name});
+                                log.err("Failed to register struct type: {s}\n", .{struct_decl.name});
                             };
                         } else |_| {
-                            std.debug.print("ERROR: Failed to allocate fields slice for struct: {s}\n", .{struct_decl.name});
+                            log.err("Failed to allocate fields slice for struct: {s}\n", .{struct_decl.name});
                         }
                     }
                 }
@@ -77,29 +78,6 @@ pub fn lowerContract(self: *const DeclarationLowerer, contract: *const lib.Contr
     }
 
     // set additional attributes using C API (attributes are just metadata)
-    if (contract.extends) |base_contract| {
-        const extends_ref = c.mlirStringRefCreate(base_contract.ptr, base_contract.len);
-        const extends_attr = c.mlirStringAttrGet(self.ctx, extends_ref);
-        const extends_name = h.strRef("ora.extends");
-        c.mlirOperationSetAttributeByName(contract_op, extends_name, extends_attr);
-    }
-
-    if (contract.implements.len > 0) {
-        // create array attribute for implemented interfaces
-        var interface_attrs = std.ArrayList(c.MlirAttribute){};
-        defer interface_attrs.deinit(std.heap.page_allocator);
-
-        for (contract.implements) |interface_name| {
-            const interface_ref = c.mlirStringRefCreate(interface_name.ptr, interface_name.len);
-            const interface_attr = c.mlirStringAttrGet(self.ctx, interface_ref);
-            interface_attrs.append(std.heap.page_allocator, interface_attr) catch {};
-        }
-
-        const implements_array = c.mlirArrayAttrGet(self.ctx, @intCast(interface_attrs.items.len), interface_attrs.items.ptr);
-        const implements_name = h.strRef("ora.implements");
-        c.mlirOperationSetAttributeByName(contract_op, implements_name, implements_array);
-    }
-
     // add contract metadata attribute
     const contract_attr = c.mlirBoolAttrGet(self.ctx, 1);
     const contract_name = h.strRef("ora.contract_decl");
@@ -143,11 +121,11 @@ pub fn lowerContract(self: *const DeclarationLowerer, contract: *const lib.Contr
                     },
                     .Stack => {
                         // stack variables at contract level are not allowed in Ora
-                        std.debug.print("WARNING: Stack variable at contract level: {s}\n", .{var_decl.name});
+                        log.warn("Stack variable at contract level: {s}\n", .{var_decl.name});
                     },
                     .Calldata => {
                         // calldata variables at contract level are not allowed
-                        std.debug.print("WARNING: Calldata variable at contract level: {s}\n", .{var_decl.name});
+                        log.warn("Calldata variable at contract level: {s}\n", .{var_decl.name});
                     },
                 }
             },
@@ -223,7 +201,7 @@ pub fn lowerContract(self: *const DeclarationLowerer, contract: *const lib.Contr
                 if (self.symbol_table) |st| {
                     const error_type = self.createErrorType(&error_decl);
                     st.addError(error_decl.name, error_type, null) catch {
-                        std.debug.print("ERROR: Failed to add error to symbol table: {s}\n", .{error_decl.name});
+                        log.err("Failed to add error to symbol table: {s}\n", .{error_decl.name});
                     };
                 }
             },
@@ -239,11 +217,11 @@ pub fn lowerContract(self: *const DeclarationLowerer, contract: *const lib.Contr
                     const const_type = self.type_mapper.toMlirType(const_decl.typ);
                     // register the constant declaration so we can create its value when referenced
                     st.registerConstantDecl(const_decl.name, &const_decl) catch {
-                        std.debug.print("ERROR: Failed to register constant declaration: {s}\n", .{const_decl.name});
+                        log.err("Failed to register constant declaration: {s}\n", .{const_decl.name});
                     };
                     // add to symbol table with null value - will be created lazily when referenced
                     st.addConstant(const_decl.name, const_type, null, null) catch {
-                        std.debug.print("ERROR: Failed to add constant to symbol table: {s}\n", .{const_decl.name});
+                        log.err("Failed to add constant to symbol table: {s}\n", .{const_decl.name});
                     };
                 }
             },
@@ -255,7 +233,7 @@ pub fn lowerContract(self: *const DeclarationLowerer, contract: *const lib.Contr
                 if (self.error_handler) |eh| {
                     eh.reportMissingNodeType(@tagName(child), error_handling.getSpanFromAstNode(&child), "contract body") catch {};
                 } else {
-                    std.debug.print("WARNING: Unhandled contract body node type in MLIR lowering: {s}\n", .{@tagName(child)});
+                    log.warn("Unhandled contract body node type in MLIR lowering: {s}\n", .{@tagName(child)});
                 }
             },
         }

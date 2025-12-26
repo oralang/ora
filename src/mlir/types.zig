@@ -24,6 +24,7 @@ const constants = @import("lower.zig");
 const h = @import("helpers.zig");
 const ErrorHandler = @import("error_handling.zig").ErrorHandler;
 const math = std.math;
+const log = @import("log");
 
 /// Type alias for array struct to match AST definition
 const ArrayStruct = struct { elem: *const lib.ast.type_info.OraType, len: u64 };
@@ -200,7 +201,7 @@ pub const TypeMapper = struct {
                     "Ensure type resolution runs before MLIR lowering.",
                 ) catch {};
             } else {
-                std.debug.print("[toMlirType] ERROR: ora_type is null - Ora is strongly typed, this should not happen!\n", .{});
+                log.debug("[toMlirType] ERROR: ora_type is null - Ora is strongly typed, this should not happen!\n", .{});
             }
             return c.mlirIntegerTypeGet(self.ctx, constants.DEFAULT_INTEGER_BITS);
         };
@@ -208,11 +209,11 @@ pub const TypeMapper = struct {
         // don't print refinement types with {any} as it tries to dereference base pointers
         // which may point to invalid memory. Print a safe representation instead.
         switch (ora_ty) {
-            .min_value => |mv| std.debug.print("[toMlirType] Converting Ora type: min_value<min={d}>\n", .{mv.min}),
-            .max_value => |mv| std.debug.print("[toMlirType] Converting Ora type: max_value<max={d}>\n", .{mv.max}),
-            .in_range => |ir| std.debug.print("[toMlirType] Converting Ora type: in_range<min={d}, max={d}>\n", .{ ir.min, ir.max }),
-            .scaled => |s| std.debug.print("[toMlirType] Converting Ora type: scaled<decimals={d}>\n", .{s.decimals}),
-            else => std.debug.print("[toMlirType] Converting Ora type: {any}\n", .{ora_ty}),
+            .min_value => |mv| log.debug("[toMlirType] Converting Ora type: min_value<min={d}>\n", .{mv.min}),
+            .max_value => |mv| log.debug("[toMlirType] Converting Ora type: max_value<max={d}>\n", .{mv.max}),
+            .in_range => |ir| log.debug("[toMlirType] Converting Ora type: in_range<min={d}, max={d}>\n", .{ ir.min, ir.max }),
+            .scaled => |s| log.debug("[toMlirType] Converting Ora type: scaled<decimals={d}>\n", .{s.decimals}),
+            else => log.debug("[toMlirType] Converting Ora type: {any}\n", .{ora_ty}),
         }
 
         const result = switch (ora_ty) {
@@ -296,13 +297,13 @@ pub const TypeMapper = struct {
         // log result type info
         if (c.mlirTypeIsAInteger(result)) {
             const width = c.mlirIntegerTypeGetWidth(result);
-            std.debug.print("[toMlirType] Result: i{d}\n", .{width});
+            log.debug("[toMlirType] Result: i{d}\n", .{width});
         } else if (c.mlirTypeIsAMemRef(result)) {
-            std.debug.print("[toMlirType] Result: memref\n", .{});
+            log.debug("[toMlirType] Result: memref\n", .{});
         } else if (c.mlirTypeIsANone(result)) {
-            std.debug.print("[toMlirType] Result: none (void)\n", .{});
+            log.debug("[toMlirType] Result: none (void)\n", .{});
         } else {
-            std.debug.print("[toMlirType] Result: (other MLIR type)\n", .{});
+            log.debug("[toMlirType] Result: (other MLIR type)\n", .{});
         }
 
         return result;
@@ -391,7 +392,7 @@ pub const TypeMapper = struct {
         }
 
         // last resort: use i256 as fallback (should not happen if struct is properly declared)
-        std.debug.print("WARNING: Struct type '{s}' not found in symbol table and failed to create. Using i256 fallback.\n", .{struct_name});
+        log.debug("WARNING: Struct type '{s}' not found in symbol table and failed to create. Using i256 fallback.\n", .{struct_name});
         return c.mlirIntegerTypeGet(self.ctx, constants.DEFAULT_INTEGER_BITS);
     }
 
@@ -528,21 +529,8 @@ pub const TypeMapper = struct {
     /// Error unions are sum types that can hold one of several error values
     /// Represented as: { tag: u8, value: largest_type }
     pub fn mapErrorUnionType(self: *const TypeMapper, error_union_info: anytype) c.MlirType {
-        // error unions in EVM are represented as i256 for simplicity:
-        // - Lower bits: error code/discriminant (which error type)
-        // - Upper bits: error value (if error carries data)
-        //
-        // layout in i256:
-        // [255:8] = error value (248 bits)
-        // [7:0]   = error discriminant (8 bits for up to 256 error types)
-        //
-        // this allows efficient error handling and revert data encoding
-
-        _ = error_union_info; // Type information tracked in symbol table
-
-        // return i256 for EVM-compatible error representation
-        // future: migrate to !ora.error_union<T1, T2, ...> dialect type
-        return c.mlirIntegerTypeGet(self.ctx, constants.DEFAULT_INTEGER_BITS);
+        const success_type = self.toMlirType(.{ .ora_type = error_union_info.* });
+        return c.oraErrorUnionTypeGet(self.ctx, success_type);
     }
 
     /// Convert error type `!T` to result type representation

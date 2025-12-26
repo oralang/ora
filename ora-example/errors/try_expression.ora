@@ -1,0 +1,30 @@
+contract TryExpr {
+    
+    error Fail;
+
+    fn test(x: u256) -> u256 {
+        return x * 2;
+    }
+
+    fn mayFail(x: u256) -> !u256 {
+        if (x == 0) {
+            return error.Fail;
+        }
+        return x + 1;
+    }
+
+    fn run(x: u256) -> !u256 {
+        let y = try mayFail(x);
+        return y * 2;
+    }
+
+    pub fn main(x: u256) {
+        try {
+            run(x);
+        } catch (e) {
+            log Failed(e);
+        }
+    }
+
+    log Failed(err: u256);
+}

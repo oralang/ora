@@ -19,6 +19,7 @@ const std = @import("std");
 const ast = @import("../ast.zig");
 const TypeInfo = @import("../ast/type_info.zig").TypeInfo;
 const builtins = @import("../semantics.zig").builtins;
+const log = @import("log");
 
 pub const SymbolKind = enum {
     Contract,
@@ -118,7 +119,7 @@ pub const SymbolTable = struct {
     pub fn init(allocator: std.mem.Allocator) SymbolTable {
         const root_scope = Scope.init(allocator, null, null);
         const builtin_reg = builtins.BuiltinRegistry.init(allocator) catch {
-            std.debug.print("FATAL: Failed to initialize builtin registry\n", .{});
+            log.err("Failed to initialize builtin registry\n", .{});
             @panic("Builtin registry initialization failed");
         };
         return .{

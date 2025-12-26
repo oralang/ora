@@ -71,8 +71,6 @@ pub const ModuleNode = struct {
 
 pub const ContractNode = struct {
     name: []const u8,
-    extends: ?[]const u8, // Base contract name for inheritance
-    implements: [][]const u8, // Interface names this contract implements
     attributes: []u8, // Placeholder for future contract attributes
     body: []AstNode, // Contract body contains declarations
     span: SourceSpan,

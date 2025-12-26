@@ -56,6 +56,9 @@ pub const ExpressionLowerer = struct {
     error_handler: ?*ErrorHandler,
     locations: LocationTracker,
     ora_dialect: *OraDialect,
+    in_try_block: bool = false,
+    current_function_return_type: ?c.MlirType = null,
+    current_function_return_type_info: ?lib.ast.Types.TypeInfo = null,
     pub fn init(ctx: c.MlirContext, block: c.MlirBlock, type_mapper: *const TypeMapper, param_map: ?*const ParamMap, storage_map: ?*const StorageMap, local_var_map: ?*const LocalVarMap, symbol_table: ?*const SymbolTable, builtin_registry: ?*const builtins.BuiltinRegistry, error_handler: ?*ErrorHandler, locations: LocationTracker, ora_dialect: *OraDialect) ExpressionLowerer {
         return .{
             .ctx = ctx,
@@ -69,6 +72,9 @@ pub const ExpressionLowerer = struct {
             .error_handler = error_handler,
             .locations = locations,
             .ora_dialect = ora_dialect,
+            .in_try_block = false,
+            .current_function_return_type = null,
+            .current_function_return_type_info = null,
         };
     }
 

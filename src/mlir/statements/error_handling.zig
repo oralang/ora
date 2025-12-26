@@ -11,6 +11,7 @@ const StatementLowerer = @import("statement_lowerer.zig").StatementLowerer;
 const LoweringError = StatementLowerer.LoweringError;
 const helpers = @import("helpers.zig");
 const return_stmt = @import("return.zig");
+const log = @import("log");
 
 fn getLastOperation(block: c.MlirBlock) c.MlirOperation {
     var op = c.mlirBlockGetFirstOperation(block);
@@ -103,7 +104,7 @@ pub fn lowerTryBlock(self: *const StatementLowerer, try_stmt: *const lib.ast.Sta
             // add error variable to LocalVarMap so it can be referenced in the catch block
             if (self.local_var_map) |lvm| {
                 lvm.addLocalVar(error_var_name, error_value) catch {
-                    std.debug.print("WARNING: Failed to add error variable '{s}' to local var map\n", .{error_var_name});
+                    log.warn("Failed to add error variable '{s}' to local var map\n", .{error_var_name});
                 };
             }
         }

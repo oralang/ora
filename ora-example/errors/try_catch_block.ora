@@ -1,0 +1,22 @@
+contract TryCatchBlock {
+    error Fail;
+
+    fn mayFail(x: u256) -> !u256 {
+        if (x == 0) {
+            return error.Fail;
+        }
+        return x + 1;
+    }
+
+    fn run(x: u256) {
+        try {
+            let y = mayFail(x);
+            log Success(y);
+        } catch (e) {
+            log Failed(e);
+        }
+    }
+
+    log Success(value: u256);
+    log Failed(err: u256);
+}

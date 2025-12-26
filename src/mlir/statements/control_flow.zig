@@ -13,6 +13,7 @@ const LoweringError = StatementLowerer.LoweringError;
 const ExpressionLowerer = @import("../expressions.zig").ExpressionLowerer;
 const helpers = @import("helpers.zig");
 const verification = @import("verification.zig");
+const log = @import("log");
 
 /// Lower if statements using ora.if with then/else regions
 pub fn lowerIf(self: *const StatementLowerer, if_stmt: *const lib.ast.Statements.IfNode) LoweringError!void {
@@ -160,13 +161,13 @@ fn lowerIfWithReturns(self: *const StatementLowerer, if_stmt: *const lib.ast.Sta
 
 /// Lower block body with yield - replaces return statements with scf.yield
 fn lowerBlockBodyWithYield(self: *const StatementLowerer, block_body: lib.ast.Statements.BlockNode, target_block: c.MlirBlock) LoweringError!void {
-    std.debug.print("[lowerBlockBodyWithYield] Starting, block has {} statements\n", .{block_body.statements.len});
+    log.debug("[lowerBlockBodyWithYield] Starting, block has {} statements\n", .{block_body.statements.len});
     // create a temporary lowerer for this block by copying the current one and changing the block
     var temp_lowerer = self.*;
     temp_lowerer.block = target_block;
 
     // create a new expression lowerer with the target block to ensure constants are created in the correct block
-    const expr_lowerer = ExpressionLowerer.init(
+    var expr_lowerer = ExpressionLowerer.init(
         self.ctx,
         target_block,
         self.expr_lowerer.type_mapper,
@@ -179,6 +180,9 @@ fn lowerBlockBodyWithYield(self: *const StatementLowerer, block_body: lib.ast.St
         self.expr_lowerer.locations,
         self.ora_dialect,
     );
+    expr_lowerer.current_function_return_type = self.current_function_return_type;
+    expr_lowerer.current_function_return_type_info = self.current_function_return_type_info;
+    expr_lowerer.in_try_block = self.in_try_block;
 
     // track if we've added a terminator to this block
     var has_terminator = false;
@@ -192,7 +196,7 @@ fn lowerBlockBodyWithYield(self: *const StatementLowerer, block_body: lib.ast.St
             .Return => |ret| {
                 // if we're inside a try block, use memref-based approach instead of scf.yield
                 if (self.in_try_block and self.try_return_flag_memref != null) {
-                    std.debug.print("[lowerBlockBodyWithYield] Return inside try block - using memref approach\n", .{});
+                    log.debug("[lowerBlockBodyWithYield] Return inside try block - using memref approach\n", .{});
                     const loc = temp_lowerer.fileLoc(ret.span);
                     const return_flag_memref = self.try_return_flag_memref.?;
 
@@ -232,7 +236,7 @@ fn lowerBlockBodyWithYield(self: *const StatementLowerer, block_body: lib.ast.St
                 }
 
                 // replace return with scf.yield (normal case, not in try block)
-                std.debug.print("[lowerBlockBodyWithYield] Converting return to scf.yield\n", .{});
+                log.debug("[lowerBlockBodyWithYield] Converting return to scf.yield\n", .{});
                 const loc = temp_lowerer.fileLoc(ret.span);
 
                 if (ret.value) |e| {
@@ -248,11 +252,11 @@ fn lowerBlockBodyWithYield(self: *const StatementLowerer, block_body: lib.ast.St
                     } else v;
                     const yield_op = temp_lowerer.ora_dialect.createScfYieldWithValues(&[_]c.MlirValue{final_value}, loc);
                     h.appendOp(target_block, yield_op);
-                    std.debug.print("[lowerBlockBodyWithYield] Added scf.yield with value\n", .{});
+                    log.debug("[lowerBlockBodyWithYield] Added scf.yield with value\n", .{});
                 } else {
                     const yield_op = temp_lowerer.ora_dialect.createScfYield(loc);
                     h.appendOp(target_block, yield_op);
-                    std.debug.print("[lowerBlockBodyWithYield] Added scf.yield without value\n", .{});
+                    log.debug("[lowerBlockBodyWithYield] Added scf.yield without value\n", .{});
                 }
                 has_terminator = true;
             },
@@ -391,7 +395,7 @@ pub fn lowerWhile(self: *const StatementLowerer, while_stmt: *const lib.ast.Stat
     const body_block = c.mlirRegionGetFirstBlock(body_region);
 
     // create expression lowerer for loop body (uses body_block, shares local_var_map for memref access)
-    const body_expr_lowerer = ExpressionLowerer.init(
+    var body_expr_lowerer = ExpressionLowerer.init(
         self.ctx,
         body_block,
         self.type_mapper,
@@ -404,6 +408,9 @@ pub fn lowerWhile(self: *const StatementLowerer, while_stmt: *const lib.ast.Stat
         self.expr_lowerer.locations,
         self.ora_dialect,
     );
+    body_expr_lowerer.current_function_return_type = self.current_function_return_type;
+    body_expr_lowerer.current_function_return_type_info = self.current_function_return_type_info;
+    body_expr_lowerer.in_try_block = self.in_try_block;
 
     // lower loop invariants if present (in body block, using body expression lowerer)
     for (while_stmt.invariants) |*invariant| {
@@ -545,7 +552,7 @@ fn lowerSimpleForLoop(
 
     // set up a body-scoped expression lowerer so that any index→element
     // conversions and bounds checks land inside the loop body.
-    const body_expr_lowerer = ExpressionLowerer.init(
+    var body_expr_lowerer = ExpressionLowerer.init(
         self.ctx,
         body_block,
         self.type_mapper,
@@ -558,6 +565,9 @@ fn lowerSimpleForLoop(
         self.expr_lowerer.locations,
         self.ora_dialect,
     );
+    body_expr_lowerer.current_function_return_type = self.current_function_return_type;
+    body_expr_lowerer.current_function_return_type_info = self.current_function_return_type_info;
+    body_expr_lowerer.in_try_block = self.in_try_block;
 
     // bind the loop variable:
     // - For range-style loops (integer iterable), item is the index itself.
@@ -566,17 +576,17 @@ fn lowerSimpleForLoop(
         if (c.mlirTypeIsAInteger(iterable_ty)) {
             // range-based: item is the index
             lvm.addLocalVar(item_name, induction_var) catch {
-                std.debug.print("WARNING: Failed to add loop variable to map: {s}\n", .{item_name});
+                log.warn("Failed to add loop variable to map: {s}\n", .{item_name});
             };
         } else if (c.mlirTypeIsAMemRef(iterable_ty) or c.mlirTypeIsAShaped(iterable_ty)) {
             const elem_value = body_expr_lowerer.createArrayIndexLoad(iterable, induction_var, span);
             lvm.addLocalVar(item_name, elem_value) catch {
-                std.debug.print("WARNING: Failed to add element variable to map: {s}\n", .{item_name});
+                log.warn("Failed to add element variable to map: {s}\n", .{item_name});
             };
         } else {
             // fallback: expose the index directly
             lvm.addLocalVar(item_name, induction_var) catch {
-                std.debug.print("WARNING: Failed to add loop variable to map: {s}\n", .{item_name});
+                log.warn("Failed to add loop variable to map: {s}\n", .{item_name});
             };
         }
     }
@@ -692,7 +702,7 @@ fn lowerIndexedForLoop(
     const op_body_block = c.mlirRegionGetFirstBlock(op_body_region);
 
     // body-scoped expression lowerer to keep index/element IR in the loop region
-    const body_expr_lowerer = ExpressionLowerer.init(
+    var body_expr_lowerer = ExpressionLowerer.init(
         self.ctx,
         op_body_block,
         self.type_mapper,
@@ -705,6 +715,9 @@ fn lowerIndexedForLoop(
         self.expr_lowerer.locations,
         self.ora_dialect,
     );
+    body_expr_lowerer.current_function_return_type = self.current_function_return_type;
+    body_expr_lowerer.current_function_return_type_info = self.current_function_return_type_info;
+    body_expr_lowerer.in_try_block = self.in_try_block;
 
     // get the induction variable (index)
     const index_var = c.mlirBlockGetArgument(op_body_block, 0);
@@ -712,22 +725,22 @@ fn lowerIndexedForLoop(
     // for collection-based loops, item is the element at iterable[index].
     if (self.local_var_map) |lvm| {
         lvm.addLocalVar(index_name, index_var) catch {
-            std.debug.print("WARNING: Failed to add index variable to map: {s}\n", .{index_name});
+            log.warn("Failed to add index variable to map: {s}\n", .{index_name});
         };
 
         if (c.mlirTypeIsAInteger(iterable_ty)) {
             // range-based: item is also the index
             lvm.addLocalVar(item_name, index_var) catch {
-                std.debug.print("WARNING: Failed to add item variable to map: {s}\n", .{item_name});
+                log.warn("Failed to add item variable to map: {s}\n", .{item_name});
             };
         } else if (c.mlirTypeIsAMemRef(iterable_ty) or c.mlirTypeIsAShaped(iterable_ty)) {
             const elem_value = body_expr_lowerer.createArrayIndexLoad(iterable, index_var, span);
             lvm.addLocalVar(item_name, elem_value) catch {
-                std.debug.print("WARNING: Failed to add element variable to map: {s}\n", .{item_name});
+                log.warn("Failed to add element variable to map: {s}\n", .{item_name});
             };
         } else {
             lvm.addLocalVar(item_name, index_var) catch {
-                std.debug.print("WARNING: Failed to add item variable to map: {s}\n", .{item_name});
+                log.warn("Failed to add item variable to map: {s}\n", .{item_name});
             };
         }
     }
@@ -832,12 +845,12 @@ fn lowerDestructuredForLoop(self: *const StatementLowerer, pattern: lib.ast.Expr
 
                     // add to variable map
                     lvm.addLocalVar(field.variable, field_value) catch {
-                        std.debug.print("WARNING: Failed to add destructured field to map: {s}\n", .{field.variable});
+                        log.warn("Failed to add destructured field to map: {s}\n", .{field.variable});
                     };
                 }
             },
             else => {
-                std.debug.print("WARNING: Unsupported destructuring pattern type\n", .{});
+                log.warn("Unsupported destructuring pattern type\n", .{});
             },
         }
     }
@@ -970,7 +983,10 @@ pub fn lowerSwitch(self: *const StatementLowerer, switch_stmt: *const lib.ast.St
         const case_block = c.mlirBlockCreate(0, null, null);
         c.mlirRegionInsertOwnedBlock(case_region, 0, case_block);
 
-        const case_expr_lowerer = ExpressionLowerer.init(self.ctx, case_block, self.type_mapper, self.expr_lowerer.param_map, self.expr_lowerer.storage_map, self.expr_lowerer.local_var_map, self.expr_lowerer.symbol_table, self.expr_lowerer.builtin_registry, self.expr_lowerer.error_handler, self.expr_lowerer.locations, self.ora_dialect);
+        var case_expr_lowerer = ExpressionLowerer.init(self.ctx, case_block, self.type_mapper, self.expr_lowerer.param_map, self.expr_lowerer.storage_map, self.expr_lowerer.local_var_map, self.expr_lowerer.symbol_table, self.expr_lowerer.builtin_registry, self.expr_lowerer.error_handler, self.expr_lowerer.locations, self.ora_dialect);
+        case_expr_lowerer.current_function_return_type = self.current_function_return_type;
+        case_expr_lowerer.current_function_return_type_info = self.current_function_return_type_info;
+        case_expr_lowerer.in_try_block = self.in_try_block;
 
         switch (case.pattern) {
             .Literal => |lit| {
@@ -1117,7 +1133,10 @@ pub fn lowerSwitch(self: *const StatementLowerer, switch_stmt: *const lib.ast.St
 
         const default_has_return = helpers.blockHasReturn(self, default_block);
         if (default_has_return) {
-            const default_expr_lowerer = ExpressionLowerer.init(self.ctx, default_block_mlir, self.type_mapper, self.expr_lowerer.param_map, self.expr_lowerer.storage_map, self.expr_lowerer.local_var_map, self.expr_lowerer.symbol_table, self.expr_lowerer.builtin_registry, self.expr_lowerer.error_handler, self.expr_lowerer.locations, self.ora_dialect);
+            var default_expr_lowerer = ExpressionLowerer.init(self.ctx, default_block_mlir, self.type_mapper, self.expr_lowerer.param_map, self.expr_lowerer.storage_map, self.expr_lowerer.local_var_map, self.expr_lowerer.symbol_table, self.expr_lowerer.builtin_registry, self.expr_lowerer.error_handler, self.expr_lowerer.locations, self.ora_dialect);
+            default_expr_lowerer.current_function_return_type = self.current_function_return_type;
+            default_expr_lowerer.current_function_return_type_info = self.current_function_return_type_info;
+            default_expr_lowerer.in_try_block = self.in_try_block;
             stmt_loop: for (default_block.statements) |stmt| {
                 switch (stmt) {
                     .Return => |ret| {
@@ -1193,7 +1212,7 @@ pub fn lowerSwitch(self: *const StatementLowerer, switch_stmt: *const lib.ast.St
 /// For cases with returns, use scf.yield (like lowerIfWithReturns) instead of ora.return
 /// However, if we're inside a labeled switch (scf.while), we can't use result types
 pub fn lowerSwitchCases(self: *const StatementLowerer, cases: []const lib.ast.Expressions.SwitchCase, condition: c.MlirValue, case_idx: usize, target_block: c.MlirBlock, loc: c.MlirLocation, default_case: ?lib.ast.Statements.BlockNode) LoweringError!?c.MlirValue {
-    std.debug.print("[lowerSwitchCases] case_idx={}, total_cases={}, has_default={}\n", .{ case_idx, cases.len, default_case != null });
+    log.debug("[lowerSwitchCases] case_idx={}, total_cases={}, has_default={}\n", .{ case_idx, cases.len, default_case != null });
 
     // determine if we need result type (if any case or default has return)
     // but NOT if we're inside a labeled switch (scf.while) - those can't yield values
@@ -1202,17 +1221,17 @@ pub fn lowerSwitchCases(self: *const StatementLowerer, cases: []const lib.ast.Ex
         break :blk if (self.current_function_return_type) |ret_type| ret_type else null;
     } else null;
 
-    std.debug.print("[lowerSwitchCases] is_labeled_switch={}, result_type={any}\n", .{ is_labeled_switch, result_type != null });
+    log.debug("[lowerSwitchCases] is_labeled_switch={}, result_type={any}\n", .{ is_labeled_switch, result_type != null });
 
     if (case_idx >= cases.len) {
-        std.debug.print("[lowerSwitchCases] Reached end of cases, handling default\n", .{});
+        log.debug("[lowerSwitchCases] Reached end of cases, handling default\n", .{});
         if (default_case) |default_block| {
             const has_return = helpers.blockHasReturn(self, default_block);
-            std.debug.print("[lowerSwitchCases] Default case has_return={}, is_labeled_switch={}\n", .{ has_return, is_labeled_switch });
+            log.debug("[lowerSwitchCases] Default case has_return={}, is_labeled_switch={}\n", .{ has_return, is_labeled_switch });
             if (has_return and is_labeled_switch) {
                 // for labeled switches, we can't use ora.return inside scf.if regions
                 // use empty scf.yield (returns handled after scf.while)
-                std.debug.print("[lowerSwitchCases] Labeled switch default with return - using empty scf.yield\n", .{});
+                log.debug("[lowerSwitchCases] Labeled switch default with return - using empty scf.yield\n", .{});
                 var temp_lowerer = self.*;
                 temp_lowerer.block = target_block;
                 var has_terminator = false;
@@ -1244,7 +1263,7 @@ pub fn lowerSwitchCases(self: *const StatementLowerer, cases: []const lib.ast.Ex
                     h.appendOp(target_block, yield_op);
                 }
             } else if (has_return) {
-                std.debug.print("[lowerSwitchCases] Non-labeled switch default with return - using lowerBlockBodyWithYield\n", .{});
+                log.debug("[lowerSwitchCases] Non-labeled switch default with return - using lowerBlockBodyWithYield\n", .{});
                 // for non-labeled switches with returns, use lowerBlockBodyWithYield (converts to scf.yield)
                 try lowerBlockBodyWithYield(self, default_block, target_block);
 
@@ -1306,12 +1325,15 @@ pub fn lowerSwitchCases(self: *const StatementLowerer, cases: []const lib.ast.Ex
     }
 
     const case = cases[case_idx];
-    std.debug.print("[lowerSwitchCases] Processing case {}\n", .{case_idx});
+    log.debug("[lowerSwitchCases] Processing case {}\n", .{case_idx});
 
     const case_condition = switch (case.pattern) {
         .Literal => |lit| blk: {
             // create case value constant in target_block (where it will be used)
-            const case_expr_lowerer = ExpressionLowerer.init(self.ctx, target_block, self.type_mapper, self.expr_lowerer.param_map, self.expr_lowerer.storage_map, self.expr_lowerer.local_var_map, self.expr_lowerer.symbol_table, self.expr_lowerer.builtin_registry, self.expr_lowerer.error_handler, self.expr_lowerer.locations, self.ora_dialect);
+            var case_expr_lowerer = ExpressionLowerer.init(self.ctx, target_block, self.type_mapper, self.expr_lowerer.param_map, self.expr_lowerer.storage_map, self.expr_lowerer.local_var_map, self.expr_lowerer.symbol_table, self.expr_lowerer.builtin_registry, self.expr_lowerer.error_handler, self.expr_lowerer.locations, self.ora_dialect);
+            case_expr_lowerer.current_function_return_type = self.current_function_return_type;
+            case_expr_lowerer.current_function_return_type_info = self.current_function_return_type_info;
+            case_expr_lowerer.in_try_block = self.in_try_block;
             const case_value = case_expr_lowerer.lowerLiteral(&lit.value);
             var cmp_state = h.opState("ora.cmp", loc);
 
@@ -1329,7 +1351,10 @@ pub fn lowerSwitchCases(self: *const StatementLowerer, cases: []const lib.ast.Ex
         },
         .Range => |range| blk: {
             // create range values in target_block (where they will be used)
-            const case_expr_lowerer = ExpressionLowerer.init(self.ctx, target_block, self.type_mapper, self.expr_lowerer.param_map, self.expr_lowerer.storage_map, self.expr_lowerer.local_var_map, self.expr_lowerer.symbol_table, self.expr_lowerer.builtin_registry, self.expr_lowerer.error_handler, self.expr_lowerer.locations, self.ora_dialect);
+            var case_expr_lowerer = ExpressionLowerer.init(self.ctx, target_block, self.type_mapper, self.expr_lowerer.param_map, self.expr_lowerer.storage_map, self.expr_lowerer.local_var_map, self.expr_lowerer.symbol_table, self.expr_lowerer.builtin_registry, self.expr_lowerer.error_handler, self.expr_lowerer.locations, self.ora_dialect);
+            case_expr_lowerer.current_function_return_type = self.current_function_return_type;
+            case_expr_lowerer.current_function_return_type_info = self.current_function_return_type_info;
+            case_expr_lowerer.in_try_block = self.in_try_block;
             const start_val = case_expr_lowerer.lowerExpression(range.start);
             const end_val = case_expr_lowerer.lowerExpression(range.end);
 
@@ -1418,7 +1443,7 @@ pub fn lowerSwitchCases(self: *const StatementLowerer, cases: []const lib.ast.Ex
     // for non-labeled switches with returns, use scf.if with result types and scf.yield
     // note: Regular if statements with returns also use scf.if, not ora.if
     const if_op = if (is_labeled_switch) blk: {
-        std.debug.print("[lowerSwitchCases] Creating scf.if for labeled switch (no result type, ora.return inside)\n", .{});
+        log.debug("[lowerSwitchCases] Creating scf.if for labeled switch (no result type, ora.return inside)\n", .{});
         // use scf.if without result type - allows ora.return inside regions
         var if_state = h.opState("scf.if", loc);
         c.mlirOperationStateAddOperands(&if_state, 1, @ptrCast(&case_condition));
@@ -1438,7 +1463,7 @@ pub fn lowerSwitchCases(self: *const StatementLowerer, cases: []const lib.ast.Ex
         const op = c.mlirOperationCreate(&if_state);
         break :blk op;
     } else blk: {
-        std.debug.print("[lowerSwitchCases] Creating scf.if for non-labeled switch\n", .{});
+        log.debug("[lowerSwitchCases] Creating scf.if for non-labeled switch\n", .{});
         // use scf.if - allows scf.yield with values
         var if_state = h.opState("scf.if", loc);
         c.mlirOperationStateAddOperands(&if_state, 1, @ptrCast(&case_condition));
@@ -1476,9 +1501,9 @@ pub fn lowerSwitchCases(self: *const StatementLowerer, cases: []const lib.ast.Ex
     const then_block = c.mlirRegionGetFirstBlock(then_region);
     const else_block = c.mlirRegionGetFirstBlock(else_region);
 
-    std.debug.print("[lowerSwitchCases] if operation created, appending to self.block\n", .{});
+    log.debug("[lowerSwitchCases] if operation created, appending to self.block\n", .{});
     h.appendOp(target_block, if_op);
-    std.debug.print("[lowerSwitchCases] if operation appended\n", .{});
+    log.debug("[lowerSwitchCases] if operation appended\n", .{});
 
     // get result from scf.if if it has one (for non-labeled switches with returns)
     const result_value = if (!is_labeled_switch and result_type != null) blk: {
@@ -1488,11 +1513,14 @@ pub fn lowerSwitchCases(self: *const StatementLowerer, cases: []const lib.ast.Ex
 
     // lower case body in then block
     // use lowerBlockBodyWithYield which converts returns to scf.yield (like lowerIfWithReturns)
-    std.debug.print("[lowerSwitchCases] Lowering case body\n", .{});
+    log.debug("[lowerSwitchCases] Lowering case body\n", .{});
     switch (case.body) {
         .Expression => |expr| {
-            std.debug.print("[lowerSwitchCases] Case body is Expression\n", .{});
-            const case_expr_lowerer = ExpressionLowerer.init(self.ctx, then_block, self.type_mapper, self.expr_lowerer.param_map, self.expr_lowerer.storage_map, self.expr_lowerer.local_var_map, self.expr_lowerer.symbol_table, self.expr_lowerer.builtin_registry, self.expr_lowerer.error_handler, self.expr_lowerer.locations, self.ora_dialect);
+            log.debug("[lowerSwitchCases] Case body is Expression\n", .{});
+            var case_expr_lowerer = ExpressionLowerer.init(self.ctx, then_block, self.type_mapper, self.expr_lowerer.param_map, self.expr_lowerer.storage_map, self.expr_lowerer.local_var_map, self.expr_lowerer.symbol_table, self.expr_lowerer.builtin_registry, self.expr_lowerer.error_handler, self.expr_lowerer.locations, self.ora_dialect);
+            case_expr_lowerer.current_function_return_type = self.current_function_return_type;
+            case_expr_lowerer.current_function_return_type_info = self.current_function_return_type_info;
+            case_expr_lowerer.in_try_block = self.in_try_block;
             _ = case_expr_lowerer.lowerExpression(expr);
             // add appropriate yield - scf.if always uses scf.yield (even for labeled switches)
             if (result_type) |ret_type| {
@@ -1508,13 +1536,16 @@ pub fn lowerSwitchCases(self: *const StatementLowerer, cases: []const lib.ast.Ex
         },
         .Block => |block| {
             const has_return = helpers.blockHasReturn(self, block);
-            std.debug.print("[lowerSwitchCases] Case body is Block, has_return={}, is_labeled_switch={}\n", .{ has_return, is_labeled_switch });
+            log.debug("[lowerSwitchCases] Case body is Block, has_return={}, is_labeled_switch={}\n", .{ has_return, is_labeled_switch });
             if (has_return and is_labeled_switch) {
                 // for labeled switches, store return value and set return flag, then use scf.yield with value
-                std.debug.print("[lowerSwitchCases] Labeled switch with return - storing return value and flag\n", .{});
+                log.debug("[lowerSwitchCases] Labeled switch with return - storing return value and flag\n", .{});
                 var temp_lowerer = self.*;
                 temp_lowerer.block = then_block;
-                const expr_lowerer = ExpressionLowerer.init(self.ctx, then_block, self.type_mapper, self.expr_lowerer.param_map, self.expr_lowerer.storage_map, self.expr_lowerer.local_var_map, self.expr_lowerer.symbol_table, self.expr_lowerer.builtin_registry, self.expr_lowerer.error_handler, self.expr_lowerer.locations, self.ora_dialect);
+                var expr_lowerer = ExpressionLowerer.init(self.ctx, then_block, self.type_mapper, self.expr_lowerer.param_map, self.expr_lowerer.storage_map, self.expr_lowerer.local_var_map, self.expr_lowerer.symbol_table, self.expr_lowerer.builtin_registry, self.expr_lowerer.error_handler, self.expr_lowerer.locations, self.ora_dialect);
+                expr_lowerer.current_function_return_type = self.current_function_return_type;
+                expr_lowerer.current_function_return_type_info = self.current_function_return_type_info;
+                expr_lowerer.in_try_block = self.in_try_block;
                 var has_terminator = false;
                 for (block.statements) |stmt| {
                     if (has_terminator) break;
@@ -1572,7 +1603,7 @@ pub fn lowerSwitchCases(self: *const StatementLowerer, cases: []const lib.ast.Ex
                     h.appendOp(then_block, yield_op);
                 }
             } else if (has_return) {
-                std.debug.print("[lowerSwitchCases] Non-labeled switch with return - using lowerBlockBodyWithYield\n", .{});
+                log.debug("[lowerSwitchCases] Non-labeled switch with return - using lowerBlockBodyWithYield\n", .{});
                 // for non-labeled switches with returns, use lowerBlockBodyWithYield (converts to scf.yield)
                 try lowerBlockBodyWithYield(self, block, then_block);
 
@@ -1610,13 +1641,16 @@ pub fn lowerSwitchCases(self: *const StatementLowerer, cases: []const lib.ast.Ex
         },
         .LabeledBlock => |labeled| {
             const has_return = helpers.blockHasReturn(self, labeled.block);
-            std.debug.print("[lowerSwitchCases] Case body is LabeledBlock, has_return={}, is_labeled_switch={}\n", .{ has_return, is_labeled_switch });
+            log.debug("[lowerSwitchCases] Case body is LabeledBlock, has_return={}, is_labeled_switch={}\n", .{ has_return, is_labeled_switch });
             if (has_return and is_labeled_switch) {
                 // for labeled switches, store return value and set return flag, then use scf.yield
-                std.debug.print("[lowerSwitchCases] Labeled switch with return - storing return value and flag\n", .{});
+                log.debug("[lowerSwitchCases] Labeled switch with return - storing return value and flag\n", .{});
                 var temp_lowerer = self.*;
                 temp_lowerer.block = then_block;
-                const expr_lowerer = ExpressionLowerer.init(self.ctx, then_block, self.type_mapper, self.expr_lowerer.param_map, self.expr_lowerer.storage_map, self.expr_lowerer.local_var_map, self.expr_lowerer.symbol_table, self.expr_lowerer.builtin_registry, self.expr_lowerer.error_handler, self.expr_lowerer.locations, self.ora_dialect);
+                var expr_lowerer = ExpressionLowerer.init(self.ctx, then_block, self.type_mapper, self.expr_lowerer.param_map, self.expr_lowerer.storage_map, self.expr_lowerer.local_var_map, self.expr_lowerer.symbol_table, self.expr_lowerer.builtin_registry, self.expr_lowerer.error_handler, self.expr_lowerer.locations, self.ora_dialect);
+                expr_lowerer.current_function_return_type = self.current_function_return_type;
+                expr_lowerer.current_function_return_type_info = self.current_function_return_type_info;
+                expr_lowerer.in_try_block = self.in_try_block;
                 var has_terminator = false;
                 for (labeled.block.statements) |stmt| {
                     if (has_terminator) break;
@@ -1674,7 +1708,7 @@ pub fn lowerSwitchCases(self: *const StatementLowerer, cases: []const lib.ast.Ex
                     h.appendOp(then_block, yield_op);
                 }
             } else if (has_return) {
-                std.debug.print("[lowerSwitchCases] Non-labeled switch with return - using lowerBlockBodyWithYield\n", .{});
+                log.debug("[lowerSwitchCases] Non-labeled switch with return - using lowerBlockBodyWithYield\n", .{});
                 // for non-labeled switches with returns, use lowerBlockBodyWithYield (converts to scf.yield)
                 try lowerBlockBodyWithYield(self, labeled.block, then_block);
 
@@ -1722,7 +1756,7 @@ pub fn lowerSwitchCases(self: *const StatementLowerer, cases: []const lib.ast.Ex
 
     // recursively lower remaining cases in else block
     // the recursive call will handle adding terminators to else_block (including default case)
-    std.debug.print("[lowerSwitchCases] Recursively lowering remaining cases in else_block\n", .{});
+    log.debug("[lowerSwitchCases] Recursively lowering remaining cases in else_block\n", .{});
     const recursive_result = try lowerSwitchCases(self, cases, condition, case_idx + 1, else_block, loc, default_case);
 
     // if the recursive call returned a result (nested scf.if), we need to yield it

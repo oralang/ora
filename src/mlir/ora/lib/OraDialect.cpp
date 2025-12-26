@@ -847,6 +847,11 @@ namespace mlir
             auto caseKindsAttr = getCaseKindsAttr();
             auto defaultIndexAttr = getDefaultCaseIndexAttr();
 
+            const size_t case_kinds_size = caseKindsAttr ? static_cast<size_t>(caseKindsAttr.size()) : 0;
+            const size_t case_values_size = caseValuesAttr ? static_cast<size_t>(caseValuesAttr.size()) : 0;
+            const size_t range_starts_size = rangeStartsAttr ? static_cast<size_t>(rangeStartsAttr.size()) : 0;
+            const size_t range_ends_size = rangeEndsAttr ? static_cast<size_t>(rangeEndsAttr.size()) : 0;
+
             for (size_t i = 0; i < getCases().size(); ++i)
             {
                 p.printNewline();
@@ -868,16 +873,16 @@ namespace mlir
                     // Regular case
                     p << "case ";
 
-                    if (caseKindsAttr && i < caseKindsAttr.size())
+                    if (caseKindsAttr && i < case_kinds_size)
                     {
                         int64_t kind = caseKindsAttr[i];
-                        if (kind == 0 && caseValuesAttr && i < caseValuesAttr.size())
+                        if (kind == 0 && caseValuesAttr && i < case_values_size)
                         {
                             // Literal case
                             p << caseValuesAttr[i];
                         }
                         else if (kind == 1 && rangeStartsAttr && rangeEndsAttr &&
-                                 i < rangeStartsAttr.size() && i < rangeEndsAttr.size())
+                                 i < range_starts_size && i < range_ends_size)
                         {
                             // Range case
                             p << rangeStartsAttr[i] << "..." << rangeEndsAttr[i];
@@ -1053,6 +1058,11 @@ namespace mlir
             auto caseKindsAttr = getCaseKindsAttr();
             auto defaultIndexAttr = getDefaultCaseIndexAttr();
 
+            const size_t case_kinds_size = caseKindsAttr ? static_cast<size_t>(caseKindsAttr.size()) : 0;
+            const size_t case_values_size = caseValuesAttr ? static_cast<size_t>(caseValuesAttr.size()) : 0;
+            const size_t range_starts_size = rangeStartsAttr ? static_cast<size_t>(rangeStartsAttr.size()) : 0;
+            const size_t range_ends_size = rangeEndsAttr ? static_cast<size_t>(rangeEndsAttr.size()) : 0;
+
             for (size_t i = 0; i < getCases().size(); ++i)
             {
                 p.printNewline();
@@ -1072,15 +1082,15 @@ namespace mlir
                 {
                     p << "case ";
 
-                    if (caseKindsAttr && i < caseKindsAttr.size())
+                    if (caseKindsAttr && i < case_kinds_size)
                     {
                         int64_t kind = caseKindsAttr[i];
-                        if (kind == 0 && caseValuesAttr && i < caseValuesAttr.size())
+                        if (kind == 0 && caseValuesAttr && i < case_values_size)
                         {
                             p << caseValuesAttr[i];
                         }
                         else if (kind == 1 && rangeStartsAttr && rangeEndsAttr &&
-                                 i < rangeStartsAttr.size() && i < rangeEndsAttr.size())
+                                 i < range_starts_size && i < range_ends_size)
                         {
                             p << rangeStartsAttr[i] << "..." << rangeEndsAttr[i];
                         }

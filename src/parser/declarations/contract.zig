@@ -3,7 +3,7 @@
 // ============================================================================
 //
 // Handles parsing of contract declarations and their members:
-//   • Contract declarations (with extends/implements)
+//   • Contract declarations
 //   • Contract members (functions, variables, structs, enums, etc.)
 //   • Contract invariants
 //   • Ghost declarations
@@ -28,27 +28,6 @@ pub fn parseContract(
 ) !ast.AstNode {
     const name_token = try parser.base.consume(.Identifier, "Expected contract name");
 
-    // parse optional inheritance: contract Child extends Parent
-    var extends: ?[]const u8 = null;
-    if (parser.base.match(.Extends)) {
-        const parent_token = try parser.base.consume(.Identifier, "Expected parent contract name after 'extends'");
-        extends = parent_token.lexeme;
-    }
-
-    // parse optional interface implementations: contract MyContract implements Interface1, Interface2
-    var implements = std.ArrayList([]const u8){};
-    defer implements.deinit(parser.base.arena.allocator());
-
-    if (parser.base.match(.Implements)) {
-        // parse comma-separated list of interface names
-        repeat: while (true) {
-            const interface_token = try parser.base.consume(.Identifier, "Expected interface name");
-            try implements.append(parser.base.arena.allocator(), interface_token.lexeme);
-
-            if (!parser.base.match(.Comma)) break :repeat;
-        }
-    }
-
     _ = try parser.base.consume(.LeftBrace, "Expected '{' after contract declaration");
 
     var body = std.ArrayList(ast.AstNode){};
@@ -69,8 +48,6 @@ pub fn parseContract(
 
     return ast.AstNode{ .Contract = ast.ContractNode{
         .name = name_token.lexeme,
-        .extends = extends,
-        .implements = try implements.toOwnedSlice(parser.base.arena.allocator()),
         .attributes = &[_]u8{},
         .body = try body.toOwnedSlice(parser.base.arena.allocator()),
         .span = parser.base.spanFromToken(name_token),

@@ -31,7 +31,7 @@ test "catch variable uses error union type from try expression" {
         \\}
         \\fn caller() {
         \\  try {
-        \\    try mayFail();
+        \\    let _ = try mayFail();
         \\  } catch (e) {
         \\    let x = e;
         \\  }

@@ -134,7 +134,10 @@ fn lowerLogicalAnd(
     const if_op = c.mlirOperationCreate(&state);
     h.appendOp(self.block, if_op);
 
-    const then_lowerer = ExpressionLowerer.init(self.ctx, then_block, self.type_mapper, self.param_map, self.storage_map, self.local_var_map, self.symbol_table, self.builtin_registry, self.error_handler, self.locations, self.ora_dialect);
+    var then_lowerer = ExpressionLowerer.init(self.ctx, then_block, self.type_mapper, self.param_map, self.storage_map, self.local_var_map, self.symbol_table, self.builtin_registry, self.error_handler, self.locations, self.ora_dialect);
+    then_lowerer.current_function_return_type = self.current_function_return_type;
+    then_lowerer.current_function_return_type_info = self.current_function_return_type_info;
+    then_lowerer.in_try_block = self.in_try_block;
     const rhs_val_raw = then_lowerer.lowerExpression(bin.rhs);
 
     const rhs_type = c.mlirValueGetType(rhs_val_raw);
@@ -187,13 +190,19 @@ fn lowerLogicalOr(
     const if_op = c.mlirOperationCreate(&state);
     h.appendOp(self.block, if_op);
 
-    const then_lowerer = ExpressionLowerer.init(self.ctx, then_block, self.type_mapper, self.param_map, self.storage_map, self.local_var_map, self.symbol_table, self.builtin_registry, self.error_handler, self.locations, self.ora_dialect);
+    var then_lowerer = ExpressionLowerer.init(self.ctx, then_block, self.type_mapper, self.param_map, self.storage_map, self.local_var_map, self.symbol_table, self.builtin_registry, self.error_handler, self.locations, self.ora_dialect);
+    then_lowerer.current_function_return_type = self.current_function_return_type;
+    then_lowerer.current_function_return_type_info = self.current_function_return_type_info;
+    then_lowerer.in_try_block = self.in_try_block;
     const true_val = then_lowerer.createBoolConstant(true, bin.span);
 
     const then_yield_op = self.ora_dialect.createScfYieldWithValues(&[_]c.MlirValue{true_val}, self.fileLoc(bin.span));
     h.appendOp(then_block, then_yield_op);
 
-    const else_lowerer = ExpressionLowerer.init(self.ctx, else_block, self.type_mapper, self.param_map, self.storage_map, self.local_var_map, self.symbol_table, self.builtin_registry, self.error_handler, self.locations, self.ora_dialect);
+    var else_lowerer = ExpressionLowerer.init(self.ctx, else_block, self.type_mapper, self.param_map, self.storage_map, self.local_var_map, self.symbol_table, self.builtin_registry, self.error_handler, self.locations, self.ora_dialect);
+    else_lowerer.current_function_return_type = self.current_function_return_type;
+    else_lowerer.current_function_return_type_info = self.current_function_return_type_info;
+    else_lowerer.in_try_block = self.in_try_block;
     const rhs_val_raw = else_lowerer.lowerExpression(bin.rhs);
 
     const rhs_type = c.mlirValueGetType(rhs_val_raw);

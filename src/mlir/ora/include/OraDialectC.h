@@ -157,6 +157,15 @@ extern "C"
         MlirContext ctx,
         MlirStringRef structName);
 
+    /// Create an Ora error union type !ora.error_union<successType>
+    MLIR_CAPI_EXPORTED MlirType oraErrorUnionTypeGet(
+        MlirContext ctx,
+        MlirType successType);
+
+    /// Extract the success type from an Ora error union type
+    /// Returns null type if the input is not an error union type
+    MLIR_CAPI_EXPORTED MlirType oraErrorUnionTypeGetSuccessType(MlirType errorUnionType);
+
     /// Extract the value type from an Ora map type !ora.map<keyType, valueType>
     /// Returns null type if the input is not a map type
     MLIR_CAPI_EXPORTED MlirType oraMapTypeGetValueType(MlirType mapType);
@@ -482,6 +491,40 @@ extern "C"
         MlirStringRef eventName,
         const MlirValue *parameters,
         size_t numParameters);
+
+    /// Create an ora.error.ok operation
+    MLIR_CAPI_EXPORTED MlirOperation oraErrorOkOpCreate(
+        MlirContext ctx,
+        MlirLocation loc,
+        MlirValue value,
+        MlirType resultType);
+
+    /// Create an ora.error.err operation
+    MLIR_CAPI_EXPORTED MlirOperation oraErrorErrOpCreate(
+        MlirContext ctx,
+        MlirLocation loc,
+        MlirValue value,
+        MlirType resultType);
+
+    /// Create an ora.error.is_error operation
+    MLIR_CAPI_EXPORTED MlirOperation oraErrorIsErrorOpCreate(
+        MlirContext ctx,
+        MlirLocation loc,
+        MlirValue value);
+
+    /// Create an ora.error.unwrap operation
+    MLIR_CAPI_EXPORTED MlirOperation oraErrorUnwrapOpCreate(
+        MlirContext ctx,
+        MlirLocation loc,
+        MlirValue value,
+        MlirType resultType);
+
+    /// Create an ora.error.get_error operation
+    MLIR_CAPI_EXPORTED MlirOperation oraErrorGetErrorOpCreate(
+        MlirContext ctx,
+        MlirLocation loc,
+        MlirValue value,
+        MlirType resultType);
 
     /// Create an ora.try_catch operation
     MLIR_CAPI_EXPORTED MlirOperation oraTryOpCreate(

@@ -32,6 +32,65 @@ const builtins = @import("../semantics.zig").builtins;
 const locals = @import("locals_binder.zig");
 const MemoryRegion = @import("../ast.zig").Memory.Region;
 const ManagedArrayList = std.array_list.Managed;
+const log = @import("log");
+
+fn isErrorUnionTypeInfo(ti: ast.Types.TypeInfo) bool {
+    if (ti.category == .ErrorUnion) return true;
+    if (ti.ora_type) |ot| switch (ot) {
+        .error_union => return true,
+        ._union => |members| return members.len > 0 and members[0] == .error_union,
+        else => {},
+    };
+    return false;
+}
+
+fn isErrorUnionOraType(ot: ast.Types.OraType) bool {
+    return switch (ot) {
+        .error_union => true,
+        ._union => |members| members.len > 0 and members[0] == .error_union,
+        else => false,
+    };
+}
+
+fn getExprSpan(e: ast.Expressions.ExprNode) ast.SourceSpan {
+    return switch (e) {
+        .Literal => |lit| switch (lit) {
+            .Integer => |v| v.span,
+            .String => |v| v.span,
+            .Bool => |v| v.span,
+            .Address => |v| v.span,
+            .Hex => |v| v.span,
+            .Binary => |v| v.span,
+            .Character => |v| v.span,
+            .Bytes => |v| v.span,
+        },
+        .Identifier => |v| v.span,
+        .Call => |v| v.span,
+        .Assignment => |v| v.span,
+        .CompoundAssignment => |v| v.span,
+        .Binary => |v| v.span,
+        .Unary => |v| v.span,
+        .Index => |v| v.span,
+        .FieldAccess => |v| v.span,
+        .Cast => |v| v.span,
+        .Comptime => |v| v.span,
+        .Old => |v| v.span,
+        .Tuple => |v| v.span,
+        .SwitchExpression => |v| v.span,
+        .Quantified => |v| v.span,
+        .Try => |v| v.span,
+        .ErrorReturn => |v| v.span,
+        .ErrorCast => |v| v.span,
+        .Shift => |v| v.span,
+        .StructInstantiation => |v| v.span,
+        .AnonymousStruct => |v| v.span,
+        .Range => |v| v.span,
+        .LabeledBlock => |v| v.span,
+        .Destructuring => |v| v.span,
+        .EnumLiteral => |v| v.span,
+        .ArrayLiteral => |v| v.span,
+    };
+}
 
 // ============================================================================
 // SECTION 1: Entry Points
@@ -47,7 +106,7 @@ pub fn checkFunctionBody(
 ) ![]const ast.SourceSpan {
     var issues = ManagedArrayList(ast.SourceSpan).init(allocator);
     // walk blocks recursively and check returns using the provided function scope
-    try walkBlock(&issues, table, scope, &f.body, f.return_type_info);
+    try walkBlock(&issues, table, scope, &f.body, f.return_type_info, false);
     return try issues.toOwnedSlice();
 }
 
@@ -112,8 +171,8 @@ fn walkBlockForUnknowns(issues: *ManagedArrayList(ast.SourceSpan), table: *state
                     try walkBlockForUnknowns(issues, table, catch_scope, &cb.block);
                 }
             },
-            .Log => |log| {
-                for (log.args) |arg| try visitExprForUnknowns(issues, table, scope, arg);
+            .Log => |log_stmt| {
+                for (log_stmt.args) |arg| try visitExprForUnknowns(issues, table, scope, arg);
             },
             .Lock => |lock| try visitExprForUnknowns(issues, table, scope, lock.path),
             .Unlock => |unlock| try visitExprForUnknowns(issues, table, scope, unlock.path),
@@ -543,7 +602,7 @@ fn checkSwitchExpressionResultTypes(
 // SECTION 5: Expression Validation (Assignments, Mutability)
 // ============================================================================
 
-fn checkExpr(issues: *ManagedArrayList(ast.SourceSpan), table: *state.SymbolTable, scope: *state.Scope, e: ast.Expressions.ExprNode) !void {
+fn checkExpr(issues: *ManagedArrayList(ast.SourceSpan), table: *state.SymbolTable, scope: *state.Scope, e: ast.Expressions.ExprNode, in_try_block: bool) !void {
     switch (e) {
         .Call => |c| {
             if (scope.name) |caller_fn| {
@@ -573,62 +632,121 @@ fn checkExpr(issues: *ManagedArrayList(ast.SourceSpan), table: *state.SymbolTabl
                     }
                 }
             }
-            try checkExpr(issues, table, scope, c.callee.*);
-            for (c.arguments) |arg| try checkExpr(issues, table, scope, arg.*);
+            // enforce explicit handling for error union arguments
+            if (builtins.isMemberAccessChain(c.callee)) {
+                const path = builtins.getMemberAccessPath(table.allocator, c.callee) catch "";
+                defer if (path.len > 0) table.allocator.free(path);
+                if (path.len > 0) {
+                    if (table.builtin_registry.lookup(path)) |builtin_info| {
+                        for (c.arguments, 0..) |arg, i| {
+                            if (i >= builtin_info.param_types.len) break;
+                            const arg_ti = expr.inferExprType(table, scope, arg.*);
+                            if (isErrorUnionTypeInfo(arg_ti) and !isErrorUnionOraType(builtin_info.param_types[i])) {
+                                try issues.append(c.span);
+                            }
+                        }
+                    }
+                }
+            } else if (c.callee.* == .Identifier and table.isScopeKnown(scope)) {
+                const fname = c.callee.Identifier.name;
+                if (table.safeFindUp(scope, fname)) |sym| {
+                    if (sym.typ) |ti| {
+                        if (ti.ora_type) |ot| switch (ot) {
+                            .function => |fnty| {
+                                for (c.arguments, 0..) |arg, i| {
+                                    if (i >= fnty.params.len) break;
+                                    const arg_ti = expr.inferExprType(table, scope, arg.*);
+                                    if (isErrorUnionTypeInfo(arg_ti) and !isErrorUnionOraType(fnty.params[i])) {
+                                        try issues.append(c.span);
+                                    }
+                                }
+                            },
+                            else => {},
+                        };
+                    }
+                }
+            }
+            try checkExpr(issues, table, scope, c.callee.*, in_try_block);
+            for (c.arguments) |arg| try checkExpr(issues, table, scope, arg.*, in_try_block);
         },
         .Try => |t| {
             const inner = expr.inferExprType(table, scope, t.expr.*);
             var ok_try = false;
             if (inner.ora_type) |ot| switch (ot) {
                 .error_union => ok_try = true,
+                ._union => |members| {
+                    if (members.len > 0 and members[0] == .error_union) ok_try = true;
+                },
                 else => {},
             };
             if (!ok_try) try issues.append(t.span);
             // recurse
-            try checkExpr(issues, table, scope, t.expr.*);
+            try checkExpr(issues, table, scope, t.expr.*, in_try_block);
         },
         .ErrorReturn => |_| {},
         .Assignment => |a| {
-            try checkExpr(issues, table, scope, a.target.*);
-            try checkExpr(issues, table, scope, a.value.*);
+            try checkExpr(issues, table, scope, a.target.*, in_try_block);
+            try checkExpr(issues, table, scope, a.value.*, in_try_block);
         },
         .CompoundAssignment => |ca| {
-            try checkExpr(issues, table, scope, ca.target.*);
-            try checkExpr(issues, table, scope, ca.value.*);
+            try checkExpr(issues, table, scope, ca.target.*, in_try_block);
+            try checkExpr(issues, table, scope, ca.value.*, in_try_block);
         },
         .Binary => |b| {
-            try checkExpr(issues, table, scope, b.lhs.*);
-            try checkExpr(issues, table, scope, b.rhs.*);
+            const lhs_ti = expr.inferExprType(table, scope, b.lhs.*);
+            const rhs_ti = expr.inferExprType(table, scope, b.rhs.*);
+            if (!in_try_block and (isErrorUnionTypeInfo(lhs_ti) or isErrorUnionTypeInfo(rhs_ti))) {
+                try issues.append(b.span);
+            }
+            try checkExpr(issues, table, scope, b.lhs.*, in_try_block);
+            try checkExpr(issues, table, scope, b.rhs.*, in_try_block);
         },
-        .Unary => |u| try checkExpr(issues, table, scope, u.operand.*),
+        .Unary => |u| {
+            const op_ti = expr.inferExprType(table, scope, u.operand.*);
+            if (!in_try_block and isErrorUnionTypeInfo(op_ti)) try issues.append(u.span);
+            try checkExpr(issues, table, scope, u.operand.*, in_try_block);
+        },
         .Index => |ix| {
-            try checkExpr(issues, table, scope, ix.target.*);
-            try checkExpr(issues, table, scope, ix.index.*);
+            const target_ti = expr.inferExprType(table, scope, ix.target.*);
+            if (!in_try_block and isErrorUnionTypeInfo(target_ti)) try issues.append(ix.span);
+            try checkExpr(issues, table, scope, ix.target.*, in_try_block);
+            try checkExpr(issues, table, scope, ix.index.*, in_try_block);
         },
-        .FieldAccess => |fa| try checkExpr(issues, table, scope, fa.target.*),
-        .Cast => |c| try checkExpr(issues, table, scope, c.operand.*),
+        .FieldAccess => |fa| {
+            const target_ti = expr.inferExprType(table, scope, fa.target.*);
+            if (!in_try_block and isErrorUnionTypeInfo(target_ti)) try issues.append(fa.span);
+            try checkExpr(issues, table, scope, fa.target.*, in_try_block);
+        },
+        .Cast => |c| try checkExpr(issues, table, scope, c.operand.*, in_try_block),
         .Tuple => |t| {
-            for (t.elements) |el| try checkExpr(issues, table, scope, el.*);
+            for (t.elements) |el| try checkExpr(issues, table, scope, el.*, in_try_block);
         },
         .AnonymousStruct => |as| {
-            for (as.fields) |f| try checkExpr(issues, table, scope, f.value.*);
+            for (as.fields) |f| try checkExpr(issues, table, scope, f.value.*, in_try_block);
         },
         .ArrayLiteral => |al| {
-            for (al.elements) |el| try checkExpr(issues, table, scope, el.*);
+            for (al.elements) |el| try checkExpr(issues, table, scope, el.*, in_try_block);
         },
         .StructInstantiation => |si| {
-            try checkExpr(issues, table, scope, si.struct_name.*);
-            for (si.fields) |f| try checkExpr(issues, table, scope, f.value.*);
+            try checkExpr(issues, table, scope, si.struct_name.*, in_try_block);
+            for (si.fields) |f| try checkExpr(issues, table, scope, f.value.*, in_try_block);
         },
         .Shift => |sh| {
-            try checkExpr(issues, table, scope, sh.mapping.*);
-            try checkExpr(issues, table, scope, sh.source.*);
-            try checkExpr(issues, table, scope, sh.dest.*);
-            try checkExpr(issues, table, scope, sh.amount.*);
+            const mapping_ti = expr.inferExprType(table, scope, sh.mapping.*);
+            const source_ti = expr.inferExprType(table, scope, sh.source.*);
+            const dest_ti = expr.inferExprType(table, scope, sh.dest.*);
+            const amount_ti = expr.inferExprType(table, scope, sh.amount.*);
+            if (!in_try_block and (isErrorUnionTypeInfo(mapping_ti) or isErrorUnionTypeInfo(source_ti) or isErrorUnionTypeInfo(dest_ti) or isErrorUnionTypeInfo(amount_ti))) {
+                try issues.append(sh.span);
+            }
+            try checkExpr(issues, table, scope, sh.mapping.*, in_try_block);
+            try checkExpr(issues, table, scope, sh.source.*, in_try_block);
+            try checkExpr(issues, table, scope, sh.dest.*, in_try_block);
+            try checkExpr(issues, table, scope, sh.amount.*, in_try_block);
         },
         .SwitchExpression => {
             if (e == .SwitchExpression) {
-                try checkExpr(issues, table, scope, e.SwitchExpression.condition.*);
+                try checkExpr(issues, table, scope, e.SwitchExpression.condition.*, in_try_block);
                 const cond_ti = expr.inferExprType(table, scope, e.SwitchExpression.condition.*);
                 try checkSwitchPatterns(issues, table, scope, cond_ti, e.SwitchExpression.cases);
                 try checkSwitchExpressionResultTypes(issues, table, scope, &e.SwitchExpression);
@@ -642,11 +760,11 @@ fn checkExpr(issues: *ManagedArrayList(ast.SourceSpan), table: *state.SymbolTabl
 // SECTION 6: Block Walking & Statement Checking
 // ============================================================================
 
-fn walkBlock(issues: *ManagedArrayList(ast.SourceSpan), table: *state.SymbolTable, scope: *state.Scope, block: *const ast.Statements.BlockNode, ret_type: ?ast.Types.TypeInfo) !void {
+fn walkBlock(issues: *ManagedArrayList(ast.SourceSpan), table: *state.SymbolTable, scope: *state.Scope, block: *const ast.Statements.BlockNode, ret_type: ?ast.Types.TypeInfo, in_try_block: bool) !void {
     for (block.statements) |stmt| {
         switch (stmt) {
             .VariableDecl => |v| {
-                if (v.value) |vp| try checkExpr(issues, table, scope, vp.*);
+                if (v.value) |vp| try checkExpr(issues, table, scope, vp.*, in_try_block);
                 if (v.value) |vp2| {
                     const tr = v.region;
                     const sr = inferExprRegion(table, scope, vp2.*);
@@ -657,6 +775,12 @@ fn walkBlock(issues: *ManagedArrayList(ast.SourceSpan), table: *state.SymbolTabl
                     if (isStorageLike(tr) and isStorageLike(sr)) {
                         const declared_ti = v.type_info;
                         if (!isLeafValueType(declared_ti)) try issues.append(v.span);
+                    }
+                }
+                if (v.value) |vp3| {
+                    const val_ti = expr.inferExprType(table, scope, vp3.*);
+                    if (!in_try_block and isErrorUnionTypeInfo(val_ti) and !isErrorUnionTypeInfo(v.type_info)) {
+                        try issues.append(v.span);
                     }
                 }
             },
@@ -684,8 +808,11 @@ fn walkBlock(issues: *ManagedArrayList(ast.SourceSpan), table: *state.SymbolTabl
                         if (lt.ora_type != null and rt.ora_type != null and !ast.Types.TypeInfo.equals(lt, rt)) {
                             try issues.append(a.span);
                         }
+                        if (!in_try_block and isErrorUnionTypeInfo(rt) and !isErrorUnionTypeInfo(lt)) {
+                            try issues.append(a.span);
+                        }
                         // recurse into RHS for error checks
-                        try checkExpr(issues, table, scope, a.value.*);
+                        try checkExpr(issues, table, scope, a.value.*, in_try_block);
                         // region transition validation
                         const tr = inferExprRegion(table, scope, a.target.*);
                         const sr = inferExprRegion(table, scope, a.value.*);
@@ -747,8 +874,12 @@ fn walkBlock(issues: *ManagedArrayList(ast.SourceSpan), table: *state.SymbolTabl
                         }
                     },
                     else => {
+                        const expr_ti = expr.inferExprType(table, scope, e);
+                        if (!in_try_block and isErrorUnionTypeInfo(expr_ti)) {
+                            try issues.append(getExprSpan(e));
+                        }
                         // general expression: traverse for error rules
-                        try checkExpr(issues, table, scope, e);
+                        try checkExpr(issues, table, scope, e, in_try_block);
                     },
                 }
             },
@@ -756,6 +887,9 @@ fn walkBlock(issues: *ManagedArrayList(ast.SourceSpan), table: *state.SymbolTabl
                 if (ret_type) |rt| {
                     if (r.value) |v| {
                         const vt = expr.inferExprType(table, scope, v);
+                        if (!in_try_block and isErrorUnionTypeInfo(vt) and !isErrorUnionTypeInfo(rt)) {
+                            try issues.append(r.span);
+                        }
                         var ok = ast.Types.TypeInfo.equals(vt, rt) or ast.Types.TypeInfo.isCompatibleWith(vt, rt);
                         if (!ok) {
                             // allow returning T when expected is !T (success case)
@@ -817,7 +951,7 @@ fn walkBlock(issues: *ManagedArrayList(ast.SourceSpan), table: *state.SymbolTabl
                                 const rstr = rstream.getWritten();
                                 const is_ident = (v == .Identifier);
                                 const fname = scope.name orelse "<anon>";
-                                std.debug.print("[semantics] Return mismatch in {s}: is_ident={}, vt='{s}', rt='{s}' at {d}:{d}\n", .{ fname, is_ident, vstr, rstr, r.span.line, r.span.column });
+                                log.debug("[semantics] Return mismatch in {s}: is_ident={}, vt='{s}', rt='{s}' at {d}:{d}\n", .{ fname, is_ident, vstr, rstr, r.span.line, r.span.column });
                             }
                             try issues.append(r.span);
                         }
@@ -833,26 +967,26 @@ fn walkBlock(issues: *ManagedArrayList(ast.SourceSpan), table: *state.SymbolTabl
             },
             .If => |iff| {
                 const then_scope = resolveBlockScope(table, scope, &iff.then_branch);
-                try walkBlock(issues, table, then_scope, &iff.then_branch, ret_type);
+                try walkBlock(issues, table, then_scope, &iff.then_branch, ret_type, in_try_block);
                 if (iff.else_branch) |*eb| {
                     const else_scope = resolveBlockScope(table, scope, eb);
-                    try walkBlock(issues, table, else_scope, eb, ret_type);
+                    try walkBlock(issues, table, else_scope, eb, ret_type, in_try_block);
                 }
             },
             .While => |wh| {
                 const body_scope = resolveBlockScope(table, scope, &wh.body);
-                try walkBlock(issues, table, body_scope, &wh.body, ret_type);
+                try walkBlock(issues, table, body_scope, &wh.body, ret_type, in_try_block);
             },
             .ForLoop => |fl| {
                 const body_scope = resolveBlockScope(table, scope, &fl.body);
-                try walkBlock(issues, table, body_scope, &fl.body, ret_type);
+                try walkBlock(issues, table, body_scope, &fl.body, ret_type, in_try_block);
             },
             .TryBlock => |tb| {
                 const try_scope = resolveBlockScope(table, scope, &tb.try_block);
-                try walkBlock(issues, table, try_scope, &tb.try_block, ret_type);
+                try walkBlock(issues, table, try_scope, &tb.try_block, ret_type, true);
                 if (tb.catch_block) |cb| {
                     const catch_scope = resolveBlockScope(table, scope, &cb.block);
-                    try walkBlock(issues, table, catch_scope, &cb.block, ret_type);
+                    try walkBlock(issues, table, catch_scope, &cb.block, ret_type, false);
                 }
             },
             // no plain Block variant in StmtNode

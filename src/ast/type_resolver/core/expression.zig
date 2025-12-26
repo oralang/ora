@@ -31,8 +31,21 @@ const validation = @import("../validation/mod.zig");
 const refinements = @import("../refinements/mod.zig");
 const utils = @import("../utils/mod.zig");
 const FunctionNode = ast.FunctionNode;
+const log = @import("log");
 
 const CoreResolver = @import("mod.zig").CoreResolver;
+
+fn isErrorUnionTypeInfo(type_info: TypeInfo) bool {
+    if (type_info.category == .ErrorUnion) return true;
+    if (type_info.ora_type) |ora_ty| {
+        return switch (ora_ty) {
+            .error_union => true,
+            ._union => |members| members.len > 0 and members[0] == .error_union,
+            else => false,
+        };
+    }
+    return false;
+}
 
 /// Synthesize (infer) the type of an expression.
 /// This is the "inference" direction of bidirectional typing.
@@ -76,12 +89,12 @@ pub fn checkExpr(
     expr: *ast.Expressions.ExprNode,
     expected: TypeInfo,
 ) TypeResolutionError!Typed {
-    std.debug.print("[checkExpr] Checking expression type={any}, expected category={s}\n", .{ @tagName(expr.*), @tagName(expected.category) });
+    log.debug("[checkExpr] Checking expression type={any}, expected category={s}\n", .{ @tagName(expr.*), @tagName(expected.category) });
 
     // special case: if expression is ErrorReturn and expected is ErrorUnion, allow it
     if (expr.* == .ErrorReturn and expected.category == .ErrorUnion) {
         const err_ret = &expr.ErrorReturn;
-        std.debug.print("[checkExpr] Special handling: ErrorReturn '{s}' with ErrorUnion expected\n", .{err_ret.error_name});
+        log.debug("[checkExpr] Special handling: ErrorReturn '{s}' with ErrorUnion expected\n", .{err_ret.error_name});
         const typed = try synthErrorReturn(self, err_ret);
         // error category is compatible with ErrorUnion
         return typed;
@@ -90,11 +103,11 @@ pub fn checkExpr(
     // synthesize type first, then validate compatibility.
     // future optimization: use expected type during synthesis for better error messages.
     var typed = try synthExpr(self, expr);
-    std.debug.print("[checkExpr] Synthesized type: category={s}\n", .{@tagName(typed.ty.category)});
+    log.debug("[checkExpr] Synthesized type: category={s}\n", .{@tagName(typed.ty.category)});
 
-    // special case: if synthesized type is ErrorUnion (or Union with error_union) and expected is the success type, unwrap it
+    // special case: unwrap ErrorUnion to success type inside try blocks only
     // this handles cases like `var x: bool = transfer(...)` inside a try block
-    if ((typed.ty.category == .ErrorUnion or typed.ty.category == .Union) and expected.category != .ErrorUnion and expected.category != .Unknown) {
+    if (self.in_try_block and (typed.ty.category == .ErrorUnion or typed.ty.category == .Union) and expected.category != .ErrorUnion and expected.category != .Unknown) {
         if (typed.ty.ora_type) |ora_ty| {
             if (ora_ty == .error_union) {
                 const success_ora_type = ora_ty.error_union.*;
@@ -154,15 +167,15 @@ pub fn checkExpr(
 
     // special case: if synthesized type is Enum (from error.X field access) and expected is ErrorUnion, allow it
     if (typed.ty.category == .Enum and expected.category == .ErrorUnion) {
-        std.debug.print("[checkExpr] Found Enum with ErrorUnion expected, expr type: {any}\n", .{@tagName(expr.*)});
+        log.debug("[checkExpr] Found Enum with ErrorUnion expected, expr type: {any}\n", .{@tagName(expr.*)});
         // check if this is actually an error (error.X field access)
         if (expr.* == .FieldAccess) {
             const fa = &expr.FieldAccess;
-            std.debug.print("[checkExpr] FieldAccess: target type={any}, field={s}\n", .{ @tagName(fa.target.*), fa.field });
+            log.debug("[checkExpr] FieldAccess: target type={any}, field={s}\n", .{ @tagName(fa.target.*), fa.field });
             if (fa.target.* == .Identifier) {
-                std.debug.print("[checkExpr] Target is Identifier: {s}\n", .{fa.target.Identifier.name});
+                log.debug("[checkExpr] Target is Identifier: {s}\n", .{fa.target.Identifier.name});
                 if (std.mem.eql(u8, fa.target.Identifier.name, "error")) {
-                    std.debug.print("[checkExpr] Special handling: FieldAccess error.{s} (Enum) with ErrorUnion expected - treating as Error\n", .{fa.field});
+                    log.debug("[checkExpr] Special handling: FieldAccess error.{s} (Enum) with ErrorUnion expected - treating as Error\n", .{fa.field});
                     // treat Enum as Error for compatibility with ErrorUnion
                     var error_typed = typed;
                     error_typed.ty.category = .Error;
@@ -186,7 +199,7 @@ pub fn checkExpr(
     if (!self.validation.isAssignable(typed.ty, expected)) {
         const got_str = formatTypeInfo(typed.ty, self.allocator) catch "unknown";
         const expected_str = formatTypeInfo(expected, self.allocator) catch "unknown";
-        std.debug.print(
+        log.debug(
             "[type_resolver] TypeMismatch: got {s}, expected {s}\n",
             .{ got_str, expected_str },
         );
@@ -286,7 +299,7 @@ fn synthAssignment(
     if (!self.validation.isAssignable(target_type, value_typed.ty)) {
         const got_str = formatTypeInfo(value_typed.ty, self.allocator) catch "unknown";
         const expected_str = formatTypeInfo(target_type, self.allocator) catch "unknown";
-        std.debug.print(
+        log.debug(
             "[type_resolver] Assignment type mismatch: got {s}, expected {s}\n",
             .{ got_str, expected_str },
         );
@@ -340,7 +353,7 @@ fn synthCast(
     if (!self.validation.isAssignable(cast.target_type, operand_typed.ty)) {
         const got_str = formatTypeInfo(operand_typed.ty, self.allocator) catch "unknown";
         const expected_str = formatTypeInfo(cast.target_type, self.allocator) catch "unknown";
-        std.debug.print(
+        log.debug(
             "[type_resolver] Cast type mismatch: got {s}, expected {s}\n",
             .{ got_str, expected_str },
         );
@@ -565,6 +578,10 @@ fn synthUnary(
     var operand_typed = try synthExpr(self, unary.operand);
     defer operand_typed.deinit(self.allocator);
 
+    if (!self.in_try_block and isErrorUnionTypeInfo(operand_typed.ty)) {
+        return TypeResolutionError.ErrorUnionOutsideTry;
+    }
+
     // unary operators preserve operand type (except ! which returns bool)
     const result_type = switch (unary.operator) {
         .Bang => CommonTypes.bool_type(),
@@ -602,7 +619,7 @@ fn synthCall(
     // if callee is an identifier, look up the function
     if (call.callee.* == .Identifier) {
         const func_name = call.callee.Identifier.name;
-        std.debug.print("[synthCall] Looking up function '{s}'\n", .{func_name});
+        log.debug("[synthCall] Looking up function '{s}'\n", .{func_name});
 
         // first try symbol table
         const symbol = SymbolTable.findUp(self.current_scope, func_name);
@@ -641,17 +658,17 @@ fn synthCall(
                                 const ret_ora_type = ret_ora_type_ptr.*;
                                 var ret_category = ret_ora_type.getCategory();
 
-                                std.debug.print("[synthCall] Function '{s}' return type: category={s}, ora_type={any}\n", .{ func_name, @tagName(ret_category), ret_ora_type });
+                                log.debug("[synthCall] Function '{s}' return type: category={s}, ora_type={any}\n", .{ func_name, @tagName(ret_category), ret_ora_type });
 
                                 // special handling: if it's a _union with error_union as first element,
                                 // treat it as ErrorUnion category
                                 if (ret_category == .Union and ret_ora_type == ._union) {
                                     if (ret_ora_type._union.len > 0) {
                                         const first_type = ret_ora_type._union[0];
-                                        std.debug.print("[synthCall] First union element: {any}\n", .{first_type});
+                                        log.debug("[synthCall] First union element: {any}\n", .{first_type});
                                         if (first_type == .error_union) {
                                             ret_category = .ErrorUnion;
-                                            std.debug.print("[synthCall] Detected error union, changing category to ErrorUnion\n", .{});
+                                            log.debug("[synthCall] Detected error union, changing category to ErrorUnion\n", .{});
                                         }
                                     }
                                 }
@@ -672,10 +689,10 @@ fn synthCall(
                                 };
                             }
                         } else {
-                            std.debug.print("[synthCall] Function '{s}' ora_type is not .function: {any}\n", .{ func_name, ora_ty });
+                            log.debug("[synthCall] Function '{s}' ora_type is not .function: {any}\n", .{ func_name, ora_ty });
                         }
                     } else {
-                        std.debug.print("[synthCall] Function '{s}' typ has no ora_type\n", .{func_name});
+                        log.debug("[synthCall] Function '{s}' typ has no ora_type\n", .{func_name});
                     }
 
                     // if we couldn't extract return type, try function registry
@@ -928,28 +945,21 @@ fn validateBinaryOperator(
     lhs_type: TypeInfo,
     rhs_type: TypeInfo,
 ) TypeResolutionError!void {
+    if (!self.in_try_block and (isErrorUnionTypeInfo(lhs_type) or isErrorUnionTypeInfo(rhs_type))) {
+        return TypeResolutionError.ErrorUnionOutsideTry;
+    }
 
     // errorUnion types should not be used directly in binary operations
-    // if an operand is an ErrorUnion or Union with error_union, extract its success type for the operation
+    // only unwrap inside try blocks
     var lhs_check = lhs_type;
     var rhs_check = rhs_type;
 
-    // check if lhs is ErrorUnion or Union with error_union
-    if (lhs_type.category == .ErrorUnion or lhs_type.category == .Union) {
-        if (lhs_type.ora_type) |lhs_ora| {
-            if (lhs_ora == .error_union) {
-                const success_ora_type = lhs_ora.error_union.*;
-                const success_category = success_ora_type.getCategory();
-                lhs_check = TypeInfo{
-                    .category = success_category,
-                    .ora_type = success_ora_type,
-                    .source = .inferred,
-                    .span = lhs_type.span,
-                };
-            } else if (lhs_ora == ._union and lhs_ora._union.len > 0) {
-                const first_type = lhs_ora._union[0];
-                if (first_type == .error_union) {
-                    const success_ora_type = first_type.error_union.*;
+    if (self.in_try_block) {
+        // check if lhs is ErrorUnion or Union with error_union
+        if (lhs_type.category == .ErrorUnion or lhs_type.category == .Union) {
+            if (lhs_type.ora_type) |lhs_ora| {
+                if (lhs_ora == .error_union) {
+                    const success_ora_type = lhs_ora.error_union.*;
                     const success_category = success_ora_type.getCategory();
                     lhs_check = TypeInfo{
                         .category = success_category,
@@ -957,27 +967,27 @@ fn validateBinaryOperator(
                         .source = .inferred,
                         .span = lhs_type.span,
                     };
+                } else if (lhs_ora == ._union and lhs_ora._union.len > 0) {
+                    const first_type = lhs_ora._union[0];
+                    if (first_type == .error_union) {
+                        const success_ora_type = first_type.error_union.*;
+                        const success_category = success_ora_type.getCategory();
+                        lhs_check = TypeInfo{
+                            .category = success_category,
+                            .ora_type = success_ora_type,
+                            .source = .inferred,
+                            .span = lhs_type.span,
+                        };
+                    }
                 }
             }
         }
-    }
 
-    // check if rhs is ErrorUnion or Union with error_union
-    if (rhs_type.category == .ErrorUnion or rhs_type.category == .Union) {
-        if (rhs_type.ora_type) |rhs_ora| {
-            if (rhs_ora == .error_union) {
-                const success_ora_type = rhs_ora.error_union.*;
-                const success_category = success_ora_type.getCategory();
-                rhs_check = TypeInfo{
-                    .category = success_category,
-                    .ora_type = success_ora_type,
-                    .source = .inferred,
-                    .span = rhs_type.span,
-                };
-            } else if (rhs_ora == ._union and rhs_ora._union.len > 0) {
-                const first_type = rhs_ora._union[0];
-                if (first_type == .error_union) {
-                    const success_ora_type = first_type.error_union.*;
+        // check if rhs is ErrorUnion or Union with error_union
+        if (rhs_type.category == .ErrorUnion or rhs_type.category == .Union) {
+            if (rhs_type.ora_type) |rhs_ora| {
+                if (rhs_ora == .error_union) {
+                    const success_ora_type = rhs_ora.error_union.*;
                     const success_category = success_ora_type.getCategory();
                     rhs_check = TypeInfo{
                         .category = success_category,
@@ -985,6 +995,18 @@ fn validateBinaryOperator(
                         .source = .inferred,
                         .span = rhs_type.span,
                     };
+                } else if (rhs_ora == ._union and rhs_ora._union.len > 0) {
+                    const first_type = rhs_ora._union[0];
+                    if (first_type == .error_union) {
+                        const success_ora_type = first_type.error_union.*;
+                        const success_category = success_ora_type.getCategory();
+                        rhs_check = TypeInfo{
+                            .category = success_category,
+                            .ora_type = success_ora_type,
+                            .source = .inferred,
+                            .span = rhs_type.span,
+                        };
+                    }
                 }
             }
         }
