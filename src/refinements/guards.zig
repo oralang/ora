@@ -74,31 +74,40 @@ fn generateMinValueGuard(
     const min_const = self.createConstant(min_attr, loc);
 
     // create comparison: value >= min
-    var cmp_state = h.opState("arith.cmpi", loc);
     const pred_id = h.identifier(self.ctx, "predicate");
     // uge = unsigned greater than or equal (predicate 5 for uge)
     const pred_attr = c.mlirIntegerAttrGet(c.mlirIntegerTypeGet(self.ctx, 64), 5);
     var attrs = [_]c.MlirNamedAttribute{c.mlirNamedAttributeGet(pred_id, pred_attr)};
-    c.mlirOperationStateAddAttributes(&cmp_state, attrs.len, &attrs);
-    c.mlirOperationStateAddOperands(&cmp_state, 2, @ptrCast(&[_]c.MlirValue{ value, min_const }));
-    c.mlirOperationStateAddResults(&cmp_state, 1, @ptrCast(&h.boolType(self.ctx)));
-    const cmp_op = c.mlirOperationCreate(&cmp_state);
+    const cmp_op = h.createOp(
+        self.ctx,
+        loc,
+        "arith.cmpi",
+        &[_]c.MlirValue{ value, min_const },
+        &[_]c.MlirType{h.boolType(self.ctx)},
+        &attrs,
+        0,
+        false,
+    );
     h.appendOp(self.block, cmp_op);
     const condition = h.getResult(cmp_op, 0);
 
     // create assertion: cf.assert condition
-    var assert_state = h.opState("cf.assert", loc);
-    c.mlirOperationStateAddOperands(&assert_state, 1, @ptrCast(&condition));
-
     // add error message attribute
     const msg = try std.fmt.allocPrint(std.heap.page_allocator, "Refinement violation: expected MinValue<u256, {d}>", .{min});
     defer std.heap.page_allocator.free(msg);
     const msg_attr = h.stringAttr(self.ctx, msg);
     const msg_id = h.identifier(self.ctx, "msg");
     var assert_attrs = [_]c.MlirNamedAttribute{c.mlirNamedAttributeGet(msg_id, msg_attr)};
-    c.mlirOperationStateAddAttributes(&assert_state, assert_attrs.len, &assert_attrs);
-
-    const assert_op = c.mlirOperationCreate(&assert_state);
+    const assert_op = h.createOp(
+        self.ctx,
+        loc,
+        "cf.assert",
+        &[_]c.MlirValue{condition},
+        &[_]c.MlirType{},
+        &assert_attrs,
+        0,
+        false,
+    );
     h.appendOp(self.block, assert_op);
 
     return value;
@@ -119,30 +128,39 @@ fn generateMaxValueGuard(
     const max_const = self.createConstant(max_attr, loc);
 
     // create comparison: value <= max
-    var cmp_state = h.opState("arith.cmpi", loc);
     const pred_id = h.identifier(self.ctx, "predicate");
     // ule = unsigned less than or equal (predicate 3 for ule)
     const pred_attr = c.mlirIntegerAttrGet(c.mlirIntegerTypeGet(self.ctx, 64), 3);
     var attrs = [_]c.MlirNamedAttribute{c.mlirNamedAttributeGet(pred_id, pred_attr)};
-    c.mlirOperationStateAddAttributes(&cmp_state, attrs.len, &attrs);
-    c.mlirOperationStateAddOperands(&cmp_state, 2, @ptrCast(&[_]c.MlirValue{ value, max_const }));
-    c.mlirOperationStateAddResults(&cmp_state, 1, @ptrCast(&h.boolType(self.ctx)));
-    const cmp_op = c.mlirOperationCreate(&cmp_state);
+    const cmp_op = h.createOp(
+        self.ctx,
+        loc,
+        "arith.cmpi",
+        &[_]c.MlirValue{ value, max_const },
+        &[_]c.MlirType{h.boolType(self.ctx)},
+        &attrs,
+        0,
+        false,
+    );
     h.appendOp(self.block, cmp_op);
     const condition = h.getResult(cmp_op, 0);
 
     // create assertion
-    var assert_state = h.opState("cf.assert", loc);
-    c.mlirOperationStateAddOperands(&assert_state, 1, @ptrCast(&condition));
-
     const msg = try std.fmt.allocPrint(std.heap.page_allocator, "Refinement violation: expected MaxValue<u256, {d}>", .{max});
     defer std.heap.page_allocator.free(msg);
     const msg_attr = h.stringAttr(self.ctx, msg);
     const msg_id = h.identifier(self.ctx, "msg");
     var assert_attrs = [_]c.MlirNamedAttribute{c.mlirNamedAttributeGet(msg_id, msg_attr)};
-    c.mlirOperationStateAddAttributes(&assert_state, assert_attrs.len, &assert_attrs);
-
-    const assert_op = c.mlirOperationCreate(&assert_state);
+    const assert_op = h.createOp(
+        self.ctx,
+        loc,
+        "cf.assert",
+        &[_]c.MlirValue{condition},
+        &[_]c.MlirType{},
+        &assert_attrs,
+        0,
+        false,
+    );
     h.appendOp(self.block, assert_op);
 
     return value;
@@ -166,48 +184,68 @@ fn generateInRangeGuard(
     const max_const = self.createConstant(max_attr, loc);
 
     // check: value >= min
-    var min_cmp_state = h.opState("arith.cmpi", loc);
     const pred_id = h.identifier(self.ctx, "predicate");
     const pred_uge_attr = c.mlirIntegerAttrGet(c.mlirIntegerTypeGet(self.ctx, 64), 5);
     var min_attrs = [_]c.MlirNamedAttribute{c.mlirNamedAttributeGet(pred_id, pred_uge_attr)};
-    c.mlirOperationStateAddAttributes(&min_cmp_state, min_attrs.len, &min_attrs);
-    c.mlirOperationStateAddOperands(&min_cmp_state, 2, @ptrCast(&[_]c.MlirValue{ value, min_const }));
-    c.mlirOperationStateAddResults(&min_cmp_state, 1, @ptrCast(&h.boolType(self.ctx)));
-    const min_cmp_op = c.mlirOperationCreate(&min_cmp_state);
+    const min_cmp_op = h.createOp(
+        self.ctx,
+        loc,
+        "arith.cmpi",
+        &[_]c.MlirValue{ value, min_const },
+        &[_]c.MlirType{h.boolType(self.ctx)},
+        &min_attrs,
+        0,
+        false,
+    );
     h.appendOp(self.block, min_cmp_op);
     const min_check = h.getResult(min_cmp_op, 0);
 
     // check: value <= max
-    var max_cmp_state = h.opState("arith.cmpi", loc);
     const pred_ule_attr = c.mlirIntegerAttrGet(c.mlirIntegerTypeGet(self.ctx, 64), 3);
     var max_attrs = [_]c.MlirNamedAttribute{c.mlirNamedAttributeGet(pred_id, pred_ule_attr)};
-    c.mlirOperationStateAddAttributes(&max_cmp_state, max_attrs.len, &max_attrs);
-    c.mlirOperationStateAddOperands(&max_cmp_state, 2, @ptrCast(&[_]c.MlirValue{ value, max_const }));
-    c.mlirOperationStateAddResults(&max_cmp_state, 1, @ptrCast(&h.boolType(self.ctx)));
-    const max_cmp_op = c.mlirOperationCreate(&max_cmp_state);
+    const max_cmp_op = h.createOp(
+        self.ctx,
+        loc,
+        "arith.cmpi",
+        &[_]c.MlirValue{ value, max_const },
+        &[_]c.MlirType{h.boolType(self.ctx)},
+        &max_attrs,
+        0,
+        false,
+    );
     h.appendOp(self.block, max_cmp_op);
     const max_check = h.getResult(max_cmp_op, 0);
 
     // combine: min_check && max_check
-    var and_state = h.opState("arith.andi", loc);
-    c.mlirOperationStateAddOperands(&and_state, 2, @ptrCast(&[_]c.MlirValue{ min_check, max_check }));
-    c.mlirOperationStateAddResults(&and_state, 1, @ptrCast(&h.boolType(self.ctx)));
-    const and_op = c.mlirOperationCreate(&and_state);
+    const and_op = h.createOp(
+        self.ctx,
+        loc,
+        "arith.andi",
+        &[_]c.MlirValue{ min_check, max_check },
+        &[_]c.MlirType{h.boolType(self.ctx)},
+        &[_]c.MlirNamedAttribute{},
+        0,
+        false,
+    );
     h.appendOp(self.block, and_op);
     const condition = h.getResult(and_op, 0);
 
     // create assertion
-    var assert_state = h.opState("cf.assert", loc);
-    c.mlirOperationStateAddOperands(&assert_state, 1, @ptrCast(&condition));
-
     const msg = try std.fmt.allocPrint(std.heap.page_allocator, "Refinement violation: expected InRange<u256, {d}, {d}>", .{ min, max });
     defer std.heap.page_allocator.free(msg);
     const msg_attr = h.stringAttr(self.ctx, msg);
     const msg_id = h.identifier(self.ctx, "msg");
     var assert_attrs = [_]c.MlirNamedAttribute{c.mlirNamedAttributeGet(msg_id, msg_attr)};
-    c.mlirOperationStateAddAttributes(&assert_state, assert_attrs.len, &assert_attrs);
-
-    const assert_op = c.mlirOperationCreate(&assert_state);
+    const assert_op = h.createOp(
+        self.ctx,
+        loc,
+        "cf.assert",
+        &[_]c.MlirValue{condition},
+        &[_]c.MlirType{},
+        &assert_attrs,
+        0,
+        false,
+    );
     h.appendOp(self.block, assert_op);
 
     return value;
@@ -224,10 +262,16 @@ pub fn generateExactDivisionGuard(
     const loc = self.fileLoc(span);
 
     // compute: dividend % divisor
-    var mod_state = h.opState("arith.remui", loc);
-    c.mlirOperationStateAddOperands(&mod_state, 2, @ptrCast(&[_]c.MlirValue{ dividend, divisor }));
-    c.mlirOperationStateAddResults(&mod_state, 1, @ptrCast(&c.mlirValueGetType(dividend)));
-    const mod_op = c.mlirOperationCreate(&mod_state);
+    const mod_op = h.createOp(
+        self.ctx,
+        loc,
+        "arith.remui",
+        &[_]c.MlirValue{ dividend, divisor },
+        &[_]c.MlirType{c.mlirValueGetType(dividend)},
+        &[_]c.MlirNamedAttribute{},
+        0,
+        false,
+    );
     h.appendOp(self.block, mod_op);
     const remainder = h.getResult(mod_op, 0);
 
@@ -237,28 +281,37 @@ pub fn generateExactDivisionGuard(
     const zero_const = self.createConstant(zero_attr, loc);
 
     // check: remainder == 0
-    var cmp_state = h.opState("arith.cmpi", loc);
     const pred_id = h.identifier(self.ctx, "predicate");
     const pred_eq_attr = c.mlirIntegerAttrGet(c.mlirIntegerTypeGet(self.ctx, 64), 0); // eq
     var attrs = [_]c.MlirNamedAttribute{c.mlirNamedAttributeGet(pred_id, pred_eq_attr)};
-    c.mlirOperationStateAddAttributes(&cmp_state, attrs.len, &attrs);
-    c.mlirOperationStateAddOperands(&cmp_state, 2, @ptrCast(&[_]c.MlirValue{ remainder, zero_const }));
-    c.mlirOperationStateAddResults(&cmp_state, 1, @ptrCast(&h.boolType(self.ctx)));
-    const cmp_op = c.mlirOperationCreate(&cmp_state);
+    const cmp_op = h.createOp(
+        self.ctx,
+        loc,
+        "arith.cmpi",
+        &[_]c.MlirValue{ remainder, zero_const },
+        &[_]c.MlirType{h.boolType(self.ctx)},
+        &attrs,
+        0,
+        false,
+    );
     h.appendOp(self.block, cmp_op);
     const condition = h.getResult(cmp_op, 0);
 
     // create assertion
-    var assert_state = h.opState("cf.assert", loc);
-    c.mlirOperationStateAddOperands(&assert_state, 1, @ptrCast(&condition));
-
     const msg = "Refinement violation: Exact<T> division must have no remainder";
     const msg_attr = h.stringAttr(self.ctx, msg);
     const msg_id = h.identifier(self.ctx, "msg");
     var assert_attrs = [_]c.MlirNamedAttribute{c.mlirNamedAttributeGet(msg_id, msg_attr)};
-    c.mlirOperationStateAddAttributes(&assert_state, assert_attrs.len, &assert_attrs);
-
-    const assert_op = c.mlirOperationCreate(&assert_state);
+    const assert_op = h.createOp(
+        self.ctx,
+        loc,
+        "cf.assert",
+        &[_]c.MlirValue{condition},
+        &[_]c.MlirType{},
+        &assert_attrs,
+        0,
+        false,
+    );
     h.appendOp(self.block, assert_op);
 }
 
@@ -276,29 +329,38 @@ fn generateNonZeroAddressGuard(
     const zero_const = self.createConstant(zero_attr, loc);
 
     // create comparison: value != 0
-    var cmp_state = h.opState("arith.cmpi", loc);
     const pred_id = h.identifier(self.ctx, "predicate");
     // ne = not equal (predicate 1 for ne)
     const pred_attr = c.mlirIntegerAttrGet(c.mlirIntegerTypeGet(self.ctx, 64), 1);
     var attrs = [_]c.MlirNamedAttribute{c.mlirNamedAttributeGet(pred_id, pred_attr)};
-    c.mlirOperationStateAddAttributes(&cmp_state, attrs.len, &attrs);
-    c.mlirOperationStateAddOperands(&cmp_state, 2, @ptrCast(&[_]c.MlirValue{ value, zero_const }));
-    c.mlirOperationStateAddResults(&cmp_state, 1, @ptrCast(&h.boolType(self.ctx)));
-    const cmp_op = c.mlirOperationCreate(&cmp_state);
+    const cmp_op = h.createOp(
+        self.ctx,
+        loc,
+        "arith.cmpi",
+        &[_]c.MlirValue{ value, zero_const },
+        &[_]c.MlirType{h.boolType(self.ctx)},
+        &attrs,
+        0,
+        false,
+    );
     h.appendOp(self.block, cmp_op);
     const condition = h.getResult(cmp_op, 0);
 
     // create assertion
-    var assert_state = h.opState("cf.assert", loc);
-    c.mlirOperationStateAddOperands(&assert_state, 1, @ptrCast(&condition));
-
     const msg = "Refinement violation: expected NonZeroAddress (address cannot be zero)";
     const msg_attr = h.stringAttr(self.ctx, msg);
     const msg_id = h.identifier(self.ctx, "msg");
     var assert_attrs = [_]c.MlirNamedAttribute{c.mlirNamedAttributeGet(msg_id, msg_attr)};
-    c.mlirOperationStateAddAttributes(&assert_state, assert_attrs.len, &assert_attrs);
-
-    const assert_op = c.mlirOperationCreate(&assert_state);
+    const assert_op = h.createOp(
+        self.ctx,
+        loc,
+        "cf.assert",
+        &[_]c.MlirValue{condition},
+        &[_]c.MlirType{},
+        &assert_attrs,
+        0,
+        false,
+    );
     h.appendOp(self.block, assert_op);
 
     return value;
@@ -307,12 +369,10 @@ fn generateNonZeroAddressGuard(
 /// Helper to create a constant value from an attribute
 fn createConstant(self: *const GuardContext, attr: c.MlirAttribute, loc: c.MlirLocation) c.MlirValue {
     const attr_type = c.mlirAttributeGetType(attr);
-    var const_state = h.opState("arith.constant", loc);
-    const value_id = h.identifier(self.ctx, "value");
-    var attrs = [_]c.MlirNamedAttribute{c.mlirNamedAttributeGet(value_id, attr)};
-    c.mlirOperationStateAddAttributes(&const_state, attrs.len, &attrs);
-    c.mlirOperationStateAddResults(&const_state, 1, @ptrCast(&attr_type));
-    const const_op = c.mlirOperationCreate(&const_state);
+    const const_op = c.oraArithConstantOpCreate(self.ctx, loc, attr_type, attr);
+    if (const_op.ptr == null) {
+        @panic("Failed to create arith.constant operation");
+    }
     h.appendOp(self.block, const_op);
     return h.getResult(const_op, 0);
 }

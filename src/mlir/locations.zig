@@ -32,21 +32,21 @@ pub const LocationTracker = struct {
     /// Create a location from SourceSpan information
     pub fn createLocation(self: *const LocationTracker, span: ?lib.ast.SourceSpan) c.MlirLocation {
         if (span) |s| {
-            const fname_ref = c.mlirStringRefCreate(self.filename.ptr, self.filename.len);
-            return c.mlirLocationFileLineColGet(self.ctx, fname_ref, s.line, s.column);
+            const fname_ref = c.oraStringRefCreate(self.filename.ptr, self.filename.len);
+            return c.oraLocationFileLineColGet(self.ctx, fname_ref, s.line, s.column);
         }
         return h.unknownLoc(self.ctx);
     }
 
     /// Create a file location with custom filename, line, and column
     pub fn createFileLocation(self: *const LocationTracker, filename: []const u8, line: u32, column: u32) c.MlirLocation {
-        const fname_ref = c.mlirStringRefCreate(filename.ptr, filename.len);
-        return c.mlirLocationFileLineColGet(self.ctx, fname_ref, line, column);
+        const fname_ref = c.oraStringRefCreate(filename.ptr, filename.len);
+        return c.oraLocationFileLineColGet(self.ctx, fname_ref, line, column);
     }
 
     /// Get location from an operation
     pub fn getLocationFromOp(_: *const LocationTracker, op: c.MlirOperation) c.MlirLocation {
-        return c.mlirOperationGetLocation(op);
+        return c.oraOperationGetLocation(op);
     }
 
     /// Create unknown location when span is not available
@@ -56,6 +56,6 @@ pub const LocationTracker = struct {
 
     /// Validate that a location is properly formed
     pub fn validateLocation(_: *const LocationTracker, loc: c.MlirLocation) bool {
-        return !c.mlirLocationIsNull(loc);
+        return !c.oraLocationIsNull(loc);
     }
 };

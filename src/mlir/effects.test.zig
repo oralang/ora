@@ -48,29 +48,17 @@ test "mlir emits storage read effects on functions" {
 
     var lowering = try mlir.lower.lowerFunctionsToModuleWithSemanticTable(h.ctx, nodes, mlir_allocator, &sem.symbols, "effects.ora");
     defer lowering.deinit(mlir_allocator);
-    defer c.mlirModuleDestroy(lowering.module);
+    defer c.oraModuleDestroy(lowering.module);
 
     try testing.expect(lowering.success);
 
-    const module_op = c.mlirModuleGetOperation(lowering.module);
-    var mlir_text_buffer = std.ArrayList(u8){};
-    defer mlir_text_buffer.deinit(mlir_allocator);
-
-    const PrintCallback = struct {
-        buffer: *std.ArrayList(u8),
-        allocator: std.mem.Allocator,
-        fn callback(message: c.MlirStringRef, user_data: ?*anyopaque) callconv(.c) void {
-            const self = @as(*@This(), @ptrCast(@alignCast(user_data)));
-            const message_slice = message.data[0..message.length];
-            self.buffer.appendSlice(self.allocator, message_slice) catch {};
-        }
-    };
-
-    var callback = PrintCallback{ .buffer = &mlir_text_buffer, .allocator = mlir_allocator };
-    c.mlirOperationPrint(module_op, PrintCallback.callback, @ptrCast(&callback));
-
-    const mlir_text = try mlir_text_buffer.toOwnedSlice(mlir_allocator);
-    defer mlir_allocator.free(mlir_text);
+    const module_op = c.oraModuleGetOperation(lowering.module);
+    const mlir_text_ref = c.oraOperationPrintToString(module_op);
+    defer @import("mlir_c_api").freeStringRef(mlir_text_ref);
+    const mlir_text = if (mlir_text_ref.data != null and mlir_text_ref.length > 0)
+        mlir_text_ref.data[0..mlir_text_ref.length]
+    else
+        "";
 
     try testing.expect(std.mem.containsAtLeast(u8, mlir_text, 1, "ora.effect = \"reads\""));
     try testing.expect(std.mem.containsAtLeast(u8, mlir_text, 1, "ora.read_slots = [\"balance\"]"));
@@ -116,29 +104,17 @@ test "mlir emits storage readwrite effects on functions" {
 
     var lowering = try mlir.lower.lowerFunctionsToModuleWithSemanticTable(h.ctx, nodes, mlir_allocator, &sem.symbols, "effects_rw.ora");
     defer lowering.deinit(mlir_allocator);
-    defer c.mlirModuleDestroy(lowering.module);
+    defer c.oraModuleDestroy(lowering.module);
 
     try testing.expect(lowering.success);
 
-    const module_op = c.mlirModuleGetOperation(lowering.module);
-    var mlir_text_buffer = std.ArrayList(u8){};
-    defer mlir_text_buffer.deinit(mlir_allocator);
-
-    const PrintCallback = struct {
-        buffer: *std.ArrayList(u8),
-        allocator: std.mem.Allocator,
-        fn callback(message: c.MlirStringRef, user_data: ?*anyopaque) callconv(.c) void {
-            const self = @as(*@This(), @ptrCast(@alignCast(user_data)));
-            const message_slice = message.data[0..message.length];
-            self.buffer.appendSlice(self.allocator, message_slice) catch {};
-        }
-    };
-
-    var callback = PrintCallback{ .buffer = &mlir_text_buffer, .allocator = mlir_allocator };
-    c.mlirOperationPrint(module_op, PrintCallback.callback, @ptrCast(&callback));
-
-    const mlir_text = try mlir_text_buffer.toOwnedSlice(mlir_allocator);
-    defer mlir_allocator.free(mlir_text);
+    const module_op = c.oraModuleGetOperation(lowering.module);
+    const mlir_text_ref = c.oraOperationPrintToString(module_op);
+    defer @import("mlir_c_api").freeStringRef(mlir_text_ref);
+    const mlir_text = if (mlir_text_ref.data != null and mlir_text_ref.length > 0)
+        mlir_text_ref.data[0..mlir_text_ref.length]
+    else
+        "";
 
     try testing.expect(std.mem.containsAtLeast(u8, mlir_text, 1, "ora.effect = \"readwrites\""));
     try testing.expect(std.mem.containsAtLeast(u8, mlir_text, 1, "ora.read_slots = [\"balance\"]"));

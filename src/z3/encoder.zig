@@ -112,13 +112,13 @@ pub const Encoder = struct {
     }
 
     /// Arithmetic operation types
-pub const ArithmeticOp = enum {
-    Add,
-    Sub,
-    Mul,
-    Div,
-    Rem,
-};
+    pub const ArithmeticOp = enum {
+        Add,
+        Sub,
+        Mul,
+        Div,
+        Rem,
+    };
 
     pub const BitwiseOp = enum {
         And,
@@ -307,12 +307,15 @@ pub const ArithmeticOp = enum {
     /// This is the main entry point for encoding MLIR operations
     pub fn encodeOperation(self: *Encoder, mlir_op: mlir.MlirOperation) EncodeError!z3.Z3_ast {
         // get operation name
-        const op_name_id = mlir.mlirOperationGetName(mlir_op);
-        const op_name_str = mlir.mlirIdentifierStr(op_name_id);
-        const op_name = op_name_str.data[0..op_name_str.length];
+        const op_name_ref = mlir.oraOperationGetName(mlir_op);
+        defer @import("mlir_c_api").freeStringRef(op_name_ref);
+        const op_name = if (op_name_ref.data == null or op_name_ref.length == 0)
+            ""
+        else
+            op_name_ref.data[0..op_name_ref.length];
 
         // get number of operands
-        const num_operands = mlir.mlirOperationGetNumOperands(mlir_op);
+        const num_operands = mlir.oraOperationGetNumOperands(mlir_op);
 
         // encode operands recursively
         const num_ops: usize = @intCast(num_operands);
@@ -320,7 +323,7 @@ pub const ArithmeticOp = enum {
         defer self.allocator.free(operands);
 
         for (0..num_ops) |i| {
-            const operand_value = mlir.mlirOperationGetOperand(mlir_op, @intCast(i));
+            const operand_value = mlir.oraOperationGetOperand(mlir_op, @intCast(i));
             operands[i] = try self.encodeValue(operand_value);
         }
 
@@ -336,9 +339,9 @@ pub const ArithmeticOp = enum {
             return cached;
         }
 
-        if (mlir.mlirValueIsAOpResult(mlir_value)) {
-            const defining_op = mlir.mlirOpResultGetOwner(mlir_value);
-            if (!mlir.mlirOperationIsNull(defining_op)) {
+        if (mlir.oraValueIsAOpResult(mlir_value)) {
+            const defining_op = mlir.oraOpResultGetOwner(mlir_value);
+            if (!mlir.oraOperationIsNull(defining_op)) {
                 if (self.encodeOperation(defining_op)) |encoded| {
                     try self.value_map.put(value_id, encoded);
                     return encoded;
@@ -349,7 +352,7 @@ pub const ArithmeticOp = enum {
         }
 
         // if no defining operation, create a fresh variable
-        const value_type = mlir.mlirValueGetType(mlir_value);
+        const value_type = mlir.oraValueGetType(mlir_value);
         const sort = try self.encodeMLIRType(value_type);
         const var_name = try std.fmt.allocPrint(self.allocator, "v_{d}", .{value_id});
         defer self.allocator.free(var_name);
@@ -368,7 +371,7 @@ pub const ArithmeticOp = enum {
 
         if (mlir.oraTypeIsIntegerType(mlir_type)) {
             const builtin = mlir.oraTypeToBuiltin(mlir_type);
-            const width = mlir.mlirIntegerTypeGetWidth(builtin);
+            const width = mlir.oraIntegerTypeGetWidth(builtin);
             if (width == 1) {
                 return z3.Z3_mk_bool_sort(self.context.ctx);
             }
@@ -376,8 +379,8 @@ pub const ArithmeticOp = enum {
         }
 
         // check if it's a builtin integer type
-        if (mlir.mlirTypeIsAInteger(mlir_type)) {
-            const width = mlir.mlirIntegerTypeGetWidth(mlir_type);
+        if (mlir.oraTypeIsAInteger(mlir_type)) {
+            const width = mlir.oraIntegerTypeGetWidth(mlir_type);
             if (width == 1) {
                 return z3.Z3_mk_bool_sort(self.context.ctx);
             }
@@ -385,7 +388,7 @@ pub const ArithmeticOp = enum {
         }
 
         const map_value_type = mlir.oraMapTypeGetValueType(mlir_type);
-        if (!mlir.mlirTypeIsNull(map_value_type)) {
+        if (!mlir.oraTypeIsNull(map_value_type)) {
             const value_sort = try self.encodeMLIRType(map_value_type);
             const key_sort = self.mkBitVectorSort(256);
             return self.mkArraySort(key_sort, value_sort);
@@ -407,10 +410,10 @@ pub const ArithmeticOp = enum {
         // constant operations
         if (std.mem.eql(u8, op_name, "arith.constant")) {
             const value = self.getConstantValue(mlir_op);
-            const value_type = mlir.mlirOperationGetResult(mlir_op, 0);
-            const mlir_type = mlir.mlirValueGetType(value_type);
-            const width: u32 = if (mlir.mlirTypeIsAInteger(mlir_type))
-                @intCast(mlir.mlirIntegerTypeGetWidth(mlir_type))
+            const value_type = mlir.oraOperationGetResult(mlir_op, 0);
+            const mlir_type = mlir.oraValueGetType(value_type);
+            const width: u32 = if (mlir.oraTypeIsAInteger(mlir_type))
+                @intCast(mlir.oraIntegerTypeGetWidth(mlir_type))
             else
                 256;
             return try self.encodeConstantOp(value, width);
@@ -492,7 +495,7 @@ pub const ArithmeticOp = enum {
         if (std.mem.eql(u8, op_name, "ora.map_store")) {
             if (operands.len >= 3) {
                 const stored = self.encodeStore(operands[0], operands[1], operands[2]);
-                const num_results = mlir.mlirOperationGetNumResults(mlir_op);
+                const num_results = mlir.oraOperationGetNumResults(mlir_op);
                 if (num_results > 0) return stored;
             }
         }
@@ -507,8 +510,8 @@ pub const ArithmeticOp = enum {
             if (operands.len >= 1) {
                 const field_name = self.getStringAttr(mlir_op, "field_name") orelse "field";
                 const struct_sort = z3.Z3_get_sort(self.context.ctx, operands[0]);
-                const result_value = mlir.mlirOperationGetResult(mlir_op, 0);
-                const result_type = mlir.mlirValueGetType(result_value);
+                const result_value = mlir.oraOperationGetResult(mlir_op, 0);
+                const result_type = mlir.oraValueGetType(result_value);
                 const result_sort = try self.encodeMLIRType(result_type);
                 return try self.applyFieldFunction(field_name, struct_sort, result_sort, operands[0]);
             }
@@ -529,38 +532,41 @@ pub const ArithmeticOp = enum {
     }
 
     fn extractIfYield(self: *Encoder, mlir_op: mlir.MlirOperation, region_index: u32) EncodeError!?z3.Z3_ast {
-        const region = mlir.mlirOperationGetRegion(mlir_op, region_index);
-        if (mlir.mlirRegionIsNull(region)) return null;
-        const block = mlir.mlirRegionGetFirstBlock(region);
-        if (mlir.mlirBlockIsNull(block)) return null;
+        const region = mlir.oraOperationGetRegion(mlir_op, region_index);
+        if (mlir.oraRegionIsNull(region)) return null;
+        const block = mlir.oraRegionGetFirstBlock(region);
+        if (mlir.oraBlockIsNull(block)) return null;
 
-        var current = mlir.mlirBlockGetFirstOperation(block);
-        while (!mlir.mlirOperationIsNull(current)) {
-            const name = self.getOperationName(current);
+        var current = mlir.oraBlockGetFirstOperation(block);
+        while (!mlir.oraOperationIsNull(current)) {
+            const name_ref = self.getOperationName(current);
+            defer @import("mlir_c_api").freeStringRef(name_ref);
+            const name = if (name_ref.data == null or name_ref.length == 0)
+                ""
+            else
+                name_ref.data[0..name_ref.length];
             if (std.mem.eql(u8, name, "scf.yield")) {
-                const num_operands = mlir.mlirOperationGetNumOperands(current);
+                const num_operands = mlir.oraOperationGetNumOperands(current);
                 if (num_operands >= 1) {
-                    const value = mlir.mlirOperationGetOperand(current, 0);
+                    const value = mlir.oraOperationGetOperand(current, 0);
                     return try self.encodeValue(value);
                 }
                 return null;
             }
-            current = mlir.mlirOperationGetNextInBlock(current);
+            current = mlir.oraOperationGetNextInBlock(current);
         }
         return null;
     }
 
-    fn getOperationName(_: *Encoder, op: mlir.MlirOperation) []const u8 {
-        const op_name = mlir.mlirOperationGetName(op);
-        const op_name_str = mlir.mlirIdentifierStr(op_name);
-        return op_name_str.data[0..op_name_str.length];
+    fn getOperationName(_: *Encoder, op: mlir.MlirOperation) mlir.MlirStringRef {
+        return mlir.oraOperationGetName(op);
     }
 
     fn getStringAttr(_: *Encoder, op: mlir.MlirOperation, name: []const u8) ?[]const u8 {
-        const attr_name_ref = mlir.MlirStringRef{ .data = name.ptr, .length = name.len };
-        const attr = mlir.mlirOperationGetAttributeByName(op, attr_name_ref);
-        if (mlir.mlirAttributeIsNull(attr)) return null;
-        const value = mlir.mlirStringAttrGetValue(attr);
+        const attr_name_ref = mlir.oraStringRefCreate(name.ptr, name.len);
+        const attr = mlir.oraOperationGetAttributeByName(op, attr_name_ref);
+        if (mlir.oraAttributeIsNull(attr)) return null;
+        const value = mlir.oraStringAttrGetValue(attr);
         if (value.data == null or value.length == 0) return null;
         return value.data[0..value.length];
     }
@@ -579,22 +585,22 @@ pub const ArithmeticOp = enum {
         const symbol = z3.Z3_mk_string_symbol(self.context.ctx, fn_name_z.ptr);
         const domain = [_]z3.Z3_sort{struct_sort};
         const func_decl = z3.Z3_mk_func_decl(self.context.ctx, symbol, 1, &domain, result_sort);
-        return z3.Z3_mk_app(self.context.ctx, func_decl, 1, &[_]z3.Z3_ast{ struct_value });
+        return z3.Z3_mk_app(self.context.ctx, func_decl, 1, &[_]z3.Z3_ast{struct_value});
     }
 
     /// Get comparison predicate from MLIR operation
     fn getCmpPredicate(_: *Encoder, mlir_op: mlir.MlirOperation) u32 {
         // extract predicate from arith.cmpi attributes
         // the predicate attribute contains the comparison type (eq, ne, ult, ule, ugt, uge, etc.)
-        const attr_name_ref = mlir.MlirStringRef{ .data = "predicate".ptr, .length = "predicate".len };
-        const attr = mlir.mlirOperationGetAttributeByName(mlir_op, attr_name_ref);
-        if (mlir.mlirAttributeIsNull(attr)) {
+        const attr_name_ref = mlir.oraStringRefCreate("predicate".ptr, "predicate".len);
+        const attr = mlir.oraOperationGetAttributeByName(mlir_op, attr_name_ref);
+        if (mlir.oraAttributeIsNull(attr)) {
             // default to eq (0) if predicate is missing
             return 0;
         }
 
         // get the integer value of the predicate
-        const predicate = mlir.mlirIntegerAttrGetValueSInt(attr);
+        const predicate = mlir.oraIntegerAttrGetValueSInt(attr);
         // mlir predicate values: 0=eq, 1=ne, 2=slt, 3=sle, 4=sgt, 5=sge, 6=ult, 7=ule, 8=ugt, 9=uge
         // we use unsigned comparisons for EVM (u256), so map signed to unsigned if needed
         // predicate values are always non-negative, so safe to cast
@@ -605,15 +611,15 @@ pub const ArithmeticOp = enum {
     fn getConstantValue(_: *Encoder, mlir_op: mlir.MlirOperation) u256 {
         // extract constant value from arith.constant attributes
         // the value attribute contains the integer constant
-        const attr_name_ref = mlir.MlirStringRef{ .data = "value".ptr, .length = "value".len };
-        const attr = mlir.mlirOperationGetAttributeByName(mlir_op, attr_name_ref);
-        if (mlir.mlirAttributeIsNull(attr)) {
+        const attr_name_ref = mlir.oraStringRefCreate("value".ptr, "value".len);
+        const attr = mlir.oraOperationGetAttributeByName(mlir_op, attr_name_ref);
+        if (mlir.oraAttributeIsNull(attr)) {
             // return 0 if value attribute is missing
             return 0;
         }
 
         // get the integer value (signed, but we'll interpret as unsigned for u256)
-        const int_value = mlir.mlirIntegerAttrGetValueSInt(attr);
+        const int_value = mlir.oraIntegerAttrGetValueSInt(attr);
 
         // handle negative values (for boolean true = -1 in MLIR, but we want 1)
         if (int_value < 0) {

@@ -11,42 +11,6 @@ const h_helpers = @import("../helpers.zig");
 const StatementLowerer = @import("statement_lowerer.zig").StatementLowerer;
 const LoweringError = StatementLowerer.LoweringError;
 
-/// Add verification attributes to an operation state
-pub fn addVerificationAttributes(
-    self: *const StatementLowerer,
-    state: *c.MlirOperationState,
-    verification_type: []const u8,
-    context: []const u8,
-) void {
-    var attributes = std.ArrayList(c.MlirNamedAttribute){};
-    defer attributes.deinit(self.allocator);
-
-    // add verification marker
-    const verification_attr = c.mlirBoolAttrGet(self.ctx, 1);
-    const verification_id = h.identifier(self.ctx, "ora.verification");
-    attributes.append(self.allocator, c.mlirNamedAttributeGet(verification_id, verification_attr)) catch {};
-
-    // add verification type
-    const type_id = h.identifier(self.ctx, "ora.verification_type");
-    const type_attr = h.stringAttr(self.ctx, verification_type);
-    attributes.append(self.allocator, c.mlirNamedAttributeGet(type_id, type_attr)) catch {};
-
-    // add verification context
-    const context_id = h.identifier(self.ctx, "ora.verification_context");
-    const context_attr = h.stringAttr(self.ctx, context);
-    attributes.append(self.allocator, c.mlirNamedAttributeGet(context_id, context_attr)) catch {};
-
-    // add formal verification marker
-    const formal_id = h.identifier(self.ctx, "ora.formal");
-    const formal_attr = c.mlirBoolAttrGet(self.ctx, 1);
-    attributes.append(self.allocator, c.mlirNamedAttributeGet(formal_id, formal_attr)) catch {};
-
-    // apply all attributes
-    if (attributes.items.len > 0) {
-        c.mlirOperationStateAddAttributes(state, @intCast(attributes.items.len), attributes.items.ptr);
-    }
-}
-
 /// Add verification attributes to an existing operation
 pub fn addVerificationAttributesToOp(
     self: *const StatementLowerer,
@@ -55,24 +19,24 @@ pub fn addVerificationAttributesToOp(
     context: []const u8,
 ) void {
     // add verification marker
-    const verification_attr = c.mlirBoolAttrGet(self.ctx, 1);
+    const verification_attr = h.boolAttr(self.ctx, 1);
     const verification_name = h.strRef("ora.verification");
-    c.mlirOperationSetAttributeByName(op, verification_name, verification_attr);
+    c.oraOperationSetAttributeByName(op, verification_name, verification_attr);
 
     // add verification type
     const type_name = h.strRef("ora.verification_type");
     const type_attr = h.stringAttr(self.ctx, verification_type);
-    c.mlirOperationSetAttributeByName(op, type_name, type_attr);
+    c.oraOperationSetAttributeByName(op, type_name, type_attr);
 
     // add verification context
     const context_name = h.strRef("ora.verification_context");
     const context_attr = h.stringAttr(self.ctx, context);
-    c.mlirOperationSetAttributeByName(op, context_name, context_attr);
+    c.oraOperationSetAttributeByName(op, context_name, context_attr);
 
     // add formal verification marker
-    const formal_attr = c.mlirBoolAttrGet(self.ctx, 1);
+    const formal_attr = h.boolAttr(self.ctx, 1);
     const formal_name = h.strRef("ora.formal");
-    c.mlirOperationSetAttributeByName(op, formal_name, formal_attr);
+    c.oraOperationSetAttributeByName(op, formal_name, formal_attr);
 }
 
 /// Lower assert statements (runtime or ghost assertions)
@@ -80,22 +44,9 @@ pub fn lowerAssert(self: *const StatementLowerer, assert_stmt: *const lib.ast.St
     const loc = self.fileLoc(assert_stmt.span);
     const condition = self.expr_lowerer.lowerExpression(&assert_stmt.condition);
 
-    var state = h.opState("ora.assert", loc);
-    c.mlirOperationStateAddOperands(&state, 1, @ptrCast(&condition));
-
-    // add optional message attribute
-    if (assert_stmt.message) |msg| {
-        const msg_attr = h.stringAttr(self.ctx, msg);
-        const msg_id = h.identifier(self.ctx, "message");
-        var attrs = [_]c.MlirNamedAttribute{c.mlirNamedAttributeGet(msg_id, msg_attr)};
-        c.mlirOperationStateAddAttributes(&state, attrs.len, &attrs);
-    }
-
-    // add verification attributes
     const context_str = if (assert_stmt.is_ghost) "ghost_assertion" else "runtime_assertion";
-    addVerificationAttributes(self, &state, "assert", context_str);
-
-    const op = c.mlirOperationCreate(&state);
+    const op = self.ora_dialect.createAssert(condition, loc, assert_stmt.message);
+    addVerificationAttributesToOp(self, op, "assert", context_str);
     h.appendOp(self.block, op);
 }
 
@@ -104,11 +55,8 @@ pub fn lowerInvariant(self: *const StatementLowerer, invariant: *const lib.ast.S
     const loc = self.fileLoc(invariant.span);
     const condition = self.expr_lowerer.lowerExpression(&invariant.condition);
 
-    var state = h.opState("ora.invariant", loc);
-    c.mlirOperationStateAddOperands(&state, 1, @ptrCast(&condition));
-    addVerificationAttributes(self, &state, "invariant", "loop_invariant");
-
-    const op = c.mlirOperationCreate(&state);
+    const op = self.ora_dialect.createInvariant(condition, loc);
+    addVerificationAttributesToOp(self, op, "invariant", "loop_invariant");
     h.appendOp(self.block, op);
 }
 
@@ -117,11 +65,8 @@ pub fn lowerRequires(self: *const StatementLowerer, requires: *const lib.ast.Sta
     const loc = self.fileLoc(requires.span);
     const condition = self.expr_lowerer.lowerExpression(&requires.condition);
 
-    var state = h.opState("ora.requires", loc);
-    c.mlirOperationStateAddOperands(&state, 1, @ptrCast(&condition));
-    addVerificationAttributes(self, &state, "requires", "function_precondition");
-
-    const op = c.mlirOperationCreate(&state);
+    const op = self.ora_dialect.createRequires(condition, loc);
+    addVerificationAttributesToOp(self, op, "requires", "function_precondition");
     h.appendOp(self.block, op);
 }
 
@@ -130,11 +75,8 @@ pub fn lowerEnsures(self: *const StatementLowerer, ensures: *const lib.ast.State
     const loc = self.fileLoc(ensures.span);
     const condition = self.expr_lowerer.lowerExpression(&ensures.condition);
 
-    var state = h.opState("ora.ensures", loc);
-    c.mlirOperationStateAddOperands(&state, 1, @ptrCast(&condition));
-    addVerificationAttributes(self, &state, "ensures", "function_postcondition");
-
-    const op = c.mlirOperationCreate(&state);
+    const op = self.ora_dialect.createEnsures(condition, loc);
+    addVerificationAttributesToOp(self, op, "ensures", "function_postcondition");
     h.appendOp(self.block, op);
 }
 

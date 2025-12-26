@@ -234,12 +234,12 @@ pub const VerificationPass = struct {
     /// This walks MLIR operations looking for ora.requires, ora.ensures, ora.invariant
     pub fn extractAnnotationsFromMLIR(self: *VerificationPass, mlir_module: mlir.MlirModule) !void {
         // get the module operation
-        const module_op = mlir.mlirModuleGetOperation(mlir_module);
+        const module_op = mlir.oraModuleGetOperation(mlir_module);
 
         // walk all regions in the module
-        const num_regions = mlir.mlirOperationGetNumRegions(module_op);
+        const num_regions = mlir.oraOperationGetNumRegions(module_op);
         for (0..@intCast(num_regions)) |region_idx| {
-            const region = mlir.mlirOperationGetRegion(module_op, @intCast(region_idx));
+            const region = mlir.oraOperationGetRegion(module_op, @intCast(region_idx));
             try self.walkMLIRRegion(region);
         }
     }
@@ -247,14 +247,19 @@ pub const VerificationPass = struct {
     /// Walk an MLIR region to find verification operations
     fn walkMLIRRegion(self: *VerificationPass, region: mlir.MlirRegion) !void {
         // get first block in region
-        var current_block = mlir.mlirRegionGetFirstBlock(region);
+        var current_block = mlir.oraRegionGetFirstBlock(region);
 
-        while (!mlir.mlirBlockIsNull(current_block)) {
+        while (!mlir.oraBlockIsNull(current_block)) {
             // walk operations in this block
-            var current_op = mlir.mlirBlockGetFirstOperation(current_block);
+            var current_op = mlir.oraBlockGetFirstOperation(current_block);
 
-            while (!mlir.mlirOperationIsNull(current_op)) {
-                const op_name = self.getMLIROperationName(current_op);
+            while (!mlir.oraOperationIsNull(current_op)) {
+                const op_name_ref = self.getMLIROperationName(current_op);
+                defer @import("mlir_c_api").freeStringRef(op_name_ref);
+                const op_name = if (op_name_ref.data == null or op_name_ref.length == 0)
+                    ""
+                else
+                    op_name_ref.data[0..op_name_ref.length];
                 const prev_function = self.current_function_name;
                 if (std.mem.eql(u8, op_name, "func.func")) {
                     if (try self.getFunctionNameFromOp(current_op)) |fn_name| {
@@ -265,9 +270,9 @@ pub const VerificationPass = struct {
                 try self.processMLIROperation(current_op);
 
                 // walk nested regions (for functions, if statements, etc.)
-                const num_regions = mlir.mlirOperationGetNumRegions(current_op);
+                const num_regions = mlir.oraOperationGetNumRegions(current_op);
                 for (0..@intCast(num_regions)) |region_idx| {
-                    const nested_region = mlir.mlirOperationGetRegion(current_op, @intCast(region_idx));
+                    const nested_region = mlir.oraOperationGetRegion(current_op, @intCast(region_idx));
                     try self.walkMLIRRegion(nested_region);
                 }
 
@@ -275,56 +280,57 @@ pub const VerificationPass = struct {
                     self.current_function_name = prev_function;
                 }
 
-                current_op = mlir.mlirOperationGetNextInBlock(current_op);
+                current_op = mlir.oraOperationGetNextInBlock(current_op);
             }
 
-            current_block = mlir.mlirBlockGetNextInRegion(current_block);
+            current_block = mlir.oraBlockGetNextInRegion(current_block);
         }
     }
 
     /// Process a single MLIR operation to extract verification annotations
     fn processMLIROperation(self: *VerificationPass, op: mlir.MlirOperation) !void {
-        const op_name = self.getMLIROperationName(op);
+        const op_name_ref = self.getMLIROperationName(op);
+        defer @import("mlir_c_api").freeStringRef(op_name_ref);
+        const op_name = if (op_name_ref.data == null or op_name_ref.length == 0)
+            ""
+        else
+            op_name_ref.data[0..op_name_ref.length];
 
         // check for verification operations
         if (std.mem.eql(u8, op_name, "ora.requires")) {
             // extract requires condition
             // get the condition operand (should be the first and only operand)
-            const num_operands = mlir.mlirOperationGetNumOperands(op);
+            const num_operands = mlir.oraOperationGetNumOperands(op);
             if (num_operands >= 1) {
-                const condition_value = mlir.mlirOperationGetOperand(op, 0);
+                const condition_value = mlir.oraOperationGetOperand(op, 0);
                 try self.recordEncodedAnnotation(op, .Requires, condition_value);
             }
         } else if (std.mem.eql(u8, op_name, "ora.ensures")) {
             // extract ensures condition
-            const num_operands = mlir.mlirOperationGetNumOperands(op);
+            const num_operands = mlir.oraOperationGetNumOperands(op);
             if (num_operands >= 1) {
-                const condition_value = mlir.mlirOperationGetOperand(op, 0);
+                const condition_value = mlir.oraOperationGetOperand(op, 0);
                 try self.recordEncodedAnnotation(op, .Ensures, condition_value);
             }
         } else if (std.mem.eql(u8, op_name, "ora.invariant")) {
             // extract invariant condition
-            const num_operands = mlir.mlirOperationGetNumOperands(op);
+            const num_operands = mlir.oraOperationGetNumOperands(op);
             if (num_operands >= 1) {
-                const condition_value = mlir.mlirOperationGetOperand(op, 0);
+                const condition_value = mlir.oraOperationGetOperand(op, 0);
                 try self.recordEncodedAnnotation(op, .LoopInvariant, condition_value);
             }
         }
     }
 
     /// Get MLIR operation name as string
-    fn getMLIROperationName(_: *VerificationPass, op: mlir.MlirOperation) []const u8 {
-        const op_name = mlir.mlirOperationGetName(op);
-        const op_name_str = mlir.mlirIdentifierStr(op_name);
-        // create a slice from the MLIR string reference
-        // note: This is safe as long as the MLIR context is alive
-        return op_name_str.data[0..op_name_str.length];
+    fn getMLIROperationName(_: *VerificationPass, op: mlir.MlirOperation) mlir.MlirStringRef {
+        return mlir.oraOperationGetName(op);
     }
 
     fn getFunctionNameFromOp(self: *VerificationPass, op: mlir.MlirOperation) !?[]const u8 {
-        const name_attr = mlir.mlirOperationGetAttributeByName(op, mlir.mlirStringRefCreate("sym_name", 8));
-        if (mlir.mlirAttributeIsNull(name_attr)) return null;
-        const name_ref = mlir.mlirStringAttrGetValue(name_attr);
+        const name_attr = mlir.oraOperationGetAttributeByName(op, mlir.oraStringRefCreate("sym_name", 8));
+        if (mlir.oraAttributeIsNull(name_attr)) return null;
+        const name_ref = mlir.oraStringAttrGetValue(name_attr);
         if (name_ref.data == null or name_ref.length == 0) return null;
         const name_slice = name_ref.data[0..name_ref.length];
         const dup = try self.allocator.dupe(u8, name_slice);
@@ -423,17 +429,17 @@ pub const VerificationPass = struct {
     }
 
     fn getLocationInfo(self: *VerificationPass, op: mlir.MlirOperation) !struct { file: []const u8, line: u32, column: u32 } {
-        const loc = mlir.mlirOperationGetLocation(op);
-        if (mlir.mlirLocationIsNull(loc)) {
+        const loc = mlir.oraOperationGetLocation(op);
+        if (mlir.oraLocationIsNull(loc)) {
             return .{ .file = "", .line = 0, .column = 0 };
         }
 
-        var buffer = ManagedArrayList(u8).init(self.allocator);
-        defer buffer.deinit();
-        const collector = LocationCollector{ .buffer = &buffer };
-        mlir.mlirLocationPrint(loc, LocationCollector.callback, @ptrCast(@constCast(&collector)));
-        const loc_str = try buffer.toOwnedSlice();
-        defer self.allocator.free(loc_str);
+        const loc_ref = mlir.oraLocationPrintToString(loc);
+        defer @import("mlir_c_api").freeStringRef(loc_ref);
+        if (loc_ref.data == null or loc_ref.length == 0) {
+            return .{ .file = "", .line = 0, .column = 0 };
+        }
+        const loc_str = loc_ref.data[0..loc_ref.length];
 
         const parsed = parseLocationString(loc_str);
         if (parsed.file.len == 0) {
@@ -482,16 +488,6 @@ const EncodedAnnotation = struct {
     file: []const u8,
     line: u32,
     column: u32,
-};
-
-const LocationCollector = struct {
-    buffer: *ManagedArrayList(u8),
-
-    fn callback(str: mlir.MlirStringRef, user_data: ?*anyopaque) callconv(.c) void {
-        if (user_data == null) return;
-        const self: *LocationCollector = @ptrCast(@alignCast(user_data));
-        _ = self.buffer.appendSlice(str.data[0..str.length]) catch {};
-    }
 };
 
 fn parseLocationString(loc: []const u8) struct { file: []const u8, line: u32, column: u32 } {

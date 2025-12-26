@@ -76,10 +76,10 @@ pub fn processNormalCall(
         if (param_types) |params| {
             if (i < params.len) {
                 const expected_param_type = params[i];
-                const arg_type = c.mlirValueGetType(arg_value);
+                const arg_type = c.oraValueGetType(arg_value);
 
                 // convert if types don't match (handles subtyping conversions like u8 -> u256)
-                if (!c.mlirTypeEqual(arg_type, expected_param_type)) {
+                if (!c.oraTypeEqual(arg_type, expected_param_type)) {
                     const error_handling = @import("../error_handling.zig");
                     const arg_span = error_handling.getSpanFromExpression(arg);
                     arg_value = self.convertToType(arg_value, expected_param_type, arg_span);
@@ -119,17 +119,20 @@ pub fn lowerBuiltinCall(
     };
     defer std.heap.page_allocator.free(op_name);
 
-    const op_name_ref = c.mlirStringRefCreate(op_name.ptr, op_name.len);
     const location = self.fileLoc(call.span);
 
     const result_type = self.type_mapper.toMlirType(.{
         .ora_type = builtin_info.return_type,
     });
 
-    var state = c.mlirOperationStateGet(op_name_ref, location);
-    c.mlirOperationStateAddResults(&state, 1, &result_type);
-
-    const op = c.mlirOperationCreate(&state);
+    const op = c.oraEvmOpCreate(
+        self.ctx,
+        location,
+        h.strRef(op_name),
+        null,
+        0,
+        result_type,
+    );
     h.appendOp(self.block, op);
     return h.getResult(op, 0);
 }
@@ -146,7 +149,7 @@ pub fn createDirectFunctionCall(
 
     if (self.symbol_table) |sym_table| {
         if (sym_table.lookupFunction(function_name)) |func_symbol| {
-            if (!c.mlirTypeIsNull(func_symbol.return_type)) {
+            if (!c.oraTypeIsNull(func_symbol.return_type)) {
                 result_types_buf[0] = func_symbol.return_type;
                 result_types = result_types_buf[0..1];
             }
@@ -154,7 +157,7 @@ pub fn createDirectFunctionCall(
     }
 
     if (result_types.len == 0) {
-        const result_ty = c.mlirIntegerTypeGet(self.ctx, constants.DEFAULT_INTEGER_BITS);
+        const result_ty = c.oraIntegerTypeCreate(self.ctx, constants.DEFAULT_INTEGER_BITS);
         result_types_buf[0] = result_ty;
         result_types = result_types_buf[0..1];
     }
@@ -174,9 +177,7 @@ pub fn createMethodCall(
     const target = self.lowerExpression(field_access.target);
     const method_name = field_access.field;
 
-    const result_ty = c.mlirIntegerTypeGet(self.ctx, constants.DEFAULT_INTEGER_BITS);
-    var state = h.opState("ora.method_call", self.fileLoc(span));
-
+    const result_ty = c.oraIntegerTypeCreate(self.ctx, constants.DEFAULT_INTEGER_BITS);
     var all_operands = std.ArrayList(c.MlirValue){};
     defer all_operands.deinit(std.heap.page_allocator);
 
@@ -191,15 +192,14 @@ pub fn createMethodCall(
         };
     }
 
-    c.mlirOperationStateAddOperands(&state, @intCast(all_operands.items.len), all_operands.items.ptr);
-    c.mlirOperationStateAddResults(&state, 1, @ptrCast(&result_ty));
-
-    const method_id = h.identifier(self.ctx, "method");
-    const method_attr = h.stringAttr(self.ctx, method_name);
-    var attrs = [_]c.MlirNamedAttribute{c.mlirNamedAttributeGet(method_id, method_attr)};
-    c.mlirOperationStateAddAttributes(&state, attrs.len, &attrs);
-
-    const op = c.mlirOperationCreate(&state);
+    const op = c.oraMethodCallOpCreate(
+        self.ctx,
+        self.fileLoc(span),
+        h.strRef(method_name),
+        if (all_operands.items.len == 0) null else all_operands.items.ptr,
+        all_operands.items.len,
+        result_ty,
+    );
     h.appendOp(self.block, op);
     return h.getResult(op, 0);
 }

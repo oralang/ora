@@ -26,6 +26,7 @@ const MlirOptions = struct {
     output_dir: ?[]const u8,
     canonicalize: bool = true,
     verify_z3: bool = false,
+    cpp_lowering_stub: bool = false,
 
     fn getOptimizationLevel(self: MlirOptions) OptimizationLevel {
         if (self.opt_level) |level| {
@@ -68,10 +69,18 @@ pub fn main() !void {
         return;
     }
 
-    const parsed = cli_args.parseArgs(args[1..]) catch {
+    // Check for fmt command
+    const is_fmt_command = args.len >= 2 and std.mem.eql(u8, args[1], "fmt");
+    const args_to_parse = if (is_fmt_command) args[2..] else args[1..];
+
+    var parsed = cli_args.parseArgs(args_to_parse) catch {
         try printUsage();
         return;
     };
+
+    if (is_fmt_command) {
+        parsed.fmt = true;
+    }
 
     const output_dir: ?[]const u8 = parsed.output_dir;
     const input_file: ?[]const u8 = parsed.input_file;
@@ -85,10 +94,27 @@ pub fn main() !void {
     const canonicalize_mlir: bool = parsed.canonicalize_mlir;
     const analyze_state: bool = parsed.analyze_state;
     const verify_z3: bool = parsed.verify_z3;
+    const cpp_lowering_stub: bool = parsed.cpp_lowering_stub;
     const debug_enabled: bool = parsed.debug;
     const mlir_opt_level: ?[]const u8 = parsed.mlir_opt_level;
+    const fmt: bool = parsed.fmt;
+    const fmt_check: bool = parsed.fmt_check;
+    const fmt_diff: bool = parsed.fmt_diff;
+    const fmt_stdout: bool = parsed.fmt_stdout;
+    const fmt_width: ?u32 = parsed.fmt_width;
 
     log.setDebugEnabled(debug_enabled);
+
+    // handle fmt command
+    if (fmt) {
+        if (input_file == null) {
+            std.debug.print("error: fmt requires input file(s)\n", .{});
+            try printUsage();
+            std.process.exit(2);
+        }
+        try runFmt(allocator, input_file.?, fmt_check, fmt_diff, fmt_stdout, fmt_width);
+        return;
+    }
 
     // require input file
     if (input_file == null) {
@@ -118,6 +144,7 @@ pub fn main() !void {
         .output_dir = output_dir,
         .canonicalize = canonicalize_mlir,
         .verify_z3 = verify_z3,
+        .cpp_lowering_stub = cpp_lowering_stub,
     };
 
     // handle CFG generation (uses MLIR's built-in view-op-graph pass)
@@ -180,6 +207,7 @@ fn printUsage() !void {
     try stdout.print("\nMLIR Options:\n", .{});
     try stdout.print("  --no-validate-mlir     - Disable automatic MLIR validation (not recommended)\n", .{});
     try stdout.print("  --no-canonicalize      - Skip Ora MLIR canonicalization pass\n", .{});
+    try stdout.print("  --cpp-lowering-stub    - Use experimental C++ lowering stub (contract+func)\n", .{});
     try stdout.print("\nAnalysis Options:\n", .{});
     try stdout.print("  --analyze-state        - Analyze storage reads/writes per function\n", .{});
     try stdout.print("  --verify               - Run Z3 verification on MLIR annotations\n", .{});
@@ -190,6 +218,99 @@ fn printUsage() !void {
 // ============================================================================
 // SECTION 3: Command Handlers (lex, parse, ast, compile)
 // ============================================================================
+
+/// Print unified diff between original and formatted code
+fn printUnifiedDiff(_: std.mem.Allocator, original: []const u8, formatted: []const u8, file_path: []const u8) !void {
+    var stdout_buffer: [4096]u8 = undefined;
+    var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
+    const stdout = &stdout_writer.interface;
+
+    try stdout.print("--- {s}\n", .{file_path});
+    try stdout.print("+++ {s}\n", .{file_path});
+
+    // Simple line-by-line diff
+    var orig_lines = std.mem.splitScalar(u8, original, '\n');
+    var fmt_lines = std.mem.splitScalar(u8, formatted, '\n');
+
+    var line_num: u32 = 1;
+    var orig_line = orig_lines.next();
+    var fmt_line = fmt_lines.next();
+
+    while (orig_line != null or fmt_line != null) {
+        const orig = orig_line orelse "";
+        const fmt = fmt_line orelse "";
+
+        if (!std.mem.eql(u8, orig, fmt)) {
+            if (orig_line != null) {
+                try stdout.print("-{d}: {s}\n", .{ line_num, orig });
+            }
+            if (fmt_line != null) {
+                try stdout.print("+{d}: {s}\n", .{ line_num, fmt });
+            }
+        } else {
+            try stdout.print(" {d}: {s}\n", .{ line_num, orig });
+        }
+
+        if (orig_line != null) orig_line = orig_lines.next();
+        if (fmt_line != null) fmt_line = fmt_lines.next();
+        line_num += 1;
+    }
+}
+
+/// Run formatter on file(s)
+fn runFmt(allocator: std.mem.Allocator, file_path: []const u8, check: bool, diff: bool, stdout: bool, width: ?u32) !void {
+    const fmt_mod = @import("fmt/mod.zig");
+    const FormatOptions = fmt_mod.FormatOptions;
+
+    const options = FormatOptions{
+        .line_width = width orelse 100,
+        .indent_size = 4,
+    };
+
+    // Read source file
+    const source = try std.fs.cwd().readFileAlloc(allocator, file_path, std.math.maxInt(usize));
+    defer allocator.free(source);
+
+    // Format
+    var formatter = fmt_mod.Formatter.init(allocator, source, options);
+    defer formatter.deinit();
+
+    const formatted = formatter.format() catch |err| {
+        std.debug.print("error: failed to format {s}: {}\n", .{ file_path, err });
+        std.process.exit(2);
+    };
+    defer allocator.free(formatted);
+
+    // Check if already formatted
+    const already_formatted = std.mem.eql(u8, source, formatted);
+
+    if (check) {
+        if (!already_formatted) {
+            std.debug.print("{s} needs formatting\n", .{file_path});
+            std.process.exit(1);
+        }
+        return;
+    }
+
+    if (diff) {
+        if (!already_formatted) {
+            // Generate unified diff
+            try printUnifiedDiff(allocator, source, formatted, file_path);
+            std.process.exit(1);
+        }
+        return;
+    }
+
+    if (stdout) {
+        try std.fs.File.stdout().writeAll(formatted);
+        return;
+    }
+
+    // Write formatted output
+    if (!already_formatted) {
+        try std.fs.cwd().writeFile(.{ .sub_path = file_path, .data = formatted });
+    }
+}
 
 /// Run lexer on file and display tokens
 fn runLexer(allocator: std.mem.Allocator, file_path: []const u8) !void {
@@ -494,25 +615,18 @@ fn runCFGGeneration(allocator: std.mem.Allocator, file_path: []const u8, mlir_op
     }
 
     // get MLIR as text by printing the module operation
-    const module_op = c.mlirModuleGetOperation(lowering_result.module);
-    var mlir_text_buffer = std.ArrayList(u8){};
-    defer mlir_text_buffer.deinit(mlir_allocator);
-
-    const PrintCallback = struct {
-        buffer: *std.ArrayList(u8),
-        allocator: std.mem.Allocator,
-        fn callback(message: c.MlirStringRef, userData: ?*anyopaque) callconv(.c) void {
-            const self = @as(*@This(), @ptrCast(@alignCast(userData)));
-            const message_slice = message.data[0..message.length];
-            self.buffer.appendSlice(self.allocator, message_slice) catch {};
-        }
+    const module_op = c.oraModuleGetOperation(lowering_result.module);
+    const mlir_text_ref = c.oraOperationPrintToString(module_op);
+    defer if (mlir_text_ref.data != null) {
+        const mlir_c = @import("mlir_c_api");
+        mlir_c.freeStringRef(mlir_text_ref);
     };
 
-    var callback = PrintCallback{ .buffer = &mlir_text_buffer, .allocator = mlir_allocator };
-    c.mlirOperationPrint(module_op, PrintCallback.callback, @ptrCast(&callback));
-
-    const mlir_text = try mlir_text_buffer.toOwnedSlice(mlir_allocator);
-    defer mlir_allocator.free(mlir_text);
+    const mlir_text = if (mlir_text_ref.data != null and mlir_text_ref.length > 0)
+        mlir_text_ref.data[0..mlir_text_ref.length]
+    else
+        "";
+    _ = mlir_text;
 
     // convert Ora MLIR to SIR MLIR before generating CFG
     if (!c.oraConvertToSIR(h.ctx, lowering_result.module)) {
@@ -680,6 +794,91 @@ fn runMlirEmitAdvanced(allocator: std.mem.Allocator, file_path: []const u8, mlir
     try stdout.flush();
 }
 
+const OraTypeTag = enum(u32) {
+    Void = 0,
+    U256 = 1,
+    I256 = 2,
+    Bool = 3,
+    Address = 4,
+};
+
+fn mapOraTypeTag(ora_type: lib.OraType) OraTypeTag {
+    return switch (ora_type) {
+        .u256 => .U256,
+        .i256 => .I256,
+        .bool => .Bool,
+        .address => .Address,
+        .void => .Void,
+        .error_union => |succ| mapOraTypeTag(succ.*),
+        else => .U256,
+    };
+}
+
+fn mapParamTypeTag(type_info: lib.ast.Types.TypeInfo) OraTypeTag {
+    if (type_info.ora_type) |ora_type| {
+        return mapOraTypeTag(ora_type);
+    }
+    return .U256;
+}
+
+fn mapReturnTypeTag(type_info: ?lib.ast.Types.TypeInfo) OraTypeTag {
+    if (type_info) |ti| {
+        if (ti.ora_type) |ora_type| {
+            return mapOraTypeTag(ora_type);
+        }
+    }
+    return .Void;
+}
+
+const StubTarget = struct {
+    contract: []const u8,
+    function: []const u8,
+    func_node: ?*const lib.FunctionNode,
+};
+
+fn getCppStubTarget(nodes: []lib.AstNode) StubTarget {
+    var target = StubTarget{
+        .contract = "StubContract",
+        .function = "main",
+        .func_node = null,
+    };
+
+    for (nodes) |node| {
+        switch (node) {
+            .Contract => |contract| {
+                target.contract = contract.name;
+                for (contract.body) |decl| {
+                    if (decl == .Function) {
+                        target.function = decl.Function.name;
+                        target.func_node = &decl.Function;
+                        return target;
+                    }
+                }
+                return target;
+            },
+            .Module => |module_node| {
+                for (module_node.declarations) |decl| {
+                    if (decl == .Contract) {
+                        const contract = decl.Contract;
+                        target.contract = contract.name;
+                        for (contract.body) |inner_decl| {
+                            if (inner_decl == .Function) {
+                                target.function = inner_decl.Function.name;
+                                target.func_node = &inner_decl.Function;
+                                return target;
+                            }
+                        }
+                        return target;
+                    }
+                }
+            },
+            else => {},
+        }
+    }
+
+    return target;
+}
+
 /// Generate MLIR output with comprehensive options
 fn generateMlirOutput(allocator: std.mem.Allocator, ast_nodes: []lib.AstNode, file_path: []const u8, mlir_options: MlirOptions) !void {
     var stdout_buffer: [1024]u8 = undefined;
@@ -700,25 +899,84 @@ fn generateMlirOutput(allocator: std.mem.Allocator, ast_nodes: []lib.AstNode, fi
     const h = mlir.createContext(mlir_allocator);
     defer mlir.destroyContext(h);
 
-    // lower AST to MLIR (type resolution already done in parser.parse())
-    const lower = @import("mlir/lower.zig");
-    const source_filename = std.fs.path.basename(file_path);
-    var lowering_result = try lower.lowerFunctionsToModuleWithErrors(h.ctx, ast_nodes, mlir_allocator, source_filename);
-    defer lowering_result.deinit(mlir_allocator);
+    const final_module = if (mlir_options.cpp_lowering_stub) blk: {
+        const target = getCppStubTarget(ast_nodes);
+        const loc = c.oraLocationUnknownGet(h.ctx);
+        const contract_ref = c.oraStringRefCreate(target.contract.ptr, target.contract.len);
+        const func_ref = c.oraStringRefCreate(target.function.ptr, target.function.len);
 
-    // check for errors first
-    if (!lowering_result.success) {
-        try stdout.print("MLIR lowering failed with {d} errors:\n", .{lowering_result.errors.len});
-        for (lowering_result.errors) |err| {
-            try stdout.print("  - {s}\n", .{err.message});
-            if (err.suggestion) |suggestion| {
-                try stdout.print("    Suggestion: {s}\n", .{suggestion});
+        var param_tags: []u32 = &[_]u32{};
+        var param_names: []c.MlirStringRef = &[_]c.MlirStringRef{};
+        var return_tag: u32 = @intFromEnum(OraTypeTag.Void);
+        if (target.func_node) |func_node| {
+            if (func_node.parameters.len > 0) {
+                param_tags = try mlir_allocator.alloc(u32, func_node.parameters.len);
+                param_names = try mlir_allocator.alloc(c.MlirStringRef, func_node.parameters.len);
+                for (func_node.parameters, 0..) |param, i| {
+                    param_tags[i] = @intFromEnum(mapParamTypeTag(param.type_info));
+                    param_names[i] = c.oraStringRefCreate(param.name.ptr, param.name.len);
+                }
+            }
+            return_tag = @intFromEnum(mapReturnTypeTag(func_node.return_type_info));
+        }
+
+        const module = c.oraLowerContractStubWithSig(
+            h.ctx,
+            loc,
+            contract_ref,
+            func_ref,
+            if (param_tags.len == 0) null else param_tags.ptr,
+            param_tags.len,
+            if (param_names.len == 0) null else param_names.ptr,
+            param_names.len,
+            return_tag,
+        );
+        if (c.oraModuleIsNull(module)) {
+            try stdout.print("C++ lowering stub failed: module is null\n", .{});
+            try stdout.flush();
+            std.process.exit(1);
+        }
+        break :blk module;
+    } else blk: {
+        // lower AST to MLIR (type resolution already done in parser.parse())
+        const lower = @import("mlir/lower.zig");
+        const source_filename = std.fs.path.basename(file_path);
+        var lowering_result = try lower.lowerFunctionsToModuleWithErrors(h.ctx, ast_nodes, mlir_allocator, source_filename);
+        defer lowering_result.deinit(mlir_allocator);
+
+        // check for errors first
+        if (!lowering_result.success) {
+            try stdout.print("MLIR lowering failed with {d} errors:\n", .{lowering_result.errors.len});
+            for (lowering_result.errors) |err| {
+                try stdout.print("  - {s}\n", .{err.message});
+                if (err.suggestion) |suggestion| {
+                    try stdout.print("    Suggestion: {s}\n", .{suggestion});
+                }
+            }
+            try stdout.flush();
+            std.process.exit(1);
+        }
+
+        // print warnings if any
+        if (lowering_result.warnings.len > 0) {
+            try stdout.print("MLIR lowering completed with {d} warnings:\n", .{lowering_result.warnings.len});
+            for (lowering_result.warnings) |warn| {
+                try stdout.print("  - {s}\n", .{warn.message});
             }
         }
-        try stdout.flush();
-        std.process.exit(1);
-    }
-    const final_module = lowering_result.module;
+
+        // print pass results if available
+        if (lowering_result.pass_result) |pass_result| {
+            if (pass_result.success) {
+                try stdout.print("Pass pipeline executed successfully\n", .{});
+            } else {
+                try stdout.print("Pass pipeline failed: {s}\n", .{pass_result.error_message orelse "unknown error"});
+            }
+        }
+
+        break :blk lowering_result.module;
+    };
+    defer c.oraModuleDestroy(final_module);
 
     // run MLIR verification after generation (when emitting MLIR)
     if (mlir_options.emit_mlir) {
@@ -762,31 +1020,12 @@ fn generateMlirOutput(allocator: std.mem.Allocator, ast_nodes: []lib.AstNode, fi
         }
     }
 
-    // print warnings if any
-    if (lowering_result.warnings.len > 0) {
-        try stdout.print("MLIR lowering completed with {d} warnings:\n", .{lowering_result.warnings.len});
-        for (lowering_result.warnings) |warn| {
-            try stdout.print("  - {s}\n", .{warn.message});
-        }
-    }
-
-    // print pass results if available
-    if (lowering_result.pass_result) |pass_result| {
-        if (pass_result.success) {
-            try stdout.print("Pass pipeline executed successfully\n", .{});
-        } else {
-            try stdout.print("Pass pipeline failed: {s}\n", .{pass_result.error_message orelse "unknown error"});
-        }
-    }
-
-    defer c.mlirModuleDestroy(lowering_result.module);
-
     // run canonicalization on Ora MLIR before printing or conversion, unless
     // explicitly disabled via --no-canonicalize. This keeps the canonicalizer
     // "online" for normal usage but lets tests or debugging runs opt out if
     // they hit upstream MLIR issues.
     if (mlir_options.canonicalize and (mlir_options.emit_mlir or mlir_options.emit_mlir_sir)) {
-        if (!c.oraCanonicalizeOraMLIR(h.ctx, lowering_result.module)) {
+        if (!c.oraCanonicalizeOraMLIR(h.ctx, final_module)) {
             try stdout.print("Warning: Ora MLIR canonicalization failed\n", .{});
             try stdout.flush();
         }
@@ -794,8 +1033,8 @@ fn generateMlirOutput(allocator: std.mem.Allocator, ast_nodes: []lib.AstNode, fi
 
     // output Ora MLIR (after canonicalization, before conversion)
     if (mlir_options.emit_mlir) {
-        const module_op_ora = c.mlirModuleGetOperation(lowering_result.module);
-        const mlir_str_ora = c.oraPrintOperation(h.ctx, module_op_ora);
+        const module_op_ora = c.oraModuleGetOperation(final_module);
+        const mlir_str_ora = c.oraOperationPrintToString(module_op_ora);
         defer if (mlir_str_ora.data != null) {
             const mlir_c = @import("mlir_c_api");
             mlir_c.freeStringRef(mlir_str_ora);
@@ -810,7 +1049,7 @@ fn generateMlirOutput(allocator: std.mem.Allocator, ast_nodes: []lib.AstNode, fi
 
     // convert Ora to SIR if emitting SIR MLIR
     if (mlir_options.emit_mlir_sir) {
-        const conversion_success = c.oraConvertToSIR(h.ctx, lowering_result.module);
+        const conversion_success = c.oraConvertToSIR(h.ctx, final_module);
         if (!conversion_success) {
             try stdout.print("Error: Ora to SIR conversion failed\n", .{});
             try stdout.flush();
@@ -825,8 +1064,8 @@ fn generateMlirOutput(allocator: std.mem.Allocator, ast_nodes: []lib.AstNode, fi
         try stdout.print("//===----------------------------------------------------------------------===//\n\n", .{});
         try stdout.flush();
 
-        const module_op_sir = c.mlirModuleGetOperation(lowering_result.module);
-        const mlir_str_sir = c.oraPrintOperation(h.ctx, module_op_sir);
+        const module_op_sir = c.oraModuleGetOperation(final_module);
+        const mlir_str_sir = c.oraOperationPrintToString(module_op_sir);
         defer if (mlir_str_sir.data != null) {
             const mlir_c = @import("mlir_c_api");
             mlir_c.freeStringRef(mlir_str_sir);

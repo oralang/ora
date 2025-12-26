@@ -24,8 +24,8 @@ pub fn lowerBinary(
     const lhs = self.lowerExpression(bin.lhs);
     const rhs = self.lowerExpression(bin.rhs);
 
-    const lhs_ty = c.mlirValueGetType(lhs);
-    const rhs_ty = c.mlirValueGetType(rhs);
+    const lhs_ty = c.oraValueGetType(lhs);
+    const rhs_ty = c.oraValueGetType(rhs);
     const result_ty = self.getCommonType(lhs_ty, rhs_ty);
 
     const lhs_converted = self.convertToType(lhs, result_ty, bin.span);
@@ -81,7 +81,7 @@ pub fn lowerUnary(
     unary: *const lib.ast.Expressions.UnaryExpr,
 ) c.MlirValue {
     const operand = self.lowerExpression(unary.operand);
-    const operand_ty = c.mlirValueGetType(operand);
+    const operand_ty = c.oraValueGetType(operand);
 
     return switch (unary.operator) {
         .Bang => lowerLogicalNot(self, operand, operand_ty, unary.span),
@@ -108,8 +108,8 @@ fn lowerLogicalAnd(
 ) c.MlirValue {
     const lhs_val_raw = self.lowerExpression(bin.lhs);
     const bool_ty = h.boolType(self.ctx);
-    const lhs_type = c.mlirValueGetType(lhs_val_raw);
-    const lhs_val = if (c.mlirTypeEqual(lhs_type, bool_ty))
+    const lhs_type = c.oraValueGetType(lhs_val_raw);
+    const lhs_val = if (c.oraTypeEqual(lhs_type, bool_ty))
         lhs_val_raw
     else blk: {
         const zero_val = self.createConstant(0, bin.span);
@@ -117,22 +117,13 @@ fn lowerLogicalAnd(
     };
 
     const result_types = [_]c.MlirType{bool_ty};
-    var state = h.opState("scf.if", self.fileLoc(bin.span));
-    c.mlirOperationStateAddOperands(&state, 1, @ptrCast(&lhs_val));
-    c.mlirOperationStateAddResults(&state, 1, &result_types);
-
-    const then_region = c.mlirRegionCreate();
-    const then_block = c.mlirBlockCreate(0, null, null);
-    c.mlirRegionInsertOwnedBlock(then_region, 0, then_block);
-    c.mlirOperationStateAddOwnedRegions(&state, 1, @ptrCast(&then_region));
-
-    const else_region = c.mlirRegionCreate();
-    const else_block = c.mlirBlockCreate(0, null, null);
-    c.mlirRegionInsertOwnedBlock(else_region, 0, else_block);
-    c.mlirOperationStateAddOwnedRegions(&state, 1, @ptrCast(&else_region));
-
-    const if_op = c.mlirOperationCreate(&state);
+    const if_op = self.ora_dialect.createScfIf(lhs_val, result_types[0..], self.fileLoc(bin.span));
     h.appendOp(self.block, if_op);
+    const then_block = c.oraScfIfOpGetThenBlock(if_op);
+    const else_block = c.oraScfIfOpGetElseBlock(if_op);
+    if (c.oraBlockIsNull(then_block) or c.oraBlockIsNull(else_block)) {
+        @panic("scf.if missing then/else blocks");
+    }
 
     var then_lowerer = ExpressionLowerer.init(self.ctx, then_block, self.type_mapper, self.param_map, self.storage_map, self.local_var_map, self.symbol_table, self.builtin_registry, self.error_handler, self.locations, self.ora_dialect);
     then_lowerer.current_function_return_type = self.current_function_return_type;
@@ -140,8 +131,8 @@ fn lowerLogicalAnd(
     then_lowerer.in_try_block = self.in_try_block;
     const rhs_val_raw = then_lowerer.lowerExpression(bin.rhs);
 
-    const rhs_type = c.mlirValueGetType(rhs_val_raw);
-    const rhs_val = if (c.mlirTypeEqual(rhs_type, bool_ty))
+    const rhs_type = c.oraValueGetType(rhs_val_raw);
+    const rhs_val = if (c.oraTypeEqual(rhs_type, bool_ty))
         rhs_val_raw
     else blk: {
         const zero_val = then_lowerer.createConstant(0, bin.span);
@@ -164,8 +155,8 @@ fn lowerLogicalOr(
 ) c.MlirValue {
     const lhs_val_raw = self.lowerExpression(bin.lhs);
     const bool_ty = h.boolType(self.ctx);
-    const lhs_type = c.mlirValueGetType(lhs_val_raw);
-    const lhs_val = if (c.mlirTypeEqual(lhs_type, bool_ty))
+    const lhs_type = c.oraValueGetType(lhs_val_raw);
+    const lhs_val = if (c.oraTypeEqual(lhs_type, bool_ty))
         lhs_val_raw
     else blk: {
         const zero_val = self.createConstant(0, bin.span);
@@ -173,22 +164,13 @@ fn lowerLogicalOr(
     };
 
     const result_types = [_]c.MlirType{bool_ty};
-    var state = h.opState("scf.if", self.fileLoc(bin.span));
-    c.mlirOperationStateAddOperands(&state, 1, @ptrCast(&lhs_val));
-    c.mlirOperationStateAddResults(&state, 1, &result_types);
-
-    const then_region = c.mlirRegionCreate();
-    const then_block = c.mlirBlockCreate(0, null, null);
-    c.mlirRegionInsertOwnedBlock(then_region, 0, then_block);
-    c.mlirOperationStateAddOwnedRegions(&state, 1, @ptrCast(&then_region));
-
-    const else_region = c.mlirRegionCreate();
-    const else_block = c.mlirBlockCreate(0, null, null);
-    c.mlirRegionInsertOwnedBlock(else_region, 0, else_block);
-    c.mlirOperationStateAddOwnedRegions(&state, 1, @ptrCast(&else_region));
-
-    const if_op = c.mlirOperationCreate(&state);
+    const if_op = self.ora_dialect.createScfIf(lhs_val, result_types[0..], self.fileLoc(bin.span));
     h.appendOp(self.block, if_op);
+    const then_block = c.oraScfIfOpGetThenBlock(if_op);
+    const else_block = c.oraScfIfOpGetElseBlock(if_op);
+    if (c.oraBlockIsNull(then_block) or c.oraBlockIsNull(else_block)) {
+        @panic("scf.if missing then/else blocks");
+    }
 
     var then_lowerer = ExpressionLowerer.init(self.ctx, then_block, self.type_mapper, self.param_map, self.storage_map, self.local_var_map, self.symbol_table, self.builtin_registry, self.error_handler, self.locations, self.ora_dialect);
     then_lowerer.current_function_return_type = self.current_function_return_type;
@@ -205,8 +187,8 @@ fn lowerLogicalOr(
     else_lowerer.in_try_block = self.in_try_block;
     const rhs_val_raw = else_lowerer.lowerExpression(bin.rhs);
 
-    const rhs_type = c.mlirValueGetType(rhs_val_raw);
-    const rhs_val = if (c.mlirTypeEqual(rhs_type, bool_ty))
+    const rhs_type = c.oraValueGetType(rhs_val_raw);
+    const rhs_val = if (c.oraTypeEqual(rhs_type, bool_ty))
         rhs_val_raw
     else blk: {
         const zero_val = else_lowerer.createConstant(0, bin.span);
@@ -239,7 +221,7 @@ fn lowerLogicalNot(
     operand_ty: c.MlirType,
     span: lib.ast.SourceSpan,
 ) c.MlirValue {
-    if (c.mlirTypeIsAInteger(operand_ty) and c.mlirIntegerTypeGetWidth(operand_ty) == 1) {
+    if (c.oraTypeIsAInteger(operand_ty) and c.oraIntegerTypeGetWidth(operand_ty) == 1) {
         const one_val = self.createBoolConstant(true, span);
         return self.createArithmeticOp("arith.xori", operand, one_val, operand_ty, span);
     } else {
@@ -264,8 +246,8 @@ fn lowerBitwiseNot(
     operand_ty: c.MlirType,
     span: lib.ast.SourceSpan,
 ) c.MlirValue {
-    const bit_width = if (c.mlirTypeIsAInteger(operand_ty))
-        c.mlirIntegerTypeGetWidth(operand_ty)
+    const bit_width = if (c.oraTypeIsAInteger(operand_ty))
+        c.oraIntegerTypeGetWidth(operand_ty)
     else
         constants.DEFAULT_INTEGER_BITS;
 
@@ -315,43 +297,21 @@ pub fn insertExactDivisionGuard(
     span: lib.ast.SourceSpan,
 ) void {
     const loc = self.fileLoc(span);
-    const dividend_type = c.mlirValueGetType(dividend);
+    const dividend_type = c.oraValueGetType(dividend);
 
-    var mod_state = h.opState("arith.remui", loc);
-    c.mlirOperationStateAddOperands(&mod_state, 2, @ptrCast(&[_]c.MlirValue{ dividend, divisor }));
-    c.mlirOperationStateAddResults(&mod_state, 1, @ptrCast(&dividend_type));
-    const mod_op = c.mlirOperationCreate(&mod_state);
+    const mod_op = c.oraArithRemUIOpCreate(self.ctx, loc, dividend, divisor);
     h.appendOp(self.block, mod_op);
     const remainder = h.getResult(mod_op, 0);
 
-    const zero_attr = c.mlirIntegerAttrGet(dividend_type, 0);
-    var zero_state = h.opState("arith.constant", loc);
-    const value_id = h.identifier(self.ctx, "value");
-    var zero_attrs = [_]c.MlirNamedAttribute{c.mlirNamedAttributeGet(value_id, zero_attr)};
-    c.mlirOperationStateAddAttributes(&zero_state, zero_attrs.len, &zero_attrs);
-    c.mlirOperationStateAddResults(&zero_state, 1, @ptrCast(&dividend_type));
-    const zero_op = c.mlirOperationCreate(&zero_state);
+    const zero_op = self.ora_dialect.createArithConstant(0, dividend_type, loc);
     h.appendOp(self.block, zero_op);
     const zero_const = h.getResult(zero_op, 0);
 
-    var cmp_state = h.opState("arith.cmpi", loc);
-    const pred_id = h.identifier(self.ctx, "predicate");
-    const pred_eq_attr = c.mlirIntegerAttrGet(c.mlirIntegerTypeGet(self.ctx, 64), 0);
-    var attrs = [_]c.MlirNamedAttribute{c.mlirNamedAttributeGet(pred_id, pred_eq_attr)};
-    c.mlirOperationStateAddAttributes(&cmp_state, attrs.len, &attrs);
-    c.mlirOperationStateAddOperands(&cmp_state, 2, @ptrCast(&[_]c.MlirValue{ remainder, zero_const }));
-    c.mlirOperationStateAddResults(&cmp_state, 1, @ptrCast(&h.boolType(self.ctx)));
-    const cmp_op = c.mlirOperationCreate(&cmp_state);
+    const cmp_op = c.oraArithCmpIOpCreate(self.ctx, loc, 0, remainder, zero_const);
     h.appendOp(self.block, cmp_op);
     const condition = h.getResult(cmp_op, 0);
 
-    var assert_state = h.opState("cf.assert", loc);
-    c.mlirOperationStateAddOperands(&assert_state, 1, @ptrCast(&condition));
     const msg = "Refinement violation: Exact<T> division must have no remainder";
-    const msg_attr = h.stringAttr(self.ctx, msg);
-    const msg_id = h.identifier(self.ctx, "msg");
-    var assert_attrs = [_]c.MlirNamedAttribute{c.mlirNamedAttributeGet(msg_id, msg_attr)};
-    c.mlirOperationStateAddAttributes(&assert_state, assert_attrs.len, &assert_attrs);
-    const assert_op = c.mlirOperationCreate(&assert_state);
+    const assert_op = self.ora_dialect.createCfAssert(condition, msg, loc);
     h.appendOp(self.block, assert_op);
 }

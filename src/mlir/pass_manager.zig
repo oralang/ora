@@ -131,7 +131,7 @@ pub const PassManager = struct {
     allocator: std.mem.Allocator,
 
     pub fn init(ctx: c.MlirContext, allocator: std.mem.Allocator) PassManager {
-        const pass_manager = c.mlirPassManagerCreate(ctx);
+        const pass_manager = c.oraPassManagerCreate(ctx);
         return .{
             .ctx = ctx,
             .pass_manager = pass_manager,
@@ -141,28 +141,26 @@ pub const PassManager = struct {
 
     /// Enable verification on this pass manager
     pub fn enableVerifier(self: *PassManager, enable: bool) void {
-        c.mlirPassManagerEnableVerifier(self.pass_manager, enable);
+        c.oraPassManagerEnableVerifier(self.pass_manager, enable);
     }
 
     /// Enable timing on this pass manager
     pub fn enableTiming(self: *PassManager) void {
-        c.mlirPassManagerEnableTiming(self.pass_manager);
+        c.oraPassManagerEnableTiming(self.pass_manager);
     }
 
     pub fn deinit(self: *PassManager) void {
-        c.mlirPassManagerDestroy(self.pass_manager);
+        c.oraPassManagerDestroy(self.pass_manager);
     }
 
     /// Add standard MLIR optimization passes
     pub fn addStandardOptimizationPasses(self: *PassManager) void {
         // use comprehensive optimization pipeline
         const pipeline_str = "builtin.module(canonicalize,cse,sccp,symbol-dce,mem2reg,loop-invariant-code-motion,cf-cfg-simplification)";
-        const pipeline_ref = c.mlirStringRefCreateFromCString(pipeline_str);
+        const pipeline_ref = c.oraStringRefCreateFromCString(pipeline_str);
 
         // parse and add the pipeline
-        const result = c.mlirParsePassPipeline(c.mlirPassManagerGetAsOpPassManager(self.pass_manager), pipeline_ref, null, null);
-
-        if (c.mlirLogicalResultIsFailure(result)) {
+        if (!c.oraPassManagerParsePipeline(self.pass_manager, pipeline_ref)) {
             log.warn("Failed to parse standard optimization pipeline\n", .{});
         }
     }
@@ -177,19 +175,16 @@ pub const PassManager = struct {
 
     /// Add custom passes from a pipeline string
     pub fn addCustomPasses(self: *PassManager, pipeline_str: []const u8) !void {
-        const pipeline_ref = c.mlirStringRefCreate(pipeline_str.ptr, pipeline_str.len);
-        const result = c.mlirParsePassPipeline(c.mlirPassManagerGetAsOpPassManager(self.pass_manager), pipeline_ref, null, null);
-
-        if (c.mlirLogicalResultIsFailure(result)) {
+        const pipeline_ref = c.oraStringRefCreate(pipeline_str.ptr, pipeline_str.len);
+        if (!c.oraPassManagerParsePipeline(self.pass_manager, pipeline_ref)) {
             return error.FailedToParsePipeline;
         }
     }
 
     /// Run the pass manager on a module
     pub fn run(self: *PassManager, module: c.MlirModule) !bool {
-        const op = c.mlirModuleGetOperation(module);
-        const result = c.mlirPassManagerRunOnOp(self.pass_manager, op);
-        return c.mlirLogicalResultIsSuccess(result);
+        const op = c.oraModuleGetOperation(module);
+        return c.oraPassManagerRun(self.pass_manager, op);
     }
 };
 
@@ -234,10 +229,8 @@ pub const PassResult = struct {
 pub const OraPassUtils = struct {
     /// Parse a pipeline string and add passes to the pass manager
     pub fn parsePipelineString(pass_manager: *PassManager, pipeline_str: []const u8) !void {
-        const pipeline_ref = c.mlirStringRefCreate(pipeline_str.ptr, pipeline_str.len);
-        const result = c.mlirParsePassPipeline(c.mlirPassManagerGetAsOpPassManager(pass_manager.pass_manager), pipeline_ref, null, null);
-
-        if (c.mlirLogicalResultIsFailure(result)) {
+        const pipeline_ref = c.oraStringRefCreate(pipeline_str.ptr, pipeline_str.len);
+        if (!c.oraPassManagerParsePipeline(pass_manager.pass_manager, pipeline_ref)) {
             return error.FailedToParsePipeline;
         }
     }

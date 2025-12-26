@@ -14,31 +14,31 @@ const return_stmt = @import("return.zig");
 const log = @import("log");
 
 fn getLastOperation(block: c.MlirBlock) c.MlirOperation {
-    var op = c.mlirBlockGetFirstOperation(block);
+    var op = c.oraBlockGetFirstOperation(block);
     var last: c.MlirOperation = c.MlirOperation{};
-    while (!c.mlirOperationIsNull(op)) {
+    while (!c.oraOperationIsNull(op)) {
         last = op;
-        op = c.mlirOperationGetNextInBlock(op);
+        op = c.oraOperationGetNextInBlock(op);
     }
     return last;
 }
 
 fn findTryCatchOperandAfter(block: c.MlirBlock, last_before: c.MlirOperation) ?c.MlirValue {
-    var op = if (c.mlirOperationIsNull(last_before))
-        c.mlirBlockGetFirstOperation(block)
+    var op = if (c.oraOperationIsNull(last_before))
+        c.oraBlockGetFirstOperation(block)
     else
-        c.mlirOperationGetNextInBlock(last_before);
+        c.oraOperationGetNextInBlock(last_before);
 
     var last_try_operand: ?c.MlirValue = null;
-    while (!c.mlirOperationIsNull(op)) {
-        const name_id = c.mlirOperationGetName(op);
-        const name_ref = c.mlirIdentifierStr(name_id);
+    while (!c.oraOperationIsNull(op)) {
+        const name_ref = c.oraOperationGetName(op);
         if (name_ref.length > 0 and std.mem.eql(u8, name_ref.data[0..name_ref.length], "ora.try_catch")) {
-            if (c.mlirOperationGetNumOperands(op) > 0) {
-                last_try_operand = c.mlirOperationGetOperand(op, 0);
+            if (c.oraOperationGetNumOperands(op) > 0) {
+                last_try_operand = c.oraOperationGetOperand(op, 0);
             }
         }
-        op = c.mlirOperationGetNextInBlock(op);
+        c.oraStringRefFree(name_ref);
+        op = c.oraOperationGetNextInBlock(op);
     }
 
     return last_try_operand;
@@ -48,23 +48,19 @@ fn findTryCatchOperandAfter(block: c.MlirBlock, last_before: c.MlirOperation) ?c
 pub fn lowerTryBlock(self: *const StatementLowerer, try_stmt: *const lib.ast.Statements.TryBlockNode) LoweringError!void {
     const loc = self.fileLoc(try_stmt.span);
     const i1_type = h.boolType(self.ctx);
-    const empty_attr = c.mlirAttributeGetNull();
+    const empty_attr = c.oraNullAttrCreate();
 
     // create memrefs for return flag and return value (similar to labeled blocks)
     // this allows returns inside try blocks to store their values instead of using ora.return
-    const return_flag_memref_type = c.mlirMemRefTypeGet(i1_type, 0, null, empty_attr, empty_attr);
-    var return_flag_alloca_state = h.opState("memref.alloca", loc);
-    c.mlirOperationStateAddResults(&return_flag_alloca_state, 1, @ptrCast(&return_flag_memref_type));
-    const return_flag_alloca = c.mlirOperationCreate(&return_flag_alloca_state);
+    const return_flag_memref_type = h.memRefType(self.ctx, i1_type, 0, null, empty_attr, empty_attr);
+    const return_flag_alloca = c.oraMemrefAllocaOpCreate(self.ctx, loc, return_flag_memref_type);
     h.appendOp(self.block, return_flag_alloca);
     const return_flag_memref = h.getResult(return_flag_alloca, 0);
 
     // return value memref (only if function has return type)
     const return_value_memref = if (self.current_function_return_type) |ret_type| blk: {
-        const return_value_memref_type = c.mlirMemRefTypeGet(ret_type, 0, null, empty_attr, empty_attr);
-        var return_value_alloca_state = h.opState("memref.alloca", loc);
-        c.mlirOperationStateAddResults(&return_value_alloca_state, 1, @ptrCast(&return_value_memref_type));
-        const return_value_alloca = c.mlirOperationCreate(&return_value_alloca_state);
+        const return_value_memref_type = h.memRefType(self.ctx, ret_type, 0, null, empty_attr, empty_attr);
+        const return_value_alloca = c.oraMemrefAllocaOpCreate(self.ctx, loc, return_value_memref_type);
         h.appendOp(self.block, return_value_alloca);
         break :blk h.getResult(return_value_alloca, 0);
     } else null;
@@ -89,14 +85,8 @@ pub fn lowerTryBlock(self: *const StatementLowerer, try_stmt: *const lib.ast.Sta
         // if there's an error variable, create a placeholder value and add it to LocalVarMap
         if (catch_block.error_variable) |error_var_name| {
             const error_value = findTryCatchOperandAfter(self.block, last_before_try) orelse blk: {
-                const error_type = c.mlirIntegerTypeGet(self.ctx, 256);
-                var error_const_state = h.opState("arith.constant", loc);
-                const error_const_attr = c.mlirIntegerAttrGet(error_type, 0);
-                const error_value_id = h.identifier(self.ctx, "value");
-                var error_attrs = [_]c.MlirNamedAttribute{c.mlirNamedAttributeGet(error_value_id, error_const_attr)};
-                c.mlirOperationStateAddAttributes(&error_const_state, error_attrs.len, &error_attrs);
-                c.mlirOperationStateAddResults(&error_const_state, 1, @ptrCast(&error_type));
-                const error_const_op = c.mlirOperationCreate(&error_const_state);
+                const error_type = c.oraIntegerTypeCreate(self.ctx, 256);
+                const error_const_op = self.ora_dialect.createArithConstant(0, error_type, loc);
                 h.appendOp(self.block, error_const_op);
                 break :blk h.getResult(error_const_op, 0);
             };
@@ -120,10 +110,7 @@ pub fn lowerTryBlock(self: *const StatementLowerer, try_stmt: *const lib.ast.Sta
     // after try/catch, check return flag and return if needed
     if (self.current_function_return_type) |ret_type| {
         // load return flag
-        var load_return_flag_state = h.opState("memref.load", loc);
-        c.mlirOperationStateAddOperands(&load_return_flag_state, 1, @ptrCast(&return_flag_memref));
-        c.mlirOperationStateAddResults(&load_return_flag_state, 1, @ptrCast(&i1_type));
-        const load_return_flag = c.mlirOperationCreate(&load_return_flag_state);
+        const load_return_flag = c.oraMemrefLoadOpCreate(self.ctx, loc, return_flag_memref, null, 0, i1_type);
         h.appendOp(self.block, load_return_flag);
         const should_return = h.getResult(load_return_flag, 0);
 
@@ -132,17 +119,15 @@ pub fn lowerTryBlock(self: *const StatementLowerer, try_stmt: *const lib.ast.Sta
         h.appendOp(self.block, return_if_op);
 
         // get the then and else blocks from ora.if
-        const then_region = c.mlirOperationGetRegion(return_if_op, 0);
-        const else_region = c.mlirOperationGetRegion(return_if_op, 1);
-        const return_if_then_block = c.mlirRegionGetFirstBlock(then_region);
-        const return_if_else_block = c.mlirRegionGetFirstBlock(else_region);
+        const return_if_then_block = c.oraIfOpGetThenBlock(return_if_op);
+        const return_if_else_block = c.oraIfOpGetElseBlock(return_if_op);
+        if (c.oraBlockIsNull(return_if_then_block) or c.oraBlockIsNull(return_if_else_block)) {
+            @panic("ora.if missing then/else blocks");
+        }
 
         // then block: load return value and return directly
         if (return_value_memref) |ret_val_memref| {
-            var load_return_value_state = h.opState("memref.load", loc);
-            c.mlirOperationStateAddOperands(&load_return_value_state, 1, @ptrCast(&ret_val_memref));
-            c.mlirOperationStateAddResults(&load_return_value_state, 1, @ptrCast(&ret_type));
-            const load_return_value = c.mlirOperationCreate(&load_return_value_state);
+            const load_return_value = c.oraMemrefLoadOpCreate(self.ctx, loc, ret_val_memref, null, 0, ret_type);
             h.appendOp(return_if_then_block, load_return_value);
             const return_val = h.getResult(load_return_value, 0);
 
@@ -163,8 +148,7 @@ pub fn lowerTryBlock(self: *const StatementLowerer, try_stmt: *const lib.ast.Sta
         }
 
         // else block: empty yield (no return, function continues to next statement)
-        var else_yield_state = h.opState("ora.yield", loc);
-        const else_yield_op = c.mlirOperationCreate(&else_yield_state);
+        const else_yield_op = self.ora_dialect.createYield(&[_]c.MlirValue{}, loc);
         h.appendOp(return_if_else_block, else_yield_op);
     }
 }
@@ -173,26 +157,31 @@ pub fn lowerTryBlock(self: *const StatementLowerer, try_stmt: *const lib.ast.Sta
 pub fn lowerErrorDecl(self: *const StatementLowerer, error_decl: *const lib.ast.Statements.ErrorDeclNode) LoweringError!void {
     const loc = self.fileLoc(error_decl.span);
 
-    var state = h.opState("ora.error.decl", loc);
-
     // add error name as attribute
-    const name_ref = c.mlirStringRefCreate(error_decl.name.ptr, error_decl.name.len);
-    const name_attr = c.mlirStringAttrGet(self.ctx, name_ref);
+    const name_ref = c.oraStringRefCreate(error_decl.name.ptr, error_decl.name.len);
+    const name_attr = c.oraStringAttrCreate(self.ctx, name_ref);
     const name_id = h.identifier(self.ctx, "name");
-    var attrs = [_]c.MlirNamedAttribute{c.mlirNamedAttributeGet(name_id, name_attr)};
-    c.mlirOperationStateAddAttributes(&state, attrs.len, &attrs);
+    var attrs = std.ArrayList(c.MlirNamedAttribute){};
+    defer attrs.deinit(self.allocator);
+    attrs.append(self.allocator, c.oraNamedAttributeGet(name_id, name_attr)) catch {};
 
     // handle error parameters if present
     if (error_decl.parameters) |parameters| {
         for (parameters) |param| {
-            const param_ref = c.mlirStringRefCreate(param.name.ptr, param.name.len);
-            const param_attr = c.mlirStringAttrGet(self.ctx, param_ref);
+            const param_ref = c.oraStringRefCreate(param.name.ptr, param.name.len);
+            const param_attr = c.oraStringAttrCreate(self.ctx, param_ref);
             const param_id = h.identifier(self.ctx, "param");
-            var param_attrs = [_]c.MlirNamedAttribute{c.mlirNamedAttributeGet(param_id, param_attr)};
-            c.mlirOperationStateAddAttributes(&state, param_attrs.len, &param_attrs);
+            attrs.append(self.allocator, c.oraNamedAttributeGet(param_id, param_attr)) catch {};
         }
     }
 
-    const op = c.mlirOperationCreate(&state);
+    const op = c.oraErrorDeclOpCreate(
+        self.ctx,
+        loc,
+        null,
+        0,
+        if (attrs.items.len == 0) null else attrs.items.ptr,
+        attrs.items.len,
+    );
     h.appendOp(self.block, op);
 }

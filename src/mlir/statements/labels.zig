@@ -86,8 +86,8 @@ fn handleLabeledSwitchContinue(
         const value_to_store = helpers.ensureValue(self, value, loc);
 
         // get target type from memref element type
-        const memref_type = c.mlirValueGetType(value_memref);
-        const element_type = c.mlirShapedTypeGetElementType(memref_type);
+        const memref_type = c.oraValueGetType(value_memref);
+        const element_type = c.oraShapedTypeGetElementType(memref_type);
 
         // convert value to match memref element type
         const final_value = helpers.convertValueToType(self, value_to_store, element_type, continue_stmt.span, loc);
@@ -162,41 +162,33 @@ fn lowerLabeledSwitch(self: *const StatementLowerer, labeled_block: *const lib.a
 
     // create memrefs for continue flag and switch value
     const i1_type = h.boolType(self.ctx);
-    const empty_attr = c.mlirAttributeGetNull();
+    const empty_attr = c.oraNullAttrCreate();
 
     // continue flag memref
-    const continue_flag_memref_type = c.mlirMemRefTypeGet(i1_type, 0, null, empty_attr, empty_attr);
-    var continue_flag_alloca_state = h.opState("memref.alloca", loc);
-    c.mlirOperationStateAddResults(&continue_flag_alloca_state, 1, @ptrCast(&continue_flag_memref_type));
-    const continue_flag_alloca = c.mlirOperationCreate(&continue_flag_alloca_state);
+    const continue_flag_memref_type = h.memRefType(self.ctx, i1_type, 0, null, empty_attr, empty_attr);
+    const continue_flag_alloca = self.ora_dialect.createMemrefAlloca(continue_flag_memref_type, loc);
     h.appendOp(self.block, continue_flag_alloca);
     const continue_flag_memref = h.getResult(continue_flag_alloca, 0);
 
     // switch value memref (use Ora types consistently)
     const condition_raw = self.expr_lowerer.lowerExpression(&switch_stmt.condition);
     const initial_value = helpers.ensureValue(self, condition_raw, loc);
-    const value_type = c.mlirValueGetType(initial_value);
-    const value_memref_type = c.mlirMemRefTypeGet(value_type, 0, null, empty_attr, empty_attr);
-    var value_alloca_state = h.opState("memref.alloca", loc);
-    c.mlirOperationStateAddResults(&value_alloca_state, 1, @ptrCast(&value_memref_type));
-    const value_alloca = c.mlirOperationCreate(&value_alloca_state);
+    const value_type = c.oraValueGetType(initial_value);
+    const value_memref_type = h.memRefType(self.ctx, value_type, 0, null, empty_attr, empty_attr);
+    const value_alloca = self.ora_dialect.createMemrefAlloca(value_memref_type, loc);
     h.appendOp(self.block, value_alloca);
     const value_memref = h.getResult(value_alloca, 0);
 
     // return flag memref (for returns in labeled switches)
-    const return_flag_memref_type = c.mlirMemRefTypeGet(i1_type, 0, null, empty_attr, empty_attr);
-    var return_flag_alloca_state = h.opState("memref.alloca", loc);
-    c.mlirOperationStateAddResults(&return_flag_alloca_state, 1, @ptrCast(&return_flag_memref_type));
-    const return_flag_alloca = c.mlirOperationCreate(&return_flag_alloca_state);
+    const return_flag_memref_type = h.memRefType(self.ctx, i1_type, 0, null, empty_attr, empty_attr);
+    const return_flag_alloca = self.ora_dialect.createMemrefAlloca(return_flag_memref_type, loc);
     h.appendOp(self.block, return_flag_alloca);
     const return_flag_memref = h.getResult(return_flag_alloca, 0);
 
     // return value memref (for return values in labeled switches)
     const return_value_type = if (self.current_function_return_type) |ret_type| ret_type else value_type;
-    const return_value_memref_type = c.mlirMemRefTypeGet(return_value_type, 0, null, empty_attr, empty_attr);
-    var return_value_alloca_state = h.opState("memref.alloca", loc);
-    c.mlirOperationStateAddResults(&return_value_alloca_state, 1, @ptrCast(&return_value_memref_type));
-    const return_value_alloca = c.mlirOperationCreate(&return_value_alloca_state);
+    const return_value_memref_type = h.memRefType(self.ctx, return_value_type, 0, null, empty_attr, empty_attr);
+    const return_value_alloca = self.ora_dialect.createMemrefAlloca(return_value_memref_type, loc);
     h.appendOp(self.block, return_value_alloca);
     const return_value_memref = h.getResult(return_value_alloca, 0);
 
@@ -208,39 +200,34 @@ fn lowerLabeledSwitch(self: *const StatementLowerer, labeled_block: *const lib.a
     helpers.storeToMemref(self, initial_value, value_memref, loc);
 
     // create scf.while operation
-    var while_state = h.opState("scf.while", loc);
+    const while_op = self.ora_dialect.createScfWhile(&[_]c.MlirValue{}, &[_]c.MlirType{}, loc);
+    h.appendOp(self.block, while_op);
 
     // before region: load continue_flag and check condition
-    const before_region = c.mlirRegionCreate();
-    const before_block = c.mlirBlockCreate(0, null, null);
-    c.mlirRegionInsertOwnedBlock(before_region, 0, before_block);
+    const before_block = c.oraScfWhileOpGetBeforeBlock(while_op);
+    if (c.oraBlockIsNull(before_block)) {
+        @panic("scf.while missing before block");
+    }
 
-    var load_flag_state = h.opState("memref.load", loc);
-    c.mlirOperationStateAddOperands(&load_flag_state, 1, @ptrCast(&continue_flag_memref));
-    c.mlirOperationStateAddResults(&load_flag_state, 1, @ptrCast(&i1_type));
-    const load_flag = c.mlirOperationCreate(&load_flag_state);
+    const load_flag = self.ora_dialect.createMemrefLoad(continue_flag_memref, &[_]c.MlirValue{}, i1_type, loc);
     h.appendOp(before_block, load_flag);
     const should_continue = h.getResult(load_flag, 0);
 
-    var condition_state = h.opState("scf.condition", loc);
-    c.mlirOperationStateAddOperands(&condition_state, 1, @ptrCast(&should_continue));
-    const condition_op = c.mlirOperationCreate(&condition_state);
+    const condition_op = self.ora_dialect.createScfCondition(should_continue, &[_]c.MlirValue{}, loc);
     h.appendOp(before_block, condition_op);
 
     // after region: reset flag, load value, execute switch
-    const after_region = c.mlirRegionCreate();
-    const after_block = c.mlirBlockCreate(0, null, null);
-    c.mlirRegionInsertOwnedBlock(after_region, 0, after_block);
+    const after_block = c.oraScfWhileOpGetAfterBlock(while_op);
+    if (c.oraBlockIsNull(after_block)) {
+        @panic("scf.while missing after block");
+    }
 
     // reset continue_flag to false
     const false_val_continue = helpers.createBoolConstant(self, false, loc);
     helpers.storeToMemref(self, false_val_continue, continue_flag_memref, loc);
 
     // load switch value
-    var load_value_state = h.opState("memref.load", loc);
-    c.mlirOperationStateAddOperands(&load_value_state, 1, @ptrCast(&value_memref));
-    c.mlirOperationStateAddResults(&load_value_state, 1, @ptrCast(&value_type));
-    const load_value = c.mlirOperationCreate(&load_value_state);
+    const load_value = self.ora_dialect.createMemrefLoad(value_memref, &[_]c.MlirValue{}, value_type, loc);
     h.appendOp(after_block, load_value);
     const switch_value = h.getResult(load_value, 0);
 
@@ -256,26 +243,16 @@ fn lowerLabeledSwitch(self: *const StatementLowerer, labeled_block: *const lib.a
     if (!has_terminator) {
         log.debug("[lowerLabeledSwitch] Adding scf.yield to after_block (scf.while requires scf.yield)\n", .{});
         // scf.while's after region must end with scf.yield to continue the loop
-        var yield_state = h.opState("scf.yield", loc);
-        const yield_op = c.mlirOperationCreate(&yield_state);
+        const yield_op = self.ora_dialect.createScfYield(loc);
         h.appendOp(after_block, yield_op);
     } else {
         log.debug("[lowerLabeledSwitch] after_block already has terminator, skipping yield\n", .{});
     }
 
-    // add regions and create while operation
-    c.mlirOperationStateAddOwnedRegions(&while_state, 1, @ptrCast(&before_region));
-    c.mlirOperationStateAddOwnedRegions(&while_state, 1, @ptrCast(&after_region));
-    const while_op = c.mlirOperationCreate(&while_state);
-    h.appendOp(self.block, while_op);
-
     // after scf.while, check return flag and return if needed
     if (self.current_function_return_type) |ret_type| {
         // load return flag
-        var load_return_flag_state = h.opState("memref.load", loc);
-        c.mlirOperationStateAddOperands(&load_return_flag_state, 1, @ptrCast(&return_flag_memref));
-        c.mlirOperationStateAddResults(&load_return_flag_state, 1, @ptrCast(&i1_type));
-        const load_return_flag = c.mlirOperationCreate(&load_return_flag_state);
+        const load_return_flag = self.ora_dialect.createMemrefLoad(return_flag_memref, &[_]c.MlirValue{}, i1_type, loc);
         h.appendOp(self.block, load_return_flag);
         const should_return = h.getResult(load_return_flag, 0);
 
@@ -284,24 +261,21 @@ fn lowerLabeledSwitch(self: *const StatementLowerer, labeled_block: *const lib.a
         h.appendOp(self.block, return_if_op);
 
         // get the then and else blocks from ora.if
-        const then_region = c.mlirOperationGetRegion(return_if_op, 0);
-        const else_region = c.mlirOperationGetRegion(return_if_op, 1);
-        const return_if_then_block = c.mlirRegionGetFirstBlock(then_region);
-        const return_if_else_block = c.mlirRegionGetFirstBlock(else_region);
+        const return_if_then_block = c.oraIfOpGetThenBlock(return_if_op);
+        const return_if_else_block = c.oraIfOpGetElseBlock(return_if_op);
+        if (c.oraBlockIsNull(return_if_then_block) or c.oraBlockIsNull(return_if_else_block)) {
+            @panic("ora.if missing then/else blocks");
+        }
 
         // then block: load return value and return directly
-        var load_return_value_state = h.opState("memref.load", loc);
-        c.mlirOperationStateAddOperands(&load_return_value_state, 1, @ptrCast(&return_value_memref));
-        c.mlirOperationStateAddResults(&load_return_value_state, 1, @ptrCast(&ret_type));
-        const load_return_value = c.mlirOperationCreate(&load_return_value_state);
+        const load_return_value = self.ora_dialect.createMemrefLoad(return_value_memref, &[_]c.MlirValue{}, ret_type, loc);
         h.appendOp(return_if_then_block, load_return_value);
         const return_val = h.getResult(load_return_value, 0);
         const return_op = self.ora_dialect.createFuncReturnWithValue(return_val, loc);
         h.appendOp(return_if_then_block, return_op);
 
         // else block: empty yield (no return, function continues to next statement)
-        var else_yield_state = h.opState("ora.yield", loc);
-        const else_yield_op = c.mlirOperationCreate(&else_yield_state);
+        const else_yield_op = self.ora_dialect.createYield(&[_]c.MlirValue{}, loc);
         h.appendOp(return_if_else_block, else_yield_op);
     }
 }

@@ -50,35 +50,27 @@ pub fn lowerComptime(
             .Return => |ret| {
                 if (ret.value) |*expr| {
                     result_value = self.lowerExpression(expr);
-                    result_type = c.mlirValueGetType(result_value.?);
+                    result_type = c.oraValueGetType(result_value.?);
                     break;
                 }
             },
             .Expr => |expr_node| {
                 result_value = self.lowerExpression(&expr_node);
-                result_type = c.mlirValueGetType(result_value.?);
+                result_type = c.oraValueGetType(result_value.?);
                 break;
             },
             else => {},
         }
     }
 
-    const ty = result_type orelse c.mlirIntegerTypeGet(self.ctx, constants.DEFAULT_INTEGER_BITS);
-    var state = h.opState("arith.constant", loc);
-    c.mlirOperationStateAddResults(&state, 1, @ptrCast(&ty));
-
-    const attr = c.mlirIntegerAttrGet(ty, 0);
-    const value_id = h.identifier(self.ctx, "value");
+    const ty = result_type orelse c.oraIntegerTypeCreate(self.ctx, constants.DEFAULT_INTEGER_BITS);
     const comptime_id = h.identifier(self.ctx, "ora.comptime");
-    const comptime_attr = c.mlirBoolAttrGet(self.ctx, 1);
+    const comptime_attr = h.boolAttr(self.ctx, 1);
 
-    var attrs = [_]c.MlirNamedAttribute{
-        c.mlirNamedAttributeGet(value_id, attr),
-        c.mlirNamedAttributeGet(comptime_id, comptime_attr),
+    const attrs = [_]c.MlirNamedAttribute{
+        c.oraNamedAttributeGet(comptime_id, comptime_attr),
     };
-    c.mlirOperationStateAddAttributes(&state, attrs.len, &attrs);
-
-    const op = c.mlirOperationCreate(&state);
+    const op = self.ora_dialect.createArithConstantWithAttrs(0, ty, &attrs, loc);
     h.appendOp(self.block, op);
     return h.getResult(op, 0);
 }
@@ -116,30 +108,32 @@ pub fn lowerTuple(
     defer element_types.deinit(std.heap.page_allocator);
 
     for (element_values.items) |value| {
-        const ty = c.mlirValueGetType(value);
+        const ty = c.oraValueGetType(value);
         element_types.append(std.heap.page_allocator, ty) catch {};
     }
 
     const tuple_ty = createTupleType(self, element_types.items);
-    var undef_state = h.opState("llvm.mlir.undef", self.fileLoc(tuple.span));
-    c.mlirOperationStateAddResults(&undef_state, 1, @ptrCast(&tuple_ty));
-    const undef_op = c.mlirOperationCreate(&undef_state);
+    const undef_op = c.oraLlvmUndefOpCreate(self.ctx, self.fileLoc(tuple.span), tuple_ty);
+    if (c.oraOperationIsNull(undef_op)) {
+        @panic("Failed to create llvm.mlir.undef operation");
+    }
     h.appendOp(self.block, undef_op);
     var current_tuple = h.getResult(undef_op, 0);
 
     for (element_values.items, 0..) |element_value, i| {
-        var insert_state = h.opState("llvm.insertvalue", self.fileLoc(tuple.span));
-        c.mlirOperationStateAddOperands(&insert_state, 2, @ptrCast(&[_]c.MlirValue{ current_tuple, element_value }));
-        c.mlirOperationStateAddResults(&insert_state, 1, @ptrCast(&tuple_ty));
-
-        const position_attr = c.mlirIntegerAttrGet(c.mlirIntegerTypeGet(self.ctx, 32), @intCast(i));
-        const position_id = h.identifier(self.ctx, "position");
-        var attrs = [_]c.MlirNamedAttribute{
-            c.mlirNamedAttributeGet(position_id, position_attr),
-        };
-        c.mlirOperationStateAddAttributes(&insert_state, attrs.len, &attrs);
-
-        const insert_op = c.mlirOperationCreate(&insert_state);
+        const position = [_]i64{@intCast(i)};
+        const insert_op = c.oraLlvmInsertValueOpCreate(
+            self.ctx,
+            self.fileLoc(tuple.span),
+            tuple_ty,
+            current_tuple,
+            element_value,
+            &position,
+            position.len,
+        );
+        if (c.oraOperationIsNull(insert_op)) {
+            @panic("Failed to create llvm.insertvalue operation");
+        }
         h.appendOp(self.block, insert_op);
         current_tuple = h.getResult(insert_op, 0);
     }
@@ -154,12 +148,9 @@ pub fn lowerSwitchExpression(
 ) c.MlirValue {
     const loc = self.fileLoc(switch_expr.span);
     const condition_raw = self.lowerExpression(switch_expr.condition);
-    const condition = if (c.mlirTypeIsAMemRef(c.mlirValueGetType(condition_raw))) blk: {
-        var load_state = h.opState("memref.load", loc);
-        c.mlirOperationStateAddOperands(&load_state, 1, @ptrCast(&condition_raw));
-        const result_type = c.mlirShapedTypeGetElementType(c.mlirValueGetType(condition_raw));
-        c.mlirOperationStateAddResults(&load_state, 1, @ptrCast(&result_type));
-        const load_op = c.mlirOperationCreate(&load_state);
+    const condition = if (c.oraTypeIsAMemRef(c.oraValueGetType(condition_raw))) blk: {
+        const result_type = c.oraShapedTypeGetElementType(c.oraValueGetType(condition_raw));
+        const load_op = c.oraMemrefLoadOpCreate(self.ctx, loc, condition_raw, null, 0, result_type);
         h.appendOp(self.block, load_op);
         break :blk h.getResult(load_op, 0);
     } else condition_raw;
@@ -168,7 +159,7 @@ pub fn lowerSwitchExpression(
         if (switch_expr.cases.len > 0) {
             switch (switch_expr.cases[0].body) {
                 .Expression => |expr| {
-                    const expr_type = c.mlirValueGetType(self.lowerExpression(expr));
+                    const expr_type = c.oraValueGetType(self.lowerExpression(expr));
                     break :blk expr_type;
                 },
                 .Block, .LabeledBlock => {
@@ -180,12 +171,12 @@ pub fn lowerSwitchExpression(
                 switch (default_block.statements[0]) {
                     .Return => |ret| {
                         if (ret.value) |e| {
-                            const expr_type = c.mlirValueGetType(self.lowerExpression(&e));
+                            const expr_type = c.oraValueGetType(self.lowerExpression(&e));
                             break :blk expr_type;
                         }
                     },
                     .Expr => |e| {
-                        const expr_type = c.mlirValueGetType(self.lowerExpression(&e));
+                        const expr_type = c.oraValueGetType(self.lowerExpression(&e));
                         break :blk expr_type;
                     },
                     else => {},
@@ -195,17 +186,19 @@ pub fn lowerSwitchExpression(
         break :blk h.i256Type(self.ctx);
     };
 
-    var switch_state = h.opState("ora.switch_expr", loc);
-    c.mlirOperationStateAddOperands(&switch_state, 1, @ptrCast(&condition));
-    c.mlirOperationStateAddResults(&switch_state, 1, @ptrCast(&result_type));
-
     const total_cases = switch_expr.cases.len + if (switch_expr.default_case != null) @as(usize, 1) else 0;
-    var case_regions_buf: [16]c.MlirRegion = undefined;
-    const case_regions = if (total_cases <= 16) case_regions_buf[0..total_cases] else blk: {
-        const regions = std.heap.page_allocator.alloc(c.MlirRegion, total_cases) catch return condition;
-        break :blk regions;
-    };
-    defer if (total_cases > 16) std.heap.page_allocator.free(case_regions);
+    const switch_op = c.oraSwitchExprOpCreateWithCases(
+        self.ctx,
+        loc,
+        condition,
+        &[_]c.MlirType{result_type},
+        1,
+        total_cases,
+    );
+    if (c.oraOperationIsNull(switch_op)) {
+        @panic("Failed to create ora.switch_expr operation");
+    }
+    h.appendOp(self.block, switch_op);
 
     const StatementLowerer = @import("../statements.zig").StatementLowerer;
 
@@ -221,9 +214,10 @@ pub fn lowerSwitchExpression(
 
     var case_idx: usize = 0;
     for (switch_expr.cases) |case| {
-        const case_region = c.mlirRegionCreate();
-        const case_block = c.mlirBlockCreate(0, null, null);
-        c.mlirRegionInsertOwnedBlock(case_region, 0, case_block);
+        const case_block = c.oraSwitchExprOpGetCaseBlock(switch_op, case_idx);
+        if (c.oraBlockIsNull(case_block)) {
+            @panic("ora.switch_expr missing case block");
+        }
 
         var case_expr_lowerer = ExpressionLowerer.init(self.ctx, case_block, self.type_mapper, self.param_map, self.storage_map, self.local_var_map, self.symbol_table, self.builtin_registry, self.error_handler, self.locations, self.ora_dialect);
         case_expr_lowerer.current_function_return_type = self.current_function_return_type;
@@ -402,14 +396,14 @@ pub fn lowerSwitchExpression(
             },
         }
 
-        case_regions[case_idx] = case_region;
         case_idx += 1;
     }
 
     if (switch_expr.default_case) |default_block| {
-        const default_region = c.mlirRegionCreate();
-        const default_block_mlir = c.mlirBlockCreate(0, null, null);
-        c.mlirRegionInsertOwnedBlock(default_region, 0, default_block_mlir);
+        const default_block_mlir = c.oraSwitchExprOpGetCaseBlock(switch_op, case_idx);
+        if (c.oraBlockIsNull(default_block_mlir)) {
+            @panic("ora.switch_expr missing default block");
+        }
 
         var default_expr_lowerer = ExpressionLowerer.init(self.ctx, default_block_mlir, self.type_mapper, self.param_map, self.storage_map, self.local_var_map, self.symbol_table, self.builtin_registry, self.error_handler, self.locations, self.ora_dialect);
         default_expr_lowerer.current_function_return_type = self.current_function_return_type;
@@ -452,7 +446,6 @@ pub fn lowerSwitchExpression(
             h.appendOp(default_block_mlir, yield_op);
         }
 
-        case_regions[case_idx] = default_region;
         if (default_case_index < 0) {
             default_case_index = @intCast(case_idx);
         }
@@ -462,11 +455,6 @@ pub fn lowerSwitchExpression(
         case_kinds.append(std.heap.page_allocator, 2) catch {};
         case_idx += 1;
     }
-
-    c.mlirOperationStateAddOwnedRegions(&switch_state, @intCast(case_regions.len), case_regions.ptr);
-
-    const switch_op = c.mlirOperationCreate(&switch_state);
-    h.appendOp(self.block, switch_op);
 
     if (case_values.items.len > 0) {
         c.oraSwitchOpSetCasePatterns(
@@ -496,71 +484,76 @@ pub fn lowerQuantified(
         condition_value = self.lowerExpression(condition);
     }
 
-    var state = h.opState("ora.quantified", self.fileLoc(quantified.span));
-    c.mlirOperationStateAddResults(&state, 1, @ptrCast(&result_ty));
-
     var attributes = std.ArrayList(c.MlirNamedAttribute){};
     defer attributes.deinit(std.heap.page_allocator);
 
-    if (quantified.verification_metadata) |metadata| {
-        const quantifier_type_str = switch (metadata.quantifier_type) {
+    const quantifier_type_str = if (quantified.verification_metadata) |metadata|
+        switch (metadata.quantifier_type) {
             .Forall => "forall",
             .Exists => "exists",
-        };
+        }
+    else switch (quantified.quantifier) {
+        .Forall => "forall",
+        .Exists => "exists",
+    };
+    const variable_name = if (quantified.verification_metadata) |metadata|
+        metadata.variable_name
+    else
+        quantified.variable;
+    const var_type_str = if (quantified.verification_metadata) |metadata|
+        getTypeString(self, metadata.variable_type)
+    else
+        getTypeString(self, quantified.variable_type);
+
+    if (quantified.verification_metadata) |metadata| {
         const quantifier_id = h.identifier(self.ctx, "quantifier");
         const quantifier_attr = h.stringAttr(self.ctx, quantifier_type_str);
-        attributes.append(std.heap.page_allocator, c.mlirNamedAttributeGet(quantifier_id, quantifier_attr)) catch {};
+        attributes.append(std.heap.page_allocator, c.oraNamedAttributeGet(quantifier_id, quantifier_attr)) catch {};
 
         const var_name_id = h.identifier(self.ctx, "variable");
         const var_name_attr = h.stringAttr(self.ctx, metadata.variable_name);
-        attributes.append(std.heap.page_allocator, c.mlirNamedAttributeGet(var_name_id, var_name_attr)) catch {};
+        attributes.append(std.heap.page_allocator, c.oraNamedAttributeGet(var_name_id, var_name_attr)) catch {};
 
         const var_type_id = h.identifier(self.ctx, "variable_type");
-        const var_type_str = getTypeString(self, metadata.variable_type);
         const var_type_attr = h.stringAttr(self.ctx, var_type_str);
-        attributes.append(std.heap.page_allocator, c.mlirNamedAttributeGet(var_type_id, var_type_attr)) catch {};
+        attributes.append(std.heap.page_allocator, c.oraNamedAttributeGet(var_type_id, var_type_attr)) catch {};
 
         const has_condition_id = h.identifier(self.ctx, "ora.has_condition");
-        const has_condition_attr = c.mlirBoolAttrGet(self.ctx, if (metadata.has_condition) 1 else 0);
-        attributes.append(std.heap.page_allocator, c.mlirNamedAttributeGet(has_condition_id, has_condition_attr)) catch {};
+        const has_condition_attr = h.boolAttr(self.ctx, @as(i32, @intFromBool(metadata.has_condition)));
+        attributes.append(std.heap.page_allocator, c.oraNamedAttributeGet(has_condition_id, has_condition_attr)) catch {};
 
         const span_id = h.identifier(self.ctx, "ora.span");
         const span_str = std.fmt.allocPrint(std.heap.page_allocator, "{}:{}", .{ metadata.span.line, metadata.span.column }) catch "0:0";
         defer std.heap.page_allocator.free(span_str);
         const span_attr = h.stringAttr(self.ctx, span_str);
-        attributes.append(std.heap.page_allocator, c.mlirNamedAttributeGet(span_id, span_attr)) catch {};
+        attributes.append(std.heap.page_allocator, c.oraNamedAttributeGet(span_id, span_attr)) catch {};
     } else {
-        const quantifier_type_str = switch (quantified.quantifier) {
-            .Forall => "forall",
-            .Exists => "exists",
-        };
         const quantifier_id = h.identifier(self.ctx, "quantifier");
         const quantifier_attr = h.stringAttr(self.ctx, quantifier_type_str);
-        attributes.append(std.heap.page_allocator, c.mlirNamedAttributeGet(quantifier_id, quantifier_attr)) catch {};
+        attributes.append(std.heap.page_allocator, c.oraNamedAttributeGet(quantifier_id, quantifier_attr)) catch {};
 
         const var_name_id = h.identifier(self.ctx, "variable");
         const var_name_attr = h.stringAttr(self.ctx, quantified.variable);
-        attributes.append(std.heap.page_allocator, c.mlirNamedAttributeGet(var_name_id, var_name_attr)) catch {};
+        attributes.append(std.heap.page_allocator, c.oraNamedAttributeGet(var_name_id, var_name_attr)) catch {};
 
         const var_type_id = h.identifier(self.ctx, "variable_type");
-        const var_type_str = getTypeString(self, quantified.variable_type);
         const var_type_attr = h.stringAttr(self.ctx, var_type_str);
-        attributes.append(std.heap.page_allocator, c.mlirNamedAttributeGet(var_type_id, var_type_attr)) catch {};
+        attributes.append(std.heap.page_allocator, c.oraNamedAttributeGet(var_type_id, var_type_attr)) catch {};
 
         const has_condition_id = h.identifier(self.ctx, "ora.has_condition");
-        const has_condition_attr = c.mlirBoolAttrGet(self.ctx, if (quantified.condition != null) 1 else 0);
-        attributes.append(std.heap.page_allocator, c.mlirNamedAttributeGet(has_condition_id, has_condition_attr)) catch {};
+        const has_condition_attr = h.boolAttr(self.ctx, @as(i32, @intFromBool(quantified.condition != null)));
+        attributes.append(std.heap.page_allocator, c.oraNamedAttributeGet(has_condition_id, has_condition_attr)) catch {};
     }
 
     if (quantified.verification_attributes.len > 0) {
         for (quantified.verification_attributes) |attr| {
             if (attr.name) |name| {
-                const attr_name_id = c.mlirIdentifierGet(self.ctx, h.strRef(name));
+                const attr_name_id = c.oraIdentifierGet(self.ctx, h.strRef(name));
                 const attr_value = if (attr.value) |value|
                     h.stringAttr(self.ctx, value)
                 else
-                    c.mlirStringAttrGet(self.ctx, c.mlirStringRefCreateFromCString(""));
-                attributes.append(std.heap.page_allocator, c.mlirNamedAttributeGet(attr_name_id, attr_value)) catch {};
+                    c.oraStringAttrCreate(self.ctx, c.oraStringRefCreateFromCString(""));
+                attributes.append(std.heap.page_allocator, c.oraNamedAttributeGet(attr_name_id, attr_value)) catch {};
             }
         }
     }
@@ -573,21 +566,23 @@ pub fn lowerQuantified(
         .Exists => "existential",
     };
     const domain_attr = h.stringAttr(self.ctx, domain_str);
-    attributes.append(std.heap.page_allocator, c.mlirNamedAttributeGet(domain_id, domain_attr)) catch {};
+    attributes.append(std.heap.page_allocator, c.oraNamedAttributeGet(domain_id, domain_attr)) catch {};
 
-    c.mlirOperationStateAddAttributes(&state, @intCast(attributes.items.len), attributes.items.ptr);
-
-    var operands = std.ArrayList(c.MlirValue){};
-    defer operands.deinit(std.heap.page_allocator);
-
-    if (condition_value) |cond_val| {
-        operands.append(std.heap.page_allocator, cond_val) catch {};
+    const condition_val = if (condition_value) |cond_val| cond_val else c.MlirValue{ .ptr = null };
+    const quantified_op = c.oraQuantifiedOpCreate(
+        self.ctx,
+        self.fileLoc(quantified.span),
+        h.strRef(quantifier_type_str),
+        h.strRef(variable_name),
+        h.strRef(var_type_str),
+        condition_val,
+        condition_value != null,
+        body_value,
+        result_ty,
+    );
+    for (attributes.items) |attr| {
+        c.oraOperationSetAttributeByName(quantified_op, c.oraIdentifierStr(attr.name), attr.attribute);
     }
-    operands.append(std.heap.page_allocator, body_value) catch {};
-
-    c.mlirOperationStateAddOperands(&state, @intCast(operands.items.len), operands.items.ptr);
-
-    const quantified_op = c.mlirOperationCreate(&state);
     h.appendOp(self.block, quantified_op);
 
     return h.getResult(quantified_op, 0);
@@ -599,16 +594,16 @@ pub fn lowerTry(
     try_expr: *const lib.ast.Expressions.TryExpr,
 ) c.MlirValue {
     const expr_value = self.lowerExpression(try_expr.expr);
-    if (c.mlirValueIsNull(expr_value)) {
+    if (c.oraValueIsNull(expr_value)) {
         if (self.error_handler) |handler| {
             handler.reportError(.InternalError, try_expr.span, "failed to lower try operand", "check the called expression inside the try block") catch {};
         }
         return self.createErrorPlaceholder(try_expr.span, "failed to lower try operand");
     }
-    const expr_ty = c.mlirValueGetType(expr_value);
+    const expr_ty = c.oraValueGetType(expr_value);
     var result_type = expr_ty;
     const success_ty = c.oraErrorUnionTypeGetSuccessType(expr_ty);
-    if (!c.mlirTypeIsNull(success_ty)) {
+    if (!c.oraTypeIsNull(success_ty)) {
         result_type = success_ty;
     }
     const loc = self.fileLoc(try_expr.span);
@@ -624,11 +619,10 @@ pub fn lowerTry(
     h.appendOp(self.block, op);
 
     // ensure the catch region has a terminator to avoid empty block errors
-    const catch_region = c.mlirOperationGetRegion(op, 0);
-    const catch_block = c.mlirRegionGetFirstBlock(catch_region);
-    if (!c.mlirBlockIsNull(catch_block)) {
-        const first_op = c.mlirBlockGetFirstOperation(catch_block);
-        if (c.mlirOperationIsNull(first_op)) {
+    const catch_block = c.oraTryOpGetCatchBlock(op);
+    if (!c.oraBlockIsNull(catch_block)) {
+        const first_op = c.oraBlockGetFirstOperation(catch_block);
+        if (c.oraOperationIsNull(first_op)) {
             if (should_propagate) {
                 const return_op = self.ora_dialect.createFuncReturnWithValue(expr_value, loc);
                 h.appendOp(catch_block, return_op);
@@ -640,7 +634,7 @@ pub fn lowerTry(
                 }
                 var catch_lowerer = self.*;
                 catch_lowerer.block = catch_block;
-                if (c.mlirTypeEqual(result_type, c.mlirNoneTypeGet(self.ctx))) {
+                if (c.oraTypeEqual(result_type, c.oraNoneTypeCreate(self.ctx))) {
                     const yield_op = self.ora_dialect.createYield(&[_]c.MlirValue{}, loc);
                     h.appendOp(catch_block, yield_op);
                 } else {
@@ -673,22 +667,14 @@ pub fn lowerErrorReturn(
     self: *const ExpressionLowerer,
     error_ret: *const lib.ast.Expressions.ErrorReturnExpr,
 ) c.MlirValue {
-    const ty = c.mlirIntegerTypeGet(self.ctx, constants.DEFAULT_INTEGER_BITS);
-    var state = h.opState("arith.constant", self.fileLoc(error_ret.span));
-    c.mlirOperationStateAddResults(&state, 1, @ptrCast(&ty));
-
-    const attr = c.mlirIntegerAttrGet(ty, 1);
-    const value_id = h.identifier(self.ctx, "value");
+    const ty = c.oraIntegerTypeCreate(self.ctx, constants.DEFAULT_INTEGER_BITS);
     const error_id = h.identifier(self.ctx, "ora.error");
     const error_name_attr = h.stringAttr(self.ctx, error_ret.error_name);
 
-    var attrs = [_]c.MlirNamedAttribute{
-        c.mlirNamedAttributeGet(value_id, attr),
-        c.mlirNamedAttributeGet(error_id, error_name_attr),
+    const attrs = [_]c.MlirNamedAttribute{
+        c.oraNamedAttributeGet(error_id, error_name_attr),
     };
-    c.mlirOperationStateAddAttributes(&state, attrs.len, &attrs);
-
-    const op = c.mlirOperationCreate(&state);
+    const op = self.ora_dialect.createArithConstantWithAttrs(1, ty, &attrs, self.fileLoc(error_ret.span));
     h.appendOp(self.block, op);
     return h.getResult(op, 0);
 }
@@ -715,12 +701,16 @@ pub fn lowerShift(
     const dest = self.lowerExpression(shift.dest);
     const amount = self.lowerExpression(shift.amount);
 
-    const ty = c.mlirIntegerTypeGet(self.ctx, constants.DEFAULT_INTEGER_BITS);
-    var state = h.opState("ora.move", self.fileLoc(shift.span));
-    c.mlirOperationStateAddOperands(&state, 4, @ptrCast(&[_]c.MlirValue{ mapping, source, dest, amount }));
-    c.mlirOperationStateAddResults(&state, 1, @ptrCast(&ty));
-
-    const op = c.mlirOperationCreate(&state);
+    const ty = c.oraIntegerTypeCreate(self.ctx, constants.DEFAULT_INTEGER_BITS);
+    const op = c.oraMoveOpCreateWithMapping(
+        self.ctx,
+        self.fileLoc(shift.span),
+        mapping,
+        source,
+        dest,
+        amount,
+        ty,
+    );
     h.appendOp(self.block, op);
     return h.getResult(op, 0);
 }
@@ -783,19 +773,15 @@ pub fn lowerRange(
     const start = self.lowerExpression(range.start);
     const end = self.lowerExpression(range.end);
 
-    const result_ty = c.mlirIntegerTypeGet(self.ctx, constants.DEFAULT_INTEGER_BITS);
-    var state = h.opState("ora.range", self.fileLoc(range.span));
-    c.mlirOperationStateAddOperands(&state, 2, @ptrCast(&[_]c.MlirValue{ start, end }));
-    c.mlirOperationStateAddResults(&state, 1, @ptrCast(&result_ty));
-
-    const inclusive_attr = c.mlirBoolAttrGet(self.ctx, if (range.inclusive) 1 else 0);
-    const inclusive_id = h.identifier(self.ctx, "inclusive");
-    var attrs = [_]c.MlirNamedAttribute{
-        c.mlirNamedAttributeGet(inclusive_id, inclusive_attr),
-    };
-    c.mlirOperationStateAddAttributes(&state, attrs.len, &attrs);
-
-    const op = c.mlirOperationCreate(&state);
+    const result_ty = c.oraIntegerTypeCreate(self.ctx, constants.DEFAULT_INTEGER_BITS);
+    const op = c.oraRangeOpCreate(
+        self.ctx,
+        self.fileLoc(range.span),
+        start,
+        end,
+        result_ty,
+        range.inclusive,
+    );
     h.appendOp(self.block, op);
     return h.getResult(op, 0);
 }
@@ -805,23 +791,21 @@ pub fn lowerLabeledBlock(
     self: *const ExpressionLowerer,
     labeled_block: *const lib.ast.Expressions.LabeledBlockExpr,
 ) c.MlirValue {
-    const ty = c.mlirIntegerTypeGet(self.ctx, constants.DEFAULT_INTEGER_BITS);
-    var state = h.opState("scf.execute_region", self.fileLoc(labeled_block.span));
-    c.mlirOperationStateAddResults(&state, 1, @ptrCast(&ty));
-
-    const op = c.mlirOperationCreate(&state);
+    const ty = c.oraIntegerTypeCreate(self.ctx, constants.DEFAULT_INTEGER_BITS);
+    const op = c.oraScfExecuteRegionOpCreate(self.ctx, self.fileLoc(labeled_block.span), &ty, 1, false);
+    if (c.oraOperationIsNull(op)) {
+        @panic("Failed to create scf.execute_region operation");
+    }
     h.appendOp(self.block, op);
 
     const label_attr = h.stringAttr(self.ctx, labeled_block.label);
-    const label_id = h.identifier(self.ctx, "ora.label");
-    var attrs = [_]c.MlirNamedAttribute{
-        c.mlirNamedAttributeGet(label_id, label_attr),
-    };
-    c.mlirOperationStateAddAttributes(&state, attrs.len, &attrs);
+    c.oraOperationSetAttributeByName(op, h.strRef("ora.label"), label_attr);
 
     const StatementLowerer = @import("../statements.zig").StatementLowerer;
-    const region = c.mlirOperationGetRegion(op, 0);
-    const block = c.mlirRegionGetFirstBlock(region);
+    const block = c.oraScfExecuteRegionOpGetBodyBlock(op);
+    if (c.oraBlockIsNull(block)) {
+        @panic("scf.execute_region missing body block");
+    }
 
     const stmt_lowerer = StatementLowerer.init(self.ctx, block, self.type_mapper, self, self.param_map, self.storage_map, @constCast(self.local_var_map), self.locations, null, self.builtin_registry, std.heap.page_allocator, null, null, self.ora_dialect, &[_]*lib.ast.Expressions.ExprNode{});
 
@@ -842,25 +826,18 @@ pub fn lowerDestructuring(
 ) c.MlirValue {
     const value = self.lowerExpression(destructuring.value);
 
-    const result_ty = c.mlirIntegerTypeGet(self.ctx, constants.DEFAULT_INTEGER_BITS);
-    var state = h.opState("ora.destructure", self.fileLoc(destructuring.span));
-    c.mlirOperationStateAddOperands(&state, 1, @ptrCast(&value));
-    c.mlirOperationStateAddResults(&state, 1, @ptrCast(&result_ty));
-
+    const result_ty = c.oraIntegerTypeCreate(self.ctx, constants.DEFAULT_INTEGER_BITS);
     const pattern_type = switch (destructuring.pattern) {
         .Struct => "struct",
         .Tuple => "tuple",
         .Array => "array",
     };
-    const pattern_attr = c.mlirStringAttrGet(self.ctx, c.mlirStringRefCreateFromCString(pattern_type));
-    const pattern_id = h.identifier(self.ctx, "pattern_type");
-
-    var attrs = [_]c.MlirNamedAttribute{
-        c.mlirNamedAttributeGet(pattern_id, pattern_attr),
-    };
-    c.mlirOperationStateAddAttributes(&state, attrs.len, &attrs);
-
-    const op = c.mlirOperationCreate(&state);
+    const op = self.ora_dialect.createDestructure(
+        value,
+        pattern_type,
+        result_ty,
+        self.fileLoc(destructuring.span),
+    );
     h.appendOp(self.block, op);
     return h.getResult(op, 0);
 }
@@ -870,7 +847,7 @@ pub fn lowerEnumLiteral(
     self: *const ExpressionLowerer,
     enum_lit: *const lib.ast.Expressions.EnumLiteralExpr,
 ) c.MlirValue {
-    var enum_ty = c.mlirIntegerTypeGet(self.ctx, constants.DEFAULT_INTEGER_BITS);
+    var enum_ty = c.oraIntegerTypeCreate(self.ctx, constants.DEFAULT_INTEGER_BITS);
     var enum_value: i64 = 0;
 
     if (self.symbol_table) |st| {
@@ -892,21 +869,13 @@ pub fn lowerEnumLiteral(
         }
     }
 
-    var state = h.opState("arith.constant", self.fileLoc(enum_lit.span));
-    c.mlirOperationStateAddResults(&state, 1, @ptrCast(&enum_ty));
-
-    const attr = c.mlirIntegerAttrGet(enum_ty, enum_value);
-    const value_id = h.identifier(self.ctx, "value");
     const enum_id = h.identifier(self.ctx, "ora.enum");
     const enum_name_attr = h.stringAttr(self.ctx, enum_lit.enum_name);
 
-    var attrs = [_]c.MlirNamedAttribute{
-        c.mlirNamedAttributeGet(value_id, attr),
-        c.mlirNamedAttributeGet(enum_id, enum_name_attr),
+    const attrs = [_]c.MlirNamedAttribute{
+        c.oraNamedAttributeGet(enum_id, enum_name_attr),
     };
-    c.mlirOperationStateAddAttributes(&state, attrs.len, &attrs);
-
-    const op = c.mlirOperationCreate(&state);
+    const op = self.ora_dialect.createArithConstantWithAttrs(enum_value, enum_ty, &attrs, self.fileLoc(enum_lit.span));
     h.appendOp(self.block, op);
     return h.getResult(op, 0);
 }
@@ -929,25 +898,13 @@ pub fn createDefaultValueForType(
     mlir_type: c.MlirType,
     loc: c.MlirLocation,
 ) !c.MlirValue {
-    if (c.mlirTypeIsAInteger(mlir_type)) {
-        var const_state = h.opState("arith.constant", loc);
-        const value_attr = c.mlirIntegerAttrGet(mlir_type, 0);
-        const value_id = h.identifier(self.ctx, "value");
-        var attrs = [_]c.MlirNamedAttribute{c.mlirNamedAttributeGet(value_id, value_attr)};
-        c.mlirOperationStateAddAttributes(&const_state, attrs.len, &attrs);
-        c.mlirOperationStateAddResults(&const_state, 1, @ptrCast(&mlir_type));
-        const const_op = c.mlirOperationCreate(&const_state);
+    if (c.oraTypeIsAInteger(mlir_type)) {
+        const const_op = self.ora_dialect.createArithConstant(0, mlir_type, loc);
         h.appendOp(self.block, const_op);
         return h.getResult(const_op, 0);
     }
-    var const_state = h.opState("arith.constant", loc);
-    const zero_type = c.mlirIntegerTypeGet(self.ctx, 256);
-    const value_attr = c.mlirIntegerAttrGet(zero_type, 0);
-    const value_id = h.identifier(self.ctx, "value");
-    var attrs = [_]c.MlirNamedAttribute{c.mlirNamedAttributeGet(value_id, value_attr)};
-    c.mlirOperationStateAddAttributes(&const_state, attrs.len, &attrs);
-    c.mlirOperationStateAddResults(&const_state, 1, @ptrCast(&zero_type));
-    const const_op = c.mlirOperationCreate(&const_state);
+    const zero_type = c.oraIntegerTypeCreate(self.ctx, 256);
+    const const_op = self.ora_dialect.createArithConstant(0, zero_type, loc);
     h.appendOp(self.block, const_op);
     return h.getResult(const_op, 0);
 }
@@ -958,7 +915,7 @@ pub fn createTupleType(
     element_types: []c.MlirType,
 ) c.MlirType {
     if (element_types.len == 0) {
-        return c.mlirIntegerTypeGet(self.ctx, constants.DEFAULT_INTEGER_BITS);
+        return c.oraIntegerTypeCreate(self.ctx, constants.DEFAULT_INTEGER_BITS);
     }
 
     return element_types[0];
@@ -969,8 +926,8 @@ pub fn createEmptyArray(
     self: *const ExpressionLowerer,
     span: lib.ast.SourceSpan,
 ) c.MlirValue {
-    const element_ty = c.mlirIntegerTypeGet(self.ctx, constants.DEFAULT_INTEGER_BITS);
-    const memref_ty = c.mlirMemRefTypeGet(element_ty, 1, @ptrCast(&@as(i64, 0)), c.mlirAttributeGetNull(), c.mlirAttributeGetNull());
+    const element_ty = c.oraIntegerTypeCreate(self.ctx, constants.DEFAULT_INTEGER_BITS);
+    const memref_ty = h.memRefType(self.ctx, element_ty, 1, @ptrCast(&@as(i64, 0)), h.nullAttr(), h.nullAttr());
 
     const op = self.ora_dialect.createMemrefAlloca(memref_ty, self.fileLoc(span));
     h.appendOp(self.block, op);
@@ -984,26 +941,31 @@ pub fn createInitializedArray(
     span: lib.ast.SourceSpan,
 ) c.MlirValue {
     const first_element_val = self.lowerExpression(elements[0]);
-    const element_ty = c.mlirValueGetType(first_element_val);
+    const element_ty = c.oraValueGetType(first_element_val);
 
     const array_size = @as(i64, @intCast(elements.len));
-    const memref_ty = c.mlirMemRefTypeGet(element_ty, 1, @ptrCast(&array_size), c.mlirAttributeGetNull(), c.mlirAttributeGetNull());
+    const memref_ty = h.memRefType(self.ctx, element_ty, 1, @ptrCast(&array_size), h.nullAttr(), h.nullAttr());
 
     const alloca_op = self.ora_dialect.createMemrefAlloca(memref_ty, self.fileLoc(span));
     h.appendOp(self.block, alloca_op);
     const array_ref = h.getResult(alloca_op, 0);
 
-    const array_type = c.mlirValueGetType(array_ref);
-    const element_type = c.mlirShapedTypeGetElementType(array_type);
+    const array_type = c.oraValueGetType(array_ref);
+    const element_type = c.oraShapedTypeGetElementType(array_type);
     for (elements, 0..) |element, i| {
         var element_val = if (i == 0) first_element_val else self.lowerExpression(element);
         element_val = self.convertToType(element_val, element_type, span);
         const index_val = self.createConstant(@intCast(i), span);
         const index_index = expr_access.convertIndexToIndexType(self, index_val, span);
 
-        var store_state = h.opState("memref.store", self.fileLoc(span));
-        c.mlirOperationStateAddOperands(&store_state, 3, @ptrCast(&[_]c.MlirValue{ element_val, array_ref, index_index }));
-        const store_op = c.mlirOperationCreate(&store_state);
+        const store_op = c.oraMemrefStoreOpCreate(
+            self.ctx,
+            self.fileLoc(span),
+            element_val,
+            array_ref,
+            &[_]c.MlirValue{index_index},
+            1,
+        );
         h.appendOp(self.block, store_op);
     }
 
@@ -1015,22 +977,14 @@ pub fn createEmptyStruct(
     self: *const ExpressionLowerer,
     span: lib.ast.SourceSpan,
 ) c.MlirValue {
-    const struct_ty = c.mlirIntegerTypeGet(self.ctx, constants.DEFAULT_INTEGER_BITS);
-    var state = h.opState("arith.constant", self.fileLoc(span));
-    c.mlirOperationStateAddResults(&state, 1, @ptrCast(&struct_ty));
-
-    const attr = c.mlirIntegerAttrGet(struct_ty, 0);
-    const value_id = h.identifier(self.ctx, "value");
+    const struct_ty = c.oraIntegerTypeCreate(self.ctx, constants.DEFAULT_INTEGER_BITS);
     const struct_id = h.identifier(self.ctx, "ora.empty_struct");
-    const struct_attr = c.mlirBoolAttrGet(self.ctx, 1);
+    const struct_attr = h.boolAttr(self.ctx, 1);
 
-    var attrs = [_]c.MlirNamedAttribute{
-        c.mlirNamedAttributeGet(value_id, attr),
-        c.mlirNamedAttributeGet(struct_id, struct_attr),
+    const attrs = [_]c.MlirNamedAttribute{
+        c.oraNamedAttributeGet(struct_id, struct_attr),
     };
-    c.mlirOperationStateAddAttributes(&state, attrs.len, &attrs);
-
-    const op = c.mlirOperationCreate(&state);
+    const op = self.ora_dialect.createArithConstantWithAttrs(0, struct_ty, &attrs, self.fileLoc(span));
     h.appendOp(self.block, op);
     return h.getResult(op, 0);
 }
@@ -1041,7 +995,7 @@ pub fn createInitializedStruct(
     fields: []lib.ast.Expressions.AnonymousStructField,
     span: lib.ast.SourceSpan,
 ) c.MlirValue {
-    const struct_ty = c.mlirIntegerTypeGet(self.ctx, constants.DEFAULT_INTEGER_BITS);
+    const struct_ty = c.oraIntegerTypeCreate(self.ctx, constants.DEFAULT_INTEGER_BITS);
 
     var field_values = std.ArrayList(c.MlirValue){};
     defer field_values.deinit(std.heap.page_allocator);
@@ -1065,18 +1019,9 @@ pub fn createExpressionCapture(
     expr_value: c.MlirValue,
     span: lib.ast.SourceSpan,
 ) c.MlirOperation {
-    const result_ty = c.mlirValueGetType(expr_value);
+    const result_ty = c.oraValueGetType(expr_value);
 
-    var state = h.opState("ora.expression_capture", self.fileLoc(span));
-    c.mlirOperationStateAddOperands(&state, 1, @ptrCast(&expr_value));
-    c.mlirOperationStateAddResults(&state, 1, @ptrCast(&result_ty));
-
-    const capture_id = h.identifier(self.ctx, "ora.top_level_expression");
-    const capture_attr = c.mlirBoolAttrGet(self.ctx, 1);
-    var attrs = [_]c.MlirNamedAttribute{c.mlirNamedAttributeGet(capture_id, capture_attr)};
-    c.mlirOperationStateAddAttributes(&state, attrs.len, &attrs);
-
-    const op = c.mlirOperationCreate(&state);
+    const op = c.oraExpressionCaptureOpCreate(self.ctx, self.fileLoc(span), expr_value, result_ty);
     h.appendOp(self.block, op);
     return op;
 }
@@ -1139,20 +1084,20 @@ pub fn addVerificationAttributes(
     context: []const u8,
 ) void {
     const verification_id = h.identifier(self.ctx, "ora.verification");
-    const verification_attr = c.mlirBoolAttrGet(self.ctx, 1);
-    attributes.append(std.heap.page_allocator, c.mlirNamedAttributeGet(verification_id, verification_attr)) catch {};
+    const verification_attr = h.boolAttr(self.ctx, 1);
+    attributes.append(std.heap.page_allocator, c.oraNamedAttributeGet(verification_id, verification_attr)) catch {};
 
     const type_id = h.identifier(self.ctx, "ora.verification_type");
     const type_attr = h.stringAttr(self.ctx, verification_type);
-    attributes.append(std.heap.page_allocator, c.mlirNamedAttributeGet(type_id, type_attr)) catch {};
+    attributes.append(std.heap.page_allocator, c.oraNamedAttributeGet(type_id, type_attr)) catch {};
 
     const context_id = h.identifier(self.ctx, "ora.verification_context");
     const context_attr = h.stringAttr(self.ctx, context);
-    attributes.append(std.heap.page_allocator, c.mlirNamedAttributeGet(context_id, context_attr)) catch {};
+    attributes.append(std.heap.page_allocator, c.oraNamedAttributeGet(context_id, context_attr)) catch {};
 
     const formal_id = h.identifier(self.ctx, "ora.formal");
-    const formal_attr = c.mlirBoolAttrGet(self.ctx, 1);
-    attributes.append(std.heap.page_allocator, c.mlirNamedAttributeGet(formal_id, formal_attr)) catch {};
+    const formal_attr = h.boolAttr(self.ctx, 1);
+    attributes.append(std.heap.page_allocator, c.oraNamedAttributeGet(formal_id, formal_attr)) catch {};
 }
 
 /// Create verification metadata
@@ -1170,16 +1115,16 @@ pub fn createVerificationMetadata(
     };
     const quantifier_id = h.identifier(self.ctx, "quantifier");
     const quantifier_attr = h.stringAttr(self.ctx, quantifier_str);
-    metadata.append(std.heap.page_allocator, c.mlirNamedAttributeGet(quantifier_id, quantifier_attr)) catch {};
+    metadata.append(std.heap.page_allocator, c.oraNamedAttributeGet(quantifier_id, quantifier_attr)) catch {};
 
     const var_name_id = h.identifier(self.ctx, "variable");
     const var_name_attr = h.stringAttr(self.ctx, variable_name);
-    metadata.append(std.heap.page_allocator, c.mlirNamedAttributeGet(var_name_id, var_name_attr)) catch {};
+    metadata.append(std.heap.page_allocator, c.oraNamedAttributeGet(var_name_id, var_name_attr)) catch {};
 
     const var_type_id = h.identifier(self.ctx, "variable_type");
     const var_type_str = getTypeString(self, variable_type);
     const var_type_attr = h.stringAttr(self.ctx, var_type_str);
-    metadata.append(std.heap.page_allocator, c.mlirNamedAttributeGet(var_type_id, var_type_attr)) catch {};
+    metadata.append(std.heap.page_allocator, c.oraNamedAttributeGet(var_type_id, var_type_attr)) catch {};
 
     addVerificationAttributes(self, &metadata, "quantified", "formal_verification");
 

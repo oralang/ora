@@ -1,32 +1,26 @@
 contract ArrayOperations {
-    // Storage arrays
     storage var numbers: [u256; 5];
 
-    // Function that works with array literals
     pub fn initializeArray() {
         numbers[0] = 10;
         numbers[1] = 20;
         numbers[2] = 30;
     }
 
-    // Function that reads from array
     pub fn getNumber(index: u256) -> u256 {
         return numbers[index];
     }
 
-    // Function that sets array element
     pub fn setNumber(index: u256, value: u256) {
         numbers[index] = value;
     }
 
-    // Function that uses memory arrays
     pub fn processMemoryArray() -> u256 {
         let mem_array: [u256; 3] = [100, 200, 300];
         var sum: u256 = mem_array[0] + mem_array[1] + mem_array[2];
         return mem_array[1];
     }
 
-    // Test: Multiple memory arrays
     pub fn multipleArrays() -> u256 {
         let arr1: [u256; 2] = [10, 20];
         let arr2: [u256; 2] = [30, 40];
@@ -34,14 +28,12 @@ contract ArrayOperations {
         return res;
     }
 
-    // Test: Array with computed indices
     pub fn computedIndex(base: u256) -> u256 {
         let arr: [u256; 4] = [1, 2, 3, 4];
         var idx: u256 = base + 1;
         return arr[idx];
     }
 
-    // Test: Array operations with arithmetic
     pub fn arrayArithmetic() -> u256 {
         let arr: [u256; 3] = [5, 10, 15];
         var sum: u256 = arr[0] + arr[1];
@@ -50,7 +42,6 @@ contract ArrayOperations {
         return res;
     }
 
-    // Test: Nested array access
     pub fn nestedAccess() -> u256 {
         let arr: [u256; 3] = [100, 200, 300];
         var first: u256 = arr[0];
@@ -60,7 +51,6 @@ contract ArrayOperations {
         return total;
     }
 
-    // Test: Array modification and return
     pub fn modifyAndReturn() -> u256 {
         let arr: [u256; 3] = [1, 2, 3];
         arr[0] = 10;
@@ -69,7 +59,6 @@ contract ArrayOperations {
         return arr[0] + arr[1];
     }
 
-    // Test: Complex array computation
     pub fn complexComputation() -> u256 {
         let values: [u256; 4] = [1, 2, 3, 4];
         var a: u256 = values[0] + values[1];
@@ -79,60 +68,43 @@ contract ArrayOperations {
         return c + d;
     }
 
-    // Test: Copy values from one array to another
     pub fn copyArray() -> u256 {
         let source: [u256; 3] = [100, 200, 300];
         let dest: [u256; 3] = [0, 0, 0];
-        
-        // Copy all elements
         dest[0] = source[0];
         dest[1] = source[1];
         dest[2] = source[2];
-        
-        // Return sum of copied values
         return dest[0] + dest[1] + dest[2];
     }
 
-    // Test: Copy with transformation (multiply by 2)
     pub fn copyAndTransform() -> u256 {
         let source: [u256; 3] = [10, 20, 30];
         let dest: [u256; 3] = [0, 0, 0];
-        
-        // Copy and transform
         dest[0] = source[0] * 2;
         dest[1] = source[1] * 2;
         dest[2] = source[2] * 2;
-        
         return dest[1];
     }
 
-    // Test: Reverse copy (copy in reverse order)
     pub fn reverseCopy() -> u256 {
         let source: [u256; 4] = [1, 2, 3, 4];
         let dest: [u256; 4] = [0, 0, 0, 0];
-        
         dest[0] = source[3];
         dest[1] = source[2];
         dest[2] = source[1];
         dest[3] = source[0];
-        
         return dest[0];
     }
 
-    // Test: Partial copy (copy first N elements)
     pub fn partialCopy() -> u256 {
         let source: [u256; 5] = [10, 20, 30, 40, 50];
         let dest: [u256; 3] = [0, 0, 0];
-        
-        // Copy first 3 elements
         dest[0] = source[0];
         dest[1] = source[1];
         dest[2] = source[2];
-        
         return dest[0] + dest[1] + dest[2];
     }
 
-    // Test: Constant folding (5 + 6 * 3 = 23)
     pub fn constantFolding() -> u256 {
         var a: u256 = 5 + 6 * 3;
         let array: [u256; 1] = [0];
@@ -140,4 +112,3 @@ contract ArrayOperations {
         return array[0];
     }
 }
-

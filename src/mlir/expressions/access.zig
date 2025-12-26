@@ -28,19 +28,19 @@ pub fn lowerIdentifier(
     }
 
     if (self.param_map) |pm| {
-            if (pm.getParamIndex(identifier.name)) |param_index| {
-                if (pm.getBlockArgument(identifier.name)) |block_arg| {
-                    return block_arg;
-                } else {
-                    log.debug("FATAL ERROR: Function parameter '{s}' at index {d} not found - compilation aborted\n", .{ identifier.name, param_index });
-                    return self.reportLoweringError(
-                        identifier.span,
-                        "missing function parameter during MLIR lowering",
-                        "check parameter mapping and verify function signature lowering",
-                    );
-                }
+        if (pm.getParamIndex(identifier.name)) |param_index| {
+            if (pm.getBlockArgument(identifier.name)) |block_arg| {
+                return block_arg;
+            } else {
+                log.debug("FATAL ERROR: Function parameter '{s}' at index {d} not found - compilation aborted\n", .{ identifier.name, param_index });
+                return self.reportLoweringError(
+                    identifier.span,
+                    "missing function parameter during MLIR lowering",
+                    "check parameter mapping and verify function signature lowering",
+                );
             }
         }
+    }
 
     var is_storage_variable = false;
     if (self.storage_map) |sm| {
@@ -57,9 +57,9 @@ pub fn lowerIdentifier(
             if (st.lookupSymbol(identifier.name)) |symbol| {
                 break :blk symbol.type;
             }
-            break :blk c.mlirIntegerTypeGet(self.ctx, constants.DEFAULT_INTEGER_BITS);
+            break :blk c.oraIntegerTypeCreate(self.ctx, constants.DEFAULT_INTEGER_BITS);
         } else blk: {
-            break :blk c.mlirIntegerTypeGet(self.ctx, constants.DEFAULT_INTEGER_BITS);
+            break :blk c.oraIntegerTypeCreate(self.ctx, constants.DEFAULT_INTEGER_BITS);
         };
 
         const result_name = identifier.name;
@@ -67,24 +67,24 @@ pub fn lowerIdentifier(
         const load_op = memory_manager.createStorageLoadWithName(identifier.name, var_type, self.fileLoc(identifier.span), result_name);
         h.appendOp(self.block, load_op);
         const result = h.getResult(load_op, 0);
-        const actual_type = c.mlirValueGetType(result);
+        const actual_type = c.oraValueGetType(result);
         log.debug("[lowerIdentifier] Storage load for '{s}' returned type {any}\n", .{ identifier.name, actual_type });
         return result;
     }
 
     if (self.local_var_map) |lvm| {
         if (lvm.getLocalVar(identifier.name)) |local_var_ref| {
-            const var_type = c.mlirValueGetType(local_var_ref);
+            const var_type = c.oraValueGetType(local_var_ref);
 
-            if (c.mlirTypeIsAMemRef(var_type)) {
-                const element_type = c.mlirShapedTypeGetElementType(var_type);
+            if (c.oraTypeIsAMemRef(var_type)) {
+                const element_type = c.oraShapedTypeGetElementType(var_type);
                 const bool_ty = h.boolType(self.ctx);
-                const rank = c.mlirShapedTypeGetRank(var_type);
+                const rank = c.oraShapedTypeGetRank(var_type);
                 var is_scalar: bool = false;
                 if (rank == 0) {
-                    if (c.mlirTypeIsAInteger(element_type)) {
+                    if (c.oraTypeIsAInteger(element_type)) {
                         is_scalar = true;
-                    } else if (c.mlirTypeEqual(element_type, bool_ty)) {
+                    } else if (c.oraTypeEqual(element_type, bool_ty)) {
                         is_scalar = true;
                     }
                 }
@@ -109,22 +109,14 @@ pub fn lowerIdentifier(
             // check if this is an error identifier (errors are symbols with .Error kind)
             if (symbol.symbol_kind == .Error) {
                 // lower as an error return expression
-                const ty = c.mlirIntegerTypeGet(self.ctx, constants.DEFAULT_INTEGER_BITS);
-                var state = h.opState("arith.constant", self.fileLoc(identifier.span));
-                c.mlirOperationStateAddResults(&state, 1, @ptrCast(&ty));
-
-                const attr = c.mlirIntegerAttrGet(ty, 1);
-                const value_id = h.identifier(self.ctx, "value");
+                const ty = c.oraIntegerTypeCreate(self.ctx, constants.DEFAULT_INTEGER_BITS);
                 const error_id = h.identifier(self.ctx, "ora.error");
                 const error_name_attr = h.stringAttr(self.ctx, identifier.name);
 
-                var attrs = [_]c.MlirNamedAttribute{
-                    c.mlirNamedAttributeGet(value_id, attr),
-                    c.mlirNamedAttributeGet(error_id, error_name_attr),
+                const attrs = [_]c.MlirNamedAttribute{
+                    c.oraNamedAttributeGet(error_id, error_name_attr),
                 };
-                c.mlirOperationStateAddAttributes(&state, attrs.len, &attrs);
-
-                const op = c.mlirOperationCreate(&state);
+                const op = self.ora_dialect.createArithConstantWithAttrs(1, ty, &attrs, self.fileLoc(identifier.span));
                 h.appendOp(self.block, op);
                 return h.getResult(op, 0);
             }
@@ -144,15 +136,8 @@ pub fn lowerIdentifier(
 
         if (st.lookupType(identifier.name)) |type_symbol| {
             log.debug("[lowerIdentifier] Found type: {s}, type_kind: {any}\n", .{ identifier.name, type_symbol.type_kind });
-            const type_val = c.mlirIntegerTypeGet(self.ctx, constants.DEFAULT_INTEGER_BITS);
-            const zero_const = c.mlirIntegerTypeGet(self.ctx, constants.DEFAULT_INTEGER_BITS);
-            var state = h.opState("arith.constant", self.fileLoc(identifier.span));
-            const zero_attr = c.mlirIntegerAttrGet(zero_const, 0);
-            const attr_id = h.identifier(self.ctx, "value");
-            const named_attr = c.mlirNamedAttributeGet(attr_id, zero_attr);
-            c.mlirOperationStateAddAttributes(&state, 1, &named_attr);
-            c.mlirOperationStateAddResults(&state, 1, @ptrCast(&type_val));
-            const const_op = c.mlirOperationCreate(&state);
+            const type_val = c.oraIntegerTypeCreate(self.ctx, constants.DEFAULT_INTEGER_BITS);
+            const const_op = self.ora_dialect.createArithConstant(0, type_val, self.fileLoc(identifier.span));
             h.appendOp(self.block, const_op);
             return h.getResult(const_op, 0);
         }
@@ -170,14 +155,7 @@ pub fn lowerIdentifier(
                     .ora_type = builtin_info.return_type,
                 });
                 // for now, return a zero value - proper builtin constant lowering should be implemented
-                const zero_const = c.mlirIntegerTypeGet(self.ctx, constants.DEFAULT_INTEGER_BITS);
-                var state = h.opState("arith.constant", self.fileLoc(identifier.span));
-                const zero_attr = c.mlirIntegerAttrGet(zero_const, 0);
-                const attr_id = h.identifier(self.ctx, "value");
-                const named_attr = c.mlirNamedAttributeGet(attr_id, zero_attr);
-                c.mlirOperationStateAddAttributes(&state, 1, &named_attr);
-                c.mlirOperationStateAddResults(&state, 1, @ptrCast(&result_type));
-                const const_op = c.mlirOperationCreate(&state);
+                const const_op = self.ora_dialect.createArithConstant(0, result_type, self.fileLoc(identifier.span));
                 h.appendOp(self.block, const_op);
                 return h.getResult(const_op, 0);
             }
@@ -197,10 +175,10 @@ pub fn lowerIndex(
 ) c.MlirValue {
     const target = self.lowerExpression(index.target);
     const index_val = self.lowerExpression(index.index);
-    const target_type = c.mlirValueGetType(target);
+    const target_type = c.oraValueGetType(target);
 
     // handle memrefs and tensors/shaped types with tensor.extract/memref.load
-    if (c.mlirTypeIsAMemRef(target_type) or c.mlirTypeIsAShaped(target_type)) {
+    if (c.oraTypeIsAMemRef(target_type) or c.oraTypeIsAShaped(target_type)) {
         return createArrayIndexLoad(self, target, index_val, index.span);
     } else {
         var result_type: ?c.MlirType = null;
@@ -258,7 +236,7 @@ pub fn lowerIndex(
         if (map_value_type.ptr != null) {
             log.debug("[lowerIndex] Map type's value type: {any}\n", .{map_value_type});
             if (result_type) |rt| {
-                if (!c.mlirTypeEqual(map_value_type, rt)) {
+                if (!c.oraTypeEqual(map_value_type, rt)) {
                     log.debug("[lowerIndex] WARNING: Map value type {any} doesn't match expected result_type {any}\n", .{ map_value_type, rt });
                 }
             }
@@ -278,7 +256,7 @@ pub fn lowerFieldAccess(
         const builtins = lib.semantics.builtins;
         const path = builtins.getMemberAccessPath(registry.allocator, &field_expr_node) catch {
             const target = self.lowerExpression(field.target);
-            _ = c.mlirValueGetType(target);
+            _ = c.oraValueGetType(target);
             return createStructFieldExtract(self, target, field.field, field.span);
         };
         defer registry.allocator.free(path);
@@ -291,7 +269,7 @@ pub fn lowerFieldAccess(
     }
 
     const target = self.lowerExpression(field.target);
-    _ = c.mlirValueGetType(target);
+    _ = c.oraValueGetType(target);
     return createStructFieldExtract(self, target, field.field, field.span);
 }
 
@@ -310,29 +288,12 @@ fn lowerBuiltinConstant(
             .ora_type = builtin_info.return_type,
         });
 
-        const i160_ty = c.mlirIntegerTypeGet(self.ctx, 160);
-        var state = h.opState("arith.constant", self.fileLoc(span));
-        c.mlirOperationStateAddResults(&state, 1, @ptrCast(&i160_ty));
-
-        const value_attr = c.mlirIntegerAttrGet(i160_ty, 0);
-        const value_id = h.identifier(self.ctx, "value");
-        const gas_cost_attr = c.mlirIntegerAttrGet(c.mlirIntegerTypeGet(self.ctx, 64), 0);
-        const gas_cost_id = h.identifier(self.ctx, "gas_cost");
-
-        var attrs = [_]c.MlirNamedAttribute{
-            c.mlirNamedAttributeGet(value_id, value_attr),
-            c.mlirNamedAttributeGet(gas_cost_id, gas_cost_attr),
-        };
-        c.mlirOperationStateAddAttributes(&state, attrs.len, &attrs);
-
-        const const_op = c.mlirOperationCreate(&state);
+        const i160_ty = c.oraIntegerTypeCreate(self.ctx, 160);
+        const const_op = self.ora_dialect.createArithConstant(0, i160_ty, self.fileLoc(span));
         h.appendOp(self.block, const_op);
         const i160_value = h.getResult(const_op, 0);
 
-        var bitcast_state = h.opState("arith.bitcast", self.fileLoc(span));
-        c.mlirOperationStateAddOperands(&bitcast_state, 1, @ptrCast(&i160_value));
-        c.mlirOperationStateAddResults(&bitcast_state, 1, @ptrCast(&addr_ty));
-        const bitcast_op = c.mlirOperationCreate(&bitcast_state);
+        const bitcast_op = c.oraArithBitcastOpCreate(self.ctx, self.fileLoc(span), i160_value, addr_ty);
         h.appendOp(self.block, bitcast_op);
         return h.getResult(bitcast_op, 0);
     }
@@ -359,7 +320,7 @@ pub fn createStructFieldExtract(
     field_name: []const u8,
     span: lib.ast.SourceSpan,
 ) c.MlirValue {
-    var result_ty = c.mlirIntegerTypeGet(self.ctx, constants.DEFAULT_INTEGER_BITS);
+    var result_ty = c.oraIntegerTypeCreate(self.ctx, constants.DEFAULT_INTEGER_BITS);
 
     if (self.symbol_table) |st| {
         var type_iter = st.types.iterator();
@@ -406,14 +367,14 @@ pub fn createLengthAccess(
     target: c.MlirValue,
     span: lib.ast.SourceSpan,
 ) c.MlirValue {
-    const target_type = c.mlirValueGetType(target);
-    const index_ty = c.mlirIndexTypeGet(self.ctx);
+    const target_type = c.oraValueGetType(target);
+    const index_ty = c.oraIndexTypeCreate(self.ctx);
 
-    if (c.mlirTypeIsAMemRef(target_type) or c.mlirTypeIsAShaped(target_type)) {
-        if (c.mlirTypeIsAShaped(target_type) and c.mlirShapedTypeHasStaticShape(target_type)) {
-            const num_dims = c.mlirShapedTypeGetRank(target_type);
+    if (c.oraTypeIsAMemRef(target_type) or c.oraTypeIsAShaped(target_type)) {
+        if (c.oraTypeIsAShaped(target_type) and c.oraShapedTypeHasStaticShape(target_type)) {
+            const num_dims = c.oraShapedTypeGetRank(target_type);
             if (num_dims > 0) {
-                const dim_size = c.mlirShapedTypeGetDimSize(target_type, 0);
+                const dim_size = c.oraShapedTypeGetDimSize(target_type, 0);
 
                 if (dim_size >= 0) {
                     const len_const = self.createConstant(@intCast(dim_size), span);
@@ -422,52 +383,25 @@ pub fn createLengthAccess(
             }
         }
 
-        if (c.mlirTypeIsAMemRef(target_type)) {
-            var state = h.opState("memref.dim", self.fileLoc(span));
-            c.mlirOperationStateAddOperands(&state, 1, @ptrCast(&target));
-
-            var dim_const_state = h.opState("arith.constant", self.fileLoc(span));
-            c.mlirOperationStateAddResults(&dim_const_state, 1, @ptrCast(&index_ty));
-            const dim_attr = c.mlirIntegerAttrGet(index_ty, 0);
-            const dim_value_id = h.identifier(self.ctx, "value");
-            var dim_attrs = [_]c.MlirNamedAttribute{c.mlirNamedAttributeGet(dim_value_id, dim_attr)};
-            c.mlirOperationStateAddAttributes(&dim_const_state, dim_attrs.len, &dim_attrs);
-            const dim_const_op = c.mlirOperationCreate(&dim_const_state);
+        if (c.oraTypeIsAMemRef(target_type)) {
+            const dim_const_op = self.ora_dialect.createArithConstant(0, index_ty, self.fileLoc(span));
             h.appendOp(self.block, dim_const_op);
             const dim_index = h.getResult(dim_const_op, 0);
 
-            c.mlirOperationStateAddOperands(&state, 1, @ptrCast(&dim_index));
-            c.mlirOperationStateAddResults(&state, 1, @ptrCast(&index_ty));
-
-            const op = c.mlirOperationCreate(&state);
+            const op = c.oraMemrefDimOpCreate(self.ctx, self.fileLoc(span), target, dim_index);
             h.appendOp(self.block, op);
             return h.getResult(op, 0);
         }
 
-        var state = h.opState("tensor.dim", self.fileLoc(span));
-        c.mlirOperationStateAddOperands(&state, 1, @ptrCast(&target));
-
-        var dim_const_state = h.opState("arith.constant", self.fileLoc(span));
-        c.mlirOperationStateAddResults(&dim_const_state, 1, @ptrCast(&index_ty));
-        const dim_attr = c.mlirIntegerAttrGet(index_ty, 0);
-        const dim_value_id = h.identifier(self.ctx, "value");
-        var dim_attrs = [_]c.MlirNamedAttribute{c.mlirNamedAttributeGet(dim_value_id, dim_attr)};
-        c.mlirOperationStateAddAttributes(&dim_const_state, dim_attrs.len, &dim_attrs);
-        const dim_const_op = c.mlirOperationCreate(&dim_const_state);
+        const dim_const_op = self.ora_dialect.createArithConstant(0, index_ty, self.fileLoc(span));
         h.appendOp(self.block, dim_const_op);
         const dim_index = h.getResult(dim_const_op, 0);
 
-        c.mlirOperationStateAddOperands(&state, 1, @ptrCast(&dim_index));
-        c.mlirOperationStateAddResults(&state, 1, @ptrCast(&index_ty));
-
-        const op = c.mlirOperationCreate(&state);
+        const op = c.oraTensorDimOpCreate(self.ctx, self.fileLoc(span), target, dim_index);
         h.appendOp(self.block, op);
         return h.getResult(op, 0);
     } else {
-        var state = h.opState("ora.length", self.fileLoc(span));
-        c.mlirOperationStateAddOperands(&state, 1, @ptrCast(&target));
-        c.mlirOperationStateAddResults(&state, 1, @ptrCast(&index_ty));
-        const op = c.mlirOperationCreate(&state);
+        const op = c.oraLengthOpCreate(self.ctx, self.fileLoc(span), target, index_ty);
         h.appendOp(self.block, op);
         return h.getResult(op, 0);
     }
@@ -479,33 +413,27 @@ pub fn convertIndexToIndexType(
     index: c.MlirValue,
     span: lib.ast.SourceSpan,
 ) c.MlirValue {
-    const index_type = c.mlirValueGetType(index);
-    const mlir_index_type = c.mlirIndexTypeGet(self.ctx);
+    const index_type = c.oraValueGetType(index);
+    const mlir_index_type = c.oraIndexTypeCreate(self.ctx);
 
-    if (c.mlirTypeEqual(index_type, mlir_index_type)) {
+    if (c.oraTypeEqual(index_type, mlir_index_type)) {
         return index;
     }
 
     var current_value = index;
-    const current_type = c.mlirValueGetType(current_value);
+    const current_type = c.oraValueGetType(current_value);
 
-    if (c.mlirTypeIsAInteger(current_type)) {
-        const width = c.mlirIntegerTypeGetWidth(current_type);
-        const signless_type = c.mlirIntegerTypeGet(self.ctx, width);
-        if (!c.mlirTypeEqual(current_type, signless_type)) {
-            var signless_cast_state = h.opState("arith.bitcast", self.fileLoc(span));
-            c.mlirOperationStateAddOperands(&signless_cast_state, 1, @ptrCast(&current_value));
-            c.mlirOperationStateAddResults(&signless_cast_state, 1, @ptrCast(&signless_type));
-            const signless_cast_op = c.mlirOperationCreate(&signless_cast_state);
+    if (c.oraTypeIsAInteger(current_type)) {
+        const width = c.oraIntegerTypeGetWidth(current_type);
+        const signless_type = c.oraIntegerTypeCreate(self.ctx, width);
+        if (!c.oraTypeEqual(current_type, signless_type)) {
+            const signless_cast_op = c.oraArithBitcastOpCreate(self.ctx, self.fileLoc(span), current_value, signless_type);
             h.appendOp(self.block, signless_cast_op);
             current_value = h.getResult(signless_cast_op, 0);
         }
     }
 
-    var cast_state = h.opState("arith.index_castui", self.fileLoc(span));
-    c.mlirOperationStateAddOperands(&cast_state, 1, @ptrCast(&current_value));
-    c.mlirOperationStateAddResults(&cast_state, 1, @ptrCast(&mlir_index_type));
-    const index_cast_op = c.mlirOperationCreate(&cast_state);
+    const index_cast_op = c.oraArithIndexCastUIOpCreate(self.ctx, self.fileLoc(span), current_value, mlir_index_type);
     h.appendOp(self.block, index_cast_op);
     return h.getResult(index_cast_op, 0);
 }
@@ -517,57 +445,47 @@ pub fn createArrayIndexLoad(
     index: c.MlirValue,
     span: lib.ast.SourceSpan,
 ) c.MlirValue {
-    const array_type = c.mlirValueGetType(array);
+    const array_type = c.oraValueGetType(array);
     const index_index = convertIndexToIndexType(self, index, span);
     const enable_bounds_check = true;
 
-    if (enable_bounds_check and (c.mlirTypeIsAMemRef(array_type) or c.mlirTypeIsAShaped(array_type))) {
+    if (enable_bounds_check and (c.oraTypeIsAMemRef(array_type) or c.oraTypeIsAShaped(array_type))) {
         const array_length = createLengthAccess(self, array, span);
 
-        var cmp_state = h.opState("arith.cmpi", self.fileLoc(span));
-        c.mlirOperationStateAddOperands(&cmp_state, 2, @ptrCast(&[_]c.MlirValue{ index_index, array_length }));
-        const bool_ty = h.boolType(self.ctx);
-        c.mlirOperationStateAddResults(&cmp_state, 1, @ptrCast(&bool_ty));
-
         const predicate_value = expr_helpers.predicateStringToInt("ult");
-        const predicate_attr = c.mlirIntegerAttrGet(c.mlirIntegerTypeGet(self.ctx, 64), predicate_value);
-        const predicate_id = h.identifier(self.ctx, "predicate");
-        var cmp_attrs = [_]c.MlirNamedAttribute{
-            c.mlirNamedAttributeGet(predicate_id, predicate_attr),
-        };
-        c.mlirOperationStateAddAttributes(&cmp_state, cmp_attrs.len, &cmp_attrs);
-
-        const cmp_op = c.mlirOperationCreate(&cmp_state);
+        const cmp_op = c.oraArithCmpIOpCreate(self.ctx, self.fileLoc(span), predicate_value, index_index, array_length);
         h.appendOp(self.block, cmp_op);
         const in_bounds = h.getResult(cmp_op, 0);
 
-        var assert_state = h.opState("cf.assert", self.fileLoc(span));
-        c.mlirOperationStateAddOperands(&assert_state, 1, @ptrCast(&in_bounds));
-        const msg_id = h.identifier(self.ctx, "msg");
-        const msg_attr = h.stringAttr(self.ctx, "array index out of bounds");
-        c.mlirOperationStateAddAttributes(&assert_state, 1, @ptrCast(&c.mlirNamedAttributeGet(msg_id, msg_attr)));
-        const assert_op = c.mlirOperationCreate(&assert_state);
+        const assert_op = self.ora_dialect.createCfAssert(in_bounds, "array index out of bounds", self.fileLoc(span));
         h.appendOp(self.block, assert_op);
     }
 
-    const element_type = if (c.mlirTypeIsAMemRef(array_type) or c.mlirTypeIsAShaped(array_type))
-        c.mlirShapedTypeGetElementType(array_type)
+    const element_type = if (c.oraTypeIsAMemRef(array_type) or c.oraTypeIsAShaped(array_type))
+        c.oraShapedTypeGetElementType(array_type)
     else
-        c.mlirIntegerTypeGet(self.ctx, constants.DEFAULT_INTEGER_BITS);
+        c.oraIntegerTypeCreate(self.ctx, constants.DEFAULT_INTEGER_BITS);
 
-    if (c.mlirTypeIsAMemRef(array_type)) {
-        var load_state = h.opState("memref.load", self.fileLoc(span));
-        c.mlirOperationStateAddOperands(&load_state, 2, @ptrCast(&[_]c.MlirValue{ array, index_index }));
-        c.mlirOperationStateAddResults(&load_state, 1, @ptrCast(&element_type));
-        const load_op = c.mlirOperationCreate(&load_state);
+    if (c.oraTypeIsAMemRef(array_type)) {
+        const load_op = c.oraMemrefLoadOpCreate(
+            self.ctx,
+            self.fileLoc(span),
+            array,
+            &[_]c.MlirValue{index_index},
+            1,
+            element_type,
+        );
         h.appendOp(self.block, load_op);
         return h.getResult(load_op, 0);
-    } else if (c.mlirTypeIsAShaped(array_type)) {
-        var extract_state = h.opState("tensor.extract", self.fileLoc(span));
-        c.mlirOperationStateAddOperands(&extract_state, 1, @ptrCast(&array));
-        c.mlirOperationStateAddOperands(&extract_state, 1, @ptrCast(&index_index));
-        c.mlirOperationStateAddResults(&extract_state, 1, @ptrCast(&element_type));
-        const extract_op = c.mlirOperationCreate(&extract_state);
+    } else if (c.oraTypeIsAShaped(array_type)) {
+        const extract_op = c.oraTensorExtractOpCreate(
+            self.ctx,
+            self.fileLoc(span),
+            array,
+            &[_]c.MlirValue{index_index},
+            1,
+            element_type,
+        );
         h.appendOp(self.block, extract_op);
         return h.getResult(extract_op, 0);
     } else {
@@ -585,8 +503,8 @@ pub fn createMapIndexLoad(
 ) c.MlirValue {
     // ensure we're not using ora.map_get on tensors - they should use tensor.extract
     // check if the type is a shaped type but not a map (tensors are shaped but not maps)
-    const map_type_check = c.mlirValueGetType(map);
-    if (c.mlirTypeIsAShaped(map_type_check)) {
+    const map_type_check = c.oraValueGetType(map);
+    if (c.oraTypeIsAShaped(map_type_check)) {
         // try to extract value type - if it fails, it's likely a tensor, not a map
         const test_value_type = c.oraMapTypeGetValueType(map_type_check);
         if (test_value_type.ptr == null) {
@@ -605,24 +523,24 @@ pub fn createMapIndexLoad(
         result_ty = ty;
     } else {
         log.debug("[createMapIndexLoad] Extracting value type from map type\n", .{});
-        const map_type = c.mlirValueGetType(map);
+        const map_type = c.oraValueGetType(map);
         const extracted_value_type = c.oraMapTypeGetValueType(map_type);
         if (extracted_value_type.ptr != null) {
             log.debug("[createMapIndexLoad] Extracted value type from map\n", .{});
             result_ty = extracted_value_type;
         } else {
             log.debug("WARNING: createMapIndexLoad: Could not extract value type from map, defaulting to i256.\n", .{});
-            result_ty = c.mlirIntegerTypeGet(self.ctx, constants.DEFAULT_INTEGER_BITS);
+            result_ty = c.oraIntegerTypeCreate(self.ctx, constants.DEFAULT_INTEGER_BITS);
         }
     }
     log.debug("[createMapIndexLoad] Creating ora.map_get with result_type: {any}\n", .{result_ty});
 
     // verify map type's value type matches our expected result_type
-    const map_type_verify = c.mlirValueGetType(map);
+    const map_type_verify = c.oraValueGetType(map);
     const map_value_type = c.oraMapTypeGetValueType(map_type_verify);
     if (map_value_type.ptr != null) {
         log.debug("[createMapIndexLoad] Map type's value type: {any}\n", .{map_value_type});
-        if (!c.mlirTypeEqual(map_value_type, result_ty)) {
+        if (!c.oraTypeEqual(map_value_type, result_ty)) {
             log.debug("[createMapIndexLoad] ERROR: Map value type {any} doesn't match expected result_type {any}\n", .{ map_value_type, result_ty });
             log.debug("[createMapIndexLoad] This will cause ora.map_get to return the wrong type!\n", .{});
             log.debug("[createMapIndexLoad] Using map_value_type instead of result_type to avoid type mismatch\n", .{});
@@ -634,11 +552,11 @@ pub fn createMapIndexLoad(
     const op = self.ora_dialect.createMapGet(map, key, result_ty, self.fileLoc(span));
     h.appendOp(self.block, op);
     const result = h.getResult(op, 0);
-    const actual_result_type = c.mlirValueGetType(result);
+    const actual_result_type = c.oraValueGetType(result);
     log.debug("[createMapIndexLoad] ora.map_get created, actual result type: {any}\n", .{actual_result_type});
 
     // check if map_get returned the wrong type
-    if (!c.mlirTypeEqual(actual_result_type, result_ty)) {
+    if (!c.oraTypeEqual(actual_result_type, result_ty)) {
         log.debug("[createMapIndexLoad] ERROR: map_get returned {any} but we requested {any}\n", .{ actual_result_type, result_ty });
         log.debug("[createMapIndexLoad] This is a bug - ora.map_get should respect the result_type parameter\n", .{});
         // for now, return the result as-is - the type system will catch this error later

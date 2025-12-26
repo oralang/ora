@@ -33,10 +33,11 @@ pub fn lowerIf(self: *const StatementLowerer, if_stmt: *const lib.ast.Statements
     const if_op = self.ora_dialect.createIf(condition, loc);
 
     // get then and else regions
-    const then_region = c.mlirOperationGetRegion(if_op, 0);
-    const else_region = c.mlirOperationGetRegion(if_op, 1);
-    const then_block = c.mlirRegionGetFirstBlock(then_region);
-    const else_block = c.mlirRegionGetFirstBlock(else_region);
+    const then_block = c.oraIfOpGetThenBlock(if_op);
+    const else_block = c.oraIfOpGetElseBlock(if_op);
+    if (c.oraBlockIsNull(then_block) or c.oraBlockIsNull(else_block)) {
+        @panic("ora.if missing then/else blocks");
+    }
 
     // lower else branch if present, otherwise add ora.yield to empty region
     if (if_stmt.else_branch) |else_branch| {
@@ -72,34 +73,21 @@ fn lowerIfWithReturns(self: *const StatementLowerer, if_stmt: *const lib.ast.Sta
     // 1. Use scf.if with scf.yield to pass values out of regions
     // 2. Have a single func.return at the end that uses the result from scf.if
 
-    // create the scf.if operation with proper then/else regions
-    var state = h.opState("scf.if", loc);
-
-    // add the condition operand
-    c.mlirOperationStateAddOperands(&state, 1, @ptrCast(&condition));
-
-    // add gas cost attribute (JUMPI = 10, conditional branch)
-    const if2_gas_cost_attr = c.mlirIntegerAttrGet(c.mlirIntegerTypeGet(self.ctx, 64), 10);
-    const if2_gas_cost_id = h.identifier(self.ctx, "gas_cost");
-    var if2_gas_attrs = [_]c.MlirNamedAttribute{c.mlirNamedAttributeGet(if2_gas_cost_id, if2_gas_cost_attr)};
-    c.mlirOperationStateAddAttributes(&state, if2_gas_attrs.len, &if2_gas_attrs);
-
-    // create then region
-    const then_region = c.mlirRegionCreate();
-    const then_block = c.mlirBlockCreate(0, null, null);
-    c.mlirRegionInsertOwnedBlock(then_region, 0, then_block);
-    c.mlirOperationStateAddOwnedRegions(&state, 1, @ptrCast(&then_region));
-
-    // create else region (always needed for scf.if)
-    const else_region = c.mlirRegionCreate();
-    const else_block = c.mlirBlockCreate(0, null, null);
-    c.mlirRegionInsertOwnedBlock(else_region, 0, else_block);
-    c.mlirOperationStateAddOwnedRegions(&state, 1, @ptrCast(&else_region));
-
     // determine the result type from the return statements
     const result_type = helpers.getReturnTypeFromIfStatement(self, if_stmt);
+    var result_types: [1]c.MlirType = undefined;
+    var result_slice: []c.MlirType = &[_]c.MlirType{};
     if (result_type) |ret_type| {
-        c.mlirOperationStateAddResults(&state, 1, @ptrCast(&ret_type));
+        result_types[0] = ret_type;
+        result_slice = result_types[0..1];
+    }
+
+    // create the scf.if operation with proper then/else regions
+    const op = self.ora_dialect.createScfIf(condition, result_slice, loc);
+    const then_block = c.oraScfIfOpGetThenBlock(op);
+    const else_block = c.oraScfIfOpGetElseBlock(op);
+    if (c.oraBlockIsNull(then_block) or c.oraBlockIsNull(else_block)) {
+        @panic("scf.if missing then/else blocks");
     }
 
     // lower then branch - replace return statements with scf.yield
@@ -140,8 +128,7 @@ fn lowerIfWithReturns(self: *const StatementLowerer, if_stmt: *const lib.ast.Sta
         }
     }
 
-    // create and append the scf.if operation to the block
-    const op = c.mlirOperationCreate(&state);
+    // append the scf.if operation to the block
     h.appendOp(self.block, op);
 
     // if both branches return (no subsequent statements), add func.return
@@ -217,8 +204,8 @@ fn lowerBlockBodyWithYield(self: *const StatementLowerer, block_body: lib.ast.St
                             }
 
                             // get target type from memref element type
-                            const memref_type = c.mlirValueGetType(return_value_memref);
-                            const element_type = c.mlirShapedTypeGetElementType(memref_type);
+                            const memref_type = c.oraValueGetType(return_value_memref);
+                            const element_type = c.oraShapedTypeGetElementType(memref_type);
 
                             // convert value to match memref element type
                             const final_value = helpers.convertValueToType(&temp_lowerer, v, element_type, ret.span, loc);
@@ -243,8 +230,8 @@ fn lowerBlockBodyWithYield(self: *const StatementLowerer, block_body: lib.ast.St
                     const v = expr_lowerer.lowerExpression(&e);
                     // convert return value to match function return type if available
                     const final_value = if (temp_lowerer.current_function_return_type) |ret_type| blk: {
-                        const value_type = c.mlirValueGetType(v);
-                        if (!c.mlirTypeEqual(value_type, ret_type)) {
+                        const value_type = c.oraValueGetType(v);
+                        if (!c.oraTypeEqual(value_type, ret_type)) {
                             // convert to match return type (e.g., i256 -> i8 for u8 return)
                             break :blk helpers.convertValueToType(&temp_lowerer, v, ret_type, ret.span, loc);
                         }
@@ -267,30 +254,20 @@ fn lowerBlockBodyWithYield(self: *const StatementLowerer, block_body: lib.ast.St
 
                 // if the nested if has returns, handle it specially
                 if (helpers.ifStatementHasReturns(&temp_lowerer, &if_stmt)) {
-                    // create scf.if with result type
-                    var state = h.opState("scf.if", loc);
-                    c.mlirOperationStateAddOperands(&state, 1, @ptrCast(&condition));
-
-                    // add gas cost attribute (JUMPI = 10, conditional branch)
-                    const if3_gas_cost_attr = c.mlirIntegerAttrGet(c.mlirIntegerTypeGet(temp_lowerer.ctx, 64), 10);
-                    const if3_gas_cost_id = h.identifier(temp_lowerer.ctx, "gas_cost");
-                    var if3_gas_attrs = [_]c.MlirNamedAttribute{c.mlirNamedAttributeGet(if3_gas_cost_id, if3_gas_cost_attr)};
-                    c.mlirOperationStateAddAttributes(&state, if3_gas_attrs.len, &if3_gas_attrs);
-
                     const result_type = helpers.getReturnTypeFromIfStatement(&temp_lowerer, &if_stmt);
+                    var result_types: [1]c.MlirType = undefined;
+                    var result_slice: []c.MlirType = &[_]c.MlirType{};
                     if (result_type) |ret_type| {
-                        c.mlirOperationStateAddResults(&state, 1, @ptrCast(&ret_type));
+                        result_types[0] = ret_type;
+                        result_slice = result_types[0..1];
                     }
 
-                    // create then region
-                    const then_region = c.mlirRegionCreate();
-                    const then_block = c.mlirBlockCreate(0, null, null);
-                    c.mlirRegionInsertOwnedBlock(then_region, 0, then_block);
-
-                    // create else region
-                    const else_region = c.mlirRegionCreate();
-                    const else_block = c.mlirBlockCreate(0, null, null);
-                    c.mlirRegionInsertOwnedBlock(else_region, 0, else_block);
+                    const if_op = temp_lowerer.ora_dialect.createScfIf(condition, result_slice, loc);
+                    const then_block = c.oraScfIfOpGetThenBlock(if_op);
+                    const else_block = c.oraScfIfOpGetElseBlock(if_op);
+                    if (c.oraBlockIsNull(then_block) or c.oraBlockIsNull(else_block)) {
+                        @panic("scf.if missing then/else blocks");
+                    }
 
                     // lower then branch
                     const then_has_return = helpers.blockHasReturn(&temp_lowerer, if_stmt.then_branch);
@@ -327,9 +304,6 @@ fn lowerBlockBodyWithYield(self: *const StatementLowerer, block_body: lib.ast.St
                         }
                     }
 
-                    c.mlirOperationStateAddOwnedRegions(&state, 1, @ptrCast(&then_region));
-                    c.mlirOperationStateAddOwnedRegions(&state, 1, @ptrCast(&else_region));
-                    const if_op = c.mlirOperationCreate(&state);
                     h.appendOp(target_block, if_op);
 
                     // if the nested scf.if has a result, we need to yield it
@@ -378,9 +352,9 @@ pub fn lowerWhile(self: *const StatementLowerer, while_stmt: *const lib.ast.Stat
     const condition_raw = self.expr_lowerer.lowerExpression(&while_stmt.condition);
 
     // ensure condition is boolean (i1) - ora.while requires I1 type
-    const condition_type = c.mlirValueGetType(condition_raw);
+    const condition_type = c.oraValueGetType(condition_raw);
     const bool_ty = h.boolType(self.ctx);
-    const condition = if (c.mlirTypeEqual(condition_type, bool_ty))
+    const condition = if (c.oraTypeEqual(condition_type, bool_ty))
         condition_raw
     else
         helpers.convertValueToType(self, condition_raw, bool_ty, while_stmt.span, loc);
@@ -390,9 +364,10 @@ pub fn lowerWhile(self: *const StatementLowerer, while_stmt: *const lib.ast.Stat
     const op = self.ora_dialect.createWhile(condition, loc);
     h.appendOp(self.block, op);
 
-    // get body region
-    const body_region = c.mlirOperationGetRegion(op, 0);
-    const body_block = c.mlirRegionGetFirstBlock(body_region);
+    const body_block = c.oraWhileOpGetBodyBlock(op);
+    if (c.oraBlockIsNull(body_block)) {
+        @panic("ora.while missing body block");
+    }
 
     // create expression lowerer for loop body (uses body_block, shares local_var_map for memref access)
     var body_expr_lowerer = ExpressionLowerer.init(
@@ -416,11 +391,8 @@ pub fn lowerWhile(self: *const StatementLowerer, while_stmt: *const lib.ast.Stat
     for (while_stmt.invariants) |*invariant| {
         const invariant_value = body_expr_lowerer.lowerExpression(invariant);
 
-        // create ora.invariant operation
-        var inv_state = h.opState("ora.invariant", loc);
-        c.mlirOperationStateAddOperands(&inv_state, 1, @ptrCast(&invariant_value));
-        verification.addVerificationAttributes(self, &inv_state, "invariant", "loop_invariant");
-        const inv_op = c.mlirOperationCreate(&inv_state);
+        const inv_op = self.ora_dialect.createInvariant(invariant_value, loc);
+        verification.addVerificationAttributesToOp(self, inv_op, "invariant", "loop_invariant");
         h.appendOp(body_block, inv_op);
     }
 
@@ -482,12 +454,9 @@ fn lowerSimpleForLoop(
     increases: ?*lib.ast.Expressions.ExprNode,
     loc: c.MlirLocation,
 ) LoweringError!void {
-    // create scf.for operation
-    var state = h.opState("scf.for", loc);
-
     // get the iterable type to determine proper iteration strategy
-    const iterable_ty = c.mlirValueGetType(iterable);
-    const index_ty = c.mlirIndexTypeGet(self.ctx);
+    const iterable_ty = c.oraValueGetType(iterable);
+    const index_ty = c.oraIndexTypeCreate(self.ctx);
 
     // determine iteration strategy based on type
     var lower_bound: c.MlirValue = undefined;
@@ -500,10 +469,10 @@ fn lowerSimpleForLoop(
     // - If the iterable is already an integer, cast once to index (range-style loop)
     // - If it's a memref or other shaped/collection type (tensor, slice, map),
     //   use createLengthAccess/ora.length which returns index.
-    if (c.mlirTypeIsAInteger(iterable_ty)) {
+    if (c.oraTypeIsAInteger(iterable_ty)) {
         const upper_raw = iterable;
         upper_bound = self.expr_lowerer.convertIndexToIndexType(upper_raw, span);
-    } else if (c.mlirTypeIsAMemRef(iterable_ty) or c.mlirTypeIsAShaped(iterable_ty)) {
+    } else if (c.oraTypeIsAMemRef(iterable_ty) or c.oraTypeIsAShaped(iterable_ty)) {
         const len_index = self.expr_lowerer.createLengthAccess(iterable, span);
         upper_bound = len_index;
     } else {
@@ -512,43 +481,26 @@ fn lowerSimpleForLoop(
     }
 
     // create constants for loop bounds (index-typed)
-    var zero_state = h.opState("arith.constant", loc);
-    c.mlirOperationStateAddResults(&zero_state, 1, @ptrCast(&index_ty));
-    const zero_attr = c.mlirIntegerAttrGet(index_ty, 0);
-    const value_id = h.identifier(self.ctx, "value");
-    var zero_attrs = [_]c.MlirNamedAttribute{c.mlirNamedAttributeGet(value_id, zero_attr)};
-    c.mlirOperationStateAddAttributes(&zero_state, zero_attrs.len, &zero_attrs);
-    const zero_op = c.mlirOperationCreate(&zero_state);
+    const zero_op = self.ora_dialect.createArithConstant(0, index_ty, loc);
     h.appendOp(self.block, zero_op);
     lower_bound = h.getResult(zero_op, 0);
 
     // create step constant (index-typed)
-    var step_state = h.opState("arith.constant", loc);
-    c.mlirOperationStateAddResults(&step_state, 1, @ptrCast(&index_ty));
-    const step_attr = c.mlirIntegerAttrGet(index_ty, 1);
-    var step_attrs = [_]c.MlirNamedAttribute{c.mlirNamedAttributeGet(value_id, step_attr)};
-    c.mlirOperationStateAddAttributes(&step_state, step_attrs.len, &step_attrs);
-    const step_op = c.mlirOperationCreate(&step_state);
+    const step_op = self.ora_dialect.createArithConstant(1, index_ty, loc);
     h.appendOp(self.block, step_op);
     step = h.getResult(step_op, 0);
 
-    // add operands to scf.for
-    const operands = [_]c.MlirValue{ lower_bound, upper_bound, step };
-    c.mlirOperationStateAddOperands(&state, operands.len, &operands);
-
-    // create body region with index-typed induction variable
-    const body_region = c.mlirRegionCreate();
-    const arg_types = [_]c.MlirType{index_ty};
-    const arg_locs = [_]c.MlirLocation{loc};
-    const body_block = c.mlirBlockCreate(1, &arg_types, &arg_locs);
-    c.mlirRegionInsertOwnedBlock(body_region, 0, body_block);
-    c.mlirOperationStateAddOwnedRegions(&state, 1, @ptrCast(&body_region));
-
-    const for_op = c.mlirOperationCreate(&state);
+    // create scf.for operation
+    const for_op = self.ora_dialect.createScfFor(lower_bound, upper_bound, step, &[_]c.MlirValue{}, &[_]c.MlirType{}, loc);
     h.appendOp(self.block, for_op);
 
+    const body_block = c.oraScfForOpGetBodyBlock(for_op);
+    if (c.oraBlockIsNull(body_block)) {
+        @panic("scf.for missing body block");
+    }
+
     // get the induction variable
-    const induction_var = c.mlirBlockGetArgument(body_block, 0);
+    const induction_var = c.oraBlockGetArgument(body_block, 0);
 
     // set up a body-scoped expression lowerer so that any index→element
     // conversions and bounds checks land inside the loop body.
@@ -573,12 +525,12 @@ fn lowerSimpleForLoop(
     // - For range-style loops (integer iterable), item is the index itself.
     // - For collection-style loops, item is the element at the current index.
     if (self.local_var_map) |lvm| {
-        if (c.mlirTypeIsAInteger(iterable_ty)) {
+        if (c.oraTypeIsAInteger(iterable_ty)) {
             // range-based: item is the index
             lvm.addLocalVar(item_name, induction_var) catch {
                 log.warn("Failed to add loop variable to map: {s}\n", .{item_name});
             };
-        } else if (c.mlirTypeIsAMemRef(iterable_ty) or c.mlirTypeIsAShaped(iterable_ty)) {
+        } else if (c.oraTypeIsAMemRef(iterable_ty) or c.oraTypeIsAShaped(iterable_ty)) {
             const elem_value = body_expr_lowerer.createArrayIndexLoad(iterable, induction_var, span);
             lvm.addLocalVar(item_name, elem_value) catch {
                 log.warn("Failed to add element variable to map: {s}\n", .{item_name});
@@ -594,10 +546,8 @@ fn lowerSimpleForLoop(
     // lower loop invariants if present
     for (invariants) |*invariant| {
         const invariant_value = self.expr_lowerer.lowerExpression(invariant);
-        var inv_state = h.opState("ora.invariant", loc);
-        c.mlirOperationStateAddOperands(&inv_state, 1, @ptrCast(&invariant_value));
-        verification.addVerificationAttributes(self, &inv_state, "invariant", "loop_invariant");
-        const inv_op = c.mlirOperationCreate(&inv_state);
+        const inv_op = self.ora_dialect.createInvariant(invariant_value, loc);
+        verification.addVerificationAttributesToOp(self, inv_op, "invariant", "loop_invariant");
         h.appendOp(body_block, inv_op);
     }
 
@@ -639,31 +589,22 @@ fn lowerIndexedForLoop(
     increases: ?*lib.ast.Expressions.ExprNode,
     loc: c.MlirLocation,
 ) LoweringError!void {
-    // create scf.for operation similar to simple for loop
-    var state = h.opState("scf.for", loc);
-
     // use MLIR index type for loop bounds and induction variable
-    const index_ty = c.mlirIndexTypeGet(self.ctx);
+    const index_ty = c.oraIndexTypeCreate(self.ctx);
 
     // create constants for loop bounds
-    var zero_state = h.opState("arith.constant", loc);
-    c.mlirOperationStateAddResults(&zero_state, 1, @ptrCast(&index_ty));
-    const zero_attr = c.mlirIntegerAttrGet(index_ty, 0);
-    const value_id = h.identifier(self.ctx, "value");
-    var zero_attrs = [_]c.MlirNamedAttribute{c.mlirNamedAttributeGet(value_id, zero_attr)};
-    c.mlirOperationStateAddAttributes(&zero_state, zero_attrs.len, &zero_attrs);
-    const zero_op = c.mlirOperationCreate(&zero_state);
+    const zero_op = self.ora_dialect.createArithConstant(0, index_ty, loc);
     h.appendOp(self.block, zero_op);
     const lower_bound = h.getResult(zero_op, 0);
 
     // determine upper bound: integer iterables are ranges; shaped collections use length().
-    const iterable_ty = c.mlirValueGetType(iterable);
+    const iterable_ty = c.oraValueGetType(iterable);
     const span = body.span;
     const upper_bound = blk: {
-        if (c.mlirTypeIsAInteger(iterable_ty)) {
+        if (c.oraTypeIsAInteger(iterable_ty)) {
             const upper_raw = iterable;
             break :blk self.expr_lowerer.convertIndexToIndexType(upper_raw, span);
-        } else if (c.mlirTypeIsAMemRef(iterable_ty) or c.mlirTypeIsAShaped(iterable_ty)) {
+        } else if (c.oraTypeIsAMemRef(iterable_ty) or c.oraTypeIsAShaped(iterable_ty)) {
             const len_index = self.expr_lowerer.createLengthAccess(iterable, span);
             break :blk len_index;
         } else {
@@ -672,34 +613,18 @@ fn lowerIndexedForLoop(
     };
 
     // create step constant
-    var step_state = h.opState("arith.constant", loc);
-    c.mlirOperationStateAddResults(&step_state, 1, @ptrCast(&index_ty));
-    const step_attr = c.mlirIntegerAttrGet(index_ty, 1);
-    var step_attrs = [_]c.MlirNamedAttribute{c.mlirNamedAttributeGet(value_id, step_attr)};
-    c.mlirOperationStateAddAttributes(&step_state, step_attrs.len, &step_attrs);
-    const step_op = c.mlirOperationCreate(&step_state);
+    const step_op = self.ora_dialect.createArithConstant(1, index_ty, loc);
     h.appendOp(self.block, step_op);
     const step = h.getResult(step_op, 0);
 
-    // add operands to scf.for
-    const operands = [_]c.MlirValue{ lower_bound, upper_bound, step };
-    c.mlirOperationStateAddOperands(&state, operands.len, &operands);
-
-    // create body region with one argument: the induction variable (index)
-    // for range-based loops, the item is the same as the index
-    const body_region = c.mlirRegionCreate();
-    const arg_types = [_]c.MlirType{index_ty};
-    const arg_locs = [_]c.MlirLocation{loc};
-    const body_block = c.mlirBlockCreate(1, &arg_types, &arg_locs);
-    c.mlirRegionInsertOwnedBlock(body_region, 0, body_block);
-    c.mlirOperationStateAddOwnedRegions(&state, 1, @ptrCast(&body_region));
-
-    const for_op = c.mlirOperationCreate(&state);
+    // create scf.for operation
+    const for_op = self.ora_dialect.createScfFor(lower_bound, upper_bound, step, &[_]c.MlirValue{}, &[_]c.MlirType{}, loc);
     h.appendOp(self.block, for_op);
 
-    // get the body block from the operation's region (after operation is created)
-    const op_body_region = c.mlirOperationGetRegion(for_op, 0);
-    const op_body_block = c.mlirRegionGetFirstBlock(op_body_region);
+    const op_body_block = c.oraScfForOpGetBodyBlock(for_op);
+    if (c.oraBlockIsNull(op_body_block)) {
+        @panic("scf.for missing body block");
+    }
 
     // body-scoped expression lowerer to keep index/element IR in the loop region
     var body_expr_lowerer = ExpressionLowerer.init(
@@ -720,7 +645,7 @@ fn lowerIndexedForLoop(
     body_expr_lowerer.in_try_block = self.in_try_block;
 
     // get the induction variable (index)
-    const index_var = c.mlirBlockGetArgument(op_body_block, 0);
+    const index_var = c.oraBlockGetArgument(op_body_block, 0);
     // for range-based loops, item is the same as index.
     // for collection-based loops, item is the element at iterable[index].
     if (self.local_var_map) |lvm| {
@@ -728,12 +653,12 @@ fn lowerIndexedForLoop(
             log.warn("Failed to add index variable to map: {s}\n", .{index_name});
         };
 
-        if (c.mlirTypeIsAInteger(iterable_ty)) {
+        if (c.oraTypeIsAInteger(iterable_ty)) {
             // range-based: item is also the index
             lvm.addLocalVar(item_name, index_var) catch {
                 log.warn("Failed to add item variable to map: {s}\n", .{item_name});
             };
-        } else if (c.mlirTypeIsAMemRef(iterable_ty) or c.mlirTypeIsAShaped(iterable_ty)) {
+        } else if (c.oraTypeIsAMemRef(iterable_ty) or c.oraTypeIsAShaped(iterable_ty)) {
             const elem_value = body_expr_lowerer.createArrayIndexLoad(iterable, index_var, span);
             lvm.addLocalVar(item_name, elem_value) catch {
                 log.warn("Failed to add element variable to map: {s}\n", .{item_name});
@@ -748,10 +673,8 @@ fn lowerIndexedForLoop(
     // lower loop invariants if present
     for (invariants) |*invariant| {
         const invariant_value = self.expr_lowerer.lowerExpression(invariant);
-        var inv_state = h.opState("ora.invariant", loc);
-        c.mlirOperationStateAddOperands(&inv_state, 1, @ptrCast(&invariant_value));
-        verification.addVerificationAttributes(self, &inv_state, "invariant", "loop_invariant");
-        const inv_op = c.mlirOperationCreate(&inv_state);
+        const inv_op = self.ora_dialect.createInvariant(invariant_value, loc);
+        verification.addVerificationAttributesToOp(self, inv_op, "invariant", "loop_invariant");
         h.appendOp(op_body_block, inv_op);
     }
 
@@ -783,20 +706,11 @@ fn lowerIndexedForLoop(
 
 /// Lower destructured for loop (for (iterable) |.{field1, field2}| body)
 fn lowerDestructuredForLoop(self: *const StatementLowerer, pattern: lib.ast.Expressions.DestructuringPattern, iterable: c.MlirValue, body: lib.ast.Statements.BlockNode, invariants: []lib.ast.Expressions.ExprNode, decreases: ?*lib.ast.Expressions.ExprNode, increases: ?*lib.ast.Expressions.ExprNode, loc: c.MlirLocation) LoweringError!void {
-    // create scf.for operation similar to simple for loop
-    var state = h.opState("scf.for", loc);
-
     // create integer type for loop bounds
-    const zero_ty = c.mlirIntegerTypeGet(self.ctx, constants.DEFAULT_INTEGER_BITS);
+    const zero_ty = c.oraIntegerTypeCreate(self.ctx, constants.DEFAULT_INTEGER_BITS);
 
     // create constants for loop bounds
-    var zero_state = h.opState("arith.constant", loc);
-    c.mlirOperationStateAddResults(&zero_state, 1, @ptrCast(&zero_ty));
-    const zero_attr = c.mlirIntegerAttrGet(zero_ty, 0);
-    const value_id = h.identifier(self.ctx, "value");
-    var zero_attrs = [_]c.MlirNamedAttribute{c.mlirNamedAttributeGet(value_id, zero_attr)};
-    c.mlirOperationStateAddAttributes(&zero_state, zero_attrs.len, &zero_attrs);
-    const zero_op = c.mlirOperationCreate(&zero_state);
+    const zero_op = self.ora_dialect.createArithConstant(0, zero_ty, loc);
     h.appendOp(self.block, zero_op);
     const lower_bound = h.getResult(zero_op, 0);
 
@@ -804,32 +718,21 @@ fn lowerDestructuredForLoop(self: *const StatementLowerer, pattern: lib.ast.Expr
     const upper_bound = iterable;
 
     // create step constant
-    var step_state = h.opState("arith.constant", loc);
-    c.mlirOperationStateAddResults(&step_state, 1, @ptrCast(&zero_ty));
-    const step_attr = c.mlirIntegerAttrGet(zero_ty, 1);
-    var step_attrs = [_]c.MlirNamedAttribute{c.mlirNamedAttributeGet(value_id, step_attr)};
-    c.mlirOperationStateAddAttributes(&step_state, step_attrs.len, &step_attrs);
-    const step_op = c.mlirOperationCreate(&step_state);
+    const step_op = self.ora_dialect.createArithConstant(1, zero_ty, loc);
     h.appendOp(self.block, step_op);
     const step = h.getResult(step_op, 0);
 
-    // add operands to scf.for
-    const operands = [_]c.MlirValue{ lower_bound, upper_bound, step };
-    c.mlirOperationStateAddOperands(&state, operands.len, &operands);
-
-    // create body region with one argument: the item to destructure
-    const body_region = c.mlirRegionCreate();
-    const arg_types = [_]c.MlirType{zero_ty};
-    const arg_locs = [_]c.MlirLocation{loc};
-    const body_block = c.mlirBlockCreate(1, &arg_types, &arg_locs);
-    c.mlirRegionInsertOwnedBlock(body_region, 0, body_block);
-    c.mlirOperationStateAddOwnedRegions(&state, 1, @ptrCast(&body_region));
-
-    const for_op = c.mlirOperationCreate(&state);
+    // create scf.for operation
+    const for_op = self.ora_dialect.createScfFor(lower_bound, upper_bound, step, &[_]c.MlirValue{}, &[_]c.MlirType{}, loc);
     h.appendOp(self.block, for_op);
 
+    const body_block = c.oraScfForOpGetBodyBlock(for_op);
+    if (c.oraBlockIsNull(body_block)) {
+        @panic("scf.for missing body block");
+    }
+
     // get the item variable
-    const item_var = c.mlirBlockGetArgument(body_block, 0);
+    const item_var = c.oraBlockGetArgument(body_block, 0);
 
     // add destructured fields to local variable map
     if (self.local_var_map) |lvm| {
@@ -837,7 +740,7 @@ fn lowerDestructuredForLoop(self: *const StatementLowerer, pattern: lib.ast.Expr
             .Struct => |struct_pattern| {
                 for (struct_pattern, 0..) |field, i| {
                     // create field access for each destructured field
-                    const result_ty = c.mlirIntegerTypeGet(self.ctx, constants.DEFAULT_INTEGER_BITS);
+                    const result_ty = c.oraIntegerTypeCreate(self.ctx, constants.DEFAULT_INTEGER_BITS);
                     const indices = [_]u32{@intCast(i)};
                     const field_access_op = self.ora_dialect.createLlvmExtractvalue(item_var, &indices, result_ty, loc);
                     h.appendOp(body_block, field_access_op);
@@ -858,10 +761,8 @@ fn lowerDestructuredForLoop(self: *const StatementLowerer, pattern: lib.ast.Expr
     // lower loop invariants if present
     for (invariants) |*invariant| {
         const invariant_value = self.expr_lowerer.lowerExpression(invariant);
-        var inv_state = h.opState("ora.invariant", loc);
-        c.mlirOperationStateAddOperands(&inv_state, 1, @ptrCast(&invariant_value));
-        verification.addVerificationAttributes(self, &inv_state, "invariant", "loop_invariant");
-        const inv_op = c.mlirOperationCreate(&inv_state);
+        const inv_op = self.ora_dialect.createInvariant(invariant_value, loc);
+        verification.addVerificationAttributesToOp(self, inv_op, "invariant", "loop_invariant");
         h.appendOp(body_block, inv_op);
     }
 
@@ -954,18 +855,19 @@ pub fn lowerSwitch(self: *const StatementLowerer, switch_stmt: *const lib.ast.St
         return;
     }
 
-    // switch statements never produce values - no result type needed
-    var switch_state = h.opState("ora.switch", loc);
-    c.mlirOperationStateAddOperands(&switch_state, 1, @ptrCast(&condition));
-    // switch statements don't produce results - no result type needed
-
     const total_cases = switch_stmt.cases.len + if (switch_stmt.default_case != null) @as(usize, 1) else 0;
-    var case_regions_buf: [16]c.MlirRegion = undefined;
-    const case_regions = if (total_cases <= 16) case_regions_buf[0..total_cases] else blk: {
-        const regions = self.allocator.alloc(c.MlirRegion, total_cases) catch return error.OutOfMemory;
-        break :blk regions;
-    };
-    defer if (total_cases > 16) self.allocator.free(case_regions);
+    const switch_op = c.oraSwitchOpCreateWithCases(
+        self.ctx,
+        loc,
+        condition,
+        null,
+        0,
+        total_cases,
+    );
+    if (c.oraOperationIsNull(switch_op)) {
+        @panic("Failed to create ora.switch operation");
+    }
+    h.appendOp(self.block, switch_op);
 
     var case_values = std.ArrayList(i64){};
     defer case_values.deinit(self.allocator);
@@ -979,9 +881,10 @@ pub fn lowerSwitch(self: *const StatementLowerer, switch_stmt: *const lib.ast.St
 
     var case_idx: usize = 0;
     for (switch_stmt.cases) |case| {
-        const case_region = c.mlirRegionCreate();
-        const case_block = c.mlirBlockCreate(0, null, null);
-        c.mlirRegionInsertOwnedBlock(case_region, 0, case_block);
+        const case_block = c.oraSwitchOpGetCaseBlock(switch_op, case_idx);
+        if (c.oraBlockIsNull(case_block)) {
+            @panic("ora.switch missing case block");
+        }
 
         var case_expr_lowerer = ExpressionLowerer.init(self.ctx, case_block, self.type_mapper, self.expr_lowerer.param_map, self.expr_lowerer.storage_map, self.expr_lowerer.local_var_map, self.expr_lowerer.symbol_table, self.expr_lowerer.builtin_registry, self.expr_lowerer.error_handler, self.expr_lowerer.locations, self.ora_dialect);
         case_expr_lowerer.current_function_return_type = self.current_function_return_type;
@@ -1122,14 +1025,14 @@ pub fn lowerSwitch(self: *const StatementLowerer, switch_stmt: *const lib.ast.St
             },
         }
 
-        case_regions[case_idx] = case_region;
         case_idx += 1;
     }
 
     if (switch_stmt.default_case) |default_block| {
-        const default_region = c.mlirRegionCreate();
-        const default_block_mlir = c.mlirBlockCreate(0, null, null);
-        c.mlirRegionInsertOwnedBlock(default_region, 0, default_block_mlir);
+        const default_block_mlir = c.oraSwitchOpGetCaseBlock(switch_op, case_idx);
+        if (c.oraBlockIsNull(default_block_mlir)) {
+            @panic("ora.switch missing default block");
+        }
 
         const default_has_return = helpers.blockHasReturn(self, default_block);
         if (default_has_return) {
@@ -1176,7 +1079,6 @@ pub fn lowerSwitch(self: *const StatementLowerer, switch_stmt: *const lib.ast.St
             }
         }
 
-        case_regions[case_idx] = default_region;
         if (default_case_index < 0) {
             default_case_index = @intCast(case_idx);
         }
@@ -1186,11 +1088,6 @@ pub fn lowerSwitch(self: *const StatementLowerer, switch_stmt: *const lib.ast.St
         case_kinds.append(self.allocator, 2) catch {}; // 2 = else
         case_idx += 1;
     }
-
-    c.mlirOperationStateAddOwnedRegions(&switch_state, @intCast(case_regions.len), case_regions.ptr);
-
-    const switch_op = c.mlirOperationCreate(&switch_state);
-    h.appendOp(self.block, switch_op);
 
     if (case_values.items.len > 0) {
         c.oraSwitchOpSetCasePatterns(
@@ -1241,8 +1138,7 @@ pub fn lowerSwitchCases(self: *const StatementLowerer, cases: []const lib.ast.Ex
                         .Return => |ret| {
                             // for labeled switches, use empty scf.yield (returns handled after scf.while)
                             const ret_loc = temp_lowerer.fileLoc(ret.span);
-                            var yield_state = h.opState("scf.yield", ret_loc);
-                            const yield_op = c.mlirOperationCreate(&yield_state);
+            const yield_op = self.ora_dialect.createScfYield(ret_loc);
                             h.appendOp(target_block, yield_op);
                             has_terminator = true;
                         },
@@ -1258,8 +1154,7 @@ pub fn lowerSwitchCases(self: *const StatementLowerer, cases: []const lib.ast.Ex
                 }
                 // ensure block has a terminator
                 if (!has_terminator) {
-                    var yield_state = h.opState("scf.yield", loc);
-                    const yield_op = c.mlirOperationCreate(&yield_state);
+            const yield_op = self.ora_dialect.createScfYield(loc);
                     h.appendOp(target_block, yield_op);
                 }
             } else if (has_return) {
@@ -1276,8 +1171,7 @@ pub fn lowerSwitchCases(self: *const StatementLowerer, cases: []const lib.ast.Ex
                         const yield_op = self.ora_dialect.createScfYieldWithValues(&[_]c.MlirValue{default_val}, loc);
                         h.appendOp(target_block, yield_op);
                     } else {
-                        var yield_state = h.opState("scf.yield", loc);
-                        const yield_op = c.mlirOperationCreate(&yield_state);
+            const yield_op = self.ora_dialect.createScfYield(loc);
                         h.appendOp(target_block, yield_op);
                     }
                 }
@@ -1291,8 +1185,7 @@ pub fn lowerSwitchCases(self: *const StatementLowerer, cases: []const lib.ast.Ex
                             const yield_op = self.ora_dialect.createScfYieldWithValues(&[_]c.MlirValue{default_val}, loc);
                             h.appendOp(target_block, yield_op);
                         } else {
-                            var yield_state = h.opState("scf.yield", loc);
-                            const yield_op = c.mlirOperationCreate(&yield_state);
+            const yield_op = self.ora_dialect.createScfYield(loc);
                             h.appendOp(target_block, yield_op);
                         }
                     }
@@ -1304,20 +1197,17 @@ pub fn lowerSwitchCases(self: *const StatementLowerer, cases: []const lib.ast.Ex
                 const ends_with_break_or_continue = helpers.blockEndsWithBreak(self, target_block) or helpers.blockEndsWithContinue(self, target_block);
                 if (ends_with_break_or_continue) {
                     // add scf.yield after ora.break/ora.continue to properly terminate the scf.if block
-                    var yield_state = h.opState("scf.yield", loc);
-                    const yield_op = c.mlirOperationCreate(&yield_state);
+            const yield_op = self.ora_dialect.createScfYield(loc);
                     h.appendOp(target_block, yield_op);
                 } else if (!ended_with_terminator) {
                     // block doesn't have a terminator, add scf.yield for scf.if block
-                    var yield_state = h.opState("scf.yield", loc);
-                    const yield_op = c.mlirOperationCreate(&yield_state);
+            const yield_op = self.ora_dialect.createScfYield(loc);
                     h.appendOp(target_block, yield_op);
                 }
             }
         } else {
             // no default case - add scf.yield
-            var yield_state = h.opState("scf.yield", loc);
-            const yield_op = c.mlirOperationCreate(&yield_state);
+            const yield_op = self.ora_dialect.createScfYield(loc);
             h.appendOp(target_block, yield_op);
         }
         // for default case handling, return null (no result from this path)
@@ -1335,17 +1225,14 @@ pub fn lowerSwitchCases(self: *const StatementLowerer, cases: []const lib.ast.Ex
             case_expr_lowerer.current_function_return_type_info = self.current_function_return_type_info;
             case_expr_lowerer.in_try_block = self.in_try_block;
             const case_value = case_expr_lowerer.lowerLiteral(&lit.value);
-            var cmp_state = h.opState("ora.cmp", loc);
-
-            const predicate_attr = h.stringAttr(self.ctx, "eq");
-            const pred_id = h.identifier(self.ctx, "predicate");
-            var attrs = [_]c.MlirNamedAttribute{c.mlirNamedAttributeGet(pred_id, predicate_attr)};
-            c.mlirOperationStateAddAttributes(&cmp_state, attrs.len, &attrs);
-
-            c.mlirOperationStateAddOperands(&cmp_state, 2, @ptrCast(&[_]c.MlirValue{ condition, case_value }));
-            c.mlirOperationStateAddResults(&cmp_state, 1, @ptrCast(&h.boolType(self.ctx)));
-
-            const cmp_op = c.mlirOperationCreate(&cmp_state);
+            const cmp_op = c.oraCmpOpCreate(
+                self.ctx,
+                loc,
+                h.strRef("eq"),
+                condition,
+                case_value,
+                h.boolType(self.ctx),
+            );
             h.appendOp(target_block, cmp_op);
             break :blk h.getResult(cmp_op, 0);
         },
@@ -1358,31 +1245,29 @@ pub fn lowerSwitchCases(self: *const StatementLowerer, cases: []const lib.ast.Ex
             const start_val = case_expr_lowerer.lowerExpression(range.start);
             const end_val = case_expr_lowerer.lowerExpression(range.end);
 
-            var lower_cmp_state = h.opState("ora.cmp", loc);
-            const pred_id = h.identifier(self.ctx, "predicate");
-            const pred_uge_attr = h.stringAttr(self.ctx, "uge");
-            var lower_attrs = [_]c.MlirNamedAttribute{c.mlirNamedAttributeGet(pred_id, pred_uge_attr)};
-            c.mlirOperationStateAddAttributes(&lower_cmp_state, lower_attrs.len, &lower_attrs);
-            c.mlirOperationStateAddOperands(&lower_cmp_state, 2, @ptrCast(&[_]c.MlirValue{ condition, start_val }));
-            c.mlirOperationStateAddResults(&lower_cmp_state, 1, @ptrCast(&h.boolType(self.ctx)));
-            const lower_cmp_op = c.mlirOperationCreate(&lower_cmp_state);
+            const lower_cmp_op = c.oraCmpOpCreate(
+                self.ctx,
+                loc,
+                h.strRef("uge"),
+                condition,
+                start_val,
+                h.boolType(self.ctx),
+            );
             h.appendOp(target_block, lower_cmp_op);
             const lower_bound = h.getResult(lower_cmp_op, 0);
 
-            var upper_cmp_state = h.opState("ora.cmp", loc);
-            const pred_ule_attr = h.stringAttr(self.ctx, "ule");
-            var upper_attrs = [_]c.MlirNamedAttribute{c.mlirNamedAttributeGet(pred_id, pred_ule_attr)};
-            c.mlirOperationStateAddAttributes(&upper_cmp_state, upper_attrs.len, &upper_attrs);
-            c.mlirOperationStateAddOperands(&upper_cmp_state, 2, @ptrCast(&[_]c.MlirValue{ condition, end_val }));
-            c.mlirOperationStateAddResults(&upper_cmp_state, 1, @ptrCast(&h.boolType(self.ctx)));
-            const upper_cmp_op = c.mlirOperationCreate(&upper_cmp_state);
+            const upper_cmp_op = c.oraCmpOpCreate(
+                self.ctx,
+                loc,
+                h.strRef("ule"),
+                condition,
+                end_val,
+                h.boolType(self.ctx),
+            );
             h.appendOp(target_block, upper_cmp_op);
             const upper_bound = h.getResult(upper_cmp_op, 0);
 
-            var and_state = h.opState("arith.andi", loc);
-            c.mlirOperationStateAddOperands(&and_state, 2, @ptrCast(&[_]c.MlirValue{ lower_bound, upper_bound }));
-            c.mlirOperationStateAddResults(&and_state, 1, @ptrCast(&h.boolType(self.ctx)));
-            const and_op = c.mlirOperationCreate(&and_state);
+            const and_op = c.oraArithAndIOpCreate(self.ctx, loc, lower_bound, upper_bound);
             h.appendOp(target_block, and_op);
             break :blk h.getResult(and_op, 0);
         },
@@ -1392,48 +1277,23 @@ pub fn lowerSwitchCases(self: *const StatementLowerer, cases: []const lib.ast.Ex
                     if (enum_type.getVariantIndex(enum_val.variant_name)) |variant_idx| {
                         // use the enum's underlying type (stored in mlir_type) instead of hardcoded i256
                         const enum_underlying_type = enum_type.mlir_type;
-                        var const_state = h.opState("arith.constant", loc);
-                        const value_attr = c.mlirIntegerAttrGet(enum_underlying_type, @intCast(variant_idx));
-                        const value_id = h.identifier(self.ctx, "value");
-                        var attrs = [_]c.MlirNamedAttribute{c.mlirNamedAttributeGet(value_id, value_attr)};
-                        c.mlirOperationStateAddAttributes(&const_state, attrs.len, &attrs);
-                        c.mlirOperationStateAddResults(&const_state, 1, @ptrCast(&enum_underlying_type));
-                        const const_op = c.mlirOperationCreate(&const_state);
+                        const const_op = self.ora_dialect.createArithConstant(@intCast(variant_idx), enum_underlying_type, loc);
                         h.appendOp(self.block, const_op);
                         const variant_const = h.getResult(const_op, 0);
 
-                        var cmp_state = h.opState("arith.cmpi", loc);
-                        const pred_id = h.identifier(self.ctx, "predicate");
-                        const pred_attr = c.mlirIntegerAttrGet(c.mlirIntegerTypeGet(self.ctx, 64), 0);
-                        var cmp_attrs = [_]c.MlirNamedAttribute{c.mlirNamedAttributeGet(pred_id, pred_attr)};
-                        c.mlirOperationStateAddAttributes(&cmp_state, cmp_attrs.len, &cmp_attrs);
-                        c.mlirOperationStateAddOperands(&cmp_state, 2, @ptrCast(&[_]c.MlirValue{ condition, variant_const }));
-                        c.mlirOperationStateAddResults(&cmp_state, 1, @ptrCast(&h.boolType(self.ctx)));
-                        const cmp_op = c.mlirOperationCreate(&cmp_state);
+                        const cmp_op = c.oraArithCmpIOpCreate(self.ctx, loc, 0, condition, variant_const);
                         h.appendOp(target_block, cmp_op);
                         break :blk h.getResult(cmp_op, 0);
                     }
                 }
             }
-            var const_state = h.opState("arith.constant", loc);
-            const value_attr = c.mlirIntegerAttrGet(h.boolType(self.ctx), 0);
-            const value_id = h.identifier(self.ctx, "value");
-            var attrs = [_]c.MlirNamedAttribute{c.mlirNamedAttributeGet(value_id, value_attr)};
-            c.mlirOperationStateAddAttributes(&const_state, attrs.len, &attrs);
-            c.mlirOperationStateAddResults(&const_state, 1, @ptrCast(&h.boolType(self.ctx)));
-            const const_op = c.mlirOperationCreate(&const_state);
+            const const_op = self.ora_dialect.createArithConstant(0, h.boolType(self.ctx), loc);
             h.appendOp(self.block, const_op);
             break :blk h.getResult(const_op, 0);
         },
         .Else => blk: {
             // else case always matches
-            var const_state = h.opState("arith.constant", loc);
-            const value_attr = c.mlirIntegerAttrGet(h.boolType(self.ctx), 1);
-            const value_id = h.identifier(self.ctx, "value");
-            var attrs = [_]c.MlirNamedAttribute{c.mlirNamedAttributeGet(value_id, value_attr)};
-            c.mlirOperationStateAddAttributes(&const_state, attrs.len, &attrs);
-            c.mlirOperationStateAddResults(&const_state, 1, @ptrCast(&h.boolType(self.ctx)));
-            const const_op = c.mlirOperationCreate(&const_state);
+            const const_op = self.ora_dialect.createArithConstant(1, h.boolType(self.ctx), loc);
             h.appendOp(self.block, const_op);
             break :blk h.getResult(const_op, 0);
         },
@@ -1445,61 +1305,30 @@ pub fn lowerSwitchCases(self: *const StatementLowerer, cases: []const lib.ast.Ex
     const if_op = if (is_labeled_switch) blk: {
         log.debug("[lowerSwitchCases] Creating scf.if for labeled switch (no result type, ora.return inside)\n", .{});
         // use scf.if without result type - allows ora.return inside regions
-        var if_state = h.opState("scf.if", loc);
-        c.mlirOperationStateAddOperands(&if_state, 1, @ptrCast(&case_condition));
-        // no result type for labeled switches (inside scf.while)
-
-        const then_region = c.mlirRegionCreate();
-        const then_block = c.mlirBlockCreate(0, null, null);
-        c.mlirRegionInsertOwnedBlock(then_region, 0, then_block);
-
-        const else_region = c.mlirRegionCreate();
-        const else_block = c.mlirBlockCreate(0, null, null);
-        c.mlirRegionInsertOwnedBlock(else_region, 0, else_block);
-
-        c.mlirOperationStateAddOwnedRegions(&if_state, 1, @ptrCast(&then_region));
-        c.mlirOperationStateAddOwnedRegions(&if_state, 1, @ptrCast(&else_region));
-
-        const op = c.mlirOperationCreate(&if_state);
+        const result_types = [_]c.MlirType{};
+        const op = self.ora_dialect.createScfIf(case_condition, result_types[0..], loc);
         break :blk op;
     } else blk: {
         log.debug("[lowerSwitchCases] Creating scf.if for non-labeled switch\n", .{});
         // use scf.if - allows scf.yield with values
-        var if_state = h.opState("scf.if", loc);
-        c.mlirOperationStateAddOperands(&if_state, 1, @ptrCast(&case_condition));
-
-        // add result type if we have returns
+        var result_types: [1]c.MlirType = undefined;
+        var result_slice: []c.MlirType = &[_]c.MlirType{};
         if (result_type) |ret_type| {
-            c.mlirOperationStateAddResults(&if_state, 1, @ptrCast(&ret_type));
+            result_types[0] = ret_type;
+            result_slice = result_types[0..1];
         }
-
-        const then_region = c.mlirRegionCreate();
-        const then_block = c.mlirBlockCreate(0, null, null);
-        c.mlirRegionInsertOwnedBlock(then_region, 0, then_block);
-
-        const else_region = c.mlirRegionCreate();
-        const else_block = c.mlirBlockCreate(0, null, null);
-        c.mlirRegionInsertOwnedBlock(else_region, 0, else_block);
-
-        c.mlirOperationStateAddOwnedRegions(&if_state, 1, @ptrCast(&then_region));
-        c.mlirOperationStateAddOwnedRegions(&if_state, 1, @ptrCast(&else_region));
-
-        const op = c.mlirOperationCreate(&if_state);
+        const op = self.ora_dialect.createScfIf(case_condition, result_slice, loc);
         break :blk op;
     };
 
     // get regions (works for both ora.if and scf.if)
     // for labeled switches, we already created the regions above
     // for non-labeled switches, we need to get them from the operation
-    const then_region = if (is_labeled_switch) blk: {
-        // regions already created above for labeled switches
-        break :blk c.mlirOperationGetRegion(if_op, 0);
-    } else blk: {
-        break :blk c.mlirOperationGetRegion(if_op, 0);
-    };
-    const else_region = c.mlirOperationGetRegion(if_op, 1);
-    const then_block = c.mlirRegionGetFirstBlock(then_region);
-    const else_block = c.mlirRegionGetFirstBlock(else_region);
+    const then_block = c.oraScfIfOpGetThenBlock(if_op);
+    const else_block = c.oraScfIfOpGetElseBlock(if_op);
+    if (c.oraBlockIsNull(then_block) or c.oraBlockIsNull(else_block)) {
+        @panic("scf.if missing then/else blocks");
+    }
 
     log.debug("[lowerSwitchCases] if operation created, appending to self.block\n", .{});
     h.appendOp(target_block, if_op);
@@ -1529,8 +1358,7 @@ pub fn lowerSwitchCases(self: *const StatementLowerer, cases: []const lib.ast.Ex
                 h.appendOp(then_block, yield_op);
             } else {
                 // no result type - use empty scf.yield
-                var yield_state = h.opState("scf.yield", loc);
-                const yield_op = c.mlirOperationCreate(&yield_state);
+            const yield_op = self.ora_dialect.createScfYield(loc);
                 h.appendOp(then_block, yield_op);
             }
         },
@@ -1560,8 +1388,8 @@ pub fn lowerSwitchCases(self: *const StatementLowerer, cases: []const lib.ast.Ex
                                             const return_value = expr_lowerer.lowerExpression(&value_expr);
                                             const value_to_store = helpers.ensureValue(&temp_lowerer, return_value, ret_loc);
                                             // get target type from memref element type
-                                            const memref_type = c.mlirValueGetType(return_value_memref);
-                                            const element_type = c.mlirShapedTypeGetElementType(memref_type);
+                                            const memref_type = c.oraValueGetType(return_value_memref);
+                                            const element_type = c.oraShapedTypeGetElementType(memref_type);
                                             // convert value to match memref element type
                                             const final_value = helpers.convertValueToType(&temp_lowerer, value_to_store, element_type, ret.span, ret_loc);
                                             // store return value
@@ -1581,8 +1409,7 @@ pub fn lowerSwitchCases(self: *const StatementLowerer, cases: []const lib.ast.Ex
                             }
                             // use scf.yield to exit scf.if region (return handled after scf.while)
                             const ret_loc = temp_lowerer.fileLoc(ret.span);
-                            var yield_state = h.opState("scf.yield", ret_loc);
-                            const yield_op = c.mlirOperationCreate(&yield_state);
+            const yield_op = self.ora_dialect.createScfYield(ret_loc);
                             h.appendOp(then_block, yield_op);
                             has_terminator = true;
                         },
@@ -1598,8 +1425,7 @@ pub fn lowerSwitchCases(self: *const StatementLowerer, cases: []const lib.ast.Ex
                 }
                 // ensure block has a terminator
                 if (!has_terminator) {
-                    var yield_state = h.opState("scf.yield", loc);
-                    const yield_op = c.mlirOperationCreate(&yield_state);
+            const yield_op = self.ora_dialect.createScfYield(loc);
                     h.appendOp(then_block, yield_op);
                 }
             } else if (has_return) {
@@ -1616,8 +1442,7 @@ pub fn lowerSwitchCases(self: *const StatementLowerer, cases: []const lib.ast.Ex
                         const yield_op = self.ora_dialect.createScfYieldWithValues(&[_]c.MlirValue{default_val}, loc);
                         h.appendOp(then_block, yield_op);
                     } else {
-                        var yield_state = h.opState("scf.yield", loc);
-                        const yield_op = c.mlirOperationCreate(&yield_state);
+            const yield_op = self.ora_dialect.createScfYield(loc);
                         h.appendOp(then_block, yield_op);
                     }
                 }
@@ -1628,13 +1453,11 @@ pub fn lowerSwitchCases(self: *const StatementLowerer, cases: []const lib.ast.Ex
                 const ends_with_break_or_continue = helpers.blockEndsWithBreak(self, then_block) or helpers.blockEndsWithContinue(self, then_block);
                 if (ends_with_break_or_continue) {
                     // add scf.yield after ora.break/ora.continue to properly terminate the scf.if block
-                    var yield_state = h.opState("scf.yield", loc);
-                    const yield_op = c.mlirOperationCreate(&yield_state);
+            const yield_op = self.ora_dialect.createScfYield(loc);
                     h.appendOp(then_block, yield_op);
                 } else if (!ended_with_terminator) {
                     // block doesn't have a terminator, add scf.yield for scf.if block
-                    var yield_state = h.opState("scf.yield", loc);
-                    const yield_op = c.mlirOperationCreate(&yield_state);
+            const yield_op = self.ora_dialect.createScfYield(loc);
                     h.appendOp(then_block, yield_op);
                 }
             }
@@ -1665,8 +1488,8 @@ pub fn lowerSwitchCases(self: *const StatementLowerer, cases: []const lib.ast.Ex
                                             const return_value = expr_lowerer.lowerExpression(&value_expr);
                                             const value_to_store = helpers.ensureValue(&temp_lowerer, return_value, ret_loc);
                                             // get target type from memref element type
-                                            const memref_type = c.mlirValueGetType(return_value_memref);
-                                            const element_type = c.mlirShapedTypeGetElementType(memref_type);
+                                            const memref_type = c.oraValueGetType(return_value_memref);
+                                            const element_type = c.oraShapedTypeGetElementType(memref_type);
                                             // convert value to match memref element type
                                             const final_value = helpers.convertValueToType(&temp_lowerer, value_to_store, element_type, ret.span, ret_loc);
                                             // store return value
@@ -1686,8 +1509,7 @@ pub fn lowerSwitchCases(self: *const StatementLowerer, cases: []const lib.ast.Ex
                             }
                             // use scf.yield to exit scf.if region (return handled after scf.while)
                             const ret_loc = temp_lowerer.fileLoc(ret.span);
-                            var yield_state = h.opState("scf.yield", ret_loc);
-                            const yield_op = c.mlirOperationCreate(&yield_state);
+            const yield_op = self.ora_dialect.createScfYield(ret_loc);
                             h.appendOp(then_block, yield_op);
                             has_terminator = true;
                         },
@@ -1703,8 +1525,7 @@ pub fn lowerSwitchCases(self: *const StatementLowerer, cases: []const lib.ast.Ex
                 }
                 // ensure block has a terminator
                 if (!has_terminator) {
-                    var yield_state = h.opState("scf.yield", loc);
-                    const yield_op = c.mlirOperationCreate(&yield_state);
+            const yield_op = self.ora_dialect.createScfYield(loc);
                     h.appendOp(then_block, yield_op);
                 }
             } else if (has_return) {
@@ -1729,8 +1550,7 @@ pub fn lowerSwitchCases(self: *const StatementLowerer, cases: []const lib.ast.Ex
                         const yield_op = self.ora_dialect.createScfYieldWithValues(&[_]c.MlirValue{default_val}, loc);
                         h.appendOp(then_block, yield_op);
                     } else {
-                        var yield_state = h.opState("scf.yield", loc);
-                        const yield_op = c.mlirOperationCreate(&yield_state);
+            const yield_op = self.ora_dialect.createScfYield(loc);
                         h.appendOp(then_block, yield_op);
                     }
                 }
@@ -1741,13 +1561,11 @@ pub fn lowerSwitchCases(self: *const StatementLowerer, cases: []const lib.ast.Ex
                 const ends_with_break_or_continue = helpers.blockEndsWithBreak(self, then_block) or helpers.blockEndsWithContinue(self, then_block);
                 if (ends_with_break_or_continue) {
                     // add scf.yield after ora.break/ora.continue to properly terminate the scf.if block
-                    var yield_state = h.opState("scf.yield", loc);
-                    const yield_op = c.mlirOperationCreate(&yield_state);
+            const yield_op = self.ora_dialect.createScfYield(loc);
                     h.appendOp(then_block, yield_op);
                 } else if (!ended_with_terminator) {
                     // block doesn't have a terminator, add scf.yield for scf.if block
-                    var yield_state = h.opState("scf.yield", loc);
-                    const yield_op = c.mlirOperationCreate(&yield_state);
+            const yield_op = self.ora_dialect.createScfYield(loc);
                     h.appendOp(then_block, yield_op);
                 }
             }
@@ -1765,8 +1583,8 @@ pub fn lowerSwitchCases(self: *const StatementLowerer, cases: []const lib.ast.Ex
         if (recursive_result) |nested_result| {
             // ensure nested result matches the expected result type
             if (result_type) |ret_type| {
-                const nested_type = c.mlirValueGetType(nested_result);
-                const final_result = if (!c.mlirTypeEqual(nested_type, ret_type))
+                const nested_type = c.oraValueGetType(nested_result);
+                const final_result = if (!c.oraTypeEqual(nested_type, ret_type))
                     helpers.convertValueToType(self, nested_result, ret_type, cases[0].span, loc)
                 else
                     nested_result;
@@ -1786,8 +1604,7 @@ pub fn lowerSwitchCases(self: *const StatementLowerer, cases: []const lib.ast.Ex
                     const yield_op = self.ora_dialect.createScfYieldWithValues(&[_]c.MlirValue{default_val}, loc);
                     h.appendOp(else_block, yield_op);
                 } else {
-                    var yield_state = h.opState("scf.yield", loc);
-                    const yield_op = c.mlirOperationCreate(&yield_state);
+            const yield_op = self.ora_dialect.createScfYield(loc);
                     h.appendOp(else_block, yield_op);
                 }
             }
@@ -1796,8 +1613,7 @@ pub fn lowerSwitchCases(self: *const StatementLowerer, cases: []const lib.ast.Ex
         // for labeled switches or switches without result types, just ensure terminator
         const has_yield = helpers.blockEndsWithYield(self, else_block);
         if (!has_yield) {
-            var yield_state = h.opState("scf.yield", loc);
-            const yield_op = c.mlirOperationCreate(&yield_state);
+            const yield_op = self.ora_dialect.createScfYield(loc);
             h.appendOp(else_block, yield_op);
         }
     }

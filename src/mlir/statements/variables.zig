@@ -147,12 +147,13 @@ pub fn lowerStackVariableDecl(self: *const StatementLowerer, var_decl: *const li
 
         // arrays need rank 1 with shape, other aggregates and scalar accumulators use rank 0
         const rank: u32 = if (ora_type == .array) 1 else 0;
-        const shape: ?[*]const i64 = if (ora_type == .array) blk: {
-            const array_len: i64 = @intCast(ora_type.array.len);
-            break :blk &[_]i64{array_len};
+        var shape_buf: [1]i64 = .{0};
+        const shape: ?*const i64 = if (ora_type == .array) blk: {
+            shape_buf[0] = @intCast(ora_type.array.len);
+            break :blk &shape_buf[0];
         } else null;
 
-        const memref_type = c.mlirMemRefTypeGet(mlir_type, rank, shape, c.mlirAttributeGetNull(), c.mlirAttributeGetNull());
+        const memref_type = h.memRefType(self.ctx, mlir_type, rank, shape, h.nullAttr(), h.nullAttr());
 
         // allocate memory on the stack
         const alloca_op = self.ora_dialect.createMemrefAlloca(memref_type, loc);
@@ -167,7 +168,7 @@ pub fn lowerStackVariableDecl(self: *const StatementLowerer, var_decl: *const li
             init_value = try helpers.insertRefinementGuard(self, init_value, ora_type, var_decl.span, var_decl.skip_guard);
 
             // ensure value type matches memref element type (both should be Ora types now)
-            const element_type = c.mlirShapedTypeGetElementType(memref_type);
+            const element_type = c.oraShapedTypeGetElementType(memref_type);
             init_value = self.expr_lowerer.convertToType(init_value, element_type, var_decl.span);
 
             const store_op = self.ora_dialect.createMemrefStore(init_value, memref, &[_]c.MlirValue{}, loc);
@@ -180,7 +181,7 @@ pub fn lowerStackVariableDecl(self: *const StatementLowerer, var_decl: *const li
             default_value = try helpers.insertRefinementGuard(self, default_value, ora_type, var_decl.span, var_decl.skip_guard);
 
             // ensure value type matches memref element type (both should be Ora types now)
-            const element_type = c.mlirShapedTypeGetElementType(memref_type);
+            const element_type = c.oraShapedTypeGetElementType(memref_type);
             default_value = self.expr_lowerer.convertToType(default_value, element_type, var_decl.span);
 
             const store_op = self.ora_dialect.createMemrefStore(default_value, memref, &[_]c.MlirValue{}, loc);
@@ -328,16 +329,7 @@ pub fn createDefaultValue(self: *const StatementLowerer, mlir_type: c.MlirType, 
     _ = kind; // Variable kind might affect default value in the future
 
     // for now, create zero value for integer types
-    var const_state = h.opState("arith.constant", loc);
-    c.mlirOperationStateAddResults(&const_state, 1, @ptrCast(&mlir_type));
-
-    const attr = c.mlirIntegerAttrGet(mlir_type, 0);
-    const value_id = h.identifier(self.ctx, "value");
-    var attrs = [_]c.MlirNamedAttribute{c.mlirNamedAttributeGet(value_id, attr)};
-    c.mlirOperationStateAddAttributes(&const_state, attrs.len, &attrs);
-
-    const const_op = c.mlirOperationCreate(&const_state);
+    const const_op = self.ora_dialect.createArithConstant(0, mlir_type, loc);
     h.appendOp(self.block, const_op);
-
     return h.getResult(const_op, 0);
 }

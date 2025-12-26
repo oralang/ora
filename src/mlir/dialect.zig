@@ -282,7 +282,7 @@ pub const OraDialect = struct {
             @panic("Ora dialect must be registered before creating operations");
         }
         // result type is same as input type
-        const input_type = c.mlirValueGetType(value);
+        const input_type = c.oraValueGetType(value);
         const op = c.oraOldOpCreate(self.ctx, loc, value, input_type);
         if (op.ptr == null) {
             @panic("Failed to create ora.old operation");
@@ -452,28 +452,6 @@ pub const OraDialect = struct {
         if (op.ptr == null) {
             @panic("Failed to create ora.struct.decl operation");
         }
-        return op;
-    }
-
-    /// Create ora.struct.decl operation (old implementation kept for reference)
-    pub fn createStructDeclOld(
-        self: *OraDialect,
-        name: []const u8,
-        loc: c.MlirLocation,
-    ) c.MlirOperation {
-        var state = h.opState("ora.struct.decl", loc);
-
-        // add struct name attribute
-        const name_attr = h.stringAttr(self.ctx, name);
-        const name_id = h.identifier(self.ctx, "name");
-        var attrs = [_]c.MlirNamedAttribute{c.mlirNamedAttributeGet(name_id, name_attr)};
-        c.mlirOperationStateAddAttributes(&state, attrs.len, &attrs);
-
-        // add fields region
-        const region = c.mlirRegionCreate();
-        c.mlirOperationStateAddOwnedRegions(&state, 1, @ptrCast(&region));
-
-        const op = c.mlirOperationCreate(&state);
         return op;
     }
 
@@ -817,25 +795,11 @@ pub const OraDialect = struct {
         value_type: c.MlirType,
         loc: c.MlirLocation,
     ) c.MlirOperation {
-        var state = h.opState("arith.constant", loc);
-
-        // add result type
-        c.mlirOperationStateAddResults(&state, 1, @ptrCast(&value_type));
-
-        // add value attribute
-        const attr = c.mlirIntegerAttrGet(value_type, value);
-        const value_id = h.identifier(self.ctx, "value");
-
-        // add gas cost attribute (constants are free = 0)
-        const gas_cost_attr = c.mlirIntegerAttrGet(c.mlirIntegerTypeGet(self.ctx, 64), 0);
-        const gas_cost_id = h.identifier(self.ctx, "gas_cost");
-        var attrs = [_]c.MlirNamedAttribute{
-            c.mlirNamedAttributeGet(value_id, attr),
-            c.mlirNamedAttributeGet(gas_cost_id, gas_cost_attr),
-        };
-        c.mlirOperationStateAddAttributes(&state, attrs.len, &attrs);
-
-        const op = c.mlirOperationCreate(&state);
+        const attr = c.oraIntegerAttrCreateI64FromType(value_type, value);
+        const op = c.oraArithConstantOpCreate(self.ctx, loc, value_type, attr);
+        if (op.ptr == null) {
+            @panic("Failed to create arith.constant operation");
+        }
         return op;
     }
 
@@ -845,7 +809,7 @@ pub const OraDialect = struct {
         value: bool,
         loc: c.MlirLocation,
     ) c.MlirOperation {
-        const bool_type = c.mlirIntegerTypeGet(self.ctx, 1);
+        const bool_type = c.oraIntegerTypeCreate(self.ctx, 1);
         const int_value: i64 = if (value) 1 else 0;
         return self.createArithConstant(int_value, bool_type, loc);
     }
@@ -858,31 +822,15 @@ pub const OraDialect = struct {
         custom_attrs: []const c.MlirNamedAttribute,
         loc: c.MlirLocation,
     ) c.MlirOperation {
-        var state = h.opState("arith.constant", loc);
-
-        // add result type
-        c.mlirOperationStateAddResults(&state, 1, @ptrCast(&value_type));
-
         // add value attribute
-        const attr = c.mlirIntegerAttrGet(value_type, value);
-        const value_id = h.identifier(self.ctx, "value");
-        const attrs = [_]c.MlirNamedAttribute{c.mlirNamedAttributeGet(value_id, attr)};
-
-        // combine with custom attributes
-        var all_attrs: [16]c.MlirNamedAttribute = undefined;
-        var attr_count: usize = 1;
-        all_attrs[0] = attrs[0];
-
-        for (custom_attrs) |custom_attr| {
-            if (attr_count < all_attrs.len) {
-                all_attrs[attr_count] = custom_attr;
-                attr_count += 1;
-            }
+        const attr = c.oraIntegerAttrCreateI64FromType(value_type, value);
+        const op = c.oraArithConstantOpCreate(self.ctx, loc, value_type, attr);
+        if (op.ptr == null) {
+            @panic("Failed to create arith.constant operation");
         }
-
-        c.mlirOperationStateAddAttributes(&state, @intCast(attr_count), &all_attrs);
-
-        const op = c.mlirOperationCreate(&state);
+        for (custom_attrs) |custom_attr| {
+            c.oraOperationSetAttributeByName(op, c.oraIdentifierStr(custom_attr.name), custom_attr.attribute);
+        }
         return op;
     }
 
@@ -891,15 +839,10 @@ pub const OraDialect = struct {
         self: *OraDialect,
         loc: c.MlirLocation,
     ) c.MlirOperation {
-        var state = h.opState("ora.return", loc);
-
-        // add gas cost attribute (JUMP = 8, return is similar to jump)
-        const gas_cost_attr = c.mlirIntegerAttrGet(c.mlirIntegerTypeGet(self.ctx, 64), 8);
-        const gas_cost_id = h.identifier(self.ctx, "gas_cost");
-        var attrs = [_]c.MlirNamedAttribute{c.mlirNamedAttributeGet(gas_cost_id, gas_cost_attr)};
-        c.mlirOperationStateAddAttributes(&state, attrs.len, &attrs);
-
-        const op = c.mlirOperationCreate(&state);
+        const op = c.oraReturnOpCreate(self.ctx, loc, null, 0);
+        if (op.ptr == null) {
+            @panic("Failed to create ora.return operation");
+        }
         return op;
     }
 
@@ -909,16 +852,10 @@ pub const OraDialect = struct {
         return_value: c.MlirValue,
         loc: c.MlirLocation,
     ) c.MlirOperation {
-        var state = h.opState("ora.return", loc);
-        c.mlirOperationStateAddOperands(&state, 1, @ptrCast(&return_value));
-
-        // add gas cost attribute (JUMP = 8, return is similar to jump)
-        const gas_cost_attr = c.mlirIntegerAttrGet(c.mlirIntegerTypeGet(self.ctx, 64), 8);
-        const gas_cost_id = h.identifier(self.ctx, "gas_cost");
-        var attrs = [_]c.MlirNamedAttribute{c.mlirNamedAttributeGet(gas_cost_id, gas_cost_attr)};
-        c.mlirOperationStateAddAttributes(&state, attrs.len, &attrs);
-
-        const op = c.mlirOperationCreate(&state);
+        const op = c.oraReturnOpCreate(self.ctx, loc, &[_]c.MlirValue{return_value}, 1);
+        if (op.ptr == null) {
+            @panic("Failed to create ora.return operation");
+        }
         return op;
     }
 
@@ -927,15 +864,10 @@ pub const OraDialect = struct {
         self: *OraDialect,
         loc: c.MlirLocation,
     ) c.MlirOperation {
-        var state = h.opState("scf.yield", loc);
-
-        // add gas cost attribute (yield itself has no cost, but JUMPDEST = 1 at destination)
-        const gas_cost_attr = c.mlirIntegerAttrGet(c.mlirIntegerTypeGet(self.ctx, 64), 1);
-        const gas_cost_id = h.identifier(self.ctx, "gas_cost");
-        var attrs = [_]c.MlirNamedAttribute{c.mlirNamedAttributeGet(gas_cost_id, gas_cost_attr)};
-        c.mlirOperationStateAddAttributes(&state, attrs.len, &attrs);
-
-        const op = c.mlirOperationCreate(&state);
+        const op = c.oraScfYieldOpCreate(self.ctx, loc, null, 0);
+        if (op.ptr == null) {
+            @panic("Failed to create scf.yield operation");
+        }
         return op;
     }
 
@@ -945,18 +877,11 @@ pub const OraDialect = struct {
         values: []const c.MlirValue,
         loc: c.MlirLocation,
     ) c.MlirOperation {
-        var state = h.opState("scf.yield", loc);
-        if (values.len > 0) {
-            c.mlirOperationStateAddOperands(&state, @intCast(values.len), values.ptr);
+        const values_ptr = if (values.len == 0) null else values.ptr;
+        const op = c.oraScfYieldOpCreate(self.ctx, loc, values_ptr, values.len);
+        if (op.ptr == null) {
+            @panic("Failed to create scf.yield operation");
         }
-
-        // add gas cost attribute (yield itself has no cost, but JUMPDEST = 1 at destination)
-        const gas_cost_attr = c.mlirIntegerAttrGet(c.mlirIntegerTypeGet(self.ctx, 64), 1);
-        const gas_cost_id = h.identifier(self.ctx, "gas_cost");
-        var attrs = [_]c.MlirNamedAttribute{c.mlirNamedAttributeGet(gas_cost_id, gas_cost_attr)};
-        c.mlirOperationStateAddAttributes(&state, attrs.len, &attrs);
-
-        const op = c.mlirOperationCreate(&state);
         return op;
     }
 
@@ -966,10 +891,10 @@ pub const OraDialect = struct {
         dest_block: c.MlirBlock,
         loc: c.MlirLocation,
     ) c.MlirOperation {
-        _ = self;
-        var state = h.opState("cf.br", loc);
-        c.mlirOperationStateAddSuccessors(&state, 1, @ptrCast(&dest_block));
-        const op = c.mlirOperationCreate(&state);
+        const op = c.oraCfBrOpCreate(self.ctx, loc, dest_block);
+        if (op.ptr == null) {
+            @panic("Failed to create cf.br operation");
+        }
         return op;
     }
 
@@ -981,12 +906,39 @@ pub const OraDialect = struct {
         false_block: c.MlirBlock,
         loc: c.MlirLocation,
     ) c.MlirOperation {
-        _ = self;
-        var state = h.opState("cf.cond_br", loc);
-        c.mlirOperationStateAddOperands(&state, 1, @ptrCast(&condition));
-        const successors = [_]c.MlirBlock{ true_block, false_block };
-        c.mlirOperationStateAddSuccessors(&state, 2, successors.ptr);
-        const op = c.mlirOperationCreate(&state);
+        const op = c.oraCfCondBrOpCreate(self.ctx, loc, condition, true_block, false_block);
+        if (op.ptr == null) {
+            @panic("Failed to create cf.cond_br operation");
+        }
+        return op;
+    }
+
+    /// Create cf.assert operation
+    pub fn createCfAssert(
+        self: *OraDialect,
+        condition: c.MlirValue,
+        message: []const u8,
+        loc: c.MlirLocation,
+    ) c.MlirOperation {
+        const msg_ref = c.oraStringRefCreate(message.ptr, message.len);
+        const op = c.oraCfAssertOpCreate(self.ctx, loc, condition, msg_ref);
+        if (op.ptr == null) {
+            @panic("Failed to create cf.assert operation");
+        }
+        return op;
+    }
+
+    /// Create cf.assert operation with custom attributes
+    pub fn createCfAssertWithAttrs(
+        self: *OraDialect,
+        condition: c.MlirValue,
+        attrs: []const c.MlirNamedAttribute,
+        loc: c.MlirLocation,
+    ) c.MlirOperation {
+        const op = c.oraCfAssertOpCreateWithAttrs(self.ctx, loc, condition, attrs.ptr, attrs.len);
+        if (op.ptr == null) {
+            @panic("Failed to create cf.assert operation");
+        }
         return op;
     }
 
@@ -996,10 +948,10 @@ pub const OraDialect = struct {
         memref_type: c.MlirType,
         loc: c.MlirLocation,
     ) c.MlirOperation {
-        _ = self;
-        var state = h.opState("memref.alloca", loc);
-        c.mlirOperationStateAddResults(&state, 1, @ptrCast(&memref_type));
-        const op = c.mlirOperationCreate(&state);
+        const op = c.oraMemrefAllocaOpCreate(self.ctx, loc, memref_type);
+        if (op.ptr == null) {
+            @panic("Failed to create memref.alloca operation");
+        }
         return op;
     }
 
@@ -1011,23 +963,23 @@ pub const OraDialect = struct {
         result_type: c.MlirType,
         loc: c.MlirLocation,
     ) c.MlirOperation {
-        var state = h.opState("llvm.extractvalue", loc);
-        c.mlirOperationStateAddOperands(&state, 1, @ptrCast(&aggregate));
-        c.mlirOperationStateAddResults(&state, 1, @ptrCast(&result_type));
-
-        // add indices attribute - create array of integer attributes
-        var index_attrs = std.ArrayList(c.MlirAttribute){};
-        defer index_attrs.deinit(self.allocator);
+        var positions = std.ArrayList(i64){};
+        defer positions.deinit(self.allocator);
         for (indices) |index| {
-            const index_attr = c.mlirIntegerAttrGet(c.mlirIntegerTypeGet(self.ctx, 32), @intCast(index));
-            index_attrs.append(self.allocator, index_attr) catch unreachable;
+            positions.append(self.allocator, @intCast(index)) catch unreachable;
         }
-        const indices_attr = c.mlirArrayAttrGet(self.ctx, @intCast(index_attrs.items.len), index_attrs.items.ptr);
-        const indices_id = h.identifier(self.ctx, "position");
-        const attrs = [_]c.MlirNamedAttribute{c.mlirNamedAttributeGet(indices_id, indices_attr)};
-        c.mlirOperationStateAddAttributes(&state, attrs.len, &attrs);
 
-        const op = c.mlirOperationCreate(&state);
+        const op = c.oraLlvmExtractValueOpCreate(
+            self.ctx,
+            loc,
+            result_type,
+            aggregate,
+            if (positions.items.len > 0) positions.items.ptr else null,
+            positions.items.len,
+        );
+        if (op.ptr == null) {
+            @panic("Failed to create llvm.extractvalue operation");
+        }
         return op;
     }
 
@@ -1039,35 +991,19 @@ pub const OraDialect = struct {
         result_types: []const c.MlirType,
         loc: c.MlirLocation,
     ) c.MlirOperation {
-        var state = h.opState("func.call", loc);
-
-        // add operands
-        if (operands.len > 0) {
-            c.mlirOperationStateAddOperands(&state, @intCast(operands.len), operands.ptr);
+        const callee_ref = c.oraStringRefCreate(callee.ptr, callee.len);
+        const op = c.oraFuncCallOpCreate(
+            self.ctx,
+            loc,
+            callee_ref,
+            if (operands.len > 0) operands.ptr else null,
+            operands.len,
+            if (result_types.len > 0) result_types.ptr else null,
+            result_types.len,
+        );
+        if (op.ptr == null) {
+            @panic("Failed to create func.call operation");
         }
-
-        // add result types
-        if (result_types.len > 0) {
-            c.mlirOperationStateAddResults(&state, @intCast(result_types.len), result_types.ptr);
-        }
-
-        // add gas cost attribute (internal function call - minimal cost, similar to JUMPI = 10)
-        // for external calls, this would be CALL_BASE = 700, but internal calls are cheaper
-        const gas_cost_attr = c.mlirIntegerAttrGet(c.mlirIntegerTypeGet(self.ctx, 64), 10);
-        const gas_cost_id = h.identifier(self.ctx, "gas_cost");
-        const gas_attrs = [_]c.MlirNamedAttribute{c.mlirNamedAttributeGet(gas_cost_id, gas_cost_attr)};
-
-        // add callee attribute
-        const callee_ref = c.mlirStringRefCreate(callee.ptr, callee.len);
-        const callee_attr = c.mlirFlatSymbolRefAttrGet(self.ctx, callee_ref);
-        const callee_id = h.identifier(self.ctx, "callee");
-        var attrs = [_]c.MlirNamedAttribute{
-            c.mlirNamedAttributeGet(callee_id, callee_attr),
-            gas_attrs[0],
-        };
-        c.mlirOperationStateAddAttributes(&state, attrs.len, &attrs);
-
-        const op = c.mlirOperationCreate(&state);
         return op;
     }
 
@@ -1078,11 +1014,10 @@ pub const OraDialect = struct {
         result_type: c.MlirType,
         loc: c.MlirLocation,
     ) c.MlirOperation {
-        _ = self;
-        var state = h.opState("arith.bitcast", loc);
-        c.mlirOperationStateAddOperands(&state, 1, @ptrCast(&operand));
-        c.mlirOperationStateAddResults(&state, 1, @ptrCast(&result_type));
-        const op = c.mlirOperationCreate(&state);
+        const op = c.oraArithBitcastOpCreate(self.ctx, loc, operand, result_type);
+        if (op.ptr == null) {
+            @panic("Failed to create arith.bitcast operation");
+        }
         return op;
     }
 
@@ -1110,19 +1045,11 @@ pub const OraDialect = struct {
         result_types: []const c.MlirType,
         loc: c.MlirLocation,
     ) c.MlirOperation {
-        var state = h.opState("scf.if", loc);
-        c.mlirOperationStateAddOperands(&state, 1, @ptrCast(&condition));
-        if (result_types.len > 0) {
-            c.mlirOperationStateAddResults(&state, @intCast(result_types.len), result_types.ptr);
+        const result_ptr = if (result_types.len == 0) null else result_types.ptr;
+        const op = c.oraScfIfOpCreate(self.ctx, loc, condition, result_ptr, result_types.len, true);
+        if (op.ptr == null) {
+            @panic("Failed to create scf.if operation");
         }
-
-        // add gas cost attribute (JUMPI = 10, conditional branch)
-        const gas_cost_attr = c.mlirIntegerAttrGet(c.mlirIntegerTypeGet(self.ctx, 64), 10);
-        const gas_cost_id = h.identifier(self.ctx, "gas_cost");
-        var attrs = [_]c.MlirNamedAttribute{c.mlirNamedAttributeGet(gas_cost_id, gas_cost_attr)};
-        c.mlirOperationStateAddAttributes(&state, attrs.len, &attrs);
-
-        const op = c.mlirOperationCreate(&state);
         return op;
     }
 
@@ -1166,22 +1093,12 @@ pub const OraDialect = struct {
         result_types: []const c.MlirType,
         loc: c.MlirLocation,
     ) c.MlirOperation {
-        var state = h.opState("scf.while", loc);
-        if (operands.len > 0) {
-            c.mlirOperationStateAddOperands(&state, @intCast(operands.len), operands.ptr);
+        const operands_ptr = if (operands.len == 0) null else operands.ptr;
+        const result_ptr = if (result_types.len == 0) null else result_types.ptr;
+        const op = c.oraScfWhileOpCreate(self.ctx, loc, operands_ptr, operands.len, result_ptr, result_types.len);
+        if (op.ptr == null) {
+            @panic("Failed to create scf.while operation");
         }
-        if (result_types.len > 0) {
-            c.mlirOperationStateAddResults(&state, @intCast(result_types.len), result_types.ptr);
-        }
-
-        // add gas cost attribute (JUMPI = 10 per loop iteration for the conditional jump)
-        // note: This is the cost per iteration, actual total depends on loop execution
-        const gas_cost_attr = c.mlirIntegerAttrGet(c.mlirIntegerTypeGet(self.ctx, 64), 10);
-        const gas_cost_id = h.identifier(self.ctx, "gas_cost");
-        var attrs = [_]c.MlirNamedAttribute{c.mlirNamedAttributeGet(gas_cost_id, gas_cost_attr)};
-        c.mlirOperationStateAddAttributes(&state, attrs.len, &attrs);
-
-        const op = c.mlirOperationCreate(&state);
         return op;
     }
 
@@ -1195,29 +1112,12 @@ pub const OraDialect = struct {
         result_types: []const c.MlirType,
         loc: c.MlirLocation,
     ) c.MlirOperation {
-        var state = h.opState("scf.for", loc);
-
-        // add bounds and step operands
-        const bounds_operands = [_]c.MlirValue{ lower_bound, upper_bound, step };
-        c.mlirOperationStateAddOperands(&state, bounds_operands.len, &bounds_operands);
-
-        // add init args if any
-        if (init_args.len > 0) {
-            c.mlirOperationStateAddOperands(&state, @intCast(init_args.len), init_args.ptr);
+        const init_ptr = if (init_args.len == 0) null else init_args.ptr;
+        _ = result_types;
+        const op = c.oraScfForOpCreate(self.ctx, loc, lower_bound, upper_bound, step, init_ptr, init_args.len, false);
+        if (op.ptr == null) {
+            @panic("Failed to create scf.for operation");
         }
-
-        // add result types if any
-        if (result_types.len > 0) {
-            c.mlirOperationStateAddResults(&state, @intCast(result_types.len), result_types.ptr);
-        }
-
-        // add gas cost attribute (JUMPI = 10 per loop iteration for the conditional jump)
-        const gas_cost_attr = c.mlirIntegerAttrGet(c.mlirIntegerTypeGet(self.ctx, 64), 10);
-        const gas_cost_id = h.identifier(self.ctx, "gas_cost");
-        var attrs = [_]c.MlirNamedAttribute{c.mlirNamedAttributeGet(gas_cost_id, gas_cost_attr)};
-        c.mlirOperationStateAddAttributes(&state, attrs.len, &attrs);
-
-        const op = c.mlirOperationCreate(&state);
         return op;
     }
 
@@ -1228,18 +1128,11 @@ pub const OraDialect = struct {
         args: []const c.MlirValue,
         loc: c.MlirLocation,
     ) c.MlirOperation {
-        _ = self;
-        var state = h.opState("scf.condition", loc);
-
-        // add condition operand
-        c.mlirOperationStateAddOperands(&state, 1, @ptrCast(&condition));
-
-        // add args if any
-        if (args.len > 0) {
-            c.mlirOperationStateAddOperands(&state, @intCast(args.len), args.ptr);
+        const args_ptr = if (args.len == 0) null else args.ptr;
+        const op = c.oraScfConditionOpCreate(self.ctx, loc, condition, args_ptr, args.len);
+        if (op.ptr == null) {
+            @panic("Failed to create scf.condition operation");
         }
-
-        const op = c.mlirOperationCreate(&state);
         return op;
     }
 
@@ -1251,21 +1144,11 @@ pub const OraDialect = struct {
         result_type: c.MlirType,
         loc: c.MlirLocation,
     ) c.MlirOperation {
-        var state = h.opState("memref.load", loc);
-
-        // add operands: memref + indices
-        var operands = std.ArrayList(c.MlirValue){};
-        defer operands.deinit(self.allocator);
-        operands.append(self.allocator, memref) catch unreachable;
-        for (indices) |index| {
-            operands.append(self.allocator, index) catch unreachable;
+        const indices_ptr = if (indices.len == 0) @as([*]const c.MlirValue, undefined) else indices.ptr;
+        const op = c.oraMemrefLoadOpCreate(self.ctx, loc, memref, indices_ptr, indices.len, result_type);
+        if (op.ptr == null) {
+            @panic("Failed to create memref.load operation");
         }
-        c.mlirOperationStateAddOperands(&state, @intCast(operands.items.len), operands.items.ptr);
-
-        // add result type
-        c.mlirOperationStateAddResults(&state, 1, @ptrCast(&result_type));
-
-        const op = c.mlirOperationCreate(&state);
         return op;
     }
 
@@ -1277,19 +1160,11 @@ pub const OraDialect = struct {
         indices: []const c.MlirValue,
         loc: c.MlirLocation,
     ) c.MlirOperation {
-        var state = h.opState("memref.store", loc);
-
-        // add operands: value + memref + indices
-        var operands = std.ArrayList(c.MlirValue){};
-        defer operands.deinit(self.allocator);
-        operands.append(self.allocator, value) catch unreachable;
-        operands.append(self.allocator, memref) catch unreachable;
-        for (indices) |index| {
-            operands.append(self.allocator, index) catch unreachable;
+        const indices_ptr = if (indices.len == 0) @as([*]const c.MlirValue, undefined) else indices.ptr;
+        const op = c.oraMemrefStoreOpCreate(self.ctx, loc, value, memref, indices_ptr, indices.len);
+        if (op.ptr == null) {
+            @panic("Failed to create memref.store operation");
         }
-        c.mlirOperationStateAddOperands(&state, @intCast(operands.items.len), operands.items.ptr);
-
-        const op = c.mlirOperationCreate(&state);
         return op;
     }
 
@@ -1299,12 +1174,11 @@ pub const OraDialect = struct {
         operands: []const c.MlirValue,
         loc: c.MlirLocation,
     ) c.MlirOperation {
-        _ = self;
-        var state = h.opState("scf.break", loc);
-        if (operands.len > 0) {
-            c.mlirOperationStateAddOperands(&state, @intCast(operands.len), operands.ptr);
+        const operands_ptr = if (operands.len == 0) null else operands.ptr;
+        const op = c.oraScfBreakOpCreate(self.ctx, loc, operands_ptr, operands.len);
+        if (op.ptr == null) {
+            @panic("Failed to create scf.break operation");
         }
-        const op = c.mlirOperationCreate(&state);
         return op;
     }
 
@@ -1314,12 +1188,11 @@ pub const OraDialect = struct {
         operands: []const c.MlirValue,
         loc: c.MlirLocation,
     ) c.MlirOperation {
-        _ = self;
-        var state = h.opState("scf.continue", loc);
-        if (operands.len > 0) {
-            c.mlirOperationStateAddOperands(&state, @intCast(operands.len), operands.ptr);
+        const operands_ptr = if (operands.len == 0) null else operands.ptr;
+        const op = c.oraScfContinueOpCreate(self.ctx, loc, operands_ptr, operands.len);
+        if (op.ptr == null) {
+            @panic("Failed to create scf.continue operation");
         }
-        const op = c.mlirOperationCreate(&state);
         return op;
     }
 
@@ -1331,18 +1204,11 @@ pub const OraDialect = struct {
         result_type: c.MlirType,
         loc: c.MlirLocation,
     ) c.MlirOperation {
-        var state = h.opState("arith.addi", loc);
-        const operands = [_]c.MlirValue{ lhs, rhs };
-        c.mlirOperationStateAddOperands(&state, operands.len, &operands);
-        c.mlirOperationStateAddResults(&state, 1, @ptrCast(&result_type));
-
-        // add gas cost attribute (ADD = 3)
-        const gas_cost_attr = c.mlirIntegerAttrGet(c.mlirIntegerTypeGet(self.ctx, 64), 3);
-        const gas_cost_id = h.identifier(self.ctx, "gas_cost");
-        var attrs = [_]c.MlirNamedAttribute{c.mlirNamedAttributeGet(gas_cost_id, gas_cost_attr)};
-        c.mlirOperationStateAddAttributes(&state, attrs.len, &attrs);
-
-        const op = c.mlirOperationCreate(&state);
+        _ = result_type;
+        const op = c.oraArithAddIOpCreate(self.ctx, loc, lhs, rhs);
+        if (op.ptr == null) {
+            @panic("Failed to create arith.addi operation");
+        }
         return op;
     }
 
@@ -1354,18 +1220,11 @@ pub const OraDialect = struct {
         result_type: c.MlirType,
         loc: c.MlirLocation,
     ) c.MlirOperation {
-        var state = h.opState("arith.subi", loc);
-        const operands = [_]c.MlirValue{ lhs, rhs };
-        c.mlirOperationStateAddOperands(&state, operands.len, &operands);
-        c.mlirOperationStateAddResults(&state, 1, @ptrCast(&result_type));
-
-        // add gas cost attribute (SUB = 3)
-        const gas_cost_attr = c.mlirIntegerAttrGet(c.mlirIntegerTypeGet(self.ctx, 64), 3);
-        const gas_cost_id = h.identifier(self.ctx, "gas_cost");
-        var attrs = [_]c.MlirNamedAttribute{c.mlirNamedAttributeGet(gas_cost_id, gas_cost_attr)};
-        c.mlirOperationStateAddAttributes(&state, attrs.len, &attrs);
-
-        const op = c.mlirOperationCreate(&state);
+        _ = result_type;
+        const op = c.oraArithSubIOpCreate(self.ctx, loc, lhs, rhs);
+        if (op.ptr == null) {
+            @panic("Failed to create arith.subi operation");
+        }
         return op;
     }
 
@@ -1377,18 +1236,11 @@ pub const OraDialect = struct {
         result_type: c.MlirType,
         loc: c.MlirLocation,
     ) c.MlirOperation {
-        var state = h.opState("arith.muli", loc);
-        const operands = [_]c.MlirValue{ lhs, rhs };
-        c.mlirOperationStateAddOperands(&state, operands.len, &operands);
-        c.mlirOperationStateAddResults(&state, 1, @ptrCast(&result_type));
-
-        // add gas cost attribute (MUL = 5)
-        const gas_cost_attr = c.mlirIntegerAttrGet(c.mlirIntegerTypeGet(self.ctx, 64), 5);
-        const gas_cost_id = h.identifier(self.ctx, "gas_cost");
-        var attrs = [_]c.MlirNamedAttribute{c.mlirNamedAttributeGet(gas_cost_id, gas_cost_attr)};
-        c.mlirOperationStateAddAttributes(&state, attrs.len, &attrs);
-
-        const op = c.mlirOperationCreate(&state);
+        _ = result_type;
+        const op = c.oraArithMulIOpCreate(self.ctx, loc, lhs, rhs);
+        if (op.ptr == null) {
+            @panic("Failed to create arith.muli operation");
+        }
         return op;
     }
 
@@ -1400,18 +1252,11 @@ pub const OraDialect = struct {
         result_type: c.MlirType,
         loc: c.MlirLocation,
     ) c.MlirOperation {
-        var state = h.opState("arith.divsi", loc);
-        const operands = [_]c.MlirValue{ lhs, rhs };
-        c.mlirOperationStateAddOperands(&state, operands.len, &operands);
-        c.mlirOperationStateAddResults(&state, 1, @ptrCast(&result_type));
-
-        // add gas cost attribute (DIV = 5)
-        const gas_cost_attr = c.mlirIntegerAttrGet(c.mlirIntegerTypeGet(self.ctx, 64), 5);
-        const gas_cost_id = h.identifier(self.ctx, "gas_cost");
-        var attrs = [_]c.MlirNamedAttribute{c.mlirNamedAttributeGet(gas_cost_id, gas_cost_attr)};
-        c.mlirOperationStateAddAttributes(&state, attrs.len, &attrs);
-
-        const op = c.mlirOperationCreate(&state);
+        _ = result_type;
+        const op = c.oraArithDivSIOpCreate(self.ctx, loc, lhs, rhs);
+        if (op.ptr == null) {
+            @panic("Failed to create arith.divsi operation");
+        }
         return op;
     }
 
@@ -1423,18 +1268,11 @@ pub const OraDialect = struct {
         result_type: c.MlirType,
         loc: c.MlirLocation,
     ) c.MlirOperation {
-        var state = h.opState("arith.remsi", loc);
-        const operands = [_]c.MlirValue{ lhs, rhs };
-        c.mlirOperationStateAddOperands(&state, operands.len, &operands);
-        c.mlirOperationStateAddResults(&state, 1, @ptrCast(&result_type));
-
-        // add gas cost attribute (MOD = 5)
-        const gas_cost_attr = c.mlirIntegerAttrGet(c.mlirIntegerTypeGet(self.ctx, 64), 5);
-        const gas_cost_id = h.identifier(self.ctx, "gas_cost");
-        var attrs = [_]c.MlirNamedAttribute{c.mlirNamedAttributeGet(gas_cost_id, gas_cost_attr)};
-        c.mlirOperationStateAddAttributes(&state, attrs.len, &attrs);
-
-        const op = c.mlirOperationCreate(&state);
+        _ = result_type;
+        const op = c.oraArithRemSIOpCreate(self.ctx, loc, lhs, rhs);
+        if (op.ptr == null) {
+            @panic("Failed to create arith.remsi operation");
+        }
         return op;
     }
 

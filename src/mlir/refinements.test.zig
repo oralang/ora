@@ -14,8 +14,8 @@ const DeclarationLowerer = @import("declarations/mod.zig").DeclarationLowerer;
 
 test "refinement guard reports error for null value" {
     const allocator = testing.allocator;
-    const ctx = mlir.mlirContextCreate();
-    defer mlir.mlirContextDestroy(ctx);
+    const ctx = mlir.oraContextCreate();
+    defer mlir.oraContextDestroy(ctx);
 
     var handler = ErrorHandler.init(allocator);
     defer handler.deinit();

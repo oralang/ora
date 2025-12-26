@@ -230,32 +230,13 @@ pub const ExpressionLowerer = struct {
                 .ora_type = builtin_info.return_type,
             });
 
-            // create constant as i160 (both attribute and result type must match)
-            const i160_ty = c.mlirIntegerTypeGet(self.ctx, 160);
-            var state = h.opState("arith.constant", self.fileLoc(span));
-            c.mlirOperationStateAddResults(&state, 1, @ptrCast(&i160_ty)); // Result type is i160
-
-            // create integer attribute for value 0 (using i160 type for attribute)
-            const value_attr = c.mlirIntegerAttrGet(i160_ty, 0);
-            const value_id = h.identifier(self.ctx, "value");
-            const gas_cost_attr = c.mlirIntegerAttrGet(c.mlirIntegerTypeGet(self.ctx, 64), 0);
-            const gas_cost_id = h.identifier(self.ctx, "gas_cost");
-
-            var attrs = [_]c.MlirNamedAttribute{
-                c.mlirNamedAttributeGet(value_id, value_attr),
-                c.mlirNamedAttributeGet(gas_cost_id, gas_cost_attr),
-            };
-            c.mlirOperationStateAddAttributes(&state, attrs.len, &attrs);
-
-            const const_op = c.mlirOperationCreate(&state);
+            const i160_ty = c.oraIntegerTypeCreate(self.ctx, 160);
+            const const_op = self.ora_dialect.createArithConstant(0, i160_ty, self.fileLoc(span));
             h.appendOp(self.block, const_op);
             const i160_value = h.getResult(const_op, 0);
 
             // convert i160 to !ora.address using arith.bitcast (same width, different type)
-            var bitcast_state = h.opState("arith.bitcast", self.fileLoc(span));
-            c.mlirOperationStateAddOperands(&bitcast_state, 1, @ptrCast(&i160_value));
-            c.mlirOperationStateAddResults(&bitcast_state, 1, @ptrCast(&addr_ty)); // Result type is !ora.address
-            const bitcast_op = c.mlirOperationCreate(&bitcast_state);
+            const bitcast_op = c.oraArithBitcastOpCreate(self.ctx, self.fileLoc(span), i160_value, addr_ty);
             h.appendOp(self.block, bitcast_op);
             return h.getResult(bitcast_op, 0);
         }
@@ -414,11 +395,11 @@ pub const ExpressionLowerer = struct {
         // and assume it's zero if it's a small integer type
         // this is a heuristic - in practice, we'd need to check the actual constant value
         // for now, we'll rely on the type system to handle this correctly
-        const value_ty = c.mlirValueGetType(value);
+        const value_ty = c.oraValueGetType(value);
 
         // check if it's i160 (zero address would be i160)
-        if (c.mlirTypeIsAInteger(value_ty)) {
-            const width = c.mlirIntegerTypeGetWidth(value_ty);
+        if (c.oraTypeIsAInteger(value_ty)) {
+            const width = c.oraIntegerTypeGetWidth(value_ty);
             // if it's i160, it could be a zero address constant
             // we'll be conservative and only treat it as zero if it's explicitly i160
             // the actual zero detection would require checking the defining operation

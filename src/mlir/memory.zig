@@ -86,7 +86,7 @@ pub const MemoryManager = struct {
     /// Get memory space as MLIR attribute
     pub fn getMemorySpaceAttribute(self: *const MemoryManager, storage_type: lib.ast.Statements.MemoryRegion) c.MlirAttribute {
         const space_value = self.getMemorySpace(storage_type);
-        return c.mlirIntegerAttrGet(c.mlirIntegerTypeGet(self.ctx, 64), @intCast(space_value));
+        return c.oraIntegerAttrCreateI64FromType(c.oraIntegerTypeCreate(self.ctx, 64), @intCast(space_value));
     }
 
     /// Create region attribute for attaching `ora.region` attributes
@@ -98,8 +98,8 @@ pub const MemoryManager = struct {
             .Calldata => "calldata",
             .Stack => "stack",
         };
-        const region_ref = c.mlirStringRefCreate(region_str.ptr, region_str.len);
-        return c.mlirStringAttrGet(self.ctx, region_ref);
+        const region_ref = c.oraStringRefCreate(region_str.ptr, region_str.len);
+        return c.oraStringAttrCreate(self.ctx, region_ref);
     }
 
     /// Create allocation operation for variables in correct memory spaces
@@ -122,10 +122,8 @@ pub const MemoryManager = struct {
             .Calldata => {
                 // calldata is read-only and cannot be allocated
                 log.err("Calldata variables cannot be allocated\n", .{});
-                var state = h.opState("ora.error", loc);
-                const error_ty = c.mlirIntegerTypeGet(self.ctx, 32);
-                c.mlirOperationStateAddResults(&state, 1, @ptrCast(&error_ty));
-                return c.mlirOperationCreate(&state);
+                const error_ty = c.oraIntegerTypeCreate(self.ctx, 32);
+                return c.oraErrorOpCreate(self.ctx, loc, error_ty);
             },
             .Stack => {
                 // stack variables use regular memref.alloca
@@ -141,42 +139,27 @@ pub const MemoryManager = struct {
                 // storage uses ora.sstore - address should be variable name
                 log.err("Use createStorageStore for storage variables\n", .{});
                 // create a placeholder error operation
-                var state = h.opState("ora.error", loc);
-                const error_ty = c.mlirIntegerTypeGet(self.ctx, 32);
-                c.mlirOperationStateAddResults(&state, 1, @ptrCast(&error_ty));
-                return c.mlirOperationCreate(&state);
+                const error_ty = c.oraIntegerTypeCreate(self.ctx, 32);
+                return c.oraErrorOpCreate(self.ctx, loc, error_ty);
             },
             .Memory => {
                 // memory uses memref.store with memory space 0
-                var state = h.opState("memref.store", loc);
-                c.mlirOperationStateAddOperands(&state, 2, @ptrCast(&[_]c.MlirValue{ value, address }));
-
                 // add memory space attribute
                 const space_attr = self.getMemorySpaceAttribute(storage_type);
-                const space_id = h.identifier(self.ctx, "memspace");
-                var attrs = [_]c.MlirNamedAttribute{
-                    c.mlirNamedAttributeGet(space_id, space_attr),
-                };
-                c.mlirOperationStateAddAttributes(&state, attrs.len, &attrs);
-
-                return c.mlirOperationCreate(&state);
+                return c.oraMemrefStoreOpCreateWithMemspace(self.ctx, loc, value, address, null, 0, space_attr);
             },
             .TStore => {
                 // transient storage uses ora.tstore
                 log.err("Use createTStoreStore for transient storage variables\n", .{});
                 // create a placeholder error operation
-                var state = h.opState("ora.error", loc);
-                const error_ty = c.mlirIntegerTypeGet(self.ctx, 32);
-                c.mlirOperationStateAddResults(&state, 1, @ptrCast(&error_ty));
-                return c.mlirOperationCreate(&state);
+                const error_ty = c.oraIntegerTypeCreate(self.ctx, 32);
+                return c.oraErrorOpCreate(self.ctx, loc, error_ty);
             },
             .Calldata => {
                 // calldata is read-only
                 log.err("Cannot store to calldata\n", .{});
-                var state = h.opState("ora.error", loc);
-                const error_ty = c.mlirIntegerTypeGet(self.ctx, 32);
-                c.mlirOperationStateAddResults(&state, 1, @ptrCast(&error_ty));
-                return c.mlirOperationCreate(&state);
+                const error_ty = c.oraIntegerTypeCreate(self.ctx, 32);
+                return c.oraErrorOpCreate(self.ctx, loc, error_ty);
             },
             .Stack => {
                 // stack uses regular memref.store
@@ -193,40 +176,24 @@ pub const MemoryManager = struct {
                 // storage uses ora.sload - address should be variable name
                 log.err("Use createStorageLoad for storage variables\n", .{});
                 // create a placeholder error operation
-                var state = h.opState("ora.error", loc);
-                c.mlirOperationStateAddResults(&state, 1, @ptrCast(&result_type));
-                return c.mlirOperationCreate(&state);
+                return c.oraErrorOpCreate(self.ctx, loc, result_type);
             },
             .Memory => {
                 // memory uses memref.load with memory space 0
-                var state = h.opState("memref.load", loc);
-                c.mlirOperationStateAddOperands(&state, 1, @ptrCast(&address));
-                c.mlirOperationStateAddResults(&state, 1, @ptrCast(&result_type));
-
                 // add memory space attribute
                 const space_attr = self.getMemorySpaceAttribute(storage_type);
-                const space_id = h.identifier(self.ctx, "memspace");
-                var attrs = [_]c.MlirNamedAttribute{
-                    c.mlirNamedAttributeGet(space_id, space_attr),
-                };
-                c.mlirOperationStateAddAttributes(&state, attrs.len, &attrs);
-
-                return c.mlirOperationCreate(&state);
+                return c.oraMemrefLoadOpCreateWithMemspace(self.ctx, loc, address, null, 0, result_type, space_attr);
             },
             .TStore => {
                 // transient storage uses ora.tload
                 log.err("Use createTStoreLoad for transient storage variables\n", .{});
                 // create a placeholder error operation
-                var state = h.opState("ora.error", loc);
-                c.mlirOperationStateAddResults(&state, 1, @ptrCast(&result_type));
-                return c.mlirOperationCreate(&state);
+                return c.oraErrorOpCreate(self.ctx, loc, result_type);
             },
             .Calldata => {
                 // calldata should not use load ops in lowering
                 log.err("Calldata loads should use SSA values\n", .{});
-                var state = h.opState("ora.error", loc);
-                c.mlirOperationStateAddResults(&state, 1, @ptrCast(&result_type));
-                return c.mlirOperationCreate(&state);
+                return c.oraErrorOpCreate(self.ctx, loc, result_type);
             },
             .Stack => {
                 // stack uses regular memref.load
@@ -249,14 +216,14 @@ pub const MemoryManager = struct {
     /// Create memory load operation (ora.mload)
     pub fn createMemoryLoad(self: *const MemoryManager, var_name: []const u8, loc: c.MlirLocation) c.MlirOperation {
         // use C++ API wrapper (dialect must be registered)
-        const result_ty = c.mlirIntegerTypeGet(self.ctx, constants.DEFAULT_INTEGER_BITS);
+        const result_ty = c.oraIntegerTypeCreate(self.ctx, constants.DEFAULT_INTEGER_BITS);
         return self.ora_dialect.createMLoad(var_name, result_ty, loc);
     }
 
     /// Create transient storage load operation (ora.tload)
     pub fn createTStoreLoad(self: *const MemoryManager, var_name: []const u8, loc: c.MlirLocation) c.MlirOperation {
         // use C++ API wrapper (dialect must be registered)
-        const result_ty = c.mlirIntegerTypeGet(self.ctx, constants.DEFAULT_INTEGER_BITS);
+        const result_ty = c.oraIntegerTypeCreate(self.ctx, constants.DEFAULT_INTEGER_BITS);
         return self.ora_dialect.createTLoad(var_name, result_ty, loc);
     }
 
@@ -303,54 +270,31 @@ pub const MemoryManager = struct {
         switch (storage_type) {
             .Storage => {
                 // generate ora.sload for storage variables
-                var state = h.opState("ora.sload", loc);
-
-                // add the global name as a symbol reference
-                var name_buffer: [256]u8 = undefined;
-                for (0..var_name.len) |i| {
-                    name_buffer[i] = var_name[i];
-                }
-                name_buffer[var_name.len] = 0; // null-terminate
-                const name_str = c.mlirStringRefCreateFromCString(&name_buffer[0]);
-                const name_attr = c.mlirStringAttrGet(self.ctx, name_str);
-                const name_id = h.identifier(self.ctx, "global");
-                var attrs = [_]c.MlirNamedAttribute{
-                    c.mlirNamedAttributeGet(name_id, name_attr),
-                };
-                c.mlirOperationStateAddAttributes(&state, attrs.len, &attrs);
-
-                // add result type (default to i256 for now)
-                const result_ty = c.mlirIntegerTypeGet(self.ctx, constants.DEFAULT_INTEGER_BITS);
-                c.mlirOperationStateAddResults(&state, 1, @ptrCast(&result_ty));
-
-                return c.mlirOperationCreate(&state);
+                const result_ty = c.oraIntegerTypeCreate(self.ctx, constants.DEFAULT_INTEGER_BITS);
+                return self.ora_dialect.createSLoad(var_name, result_ty, loc);
             },
             .Memory => {
                 // generate ora.mload for memory variables
-                const result_ty = c.mlirIntegerTypeGet(self.ctx, constants.DEFAULT_INTEGER_BITS);
+                const result_ty = c.oraIntegerTypeCreate(self.ctx, constants.DEFAULT_INTEGER_BITS);
                 return self.ora_dialect.createMLoad(var_name, result_ty, loc);
             },
             .TStore => {
                 // generate ora.tload for transient storage variables
-                const result_ty = c.mlirIntegerTypeGet(self.ctx, constants.DEFAULT_INTEGER_BITS);
+                const result_ty = c.oraIntegerTypeCreate(self.ctx, constants.DEFAULT_INTEGER_BITS);
                 return self.ora_dialect.createTLoad(var_name, result_ty, loc);
             },
             .Calldata => {
                 log.err("Calldata should not use createLoadOperation\n", .{});
-                var state = h.opState("ora.error", loc);
-                const error_ty = c.mlirIntegerTypeGet(self.ctx, 32);
-                c.mlirOperationStateAddResults(&state, 1, @ptrCast(&error_ty));
-                return c.mlirOperationCreate(&state);
+                const error_ty = c.oraIntegerTypeCreate(self.ctx, 32);
+                return c.oraErrorOpCreate(self.ctx, loc, error_ty);
             },
             .Stack => {
                 // for stack variables, we return the value directly from our local variable map
                 // this is handled differently in the identifier lowering
                 log.err("Stack variables should not use createLoadOperation\n", .{});
                 // create a placeholder error operation
-                var state = h.opState("ora.error", loc);
-                const error_ty = c.mlirIntegerTypeGet(self.ctx, 32);
-                c.mlirOperationStateAddResults(&state, 1, @ptrCast(&error_ty));
-                return c.mlirOperationCreate(&state);
+                const error_ty = c.oraIntegerTypeCreate(self.ctx, 32);
+                return c.oraErrorOpCreate(self.ctx, loc, error_ty);
             },
         }
     }
@@ -361,25 +305,7 @@ pub const MemoryManager = struct {
 
         switch (storage_type) {
             .Storage => {
-                // generate ora.sstore for storage variables
-                var state = h.opState("ora.sstore", loc);
-                c.mlirOperationStateAddOperands(&state, 1, @ptrCast(&value));
-
-                // add the global name as a symbol reference
-                var name_buffer: [256]u8 = undefined;
-                for (0..var_name.len) |i| {
-                    name_buffer[i] = var_name[i];
-                }
-                name_buffer[var_name.len] = 0; // null-terminate
-                const name_str = c.mlirStringRefCreateFromCString(&name_buffer[0]);
-                const name_attr = c.mlirStringAttrGet(self.ctx, name_str);
-                const name_id = h.identifier(self.ctx, "global");
-                var attrs = [_]c.MlirNamedAttribute{
-                    c.mlirNamedAttributeGet(name_id, name_attr),
-                };
-                c.mlirOperationStateAddAttributes(&state, attrs.len, &attrs);
-
-                return c.mlirOperationCreate(&state);
+                return self.ora_dialect.createSStore(value, var_name, loc);
             },
             .Memory => {
                 // generate ora.mstore for memory variables
@@ -391,71 +317,39 @@ pub const MemoryManager = struct {
             },
             .Calldata => {
                 log.err("Cannot store to calldata\n", .{});
-                var state = h.opState("ora.error", loc);
-                const error_ty = c.mlirIntegerTypeGet(self.ctx, 32);
-                c.mlirOperationStateAddResults(&state, 1, @ptrCast(&error_ty));
-                return c.mlirOperationCreate(&state);
+                const error_ty = c.oraIntegerTypeCreate(self.ctx, 32);
+                return c.oraErrorOpCreate(self.ctx, loc, error_ty);
             },
             .Stack => {
                 // for stack variables, we store the value directly in our local variable map
                 // this is handled differently in the assignment lowering
                 log.err("Stack variables should not use createStoreOperation\n", .{});
                 // create a placeholder error operation
-                var state = h.opState("ora.error", loc);
-                const error_ty = c.mlirIntegerTypeGet(self.ctx, 32);
-                c.mlirOperationStateAddResults(&state, 1, @ptrCast(&error_ty));
-                return c.mlirOperationCreate(&state);
+                const error_ty = c.oraIntegerTypeCreate(self.ctx, 32);
+                return c.oraErrorOpCreate(self.ctx, loc, error_ty);
             },
         }
     }
 
     /// Create file location for operations
     fn createFileLocation(self: *const MemoryManager, span: lib.ast.SourceSpan) c.MlirLocation {
-        return c.mlirLocationFileLineColGet(self.ctx, h.strRefLit("input.ora"), span.line, span.column);
+        return c.oraLocationFileLineColGet(self.ctx, h.strRefLit("input.ora"), span.line, span.column);
     }
 
     /// Create global storage declaration
     fn createGlobalStorageDeclaration(self: *const MemoryManager, var_name: []const u8, var_type: c.MlirType, loc: c.MlirLocation) c.MlirOperation {
-        var state = h.opState("ora.global", loc);
-
         // add variable name as symbol attribute
-        const name_ref = c.mlirStringRefCreate(var_name.ptr, var_name.len);
-        const name_attr = c.mlirStringAttrGet(self.ctx, name_ref);
-        const name_id = h.identifier(self.ctx, "sym_name");
-
-        // add type attribute
-        const type_attr = c.mlirTypeAttrGet(var_type);
-        const type_id = h.identifier(self.ctx, "type");
-
-        var attrs = [_]c.MlirNamedAttribute{
-            c.mlirNamedAttributeGet(name_id, name_attr),
-            c.mlirNamedAttributeGet(type_id, type_attr),
-        };
-        c.mlirOperationStateAddAttributes(&state, attrs.len, &attrs);
-
-        return c.mlirOperationCreate(&state);
+        const init_attr = if (c.oraTypeIsAInteger(var_type))
+            c.oraIntegerAttrCreateI64FromType(var_type, 0)
+        else
+            c.oraNullAttrCreate();
+        return self.ora_dialect.createGlobal(var_name, var_type, init_attr, loc);
     }
 
     /// Create global transient storage declaration
     fn createGlobalTStoreDeclaration(self: *const MemoryManager, var_name: []const u8, var_type: c.MlirType, loc: c.MlirLocation) c.MlirOperation {
-        var state = h.opState("ora.tstore.global", loc);
-
         // add variable name as symbol attribute
-        const name_ref = c.mlirStringRefCreate(var_name.ptr, var_name.len);
-        const name_attr = c.mlirStringAttrGet(self.ctx, name_ref);
-        const name_id = h.identifier(self.ctx, "sym_name");
-
-        // add type attribute
-        const type_attr = c.mlirTypeAttrGet(var_type);
-        const type_id = h.identifier(self.ctx, "type");
-
-        var attrs = [_]c.MlirNamedAttribute{
-            c.mlirNamedAttributeGet(name_id, name_attr),
-            c.mlirNamedAttributeGet(type_id, type_attr),
-        };
-        c.mlirOperationStateAddAttributes(&state, attrs.len, &attrs);
-
-        return c.mlirOperationCreate(&state);
+        return c.oraTStoreGlobalOpCreate(self.ctx, loc, h.strRef(var_name), var_type);
     }
 
     /// Validate memory region constraints

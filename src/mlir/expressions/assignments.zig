@@ -36,13 +36,13 @@ pub fn lowerAssignment(
         .Identifier => |ident| {
             if (self.local_var_map) |lvm| {
                 if (lvm.getLocalVar(ident.name)) |local_var_ref| {
-                    const var_type = c.mlirValueGetType(local_var_ref);
+                    const var_type = c.oraValueGetType(local_var_ref);
                     var store_value = value;
-                    if (c.mlirTypeIsAMemRef(var_type)) {
-                        const element_type = c.mlirShapedTypeGetElementType(var_type);
-                        const value_type = c.mlirValueGetType(value);
-                        log.debug("[ASSIGN Expression] Variable: {s}, value_type != element_type: {}, value_is_ora: {}, element_is_ora: {}\n", .{ ident.name, !c.mlirTypeEqual(value_type, element_type), c.oraTypeIsIntegerType(value_type), c.oraTypeIsIntegerType(element_type) });
-                        if (!c.mlirTypeEqual(value_type, element_type)) {
+                    if (c.oraTypeIsAMemRef(var_type)) {
+                        const element_type = c.oraShapedTypeGetElementType(var_type);
+                        const value_type = c.oraValueGetType(value);
+                        log.debug("[ASSIGN Expression] Variable: {s}, value_type != element_type: {}, value_is_ora: {}, element_is_ora: {}\n", .{ ident.name, !c.oraTypeEqual(value_type, element_type), c.oraTypeIsIntegerType(value_type), c.oraTypeIsIntegerType(element_type) });
+                        if (!c.oraTypeEqual(value_type, element_type)) {
                             log.debug("[ASSIGN Expression] Converting (types not equal)\n", .{});
                             store_value = self.convertToType(value, element_type, assign.span);
                         } else if (c.oraTypeIsIntegerType(value_type) and c.oraTypeIsIntegerType(element_type)) {
@@ -51,12 +51,17 @@ pub fn lowerAssignment(
                         } else {
                             log.debug("[ASSIGN Expression] No conversion needed\n", .{});
                         }
-                        const store_value_type = c.mlirValueGetType(store_value);
-                        log.debug("[ASSIGN Expression] After conversion: types_equal: {}\n", .{c.mlirTypeEqual(store_value_type, element_type)});
+                        const store_value_type = c.oraValueGetType(store_value);
+                        log.debug("[ASSIGN Expression] After conversion: types_equal: {}\n", .{c.oraTypeEqual(store_value_type, element_type)});
                     }
-                    var store_state = h.opState("memref.store", self.fileLoc(assign.span));
-                    c.mlirOperationStateAddOperands(&store_state, 2, @ptrCast(&[_]c.MlirValue{ store_value, local_var_ref }));
-                    const store_op = c.mlirOperationCreate(&store_state);
+                    const store_op = c.oraMemrefStoreOpCreate(
+                        self.ctx,
+                        self.fileLoc(assign.span),
+                        store_value,
+                        local_var_ref,
+                        null,
+                        0,
+                    );
                     h.appendOp(self.block, store_op);
                     return value;
                 }
@@ -71,22 +76,27 @@ pub fn lowerAssignment(
                 }
             }
 
-            const var_type = c.mlirValueGetType(value);
-            const memref_type = c.mlirMemRefTypeGet(var_type, 0, null, c.mlirAttributeGetNull(), c.mlirAttributeGetNull());
+            const var_type = c.oraValueGetType(value);
+            const memref_type = h.memRefType(self.ctx, var_type, 0, null, h.nullAttr(), h.nullAttr());
             const alloca_op = self.ora_dialect.createMemrefAlloca(memref_type, self.fileLoc(assign.span));
             h.appendOp(self.block, alloca_op);
             const alloca_result = h.getResult(alloca_op, 0);
 
-            var store_state = h.opState("memref.store", self.fileLoc(assign.span));
-            c.mlirOperationStateAddOperands(&store_state, 2, @ptrCast(&[_]c.MlirValue{ value, alloca_result }));
-            const store_op = c.mlirOperationCreate(&store_state);
+            const store_op = c.oraMemrefStoreOpCreate(
+                self.ctx,
+                self.fileLoc(assign.span),
+                value,
+                alloca_result,
+                null,
+                0,
+            );
             h.appendOp(self.block, store_op);
 
             return value;
         },
         .FieldAccess => |field_access| {
             const target_value = self.lowerExpression(field_access.target);
-            const target_type = c.mlirValueGetType(target_value);
+            const target_type = c.oraValueGetType(target_value);
             const field_name = field_access.field;
 
             if (field_access.target.* == .Identifier) {
@@ -112,7 +122,7 @@ pub fn lowerAssignment(
                             );
                         }
 
-                        if (!c.mlirTypeEqual(target_type, expected_struct_type)) {
+                        if (!c.oraTypeEqual(target_type, expected_struct_type)) {
                             log.debug(
                                 "ERROR [lowerAssignment]: Variable '{s}' should be struct type but got: {any}\n",
                                 .{ ident.name, target_type },
@@ -157,15 +167,18 @@ pub fn lowerAssignment(
         .Index => |index_expr| {
             const target_value = self.lowerExpression(index_expr.target);
             const index_value = self.lowerExpression(index_expr.index);
-            const target_type = c.mlirValueGetType(target_value);
+            const target_type = c.oraValueGetType(target_value);
 
-            if (c.mlirTypeIsAMemRef(target_type) or c.mlirTypeIsAShaped(target_type)) {
+            if (c.oraTypeIsAMemRef(target_type) or c.oraTypeIsAShaped(target_type)) {
                 const index_index = expr_access.convertIndexToIndexType(self, index_value, index_expr.span);
-                var store_state = h.opState("memref.store", self.fileLoc(assign.span));
-                c.mlirOperationStateAddOperands(&store_state, 1, @ptrCast(&value));
-                c.mlirOperationStateAddOperands(&store_state, 1, @ptrCast(&target_value));
-                c.mlirOperationStateAddOperands(&store_state, 1, @ptrCast(&index_index));
-                const store_op = c.mlirOperationCreate(&store_state);
+                const store_op = c.oraMemrefStoreOpCreate(
+                    self.ctx,
+                    self.fileLoc(assign.span),
+                    value,
+                    target_value,
+                    &[_]c.MlirValue{index_index},
+                    1,
+                );
                 h.appendOp(self.block, store_op);
             } else {
                 const op = self.ora_dialect.createMapStore(target_value, index_value, value, self.fileLoc(assign.span));
@@ -188,8 +201,8 @@ pub fn lowerCompoundAssignment(
     const current_value = lowerLValue(self, comp_assign.target, .Load);
     const rhs_value = self.lowerExpression(comp_assign.value);
 
-    const current_ty = c.mlirValueGetType(current_value);
-    const rhs_ty = c.mlirValueGetType(rhs_value);
+    const current_ty = c.oraValueGetType(current_value);
+    const rhs_ty = c.oraValueGetType(rhs_value);
     const common_ty = self.getCommonType(current_ty, rhs_ty);
 
     const current_converted = self.convertToType(current_value, common_ty, comp_assign.span);
@@ -273,13 +286,13 @@ pub fn storeLValue(
         .Identifier => |ident| {
             if (self.local_var_map) |lvm| {
                 if (lvm.getLocalVar(ident.name)) |local_var_ref| {
-                    const var_type = c.mlirValueGetType(local_var_ref);
+                    const var_type = c.oraValueGetType(local_var_ref);
                     var store_value = value;
-                    if (c.mlirTypeIsAMemRef(var_type)) {
-                        const element_type = c.mlirShapedTypeGetElementType(var_type);
-                        const value_type = c.mlirValueGetType(value);
-                        log.debug("[storeLValue] Variable: {s}, value_type != element_type: {}, value_is_ora: {}, element_is_ora: {}\n", .{ ident.name, !c.mlirTypeEqual(value_type, element_type), c.oraTypeIsIntegerType(value_type), c.oraTypeIsIntegerType(element_type) });
-                        if (!c.mlirTypeEqual(value_type, element_type)) {
+                    if (c.oraTypeIsAMemRef(var_type)) {
+                        const element_type = c.oraShapedTypeGetElementType(var_type);
+                        const value_type = c.oraValueGetType(value);
+                        log.debug("[storeLValue] Variable: {s}, value_type != element_type: {}, value_is_ora: {}, element_is_ora: {}\n", .{ ident.name, !c.oraTypeEqual(value_type, element_type), c.oraTypeIsIntegerType(value_type), c.oraTypeIsIntegerType(element_type) });
+                        if (!c.oraTypeEqual(value_type, element_type)) {
                             log.debug("[storeLValue] Converting (types not equal)\n", .{});
                             store_value = self.convertToType(value, element_type, span);
                         } else if (c.oraTypeIsIntegerType(value_type) and c.oraTypeIsIntegerType(element_type)) {
@@ -288,12 +301,17 @@ pub fn storeLValue(
                         } else {
                             log.debug("[storeLValue] No conversion needed\n", .{});
                         }
-                        const store_value_type = c.mlirValueGetType(store_value);
-                        log.debug("[storeLValue] After conversion: types_equal: {}\n", .{c.mlirTypeEqual(store_value_type, element_type)});
+                        const store_value_type = c.oraValueGetType(store_value);
+                        log.debug("[storeLValue] After conversion: types_equal: {}\n", .{c.oraTypeEqual(store_value_type, element_type)});
                     }
-                    var store_state = h.opState("memref.store", self.fileLoc(span));
-                    c.mlirOperationStateAddOperands(&store_state, 2, @ptrCast(&[_]c.MlirValue{ store_value, local_var_ref }));
-                    const store_op = c.mlirOperationCreate(&store_state);
+                    const store_op = c.oraMemrefStoreOpCreate(
+                        self.ctx,
+                        self.fileLoc(span),
+                        store_value,
+                        local_var_ref,
+                        null,
+                        0,
+                    );
                     h.appendOp(self.block, store_op);
                     return;
                 }
@@ -312,7 +330,7 @@ pub fn storeLValue(
         },
         .FieldAccess => |field| {
             const target_val = self.lowerExpression(field.target);
-            const target_type = c.mlirValueGetType(target_val);
+            const target_type = c.oraValueGetType(target_val);
 
             if (field.target.* == .Identifier) {
                 const ident = field.target.Identifier;
@@ -338,7 +356,7 @@ pub fn storeLValue(
                             return;
                         }
 
-                        if (!c.mlirTypeEqual(target_type, expected_struct_type)) {
+                        if (!c.oraTypeEqual(target_type, expected_struct_type)) {
                             log.debug(
                                 "ERROR [storeLValue]: Variable '{s}' should be struct type but got: {any}\n",
                                 .{ ident.name, target_type },
@@ -383,15 +401,18 @@ pub fn storeLValue(
         .Index => |index| {
             const target_val = self.lowerExpression(index.target);
             const index_val = self.lowerExpression(index.index);
-            const target_type = c.mlirValueGetType(target_val);
+            const target_type = c.oraValueGetType(target_val);
 
-            if (c.mlirTypeIsAMemRef(target_type) or c.mlirTypeIsAShaped(target_type)) {
+            if (c.oraTypeIsAMemRef(target_type) or c.oraTypeIsAShaped(target_type)) {
                 const index_index = expr_access.convertIndexToIndexType(self, index_val, index.span);
-                var store_state = h.opState("memref.store", self.fileLoc(span));
-                c.mlirOperationStateAddOperands(&store_state, 1, @ptrCast(&value));
-                c.mlirOperationStateAddOperands(&store_state, 1, @ptrCast(&target_val));
-                c.mlirOperationStateAddOperands(&store_state, 1, @ptrCast(&index_index));
-                const store_op = c.mlirOperationCreate(&store_state);
+                const store_op = c.oraMemrefStoreOpCreate(
+                    self.ctx,
+                    self.fileLoc(span),
+                    value,
+                    target_val,
+                    &[_]c.MlirValue{index_index},
+                    1,
+                );
                 h.appendOp(self.block, store_op);
             } else {
                 const op = self.ora_dialect.createMapStore(target_val, index_val, value, self.fileLoc(span));

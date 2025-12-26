@@ -45,7 +45,7 @@ fn lowerIntegerLiteral(
     const ty = if (int.type_info.ora_type) |_|
         type_mapper.toMlirType(int.type_info)
     else
-        c.mlirIntegerTypeGet(ctx, constants.DEFAULT_INTEGER_BITS);
+        c.oraIntegerTypeCreate(ctx, constants.DEFAULT_INTEGER_BITS);
 
     var parsed: u256 = 0;
     var digit_count: u32 = 0;
@@ -80,47 +80,19 @@ fn lowerIntegerLiteral(
     }
 
     const loc = locations.createLocation(int.span);
-    var state = h.opState("arith.constant", loc);
-    c.mlirOperationStateAddResults(&state, 1, @ptrCast(&ty));
-
-    if (parsed <= std.math.maxInt(i64)) {
-        const attr = c.mlirIntegerAttrGet(ty, @intCast(parsed));
-        const value_id = h.identifier(ctx, "value");
-        const gas_cost_attr = c.mlirIntegerAttrGet(c.mlirIntegerTypeGet(ctx, 64), 0);
-        const gas_cost_id = h.identifier(ctx, "gas_cost");
-        var attrs = [_]c.MlirNamedAttribute{
-            c.mlirNamedAttributeGet(value_id, attr),
-            c.mlirNamedAttributeGet(gas_cost_id, gas_cost_attr),
-        };
-        c.mlirOperationStateAddAttributes(&state, attrs.len, &attrs);
-    } else {
+    const attr = if (parsed <= std.math.maxInt(i64)) blk: {
+        break :blk c.oraIntegerAttrCreateI64FromType(ty, @intCast(parsed));
+    } else blk: {
         const value_str_ref = h.strRef(int.value);
-        const attr = c.oraIntegerAttrGetFromString(ty, value_str_ref);
-
-        if (c.mlirAttributeIsNull(attr)) {
+        const big_attr = c.oraIntegerAttrGetFromString(ty, value_str_ref);
+        if (c.oraAttributeIsNull(big_attr)) {
             log.err("Failed to create integer attribute from string '{s}'\n", .{int.value});
-            const fallback_attr = c.mlirIntegerAttrGet(ty, 0);
-            const value_id = h.identifier(ctx, "value");
-            const gas_cost_attr = c.mlirIntegerAttrGet(c.mlirIntegerTypeGet(ctx, 64), 0);
-            const gas_cost_id = h.identifier(ctx, "gas_cost");
-            var attrs = [_]c.MlirNamedAttribute{
-                c.mlirNamedAttributeGet(value_id, fallback_attr),
-                c.mlirNamedAttributeGet(gas_cost_id, gas_cost_attr),
-            };
-            c.mlirOperationStateAddAttributes(&state, attrs.len, &attrs);
-        } else {
-            const value_id = h.identifier(ctx, "value");
-            const gas_cost_attr = c.mlirIntegerAttrGet(c.mlirIntegerTypeGet(ctx, 64), 0);
-            const gas_cost_id = h.identifier(ctx, "gas_cost");
-            var attrs = [_]c.MlirNamedAttribute{
-                c.mlirNamedAttributeGet(value_id, attr),
-                c.mlirNamedAttributeGet(gas_cost_id, gas_cost_attr),
-            };
-            c.mlirOperationStateAddAttributes(&state, attrs.len, &attrs);
+            break :blk c.oraIntegerAttrCreateI64FromType(ty, 0);
         }
-    }
+        break :blk big_attr;
+    };
 
-    const op = c.mlirOperationCreate(&state);
+    const op = c.oraArithConstantOpCreate(ctx, loc, ty, attr);
     h.appendOp(block, op);
     return h.getResult(op, 0);
 }
@@ -146,12 +118,12 @@ fn lowerStringLiteral(
     string_lit: lib.ast.Expressions.StringLiteral,
 ) c.MlirValue {
     const string_len = string_lit.value.len;
-    const ty = c.mlirIntegerTypeGet(ctx, @intCast(string_len * 8));
+    const ty = c.oraIntegerTypeCreate(ctx, @intCast(string_len * 8));
     const loc = locations.createLocation(string_lit.span);
     const op = ora_dialect.createStringConstant(string_lit.value, ty, loc);
-    const length_attr = h.intAttr(ctx, c.mlirIntegerTypeGet(ctx, 32), @intCast(string_len));
+    const length_attr = h.intAttr(ctx, c.oraIntegerTypeCreate(ctx, 32), @intCast(string_len));
     const length_name = h.strRef("length");
-    c.mlirOperationSetAttributeByName(op, length_name, length_attr);
+    c.oraOperationSetAttributeByName(op, length_name, length_attr);
     h.appendOp(block, op);
     return h.getResult(op, 0);
 }
@@ -193,64 +165,25 @@ fn lowerAddressLiteral(
         }
     }
 
-    const i160_ty = c.mlirIntegerTypeGet(ctx, 160);
-    var state = h.opState("arith.constant", loc);
-    c.mlirOperationStateAddResults(&state, 1, @ptrCast(&i160_ty));
-
-    if (parsed <= std.math.maxInt(i64)) {
-        const attr = c.mlirIntegerAttrGet(i160_ty, @intCast(parsed));
-        const value_id = h.identifier(ctx, "value");
-        const gas_cost_attr = c.mlirIntegerAttrGet(c.mlirIntegerTypeGet(ctx, 64), 0);
-        const gas_cost_id = h.identifier(ctx, "gas_cost");
-        var attrs = [_]c.MlirNamedAttribute{
-            c.mlirNamedAttributeGet(value_id, attr),
-            c.mlirNamedAttributeGet(gas_cost_id, gas_cost_attr),
-        };
-        c.mlirOperationStateAddAttributes(&state, attrs.len, &attrs);
-    } else {
+    const i160_ty = c.oraIntegerTypeCreate(ctx, 160);
+    const attr = if (parsed <= std.math.maxInt(i64)) blk: {
+        break :blk c.oraIntegerAttrCreateI64FromType(i160_ty, @intCast(parsed));
+    } else blk: {
         var decimal_buf: [80]u8 = undefined;
         const decimal_str = std.fmt.bufPrint(&decimal_buf, "{}", .{parsed}) catch {
             log.err("Failed to format address as decimal\n", .{});
-            const fallback_attr = c.mlirIntegerAttrGet(i160_ty, 0);
-            const value_id = h.identifier(ctx, "value");
-            const gas_cost_attr = c.mlirIntegerAttrGet(c.mlirIntegerTypeGet(ctx, 64), 0);
-            const gas_cost_id = h.identifier(ctx, "gas_cost");
-            var attrs = [_]c.MlirNamedAttribute{
-                c.mlirNamedAttributeGet(value_id, fallback_attr),
-                c.mlirNamedAttributeGet(gas_cost_id, gas_cost_attr),
-            };
-            c.mlirOperationStateAddAttributes(&state, attrs.len, &attrs);
-            const op = c.mlirOperationCreate(&state);
-            h.appendOp(block, op);
-            return h.getResult(op, 0);
+            break :blk c.oraIntegerAttrCreateI64FromType(i160_ty, 0);
         };
         const addr_str_ref = h.strRef(decimal_str);
-        const attr = c.oraIntegerAttrGetFromString(i160_ty, addr_str_ref);
-
-        if (c.mlirAttributeIsNull(attr)) {
+        const big_attr = c.oraIntegerAttrGetFromString(i160_ty, addr_str_ref);
+        if (c.oraAttributeIsNull(big_attr)) {
             log.err("Failed to create address attribute from string '{s}'\n", .{addr_lit.value});
-            const fallback_attr = c.mlirIntegerAttrGet(i160_ty, 0);
-            const value_id = h.identifier(ctx, "value");
-            const gas_cost_attr = c.mlirIntegerAttrGet(c.mlirIntegerTypeGet(ctx, 64), 0);
-            const gas_cost_id = h.identifier(ctx, "gas_cost");
-            var attrs = [_]c.MlirNamedAttribute{
-                c.mlirNamedAttributeGet(value_id, fallback_attr),
-                c.mlirNamedAttributeGet(gas_cost_id, gas_cost_attr),
-            };
-            c.mlirOperationStateAddAttributes(&state, attrs.len, &attrs);
-        } else {
-            const value_id = h.identifier(ctx, "value");
-            const gas_cost_attr = c.mlirIntegerAttrGet(c.mlirIntegerTypeGet(ctx, 64), 0);
-            const gas_cost_id = h.identifier(ctx, "gas_cost");
-            var attrs = [_]c.MlirNamedAttribute{
-                c.mlirNamedAttributeGet(value_id, attr),
-                c.mlirNamedAttributeGet(gas_cost_id, gas_cost_attr),
-            };
-            c.mlirOperationStateAddAttributes(&state, attrs.len, &attrs);
+            break :blk c.oraIntegerAttrCreateI64FromType(i160_ty, 0);
         }
-    }
+        break :blk big_attr;
+    };
 
-    const const_op = c.mlirOperationCreate(&state);
+    const const_op = c.oraArithConstantOpCreate(ctx, loc, i160_ty, attr);
     h.appendOp(block, const_op);
     const i160_value = h.getResult(const_op, 0);
     const converted = type_mapper.createConversionOp(block, i160_value, addr_ty, addr_lit.span);
@@ -264,7 +197,7 @@ fn lowerHexLiteral(
     locations: LocationTracker,
     hex_lit: lib.ast.Expressions.HexLiteral,
 ) c.MlirValue {
-    const ty = c.mlirIntegerTypeGet(ctx, constants.DEFAULT_INTEGER_BITS);
+    const ty = c.oraIntegerTypeCreate(ctx, constants.DEFAULT_INTEGER_BITS);
     const loc = locations.createLocation(hex_lit.span);
     const op = ora_dialect.createHexConstant(hex_lit.value, ty, loc);
     h.appendOp(block, op);
@@ -277,11 +210,8 @@ fn lowerBinaryLiteral(
     locations: LocationTracker,
     bin_lit: lib.ast.Expressions.BinaryLiteral,
 ) c.MlirValue {
-    const ty = c.mlirIntegerTypeGet(ctx, constants.DEFAULT_INTEGER_BITS);
+    const ty = c.oraIntegerTypeCreate(ctx, constants.DEFAULT_INTEGER_BITS);
     const loc = locations.createLocation(bin_lit.span);
-    var state = h.opState("ora.binary.constant", loc);
-    c.mlirOperationStateAddResults(&state, 1, @ptrCast(&ty));
-
     const bin_str = if (std.mem.startsWith(u8, bin_lit.value, "0b"))
         bin_lit.value[2..]
     else
@@ -302,22 +232,27 @@ fn lowerBinaryLiteral(
         log.err("Failed to parse binary literal '{s}': {s}\n", .{ bin_lit.value, @errorName(err) });
         break :blk 0;
     };
-    const attr = c.mlirIntegerAttrGet(ty, parsed);
+    const attr = c.oraIntegerAttrCreateI64FromType(ty, parsed);
 
     const value_id = h.identifier(ctx, "value");
     const binary_id = h.identifier(ctx, "ora.binary");
-    const binary_ref = c.mlirStringRefCreate(bin_lit.value.ptr, bin_lit.value.len);
-    const binary_attr = c.mlirStringAttrGet(ctx, binary_ref);
+    const binary_ref = c.oraStringRefCreate(bin_lit.value.ptr, bin_lit.value.len);
+    const binary_attr = c.oraStringAttrCreate(ctx, binary_ref);
     const length_id = h.identifier(ctx, "length");
-    const length_attr = c.mlirIntegerAttrGet(c.mlirIntegerTypeGet(ctx, 32), @intCast(bin_str.len));
+    const length_attr = c.oraIntegerAttrCreateI64FromType(c.oraIntegerTypeCreate(ctx, 32), @intCast(bin_str.len));
 
     var attrs = [_]c.MlirNamedAttribute{
-        c.mlirNamedAttributeGet(value_id, attr),
-        c.mlirNamedAttributeGet(binary_id, binary_attr),
-        c.mlirNamedAttributeGet(length_id, length_attr),
+        c.oraNamedAttributeGet(value_id, attr),
+        c.oraNamedAttributeGet(binary_id, binary_attr),
+        c.oraNamedAttributeGet(length_id, length_attr),
     };
-    c.mlirOperationStateAddAttributes(&state, attrs.len, &attrs);
-    const op = c.mlirOperationCreate(&state);
+    const op = c.oraBinaryConstantOpCreate(
+        ctx,
+        loc,
+        ty,
+        attrs[0..].ptr,
+        attrs.len,
+    );
     h.appendOp(block, op);
     return h.getResult(op, 0);
 }
@@ -329,7 +264,7 @@ fn lowerCharacterLiteral(
     locations: LocationTracker,
     char_lit: lib.ast.Expressions.CharacterLiteral,
 ) c.MlirValue {
-    const ty = c.mlirIntegerTypeGet(ctx, 8);
+    const ty = c.oraIntegerTypeCreate(ctx, 8);
     const loc = locations.createLocation(char_lit.span);
 
     if (char_lit.value > 127) {
@@ -338,7 +273,7 @@ fn lowerCharacterLiteral(
     }
 
     const character_id = h.identifier(ctx, "ora.character_literal");
-    const custom_attrs = [_]c.MlirNamedAttribute{c.mlirNamedAttributeGet(character_id, c.mlirBoolAttrGet(ctx, 1))};
+    const custom_attrs = [_]c.MlirNamedAttribute{c.oraNamedAttributeGet(character_id, h.boolAttr(ctx, 1))};
     const op = ora_dialect.createArithConstantWithAttrs(@intCast(char_lit.value), ty, &custom_attrs, loc);
     h.appendOp(block, op);
     return h.getResult(op, 0);
@@ -352,11 +287,8 @@ fn lowerBytesLiteral(
     bytes_lit: lib.ast.Expressions.BytesLiteral,
 ) c.MlirValue {
     const bytes_len = bytes_lit.value.len;
-    const ty = c.mlirIntegerTypeGet(ctx, @intCast(bytes_len * 8));
+    const ty = c.oraIntegerTypeCreate(ctx, @intCast(bytes_len * 8));
     const loc = locations.createLocation(bytes_lit.span);
-    var state = h.opState("arith.constant", loc);
-    c.mlirOperationStateAddResults(&state, 1, @ptrCast(&ty));
-
     const bytes_str = if (std.mem.startsWith(u8, bytes_lit.value, "0x"))
         bytes_lit.value[2..]
     else
@@ -379,13 +311,11 @@ fn lowerBytesLiteral(
         return expr_helpers.createConstant(ctx, block, ora_dialect, locations, 0, bytes_lit.span);
     };
 
-    const attr = c.mlirIntegerAttrGet(ty, parsed);
-    const value_id = h.identifier(ctx, "value");
     const bytes_id = h.identifier(ctx, "ora.bytes_literal");
-    var attrs = [_]c.MlirNamedAttribute{ c.mlirNamedAttributeGet(value_id, attr), c.mlirNamedAttributeGet(bytes_id, c.mlirBoolAttrGet(ctx, 1)) };
-    c.mlirOperationStateAddAttributes(&state, attrs.len, &attrs);
-
-    const op = c.mlirOperationCreate(&state);
+    const attrs = [_]c.MlirNamedAttribute{
+        c.oraNamedAttributeGet(bytes_id, h.boolAttr(ctx, 1)),
+    };
+    const op = ora_dialect.createArithConstantWithAttrs(parsed, ty, &attrs, loc);
     h.appendOp(block, op);
     return h.getResult(op, 0);
 }

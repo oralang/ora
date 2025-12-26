@@ -71,7 +71,7 @@ fn lowerContractTypes(self: *const DeclarationLowerer, block: c.MlirBlock, contr
 /// Lower contract declarations with enhanced metadata and inheritance support
 pub fn lowerContract(self: *const DeclarationLowerer, contract: *const lib.ContractNode) c.MlirOperation {
     // create the contract operation using C++ API
-    const name_ref = c.mlirStringRefCreate(contract.name.ptr, contract.name.len);
+    const name_ref = c.oraStringRefCreate(contract.name.ptr, contract.name.len);
     const contract_op = c.oraContractOpCreate(self.ctx, helpers.createFileLocation(self, contract.span), name_ref);
     if (contract_op.ptr == null) {
         @panic("Failed to create ora.contract operation");
@@ -79,13 +79,15 @@ pub fn lowerContract(self: *const DeclarationLowerer, contract: *const lib.Contr
 
     // set additional attributes using C API (attributes are just metadata)
     // add contract metadata attribute
-    const contract_attr = c.mlirBoolAttrGet(self.ctx, 1);
+    const contract_attr = h.boolAttr(self.ctx, 1);
     const contract_name = h.strRef("ora.contract_decl");
-    c.mlirOperationSetAttributeByName(contract_op, contract_name, contract_attr);
+    c.oraOperationSetAttributeByName(contract_op, contract_name, contract_attr);
 
     // get the body region from the created operation
-    const region = c.mlirOperationGetRegion(contract_op, 0);
-    const block = c.mlirRegionGetFirstBlock(region);
+    const block = c.oraContractOpGetBodyBlock(contract_op);
+    if (c.oraBlockIsNull(block)) {
+        @panic("ora.contract missing body block");
+    }
 
     // create contract-level symbol management
     var contract_symbol_table = SymbolTable.init(std.heap.page_allocator);

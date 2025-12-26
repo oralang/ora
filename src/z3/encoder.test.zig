@@ -20,14 +20,14 @@ test "encodeMLIRType maps bool and i32" {
     var encoder = Encoder.init(&z3_ctx, testing.allocator);
     defer encoder.deinit();
 
-    const mlir_ctx = mlir.mlirContextCreate();
-    defer mlir.mlirContextDestroy(mlir_ctx);
+    const mlir_ctx = mlir.oraContextCreate();
+    defer mlir.oraContextDestroy(mlir_ctx);
 
-    const ty_i1 = mlir.mlirIntegerTypeGet(mlir_ctx, 1);
+    const ty_i1 = mlir.oraIntegerTypeCreate(mlir_ctx, 1);
     const bool_sort = try encoder.encodeMLIRType(ty_i1);
     try testing.expectEqual(@as(u32, z3.Z3_BOOL_SORT), @as(u32, @intCast(z3.Z3_get_sort_kind(z3_ctx.ctx, bool_sort))));
 
-    const ty_i32 = mlir.mlirIntegerTypeGet(mlir_ctx, 32);
+    const ty_i32 = mlir.oraIntegerTypeCreate(mlir_ctx, 32);
     const i32_sort = try encoder.encodeMLIRType(ty_i32);
     try testing.expectEqual(@as(u32, z3.Z3_BV_SORT), @as(u32, @intCast(z3.Z3_get_sort_kind(z3_ctx.ctx, i32_sort))));
     try testing.expectEqual(@as(u32, 32), @as(u32, @intCast(z3.Z3_get_bv_sort_size(z3_ctx.ctx, i32_sort))));

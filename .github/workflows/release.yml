@@ -310,10 +310,33 @@ jobs:
             ~/.cache/zig
             .zig-cache
             vendor/solidity/build
+            vendor/mlir/
           key: ${{ runner.os }}-${{ matrix.target }}-deps-${{ hashFiles('build.zig', 'build.zig.zon') }}
           restore-keys: |
             ${{ runner.os }}-${{ matrix.target }}-deps-
             ${{ runner.os }}-deps-
+
+      - name: Clone LLVM/MLIR for build
+        shell: bash
+        run: |
+          echo "📦 Cloning LLVM/MLIR (shallow clone for faster CI)..."
+          if [ ! -d "vendor/llvm-project" ]; then
+            git clone --depth=1 --branch=release/19.x https://github.com/llvm/llvm-project.git vendor/llvm-project
+            echo "✅ LLVM/MLIR cloned"
+          else
+            echo "✅ LLVM/MLIR already present"
+          fi
+
+      - name: Build MLIR libraries if needed
+        shell: bash
+        run: |
+          if [ -d "vendor/mlir/lib" ] && [ "$(ls -A vendor/mlir/lib/*.a 2>/dev/null | wc -l)" -gt 0 ]; then
+            echo "✅ MLIR libraries already built and cached"
+          else
+            echo "🔨 Building MLIR libraries..."
+            zig build
+            echo "✅ MLIR libraries built"
+          fi
 
       # Rely on zig's build.zig to configure and build Solidity via CMake
       # Ensures flags and C++ stdlib are consistent across CI and release

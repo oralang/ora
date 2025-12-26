@@ -132,14 +132,11 @@ pub fn lowerIdentifierAssignment(self: *const StatementLowerer, ident: *const li
                 .Storage => {
                     // storage always holds i256 values in EVM
                     // if value is i1 (boolean), extend it to i256
-                    const value_type = c.mlirValueGetType(value);
-                    const actual_value = if (c.mlirTypeIsAInteger(value_type) and c.mlirIntegerTypeGetWidth(value_type) == 1) blk: {
+                    const value_type = c.oraValueGetType(value);
+                    const actual_value = if (c.oraTypeIsAInteger(value_type) and c.oraIntegerTypeGetWidth(value_type) == 1) blk: {
                         // this is i1, need to extend to i256
-                        const i256_type = c.mlirIntegerTypeGet(self.ctx, constants.DEFAULT_INTEGER_BITS);
-                        var ext_state = h.opState("arith.extui", loc);
-                        c.mlirOperationStateAddOperands(&ext_state, 1, @ptrCast(&value));
-                        c.mlirOperationStateAddResults(&ext_state, 1, @ptrCast(&i256_type));
-                        const ext_op = c.mlirOperationCreate(&ext_state);
+                        const i256_type = c.oraIntegerTypeCreate(self.ctx, constants.DEFAULT_INTEGER_BITS);
+                        const ext_op = c.oraArithExtUIOpCreate(self.ctx, loc, value, i256_type);
                         h.appendOp(self.block, ext_op);
                         break :blk h.getResult(ext_op, 0);
                     } else blk: {
@@ -180,16 +177,16 @@ pub fn lowerIdentifierAssignment(self: *const StatementLowerer, ident: *const li
                     if (self.local_var_map) |lvm| {
                         if (lvm.getLocalVar(ident.name)) |var_value| {
                             // check if this is a memref type (mutable aggregate variable)
-                            const var_type = c.mlirValueGetType(var_value);
-                            if (c.mlirTypeIsAMemRef(var_type)) {
+                            const var_type = c.oraValueGetType(var_value);
+                            if (c.oraTypeIsAMemRef(var_type)) {
                                 // it's a memref (aggregate) - ensure value type matches element type
-                                const element_type = c.mlirShapedTypeGetElementType(var_type);
-                                const value_type = c.mlirValueGetType(value);
-                                log.debug("[ASSIGN Stack] Variable: {s}, value_type != element_type: {}, value_is_ora: {}, element_is_ora: {}\n", .{ ident.name, !c.mlirTypeEqual(value_type, element_type), c.oraTypeIsIntegerType(value_type), c.oraTypeIsIntegerType(element_type) });
+                                const element_type = c.oraShapedTypeGetElementType(var_type);
+                                const value_type = c.oraValueGetType(value);
+                                log.debug("[ASSIGN Stack] Variable: {s}, value_type != element_type: {}, value_is_ora: {}, element_is_ora: {}\n", .{ ident.name, !c.oraTypeEqual(value_type, element_type), c.oraTypeIsIntegerType(value_type), c.oraTypeIsIntegerType(element_type) });
                                 // always convert to ensure type compatibility
                                 const store_value = self.expr_lowerer.convertToType(value, element_type, ident.span);
-                                const store_value_type = c.mlirValueGetType(store_value);
-                                log.debug("[ASSIGN Stack] After conversion: types_equal: {}, store_value_is_ora: {}, element_is_ora: {}\n", .{ c.mlirTypeEqual(store_value_type, element_type), c.oraTypeIsIntegerType(store_value_type), c.oraTypeIsIntegerType(element_type) });
+                                const store_value_type = c.oraValueGetType(store_value);
+                                log.debug("[ASSIGN Stack] After conversion: types_equal: {}, store_value_is_ora: {}, element_is_ora: {}\n", .{ c.oraTypeEqual(store_value_type, element_type), c.oraTypeIsIntegerType(store_value_type), c.oraTypeIsIntegerType(element_type) });
                                 const store_op = self.ora_dialect.createMemrefStore(store_value, var_value, &[_]c.MlirValue{}, loc);
                                 h.appendOp(self.block, store_op);
                                 return;
@@ -296,7 +293,7 @@ pub fn lowerIdentifierAssignment(self: *const StatementLowerer, ident: *const li
 pub fn lowerFieldAccessAssignment(self: *const StatementLowerer, field_access: *const lib.ast.Expressions.FieldAccessExpr, value: c.MlirValue, loc: c.MlirLocation) LoweringError!void {
     // lower the target expression to get the struct
     var target = self.expr_lowerer.lowerExpression(field_access.target);
-    var target_type = c.mlirValueGetType(target);
+    var target_type = c.oraValueGetType(target);
 
     // if the target is a local variable, ensure we have the correct struct type
     // the target should be a struct SSA value, not i256 or address
@@ -307,26 +304,26 @@ pub fn lowerFieldAccessAssignment(self: *const StatementLowerer, field_access: *
         if (ident.type_info.ora_type) |ora_type| {
             if (ora_type == .struct_type) {
                 const expected_struct_type = self.expr_lowerer.type_mapper.toMlirType(ident.type_info);
-                const actual_type = c.mlirValueGetType(target);
+                const actual_type = c.oraValueGetType(target);
 
                 // check if the actual type is an address (this is wrong - we need a struct)
-                    if (c.oraTypeIsAddressType(actual_type)) {
-                        log.err("Variable '{s}' is address type but should be struct type for field access\n", .{ident.name});
-                        log.debug("  This likely means a map load returned !ora.address instead of the struct type\n", .{});
-                        log.debug("  Expected struct type: {any}\n", .{expected_struct_type});
-                        reportAssignmentError(
-                            self,
-                            field_access.span,
-                            .TypeMismatch,
-                            "Cannot assign to field on address-typed value; expected struct value",
-                            "Ensure the target expression resolves to a struct type before assigning to a field.",
-                        );
-                        return LoweringError.TypeMismatch;
-                    }
+                if (c.oraTypeIsAddressType(actual_type)) {
+                    log.err("Variable '{s}' is address type but should be struct type for field access\n", .{ident.name});
+                    log.debug("  This likely means a map load returned !ora.address instead of the struct type\n", .{});
+                    log.debug("  Expected struct type: {any}\n", .{expected_struct_type});
+                    reportAssignmentError(
+                        self,
+                        field_access.span,
+                        .TypeMismatch,
+                        "Cannot assign to field on address-typed value; expected struct value",
+                        "Ensure the target expression resolves to a struct type before assigning to a field.",
+                    );
+                    return LoweringError.TypeMismatch;
+                }
 
                 // if the actual type doesn't match the expected struct type, we have a problem
                 // this can happen if map loads return i256 instead of struct types
-                if (!c.mlirTypeEqual(actual_type, expected_struct_type)) {
+                if (!c.oraTypeEqual(actual_type, expected_struct_type)) {
                     log.err("Variable '{s}' should be struct type but got: {any}\n", .{ ident.name, actual_type });
                     log.debug("  Expected struct type: {any}\n", .{expected_struct_type});
                     log.debug("  This likely means a map load returned wrong type instead of the struct type\n", .{});
@@ -349,14 +346,11 @@ pub fn lowerFieldAccessAssignment(self: *const StatementLowerer, field_access: *
         // if the target is stored as memref (shouldn't happen for structs now, but check anyway)
         if (self.local_var_map) |var_map| {
             if (var_map.getLocalVar(ident.name)) |var_value| {
-                const var_type = c.mlirValueGetType(var_value);
-                if (c.mlirTypeIsAMemRef(var_type)) {
+                const var_type = c.oraValueGetType(var_value);
+                if (c.oraTypeIsAMemRef(var_type)) {
                     // load the struct from memref
-                    const element_type = c.mlirShapedTypeGetElementType(var_type);
-                    var load_state = h.opState("memref.load", loc);
-                    c.mlirOperationStateAddOperands(&load_state, 1, @ptrCast(&var_value));
-                    c.mlirOperationStateAddResults(&load_state, 1, @ptrCast(&element_type));
-                    const load_op = c.mlirOperationCreate(&load_state);
+                    const element_type = c.oraShapedTypeGetElementType(var_type);
+                    const load_op = c.oraMemrefLoadOpCreate(self.ctx, loc, var_value, null, 0, element_type);
                     h.appendOp(self.block, load_op);
                     target = h.getResult(load_op, 0);
                     target_type = element_type;
@@ -366,7 +360,7 @@ pub fn lowerFieldAccessAssignment(self: *const StatementLowerer, field_access: *
     } else {
         // for non-identifier targets (e.g., nested field access or map loads),
         // check if the target is an address type and error if so
-        const actual_type = c.mlirValueGetType(target);
+        const actual_type = c.oraValueGetType(target);
         if (c.oraTypeIsAddressType(actual_type)) {
             log.err("Field access target is address type but should be struct type\n", .{});
             log.debug("  This likely means a map load returned !ora.address instead of the struct type\n", .{});
@@ -447,16 +441,21 @@ pub fn lowerIndexAssignment(self: *const StatementLowerer, index_expr: *const li
     // lower the target expression to get the array/map
     const target = self.expr_lowerer.lowerExpression(index_expr.target);
     const index_val = self.expr_lowerer.lowerExpression(index_expr.index);
-    const target_type = c.mlirValueGetType(target);
+    const target_type = c.oraValueGetType(target);
 
     // determine the type of indexing operation
-    if (c.mlirTypeIsAMemRef(target_type)) {
+    if (c.oraTypeIsAMemRef(target_type)) {
         // array indexing using memref.store
         // convert index to index type for memref operations
         const index_index = self.expr_lowerer.convertIndexToIndexType(index_val, index_expr.span);
-        var store_state = h.opState("memref.store", loc);
-        c.mlirOperationStateAddOperands(&store_state, 3, @ptrCast(&[_]c.MlirValue{ value, target, index_index }));
-        const store_op = c.mlirOperationCreate(&store_state);
+        const store_op = c.oraMemrefStoreOpCreate(
+            self.ctx,
+            loc,
+            value,
+            target,
+            &[_]c.MlirValue{index_index},
+            1,
+        );
         h.appendOp(self.block, store_op);
     } else {
         // map indexing or other complex indexing operations
@@ -484,7 +483,7 @@ pub fn lowerDestructuringPattern(self: *const StatementLowerer, pattern: lib.ast
             // extract each field from the struct value
             for (fields, 0..) |field, i| {
                 // create llvm.extractvalue operation for each field
-                const result_ty = c.mlirIntegerTypeGet(self.ctx, constants.DEFAULT_INTEGER_BITS);
+                const result_ty = c.oraIntegerTypeCreate(self.ctx, constants.DEFAULT_INTEGER_BITS);
                 const indices = [_]u32{@intCast(i)};
                 const extract_op = self.ora_dialect.createLlvmExtractvalue(value, &indices, result_ty, loc);
                 h.appendOp(self.block, extract_op);
@@ -510,7 +509,7 @@ pub fn lowerDestructuringPattern(self: *const StatementLowerer, pattern: lib.ast
             // similar to struct destructuring but for tuple elements
             for (elements, 0..) |element_name, i| {
                 // create llvm.extractvalue operation for each tuple element
-                const result_ty = c.mlirIntegerTypeGet(self.ctx, constants.DEFAULT_INTEGER_BITS);
+                const result_ty = c.oraIntegerTypeCreate(self.ctx, constants.DEFAULT_INTEGER_BITS);
                 const indices = [_]u32{@intCast(i)};
                 const extract_op = self.ora_dialect.createLlvmExtractvalue(value, &indices, result_ty, loc);
                 h.appendOp(self.block, extract_op);
@@ -537,27 +536,21 @@ pub fn lowerDestructuringPattern(self: *const StatementLowerer, pattern: lib.ast
             for (elements, 0..) |element_name, i| {
                 // create memref.load operation for each array element
                 // first, create index constant
-                const index_ty = c.mlirIntegerTypeGet(self.ctx, constants.DEFAULT_INTEGER_BITS);
-                var index_state = h.opState("arith.constant", loc);
-                c.mlirOperationStateAddResults(&index_state, 1, @ptrCast(&index_ty));
-                const index_attr = c.mlirIntegerAttrGet(index_ty, @intCast(i));
-                const value_id = h.identifier(self.ctx, "value");
-                var index_attrs = [_]c.MlirNamedAttribute{c.mlirNamedAttributeGet(value_id, index_attr)};
-                c.mlirOperationStateAddAttributes(&index_state, index_attrs.len, &index_attrs);
-                const index_op = c.mlirOperationCreate(&index_state);
+                const index_ty = c.oraIntegerTypeCreate(self.ctx, constants.DEFAULT_INTEGER_BITS);
+                const index_op = self.ora_dialect.createArithConstant(@intCast(i), index_ty, loc);
                 h.appendOp(self.block, index_op);
                 const index_value = h.getResult(index_op, 0);
 
                 // create memref.load operation
-                var load_state = h.opState("memref.load", loc);
-                const operands = [_]c.MlirValue{ value, index_value };
-                c.mlirOperationStateAddOperands(&load_state, operands.len, &operands);
-
-                // add result type
-                const result_ty = c.mlirIntegerTypeGet(self.ctx, constants.DEFAULT_INTEGER_BITS);
-                c.mlirOperationStateAddResults(&load_state, 1, @ptrCast(&result_ty));
-
-                const load_op = c.mlirOperationCreate(&load_state);
+                const result_ty = c.oraIntegerTypeCreate(self.ctx, constants.DEFAULT_INTEGER_BITS);
+                const load_op = c.oraMemrefLoadOpCreate(
+                    self.ctx,
+                    loc,
+                    value,
+                    &[_]c.MlirValue{index_value},
+                    1,
+                    result_ty,
+                );
                 h.appendOp(self.block, load_op);
                 const element_value = h.getResult(load_op, 0);
 
@@ -599,7 +592,7 @@ pub fn lowerCompoundAssignment(self: *const StatementLowerer, assignment: *const
             _ = sm; // Use the variable to avoid warning
 
             // define result type for arithmetic operations
-            const result_ty = c.mlirIntegerTypeGet(self.ctx, constants.DEFAULT_INTEGER_BITS);
+            const result_ty = c.oraIntegerTypeCreate(self.ctx, constants.DEFAULT_INTEGER_BITS);
 
             // load current value from storage using ora.sload
             const memory_manager = MemoryManager.init(self.ctx, self.ora_dialect);
@@ -649,10 +642,8 @@ pub fn lowerCompoundAssignment(self: *const StatementLowerer, assignment: *const
             const store_op = memory_manager.createStorageStore(new_value, ident.name, self.fileLoc(ident.span));
             h.appendOp(self.block, store_op);
         } else {
-            // no storage map - fall back to placeholder
-            var state = h.opState("ora.compound_assign", self.fileLoc(ident.span));
-            const op = c.mlirOperationCreate(&state);
-            h.appendOp(self.block, op);
+            log.err("Compound assignment lowering for storage maps is unimplemented\n", .{});
+            @panic("compound assignment lowering not implemented");
         }
     } else {
         // for now, skip non-identifier compound assignments

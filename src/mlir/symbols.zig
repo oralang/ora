@@ -306,7 +306,7 @@ pub const SymbolTable = struct {
             scope_idx -= 1;
         }
         // if symbol not found, add it to current scope
-        try self.addSymbol(name, c.mlirValueGetType(value), lib.ast.Statements.MemoryRegion.Stack, null, null);
+        try self.addSymbol(name, c.oraValueGetType(value), lib.ast.Statements.MemoryRegion.Stack, null, null);
         if (self.scopes.items[self.current_scope].get(name)) |symbol| {
             var updated_symbol = symbol;
             updated_symbol.value = value;

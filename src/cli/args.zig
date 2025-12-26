@@ -14,11 +14,18 @@ pub const CliOptions = struct {
     emit_cfg: bool = false,
     emit_abi: bool = false,
     emit_abi_solidity: bool = false,
+    cpp_lowering_stub: bool = false,
     canonicalize_mlir: bool = true,
     analyze_state: bool = false,
     verify_z3: bool = false,
     debug: bool = false,
     mlir_opt_level: ?[]const u8 = null,
+    // fmt options
+    fmt: bool = false,
+    fmt_check: bool = false,
+    fmt_diff: bool = false,
+    fmt_stdout: bool = false,
+    fmt_width: ?u32 = null,
 };
 
 pub const ParseError = error{
@@ -57,6 +64,9 @@ pub fn parseArgs(args: []const []const u8) ParseError!CliOptions {
         } else if (std.mem.eql(u8, arg, "--emit-abi-solidity")) {
             opts.emit_abi_solidity = true;
             i += 1;
+        } else if (std.mem.eql(u8, arg, "--cpp-lowering-stub")) {
+            opts.cpp_lowering_stub = true;
+            i += 1;
         } else if (std.mem.eql(u8, arg, "--verify")) {
             opts.verify_z3 = true;
             i += 1;
@@ -80,6 +90,24 @@ pub fn parseArgs(args: []const []const u8) ParseError!CliOptions {
         } else if (std.mem.eql(u8, arg, "--no-canonicalize")) {
             opts.canonicalize_mlir = false;
             i += 1;
+        } else if (std.mem.eql(u8, arg, "fmt")) {
+            opts.fmt = true;
+            i += 1;
+        } else if (std.mem.eql(u8, arg, "--check")) {
+            opts.fmt_check = true;
+            i += 1;
+        } else if (std.mem.eql(u8, arg, "--diff")) {
+            opts.fmt_diff = true;
+            i += 1;
+        } else if (std.mem.eql(u8, arg, "--stdout")) {
+            opts.fmt_stdout = true;
+            i += 1;
+        } else if (std.mem.eql(u8, arg, "--width")) {
+            if (i + 1 >= args.len) return error.MissingArgument;
+            opts.fmt_width = std.fmt.parseInt(u32, args[i + 1], 10) catch {
+                return error.UnknownArgument;
+            };
+            i += 2;
         } else if (opts.input_file == null and !std.mem.startsWith(u8, arg, "-")) {
             opts.input_file = arg;
             i += 1;

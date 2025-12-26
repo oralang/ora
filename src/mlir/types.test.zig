@@ -11,8 +11,8 @@ const ErrorHandler = @import("error_handling.zig").ErrorHandler;
 
 test "toMlirType reports missing ora type" {
     const allocator = testing.allocator;
-    const ctx = mlir.mlirContextCreate();
-    defer mlir.mlirContextDestroy(ctx);
+    const ctx = mlir.oraContextCreate();
+    defer mlir.oraContextDestroy(ctx);
 
     var handler = ErrorHandler.init(allocator);
     defer handler.deinit();
@@ -24,7 +24,7 @@ test "toMlirType reports missing ora type" {
     const unknown = lib.TypeInfo.unknown();
     const ty = mapper.toMlirType(unknown);
 
-    try testing.expect(mlir.mlirTypeIsAInteger(ty));
-    try testing.expectEqual(@as(u32, 256), mlir.mlirIntegerTypeGetWidth(ty));
+    try testing.expect(mlir.oraTypeIsAInteger(ty));
+    try testing.expectEqual(@as(u32, 256), mlir.oraIntegerTypeGetWidth(ty));
     try testing.expect(handler.hasErrors());
 }

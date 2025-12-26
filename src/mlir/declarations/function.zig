@@ -47,12 +47,11 @@ pub fn lowerFunction(self: *const DeclarationLowerer, func: *const lib.FunctionN
         param_types[i] = param_type;
     }
 
-    // create the function operation
-    var state = h.opState("func.func", helpers.createFileLocation(self, func.span));
+    const func_loc = helpers.createFileLocation(self, func.span);
 
     // add function name
-    const name_ref = c.mlirStringRefCreate(func.name.ptr, func.name.len);
-    const name_attr = c.mlirStringAttrGet(self.ctx, name_ref);
+    const name_ref = c.oraStringRefCreate(func.name.ptr, func.name.len);
+    const name_attr = c.oraStringAttrCreate(self.ctx, name_ref);
     const sym_name_id = h.identifier(self.ctx, "sym_name");
 
     // collect all function attributes
@@ -60,79 +59,79 @@ pub fn lowerFunction(self: *const DeclarationLowerer, func: *const lib.FunctionN
     defer attributes.deinit(std.heap.page_allocator);
 
     // add function name attribute
-    attributes.append(std.heap.page_allocator, c.mlirNamedAttributeGet(sym_name_id, name_attr)) catch {};
+    attributes.append(std.heap.page_allocator, c.oraNamedAttributeGet(sym_name_id, name_attr)) catch {};
 
     // add visibility modifier attribute
     const visibility_attr = switch (func.visibility) {
-        .Public => c.mlirStringAttrGet(self.ctx, h.strRef("pub")),
-        .Private => c.mlirStringAttrGet(self.ctx, h.strRef("private")),
+        .Public => c.oraStringAttrCreate(self.ctx, h.strRef("pub")),
+        .Private => c.oraStringAttrCreate(self.ctx, h.strRef("private")),
     };
     const visibility_id = h.identifier(self.ctx, "ora.visibility");
-    attributes.append(std.heap.page_allocator, c.mlirNamedAttributeGet(visibility_id, visibility_attr)) catch {};
+    attributes.append(std.heap.page_allocator, c.oraNamedAttributeGet(visibility_id, visibility_attr)) catch {};
 
     // add function effect metadata (pure/writes + slot list)
     if (self.symbol_table) |table| {
         if (table.function_effects.get(func.name)) |eff| {
             switch (eff) {
                 .Pure => {
-                    const effect_attr = c.mlirStringAttrGet(self.ctx, h.strRef("pure"));
+                    const effect_attr = c.oraStringAttrCreate(self.ctx, h.strRef("pure"));
                     const effect_id = h.identifier(self.ctx, "ora.effect");
-                    attributes.append(std.heap.page_allocator, c.mlirNamedAttributeGet(effect_id, effect_attr)) catch {};
+                    attributes.append(std.heap.page_allocator, c.oraNamedAttributeGet(effect_id, effect_attr)) catch {};
                 },
                 .Reads => |slots| {
-                    const effect_attr = c.mlirStringAttrGet(self.ctx, h.strRef("reads"));
+                    const effect_attr = c.oraStringAttrCreate(self.ctx, h.strRef("reads"));
                     const effect_id = h.identifier(self.ctx, "ora.effect");
-                    attributes.append(std.heap.page_allocator, c.mlirNamedAttributeGet(effect_id, effect_attr)) catch {};
+                    attributes.append(std.heap.page_allocator, c.oraNamedAttributeGet(effect_id, effect_attr)) catch {};
 
                     var slot_attrs = std.ArrayList(c.MlirAttribute){};
                     defer slot_attrs.deinit(std.heap.page_allocator);
                     for (slots.items) |slot| {
-                        const slot_attr = c.mlirStringAttrGet(self.ctx, h.strRef(slot));
+                        const slot_attr = c.oraStringAttrCreate(self.ctx, h.strRef(slot));
                         slot_attrs.append(std.heap.page_allocator, slot_attr) catch {};
                     }
-                    const slots_attr = c.mlirArrayAttrGet(self.ctx, @intCast(slot_attrs.items.len), slot_attrs.items.ptr);
+                    const slots_attr = c.oraArrayAttrCreate(self.ctx, @intCast(slot_attrs.items.len), slot_attrs.items.ptr);
                     const slots_id = h.identifier(self.ctx, "ora.read_slots");
-                    attributes.append(std.heap.page_allocator, c.mlirNamedAttributeGet(slots_id, slots_attr)) catch {};
+                    attributes.append(std.heap.page_allocator, c.oraNamedAttributeGet(slots_id, slots_attr)) catch {};
                 },
                 .Writes => |slots| {
-                    const effect_attr = c.mlirStringAttrGet(self.ctx, h.strRef("writes"));
+                    const effect_attr = c.oraStringAttrCreate(self.ctx, h.strRef("writes"));
                     const effect_id = h.identifier(self.ctx, "ora.effect");
-                    attributes.append(std.heap.page_allocator, c.mlirNamedAttributeGet(effect_id, effect_attr)) catch {};
+                    attributes.append(std.heap.page_allocator, c.oraNamedAttributeGet(effect_id, effect_attr)) catch {};
 
                     var slot_attrs = std.ArrayList(c.MlirAttribute){};
                     defer slot_attrs.deinit(std.heap.page_allocator);
                     for (slots.items) |slot| {
-                        const slot_attr = c.mlirStringAttrGet(self.ctx, h.strRef(slot));
+                        const slot_attr = c.oraStringAttrCreate(self.ctx, h.strRef(slot));
                         slot_attrs.append(std.heap.page_allocator, slot_attr) catch {};
                     }
-                    const slots_attr = c.mlirArrayAttrGet(self.ctx, @intCast(slot_attrs.items.len), slot_attrs.items.ptr);
+                    const slots_attr = c.oraArrayAttrCreate(self.ctx, @intCast(slot_attrs.items.len), slot_attrs.items.ptr);
                     const slots_id = h.identifier(self.ctx, "ora.write_slots");
-                    attributes.append(std.heap.page_allocator, c.mlirNamedAttributeGet(slots_id, slots_attr)) catch {};
+                    attributes.append(std.heap.page_allocator, c.oraNamedAttributeGet(slots_id, slots_attr)) catch {};
                 },
                 .ReadsWrites => |rw| {
-                    const effect_attr = c.mlirStringAttrGet(self.ctx, h.strRef("readwrites"));
+                    const effect_attr = c.oraStringAttrCreate(self.ctx, h.strRef("readwrites"));
                     const effect_id = h.identifier(self.ctx, "ora.effect");
-                    attributes.append(std.heap.page_allocator, c.mlirNamedAttributeGet(effect_id, effect_attr)) catch {};
+                    attributes.append(std.heap.page_allocator, c.oraNamedAttributeGet(effect_id, effect_attr)) catch {};
 
                     var read_attrs = std.ArrayList(c.MlirAttribute){};
                     defer read_attrs.deinit(std.heap.page_allocator);
                     for (rw.reads.items) |slot| {
-                        const slot_attr = c.mlirStringAttrGet(self.ctx, h.strRef(slot));
+                        const slot_attr = c.oraStringAttrCreate(self.ctx, h.strRef(slot));
                         read_attrs.append(std.heap.page_allocator, slot_attr) catch {};
                     }
-                    const read_slots_attr = c.mlirArrayAttrGet(self.ctx, @intCast(read_attrs.items.len), read_attrs.items.ptr);
+                    const read_slots_attr = c.oraArrayAttrCreate(self.ctx, @intCast(read_attrs.items.len), read_attrs.items.ptr);
                     const read_slots_id = h.identifier(self.ctx, "ora.read_slots");
-                    attributes.append(std.heap.page_allocator, c.mlirNamedAttributeGet(read_slots_id, read_slots_attr)) catch {};
+                    attributes.append(std.heap.page_allocator, c.oraNamedAttributeGet(read_slots_id, read_slots_attr)) catch {};
 
                     var write_attrs = std.ArrayList(c.MlirAttribute){};
                     defer write_attrs.deinit(std.heap.page_allocator);
                     for (rw.writes.items) |slot| {
-                        const slot_attr = c.mlirStringAttrGet(self.ctx, h.strRef(slot));
+                        const slot_attr = c.oraStringAttrCreate(self.ctx, h.strRef(slot));
                         write_attrs.append(std.heap.page_allocator, slot_attr) catch {};
                     }
-                    const write_slots_attr = c.mlirArrayAttrGet(self.ctx, @intCast(write_attrs.items.len), write_attrs.items.ptr);
+                    const write_slots_attr = c.oraArrayAttrCreate(self.ctx, @intCast(write_attrs.items.len), write_attrs.items.ptr);
                     const write_slots_id = h.identifier(self.ctx, "ora.write_slots");
-                    attributes.append(std.heap.page_allocator, c.mlirNamedAttributeGet(write_slots_id, write_slots_attr)) catch {};
+                    attributes.append(std.heap.page_allocator, c.oraNamedAttributeGet(write_slots_id, write_slots_attr)) catch {};
                 },
             }
         }
@@ -140,59 +139,53 @@ pub fn lowerFunction(self: *const DeclarationLowerer, func: *const lib.FunctionN
 
     // add special function name attributes
     if (std.mem.eql(u8, func.name, "init")) {
-        const init_attr = c.mlirBoolAttrGet(self.ctx, 1);
+        const init_attr = h.boolAttr(self.ctx, 1);
         const init_id = h.identifier(self.ctx, "ora.init");
-        attributes.append(std.heap.page_allocator, c.mlirNamedAttributeGet(init_id, init_attr)) catch {};
+        attributes.append(std.heap.page_allocator, c.oraNamedAttributeGet(init_id, init_attr)) catch {};
     }
 
     // add comprehensive verification metadata for function contracts
     if (func.requires_clauses.len > 0 or func.ensures_clauses.len > 0) {
         // add verification marker for formal verification tools
-        const verification_attr = c.mlirBoolAttrGet(self.ctx, 1);
+        const verification_attr = h.boolAttr(self.ctx, 1);
         const verification_id = h.identifier(self.ctx, "ora.verification");
-        attributes.append(std.heap.page_allocator, c.mlirNamedAttributeGet(verification_id, verification_attr)) catch {};
+        attributes.append(std.heap.page_allocator, c.oraNamedAttributeGet(verification_id, verification_attr)) catch {};
 
         // add formal verification marker
-        const formal_attr = c.mlirBoolAttrGet(self.ctx, 1);
+        const formal_attr = h.boolAttr(self.ctx, 1);
         const formal_id = h.identifier(self.ctx, "ora.formal");
-        attributes.append(std.heap.page_allocator, c.mlirNamedAttributeGet(formal_id, formal_attr)) catch {};
+        attributes.append(std.heap.page_allocator, c.oraNamedAttributeGet(formal_id, formal_attr)) catch {};
 
         // add verification context attribute
-        const context_attr = c.mlirStringAttrGet(self.ctx, h.strRef("function_contract"));
+        const context_attr = c.oraStringAttrCreate(self.ctx, h.strRef("function_contract"));
         const context_id = h.identifier(self.ctx, "ora.verification_context");
-        attributes.append(std.heap.page_allocator, c.mlirNamedAttributeGet(context_id, context_attr)) catch {};
+        attributes.append(std.heap.page_allocator, c.oraNamedAttributeGet(context_id, context_attr)) catch {};
 
         // add requires clauses count
         if (func.requires_clauses.len > 0) {
-            const requires_count_attr = c.mlirIntegerAttrGet(c.mlirIntegerTypeGet(self.ctx, 32), @intCast(func.requires_clauses.len));
+            const requires_count_attr = c.oraIntegerAttrCreateI64FromType(c.oraIntegerTypeCreate(self.ctx, 32), @intCast(func.requires_clauses.len));
             const requires_count_id = h.identifier(self.ctx, "ora.requires_count");
-            attributes.append(std.heap.page_allocator, c.mlirNamedAttributeGet(requires_count_id, requires_count_attr)) catch {};
+            attributes.append(std.heap.page_allocator, c.oraNamedAttributeGet(requires_count_id, requires_count_attr)) catch {};
         }
 
         // add ensures clauses count
         if (func.ensures_clauses.len > 0) {
-            const ensures_count_attr = c.mlirIntegerAttrGet(c.mlirIntegerTypeGet(self.ctx, 32), @intCast(func.ensures_clauses.len));
+            const ensures_count_attr = c.oraIntegerAttrCreateI64FromType(c.oraIntegerTypeCreate(self.ctx, 32), @intCast(func.ensures_clauses.len));
             const ensures_count_id = h.identifier(self.ctx, "ora.ensures_count");
-            attributes.append(std.heap.page_allocator, c.mlirNamedAttributeGet(ensures_count_id, ensures_count_attr)) catch {};
+            attributes.append(std.heap.page_allocator, c.oraNamedAttributeGet(ensures_count_id, ensures_count_attr)) catch {};
         }
 
         // add contract verification level
-        const contract_level_attr = c.mlirStringAttrGet(self.ctx, h.strRef("full"));
+        const contract_level_attr = c.oraStringAttrCreate(self.ctx, h.strRef("full"));
         const contract_level_id = h.identifier(self.ctx, "ora.contract_level");
-        attributes.append(std.heap.page_allocator, c.mlirNamedAttributeGet(contract_level_id, contract_level_attr)) catch {};
+        attributes.append(std.heap.page_allocator, c.oraNamedAttributeGet(contract_level_id, contract_level_attr)) catch {};
     }
 
     // add function type
     const fn_type = helpers.createFunctionType(self, func);
-    const fn_type_attr = c.mlirTypeAttrGet(fn_type);
+    const fn_type_attr = c.oraTypeAttrCreateFromType(fn_type);
     const fn_type_id = h.identifier(self.ctx, "function_type");
-    attributes.append(std.heap.page_allocator, c.mlirNamedAttributeGet(fn_type_id, fn_type_attr)) catch {};
-
-    // apply all attributes to the operation state
-    c.mlirOperationStateAddAttributes(&state, @intCast(attributes.items.len), attributes.items.ptr);
-
-    // create the function body region with block arguments for parameters
-    const region = c.mlirRegionCreate();
+    attributes.append(std.heap.page_allocator, c.oraNamedAttributeGet(fn_type_id, fn_type_attr)) catch {};
 
     // create locations for block arguments
     var param_locs_buf: [16]c.MlirLocation = undefined;
@@ -208,20 +201,31 @@ pub fn lowerFunction(self: *const DeclarationLowerer, func: *const lib.FunctionN
         param_locs[i] = helpers.createFileLocation(self, param.span);
     }
 
-    const block = c.mlirBlockCreate(@intCast(param_types.len), param_types.ptr, param_locs.ptr);
-    c.mlirRegionInsertOwnedBlock(region, 0, block);
-    c.mlirOperationStateAddOwnedRegions(&state, 1, @ptrCast(&region));
+    const func_op = c.oraFuncFuncOpCreate(
+        self.ctx,
+        func_loc,
+        attributes.items.ptr,
+        attributes.items.len,
+        param_types.ptr,
+        param_locs.ptr,
+        param_types.len,
+    );
+    if (c.oraOperationIsNull(func_op)) {
+        @panic("Failed to create func.func operation");
+    }
 
-    // create the function operation early so we can add it to symbol table before lowering body
-    // (needed for call site type conversion)
-    const func_op = c.mlirOperationCreate(&state);
+    // get the function body block
+    const block = c.oraFuncOpGetBodyBlock(func_op);
+    if (c.oraBlockIsNull(block)) {
+        @panic("func.func missing body block");
+    }
 
     // add function to symbol table BEFORE lowering body (so calls within body can look it up)
     if (self.symbol_table) |sym_table| {
         const return_type = if (func.return_type_info) |ret_info|
             self.type_mapper.toMlirType(ret_info)
         else
-            c.mlirNoneTypeGet(self.ctx);
+            c.oraNoneTypeCreate(self.ctx);
 
         // allocate param_types array for symbol table (it will be owned by FunctionSymbol)
         if (sym_table.allocator.alloc(c.MlirType, param_types.len)) |allocated| {
@@ -238,7 +242,7 @@ pub fn lowerFunction(self: *const DeclarationLowerer, func: *const lib.FunctionN
 
     // map parameter names to block arguments
     for (func.parameters, 0..) |param, i| {
-        const block_arg = c.mlirBlockGetArgument(block, @intCast(i));
+        const block_arg = c.oraBlockGetArgument(block, @intCast(i));
         param_map.setBlockArgument(param.name, block_arg) catch {};
 
         // insert refinement type guards for parameters
@@ -321,7 +325,7 @@ pub fn lowerFunction(self: *const DeclarationLowerer, func: *const lib.FunctionN
         };
         defer std.heap.page_allocator.free(type_str);
 
-        const type_attr = c.mlirStringAttrGet(self.ctx, h.strRef(type_str));
+        const type_attr = c.oraStringAttrCreate(self.ctx, h.strRef(type_str));
         const success = c.oraFuncSetArgAttr(func_op, @intCast(i), ora_type_attr_name, type_attr);
         if (!success) {
             log.warn("Failed to set ora.type attribute on parameter {s}\n", .{param.name});
@@ -336,7 +340,7 @@ pub fn lowerFunction(self: *const DeclarationLowerer, func: *const lib.FunctionN
         };
         defer std.heap.page_allocator.free(type_str);
 
-        const type_attr = c.mlirStringAttrGet(self.ctx, h.strRef(type_str));
+        const type_attr = c.oraStringAttrCreate(self.ctx, h.strRef(type_str));
         const success = c.oraFuncSetResultAttr(func_op, 0, ora_type_attr_name, type_attr);
         if (!success) {
             log.warn("Failed to set ora.type attribute on return value\n", .{});
@@ -376,11 +380,7 @@ fn lowerRequiresClauses(self: *const DeclarationLowerer, requires_clauses: []*li
         // lower the requires expression
         const condition_value = expr_lowerer.lowerExpression(clause);
 
-        // create an assertion operation with comprehensive verification attributes
-        var assert_state = h.opState("cf.assert", helpers.createFileLocation(self, helpers.getExpressionSpan(self, clause)));
-
-        // add the condition as an operand
-        c.mlirOperationStateAddOperands(&assert_state, 1, @ptrCast(&condition_value));
+        const clause_loc = helpers.createFileLocation(self, helpers.getExpressionSpan(self, clause));
 
         // collect verification attributes
         var attributes = std.ArrayList(c.MlirNamedAttribute){};
@@ -391,37 +391,34 @@ fn lowerRequiresClauses(self: *const DeclarationLowerer, requires_clauses: []*li
         defer std.heap.page_allocator.free(msg_text);
         const msg_attr = h.stringAttr(self.ctx, msg_text);
         const msg_id = h.identifier(self.ctx, "msg");
-        attributes.append(std.heap.page_allocator, c.mlirNamedAttributeGet(msg_id, msg_attr)) catch {};
+        attributes.append(std.heap.page_allocator, c.oraNamedAttributeGet(msg_id, msg_attr)) catch {};
 
         // add ora.requires attribute to mark this as a precondition
-        const requires_attr = c.mlirBoolAttrGet(self.ctx, 1);
+        const requires_attr = h.boolAttr(self.ctx, 1);
         const requires_id = h.identifier(self.ctx, "ora.requires");
-        attributes.append(std.heap.page_allocator, c.mlirNamedAttributeGet(requires_id, requires_attr)) catch {};
+        attributes.append(std.heap.page_allocator, c.oraNamedAttributeGet(requires_id, requires_attr)) catch {};
 
         // add verification context attribute
-        const context_attr = c.mlirStringAttrGet(self.ctx, h.strRef("function_precondition"));
+        const context_attr = c.oraStringAttrCreate(self.ctx, h.strRef("function_precondition"));
         const context_id = h.identifier(self.ctx, "ora.verification_context");
-        attributes.append(std.heap.page_allocator, c.mlirNamedAttributeGet(context_id, context_attr)) catch {};
+        attributes.append(std.heap.page_allocator, c.oraNamedAttributeGet(context_id, context_attr)) catch {};
 
         // add verification marker for formal verification tools
-        const verification_attr = c.mlirBoolAttrGet(self.ctx, 1);
+        const verification_attr = h.boolAttr(self.ctx, 1);
         const verification_id = h.identifier(self.ctx, "ora.verification");
-        attributes.append(std.heap.page_allocator, c.mlirNamedAttributeGet(verification_id, verification_attr)) catch {};
+        attributes.append(std.heap.page_allocator, c.oraNamedAttributeGet(verification_id, verification_attr)) catch {};
 
         // add precondition index for multiple requires clauses
-        const index_attr = c.mlirIntegerAttrGet(c.mlirIntegerTypeGet(self.ctx, 32), @intCast(i));
+        const index_attr = c.oraIntegerAttrCreateI64FromType(c.oraIntegerTypeCreate(self.ctx, 32), @intCast(i));
         const index_id = h.identifier(self.ctx, "ora.precondition_index");
-        attributes.append(std.heap.page_allocator, c.mlirNamedAttributeGet(index_id, index_attr)) catch {};
+        attributes.append(std.heap.page_allocator, c.oraNamedAttributeGet(index_id, index_attr)) catch {};
 
         // add formal verification marker
-        const formal_attr = c.mlirBoolAttrGet(self.ctx, 1);
+        const formal_attr = h.boolAttr(self.ctx, 1);
         const formal_id = h.identifier(self.ctx, "ora.formal");
-        attributes.append(std.heap.page_allocator, c.mlirNamedAttributeGet(formal_id, formal_attr)) catch {};
+        attributes.append(std.heap.page_allocator, c.oraNamedAttributeGet(formal_id, formal_attr)) catch {};
 
-        // apply all attributes
-        c.mlirOperationStateAddAttributes(&assert_state, @intCast(attributes.items.len), attributes.items.ptr);
-
-        const assert_op = c.mlirOperationCreate(&assert_state);
+        const assert_op = self.ora_dialect.createCfAssertWithAttrs(condition_value, attributes.items, clause_loc);
         h.appendOp(block, assert_op);
     }
 }
@@ -435,50 +432,43 @@ fn lowerEnsuresClauses(self: *const DeclarationLowerer, ensures_clauses: []*lib.
         // lower the ensures expression
         const condition_value = expr_lowerer.lowerExpression(clause);
 
-        // create an assertion operation with comprehensive verification attributes
-        var assert_state = h.opState("cf.assert", helpers.createFileLocation(self, helpers.getExpressionSpan(self, clause)));
-
-        // add the condition as an operand
-        c.mlirOperationStateAddOperands(&assert_state, 1, @ptrCast(&condition_value));
+        const clause_loc = helpers.createFileLocation(self, helpers.getExpressionSpan(self, clause));
 
         // collect verification attributes
         var attributes = std.ArrayList(c.MlirNamedAttribute){};
         defer attributes.deinit(std.heap.page_allocator);
 
         // add ora.ensures attribute to mark this as a postcondition
-        const ensures_attr = c.mlirBoolAttrGet(self.ctx, 1);
+        const ensures_attr = h.boolAttr(self.ctx, 1);
         const ensures_id = h.identifier(self.ctx, "ora.ensures");
-        attributes.append(std.heap.page_allocator, c.mlirNamedAttributeGet(ensures_id, ensures_attr)) catch {};
+        attributes.append(std.heap.page_allocator, c.oraNamedAttributeGet(ensures_id, ensures_attr)) catch {};
 
         // add verification context attribute
-        const context_attr = c.mlirStringAttrGet(self.ctx, h.strRef("function_postcondition"));
+        const context_attr = c.oraStringAttrCreate(self.ctx, h.strRef("function_postcondition"));
         const context_id = h.identifier(self.ctx, "ora.verification_context");
-        attributes.append(std.heap.page_allocator, c.mlirNamedAttributeGet(context_id, context_attr)) catch {};
+        attributes.append(std.heap.page_allocator, c.oraNamedAttributeGet(context_id, context_attr)) catch {};
 
         // add verification marker for formal verification tools
-        const verification_attr = c.mlirBoolAttrGet(self.ctx, 1);
+        const verification_attr = h.boolAttr(self.ctx, 1);
         const verification_id = h.identifier(self.ctx, "ora.verification");
-        attributes.append(std.heap.page_allocator, c.mlirNamedAttributeGet(verification_id, verification_attr)) catch {};
+        attributes.append(std.heap.page_allocator, c.oraNamedAttributeGet(verification_id, verification_attr)) catch {};
 
         // add postcondition index for multiple ensures clauses
-        const index_attr = c.mlirIntegerAttrGet(c.mlirIntegerTypeGet(self.ctx, 32), @intCast(i));
+        const index_attr = c.oraIntegerAttrCreateI64FromType(c.oraIntegerTypeCreate(self.ctx, 32), @intCast(i));
         const index_id = h.identifier(self.ctx, "ora.postcondition_index");
-        attributes.append(std.heap.page_allocator, c.mlirNamedAttributeGet(index_id, index_attr)) catch {};
+        attributes.append(std.heap.page_allocator, c.oraNamedAttributeGet(index_id, index_attr)) catch {};
 
         // add formal verification marker
-        const formal_attr = c.mlirBoolAttrGet(self.ctx, 1);
+        const formal_attr = h.boolAttr(self.ctx, 1);
         const formal_id = h.identifier(self.ctx, "ora.formal");
-        attributes.append(std.heap.page_allocator, c.mlirNamedAttributeGet(formal_id, formal_attr)) catch {};
+        attributes.append(std.heap.page_allocator, c.oraNamedAttributeGet(formal_id, formal_attr)) catch {};
 
         // add return value reference for postconditions
-        const return_ref_attr = c.mlirStringAttrGet(self.ctx, h.strRef("return_value"));
+        const return_ref_attr = c.oraStringAttrCreate(self.ctx, h.strRef("return_value"));
         const return_ref_id = h.identifier(self.ctx, "ora.return_reference");
-        attributes.append(std.heap.page_allocator, c.mlirNamedAttributeGet(return_ref_id, return_ref_attr)) catch {};
+        attributes.append(std.heap.page_allocator, c.oraNamedAttributeGet(return_ref_id, return_ref_attr)) catch {};
 
-        // apply all attributes
-        c.mlirOperationStateAddAttributes(&assert_state, @intCast(attributes.items.len), attributes.items.ptr);
-
-        const assert_op = c.mlirOperationCreate(&assert_state);
+        const assert_op = self.ora_dialect.createCfAssertWithAttrs(condition_value, attributes.items, clause_loc);
         h.appendOp(block, assert_op);
     }
 }

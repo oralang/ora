@@ -35,8 +35,8 @@ pub fn lowerReturn(self: *const StatementLowerer, ret: *const lib.ast.Statements
                 }
 
                 // get target type from memref element type
-                const memref_type = c.mlirValueGetType(return_value_memref);
-                const element_type = c.mlirShapedTypeGetElementType(memref_type);
+                const memref_type = c.oraValueGetType(return_value_memref);
+                const element_type = c.oraShapedTypeGetElementType(memref_type);
 
                 // convert value to match memref element type
                 const final_value = helpers.convertValueToType(self, v, element_type, ret.span, loc);
@@ -69,8 +69,8 @@ pub fn lowerReturn(self: *const StatementLowerer, ret: *const lib.ast.Statements
 
         // convert return value to match function return type if available
         const final_value = if (self.current_function_return_type) |ret_type| blk: {
-            const value_type = c.mlirValueGetType(v);
-            if (!c.mlirTypeEqual(value_type, ret_type)) {
+            const value_type = c.oraValueGetType(v);
+            if (!c.oraTypeEqual(value_type, ret_type)) {
                 // convert to match return type (e.g., i1 -> i256 for bool -> u256)
                 break :blk helpers.convertValueToType(self, v, ret_type, ret.span, loc);
             }
@@ -137,11 +137,6 @@ pub fn lowerEnsuresBeforeReturn(self: *const StatementLowerer, block: c.MlirBloc
         // create an assertion operation with comprehensive verification attributes
         // get the clause's span by switching on the expression type
         const clause_span = getExpressionSpan(clause);
-        var assert_state = h.opState("cf.assert", self.fileLoc(clause_span));
-
-        // add the condition as an operand
-        c.mlirOperationStateAddOperands(&assert_state, 1, @ptrCast(&condition_value));
-
         // collect verification attributes
         var attributes = std.ArrayList(c.MlirNamedAttribute){};
         defer attributes.deinit(self.allocator);
@@ -151,32 +146,29 @@ pub fn lowerEnsuresBeforeReturn(self: *const StatementLowerer, block: c.MlirBloc
         defer self.allocator.free(msg_text);
         const msg_attr = h.stringAttr(self.ctx, msg_text);
         const msg_id = h.identifier(self.ctx, "msg");
-        try attributes.append(self.allocator, c.mlirNamedAttributeGet(msg_id, msg_attr));
+        try attributes.append(self.allocator, c.oraNamedAttributeGet(msg_id, msg_attr));
 
         // add ora.ensures attribute to mark this as a postcondition
-        const ensures_attr = c.mlirBoolAttrGet(self.ctx, 1);
+        const ensures_attr = h.boolAttr(self.ctx, 1);
         const ensures_id = h.identifier(self.ctx, "ora.ensures");
-        attributes.append(self.allocator, c.mlirNamedAttributeGet(ensures_id, ensures_attr)) catch {};
+        attributes.append(self.allocator, c.oraNamedAttributeGet(ensures_id, ensures_attr)) catch {};
 
         // add verification context attribute
-        const context_attr = c.mlirStringAttrGet(self.ctx, h.strRef("function_postcondition"));
+        const context_attr = c.oraStringAttrCreate(self.ctx, h.strRef("function_postcondition"));
         const context_id = h.identifier(self.ctx, "ora.verification_context");
-        attributes.append(self.allocator, c.mlirNamedAttributeGet(context_id, context_attr)) catch {};
+        attributes.append(self.allocator, c.oraNamedAttributeGet(context_id, context_attr)) catch {};
 
         // add verification marker for formal verification tools
-        const verification_attr = c.mlirBoolAttrGet(self.ctx, 1);
+        const verification_attr = h.boolAttr(self.ctx, 1);
         const verification_id = h.identifier(self.ctx, "ora.verification");
-        attributes.append(self.allocator, c.mlirNamedAttributeGet(verification_id, verification_attr)) catch {};
+        attributes.append(self.allocator, c.oraNamedAttributeGet(verification_id, verification_attr)) catch {};
 
         // add postcondition index for multiple ensures clauses
-        const index_attr = c.mlirIntegerAttrGet(c.mlirIntegerTypeGet(self.ctx, 32), @intCast(i));
+        const index_attr = c.oraIntegerAttrCreateI64FromType(c.oraIntegerTypeCreate(self.ctx, 32), @intCast(i));
         const index_id = h.identifier(self.ctx, "ora.postcondition_index");
-        attributes.append(self.allocator, c.mlirNamedAttributeGet(index_id, index_attr)) catch {};
+        attributes.append(self.allocator, c.oraNamedAttributeGet(index_id, index_attr)) catch {};
 
-        // apply all attributes
-        c.mlirOperationStateAddAttributes(&assert_state, @intCast(attributes.items.len), attributes.items.ptr);
-
-        const assert_op = c.mlirOperationCreate(&assert_state);
+        const assert_op = self.ora_dialect.createCfAssertWithAttrs(condition_value, attributes.items, self.fileLoc(clause_span));
         h.appendOp(block, assert_op);
     }
 }

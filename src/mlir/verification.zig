@@ -44,7 +44,7 @@ pub const OraVerification = struct {
         // reset error handler for new verification run
         self.error_handler = ErrorHandler.init(self.allocator);
 
-        const module_op = c.mlirModuleGetOperation(module);
+        const module_op = c.oraModuleGetOperation(module);
 
         // run all verification passes
         try self.verifyTypes(module_op);
@@ -92,12 +92,10 @@ pub const OraVerification = struct {
         }
 
         // recursively verify regions
-        const num_regions = c.mlirOperationGetNumRegions(op);
+        const num_regions = c.oraOperationGetNumRegions(op);
         for (0..@intCast(num_regions)) |region_idx| {
-            const region = c.mlirOperationGetRegion(op, @intCast(region_idx));
-            // note: We can't traverse blocks due to missing MLIR C API functions
-            // this is a limitation of the current C API bindings
-            _ = region;
+            const block = c.oraOperationGetRegionBlock(op, region_idx);
+            _ = block;
         }
     }
 
@@ -119,8 +117,8 @@ pub const OraVerification = struct {
         }
 
         // basic operand/result count verification
-        _ = c.mlirOperationGetNumOperands(op);
-        const num_results = c.mlirOperationGetNumResults(op);
+        _ = c.oraOperationGetNumOperands(op);
+        const num_results = c.oraOperationGetNumResults(op);
 
         // result count verification skipped to avoid false positives
         // operation-specific result validation handled by MLIR verifier
@@ -129,8 +127,8 @@ pub const OraVerification = struct {
 
     /// Verify contract operation
     fn verifyContractOperation(self: *Self, op: c.MlirOperation) !void {
-        _ = c.mlirOperationGetNumOperands(op);
-        const num_results = c.mlirOperationGetNumResults(op);
+        _ = c.oraOperationGetNumOperands(op);
+        const num_results = c.oraOperationGetNumResults(op);
 
         // contract should have at least one result (the contract instance)
         if (num_results == 0) {
@@ -138,7 +136,7 @@ pub const OraVerification = struct {
         }
 
         // contract should have at least one region (the body)
-        const num_regions = c.mlirOperationGetNumRegions(op);
+        const num_regions = c.oraOperationGetNumRegions(op);
         if (num_regions == 0) {
             try self.error_handler.reportError(.MlirOperationFailed, null, "Contract operation must have at least one region", "add region to contract operation");
         }
@@ -146,8 +144,8 @@ pub const OraVerification = struct {
 
     /// Verify global operation
     fn verifyGlobalOperation(self: *Self, op: c.MlirOperation) !void {
-        _ = c.mlirOperationGetNumOperands(op);
-        const num_results = c.mlirOperationGetNumResults(op);
+        _ = c.oraOperationGetNumOperands(op);
+        const num_results = c.oraOperationGetNumResults(op);
 
         // global should have exactly one result
         if (num_results != 1) {
@@ -157,8 +155,8 @@ pub const OraVerification = struct {
 
     /// Verify storage load operation
     fn verifySLoadOperation(self: *Self, op: c.MlirOperation) !void {
-        const num_operands = c.mlirOperationGetNumOperands(op);
-        const num_results = c.mlirOperationGetNumResults(op);
+        const num_operands = c.oraOperationGetNumOperands(op);
+        const num_results = c.oraOperationGetNumResults(op);
 
         // sLoad should have exactly one operand (address) and one result (value)
         if (num_operands != 1) {
@@ -171,8 +169,8 @@ pub const OraVerification = struct {
 
     /// Verify storage store operation
     fn verifySStoreOperation(self: *Self, op: c.MlirOperation) !void {
-        const num_operands = c.mlirOperationGetNumOperands(op);
-        const num_results = c.mlirOperationGetNumResults(op);
+        const num_operands = c.oraOperationGetNumOperands(op);
+        const num_results = c.oraOperationGetNumResults(op);
 
         // sStore should have exactly two operands (address, value) and no results
         if (num_operands != 2) {
@@ -185,8 +183,8 @@ pub const OraVerification = struct {
 
     /// Verify memory load operation
     fn verifyMLoadOperation(self: *Self, op: c.MlirOperation) !void {
-        const num_operands = c.mlirOperationGetNumOperands(op);
-        const num_results = c.mlirOperationGetNumResults(op);
+        const num_operands = c.oraOperationGetNumOperands(op);
+        const num_results = c.oraOperationGetNumResults(op);
 
         // mLoad should have exactly one operand (address) and one result (value)
         if (num_operands != 1) {
@@ -199,8 +197,8 @@ pub const OraVerification = struct {
 
     /// Verify memory store operation
     fn verifyMStoreOperation(self: *Self, op: c.MlirOperation) !void {
-        const num_operands = c.mlirOperationGetNumOperands(op);
-        const num_results = c.mlirOperationGetNumResults(op);
+        const num_operands = c.oraOperationGetNumOperands(op);
+        const num_results = c.oraOperationGetNumResults(op);
 
         // mStore should have exactly two operands (address, value) and no results
         if (num_operands != 2) {
@@ -219,7 +217,7 @@ pub const OraVerification = struct {
         // check for memory operation patterns
         if (std.mem.eql(u8, op_name, "ora.mload") or std.mem.eql(u8, op_name, "ora.mstore")) {
             // memory operations should have proper operand types
-            const num_operands = c.mlirOperationGetNumOperands(op);
+            const num_operands = c.oraOperationGetNumOperands(op);
             if (num_operands > 0) {
                 // memory address type checking delegated to MLIR type system
                 // for now, just verify operand count
@@ -227,11 +225,10 @@ pub const OraVerification = struct {
         }
 
         // recursively check regions
-        const num_regions = c.mlirOperationGetNumRegions(op);
+        const num_regions = c.oraOperationGetNumRegions(op);
         for (0..@intCast(num_regions)) |region_idx| {
-            const region = c.mlirOperationGetRegion(op, @intCast(region_idx));
-            // note: We can't traverse blocks due to missing MLIR C API functions
-            _ = region;
+            const block = c.oraOperationGetRegionBlock(op, region_idx);
+            _ = block;
         }
     }
 
@@ -243,18 +240,17 @@ pub const OraVerification = struct {
         // check for contract-related operations
         if (std.mem.eql(u8, op_name, "ora.requires") or std.mem.eql(u8, op_name, "ora.ensures")) {
             // contract operations should have exactly one operand (the condition)
-            const num_operands = c.mlirOperationGetNumOperands(op);
+            const num_operands = c.oraOperationGetNumOperands(op);
             if (num_operands != 1) {
                 try self.error_handler.reportError(.MlirOperationFailed, null, "Contract operation must have exactly one operand (condition)", "ensure contract has exactly one condition operand");
             }
         }
 
         // recursively check regions
-        const num_regions = c.mlirOperationGetNumRegions(op);
+        const num_regions = c.oraOperationGetNumRegions(op);
         for (0..@intCast(num_regions)) |region_idx| {
-            const region = c.mlirOperationGetRegion(op, @intCast(region_idx));
-            // note: We can't traverse blocks due to missing MLIR C API functions
-            _ = region;
+            const block = c.oraOperationGetRegionBlock(op, region_idx);
+            _ = block;
         }
     }
 
@@ -266,8 +262,8 @@ pub const OraVerification = struct {
         // check for semantic consistency
         if (std.mem.eql(u8, op_name, "ora.if")) {
             // if operation should have exactly one operand (condition) and at least one region
-            const num_operands = c.mlirOperationGetNumOperands(op);
-            const num_regions = c.mlirOperationGetNumRegions(op);
+            const num_operands = c.oraOperationGetNumOperands(op);
+            const num_regions = c.oraOperationGetNumRegions(op);
 
             if (num_operands != 1) {
                 try self.error_handler.reportError(.MlirOperationFailed, null, "If operation must have exactly one operand (condition)", "ensure if operation has exactly one condition operand");
@@ -278,11 +274,10 @@ pub const OraVerification = struct {
         }
 
         // recursively check regions
-        const num_regions = c.mlirOperationGetNumRegions(op);
+        const num_regions = c.oraOperationGetNumRegions(op);
         for (0..@intCast(num_regions)) |region_idx| {
-            const region = c.mlirOperationGetRegion(op, @intCast(region_idx));
-            // note: We can't traverse blocks due to missing MLIR C API functions
-            _ = region;
+            const block = c.oraOperationGetRegionBlock(op, region_idx);
+            _ = block;
         }
     }
 
@@ -300,11 +295,11 @@ pub const OraVerification = struct {
         // allocate a copy that we can return
         const name_copy = self.allocator.dupe(u8, name_slice) catch {
             // if allocation fails, free the C string and return a fallback
-            @import("std").c.free(@ptrCast(@constCast(name_ref.data)));
+            c.oraStringRefFree(name_ref);
             return "unknown.operation";
         };
         // free the C-allocated string
-        @import("std").c.free(@ptrCast(@constCast(name_ref.data)));
+        c.oraStringRefFree(name_ref);
         return name_copy;
     }
 };

@@ -14,6 +14,75 @@ env:
   ZIG_VERSION: 0.15.2
 
 jobs:
+  mlir-build:
+    name: Build MLIR (once)
+    runs-on: macos-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - name: Setup Zig
+        uses: goto-bus-stop/setup-zig@v2
+        with:
+          version: ${{ env.ZIG_VERSION }}
+
+      - name: Install system dependencies
+        shell: bash
+        run: |
+          echo "🔧 Installing system dependencies for ${{ runner.os }}..."
+          brew update
+          brew install boost openssl cmake
+          echo "✅ macOS dependencies installed"
+
+      - name: Cache Zig artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/zig
+            .zig-cache
+          key: ${{ runner.os }}-zig-${{ env.ZIG_VERSION }}-${{ hashFiles('build.zig', 'build.zig.zon') }}
+          restore-keys: |
+            ${{ runner.os }}-zig-${{ env.ZIG_VERSION }}-
+
+      - name: Clone LLVM/MLIR for build
+        shell: bash
+        run: |
+          echo "📦 Cloning LLVM/MLIR (shallow clone for faster CI)..."
+          if [ ! -d "vendor/llvm-project" ]; then
+            git clone --depth=1 --branch=release/19.x https://github.com/llvm/llvm-project.git vendor/llvm-project
+            echo "✅ LLVM/MLIR cloned"
+          else
+            echo "✅ LLVM/MLIR already present"
+          fi
+
+      - name: Cache MLIR build
+        uses: actions/cache@v4
+        with:
+          path: vendor/mlir/
+          key: ${{ runner.os }}-mlir-build-${{ hashFiles('vendor/llvm-project/.git/HEAD', 'build.zig') }}
+          restore-keys: |
+            ${{ runner.os }}-mlir-build-
+
+      - name: Build MLIR libraries if needed
+        shell: bash
+        run: |
+          if [ -d "vendor/mlir/lib" ] && [ "$(ls -A vendor/mlir/lib/*.a 2>/dev/null | wc -l)" -gt 0 ]; then
+            echo "✅ MLIR libraries already built and cached"
+          else
+            echo "🔨 Building MLIR libraries..."
+            zig build
+            echo "✅ MLIR libraries built"
+          fi
+
+      - name: Upload MLIR artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: mlir-${{ runner.os }}
+          path: vendor/mlir/
+          retention-days: 7
+
   lint:
     name: Lint and Format  
     runs-on: macos-latest  # Changed to macOS to match other jobs
@@ -71,41 +140,6 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-zig-${{ env.ZIG_VERSION }}-
 
-      - name: Clone LLVM/MLIR for build
-        shell: bash
-        run: |
-          echo "📦 Cloning LLVM/MLIR (shallow clone for faster CI)..."
-          if [ ! -d "vendor/llvm-project" ]; then
-            git clone --depth=1 --branch=release/19.x https://github.com/llvm/llvm-project.git vendor/llvm-project
-            echo "✅ LLVM/MLIR cloned"
-          else
-            echo "✅ LLVM/MLIR already present"
-          fi
-
-      - name: Cache MLIR build
-        uses: actions/cache@v4
-        with:
-          path: vendor/mlir/
-          key: ${{ runner.os }}-mlir-build-${{ hashFiles('vendor/llvm-project/.git/HEAD', 'build.zig') }}
-          restore-keys: |
-            ${{ runner.os }}-mlir-build-
-
-      - name: Build MLIR libraries if needed
-        shell: bash
-        run: |
-          # Check if MLIR is already built (any .a file in vendor/mlir/lib indicates it's built)
-          if [ -d "vendor/mlir/lib" ] && [ "$(ls -A vendor/mlir/lib/*.a 2>/dev/null | wc -l)" -gt 0 ]; then
-            echo "✅ MLIR libraries already built and cached"
-          else
-            echo "🔨 Building MLIR libraries (this takes ~20 minutes, only on first run)..."
-            echo "Building via zig build (which triggers CMake for MLIR)..."
-            # The zig build process will automatically build MLIR if needed
-            zig build 2>&1 | head -100 || {
-              echo "⚠️  Initial build triggered MLIR compilation"
-            }
-            echo "✅ MLIR libraries built"
-          fi
-
       - name: Check formatting
         run: |
           echo "🔍 Checking code formatting..."
@@ -127,6 +161,7 @@ jobs:
   test:
     name: Test
     runs-on: ${{ matrix.os }}
+    needs: [mlir-build]
     strategy:
       fail-fast: false
       matrix:
@@ -188,40 +223,11 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-zig-${{ matrix.zig-version }}-
 
-      - name: Clone LLVM/MLIR for build
-        shell: bash
-        run: |
-          echo "📦 Cloning LLVM/MLIR (shallow clone for faster CI)..."
-          if [ ! -d "vendor/llvm-project" ]; then
-            git clone --depth=1 --branch=release/19.x https://github.com/llvm/llvm-project.git vendor/llvm-project
-            echo "✅ LLVM/MLIR cloned"
-          else
-            echo "✅ LLVM/MLIR already present"
-          fi
-
-      - name: Cache MLIR build
-        uses: actions/cache@v4
+      - name: Download MLIR artifact
+        uses: actions/download-artifact@v4
         with:
-          path: vendor/mlir/
-          key: ${{ runner.os }}-mlir-build-${{ hashFiles('vendor/llvm-project/.git/HEAD', 'build.zig') }}
-          restore-keys: |
-            ${{ runner.os }}-mlir-build-
-
-      - name: Build MLIR libraries if needed
-        shell: bash
-        run: |
-          # Check if MLIR is already built (any .a file in vendor/mlir/lib indicates it's built)
-          if [ -d "vendor/mlir/lib" ] && [ "$(ls -A vendor/mlir/lib/*.a 2>/dev/null | wc -l)" -gt 0 ]; then
-            echo "✅ MLIR libraries already built and cached"
-          else
-            echo "🔨 Building MLIR libraries (this takes ~20 minutes, only on first run)..."
-            echo "Building via zig build (which triggers CMake for MLIR)..."
-            # The zig build process will automatically build MLIR if needed
-            zig build 2>&1 | head -100 || {
-              echo "⚠️  Initial build triggered MLIR compilation"
-            }
-            echo "✅ MLIR libraries built"
-          fi
+          name: mlir-${{ runner.os }}
+          path: vendor/mlir
 
       - name: Build project
         shell: bash
@@ -244,7 +250,7 @@ jobs:
   comprehensive-tests:
     name: Comprehensive Feature Tests
     runs-on: ${{ matrix.os }}
-    needs: [lint, test]
+    needs: [lint, test, mlir-build]
     
     strategy:
       matrix:
@@ -304,24 +310,11 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-zig-${{ env.ZIG_VERSION }}-
 
-      - name: Clone LLVM/MLIR for build
-        shell: bash
-        run: |
-          echo "📦 Cloning LLVM/MLIR (shallow clone for faster CI)..."
-          if [ ! -d "vendor/llvm-project" ]; then
-            git clone --depth=1 --branch=release/19.x https://github.com/llvm/llvm-project.git vendor/llvm-project
-            echo "✅ LLVM/MLIR cloned"
-          else
-            echo "✅ LLVM/MLIR already present"
-          fi
-
-      - name: Cache MLIR build
-        uses: actions/cache@v4
+      - name: Download MLIR artifact
+        uses: actions/download-artifact@v4
         with:
-          path: vendor/mlir/
-          key: ${{ runner.os }}-mlir-build-${{ hashFiles('vendor/llvm-project/.git/HEAD', 'build.zig') }}
-          restore-keys: |
-            ${{ runner.os }}-mlir-build-
+          name: mlir-${{ runner.os }}
+          path: vendor/mlir
 
       - name: Build compiler (includes MLIR)
         shell: bash
@@ -417,6 +410,7 @@ jobs:
     name: Performance Benchmarks
     runs-on: macos-latest  # Changed to macOS to match other jobs
     if: github.event_name == 'schedule' || contains(github.event.pull_request.labels.*.name, 'performance')
+    needs: [mlir-build]
     
     steps:
       - name: Checkout code
@@ -469,24 +463,11 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-zig-${{ env.ZIG_VERSION }}-
 
-      - name: Clone LLVM/MLIR for build
-        shell: bash
-        run: |
-          echo "📦 Cloning LLVM/MLIR (shallow clone for faster CI)..."
-          if [ ! -d "vendor/llvm-project" ]; then
-            git clone --depth=1 --branch=release/19.x https://github.com/llvm/llvm-project.git vendor/llvm-project
-            echo "✅ LLVM/MLIR cloned"
-          else
-            echo "✅ LLVM/MLIR already present"
-          fi
-
-      - name: Cache MLIR build
-        uses: actions/cache@v4
+      - name: Download MLIR artifact
+        uses: actions/download-artifact@v4
         with:
-          path: vendor/mlir/
-          key: ${{ runner.os }}-mlir-build-${{ hashFiles('vendor/llvm-project/.git/HEAD', 'build.zig') }}
-          restore-keys: |
-            ${{ runner.os }}-mlir-build-
+          name: mlir-${{ runner.os }}
+          path: vendor/mlir
 
       - name: Build with optimizations
         shell: bash

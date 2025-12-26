@@ -37,14 +37,14 @@ pub const MlirContextHandle = struct {
 };
 
 pub fn createContext(allocator: std.mem.Allocator) MlirContextHandle {
-    const ctx = c.mlirContextCreate();
+    const ctx = c.oraContextCreate();
 
     // register all standard MLIR dialects
-    const registry = c.mlirDialectRegistryCreate();
-    c.mlirRegisterAllDialects(registry);
-    c.mlirContextAppendDialectRegistry(ctx, registry);
-    c.mlirDialectRegistryDestroy(registry);
-    c.mlirContextLoadAllAvailableDialects(ctx);
+    const registry = c.oraDialectRegistryCreate();
+    c.oraRegisterAllDialects(registry);
+    c.oraContextAppendDialectRegistry(ctx, registry);
+    c.oraDialectRegistryDestroy(registry);
+    c.oraContextLoadAllAvailableDialects(ctx);
 
     // initialize the Ora dialect
     var ora_dialect = @import("dialect.zig").OraDialect.init(ctx, allocator);
@@ -59,7 +59,7 @@ pub fn createContext(allocator: std.mem.Allocator) MlirContextHandle {
 }
 
 pub fn destroyContext(handle: MlirContextHandle) void {
-    c.mlirContextDestroy(handle.ctx);
+    c.oraContextDestroy(handle.ctx);
 }
 
 // Re-export ParamMap from symbols.zig to avoid duplication
@@ -374,7 +374,7 @@ pub const SymbolTable = struct {
         }
         // if symbol not found, add it to current scope
         log.debug("[updateSymbolValue] WARNING: Symbol not found: {s}, adding new symbol with variable_kind=null\n", .{name});
-        try self.addSymbol(name, c.mlirValueGetType(value), lib.ast.Statements.MemoryRegion.Stack, null, null);
+        try self.addSymbol(name, c.oraValueGetType(value), lib.ast.Statements.MemoryRegion.Stack, null, null);
         if (self.scopes.items[self.current_scope].get(name)) |symbol| {
             var updated_symbol = symbol;
             updated_symbol.value = value;
@@ -554,8 +554,8 @@ pub fn lowerFunctionsToModuleWithSemanticTable(ctx: c.MlirContext, nodes: []lib.
     else
         location_tracker.getUnknownLocation();
 
-    const module = c.mlirModuleCreateEmpty(loc);
-    const body = c.mlirModuleGetBody(module);
+    const module = c.oraModuleCreateEmpty(loc);
+    const body = c.oraModuleGetBody(module);
 
     // initialize error handler
     var error_handler = ErrorHandler.init(allocator);
@@ -607,29 +607,29 @@ pub fn lowerFunctionsToModuleWithSemanticTable(ctx: c.MlirContext, nodes: []lib.
                 .Storage => {
                     if (var_decl.kind == .Immutable) {
                         const immutable_op = decls.lowerImmutableDecl(var_decl);
-                        c.mlirBlockAppendOwnedOperation(block, immutable_op);
+                        c.oraBlockAppendOwnedOperation(block, immutable_op);
                     } else {
                         const global_op = decls.createGlobalDeclaration(var_decl);
-                        c.mlirBlockAppendOwnedOperation(block, global_op);
+                        c.oraBlockAppendOwnedOperation(block, global_op);
                     }
                     _ = storage_map.getOrCreateAddress(var_decl.name) catch {};
                 },
                 .Memory => {
                     if (var_decl.kind == .Immutable) {
                         const immutable_op = decls.lowerImmutableDecl(var_decl);
-                        c.mlirBlockAppendOwnedOperation(block, immutable_op);
+                        c.oraBlockAppendOwnedOperation(block, immutable_op);
                     } else {
                         const memory_global_op = decls.createMemoryGlobalDeclaration(var_decl);
-                        c.mlirBlockAppendOwnedOperation(block, memory_global_op);
+                        c.oraBlockAppendOwnedOperation(block, memory_global_op);
                     }
                 },
                 .TStore => {
                     if (var_decl.kind == .Immutable) {
                         const immutable_op = decls.lowerImmutableDecl(var_decl);
-                        c.mlirBlockAppendOwnedOperation(block, immutable_op);
+                        c.oraBlockAppendOwnedOperation(block, immutable_op);
                     } else {
                         const tstore_global_op = decls.createTStoreGlobalDeclaration(var_decl);
-                        c.mlirBlockAppendOwnedOperation(block, tstore_global_op);
+                        c.oraBlockAppendOwnedOperation(block, tstore_global_op);
                     }
                 },
                 .Stack => {
@@ -650,36 +650,36 @@ pub fn lowerFunctionsToModuleWithSemanticTable(ctx: c.MlirContext, nodes: []lib.
                 var local_var_map = LocalVarMap.init(allocator);
                 defer local_var_map.deinit();
                 const func_op = decl_lowerer.lowerFunction(&func, &global_storage_map, &local_var_map);
-                c.mlirBlockAppendOwnedOperation(body, func_op);
+                c.oraBlockAppendOwnedOperation(body, func_op);
             },
             .Contract => |contract| {
                 const contract_op = decl_lowerer.lowerContract(&contract);
-                c.mlirBlockAppendOwnedOperation(body, contract_op);
+                c.oraBlockAppendOwnedOperation(body, contract_op);
             },
             .VariableDecl => |var_decl| {
                 appendModuleVarDecl(&decl_lowerer, &var_decl, &global_storage_map, body);
             },
             .Import => |import_decl| {
                 const import_op = decl_lowerer.lowerImport(&import_decl);
-                c.mlirBlockAppendOwnedOperation(body, import_op);
+                c.oraBlockAppendOwnedOperation(body, import_op);
             },
             .Constant => |const_decl| {
                 const const_op = decl_lowerer.lowerConstDecl(&const_decl);
-                c.mlirBlockAppendOwnedOperation(body, const_op);
+                c.oraBlockAppendOwnedOperation(body, const_op);
             },
             .LogDecl => |log_decl| {
                 const log_op = decl_lowerer.lowerLogDecl(&log_decl);
-                c.mlirBlockAppendOwnedOperation(body, log_op);
+                c.oraBlockAppendOwnedOperation(body, log_op);
             },
             .ErrorDecl => |error_decl| {
                 const error_op = decl_lowerer.lowerErrorDecl(&error_decl);
-                c.mlirBlockAppendOwnedOperation(body, error_op);
+                c.oraBlockAppendOwnedOperation(body, error_op);
             },
             .Module => |module_node| {
                 // lower module imports
                 for (module_node.imports) |import_decl| {
                     const import_op = decl_lowerer.lowerImport(&import_decl);
-                    c.mlirBlockAppendOwnedOperation(body, import_op);
+                    c.oraBlockAppendOwnedOperation(body, import_op);
                 }
 
                 // lower module declarations
@@ -689,38 +689,38 @@ pub fn lowerFunctionsToModuleWithSemanticTable(ctx: c.MlirContext, nodes: []lib.
                             var local_var_map = LocalVarMap.init(allocator);
                             defer local_var_map.deinit();
                             const func_op = decl_lowerer.lowerFunction(&func, &global_storage_map, &local_var_map);
-                            c.mlirBlockAppendOwnedOperation(body, func_op);
+                            c.oraBlockAppendOwnedOperation(body, func_op);
                         },
                         .Contract => |contract| {
                             const contract_op = decl_lowerer.lowerContract(&contract);
-                            c.mlirBlockAppendOwnedOperation(body, contract_op);
+                            c.oraBlockAppendOwnedOperation(body, contract_op);
                         },
                         .VariableDecl => |var_decl| {
                             appendModuleVarDecl(&decl_lowerer, &var_decl, &global_storage_map, body);
                         },
                         .Import => |import_decl| {
                             const import_op = decl_lowerer.lowerImport(&import_decl);
-                            c.mlirBlockAppendOwnedOperation(body, import_op);
+                            c.oraBlockAppendOwnedOperation(body, import_op);
                         },
                         .Constant => |const_decl| {
                             const const_op = decl_lowerer.lowerConstDecl(&const_decl);
-                            c.mlirBlockAppendOwnedOperation(body, const_op);
+                            c.oraBlockAppendOwnedOperation(body, const_op);
                         },
                         .LogDecl => |log_decl| {
                             const log_op = decl_lowerer.lowerLogDecl(&log_decl);
-                            c.mlirBlockAppendOwnedOperation(body, log_op);
+                            c.oraBlockAppendOwnedOperation(body, log_op);
                         },
                         .ErrorDecl => |error_decl| {
                             const error_op = decl_lowerer.lowerErrorDecl(&error_decl);
-                            c.mlirBlockAppendOwnedOperation(body, error_op);
+                            c.oraBlockAppendOwnedOperation(body, error_op);
                         },
                         .Block => |block| {
                             const block_op = decl_lowerer.lowerBlock(&block);
-                            c.mlirBlockAppendOwnedOperation(body, block_op);
+                            c.oraBlockAppendOwnedOperation(body, block_op);
                         },
                         .TryBlock => |try_block| {
                             const try_op = decl_lowerer.lowerTryBlock(&try_block);
-                            c.mlirBlockAppendOwnedOperation(body, try_op);
+                            c.oraBlockAppendOwnedOperation(body, try_op);
                         },
                         .Expression, .Statement => {
                             // expressions/statements are not lowered in this path
@@ -733,18 +733,18 @@ pub fn lowerFunctionsToModuleWithSemanticTable(ctx: c.MlirContext, nodes: []lib.
                         },
                         .Module => |nested_module| {
                             const placeholder_op = decl_lowerer.createModulePlaceholder(&nested_module);
-                            c.mlirBlockAppendOwnedOperation(body, placeholder_op);
+                            c.oraBlockAppendOwnedOperation(body, placeholder_op);
                         },
                     }
                 }
             },
             .Block => |block| {
                 const block_op = decl_lowerer.lowerBlock(&block);
-                c.mlirBlockAppendOwnedOperation(body, block_op);
+                c.oraBlockAppendOwnedOperation(body, block_op);
             },
             .TryBlock => |try_block| {
                 const try_op = decl_lowerer.lowerTryBlock(&try_block);
-                c.mlirBlockAppendOwnedOperation(body, try_op);
+                c.oraBlockAppendOwnedOperation(body, try_op);
             },
             .Expression, .Statement => {
                 // top-level expressions/statements are not lowered in this path
@@ -808,8 +808,8 @@ pub fn lowerFunctionsToModuleWithErrors(ctx: c.MlirContext, nodes: []lib.AstNode
     else
         LocationTracker.init(ctx);
     const loc = location_tracker.getUnknownLocation();
-    const module = c.mlirModuleCreateEmpty(loc);
-    const body = c.mlirModuleGetBody(module);
+    const module = c.oraModuleCreateEmpty(loc);
+    const body = c.oraModuleGetBody(module);
 
     // initialize error handler
     var error_handler = ErrorHandler.init(allocator);
@@ -858,7 +858,7 @@ pub fn lowerFunctionsToModuleWithErrors(ctx: c.MlirContext, nodes: []lib.AstNode
                 if (enum_valid) {
                     const enum_op = decl_lowerer.lowerEnum(&enum_decl);
                     if (error_handler.validateMlirOperation(enum_op, enum_decl.span) catch false) {
-                        c.mlirBlockAppendOwnedOperation(body, enum_op);
+                        c.oraBlockAppendOwnedOperation(body, enum_op);
 
                         // register enum type in symbol table
                         const enum_type = decl_lowerer.createEnumType(&enum_decl);
@@ -910,7 +910,7 @@ pub fn lowerFunctionsToModuleWithErrors(ctx: c.MlirContext, nodes: []lib.AstNode
                 if (struct_valid) {
                     const struct_op = decl_lowerer.lowerStruct(&struct_decl);
                     if (error_handler.validateMlirOperation(struct_op, struct_decl.span) catch false) {
-                        c.mlirBlockAppendOwnedOperation(body, struct_op);
+                        c.oraBlockAppendOwnedOperation(body, struct_op);
 
                         // register struct type in symbol table
                         const struct_type = decl_lowerer.createStructType(&struct_decl);
@@ -995,7 +995,7 @@ pub fn lowerFunctionsToModuleWithErrors(ctx: c.MlirContext, nodes: []lib.AstNode
 
                 // validate the created MLIR operation
                 if (error_handler.validateMlirOperation(func_op, func.span) catch false) {
-                    c.mlirBlockAppendOwnedOperation(body, func_op);
+                    c.oraBlockAppendOwnedOperation(body, func_op);
                 }
             },
             .Contract => |contract| {
@@ -1017,7 +1017,7 @@ pub fn lowerFunctionsToModuleWithErrors(ctx: c.MlirContext, nodes: []lib.AstNode
 
                 // validate the created MLIR operation
                 if (error_handler.validateMlirOperation(contract_op, contract.span) catch false) {
-                    c.mlirBlockAppendOwnedOperation(body, contract_op);
+                    c.oraBlockAppendOwnedOperation(body, contract_op);
                 }
             },
             .VariableDecl => |var_decl| {
@@ -1043,12 +1043,12 @@ pub fn lowerFunctionsToModuleWithErrors(ctx: c.MlirContext, nodes: []lib.AstNode
                             // handle immutable storage variables
                             const immutable_op = decl_lowerer.lowerImmutableDecl(&var_decl);
                             if (error_handler.validateMlirOperation(immutable_op, var_decl.span) catch false) {
-                                c.mlirBlockAppendOwnedOperation(body, immutable_op);
+                                c.oraBlockAppendOwnedOperation(body, immutable_op);
                             }
                         } else {
                             const global_op = decl_lowerer.createGlobalDeclaration(&var_decl);
                             if (error_handler.validateMlirOperation(global_op, var_decl.span) catch false) {
-                                c.mlirBlockAppendOwnedOperation(body, global_op);
+                                c.oraBlockAppendOwnedOperation(body, global_op);
                             }
                         }
                         _ = global_storage_map.getOrCreateAddress(var_decl.name) catch {};
@@ -1058,12 +1058,12 @@ pub fn lowerFunctionsToModuleWithErrors(ctx: c.MlirContext, nodes: []lib.AstNode
                             // handle immutable memory variables
                             const immutable_op = decl_lowerer.lowerImmutableDecl(&var_decl);
                             if (error_handler.validateMlirOperation(immutable_op, var_decl.span) catch false) {
-                                c.mlirBlockAppendOwnedOperation(body, immutable_op);
+                                c.oraBlockAppendOwnedOperation(body, immutable_op);
                             }
                         } else {
                             const memory_global_op = decl_lowerer.createMemoryGlobalDeclaration(&var_decl);
                             if (error_handler.validateMlirOperation(memory_global_op, var_decl.span) catch false) {
-                                c.mlirBlockAppendOwnedOperation(body, memory_global_op);
+                                c.oraBlockAppendOwnedOperation(body, memory_global_op);
                             }
                         }
                     },
@@ -1072,12 +1072,12 @@ pub fn lowerFunctionsToModuleWithErrors(ctx: c.MlirContext, nodes: []lib.AstNode
                             // handle immutable transient storage variables
                             const immutable_op = decl_lowerer.lowerImmutableDecl(&var_decl);
                             if (error_handler.validateMlirOperation(immutable_op, var_decl.span) catch false) {
-                                c.mlirBlockAppendOwnedOperation(body, immutable_op);
+                                c.oraBlockAppendOwnedOperation(body, immutable_op);
                             }
                         } else {
                             const tstore_global_op = decl_lowerer.createTStoreGlobalDeclaration(&var_decl);
                             if (error_handler.validateMlirOperation(tstore_global_op, var_decl.span) catch false) {
-                                c.mlirBlockAppendOwnedOperation(body, tstore_global_op);
+                                c.oraBlockAppendOwnedOperation(body, tstore_global_op);
                             }
                         }
                     },
@@ -1099,7 +1099,7 @@ pub fn lowerFunctionsToModuleWithErrors(ctx: c.MlirContext, nodes: []lib.AstNode
                 if (import_valid) {
                     const import_op = decl_lowerer.lowerImport(&import_decl);
                     if (error_handler.validateMlirOperation(import_op, import_decl.span) catch false) {
-                        c.mlirBlockAppendOwnedOperation(body, import_op);
+                        c.oraBlockAppendOwnedOperation(body, import_op);
                     }
                 }
             },
@@ -1111,7 +1111,7 @@ pub fn lowerFunctionsToModuleWithErrors(ctx: c.MlirContext, nodes: []lib.AstNode
                 if (const_valid) {
                     const const_op = decl_lowerer.lowerConstDecl(&const_decl);
                     if (error_handler.validateMlirOperation(const_op, const_decl.span) catch false) {
-                        c.mlirBlockAppendOwnedOperation(body, const_op);
+                        c.oraBlockAppendOwnedOperation(body, const_op);
 
                         // register constant declaration for lazy value creation
                         symbol_table.registerConstantDecl(const_decl.name, &const_decl) catch {
@@ -1133,7 +1133,7 @@ pub fn lowerFunctionsToModuleWithErrors(ctx: c.MlirContext, nodes: []lib.AstNode
                 if (log_valid) {
                     const log_op = decl_lowerer.lowerLogDecl(&log_decl);
                     if (error_handler.validateMlirOperation(log_op, log_decl.span) catch false) {
-                        c.mlirBlockAppendOwnedOperation(body, log_op);
+                        c.oraBlockAppendOwnedOperation(body, log_op);
                     }
                 }
             },
@@ -1145,7 +1145,7 @@ pub fn lowerFunctionsToModuleWithErrors(ctx: c.MlirContext, nodes: []lib.AstNode
                 if (error_valid) {
                     const error_op = decl_lowerer.lowerErrorDecl(&error_decl);
                     if (error_handler.validateMlirOperation(error_op, error_decl.span) catch false) {
-                        c.mlirBlockAppendOwnedOperation(body, error_op);
+                        c.oraBlockAppendOwnedOperation(body, error_op);
                     }
                 }
             },
@@ -1176,7 +1176,7 @@ pub fn lowerFunctionsToModuleWithErrors(ctx: c.MlirContext, nodes: []lib.AstNode
                     if (import_valid) {
                         const import_op = decl_lowerer.lowerImport(&import);
                         if (error_handler.validateMlirOperation(import_op, import.span) catch false) {
-                            c.mlirBlockAppendOwnedOperation(body, import_op);
+                            c.oraBlockAppendOwnedOperation(body, import_op);
                         }
                     }
                 }
@@ -1195,13 +1195,13 @@ pub fn lowerFunctionsToModuleWithErrors(ctx: c.MlirContext, nodes: []lib.AstNode
 
                             const func_op = decl_lowerer.lowerFunction(&func, &global_storage_map, &local_var_map);
                             if (error_handler.validateMlirOperation(func_op, func.span) catch false) {
-                                c.mlirBlockAppendOwnedOperation(body, func_op);
+                                c.oraBlockAppendOwnedOperation(body, func_op);
                             }
                         },
                         .Contract => |contract| {
                             const contract_op = decl_lowerer.lowerContract(&contract);
                             if (error_handler.validateMlirOperation(contract_op, contract.span) catch false) {
-                                c.mlirBlockAppendOwnedOperation(body, contract_op);
+                                c.oraBlockAppendOwnedOperation(body, contract_op);
                             }
                         },
                         .VariableDecl => |var_decl| {
@@ -1210,43 +1210,43 @@ pub fn lowerFunctionsToModuleWithErrors(ctx: c.MlirContext, nodes: []lib.AstNode
                             // create a placeholder operation to allow compilation to continue
                             const placeholder_op = decl_lowerer.createVariablePlaceholder(&var_decl);
                             if (error_handler.validateMlirOperation(placeholder_op, var_decl.span) catch false) {
-                                c.mlirBlockAppendOwnedOperation(body, placeholder_op);
+                                c.oraBlockAppendOwnedOperation(body, placeholder_op);
                             }
                         },
                         .StructDecl => |struct_decl| {
                             const struct_op = decl_lowerer.lowerStruct(&struct_decl);
                             if (error_handler.validateMlirOperation(struct_op, struct_decl.span) catch false) {
-                                c.mlirBlockAppendOwnedOperation(body, struct_op);
+                                c.oraBlockAppendOwnedOperation(body, struct_op);
                             }
                         },
                         .EnumDecl => |enum_decl| {
                             const enum_op = decl_lowerer.lowerEnum(&enum_decl);
                             if (error_handler.validateMlirOperation(enum_op, enum_decl.span) catch false) {
-                                c.mlirBlockAppendOwnedOperation(body, enum_op);
+                                c.oraBlockAppendOwnedOperation(body, enum_op);
                             }
                         },
                         .Import => |import_decl| {
                             const import_op = decl_lowerer.lowerImport(&import_decl);
                             if (error_handler.validateMlirOperation(import_op, import_decl.span) catch false) {
-                                c.mlirBlockAppendOwnedOperation(body, import_op);
+                                c.oraBlockAppendOwnedOperation(body, import_op);
                             }
                         },
                         .Constant => |const_decl| {
                             const const_op = decl_lowerer.lowerConstDecl(&const_decl);
                             if (error_handler.validateMlirOperation(const_op, const_decl.span) catch false) {
-                                c.mlirBlockAppendOwnedOperation(body, const_op);
+                                c.oraBlockAppendOwnedOperation(body, const_op);
                             }
                         },
                         .LogDecl => |log_decl| {
                             const log_op = decl_lowerer.lowerLogDecl(&log_decl);
                             if (error_handler.validateMlirOperation(log_op, log_decl.span) catch false) {
-                                c.mlirBlockAppendOwnedOperation(body, log_op);
+                                c.oraBlockAppendOwnedOperation(body, log_op);
                             }
                         },
                         .ErrorDecl => |error_decl| {
                             const error_op = decl_lowerer.lowerErrorDecl(&error_decl);
                             if (error_handler.validateMlirOperation(error_op, error_decl.span) catch false) {
-                                c.mlirBlockAppendOwnedOperation(body, error_op);
+                                c.oraBlockAppendOwnedOperation(body, error_op);
                             }
                         },
                         .ContractInvariant => {
@@ -1259,13 +1259,13 @@ pub fn lowerFunctionsToModuleWithErrors(ctx: c.MlirContext, nodes: []lib.AstNode
                             // create a placeholder operation to allow compilation to continue
                             const placeholder_op = decl_lowerer.createModulePlaceholder(&nested_module);
                             if (error_handler.validateMlirOperation(placeholder_op, nested_module.span) catch false) {
-                                c.mlirBlockAppendOwnedOperation(body, placeholder_op);
+                                c.oraBlockAppendOwnedOperation(body, placeholder_op);
                             }
                         },
                         .Block => |block| {
                             const block_op = decl_lowerer.lowerBlock(&block);
                             if (error_handler.validateMlirOperation(block_op, block.span) catch false) {
-                                c.mlirBlockAppendOwnedOperation(body, block_op);
+                                c.oraBlockAppendOwnedOperation(body, block_op);
                             }
                         },
                         .Expression => |expr| {
@@ -1276,7 +1276,7 @@ pub fn lowerFunctionsToModuleWithErrors(ctx: c.MlirContext, nodes: []lib.AstNode
                             const expr_value = expr_lowerer.lowerExpression(expr);
                             const expr_op = expr_lowerer.createExpressionCapture(expr_value, error_handling.getSpanFromExpression(expr));
                             if (error_handler.validateMlirOperation(expr_op, error_handling.getSpanFromExpression(expr)) catch false) {
-                                c.mlirBlockAppendOwnedOperation(body, expr_op);
+                                c.oraBlockAppendOwnedOperation(body, expr_op);
                             }
                         },
                         .Statement => |stmt| {
@@ -1293,7 +1293,7 @@ pub fn lowerFunctionsToModuleWithErrors(ctx: c.MlirContext, nodes: []lib.AstNode
                         .TryBlock => |try_block| {
                             const try_block_op = decl_lowerer.lowerTryBlock(&try_block);
                             if (error_handler.validateMlirOperation(try_block_op, try_block.span) catch false) {
-                                c.mlirBlockAppendOwnedOperation(body, try_block_op);
+                                c.oraBlockAppendOwnedOperation(body, try_block_op);
                             }
                         },
                     }
@@ -1316,7 +1316,7 @@ pub fn lowerFunctionsToModuleWithErrors(ctx: c.MlirContext, nodes: []lib.AstNode
                 // lower top-level block using the declaration lowerer
                 const block_op = decl_lowerer.lowerBlock(&block);
                 if (error_handler.validateMlirOperation(block_op, block.span) catch false) {
-                    c.mlirBlockAppendOwnedOperation(body, block_op);
+                    c.oraBlockAppendOwnedOperation(body, block_op);
                 }
             },
             .Expression => |expr| {
@@ -1342,7 +1342,7 @@ pub fn lowerFunctionsToModuleWithErrors(ctx: c.MlirContext, nodes: []lib.AstNode
                 // for now, we'll create a simple operation that captures the expression value
                 const expr_op = expr_lowerer.createExpressionCapture(expr_value, error_handling.getSpanFromExpression(expr));
                 if (error_handler.validateMlirOperation(expr_op, error_handling.getSpanFromExpression(expr)) catch false) {
-                    c.mlirBlockAppendOwnedOperation(body, expr_op);
+                    c.oraBlockAppendOwnedOperation(body, expr_op);
                 }
             },
             .Statement => |stmt| {
@@ -1384,7 +1384,7 @@ pub fn lowerFunctionsToModuleWithErrors(ctx: c.MlirContext, nodes: []lib.AstNode
                 // lower top-level try block using the declaration lowerer
                 const try_block_op = decl_lowerer.lowerTryBlock(&try_block);
                 if (error_handler.validateMlirOperation(try_block_op, try_block.span) catch false) {
-                    c.mlirBlockAppendOwnedOperation(body, try_block_op);
+                    c.oraBlockAppendOwnedOperation(body, try_block_op);
                 }
             },
             .EnumDecl => |enum_decl| {
@@ -1561,8 +1561,8 @@ pub fn lowerFunctionsToModule(ctx: c.MlirContext, nodes: []lib.AstNode) c.MlirMo
     const result = lowerFunctionsToModuleWithErrors(ctx, nodes, arena.allocator()) catch |err| {
         log.debug("Error during MLIR lowering: {s}\n", .{@errorName(err)});
         // return empty module on error
-        const loc = c.mlirLocationUnknownGet(ctx);
-        return c.mlirModuleCreateEmpty(loc);
+        const loc = c.oraLocationUnknownGet(ctx);
+        return c.oraModuleCreateEmpty(loc);
     };
 
     // print diagnostics if there are any errors or warnings

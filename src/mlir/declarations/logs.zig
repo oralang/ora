@@ -11,18 +11,17 @@ const helpers = @import("helpers.zig");
 
 /// Lower log declarations with event type definitions and indexed field information (Requirements 7.3)
 pub fn lowerLogDecl(self: *const DeclarationLowerer, log_decl: *const lib.ast.LogDeclNode) c.MlirOperation {
-    // create ora.log.decl operation
-    var state = h.opState("ora.log.decl", helpers.createFileLocation(self, log_decl.span));
+    const loc = helpers.createFileLocation(self, log_decl.span);
 
     // collect log attributes
     var attributes = std.ArrayList(c.MlirNamedAttribute){};
     defer attributes.deinit(std.heap.page_allocator);
 
     // add log name
-    const name_ref = c.mlirStringRefCreate(log_decl.name.ptr, log_decl.name.len);
-    const name_attr = c.mlirStringAttrGet(self.ctx, name_ref);
+    const name_ref = c.oraStringRefCreate(log_decl.name.ptr, log_decl.name.len);
+    const name_attr = c.oraStringAttrCreate(self.ctx, name_ref);
     const name_id = h.identifier(self.ctx, "sym_name");
-    attributes.append(std.heap.page_allocator, c.mlirNamedAttributeGet(name_id, name_attr)) catch {};
+    attributes.append(std.heap.page_allocator, c.oraNamedAttributeGet(name_id, name_attr)) catch {};
 
     // create field information as attributes
     var field_names = std.ArrayList(c.MlirAttribute){};
@@ -34,60 +33,61 @@ pub fn lowerLogDecl(self: *const DeclarationLowerer, log_decl: *const lib.ast.Lo
 
     for (log_decl.fields) |field| {
         // add field name
-        const field_name_ref = c.mlirStringRefCreate(field.name.ptr, field.name.len);
-        const field_name_attr = c.mlirStringAttrGet(self.ctx, field_name_ref);
+        const field_name_ref = c.oraStringRefCreate(field.name.ptr, field.name.len);
+        const field_name_attr = c.oraStringAttrCreate(self.ctx, field_name_ref);
         field_names.append(std.heap.page_allocator, field_name_attr) catch {};
 
         // add field type
         const field_type = self.type_mapper.toMlirType(field.type_info);
-        const field_type_attr = c.mlirTypeAttrGet(field_type);
+        const field_type_attr = c.oraTypeAttrCreateFromType(field_type);
         field_types.append(std.heap.page_allocator, field_type_attr) catch {};
 
         // add indexed flag
-        const indexed_attr = c.mlirBoolAttrGet(self.ctx, if (field.indexed) 1 else 0);
+        const indexed_attr = h.boolAttr(self.ctx, @as(i32, @intFromBool(field.indexed)));
         field_indexed.append(std.heap.page_allocator, indexed_attr) catch {};
     }
 
     // add field arrays as attributes
     if (field_names.items.len > 0) {
-        const field_names_array = c.mlirArrayAttrGet(self.ctx, @intCast(field_names.items.len), field_names.items.ptr);
+        const field_names_array = c.oraArrayAttrCreate(self.ctx, @intCast(field_names.items.len), field_names.items.ptr);
         const field_names_id = h.identifier(self.ctx, "ora.field_names");
-        attributes.append(std.heap.page_allocator, c.mlirNamedAttributeGet(field_names_id, field_names_array)) catch {};
+        attributes.append(std.heap.page_allocator, c.oraNamedAttributeGet(field_names_id, field_names_array)) catch {};
 
-        const field_types_array = c.mlirArrayAttrGet(self.ctx, @intCast(field_types.items.len), field_types.items.ptr);
+        const field_types_array = c.oraArrayAttrCreate(self.ctx, @intCast(field_types.items.len), field_types.items.ptr);
         const field_types_id = h.identifier(self.ctx, "ora.field_types");
-        attributes.append(std.heap.page_allocator, c.mlirNamedAttributeGet(field_types_id, field_types_array)) catch {};
+        attributes.append(std.heap.page_allocator, c.oraNamedAttributeGet(field_types_id, field_types_array)) catch {};
 
-        const field_indexed_array = c.mlirArrayAttrGet(self.ctx, @intCast(field_indexed.items.len), field_indexed.items.ptr);
+        const field_indexed_array = c.oraArrayAttrCreate(self.ctx, @intCast(field_indexed.items.len), field_indexed.items.ptr);
         const field_indexed_id = h.identifier(self.ctx, "ora.field_indexed");
-        attributes.append(std.heap.page_allocator, c.mlirNamedAttributeGet(field_indexed_id, field_indexed_array)) catch {};
+        attributes.append(std.heap.page_allocator, c.oraNamedAttributeGet(field_indexed_id, field_indexed_array)) catch {};
     }
 
     // add log declaration marker
-    const log_decl_attr = c.mlirBoolAttrGet(self.ctx, 1);
+    const log_decl_attr = h.boolAttr(self.ctx, 1);
     const log_decl_id = h.identifier(self.ctx, "ora.log_decl");
-    attributes.append(std.heap.page_allocator, c.mlirNamedAttributeGet(log_decl_id, log_decl_attr)) catch {};
+    attributes.append(std.heap.page_allocator, c.oraNamedAttributeGet(log_decl_id, log_decl_attr)) catch {};
 
-    // apply all attributes
-    c.mlirOperationStateAddAttributes(&state, @intCast(attributes.items.len), attributes.items.ptr);
-
-    return c.mlirOperationCreate(&state);
+    return c.oraLogDeclOpCreate(
+        self.ctx,
+        loc,
+        if (attributes.items.len == 0) null else attributes.items.ptr,
+        attributes.items.len,
+    );
 }
 
 /// Lower error declarations with error type definitions (Requirements 7.4)
 pub fn lowerErrorDecl(self: *const DeclarationLowerer, error_decl: *const lib.ast.Statements.ErrorDeclNode) c.MlirOperation {
-    // create ora.error.decl operation
-    var state = h.opState("ora.error.decl", helpers.createFileLocation(self, error_decl.span));
+    const loc = helpers.createFileLocation(self, error_decl.span);
 
     // collect error attributes
     var attributes = std.ArrayList(c.MlirNamedAttribute){};
     defer attributes.deinit(std.heap.page_allocator);
 
     // add error name
-    const name_ref = c.mlirStringRefCreate(error_decl.name.ptr, error_decl.name.len);
-    const name_attr = c.mlirStringAttrGet(self.ctx, name_ref);
+    const name_ref = c.oraStringRefCreate(error_decl.name.ptr, error_decl.name.len);
+    const name_attr = c.oraStringAttrCreate(self.ctx, name_ref);
     const name_id = h.identifier(self.ctx, "sym_name");
-    attributes.append(std.heap.page_allocator, c.mlirNamedAttributeGet(name_id, name_attr)) catch {};
+    attributes.append(std.heap.page_allocator, c.oraNamedAttributeGet(name_id, name_attr)) catch {};
 
     // add error parameters if present
     if (error_decl.parameters) |params| {
@@ -98,39 +98,41 @@ pub fn lowerErrorDecl(self: *const DeclarationLowerer, error_decl: *const lib.as
 
         for (params) |param| {
             // add parameter name
-            const param_name_ref = c.mlirStringRefCreate(param.name.ptr, param.name.len);
-            const param_name_attr = c.mlirStringAttrGet(self.ctx, param_name_ref);
+            const param_name_ref = c.oraStringRefCreate(param.name.ptr, param.name.len);
+            const param_name_attr = c.oraStringAttrCreate(self.ctx, param_name_ref);
             param_names.append(std.heap.page_allocator, param_name_attr) catch {};
 
             // add parameter type
             const param_type = self.type_mapper.toMlirType(param.type_info);
-            const param_type_attr = c.mlirTypeAttrGet(param_type);
+            const param_type_attr = c.oraTypeAttrCreateFromType(param_type);
             param_types.append(std.heap.page_allocator, param_type_attr) catch {};
         }
 
         // add parameter arrays as attributes
         if (param_names.items.len > 0) {
-            const param_names_array = c.mlirArrayAttrGet(self.ctx, @intCast(param_names.items.len), param_names.items.ptr);
+            const param_names_array = c.oraArrayAttrCreate(self.ctx, @intCast(param_names.items.len), param_names.items.ptr);
             const param_names_id = h.identifier(self.ctx, "ora.param_names");
-            attributes.append(std.heap.page_allocator, c.mlirNamedAttributeGet(param_names_id, param_names_array)) catch {};
+            attributes.append(std.heap.page_allocator, c.oraNamedAttributeGet(param_names_id, param_names_array)) catch {};
 
-            const param_types_array = c.mlirArrayAttrGet(self.ctx, @intCast(param_types.items.len), param_types.items.ptr);
+            const param_types_array = c.oraArrayAttrCreate(self.ctx, @intCast(param_types.items.len), param_types.items.ptr);
             const param_types_id = h.identifier(self.ctx, "ora.param_types");
-            attributes.append(std.heap.page_allocator, c.mlirNamedAttributeGet(param_types_id, param_types_array)) catch {};
+            attributes.append(std.heap.page_allocator, c.oraNamedAttributeGet(param_types_id, param_types_array)) catch {};
         }
     }
 
     // add error declaration marker
-    const error_decl_attr = c.mlirBoolAttrGet(self.ctx, 1);
+    const error_decl_attr = h.boolAttr(self.ctx, 1);
     const error_decl_id = h.identifier(self.ctx, "ora.error_decl");
-    attributes.append(std.heap.page_allocator, c.mlirNamedAttributeGet(error_decl_id, error_decl_attr)) catch {};
-
-    // apply all attributes
-    c.mlirOperationStateAddAttributes(&state, @intCast(attributes.items.len), attributes.items.ptr);
+    attributes.append(std.heap.page_allocator, c.oraNamedAttributeGet(error_decl_id, error_decl_attr)) catch {};
 
     // create the error type and add it as a result
     const error_type = self.createErrorType(error_decl);
-    c.mlirOperationStateAddResults(&state, 1, @ptrCast(&error_type));
-
-    return c.mlirOperationCreate(&state);
+    return c.oraErrorDeclOpCreate(
+        self.ctx,
+        loc,
+        &[_]c.MlirType{error_type},
+        1,
+        if (attributes.items.len == 0) null else attributes.items.ptr,
+        attributes.items.len,
+    );
 }

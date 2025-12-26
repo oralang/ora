@@ -56,12 +56,7 @@ pub fn getExpressionSpan(_: *const DeclarationLowerer, expr: *const lib.ast.Expr
 
 /// Create a constant value from an attribute
 pub fn createConstant(self: *const DeclarationLowerer, block: c.MlirBlock, attr: c.MlirAttribute, ty: c.MlirType, loc: c.MlirLocation) c.MlirValue {
-    var const_state = h.opState("arith.constant", loc);
-    const value_id = h.identifier(self.ctx, "value");
-    var attrs = [_]c.MlirNamedAttribute{c.mlirNamedAttributeGet(value_id, attr)};
-    c.mlirOperationStateAddAttributes(&const_state, attrs.len, &attrs);
-    c.mlirOperationStateAddResults(&const_state, 1, @ptrCast(&ty));
-    const const_op = c.mlirOperationCreate(&const_state);
+    const const_op = c.oraArithConstantOpCreate(self.ctx, loc, ty, attr);
     h.appendOp(block, const_op);
     return h.getResult(const_op, 0);
 }
@@ -69,37 +64,32 @@ pub fn createConstant(self: *const DeclarationLowerer, block: c.MlirBlock, attr:
 /// Create a placeholder operation for unsupported variable declarations
 pub fn createVariablePlaceholder(self: *const DeclarationLowerer, var_decl: *const lib.ast.Statements.VariableDeclNode) c.MlirOperation {
     const loc = self.createFileLocation(var_decl.span);
-    var state = h.opState("ora.variable_placeholder", loc);
-
     // add variable name as attribute
-    const name_ref = c.mlirStringRefCreate(var_decl.name.ptr, var_decl.name.len);
-    const name_attr = c.mlirStringAttrGet(self.ctx, name_ref);
-    const name_id = h.identifier(self.ctx, "name");
-    var attrs = [_]c.MlirNamedAttribute{c.mlirNamedAttributeGet(name_id, name_attr)};
-    c.mlirOperationStateAddAttributes(&state, attrs.len, &attrs);
-
-    // add placeholder type
-    const placeholder_ty = c.mlirIntegerTypeGet(self.ctx, 32);
-    c.mlirOperationStateAddResults(&state, 1, @ptrCast(&placeholder_ty));
-
-    return c.mlirOperationCreate(&state);
+    const placeholder_ty = c.oraIntegerTypeCreate(self.ctx, 32);
+    return c.oraVariablePlaceholderOpCreate(self.ctx, loc, h.strRef(var_decl.name), placeholder_ty);
 }
 
 /// Create a placeholder operation for module declarations
 pub fn createModulePlaceholder(self: *const DeclarationLowerer, module_decl: *const lib.ast.ModuleNode) c.MlirOperation {
     const loc = self.createFileLocation(module_decl.span);
-    var state = h.opState("ora.module_placeholder", loc);
+    var attrs = std.ArrayList(c.MlirNamedAttribute){};
+    defer attrs.deinit(std.heap.page_allocator);
 
-    // add module name as attribute
     if (module_decl.name) |name| {
-        const name_ref = c.mlirStringRefCreate(name.ptr, name.len);
-        const name_attr = c.mlirStringAttrGet(self.ctx, name_ref);
+        const name_ref = c.oraStringRefCreate(name.ptr, name.len);
+        const name_attr = c.oraStringAttrCreate(self.ctx, name_ref);
         const name_id = h.identifier(self.ctx, "name");
-        var attrs = [_]c.MlirNamedAttribute{c.mlirNamedAttributeGet(name_id, name_attr)};
-        c.mlirOperationStateAddAttributes(&state, attrs.len, &attrs);
+        attrs.append(std.heap.page_allocator, c.oraNamedAttributeGet(name_id, name_attr)) catch {};
     }
 
-    return c.mlirOperationCreate(&state);
+    const module_name = if (module_decl.name) |name| name else "module";
+    return c.oraModulePlaceholderOpCreate(
+        self.ctx,
+        loc,
+        h.strRef(module_name),
+        if (attrs.items.len == 0) null else attrs.items.ptr,
+        attrs.items.len,
+    );
 }
 
 /// Convert Ora TypeInfo to string representation for attributes
@@ -148,9 +138,9 @@ pub fn createFunctionType(self: *const DeclarationLowerer, func: *const lib.Func
     // create function type
     if (func.return_type_info) |ret_info| {
         const result_type = self.type_mapper.toMlirType(ret_info);
-        return c.mlirFunctionTypeGet(self.ctx, @intCast(param_types.items.len), if (param_types.items.len > 0) param_types.items.ptr else null, 1, @ptrCast(&result_type));
+        return c.oraFunctionTypeGet(self.ctx, @intCast(param_types.items.len), if (param_types.items.len > 0) param_types.items.ptr else null, 1, @ptrCast(&result_type));
     } else {
         // functions with no return type should have 0 result types, not a 'none' type
-        return c.mlirFunctionTypeGet(self.ctx, @intCast(param_types.items.len), if (param_types.items.len > 0) param_types.items.ptr else null, 0, null);
+        return c.oraFunctionTypeGet(self.ctx, @intCast(param_types.items.len), if (param_types.items.len > 0) param_types.items.ptr else null, 0, null);
     }
 }

@@ -12,22 +12,485 @@
 #include "mlir/CAPI/IR.h"
 #include "mlir/CAPI/Support.h"
 #include "mlir/CAPI/Pass.h"
+#include "mlir/IR/Attributes.h"
+#include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/IR/Builders.h"
+#include "mlir/IR/BuiltinTypes.h"
+#include "mlir/IR/BuiltinTypeInterfaces.h"
 #include "mlir/IR/BuiltinOps.h"
+#include "mlir/IR/Value.h"
+#include "mlir/IR/Location.h"
 #include "mlir/IR/OpImplementation.h"
+#include "mlir/IR/Operation.h"
 #include "mlir/IR/Dialect.h"
+#include "mlir/IR/DialectRegistry.h"
 #include "mlir/IR/AsmState.h"
+#include "mlir/InitAllDialects.h"
 #include "mlir/Pass/Pass.h"
 #include "mlir/Pass/PassManager.h"
 #include "mlir/Pass/PassRegistry.h"
 #include "mlir/Pass/Pass.h"
+#include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
+#include "mlir/Dialect/SCF/IR/SCF.h"
+#include "mlir/Dialect/ControlFlow/IR/ControlFlowOps.h"
+#include "mlir/Dialect/MemRef/IR/MemRef.h"
+#include "mlir/Dialect/Tensor/IR/Tensor.h"
+#include "mlir/Dialect/LLVMIR/LLVMDialect.h"
 #include "llvm/ADT/APInt.h"
+#include "llvm/Support/Casting.h"
 #include <sstream>
 #include "mlir/Transforms/ViewOpGraph.h"
 #include "mlir/Transforms/Passes.h"
 #include "llvm/Support/FileSystem.h"
 #include "llvm/Support/Path.h"
+#include <cstdlib>
+#include <cstring>
+
+extern "C" {
+MlirStringRef oraStringRefCreate(const char *data, size_t length) {
+    MlirStringRef ref;
+    ref.data = data;
+    ref.length = length;
+    return ref;
+}
+
+MlirStringRef oraStringRefCreateFromCString(const char *data) {
+    return oraStringRefCreate(data, std::strlen(data));
+}
+
+void oraStringRefFree(MlirStringRef ref) {
+    if (ref.data != nullptr) {
+        std::free(const_cast<char *>(ref.data));
+    }
+}
+
+MlirIdentifier oraIdentifierGet(MlirContext ctx, MlirStringRef name) {
+    mlir::StringAttr attr = mlir::StringAttr::get(unwrap(ctx), unwrap(name));
+    return MlirIdentifier{attr.getAsOpaquePointer()};
+}
+
+MlirStringRef oraIdentifierStr(MlirIdentifier id) {
+    llvm::StringRef name = unwrap(id).getValue();
+    return oraStringRefCreate(name.data(), name.size());
+}
+
+MlirNamedAttribute oraNamedAttributeGet(MlirIdentifier name, MlirAttribute attr) {
+    MlirNamedAttribute named;
+    named.name = name;
+    named.attribute = attr;
+    return named;
+}
+
+MlirLocation oraLocationUnknownGet(MlirContext ctx) {
+    mlir::Location loc = mlir::UnknownLoc::get(unwrap(ctx));
+    return MlirLocation{loc.getAsOpaquePointer()};
+}
+
+MlirLocation oraLocationFileLineColGet(
+    MlirContext ctx,
+    MlirStringRef filename,
+    unsigned line,
+    unsigned column) {
+    mlir::Location loc = mlir::FileLineColLoc::get(unwrap(ctx), unwrap(filename), line, column);
+    return MlirLocation{loc.getAsOpaquePointer()};
+}
+
+bool oraLocationIsNull(MlirLocation loc) {
+    return loc.ptr == nullptr;
+}
+
+MlirStringRef oraLocationPrintToString(MlirLocation loc) {
+    std::string buffer;
+    llvm::raw_string_ostream os(buffer);
+    unwrap(loc).print(os);
+    os.flush();
+    char *out = static_cast<char *>(std::malloc(buffer.size() + 1));
+    if (!out) {
+        return oraStringRefCreate(nullptr, 0);
+    }
+    std::memcpy(out, buffer.data(), buffer.size());
+    out[buffer.size()] = '\0';
+    return oraStringRefCreate(out, buffer.size());
+}
+
+MlirContext oraContextCreate() {
+    return wrap(new mlir::MLIRContext());
+}
+
+void oraContextDestroy(MlirContext ctx) {
+    delete unwrap(ctx);
+}
+
+MlirDialectRegistry oraDialectRegistryCreate() {
+    return wrap(new mlir::DialectRegistry());
+}
+
+void oraDialectRegistryDestroy(MlirDialectRegistry registry) {
+    delete unwrap(registry);
+}
+
+void oraRegisterAllDialects(MlirDialectRegistry registry) {
+    mlir::registerAllDialects(*unwrap(registry));
+}
+
+void oraContextAppendDialectRegistry(MlirContext ctx, MlirDialectRegistry registry) {
+    unwrap(ctx)->appendDialectRegistry(*unwrap(registry));
+}
+
+void oraContextLoadAllAvailableDialects(MlirContext ctx) {
+    unwrap(ctx)->loadAllAvailableDialects();
+}
+
+MlirModule oraModuleCreateEmpty(MlirLocation loc) {
+    return wrap(mlir::ModuleOp::create(unwrap(loc)));
+}
+
+MlirOperation oraModuleGetOperation(MlirModule module) {
+    return wrap(unwrap(module).getOperation());
+}
+
+MlirBlock oraModuleGetBody(MlirModule module) {
+    return wrap(unwrap(module).getBody());
+}
+
+bool oraModuleIsNull(MlirModule module) {
+    return module.ptr == nullptr;
+}
+
+void oraModuleDestroy(MlirModule module) {
+    if (module.ptr == nullptr) {
+        return;
+    }
+    unwrap(module).erase();
+}
+
+void oraBlockAppendOwnedOperation(MlirBlock block, MlirOperation op) {
+    unwrap(block)->push_back(unwrap(op));
+}
+
+MlirOperation oraBlockGetFirstOperation(MlirBlock block) {
+    mlir::Block *blk = unwrap(block);
+    if (blk == nullptr || blk->empty()) {
+        return MlirOperation{nullptr};
+    }
+    return wrap(&blk->front());
+}
+
+MlirOperation oraBlockGetTerminator(MlirBlock block) {
+    mlir::Block *blk = unwrap(block);
+    if (blk == nullptr || blk->empty()) {
+        return MlirOperation{nullptr};
+    }
+    return wrap(blk->getTerminator());
+}
+
+MlirValue oraBlockGetArgument(MlirBlock block, size_t index) {
+    return wrap(unwrap(block)->getArgument(index));
+}
+
+bool oraBlockIsNull(MlirBlock block) {
+    return block.ptr == nullptr;
+}
+
+MlirOperation oraOperationGetNextInBlock(MlirOperation op) {
+    mlir::Operation *operation = unwrap(op);
+    if (operation == nullptr) {
+        return MlirOperation{nullptr};
+    }
+    return wrap(operation->getNextNode());
+}
+
+MlirValue oraOperationGetResult(MlirOperation op, size_t index) {
+    mlir::Operation *operation = unwrap(op);
+    if (operation == nullptr) {
+        return MlirValue{nullptr};
+    }
+    return wrap(operation->getResult(index));
+}
+
+MlirValue oraOperationGetOperand(MlirOperation op, size_t index) {
+    return wrap(unwrap(op)->getOperand(index));
+}
+
+size_t oraOperationGetNumOperands(MlirOperation op) {
+    return unwrap(op)->getNumOperands();
+}
+
+size_t oraOperationGetNumResults(MlirOperation op) {
+    return unwrap(op)->getNumResults();
+}
+
+size_t oraOperationGetNumRegions(MlirOperation op) {
+    return unwrap(op)->getNumRegions();
+}
+
+bool oraOperationIsNull(MlirOperation op) {
+    return op.ptr == nullptr;
+}
+
+void oraOperationSetAttributeByName(
+    MlirOperation op,
+    MlirStringRef name,
+    MlirAttribute attr) {
+    unwrap(op)->setAttr(unwrap(name), unwrap(attr));
+}
+
+MlirAttribute oraOperationGetAttributeByName(MlirOperation op, MlirStringRef name) {
+    return wrap(unwrap(op)->getAttr(unwrap(name)));
+}
+
+MlirLocation oraOperationGetLocation(MlirOperation op) {
+    return wrap(unwrap(op)->getLoc());
+}
+
+MlirRegion oraOperationGetRegion(MlirOperation op, size_t index) {
+    return wrap(&unwrap(op)->getRegion(index));
+}
+
+MlirType oraValueGetType(MlirValue value) {
+    return wrap(unwrap(value).getType());
+}
+
+bool oraValueIsNull(MlirValue value) {
+    return value.ptr == nullptr;
+}
+
+bool oraValueIsAOpResult(MlirValue value) {
+    return llvm::isa<mlir::OpResult>(unwrap(value));
+}
+
+MlirOperation oraOpResultGetOwner(MlirValue value) {
+    auto result = llvm::dyn_cast<mlir::OpResult>(unwrap(value));
+    if (!result) {
+        return MlirOperation{nullptr};
+    }
+    return wrap(result.getOwner());
+}
+
+MlirBlock oraRegionGetFirstBlock(MlirRegion region) {
+    mlir::Region *reg = unwrap(region);
+    if (reg == nullptr || reg->empty()) {
+        return MlirBlock{nullptr};
+    }
+    return wrap(&reg->front());
+}
+
+MlirBlock oraBlockGetNextInRegion(MlirBlock block) {
+    mlir::Block *blk = unwrap(block);
+    if (blk == nullptr) {
+        return MlirBlock{nullptr};
+    }
+    return wrap(blk->getNextNode());
+}
+
+bool oraRegionIsNull(MlirRegion region) {
+    return region.ptr == nullptr;
+}
+
+bool oraAttributeIsNull(MlirAttribute attr) {
+    return attr.ptr == nullptr;
+}
+
+MlirStringRef oraStringAttrGetValue(MlirAttribute attr) {
+    auto str_attr = llvm::dyn_cast<mlir::StringAttr>(unwrap(attr));
+    if (!str_attr) {
+        return oraStringRefCreate(nullptr, 0);
+    }
+    llvm::StringRef value = str_attr.getValue();
+    return oraStringRefCreate(value.data(), value.size());
+}
+
+int64_t oraIntegerAttrGetValueSInt(MlirAttribute attr) {
+    auto int_attr = llvm::dyn_cast<mlir::IntegerAttr>(unwrap(attr));
+    if (!int_attr) {
+        return 0;
+    }
+    return int_attr.getValue().getSExtValue();
+}
+
+MlirType oraFunctionTypeGet(
+    MlirContext ctx,
+    size_t numInputs,
+    const MlirType *inputTypes,
+    size_t numResults,
+    const MlirType *resultTypes) {
+    llvm::SmallVector<mlir::Type, 8> inputs;
+    llvm::SmallVector<mlir::Type, 2> results;
+    inputs.reserve(numInputs);
+    results.reserve(numResults);
+    for (size_t i = 0; i < numInputs; ++i) {
+        inputs.push_back(unwrap(inputTypes[i]));
+    }
+    for (size_t i = 0; i < numResults; ++i) {
+        results.push_back(unwrap(resultTypes[i]));
+    }
+    return wrap(mlir::FunctionType::get(unwrap(ctx), inputs, results));
+}
+
+MlirStringRef oraOperationPrintToString(MlirOperation op) {
+    try
+    {
+        ORA_DEBUG_PREFIX("OraCAPI", "oraOperationPrintToString called");
+
+        mlir::Operation *operation = unwrap(op);
+
+        if (!operation)
+        {
+            ORA_DEBUG_PREFIX("OraCAPI", "ERROR: operation is null!");
+            return {nullptr, 0};
+        }
+
+        // Check if DCE left the IR in an invalid state
+        if (auto moduleOp = llvm::dyn_cast<mlir::ModuleOp>(operation))
+        {
+            if (moduleOp->hasAttr("ora.dce_invalid"))
+            {
+                ORA_DEBUG_PREFIX("OraCAPI", "  This would cause a segfault if we tried to print");
+                return {nullptr, 0};
+            }
+        }
+
+        ORA_DEBUG_PREFIX("OraCAPI", "Operation: " << operation->getName());
+
+        // Register the Ora dialect to ensure custom printers are available
+        mlir::MLIRContext *context = operation->getContext();
+        if (!context)
+        {
+            return {nullptr, 0};
+        }
+        context->getOrLoadDialect<mlir::ora::OraDialect>();
+        context->getOrLoadDialect<sir::SIRDialect>();
+
+        // Create a string stream to capture the printed output
+        std::string mlirContent;
+        llvm::raw_string_ostream mlirStream(mlirContent);
+
+        // Use OpPrintingFlags to enable custom assembly formats
+        mlir::OpPrintingFlags flags;
+        flags.enableDebugInfo(true, false);
+        flags.printGenericOpForm(false);
+        flags.assumeVerified();
+        flags.useLocalScope();
+
+        mlir::AsmState state(operation, flags);
+        operation->print(mlirStream, state);
+
+        mlirStream.flush();
+
+        if (mlirContent.empty())
+        {
+            return {nullptr, 0};
+        }
+
+        // Post-process the output to add line breaks for readability
+        std::string formattedContent;
+        formattedContent.reserve(mlirContent.size() * 1.1);
+
+        std::istringstream inputStream(mlirContent);
+        std::string line;
+        std::string prevLine;
+        bool prevWasEmpty = false;
+
+        while (std::getline(inputStream, line))
+        {
+            if (line.empty() || (line.find_first_not_of(" \t") == std::string::npos))
+            {
+                prevWasEmpty = true;
+                continue;
+            }
+
+            bool shouldAddBlankLine = false;
+
+            if ((line.find("sir.return") != std::string::npos || line.find("sir.iret") != std::string::npos) &&
+                !prevLine.empty() && !prevWasEmpty)
+            {
+                shouldAddBlankLine = true;
+            }
+            else if (line.find("func.func") != std::string::npos &&
+                     !prevLine.empty() && !prevWasEmpty && prevLine.find("func.func") == std::string::npos)
+            {
+                shouldAddBlankLine = true;
+            }
+            else if (line.find("//") != std::string::npos && line.find("//") < line.length() &&
+                     !prevLine.empty() && !prevWasEmpty && prevLine.find("//") == std::string::npos)
+            {
+                shouldAddBlankLine = true;
+            }
+            else if (prevLine.find("return") != std::string::npos &&
+                     prevLine.find("return") < prevLine.length() &&
+                     !line.empty() && line.find("}") == std::string::npos)
+            {
+                shouldAddBlankLine = true;
+            }
+            else if (prevLine.find("}") != std::string::npos &&
+                     (prevLine.find("} {gas_cost") != std::string::npos ||
+                      (prevLine.find("}") == prevLine.find_last_of("}") &&
+                       prevLine.find("} else {") == std::string::npos)) &&
+                     !line.empty() && line.find("}") == std::string::npos &&
+                     line.find("func.func") == std::string::npos)
+            {
+                shouldAddBlankLine = true;
+            }
+            else if (prevLine.find("//") != std::string::npos &&
+                     prevLine.find("//") < prevLine.length() &&
+                     !line.empty() && line.find("//") == std::string::npos)
+            {
+                shouldAddBlankLine = true;
+            }
+
+            if (shouldAddBlankLine && !prevLine.empty() && !prevWasEmpty)
+            {
+                formattedContent += "\n";
+            }
+
+            formattedContent += line;
+            formattedContent += "\n";
+
+            prevWasEmpty = false;
+            prevLine = line;
+        }
+
+        char *result = static_cast<char *>(std::malloc(formattedContent.size() + 1));
+        if (!result)
+        {
+            return {nullptr, 0};
+        }
+        std::memcpy(result, formattedContent.c_str(), formattedContent.size());
+        result[formattedContent.size()] = '\0';
+
+        return {result, formattedContent.size()};
+    }
+    catch (...)
+    {
+        return {nullptr, 0};
+    }
+}
+
+MlirPassManager oraPassManagerCreate(MlirContext ctx) {
+    return wrap(new mlir::PassManager(unwrap(ctx)));
+}
+
+void oraPassManagerDestroy(MlirPassManager pm) {
+    delete unwrap(pm);
+}
+
+void oraPassManagerEnableVerifier(MlirPassManager pm, bool enable) {
+    unwrap(pm)->enableVerifier(enable);
+}
+
+void oraPassManagerEnableTiming(MlirPassManager pm) {
+    unwrap(pm)->enableTiming();
+}
+
+bool oraPassManagerParsePipeline(MlirPassManager pm, MlirStringRef pipeline) {
+    return mlir::succeeded(mlir::parsePassPipeline(unwrap(pipeline), *unwrap(pm)));
+}
+
+bool oraPassManagerRun(MlirPassManager pm, MlirOperation op) {
+    return mlir::succeeded(unwrap(pm)->run(unwrap(op)));
+}
+} // extern "C"
 #include "llvm/Support/raw_ostream.h"
 #include "llvm/Support/Debug.h"
 #include <cstdio>
@@ -113,12 +576,227 @@ MlirOperation oraContractOpCreate(MlirContext ctx, MlirLocation loc, MlirStringR
     }
 }
 
+MlirBlock oraContractOpGetBodyBlock(MlirOperation op)
+{
+    try
+    {
+        Operation *operation = unwrap(op);
+        if (!operation)
+        {
+            return {nullptr};
+        }
+
+        auto contractOp = dyn_cast<ora::ContractOp>(operation);
+        if (!contractOp)
+        {
+            return {nullptr};
+        }
+
+        Region &body = contractOp.getBody();
+        if (body.empty())
+        {
+            body.push_back(new Block());
+        }
+
+        return wrap(&body.front());
+    }
+    catch (...)
+    {
+        return {nullptr};
+    }
+}
+
+MlirModule oraLowerContractStub(MlirContext ctx, MlirLocation loc, MlirStringRef contractName, MlirStringRef funcName)
+{
+    try
+    {
+        MLIRContext *context = unwrap(ctx);
+        Location location = unwrap(loc);
+        StringRef contractRef = unwrap(contractName);
+        StringRef funcRef = unwrap(funcName);
+
+        if (!oraDialectIsRegistered(ctx))
+        {
+            return {nullptr};
+        }
+
+        OpBuilder builder(context);
+
+        auto moduleOp = ModuleOp::create(location);
+        builder.setInsertionPointToStart(moduleOp.getBody());
+
+        auto contractOp = builder.create<ContractOp>(location, contractRef);
+        auto &bodyRegion = contractOp.getBody();
+        if (bodyRegion.empty())
+        {
+            bodyRegion.push_back(new Block());
+        }
+
+        auto contractDeclAttr = builder.getBoolAttr(true);
+        contractOp->setAttr("ora.contract_decl", contractDeclAttr);
+        auto gasCostAttr = IntegerAttr::get(::mlir::IntegerType::get(context, 64), 0);
+        contractOp->setAttr("gas_cost", gasCostAttr);
+
+        Block &contractBody = bodyRegion.front();
+        builder.setInsertionPointToStart(&contractBody);
+
+        auto funcType = builder.getFunctionType(TypeRange{}, TypeRange{});
+        auto funcOp = builder.create<func::FuncOp>(location, funcRef, funcType);
+        funcOp->setAttr("ora.visibility", builder.getStringAttr("pub"));
+
+        Block *entry = funcOp.addEntryBlock();
+        builder.setInsertionPointToStart(entry);
+        builder.create<ReturnOp>(location, ValueRange{});
+
+        return wrap(moduleOp);
+    }
+    catch (...)
+    {
+        return {nullptr};
+    }
+}
+
+static Type oraTypeFromTag(MLIRContext *context, uint32_t tag)
+{
+    switch (tag)
+    {
+    case ORA_TYPE_U256:
+        return ora::IntegerType::get(context, 256, false);
+    case ORA_TYPE_I256:
+        return ora::IntegerType::get(context, 256, true);
+    case ORA_TYPE_BOOL:
+        return ora::BoolType::get(context);
+    case ORA_TYPE_ADDRESS:
+        return ora::AddressType::get(context);
+    case ORA_TYPE_VOID:
+    default:
+        return Type();
+    }
+}
+
+static StringRef oraTypeTagToString(uint32_t tag)
+{
+    switch (tag)
+    {
+    case ORA_TYPE_U256:
+        return "!ora.int<256,false>";
+    case ORA_TYPE_I256:
+        return "!ora.int<256,true>";
+    case ORA_TYPE_BOOL:
+        return "!ora.bool";
+    case ORA_TYPE_ADDRESS:
+        return "!ora.address";
+    case ORA_TYPE_VOID:
+        return "!ora.void";
+    default:
+        return "!ora.unknown";
+    }
+}
+
+MlirModule oraLowerContractStubWithSig(
+    MlirContext ctx,
+    MlirLocation loc,
+    MlirStringRef contractName,
+    MlirStringRef funcName,
+    const uint32_t *paramTypes,
+    size_t numParams,
+    const MlirStringRef *paramNames,
+    size_t numParamNames,
+    uint32_t returnType)
+{
+    try
+    {
+        MLIRContext *context = unwrap(ctx);
+        Location location = unwrap(loc);
+        StringRef contractRef = unwrap(contractName);
+        StringRef funcRef = unwrap(funcName);
+
+        if (!oraDialectIsRegistered(ctx))
+        {
+            return {nullptr};
+        }
+
+        OpBuilder builder(context);
+
+        auto moduleOp = ModuleOp::create(location);
+        builder.setInsertionPointToStart(moduleOp.getBody());
+
+        auto contractOp = builder.create<ContractOp>(location, contractRef);
+        auto &bodyRegion = contractOp.getBody();
+        if (bodyRegion.empty())
+        {
+            bodyRegion.push_back(new Block());
+        }
+
+        auto contractDeclAttr = builder.getBoolAttr(true);
+        contractOp->setAttr("ora.contract_decl", contractDeclAttr);
+        auto gasCostAttr = IntegerAttr::get(::mlir::IntegerType::get(context, 64), 0);
+        contractOp->setAttr("gas_cost", gasCostAttr);
+
+        SmallVector<Type> argTypes;
+        argTypes.reserve(numParams);
+        for (size_t i = 0; i < numParams; ++i)
+        {
+            Type t = oraTypeFromTag(context, paramTypes[i]);
+            if (!t)
+            {
+                t = ora::IntegerType::get(context, 256, false);
+            }
+            argTypes.push_back(t);
+        }
+
+        SmallVector<Type> resultTypes;
+        Type retType = oraTypeFromTag(context, returnType);
+        if (retType)
+        {
+            resultTypes.push_back(retType);
+        }
+
+        auto funcType = builder.getFunctionType(argTypes, resultTypes);
+
+        Block &contractBody = bodyRegion.front();
+        builder.setInsertionPointToStart(&contractBody);
+
+        auto funcOp = builder.create<func::FuncOp>(location, funcRef, funcType);
+        funcOp->setAttr("ora.visibility", builder.getStringAttr("pub"));
+
+        for (size_t i = 0; i < numParams; ++i)
+        {
+            StringRef typeStr = oraTypeTagToString(paramTypes ? paramTypes[i] : ORA_TYPE_U256);
+            funcOp.setArgAttr(static_cast<unsigned>(i), "ora.type", builder.getStringAttr(typeStr));
+
+            if (paramNames && i < numParamNames && paramNames[i].data)
+            {
+                StringRef nameRef = unwrap(paramNames[i]);
+                funcOp.setArgAttr(static_cast<unsigned>(i), "ora.name", builder.getStringAttr(nameRef));
+            }
+        }
+
+        if (retType)
+        {
+            StringRef retStr = oraTypeTagToString(returnType);
+            funcOp.setResultAttr(0, "ora.type", builder.getStringAttr(retStr));
+        }
+
+        Block *entry = funcOp.addEntryBlock();
+        builder.setInsertionPointToStart(entry);
+        builder.create<ReturnOp>(location, ValueRange{});
+
+        return wrap(moduleOp);
+    }
+    catch (...)
+    {
+        return {nullptr};
+    }
+}
+
 MlirOperation oraGlobalOpCreate(MlirContext ctx, MlirLocation loc, MlirStringRef name, MlirType type, MlirAttribute initValue)
 {
     try
     {
         MLIRContext *context = unwrap(ctx);
         Location location = unwrap(loc);
+        (void)context;
         StringRef nameRef = unwrap(name);
         Type typeRef = unwrap(type);
 
@@ -133,7 +811,7 @@ MlirOperation oraGlobalOpCreate(MlirContext ctx, MlirLocation loc, MlirStringRef
         auto nameAttr = StringAttr::get(context, nameRef);
         auto typeAttr = TypeAttr::get(typeRef);
         Attribute initAttr;
-        if (mlirAttributeIsNull(initValue))
+        if (oraAttributeIsNull(initValue))
         {
             initAttr = UnitAttr::get(context);
         }
@@ -193,6 +871,7 @@ MlirOperation oraSLoadOpCreateWithName(MlirContext ctx, MlirLocation loc, MlirSt
     {
         MLIRContext *context = unwrap(ctx);
         Location location = unwrap(loc);
+        (void)context;
         StringRef nameRef = unwrap(globalName);
         Type typeRef = unwrap(resultType);
 
@@ -295,6 +974,64 @@ MlirOperation oraIfOpCreate(MlirContext ctx, MlirLocation loc, MlirValue conditi
     }
 }
 
+MlirBlock oraIfOpGetThenBlock(MlirOperation ifOp)
+{
+    try
+    {
+        Operation *operation = unwrap(ifOp);
+        if (!operation)
+        {
+            return {nullptr};
+        }
+
+        auto op = dyn_cast<ora::IfOp>(operation);
+        if (!op)
+        {
+            return {nullptr};
+        }
+
+        Region &thenRegion = op.getThenRegion();
+        if (thenRegion.empty())
+        {
+            thenRegion.push_back(new Block());
+        }
+        return wrap(&thenRegion.front());
+    }
+    catch (...)
+    {
+        return {nullptr};
+    }
+}
+
+MlirBlock oraIfOpGetElseBlock(MlirOperation ifOp)
+{
+    try
+    {
+        Operation *operation = unwrap(ifOp);
+        if (!operation)
+        {
+            return {nullptr};
+        }
+
+        auto op = dyn_cast<ora::IfOp>(operation);
+        if (!op)
+        {
+            return {nullptr};
+        }
+
+        Region &elseRegion = op.getElseRegion();
+        if (elseRegion.empty())
+        {
+            elseRegion.push_back(new Block());
+        }
+        return wrap(&elseRegion.front());
+    }
+    catch (...)
+    {
+        return {nullptr};
+    }
+}
+
 MlirOperation oraWhileOpCreate(MlirContext ctx, MlirLocation loc, MlirValue condition)
 {
     try
@@ -326,6 +1063,36 @@ MlirOperation oraWhileOpCreate(MlirContext ctx, MlirLocation loc, MlirValue cond
         whileOp->setAttr("gas_cost", gasCostAttr);
 
         return wrap(whileOp.getOperation());
+    }
+    catch (...)
+    {
+        return {nullptr};
+    }
+}
+
+MlirBlock oraWhileOpGetBodyBlock(MlirOperation whileOp)
+{
+    try
+    {
+        Operation *operation = unwrap(whileOp);
+        if (!operation)
+        {
+            return {nullptr};
+        }
+
+        auto op = dyn_cast<ora::WhileOp>(operation);
+        if (!op)
+        {
+            return {nullptr};
+        }
+
+        Region &body = op.getBody();
+        if (body.empty())
+        {
+            body.push_back(new Block());
+        }
+
+        return wrap(&body.front());
     }
     catch (...)
     {
@@ -1415,6 +2182,1142 @@ MlirOperation oraOldOpCreate(MlirContext ctx, MlirLocation loc, MlirValue value,
     }
 }
 
+MlirOperation oraArithConstantOpCreate(MlirContext ctx, MlirLocation loc, MlirType resultType, MlirAttribute valueAttr)
+{
+    try
+    {
+        MLIRContext *context = unwrap(ctx);
+        Location location = unwrap(loc);
+        Type resultTy = unwrap(resultType);
+        Attribute attr = unwrap(valueAttr);
+        auto typedAttr = llvm::dyn_cast<mlir::TypedAttr>(attr);
+        if (!typedAttr)
+        {
+            if (auto intTy = llvm::dyn_cast<mlir::IntegerType>(resultTy))
+            {
+                typedAttr = mlir::IntegerAttr::get(intTy, 0);
+            }
+            else
+            {
+                return {nullptr};
+            }
+        }
+
+        OpBuilder builder(context);
+        auto op = builder.create<arith::ConstantOp>(location, resultTy, typedAttr);
+
+        // attach gas_cost=0 like the Zig-side builder
+        auto gasCostAttr = builder.getI64IntegerAttr(0);
+        op->setAttr("gas_cost", gasCostAttr);
+
+        return wrap(op.getOperation());
+    }
+    catch (...)
+    {
+        return {nullptr};
+    }
+}
+
+MlirOperation oraArithAddIOpCreate(MlirContext ctx, MlirLocation loc, MlirValue lhs, MlirValue rhs)
+{
+    try
+    {
+        MLIRContext *context = unwrap(ctx);
+        Location location = unwrap(loc);
+        Value lhsVal = unwrap(lhs);
+        Value rhsVal = unwrap(rhs);
+
+        OpBuilder builder(context);
+        auto op = builder.create<arith::AddIOp>(location, lhsVal, rhsVal);
+        auto gasCostAttr = builder.getI64IntegerAttr(3);
+        op->setAttr("gas_cost", gasCostAttr);
+        return wrap(op.getOperation());
+    }
+    catch (...)
+    {
+        return {nullptr};
+    }
+}
+
+MlirOperation oraArithSubIOpCreate(MlirContext ctx, MlirLocation loc, MlirValue lhs, MlirValue rhs)
+{
+    try
+    {
+        MLIRContext *context = unwrap(ctx);
+        Location location = unwrap(loc);
+        Value lhsVal = unwrap(lhs);
+        Value rhsVal = unwrap(rhs);
+
+        OpBuilder builder(context);
+        auto op = builder.create<arith::SubIOp>(location, lhsVal, rhsVal);
+        auto gasCostAttr = builder.getI64IntegerAttr(3);
+        op->setAttr("gas_cost", gasCostAttr);
+        return wrap(op.getOperation());
+    }
+    catch (...)
+    {
+        return {nullptr};
+    }
+}
+
+MlirOperation oraArithMulIOpCreate(MlirContext ctx, MlirLocation loc, MlirValue lhs, MlirValue rhs)
+{
+    try
+    {
+        MLIRContext *context = unwrap(ctx);
+        Location location = unwrap(loc);
+        Value lhsVal = unwrap(lhs);
+        Value rhsVal = unwrap(rhs);
+
+        OpBuilder builder(context);
+        auto op = builder.create<arith::MulIOp>(location, lhsVal, rhsVal);
+        auto gasCostAttr = builder.getI64IntegerAttr(5);
+        op->setAttr("gas_cost", gasCostAttr);
+        return wrap(op.getOperation());
+    }
+    catch (...)
+    {
+        return {nullptr};
+    }
+}
+
+MlirOperation oraArithDivUIOpCreate(MlirContext ctx, MlirLocation loc, MlirValue lhs, MlirValue rhs)
+{
+    try
+    {
+        MLIRContext *context = unwrap(ctx);
+        Location location = unwrap(loc);
+        Value lhsVal = unwrap(lhs);
+        Value rhsVal = unwrap(rhs);
+
+        OpBuilder builder(context);
+        auto op = builder.create<arith::DivUIOp>(location, lhsVal, rhsVal);
+        auto gasCostAttr = builder.getI64IntegerAttr(5);
+        op->setAttr("gas_cost", gasCostAttr);
+        return wrap(op.getOperation());
+    }
+    catch (...)
+    {
+        return {nullptr};
+    }
+}
+
+MlirOperation oraArithDivSIOpCreate(MlirContext ctx, MlirLocation loc, MlirValue lhs, MlirValue rhs)
+{
+    try
+    {
+        MLIRContext *context = unwrap(ctx);
+        Location location = unwrap(loc);
+        Value lhsVal = unwrap(lhs);
+        Value rhsVal = unwrap(rhs);
+
+        OpBuilder builder(context);
+        auto op = builder.create<arith::DivSIOp>(location, lhsVal, rhsVal);
+        auto gasCostAttr = builder.getI64IntegerAttr(5);
+        op->setAttr("gas_cost", gasCostAttr);
+        return wrap(op.getOperation());
+    }
+    catch (...)
+    {
+        return {nullptr};
+    }
+}
+
+MlirOperation oraArithRemUIOpCreate(MlirContext ctx, MlirLocation loc, MlirValue lhs, MlirValue rhs)
+{
+    try
+    {
+        MLIRContext *context = unwrap(ctx);
+        Location location = unwrap(loc);
+        Value lhsVal = unwrap(lhs);
+        Value rhsVal = unwrap(rhs);
+
+        OpBuilder builder(context);
+        auto op = builder.create<arith::RemUIOp>(location, lhsVal, rhsVal);
+        auto gasCostAttr = builder.getI64IntegerAttr(5);
+        op->setAttr("gas_cost", gasCostAttr);
+        return wrap(op.getOperation());
+    }
+    catch (...)
+    {
+        return {nullptr};
+    }
+}
+
+MlirOperation oraArithRemSIOpCreate(MlirContext ctx, MlirLocation loc, MlirValue lhs, MlirValue rhs)
+{
+    try
+    {
+        MLIRContext *context = unwrap(ctx);
+        Location location = unwrap(loc);
+        Value lhsVal = unwrap(lhs);
+        Value rhsVal = unwrap(rhs);
+
+        OpBuilder builder(context);
+        auto op = builder.create<arith::RemSIOp>(location, lhsVal, rhsVal);
+        auto gasCostAttr = builder.getI64IntegerAttr(5);
+        op->setAttr("gas_cost", gasCostAttr);
+        return wrap(op.getOperation());
+    }
+    catch (...)
+    {
+        return {nullptr};
+    }
+}
+
+MlirOperation oraArithAndIOpCreate(MlirContext ctx, MlirLocation loc, MlirValue lhs, MlirValue rhs)
+{
+    try
+    {
+        MLIRContext *context = unwrap(ctx);
+        Location location = unwrap(loc);
+        Value lhsVal = unwrap(lhs);
+        Value rhsVal = unwrap(rhs);
+
+        OpBuilder builder(context);
+        auto op = builder.create<arith::AndIOp>(location, lhsVal, rhsVal);
+        return wrap(op.getOperation());
+    }
+    catch (...)
+    {
+        return {nullptr};
+    }
+}
+
+MlirOperation oraArithOrIOpCreate(MlirContext ctx, MlirLocation loc, MlirValue lhs, MlirValue rhs)
+{
+    try
+    {
+        MLIRContext *context = unwrap(ctx);
+        Location location = unwrap(loc);
+        Value lhsVal = unwrap(lhs);
+        Value rhsVal = unwrap(rhs);
+
+        OpBuilder builder(context);
+        auto op = builder.create<arith::OrIOp>(location, lhsVal, rhsVal);
+        return wrap(op.getOperation());
+    }
+    catch (...)
+    {
+        return {nullptr};
+    }
+}
+
+MlirOperation oraArithXorIOpCreate(MlirContext ctx, MlirLocation loc, MlirValue lhs, MlirValue rhs)
+{
+    try
+    {
+        MLIRContext *context = unwrap(ctx);
+        Location location = unwrap(loc);
+        Value lhsVal = unwrap(lhs);
+        Value rhsVal = unwrap(rhs);
+
+        OpBuilder builder(context);
+        auto op = builder.create<arith::XOrIOp>(location, lhsVal, rhsVal);
+        return wrap(op.getOperation());
+    }
+    catch (...)
+    {
+        return {nullptr};
+    }
+}
+
+MlirOperation oraArithShlIOpCreate(MlirContext ctx, MlirLocation loc, MlirValue lhs, MlirValue rhs)
+{
+    try
+    {
+        MLIRContext *context = unwrap(ctx);
+        Location location = unwrap(loc);
+        Value lhsVal = unwrap(lhs);
+        Value rhsVal = unwrap(rhs);
+
+        OpBuilder builder(context);
+        auto op = builder.create<arith::ShLIOp>(location, lhsVal, rhsVal);
+        return wrap(op.getOperation());
+    }
+    catch (...)
+    {
+        return {nullptr};
+    }
+}
+
+MlirOperation oraArithShrSIOpCreate(MlirContext ctx, MlirLocation loc, MlirValue lhs, MlirValue rhs)
+{
+    try
+    {
+        MLIRContext *context = unwrap(ctx);
+        Location location = unwrap(loc);
+        Value lhsVal = unwrap(lhs);
+        Value rhsVal = unwrap(rhs);
+
+        OpBuilder builder(context);
+        auto op = builder.create<arith::ShRSIOp>(location, lhsVal, rhsVal);
+        return wrap(op.getOperation());
+    }
+    catch (...)
+    {
+        return {nullptr};
+    }
+}
+
+MlirOperation oraArithBitcastOpCreate(MlirContext ctx, MlirLocation loc, MlirValue operand, MlirType resultType)
+{
+    try
+    {
+        MLIRContext *context = unwrap(ctx);
+        Location location = unwrap(loc);
+        Value operandVal = unwrap(operand);
+        Type resultTy = unwrap(resultType);
+
+        OpBuilder builder(context);
+        auto op = builder.create<arith::BitcastOp>(location, resultTy, operandVal);
+        return wrap(op.getOperation());
+    }
+    catch (...)
+    {
+        return {nullptr};
+    }
+}
+
+MlirOperation oraArithExtUIOpCreate(MlirContext ctx, MlirLocation loc, MlirValue operand, MlirType resultType)
+{
+    try
+    {
+        MLIRContext *context = unwrap(ctx);
+        Location location = unwrap(loc);
+        Value operandVal = unwrap(operand);
+        Type resultTy = unwrap(resultType);
+
+        OpBuilder builder(context);
+        auto op = builder.create<arith::ExtUIOp>(location, resultTy, operandVal);
+        return wrap(op.getOperation());
+    }
+    catch (...)
+    {
+        return {nullptr};
+    }
+}
+
+MlirOperation oraArithTruncIOpCreate(MlirContext ctx, MlirLocation loc, MlirValue operand, MlirType resultType)
+{
+    try
+    {
+        MLIRContext *context = unwrap(ctx);
+        Location location = unwrap(loc);
+        Value operandVal = unwrap(operand);
+        Type resultTy = unwrap(resultType);
+
+        OpBuilder builder(context);
+        auto op = builder.create<arith::TruncIOp>(location, resultTy, operandVal);
+        return wrap(op.getOperation());
+    }
+    catch (...)
+    {
+        return {nullptr};
+    }
+}
+
+MlirOperation oraArithIndexCastUIOpCreate(MlirContext ctx, MlirLocation loc, MlirValue operand, MlirType resultType)
+{
+    try
+    {
+        MLIRContext *context = unwrap(ctx);
+        Location location = unwrap(loc);
+        Value operandVal = unwrap(operand);
+        Type resultTy = unwrap(resultType);
+
+        OpBuilder builder(context);
+        auto op = builder.create<arith::IndexCastUIOp>(location, resultTy, operandVal);
+        return wrap(op.getOperation());
+    }
+    catch (...)
+    {
+        return {nullptr};
+    }
+}
+
+MlirOperation oraArithCmpIOpCreate(MlirContext ctx, MlirLocation loc, int64_t predicate, MlirValue lhs, MlirValue rhs)
+{
+    try
+    {
+        MLIRContext *context = unwrap(ctx);
+        Location location = unwrap(loc);
+        Value lhsVal = unwrap(lhs);
+        Value rhsVal = unwrap(rhs);
+
+        OpBuilder builder(context);
+        auto pred = static_cast<arith::CmpIPredicate>(predicate);
+        auto op = builder.create<arith::CmpIOp>(location, pred, lhsVal, rhsVal);
+        return wrap(op.getOperation());
+    }
+    catch (...)
+    {
+        return {nullptr};
+    }
+}
+
+MlirOperation oraFuncCallOpCreate(MlirContext ctx, MlirLocation loc, MlirStringRef callee, const MlirValue *operands, size_t numOperands, const MlirType *resultTypes, size_t numResults)
+{
+    try
+    {
+        MLIRContext *context = unwrap(ctx);
+        Location location = unwrap(loc);
+        StringRef calleeRef = unwrap(callee);
+
+        OpBuilder builder(context);
+        SmallVector<Value, 8> args;
+        args.reserve(numOperands);
+        for (size_t i = 0; i < numOperands; ++i)
+        {
+            args.push_back(unwrap(operands[i]));
+        }
+
+        SmallVector<Type, 2> results;
+        results.reserve(numResults);
+        for (size_t i = 0; i < numResults; ++i)
+        {
+            results.push_back(unwrap(resultTypes[i]));
+        }
+
+        auto op = builder.create<func::CallOp>(location, calleeRef, results, args);
+
+        // attach gas_cost=10 like the Zig-side builder
+        auto gasCostAttr = builder.getI64IntegerAttr(10);
+        op->setAttr("gas_cost", gasCostAttr);
+
+        return wrap(op.getOperation());
+    }
+    catch (...)
+    {
+        return {nullptr};
+    }
+}
+
+MlirOperation oraMemrefAllocaOpCreate(MlirContext ctx, MlirLocation loc, MlirType resultType)
+{
+    try
+    {
+        MLIRContext *context = unwrap(ctx);
+        Location location = unwrap(loc);
+        Type memrefType = unwrap(resultType);
+        auto memrefTy = llvm::dyn_cast<mlir::MemRefType>(memrefType);
+        if (!memrefTy)
+        {
+            return {nullptr};
+        }
+
+        OpBuilder builder(context);
+        auto op = builder.create<memref::AllocaOp>(location, memrefTy);
+        return wrap(op.getOperation());
+    }
+    catch (...)
+    {
+        return {nullptr};
+    }
+}
+
+MlirOperation oraMemrefLoadOpCreate(MlirContext ctx, MlirLocation loc, MlirValue memref, const MlirValue *indices, size_t numIndices, MlirType resultType)
+{
+    try
+    {
+        MLIRContext *context = unwrap(ctx);
+        Location location = unwrap(loc);
+        Value memrefVal = unwrap(memref);
+        (void)resultType;
+
+        OpBuilder builder(context);
+        SmallVector<Value, 4> idx;
+        idx.reserve(numIndices);
+        for (size_t i = 0; i < numIndices; ++i)
+        {
+            idx.push_back(unwrap(indices[i]));
+        }
+
+        auto op = builder.create<memref::LoadOp>(location, memrefVal, idx);
+        return wrap(op.getOperation());
+    }
+    catch (...)
+    {
+        return {nullptr};
+    }
+}
+
+MlirOperation oraMemrefLoadOpCreateWithMemspace(MlirContext ctx, MlirLocation loc, MlirValue memref, const MlirValue *indices, size_t numIndices, MlirType resultType, MlirAttribute memspaceAttr)
+{
+    try
+    {
+        MLIRContext *context = unwrap(ctx);
+        Location location = unwrap(loc);
+        Value memrefVal = unwrap(memref);
+        Type resultTypeRef = unwrap(resultType);
+
+        SmallVector<Value, 4> idx;
+        idx.reserve(numIndices);
+        for (size_t i = 0; i < numIndices; ++i)
+        {
+            idx.push_back(unwrap(indices[i]));
+        }
+
+        OpBuilder builder(context);
+        auto op = builder.create<memref::LoadOp>(location, memrefVal, idx);
+        op->setAttr("memspace", unwrap(memspaceAttr));
+        (void)resultTypeRef;
+
+        return wrap(op.getOperation());
+    }
+    catch (...)
+    {
+        return {nullptr};
+    }
+}
+
+MlirOperation oraMemrefStoreOpCreate(MlirContext ctx, MlirLocation loc, MlirValue value, MlirValue memref, const MlirValue *indices, size_t numIndices)
+{
+    try
+    {
+        MLIRContext *context = unwrap(ctx);
+        Location location = unwrap(loc);
+        Value valueVal = unwrap(value);
+        Value memrefVal = unwrap(memref);
+
+        OpBuilder builder(context);
+        SmallVector<Value, 4> idx;
+        idx.reserve(numIndices);
+        for (size_t i = 0; i < numIndices; ++i)
+        {
+            idx.push_back(unwrap(indices[i]));
+        }
+
+        auto op = builder.create<memref::StoreOp>(location, valueVal, memrefVal, idx);
+        return wrap(op.getOperation());
+    }
+    catch (...)
+    {
+        return {nullptr};
+    }
+}
+
+MlirOperation oraMemrefStoreOpCreateWithMemspace(MlirContext ctx, MlirLocation loc, MlirValue value, MlirValue memref, const MlirValue *indices, size_t numIndices, MlirAttribute memspaceAttr)
+{
+    try
+    {
+        MLIRContext *context = unwrap(ctx);
+        Location location = unwrap(loc);
+        Value valueVal = unwrap(value);
+        Value memrefVal = unwrap(memref);
+
+        SmallVector<Value, 4> idx;
+        idx.reserve(numIndices);
+        for (size_t i = 0; i < numIndices; ++i)
+        {
+            idx.push_back(unwrap(indices[i]));
+        }
+
+        OpBuilder builder(context);
+        auto op = builder.create<memref::StoreOp>(location, valueVal, memrefVal, idx);
+        op->setAttr("memspace", unwrap(memspaceAttr));
+
+        return wrap(op.getOperation());
+    }
+    catch (...)
+    {
+        return {nullptr};
+    }
+}
+
+MlirOperation oraMemrefDimOpCreate(MlirContext ctx, MlirLocation loc, MlirValue memref, MlirValue index)
+{
+    try
+    {
+        MLIRContext *context = unwrap(ctx);
+        Location location = unwrap(loc);
+        Value memrefVal = unwrap(memref);
+        Value indexVal = unwrap(index);
+
+        OpBuilder builder(context);
+        auto op = builder.create<memref::DimOp>(location, memrefVal, indexVal);
+        return wrap(op.getOperation());
+    }
+    catch (...)
+    {
+        return {nullptr};
+    }
+}
+
+MlirOperation oraTensorDimOpCreate(MlirContext ctx, MlirLocation loc, MlirValue tensor, MlirValue index)
+{
+    try
+    {
+        MLIRContext *context = unwrap(ctx);
+        Location location = unwrap(loc);
+        Value tensorVal = unwrap(tensor);
+        Value indexVal = unwrap(index);
+
+        OpBuilder builder(context);
+        auto op = builder.create<tensor::DimOp>(location, tensorVal, indexVal);
+        return wrap(op.getOperation());
+    }
+    catch (...)
+    {
+        return {nullptr};
+    }
+}
+
+MlirOperation oraScfYieldOpCreate(MlirContext ctx, MlirLocation loc, const MlirValue *operands, size_t numOperands)
+{
+    try
+    {
+        MLIRContext *context = unwrap(ctx);
+        Location location = unwrap(loc);
+
+        OpBuilder builder(context);
+        SmallVector<Value, 4> values;
+        values.reserve(numOperands);
+        for (size_t i = 0; i < numOperands; ++i)
+        {
+            values.push_back(unwrap(operands[i]));
+        }
+
+        auto op = builder.create<scf::YieldOp>(location, values);
+
+        // attach gas_cost=1 like the Zig-side builder
+        auto gasCostAttr = builder.getI64IntegerAttr(1);
+        op->setAttr("gas_cost", gasCostAttr);
+
+        return wrap(op.getOperation());
+    }
+    catch (...)
+    {
+        return {nullptr};
+    }
+}
+
+MlirOperation oraScfConditionOpCreate(MlirContext ctx, MlirLocation loc, MlirValue condition, const MlirValue *operands, size_t numOperands)
+{
+    try
+    {
+        MLIRContext *context = unwrap(ctx);
+        Location location = unwrap(loc);
+        Value condVal = unwrap(condition);
+
+        OpBuilder builder(context);
+        SmallVector<Value, 4> values;
+        values.reserve(numOperands);
+        for (size_t i = 0; i < numOperands; ++i)
+        {
+            values.push_back(unwrap(operands[i]));
+        }
+
+        auto op = builder.create<scf::ConditionOp>(location, condVal, values);
+        return wrap(op.getOperation());
+    }
+    catch (...)
+    {
+        return {nullptr};
+    }
+}
+
+MlirOperation oraCfBrOpCreate(MlirContext ctx, MlirLocation loc, MlirBlock dest)
+{
+    try
+    {
+        MLIRContext *context = unwrap(ctx);
+        Location location = unwrap(loc);
+        Block *destBlock = unwrap(dest);
+
+        OpBuilder builder(context);
+        auto op = builder.create<cf::BranchOp>(location, destBlock);
+        return wrap(op.getOperation());
+    }
+    catch (...)
+    {
+        return {nullptr};
+    }
+}
+
+MlirOperation oraCfCondBrOpCreate(MlirContext ctx, MlirLocation loc, MlirValue condition, MlirBlock true_block, MlirBlock false_block)
+{
+    try
+    {
+        MLIRContext *context = unwrap(ctx);
+        Location location = unwrap(loc);
+        Value condVal = unwrap(condition);
+        Block *trueBlock = unwrap(true_block);
+        Block *falseBlock = unwrap(false_block);
+
+        OpBuilder builder(context);
+        auto op = builder.create<cf::CondBranchOp>(location, condVal, trueBlock, ValueRange{}, falseBlock, ValueRange{});
+        return wrap(op.getOperation());
+    }
+    catch (...)
+    {
+        return {nullptr};
+    }
+}
+
+MlirOperation oraCfAssertOpCreate(MlirContext ctx, MlirLocation loc, MlirValue condition, MlirStringRef message)
+{
+    try
+    {
+        MLIRContext *context = unwrap(ctx);
+        Location location = unwrap(loc);
+        Value condVal = unwrap(condition);
+        StringRef msgRef = unwrap(message);
+
+        OpBuilder builder(context);
+        auto msgAttr = builder.getStringAttr(msgRef);
+        auto op = builder.create<cf::AssertOp>(location, condVal, msgAttr);
+        return wrap(op.getOperation());
+    }
+    catch (...)
+    {
+        return {nullptr};
+    }
+}
+
+MlirOperation oraCfAssertOpCreateWithAttrs(MlirContext ctx, MlirLocation loc, MlirValue condition, const MlirNamedAttribute *attrs, size_t numAttrs)
+{
+    try
+    {
+        MLIRContext *context = unwrap(ctx);
+        Location location = unwrap(loc);
+        Value condVal = unwrap(condition);
+
+        OperationState state(location, "cf.assert");
+        state.addOperands(condVal);
+
+        for (size_t i = 0; i < numAttrs; ++i)
+        {
+            auto name = unwrap(attrs[i].name);
+            auto value = unwrap(attrs[i].attribute);
+            state.addAttribute(name, value);
+        }
+
+        OpBuilder builder(context);
+        Operation *op = Operation::create(state);
+        builder.insert(op);
+        return wrap(op);
+    }
+    catch (...)
+    {
+        return {nullptr};
+    }
+}
+
+MlirOperation oraScfBreakOpCreate(MlirContext ctx, MlirLocation loc, const MlirValue *operands, size_t numOperands)
+{
+    try
+    {
+        MLIRContext *context = unwrap(ctx);
+        Location location = unwrap(loc);
+
+        OpBuilder builder(context);
+        SmallVector<Value, 4> values;
+        values.reserve(numOperands);
+        for (size_t i = 0; i < numOperands; ++i)
+        {
+            values.push_back(unwrap(operands[i]));
+        }
+
+        OperationState state(location, "scf.break");
+        state.addOperands(values);
+        Operation *op = Operation::create(state);
+        builder.insert(op);
+        return wrap(op);
+    }
+    catch (...)
+    {
+        return {nullptr};
+    }
+}
+
+MlirOperation oraScfContinueOpCreate(MlirContext ctx, MlirLocation loc, const MlirValue *operands, size_t numOperands)
+{
+    try
+    {
+        MLIRContext *context = unwrap(ctx);
+        Location location = unwrap(loc);
+
+        OpBuilder builder(context);
+        SmallVector<Value, 4> values;
+        values.reserve(numOperands);
+        for (size_t i = 0; i < numOperands; ++i)
+        {
+            values.push_back(unwrap(operands[i]));
+        }
+
+        OperationState state(location, "scf.continue");
+        state.addOperands(values);
+        Operation *op = Operation::create(state);
+        builder.insert(op);
+        return wrap(op);
+    }
+    catch (...)
+    {
+        return {nullptr};
+    }
+}
+
+MlirOperation oraScfIfOpCreate(MlirContext ctx, MlirLocation loc, MlirValue condition, const MlirType *resultTypes, size_t numResults, bool withElse)
+{
+    try
+    {
+        MLIRContext *context = unwrap(ctx);
+        Location location = unwrap(loc);
+        Value condVal = unwrap(condition);
+
+        SmallVector<Type, 4> results;
+        results.reserve(numResults);
+        for (size_t i = 0; i < numResults; ++i)
+        {
+            results.push_back(unwrap(resultTypes[i]));
+        }
+
+        OpBuilder builder(context);
+        auto op = scf::IfOp::create(builder, location, results, condVal, /*addThenBlock=*/true, /*addElseBlock=*/withElse);
+
+        // attach gas_cost=10 like the Zig-side builder
+        auto gasCostAttr = builder.getI64IntegerAttr(10);
+        op->setAttr("gas_cost", gasCostAttr);
+
+        return wrap(op.getOperation());
+    }
+    catch (...)
+    {
+        return {nullptr};
+    }
+}
+
+MlirBlock oraScfIfOpGetThenBlock(MlirOperation ifOp)
+{
+    try
+    {
+        Operation *operation = unwrap(ifOp);
+        if (!operation)
+        {
+            return {nullptr};
+        }
+
+        auto op = dyn_cast<scf::IfOp>(operation);
+        if (!op)
+        {
+            return {nullptr};
+        }
+
+        return wrap(op.thenBlock());
+    }
+    catch (...)
+    {
+        return {nullptr};
+    }
+}
+
+MlirBlock oraScfIfOpGetElseBlock(MlirOperation ifOp)
+{
+    try
+    {
+        Operation *operation = unwrap(ifOp);
+        if (!operation)
+        {
+            return {nullptr};
+        }
+
+        auto op = dyn_cast<scf::IfOp>(operation);
+        if (!op)
+        {
+            return {nullptr};
+        }
+
+        if (!op.getElseRegion().empty())
+        {
+            return wrap(op.elseBlock());
+        }
+
+        return {nullptr};
+    }
+    catch (...)
+    {
+        return {nullptr};
+    }
+}
+
+MlirOperation oraScfWhileOpCreate(MlirContext ctx, MlirLocation loc, const MlirValue *operands, size_t numOperands, const MlirType *resultTypes, size_t numResults)
+{
+    try
+    {
+        MLIRContext *context = unwrap(ctx);
+        Location location = unwrap(loc);
+
+        SmallVector<Value, 4> initOperands;
+        initOperands.reserve(numOperands);
+        for (size_t i = 0; i < numOperands; ++i)
+        {
+            initOperands.push_back(unwrap(operands[i]));
+        }
+
+        SmallVector<Type, 4> results;
+        results.reserve(numResults);
+        for (size_t i = 0; i < numResults; ++i)
+        {
+            results.push_back(unwrap(resultTypes[i]));
+        }
+
+        OpBuilder builder(context);
+        auto op = scf::WhileOp::create(builder, location, results, initOperands);
+
+        // attach gas_cost=10 like the Zig-side builder
+        auto gasCostAttr = builder.getI64IntegerAttr(10);
+        op->setAttr("gas_cost", gasCostAttr);
+
+        return wrap(op.getOperation());
+    }
+    catch (...)
+    {
+        return {nullptr};
+    }
+}
+
+MlirBlock oraScfWhileOpGetBeforeBlock(MlirOperation whileOp)
+{
+    try
+    {
+        Operation *operation = unwrap(whileOp);
+        if (!operation)
+        {
+            return {nullptr};
+        }
+
+        auto op = dyn_cast<scf::WhileOp>(operation);
+        if (!op)
+        {
+            return {nullptr};
+        }
+
+        Region &before = op.getBefore();
+        if (before.empty())
+        {
+            before.push_back(new Block());
+        }
+
+        return wrap(&before.front());
+    }
+    catch (...)
+    {
+        return {nullptr};
+    }
+}
+
+MlirBlock oraScfWhileOpGetAfterBlock(MlirOperation whileOp)
+{
+    try
+    {
+        Operation *operation = unwrap(whileOp);
+        if (!operation)
+        {
+            return {nullptr};
+        }
+
+        auto op = dyn_cast<scf::WhileOp>(operation);
+        if (!op)
+        {
+            return {nullptr};
+        }
+
+        Region &after = op.getAfter();
+        if (after.empty())
+        {
+            after.push_back(new Block());
+        }
+
+        return wrap(&after.front());
+    }
+    catch (...)
+    {
+        return {nullptr};
+    }
+}
+
+MlirOperation oraScfForOpCreate(MlirContext ctx, MlirLocation loc, MlirValue lowerBound, MlirValue upperBound, MlirValue step, const MlirValue *initArgs, size_t numInitArgs, bool unsignedCmp)
+{
+    try
+    {
+        MLIRContext *context = unwrap(ctx);
+        Location location = unwrap(loc);
+        Value lb = unwrap(lowerBound);
+        Value ub = unwrap(upperBound);
+        Value st = unwrap(step);
+
+        SmallVector<Value, 4> init;
+        init.reserve(numInitArgs);
+        for (size_t i = 0; i < numInitArgs; ++i)
+        {
+            init.push_back(unwrap(initArgs[i]));
+        }
+
+        OpBuilder builder(context);
+        auto op = builder.create<scf::ForOp>(location, lb, ub, st, init, nullptr, unsignedCmp);
+
+        // attach gas_cost=10 like the Zig-side builder
+        auto gasCostAttr = builder.getI64IntegerAttr(10);
+        op->setAttr("gas_cost", gasCostAttr);
+
+        return wrap(op.getOperation());
+    }
+    catch (...)
+    {
+        return {nullptr};
+    }
+}
+
+MlirBlock oraScfForOpGetBodyBlock(MlirOperation forOp)
+{
+    try
+    {
+        Operation *operation = unwrap(forOp);
+        if (!operation)
+        {
+            return {nullptr};
+        }
+
+        auto op = dyn_cast<scf::ForOp>(operation);
+        if (!op)
+        {
+            return {nullptr};
+        }
+
+        return wrap(op.getBody());
+    }
+    catch (...)
+    {
+        return {nullptr};
+    }
+}
+
+MlirOperation oraScfExecuteRegionOpCreate(MlirContext ctx, MlirLocation loc, const MlirType *resultTypes, size_t numResults, bool noInline)
+{
+    try
+    {
+        MLIRContext *context = unwrap(ctx);
+        Location location = unwrap(loc);
+
+        SmallVector<Type, 4> results;
+        results.reserve(numResults);
+        for (size_t i = 0; i < numResults; ++i)
+        {
+            results.push_back(unwrap(resultTypes[i]));
+        }
+
+        OpBuilder builder(context);
+        auto op = scf::ExecuteRegionOp::create(builder, location, results, noInline);
+        return wrap(op.getOperation());
+    }
+    catch (...)
+    {
+        return {nullptr};
+    }
+}
+
+MlirBlock oraScfExecuteRegionOpGetBodyBlock(MlirOperation op)
+{
+    try
+    {
+        Operation *operation = unwrap(op);
+        if (!operation)
+        {
+            return {nullptr};
+        }
+
+        auto execOp = dyn_cast<scf::ExecuteRegionOp>(operation);
+        if (!execOp)
+        {
+            return {nullptr};
+        }
+
+        Region &region = execOp.getRegion();
+        if (region.empty())
+        {
+            region.push_back(new Block());
+        }
+
+        return wrap(&region.front());
+    }
+    catch (...)
+    {
+        return {nullptr};
+    }
+}
+
+MlirOperation oraLlvmUndefOpCreate(MlirContext ctx, MlirLocation loc, MlirType resultType)
+{
+    try
+    {
+        MLIRContext *context = unwrap(ctx);
+        Location location = unwrap(loc);
+        Type resType = unwrap(resultType);
+
+        OpBuilder builder(context);
+        auto op = builder.create<LLVM::UndefOp>(location, resType);
+        return wrap(op.getOperation());
+    }
+    catch (...)
+    {
+        return {nullptr};
+    }
+}
+
+MlirOperation oraLlvmInsertValueOpCreate(MlirContext ctx, MlirLocation loc, MlirType resultType, MlirValue container, MlirValue value, const int64_t *positions, size_t numPositions)
+{
+    try
+    {
+        MLIRContext *context = unwrap(ctx);
+        Location location = unwrap(loc);
+        Type resType = unwrap(resultType);
+        Value containerVal = unwrap(container);
+        Value valueVal = unwrap(value);
+
+        SmallVector<int64_t, 4> pos;
+        pos.reserve(numPositions);
+        for (size_t i = 0; i < numPositions; ++i)
+        {
+            pos.push_back(positions[i]);
+        }
+
+        OpBuilder builder(context);
+        auto op = builder.create<LLVM::InsertValueOp>(location, resType, containerVal, valueVal, pos);
+        return wrap(op.getOperation());
+    }
+    catch (...)
+    {
+        return {nullptr};
+    }
+}
+
+MlirOperation oraLlvmExtractValueOpCreate(MlirContext ctx, MlirLocation loc, MlirType resultType, MlirValue container, const int64_t *positions, size_t numPositions)
+{
+    try
+    {
+        MLIRContext *context = unwrap(ctx);
+        Location location = unwrap(loc);
+        Type resType = unwrap(resultType);
+        Value containerVal = unwrap(container);
+
+        SmallVector<int64_t, 4> pos;
+        pos.reserve(numPositions);
+        for (size_t i = 0; i < numPositions; ++i)
+        {
+            pos.push_back(positions[i]);
+        }
+
+        OpBuilder builder(context);
+        auto op = builder.create<LLVM::ExtractValueOp>(location, resType, containerVal, pos);
+        return wrap(op.getOperation());
+    }
+    catch (...)
+    {
+        return {nullptr};
+    }
+}
+
 MlirOperation oraLockOpCreate(MlirContext ctx, MlirLocation loc, MlirValue resource)
 {
     try
@@ -2040,6 +3943,932 @@ MlirOperation oraMoveOpCreate(MlirContext ctx, MlirLocation loc, MlirValue amoun
     }
 }
 
+MlirOperation oraMoveOpCreateWithMapping(MlirContext ctx, MlirLocation loc, MlirValue mapping, MlirValue source, MlirValue destination, MlirValue amount, MlirType resultType)
+{
+    try
+    {
+        Location location = unwrap(loc);
+
+        Value mappingVal = unwrap(mapping);
+        Value sourceVal = unwrap(source);
+        Value destinationVal = unwrap(destination);
+        Value amountVal = unwrap(amount);
+        Type resultTy = unwrap(resultType);
+
+        OperationState state(location, "ora.move");
+        SmallVector<Value, 4> operands;
+        operands.push_back(mappingVal);
+        operands.push_back(sourceVal);
+        operands.push_back(destinationVal);
+        operands.push_back(amountVal);
+        state.addOperands(operands);
+        state.addTypes(resultTy);
+
+        Operation *op = Operation::create(state);
+        return wrap(op);
+    }
+    catch (...)
+    {
+        return {nullptr};
+    }
+}
+
+MlirOperation oraCmpOpCreate(MlirContext ctx, MlirLocation loc, MlirStringRef predicate, MlirValue lhs, MlirValue rhs, MlirType resultType)
+{
+    try
+    {
+        MLIRContext *context = unwrap(ctx);
+        Location location = unwrap(loc);
+        Type resultTy = unwrap(resultType);
+
+        StringRef predicateRef = unwrap(predicate);
+        Value lhsVal = unwrap(lhs);
+        Value rhsVal = unwrap(rhs);
+
+        OpBuilder builder(context);
+        auto op = builder.create<ora::CmpOp>(location, resultTy, predicateRef, lhsVal, rhsVal);
+        return wrap(op.getOperation());
+    }
+    catch (...)
+    {
+        return {nullptr};
+    }
+}
+
+MlirOperation oraRangeOpCreate(MlirContext ctx, MlirLocation loc, MlirValue start, MlirValue end, MlirType resultType, bool inclusive)
+{
+    try
+    {
+        MLIRContext *context = unwrap(ctx);
+        Location location = unwrap(loc);
+        Type resultTy = unwrap(resultType);
+
+        Value startVal = unwrap(start);
+        Value endVal = unwrap(end);
+        auto inclusiveAttr = BoolAttr::get(context, inclusive);
+
+        OpBuilder builder(context);
+        auto op = builder.create<ora::RangeOp>(location, resultTy, startVal, endVal, inclusiveAttr);
+        return wrap(op.getOperation());
+    }
+    catch (...)
+    {
+        return {nullptr};
+    }
+}
+
+MlirOperation oraQuantifiedOpCreate(MlirContext ctx, MlirLocation loc, MlirStringRef quantifier, MlirStringRef variable, MlirStringRef variableType, MlirValue condition, bool hasCondition, MlirValue body, MlirType resultType)
+{
+    try
+    {
+        MLIRContext *context = unwrap(ctx);
+        Location location = unwrap(loc);
+        Type resultTy = unwrap(resultType);
+
+        StringRef quantifierRef = unwrap(quantifier);
+        StringRef variableRef = unwrap(variable);
+        StringRef variableTypeRef = unwrap(variableType);
+
+        Value conditionVal = hasCondition ? unwrap(condition) : Value();
+        Value bodyVal = unwrap(body);
+
+        OpBuilder builder(context);
+        auto op = builder.create<ora::QuantifiedOp>(location, resultTy, quantifierRef, variableRef, variableTypeRef, conditionVal, bodyVal);
+        return wrap(op.getOperation());
+    }
+    catch (...)
+    {
+        return {nullptr};
+    }
+}
+
+MlirOperation oraErrorDeclOpCreate(MlirContext ctx, MlirLocation loc, const MlirType *resultTypes, size_t numResults, const MlirNamedAttribute *attrs, size_t numAttrs)
+{
+    try
+    {
+        Location location = unwrap(loc);
+
+        OperationState state(location, "ora.error.decl");
+        for (size_t i = 0; i < numResults; ++i)
+        {
+            state.addTypes(unwrap(resultTypes[i]));
+        }
+        for (size_t i = 0; i < numAttrs; ++i)
+        {
+            auto attrName = unwrap(attrs[i].name);
+            auto attrValue = unwrap(attrs[i].attribute);
+            state.addAttribute(attrName, attrValue);
+        }
+
+        Operation *op = Operation::create(state);
+        return wrap(op);
+    }
+    catch (...)
+    {
+        return {nullptr};
+    }
+}
+
+MlirOperation oraMethodCallOpCreate(MlirContext ctx, MlirLocation loc, MlirStringRef methodName, const MlirValue *operands, size_t numOperands, MlirType resultType)
+{
+    try
+    {
+        MLIRContext *context = unwrap(ctx);
+        Location location = unwrap(loc);
+        Type resultTy = unwrap(resultType);
+        StringRef methodRef = unwrap(methodName);
+
+        OperationState state(location, "ora.method_call");
+        for (size_t i = 0; i < numOperands; ++i)
+        {
+            state.addOperands(unwrap(operands[i]));
+        }
+        state.addTypes(resultTy);
+        state.addAttribute("method", StringAttr::get(context, methodRef));
+
+        Operation *op = Operation::create(state);
+        return wrap(op);
+    }
+    catch (...)
+    {
+        return {nullptr};
+    }
+}
+
+MlirOperation oraBinaryConstantOpCreate(MlirContext ctx, MlirLocation loc, MlirType resultType, const MlirNamedAttribute *attrs, size_t numAttrs)
+{
+    try
+    {
+        Location location = unwrap(loc);
+        Type resultTy = unwrap(resultType);
+
+        OperationState state(location, "ora.binary.constant");
+        state.addTypes(resultTy);
+        for (size_t i = 0; i < numAttrs; ++i)
+        {
+            auto attrName = unwrap(attrs[i].name);
+            auto attrValue = unwrap(attrs[i].attribute);
+            state.addAttribute(attrName, attrValue);
+        }
+
+        Operation *op = Operation::create(state);
+        return wrap(op);
+    }
+    catch (...)
+    {
+        return {nullptr};
+    }
+}
+
+MlirOperation oraModuleOpCreate(MlirContext ctx, MlirLocation loc, const MlirNamedAttribute *attrs, size_t numAttrs, size_t numRegions, bool addEmptyBlocks)
+{
+    try
+    {
+        Location location = unwrap(loc);
+
+        OperationState state(location, "ora.module");
+        for (size_t i = 0; i < numAttrs; ++i)
+        {
+            auto attrName = unwrap(attrs[i].name);
+            auto attrValue = unwrap(attrs[i].attribute);
+            state.addAttribute(attrName, attrValue);
+        }
+        for (size_t i = 0; i < numRegions; ++i)
+        {
+            Region *region = state.addRegion();
+            if (addEmptyBlocks)
+            {
+                region->push_back(new Block());
+            }
+        }
+
+        Operation *op = Operation::create(state);
+        return wrap(op);
+    }
+    catch (...)
+    {
+        return {nullptr};
+    }
+}
+
+MlirOperation oraBlockOpCreate(MlirContext ctx, MlirLocation loc, const MlirNamedAttribute *attrs, size_t numAttrs, size_t numRegions, bool addEmptyBlocks)
+{
+    try
+    {
+        Location location = unwrap(loc);
+
+        OperationState state(location, "ora.block");
+        for (size_t i = 0; i < numAttrs; ++i)
+        {
+            auto attrName = unwrap(attrs[i].name);
+            auto attrValue = unwrap(attrs[i].attribute);
+            state.addAttribute(attrName, attrValue);
+        }
+        for (size_t i = 0; i < numRegions; ++i)
+        {
+            Region *region = state.addRegion();
+            if (addEmptyBlocks)
+            {
+                region->push_back(new Block());
+            }
+        }
+
+        Operation *op = Operation::create(state);
+        return wrap(op);
+    }
+    catch (...)
+    {
+        return {nullptr};
+    }
+}
+
+MlirOperation oraTryBlockOpCreate(MlirContext ctx, MlirLocation loc, const MlirNamedAttribute *attrs, size_t numAttrs, size_t numRegions, bool addEmptyBlocks)
+{
+    try
+    {
+        Location location = unwrap(loc);
+
+        OperationState state(location, "ora.try_block");
+        for (size_t i = 0; i < numAttrs; ++i)
+        {
+            auto attrName = unwrap(attrs[i].name);
+            auto attrValue = unwrap(attrs[i].attribute);
+            state.addAttribute(attrName, attrValue);
+        }
+        for (size_t i = 0; i < numRegions; ++i)
+        {
+            Region *region = state.addRegion();
+            if (addEmptyBlocks)
+            {
+                region->push_back(new Block());
+            }
+        }
+
+        Operation *op = Operation::create(state);
+        return wrap(op);
+    }
+    catch (...)
+    {
+        return {nullptr};
+    }
+}
+
+MlirOperation oraImportOpCreate(MlirContext ctx, MlirLocation loc, const MlirNamedAttribute *attrs, size_t numAttrs)
+{
+    try
+    {
+        Location location = unwrap(loc);
+
+        OperationState state(location, "ora.import");
+        for (size_t i = 0; i < numAttrs; ++i)
+        {
+            auto attrName = unwrap(attrs[i].name);
+            auto attrValue = unwrap(attrs[i].attribute);
+            state.addAttribute(attrName, attrValue);
+        }
+
+        Operation *op = Operation::create(state);
+        return wrap(op);
+    }
+    catch (...)
+    {
+        return {nullptr};
+    }
+}
+
+MlirOperation oraLogDeclOpCreate(MlirContext ctx, MlirLocation loc, const MlirNamedAttribute *attrs, size_t numAttrs)
+{
+    try
+    {
+        Location location = unwrap(loc);
+
+        OperationState state(location, "ora.log.decl");
+        for (size_t i = 0; i < numAttrs; ++i)
+        {
+            auto attrName = unwrap(attrs[i].name);
+            auto attrValue = unwrap(attrs[i].attribute);
+            state.addAttribute(attrName, attrValue);
+        }
+
+        Operation *op = Operation::create(state);
+        return wrap(op);
+    }
+    catch (...)
+    {
+        return {nullptr};
+    }
+}
+
+MlirOperation oraQuantifiedDeclOpCreate(MlirContext ctx, MlirLocation loc, const MlirNamedAttribute *attrs, size_t numAttrs, size_t numRegions, bool addEmptyBlocks)
+{
+    try
+    {
+        Location location = unwrap(loc);
+
+        OperationState state(location, "ora.quantified");
+        for (size_t i = 0; i < numAttrs; ++i)
+        {
+            auto attrName = unwrap(attrs[i].name);
+            auto attrValue = unwrap(attrs[i].attribute);
+            state.addAttribute(attrName, attrValue);
+        }
+        for (size_t i = 0; i < numRegions; ++i)
+        {
+            Region *region = state.addRegion();
+            if (addEmptyBlocks)
+            {
+                region->push_back(new Block());
+            }
+        }
+
+        Operation *op = Operation::create(state);
+        return wrap(op);
+    }
+    catch (...)
+    {
+        return {nullptr};
+    }
+}
+
+MlirOperation oraVariablePlaceholderOpCreate(MlirContext ctx, MlirLocation loc, MlirStringRef name, MlirType resultType)
+{
+    try
+    {
+        MLIRContext *context = unwrap(ctx);
+        Location location = unwrap(loc);
+        StringRef nameRef = unwrap(name);
+        Type resultTy = unwrap(resultType);
+
+        OperationState state(location, "ora.variable_placeholder");
+        state.addTypes(resultTy);
+        state.addAttribute("name", StringAttr::get(context, nameRef));
+
+        Operation *op = Operation::create(state);
+        return wrap(op);
+    }
+    catch (...)
+    {
+        return {nullptr};
+    }
+}
+
+MlirOperation oraModulePlaceholderOpCreate(MlirContext ctx, MlirLocation loc, MlirStringRef name, const MlirNamedAttribute *attrs, size_t numAttrs)
+{
+    try
+    {
+        MLIRContext *context = unwrap(ctx);
+        Location location = unwrap(loc);
+        StringRef nameRef = unwrap(name);
+
+        OperationState state(location, "ora.module_placeholder");
+        state.addAttribute("name", StringAttr::get(context, nameRef));
+        for (size_t i = 0; i < numAttrs; ++i)
+        {
+            auto attrName = unwrap(attrs[i].name);
+            auto attrValue = unwrap(attrs[i].attribute);
+            state.addAttribute(attrName, attrValue);
+        }
+
+        Operation *op = Operation::create(state);
+        return wrap(op);
+    }
+    catch (...)
+    {
+        return {nullptr};
+    }
+}
+
+MlirOperation oraTensorExtractOpCreate(MlirContext ctx, MlirLocation loc, MlirValue tensor, const MlirValue *indices, size_t numIndices, MlirType resultType)
+{
+    try
+    {
+        MLIRContext *context = unwrap(ctx);
+        Location location = unwrap(loc);
+        Value tensorVal = unwrap(tensor);
+        Type resultTy = unwrap(resultType);
+
+        SmallVector<Value> idx;
+        idx.reserve(numIndices);
+        for (size_t i = 0; i < numIndices; ++i)
+        {
+            idx.push_back(unwrap(indices[i]));
+        }
+
+        OpBuilder builder(context);
+        auto op = builder.create<tensor::ExtractOp>(location, resultTy, tensorVal, idx);
+        return wrap(op.getOperation());
+    }
+    catch (...)
+    {
+        return {nullptr};
+    }
+}
+
+MlirOperation oraEvmOpCreate(MlirContext ctx, MlirLocation loc, MlirStringRef name, const MlirValue *operands, size_t numOperands, MlirType resultType)
+{
+    try
+    {
+        Location location = unwrap(loc);
+        StringRef nameRef = unwrap(name);
+        Type resultTy = unwrap(resultType);
+
+        OperationState state(location, nameRef);
+        for (size_t i = 0; i < numOperands; ++i)
+        {
+            state.addOperands(unwrap(operands[i]));
+        }
+        state.addTypes(resultTy);
+
+        Operation *op = Operation::create(state);
+        return wrap(op);
+    }
+    catch (...)
+    {
+        return {nullptr};
+    }
+}
+
+MlirAttribute oraStringAttrCreate(MlirContext ctx, MlirStringRef value)
+{
+    try
+    {
+        MLIRContext *context = unwrap(ctx);
+        StringRef valueRef = unwrap(value);
+        return wrap(mlir::Attribute(mlir::StringAttr::get(context, valueRef)));
+    }
+    catch (...)
+    {
+        return {nullptr};
+    }
+}
+
+MlirAttribute oraBoolAttrCreate(MlirContext ctx, bool value)
+{
+    try
+    {
+        MLIRContext *context = unwrap(ctx);
+        return wrap(BoolAttr::get(context, value));
+    }
+    catch (...)
+    {
+        return {nullptr};
+    }
+}
+
+MlirAttribute oraIntegerAttrCreateI64(MlirContext ctx, MlirType type, int64_t value)
+{
+    try
+    {
+        MLIRContext *context = unwrap(ctx);
+        Type ty = unwrap(type);
+        if (auto intTy = llvm::dyn_cast<mlir::IntegerType>(ty))
+        {
+            return wrap(IntegerAttr::get(intTy, value));
+        }
+        if (auto oraIntTy = llvm::dyn_cast<mlir::ora::IntegerType>(ty))
+        {
+            auto builtinTy = mlir::IntegerType::get(context, oraIntTy.getWidth(), oraIntTy.getIsSigned() ? mlir::IntegerType::Signed : mlir::IntegerType::Unsigned);
+            return wrap(IntegerAttr::get(builtinTy, value));
+        }
+        return {nullptr};
+    }
+    catch (...)
+    {
+        return {nullptr};
+    }
+}
+
+MlirAttribute oraIntegerAttrCreateI64FromType(MlirType type, int64_t value)
+{
+    try
+    {
+        Type ty = unwrap(type);
+        MLIRContext *context = ty.getContext();
+        if (auto intTy = llvm::dyn_cast<mlir::IntegerType>(ty))
+        {
+            return wrap(IntegerAttr::get(intTy, value));
+        }
+        if (auto oraIntTy = llvm::dyn_cast<mlir::ora::IntegerType>(ty))
+        {
+            auto builtinTy = mlir::IntegerType::get(context, oraIntTy.getWidth(), oraIntTy.getIsSigned() ? mlir::IntegerType::Signed : mlir::IntegerType::Unsigned);
+            return wrap(IntegerAttr::get(builtinTy, value));
+        }
+        return {nullptr};
+    }
+    catch (...)
+    {
+        return {nullptr};
+    }
+}
+
+MlirAttribute oraTypeAttrCreate(MlirContext ctx, MlirType type)
+{
+    try
+    {
+        (void)ctx;
+        Type ty = unwrap(type);
+        return wrap(TypeAttr::get(ty));
+    }
+    catch (...)
+    {
+        return {nullptr};
+    }
+}
+
+MlirAttribute oraTypeAttrCreateFromType(MlirType type)
+{
+    try
+    {
+        Type ty = unwrap(type);
+        return wrap(TypeAttr::get(ty));
+    }
+    catch (...)
+    {
+        return {nullptr};
+    }
+}
+
+MlirAttribute oraArrayAttrCreate(MlirContext ctx, intptr_t numAttrs, const MlirAttribute *attrs)
+{
+    try
+    {
+        MLIRContext *context = unwrap(ctx);
+        const size_t attr_count = numAttrs > 0 ? static_cast<size_t>(numAttrs) : 0;
+        SmallVector<Attribute> items;
+        items.reserve(attr_count);
+        for (size_t i = 0; i < attr_count; ++i)
+        {
+            items.push_back(unwrap(attrs[i]));
+        }
+        return wrap(ArrayAttr::get(context, items));
+    }
+    catch (...)
+    {
+        return {nullptr};
+    }
+}
+
+MlirAttribute oraNullAttrCreate(void)
+{
+    try
+    {
+        return wrap(Attribute());
+    }
+    catch (...)
+    {
+        return {nullptr};
+    }
+}
+
+MlirType oraIntegerTypeCreate(MlirContext ctx, uint32_t bits)
+{
+    try
+    {
+        MLIRContext *context = unwrap(ctx);
+        return wrap(mlir::IntegerType::get(context, bits));
+    }
+    catch (...)
+    {
+        return {nullptr};
+    }
+}
+
+MlirType oraIndexTypeCreate(MlirContext ctx)
+{
+    try
+    {
+        MLIRContext *context = unwrap(ctx);
+        return wrap(IndexType::get(context));
+    }
+    catch (...)
+    {
+        return {nullptr};
+    }
+}
+
+MlirType oraNoneTypeCreate(MlirContext ctx)
+{
+    try
+    {
+        MLIRContext *context = unwrap(ctx);
+        return wrap(NoneType::get(context));
+    }
+    catch (...)
+    {
+        return {nullptr};
+    }
+}
+
+MlirType oraRankedTensorTypeCreate(MlirContext ctx, intptr_t rank, const int64_t *shape, MlirType elementType, MlirAttribute encoding)
+{
+    try
+    {
+        (void)ctx;
+        Type elemTy = unwrap(elementType);
+        Attribute encodingAttr = unwrap(encoding);
+        ArrayRef<int64_t> shapeRef(shape, static_cast<size_t>(rank));
+        return wrap(RankedTensorType::get(shapeRef, elemTy, encodingAttr));
+    }
+    catch (...)
+    {
+        return {nullptr};
+    }
+}
+
+MlirType oraMemRefTypeCreate(MlirContext ctx, MlirType elementType, intptr_t rank, const int64_t *shape, MlirAttribute layout, MlirAttribute memorySpace)
+{
+    try
+    {
+        (void)ctx;
+        Type elemTy = unwrap(elementType);
+        Attribute layoutAttr = unwrap(layout);
+        Attribute memSpaceAttr = unwrap(memorySpace);
+        ArrayRef<int64_t> shapeRef(shape, static_cast<size_t>(rank));
+        mlir::MemRefLayoutAttrInterface layoutIface;
+        if (layoutAttr)
+        {
+            layoutIface = llvm::dyn_cast<mlir::MemRefLayoutAttrInterface>(layoutAttr);
+        }
+        return wrap(mlir::MemRefType::get(shapeRef, elemTy, layoutIface, memSpaceAttr));
+    }
+    catch (...)
+    {
+        return {nullptr};
+    }
+}
+
+int64_t oraShapedTypeDynamicSize(void)
+{
+    return mlir::ShapedType::kDynamic;
+}
+
+bool oraTypeIsAInteger(MlirType type)
+{
+    Type ty = unwrap(type);
+    return ty && llvm::isa<mlir::IntegerType>(ty);
+}
+
+bool oraTypeEqual(MlirType a, MlirType b)
+{
+    Type ta = unwrap(a);
+    Type tb = unwrap(b);
+    return ta && tb && ta == tb;
+}
+
+bool oraTypeIsAShaped(MlirType type)
+{
+    Type ty = unwrap(type);
+    return ty && llvm::isa<mlir::ShapedType>(ty);
+}
+
+bool oraTypeIsAMemRef(MlirType type)
+{
+    Type ty = unwrap(type);
+    return ty && llvm::isa<mlir::MemRefType>(ty);
+}
+
+MlirType oraShapedTypeGetElementType(MlirType type)
+{
+    Type ty = unwrap(type);
+    if (auto shaped = llvm::dyn_cast<mlir::ShapedType>(ty))
+    {
+        return wrap(shaped.getElementType());
+    }
+    return {nullptr};
+}
+
+intptr_t oraShapedTypeGetRank(MlirType type)
+{
+    Type ty = unwrap(type);
+    if (auto shaped = llvm::dyn_cast<mlir::ShapedType>(ty))
+    {
+        return shaped.getRank();
+    }
+    return -1;
+}
+
+int64_t oraShapedTypeGetDimSize(MlirType type, intptr_t dim)
+{
+    Type ty = unwrap(type);
+    if (auto shaped = llvm::dyn_cast<mlir::ShapedType>(ty))
+    {
+        return shaped.getDimSize(dim);
+    }
+    return mlir::ShapedType::kDynamic;
+}
+
+bool oraShapedTypeHasStaticShape(MlirType type)
+{
+    Type ty = unwrap(type);
+    if (auto shaped = llvm::dyn_cast<mlir::ShapedType>(ty))
+    {
+        return shaped.hasStaticShape();
+    }
+    return false;
+}
+
+uint32_t oraIntegerTypeGetWidth(MlirType type)
+{
+    Type ty = unwrap(type);
+    if (auto intTy = llvm::dyn_cast<mlir::IntegerType>(ty))
+    {
+        return intTy.getWidth();
+    }
+    if (auto oraIntTy = llvm::dyn_cast<mlir::ora::IntegerType>(ty))
+    {
+        return oraIntTy.getWidth();
+    }
+    return 0;
+}
+
+bool oraTypeIsNull(MlirType type)
+{
+    return unwrap(type) == nullptr;
+}
+
+bool oraTypeIsANone(MlirType type)
+{
+    Type ty = unwrap(type);
+    return ty && llvm::isa<mlir::NoneType>(ty);
+}
+
+MlirOperation oraConstDeclOpCreate(MlirContext ctx, MlirLocation loc, const MlirType *resultTypes, size_t numResults, const MlirNamedAttribute *attrs, size_t numAttrs, size_t numRegions, bool addEmptyBlocks)
+{
+    try
+    {
+        Location location = unwrap(loc);
+
+        OperationState state(location, "ora.const");
+        for (size_t i = 0; i < numResults; ++i)
+        {
+            state.addTypes(unwrap(resultTypes[i]));
+        }
+        for (size_t i = 0; i < numAttrs; ++i)
+        {
+            auto attrName = unwrap(attrs[i].name);
+            auto attrValue = unwrap(attrs[i].attribute);
+            state.addAttribute(attrName, attrValue);
+        }
+        for (size_t i = 0; i < numRegions; ++i)
+        {
+            Region *region = state.addRegion();
+            if (addEmptyBlocks)
+            {
+                region->push_back(new Block());
+            }
+        }
+
+        Operation *op = Operation::create(state);
+        return wrap(op);
+    }
+    catch (...)
+    {
+        return {nullptr};
+    }
+}
+
+MlirOperation oraImmutableDeclOpCreate(MlirContext ctx, MlirLocation loc, const MlirType *resultTypes, size_t numResults, const MlirNamedAttribute *attrs, size_t numAttrs, size_t numRegions, bool addEmptyBlocks)
+{
+    try
+    {
+        Location location = unwrap(loc);
+
+        OperationState state(location, "ora.immutable");
+        for (size_t i = 0; i < numResults; ++i)
+        {
+            state.addTypes(unwrap(resultTypes[i]));
+        }
+        for (size_t i = 0; i < numAttrs; ++i)
+        {
+            auto attrName = unwrap(attrs[i].name);
+            auto attrValue = unwrap(attrs[i].attribute);
+            state.addAttribute(attrName, attrValue);
+        }
+        for (size_t i = 0; i < numRegions; ++i)
+        {
+            Region *region = state.addRegion();
+            if (addEmptyBlocks)
+            {
+                region->push_back(new Block());
+            }
+        }
+
+        Operation *op = Operation::create(state);
+        return wrap(op);
+    }
+    catch (...)
+    {
+        return {nullptr};
+    }
+}
+
+MlirOperation oraMemoryGlobalOpCreate(MlirContext ctx, MlirLocation loc, MlirStringRef name, MlirType type)
+{
+    try
+    {
+        MLIRContext *context = unwrap(ctx);
+        Location location = unwrap(loc);
+        StringRef nameRef = unwrap(name);
+        Type varType = unwrap(type);
+
+        OperationState state(location, "ora.memory.global");
+        state.addAttribute("sym_name", StringAttr::get(context, nameRef));
+        state.addAttribute("type", TypeAttr::get(varType));
+
+        Operation *op = Operation::create(state);
+        return wrap(op);
+    }
+    catch (...)
+    {
+        return {nullptr};
+    }
+}
+
+MlirOperation oraTStoreGlobalOpCreate(MlirContext ctx, MlirLocation loc, MlirStringRef name, MlirType type)
+{
+    try
+    {
+        MLIRContext *context = unwrap(ctx);
+        Location location = unwrap(loc);
+        StringRef nameRef = unwrap(name);
+        Type varType = unwrap(type);
+
+        OperationState state(location, "ora.tstore.global");
+        state.addAttribute("sym_name", StringAttr::get(context, nameRef));
+        state.addAttribute("type", TypeAttr::get(varType));
+
+        Operation *op = Operation::create(state);
+        return wrap(op);
+    }
+    catch (...)
+    {
+        return {nullptr};
+    }
+}
+
+MlirOperation oraErrorOpCreate(MlirContext ctx, MlirLocation loc, MlirType resultType)
+{
+    try
+    {
+        Location location = unwrap(loc);
+        Type resultTy = unwrap(resultType);
+
+        OperationState state(location, "ora.error");
+        state.addTypes(resultTy);
+
+        Operation *op = Operation::create(state);
+        return wrap(op);
+    }
+    catch (...)
+    {
+        return {nullptr};
+    }
+}
+
+MlirOperation oraLengthOpCreate(MlirContext ctx, MlirLocation loc, MlirValue value, MlirType resultType)
+{
+    try
+    {
+        Location location = unwrap(loc);
+        Value val = unwrap(value);
+        Type resultTy = unwrap(resultType);
+
+        OperationState state(location, "ora.length");
+        state.addOperands(val);
+        state.addTypes(resultTy);
+
+        Operation *op = Operation::create(state);
+        return wrap(op);
+    }
+    catch (...)
+    {
+        return {nullptr};
+    }
+}
+
+MlirOperation oraExpressionCaptureOpCreate(MlirContext ctx, MlirLocation loc, MlirValue value, MlirType resultType)
+{
+    try
+    {
+        MLIRContext *context = unwrap(ctx);
+        Location location = unwrap(loc);
+        Value val = unwrap(value);
+        Type resultTy = unwrap(resultType);
+
+        OperationState state(location, "ora.expression_capture");
+        state.addOperands(val);
+        state.addTypes(resultTy);
+        state.addAttribute("ora.top_level_expression", BoolAttr::get(context, true));
+
+        Operation *op = Operation::create(state);
+        return wrap(op);
+    }
+    catch (...)
+    {
+        return {nullptr};
+    }
+}
+
 MlirOperation oraLogOpCreate(MlirContext ctx, MlirLocation loc, MlirStringRef eventName, const MlirValue *parameters, size_t numParameters)
 {
     try
@@ -2068,6 +4897,145 @@ MlirOperation oraLogOpCreate(MlirContext ctx, MlirLocation loc, MlirStringRef ev
         op->setAttr("gas_cost", gasCostAttr);
 
         return wrap(op.getOperation());
+    }
+    catch (...)
+    {
+        return {nullptr};
+    }
+}
+
+MlirOperation oraFuncFuncOpCreate(MlirContext ctx, MlirLocation loc, const MlirNamedAttribute *attrs, size_t numAttrs, const MlirType *paramTypes, const MlirLocation *paramLocs, size_t numParams)
+{
+    try
+    {
+        MLIRContext *context = unwrap(ctx);
+        Location location = unwrap(loc);
+
+        OperationState state(location, "func.func");
+        for (size_t i = 0; i < numAttrs; ++i)
+        {
+            auto name = unwrap(attrs[i].name);
+            auto value = unwrap(attrs[i].attribute);
+            state.addAttribute(name, value);
+        }
+
+        Region *region = state.addRegion();
+        SmallVector<Type, 8> argTypes;
+        SmallVector<Location, 8> argLocs;
+        argTypes.reserve(numParams);
+        argLocs.reserve(numParams);
+        for (size_t i = 0; i < numParams; ++i)
+        {
+            argTypes.push_back(unwrap(paramTypes[i]));
+            argLocs.push_back(unwrap(paramLocs[i]));
+        }
+
+        Block *entry = new Block();
+        entry->addArguments(argTypes, argLocs);
+        region->push_back(entry);
+
+        Operation *op = Operation::create(state);
+        return wrap(op);
+    }
+    catch (...)
+    {
+        return {nullptr};
+    }
+}
+
+MlirBlock oraFuncOpGetBodyBlock(MlirOperation op)
+{
+    try
+    {
+        Operation *operation = unwrap(op);
+        if (!operation)
+        {
+            return {nullptr};
+        }
+
+        auto funcOp = dyn_cast<func::FuncOp>(operation);
+        if (!funcOp)
+        {
+            return {nullptr};
+        }
+
+        if (funcOp.getBody().empty())
+        {
+            funcOp.addEntryBlock();
+        }
+
+        return wrap(&funcOp.getBody().front());
+    }
+    catch (...)
+    {
+        return {nullptr};
+    }
+}
+
+MlirOperation oraOperationCreate(MlirContext ctx, MlirLocation loc, MlirStringRef name, const MlirValue *operands, size_t numOperands, const MlirType *resultTypes, size_t numResults, const MlirNamedAttribute *attrs, size_t numAttrs, size_t numRegions, bool addEmptyBlocks)
+{
+    try
+    {
+        MLIRContext *context = unwrap(ctx);
+        Location location = unwrap(loc);
+        StringRef nameRef = unwrap(name);
+
+        OperationState state(location, nameRef);
+        for (size_t i = 0; i < numOperands; ++i)
+        {
+            state.addOperands(unwrap(operands[i]));
+        }
+        for (size_t i = 0; i < numResults; ++i)
+        {
+            state.addTypes(unwrap(resultTypes[i]));
+        }
+        for (size_t i = 0; i < numAttrs; ++i)
+        {
+            auto attrName = unwrap(attrs[i].name);
+            auto attrValue = unwrap(attrs[i].attribute);
+            state.addAttribute(attrName, attrValue);
+        }
+        for (size_t i = 0; i < numRegions; ++i)
+        {
+            Region *region = state.addRegion();
+            if (addEmptyBlocks)
+            {
+                Block *block = new Block();
+                region->push_back(block);
+            }
+        }
+
+        Operation *op = Operation::create(state);
+        return wrap(op);
+    }
+    catch (...)
+    {
+        return {nullptr};
+    }
+}
+
+MlirBlock oraOperationGetRegionBlock(MlirOperation op, size_t index)
+{
+    try
+    {
+        Operation *operation = unwrap(op);
+        if (!operation)
+        {
+            return {nullptr};
+        }
+
+        if (index >= operation->getNumRegions())
+        {
+            return {nullptr};
+        }
+
+        Region &region = operation->getRegion(index);
+        if (region.empty())
+        {
+            region.push_back(new Block());
+        }
+
+        return wrap(&region.front());
     }
     catch (...)
     {
@@ -2208,6 +5176,36 @@ MlirOperation oraTryOpCreate(MlirContext ctx, MlirLocation loc, MlirValue tryOpe
     }
 }
 
+MlirBlock oraTryOpGetCatchBlock(MlirOperation tryOp)
+{
+    try
+    {
+        Operation *operation = unwrap(tryOp);
+        if (!operation)
+        {
+            return {nullptr};
+        }
+
+        auto op = dyn_cast<ora::TryOp>(operation);
+        if (!op)
+        {
+            return {nullptr};
+        }
+
+        Region &catchRegion = op.getCatchRegion();
+        if (catchRegion.empty())
+        {
+            catchRegion.push_back(new Block());
+        }
+
+        return wrap(&catchRegion.front());
+    }
+    catch (...)
+    {
+        return {nullptr};
+    }
+}
+
 MlirOperation oraForOpCreate(MlirContext ctx, MlirLocation loc, MlirValue collection)
 {
     try
@@ -2304,6 +5302,70 @@ MlirOperation oraSwitchOpCreate(MlirContext ctx, MlirLocation loc, MlirValue val
     }
 }
 
+MlirOperation oraSwitchOpCreateWithCases(MlirContext ctx, MlirLocation loc, MlirValue value, const MlirType *resultTypes, size_t numResults, size_t numCases)
+{
+    try
+    {
+        MLIRContext *context = unwrap(ctx);
+        Location location = unwrap(loc);
+        Value val = unwrap(value);
+
+        SmallVector<Type, 4> results;
+        results.reserve(numResults);
+        for (size_t i = 0; i < numResults; ++i)
+        {
+            results.push_back(unwrap(resultTypes[i]));
+        }
+
+        OpBuilder builder(context);
+        auto op = builder.create<ora::SwitchOp>(location, results, val, static_cast<unsigned>(numCases));
+
+        auto gasCostAttr = builder.getI64IntegerAttr(10);
+        op->setAttr("gas_cost", gasCostAttr);
+
+        return wrap(op.getOperation());
+    }
+    catch (...)
+    {
+        return {nullptr};
+    }
+}
+
+MlirBlock oraSwitchOpGetCaseBlock(MlirOperation switchOp, size_t index)
+{
+    try
+    {
+        Operation *operation = unwrap(switchOp);
+        if (!operation)
+        {
+            return {nullptr};
+        }
+
+        auto op = dyn_cast<ora::SwitchOp>(operation);
+        if (!op)
+        {
+            return {nullptr};
+        }
+
+        if (index >= operation->getNumRegions())
+        {
+            return {nullptr};
+        }
+
+        Region &region = operation->getRegion(index);
+        if (region.empty())
+        {
+            region.push_back(new Block());
+        }
+
+        return wrap(&region.front());
+    }
+    catch (...)
+    {
+        return {nullptr};
+    }
+}
+
 MlirOperation oraSwitchExprOpCreate(MlirContext ctx, MlirLocation loc, MlirValue value, MlirType resultType)
 {
     try
@@ -2328,6 +5390,70 @@ MlirOperation oraSwitchExprOpCreate(MlirContext ctx, MlirLocation loc, MlirValue
         op->setAttr("gas_cost", gasCostAttr);
 
         return wrap(op.getOperation());
+    }
+    catch (...)
+    {
+        return {nullptr};
+    }
+}
+
+MlirOperation oraSwitchExprOpCreateWithCases(MlirContext ctx, MlirLocation loc, MlirValue value, const MlirType *resultTypes, size_t numResults, size_t numCases)
+{
+    try
+    {
+        MLIRContext *context = unwrap(ctx);
+        Location location = unwrap(loc);
+        Value val = unwrap(value);
+
+        SmallVector<Type, 4> results;
+        results.reserve(numResults);
+        for (size_t i = 0; i < numResults; ++i)
+        {
+            results.push_back(unwrap(resultTypes[i]));
+        }
+
+        OpBuilder builder(context);
+        auto op = builder.create<ora::SwitchExprOp>(location, results, val, static_cast<unsigned>(numCases));
+
+        auto gasCostAttr = builder.getI64IntegerAttr(10);
+        op->setAttr("gas_cost", gasCostAttr);
+
+        return wrap(op.getOperation());
+    }
+    catch (...)
+    {
+        return {nullptr};
+    }
+}
+
+MlirBlock oraSwitchExprOpGetCaseBlock(MlirOperation switchOp, size_t index)
+{
+    try
+    {
+        Operation *operation = unwrap(switchOp);
+        if (!operation)
+        {
+            return {nullptr};
+        }
+
+        auto op = dyn_cast<ora::SwitchExprOp>(operation);
+        if (!op)
+        {
+            return {nullptr};
+        }
+
+        if (index >= operation->getNumRegions())
+        {
+            return {nullptr};
+        }
+
+        Region &region = operation->getRegion(index);
+        if (region.empty())
+        {
+            region.push_back(new Block());
+        }
+
+        return wrap(&region.front());
     }
     catch (...)
     {
@@ -2474,196 +5600,6 @@ MlirStringRef oraGenerateCFG(MlirContext ctx, MlirModule module, bool includeCon
         result[dotContent.size()] = '\0';
 
         return {result, dotContent.size()};
-    }
-    catch (...)
-    {
-        return {nullptr, 0};
-    }
-}
-
-//===----------------------------------------------------------------------===//
-// MLIR Printing with Custom Assembly Formats
-//===----------------------------------------------------------------------===//
-
-MlirStringRef oraPrintOperation(MlirContext ctx, MlirOperation op)
-{
-    try
-    {
-        ORA_DEBUG_PREFIX("OraCAPI", "oraPrintOperation called");
-
-        Operation *operation = unwrap(op);
-
-        if (!operation)
-        {
-            ORA_DEBUG_PREFIX("OraCAPI", "ERROR: operation is null!");
-            return {nullptr, 0};
-        }
-
-        // Check if DCE left the IR in an invalid state
-        // If so, skip printing to avoid segfault
-        if (auto moduleOp = dyn_cast<ModuleOp>(operation))
-        {
-            if (moduleOp->hasAttr("ora.dce_invalid"))
-            {
-                ORA_DEBUG_PREFIX("OraCAPI", "  This would cause a segfault if we tried to print");
-                return {nullptr, 0};
-            }
-        }
-
-        ORA_DEBUG_PREFIX("OraCAPI", "Operation: " << operation->getName());
-
-        // Register the Ora dialect to ensure custom printers are available
-        if (!oraDialectRegister(ctx))
-        {
-            ORA_DEBUG_PREFIX("OraCAPI", "ERROR: Failed to register Ora dialect");
-            return {nullptr, 0};
-        }
-
-        // Also register SIR dialect for printing
-        MLIRContext *context = unwrap(ctx);
-        context->getOrLoadDialect<sir::SIRDialect>();
-        ORA_DEBUG_PREFIX("OraCAPI", "Dialects registered");
-
-        // Create a string stream to capture the printed output
-        std::string mlirContent;
-        llvm::raw_string_ostream mlirStream(mlirContent);
-
-        // Use OpPrintingFlags - Operation::print(stream, flags) will automatically
-        // dispatch to custom print(OpAsmPrinter&) methods when hasCustomAssemblyFormat = 1
-        OpPrintingFlags flags;
-        flags.enableDebugInfo(true, false);
-        // CRITICAL: Explicitly disable generic op form to enable custom printers
-        // The OpPrintingFlags constructor reads from command-line options, which
-        // might enable generic form. We must explicitly disable it.
-        flags.printGenericOpForm(false);
-        // CRITICAL: Re-enable assumeVerified to prevent segfaults
-        // The issue is that DCE is leaving the IR in an invalid state, but we still need to print
-        // By assuming verified, we tell MLIR not to verify during printing (which would segfault)
-        // The real fix is to ensure DCE doesn't corrupt the IR, but for now this prevents crashes
-        flags.assumeVerified();
-        // Print locations inline instead of using location references
-        // This makes locations appear as loc("file":line:col) instead of loc(#locN)
-        flags.useLocalScope();
-
-        // Create AsmState to ensure custom printers are used
-        // AsmState tracks the state of the printer and ensures dialect-specific
-        // printers are invoked when operations have hasCustomAssemblyFormat = 1
-        AsmState state(operation, flags);
-
-        // Print the operation using AsmState - this ensures custom printers are invoked
-        // MLIR's Operation::print() should automatically call custom print() methods
-        // when hasCustomAssemblyFormat = 1
-        try
-        {
-            operation->print(mlirStream, state);
-        }
-        catch (const std::exception &e)
-        {
-            ORA_DEBUG_PREFIX("OraCAPI", "ERROR: Exception during printing: " << e.what());
-            return {nullptr, 0};
-        }
-        catch (...)
-        {
-            ORA_DEBUG_PREFIX("OraCAPI", "ERROR: Unknown exception during printing");
-            return {nullptr, 0};
-        }
-
-        // Flush the stream
-        mlirStream.flush();
-
-        // Check if we got any content
-        if (mlirContent.empty())
-        {
-            return {nullptr, 0};
-        }
-
-        // Post-process the output to add line breaks for readability
-        // Add blank lines before sir.return and sir.iret operations
-        std::string formattedContent;
-        formattedContent.reserve(mlirContent.size() * 1.1); // Reserve slightly more space
-
-        std::istringstream inputStream(mlirContent);
-        std::string line;
-        std::string prevLine;
-        bool prevWasEmpty = false;
-
-        while (std::getline(inputStream, line))
-        {
-            // Skip empty lines in input (we'll add our own)
-            if (line.empty() || (line.find_first_not_of(" \t") == std::string::npos))
-            {
-                prevWasEmpty = true;
-                continue;
-            }
-
-            // Add blank line after certain patterns for readability
-            bool shouldAddBlankLine = false;
-
-            // Add blank line before sir.return and sir.iret (always)
-            if ((line.find("sir.return") != std::string::npos || line.find("sir.iret") != std::string::npos) &&
-                !prevLine.empty() && !prevWasEmpty)
-            {
-                shouldAddBlankLine = true;
-            }
-            // Add blank line before func.func (if previous line wasn't empty and wasn't already func.func)
-            else if (line.find("func.func") != std::string::npos &&
-                     !prevLine.empty() && !prevWasEmpty && prevLine.find("func.func") == std::string::npos)
-            {
-                shouldAddBlankLine = true;
-            }
-            // Add blank line before comments (if previous line wasn't empty and wasn't already a comment)
-            else if (line.find("//") != std::string::npos && line.find("//") < line.length() &&
-                     !prevLine.empty() && !prevWasEmpty && prevLine.find("//") == std::string::npos)
-            {
-                shouldAddBlankLine = true;
-            }
-            // Add blank line after return statements (before closing brace or next operation)
-            else if (prevLine.find("return") != std::string::npos &&
-                     prevLine.find("return") < prevLine.length() &&
-                     !line.empty() && line.find("}") == std::string::npos)
-            {
-                shouldAddBlankLine = true;
-            }
-            // Add blank line after scf.if/else blocks close (before next operation)
-            else if (prevLine.find("}") != std::string::npos &&
-                     (prevLine.find("} {gas_cost") != std::string::npos ||
-                      (prevLine.find("}") == prevLine.find_last_of("}") &&
-                       prevLine.find("} else {") == std::string::npos)) &&
-                     !line.empty() && line.find("}") == std::string::npos &&
-                     line.find("func.func") == std::string::npos)
-            {
-                shouldAddBlankLine = true;
-            }
-            // Add blank line after comments (before next operation)
-            else if (prevLine.find("//") != std::string::npos &&
-                     prevLine.find("//") < prevLine.length() &&
-                     !line.empty() && line.find("//") == std::string::npos)
-            {
-                shouldAddBlankLine = true;
-            }
-
-            if (shouldAddBlankLine && !prevLine.empty() && !prevWasEmpty)
-            {
-                formattedContent += "\n";
-            }
-
-            formattedContent += line;
-            formattedContent += "\n";
-
-            prevWasEmpty = false;
-            prevLine = line;
-        }
-
-        // Allocate memory for the result (caller must free)
-        char *result = (char *)malloc(formattedContent.size() + 1);
-        if (!result)
-        {
-            return {nullptr, 0};
-        }
-        memcpy(result, formattedContent.c_str(), formattedContent.size());
-        result[formattedContent.size()] = '\0';
-
-        return {result, formattedContent.size()};
     }
     catch (...)
     {
