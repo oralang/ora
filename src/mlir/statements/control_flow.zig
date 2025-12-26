@@ -1138,7 +1138,7 @@ pub fn lowerSwitchCases(self: *const StatementLowerer, cases: []const lib.ast.Ex
                         .Return => |ret| {
                             // for labeled switches, use empty scf.yield (returns handled after scf.while)
                             const ret_loc = temp_lowerer.fileLoc(ret.span);
-            const yield_op = self.ora_dialect.createScfYield(ret_loc);
+                            const yield_op = self.ora_dialect.createScfYield(ret_loc);
                             h.appendOp(target_block, yield_op);
                             has_terminator = true;
                         },
@@ -1154,7 +1154,7 @@ pub fn lowerSwitchCases(self: *const StatementLowerer, cases: []const lib.ast.Ex
                 }
                 // ensure block has a terminator
                 if (!has_terminator) {
-            const yield_op = self.ora_dialect.createScfYield(loc);
+                    const yield_op = self.ora_dialect.createScfYield(loc);
                     h.appendOp(target_block, yield_op);
                 }
             } else if (has_return) {
@@ -1171,7 +1171,7 @@ pub fn lowerSwitchCases(self: *const StatementLowerer, cases: []const lib.ast.Ex
                         const yield_op = self.ora_dialect.createScfYieldWithValues(&[_]c.MlirValue{default_val}, loc);
                         h.appendOp(target_block, yield_op);
                     } else {
-            const yield_op = self.ora_dialect.createScfYield(loc);
+                        const yield_op = self.ora_dialect.createScfYield(loc);
                         h.appendOp(target_block, yield_op);
                     }
                 }
@@ -1185,7 +1185,7 @@ pub fn lowerSwitchCases(self: *const StatementLowerer, cases: []const lib.ast.Ex
                             const yield_op = self.ora_dialect.createScfYieldWithValues(&[_]c.MlirValue{default_val}, loc);
                             h.appendOp(target_block, yield_op);
                         } else {
-            const yield_op = self.ora_dialect.createScfYield(loc);
+                            const yield_op = self.ora_dialect.createScfYield(loc);
                             h.appendOp(target_block, yield_op);
                         }
                     }
@@ -1197,11 +1197,11 @@ pub fn lowerSwitchCases(self: *const StatementLowerer, cases: []const lib.ast.Ex
                 const ends_with_break_or_continue = helpers.blockEndsWithBreak(self, target_block) or helpers.blockEndsWithContinue(self, target_block);
                 if (ends_with_break_or_continue) {
                     // add scf.yield after ora.break/ora.continue to properly terminate the scf.if block
-            const yield_op = self.ora_dialect.createScfYield(loc);
+                    const yield_op = self.ora_dialect.createScfYield(loc);
                     h.appendOp(target_block, yield_op);
                 } else if (!ended_with_terminator) {
                     // block doesn't have a terminator, add scf.yield for scf.if block
-            const yield_op = self.ora_dialect.createScfYield(loc);
+                    const yield_op = self.ora_dialect.createScfYield(loc);
                     h.appendOp(target_block, yield_op);
                 }
             }
@@ -1358,7 +1358,7 @@ pub fn lowerSwitchCases(self: *const StatementLowerer, cases: []const lib.ast.Ex
                 h.appendOp(then_block, yield_op);
             } else {
                 // no result type - use empty scf.yield
-            const yield_op = self.ora_dialect.createScfYield(loc);
+                const yield_op = self.ora_dialect.createScfYield(loc);
                 h.appendOp(then_block, yield_op);
             }
         },
@@ -1409,7 +1409,7 @@ pub fn lowerSwitchCases(self: *const StatementLowerer, cases: []const lib.ast.Ex
                             }
                             // use scf.yield to exit scf.if region (return handled after scf.while)
                             const ret_loc = temp_lowerer.fileLoc(ret.span);
-            const yield_op = self.ora_dialect.createScfYield(ret_loc);
+                            const yield_op = self.ora_dialect.createScfYield(ret_loc);
                             h.appendOp(then_block, yield_op);
                             has_terminator = true;
                         },
@@ -1425,7 +1425,7 @@ pub fn lowerSwitchCases(self: *const StatementLowerer, cases: []const lib.ast.Ex
                 }
                 // ensure block has a terminator
                 if (!has_terminator) {
-            const yield_op = self.ora_dialect.createScfYield(loc);
+                    const yield_op = self.ora_dialect.createScfYield(loc);
                     h.appendOp(then_block, yield_op);
                 }
             } else if (has_return) {
@@ -1442,7 +1442,7 @@ pub fn lowerSwitchCases(self: *const StatementLowerer, cases: []const lib.ast.Ex
                         const yield_op = self.ora_dialect.createScfYieldWithValues(&[_]c.MlirValue{default_val}, loc);
                         h.appendOp(then_block, yield_op);
                     } else {
-            const yield_op = self.ora_dialect.createScfYield(loc);
+                        const yield_op = self.ora_dialect.createScfYield(loc);
                         h.appendOp(then_block, yield_op);
                     }
                 }
@@ -1453,11 +1453,11 @@ pub fn lowerSwitchCases(self: *const StatementLowerer, cases: []const lib.ast.Ex
                 const ends_with_break_or_continue = helpers.blockEndsWithBreak(self, then_block) or helpers.blockEndsWithContinue(self, then_block);
                 if (ends_with_break_or_continue) {
                     // add scf.yield after ora.break/ora.continue to properly terminate the scf.if block
-            const yield_op = self.ora_dialect.createScfYield(loc);
+                    const yield_op = self.ora_dialect.createScfYield(loc);
                     h.appendOp(then_block, yield_op);
                 } else if (!ended_with_terminator) {
                     // block doesn't have a terminator, add scf.yield for scf.if block
-            const yield_op = self.ora_dialect.createScfYield(loc);
+                    const yield_op = self.ora_dialect.createScfYield(loc);
                     h.appendOp(then_block, yield_op);
                 }
             }
@@ -1509,7 +1509,7 @@ pub fn lowerSwitchCases(self: *const StatementLowerer, cases: []const lib.ast.Ex
                             }
                             // use scf.yield to exit scf.if region (return handled after scf.while)
                             const ret_loc = temp_lowerer.fileLoc(ret.span);
-            const yield_op = self.ora_dialect.createScfYield(ret_loc);
+                            const yield_op = self.ora_dialect.createScfYield(ret_loc);
                             h.appendOp(then_block, yield_op);
                             has_terminator = true;
                         },
@@ -1525,7 +1525,7 @@ pub fn lowerSwitchCases(self: *const StatementLowerer, cases: []const lib.ast.Ex
                 }
                 // ensure block has a terminator
                 if (!has_terminator) {
-            const yield_op = self.ora_dialect.createScfYield(loc);
+                    const yield_op = self.ora_dialect.createScfYield(loc);
                     h.appendOp(then_block, yield_op);
                 }
             } else if (has_return) {
@@ -1550,7 +1550,7 @@ pub fn lowerSwitchCases(self: *const StatementLowerer, cases: []const lib.ast.Ex
                         const yield_op = self.ora_dialect.createScfYieldWithValues(&[_]c.MlirValue{default_val}, loc);
                         h.appendOp(then_block, yield_op);
                     } else {
-            const yield_op = self.ora_dialect.createScfYield(loc);
+                        const yield_op = self.ora_dialect.createScfYield(loc);
                         h.appendOp(then_block, yield_op);
                     }
                 }
@@ -1561,11 +1561,11 @@ pub fn lowerSwitchCases(self: *const StatementLowerer, cases: []const lib.ast.Ex
                 const ends_with_break_or_continue = helpers.blockEndsWithBreak(self, then_block) or helpers.blockEndsWithContinue(self, then_block);
                 if (ends_with_break_or_continue) {
                     // add scf.yield after ora.break/ora.continue to properly terminate the scf.if block
-            const yield_op = self.ora_dialect.createScfYield(loc);
+                    const yield_op = self.ora_dialect.createScfYield(loc);
                     h.appendOp(then_block, yield_op);
                 } else if (!ended_with_terminator) {
                     // block doesn't have a terminator, add scf.yield for scf.if block
-            const yield_op = self.ora_dialect.createScfYield(loc);
+                    const yield_op = self.ora_dialect.createScfYield(loc);
                     h.appendOp(then_block, yield_op);
                 }
             }
@@ -1604,7 +1604,7 @@ pub fn lowerSwitchCases(self: *const StatementLowerer, cases: []const lib.ast.Ex
                     const yield_op = self.ora_dialect.createScfYieldWithValues(&[_]c.MlirValue{default_val}, loc);
                     h.appendOp(else_block, yield_op);
                 } else {
-            const yield_op = self.ora_dialect.createScfYield(loc);
+                    const yield_op = self.ora_dialect.createScfYield(loc);
                     h.appendOp(else_block, yield_op);
                 }
             }
