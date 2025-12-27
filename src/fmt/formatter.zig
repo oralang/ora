@@ -31,6 +31,7 @@ pub const Formatter = struct {
     tokens: []const lib.Token,
     trivia: []const lib.lexer.TriviaPiece,
     token_index: usize = 0, // Current token being processed
+    trivia_index: usize = 0,
 
     pub fn init(allocator: std.mem.Allocator, source: []const u8, options: FormatOptions) Formatter {
         return Formatter{
@@ -41,6 +42,7 @@ pub const Formatter = struct {
             .tokens = undefined,
             .trivia = undefined,
             .token_index = 0,
+            .trivia_index = 0,
         };
     }
 
@@ -59,6 +61,7 @@ pub const Formatter = struct {
         };
         defer self.allocator.free(self.tokens);
         self.trivia = lex.getTrivia();
+        self.trivia_index = 0;
 
         // Parse tokens to AST
         var parsed = lib.parser.parseWithArena(self.allocator, self.tokens) catch {
@@ -70,12 +73,16 @@ pub const Formatter = struct {
         // Format AST nodes
         var first = true;
         for (ast_nodes) |node| {
+            if (getNodeSpan(&node)) |span| {
+                try self.emitTriviaUpTo(span.byte_offset);
+            }
             if (!first) {
                 try self.writer.newline();
             }
             first = false;
             try self.formatNode(&node);
         }
+        try self.emitTriviaUpTo(std.math.maxInt(u32));
 
         // Ensure trailing newline
         if (self.writer.current_line_length > 0) {
@@ -85,8 +92,7 @@ pub const Formatter = struct {
         return try self.writer.toOwnedSlice();
     }
 
-    // Comment preservation is simplified - we format the AST and preserve structure
-    // Full comment preservation can be added later if needed
+    // Comment preservation is best-effort: preserve trivia in source order around nodes.
 
     fn formatNode(self: *Formatter, node: *const lib.AstNode) FormatError!void {
         switch (node.*) {
@@ -112,6 +118,9 @@ pub const Formatter = struct {
 
         var prev_group: ?ContractMemberGroup = null;
         for (contract.body, 0..) |member, i| {
+            if (getNodeSpan(&member)) |span| {
+                try self.emitTriviaUpTo(span.byte_offset);
+            }
             const group = contractMemberGroup(member);
             if (i != 0) {
                 try self.writer.newline();
@@ -124,6 +133,9 @@ pub const Formatter = struct {
             if (member == .VariableDecl) {
                 try self.writer.write(";");
             }
+            if (getNodeSpan(&member)) |span| {
+                try self.emitTriviaUpTo(span.byte_offset + span.length);
+            }
         }
         if (contract.body.len > 0) {
             try self.writer.newline();
@@ -131,6 +143,46 @@ pub const Formatter = struct {
 
         self.writer.dedent();
         try self.writer.write("}");
+    }
+
+    fn emitTriviaUpTo(self: *Formatter, offset: u32) FormatError!void {
+        while (self.trivia_index < self.trivia.len) {
+            const piece = self.trivia[self.trivia_index];
+            if (piece.span.start_offset >= offset) {
+                break;
+            }
+            switch (piece.kind) {
+                .LineComment, .BlockComment, .DocLineComment, .DocBlockComment => {
+                    try self.emitComment(piece);
+                },
+                else => {},
+            }
+            self.trivia_index += 1;
+        }
+    }
+
+    fn emitComment(self: *Formatter, piece: lib.lexer.TriviaPiece) FormatError!void {
+        const start: usize = @intCast(piece.span.start_offset);
+        const end: usize = @intCast(piece.span.end_offset);
+        if (start >= end or end > self.source.len) {
+            return;
+        }
+        if (piece.span.start_column == 1 and self.writer.current_line_length > 0) {
+            try self.writer.newline();
+        }
+        if (self.writer.current_line_length > 0) {
+            try self.writer.space();
+        }
+        try self.writer.write(self.source[start..end]);
+
+        switch (piece.kind) {
+            .LineComment, .DocLineComment => try self.writer.newline(),
+            else => {
+                if (piece.span.end_line > piece.span.start_line or piece.span.start_column == 1) {
+                    try self.writer.newline();
+                }
+            },
+        }
     }
 
     const ContractMemberGroup = enum {
@@ -144,6 +196,92 @@ pub const Formatter = struct {
             .Function => .Functions,
             .VariableDecl, .StructDecl, .EnumDecl, .LogDecl, .Import, .ErrorDecl => .Decls,
             else => .Other,
+        };
+    }
+
+    fn getNodeSpan(node: *const lib.AstNode) ?lib.ast.SourceSpan {
+        return switch (node.*) {
+            .Contract => |contract| contract.span,
+            .Function => |func| func.span,
+            .VariableDecl => |var_decl| var_decl.span,
+            .StructDecl => |struct_decl| struct_decl.span,
+            .EnumDecl => |enum_decl| enum_decl.span,
+            .LogDecl => |log_decl| log_decl.span,
+            .Import => |import| import.span,
+            .ErrorDecl => |error_decl| error_decl.span,
+            else => null,
+        };
+    }
+
+    fn getStatementSpan(stmt: *const lib.ast.Statements.StmtNode) ?lib.ast.SourceSpan {
+        return switch (stmt.*) {
+            .Return => |ret| ret.span,
+            .VariableDecl => |var_decl| var_decl.span,
+            .Expr => |expr| getExprSpan(&expr),
+            .If => |if_node| if_node.span,
+            .While => |while_node| while_node.span,
+            .ForLoop => |for_node| for_node.span,
+            .Switch => |switch_node| switch_node.span,
+            .TryBlock => |try_node| try_node.span,
+            .Log => |log_stmt| log_stmt.span,
+            .Lock => |lock_stmt| lock_stmt.span,
+            .Unlock => |unlock_stmt| unlock_stmt.span,
+            .Invariant => |inv| inv.span,
+            .Requires => |req| req.span,
+            .Ensures => |ens| ens.span,
+            .Assume => |assume| assume.span,
+            .Havoc => |havoc| havoc.span,
+            .ErrorDecl => |error_decl| error_decl.span,
+            .LabeledBlock => |labeled| labeled.span,
+            .DestructuringAssignment => |destructure| destructure.span,
+            .CompoundAssignment => |compound| compound.span,
+            .Break => |break_node| break_node.span,
+            .Continue => |cont| cont.span,
+            .Assert => |assert| assert.span,
+        };
+    }
+
+    fn getExprSpan(expr: *const lib.ExprNode) ?lib.ast.SourceSpan {
+        return switch (expr.*) {
+            .Identifier => |id| id.span,
+            .Literal => |lit| getLiteralSpan(&lit),
+            .Binary => |bin| bin.span,
+            .Unary => |unary| unary.span,
+            .Assignment => |assign| assign.span,
+            .CompoundAssignment => |compound| compound.span,
+            .Call => |call| call.span,
+            .Index => |index| index.span,
+            .FieldAccess => |field| field.span,
+            .Cast => |cast| cast.span,
+            .Comptime => |ct| ct.span,
+            .Old => |old| old.span,
+            .Quantified => |quant| quant.span,
+            .Tuple => |tuple| tuple.span,
+            .SwitchExpression => |sw| sw.span,
+            .Try => |try_expr| try_expr.span,
+            .ErrorReturn => |err_ret| err_ret.span,
+            .ErrorCast => |err_cast| err_cast.span,
+            .Shift => |shift| shift.span,
+            .StructInstantiation => |inst| inst.span,
+            .AnonymousStruct => |anon| anon.span,
+            .Range => |range| range.span,
+            .LabeledBlock => |labeled| labeled.span,
+            .Destructuring => |destructure| destructure.span,
+            .EnumLiteral => |enum_lit| enum_lit.span,
+            .ArrayLiteral => |array_lit| array_lit.span,
+        };
+    }
+
+    fn getLiteralSpan(lit: *const lib.ast.Expressions.LiteralExpr) lib.ast.SourceSpan {
+        return switch (lit.*) {
+            .Integer => |i| i.span,
+            .String => |s| s.span,
+            .Bool => |b| b.span,
+            .Address => |a| a.span,
+            .Hex => |h| h.span,
+            .Binary => |b| b.span,
+            .Character => |c| c.span,
+            .Bytes => |b| b.span,
         };
     }
 
@@ -346,9 +484,15 @@ pub const Formatter = struct {
 
     fn formatBlock(self: *Formatter, block: *const lib.ast.Statements.BlockNode) FormatError!void {
         for (block.statements) |*stmt| {
+            if (getStatementSpan(stmt)) |span| {
+                try self.emitTriviaUpTo(span.byte_offset);
+            }
             try self.formatStatement(stmt);
             if (self.statementNeedsSemicolon(stmt)) {
                 try self.writer.write(";");
+            }
+            if (getStatementSpan(stmt)) |span| {
+                try self.emitTriviaUpTo(span.byte_offset + span.length);
             }
             try self.writer.newline();
         }
