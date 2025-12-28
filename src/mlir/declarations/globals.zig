@@ -5,9 +5,8 @@
 const std = @import("std");
 const c = @import("mlir_c_api").c;
 const lib = @import("ora_lib");
-const h = @import("../helpers.zig");
 const constants = @import("../lower.zig");
-const ExpressionLowerer = @import("../expressions.zig").ExpressionLowerer;
+const h = @import("../helpers.zig");
 const DeclarationLowerer = @import("mod.zig").DeclarationLowerer;
 const helpers = @import("helpers.zig");
 
@@ -15,62 +14,147 @@ const helpers = @import("helpers.zig");
 pub fn lowerConstDecl(self: *const DeclarationLowerer, const_decl: *const lib.ast.ConstantNode) c.MlirOperation {
     const loc = helpers.createFileLocation(self, const_decl.span);
 
-    // collect const attributes
-    var attributes = std.ArrayList(c.MlirNamedAttribute){};
-    defer attributes.deinit(std.heap.page_allocator);
-
-    // add constant name
     const name_ref = c.oraStringRefCreate(const_decl.name.ptr, const_decl.name.len);
-    const name_attr = c.oraStringAttrCreate(self.ctx, name_ref);
-    const name_id = h.identifier(self.ctx, "sym_name");
-    attributes.append(std.heap.page_allocator, c.oraNamedAttributeGet(name_id, name_attr)) catch {};
+    const declared_type = self.type_mapper.toMlirType(const_decl.typ);
 
-    // add constant type
-    const const_type = self.type_mapper.toMlirType(const_decl.typ);
-    const type_attr = c.oraTypeAttrCreateFromType(const_type);
-    const type_id = h.identifier(self.ctx, "type");
-    attributes.append(std.heap.page_allocator, c.oraNamedAttributeGet(type_id, type_attr)) catch {};
+    const result_type = if (const_decl.typ.ora_type) |ora_type| switch (ora_type) {
+        .address, .non_zero_address => c.oraIntegerTypeCreate(self.ctx, 160),
+        else => declared_type,
+    } else declared_type;
 
-    // add visibility modifier
+    const value_attr = buildConstValueAttr(self, const_decl, result_type) orelse return c.MlirOperation{ .ptr = null };
+
+    const const_op = c.oraConstOpCreate(self.ctx, loc, name_ref, value_attr, result_type);
+    if (c.oraOperationIsNull(const_op)) {
+        if (self.error_handler) |eh| {
+            eh.reportError(.MlirOperationFailed, const_decl.span, "failed to create ora.const operation", null) catch {};
+        }
+        return c.MlirOperation{ .ptr = null };
+    }
+
+    // preserve legacy metadata for downstream tooling
+    const sym_name_attr = c.oraStringAttrCreate(self.ctx, name_ref);
+    c.oraOperationSetAttributeByName(const_op, h.strRef("sym_name"), sym_name_attr);
+    const type_attr = c.oraTypeAttrCreateFromType(declared_type);
+    c.oraOperationSetAttributeByName(const_op, h.strRef("type"), type_attr);
+
     const visibility_attr = switch (const_decl.visibility) {
         .Public => c.oraStringAttrCreate(self.ctx, h.strRef("pub")),
         .Private => c.oraStringAttrCreate(self.ctx, h.strRef("private")),
     };
-    const visibility_id = h.identifier(self.ctx, "ora.visibility");
-    attributes.append(std.heap.page_allocator, c.oraNamedAttributeGet(visibility_id, visibility_attr)) catch {};
+    c.oraOperationSetAttributeByName(const_op, h.strRef("ora.visibility"), visibility_attr);
 
-    // add constant declaration marker
     const const_decl_attr = h.boolAttr(self.ctx, 1);
-    const const_decl_id = h.identifier(self.ctx, "ora.const_decl");
-    attributes.append(std.heap.page_allocator, c.oraNamedAttributeGet(const_decl_id, const_decl_attr)) catch {};
-
-    const const_op = c.oraConstDeclOpCreate(
-        self.ctx,
-        loc,
-        &[_]c.MlirType{const_type},
-        1,
-        if (attributes.items.len == 0) null else attributes.items.ptr,
-        attributes.items.len,
-        1,
-        false,
-    );
-
-    // create a region for the constant value initialization
-    const block = c.oraOperationGetRegionBlock(const_op, 0);
-    if (c.oraBlockIsNull(block)) {
-        @panic("ora.const missing body block");
-    }
-
-    // lower the constant value expression
-    // create a temporary expression lowerer to lower the constant value
-    const expr_lowerer = ExpressionLowerer.init(self.ctx, block, self.type_mapper, null, null, null, self.symbol_table, self.builtin_registry, self.error_handler, self.locations, self.ora_dialect);
-    const const_value = expr_lowerer.lowerExpression(const_decl.value);
-
-    // add a yield to terminate the region (required for regions)
-    const yield_op = self.ora_dialect.createYield(&[_]c.MlirValue{const_value}, loc);
-    h.appendOp(block, yield_op);
+    c.oraOperationSetAttributeByName(const_op, h.strRef("ora.const_decl"), const_decl_attr);
 
     return const_op;
+}
+
+fn buildConstValueAttr(
+    self: *const DeclarationLowerer,
+    const_decl: *const lib.ast.ConstantNode,
+    result_type: c.MlirType,
+) ?c.MlirAttribute {
+    const value_expr = const_decl.value;
+    if (value_expr.* != .Literal) {
+        if (self.error_handler) |eh| {
+            eh.reportError(.UnsupportedFeature, const_decl.span, "const value must be a literal", "use a literal value in const declarations") catch {};
+        }
+        return null;
+    }
+
+    const literal = value_expr.Literal;
+    return switch (literal) {
+        .Integer => |int_lit| buildIntegerAttr(self, int_lit.value, result_type, const_decl.span),
+        .Bool => |bool_lit| c.oraBoolAttrCreate(self.ctx, bool_lit.value),
+        .Address => |addr_lit| buildAddressAttr(self, addr_lit.value, const_decl.span),
+        .Character => |char_lit| c.oraIntegerAttrCreateI64FromType(result_type, @intCast(char_lit.value)),
+        else => blk: {
+            if (self.error_handler) |eh| {
+                eh.reportError(.UnsupportedFeature, const_decl.span, "const literal type is not supported in MLIR lowering", "use an integer, bool, address, or character literal") catch {};
+            }
+            break :blk null;
+        },
+    };
+}
+
+fn buildIntegerAttr(
+    self: *const DeclarationLowerer,
+    value: []const u8,
+    ty: c.MlirType,
+    span: lib.ast.SourceSpan,
+) ?c.MlirAttribute {
+    var cleaned = std.ArrayList(u8){};
+    defer cleaned.deinit(std.heap.page_allocator);
+
+    for (value) |ch| {
+        if (ch != '_') cleaned.append(std.heap.page_allocator, ch) catch {
+            return null;
+        };
+    }
+
+    const value_ref = c.oraStringRefCreate(cleaned.items.ptr, cleaned.items.len);
+    const attr = c.oraIntegerAttrGetFromString(ty, value_ref);
+    if (c.oraAttributeIsNull(attr)) {
+        if (self.error_handler) |eh| {
+            eh.reportError(.MalformedAst, span, "invalid integer constant literal", "use a valid integer literal") catch {};
+        }
+        return null;
+    }
+    return attr;
+}
+
+fn buildAddressAttr(
+    self: *const DeclarationLowerer,
+    value: []const u8,
+    span: lib.ast.SourceSpan,
+) ?c.MlirAttribute {
+    const addr_str = if (std.mem.startsWith(u8, value, "0x")) value[2..] else value;
+    if (addr_str.len != 40) {
+        if (self.error_handler) |eh| {
+            eh.reportError(.MalformedAst, span, "address literal must be 40 hex chars", "use a 20-byte hex address literal") catch {};
+        }
+        return null;
+    }
+
+    var parsed: u256 = 0;
+    for (addr_str) |ch| {
+        if (ch >= '0' and ch <= '9') {
+            parsed = parsed * 16 + (ch - '0');
+        } else if (ch >= 'a' and ch <= 'f') {
+            parsed = parsed * 16 + (ch - 'a' + 10);
+        } else if (ch >= 'A' and ch <= 'F') {
+            parsed = parsed * 16 + (ch - 'A' + 10);
+        } else {
+            if (self.error_handler) |eh| {
+                eh.reportError(.MalformedAst, span, "address literal contains non-hex characters", "use only 0-9 and a-f characters") catch {};
+            }
+            return null;
+        }
+    }
+
+    const i160_ty = c.oraIntegerTypeCreate(self.ctx, 160);
+    const attr = if (parsed <= std.math.maxInt(i64)) blk: {
+        break :blk c.oraIntegerAttrCreateI64FromType(i160_ty, @intCast(parsed));
+    } else blk: {
+        var decimal_buf: [80]u8 = undefined;
+        const decimal_str = std.fmt.bufPrint(&decimal_buf, "{}", .{parsed}) catch {
+            if (self.error_handler) |eh| {
+                eh.reportError(.MalformedAst, span, "failed to format address constant", null) catch {};
+            }
+            break :blk c.MlirAttribute{ .ptr = null };
+        };
+        const addr_ref = c.oraStringRefCreate(decimal_str.ptr, decimal_str.len);
+        break :blk c.oraIntegerAttrGetFromString(i160_ty, addr_ref);
+    };
+
+    if (c.oraAttributeIsNull(attr)) {
+        if (self.error_handler) |eh| {
+            eh.reportError(.MalformedAst, span, "invalid address literal", "use a valid hex address") catch {};
+        }
+        return null;
+    }
+    return attr;
 }
 
 /// Lower immutable declarations with immutable global definitions and initialization constraints (Requirements 7.7)

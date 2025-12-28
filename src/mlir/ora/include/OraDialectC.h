@@ -245,6 +245,14 @@ extern "C"
     /// Returns null type if the dialect is not registered or creation fails
     MLIR_CAPI_EXPORTED MlirType oraAddressTypeGet(MlirContext ctx);
 
+    /// Create an Ora string type
+    /// Returns null type if the dialect is not registered or creation fails
+    MLIR_CAPI_EXPORTED MlirType oraStringTypeGet(MlirContext ctx);
+
+    /// Create an Ora bytes type
+    /// Returns null type if the dialect is not registered or creation fails
+    MLIR_CAPI_EXPORTED MlirType oraBytesTypeGet(MlirContext ctx);
+
     /// Get the type of a global variable from an ora.global operation
     /// Returns null type if the operation is not an ora.global or if it fails
     MLIR_CAPI_EXPORTED MlirType oraGlobalOpGetType(MlirOperation globalOp);
@@ -817,6 +825,13 @@ extern "C"
 
     /// Create an ora.string.constant operation using the registered dialect
     MLIR_CAPI_EXPORTED MlirOperation oraStringConstantOpCreate(
+        MlirContext ctx,
+        MlirLocation loc,
+        MlirStringRef value,
+        MlirType resultType);
+
+    /// Create an ora.bytes.constant operation using the registered dialect
+    MLIR_CAPI_EXPORTED MlirOperation oraBytesConstantOpCreate(
         MlirContext ctx,
         MlirLocation loc,
         MlirStringRef value,

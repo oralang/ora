@@ -332,6 +332,24 @@ pub const OraDialect = struct {
         return op;
     }
 
+    /// Create ora.bytes.constant operation
+    pub fn createBytesConstant(
+        self: *OraDialect,
+        value: []const u8,
+        result_type: c.MlirType,
+        loc: c.MlirLocation,
+    ) c.MlirOperation {
+        if (!self.isRegistered()) {
+            @panic("Ora dialect must be registered before creating operations");
+        }
+        const value_ref = h.strRef(value);
+        const op = c.oraBytesConstantOpCreate(self.ctx, loc, value_ref, result_type);
+        if (op.ptr == null) {
+            @panic("Failed to create ora.bytes.constant operation");
+        }
+        return op;
+    }
+
     /// Create ora.power operation
     pub fn createPower(
         self: *OraDialect,

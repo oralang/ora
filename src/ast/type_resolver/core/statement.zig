@@ -114,6 +114,17 @@ fn resolveVariableDecl(
                 var_decl.skip_guard = shouldSkipGuard(self, value_expr, target_ora_type);
             }
         }
+
+        const target_region = var_decl.region;
+        const source_region = expression.inferExprRegion(self, value_expr);
+        var target_expr = ast.Expressions.ExprNode{ .Identifier = .{
+            .name = var_decl.name,
+            .type_info = var_decl.type_info,
+            .span = var_decl.span,
+        } };
+        if (!expression.isRegionAssignmentAllowed(target_region, source_region, &target_expr)) {
+            return TypeResolutionError.RegionMismatch;
+        }
     } else {
         // no initializer - type must be explicit
         if (!var_decl.type_info.isResolved()) {

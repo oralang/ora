@@ -4,19 +4,24 @@
 
 // Include pattern headers
 #include "patterns/Arithmetic.h"
+#include "patterns/Struct.h"
 #include "patterns/Storage.h"
 #include "patterns/MemRef.h"
 #include "patterns/ControlFlow.h"
+#include "patterns/EVM.h"
 
 #include "OraDialect.h"
 #include "SIR/SIRDialect.h"
 
 #include "mlir/IR/BuiltinOps.h"
+#include "mlir/IR/BuiltinDialect.h"
 #include "mlir/IR/BuiltinTypes.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/ControlFlow/IR/ControlFlow.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
+#include "mlir/Dialect/SCF/IR/SCF.h"
+#include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/Transforms/DialectConversion.h"
 #include "mlir/IR/PatternMatch.h"
 #include "mlir/Analysis/DataFlow/LivenessAnalysis.h"
@@ -51,12 +56,15 @@ public:
         patterns.add<ConvertMemRefAllocOp>(typeConverter, module.getContext());
 
         ConversionTarget target(*module.getContext());
+        target.addLegalDialect<mlir::BuiltinDialect>();
         target.addLegalDialect<sir::SIRDialect>();
+        target.addLegalDialect<ora::OraDialect>();
+        target.addLegalDialect<mlir::func::FuncDialect>();
+        target.addLegalDialect<mlir::arith::ArithDialect>();
+        target.addLegalDialect<mlir::cf::ControlFlowDialect>();
         target.addIllegalDialect<mlir::memref::MemRefDialect>();
-        target.markUnknownOpDynamicallyLegal([&](Operation *op)
-                                             { return true; });
 
-        if (failed(applyPartialConversion(module, target, std::move(patterns))))
+        if (failed(applyFullConversion(module, target, std::move(patterns))))
         {
             signalPassFailure();
         }
@@ -72,11 +80,11 @@ public:
         bool changed = true;
 
         while (changed)
-                {
+        {
             changed = false;
 
-        module.walk([&](mlir::memref::StoreOp storeOp)
-                    {
+            module.walk([&](mlir::memref::StoreOp storeOp)
+                        {
                 if (storeOp->use_empty())
                 {
                     DBG("SIRCleanupPass: removing unused store");
@@ -93,8 +101,8 @@ public:
                         changed = true;
                     } });
 
-        module.walk([&](mlir::memref::LoadOp loadOp)
-                    {
+            module.walk([&](mlir::memref::LoadOp loadOp)
+                        {
                 if (loadOp->use_empty())
                 {
                     DBG("SIRCleanupPass: removing unused load");
@@ -129,70 +137,105 @@ public:
         ora::OraToSIRTypeConverter typeConverter;
 
         RewritePatternSet patterns(ctx);
-        patterns.add<ConvertContractOp>(typeConverter, ctx);
-        patterns.add<ConvertArithConstantOp>(typeConverter, ctx);
-        patterns.add<ConvertGlobalOp>(typeConverter, ctx);
-        patterns.add<ConvertFuncOp>(typeConverter, ctx);
-        patterns.add<ConvertAddOp>(typeConverter, ctx);
-        patterns.add<ConvertSubOp>(typeConverter, ctx);
-        patterns.add<ConvertMulOp>(typeConverter, ctx);
-        patterns.add<ConvertDivOp>(typeConverter, ctx);
-        patterns.add<ConvertRemOp>(typeConverter, ctx);
-        patterns.add<ConvertMemRefStoreOp>(typeConverter, ctx, PatternBenefit(10));
-        patterns.add<ConvertMemRefLoadOp>(typeConverter, ctx);
-        patterns.add<ConvertMemRefAllocOp>(typeConverter, ctx);
-        patterns.add<ConvertSLoadOp>(typeConverter, ctx);
-        patterns.add<ConvertSStoreOp>(typeConverter, ctx);
-        patterns.add<ConvertMapGetOp>(typeConverter, ctx, PatternBenefit(5));
-        patterns.add<ConvertMapStoreOp>(typeConverter, ctx, PatternBenefit(5));
-        patterns.add<ConvertReturnOp>(typeConverter, ctx);
+        // Pattern toggles for crash bisecting (set to false to isolate)
+        const bool enable_contract = true;
+        const bool enable_func = true;
+        const bool enable_arith = true;
+        const bool enable_memref_alloc = true;
+        const bool enable_memref_load = true;
+        const bool enable_memref_store = true;
+        const bool enable_storage = true;
+        const bool enable_return = true;
+        const bool enable_control_flow = true;
+
+        if (enable_contract)
+            patterns.add<ConvertContractOp>(typeConverter, ctx);
+        if (enable_arith)
+            patterns.add<ConvertArithConstantOp>(typeConverter, ctx);
+        if (enable_storage)
+            patterns.add<ConvertGlobalOp>(typeConverter, ctx);
+        if (enable_func)
+            patterns.add<ConvertFuncOp>(typeConverter, ctx);
+        if (enable_arith)
+        {
+            patterns.add<ConvertAddOp>(typeConverter, ctx);
+            patterns.add<ConvertSubOp>(typeConverter, ctx);
+            patterns.add<ConvertMulOp>(typeConverter, ctx);
+            patterns.add<ConvertDivOp>(typeConverter, ctx);
+            patterns.add<ConvertRemOp>(typeConverter, ctx);
+            patterns.add<ConvertCmpOp>(typeConverter, ctx);
+            patterns.add<ConvertConstOp>(typeConverter, ctx);
+            patterns.add<ConvertStringConstantOp>(typeConverter, ctx);
+            patterns.add<ConvertBytesConstantOp>(typeConverter, ctx);
+            patterns.add<ConvertStructInstantiateOp>(typeConverter, ctx);
+            patterns.add<ConvertStructInitOp>(typeConverter, ctx);
+            patterns.add<ConvertStructFieldExtractOp>(typeConverter, ctx);
+            patterns.add<ConvertStructFieldUpdateOp>(typeConverter, ctx);
+            patterns.add<ConvertStructDeclOp>(typeConverter, ctx);
+        }
+        patterns.add<ConvertRefinementToBaseOp>(typeConverter, ctx);
+        patterns.add<ConvertEvmOp>(typeConverter, ctx);
+        if (enable_memref_store)
+            patterns.add<ConvertMemRefStoreOp>(typeConverter, ctx, PatternBenefit(10));
+        if (enable_memref_load)
+            patterns.add<ConvertMemRefLoadOp>(typeConverter, ctx);
+        if (enable_memref_alloc)
+            patterns.add<ConvertMemRefAllocOp>(typeConverter, ctx);
+        if (enable_storage)
+        {
+            patterns.add<ConvertSLoadOp>(typeConverter, ctx);
+            patterns.add<ConvertSStoreOp>(typeConverter, ctx);
+            patterns.add<ConvertTLoadOp>(typeConverter, ctx);
+            patterns.add<ConvertTStoreOp>(typeConverter, ctx);
+            patterns.add<ConvertMapGetOp>(typeConverter, ctx, PatternBenefit(5));
+            patterns.add<ConvertMapStoreOp>(typeConverter, ctx, PatternBenefit(5));
+        }
+        if (enable_return)
+            patterns.add<ConvertReturnOp>(typeConverter, ctx);
+        if (enable_control_flow)
+            patterns.add<ConvertWhileOp>(typeConverter, ctx);
+        if (enable_control_flow)
+        {
+            patterns.add<ConvertBreakOp>(typeConverter, ctx);
+            patterns.add<ConvertContinueOp>(typeConverter, ctx);
+            patterns.add<ConvertSwitchExprOp>(typeConverter, ctx);
+            patterns.add<ConvertSwitchOp>(typeConverter, ctx);
+        }
 
         ConversionTarget target(*ctx);
         // Mark SIR dialect as legal
+        target.addLegalDialect<mlir::BuiltinDialect>();
         target.addLegalDialect<sir::SIRDialect>();
         DBG("Marked SIR dialect as legal");
+        // Ora ops are illegal by default; only explicitly legalized ops may remain
+        target.addIllegalDialect<ora::OraDialect>();
+        target.addLegalOp<ora::ContractOp>();
+        target.addLegalOp<ora::EnumDeclOp>();
+        target.addIllegalOp<ora::StructDeclOp>();
+        target.addDynamicallyLegalOp(mlir::OperationName("ora.log.decl", ctx),
+                                     [](Operation *) { return true; });
+        target.addDynamicallyLegalOp(mlir::OperationName("ora.error.decl", ctx),
+                                     [](Operation *) { return true; });
+        target.addDynamicallyLegalOp(mlir::OperationName("ora.import", ctx),
+                                     [](Operation *) { return true; });
+        target.addDynamicallyLegalOp(mlir::OperationName("ora.tstore.global", ctx),
+                                     [](Operation *) { return true; });
+        target.addDynamicallyLegalOp(mlir::OperationName("ora.memory.global", ctx),
+                                     [](Operation *) { return true; });
+        target.addDynamicallyLegalOp<ora::SLoadOp>([](ora::SLoadOp op) {
+            return llvm::isa<mlir::RankedTensorType>(op.getResult().getType());
+        });
+        target.addDynamicallyLegalOp<ora::SStoreOp>([](ora::SStoreOp op) {
+            return llvm::isa<mlir::RankedTensorType>(op.getValue().getType());
+        });
+        DBG("Marked Ora dialect as illegal (except ora.contract)");
         // Mark cf dialect as legal (cf.assert for bounds checking)
         target.addLegalDialect<mlir::cf::ControlFlowDialect>();
         DBG("Marked cf dialect as legal");
-        // Mark memref ops as dynamically legal if they use converted types
-        // This allows stores to be converted to use converted memref types during conversion
-        // The patterns will still eliminate them, but they won't fail type checking
-        target.addDynamicallyLegalOp<mlir::memref::StoreOp>(
-            [&](Operation *op)
-            {
-                auto storeOp = cast<mlir::memref::StoreOp>(op);
-                auto memrefType = dyn_cast<mlir::MemRefType>(storeOp.getMemref().getType());
-                if (!memrefType)
-                    return false;
-                auto elementType = memrefType.getElementType();
-                if (llvm::isa<ora::IntegerType>(elementType))
-                    return false;
-                return true;
-            });
-        target.addDynamicallyLegalOp<mlir::memref::LoadOp>(
-            [&](Operation *op)
-            {
-                auto loadOp = cast<mlir::memref::LoadOp>(op);
-                auto memrefType = dyn_cast<mlir::MemRefType>(loadOp.getMemref().getType());
-                if (!memrefType)
-                    return false;
-                auto elementType = memrefType.getElementType();
-                if (llvm::isa<ora::IntegerType>(elementType))
-                    return false;
-                return true;
-            });
-        target.addDynamicallyLegalOp<mlir::memref::AllocaOp>(
-            [&](Operation *op)
-            {
-                auto allocaOp = cast<mlir::memref::AllocaOp>(op);
-                auto memrefType = dyn_cast<mlir::MemRefType>(allocaOp.getResult().getType());
-                if (!memrefType)
-                    return false;
-                auto elementType = memrefType.getElementType();
-                if (llvm::isa<ora::IntegerType>(elementType))
-                    return false;
-                return true;
-            });
+        target.addLegalDialect<mlir::scf::SCFDialect>();
+        DBG("Marked scf dialect as legal");
+        target.addLegalDialect<mlir::tensor::TensorDialect>();
+        DBG("Marked tensor dialect as legal");
         target.addDynamicallyLegalDialect<mlir::arith::ArithDialect>(
             [&](Operation *op)
             {
@@ -217,12 +260,12 @@ public:
                     auto funcType = funcOp.getFunctionType();
                     for (Type inputType : funcType.getInputs())
                     {
-                        if (llvm::isa<ora::IntegerType>(inputType))
+                        if (inputType.getDialect().getNamespace() == "ora")
                             return false;
                     }
                     for (Type resultType : funcType.getResults())
                     {
-                        if (llvm::isa<ora::IntegerType>(resultType))
+                        if (resultType.getDialect().getNamespace() == "ora")
                             return false;
                     }
                     return true;
@@ -230,31 +273,9 @@ public:
                 return true;
             });
 
-        target.addIllegalOp<ora::AddOp, ora::SubOp, ora::MulOp, ora::DivOp, ora::RemOp, ora::SLoadOp, ora::SStoreOp, ora::MapGetOp, ora::MapStoreOp, ora::ReturnOp>();
+        target.addIllegalOp<ora::AddOp, ora::SubOp, ora::MulOp, ora::DivOp, ora::RemOp, ora::MapGetOp, ora::MapStoreOp, ora::ReturnOp>();
 
-        target.addDynamicallyLegalOp<ora::GlobalOp>(
-            [&](Operation *op)
-            {
-                auto globalOp = cast<ora::GlobalOp>(op);
-                auto globalType = globalOp.getGlobalType();
-                return !llvm::isa<ora::IntegerType>(globalType);
-            });
-        target.markUnknownOpDynamicallyLegal(
-            [&](Operation *op)
-            {
-                // Skip func.func - it's handled by addDynamicallyLegalDialect
-                if (isa<mlir::func::FuncOp>(op))
-                    return true; // Will be checked by addDynamicallyLegalDialect
-
-                // Debug: check if this is a map operation
-                if (isa<ora::MapGetOp>(op) || isa<ora::MapStoreOp>(op))
-                {
-                    DBG("markUnknownOpDynamicallyLegal: checking " << op->getName());
-                    DBG("  isLegal: " << (typeConverter.isLegal(op) ? "true" : "false"));
-                }
-
-                return typeConverter.isLegal(op);
-            });
+        target.addIllegalOp<ora::GlobalOp>();
 
         // Count operations before conversion
         unsigned totalOps = 0;

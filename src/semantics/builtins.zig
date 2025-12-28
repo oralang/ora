@@ -138,7 +138,7 @@ pub const BuiltinRegistry = struct {
 
         try self.register(.{
             .full_path = "std.transaction.sender",
-            .return_type = .address,
+            .return_type = .non_zero_address,
             .param_types = &.{},
             .evm_opcode = "origin",
             .is_call = true,
@@ -160,7 +160,7 @@ pub const BuiltinRegistry = struct {
 
         try self.register(.{
             .full_path = "std.msg.sender",
-            .return_type = .address,
+            .return_type = .non_zero_address,
             .param_types = &.{},
             .evm_opcode = "caller",
             .is_call = true,

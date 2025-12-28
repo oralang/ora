@@ -1,10 +1,11 @@
 contract ConstantFolding {
-    // Test: Constant folding (5 + 6 * 3 = 23)
+    // Test constant folding
     pub fn constantFolding() -> u256 {
         var a: u256 = 5 + 6 * 3;
+        // 5 + 18 = 23
         let array: [u256; 1] = [0];
         array[0] = a;
+        // array[0] = 23
         return array[0];
     }
 }
-

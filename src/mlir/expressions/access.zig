@@ -106,6 +106,12 @@ pub fn lowerIdentifier(
 
     if (self.symbol_table) |st| {
         if (st.lookupSymbol(identifier.name)) |symbol| {
+            if (std.mem.eql(u8, symbol.region, "tstore")) {
+                const memory_manager = @import("../memory.zig").MemoryManager.init(self.ctx, self.ora_dialect);
+                const load_op = memory_manager.createTStoreLoad(identifier.name, self.fileLoc(identifier.span));
+                h.appendOp(self.block, load_op);
+                return h.getResult(load_op, 0);
+            }
             // check if this is an error identifier (errors are symbols with .Error kind)
             if (symbol.symbol_kind == .Error) {
                 // lower as an error return expression

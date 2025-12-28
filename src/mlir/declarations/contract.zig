@@ -120,6 +120,11 @@ pub fn lowerContract(self: *const DeclarationLowerer, contract: *const lib.Contr
                     },
                     .TStore => {
                         // transient storage variables are allocated in transient storage space
+                        const var_type = self.type_mapper.toMlirType(var_decl.type_info);
+                        contract_symbol_table.addSymbol(var_decl.name, var_type, var_decl.region, null, var_decl.kind) catch {};
+                        if (self.symbol_table) |st| {
+                            st.addSymbol(var_decl.name, var_type, var_decl.region, null, var_decl.kind) catch {};
+                        }
                     },
                     .Stack => {
                         // stack variables at contract level are not allowed in Ora
@@ -211,7 +216,9 @@ pub fn lowerContract(self: *const DeclarationLowerer, contract: *const lib.Contr
                 // lower constant declarations within contract
                 // lower the constant declaration operation (for metadata/documentation)
                 const const_op = self.lowerConstDecl(&const_decl);
-                h.appendOp(block, const_op);
+                if (!c.oraOperationIsNull(const_op)) {
+                    h.appendOp(block, const_op);
+                }
 
                 // register constant declaration for lazy value creation
                 // constants are created lazily when referenced to avoid cross-region issues

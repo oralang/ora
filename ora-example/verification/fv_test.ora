@@ -2,6 +2,8 @@
 // This demonstrates requires, ensures, invariants, ghost functions, and ghost variables
 
 contract FVTest {
+    error InsufficientBalance;
+
     storage balance: u256 = 0;
     storage max_balance: u256 = 1000;
     
@@ -15,7 +17,7 @@ contract FVTest {
         ensures(balance == old(balance) - amount)
     {
         if (amount > balance) {
-            return InsufficientBalance();
+            return InsufficientBalance;
         }
         
         balance = balance - amount;
@@ -77,6 +79,3 @@ contract FVTest {
         return y;
     }
 }
-
-error InsufficientBalance;
-

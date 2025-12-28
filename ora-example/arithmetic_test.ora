@@ -1,4 +1,5 @@
 contract ArithmeticTest {
+    
     storage var counter: u256;
 
     pub fn init() {

@@ -1,0 +1,11 @@
+contract RegionOkStorageMap {
+    storage var balances: map[address, u256];
+
+    fn setBalance(account: address, amount: u256) {
+        balances[account] = amount;
+    }
+
+    fn getBalance(account: address) -> u256 {
+        return balances[account];
+    }
+}

@@ -43,6 +43,13 @@ def ConstOp : SIR_PureOp<"const", [DeclareOpInterfaceMethods<OpAsmOpInterface, [
   ];
 }
 
+def StringConstantOp : SIR_Op<"string.constant"> {
+  let summary = "String constant";
+  let arguments = (ins StrAttr:$value);
+  let results   = (outs SIR_U256:$res);
+  let assemblyFormat = "$value attr-dict `:` type($res)";
+}
+
 // ==========================================================================
 // Arithmetic Operations (binary, word-wise)
 // ==========================================================================
@@ -285,6 +292,21 @@ def StoreOp : SIR_Op<"store"> {
   let arguments = (ins SIR_Ptr:$ptr, SIR_U256:$val);
   let assemblyFormat =
     "$ptr `:` type($ptr) `,` $val `:` type($val) attr-dict";
+}
+
+def Load8Op : SIR_Op<"load8"> {
+  let summary = "Load a byte from memory";
+  let arguments = (ins SIR_Ptr:$ptr, SIR_U256:$offset);
+  let results   = (outs SIR_U256:$val);
+  let assemblyFormat =
+    "$ptr `:` type($ptr) `,` $offset `:` type($offset) attr-dict `:` type($val)";
+}
+
+def Store8Op : SIR_Op<"store8"> {
+  let summary = "Store a byte to memory";
+  let arguments = (ins SIR_Ptr:$ptr, SIR_U256:$offset, SIR_U256:$val);
+  let assemblyFormat =
+    "$ptr `:` type($ptr) `,` $offset `:` type($offset) `,` $val `:` type($val) attr-dict";
 }
 
 // ==========================================================================

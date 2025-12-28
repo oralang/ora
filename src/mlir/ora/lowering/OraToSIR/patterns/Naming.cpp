@@ -194,6 +194,9 @@ void SIRNamingHelper::nameReturnVal(Operation *op, unsigned resultIndex)
 
 int64_t SIRNamingHelper::extractElementIndex(Value indexValue) const
 {
+    if (!indexValue)
+        return -1;
+
     // Try to extract constant index value
     Operation *defOp = indexValue.getDefiningOp();
     if (!defOp)

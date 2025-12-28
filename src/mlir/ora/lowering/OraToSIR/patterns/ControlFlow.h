@@ -47,5 +47,60 @@ namespace mlir
                 ConversionPatternRewriter &rewriter) const override;
         };
 
+        class ConvertWhileOp : public OpConversionPattern<ora::WhileOp>
+        {
+        public:
+            using OpConversionPattern::OpConversionPattern;
+
+            LogicalResult matchAndRewrite(
+                ora::WhileOp op,
+                typename ora::WhileOp::Adaptor adaptor,
+                ConversionPatternRewriter &rewriter) const override;
+        };
+
+        class ConvertBreakOp : public OpConversionPattern<ora::BreakOp>
+        {
+        public:
+            using OpConversionPattern::OpConversionPattern;
+
+            LogicalResult matchAndRewrite(
+                ora::BreakOp op,
+                typename ora::BreakOp::Adaptor adaptor,
+                ConversionPatternRewriter &rewriter) const override;
+        };
+
+        class ConvertContinueOp : public OpConversionPattern<ora::ContinueOp>
+        {
+        public:
+            using OpConversionPattern::OpConversionPattern;
+
+            LogicalResult matchAndRewrite(
+                ora::ContinueOp op,
+                typename ora::ContinueOp::Adaptor adaptor,
+                ConversionPatternRewriter &rewriter) const override;
+        };
+
+        class ConvertSwitchExprOp : public OpConversionPattern<ora::SwitchExprOp>
+        {
+        public:
+            using OpConversionPattern::OpConversionPattern;
+
+            LogicalResult matchAndRewrite(
+                ora::SwitchExprOp op,
+                typename ora::SwitchExprOp::Adaptor adaptor,
+                ConversionPatternRewriter &rewriter) const override;
+        };
+
+        class ConvertSwitchOp : public OpConversionPattern<ora::SwitchOp>
+        {
+        public:
+            using OpConversionPattern::OpConversionPattern;
+
+            LogicalResult matchAndRewrite(
+                ora::SwitchOp op,
+                typename ora::SwitchOp::Adaptor adaptor,
+                ConversionPatternRewriter &rewriter) const override;
+        };
+
     } // namespace ora
 } // namespace mlir

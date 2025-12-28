@@ -1,0 +1,5 @@
+contract RegionErrCalldataToMemory {
+    fn bad(amount: u256) {
+        memory var tmp: u256 = amount;
+    }
+}

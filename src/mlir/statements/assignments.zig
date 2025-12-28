@@ -114,7 +114,12 @@ pub fn lowerIdentifierAssignment(self: *const StatementLowerer, ident: *const li
             if (symbol.symbol_kind != .Variable) {
                 log.debug("[lowerIdentifierAssignment] Symbol is not a variable (kind: {any}), skipping variable_kind check\n", .{symbol.symbol_kind});
             }
-            const region = std.meta.stringToEnum(lib.ast.Statements.MemoryRegion, symbol.region) orelse blk: {
+            const region = blk: {
+                if (std.mem.eql(u8, symbol.region, "storage")) break :blk lib.ast.Statements.MemoryRegion.Storage;
+                if (std.mem.eql(u8, symbol.region, "memory")) break :blk lib.ast.Statements.MemoryRegion.Memory;
+                if (std.mem.eql(u8, symbol.region, "tstore")) break :blk lib.ast.Statements.MemoryRegion.TStore;
+                if (std.mem.eql(u8, symbol.region, "calldata")) break :blk lib.ast.Statements.MemoryRegion.Calldata;
+                if (std.mem.eql(u8, symbol.region, "stack")) break :blk lib.ast.Statements.MemoryRegion.Stack;
                 // if parsing fails, check storage_map as fallback for storage variables
                 if (self.storage_map) |sm| {
                     if (sm.hasStorageVariable(ident.name)) {

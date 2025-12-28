@@ -7,7 +7,9 @@
 
 #include "mlir/IR/BuiltinTypes.h"
 #include "mlir/IR/SymbolTable.h"
+#include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
+#include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/Transforms/DialectConversion.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/raw_ostream.h"
@@ -26,6 +28,42 @@ static void setResultName(Operation *op, unsigned resultIndex, StringRef name)
     auto nameAttr = StringAttr::get(op->getContext(), name);
     std::string attrName = "sir.result_name_" + std::to_string(resultIndex);
     op->setAttr(attrName, nameAttr);
+}
+
+static Value indexToU256(Location loc, Value indexVal, ConversionPatternRewriter &rewriter)
+{
+    auto *ctx = rewriter.getContext();
+    auto i64Type = mlir::IntegerType::get(ctx, 64, mlir::IntegerType::Unsigned);
+    auto i256Type = mlir::IntegerType::get(ctx, 256, mlir::IntegerType::Unsigned);
+    auto u256Type = sir::U256Type::get(ctx);
+
+    Value i64Val = rewriter.create<mlir::arith::IndexCastOp>(loc, i64Type, indexVal);
+    Value i256Val = rewriter.create<mlir::arith::ExtUIOp>(loc, i256Type, i64Val);
+    return rewriter.create<sir::BitcastOp>(loc, u256Type, i256Val);
+}
+
+static Value u256ToIndex(Location loc, Value valueU256, ConversionPatternRewriter &rewriter)
+{
+    auto *ctx = rewriter.getContext();
+    auto i64Type = mlir::IntegerType::get(ctx, 64, mlir::IntegerType::Unsigned);
+    auto i256Type = mlir::IntegerType::get(ctx, 256, mlir::IntegerType::Unsigned);
+    auto indexType = rewriter.getIndexType();
+
+    Value i256Val = rewriter.create<sir::BitcastOp>(loc, i256Type, valueU256);
+    Value i64Val = rewriter.create<mlir::arith::TruncIOp>(loc, i64Type, i256Val);
+    return rewriter.create<mlir::arith::IndexCastOp>(loc, indexType, i64Val);
+}
+
+static Value computeWordCount(Location loc, Value lengthU256, ConversionPatternRewriter &rewriter)
+{
+    auto *ctx = rewriter.getContext();
+    auto u256Type = sir::U256Type::get(ctx);
+    auto ui64Type = mlir::IntegerType::get(ctx, 64, mlir::IntegerType::Unsigned);
+
+    Value addend = rewriter.create<sir::ConstOp>(loc, u256Type, mlir::IntegerAttr::get(ui64Type, 31));
+    Value divisor = rewriter.create<sir::ConstOp>(loc, u256Type, mlir::IntegerAttr::get(ui64Type, 32));
+    Value sum = rewriter.create<sir::AddOp>(loc, u256Type, lengthU256, addend);
+    return rewriter.create<sir::DivOp>(loc, u256Type, sum, divisor);
 }
 
 // -----------------------------------------------------------------------------
@@ -88,6 +126,14 @@ LogicalResult ConvertSLoadOp::matchAndRewrite(
     auto ctx = rewriter.getContext();
     StringRef globalName = op.getGlobalName();
 
+    if (llvm::isa<mlir::RankedTensorType>(op.getResult().getType()))
+    {
+        DBG("  -> skipping sload of tensor type");
+        return failure();
+    }
+
+    const bool isDynamicBytes = llvm::isa<ora::StringType, ora::BytesType>(op.getResult().getType());
+
     // Compute storage slot index from ora.global operation
     uint64_t slotIndex = computeGlobalSlot(globalName, op.getOperation());
     DBG("  -> slot index: " << slotIndex);
@@ -100,8 +146,50 @@ LogicalResult ConvertSLoadOp::matchAndRewrite(
         setResultName(slotOp, 0, ("slot_" + globalName).str());
     }
 
-    // Replace the ora.sload with sir.sload
     auto u256 = sir::U256Type::get(ctx);
+    auto ptrType = sir::PtrType::get(ctx, /*addrSpace*/ 1);
+
+    if (isDynamicBytes)
+    {
+        Value length = rewriter.create<sir::SLoadOp>(loc, u256, slotConst);
+        Value wordSize = rewriter.create<sir::ConstOp>(loc, u256, mlir::IntegerAttr::get(
+                                                                     mlir::IntegerType::get(ctx, 64, mlir::IntegerType::Unsigned),
+                                                                     32));
+        Value totalSize = rewriter.create<sir::AddOp>(loc, u256, length, wordSize);
+        Value basePtr = rewriter.create<sir::MallocOp>(loc, ptrType, totalSize);
+        rewriter.create<sir::StoreOp>(loc, basePtr, length);
+
+        Value wordCount = computeWordCount(loc, length, rewriter);
+        Value upper = u256ToIndex(loc, wordCount, rewriter);
+        Value lower = rewriter.create<mlir::arith::ConstantIndexOp>(loc, 0);
+        Value step = rewriter.create<mlir::arith::ConstantIndexOp>(loc, 1);
+        auto forOp = rewriter.create<mlir::scf::ForOp>(loc, lower, upper, step);
+
+        {
+            OpBuilder::InsertionGuard guard(rewriter);
+            rewriter.setInsertionPointToStart(forOp.getBody());
+            Value iv = forOp.getInductionVar();
+            Value ivU256 = indexToU256(loc, iv, rewriter);
+            Value one = rewriter.create<sir::ConstOp>(loc, u256, mlir::IntegerAttr::get(
+                                                                    mlir::IntegerType::get(ctx, 64, mlir::IntegerType::Unsigned),
+                                                                    1));
+
+            Value slotOffset = rewriter.create<sir::AddOp>(loc, u256, ivU256, one);
+            Value slot = rewriter.create<sir::AddOp>(loc, u256, slotConst, slotOffset);
+            Value wordVal = rewriter.create<sir::SLoadOp>(loc, u256, slot);
+
+            Value wordBytes = rewriter.create<sir::MulOp>(loc, u256, ivU256, wordSize);
+            Value dataOffset = rewriter.create<sir::AddOp>(loc, u256, wordBytes, wordSize);
+            Value dataPtr = rewriter.create<sir::AddPtrOp>(loc, ptrType, basePtr, dataOffset);
+            rewriter.create<sir::StoreOp>(loc, dataPtr, wordVal);
+        }
+
+        rewriter.replaceOp(op, basePtr);
+        DBG("  -> replaced with dynamic bytes load");
+        return success();
+    }
+
+    // Replace the ora.sload with sir.sload for scalar values
     auto sloadOp = rewriter.create<sir::SLoadOp>(loc, u256, slotConst);
     setResultName(sloadOp, 0, "value");
     rewriter.replaceOp(op, sloadOp.getResult());
@@ -124,6 +212,14 @@ LogicalResult ConvertSStoreOp::matchAndRewrite(
     Value value = adaptor.getValue();
     StringRef globalName = op.getGlobalName();
 
+    if (llvm::isa<mlir::RankedTensorType>(value.getType()))
+    {
+        DBG("  -> skipping sstore of tensor type");
+        return failure();
+    }
+
+    const bool isDynamicBytes = llvm::isa<ora::StringType, ora::BytesType>(op.getValue().getType());
+
     // Compute storage slot index from ora.global operation
     uint64_t slotIndex = computeGlobalSlot(globalName, op.getOperation());
 
@@ -135,8 +231,58 @@ LogicalResult ConvertSStoreOp::matchAndRewrite(
         setResultName(slotOp, 0, ("slot_" + globalName).str());
     }
 
-    // Convert value to SIR u256 - ALL Ora types must become SIR u256
     Type u256Type = sir::U256Type::get(ctx);
+    auto ptrType = sir::PtrType::get(ctx, /*addrSpace*/ 1);
+
+    if (isDynamicBytes)
+    {
+        Value basePtr = value;
+        if (!llvm::isa<sir::PtrType>(basePtr.getType()))
+        {
+            Type converted = this->getTypeConverter()->convertType(basePtr.getType());
+            if (converted && converted != basePtr.getType())
+            {
+                basePtr = rewriter.create<sir::BitcastOp>(loc, converted, basePtr);
+            }
+        }
+
+        Value length = rewriter.create<sir::LoadOp>(loc, u256Type, basePtr);
+        rewriter.create<sir::SStoreOp>(loc, slot, length);
+
+        Value wordCount = computeWordCount(loc, length, rewriter);
+        Value upper = u256ToIndex(loc, wordCount, rewriter);
+        Value lower = rewriter.create<mlir::arith::ConstantIndexOp>(loc, 0);
+        Value step = rewriter.create<mlir::arith::ConstantIndexOp>(loc, 1);
+        auto forOp = rewriter.create<mlir::scf::ForOp>(loc, lower, upper, step);
+
+        {
+            OpBuilder::InsertionGuard guard(rewriter);
+            rewriter.setInsertionPointToStart(forOp.getBody());
+            Value iv = forOp.getInductionVar();
+            Value ivU256 = indexToU256(loc, iv, rewriter);
+            Value one = rewriter.create<sir::ConstOp>(loc, u256Type, mlir::IntegerAttr::get(
+                                                                    mlir::IntegerType::get(ctx, 64, mlir::IntegerType::Unsigned),
+                                                                    1));
+            Value wordSize = rewriter.create<sir::ConstOp>(loc, u256Type, mlir::IntegerAttr::get(
+                                                                     mlir::IntegerType::get(ctx, 64, mlir::IntegerType::Unsigned),
+                                                                     32));
+
+            Value slotOffset = rewriter.create<sir::AddOp>(loc, u256Type, ivU256, one);
+            Value slotAddr = rewriter.create<sir::AddOp>(loc, u256Type, slot, slotOffset);
+
+            Value wordBytes = rewriter.create<sir::MulOp>(loc, u256Type, ivU256, wordSize);
+            Value dataOffset = rewriter.create<sir::AddOp>(loc, u256Type, wordBytes, wordSize);
+            Value dataPtr = rewriter.create<sir::AddPtrOp>(loc, ptrType, basePtr, dataOffset);
+            Value wordVal = rewriter.create<sir::LoadOp>(loc, u256Type, dataPtr);
+
+            rewriter.create<sir::SStoreOp>(loc, slotAddr, wordVal);
+        }
+
+        rewriter.eraseOp(op);
+        return success();
+    }
+
+    // Convert value to SIR u256 - ALL Ora types must become SIR u256
     Value convertedValue = value;
     if (!llvm::isa<sir::U256Type>(value.getType()))
     {
@@ -165,6 +311,67 @@ LogicalResult ConvertSStoreOp::matchAndRewrite(
 }
 
 // -----------------------------------------------------------------------------
+// Lower ora.tload → sir.tload
+// -----------------------------------------------------------------------------
+LogicalResult ConvertTLoadOp::matchAndRewrite(
+    ora::TLoadOp op,
+    typename ora::TLoadOp::Adaptor adaptor,
+    ConversionPatternRewriter &rewriter) const
+{
+    auto loc = op.getLoc();
+    auto ctx = rewriter.getContext();
+    auto u256 = sir::U256Type::get(ctx);
+    auto ui64Type = mlir::IntegerType::get(ctx, 64, mlir::IntegerType::Unsigned);
+
+    auto keyAttr = op->getAttrOfType<StringAttr>("key");
+    if (!keyAttr)
+    {
+        return rewriter.notifyMatchFailure(op, "tload missing key attribute");
+    }
+
+    uint64_t slotIndex = computeGlobalSlot(keyAttr.getValue(), op.getOperation());
+    auto slotAttr = mlir::IntegerAttr::get(ui64Type, slotIndex);
+    Value slotConst = rewriter.create<sir::ConstOp>(loc, u256, slotAttr);
+
+    Value result = rewriter.create<sir::TLoadOp>(loc, u256, slotConst);
+    rewriter.replaceOp(op, result);
+    return success();
+}
+
+// -----------------------------------------------------------------------------
+// Lower ora.tstore → sir.tstore
+// -----------------------------------------------------------------------------
+LogicalResult ConvertTStoreOp::matchAndRewrite(
+    ora::TStoreOp op,
+    typename ora::TStoreOp::Adaptor adaptor,
+    ConversionPatternRewriter &rewriter) const
+{
+    auto loc = op.getLoc();
+    auto ctx = rewriter.getContext();
+    auto u256 = sir::U256Type::get(ctx);
+    auto ui64Type = mlir::IntegerType::get(ctx, 64, mlir::IntegerType::Unsigned);
+
+    auto keyAttr = op->getAttrOfType<StringAttr>("key");
+    if (!keyAttr)
+    {
+        return rewriter.notifyMatchFailure(op, "tstore missing key attribute");
+    }
+
+    uint64_t slotIndex = computeGlobalSlot(keyAttr.getValue(), op.getOperation());
+    auto slotAttr = mlir::IntegerAttr::get(ui64Type, slotIndex);
+    Value slotConst = rewriter.create<sir::ConstOp>(loc, u256, slotAttr);
+
+    Value value = adaptor.getValue();
+    if (!llvm::isa<sir::U256Type>(value.getType()))
+    {
+        value = rewriter.create<sir::BitcastOp>(loc, u256, value);
+    }
+
+    rewriter.replaceOpWithNewOp<sir::TStoreOp>(op, slotConst, value);
+    return success();
+}
+
+// -----------------------------------------------------------------------------
 // Lower ora.global - convert type attribute from ora.int to u256
 // Also assigns sequential slot indices to globals
 // -----------------------------------------------------------------------------
@@ -173,63 +380,8 @@ LogicalResult ConvertGlobalOp::matchAndRewrite(
     typename ora::GlobalOp::Adaptor adaptor,
     ConversionPatternRewriter &rewriter) const
 {
-    llvm::errs() << "[OraToSIR] ConvertGlobalOp::matchAndRewrite() called for: " << op.getSymName() << "\n";
-    llvm::errs().flush();
-
-    // Convert the type attribute (ora.int<256, false> -> u256)
-    Type oldType = op.getGlobalType();
-    Type newType = this->getTypeConverter()->convertType(oldType);
-
-    llvm::errs() << "[OraToSIR]   Old type: " << oldType << ", New type: " << newType << "\n";
-    llvm::errs().flush();
-
-    // Assign slot index to this global if not already assigned
-    // Slot indices are assigned sequentially based on order in module
-    auto slotAttr = op->getAttrOfType<IntegerAttr>("ora.slot_index");
-    if (!slotAttr)
-    {
-        // Get the module to count existing globals
-        ModuleOp module = op->getParentOfType<ModuleOp>();
-        if (module)
-        {
-            uint64_t slotIndex = 0;
-            module.walk([&](ora::GlobalOp g)
-                        {
-                if (g == op)
-                {
-                    return WalkResult::interrupt();
-                }
-                // Only count globals that have been assigned slots or come before this one
-                slotIndex++;
-                return WalkResult::advance(); });
-
-            // Store slot index as attribute
-            auto ctx = op->getContext();
-            auto ui64Type = mlir::IntegerType::get(ctx, 64, mlir::IntegerType::Unsigned);
-            auto slotIndexAttr = mlir::IntegerAttr::get(ui64Type, slotIndex);
-            op->setAttr("ora.slot_index", slotIndexAttr);
-
-            DBG("  -> assigned slot index: " << slotIndex);
-        }
-    }
-
-    // If type hasn't changed, no conversion needed
-    if (oldType == newType)
-    {
-        llvm::errs() << "[OraToSIR]   Types match, no conversion needed\n";
-        llvm::errs().flush();
-        return success();
-    }
-
-    // Create new global with converted type
-    auto newTypeAttr = TypeAttr::get(newType);
-    // Use updateRootInPlace to modify the operation in place
-    // This ensures the operation is properly updated
-    rewriter.modifyOpInPlace(op, [&]()
-                             { op.setTypeAttr(newTypeAttr); });
-
-    llvm::errs() << "[OraToSIR]   Converted ora.global type from " << oldType << " to " << newType << "\n";
-    llvm::errs().flush();
+    (void)adaptor;
+    rewriter.eraseOp(op);
     return success();
 }
 
@@ -311,8 +463,8 @@ LogicalResult ConvertMapGetOp::matchAndRewrite(
     auto ui64Type = mlir::IntegerType::get(ctx, 64, mlir::IntegerType::Unsigned);
 
     // Get the map operand and key
-    // Use original map operand (before conversion) to find the global name
     Value originalMapOperand = op.getMap();
+    Value convertedMapOperand = adaptor.getMap();
     Value key = adaptor.getKey();
 
     // Convert key to SIR u256 if needed
@@ -321,21 +473,30 @@ LogicalResult ConvertMapGetOp::matchAndRewrite(
         key = rewriter.create<sir::BitcastOp>(loc, u256Type, key);
     }
 
-    // Extract global name from original map operand (before conversion)
-    llvm::StringRef globalName = getGlobalNameFromMapOperand(originalMapOperand, op.getOperation());
-    if (globalName.empty())
+    Value mapSlot = Value();
+    llvm::StringRef globalName;
+    if (llvm::isa<sir::U256Type>(convertedMapOperand.getType()))
     {
-        DBG("ConvertMapGetOp: failed to find global name from map operand");
-        return rewriter.notifyMatchFailure(op, "could not extract global name from map operand");
+        mapSlot = convertedMapOperand;
     }
-
-    // Compute storage slot for the map/array from ora.global operation
-    uint64_t mapSlotIndex = computeGlobalSlot(globalName, op.getOperation());
-    Value mapSlot = findOrCreateSlotConstant(op.getOperation(), mapSlotIndex, globalName, rewriter);
-    // Set name: "slot_" + globalName
-    if (auto slotOp = mapSlot.getDefiningOp<sir::ConstOp>())
+    else
     {
-        setResultName(slotOp, 0, ("slot_" + globalName).str());
+        // Extract global name from original map operand (before conversion)
+        globalName = getGlobalNameFromMapOperand(originalMapOperand, op.getOperation());
+        if (globalName.empty())
+        {
+            DBG("ConvertMapGetOp: failed to find global name from map operand");
+            return rewriter.notifyMatchFailure(op, "could not extract global name from map operand");
+        }
+
+        // Compute storage slot for the map/array from ora.global operation
+        uint64_t mapSlotIndex = computeGlobalSlot(globalName, op.getOperation());
+        mapSlot = findOrCreateSlotConstant(op.getOperation(), mapSlotIndex, globalName, rewriter);
+        // Set name: "slot_" + globalName
+        if (auto slotOp = mapSlot.getDefiningOp<sir::ConstOp>())
+        {
+            setResultName(slotOp, 0, ("slot_" + globalName).str());
+        }
     }
 
     // Allocate 64 bytes for key + slot
@@ -356,10 +517,21 @@ LogicalResult ConvertMapGetOp::matchAndRewrite(
 
     // Compute keccak256 hash
     Value hash = rewriter.create<sir::KeccakOp>(loc, u256Type, slotKey, size64);
-    setResultName(hash.getDefiningOp(), 0, ("hash_" + globalName).str());
+    if (!globalName.empty())
+    {
+        setResultName(hash.getDefiningOp(), 0, ("hash_" + globalName).str());
+    }
 
     // Get the expected result type from ora.map_get and convert it
     Type expectedResultType = op.getResult().getType();
+
+    // If the map value is another map, return the derived slot hash as a map handle
+    if (llvm::isa<ora::MapType>(expectedResultType))
+    {
+        rewriter.replaceOp(op, hash);
+        DBG("ConvertMapGetOp: map-of-map, returning derived slot hash");
+        return success();
+    }
 
     // If the result type is a struct, handle it specially by loading multiple storage slots
     if (auto structType = llvm::dyn_cast<ora::StructType>(expectedResultType))
@@ -507,8 +679,8 @@ LogicalResult ConvertMapStoreOp::matchAndRewrite(
     auto ui64Type = mlir::IntegerType::get(ctx, 64, mlir::IntegerType::Unsigned);
 
     // Get the map operand, key, and value
-    // Use original map operand (before conversion) to find the global name
     Value originalMapOperand = op.getMap();
+    Value convertedMapOperand = adaptor.getMap();
     Value key = adaptor.getKey();
     Value value = adaptor.getValue();
 
@@ -522,39 +694,48 @@ LogicalResult ConvertMapStoreOp::matchAndRewrite(
         value = rewriter.create<sir::BitcastOp>(loc, u256Type, value);
     }
 
-    // Extract global name from original map operand (before conversion)
-    llvm::StringRef globalName = getGlobalNameFromMapOperand(originalMapOperand, op.getOperation());
-    DBG("ConvertMapStoreOp: globalName = " << (globalName.empty() ? "<empty>" : globalName.str()));
-    if (globalName.empty())
+    Value mapSlot = Value();
+    llvm::StringRef globalName;
+    if (llvm::isa<sir::U256Type>(convertedMapOperand.getType()))
     {
-        DBG("ConvertMapStoreOp: failed to find global name from map operand, trying backwards search");
-        // Try a simpler approach: look for the most recent ora.sload in the block
-        mlir::Block *block = op->getBlock();
-        auto it = mlir::Block::iterator(op.getOperation());
-        while (it != block->begin())
+        mapSlot = convertedMapOperand;
+    }
+    else
+    {
+        // Extract global name from original map operand (before conversion)
+        globalName = getGlobalNameFromMapOperand(originalMapOperand, op.getOperation());
+        DBG("ConvertMapStoreOp: globalName = " << (globalName.empty() ? "<empty>" : globalName.str()));
+        if (globalName.empty())
         {
-            --it;
-            if (auto sloadOp = llvm::dyn_cast<ora::SLoadOp>(*it))
+            DBG("ConvertMapStoreOp: failed to find global name from map operand, trying backwards search");
+            // Try a simpler approach: look for the most recent ora.sload in the block
+            mlir::Block *block = op->getBlock();
+            auto it = mlir::Block::iterator(op.getOperation());
+            while (it != block->begin())
             {
-                globalName = sloadOp.getGlobalName();
-                DBG("ConvertMapStoreOp: found global name via backwards search: " << globalName);
-                break;
+                --it;
+                if (auto sloadOp = llvm::dyn_cast<ora::SLoadOp>(*it))
+                {
+                    globalName = sloadOp.getGlobalName();
+                    DBG("ConvertMapStoreOp: found global name via backwards search: " << globalName);
+                    break;
+                }
             }
         }
-    }
-    if (globalName.empty())
-    {
-        DBG("ConvertMapStoreOp: failed to find global name from map operand");
-        return rewriter.notifyMatchFailure(op, "could not extract global name from map operand");
-    }
+        if (globalName.empty())
+        {
+            DBG("ConvertMapStoreOp: failed to find global name from map operand");
+            return rewriter.notifyMatchFailure(op, "could not extract global name from map operand");
+        }
 
-    // Compute storage slot for the map/array from ora.global operation
-    uint64_t mapSlotIndex = computeGlobalSlot(globalName, op.getOperation());
-    Value mapSlot = findOrCreateSlotConstant(op.getOperation(), mapSlotIndex, globalName, rewriter);
-    // Set name: "slot_" + globalName
-    if (auto slotOp = mapSlot.getDefiningOp<sir::ConstOp>())
-    {
-        setResultName(slotOp, 0, ("slot_" + globalName).str());
+        // Compute storage slot for the map/array from ora.global operation
+        uint64_t mapSlotIndex = computeGlobalSlot(globalName, op.getOperation());
+        mapSlot = findOrCreateSlotConstant(op.getOperation(), mapSlotIndex, globalName, rewriter);
+        // Set name: "slot_" + globalName
+        if (auto slotOp = mapSlot.getDefiningOp<sir::ConstOp>())
+        {
+            setResultName(slotOp, 0, ("slot_" + globalName).str());
+        }
     }
 
     // Allocate 64 bytes for key + slot
@@ -575,7 +756,10 @@ LogicalResult ConvertMapStoreOp::matchAndRewrite(
 
     // Compute keccak256 hash
     Value hash = rewriter.create<sir::KeccakOp>(loc, u256Type, slotKey, size64);
-    setResultName(hash.getDefiningOp(), 0, ("hash_" + globalName).str());
+    if (!globalName.empty())
+    {
+        setResultName(hash.getDefiningOp(), 0, ("hash_" + globalName).str());
+    }
 
     // Store to storage using the hash
     rewriter.create<sir::SStoreOp>(loc, hash, value);

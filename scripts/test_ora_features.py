@@ -34,6 +34,8 @@ def get_ora_operations(ops_file="src/mlir/ora/td/OraOps.td"):
 
 def test_file(file_path, compiler_path="./zig-out/bin/ora"):
     """Test a single .ora file and return results."""
+    stem = Path(file_path).stem
+    expected_failure = stem.startswith("err") or "_err_" in stem
     result = subprocess.run(
         [compiler_path, "--emit-mlir", str(file_path)],
         capture_output=True,
@@ -75,8 +77,11 @@ def test_file(file_path, compiler_path="./zig-out/bin/ora"):
     # Also check exit code
     if result.returncode != 0:
         has_error = True
-    
-    status = "❌ FAILED" if has_error else "✅ SUCCESS"
+
+    if expected_failure:
+        status = "✅ EXPECTED FAIL" if has_error else "❌ UNEXPECTED PASS"
+    else:
+        status = "❌ FAILED" if has_error else "✅ SUCCESS"
     
     # Extract MLIR output (last 100 lines)
     mlir_output = stdout.split("\n")[-100:] if stdout else []
@@ -87,7 +92,8 @@ def test_file(file_path, compiler_path="./zig-out/bin/ora"):
         "error": stderr[:500] if has_error else None,
         "mlir": "\n".join(mlir_output) if not has_error else None,
         "stdout": stdout,
-        "stderr": stderr
+        "stderr": stderr,
+        "expected_failure": expected_failure
     }
 
 
@@ -147,8 +153,8 @@ def categorize_files(ora_files):
 
 def generate_report(results, ops, output_file="docs/ORA_FEATURE_TEST_REPORT.md"):
     """Generate comprehensive test report."""
-    success_count = sum(1 for r in results if "✅" in r["status"])
-    failed_count = sum(1 for r in results if "❌" in r["status"])
+    success_count = sum(1 for r in results if r["status"].startswith("✅"))
+    failed_count = sum(1 for r in results if r["status"].startswith("❌"))
     total = len(results)
     
     with open(output_file, "w") as f:
@@ -197,6 +203,8 @@ def generate_report(results, ops, output_file="docs/ORA_FEATURE_TEST_REPORT.md")
         for r in results:
             f.write(f"### {r['file']}\n\n")
             f.write(f"**Status:** {r['status']}\n\n")
+            if r.get("expected_failure"):
+                f.write("**Expected failure:** yes\n\n")
             
             if r['error']:
                 f.write(f"**Error Output:**\n```\n{r['error']}\n```\n\n")
@@ -294,6 +302,8 @@ def main():
                        help="Path to the Ora compiler binary")
     parser.add_argument("--base-dir", default="ora-example",
                        help="Base directory containing .ora files")
+    parser.add_argument("--show-failures", action="store_true",
+                       help="Print stderr/stdout snippets for failing tests")
     
     args = parser.parse_args()
     
@@ -312,12 +322,16 @@ def main():
         result = test_file(file, args.compiler)
         results.append(result)
         print(result["status"])
+        if args.show_failures and result["status"].startswith("❌"):
+            snippet = result["stderr"].strip() or result["stdout"].strip()
+            if snippet:
+                print(snippet.splitlines()[0])
     
     print(f"\nGenerating report: {args.output}")
     generate_report(results, ops, args.output)
     
-    success_count = sum(1 for r in results if "✅" in r["status"])
-    failed_count = sum(1 for r in results if "❌" in r["status"])
+    success_count = sum(1 for r in results if r["status"].startswith("✅"))
+    failed_count = sum(1 for r in results if r["status"].startswith("❌"))
     
     print(f"\n✅ Report generated: {args.output}")
     print(f"Summary: {success_count} success, {failed_count} failed out of {len(results)}")

@@ -93,6 +93,9 @@ fn lowerIntegerLiteral(
     };
 
     const op = c.oraArithConstantOpCreate(ctx, loc, ty, attr);
+    if (op.ptr == null) {
+        @panic("Failed to create integer literal arith.constant");
+    }
     h.appendOp(block, op);
     return h.getResult(op, 0);
 }
@@ -118,7 +121,7 @@ fn lowerStringLiteral(
     string_lit: lib.ast.Expressions.StringLiteral,
 ) c.MlirValue {
     const string_len = string_lit.value.len;
-    const ty = c.oraIntegerTypeCreate(ctx, @intCast(string_len * 8));
+    const ty = c.oraStringTypeGet(ctx);
     const loc = locations.createLocation(string_lit.span);
     const op = ora_dialect.createStringConstant(string_lit.value, ty, loc);
     const length_attr = h.intAttr(ctx, c.oraIntegerTypeCreate(ctx, 32), @intCast(string_len));
@@ -184,6 +187,9 @@ fn lowerAddressLiteral(
     };
 
     const const_op = c.oraArithConstantOpCreate(ctx, loc, i160_ty, attr);
+    if (const_op.ptr == null) {
+        @panic("Failed to create address literal arith.constant");
+    }
     h.appendOp(block, const_op);
     const i160_value = h.getResult(const_op, 0);
     const converted = type_mapper.createConversionOp(block, i160_value, addr_ty, addr_lit.span);
@@ -253,6 +259,9 @@ fn lowerBinaryLiteral(
         attrs[0..].ptr,
         attrs.len,
     );
+    if (op.ptr == null) {
+        @panic("Failed to create ora.binary.constant operation");
+    }
     h.appendOp(block, op);
     return h.getResult(op, 0);
 }
@@ -286,8 +295,6 @@ fn lowerBytesLiteral(
     locations: LocationTracker,
     bytes_lit: lib.ast.Expressions.BytesLiteral,
 ) c.MlirValue {
-    const bytes_len = bytes_lit.value.len;
-    const ty = c.oraIntegerTypeCreate(ctx, @intCast(bytes_len * 8));
     const loc = locations.createLocation(bytes_lit.span);
     const bytes_str = if (std.mem.startsWith(u8, bytes_lit.value, "0x"))
         bytes_lit.value[2..]
@@ -306,16 +313,12 @@ fn lowerBytesLiteral(
         }
     }
 
-    const parsed: i64 = std.fmt.parseInt(i64, bytes_str, 16) catch |err| {
-        log.err("Failed to parse bytes literal '{s}': {s}\n", .{ bytes_lit.value, @errorName(err) });
-        return expr_helpers.createConstant(ctx, block, ora_dialect, locations, 0, bytes_lit.span);
-    };
-
-    const bytes_id = h.identifier(ctx, "ora.bytes_literal");
-    const attrs = [_]c.MlirNamedAttribute{
-        c.oraNamedAttributeGet(bytes_id, h.boolAttr(ctx, 1)),
-    };
-    const op = ora_dialect.createArithConstantWithAttrs(parsed, ty, &attrs, loc);
+    const bytes_len = bytes_str.len / 2;
+    const ty = c.oraBytesTypeGet(ctx);
+    const op = ora_dialect.createBytesConstant(bytes_lit.value, ty, loc);
+    const length_attr = h.intAttr(ctx, c.oraIntegerTypeCreate(ctx, 32), @intCast(bytes_len));
+    const length_name = h.strRef("length");
+    c.oraOperationSetAttributeByName(op, length_name, length_attr);
     h.appendOp(block, op);
     return h.getResult(op, 0);
 }

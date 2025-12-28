@@ -271,7 +271,15 @@ pub fn lowerStorageVariableDecl(self: *const StatementLowerer, var_decl: *const 
 /// Lower memory variable declarations
 pub fn lowerMemoryVariableDecl(self: *const StatementLowerer, var_decl: *const lib.ast.Statements.VariableDeclNode, mlir_type: c.MlirType, loc: c.MlirLocation) LoweringError!void {
     // create memory allocation
-    const alloca_op = self.memory_manager.createAllocaOp(mlir_type, var_decl.region, var_decl.name, loc);
+    const memref_type = h.memRefType(
+        self.ctx,
+        mlir_type,
+        0,
+        null,
+        h.nullAttr(),
+        self.memory_manager.getMemorySpaceAttribute(var_decl.region),
+    );
+    const alloca_op = self.memory_manager.createAllocaOp(memref_type, var_decl.region, var_decl.name, loc);
     h.appendOp(self.block, alloca_op);
     const alloca_result = h.getResult(alloca_op, 0);
 

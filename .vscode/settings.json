@@ -25,5 +25,5 @@
         "vector": "cpp",
         "*.inc": "cpp"
     },
-    "cmake.sourceDirectory": "/Users/logic/Ora/Ora/vendor/solidity"
+    "cmake.sourceDirectory": "/Users/logic/Ora/Ora/vendor/llvm-project/llvm/include"
 }

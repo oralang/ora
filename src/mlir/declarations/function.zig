@@ -319,13 +319,8 @@ pub fn lowerFunction(self: *const DeclarationLowerer, func: *const lib.FunctionN
 
     // set attributes on function arguments
     for (func.parameters, 0..) |param, i| {
-        const type_str = helpers.oraTypeToString(self, param.type_info, std.heap.page_allocator) catch {
-            log.warn("Failed to convert parameter type to string for {s}\n", .{param.name});
-            continue;
-        };
-        defer std.heap.page_allocator.free(type_str);
-
-        const type_attr = c.oraStringAttrCreate(self.ctx, h.strRef(type_str));
+        const param_mlir_type = self.type_mapper.toMlirType(param.type_info);
+        const type_attr = c.oraTypeAttrCreateFromType(param_mlir_type);
         const success = c.oraFuncSetArgAttr(func_op, @intCast(i), ora_type_attr_name, type_attr);
         if (!success) {
             log.warn("Failed to set ora.type attribute on parameter {s}\n", .{param.name});
@@ -334,13 +329,8 @@ pub fn lowerFunction(self: *const DeclarationLowerer, func: *const lib.FunctionN
 
     // set attribute on function return value (if present)
     if (func.return_type_info) |ret_info| {
-        const type_str = helpers.oraTypeToString(self, ret_info, std.heap.page_allocator) catch {
-            log.warn("Failed to convert return type to string\n", .{});
-            return func_op;
-        };
-        defer std.heap.page_allocator.free(type_str);
-
-        const type_attr = c.oraStringAttrCreate(self.ctx, h.strRef(type_str));
+        const ret_mlir_type = self.type_mapper.toMlirType(ret_info);
+        const type_attr = c.oraTypeAttrCreateFromType(ret_mlir_type);
         const success = c.oraFuncSetResultAttr(func_op, 0, ora_type_attr_name, type_attr);
         if (!success) {
             log.warn("Failed to set ora.type attribute on return value\n", .{});

@@ -57,6 +57,9 @@ pub fn getExpressionSpan(_: *const DeclarationLowerer, expr: *const lib.ast.Expr
 /// Create a constant value from an attribute
 pub fn createConstant(self: *const DeclarationLowerer, block: c.MlirBlock, attr: c.MlirAttribute, ty: c.MlirType, loc: c.MlirLocation) c.MlirValue {
     const const_op = c.oraArithConstantOpCreate(self.ctx, loc, ty, attr);
+    if (const_op.ptr == null) {
+        @panic("Failed to create declaration constant");
+    }
     h.appendOp(block, const_op);
     return h.getResult(const_op, 0);
 }

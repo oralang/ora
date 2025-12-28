@@ -1351,6 +1351,18 @@ namespace mlir
             effects.emplace_back(MemoryEffects::Write::get(), SideEffects::DefaultResource::get());
         }
 
+        // Byte memory load: reads from memory
+        void MLoad8Op::getEffects(SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>> &effects)
+        {
+            effects.emplace_back(MemoryEffects::Read::get(), SideEffects::DefaultResource::get());
+        }
+
+        // Byte memory store: writes to memory
+        void MStore8Op::getEffects(SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>> &effects)
+        {
+            effects.emplace_back(MemoryEffects::Write::get(), SideEffects::DefaultResource::get());
+        }
+
         // Transient storage load: reads from transient storage
         void TLoadOp::getEffects(SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>> &effects)
         {

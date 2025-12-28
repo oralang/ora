@@ -361,13 +361,14 @@ fn isElementLevelTarget(target: ast.Expressions.ExprNode) bool {
 
 fn isRegionAssignmentAllowed(target_region: MemoryRegion, source_region: MemoryRegion, target_node: ast.Expressions.ExprNode) bool {
     if (target_region == .Calldata) return false;
+    if (target_region == source_region) return true;
     if (isStorageLike(target_region)) {
         if (isStorageLike(source_region)) {
             return isElementLevelTarget(target_node);
         }
         return true;
     }
-    return true;
+    return false;
 }
 
 // ============================================================================

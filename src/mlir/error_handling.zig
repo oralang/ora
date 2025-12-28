@@ -250,9 +250,11 @@ pub const ErrorHandler = struct {
     }
 
     /// Validate an MLIR operation with comprehensive error reporting
-    pub fn validateMlirOperation(_: *ErrorHandler, _: c.MlirOperation, _: ?lib.ast.SourceSpan) !bool {
-        // basic validation - always return true for now
-        // this can be enhanced with MLIR operation validation
+    pub fn validateMlirOperation(self: *ErrorHandler, op: c.MlirOperation, span: ?lib.ast.SourceSpan) !bool {
+        if (c.oraOperationIsNull(op)) {
+            try self.reportError(.MlirOperationFailed, span, "failed to create MLIR operation", null);
+            return false;
+        }
         return true;
     }
 

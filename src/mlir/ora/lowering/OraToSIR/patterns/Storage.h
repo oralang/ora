@@ -80,6 +80,28 @@ namespace mlir
                 ConversionPatternRewriter &rewriter) const override;
         };
 
+        class ConvertTLoadOp : public OpConversionPattern<ora::TLoadOp>
+        {
+        public:
+            using OpConversionPattern::OpConversionPattern;
+
+            LogicalResult matchAndRewrite(
+                ora::TLoadOp op,
+                typename ora::TLoadOp::Adaptor adaptor,
+                ConversionPatternRewriter &rewriter) const override;
+        };
+
+        class ConvertTStoreOp : public OpConversionPattern<ora::TStoreOp>
+        {
+        public:
+            using OpConversionPattern::OpConversionPattern;
+
+            LogicalResult matchAndRewrite(
+                ora::TStoreOp op,
+                typename ora::TStoreOp::Adaptor adaptor,
+                ConversionPatternRewriter &rewriter) const override;
+        };
+
         class ConvertGlobalOp : public OpConversionPattern<ora::GlobalOp>
         {
         public:

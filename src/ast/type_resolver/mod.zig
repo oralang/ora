@@ -227,6 +227,25 @@ pub const TypeResolver = struct {
     ) TypeResolutionError!void {
         // parameters should already have explicit types, just validate them
         for (function.parameters) |*param| {
+            if (param.type_info.ora_type) |ot| {
+                if (ot == .struct_type) {
+                    const type_name = ot.struct_type;
+                    const root_scope: ?*const Scope = @as(?*const Scope, @ptrCast(&self.symbol_table.root));
+                    const type_symbol = SymbolTable.findUp(root_scope, type_name);
+                    if (type_symbol) |tsym| {
+                        if (tsym.kind == .Enum) {
+                            param.type_info.ora_type = OraType{ .enum_type = type_name };
+                            param.type_info.category = .Enum;
+                        } else {
+                            param.type_info.category = ot.getCategory();
+                        }
+                    } else {
+                        param.type_info.category = ot.getCategory();
+                    }
+                } else {
+                    param.type_info.category = ot.getCategory();
+                }
+            }
             if (!param.type_info.isResolved()) {
                 return TypeResolutionError.UnresolvedType;
             }
@@ -347,7 +366,31 @@ pub const TypeResolver = struct {
         self: *TypeResolver,
         function: *FunctionNode,
     ) TypeResolutionError!void {
-        const expected_return_type = function.return_type_info;
+        var expected_return_type = function.return_type_info;
+
+        if (expected_return_type == null) {
+            var inferred: ?TypeInfo = null;
+            var saw_value = false;
+            var saw_void = false;
+            try self.inferReturnTypeInBlock(&function.body, &inferred, &saw_value, &saw_void);
+
+            if (saw_value and saw_void) {
+                return TypeResolutionError.TypeMismatch;
+            }
+            if (saw_value) {
+                expected_return_type = inferred;
+                function.return_type_info = inferred;
+            } else if (saw_void) {
+                const void_ty = TypeInfo{
+                    .category = .Void,
+                    .ora_type = OraType.void,
+                    .source = .inferred,
+                    .span = function.span,
+                };
+                expected_return_type = void_ty;
+                function.return_type_info = void_ty;
+            }
+        }
 
         if (expected_return_type) |ret_ty| {
             log.debug("[validateReturnStatements] Function '{s}' return type: category={s}\n", .{ function.name, @tagName(ret_ty.category) });
@@ -358,6 +401,72 @@ pub const TypeResolver = struct {
         // walk through all statements in the function body
         for (function.body.statements) |*stmt| {
             try self.validateReturnInStatement(stmt, expected_return_type);
+        }
+    }
+
+    fn inferReturnTypeInStatement(
+        self: *TypeResolver,
+        stmt: *Statements.StmtNode,
+        inferred: *?TypeInfo,
+        saw_value: *bool,
+        saw_void: *bool,
+    ) TypeResolutionError!void {
+        switch (stmt.*) {
+            .Return => |*ret| {
+                if (ret.value) |*value_expr| {
+                    var typed = try self.core_resolver.synthExpr(value_expr);
+                    defer typed.deinit(self.allocator);
+
+                    if (!typed.ty.isResolved()) {
+                        return TypeResolutionError.UnresolvedType;
+                    }
+
+                    saw_value.* = true;
+                    if (inferred.*) |current| {
+                        if (!self.validation_system.isAssignable(typed.ty, current)) {
+                            return TypeResolutionError.TypeMismatch;
+                        }
+                    } else {
+                        inferred.* = typed.ty;
+                    }
+                } else {
+                    saw_void.* = true;
+                }
+            },
+            .If => |*if_stmt| {
+                try self.inferReturnTypeInBlock(&if_stmt.then_branch, inferred, saw_value, saw_void);
+                if (if_stmt.else_branch) |*else_branch| {
+                    try self.inferReturnTypeInBlock(else_branch, inferred, saw_value, saw_void);
+                }
+            },
+            .While => |*while_stmt| {
+                try self.inferReturnTypeInBlock(&while_stmt.body, inferred, saw_value, saw_void);
+            },
+            .ForLoop => |*for_stmt| {
+                try self.inferReturnTypeInBlock(&for_stmt.body, inferred, saw_value, saw_void);
+            },
+            .LabeledBlock => |*labeled_block| {
+                try self.inferReturnTypeInBlock(&labeled_block.block, inferred, saw_value, saw_void);
+            },
+            .TryBlock => |*try_block| {
+                try self.inferReturnTypeInBlock(&try_block.try_block, inferred, saw_value, saw_void);
+                if (try_block.catch_block) |*catch_block| {
+                    try self.inferReturnTypeInBlock(&catch_block.block, inferred, saw_value, saw_void);
+                }
+            },
+            else => {},
+        }
+    }
+
+    fn inferReturnTypeInBlock(
+        self: *TypeResolver,
+        block: *Statements.BlockNode,
+        inferred: *?TypeInfo,
+        saw_value: *bool,
+        saw_void: *bool,
+    ) TypeResolutionError!void {
+        for (block.statements) |*stmt| {
+            try self.inferReturnTypeInStatement(stmt, inferred, saw_value, saw_void);
         }
     }
 

@@ -69,6 +69,61 @@ namespace mlir
                 ConversionPatternRewriter &rewriter) const override;
         };
 
+        class ConvertCmpOp : public OpConversionPattern<ora::CmpOp>
+        {
+        public:
+            using OpConversionPattern::OpConversionPattern;
+
+            LogicalResult matchAndRewrite(
+                ora::CmpOp op,
+                typename ora::CmpOp::Adaptor adaptor,
+                ConversionPatternRewriter &rewriter) const override;
+        };
+
+        class ConvertConstOp : public OpConversionPattern<ora::ConstOp>
+        {
+        public:
+            using OpConversionPattern::OpConversionPattern;
+
+            LogicalResult matchAndRewrite(
+                ora::ConstOp op,
+                typename ora::ConstOp::Adaptor adaptor,
+                ConversionPatternRewriter &rewriter) const override;
+        };
+
+        class ConvertStringConstantOp : public OpConversionPattern<ora::StringConstantOp>
+        {
+        public:
+            using OpConversionPattern::OpConversionPattern;
+
+            LogicalResult matchAndRewrite(
+                ora::StringConstantOp op,
+                typename ora::StringConstantOp::Adaptor adaptor,
+                ConversionPatternRewriter &rewriter) const override;
+        };
+
+        class ConvertBytesConstantOp : public OpConversionPattern<ora::BytesConstantOp>
+        {
+        public:
+            using OpConversionPattern::OpConversionPattern;
+
+            LogicalResult matchAndRewrite(
+                ora::BytesConstantOp op,
+                typename ora::BytesConstantOp::Adaptor adaptor,
+                ConversionPatternRewriter &rewriter) const override;
+        };
+
+        class ConvertRefinementToBaseOp : public OpConversionPattern<ora::RefinementToBaseOp>
+        {
+        public:
+            using OpConversionPattern::OpConversionPattern;
+
+            LogicalResult matchAndRewrite(
+                ora::RefinementToBaseOp op,
+                typename ora::RefinementToBaseOp::Adaptor adaptor,
+                ConversionPatternRewriter &rewriter) const override;
+        };
+
         // Convert arith.constant with Ora types to sir.const
         class ConvertArithConstantOp : public OpConversionPattern<mlir::arith::ConstantOp>
         {

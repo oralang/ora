@@ -47,449 +47,520 @@
 #include <cstdlib>
 #include <cstring>
 
-extern "C" {
-MlirStringRef oraStringRefCreate(const char *data, size_t length) {
-    MlirStringRef ref;
-    ref.data = data;
-    ref.length = length;
-    return ref;
-}
-
-MlirStringRef oraStringRefCreateFromCString(const char *data) {
-    return oraStringRefCreate(data, std::strlen(data));
-}
-
-void oraStringRefFree(MlirStringRef ref) {
-    if (ref.data != nullptr) {
-        std::free(const_cast<char *>(ref.data));
-    }
-}
-
-MlirIdentifier oraIdentifierGet(MlirContext ctx, MlirStringRef name) {
-    mlir::StringAttr attr = mlir::StringAttr::get(unwrap(ctx), unwrap(name));
-    return MlirIdentifier{attr.getAsOpaquePointer()};
-}
-
-MlirStringRef oraIdentifierStr(MlirIdentifier id) {
-    llvm::StringRef name = unwrap(id).getValue();
-    return oraStringRefCreate(name.data(), name.size());
-}
-
-MlirNamedAttribute oraNamedAttributeGet(MlirIdentifier name, MlirAttribute attr) {
-    MlirNamedAttribute named;
-    named.name = name;
-    named.attribute = attr;
-    return named;
-}
-
-MlirLocation oraLocationUnknownGet(MlirContext ctx) {
-    mlir::Location loc = mlir::UnknownLoc::get(unwrap(ctx));
-    return MlirLocation{loc.getAsOpaquePointer()};
-}
-
-MlirLocation oraLocationFileLineColGet(
-    MlirContext ctx,
-    MlirStringRef filename,
-    unsigned line,
-    unsigned column) {
-    mlir::Location loc = mlir::FileLineColLoc::get(unwrap(ctx), unwrap(filename), line, column);
-    return MlirLocation{loc.getAsOpaquePointer()};
-}
-
-bool oraLocationIsNull(MlirLocation loc) {
-    return loc.ptr == nullptr;
-}
-
-MlirStringRef oraLocationPrintToString(MlirLocation loc) {
-    std::string buffer;
-    llvm::raw_string_ostream os(buffer);
-    unwrap(loc).print(os);
-    os.flush();
-    char *out = static_cast<char *>(std::malloc(buffer.size() + 1));
-    if (!out) {
-        return oraStringRefCreate(nullptr, 0);
-    }
-    std::memcpy(out, buffer.data(), buffer.size());
-    out[buffer.size()] = '\0';
-    return oraStringRefCreate(out, buffer.size());
-}
-
-MlirContext oraContextCreate() {
-    return wrap(new mlir::MLIRContext());
-}
-
-void oraContextDestroy(MlirContext ctx) {
-    delete unwrap(ctx);
-}
-
-MlirDialectRegistry oraDialectRegistryCreate() {
-    return wrap(new mlir::DialectRegistry());
-}
-
-void oraDialectRegistryDestroy(MlirDialectRegistry registry) {
-    delete unwrap(registry);
-}
-
-void oraRegisterAllDialects(MlirDialectRegistry registry) {
-    mlir::registerAllDialects(*unwrap(registry));
-}
-
-void oraContextAppendDialectRegistry(MlirContext ctx, MlirDialectRegistry registry) {
-    unwrap(ctx)->appendDialectRegistry(*unwrap(registry));
-}
-
-void oraContextLoadAllAvailableDialects(MlirContext ctx) {
-    unwrap(ctx)->loadAllAvailableDialects();
-}
-
-MlirModule oraModuleCreateEmpty(MlirLocation loc) {
-    return wrap(mlir::ModuleOp::create(unwrap(loc)));
-}
-
-MlirOperation oraModuleGetOperation(MlirModule module) {
-    return wrap(unwrap(module).getOperation());
-}
-
-MlirBlock oraModuleGetBody(MlirModule module) {
-    return wrap(unwrap(module).getBody());
-}
-
-bool oraModuleIsNull(MlirModule module) {
-    return module.ptr == nullptr;
-}
-
-void oraModuleDestroy(MlirModule module) {
-    if (module.ptr == nullptr) {
-        return;
-    }
-    unwrap(module).erase();
-}
-
-void oraBlockAppendOwnedOperation(MlirBlock block, MlirOperation op) {
-    unwrap(block)->push_back(unwrap(op));
-}
-
-MlirOperation oraBlockGetFirstOperation(MlirBlock block) {
-    mlir::Block *blk = unwrap(block);
-    if (blk == nullptr || blk->empty()) {
-        return MlirOperation{nullptr};
-    }
-    return wrap(&blk->front());
-}
-
-MlirOperation oraBlockGetTerminator(MlirBlock block) {
-    mlir::Block *blk = unwrap(block);
-    if (blk == nullptr || blk->empty()) {
-        return MlirOperation{nullptr};
-    }
-    return wrap(blk->getTerminator());
-}
-
-MlirValue oraBlockGetArgument(MlirBlock block, size_t index) {
-    return wrap(unwrap(block)->getArgument(index));
-}
-
-bool oraBlockIsNull(MlirBlock block) {
-    return block.ptr == nullptr;
-}
-
-MlirOperation oraOperationGetNextInBlock(MlirOperation op) {
-    mlir::Operation *operation = unwrap(op);
-    if (operation == nullptr) {
-        return MlirOperation{nullptr};
-    }
-    return wrap(operation->getNextNode());
-}
-
-MlirValue oraOperationGetResult(MlirOperation op, size_t index) {
-    mlir::Operation *operation = unwrap(op);
-    if (operation == nullptr) {
-        return MlirValue{nullptr};
-    }
-    return wrap(operation->getResult(index));
-}
-
-MlirValue oraOperationGetOperand(MlirOperation op, size_t index) {
-    return wrap(unwrap(op)->getOperand(index));
-}
-
-size_t oraOperationGetNumOperands(MlirOperation op) {
-    return unwrap(op)->getNumOperands();
-}
-
-size_t oraOperationGetNumResults(MlirOperation op) {
-    return unwrap(op)->getNumResults();
-}
-
-size_t oraOperationGetNumRegions(MlirOperation op) {
-    return unwrap(op)->getNumRegions();
-}
-
-bool oraOperationIsNull(MlirOperation op) {
-    return op.ptr == nullptr;
-}
-
-void oraOperationSetAttributeByName(
-    MlirOperation op,
-    MlirStringRef name,
-    MlirAttribute attr) {
-    unwrap(op)->setAttr(unwrap(name), unwrap(attr));
-}
-
-MlirAttribute oraOperationGetAttributeByName(MlirOperation op, MlirStringRef name) {
-    return wrap(unwrap(op)->getAttr(unwrap(name)));
-}
-
-MlirLocation oraOperationGetLocation(MlirOperation op) {
-    return wrap(unwrap(op)->getLoc());
-}
-
-MlirRegion oraOperationGetRegion(MlirOperation op, size_t index) {
-    return wrap(&unwrap(op)->getRegion(index));
-}
-
-MlirType oraValueGetType(MlirValue value) {
-    return wrap(unwrap(value).getType());
-}
-
-bool oraValueIsNull(MlirValue value) {
-    return value.ptr == nullptr;
-}
-
-bool oraValueIsAOpResult(MlirValue value) {
-    return llvm::isa<mlir::OpResult>(unwrap(value));
-}
-
-MlirOperation oraOpResultGetOwner(MlirValue value) {
-    auto result = llvm::dyn_cast<mlir::OpResult>(unwrap(value));
-    if (!result) {
-        return MlirOperation{nullptr};
-    }
-    return wrap(result.getOwner());
-}
-
-MlirBlock oraRegionGetFirstBlock(MlirRegion region) {
-    mlir::Region *reg = unwrap(region);
-    if (reg == nullptr || reg->empty()) {
-        return MlirBlock{nullptr};
-    }
-    return wrap(&reg->front());
-}
-
-MlirBlock oraBlockGetNextInRegion(MlirBlock block) {
-    mlir::Block *blk = unwrap(block);
-    if (blk == nullptr) {
-        return MlirBlock{nullptr};
-    }
-    return wrap(blk->getNextNode());
-}
-
-bool oraRegionIsNull(MlirRegion region) {
-    return region.ptr == nullptr;
-}
-
-bool oraAttributeIsNull(MlirAttribute attr) {
-    return attr.ptr == nullptr;
-}
-
-MlirStringRef oraStringAttrGetValue(MlirAttribute attr) {
-    auto str_attr = llvm::dyn_cast<mlir::StringAttr>(unwrap(attr));
-    if (!str_attr) {
-        return oraStringRefCreate(nullptr, 0);
-    }
-    llvm::StringRef value = str_attr.getValue();
-    return oraStringRefCreate(value.data(), value.size());
-}
-
-int64_t oraIntegerAttrGetValueSInt(MlirAttribute attr) {
-    auto int_attr = llvm::dyn_cast<mlir::IntegerAttr>(unwrap(attr));
-    if (!int_attr) {
-        return 0;
-    }
-    return int_attr.getValue().getSExtValue();
-}
-
-MlirType oraFunctionTypeGet(
-    MlirContext ctx,
-    size_t numInputs,
-    const MlirType *inputTypes,
-    size_t numResults,
-    const MlirType *resultTypes) {
-    llvm::SmallVector<mlir::Type, 8> inputs;
-    llvm::SmallVector<mlir::Type, 2> results;
-    inputs.reserve(numInputs);
-    results.reserve(numResults);
-    for (size_t i = 0; i < numInputs; ++i) {
-        inputs.push_back(unwrap(inputTypes[i]));
-    }
-    for (size_t i = 0; i < numResults; ++i) {
-        results.push_back(unwrap(resultTypes[i]));
-    }
-    return wrap(mlir::FunctionType::get(unwrap(ctx), inputs, results));
-}
-
-MlirStringRef oraOperationPrintToString(MlirOperation op) {
-    try
+extern "C"
+{
+    MlirStringRef oraStringRefCreate(const char *data, size_t length)
     {
-        ORA_DEBUG_PREFIX("OraCAPI", "oraOperationPrintToString called");
+        MlirStringRef ref;
+        ref.data = data;
+        ref.length = length;
+        return ref;
+    }
 
+    MlirStringRef oraStringRefCreateFromCString(const char *data)
+    {
+        return oraStringRefCreate(data, std::strlen(data));
+    }
+
+    void oraStringRefFree(MlirStringRef ref)
+    {
+        if (ref.data != nullptr)
+        {
+            std::free(const_cast<char *>(ref.data));
+        }
+    }
+
+    MlirIdentifier oraIdentifierGet(MlirContext ctx, MlirStringRef name)
+    {
+        mlir::StringAttr attr = mlir::StringAttr::get(unwrap(ctx), unwrap(name));
+        return MlirIdentifier{attr.getAsOpaquePointer()};
+    }
+
+    MlirStringRef oraIdentifierStr(MlirIdentifier id)
+    {
+        llvm::StringRef name = unwrap(id).getValue();
+        return oraStringRefCreate(name.data(), name.size());
+    }
+
+    MlirNamedAttribute oraNamedAttributeGet(MlirIdentifier name, MlirAttribute attr)
+    {
+        MlirNamedAttribute named;
+        named.name = name;
+        named.attribute = attr;
+        return named;
+    }
+
+    MlirLocation oraLocationUnknownGet(MlirContext ctx)
+    {
+        mlir::Location loc = mlir::UnknownLoc::get(unwrap(ctx));
+        return MlirLocation{loc.getAsOpaquePointer()};
+    }
+
+    MlirLocation oraLocationFileLineColGet(
+        MlirContext ctx,
+        MlirStringRef filename,
+        unsigned line,
+        unsigned column)
+    {
+        mlir::Location loc = mlir::FileLineColLoc::get(unwrap(ctx), unwrap(filename), line, column);
+        return MlirLocation{loc.getAsOpaquePointer()};
+    }
+
+    bool oraLocationIsNull(MlirLocation loc)
+    {
+        return loc.ptr == nullptr;
+    }
+
+    MlirStringRef oraLocationPrintToString(MlirLocation loc)
+    {
+        std::string buffer;
+        llvm::raw_string_ostream os(buffer);
+        unwrap(loc).print(os);
+        os.flush();
+        char *out = static_cast<char *>(std::malloc(buffer.size() + 1));
+        if (!out)
+        {
+            return oraStringRefCreate(nullptr, 0);
+        }
+        std::memcpy(out, buffer.data(), buffer.size());
+        out[buffer.size()] = '\0';
+        return oraStringRefCreate(out, buffer.size());
+    }
+
+    MlirContext oraContextCreate()
+    {
+        return wrap(new mlir::MLIRContext());
+    }
+
+    void oraContextDestroy(MlirContext ctx)
+    {
+        delete unwrap(ctx);
+    }
+
+    MlirDialectRegistry oraDialectRegistryCreate()
+    {
+        return wrap(new mlir::DialectRegistry());
+    }
+
+    void oraDialectRegistryDestroy(MlirDialectRegistry registry)
+    {
+        delete unwrap(registry);
+    }
+
+    void oraRegisterAllDialects(MlirDialectRegistry registry)
+    {
+        mlir::registerAllDialects(*unwrap(registry));
+    }
+
+    void oraContextAppendDialectRegistry(MlirContext ctx, MlirDialectRegistry registry)
+    {
+        unwrap(ctx)->appendDialectRegistry(*unwrap(registry));
+    }
+
+    void oraContextLoadAllAvailableDialects(MlirContext ctx)
+    {
+        unwrap(ctx)->loadAllAvailableDialects();
+    }
+
+    MlirModule oraModuleCreateEmpty(MlirLocation loc)
+    {
+        return wrap(mlir::ModuleOp::create(unwrap(loc)));
+    }
+
+    MlirOperation oraModuleGetOperation(MlirModule module)
+    {
+        return wrap(unwrap(module).getOperation());
+    }
+
+    MlirBlock oraModuleGetBody(MlirModule module)
+    {
+        return wrap(unwrap(module).getBody());
+    }
+
+    bool oraModuleIsNull(MlirModule module)
+    {
+        return module.ptr == nullptr;
+    }
+
+    void oraModuleDestroy(MlirModule module)
+    {
+        if (module.ptr == nullptr)
+        {
+            return;
+        }
+        unwrap(module).erase();
+    }
+
+    void oraBlockAppendOwnedOperation(MlirBlock block, MlirOperation op)
+    {
+        unwrap(block)->push_back(unwrap(op));
+    }
+
+    MlirOperation oraBlockGetFirstOperation(MlirBlock block)
+    {
+        mlir::Block *blk = unwrap(block);
+        if (blk == nullptr || blk->empty())
+        {
+            return MlirOperation{nullptr};
+        }
+        return wrap(&blk->front());
+    }
+
+    MlirOperation oraBlockGetTerminator(MlirBlock block)
+    {
+        mlir::Block *blk = unwrap(block);
+        if (blk == nullptr || blk->empty())
+        {
+            return MlirOperation{nullptr};
+        }
+        return wrap(blk->getTerminator());
+    }
+
+    MlirValue oraBlockGetArgument(MlirBlock block, size_t index)
+    {
+        return wrap(unwrap(block)->getArgument(index));
+    }
+
+    bool oraBlockIsNull(MlirBlock block)
+    {
+        return block.ptr == nullptr;
+    }
+
+    MlirOperation oraOperationGetNextInBlock(MlirOperation op)
+    {
         mlir::Operation *operation = unwrap(op);
-
-        if (!operation)
+        if (operation == nullptr)
         {
-            ORA_DEBUG_PREFIX("OraCAPI", "ERROR: operation is null!");
-            return {nullptr, 0};
+            return MlirOperation{nullptr};
         }
+        return wrap(operation->getNextNode());
+    }
 
-        // Check if DCE left the IR in an invalid state
-        if (auto moduleOp = llvm::dyn_cast<mlir::ModuleOp>(operation))
+    MlirValue oraOperationGetResult(MlirOperation op, size_t index)
+    {
+        mlir::Operation *operation = unwrap(op);
+        if (operation == nullptr)
         {
-            if (moduleOp->hasAttr("ora.dce_invalid"))
-            {
-                ORA_DEBUG_PREFIX("OraCAPI", "  This would cause a segfault if we tried to print");
-                return {nullptr, 0};
-            }
+            return MlirValue{nullptr};
         }
+        return wrap(operation->getResult(index));
+    }
 
-        ORA_DEBUG_PREFIX("OraCAPI", "Operation: " << operation->getName());
+    MlirValue oraOperationGetOperand(MlirOperation op, size_t index)
+    {
+        return wrap(unwrap(op)->getOperand(index));
+    }
 
-        // Register the Ora dialect to ensure custom printers are available
-        mlir::MLIRContext *context = operation->getContext();
-        if (!context)
-        {
-            return {nullptr, 0};
-        }
-        context->getOrLoadDialect<mlir::ora::OraDialect>();
-        context->getOrLoadDialect<sir::SIRDialect>();
+    size_t oraOperationGetNumOperands(MlirOperation op)
+    {
+        return unwrap(op)->getNumOperands();
+    }
 
-        // Create a string stream to capture the printed output
-        std::string mlirContent;
-        llvm::raw_string_ostream mlirStream(mlirContent);
+    size_t oraOperationGetNumResults(MlirOperation op)
+    {
+        return unwrap(op)->getNumResults();
+    }
 
-        // Use OpPrintingFlags to enable custom assembly formats
-        mlir::OpPrintingFlags flags;
-        flags.enableDebugInfo(true, false);
-        flags.printGenericOpForm(false);
-        flags.assumeVerified();
-        flags.useLocalScope();
+    size_t oraOperationGetNumRegions(MlirOperation op)
+    {
+        return unwrap(op)->getNumRegions();
+    }
 
-        mlir::AsmState state(operation, flags);
-        operation->print(mlirStream, state);
+    bool oraOperationIsNull(MlirOperation op)
+    {
+        return op.ptr == nullptr;
+    }
 
-        mlirStream.flush();
+    void oraOperationSetAttributeByName(
+        MlirOperation op,
+        MlirStringRef name,
+        MlirAttribute attr)
+    {
+        unwrap(op)->setAttr(unwrap(name), unwrap(attr));
+    }
 
-        if (mlirContent.empty())
-        {
-            return {nullptr, 0};
-        }
+    MlirAttribute oraOperationGetAttributeByName(MlirOperation op, MlirStringRef name)
+    {
+        return wrap(unwrap(op)->getAttr(unwrap(name)));
+    }
 
-        // Post-process the output to add line breaks for readability
-        std::string formattedContent;
-        formattedContent.reserve(mlirContent.size() * 1.1);
+    MlirLocation oraOperationGetLocation(MlirOperation op)
+    {
+        return wrap(unwrap(op)->getLoc());
+    }
 
-        std::istringstream inputStream(mlirContent);
-        std::string line;
-        std::string prevLine;
-        bool prevWasEmpty = false;
+    MlirRegion oraOperationGetRegion(MlirOperation op, size_t index)
+    {
+        return wrap(&unwrap(op)->getRegion(index));
+    }
 
-        while (std::getline(inputStream, line))
-        {
-            if (line.empty() || (line.find_first_not_of(" \t") == std::string::npos))
-            {
-                prevWasEmpty = true;
-                continue;
-            }
+    MlirType oraValueGetType(MlirValue value)
+    {
+        return wrap(unwrap(value).getType());
+    }
 
-            bool shouldAddBlankLine = false;
+    bool oraValueIsNull(MlirValue value)
+    {
+        return value.ptr == nullptr;
+    }
 
-            if ((line.find("sir.return") != std::string::npos || line.find("sir.iret") != std::string::npos) &&
-                !prevLine.empty() && !prevWasEmpty)
-            {
-                shouldAddBlankLine = true;
-            }
-            else if (line.find("func.func") != std::string::npos &&
-                     !prevLine.empty() && !prevWasEmpty && prevLine.find("func.func") == std::string::npos)
-            {
-                shouldAddBlankLine = true;
-            }
-            else if (line.find("//") != std::string::npos && line.find("//") < line.length() &&
-                     !prevLine.empty() && !prevWasEmpty && prevLine.find("//") == std::string::npos)
-            {
-                shouldAddBlankLine = true;
-            }
-            else if (prevLine.find("return") != std::string::npos &&
-                     prevLine.find("return") < prevLine.length() &&
-                     !line.empty() && line.find("}") == std::string::npos)
-            {
-                shouldAddBlankLine = true;
-            }
-            else if (prevLine.find("}") != std::string::npos &&
-                     (prevLine.find("} {gas_cost") != std::string::npos ||
-                      (prevLine.find("}") == prevLine.find_last_of("}") &&
-                       prevLine.find("} else {") == std::string::npos)) &&
-                     !line.empty() && line.find("}") == std::string::npos &&
-                     line.find("func.func") == std::string::npos)
-            {
-                shouldAddBlankLine = true;
-            }
-            else if (prevLine.find("//") != std::string::npos &&
-                     prevLine.find("//") < prevLine.length() &&
-                     !line.empty() && line.find("//") == std::string::npos)
-            {
-                shouldAddBlankLine = true;
-            }
+    bool oraValueIsAOpResult(MlirValue value)
+    {
+        return llvm::isa<mlir::OpResult>(unwrap(value));
+    }
 
-            if (shouldAddBlankLine && !prevLine.empty() && !prevWasEmpty)
-            {
-                formattedContent += "\n";
-            }
-
-            formattedContent += line;
-            formattedContent += "\n";
-
-            prevWasEmpty = false;
-            prevLine = line;
-        }
-
-        char *result = static_cast<char *>(std::malloc(formattedContent.size() + 1));
+    MlirOperation oraOpResultGetOwner(MlirValue value)
+    {
+        auto result = llvm::dyn_cast<mlir::OpResult>(unwrap(value));
         if (!result)
         {
+            return MlirOperation{nullptr};
+        }
+        return wrap(result.getOwner());
+    }
+
+    MlirBlock oraRegionGetFirstBlock(MlirRegion region)
+    {
+        mlir::Region *reg = unwrap(region);
+        if (reg == nullptr || reg->empty())
+        {
+            return MlirBlock{nullptr};
+        }
+        return wrap(&reg->front());
+    }
+
+    MlirBlock oraBlockGetNextInRegion(MlirBlock block)
+    {
+        mlir::Block *blk = unwrap(block);
+        if (blk == nullptr)
+        {
+            return MlirBlock{nullptr};
+        }
+        return wrap(blk->getNextNode());
+    }
+
+    bool oraRegionIsNull(MlirRegion region)
+    {
+        return region.ptr == nullptr;
+    }
+
+    bool oraAttributeIsNull(MlirAttribute attr)
+    {
+        return attr.ptr == nullptr;
+    }
+
+    MlirStringRef oraStringAttrGetValue(MlirAttribute attr)
+    {
+        auto str_attr = llvm::dyn_cast<mlir::StringAttr>(unwrap(attr));
+        if (!str_attr)
+        {
+            return oraStringRefCreate(nullptr, 0);
+        }
+        llvm::StringRef value = str_attr.getValue();
+        return oraStringRefCreate(value.data(), value.size());
+    }
+
+    int64_t oraIntegerAttrGetValueSInt(MlirAttribute attr)
+    {
+        auto int_attr = llvm::dyn_cast<mlir::IntegerAttr>(unwrap(attr));
+        if (!int_attr)
+        {
+            return 0;
+        }
+        return int_attr.getValue().getSExtValue();
+    }
+
+    MlirType oraFunctionTypeGet(
+        MlirContext ctx,
+        size_t numInputs,
+        const MlirType *inputTypes,
+        size_t numResults,
+        const MlirType *resultTypes)
+    {
+        llvm::SmallVector<mlir::Type, 8> inputs;
+        llvm::SmallVector<mlir::Type, 2> results;
+        inputs.reserve(numInputs);
+        results.reserve(numResults);
+        for (size_t i = 0; i < numInputs; ++i)
+        {
+            inputs.push_back(unwrap(inputTypes[i]));
+        }
+        for (size_t i = 0; i < numResults; ++i)
+        {
+            results.push_back(unwrap(resultTypes[i]));
+        }
+        return wrap(mlir::FunctionType::get(unwrap(ctx), inputs, results));
+    }
+
+    MlirStringRef oraOperationPrintToString(MlirOperation op)
+    {
+        try
+        {
+            ORA_DEBUG_PREFIX("OraCAPI", "oraOperationPrintToString called");
+
+            mlir::Operation *operation = unwrap(op);
+
+            if (!operation)
+            {
+                ORA_DEBUG_PREFIX("OraCAPI", "ERROR: operation is null!");
+                return {nullptr, 0};
+            }
+
+            // Check if DCE left the IR in an invalid state
+            if (auto moduleOp = llvm::dyn_cast<mlir::ModuleOp>(operation))
+            {
+                if (moduleOp->hasAttr("ora.dce_invalid"))
+                {
+                    ORA_DEBUG_PREFIX("OraCAPI", "  This would cause a segfault if we tried to print");
+                    return {nullptr, 0};
+                }
+            }
+
+            ORA_DEBUG_PREFIX("OraCAPI", "Operation: " << operation->getName());
+
+            // Register the Ora dialect to ensure custom printers are available
+            mlir::MLIRContext *context = operation->getContext();
+            if (!context)
+            {
+                return {nullptr, 0};
+            }
+            context->getOrLoadDialect<mlir::ora::OraDialect>();
+            context->getOrLoadDialect<sir::SIRDialect>();
+
+            // Create a string stream to capture the printed output
+            std::string mlirContent;
+            llvm::raw_string_ostream mlirStream(mlirContent);
+
+            // Use OpPrintingFlags to enable custom assembly formats
+            mlir::OpPrintingFlags flags;
+            flags.enableDebugInfo(true, false);
+            flags.printGenericOpForm(false);
+            flags.assumeVerified();
+            flags.useLocalScope();
+
+            mlir::AsmState state(operation, flags);
+            operation->print(mlirStream, state);
+
+            mlirStream.flush();
+
+            if (mlirContent.empty())
+            {
+                return {nullptr, 0};
+            }
+
+            // Post-process the output to add line breaks for readability
+            std::string formattedContent;
+            formattedContent.reserve(mlirContent.size() * 1.1);
+
+            std::istringstream inputStream(mlirContent);
+            std::string line;
+            std::string prevLine;
+            bool prevWasEmpty = false;
+
+            while (std::getline(inputStream, line))
+            {
+                if (line.empty() || (line.find_first_not_of(" \t") == std::string::npos))
+                {
+                    prevWasEmpty = true;
+                    continue;
+                }
+
+                bool shouldAddBlankLine = false;
+
+                if ((line.find("sir.return") != std::string::npos || line.find("sir.iret") != std::string::npos) &&
+                    !prevLine.empty() && !prevWasEmpty)
+                {
+                    shouldAddBlankLine = true;
+                }
+                else if (line.find("func.func") != std::string::npos &&
+                         !prevLine.empty() && !prevWasEmpty && prevLine.find("func.func") == std::string::npos)
+                {
+                    shouldAddBlankLine = true;
+                }
+                else if (line.find("//") != std::string::npos && line.find("//") < line.length() &&
+                         !prevLine.empty() && !prevWasEmpty && prevLine.find("//") == std::string::npos)
+                {
+                    shouldAddBlankLine = true;
+                }
+                else if (prevLine.find("return") != std::string::npos &&
+                         prevLine.find("return") < prevLine.length() &&
+                         !line.empty() && line.find("}") == std::string::npos)
+                {
+                    shouldAddBlankLine = true;
+                }
+                else if (prevLine.find("}") != std::string::npos &&
+                         (prevLine.find("} {gas_cost") != std::string::npos ||
+                          (prevLine.find("}") == prevLine.find_last_of("}") &&
+                           prevLine.find("} else {") == std::string::npos)) &&
+                         !line.empty() && line.find("}") == std::string::npos &&
+                         line.find("func.func") == std::string::npos)
+                {
+                    shouldAddBlankLine = true;
+                }
+                else if (prevLine.find("//") != std::string::npos &&
+                         prevLine.find("//") < prevLine.length() &&
+                         !line.empty() && line.find("//") == std::string::npos)
+                {
+                    shouldAddBlankLine = true;
+                }
+
+                if (shouldAddBlankLine && !prevLine.empty() && !prevWasEmpty)
+                {
+                    formattedContent += "\n";
+                }
+
+                formattedContent += line;
+                formattedContent += "\n";
+
+                prevWasEmpty = false;
+                prevLine = line;
+            }
+
+            char *result = static_cast<char *>(std::malloc(formattedContent.size() + 1));
+            if (!result)
+            {
+                return {nullptr, 0};
+            }
+            std::memcpy(result, formattedContent.c_str(), formattedContent.size());
+            result[formattedContent.size()] = '\0';
+
+            return {result, formattedContent.size()};
+        }
+        catch (...)
+        {
             return {nullptr, 0};
         }
-        std::memcpy(result, formattedContent.c_str(), formattedContent.size());
-        result[formattedContent.size()] = '\0';
-
-        return {result, formattedContent.size()};
     }
-    catch (...)
+
+    MlirPassManager oraPassManagerCreate(MlirContext ctx)
     {
-        return {nullptr, 0};
+        return wrap(new mlir::PassManager(unwrap(ctx)));
     }
-}
 
-MlirPassManager oraPassManagerCreate(MlirContext ctx) {
-    return wrap(new mlir::PassManager(unwrap(ctx)));
-}
+    void oraPassManagerDestroy(MlirPassManager pm)
+    {
+        delete unwrap(pm);
+    }
 
-void oraPassManagerDestroy(MlirPassManager pm) {
-    delete unwrap(pm);
-}
+    void oraPassManagerEnableVerifier(MlirPassManager pm, bool enable)
+    {
+        unwrap(pm)->enableVerifier(enable);
+    }
 
-void oraPassManagerEnableVerifier(MlirPassManager pm, bool enable) {
-    unwrap(pm)->enableVerifier(enable);
-}
+    void oraPassManagerEnableTiming(MlirPassManager pm)
+    {
+        unwrap(pm)->enableTiming();
+    }
 
-void oraPassManagerEnableTiming(MlirPassManager pm) {
-    unwrap(pm)->enableTiming();
-}
+    bool oraPassManagerParsePipeline(MlirPassManager pm, MlirStringRef pipeline)
+    {
+        return mlir::succeeded(mlir::parsePassPipeline(unwrap(pipeline), *unwrap(pm)));
+    }
 
-bool oraPassManagerParsePipeline(MlirPassManager pm, MlirStringRef pipeline) {
-    return mlir::succeeded(mlir::parsePassPipeline(unwrap(pipeline), *unwrap(pm)));
-}
-
-bool oraPassManagerRun(MlirPassManager pm, MlirOperation op) {
-    return mlir::succeeded(unwrap(pm)->run(unwrap(op)));
-}
+    bool oraPassManagerRun(MlirPassManager pm, MlirOperation op)
+    {
+        return mlir::succeeded(unwrap(pm)->run(unwrap(op)));
+    }
 } // extern "C"
 #include "llvm/Support/raw_ostream.h"
 #include "llvm/Support/Debug.h"
@@ -1193,6 +1264,46 @@ MlirType oraAddressTypeGet(MlirContext ctx)
         // Create the Ora address type
         auto addressType = ora::AddressType::get(context);
         return wrap(addressType);
+    }
+    catch (...)
+    {
+        return {nullptr};
+    }
+}
+
+MlirType oraStringTypeGet(MlirContext ctx)
+{
+    try
+    {
+        MLIRContext *context = unwrap(ctx);
+
+        if (!oraDialectIsRegistered(ctx))
+        {
+            return {nullptr};
+        }
+
+        auto stringType = ora::StringType::get(context);
+        return wrap(stringType);
+    }
+    catch (...)
+    {
+        return {nullptr};
+    }
+}
+
+MlirType oraBytesTypeGet(MlirContext ctx)
+{
+    try
+    {
+        MLIRContext *context = unwrap(ctx);
+
+        if (!oraDialectIsRegistered(ctx))
+        {
+            return {nullptr};
+        }
+
+        auto bytesType = ora::BytesType::get(context);
+        return wrap(bytesType);
     }
     catch (...)
     {
@@ -2190,12 +2301,18 @@ MlirOperation oraArithConstantOpCreate(MlirContext ctx, MlirLocation loc, MlirTy
         Location location = unwrap(loc);
         Type resultTy = unwrap(resultType);
         Attribute attr = unwrap(valueAttr);
+        context->getOrLoadDialect<arith::ArithDialect>();
+
         auto typedAttr = llvm::dyn_cast<mlir::TypedAttr>(attr);
         if (!typedAttr)
         {
             if (auto intTy = llvm::dyn_cast<mlir::IntegerType>(resultTy))
             {
                 typedAttr = mlir::IntegerAttr::get(intTy, 0);
+            }
+            else if (auto indexTy = llvm::dyn_cast<mlir::IndexType>(resultTy))
+            {
+                typedAttr = mlir::IntegerAttr::get(indexTy, 0);
             }
             else
             {
@@ -3397,6 +3514,32 @@ MlirOperation oraStringConstantOpCreate(MlirContext ctx, MlirLocation loc, MlirS
         stringConstOp->setAttr("gas_cost", gasCostAttr);
 
         return wrap(stringConstOp.getOperation());
+    }
+    catch (...)
+    {
+        return {nullptr};
+    }
+}
+
+MlirOperation oraBytesConstantOpCreate(MlirContext ctx, MlirLocation loc, MlirStringRef value, MlirType resultType)
+{
+    try
+    {
+        auto *context = unwrap(ctx);
+        auto location = unwrap(loc);
+        auto valueRef = unwrap(value);
+        auto resultTypeRef = unwrap(resultType);
+
+        OpBuilder builder(context);
+
+        if (!oraDialectIsRegistered(ctx))
+        {
+            return {nullptr};
+        }
+
+        auto valueAttr = StringAttr::get(context, valueRef);
+        auto bytesConstOp = builder.create<BytesConstantOp>(location, resultTypeRef, valueAttr);
+        return wrap(bytesConstOp.getOperation());
     }
     catch (...)
     {
@@ -4875,6 +5018,7 @@ MlirOperation oraLogOpCreate(MlirContext ctx, MlirLocation loc, MlirStringRef ev
     {
         MLIRContext *context = unwrap(ctx);
         Location location = unwrap(loc);
+        context->getOrLoadDialect<ora::OraDialect>();
 
         OpBuilder builder(context);
 
@@ -5684,36 +5828,47 @@ bool oraConvertToSIR(MlirContext ctx, MlirModule module)
 
         ORA_DEBUG_PREFIX("OraCAPI", "Created PassManager for builtin.module");
 
-        // Run Ora optimizations BEFORE conversion
-        // 1. Constant deduplication and constant folding (fallback)
-        pm.addPass(mlir::ora::createOraOptimizationPass());
-        ORA_DEBUG_PREFIX("OraCAPI", "Added Ora optimization pass");
+        const bool enable_pre_sir_passes = false;
+        if (enable_pre_sir_passes)
+        {
+            // 1. Constant deduplication and constant folding (fallback)
+            pm.addPass(mlir::ora::createOraOptimizationPass());
+            ORA_DEBUG_PREFIX("OraCAPI", "Added Ora optimization pass");
 
-        // 2. Canonicalization and DCE on Ora MLIR functions
-        pm.addPass(mlir::ora::createSimpleOraOptimizationPass());
-        ORA_DEBUG_PREFIX("OraCAPI", "Added Simple Ora optimization pass (canonicalize + DCE)");
+            // 2. Canonicalization and DCE on Ora MLIR functions
+            pm.addPass(mlir::ora::createSimpleOraOptimizationPass());
+            ORA_DEBUG_PREFIX("OraCAPI", "Added Simple Ora optimization pass (canonicalize + DCE)");
 
-        // 3. Cleanup unused Ora operations
-        pm.addPass(mlir::ora::createOraCleanupPass());
-        ORA_DEBUG_PREFIX("OraCAPI", "Added Ora cleanup pass");
+            // 3. Cleanup unused Ora operations
+            pm.addPass(mlir::ora::createOraCleanupPass());
+            ORA_DEBUG_PREFIX("OraCAPI", "Added Ora cleanup pass");
 
-        // 4. Inline functions marked with ora.inline attribute
-        pm.addPass(mlir::ora::createOraInliningPass());
-        ORA_DEBUG_PREFIX("OraCAPI", "Added Ora inlining pass");
+            // 4. Inline functions marked with ora.inline attribute
+            pm.addPass(mlir::ora::createOraInliningPass());
+            ORA_DEBUG_PREFIX("OraCAPI", "Added Ora inlining pass");
+        }
 
         // Add the Ora to SIR conversion pass
         // Use addPass instead of addNestedPass since this is a ModuleOp pass
-        pm.addPass(createOraToSIRPass());
-        // Add optimization pass (for SIR-specific optimizations like constant folding)
-        pm.addPass(createSIROptimizationPass());
-        // Add cleanup pass to remove unused memref operations
-        // Cleanup runs BEFORE nested passes to clean up any remaining memref operations
-        pm.addPass(createSIRCleanupPass());
+        const bool enable_ora_to_sir = true;
+        if (enable_ora_to_sir)
+        {
+            pm.addPass(createOraToSIRPass());
+        }
+        const bool enable_post_sir_passes = false;
+        if (enable_post_sir_passes)
+        {
+            // Add optimization pass (for SIR-specific optimizations like constant folding)
+            pm.addPass(createSIROptimizationPass());
+            // Add cleanup pass to remove unused memref operations
+            // Cleanup runs BEFORE nested passes to clean up any remaining memref operations
+            pm.addPass(createSIRCleanupPass());
 
-        // Add simple pass that runs canonicalization and DCE on each function
-        // This ensures both passes actually execute (nested passes weren't working)
-        pm.addPass(mlir::ora::createSimpleDCEPass());
-        ORA_DEBUG_PREFIX("OraCAPI", "Added simple pass (canonicalize + DCE)");
+            // Add simple pass that runs canonicalization and DCE on each function
+            // This ensures both passes actually execute (nested passes weren't working)
+            pm.addPass(mlir::ora::createSimpleDCEPass());
+            ORA_DEBUG_PREFIX("OraCAPI", "Added simple pass (canonicalize + DCE)");
+        }
 
         // Run the pass
         ORA_DEBUG_PREFIX("OraCAPI", "Running OraToSIR pass...");

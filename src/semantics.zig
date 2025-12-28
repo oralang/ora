@@ -72,7 +72,7 @@ pub fn validateLValues(allocator: std.mem.Allocator, nodes: []const ast.AstNode)
     return AnalysisResult{ .diagnostics = try diags.toOwnedSlice() };
 }
 
-// Unified entry point for semantics (Foundation Step 0)
+// Unified entry point for semantics
 // Runs collection (phase 1) then checks (phase 2) and returns combined diagnostics with symbols
 pub fn analyze(allocator: std.mem.Allocator, nodes: []const ast.AstNode) !core.SemanticsResult {
     var p1 = try core.analyzePhase1(allocator, nodes);

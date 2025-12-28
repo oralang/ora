@@ -665,7 +665,9 @@ pub fn lowerFunctionsToModuleWithSemanticTable(ctx: c.MlirContext, nodes: []lib.
             },
             .Constant => |const_decl| {
                 const const_op = decl_lowerer.lowerConstDecl(&const_decl);
-                c.oraBlockAppendOwnedOperation(body, const_op);
+                if (!c.oraOperationIsNull(const_op)) {
+                    c.oraBlockAppendOwnedOperation(body, const_op);
+                }
             },
             .LogDecl => |log_decl| {
                 const log_op = decl_lowerer.lowerLogDecl(&log_decl);
@@ -704,7 +706,9 @@ pub fn lowerFunctionsToModuleWithSemanticTable(ctx: c.MlirContext, nodes: []lib.
                         },
                         .Constant => |const_decl| {
                             const const_op = decl_lowerer.lowerConstDecl(&const_decl);
-                            c.oraBlockAppendOwnedOperation(body, const_op);
+                            if (!c.oraOperationIsNull(const_op)) {
+                                c.oraBlockAppendOwnedOperation(body, const_op);
+                            }
                         },
                         .LogDecl => |log_decl| {
                             const log_op = decl_lowerer.lowerLogDecl(&log_decl);

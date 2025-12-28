@@ -327,18 +327,14 @@ pub const TypeMapper = struct {
         return c.oraAddressTypeGet(self.ctx);
     }
 
-    /// Convert string type - maps to i256 for now (could be pointer type in future)
+    /// Convert string type
     pub fn mapStringType(self: *const TypeMapper) c.MlirType {
-        // string types are represented as i256 for compatibility with EVM
-        // in the future, this could be a proper MLIR string type or pointer type
-        return c.oraIntegerTypeCreate(self.ctx, constants.DEFAULT_INTEGER_BITS);
+        return c.oraStringTypeGet(self.ctx);
     }
 
-    /// Convert bytes type - maps to i256 for now (could be vector type in future)
+    /// Convert bytes type
     pub fn mapBytesType(self: *const TypeMapper) c.MlirType {
-        // bytes types are represented as i256 for compatibility with EVM
-        // in the future, this could be a proper MLIR vector type or pointer type
-        return c.oraIntegerTypeCreate(self.ctx, constants.DEFAULT_INTEGER_BITS);
+        return c.oraBytesTypeGet(self.ctx);
     }
 
     /// Convert void type

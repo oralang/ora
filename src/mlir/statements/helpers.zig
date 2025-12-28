@@ -314,6 +314,9 @@ pub fn insertRefinementGuard(
 /// Create a constant value from an attribute
 pub fn createConstantValue(self: *const StatementLowerer, attr: c.MlirAttribute, ty: c.MlirType, loc: c.MlirLocation) c.MlirValue {
     const const_op = c.oraArithConstantOpCreate(self.ctx, loc, ty, attr);
+    if (const_op.ptr == null) {
+        @panic("Failed to create constant value");
+    }
     h.appendOp(self.block, const_op);
     return h.getResult(const_op, 0);
 }

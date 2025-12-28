@@ -31,6 +31,9 @@ pub fn createErrorPlaceholder(ctx: c.MlirContext, block: c.MlirBlock, locations:
     const error_attr = h.stringAttr(ctx, error_msg);
 
     const op = c.oraArithConstantOpCreate(ctx, loc, ty, attr);
+    if (op.ptr == null) {
+        @panic("Failed to create error placeholder constant");
+    }
     c.oraOperationSetAttributeByName(op, h.strRef("ora.error_placeholder"), error_attr);
     h.appendOp(block, op);
     return h.getResult(op, 0);

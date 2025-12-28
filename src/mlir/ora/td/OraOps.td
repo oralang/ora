@@ -253,6 +253,23 @@ def Ora_StringConstantOp : Ora_PureOp<"string.constant"> {
   let assemblyFormat = "$value attr-dict `:` type($result)";
 }
 
+def Ora_BytesConstantOp : Ora_PureOp<"bytes.constant"> {
+  let summary = "Bytes constant";
+  let description = [{
+    Creates a bytes constant value.
+    
+    Example:
+    ```mlir
+    %bytes = ora.bytes.constant "0xdeadbeef" : !ora.bytes
+    ```
+  }];
+  
+  let arguments = (ins StrAttr:$value);
+  let results = (outs AnyType:$result);
+  
+  let assemblyFormat = "$value attr-dict `:` type($result)";
+}
+
 
 def Ora_HexConstantOp : Ora_PureOp<"hex.constant"> {
   let summary = "Hexadecimal constant";
@@ -467,6 +484,88 @@ def Ora_ImmutableOp : Ora_Op<"immutable"> {
 }
 
 //===----------------------------------------------------------------------===//
+// EVM Builtin Operations
+//===----------------------------------------------------------------------===//
+
+def Ora_EvmOriginOp : Ora_PureOp<"evm.origin"> {
+  let summary = "EVM origin builtin";
+  let results = (outs AnyType:$result);
+  let assemblyFormat = "attr-dict `:` type($result)";
+}
+
+def Ora_EvmCallerOp : Ora_PureOp<"evm.caller"> {
+  let summary = "EVM caller builtin";
+  let results = (outs AnyType:$result);
+  let assemblyFormat = "attr-dict `:` type($result)";
+}
+
+def Ora_EvmGaspriceOp : Ora_PureOp<"evm.gasprice"> {
+  let summary = "EVM gasprice builtin";
+  let results = (outs AnyType:$result);
+  let assemblyFormat = "attr-dict `:` type($result)";
+}
+
+def Ora_EvmCallvalueOp : Ora_PureOp<"evm.callvalue"> {
+  let summary = "EVM callvalue builtin";
+  let results = (outs AnyType:$result);
+  let assemblyFormat = "attr-dict `:` type($result)";
+}
+
+def Ora_EvmGasOp : Ora_PureOp<"evm.gas"> {
+  let summary = "EVM gas builtin";
+  let results = (outs AnyType:$result);
+  let assemblyFormat = "attr-dict `:` type($result)";
+}
+
+def Ora_EvmTimestampOp : Ora_PureOp<"evm.timestamp"> {
+  let summary = "EVM timestamp builtin";
+  let results = (outs AnyType:$result);
+  let assemblyFormat = "attr-dict `:` type($result)";
+}
+
+def Ora_EvmNumberOp : Ora_PureOp<"evm.number"> {
+  let summary = "EVM block number builtin";
+  let results = (outs AnyType:$result);
+  let assemblyFormat = "attr-dict `:` type($result)";
+}
+
+def Ora_EvmCoinbaseOp : Ora_PureOp<"evm.coinbase"> {
+  let summary = "EVM coinbase builtin";
+  let results = (outs AnyType:$result);
+  let assemblyFormat = "attr-dict `:` type($result)";
+}
+
+def Ora_EvmDifficultyOp : Ora_PureOp<"evm.difficulty"> {
+  let summary = "EVM difficulty/prevrandao builtin";
+  let results = (outs AnyType:$result);
+  let assemblyFormat = "attr-dict `:` type($result)";
+}
+
+def Ora_EvmPrevrandaoOp : Ora_PureOp<"evm.prevrandao"> {
+  let summary = "EVM prevrandao builtin";
+  let results = (outs AnyType:$result);
+  let assemblyFormat = "attr-dict `:` type($result)";
+}
+
+def Ora_EvmGaslimitOp : Ora_PureOp<"evm.gaslimit"> {
+  let summary = "EVM gaslimit builtin";
+  let results = (outs AnyType:$result);
+  let assemblyFormat = "attr-dict `:` type($result)";
+}
+
+def Ora_EvmChainidOp : Ora_PureOp<"evm.chainid"> {
+  let summary = "EVM chainid builtin";
+  let results = (outs AnyType:$result);
+  let assemblyFormat = "attr-dict `:` type($result)";
+}
+
+def Ora_EvmBasefeeOp : Ora_PureOp<"evm.basefee"> {
+  let summary = "EVM basefee builtin";
+  let results = (outs AnyType:$result);
+  let assemblyFormat = "attr-dict `:` type($result)";
+}
+
+//===----------------------------------------------------------------------===//
 // Control Flow Operations
 //===----------------------------------------------------------------------===//
 
@@ -550,6 +649,41 @@ def Ora_MStoreOp : Ora_Op<"mstore",
   let arguments = (ins AnyType:$value, StrAttr:$variable);
   
   let assemblyFormat = "$value `,` $variable attr-dict `:` type($value)";
+}
+
+def Ora_MLoad8Op : Ora_Op<"mload8",
+    [DeclareOpInterfaceMethods<MemoryEffectsOpInterface>]> {
+  let summary = "Load a single byte from memory";
+  let description = [{
+    Loads a single byte from memory at (base + offset).
+    
+    Example:
+    ```mlir
+    %byte = ora.mload8 %base, %offset : (ptr, i256) -> i256
+    ```
+  }];
+  
+  let arguments = (ins AnyType:$base, AnyType:$offset);
+  let results = (outs AnyType:$result);
+  
+  let assemblyFormat = "$base `,` $offset attr-dict `:` type($base) `,` type($offset) `->` type($result)";
+}
+
+def Ora_MStore8Op : Ora_Op<"mstore8",
+    [DeclareOpInterfaceMethods<MemoryEffectsOpInterface>]> {
+  let summary = "Store a single byte to memory";
+  let description = [{
+    Stores a single byte to memory at (base + offset).
+    
+    Example:
+    ```mlir
+    ora.mstore8 %base, %offset, %value : (ptr, i256, i256) -> ()
+    ```
+  }];
+  
+  let arguments = (ins AnyType:$base, AnyType:$offset, AnyType:$value);
+  
+  let assemblyFormat = "$base `,` $offset `,` $value attr-dict `:` type($base) `,` type($offset) `,` type($value)";
 }
 
 def Ora_TLoadOp : Ora_Op<"tload",
