@@ -20,13 +20,10 @@ pub fn isDebugEnabled() bool {
 }
 
 fn emit(prefix: []const u8, comptime fmt: []const u8, args: anytype) void {
-    var stderr_buffer: [1024]u8 = undefined;
-    var stderr_writer = std.fs.File.stderr().writer(&stderr_buffer);
-    const stderr = &stderr_writer.interface;
     if (prefix.len > 0) {
-        stderr.print("{s}: ", .{prefix}) catch return;
+        std.debug.print("{s}: ", .{prefix});
     }
-    stderr.print(fmt, args) catch return;
+    std.debug.print(fmt, args);
 }
 
 pub fn debug(comptime fmt: []const u8, args: anytype) void {

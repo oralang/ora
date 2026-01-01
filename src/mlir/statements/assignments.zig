@@ -283,7 +283,25 @@ pub fn lowerIdentifierAssignment(self: *const StatementLowerer, ident: *const li
 
     // fallback: check local variable map
     if (self.local_var_map) |lvm| {
-        if (lvm.hasLocalVar(ident.name)) {
+        if (lvm.getLocalVar(ident.name)) |var_value| {
+            const var_type = c.oraValueGetType(var_value);
+            if (c.oraTypeIsAMemRef(var_type)) {
+                const element_type = c.oraShapedTypeGetElementType(var_type);
+                const store_value = self.expr_lowerer.convertToType(value, element_type, ident.span);
+                const store_op = self.ora_dialect.createMemrefStore(store_value, var_value, &[_]c.MlirValue{}, loc);
+                h.appendOp(self.block, store_op);
+                return;
+            }
+            if (self.force_stack_memref) {
+                reportAssignmentError(
+                    self,
+                    ident.span,
+                    .InternalError,
+                    "Mutable variable is not memref-backed; assignment would break SSA dominance",
+                    "This is a compiler bug. Please report with a minimal repro.",
+                );
+                return LoweringError.InvalidLValue;
+            }
             lvm.addLocalVar(ident.name, value) catch {
                 return LoweringError.OutOfMemory;
             };
@@ -410,13 +428,29 @@ pub fn lowerFieldAccessAssignment(self: *const StatementLowerer, field_access: *
     h.appendOp(self.block, update_op);
     const updated_struct = h.getResult(update_op, 0);
 
-    // for structs, we always use SSA values (not memrefs)
-    // rebind the symbol to the new struct value
     if (field_access.target.* == .Identifier) {
         const ident = field_access.target.Identifier;
         if (self.local_var_map) |var_map| {
-            // rebind the local variable to the updated struct value
-            // addLocalVar will overwrite if the variable already exists
+            if (var_map.getLocalVar(ident.name)) |var_value| {
+                const var_type = c.oraValueGetType(var_value);
+                if (c.oraTypeIsAMemRef(var_type)) {
+                    const element_type = c.oraShapedTypeGetElementType(var_type);
+                    const store_value = self.expr_lowerer.convertToType(updated_struct, element_type, field_access.span);
+                    const store_op = self.ora_dialect.createMemrefStore(store_value, var_value, &[_]c.MlirValue{}, loc);
+                    h.appendOp(self.block, store_op);
+                    return;
+                }
+                if (self.force_stack_memref) {
+                    reportAssignmentError(
+                        self,
+                        field_access.span,
+                        .InternalError,
+                        "Mutable variable is not memref-backed; assignment would break SSA dominance",
+                        "This is a compiler bug. Please report with a minimal repro.",
+                    );
+                    return LoweringError.InvalidLValue;
+                }
+            }
             var_map.addLocalVar(ident.name, updated_struct) catch {
                 log.warn("Failed to update local variable after field assignment: {s}\n", .{ident.name});
             };
@@ -483,6 +517,7 @@ pub fn lowerDestructuringAssignment(self: *const StatementLowerer, assignment: *
 
 /// Lower destructuring patterns
 pub fn lowerDestructuringPattern(self: *const StatementLowerer, pattern: lib.ast.Expressions.DestructuringPattern, value: c.MlirValue, loc: c.MlirLocation) LoweringError!void {
+    const dummy_span = lib.ast.SourceSpan{ .line = 0, .column = 0, .length = 0 };
     switch (pattern) {
         .Struct => |fields| {
             // extract each field from the struct value
@@ -494,15 +529,33 @@ pub fn lowerDestructuringPattern(self: *const StatementLowerer, pattern: lib.ast
                 h.appendOp(self.block, extract_op);
                 const field_value = h.getResult(extract_op, 0);
 
-                // assign the extracted value to the field variable
                 if (self.local_var_map) |lvm| {
+                    if (lvm.getLocalVar(field.name)) |var_value| {
+                        const var_type = c.oraValueGetType(var_value);
+                        if (c.oraTypeIsAMemRef(var_type)) {
+                            const element_type = c.oraShapedTypeGetElementType(var_type);
+                            const store_value = self.expr_lowerer.convertToType(field_value, element_type, dummy_span);
+                            const store_op = self.ora_dialect.createMemrefStore(store_value, var_value, &[_]c.MlirValue{}, loc);
+                            h.appendOp(self.block, store_op);
+                            continue;
+                        }
+                        if (self.force_stack_memref) {
+                            reportAssignmentError(
+                                self,
+                                dummy_span,
+                                .InternalError,
+                                "Mutable variable is not memref-backed; assignment would break SSA dominance",
+                                "This is a compiler bug. Please report with a minimal repro.",
+                            );
+                            return LoweringError.InvalidLValue;
+                        }
+                    }
                     lvm.addLocalVar(field.name, field_value) catch {
                         log.err("Failed to add destructured field to map: {s}\n", .{field.name});
                         return LoweringError.OutOfMemory;
                     };
                 }
 
-                // update symbol table
                 if (self.symbol_table) |st| {
                     st.updateSymbolValue(field.name, field_value) catch {
                         log.warn("Failed to update symbol for destructured field: {s}\n", .{field.name});
@@ -520,15 +573,33 @@ pub fn lowerDestructuringPattern(self: *const StatementLowerer, pattern: lib.ast
                 h.appendOp(self.block, extract_op);
                 const element_value = h.getResult(extract_op, 0);
 
-                // assign the extracted value to the element variable
                 if (self.local_var_map) |lvm| {
+                    if (lvm.getLocalVar(element_name)) |var_value| {
+                        const var_type = c.oraValueGetType(var_value);
+                        if (c.oraTypeIsAMemRef(var_type)) {
+                            const element_type = c.oraShapedTypeGetElementType(var_type);
+                            const store_value = self.expr_lowerer.convertToType(element_value, element_type, dummy_span);
+                            const store_op = self.ora_dialect.createMemrefStore(store_value, var_value, &[_]c.MlirValue{}, loc);
+                            h.appendOp(self.block, store_op);
+                            continue;
+                        }
+                        if (self.force_stack_memref) {
+                            reportAssignmentError(
+                                self,
+                                dummy_span,
+                                .InternalError,
+                                "Mutable variable is not memref-backed; assignment would break SSA dominance",
+                                "This is a compiler bug. Please report with a minimal repro.",
+                            );
+                            return LoweringError.InvalidLValue;
+                        }
+                    }
                     lvm.addLocalVar(element_name, element_value) catch {
                         log.err("Failed to add destructured element to map: {s}\n", .{element_name});
                         return LoweringError.OutOfMemory;
                     };
                 }
 
-                // update symbol table
                 if (self.symbol_table) |st| {
                     st.updateSymbolValue(element_name, element_value) catch {
                         log.warn("Failed to update symbol for destructured element: {s}\n", .{element_name});
@@ -559,15 +630,33 @@ pub fn lowerDestructuringPattern(self: *const StatementLowerer, pattern: lib.ast
                 h.appendOp(self.block, load_op);
                 const element_value = h.getResult(load_op, 0);
 
-                // assign the extracted value to the element variable
                 if (self.local_var_map) |lvm| {
+                    if (lvm.getLocalVar(element_name)) |var_value| {
+                        const var_type = c.oraValueGetType(var_value);
+                        if (c.oraTypeIsAMemRef(var_type)) {
+                            const element_type = c.oraShapedTypeGetElementType(var_type);
+                            const store_value = self.expr_lowerer.convertToType(element_value, element_type, dummy_span);
+                            const store_op = self.ora_dialect.createMemrefStore(store_value, var_value, &[_]c.MlirValue{}, loc);
+                            h.appendOp(self.block, store_op);
+                            continue;
+                        }
+                        if (self.force_stack_memref) {
+                            reportAssignmentError(
+                                self,
+                                dummy_span,
+                                .InternalError,
+                                "Mutable variable is not memref-backed; assignment would break SSA dominance",
+                                "This is a compiler bug. Please report with a minimal repro.",
+                            );
+                            return LoweringError.InvalidLValue;
+                        }
+                    }
                     lvm.addLocalVar(element_name, element_value) catch {
                         log.err("Failed to add destructured element to map: {s}\n", .{element_name});
                         return LoweringError.OutOfMemory;
                     };
                 }
 
-                // update symbol table
                 if (self.symbol_table) |st| {
                     st.updateSymbolValue(element_name, element_value) catch {
                         log.warn("Failed to update symbol for destructured element: {s}\n", .{element_name});

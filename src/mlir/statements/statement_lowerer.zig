@@ -38,11 +38,14 @@ pub const LabelContext = struct {
     // for labeled switches with continue support
     continue_flag_memref: ?c.MlirValue = null,
     value_memref: ?c.MlirValue = null,
+    // for labeled blocks (break handling)
+    break_flag_memref: ?c.MlirValue = null,
     // for labeled switches with return support
     return_flag_memref: ?c.MlirValue = null,
     return_value_memref: ?c.MlirValue = null,
     // label type for context-aware handling
     label_type: enum { Switch, While, For, Block } = .Block,
+    parent: ?*const LabelContext = null,
 };
 
 /// Statement lowering system for converting Ora statements to MLIR operations
@@ -67,6 +70,7 @@ pub const StatementLowerer = struct {
     in_try_block: bool = false, // Track if we're inside a try block (returns should not use ora.return)
     try_return_flag_memref: ?c.MlirValue = null, // Memref for return flag in try blocks
     try_return_value_memref: ?c.MlirValue = null, // Memref for return value in try blocks
+    force_stack_memref: bool = false, // Force stack locals to lower as memrefs (e.g. labeled blocks)
 
     pub fn init(ctx: c.MlirContext, block: c.MlirBlock, type_mapper: *const TypeMapper, expr_lowerer: *const ExpressionLowerer, param_map: ?*const ParamMap, storage_map: ?*const StorageMap, local_var_map: ?*LocalVarMap, locations: LocationTracker, symbol_table: ?*SymbolTable, builtin_registry: ?*const lib.semantics.builtins.BuiltinRegistry, allocator: std.mem.Allocator, function_return_type: ?c.MlirType, function_return_type_info: ?lib.ast.Types.TypeInfo, ora_dialect: *@import("../dialect.zig").OraDialect, ensures_clauses: []*lib.ast.Expressions.ExprNode) StatementLowerer {
         return .{
@@ -88,6 +92,7 @@ pub const StatementLowerer = struct {
             .label_context = null,
             .ensures_clauses = ensures_clauses,
             .in_try_block = false,
+            .force_stack_memref = false,
         };
     }
 
@@ -249,6 +254,7 @@ pub const StatementLowerer = struct {
             };
 
             var stmt_lowerer = StatementLowerer.init(self.ctx, block, self.type_mapper, &expr_lowerer, self.param_map, self.storage_map, self.local_var_map, self.locations, self.symbol_table, self.builtin_registry, self.allocator, self.current_function_return_type, self.current_function_return_type_info, self.ora_dialect, self.ensures_clauses);
+            stmt_lowerer.force_stack_memref = self.force_stack_memref;
             stmt_lowerer.label_context = self.label_context;
             stmt_lowerer.in_try_block = self.in_try_block;
             stmt_lowerer.try_return_flag_memref = self.try_return_flag_memref;

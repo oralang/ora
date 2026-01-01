@@ -21,7 +21,8 @@ pub fn lookupIdentifier(
     self: *CoreResolver,
     name: []const u8,
 ) ?TypeInfo {
-    const symbol = SymbolTable.findUp(self.current_scope, name) orelse return null;
+    const scope = if (self.current_scope) |s| s else &self.symbol_table.root;
+    const symbol = self.symbol_table.safeFindUp(scope, name) orelse return null;
     return symbol.typ;
 }
 
@@ -31,7 +32,8 @@ pub fn resolveIdentifierType(
     id: *ast.Expressions.IdentifierExpr,
 ) TypeResolutionError!void {
     // first try to find in symbol table (for variables, functions, etc.)
-    const symbol = SymbolTable.findUp(self.current_scope, id.name);
+    const scope = if (self.current_scope) |s| s else &self.symbol_table.root;
+    const symbol = self.symbol_table.safeFindUp(scope, id.name);
 
     // if not found in symbol table, check function registry as fallback
     // this handles cases where functions aren't in symbol table yet (e.g., ghost functions)
@@ -59,17 +61,26 @@ pub fn resolveIdentifierType(
                             resolved_typ.category = .Enum;
                         } else {
                             // use the category from the ora_type
-                            const derived_category = ot.getCategory();
+                            var derived_category = ot.getCategory();
+                            if (ot == ._union and ot._union.len > 0 and ot._union[0] == .error_union) {
+                                derived_category = .ErrorUnion;
+                            }
                             resolved_typ.category = derived_category;
                         }
                     } else {
                         // type not found, use category from ora_type
-                        const derived_category = ot.getCategory();
+                        var derived_category = ot.getCategory();
+                        if (ot == ._union and ot._union.len > 0 and ot._union[0] == .error_union) {
+                            derived_category = .ErrorUnion;
+                        }
                         resolved_typ.category = derived_category;
                     }
                 } else {
                     // use the category from the ora_type
-                    const derived_category = ot.getCategory();
+                    var derived_category = ot.getCategory();
+                    if (ot == ._union and ot._union.len > 0 and ot._union[0] == .error_union) {
+                        derived_category = .ErrorUnion;
+                    }
                     resolved_typ.category = derived_category;
                 }
             } else {

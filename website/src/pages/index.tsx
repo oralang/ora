@@ -25,7 +25,7 @@ function HomepageHeader() {
 
         <p className={styles.heroDescription}>
           An experimental smart contract language with explicit semantics,
-          memory regions, and clean compilation pipeline for EVM/Yul.
+          memory regions, and clean compilation pipeline targeting EVM via sensei-ir.
         </p>
 
         <div className={styles.buttons}>
@@ -45,15 +45,15 @@ function HomepageHeader() {
         <div className={styles.stats}>
           <div className={styles.stat}>
             <div className={styles.statValue}>79%</div>
+            <div className={styles.statLabel}>Success Rate</div>
+          </div>
+          <div className={styles.stat}>
+            <div className={styles.statValue}>76/96</div>
             <div className={styles.statLabel}>Examples Pass</div>
           </div>
           <div className={styles.stat}>
-            <div className={styles.statValue}>23/29</div>
-            <div className={styles.statLabel}>Validated</div>
-          </div>
-          <div className={styles.stat}>
-            <div className={styles.statValue}>Active</div>
-            <div className={styles.statLabel}>Development</div>
+            <div className={styles.statValue}>81</div>
+            <div className={styles.statLabel}>MLIR Operations</div>
           </div>
         </div>
       </div>
@@ -66,21 +66,24 @@ function FeatureList() {
     {
       title: '✅ What Works Now',
       items: [
-        'Full lexer and parser (23/29 examples pass)',
-        'Type checking and semantic analysis',
-        'Storage, memory, and transient regions',
-        'Error unions and switch statements',
+        'Full lexer and parser (76/96 examples pass - 79% success rate)',
+        'Complete type checking and semantic analysis',
+        'Storage, memory, and transient storage operations',
+        'Switch statements and control flow (if/else)',
         'Structs, enums, and custom types',
-        'MLIR lowering for optimization',
+        'Complete MLIR lowering with 81 operations',
+        'Arithmetic operations (add, sub, mul, div, rem)',
+        'Map operations and memory management',
       ],
     },
     {
       title: '🚧 In Development',
       items: [
-        'Complete Yul/EVM code generation',
-        'Advanced for-loop syntax',
-        'Standard library functions',
-        'Full formal verification',
+        'Complete sensei-ir (SIR) lowering and EVM code generation',
+        'For loops with capture syntax',
+        'Enhanced error handling (try-catch improvements)',
+        'Type inference improvements',
+        'Full formal verification framework',
       ],
     },
     {

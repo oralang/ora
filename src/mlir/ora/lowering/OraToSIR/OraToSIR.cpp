@@ -23,6 +23,7 @@
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/Transforms/DialectConversion.h"
+#include "mlir/Transforms/GreedyPatternRewriteDriver.h"
 #include "mlir/IR/PatternMatch.h"
 #include "mlir/Analysis/DataFlow/LivenessAnalysis.h"
 #include "mlir/Interfaces/SideEffectInterfaces.h"
@@ -117,6 +118,19 @@ public:
 
 namespace
 {
+    class EraseOpByName final : public ConversionPattern
+    {
+    public:
+        EraseOpByName(StringRef name, MLIRContext *ctx, PatternBenefit benefit = 1)
+            : ConversionPattern(name, benefit, ctx) {}
+
+        LogicalResult matchAndRewrite(Operation *op, ArrayRef<Value> /*operands*/,
+                                      ConversionPatternRewriter &rewriter) const override
+        {
+            rewriter.eraseOp(op);
+            return success();
+        }
+    };
 }
 class OraToSIRPass : public PassWrapper<OraToSIRPass, OperationPass<ModuleOp>>
 {
@@ -152,10 +166,32 @@ public:
             patterns.add<ConvertContractOp>(typeConverter, ctx);
         if (enable_arith)
             patterns.add<ConvertArithConstantOp>(typeConverter, ctx);
+        if (enable_arith)
+            patterns.add<ConvertArithCmpIOp>(typeConverter, ctx);
+        if (enable_arith)
+        {
+            patterns.add<ConvertArithAddIOp>(typeConverter, ctx);
+            patterns.add<ConvertArithSubIOp>(typeConverter, ctx);
+            patterns.add<ConvertArithMulIOp>(typeConverter, ctx);
+            patterns.add<ConvertArithDivUIOp>(typeConverter, ctx);
+            patterns.add<ConvertArithRemUIOp>(typeConverter, ctx);
+            patterns.add<ConvertArithDivSIOp>(typeConverter, ctx);
+            patterns.add<ConvertArithAndIOp>(typeConverter, ctx);
+            patterns.add<ConvertArithOrIOp>(typeConverter, ctx);
+            patterns.add<ConvertArithXOrIOp>(typeConverter, ctx);
+            patterns.add<ConvertArithSelectOp>(typeConverter, ctx);
+            patterns.add<ConvertArithExtUIOp>(typeConverter, ctx);
+            patterns.add<ConvertArithIndexCastUIOp>(typeConverter, ctx);
+            patterns.add<ConvertArithTruncIOp>(typeConverter, ctx);
+            patterns.add<FoldRedundantBitcastOp>(ctx);
+            patterns.add<FoldAndOneOp>(ctx);
+        }
         if (enable_storage)
             patterns.add<ConvertGlobalOp>(typeConverter, ctx);
         if (enable_func)
             patterns.add<ConvertFuncOp>(typeConverter, ctx);
+        if (enable_func)
+            patterns.add<ConvertCallOp>(typeConverter, ctx);
         if (enable_arith)
         {
             patterns.add<ConvertAddOp>(typeConverter, ctx);
@@ -167,6 +203,18 @@ public:
             patterns.add<ConvertConstOp>(typeConverter, ctx);
             patterns.add<ConvertStringConstantOp>(typeConverter, ctx);
             patterns.add<ConvertBytesConstantOp>(typeConverter, ctx);
+            patterns.add<ConvertAddrToI160Op>(typeConverter, ctx);
+            patterns.add<ConvertI160ToAddrOp>(typeConverter, ctx);
+            patterns.add<ConvertOldOp>(typeConverter, ctx);
+            patterns.add<ConvertInvariantOp>(typeConverter, ctx);
+            patterns.add<ConvertRequiresOp>(typeConverter, ctx);
+            patterns.add<ConvertEnsuresOp>(typeConverter, ctx);
+            patterns.add<ConvertAssertOp>(typeConverter, ctx);
+            patterns.add<ConvertAssumeOp>(typeConverter, ctx);
+            patterns.add<ConvertDecreasesOp>(typeConverter, ctx);
+            patterns.add<ConvertIncreasesOp>(typeConverter, ctx);
+            patterns.add<ConvertHavocOp>(typeConverter, ctx);
+            patterns.add<ConvertQuantifiedOp>(typeConverter, ctx);
             patterns.add<ConvertStructInstantiateOp>(typeConverter, ctx);
             patterns.add<ConvertStructInitOp>(typeConverter, ctx);
             patterns.add<ConvertStructFieldExtractOp>(typeConverter, ctx);
@@ -196,39 +244,35 @@ public:
             patterns.add<ConvertWhileOp>(typeConverter, ctx);
         if (enable_control_flow)
         {
+            patterns.add<ConvertIfOp>(typeConverter, ctx);
             patterns.add<ConvertBreakOp>(typeConverter, ctx);
             patterns.add<ConvertContinueOp>(typeConverter, ctx);
             patterns.add<ConvertSwitchExprOp>(typeConverter, ctx);
             patterns.add<ConvertSwitchOp>(typeConverter, ctx);
         }
+        patterns.add<EraseOpByName>("ora.enum.decl", ctx);
+        patterns.add<EraseOpByName>("ora.error.decl", ctx);
+        patterns.add<EraseOpByName>("ora.log.decl", ctx);
+        patterns.add<EraseOpByName>("ora.import", ctx);
+        patterns.add<EraseOpByName>("ora.tstore.global", ctx);
+        patterns.add<EraseOpByName>("ora.memory.global", ctx);
 
         ConversionTarget target(*ctx);
         // Mark SIR dialect as legal
         target.addLegalDialect<mlir::BuiltinDialect>();
         target.addLegalDialect<sir::SIRDialect>();
         DBG("Marked SIR dialect as legal");
-        // Ora ops are illegal by default; only explicitly legalized ops may remain
+        // Ora ops are illegal by default; no Ora ops should remain after conversion
         target.addIllegalDialect<ora::OraDialect>();
-        target.addLegalOp<ora::ContractOp>();
-        target.addLegalOp<ora::EnumDeclOp>();
+        target.addIllegalOp<ora::ContractOp>();
         target.addIllegalOp<ora::StructDeclOp>();
-        target.addDynamicallyLegalOp(mlir::OperationName("ora.log.decl", ctx),
-                                     [](Operation *) { return true; });
-        target.addDynamicallyLegalOp(mlir::OperationName("ora.error.decl", ctx),
-                                     [](Operation *) { return true; });
-        target.addDynamicallyLegalOp(mlir::OperationName("ora.import", ctx),
-                                     [](Operation *) { return true; });
-        target.addDynamicallyLegalOp(mlir::OperationName("ora.tstore.global", ctx),
-                                     [](Operation *) { return true; });
-        target.addDynamicallyLegalOp(mlir::OperationName("ora.memory.global", ctx),
-                                     [](Operation *) { return true; });
         target.addDynamicallyLegalOp<ora::SLoadOp>([](ora::SLoadOp op) {
             return llvm::isa<mlir::RankedTensorType>(op.getResult().getType());
         });
         target.addDynamicallyLegalOp<ora::SStoreOp>([](ora::SStoreOp op) {
             return llvm::isa<mlir::RankedTensorType>(op.getValue().getType());
         });
-        DBG("Marked Ora dialect as illegal (except ora.contract)");
+        DBG("Marked Ora dialect as illegal");
         // Mark cf dialect as legal (cf.assert for bounds checking)
         target.addLegalDialect<mlir::cf::ControlFlowDialect>();
         DBG("Marked cf dialect as legal");
@@ -241,12 +285,12 @@ public:
             {
                 for (Value operand : op->getOperands())
                 {
-                    if (llvm::isa<ora::IntegerType>(operand.getType()))
+                    if (!typeConverter.isLegal(operand.getType()))
                         return false;
                 }
                 for (Type resultType : op->getResultTypes())
                 {
-                    if (llvm::isa<ora::IntegerType>(resultType))
+                    if (!typeConverter.isLegal(resultType))
                         return false;
                 }
                 return true;
@@ -260,12 +304,12 @@ public:
                     auto funcType = funcOp.getFunctionType();
                     for (Type inputType : funcType.getInputs())
                     {
-                        if (inputType.getDialect().getNamespace() == "ora")
+                        if (!typeConverter.isLegal(inputType))
                             return false;
                     }
                     for (Type resultType : funcType.getResults())
                     {
-                        if (resultType.getDialect().getNamespace() == "ora")
+                        if (!typeConverter.isLegal(resultType))
                             return false;
                     }
                     return true;
@@ -311,12 +355,28 @@ public:
         // Apply conversion
         if (failed(applyFullConversion(module, target, std::move(patterns))))
         {
+            module.walk([&](Operation *op)
+                        {
+                if (isa<ora::SLoadOp>(op))
+                {
+                    llvm::errs() << "[OraToSIR] Remaining ora.sload at " << op->getLoc() << " type=" << op->getResult(0).getType() << "\n";
+                } });
             DBG("ERROR: Conversion failed!");
             signalPassFailure();
             return;
         }
 
         DBG("Conversion completed successfully!");
+
+        RewritePatternSet cleanup(ctx);
+        cleanup.add<FoldRedundantBitcastOp>(ctx);
+        cleanup.add<FoldAndOneOp>(ctx);
+        if (failed(applyPatternsAndFoldGreedily(module, std::move(cleanup))))
+        {
+            DBG("ERROR: Post-conversion cleanup failed!");
+            signalPassFailure();
+            return;
+        }
 
         // Remove gas_cost attributes from all operations (Ora MLIR specific, not SIR)
         module.walk([&](Operation *op)
@@ -326,7 +386,7 @@ public:
                     op->removeAttr("gas_cost");
                 } });
 
-        // Check what Ora ops remain (should be none, except ora.contract)
+        // Check what Ora ops remain (should be none)
         module.walk([&](Operation *op)
                     {
                 if (op->getDialect() && op->getDialect()->getNamespace() == "ora")

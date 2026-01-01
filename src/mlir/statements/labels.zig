@@ -11,11 +11,11 @@ const LoweringError = StatementLowerer.LoweringError;
 const helpers = @import("helpers.zig");
 const control_flow = @import("control_flow.zig");
 const log = @import("log");
+const h = @import("../helpers.zig");
 
 /// Lower break statements with label support
 pub fn lowerBreak(self: *const StatementLowerer, break_stmt: *const lib.ast.Statements.BreakNode) LoweringError!void {
     const loc = self.fileLoc(break_stmt.span);
-    const h = @import("../helpers.zig");
 
     // collect break value if present
     var operands = std.ArrayList(c.MlirValue){};
@@ -26,38 +26,114 @@ pub fn lowerBreak(self: *const StatementLowerer, break_stmt: *const lib.ast.Stat
         operands.append(self.allocator, value) catch unreachable;
     }
 
-    // use ora.break operation with optional label and values
-    const label = if (break_stmt.label) |l| l else null;
-    const break_op = self.ora_dialect.createBreak(label, operands.items, loc);
-    h.appendOp(self.block, break_op);
+    // labeled breaks are handled via label context
+    if (break_stmt.label) |label| {
+        var matched_label = false;
+        var ctx_opt = self.label_context;
+        while (ctx_opt) |ctx| : (ctx_opt = ctx.parent) {
+            if (!std.mem.eql(u8, label, ctx.label)) continue;
+            matched_label = true;
+            switch (ctx.label_type) {
+                .Block => {
+                    if (ctx.break_flag_memref) |break_flag_memref| {
+                        const true_val = helpers.createBoolConstant(self, true, loc);
+                        helpers.storeToMemref(self, true_val, break_flag_memref, loc);
+                        return;
+                    }
+                },
+                .Switch => {
+                    if (ctx.continue_flag_memref) |continue_flag_memref| {
+                        const false_val = helpers.createBoolConstant(self, false, loc);
+                        helpers.storeToMemref(self, false_val, continue_flag_memref, loc);
+                        const yield_op = self.ora_dialect.createScfYield(loc);
+                        h.appendOp(self.block, yield_op);
+                        return;
+                    }
+                },
+                .While, .For => {
+                    const break_op = self.ora_dialect.createBreak(label, operands.items, loc);
+                    h.appendOp(self.block, break_op);
+                    return;
+                },
+            }
+        }
+        if (!matched_label) {
+            return LoweringError.InvalidControlFlow;
+        }
+    }
+
+    // unlabeled break: prefer switch (breaks switch), else nearest loop
+    var ctx_opt = self.label_context;
+    while (ctx_opt) |ctx| : (ctx_opt = ctx.parent) {
+        switch (ctx.label_type) {
+            .Switch => {
+                const yield_op = if (ctx.continue_flag_memref != null)
+                    self.ora_dialect.createScfYield(loc)
+                else
+                    self.ora_dialect.createYield(&[_]c.MlirValue{}, loc);
+                h.appendOp(self.block, yield_op);
+                return;
+            },
+            .While, .For => {
+                const break_op = self.ora_dialect.createBreak(null, operands.items, loc);
+                h.appendOp(self.block, break_op);
+                return;
+            },
+            .Block => {},
+        }
+    }
+
+    // No label-handling path matched, report invalid control flow without ora.break.
+    return LoweringError.InvalidControlFlow;
 }
 
 /// Lower continue statements with label support
 pub fn lowerContinue(self: *const StatementLowerer, continue_stmt: *const lib.ast.Statements.ContinueNode) LoweringError!void {
     const loc = self.fileLoc(continue_stmt.span);
-    const h = @import("../helpers.zig");
 
     if (continue_stmt.label) |label| {
-        // check if this continue targets a labeled switch (special handling for value replacement)
-        if (self.label_context) |label_ctx| {
-            if (std.mem.eql(u8, label, label_ctx.label)) {
-                // handle switch-specific continue (with value replacement)
-                if (label_ctx.label_type == .Switch and label_ctx.continue_flag_memref != null) {
-                    try handleLabeledSwitchContinue(self, continue_stmt, label_ctx, loc);
+        var matched_label = false;
+        var ctx_opt = self.label_context;
+        while (ctx_opt) |ctx| : (ctx_opt = ctx.parent) {
+            if (!std.mem.eql(u8, label, ctx.label)) continue;
+            matched_label = true;
+            switch (ctx.label_type) {
+                .Switch => {
+                    if (ctx.continue_flag_memref != null) {
+                        try handleLabeledSwitchContinue(self, continue_stmt, ctx, loc);
+                        return;
+                    }
+                    return LoweringError.InvalidControlFlow;
+                },
+                .While, .For => {
+                    const cont_op = self.ora_dialect.createContinue(label, loc);
+                    h.appendOp(self.block, cont_op);
                     return;
-                }
-                // for other labeled contexts (while, for, block), use ora.continue with label
+                },
+                .Block => {
+                    if (ctx.break_flag_memref) |break_flag_memref| {
+                        const true_val = helpers.createBoolConstant(self, true, loc);
+                        helpers.storeToMemref(self, true_val, break_flag_memref, loc);
+                        return;
+                    }
+                },
             }
         }
-
-        // labeled continue - use ora.continue with label
-        const continue_op = self.ora_dialect.createContinue(label, loc);
-        h.appendOp(self.block, continue_op);
-    } else {
-        // unlabeled continue - use ora.continue without label
-        const continue_op = self.ora_dialect.createContinue(null, loc);
-        h.appendOp(self.block, continue_op);
+        if (!matched_label) {
+            return LoweringError.InvalidControlFlow;
+        }
     }
+
+    var ctx_opt = self.label_context;
+    while (ctx_opt) |ctx| : (ctx_opt = ctx.parent) {
+        if (ctx.label_type == .While or ctx.label_type == .For) {
+            const cont_op = self.ora_dialect.createContinue(null, loc);
+            h.appendOp(self.block, cont_op);
+            return;
+        }
+    }
+
+    return LoweringError.InvalidControlFlow;
 }
 
 /// Handle continue to a labeled switch (stores value and sets continue flag)
@@ -69,11 +145,15 @@ fn handleLabeledSwitchContinue(
 ) LoweringError!void {
     // this only works for labeled switches with continue flag memref
     if (label_ctx.continue_flag_memref == null or label_ctx.value_memref == null) {
-        // fallback to regular continue
-        const continue_op = self.ora_dialect.createContinue(label_ctx.label, loc);
-        const h = @import("../helpers.zig");
-        h.appendOp(self.block, continue_op);
-        return;
+        if (self.expr_lowerer.error_handler) |handler| {
+            handler.reportError(
+                .InternalError,
+                continue_stmt.span,
+                "labeled switch continue without state",
+                "internal error: continue state missing for labeled switch",
+            ) catch {};
+        }
+        return LoweringError.InvalidControlFlow;
     }
 
     // unwrap the memrefs (we know they're not null from the check above)
@@ -100,10 +180,9 @@ fn handleLabeledSwitchContinue(
     const true_val = helpers.createBoolConstant(self, true, loc);
     helpers.storeToMemref(self, true_val, continue_flag, loc);
 
-    // use ora.continue to exit current case (switch-specific handling)
-    const continue_op = self.ora_dialect.createContinue(label_ctx.label, loc);
-    const h = @import("../helpers.zig");
-    h.appendOp(self.block, continue_op);
+    // End the current scf.if region so the while after-region can continue.
+    const yield_op = self.ora_dialect.createScfYield(loc);
+    h.appendOp(self.block, yield_op);
 }
 
 /// Lower labeled blocks (including labeled switch, while, for)
@@ -117,40 +196,83 @@ pub fn lowerLabeledBlock(self: *const StatementLowerer, labeled_block: *const li
         }
     }
 
-    // regular labeled block - create label context and lower the block
+    const loc = self.fileLoc(labeled_block.span);
+
+    // regular labeled block - use break flag to gate statement execution
+    const i1_type = h.boolType(self.ctx);
+    const empty_attr = c.oraNullAttrCreate();
+    const break_flag_memref_type = h.memRefType(self.ctx, i1_type, 0, null, empty_attr, empty_attr);
+    const break_flag_alloca = self.ora_dialect.createMemrefAlloca(break_flag_memref_type, loc);
+    h.appendOp(self.block, break_flag_alloca);
+    const break_flag_memref = h.getResult(break_flag_alloca, 0);
+
+    const false_val = helpers.createBoolConstant(self, false, loc);
+    helpers.storeToMemref(self, false_val, break_flag_memref, loc);
+
     const label_ctx = LabelContext{
         .label = labeled_block.label,
+        .break_flag_memref = break_flag_memref,
         .label_type = .Block,
+        .parent = self.label_context,
     };
 
-    // create statement lowerer with label context for break/continue
-    var lowerer_with_label = StatementLowerer.init(
-        self.ctx,
-        self.block,
-        self.type_mapper,
-        self.expr_lowerer,
-        self.param_map,
-        self.storage_map,
-        self.local_var_map,
-        self.locations,
-        self.symbol_table,
-        self.builtin_registry,
-        self.allocator,
-        self.current_function_return_type,
-        self.current_function_return_type_info,
-        self.ora_dialect,
-        self.ensures_clauses,
-    );
-    lowerer_with_label.label_context = &label_ctx;
+    for (labeled_block.block.statements) |stmt| {
+        const load_break = self.ora_dialect.createMemrefLoad(break_flag_memref, &[_]c.MlirValue{}, i1_type, loc);
+        h.appendOp(self.block, load_break);
+        const break_flag_val = h.getResult(load_break, 0);
 
-    _ = try lowerer_with_label.lowerBlockBody(labeled_block.block, self.block);
+        const cond = c.oraArithCmpIOpCreate(self.ctx, loc, 0, break_flag_val, false_val);
+        if (c.oraOperationIsNull(cond)) {
+            @panic("Failed to create arith.cmpi for labeled block break guard");
+        }
+        h.appendOp(self.block, cond);
+        const cond_val = h.getResult(cond, 0);
+
+        const if_op = self.ora_dialect.createScfIf(cond_val, &[_]c.MlirType{}, loc);
+        h.appendOp(self.block, if_op);
+
+        const then_block = c.oraScfIfOpGetThenBlock(if_op);
+        const else_block = c.oraScfIfOpGetElseBlock(if_op);
+        if (c.oraBlockIsNull(then_block) or c.oraBlockIsNull(else_block)) {
+            @panic("scf.if missing then/else blocks");
+        }
+
+        var lowerer_with_label = StatementLowerer.init(
+            self.ctx,
+            then_block,
+            self.type_mapper,
+            self.expr_lowerer,
+            self.param_map,
+            self.storage_map,
+            self.local_var_map,
+            self.locations,
+            self.symbol_table,
+            self.builtin_registry,
+            self.allocator,
+            self.current_function_return_type,
+            self.current_function_return_type_info,
+            self.ora_dialect,
+            self.ensures_clauses,
+        );
+        lowerer_with_label.label_context = &label_ctx;
+        lowerer_with_label.force_stack_memref = true;
+
+        try lowerer_with_label.lowerStatement(&stmt);
+
+        if (!helpers.blockEndsWithTerminator(&lowerer_with_label, then_block)) {
+            const yield_op = self.ora_dialect.createScfYield(loc);
+            h.appendOp(then_block, yield_op);
+        }
+
+        const else_yield = self.ora_dialect.createScfYield(loc);
+        h.appendOp(else_block, else_yield);
+    }
 }
 
 /// Lower labeled switch with continue support using scf.while
 fn lowerLabeledSwitch(self: *const StatementLowerer, labeled_block: *const lib.ast.Statements.LabeledBlockNode) LoweringError!void {
     log.debug("[lowerLabeledSwitch] Starting labeled switch lowering\n", .{});
     const loc = self.fileLoc(labeled_block.span);
-    const h = @import("../helpers.zig");
 
     // find the switch statement
     const switch_stmt = blk: {
@@ -256,7 +378,7 @@ fn lowerLabeledSwitch(self: *const StatementLowerer, labeled_block: *const lib.a
         h.appendOp(self.block, load_return_flag);
         const should_return = h.getResult(load_return_flag, 0);
 
-        // use ora.if to check return flag (ora.if allows ora.return inside its regions)
+        // use ora.if so the then-region can legally contain ora.return
         const return_if_op = self.ora_dialect.createIf(should_return, loc);
         h.appendOp(self.block, return_if_op);
 
@@ -304,6 +426,7 @@ fn lowerSwitchCasesWithLabel(
         .return_flag_memref = return_flag_memref,
         .return_value_memref = return_value_memref,
         .label_type = .Switch,
+        .parent = self.label_context,
     };
 
     // create statement lowerer with label context

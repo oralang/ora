@@ -14,7 +14,7 @@ contract IncompatibleRefinements {
     
     // ERROR: MinValue cannot convert to Exact (incompatible refinements)
     fn testMinValueToExact(amount: MinValue<u256, 1000>) {
-        // const exact: Exact<u256> = amount; // ERROR: Incompatible
+        const exact: Exact<u256> = amount; // ERROR: Incompatible
     }
     
     // ============================================================================
@@ -23,7 +23,7 @@ contract IncompatibleRefinements {
     
     // ERROR: BasisPoints cannot convert to Exact (incompatible refinements)
     fn testBasisPointsToExact(rate: BasisPoints<u256>) {
-        // const exact: Exact<u256> = rate; // ERROR: Incompatible
+        const exact: Exact<u256> = rate; // ERROR: Incompatible
     }
     
     // ============================================================================
@@ -32,7 +32,7 @@ contract IncompatibleRefinements {
     
     // ERROR: Exact cannot convert to MinValue (incompatible refinements)
     fn testExactToMinValue(total: Exact<u256>) {
-        // const min_value: MinValue<u256, 100> = total; // ERROR: Incompatible
+        const min_value: MinValue<u256, 100> = total; // ERROR: Incompatible
     }
     
     // ============================================================================
@@ -41,7 +41,7 @@ contract IncompatibleRefinements {
     
     // ERROR: Scaled cannot convert to MinValue (incompatible refinements)
     fn testScaledToMinValue(amount: Scaled<u256, 18>) {
-        // const min_value: MinValue<u256, 1000> = amount; // ERROR: Incompatible
+        const min_value: MinValue<u256, 1000> = amount; // ERROR: Incompatible
     }
     
     // ============================================================================
@@ -50,7 +50,7 @@ contract IncompatibleRefinements {
     
     // ERROR: MinValue cannot convert to Scaled (incompatible refinements)
     fn testMinValueToScaled(amount: MinValue<u256, 1000>) {
-        // const scaled: Scaled<u256, 18> = amount; // ERROR: Incompatible
+        const scaled: Scaled<u256, 18> = amount; // ERROR: Incompatible
     }
     
     // ============================================================================
@@ -59,11 +59,11 @@ contract IncompatibleRefinements {
     
     // ERROR: u8 cannot convert to MinValue<u256, ...> (base type mismatch)
     fn testWrongBaseType(value: u8) {
-        // const min_value: MinValue<u256, 100> = value; // ERROR: Base type mismatch
+        const min_value: MinValue<u256, 100> = value; // ERROR: Base type mismatch
     }
     
     // ERROR: address cannot convert to MinValue<u256, ...> (completely different types)
     fn testAddressToMinValue(addr: address) {
-        // const min_value: MinValue<u256, 100> = addr; // ERROR: Type mismatch
+        const min_value: MinValue<u256, 100> = addr; // ERROR: Type mismatch
     }
 }

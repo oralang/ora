@@ -234,9 +234,13 @@ pub fn checkExpr(
     if (!self.validation.isAssignable(typed.ty, expected)) {
         const got_str = formatTypeInfo(typed.ty, self.allocator) catch "unknown";
         const expected_str = formatTypeInfo(expected, self.allocator) catch "unknown";
-        log.debug(
+        log.err(
             "[type_resolver] TypeMismatch: got {s}, expected {s}\n",
             .{ got_str, expected_str },
+        );
+        log.err(
+            "[type_resolver] TypeMismatch details: got category={s} ora_type={any} expected category={s} ora_type={any}\n",
+            .{ @tagName(typed.ty.category), typed.ty.ora_type, @tagName(expected.category), expected.ora_type },
         );
         return TypeResolutionError.TypeMismatch;
     }
@@ -355,19 +359,28 @@ fn synthAssignment(
     const target_region = inferExprRegion(self, assign.target);
     const source_region = inferExprRegion(self, assign.value);
     if (!isRegionAssignmentAllowed(target_region, source_region, assign.target)) {
+        const target_tag = @tagName(target_region);
+        const source_tag = @tagName(source_region);
+        const target_kind = @tagName(assign.target.*);
+        const value_kind = @tagName(assign.value.*);
+        log.err(
+            "[type_resolver] RegionMismatch: target={s}({s}) source={s}({s})\n",
+            .{ target_tag, target_kind, source_tag, value_kind },
+        );
         return TypeResolutionError.RegionMismatch;
     }
 
-    // compute write effect if target is a storage slot
-    var write_eff = Effect.pure();
-    if (resolveStorageSlot(self, assign.target)) |slot_name| {
-        var slots = SlotSet.init(self.allocator);
-        try slots.add(self.allocator, slot_name);
-        write_eff = Effect.writes(slots);
-    }
+    // compute effects for implicit region transitions
+    const region_eff = try regionEffectForAssignment(
+        self,
+        target_region,
+        source_region,
+        assign.target,
+        assign.value,
+    );
 
     var combined_eff = takeEffect(&value_typed);
-    mergeEffects(self.allocator, &combined_eff, write_eff);
+    mergeEffects(self.allocator, &combined_eff, region_eff);
     return Typed.init(target_type, combined_eff, self.allocator);
 }
 
@@ -534,7 +547,7 @@ fn synthIdentifier(
     var eff = Effect.pure();
     if (self.current_scope) |scope| {
         if (SymbolTable.findUp(scope, id.name)) |sym| {
-            if (sym.region == .Storage) {
+            if (sym.region == .Storage or sym.region == .TStore) {
                 var slots = SlotSet.init(self.allocator);
                 try slots.add(self.allocator, sym.name);
                 eff = Effect.reads(slots);
@@ -925,8 +938,11 @@ fn synthIndex(
 pub fn inferExprRegion(self: *CoreResolver, expr: *ast.Expressions.ExprNode) MemoryRegion {
     return switch (expr.*) {
         .Identifier => |id| id.type_info.region orelse blk: {
+            if (std.mem.eql(u8, id.name, "std")) {
+                break :blk MemoryRegion.Calldata;
+            }
             if (self.current_scope) |scope| {
-                if (SymbolTable.findUp(scope, id.name)) |sym| {
+                if (self.symbol_table.safeFindUp(scope, id.name)) |sym| {
                     break :blk sym.region orelse MemoryRegion.Stack;
                 }
             }
@@ -943,38 +959,47 @@ fn isStorageLike(r: MemoryRegion) bool {
     return r == .Storage or r == .TStore;
 }
 
-fn isElementLevelTarget(target: *ast.Expressions.ExprNode) bool {
-    return switch (target.*) {
-        .FieldAccess, .Index => true,
-        else => false,
-    };
+fn isStackOrMemory(r: MemoryRegion) bool {
+    return r == .Stack or r == .Memory;
 }
 
 pub fn isRegionAssignmentAllowed(target_region: MemoryRegion, source_region: MemoryRegion, target_node: *ast.Expressions.ExprNode) bool {
+    _ = target_node;
     if (target_region == .Calldata) return false;
     if (target_region == source_region) return true;
-    if (isStorageLike(target_region)) {
-        if (isStorageLike(source_region)) {
-            return isElementLevelTarget(target_node);
-        }
-        return true;
+    if (source_region == .Calldata) {
+        return isStackOrMemory(target_region) or target_region == .Storage or target_region == .TStore;
     }
+
+    if (isStackOrMemory(target_region)) {
+        return isStackOrMemory(source_region) or isStorageLike(source_region) or source_region == .Calldata;
+    }
+
+    if (target_region == .Storage) {
+        return isStackOrMemory(source_region);
+    }
+
+    if (target_region == .TStore) {
+        return isStackOrMemory(source_region);
+    }
+
     return false;
 }
 
-fn resolveStorageSlot(
+fn resolveRegionSlot(
     self: *CoreResolver,
     target: *ast.Expressions.ExprNode,
+    region: MemoryRegion,
 ) ?[]const u8 {
     const base_name = findBaseIdentifier(target) orelse return null;
     if (self.current_scope) |scope| {
         if (self.symbol_table.safeFindUp(scope, base_name)) |sym| {
-            if (sym.region == .Storage) return sym.name;
+            if (sym.region == region) return sym.name;
         }
     }
     if (self.symbol_table.root.findInCurrent(base_name)) |idx| {
         const sym = self.symbol_table.root.symbols.items[idx];
-        if (sym.region == .Storage) return sym.name;
+        if (sym.region == region) return sym.name;
     }
     return null;
 }
@@ -986,6 +1011,54 @@ fn findBaseIdentifier(expr: *const ast.Expressions.ExprNode) ?[]const u8 {
         .Index => |ix| findBaseIdentifier(ix.target),
         else => null,
     };
+}
+
+fn regionReadEffect(self: *CoreResolver, expr: *ast.Expressions.ExprNode, region: MemoryRegion) TypeResolutionError!Effect {
+    if (region == .Storage or region == .TStore) {
+        if (resolveRegionSlot(self, expr, region)) |slot_name| {
+            var slots = SlotSet.init(self.allocator);
+            try slots.add(self.allocator, slot_name);
+            return Effect.reads(slots);
+        }
+    }
+    return Effect.pure();
+}
+
+fn regionWriteEffect(self: *CoreResolver, expr: *ast.Expressions.ExprNode, region: MemoryRegion) TypeResolutionError!Effect {
+    if (region == .Storage or region == .TStore) {
+        if (resolveRegionSlot(self, expr, region)) |slot_name| {
+            var slots = SlotSet.init(self.allocator);
+            try slots.add(self.allocator, slot_name);
+            return Effect.writes(slots);
+        }
+    }
+    return Effect.pure();
+}
+
+pub fn regionEffectForAssignment(
+    self: *CoreResolver,
+    target_region: MemoryRegion,
+    source_region: MemoryRegion,
+    target_expr: *ast.Expressions.ExprNode,
+    source_expr: *ast.Expressions.ExprNode,
+) TypeResolutionError!Effect {
+    if (target_region == source_region) return Effect.pure();
+
+    if (isStackOrMemory(target_region)) {
+        if (source_region == .Storage or source_region == .TStore) {
+            return regionReadEffect(self, source_expr, source_region);
+        }
+        return Effect.pure();
+    }
+
+    if ((target_region == .Storage or target_region == .TStore) and isStackOrMemory(source_region)) {
+        return regionWriteEffect(self, target_expr, target_region);
+    }
+    if ((target_region == .Storage or target_region == .TStore) and source_region == .Calldata) {
+        return regionWriteEffect(self, target_expr, target_region);
+    }
+
+    return Effect.pure();
 }
 
 // ============================================================================

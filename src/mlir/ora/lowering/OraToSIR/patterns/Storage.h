@@ -42,19 +42,8 @@ namespace mlir
                 return slotAttr.getUInt();
             }
 
-            // If no slot index attribute, compute sequential index based on order in module
-            // This happens on first access - we'll assign it in ConvertGlobalOp
-            uint64_t slotIndex = 0;
-            module.walk([&](ora::GlobalOp g)
-                        {
-        if (g == globalOp)
-        {
-            return WalkResult::interrupt();
-        }
-        slotIndex++;
-        return WalkResult::advance(); });
-
-            return slotIndex;
+            // If no slot index attribute, fall back to a stable hash of the name.
+            return std::hash<std::string>{}(name.str());
         }
 
         // Storage operation conversions

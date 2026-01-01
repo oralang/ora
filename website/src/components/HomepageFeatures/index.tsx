@@ -15,8 +15,8 @@ const FeatureList: FeatureItem[] = [
     Svg: require('@site/static/img/undraw_docusaurus_mountain.svg').default,
     description: (
       <>
-        <strong>Core Pipeline:</strong> Lexical analysis → Syntax analysis → Semantic analysis → HIR → Yul → Bytecode is functional.<br />
-        <strong>In Progress:</strong> Formal verification system, advanced safety checks, and comprehensive error handling.
+        <strong>Core Pipeline:</strong> Lexical analysis → Syntax analysis → Semantic analysis → HIR → MLIR (81 operations) → sensei-ir (SIR) → EVM Bytecode is functional.<br />
+        <strong>Success Rate:</strong> 79% (76/96 examples passing). <strong>In Progress:</strong> sensei-ir lowering, for loops, enhanced error handling.
       </>
     ),
   },
@@ -37,7 +37,7 @@ const FeatureList: FeatureItem[] = [
     description: (
       <>
         <strong>Built with Zig:</strong> Leveraging Zig's compile-time capabilities for meta-programming.<br />
-        <strong>Yul Backend:</strong> Compiles to Ethereum's intermediate language for optimal bytecode generation.<br />
+        <strong>sensei-ir Backend:</strong> Compiles to sensei-ir (SIR), a bespoke EVM IR for optimal bytecode generation.<br />
         <strong>Formal Methods:</strong> Exploring mathematical proof systems for contract verification.
       </>
     ),

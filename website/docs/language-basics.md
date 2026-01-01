@@ -26,7 +26,7 @@ Ora is designed as a smart contract language with formal verification capabiliti
 
 **🚧 In Development:**
 - For loops with capture syntax
-- Complete Yul code generation
+- Complete sensei-ir (SIR) lowering and EVM code generation
 - Standard library
 - Full formal verification
 
@@ -481,8 +481,9 @@ Understanding how Ora processes your code:
 2. **Syntax Analysis**: Tokens → Abstract Syntax Tree (AST)
 3. **Semantic Analysis**: AST → Validated AST with type information
 4. **HIR Generation**: AST → High-level Intermediate Representation
-5. **Yul Generation**: HIR → Yul code
-6. **Bytecode Generation**: Yul → EVM bytecode
+5. **MLIR Lowering**: HIR → MLIR intermediate representation
+6. **sensei-ir Lowering**: MLIR → sensei-ir (SIR) code
+7. **Bytecode Generation**: sensei-ir → EVM bytecode
 
 ## Best Practices (Current)
 

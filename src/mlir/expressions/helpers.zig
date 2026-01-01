@@ -207,67 +207,41 @@ pub fn createComparisonOp(ctx: c.MlirContext, block: c.MlirBlock, locations: Loc
     const is_rhs_address = c.oraTypeIsAddressType(rhs_ty);
     const loc = locations.createLocation(span);
 
-    const lhs_converted = if (is_lhs_address) blk: {
-        const addr_to_i160_op = c.oraAddrToI160OpCreate(ctx, loc, lhs);
-        h.appendOp(block, addr_to_i160_op);
-        break :blk h.getResult(addr_to_i160_op, 0);
-    } else lhs;
-    const rhs_converted = if (is_rhs_address) blk: {
-        const addr_to_i160_op = c.oraAddrToI160OpCreate(ctx, loc, rhs);
-        h.appendOp(block, addr_to_i160_op);
-        break :blk h.getResult(addr_to_i160_op, 0);
-    } else rhs;
-
     if (is_lhs_address or is_rhs_address) {
-        // both operands should be converted to i160 for comparison
-        // ensure both are the same type (i160)
-        const i160_ty = c.oraIntegerTypeCreate(ctx, 160);
-        const lhs_final = if (is_lhs_address) lhs_converted else blk: {
-            // convert non-address to i160 if needed
-            const lhs_ty_inner = c.oraValueGetType(lhs);
-            if (c.oraTypeEqual(lhs_ty_inner, i160_ty)) {
-                break :blk lhs;
-            } else {
-                // convert to i160 using arith.extui or arith.trunci
-                const lhs_width = c.oraIntegerTypeGetWidth(lhs_ty_inner);
-                if (lhs_width < 160) {
-                    const ext_op = c.oraArithExtUIOpCreate(ctx, loc, lhs, i160_ty);
-                    h.appendOp(block, ext_op);
-                    break :blk h.getResult(ext_op, 0);
-                } else {
-                    const trunc_op = c.oraArithTruncIOpCreate(ctx, loc, lhs, i160_ty);
-                    h.appendOp(block, trunc_op);
-                    break :blk h.getResult(trunc_op, 0);
-                }
-            }
-        };
-        const rhs_final = if (is_rhs_address) rhs_converted else blk: {
-            // convert non-address to i160 if needed
-            const rhs_ty_inner = c.oraValueGetType(rhs);
-            if (c.oraTypeEqual(rhs_ty_inner, i160_ty)) {
-                break :blk rhs;
-            } else {
-                // convert to i160 using arith.extui or arith.trunci
-                const rhs_width = c.oraIntegerTypeGetWidth(rhs_ty_inner);
-                if (rhs_width < 160) {
-                    const ext_op = c.oraArithExtUIOpCreate(ctx, loc, rhs, i160_ty);
-                    h.appendOp(block, ext_op);
-                    break :blk h.getResult(ext_op, 0);
-                } else {
-                    const trunc_op = c.oraArithTruncIOpCreate(ctx, loc, rhs, i160_ty);
-                    h.appendOp(block, trunc_op);
-                    break :blk h.getResult(trunc_op, 0);
-                }
-            }
-        };
+        const bool_ty = h.boolType(ctx);
+        if (is_lhs_address and is_rhs_address) {
+            const op = c.oraCmpOpCreate(ctx, loc, h.strRef(predicate), lhs, rhs, bool_ty);
+            h.appendOp(block, op);
+            return h.getResult(op, 0);
+        }
 
-        const predicate_value = predicateStringToInt(predicate);
-        const op = c.oraArithCmpIOpCreate(ctx, loc, predicate_value, lhs_final, rhs_final);
+        const i160_ty = c.oraIntegerTypeCreate(ctx, 160);
+        const addr_operand = if (is_lhs_address) lhs else rhs;
+        const int_operand = if (is_lhs_address) rhs else lhs;
+        const int_ty = c.oraValueGetType(int_operand);
+        const int_i160 = if (c.oraTypeIsAInteger(int_ty) and !c.oraTypeEqual(int_ty, i160_ty)) blk: {
+            const int_width = c.oraIntegerTypeGetWidth(int_ty);
+            if (int_width < 160) {
+                const ext_op = c.oraArithExtUIOpCreate(ctx, loc, int_operand, i160_ty);
+                h.appendOp(block, ext_op);
+                break :blk h.getResult(ext_op, 0);
+            }
+            const trunc_op = c.oraArithTruncIOpCreate(ctx, loc, int_operand, i160_ty);
+            h.appendOp(block, trunc_op);
+            break :blk h.getResult(trunc_op, 0);
+        } else int_operand;
+        const i160_to_addr = c.oraI160ToAddrOpCreate(ctx, loc, int_i160);
+        h.appendOp(block, i160_to_addr);
+        const int_addr = h.getResult(i160_to_addr, 0);
+
+        const lhs_final = if (is_lhs_address) addr_operand else int_addr;
+        const rhs_final = if (is_lhs_address) int_addr else addr_operand;
+        const op = c.oraCmpOpCreate(ctx, loc, h.strRef(predicate), lhs_final, rhs_final, bool_ty);
         h.appendOp(block, op);
         return h.getResult(op, 0);
     } else {
         const bool_ty = h.boolType(ctx);
-        const op = c.oraCmpOpCreate(ctx, loc, h.strRef(predicate), lhs_converted, rhs_converted, bool_ty);
+        const op = c.oraCmpOpCreate(ctx, loc, h.strRef(predicate), lhs, rhs, bool_ty);
         h.appendOp(block, op);
         return h.getResult(op, 0);
     }

@@ -196,6 +196,15 @@ def IsZeroOp : SIR_Op<"iszero"> {
     "$x `:` type($x) attr-dict `:` type($res)";
 }
 
+def SelectOp : SIR_PureOp<"select"> {
+  let summary = "Select between two values";
+  let arguments = (ins SIR_U256:$cond, SIR_U256:$true_value, SIR_U256:$false_value);
+  let results   = (outs SIR_U256:$res);
+  let assemblyFormat =
+    "$cond `:` type($cond) `,` $true_value `:` type($true_value) `,` "
+    "$false_value `:` type($false_value) attr-dict `:` type($res)";
+}
+
 // ==========================================================================
 // Bitwise Operations
 // ==========================================================================

@@ -1,0 +1,8 @@
+contract RegionOkTstoreToMemory {
+    tstore var temp: u256;
+
+    fn ok() {
+        memory var tmp: u256 = temp;
+        let sink: u256 = tmp;
+    }
+}

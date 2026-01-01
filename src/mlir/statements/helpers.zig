@@ -363,80 +363,13 @@ pub fn blockEndsWithTerminator(_: *const StatementLowerer, block: c.MlirBlock) b
 
 /// Check if a block ends with ora.break (which is NOT a terminator)
 pub fn blockEndsWithBreak(_: *const StatementLowerer, block: c.MlirBlock) bool {
-    // get the last operation in the block (not necessarily a terminator)
-    // iterate through operations to find the last one
-    var op = c.oraBlockGetFirstOperation(block);
-    var last_op: c.MlirOperation = c.MlirOperation{};
-
-    while (!c.oraOperationIsNull(op)) {
-        last_op = op;
-        op = c.oraOperationGetNextInBlock(op);
-    }
-
-    if (c.oraOperationIsNull(last_op)) {
-        return false;
-    }
-
-    const op_name_ref = c.oraOperationGetName(last_op);
-    const name_str = op_name_ref.data;
-    const name_len = op_name_ref.length;
-
-    log.debug("[blockEndsWithBreak] Last op name length: {}, checking for 'ora.break'\n", .{name_len});
-
-    if (name_str == null or name_len == 0) {
-        c_zig.freeStringRef(op_name_ref);
-        return false;
-    }
-
-    if (name_len == 9) {
-        const name_slice = name_str[0..name_len];
-        log.debug("[blockEndsWithBreak] Last op name: {s}\n", .{name_slice});
-        const result = std.mem.eql(u8, name_slice, "ora.break");
-        // free the string returned from oraOperationGetName
-        c_zig.freeStringRef(op_name_ref);
-        return result;
-    }
-
-    // free the string returned from oraOperationGetName
-    c_zig.freeStringRef(op_name_ref);
+    _ = block;
     return false;
 }
 
 /// Check if a block ends with ora.continue (which is NOT a terminator for if regions)
 pub fn blockEndsWithContinue(_: *const StatementLowerer, block: c.MlirBlock) bool {
-    // get the last operation in the block (not necessarily a terminator)
-    var op = c.oraBlockGetFirstOperation(block);
-    var last_op: c.MlirOperation = c.MlirOperation{};
-
-    while (!c.oraOperationIsNull(op)) {
-        last_op = op;
-        op = c.oraOperationGetNextInBlock(op);
-    }
-
-    if (c.oraOperationIsNull(last_op)) {
-        return false;
-    }
-
-    const op_name_ref = c.oraOperationGetName(last_op);
-    const name_str = op_name_ref.data;
-    const name_len = op_name_ref.length;
-
-    log.debug("[blockEndsWithContinue] Last op name length: {}, checking for 'ora.continue'\n", .{name_len});
-
-    if (name_str == null or name_len == 0) {
-        c_zig.freeStringRef(op_name_ref);
-        return false;
-    }
-
-    if (name_len == 12) {
-        const name_slice = name_str[0..name_len];
-        log.debug("[blockEndsWithContinue] Last op name: {s}\n", .{name_slice});
-        const result = std.mem.eql(u8, name_slice, "ora.continue");
-        c_zig.freeStringRef(op_name_ref);
-        return result;
-    }
-
-    c_zig.freeStringRef(op_name_ref);
+    _ = block;
     return false;
 }
 

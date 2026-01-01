@@ -274,6 +274,12 @@ extern "C"
         MlirLocation loc,
         MlirValue addr);
 
+    /// Create an ora.i160.to.addr operation to convert i160 to !ora.address
+    MLIR_CAPI_EXPORTED MlirOperation oraI160ToAddrOpCreate(
+        MlirContext ctx,
+        MlirLocation loc,
+        MlirValue value);
+
     /// Create an Ora map type !ora.map<keyType, valueType>
     MLIR_CAPI_EXPORTED MlirType oraMapTypeGet(
         MlirContext ctx,
@@ -581,6 +587,13 @@ extern "C"
 
     /// Create an arith.bitcast operation
     MLIR_CAPI_EXPORTED MlirOperation oraArithBitcastOpCreate(
+        MlirContext ctx,
+        MlirLocation loc,
+        MlirValue operand,
+        MlirType resultType);
+
+    /// Create a builtin.unrealized_conversion_cast operation
+    MLIR_CAPI_EXPORTED MlirOperation oraUnrealizedConversionCastOpCreate(
         MlirContext ctx,
         MlirLocation loc,
         MlirValue operand,
@@ -1197,6 +1210,15 @@ extern "C"
 
     /// Query: type is none
     MLIR_CAPI_EXPORTED bool oraTypeIsANone(MlirType type);
+
+    /// Query: is enum type
+    MLIR_CAPI_EXPORTED bool oraTypeIsAEnum(MlirType type);
+
+    /// Get representation type from enum type
+    MLIR_CAPI_EXPORTED MlirType oraEnumTypeGetReprType(MlirType enumType);
+
+    /// Query: is ora integer type
+    MLIR_CAPI_EXPORTED bool oraTypeIsAOraInteger(MlirType type);
 
     /// Create an ora.const operation with optional regions
     MLIR_CAPI_EXPORTED MlirOperation oraConstDeclOpCreate(

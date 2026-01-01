@@ -10,6 +10,7 @@
 #include "mlir/IR/BuiltinTypes.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/Transforms/DialectConversion.h"
+#include "llvm/ADT/APInt.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/raw_ostream.h"
 
@@ -830,6 +831,59 @@ LogicalResult ConvertBytesConstantOp::matchAndRewrite(
 }
 
 // -----------------------------------------------------------------------------
+// Lower ora.addr.to.i160 → sir.bitcast
+// -----------------------------------------------------------------------------
+LogicalResult ConvertAddrToI160Op::matchAndRewrite(
+    ora::AddrToI160Op op,
+    typename ora::AddrToI160Op::Adaptor adaptor,
+    ConversionPatternRewriter &rewriter) const
+{
+    auto loc = op.getLoc();
+    Value input = adaptor.getAddr();
+    Type outType = op.getType();
+
+    rewriter.replaceOpWithNewOp<sir::BitcastOp>(op, outType, input);
+    return success();
+}
+
+// -----------------------------------------------------------------------------
+// Lower ora.i160.to.addr → sir.bitcast + mask to 160 bits
+// -----------------------------------------------------------------------------
+LogicalResult ConvertI160ToAddrOp::matchAndRewrite(
+    ora::I160ToAddrOp op,
+    typename ora::I160ToAddrOp::Adaptor adaptor,
+    ConversionPatternRewriter &rewriter) const
+{
+    auto loc = op.getLoc();
+    auto ctx = op.getContext();
+    Value input = adaptor.getI160();
+
+    auto u256Type = sir::U256Type::get(ctx);
+    Value cast = rewriter.create<sir::BitcastOp>(loc, u256Type, input);
+
+    llvm::APInt maskValue(256, 0);
+    maskValue.setLowBits(160);
+    auto maskAttr = mlir::IntegerAttr::get(u256Type, maskValue);
+    Value mask = rewriter.create<sir::ConstOp>(loc, u256Type, maskAttr);
+    Value masked = rewriter.create<sir::AndOp>(loc, u256Type, cast, mask);
+
+    rewriter.replaceOp(op, masked);
+    return success();
+}
+
+// -----------------------------------------------------------------------------
+// Lower ora.old → passthrough value
+// -----------------------------------------------------------------------------
+LogicalResult ConvertOldOp::matchAndRewrite(
+    ora::OldOp op,
+    typename ora::OldOp::Adaptor adaptor,
+    ConversionPatternRewriter &rewriter) const
+{
+    rewriter.replaceOp(op, adaptor.getValue());
+    return success();
+}
+
+// -----------------------------------------------------------------------------
 // Convert ora.refinement_to_base → passthrough value
 // -----------------------------------------------------------------------------
 LogicalResult ConvertRefinementToBaseOp::matchAndRewrite(
@@ -838,6 +892,90 @@ LogicalResult ConvertRefinementToBaseOp::matchAndRewrite(
     ConversionPatternRewriter &rewriter) const
 {
     rewriter.replaceOp(op, adaptor.getValue());
+    return success();
+}
+
+// -----------------------------------------------------------------------------
+// Verification ops lowered away for Ora → SIR
+// -----------------------------------------------------------------------------
+LogicalResult ConvertInvariantOp::matchAndRewrite(
+    ora::InvariantOp op,
+    typename ora::InvariantOp::Adaptor adaptor,
+    ConversionPatternRewriter &rewriter) const
+{
+    rewriter.eraseOp(op);
+    return success();
+}
+
+LogicalResult ConvertRequiresOp::matchAndRewrite(
+    ora::RequiresOp op,
+    typename ora::RequiresOp::Adaptor adaptor,
+    ConversionPatternRewriter &rewriter) const
+{
+    rewriter.eraseOp(op);
+    return success();
+}
+
+LogicalResult ConvertEnsuresOp::matchAndRewrite(
+    ora::EnsuresOp op,
+    typename ora::EnsuresOp::Adaptor adaptor,
+    ConversionPatternRewriter &rewriter) const
+{
+    rewriter.eraseOp(op);
+    return success();
+}
+
+LogicalResult ConvertAssertOp::matchAndRewrite(
+    ora::AssertOp op,
+    typename ora::AssertOp::Adaptor adaptor,
+    ConversionPatternRewriter &rewriter) const
+{
+    rewriter.eraseOp(op);
+    return success();
+}
+
+LogicalResult ConvertAssumeOp::matchAndRewrite(
+    ora::AssumeOp op,
+    typename ora::AssumeOp::Adaptor adaptor,
+    ConversionPatternRewriter &rewriter) const
+{
+    rewriter.eraseOp(op);
+    return success();
+}
+
+LogicalResult ConvertDecreasesOp::matchAndRewrite(
+    ora::DecreasesOp op,
+    typename ora::DecreasesOp::Adaptor adaptor,
+    ConversionPatternRewriter &rewriter) const
+{
+    rewriter.eraseOp(op);
+    return success();
+}
+
+LogicalResult ConvertIncreasesOp::matchAndRewrite(
+    ora::IncreasesOp op,
+    typename ora::IncreasesOp::Adaptor adaptor,
+    ConversionPatternRewriter &rewriter) const
+{
+    rewriter.eraseOp(op);
+    return success();
+}
+
+LogicalResult ConvertHavocOp::matchAndRewrite(
+    ora::HavocOp op,
+    typename ora::HavocOp::Adaptor adaptor,
+    ConversionPatternRewriter &rewriter) const
+{
+    rewriter.eraseOp(op);
+    return success();
+}
+
+LogicalResult ConvertQuantifiedOp::matchAndRewrite(
+    ora::QuantifiedOp op,
+    typename ora::QuantifiedOp::Adaptor adaptor,
+    ConversionPatternRewriter &rewriter) const
+{
+    rewriter.replaceOp(op, adaptor.getBody());
     return success();
 }
 
@@ -854,10 +992,15 @@ LogicalResult ConvertArithConstantOp::matchAndRewrite(
 
     DBG("ConvertArithConstantOp: checking constant with type: " << resultType);
 
-    // Only convert if the result type is an Ora type
-    if (!llvm::isa<ora::IntegerType>(resultType))
+    auto *typeConverter = getTypeConverter();
+    if (!typeConverter)
     {
-        // Not an Ora type, skip conversion
+        return rewriter.notifyMatchFailure(op, "missing type converter");
+    }
+
+    // Only convert if the result type is not already legal in SIR
+    if (typeConverter->isLegal(resultType))
+    {
         DBG("ConvertArithConstantOp: not an Ora type, skipping");
         return failure();
     }
@@ -880,6 +1023,12 @@ LogicalResult ConvertArithConstantOp::matchAndRewrite(
         return rewriter.notifyMatchFailure(op, "value attribute is not an integer");
     }
 
+    auto convertedType = typeConverter->convertType(resultType);
+    if (!convertedType)
+    {
+        return rewriter.notifyMatchFailure(op, "unable to convert constant type");
+    }
+
     auto u256Type = sir::U256Type::get(op.getContext());
     auto ui64Type = mlir::IntegerType::get(op.getContext(), 64, mlir::IntegerType::Unsigned);
 
@@ -896,4 +1045,475 @@ LogicalResult ConvertArithConstantOp::matchAndRewrite(
     }
     rewriter.replaceOp(op, constOp.getResult());
     return success();
+}
+
+// -----------------------------------------------------------------------------
+// Convert arith.cmpi → sir.{eq,lt,gt,sgt,slt} (+ combos for le/ge/ne)
+// -----------------------------------------------------------------------------
+LogicalResult ConvertArithCmpIOp::matchAndRewrite(
+    mlir::arith::CmpIOp op,
+    typename mlir::arith::CmpIOp::Adaptor adaptor,
+    ConversionPatternRewriter &rewriter) const
+{
+    auto loc = op.getLoc();
+    auto *typeConverter = getTypeConverter();
+    if (!typeConverter)
+    {
+        return rewriter.notifyMatchFailure(op, "missing type converter");
+    }
+
+    auto resultType = typeConverter->convertType(op.getResult().getType());
+    if (!resultType)
+    {
+        return rewriter.notifyMatchFailure(op, "unable to convert cmp result type");
+    }
+
+    auto u256Type = sir::U256Type::get(op.getContext());
+    auto ui64Type = mlir::IntegerType::get(op.getContext(), 64, mlir::IntegerType::Unsigned);
+    auto oneAttr = mlir::IntegerAttr::get(ui64Type, 1);
+    auto one = rewriter.create<sir::ConstOp>(loc, u256Type, oneAttr);
+
+    Value lhs = adaptor.getLhs();
+    Value rhs = adaptor.getRhs();
+    const auto pred = op.getPredicate();
+
+    auto mkEq = [&]() { return rewriter.create<sir::EqOp>(loc, resultType, lhs, rhs).getResult(); };
+    auto mkLt = [&]() { return rewriter.create<sir::LtOp>(loc, resultType, lhs, rhs).getResult(); };
+    auto mkGt = [&]() { return rewriter.create<sir::GtOp>(loc, resultType, lhs, rhs).getResult(); };
+    auto mkSLt = [&]() { return rewriter.create<sir::SLtOp>(loc, resultType, lhs, rhs).getResult(); };
+    auto mkSGt = [&]() { return rewriter.create<sir::SGtOp>(loc, resultType, lhs, rhs).getResult(); };
+
+    Value out;
+    switch (pred)
+    {
+    case mlir::arith::CmpIPredicate::eq:
+        out = mkEq();
+        break;
+    case mlir::arith::CmpIPredicate::ne:
+    {
+        auto eq = mkEq();
+        out = rewriter.create<sir::XorOp>(loc, resultType, eq, one).getResult();
+        break;
+    }
+    case mlir::arith::CmpIPredicate::ult:
+        out = mkLt();
+        break;
+    case mlir::arith::CmpIPredicate::ugt:
+        out = mkGt();
+        break;
+    case mlir::arith::CmpIPredicate::ule:
+    {
+        auto lt = mkLt();
+        auto eq = mkEq();
+        out = rewriter.create<sir::OrOp>(loc, resultType, lt, eq).getResult();
+        break;
+    }
+    case mlir::arith::CmpIPredicate::uge:
+    {
+        auto gt = mkGt();
+        auto eq = mkEq();
+        out = rewriter.create<sir::OrOp>(loc, resultType, gt, eq).getResult();
+        break;
+    }
+    case mlir::arith::CmpIPredicate::slt:
+        out = mkSLt();
+        break;
+    case mlir::arith::CmpIPredicate::sgt:
+        out = mkSGt();
+        break;
+    case mlir::arith::CmpIPredicate::sle:
+    {
+        auto lt = mkSLt();
+        auto eq = mkEq();
+        out = rewriter.create<sir::OrOp>(loc, resultType, lt, eq).getResult();
+        break;
+    }
+    case mlir::arith::CmpIPredicate::sge:
+    {
+        auto gt = mkSGt();
+        auto eq = mkEq();
+        out = rewriter.create<sir::OrOp>(loc, resultType, gt, eq).getResult();
+        break;
+    }
+    default:
+        return rewriter.notifyMatchFailure(op, "unsupported cmp predicate");
+    }
+
+    rewriter.replaceOp(op, out);
+    return success();
+}
+
+// -----------------------------------------------------------------------------
+// Convert arith.addi → sir.add
+// -----------------------------------------------------------------------------
+LogicalResult ConvertArithAddIOp::matchAndRewrite(
+    mlir::arith::AddIOp op,
+    typename mlir::arith::AddIOp::Adaptor adaptor,
+    ConversionPatternRewriter &rewriter) const
+{
+    auto *typeConverter = getTypeConverter();
+    if (!typeConverter)
+    {
+        return rewriter.notifyMatchFailure(op, "missing type converter");
+    }
+    auto resultType = typeConverter->convertType(op.getResult().getType());
+    if (!resultType)
+    {
+        return rewriter.notifyMatchFailure(op, "unable to convert addi result type");
+    }
+
+    auto newOp = rewriter.create<sir::AddOp>(op.getLoc(), resultType, adaptor.getLhs(), adaptor.getRhs());
+    rewriter.replaceOp(op, newOp.getResult());
+    return success();
+}
+
+// -----------------------------------------------------------------------------
+// Convert arith.subi → sir.sub
+// -----------------------------------------------------------------------------
+LogicalResult ConvertArithSubIOp::matchAndRewrite(
+    mlir::arith::SubIOp op,
+    typename mlir::arith::SubIOp::Adaptor adaptor,
+    ConversionPatternRewriter &rewriter) const
+{
+    auto *typeConverter = getTypeConverter();
+    if (!typeConverter)
+    {
+        return rewriter.notifyMatchFailure(op, "missing type converter");
+    }
+    auto resultType = typeConverter->convertType(op.getResult().getType());
+    if (!resultType)
+    {
+        return rewriter.notifyMatchFailure(op, "unable to convert subi result type");
+    }
+
+    auto newOp = rewriter.create<sir::SubOp>(op.getLoc(), resultType, adaptor.getLhs(), adaptor.getRhs());
+    rewriter.replaceOp(op, newOp.getResult());
+    return success();
+}
+
+// -----------------------------------------------------------------------------
+// Convert arith.muli → sir.mul
+// -----------------------------------------------------------------------------
+LogicalResult ConvertArithMulIOp::matchAndRewrite(
+    mlir::arith::MulIOp op,
+    typename mlir::arith::MulIOp::Adaptor adaptor,
+    ConversionPatternRewriter &rewriter) const
+{
+    auto *typeConverter = getTypeConverter();
+    if (!typeConverter)
+    {
+        return rewriter.notifyMatchFailure(op, "missing type converter");
+    }
+    auto resultType = typeConverter->convertType(op.getResult().getType());
+    if (!resultType)
+    {
+        return rewriter.notifyMatchFailure(op, "unable to convert muli result type");
+    }
+
+    auto newOp = rewriter.create<sir::MulOp>(op.getLoc(), resultType, adaptor.getLhs(), adaptor.getRhs());
+    rewriter.replaceOp(op, newOp.getResult());
+    return success();
+}
+
+// -----------------------------------------------------------------------------
+// Convert arith.divui → sir.div
+// -----------------------------------------------------------------------------
+LogicalResult ConvertArithDivUIOp::matchAndRewrite(
+    mlir::arith::DivUIOp op,
+    typename mlir::arith::DivUIOp::Adaptor adaptor,
+    ConversionPatternRewriter &rewriter) const
+{
+    auto *typeConverter = getTypeConverter();
+    if (!typeConverter)
+    {
+        return rewriter.notifyMatchFailure(op, "missing type converter");
+    }
+    auto resultType = typeConverter->convertType(op.getResult().getType());
+    if (!resultType)
+    {
+        return rewriter.notifyMatchFailure(op, "unable to convert divui result type");
+    }
+
+    auto newOp = rewriter.create<sir::DivOp>(op.getLoc(), resultType, adaptor.getLhs(), adaptor.getRhs());
+    rewriter.replaceOp(op, newOp.getResult());
+    return success();
+}
+
+// -----------------------------------------------------------------------------
+// Convert arith.remui → sir.mod
+// -----------------------------------------------------------------------------
+LogicalResult ConvertArithRemUIOp::matchAndRewrite(
+    mlir::arith::RemUIOp op,
+    typename mlir::arith::RemUIOp::Adaptor adaptor,
+    ConversionPatternRewriter &rewriter) const
+{
+    auto *typeConverter = getTypeConverter();
+    if (!typeConverter)
+    {
+        return rewriter.notifyMatchFailure(op, "missing type converter");
+    }
+    auto resultType = typeConverter->convertType(op.getResult().getType());
+    if (!resultType)
+    {
+        return rewriter.notifyMatchFailure(op, "unable to convert remui result type");
+    }
+
+    auto newOp = rewriter.create<sir::ModOp>(op.getLoc(), resultType, adaptor.getLhs(), adaptor.getRhs());
+    rewriter.replaceOp(op, newOp.getResult());
+    return success();
+}
+
+// -----------------------------------------------------------------------------
+// Convert arith.divsi → sir.div
+// -----------------------------------------------------------------------------
+LogicalResult ConvertArithDivSIOp::matchAndRewrite(
+    mlir::arith::DivSIOp op,
+    typename mlir::arith::DivSIOp::Adaptor adaptor,
+    ConversionPatternRewriter &rewriter) const
+{
+    auto *typeConverter = getTypeConverter();
+    if (!typeConverter)
+    {
+        return rewriter.notifyMatchFailure(op, "missing type converter");
+    }
+    auto resultType = typeConverter->convertType(op.getResult().getType());
+    if (!resultType)
+    {
+        return rewriter.notifyMatchFailure(op, "unable to convert divsi result type");
+    }
+
+    auto newOp = rewriter.create<sir::DivOp>(op.getLoc(), resultType, adaptor.getLhs(), adaptor.getRhs());
+    rewriter.replaceOp(op, newOp.getResult());
+    return success();
+}
+
+// -----------------------------------------------------------------------------
+// Convert arith.andi → sir.and
+// -----------------------------------------------------------------------------
+LogicalResult ConvertArithAndIOp::matchAndRewrite(
+    mlir::arith::AndIOp op,
+    typename mlir::arith::AndIOp::Adaptor adaptor,
+    ConversionPatternRewriter &rewriter) const
+{
+    auto *typeConverter = getTypeConverter();
+    if (!typeConverter)
+    {
+        return rewriter.notifyMatchFailure(op, "missing type converter");
+    }
+    auto resultType = typeConverter->convertType(op.getResult().getType());
+    if (!resultType)
+    {
+        return rewriter.notifyMatchFailure(op, "unable to convert andi result type");
+    }
+
+    auto newOp = rewriter.create<sir::AndOp>(op.getLoc(), resultType, adaptor.getLhs(), adaptor.getRhs());
+    rewriter.replaceOp(op, newOp.getResult());
+    return success();
+}
+
+// -----------------------------------------------------------------------------
+// Convert arith.ori → sir.or
+// -----------------------------------------------------------------------------
+LogicalResult ConvertArithOrIOp::matchAndRewrite(
+    mlir::arith::OrIOp op,
+    typename mlir::arith::OrIOp::Adaptor adaptor,
+    ConversionPatternRewriter &rewriter) const
+{
+    auto *typeConverter = getTypeConverter();
+    if (!typeConverter)
+    {
+        return rewriter.notifyMatchFailure(op, "missing type converter");
+    }
+    auto resultType = typeConverter->convertType(op.getResult().getType());
+    if (!resultType)
+    {
+        return rewriter.notifyMatchFailure(op, "unable to convert ori result type");
+    }
+
+    auto newOp = rewriter.create<sir::OrOp>(op.getLoc(), resultType, adaptor.getLhs(), adaptor.getRhs());
+    rewriter.replaceOp(op, newOp.getResult());
+    return success();
+}
+
+// -----------------------------------------------------------------------------
+// Convert arith.xori → sir.xor
+// -----------------------------------------------------------------------------
+LogicalResult ConvertArithXOrIOp::matchAndRewrite(
+    mlir::arith::XOrIOp op,
+    typename mlir::arith::XOrIOp::Adaptor adaptor,
+    ConversionPatternRewriter &rewriter) const
+{
+    auto *typeConverter = getTypeConverter();
+    if (!typeConverter)
+    {
+        return rewriter.notifyMatchFailure(op, "missing type converter");
+    }
+    auto resultType = typeConverter->convertType(op.getResult().getType());
+    if (!resultType)
+    {
+        return rewriter.notifyMatchFailure(op, "unable to convert xori result type");
+    }
+
+    auto newOp = rewriter.create<sir::XorOp>(op.getLoc(), resultType, adaptor.getLhs(), adaptor.getRhs());
+    rewriter.replaceOp(op, newOp.getResult());
+    return success();
+}
+
+// -----------------------------------------------------------------------------
+// Convert arith.select → sir.select
+// -----------------------------------------------------------------------------
+LogicalResult ConvertArithSelectOp::matchAndRewrite(
+    mlir::arith::SelectOp op,
+    typename mlir::arith::SelectOp::Adaptor adaptor,
+    ConversionPatternRewriter &rewriter) const
+{
+    auto *typeConverter = getTypeConverter();
+    if (!typeConverter)
+    {
+        return rewriter.notifyMatchFailure(op, "missing type converter");
+    }
+
+    auto resultType = typeConverter->convertType(op.getResult().getType());
+    if (!resultType)
+    {
+        return rewriter.notifyMatchFailure(op, "unable to convert select result type");
+    }
+
+    auto loc = op.getLoc();
+    Value cond = ensureU256(rewriter, loc, adaptor.getCondition());
+    Value trueVal = ensureU256(rewriter, loc, adaptor.getTrueValue());
+    Value falseVal = ensureU256(rewriter, loc, adaptor.getFalseValue());
+
+    auto newOp = rewriter.create<sir::SelectOp>(loc, resultType, cond, trueVal, falseVal);
+    rewriter.replaceOp(op, newOp.getResult());
+    return success();
+}
+
+// -----------------------------------------------------------------------------
+// Convert arith.extui → sir.bitcast (u256)
+// -----------------------------------------------------------------------------
+LogicalResult ConvertArithExtUIOp::matchAndRewrite(
+    mlir::arith::ExtUIOp op,
+    typename mlir::arith::ExtUIOp::Adaptor adaptor,
+    ConversionPatternRewriter &rewriter) const
+{
+    auto *typeConverter = getTypeConverter();
+    if (!typeConverter)
+    {
+        return rewriter.notifyMatchFailure(op, "missing type converter");
+    }
+    auto resultType = typeConverter->convertType(op.getResult().getType());
+    if (!resultType)
+    {
+        return rewriter.notifyMatchFailure(op, "unable to convert extui result type");
+    }
+
+    auto newOp = rewriter.create<sir::BitcastOp>(op.getLoc(), resultType, adaptor.getIn());
+    rewriter.replaceOp(op, newOp.getResult());
+    return success();
+}
+
+// -----------------------------------------------------------------------------
+// Convert arith.index_castui → sir.bitcast
+// -----------------------------------------------------------------------------
+LogicalResult ConvertArithIndexCastUIOp::matchAndRewrite(
+    mlir::arith::IndexCastUIOp op,
+    typename mlir::arith::IndexCastUIOp::Adaptor adaptor,
+    ConversionPatternRewriter &rewriter) const
+{
+    auto *typeConverter = getTypeConverter();
+    if (!typeConverter)
+    {
+        return rewriter.notifyMatchFailure(op, "missing type converter");
+    }
+    auto resultType = typeConverter->convertType(op.getResult().getType());
+    if (!resultType)
+    {
+        return rewriter.notifyMatchFailure(op, "unable to convert index_castui result type");
+    }
+
+    auto newOp = rewriter.create<sir::BitcastOp>(op.getLoc(), resultType, adaptor.getIn());
+    rewriter.replaceOp(op, newOp.getResult());
+    return success();
+}
+
+// -----------------------------------------------------------------------------
+// Convert arith.trunci → sir.bitcast (u256)
+// -----------------------------------------------------------------------------
+LogicalResult ConvertArithTruncIOp::matchAndRewrite(
+    mlir::arith::TruncIOp op,
+    typename mlir::arith::TruncIOp::Adaptor adaptor,
+    ConversionPatternRewriter &rewriter) const
+{
+    auto *typeConverter = getTypeConverter();
+    if (!typeConverter)
+    {
+        return rewriter.notifyMatchFailure(op, "missing type converter");
+    }
+    auto resultType = typeConverter->convertType(op.getResult().getType());
+    if (!resultType)
+    {
+        return rewriter.notifyMatchFailure(op, "unable to convert trunci result type");
+    }
+
+    auto newOp = rewriter.create<sir::BitcastOp>(op.getLoc(), resultType, adaptor.getIn());
+    rewriter.replaceOp(op, newOp.getResult());
+    return success();
+}
+
+// -----------------------------------------------------------------------------
+// Fold redundant sir.bitcast chains
+// -----------------------------------------------------------------------------
+LogicalResult FoldRedundantBitcastOp::matchAndRewrite(
+    sir::BitcastOp op,
+    PatternRewriter &rewriter) const
+{
+    auto in = op.getInput();
+    if (in.getType() == op.getType())
+    {
+        rewriter.replaceOp(op, in);
+        return success();
+    }
+
+    if (auto inner = in.getDefiningOp<sir::BitcastOp>())
+    {
+        if (inner.getInput().getType() == op.getType())
+        {
+            rewriter.replaceOp(op, inner.getInput());
+            return success();
+        }
+    }
+
+    return failure();
+}
+
+// -----------------------------------------------------------------------------
+// Fold sir.and with const 1
+// -----------------------------------------------------------------------------
+LogicalResult FoldAndOneOp::matchAndRewrite(
+    sir::AndOp op,
+    PatternRewriter &rewriter) const
+{
+    auto lhs = op.getLhs();
+    auto rhs = op.getRhs();
+
+    if (auto lhs_const = lhs.getDefiningOp<sir::ConstOp>())
+    {
+        if (lhs_const.getValue() == 1)
+        {
+            rewriter.replaceOp(op, rhs);
+            return success();
+        }
+    }
+
+    if (auto rhs_const = rhs.getDefiningOp<sir::ConstOp>())
+    {
+        if (rhs_const.getValue() == 1)
+        {
+            rewriter.replaceOp(op, lhs);
+            return success();
+        }
+    }
+
+    return failure();
 }

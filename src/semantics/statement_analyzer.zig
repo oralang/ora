@@ -352,22 +352,22 @@ fn isStorageLike(r: MemoryRegion) bool {
     return r == .Storage or r == .TStore;
 }
 
-fn isElementLevelTarget(target: ast.Expressions.ExprNode) bool {
-    return switch (target) {
-        .FieldAccess, .Index => true,
-        else => false,
-    };
+fn isStackOrMemory(r: MemoryRegion) bool {
+    return r == .Stack or r == .Memory;
 }
 
 fn isRegionAssignmentAllowed(target_region: MemoryRegion, source_region: MemoryRegion, target_node: ast.Expressions.ExprNode) bool {
+    _ = target_node;
     if (target_region == .Calldata) return false;
     if (target_region == source_region) return true;
-    if (isStorageLike(target_region)) {
-        if (isStorageLike(source_region)) {
-            return isElementLevelTarget(target_node);
-        }
-        return true;
+    if (source_region == .Calldata) {
+        return isStackOrMemory(target_region) or target_region == .Storage or target_region == .TStore;
     }
+    if (isStackOrMemory(target_region)) {
+        return isStackOrMemory(source_region) or isStorageLike(source_region) or source_region == .Calldata;
+    }
+    if (target_region == .Storage) return isStackOrMemory(source_region);
+    if (target_region == .TStore) return isStackOrMemory(source_region);
     return false;
 }
 

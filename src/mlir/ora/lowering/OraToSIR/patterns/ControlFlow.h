@@ -36,6 +36,17 @@ namespace mlir
                 ConversionPatternRewriter &rewriter) const override;
         };
 
+        class ConvertCallOp : public OpConversionPattern<mlir::func::CallOp>
+        {
+        public:
+            using OpConversionPattern<mlir::func::CallOp>::OpConversionPattern;
+
+            LogicalResult matchAndRewrite(
+                mlir::func::CallOp op,
+                typename mlir::func::CallOp::Adaptor adaptor,
+                ConversionPatternRewriter &rewriter) const override;
+        };
+
         class ConvertContractOp : public OpConversionPattern<ora::ContractOp>
         {
         public:
@@ -55,6 +66,17 @@ namespace mlir
             LogicalResult matchAndRewrite(
                 ora::WhileOp op,
                 typename ora::WhileOp::Adaptor adaptor,
+                ConversionPatternRewriter &rewriter) const override;
+        };
+
+        class ConvertIfOp : public OpConversionPattern<ora::IfOp>
+        {
+        public:
+            using OpConversionPattern::OpConversionPattern;
+
+            LogicalResult matchAndRewrite(
+                ora::IfOp op,
+                typename ora::IfOp::Adaptor adaptor,
                 ConversionPatternRewriter &rewriter) const override;
         };
 

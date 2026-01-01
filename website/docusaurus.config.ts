@@ -94,13 +94,18 @@ const config: Config = {
           position: 'left',
         },
         {
-          to: '/docs/design-documents',
-          label: 'Design Docs',
+          to: '/docs/specs/type-system',
+          label: 'Specs',
           position: 'left',
         },
         {
-          to: '/docs/evm-ir/intro',
-          label: 'EVM IR',
+          to: '/docs/compiler/field-guide',
+          label: 'Field Guide',
+          position: 'left',
+        },
+        {
+          to: '/playground',
+          label: 'Playground',
           position: 'left',
         },
         {
@@ -137,6 +142,10 @@ const config: Config = {
               label: 'Examples',
               to: '/docs/examples',
             },
+            {
+              label: 'Compiler Field Guide',
+              to: '/docs/compiler/field-guide',
+            },
           ],
         },
         {
@@ -154,22 +163,18 @@ const config: Config = {
               label: 'API Reference',
               to: '/docs/specifications/api',
             },
-            {
-              label: 'EVM IR Specification',
-              to: '/docs/evm-ir/intro',
-            },
           ],
         },
         {
-          title: 'Design Documents',
+          title: 'Specs',
           items: [
             {
-              label: 'Overview',
-              to: '/docs/design-documents',
+              label: 'Type System v0.11',
+              to: '/docs/specs/type-system',
             },
             {
-              label: 'Type System (v0.1)',
-              to: '/docs/design-documents/type-system-v0.1',
+              label: 'ABI v0.1',
+              to: '/docs/specs/abi',
             },
           ],
         },

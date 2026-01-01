@@ -130,11 +130,11 @@ pub fn lowerStackVariableDecl(self: *const StatementLowerer, var_decl: *const li
     // immutable locals (let/const) remain SSA values.
     const is_aggregate = isAggregateType(var_decl.type_info.ora_type);
     const is_scalar = isScalarValueType(var_decl.type_info.ora_type);
-    const needs_memref = (var_decl.kind == .Var) and (is_aggregate or is_scalar);
+    const needs_memref = self.force_stack_memref or ((var_decl.kind == .Var) and (is_aggregate or is_scalar));
 
     log.debug(
-        "[lowerStackVariableDecl] {s}: kind={any}, is_aggregate={}, is_scalar={}, needs_memref={}\n",
-        .{ var_decl.name, var_decl.kind, is_aggregate, is_scalar, needs_memref },
+        "[lowerStackVariableDecl] {s}: kind={any}, is_aggregate={}, is_scalar={}, force_memref={}, needs_memref={}\n",
+        .{ var_decl.name, var_decl.kind, is_aggregate, is_scalar, self.force_stack_memref, needs_memref },
     );
 
     if (needs_memref) {

@@ -824,6 +824,28 @@ pub const TypeMapper = struct {
             const cast_op = c.oraArithIndexCastUIOpCreate(self.ctx, loc, value, target_type);
             h.appendOp(block, cast_op);
             return h.getResult(cast_op, 0);
+        } else if (c.oraTypeIsAddressType(target_type) and value_is_int) {
+            // convert i160 -> !ora.address using ora.i160.to.addr
+            if (c.oraIntegerTypeGetWidth(value_type) == 160) {
+                const loc = c.oraLocationUnknownGet(self.ctx);
+                const addr_op = c.oraI160ToAddrOpCreate(self.ctx, loc, value);
+                h.appendOp(block, addr_op);
+                return h.getResult(addr_op, 0);
+            }
+        } else if (c.oraTypeIsAddressType(value_type) and c.oraTypeIsAddressType(target_type)) {
+            // convert between address-like types (address <-> non_zero_address)
+            const loc = c.oraLocationUnknownGet(self.ctx);
+            const cast_op = c.oraUnrealizedConversionCastOpCreate(self.ctx, loc, value, target_type);
+            h.appendOp(block, cast_op);
+            return h.getResult(cast_op, 0);
+        } else if (c.oraTypeIsAddressType(value_type) and target_is_int) {
+            // convert !ora.address -> i160 using ora.addr.to.i160 when requested
+            if (c.oraIntegerTypeGetWidth(target_type) == 160) {
+                const loc = c.oraLocationUnknownGet(self.ctx);
+                const addr_to_i160 = c.oraAddrToI160OpCreate(self.ctx, loc, value);
+                h.appendOp(block, addr_to_i160);
+                return h.getResult(addr_to_i160, 0);
+            }
         } else if (value_is_int and target_is_int) {
             const value_width = c.oraIntegerTypeGetWidth(value_type);
             const target_width = c.oraIntegerTypeGetWidth(target_type);

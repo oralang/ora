@@ -237,13 +237,25 @@ pub const TypeResolver = struct {
                             param.type_info.ora_type = OraType{ .enum_type = type_name };
                             param.type_info.category = .Enum;
                         } else {
-                            param.type_info.category = ot.getCategory();
+                            var derived_category = ot.getCategory();
+                            if (ot == ._union and ot._union.len > 0 and ot._union[0] == .error_union) {
+                                derived_category = .ErrorUnion;
+                            }
+                            param.type_info.category = derived_category;
                         }
                     } else {
-                        param.type_info.category = ot.getCategory();
+                        var derived_category = ot.getCategory();
+                        if (ot == ._union and ot._union.len > 0 and ot._union[0] == .error_union) {
+                            derived_category = .ErrorUnion;
+                        }
+                        param.type_info.category = derived_category;
                     }
                 } else {
-                    param.type_info.category = ot.getCategory();
+                    var derived_category = ot.getCategory();
+                    if (ot == ._union and ot._union.len > 0 and ot._union[0] == .error_union) {
+                        derived_category = .ErrorUnion;
+                    }
+                    param.type_info.category = derived_category;
                 }
             }
             if (!param.type_info.isResolved()) {
@@ -267,15 +279,27 @@ pub const TypeResolver = struct {
                             ret_type.category = .Enum;
                         } else {
                             // use the category from the ora_type
-                            ret_type.category = ot.getCategory();
+                            var derived_category = ot.getCategory();
+                            if (ot == ._union and ot._union.len > 0 and ot._union[0] == .error_union) {
+                                derived_category = .ErrorUnion;
+                            }
+                            ret_type.category = derived_category;
                         }
                     } else {
                         // type not found, use category from ora_type
-                        ret_type.category = ot.getCategory();
+                        var derived_category = ot.getCategory();
+                        if (ot == ._union and ot._union.len > 0 and ot._union[0] == .error_union) {
+                            derived_category = .ErrorUnion;
+                        }
+                        ret_type.category = derived_category;
                     }
                 } else {
                     // use the category from the ora_type
-                    ret_type.category = ot.getCategory();
+                    var derived_category = ot.getCategory();
+                    if (ot == ._union and ot._union.len > 0 and ot._union[0] == .error_union) {
+                        derived_category = .ErrorUnion;
+                    }
+                    ret_type.category = derived_category;
                 }
             }
             if (!ret_type.isResolved()) {
@@ -302,18 +326,26 @@ pub const TypeResolver = struct {
             self.current_scope = new_scope;
             self.core_resolver.current_scope = new_scope;
 
-            // add parameters to function scope
+        }
+        // ensure parameters exist in function scope (and are marked as calldata)
+        if (func_scope) |scope| {
             for (function.parameters) |*param| {
                 param.type_info.region = .Calldata;
-                const param_symbol = semantics.state.Symbol{
-                    .name = param.name,
-                    .kind = .Param,
-                    .typ = param.type_info,
-                    .span = param.span,
-                    .mutable = param.is_mutable,
-                    .region = .Calldata,
-                };
-                _ = try self.symbol_table.declare(new_scope, param_symbol);
+                if (scope.findInCurrent(param.name)) |idx| {
+                    scope.symbols.items[idx].typ = param.type_info;
+                    scope.symbols.items[idx].region = .Calldata;
+                    scope.symbols.items[idx].mutable = param.is_mutable;
+                } else {
+                    const param_symbol = semantics.state.Symbol{
+                        .name = param.name,
+                        .kind = .Param,
+                        .typ = param.type_info,
+                        .span = param.span,
+                        .mutable = param.is_mutable,
+                        .region = .Calldata,
+                    };
+                    _ = try self.symbol_table.declare(scope, param_symbol);
+                }
             }
         }
         defer {

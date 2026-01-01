@@ -1399,7 +1399,7 @@ bool oraTypeIsAddressType(MlirType type)
     try
     {
         Type mlirType = unwrap(type);
-        return dyn_cast<ora::AddressType>(mlirType) != nullptr;
+        return isa<ora::AddressType>(mlirType) || isa<ora::NonZeroAddressType>(mlirType);
     }
     catch (...)
     {
@@ -1427,6 +1427,33 @@ MlirOperation oraAddrToI160OpCreate(MlirContext ctx, MlirLocation loc, MlirValue
         auto addrToI160Op = builder.create<ora::AddrToI160Op>(location, i160Type, addrValue);
 
         return wrap(addrToI160Op.getOperation());
+    }
+    catch (...)
+    {
+        return {nullptr};
+    }
+}
+
+/// Create an ora.i160.to.addr operation to convert i160 to !ora.address
+MlirOperation oraI160ToAddrOpCreate(MlirContext ctx, MlirLocation loc, MlirValue value)
+{
+    try
+    {
+        MLIRContext *context = unwrap(ctx);
+        Location location = unwrap(loc);
+        Value inputValue = unwrap(value);
+
+        if (!oraDialectIsRegistered(ctx))
+        {
+            return {nullptr};
+        }
+
+        OpBuilder builder(context);
+
+        auto addrType = ora::AddressType::get(context);
+        auto i160ToAddrOp = builder.create<ora::I160ToAddrOp>(location, addrType, inputValue);
+
+        return wrap(i160ToAddrOp.getOperation());
     }
     catch (...)
     {
@@ -2588,6 +2615,25 @@ MlirOperation oraArithBitcastOpCreate(MlirContext ctx, MlirLocation loc, MlirVal
 
         OpBuilder builder(context);
         auto op = builder.create<arith::BitcastOp>(location, resultTy, operandVal);
+        return wrap(op.getOperation());
+    }
+    catch (...)
+    {
+        return {nullptr};
+    }
+}
+
+MlirOperation oraUnrealizedConversionCastOpCreate(MlirContext ctx, MlirLocation loc, MlirValue operand, MlirType resultType)
+{
+    try
+    {
+        MLIRContext *context = unwrap(ctx);
+        Location location = unwrap(loc);
+        Value operandVal = unwrap(operand);
+        Type resultTy = unwrap(resultType);
+
+        OpBuilder builder(context);
+        auto op = builder.create<UnrealizedConversionCastOp>(location, resultTy, operandVal);
         return wrap(op.getOperation());
     }
     catch (...)
@@ -4596,6 +4642,20 @@ MlirAttribute oraIntegerAttrCreateI64FromType(MlirType type, int64_t value)
             auto builtinTy = mlir::IntegerType::get(context, oraIntTy.getWidth(), oraIntTy.getIsSigned() ? mlir::IntegerType::Signed : mlir::IntegerType::Unsigned);
             return wrap(IntegerAttr::get(builtinTy, value));
         }
+        // Handle ora::EnumType - extract underlying representation type
+        if (auto enumTy = llvm::dyn_cast<ora::EnumType>(ty))
+        {
+            Type reprType = enumTy.getReprType();
+            if (auto intTy = llvm::dyn_cast<mlir::IntegerType>(reprType))
+            {
+                return wrap(IntegerAttr::get(intTy, value));
+            }
+            if (auto oraIntTy = llvm::dyn_cast<mlir::ora::IntegerType>(reprType))
+            {
+                auto builtinTy = mlir::IntegerType::get(context, oraIntTy.getWidth(), oraIntTy.getIsSigned() ? mlir::IntegerType::Signed : mlir::IntegerType::Unsigned);
+                return wrap(IntegerAttr::get(builtinTy, value));
+            }
+        }
         return {nullptr};
     }
     catch (...)
@@ -4833,6 +4893,49 @@ bool oraTypeIsANone(MlirType type)
 {
     Type ty = unwrap(type);
     return ty && llvm::isa<mlir::NoneType>(ty);
+}
+
+bool oraTypeIsAEnum(MlirType type)
+{
+    try
+    {
+        Type ty = unwrap(type);
+        return ty && llvm::isa<ora::EnumType>(ty);
+    }
+    catch (...)
+    {
+        return false;
+    }
+}
+
+MlirType oraEnumTypeGetReprType(MlirType enumType)
+{
+    try
+    {
+        Type ty = unwrap(enumType);
+        if (auto enumTy = llvm::dyn_cast<ora::EnumType>(ty))
+        {
+            return wrap(enumTy.getReprType());
+        }
+        return {nullptr};
+    }
+    catch (...)
+    {
+        return {nullptr};
+    }
+}
+
+bool oraTypeIsAOraInteger(MlirType type)
+{
+    try
+    {
+        Type ty = unwrap(type);
+        return ty && llvm::isa<ora::IntegerType>(ty);
+    }
+    catch (...)
+    {
+        return false;
+    }
 }
 
 MlirOperation oraConstDeclOpCreate(MlirContext ctx, MlirLocation loc, const MlirType *resultTypes, size_t numResults, const MlirNamedAttribute *attrs, size_t numAttrs, size_t numRegions, bool addEmptyBlocks)

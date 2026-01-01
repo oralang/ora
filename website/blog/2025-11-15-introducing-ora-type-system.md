@@ -153,7 +153,7 @@ It's not just about catching bugs—it's about building confidence. When the com
 
 ## What's Next
 
-The type system design is documented in our [design documents](/docs/design-documents/type-system-v0.1). It's a working design, evolving as we build the compiler.
+The type system design is documented in our [Type System Specification v0.11](/docs/specs/type-system). It's a working design, evolving as we build the compiler.
 
 We're actively implementing these features. Memory regions are working. Affine types are in progress. Traits are being designed. Refinement types are already functional.
 

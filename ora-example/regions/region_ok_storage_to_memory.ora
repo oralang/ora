@@ -1,0 +1,8 @@
+contract RegionOkStorageToMemory {
+    storage var counter: u256;
+
+    fn ok() {
+        memory var tmp: u256 = counter;
+        let sink: u256 = tmp;
+    }
+}

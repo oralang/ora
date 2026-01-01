@@ -17,7 +17,7 @@ contract FVTest {
         ensures(balance == old(balance) - amount)
     {
         if (amount > balance) {
-            return InsufficientBalance;
+            return error.InsufficientBalance;
         }
         
         balance = balance - amount;

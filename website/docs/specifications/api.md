@@ -10,8 +10,9 @@ The Ora compiler is a domain-specific language compiler for smart contract devel
 2. **Syntax Analysis** - Abstract Syntax Tree generation ✅ *Implemented*
 3. **Semantic Analysis** - Type checking and validation ✅ *Implemented*
 4. **HIR Generation** - High-level Intermediate Representation ✅ *Implemented*
-5. **Yul Generation** - Conversion to Yul intermediate language ✅ *Implemented*
-6. **Bytecode Generation** - EVM bytecode compilation ✅ *Implemented*
+5. **MLIR Lowering** - Conversion to MLIR intermediate representation ✅ *Implemented*
+6. **sensei-ir Lowering** - Conversion to sensei-ir (SIR) 🚧 *In Development*
+7. **Bytecode Generation** - EVM bytecode compilation via sensei-ir 🚧 *In Development*
 
 ## CLI Commands
 
@@ -27,8 +28,8 @@ ora <command> <file>
 - `analyze <file>` - Perform semantic analysis ✅
 - `ir <file>` - Generate and validate IR from source ✅
 - `hir <file>` - Generate HIR and save to JSON file ✅
-- `yul <file>` - Generate Yul code from HIR ✅
-- `bytecode <file>` - Generate EVM bytecode from HIR ✅
+- `sir <file>` - Generate sensei-ir (SIR) code from MLIR 🚧 *In Development*
+- `bytecode <file>` - Generate EVM bytecode from sensei-ir 🚧 *In Development*
 - `compile <file>` - Full compilation pipeline ✅
 
 ### Examples
@@ -40,8 +41,8 @@ ora <command> <file>
 # Generate just the bytecode
 ./zig-out/bin/ora bytecode examples/simple_token.ora
 
-# Generate Yul intermediate code
-./zig-out/bin/ora yul examples/simple_storage_test.ora
+# Generate sensei-ir (SIR) intermediate code
+./zig-out/bin/ora sir examples/simple_storage_test.ora
 
 # Analyze for type errors and formal verification
 ./zig-out/bin/ora analyze examples/formal_verification_test.ora
@@ -54,28 +55,20 @@ ora <command> <file>
 
 ### Core Modules
 
-#### `YulCodegen`
-Generates Yul code from HIR with stack-based variable management.
+#### `SIRLowering`
+Lowers MLIR to sensei-ir (SIR) intermediate representation.
 
 ```zig
-var codegen = YulCodegen.init(allocator);
-defer codegen.deinit();
-
-const yul_code = try codegen.generateYulSimple(&hir);
-defer allocator.free(yul_code);
+// Note: API is under development
+// This will lower MLIR operations to sensei-ir (SIR) format
 ```
 
-#### `YulCompiler`
-FFI bindings to the Solidity Yul compiler.
+#### `SIRBackend`
+Generates EVM bytecode from sensei-ir (SIR).
 
 ```zig
-var result = try YulCompiler.compile(allocator, yul_source);
-defer result.deinit(allocator);
-
-if (result.success) {
-    // Use result.bytecode
-    std.debug.print("Bytecode: {s}\n", .{result.bytecode});
-}
+// Note: API is under development
+// This will use the sensei-ir debug-backend to generate EVM bytecode
 ```
 
 #### `IRBuilder`
@@ -177,21 +170,13 @@ pub fn compileOraFile(allocator: std.mem.Allocator, file_path: []const u8) ![]u8
     try ir_builder.buildFromAST(ast_nodes);
     const hir_program = ir_builder.getProgramPtr();
     
-    // 6. Generate Yul
-    var yul_codegen = ora.YulCodegen.init(allocator);
-    defer yul_codegen.deinit();
+    // 6. Lower to sensei-ir (SIR)
+    // Note: API is under development
+    // This will lower MLIR to sensei-ir (SIR) format
     
-    const yul_code = try yul_codegen.generateYulSimple(hir_program);
-    defer allocator.free(yul_code);
-    
-    // 7. Compile to bytecode
-    var yul_compiler = ora.YulCompiler.init();
-    const compile_result = try yul_compiler.compile(allocator, yul_code);
-    defer compile_result.deinit(allocator);
-    
-    if (!compile_result.success) {
-        return error.CompilationFailed;
-    }
+    // 7. Generate EVM bytecode from sensei-ir
+    // Note: API is under development
+    // This will use the sensei-ir debug-backend to generate bytecode
     
     // Return bytecode (caller owns)
     return allocator.dupe(u8, compile_result.bytecode);
@@ -382,9 +367,13 @@ AST:
        ↓ (MLIR Lowering)
 MLIR:
   %0 = ora.evm.caller() : i160
-       ↓ (Yul Lowering)
-Yul:
-  let temp_0 := caller()
+       ↓ (sensei-ir Lowering)
+sensei-ir (SIR):
+  fn main:
+    entry -> result {
+      result = caller
+      iret
+    }
        ↓ (Bytecode Generation)
 EVM:
   CALLER (opcode 0x33)
@@ -430,8 +419,9 @@ let timestamp: address = std.block.timestamp(); // ❌ Compile error
 - MLIR lowering with automatic validation
 - SSA transformation via mem2reg
 - HIR generation and validation
-- Yul code generation
-- Bytecode compilation via Solidity integration
+- MLIR lowering and optimization
+- sensei-ir (SIR) lowering 🚧 *In Development*
+- Bytecode compilation via sensei-ir 🚧 *In Development*
 - Semantic analysis with builtin validation
 - Effect tracking and analysis
 
@@ -489,12 +479,9 @@ zig build test-examples -- examples/simple_token.ora
 
 ## Integration
 
-### Building with Yul Support
+### Building with sensei-ir Support
 
-The build system automatically:
-1. Downloads and builds Solidity libraries via CMake
-2. Compiles the C++ Yul wrapper
-3. Links everything into the final executable
+The build system includes sensei-ir as a submodule:
 
 ```bash
 zig build        # Build everything
@@ -502,16 +489,15 @@ zig build test   # Run tests
 zig build docs   # Generate documentation
 ```
 
-### FFI Integration
+### sensei-ir Integration
 
-The Yul integration uses Foreign Function Interface (FFI) to call the Solidity compiler:
+Ora uses sensei-ir (SIR) as its backend for EVM bytecode generation:
 
-- `src/yul_wrapper.h` - C header interface
-- `src/yul_wrapper.cpp` - C++ implementation  
-- `src/yul_bindings.zig` - Zig FFI bindings
-- `src/codegen_yul.zig` - High-level Zig interface
+- `sensei-ir-main/` - sensei-ir submodule (Rust-based EVM IR)
+- Integration via FFI or direct library linking (under development)
+- The sensei-ir debug-backend generates EVM bytecode from SIR
 
-This architecture ensures memory safety while leveraging the mature Solidity toolchain.
+This architecture provides a clean, language-agnostic IR for EVM compilation.
 
 ## Performance Benchmarks
 
@@ -520,7 +506,8 @@ This architecture ensures memory safety while leveraging the mature Solidity too
 - **Parsing**: ~100K AST nodes/second
 - **Semantic Analysis**: ~50K nodes/second
 - **HIR Generation**: ~75K nodes/second
-- **Yul Generation**: ~25K nodes/second
+- **MLIR Lowering**: ~50K nodes/second
+- **sensei-ir Lowering**: 🚧 *Benchmarks pending*
 
 ### Memory Usage
 - **Typical contract**: 1-5MB peak memory

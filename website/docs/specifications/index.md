@@ -47,7 +47,7 @@ Automatic storage access tracking and optimization:
 ## Implementation Status
 
 Each specification includes implementation status indicators:
-- ✅ **Complete**: Feature is fully implemented and tested (23/29 examples pass)
+- ✅ **Complete**: Feature is fully implemented and tested (79% success rate - 76/96 examples)
 - 🚧 **In Progress**: Partially implemented, actively being developed
 - 📋 **Planned**: Designed but not yet started
 
@@ -56,12 +56,22 @@ Each specification includes implementation status indicators:
 | Component | Status | Notes |
 |-----------|--------|-------|
 | Lexer | ✅ Complete | All tokens, trivia support |
-| Parser | ✅ Complete | 79% example validation |
-| Type System | ✅ Complete | Full inference and checking |
+| Parser | ✅ Complete | 79% success rate (76/96 examples) |
+| Type System | ✅ Complete | Full type checking and validation |
 | Semantics | ✅ Complete | Region and error validation |
-| MLIR | ✅ Complete | Lowering and optimization |
+| MLIR | ✅ Complete | 81 operations, lowering and optimization |
 | State Analysis | ✅ Complete | Automatic tracking & warnings |
-| Yul Backend | 🚧 In Progress | Core generation working |
+| Structs | ✅ Complete | Declaration, instantiation, field operations |
+| Enums | ✅ Complete | Declaration with explicit values |
+| Control Flow | ✅ Complete | if/else, switch statements |
+| Arithmetic | ✅ Complete | All operations (add, sub, mul, div, rem, power) |
+| Memory Ops | ✅ Complete | mload, mstore, mload8, mstore8 |
+| Transient Storage | ✅ Complete | tload, tstore operations |
+| Maps | ✅ Complete | Map get/store operations |
+| sensei-ir Backend | 🚧 In Progress | Lowering to sensei-ir (SIR) in development |
+| For Loops | 🚧 In Progress | Capture syntax in development |
+| Error Handling | 🚧 In Progress | Try-catch improvements needed |
+| Type Inference | 🚧 In Progress | Currently requires explicit types |
 | Standard Lib | 🚧 In Progress | Basic utilities |
 | Z3 Verification | 🚧 In Progress | Grammar & AST complete, VC generation in progress |
 

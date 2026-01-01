@@ -124,15 +124,46 @@ LogicalResult ConvertSLoadOp::matchAndRewrite(
 
     auto loc = op.getLoc();
     auto ctx = rewriter.getContext();
+    ctx->getOrLoadDialect<sir::SIRDialect>();
     StringRef globalName = op.getGlobalName();
 
     if (llvm::isa<mlir::RankedTensorType>(op.getResult().getType()))
     {
-        DBG("  -> skipping sload of tensor type");
+        llvm::errs() << "[OraToSIR]   sload is tensor type, skipping\n";
         return failure();
     }
 
-    const bool isDynamicBytes = llvm::isa<ora::StringType, ora::BytesType>(op.getResult().getType());
+    // Check if result type is dynamic bytes (string, bytes, or enum with string repr)
+    Type resultType = op.getResult().getType();
+    bool isDynamicBytes = llvm::isa<ora::StringType, ora::BytesType>(resultType);
+    llvm::errs() << "[OraToSIR]   resultType: " << resultType << "\n";
+    llvm::errs() << "[OraToSIR]   dialect: " << resultType.getDialect().getNamespace() << "\n";
+    llvm::errs() << "[OraToSIR]   is StringType: " << llvm::isa<ora::StringType>(resultType) << "\n";
+    llvm::errs() << "[OraToSIR]   is BytesType: " << llvm::isa<ora::BytesType>(resultType) << "\n";
+    llvm::errs() << "[OraToSIR]   is EnumType: " << llvm::isa<ora::EnumType>(resultType) << "\n";
+    llvm::errs() << "[OraToSIR]   isDynamicBytes (initial): " << isDynamicBytes << "\n";
+
+    // Check if enum type has string/bytes representation
+    if (auto enumType = llvm::dyn_cast<ora::EnumType>(resultType))
+    {
+        Type reprType = enumType.getReprType();
+        llvm::errs() << "[OraToSIR]   enum reprType: " << reprType << "\n";
+        if (llvm::isa<ora::StringType, ora::BytesType>(reprType))
+        {
+            isDynamicBytes = true;
+        }
+    }
+    if (!isDynamicBytes)
+    {
+        if (auto opaque = llvm::dyn_cast<mlir::OpaqueType>(resultType))
+        {
+            if (opaque.getDialectNamespace() == "ora" &&
+                (opaque.getTypeData() == "string" || opaque.getTypeData() == "bytes"))
+            {
+                isDynamicBytes = true;
+            }
+        }
+    }
 
     // Compute storage slot index from ora.global operation
     uint64_t slotIndex = computeGlobalSlot(globalName, op.getOperation());
@@ -149,14 +180,33 @@ LogicalResult ConvertSLoadOp::matchAndRewrite(
     auto u256 = sir::U256Type::get(ctx);
     auto ptrType = sir::PtrType::get(ctx, /*addrSpace*/ 1);
 
+    // Precompute converted type so we can treat pointer results as dynamic bytes.
+    Type convertedResultType = this->getTypeConverter()->convertType(resultType);
+    if (!convertedResultType)
+    {
+        convertedResultType = ptrType;
+    }
+    llvm::errs() << "[OraToSIR]   convertedResultType: " << convertedResultType << "\n";
+    if (llvm::isa<sir::PtrType>(convertedResultType))
+    {
+        isDynamicBytes = true;
+    }
+    // Fallback: if this is an Ora type that isn't a known scalar, treat as dynamic bytes.
+    if (!isDynamicBytes && resultType.getDialect().getNamespace() == "ora" &&
+        !llvm::isa<ora::IntegerType, ora::BoolType, ora::AddressType, ora::MapType, ora::StructType, ora::EnumType>(resultType))
+    {
+        isDynamicBytes = true;
+    }
+    llvm::errs() << "[OraToSIR]   isDynamicBytes (final): " << isDynamicBytes << "\n";
+
     if (isDynamicBytes)
     {
+        // Use the precomputed converted result type (ptr fallback for dynamic bytes).
+
         Value length = rewriter.create<sir::SLoadOp>(loc, u256, slotConst);
-        Value wordSize = rewriter.create<sir::ConstOp>(loc, u256, mlir::IntegerAttr::get(
-                                                                     mlir::IntegerType::get(ctx, 64, mlir::IntegerType::Unsigned),
-                                                                     32));
+        Value wordSize = rewriter.create<sir::ConstOp>(loc, u256, mlir::IntegerAttr::get(mlir::IntegerType::get(ctx, 64, mlir::IntegerType::Unsigned), 32));
         Value totalSize = rewriter.create<sir::AddOp>(loc, u256, length, wordSize);
-        Value basePtr = rewriter.create<sir::MallocOp>(loc, ptrType, totalSize);
+        Value basePtr = rewriter.create<sir::MallocOp>(loc, convertedResultType, totalSize);
         rewriter.create<sir::StoreOp>(loc, basePtr, length);
 
         Value wordCount = computeWordCount(loc, length, rewriter);
@@ -170,9 +220,7 @@ LogicalResult ConvertSLoadOp::matchAndRewrite(
             rewriter.setInsertionPointToStart(forOp.getBody());
             Value iv = forOp.getInductionVar();
             Value ivU256 = indexToU256(loc, iv, rewriter);
-            Value one = rewriter.create<sir::ConstOp>(loc, u256, mlir::IntegerAttr::get(
-                                                                    mlir::IntegerType::get(ctx, 64, mlir::IntegerType::Unsigned),
-                                                                    1));
+            Value one = rewriter.create<sir::ConstOp>(loc, u256, mlir::IntegerAttr::get(mlir::IntegerType::get(ctx, 64, mlir::IntegerType::Unsigned), 1));
 
             Value slotOffset = rewriter.create<sir::AddOp>(loc, u256, ivU256, one);
             Value slot = rewriter.create<sir::AddOp>(loc, u256, slotConst, slotOffset);
@@ -180,21 +228,33 @@ LogicalResult ConvertSLoadOp::matchAndRewrite(
 
             Value wordBytes = rewriter.create<sir::MulOp>(loc, u256, ivU256, wordSize);
             Value dataOffset = rewriter.create<sir::AddOp>(loc, u256, wordBytes, wordSize);
-            Value dataPtr = rewriter.create<sir::AddPtrOp>(loc, ptrType, basePtr, dataOffset);
+            Value dataPtr = rewriter.create<sir::AddPtrOp>(loc, convertedResultType, basePtr, dataOffset);
             rewriter.create<sir::StoreOp>(loc, dataPtr, wordVal);
         }
 
         rewriter.replaceOp(op, basePtr);
-        DBG("  -> replaced with dynamic bytes load");
+        llvm::errs() << "[OraToSIR]   replaced with dynamic bytes load\n";
         return success();
     }
 
     // Replace the ora.sload with sir.sload for scalar values
-    auto sloadOp = rewriter.create<sir::SLoadOp>(loc, u256, slotConst);
-    setResultName(sloadOp, 0, "value");
-    rewriter.replaceOp(op, sloadOp.getResult());
+    // Get the converted result type from type converter (enum -> u256, etc.)
+    if (!convertedResultType)
+    {
+        llvm::errs() << "[OraToSIR]   failed to convert result type for scalar sload\n";
+        return rewriter.notifyMatchFailure(op, "failed to convert result type");
+    }
 
-    DBG("  -> replaced with sir.sload");
+    // Ensure we use u256 for storage loads (all scalar types become u256 in SIR)
+    if (!llvm::isa<sir::U256Type>(convertedResultType))
+    {
+        convertedResultType = u256;
+    }
+
+    auto sloadOp = rewriter.replaceOpWithNewOp<sir::SLoadOp>(op, convertedResultType, slotConst);
+    setResultName(sloadOp, 0, "value");
+
+    llvm::errs() << "[OraToSIR]   replaced with sir.sload\n";
     return success();
 }
 
@@ -260,12 +320,8 @@ LogicalResult ConvertSStoreOp::matchAndRewrite(
             rewriter.setInsertionPointToStart(forOp.getBody());
             Value iv = forOp.getInductionVar();
             Value ivU256 = indexToU256(loc, iv, rewriter);
-            Value one = rewriter.create<sir::ConstOp>(loc, u256Type, mlir::IntegerAttr::get(
-                                                                    mlir::IntegerType::get(ctx, 64, mlir::IntegerType::Unsigned),
-                                                                    1));
-            Value wordSize = rewriter.create<sir::ConstOp>(loc, u256Type, mlir::IntegerAttr::get(
-                                                                     mlir::IntegerType::get(ctx, 64, mlir::IntegerType::Unsigned),
-                                                                     32));
+            Value one = rewriter.create<sir::ConstOp>(loc, u256Type, mlir::IntegerAttr::get(mlir::IntegerType::get(ctx, 64, mlir::IntegerType::Unsigned), 1));
+            Value wordSize = rewriter.create<sir::ConstOp>(loc, u256Type, mlir::IntegerAttr::get(mlir::IntegerType::get(ctx, 64, mlir::IntegerType::Unsigned), 32));
 
             Value slotOffset = rewriter.create<sir::AddOp>(loc, u256Type, ivU256, one);
             Value slotAddr = rewriter.create<sir::AddOp>(loc, u256Type, slot, slotOffset);

@@ -119,7 +119,10 @@ pub const TypeInfo = struct {
 
     /// Create TypeInfo from OraType
     pub fn fromOraType(ora_type: OraType) TypeInfo {
-        const category = ora_type.getCategory();
+        var category = ora_type.getCategory();
+        if (ora_type == ._union and ora_type._union.len > 0 and ora_type._union[0] == .error_union) {
+            category = .ErrorUnion;
+        }
         return TypeInfo{
             .category = category,
             .ora_type = ora_type,

@@ -6,46 +6,53 @@ sidebar_position: 1
 
 > **Pre-ASUKA Alpha** | **Contributors Welcome** | **Active Development**
 
-Welcome to the **Ora Development Notebook** - documentation for an experimental smart contract language targeting EVM/Yul with explicit semantics and clean compilation pipeline.
+Welcome to the **Ora Development Notebook** - documentation for an experimental smart contract language targeting EVM via sensei-ir (SIR) with explicit semantics and clean compilation pipeline.
 
 ## Project Status
 
-Ora is in **pre-release alpha**, working toward the first ASUKA release. The core compiler infrastructure is functional, with active development on Yul code generation and standard library.
+Ora is in **pre-release alpha**, working toward the first ASUKA release. The core compiler infrastructure is highly functional with a **79% success rate** (76/96 examples passing), with active development on sensei-ir (SIR) lowering and EVM code generation.
 
 **Not ready for production.** Syntax and features may change without notice.
 
 ## What is Ora?
 
-Ora is an experimental smart contract language that compiles to Yul (Ethereum's intermediate language) and EVM bytecode. Built with Zig, it aims to provide safety guarantees through formal verification while maintaining high performance and developer productivity.
+Ora is an experimental smart contract language that compiles to sensei-ir (SIR), a bespoke EVM intermediate representation, and then to EVM bytecode. Built with Zig, it aims to provide safety guarantees through formal verification while maintaining high performance and developer productivity.
 
 ### What Works Now
 
-✅ **Compiler Pipeline**
-- Full lexer and parser (23/29 examples pass)
-- Type checking and semantic analysis
+✅ **Compiler Pipeline** (79% success rate - 76/96 examples)
+- Full lexer and parser with comprehensive token support
+- Complete type checking and semantic analysis
 - AST generation and validation
-- MLIR lowering for optimization
+- MLIR lowering with 81 operations for optimization
 
 ✅ **Language Features**
-- Storage, memory, and transient storage regions
-- Error unions (`!T | E1 | E2`)
-- Switch statements (expression and statement forms)
-- Structs, enums, and custom types
-- Contract declarations and event logs
-- **Inline functions** with automatic complexity analysis
+- **Contracts**: Full contract declarations and structure
+- **Storage Operations**: Complete `storage`, `memory`, and `transient` storage operations
+- **Arithmetic**: All operations (add, sub, mul, div, rem, power, comparisons)
+- **Control Flow**: if/else statements, switch statements (expression and statement forms)
+- **Structs**: Full declaration, instantiation, field access, and updates
+- **Enums**: Enum declarations with explicit values
+- **Maps**: Map get/store operations
+- **Functions**: Basic function declarations with parameters and returns
+- **Memory Operations**: mload, mstore, mload8, mstore8 operations
+- **Transient Storage**: tload, tstore operations
 
 ✅ **Advanced Compiler Features**
 - **State Analysis**: Automatic storage access tracking with dead store detection
-- **Formal Verification**: Z3 integration for mathematical proofs (AST complete)
-- **MLIR Optimization**: Industry-standard compiler infrastructure
+- **Formal Verification**: Z3 integration for mathematical proofs
+- **MLIR Optimization**: Industry-standard compiler infrastructure with 81 operations
 - **Gas Insights**: Built-in warnings for inefficient patterns
+- **Code Formatter** (`ora fmt`): Canonical, deterministic code formatting (like `zig fmt` / `gofmt`)
 
 ### In Development
 
-🚧 **Yul Backend**: Complete code generation for EVM bytecode  
+🚧 **sensei-ir Backend**: Complete lowering to sensei-ir (SIR) and EVM code generation  
+🚧 **For Loops**: Advanced capture syntax  
+🚧 **Error Handling**: Enhanced try-catch error handling  
+🚧 **Type Inference**: Improved type inference (currently requires explicit types)  
 🚧 **Standard Library**: Core utilities and common patterns  
-🚧 **Z3 Verification**: Verification condition generation (grammar & AST complete)  
-🚧 **For Loops**: Advanced capture syntax
+🚧 **Z3 Verification**: Verification condition generation improvements
 
 ## Language Design Philosophy
 
@@ -156,6 +163,9 @@ Try the compiler features:
 ```bash
 # Compile with automatic state analysis
 ora contract.ora
+
+# Format your code
+ora fmt contract.ora
 
 # Detailed storage access analysis
 ora --analyze-state contract.ora

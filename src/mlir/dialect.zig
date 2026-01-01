@@ -842,6 +842,9 @@ pub const OraDialect = struct {
     ) c.MlirOperation {
         // add value attribute
         const attr = c.oraIntegerAttrCreateI64FromType(value_type, value);
+        if (attr.ptr == null) {
+            @panic("Failed to create integer attribute");
+        }
         const op = c.oraArithConstantOpCreate(self.ctx, loc, value_type, attr);
         if (op.ptr == null) {
             @panic("Failed to create arith.constant operation");

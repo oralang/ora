@@ -9,6 +9,7 @@ const OraType = @import("../../type_info.zig").OraType;
 const refinements = @import("../refinements/mod.zig");
 const utils = @import("../utils/mod.zig");
 const compat = @import("compatibility.zig");
+const log = @import("log");
 
 /// Check if a type can be assigned to a target type
 /// Assignment allows widening conversions only (value_type <: target_type)
@@ -36,6 +37,18 @@ pub fn isAssignable(
             compat.isBaseTypeCompatible,
         )) {
             return true;
+        }
+    }
+
+    // allow base-to-refinement assignment with a runtime guard
+    // (e.g., address -> NonZeroAddress), guard insertion is handled later
+    if (target_type.ora_type) |target_ora| {
+        if (value_type.ora_type) |value_ora| {
+            const target_base = utils_sys.extractBaseType(target_ora) orelse target_ora;
+            const value_base = utils_sys.extractBaseType(value_ora) orelse value_ora;
+            if (!OraType.equals(target_ora, target_base) and OraType.equals(value_base, target_base)) {
+                return true;
+            }
         }
     }
 
@@ -121,6 +134,12 @@ pub fn isAssignable(
         }
     }
 
+    if (target_type.category == .ErrorUnion) {
+        log.err(
+            "[type_resolver] isAssignable: ErrorUnion target did not match value. target={any} value={any}\n",
+            .{ target_type, value_type },
+        );
+    }
     return false;
 }
 

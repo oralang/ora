@@ -855,27 +855,83 @@ pub fn lowerEnumLiteral(
             if (type_sym.type_kind == .Enum) {
                 enum_ty = type_sym.mlir_type;
 
-                if (type_sym.variants) |variants| {
-                    for (variants) |variant| {
-                        if (std.mem.eql(u8, variant.name, enum_lit.variant_name)) {
-                            if (variant.value) |val| {
-                                enum_value = val;
+                // Check if enum_ty is an !ora.enum<...> type and extract repr type
+                if (c.oraTypeIsAEnum(enum_ty)) {
+                    const repr_type = c.oraEnumTypeGetReprType(enum_ty);
+                    if (repr_type.ptr == null) {
+                        @panic("Failed to extract repr type from enum");
+                    }
+                    enum_ty = repr_type;
+                }
+
+                // Handle integer enum types
+                if (c.oraTypeIsAInteger(enum_ty) or c.oraTypeIsAOraInteger(enum_ty)) {
+                    if (type_sym.variants) |variants| {
+                        for (variants) |variant| {
+                            if (std.mem.eql(u8, variant.name, enum_lit.variant_name)) {
+                                if (variant.value) |val| {
+                                    enum_value = val;
+                                }
+                                break;
                             }
-                            break;
                         }
                     }
+
+                    const enum_id = h.identifier(self.ctx, "ora.enum");
+                    const enum_name_attr = h.stringAttr(self.ctx, enum_lit.enum_name);
+
+                    const attrs = [_]c.MlirNamedAttribute{
+                        c.oraNamedAttributeGet(enum_id, enum_name_attr),
+                    };
+                    const op = self.ora_dialect.createArithConstantWithAttrs(enum_value, enum_ty, &attrs, self.fileLoc(enum_lit.span));
+                    h.appendOp(self.block, op);
+                    return h.getResult(op, 0);
                 }
+
+                // Handle string enum types
+                const string_ty = c.oraStringTypeGet(self.ctx);
+                if (c.oraTypeEqual(enum_ty, string_ty)) {
+                    var string_value: ?[]const u8 = null;
+
+                    if (type_sym.variants) |variants| {
+                        for (variants) |variant| {
+                            if (std.mem.eql(u8, variant.name, enum_lit.variant_name)) {
+                                if (variant.string_value) |str_val| {
+                                    string_value = str_val;
+                                }
+                                break;
+                            }
+                        }
+                    }
+
+                    if (string_value == null) {
+                        @panic("String enum variant value not found");
+                    }
+
+                    const enum_id = h.identifier(self.ctx, "ora.enum");
+                    const enum_name_attr = h.stringAttr(self.ctx, enum_lit.enum_name);
+
+                    const attrs = [_]c.MlirNamedAttribute{
+                        c.oraNamedAttributeGet(enum_id, enum_name_attr),
+                    };
+
+                    const loc = self.fileLoc(enum_lit.span);
+                    const op = self.ora_dialect.createStringConstant(string_value.?, enum_ty, loc);
+                    for (attrs) |custom_attr| {
+                        c.oraOperationSetAttributeByName(op, c.oraIdentifierStr(custom_attr.name), custom_attr.attribute);
+                    }
+                    h.appendOp(self.block, op);
+                    return h.getResult(op, 0);
+                }
+
+                // Other non-integer enum types are not yet supported
+                @panic("Enum with non-integer underlying type is not yet supported");
             }
         }
     }
 
-    const enum_id = h.identifier(self.ctx, "ora.enum");
-    const enum_name_attr = h.stringAttr(self.ctx, enum_lit.enum_name);
-
-    const attrs = [_]c.MlirNamedAttribute{
-        c.oraNamedAttributeGet(enum_id, enum_name_attr),
-    };
-    const op = self.ora_dialect.createArithConstantWithAttrs(enum_value, enum_ty, &attrs, self.fileLoc(enum_lit.span));
+    // Fallback: create default integer constant if enum not found
+    const op = self.ora_dialect.createArithConstant(enum_value, enum_ty, self.fileLoc(enum_lit.span));
     h.appendOp(self.block, op);
     return h.getResult(op, 0);
 }

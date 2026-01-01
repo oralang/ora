@@ -1,0 +1,8 @@
+contract RegionOkMemoryToTstore {
+    tstore var temp: u256;
+
+    fn ok(x: u256) {
+        memory var tmp: u256 = x;
+        temp = tmp;
+    }
+}

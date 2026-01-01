@@ -113,6 +113,39 @@ namespace mlir
                 ConversionPatternRewriter &rewriter) const override;
         };
 
+        class ConvertAddrToI160Op : public OpConversionPattern<ora::AddrToI160Op>
+        {
+        public:
+            using OpConversionPattern::OpConversionPattern;
+
+            LogicalResult matchAndRewrite(
+                ora::AddrToI160Op op,
+                typename ora::AddrToI160Op::Adaptor adaptor,
+                ConversionPatternRewriter &rewriter) const override;
+        };
+
+        class ConvertI160ToAddrOp : public OpConversionPattern<ora::I160ToAddrOp>
+        {
+        public:
+            using OpConversionPattern::OpConversionPattern;
+
+            LogicalResult matchAndRewrite(
+                ora::I160ToAddrOp op,
+                typename ora::I160ToAddrOp::Adaptor adaptor,
+                ConversionPatternRewriter &rewriter) const override;
+        };
+
+        class ConvertOldOp : public OpConversionPattern<ora::OldOp>
+        {
+        public:
+            using OpConversionPattern::OpConversionPattern;
+
+            LogicalResult matchAndRewrite(
+                ora::OldOp op,
+                typename ora::OldOp::Adaptor adaptor,
+                ConversionPatternRewriter &rewriter) const override;
+        };
+
         class ConvertRefinementToBaseOp : public OpConversionPattern<ora::RefinementToBaseOp>
         {
         public:
@@ -121,6 +154,105 @@ namespace mlir
             LogicalResult matchAndRewrite(
                 ora::RefinementToBaseOp op,
                 typename ora::RefinementToBaseOp::Adaptor adaptor,
+                ConversionPatternRewriter &rewriter) const override;
+        };
+
+        class ConvertInvariantOp : public OpConversionPattern<ora::InvariantOp>
+        {
+        public:
+            using OpConversionPattern::OpConversionPattern;
+
+            LogicalResult matchAndRewrite(
+                ora::InvariantOp op,
+                typename ora::InvariantOp::Adaptor adaptor,
+                ConversionPatternRewriter &rewriter) const override;
+        };
+
+        class ConvertRequiresOp : public OpConversionPattern<ora::RequiresOp>
+        {
+        public:
+            using OpConversionPattern::OpConversionPattern;
+
+            LogicalResult matchAndRewrite(
+                ora::RequiresOp op,
+                typename ora::RequiresOp::Adaptor adaptor,
+                ConversionPatternRewriter &rewriter) const override;
+        };
+
+        class ConvertEnsuresOp : public OpConversionPattern<ora::EnsuresOp>
+        {
+        public:
+            using OpConversionPattern::OpConversionPattern;
+
+            LogicalResult matchAndRewrite(
+                ora::EnsuresOp op,
+                typename ora::EnsuresOp::Adaptor adaptor,
+                ConversionPatternRewriter &rewriter) const override;
+        };
+
+        class ConvertAssertOp : public OpConversionPattern<ora::AssertOp>
+        {
+        public:
+            using OpConversionPattern::OpConversionPattern;
+
+            LogicalResult matchAndRewrite(
+                ora::AssertOp op,
+                typename ora::AssertOp::Adaptor adaptor,
+                ConversionPatternRewriter &rewriter) const override;
+        };
+
+        class ConvertAssumeOp : public OpConversionPattern<ora::AssumeOp>
+        {
+        public:
+            using OpConversionPattern::OpConversionPattern;
+
+            LogicalResult matchAndRewrite(
+                ora::AssumeOp op,
+                typename ora::AssumeOp::Adaptor adaptor,
+                ConversionPatternRewriter &rewriter) const override;
+        };
+
+        class ConvertDecreasesOp : public OpConversionPattern<ora::DecreasesOp>
+        {
+        public:
+            using OpConversionPattern::OpConversionPattern;
+
+            LogicalResult matchAndRewrite(
+                ora::DecreasesOp op,
+                typename ora::DecreasesOp::Adaptor adaptor,
+                ConversionPatternRewriter &rewriter) const override;
+        };
+
+        class ConvertIncreasesOp : public OpConversionPattern<ora::IncreasesOp>
+        {
+        public:
+            using OpConversionPattern::OpConversionPattern;
+
+            LogicalResult matchAndRewrite(
+                ora::IncreasesOp op,
+                typename ora::IncreasesOp::Adaptor adaptor,
+                ConversionPatternRewriter &rewriter) const override;
+        };
+
+        class ConvertHavocOp : public OpConversionPattern<ora::HavocOp>
+        {
+        public:
+            using OpConversionPattern::OpConversionPattern;
+
+            LogicalResult matchAndRewrite(
+                ora::HavocOp op,
+                typename ora::HavocOp::Adaptor adaptor,
+                ConversionPatternRewriter &rewriter) const override;
+        };
+
+        class ConvertQuantifiedOp : public OpConversionPattern<ora::QuantifiedOp>
+        {
+        public:
+            using OpConversionPattern::OpConversionPattern;
+
+            LogicalResult matchAndRewrite(
+                ora::QuantifiedOp op,
+                typename ora::QuantifiedOp::Adaptor adaptor,
                 ConversionPatternRewriter &rewriter) const override;
         };
 
@@ -134,6 +266,180 @@ namespace mlir
                 mlir::arith::ConstantOp op,
                 typename mlir::arith::ConstantOp::Adaptor adaptor,
                 ConversionPatternRewriter &rewriter) const override;
+        };
+
+        class ConvertArithCmpIOp : public OpConversionPattern<mlir::arith::CmpIOp>
+        {
+        public:
+            using OpConversionPattern::OpConversionPattern;
+
+            LogicalResult matchAndRewrite(
+                mlir::arith::CmpIOp op,
+                typename mlir::arith::CmpIOp::Adaptor adaptor,
+                ConversionPatternRewriter &rewriter) const override;
+        };
+
+        class ConvertArithAddIOp : public OpConversionPattern<mlir::arith::AddIOp>
+        {
+        public:
+            using OpConversionPattern::OpConversionPattern;
+
+            LogicalResult matchAndRewrite(
+                mlir::arith::AddIOp op,
+                typename mlir::arith::AddIOp::Adaptor adaptor,
+                ConversionPatternRewriter &rewriter) const override;
+        };
+
+        class ConvertArithSubIOp : public OpConversionPattern<mlir::arith::SubIOp>
+        {
+        public:
+            using OpConversionPattern::OpConversionPattern;
+
+            LogicalResult matchAndRewrite(
+                mlir::arith::SubIOp op,
+                typename mlir::arith::SubIOp::Adaptor adaptor,
+                ConversionPatternRewriter &rewriter) const override;
+        };
+
+        class ConvertArithMulIOp : public OpConversionPattern<mlir::arith::MulIOp>
+        {
+        public:
+            using OpConversionPattern::OpConversionPattern;
+
+            LogicalResult matchAndRewrite(
+                mlir::arith::MulIOp op,
+                typename mlir::arith::MulIOp::Adaptor adaptor,
+                ConversionPatternRewriter &rewriter) const override;
+        };
+
+        class ConvertArithDivUIOp : public OpConversionPattern<mlir::arith::DivUIOp>
+        {
+        public:
+            using OpConversionPattern::OpConversionPattern;
+
+            LogicalResult matchAndRewrite(
+                mlir::arith::DivUIOp op,
+                typename mlir::arith::DivUIOp::Adaptor adaptor,
+                ConversionPatternRewriter &rewriter) const override;
+        };
+
+        class ConvertArithRemUIOp : public OpConversionPattern<mlir::arith::RemUIOp>
+        {
+        public:
+            using OpConversionPattern::OpConversionPattern;
+
+            LogicalResult matchAndRewrite(
+                mlir::arith::RemUIOp op,
+                typename mlir::arith::RemUIOp::Adaptor adaptor,
+                ConversionPatternRewriter &rewriter) const override;
+        };
+
+        class ConvertArithDivSIOp : public OpConversionPattern<mlir::arith::DivSIOp>
+        {
+        public:
+            using OpConversionPattern::OpConversionPattern;
+
+            LogicalResult matchAndRewrite(
+                mlir::arith::DivSIOp op,
+                typename mlir::arith::DivSIOp::Adaptor adaptor,
+                ConversionPatternRewriter &rewriter) const override;
+        };
+
+        class ConvertArithAndIOp : public OpConversionPattern<mlir::arith::AndIOp>
+        {
+        public:
+            using OpConversionPattern::OpConversionPattern;
+
+            LogicalResult matchAndRewrite(
+                mlir::arith::AndIOp op,
+                typename mlir::arith::AndIOp::Adaptor adaptor,
+                ConversionPatternRewriter &rewriter) const override;
+        };
+
+        class ConvertArithOrIOp : public OpConversionPattern<mlir::arith::OrIOp>
+        {
+        public:
+            using OpConversionPattern::OpConversionPattern;
+
+            LogicalResult matchAndRewrite(
+                mlir::arith::OrIOp op,
+                typename mlir::arith::OrIOp::Adaptor adaptor,
+                ConversionPatternRewriter &rewriter) const override;
+        };
+
+        class ConvertArithXOrIOp : public OpConversionPattern<mlir::arith::XOrIOp>
+        {
+        public:
+            using OpConversionPattern::OpConversionPattern;
+
+            LogicalResult matchAndRewrite(
+                mlir::arith::XOrIOp op,
+                typename mlir::arith::XOrIOp::Adaptor adaptor,
+                ConversionPatternRewriter &rewriter) const override;
+        };
+
+        class ConvertArithSelectOp : public OpConversionPattern<mlir::arith::SelectOp>
+        {
+        public:
+            using OpConversionPattern::OpConversionPattern;
+
+            LogicalResult matchAndRewrite(
+                mlir::arith::SelectOp op,
+                typename mlir::arith::SelectOp::Adaptor adaptor,
+                ConversionPatternRewriter &rewriter) const override;
+        };
+
+        class ConvertArithExtUIOp : public OpConversionPattern<mlir::arith::ExtUIOp>
+        {
+        public:
+            using OpConversionPattern::OpConversionPattern;
+
+            LogicalResult matchAndRewrite(
+                mlir::arith::ExtUIOp op,
+                typename mlir::arith::ExtUIOp::Adaptor adaptor,
+                ConversionPatternRewriter &rewriter) const override;
+        };
+
+        class ConvertArithIndexCastUIOp : public OpConversionPattern<mlir::arith::IndexCastUIOp>
+        {
+        public:
+            using OpConversionPattern::OpConversionPattern;
+
+            LogicalResult matchAndRewrite(
+                mlir::arith::IndexCastUIOp op,
+                typename mlir::arith::IndexCastUIOp::Adaptor adaptor,
+                ConversionPatternRewriter &rewriter) const override;
+        };
+
+        class ConvertArithTruncIOp : public OpConversionPattern<mlir::arith::TruncIOp>
+        {
+        public:
+            using OpConversionPattern::OpConversionPattern;
+
+            LogicalResult matchAndRewrite(
+                mlir::arith::TruncIOp op,
+                typename mlir::arith::TruncIOp::Adaptor adaptor,
+                ConversionPatternRewriter &rewriter) const override;
+        };
+
+        class FoldRedundantBitcastOp : public OpRewritePattern<sir::BitcastOp>
+        {
+        public:
+            using OpRewritePattern::OpRewritePattern;
+
+            LogicalResult matchAndRewrite(
+                sir::BitcastOp op,
+                PatternRewriter &rewriter) const override;
+        };
+
+        class FoldAndOneOp : public OpRewritePattern<sir::AndOp>
+        {
+        public:
+            using OpRewritePattern::OpRewritePattern;
+
+            LogicalResult matchAndRewrite(
+                sir::AndOp op,
+                PatternRewriter &rewriter) const override;
         };
 
     } // namespace ora

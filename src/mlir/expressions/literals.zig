@@ -138,7 +138,8 @@ fn lowerAddressLiteral(
     locations: LocationTracker,
     addr_lit: lib.ast.Expressions.AddressLiteral,
 ) c.MlirValue {
-    const addr_ty = c.oraAddressTypeGet(ctx);
+    _ = type_mapper;
+
     const loc = locations.createLocation(addr_lit.span);
 
     const addr_str = if (std.mem.startsWith(u8, addr_lit.value, "0x"))
@@ -192,8 +193,12 @@ fn lowerAddressLiteral(
     }
     h.appendOp(block, const_op);
     const i160_value = h.getResult(const_op, 0);
-    const converted = type_mapper.createConversionOp(block, i160_value, addr_ty, addr_lit.span);
-    return converted;
+    const addr_op = c.oraI160ToAddrOpCreate(ctx, loc, i160_value);
+    if (addr_op.ptr == null) {
+        @panic("Failed to create address literal ora.i160.to.addr");
+    }
+    h.appendOp(block, addr_op);
+    return h.getResult(addr_op, 0);
 }
 
 fn lowerHexLiteral(

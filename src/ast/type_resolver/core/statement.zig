@@ -78,14 +78,22 @@ fn resolveVariableDecl(
             }
         }
         // ensure category matches ora_type if present (fixes refinement types)
-        var_decl.type_info.category = ot.getCategory();
+        var derived_category = ot.getCategory();
+        if (ot == ._union and ot._union.len > 0 and ot._union[0] == .error_union) {
+            derived_category = .ErrorUnion;
+        }
+        var_decl.type_info.category = derived_category;
     }
 
     var init_effect = Effect.pure();
     if (var_decl.value) |value_expr| {
         // ensure category matches ora_type if present (fixes refinement types)
         if (var_decl.type_info.ora_type) |ot| {
-            var_decl.type_info.category = ot.getCategory();
+            var derived_category = ot.getCategory();
+            if (ot == ._union and ot._union.len > 0 and ot._union[0] == .error_union) {
+                derived_category = .ErrorUnion;
+            }
+            var_decl.type_info.category = derived_category;
         }
         // if type is unknown, infer it from the initializer expression
         if (!var_decl.type_info.isResolved()) {
@@ -123,8 +131,22 @@ fn resolveVariableDecl(
             .span = var_decl.span,
         } };
         if (!expression.isRegionAssignmentAllowed(target_region, source_region, &target_expr)) {
+            log.debug(
+                "[resolveVariableDecl] RegionMismatch: '{s}' target={s} source={s}\n",
+                .{ var_decl.name, @tagName(target_region), @tagName(source_region) },
+            );
             return TypeResolutionError.RegionMismatch;
         }
+
+        // record implicit region effects for the initializer assignment
+        const region_eff = try expression.regionEffectForAssignment(
+            self,
+            target_region,
+            source_region,
+            &target_expr,
+            value_expr,
+        );
+        mergeEffects(self.allocator, &init_effect, region_eff);
     } else {
         // no initializer - type must be explicit
         if (!var_decl.type_info.isResolved()) {
@@ -294,13 +316,7 @@ fn resolveVariableDecl(
         }
     }
 
-    var combined_eff = init_effect;
-    if (var_decl.value != null and var_decl.region == .Storage) {
-        var slots = SlotSet.init(self.allocator);
-        try slots.add(self.allocator, var_decl.name);
-        const write_eff = Effect.writes(slots);
-        mergeEffects(self.allocator, &combined_eff, write_eff);
-    }
+    const combined_eff = init_effect;
 
     return Typed.init(var_decl.type_info, combined_eff, self.allocator);
 }

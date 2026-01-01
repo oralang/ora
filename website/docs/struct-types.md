@@ -246,4 +246,4 @@ Struct definitions flow through Ora's complete compilation pipeline:
 2. **Semantic Analysis**: Validates field types, cross-references, and memory region compatibility
 3. **Type Checking**: Ensures type safety and proper field access patterns
 4. **HIR Generation**: Optimizes struct operations and memory layout
-5. **Yul Generation**: Produces efficient EVM bytecode with optimized memory operations
+5. **sensei-ir Lowering**: Lowers to sensei-ir (SIR) for efficient EVM bytecode generation with optimized memory operations

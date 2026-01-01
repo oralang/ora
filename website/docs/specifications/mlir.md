@@ -2,7 +2,7 @@
 
 ## Overview
 
-The Ora compiler includes a comprehensive MLIR (Multi-Level Intermediate Representation) lowering system that provides an intermediate representation for advanced analysis, optimization, and alternative code generation paths. This system complements the primary Yul backend and enables sophisticated compiler transformations.
+The Ora compiler includes a comprehensive MLIR (Multi-Level Intermediate Representation) lowering system that provides an intermediate representation for advanced analysis, optimization, and alternative code generation paths. This system lowers to sensei-ir (SIR) for EVM bytecode generation and enables sophisticated compiler transformations.
 
 ## What is MLIR?
 
@@ -19,7 +19,7 @@ The Ora compiler integrates with the existing MLIR framework to provide Ora-spec
 The Ora compiler integrates with the LLVM MLIR framework (https://mlir.llvm.org) to:
 1. **Represent Ora semantics** in a structured intermediate form using MLIR operations and types
 2. **Enable advanced analysis** for verification and optimization using MLIR's pass infrastructure
-3. **Support alternative backends** beyond Yul by leveraging MLIR's code generation capabilities
+3. **Lower to sensei-ir (SIR)** for EVM bytecode generation via the sensei-ir backend
 4. **Provide debugging information** with source location preservation using MLIR's location tracking
 
 Our implementation provides Ora-specific dialects, operations, and lowering passes that work within the existing MLIR ecosystem.
@@ -368,9 +368,9 @@ ora --emit-bytecode contract.ora
 ora --emit-mlir contract.ora
 ```
 
-**View Yul intermediate code:**
+**View sensei-ir (SIR) intermediate code:**
 ```bash
-ora --emit-yul contract.ora
+ora --emit-sir contract.ora
 ```
 
 **Advanced options:**
@@ -384,17 +384,17 @@ ora --mlir-passes="canonicalize,cse,mem2reg" contract.ora
 
 ### Automatic MLIR Validation
 
-The compiler automatically validates MLIR correctness before Yul lowering:
+The compiler automatically validates MLIR correctness before sensei-ir lowering:
 
 ```
 $ ora contract.ora
 Parsing contract.ora...
 Performing semantic analysis...
 Lowering to MLIR...
-Validating MLIR before Yul lowering...
+Validating MLIR before sensei-ir lowering...
 ✅ MLIR validation passed
-Lowering to Yul...
-Compiling to EVM bytecode...
+Lowering to sensei-ir (SIR)...
+Compiling to EVM bytecode via sensei-ir...
 Successfully compiled to EVM bytecode!
 ```
 
@@ -417,8 +417,8 @@ The MLIR lowering pipeline:
 3. **MLIR Lowering**: AST → MLIR module (with source locations)
 4. **MLIR Validation**: Structural and semantic checks (automatic)
 5. **MLIR Optimization**: CSE, canonicalization, mem2reg, SCCP, LICM
-6. **Yul Lowering**: MLIR → Yul (EVM intermediate language)
-7. **Bytecode Generation**: Yul → EVM bytecode
+6. **sensei-ir Lowering**: MLIR → sensei-ir (SIR) 🚧 *In Development*
+7. **Bytecode Generation**: sensei-ir → EVM bytecode via sensei-ir debug-backend 🚧 *In Development*
 
 ## SSA Transformation
 
@@ -518,20 +518,24 @@ let sender = std.msg.sender();
 %sender = ora.evm.caller() : i160 loc("contract.ora":11:17)
 ```
 
-**Yul**:
-```yul
-let timestamp := timestamp()
-let sender := caller()
+**sensei-ir (SIR)**:
+```sir
+fn main:
+  entry -> timestamp sender {
+    timestamp = timestamp
+    sender = caller
+    iret
+  }
 ```
 
 ### Zero-Overhead Guarantee
 
 All standard library calls are **inlined** at the MLIR level - no function call overhead:
 
-| Ora Built-in | MLIR Operation | Yul Opcode | Overhead |
-|--------------|----------------|------------|----------|
-| `std.block.timestamp()` | `ora.evm.timestamp` | `timestamp()` | **Zero** |
-| `std.msg.sender()` | `ora.evm.caller` | `caller()` | **Zero** |
+| Ora Built-in | MLIR Operation | sensei-ir Operation | Overhead |
+|--------------|----------------|-------------------|----------|
+| `std.block.timestamp()` | `ora.evm.timestamp` | `timestamp` | **Zero** |
+| `std.msg.sender()` | `ora.evm.caller` | `caller` | **Zero** |
 | `std.constants.U256_MAX` | `arith.constant -1` | `0xfff...fff` | **Zero** |
 
 ### Semantic Validation
@@ -623,7 +627,7 @@ The MLIR lowering system is designed for:
 | Storage Operations | sload, sstore, tload, tstore |
 | Control Flow | if, while, for, switch |
 | Function Calls | Complete |
-| Yul Lowering | Complete |
+| sensei-ir Lowering | 🚧 In Development |
 
 ### In Development
 

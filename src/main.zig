@@ -95,7 +95,14 @@ pub fn main() !void {
     const analyze_state: bool = parsed.analyze_state;
     const verify_z3: bool = parsed.verify_z3;
     const cpp_lowering_stub: bool = parsed.cpp_lowering_stub;
-    const debug_enabled: bool = parsed.debug;
+    var debug_enabled: bool = parsed.debug;
+    if (!debug_enabled) {
+        if (std.posix.getenv("ORA_DEBUG")) |env_value| {
+            if (env_value[0] != 0 and env_value[0] != '0') {
+                debug_enabled = true;
+            }
+        }
+    }
     const mlir_opt_level: ?[]const u8 = parsed.mlir_opt_level;
     const fmt: bool = parsed.fmt;
     const fmt_check: bool = parsed.fmt_check;

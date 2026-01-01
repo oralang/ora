@@ -378,9 +378,13 @@ Standard library built-ins compile directly to EVM opcodes:
 let timestamp = std.block.timestamp();
 ```
 
-```yul
-// Generated Yul
-let timestamp := timestamp()
+```sir
+// Generated sensei-ir (SIR)
+fn main:
+  entry -> result {
+    result = timestamp
+    iret
+  }
 ```
 
 The built-in is replaced with the raw EVM opcode at compile time - no function call overhead.
@@ -474,8 +478,8 @@ contract SimpleToken {
 The standard library compiles in three stages:
 
 ```
-Ora Source          →  MLIR IR          →  Yul           →  EVM Bytecode
-std.msg.sender()       ora.evm.caller()    caller()         CALLER (0x33)
+Ora Source          →  MLIR IR          →  sensei-ir (SIR)  →  EVM Bytecode
+std.msg.sender()       ora.evm.caller()    caller operation    CALLER (0x33)
 ```
 
 Each built-in maps to a single EVM opcode, guaranteeing zero overhead.

@@ -138,7 +138,8 @@ pub const TypeSymbol = struct {
 
     pub const VariantInfo = struct {
         name: []const u8,
-        value: ?i64,
+        value: ?i64, // For integer enum variants
+        string_value: ?[]const u8, // For string enum variants
     };
 
     pub fn deinit(self: *TypeSymbol) void {
@@ -874,11 +875,18 @@ pub fn lowerFunctionsToModuleWithErrors(ctx: c.MlirContext, nodes: []lib.AstNode
                         };
 
                         for (enum_decl.variants, 0..) |variant, i| {
-                            // use index as value for implicit enum variants
-                            // explicit value evaluation handled by constant expression evaluator
+                            // Extract string value if variant has a string literal
+                            var string_val: ?[]const u8 = null;
+                            if (variant.value) |value_expr| {
+                                if (value_expr == .Literal and value_expr.Literal == .String) {
+                                    string_val = value_expr.Literal.String.value;
+                                }
+                            }
+                            
                             variants_slice[i] = .{
                                 .name = variant.name,
                                 .value = null, // Will be set to index during symbol table creation
+                                .string_value = string_val,
                             };
                         }
 

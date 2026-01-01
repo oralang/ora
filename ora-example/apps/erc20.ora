@@ -1,103 +1,144 @@
-// Minimal ERC20 Token Implementation in Ora
-// Using only currently available features
+// ERC20 Token Implementation in Ora
+// Using refinement types and error unions
 
-contract SimpleToken {
-    // Storage
-    storage totalSupply: u256;
-    storage balances: map[address, u256];
-    storage allowances: map[address, map[address, u256]];
+// Error declarations
+error InsufficientBalance(required: u256, available: u256);
+error InsufficientAllowance(required: u256, available: u256);
+error InvalidAddress;
+error InvalidAmount;
+error TransferToZeroAddress;
+
+contract ERC20Token {
+    // Storage variables (explicit @storage region)
+    storage var totalSupply: u256;  // @storage: persistent contract storage
+    storage balances: map[address, u256];  // @storage: persistent storage map
+    storage allowances: map[address, map[address, u256]];  // @storage: nested storage map
+    
+    // Events (logs)
+    log Transfer(from: address, to: address, amount: u256);
+    log Approval(owner: address, spender: address, amount: u256);
     
     // Constructor - runs once at deployment
-    pub fn init(initialSupply: u256) {
-        var deployer: address = std.msg.sender();
-        totalSupply = initialSupply;
-        balances[deployer] = initialSupply;
-    }
-    
-    // Initialize with supply (can be called after deployment)
-    pub fn initialize(initialSupply: u256) -> bool {
-        var deployer: address = std.msg.sender();
-        totalSupply = initialSupply;
-        balances[deployer] = initialSupply;
-        return true;
+    pub fn init(initialSupply: MinValue<u256, 0>) {
+        // initialSupply: @calldata (function parameter, read-only)
+        let deployer: NonZeroAddress = std.msg.sender();  // @stack: std.msg.sender() returns NonZeroAddress (guaranteed non-zero by EVM, so NonZeroAddress <: address)
+        totalSupply = initialSupply;  // @storage = @calldata: allowed (calldata -> storage)
+        balances[deployer] = initialSupply;  // @storage[@stack] = @calldata: storage map write (NonZeroAddress <: address)
+        log Transfer(std.constants.ZERO_ADDRESS, deployer, initialSupply);  // constants are @stack, NonZeroAddress <: address
     }
     
     // Get total supply
     pub fn getTotalSupply() -> u256 {
-        return totalSupply;
+        return totalSupply;  // @storage -> @stack: storage read returns stack value
     }
     
     // Get balance of an account
     pub fn balanceOf(account: address) -> u256 {
-        return balances[account];
+        // account: @calldata (function parameter)
+        return balances[account];  // @storage[@calldata] -> @stack: storage map read returns stack value
     }
     
     // Transfer tokens from sender to recipient
-    pub fn transfer(recipient: address, amount: u256) -> bool {
-        var sender: address = std.msg.sender();
-        var sender_balance: u256 = balances[sender];
+    // Uses refinement types to ensure non-negative amounts and non-zero recipient
+    pub fn transfer(recipient: NonZeroAddress, amount: MinValue<u256, 0>) -> !bool | InsufficientBalance {
+        // recipient: @calldata (function parameter, NonZeroAddress - guaranteed non-zero at compile time)
+        // amount: @calldata (function parameter with refinement type)
         
-        // Simple checks without require
-        if (sender_balance < amount) {
-            return false;
+        let sender: NonZeroAddress = std.msg.sender();  // @stack: std.msg.sender() returns NonZeroAddress (guaranteed non-zero by EVM)
+        let sender_balance: u256 = balances[sender];  // @stack: storage map read (@storage[@stack]) returns stack value
+        
+        // No zero address check needed - NonZeroAddress guarantees recipient != 0
+        
+        // Check sufficient balance (runtime check required - sender_balance is from storage)
+        if (sender_balance < amount) {  // @stack < @calldata: allowed comparison
+            return error.InsufficientBalance(amount, sender_balance);  // error values are @stack
         }
         
-        if (recipient == std.constants.ZERO_ADDRESS) {
-            return false;
-        }
+        // After the check, we know sender_balance >= amount
+        // We can use refinement type to make subtraction type-safe
+        // Note: sender_balance is u256, but we know it's >= amount (MinValue<u256, 0>)
+        // The subtraction is safe because we've verified sender_balance >= amount
         
         // Perform transfer
-        balances[sender] = sender_balance - amount;
-        var recipient_balance: u256 = balances[recipient];
-        balances[recipient] = recipient_balance + amount;
+        balances[sender] = sender_balance - amount;  // @storage[@stack] = @stack: storage map write (safe: sender_balance >= amount verified above)
+        let recipient_balance: u256 = balances[recipient];  // @stack: storage map read (@storage[@calldata]) returns stack value
+        balances[recipient] = recipient_balance + amount;  // @storage[@calldata] = @stack: storage map write
         
-        return true;
+        log Transfer(sender, recipient, amount);  // all values are @stack
+        return true;  // @stack: return value
     }
     
     // Approve spender to spend tokens
-    pub fn approve(spender: address, amount: u256) -> bool {
-        var owner: address = std.msg.sender();
+    pub fn approve(spender: NonZeroAddress, amount: MinValue<u256, 0>) -> !bool {
+        // spender: @calldata (function parameter, NonZeroAddress - guaranteed non-zero at compile time)
+        // amount: @calldata (function parameter with refinement type)
         
-        if (spender == std.constants.ZERO_ADDRESS) {
-            return false;
-        }
+        let owner: NonZeroAddress = std.msg.sender();  // @stack: std.msg.sender() returns NonZeroAddress (guaranteed non-zero by EVM)
         
-        allowances[owner][spender] = amount;
-        return true;
+        // No zero address check needed - NonZeroAddress guarantees spender != 0
+        
+        allowances[owner][spender] = amount;  // @storage[@stack][@calldata] = @calldata: nested storage map write (NonZeroAddress <: address)
+        log Approval(owner, spender, amount);  // all values are @stack
+        return true;  // @stack: return value
     }
     
     // Get allowance
     pub fn allowance(owner: address, spender: address) -> u256 {
-        return allowances[owner][spender];
+        // owner: @calldata (function parameter)
+        // spender: @calldata (function parameter)
+        return allowances[owner][spender];  // @storage[@calldata][@calldata] -> @stack: nested storage map read returns stack value
     }
     
     // Transfer from one address to another using allowance
-    pub fn transferFrom(sender: address, recipient: address, amount: u256) -> bool {
-        var spender: address = std.msg.sender();
+    pub fn transferFrom(sender: address, recipient: NonZeroAddress, amount: MinValue<u256, 0>) -> !bool | InsufficientBalance | InsufficientAllowance {
+        // sender: @calldata (function parameter, can be any address including zero)
+        // recipient: @calldata (function parameter, NonZeroAddress - guaranteed non-zero at compile time)
+        // amount: @calldata (function parameter with refinement type)
         
-        var current_allowance: u256 = allowances[sender][spender];
-        if (current_allowance < amount) {
-            return false;
+        let spender: NonZeroAddress = std.msg.sender();  // @stack: std.msg.sender() returns NonZeroAddress (guaranteed non-zero by EVM)
+        
+        // No zero address check needed for recipient - NonZeroAddress guarantees recipient != 0
+        // Note: sender can still be zero address (e.g., for contract-to-contract transfers)
+        
+        // Check allowance
+        let current_allowance: u256 = allowances[sender][spender];  // @stack: nested storage map read (@storage[@calldata][@stack]) returns stack value
+        if (current_allowance < amount) {  // @stack < @calldata: allowed comparison
+            return error.InsufficientAllowance(amount, current_allowance);  // @stack: error value
         }
         
-        var sender_balance: u256 = balances[sender];
-        if (sender_balance < amount) {
-            return false;
+        // Check sender balance (runtime check required - sender_balance is from storage)
+        let sender_balance: u256 = balances[sender];  // @stack: storage map read (@storage[@calldata]) returns stack value
+        if (sender_balance < amount) {  // @stack < @calldata: allowed comparison
+            return error.InsufficientBalance(amount, sender_balance);  // @stack: error value
         }
         
-        if (recipient == std.constants.ZERO_ADDRESS) {
-            return false;
-        }
+        // After the check, we know sender_balance >= amount and current_allowance >= amount
+        // Subtractions are safe because we've verified the conditions above
         
         // Update allowance
-        allowances[sender][spender] = current_allowance - amount;
+        allowances[sender][spender] = current_allowance - amount;  // @storage[@calldata][@stack] = @stack: nested storage map write (safe: current_allowance >= amount verified above)
         
         // Perform transfer
-        balances[sender] = sender_balance - amount;
-        var recipient_balance: u256 = balances[recipient];
-        balances[recipient] = recipient_balance + amount;
+        balances[sender] = sender_balance - amount;  // @storage[@calldata] = @stack: storage map write (safe: sender_balance >= amount verified above)
+        let recipient_balance: u256 = balances[recipient];  // @stack: storage map read (@storage[@calldata]) returns stack value
+        balances[recipient] = recipient_balance + amount;  // @storage[@calldata] = @stack: storage map write
         
-        return true;
+        log Transfer(sender, recipient, amount);  // all values are @stack
+        return true;  // @stack: return value
+    }
+    
+    // Helper function to safely transfer with error handling
+    pub fn safeTransfer(recipient: NonZeroAddress, amount: MinValue<u256, 0>) {
+        // recipient: @calldata (function parameter, NonZeroAddress - guaranteed non-zero at compile time)
+        // amount: @calldata (function parameter with refinement type)
+        try {
+            let result = transfer(recipient, amount);  // @stack: function call returns stack value (error union)
+            // Transfer succeeded - result is true (@stack)
+        } catch (e) {
+            // Handle transfer errors
+            // e: @stack (error value from error union)
+            // e can be InsufficientBalance (TransferToZeroAddress removed - compile-time guarantee)
+        }
     }
 }
 

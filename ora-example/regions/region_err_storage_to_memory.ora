@@ -1,7 +1,8 @@
 contract RegionErrStorageToMemory {
     storage var counter: u256;
+    tstore var temp: u256;
 
     fn bad() {
-        memory var tmp: u256 = counter;
+        temp = counter;
     }
 }

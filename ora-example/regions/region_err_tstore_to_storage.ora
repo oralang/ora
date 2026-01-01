@@ -1,0 +1,8 @@
+contract RegionErrTstoreToStorage {
+    storage var counter: u256;
+    tstore var temp: u256;
+
+    fn bad() {
+        counter = temp;
+    }
+}

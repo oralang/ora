@@ -9,6 +9,7 @@ const lib = @import("ora_lib");
 const h = @import("../helpers.zig");
 const constants = @import("../lower.zig");
 const StatementLowerer = @import("statement_lowerer.zig").StatementLowerer;
+const LabelContext = @import("statement_lowerer.zig").LabelContext;
 const LoweringError = StatementLowerer.LoweringError;
 const ExpressionLowerer = @import("../expressions.zig").ExpressionLowerer;
 const helpers = @import("helpers.zig");
@@ -414,8 +415,16 @@ pub fn lowerWhile(self: *const StatementLowerer, while_stmt: *const lib.ast.Stat
         h.appendOp(body_block, inc_op);
     }
 
-    // lower body in body region
-    _ = try self.lowerBlockBody(while_stmt.body, body_block);
+    // lower body in body region with loop label context
+    const loop_label = while_stmt.label orelse "";
+    const loop_ctx = LabelContext{
+        .label = loop_label,
+        .label_type = .While,
+        .parent = self.label_context,
+    };
+    var body_lowerer = self.*;
+    body_lowerer.label_context = &loop_ctx;
+    _ = try body_lowerer.lowerBlockBody(while_stmt.body, body_block);
 
     // add ora.yield at end of body to continue loop
     const yield_op = self.ora_dialect.createYield(&[_]c.MlirValue{}, loc);
@@ -432,13 +441,13 @@ pub fn lowerFor(self: *const StatementLowerer, for_stmt: *const lib.ast.Statemen
     // handle different loop patterns
     switch (for_stmt.pattern) {
         .Single => |single| {
-            try lowerSimpleForLoop(self, single.name, iterable, for_stmt.body, for_stmt.invariants, for_stmt.decreases, for_stmt.increases, loc);
+            try lowerSimpleForLoop(self, single.name, iterable, for_stmt.body, for_stmt.invariants, for_stmt.decreases, for_stmt.increases, for_stmt.label, loc);
         },
         .IndexPair => |pair| {
-            try lowerIndexedForLoop(self, pair.item, pair.index, iterable, for_stmt.body, for_stmt.invariants, for_stmt.decreases, for_stmt.increases, loc);
+            try lowerIndexedForLoop(self, pair.item, pair.index, iterable, for_stmt.body, for_stmt.invariants, for_stmt.decreases, for_stmt.increases, for_stmt.label, loc);
         },
         .Destructured => |destructured| {
-            try lowerDestructuredForLoop(self, destructured.pattern, iterable, for_stmt.body, for_stmt.invariants, for_stmt.decreases, for_stmt.increases, loc);
+            try lowerDestructuredForLoop(self, destructured.pattern, iterable, for_stmt.body, for_stmt.invariants, for_stmt.decreases, for_stmt.increases, for_stmt.label, loc);
         },
     }
 }
@@ -452,6 +461,7 @@ fn lowerSimpleForLoop(
     invariants: []lib.ast.Expressions.ExprNode,
     decreases: ?*lib.ast.Expressions.ExprNode,
     increases: ?*lib.ast.Expressions.ExprNode,
+    label: ?[]const u8,
     loc: c.MlirLocation,
 ) LoweringError!void {
     // get the iterable type to determine proper iteration strategy
@@ -567,8 +577,16 @@ fn lowerSimpleForLoop(
         h.appendOp(body_block, inc_op);
     }
 
-    // lower the loop body
-    const ended_with_terminator = try self.lowerBlockBody(body, body_block);
+    // lower the loop body with loop label context
+    const loop_label = label orelse "";
+    const loop_ctx = LabelContext{
+        .label = loop_label,
+        .label_type = .For,
+        .parent = self.label_context,
+    };
+    var body_lowerer = self.*;
+    body_lowerer.label_context = &loop_ctx;
+    const ended_with_terminator = try body_lowerer.lowerBlockBody(body, body_block);
 
     // add scf.yield at end of body if no terminator
     if (!ended_with_terminator) {
@@ -587,6 +605,7 @@ fn lowerIndexedForLoop(
     invariants: []lib.ast.Expressions.ExprNode,
     decreases: ?*lib.ast.Expressions.ExprNode,
     increases: ?*lib.ast.Expressions.ExprNode,
+    label: ?[]const u8,
     loc: c.MlirLocation,
 ) LoweringError!void {
     // use MLIR index type for loop bounds and induction variable
@@ -694,8 +713,16 @@ fn lowerIndexedForLoop(
         h.appendOp(op_body_block, inc_op);
     }
 
-    // lower the loop body
-    const ended_with_terminator = try self.lowerBlockBody(body, op_body_block);
+    // lower the loop body with loop label context
+    const loop_label = label orelse "";
+    const loop_ctx = LabelContext{
+        .label = loop_label,
+        .label_type = .For,
+        .parent = self.label_context,
+    };
+    var body_lowerer = self.*;
+    body_lowerer.label_context = &loop_ctx;
+    const ended_with_terminator = try body_lowerer.lowerBlockBody(body, op_body_block);
 
     // add scf.yield at end of body if no terminator
     if (!ended_with_terminator) {
@@ -705,7 +732,7 @@ fn lowerIndexedForLoop(
 }
 
 /// Lower destructured for loop (for (iterable) |.{field1, field2}| body)
-fn lowerDestructuredForLoop(self: *const StatementLowerer, pattern: lib.ast.Expressions.DestructuringPattern, iterable: c.MlirValue, body: lib.ast.Statements.BlockNode, invariants: []lib.ast.Expressions.ExprNode, decreases: ?*lib.ast.Expressions.ExprNode, increases: ?*lib.ast.Expressions.ExprNode, loc: c.MlirLocation) LoweringError!void {
+fn lowerDestructuredForLoop(self: *const StatementLowerer, pattern: lib.ast.Expressions.DestructuringPattern, iterable: c.MlirValue, body: lib.ast.Statements.BlockNode, invariants: []lib.ast.Expressions.ExprNode, decreases: ?*lib.ast.Expressions.ExprNode, increases: ?*lib.ast.Expressions.ExprNode, label: ?[]const u8, loc: c.MlirLocation) LoweringError!void {
     // create integer type for loop bounds
     const zero_ty = c.oraIntegerTypeCreate(self.ctx, constants.DEFAULT_INTEGER_BITS);
 
@@ -782,8 +809,16 @@ fn lowerDestructuredForLoop(self: *const StatementLowerer, pattern: lib.ast.Expr
         h.appendOp(body_block, inc_op);
     }
 
-    // lower the loop body
-    const ended_with_terminator = try self.lowerBlockBody(body, body_block);
+    // lower the loop body with loop label context
+    const loop_label = label orelse "";
+    const loop_ctx = LabelContext{
+        .label = loop_label,
+        .label_type = .For,
+        .parent = self.label_context,
+    };
+    var body_lowerer = self.*;
+    body_lowerer.label_context = &loop_ctx;
+    const ended_with_terminator = try body_lowerer.lowerBlockBody(body, body_block);
 
     // add scf.yield at end of body if no terminator
     if (!ended_with_terminator) {
@@ -890,6 +925,11 @@ pub fn lowerSwitch(self: *const StatementLowerer, switch_stmt: *const lib.ast.St
         case_expr_lowerer.current_function_return_type = self.current_function_return_type;
         case_expr_lowerer.current_function_return_type_info = self.current_function_return_type_info;
         case_expr_lowerer.in_try_block = self.in_try_block;
+        const switch_ctx = LabelContext{
+            .label = "",
+            .label_type = .Switch,
+            .parent = self.label_context,
+        };
 
         switch (case.pattern) {
             .Literal => |lit| {
@@ -961,19 +1001,16 @@ pub fn lowerSwitch(self: *const StatementLowerer, switch_stmt: *const lib.ast.St
                             else => {
                                 var temp_lowerer = self.*;
                                 temp_lowerer.block = case_block;
+                                temp_lowerer.label_context = &switch_ctx;
                                 try temp_lowerer.lowerStatement(&stmt);
                             },
                         }
                     }
                 } else {
-                    const ended_with_terminator = try self.lowerBlockBody(block, case_block);
-                    // check if block ends with ora.break (which is not a proper terminator)
-                    if (helpers.blockEndsWithBreak(self, case_block)) {
-                        // add ora.yield after ora.break to properly terminate the block
-                        // switch statements use empty yield (no value)
-                        const yield_op = self.ora_dialect.createYield(&[_]c.MlirValue{}, loc);
-                        h.appendOp(case_block, yield_op);
-                    } else if (!ended_with_terminator) {
+                    var body_lowerer = self.*;
+                    body_lowerer.label_context = &switch_ctx;
+                    const ended_with_terminator = try body_lowerer.lowerBlockBody(block, case_block);
+                    if (!ended_with_terminator) {
                         // block doesn't have a terminator, add one
                         // switch statements use empty yield (no value)
                         const yield_op = self.ora_dialect.createYield(&[_]c.MlirValue{}, loc);
@@ -1003,19 +1040,16 @@ pub fn lowerSwitch(self: *const StatementLowerer, switch_stmt: *const lib.ast.St
                             else => {
                                 var temp_lowerer = self.*;
                                 temp_lowerer.block = case_block;
+                                temp_lowerer.label_context = &switch_ctx;
                                 try temp_lowerer.lowerStatement(&stmt);
                             },
                         }
                     }
                 } else {
-                    const ended_with_terminator = try self.lowerBlockBody(labeled.block, case_block);
-                    // check if block ends with ora.break (which is not a proper terminator)
-                    if (helpers.blockEndsWithBreak(self, case_block)) {
-                        // add ora.yield after ora.break to properly terminate the block
-                        // switch statements use empty yield (no value)
-                        const yield_op = self.ora_dialect.createYield(&[_]c.MlirValue{}, loc);
-                        h.appendOp(case_block, yield_op);
-                    } else if (!ended_with_terminator) {
+                    var body_lowerer = self.*;
+                    body_lowerer.label_context = &switch_ctx;
+                    const ended_with_terminator = try body_lowerer.lowerBlockBody(labeled.block, case_block);
+                    if (!ended_with_terminator) {
                         // block doesn't have a terminator, add one
                         // switch statements use empty yield (no value)
                         const yield_op = self.ora_dialect.createYield(&[_]c.MlirValue{}, loc);
@@ -1034,6 +1068,11 @@ pub fn lowerSwitch(self: *const StatementLowerer, switch_stmt: *const lib.ast.St
             @panic("ora.switch missing default block");
         }
 
+        const switch_ctx = LabelContext{
+            .label = "",
+            .label_type = .Switch,
+            .parent = self.label_context,
+        };
         const default_has_return = helpers.blockHasReturn(self, default_block);
         if (default_has_return) {
             var default_expr_lowerer = ExpressionLowerer.init(self.ctx, default_block_mlir, self.type_mapper, self.expr_lowerer.param_map, self.expr_lowerer.storage_map, self.expr_lowerer.local_var_map, self.expr_lowerer.symbol_table, self.expr_lowerer.builtin_registry, self.expr_lowerer.error_handler, self.expr_lowerer.locations, self.ora_dialect);
@@ -1059,19 +1098,16 @@ pub fn lowerSwitch(self: *const StatementLowerer, switch_stmt: *const lib.ast.St
                     else => {
                         var temp_lowerer = self.*;
                         temp_lowerer.block = default_block_mlir;
+                        temp_lowerer.label_context = &switch_ctx;
                         try temp_lowerer.lowerStatement(&stmt);
                     },
                 }
             }
         } else {
-            const ended_with_terminator = try self.lowerBlockBody(default_block, default_block_mlir);
-            // check if block ends with ora.break (which is not a proper terminator)
-            if (helpers.blockEndsWithBreak(self, default_block_mlir)) {
-                // add ora.yield after ora.break to properly terminate the block
-                // switch statements use empty yield (no value)
-                const yield_op = self.ora_dialect.createYield(&[_]c.MlirValue{}, loc);
-                h.appendOp(default_block_mlir, yield_op);
-            } else if (!ended_with_terminator) {
+            var body_lowerer = self.*;
+            body_lowerer.label_context = &switch_ctx;
+            const ended_with_terminator = try body_lowerer.lowerBlockBody(default_block, default_block_mlir);
+            if (!ended_with_terminator) {
                 // block doesn't have a terminator, add one
                 // switch statements use empty yield (no value)
                 const yield_op = self.ora_dialect.createYield(&[_]c.MlirValue{}, loc);
@@ -1126,17 +1162,39 @@ pub fn lowerSwitchCases(self: *const StatementLowerer, cases: []const lib.ast.Ex
             const has_return = helpers.blockHasReturn(self, default_block);
             log.debug("[lowerSwitchCases] Default case has_return={}, is_labeled_switch={}\n", .{ has_return, is_labeled_switch });
             if (has_return and is_labeled_switch) {
-                // for labeled switches, we can't use ora.return inside scf.if regions
-                // use empty scf.yield (returns handled after scf.while)
-                log.debug("[lowerSwitchCases] Labeled switch default with return - using empty scf.yield\n", .{});
+                // for labeled switches, store return value/flag and then scf.yield
+                log.debug("[lowerSwitchCases] Labeled switch default with return - storing return value and flag\n", .{});
                 var temp_lowerer = self.*;
                 temp_lowerer.block = target_block;
+                var expr_lowerer = ExpressionLowerer.init(self.ctx, target_block, self.type_mapper, self.expr_lowerer.param_map, self.expr_lowerer.storage_map, self.expr_lowerer.local_var_map, self.expr_lowerer.symbol_table, self.expr_lowerer.builtin_registry, self.expr_lowerer.error_handler, self.expr_lowerer.locations, self.ora_dialect);
+                expr_lowerer.current_function_return_type = self.current_function_return_type;
+                expr_lowerer.current_function_return_type_info = self.current_function_return_type_info;
+                expr_lowerer.in_try_block = self.in_try_block;
                 var has_terminator = false;
                 for (default_block.statements) |stmt| {
                     if (has_terminator) break;
                     switch (stmt) {
                         .Return => |ret| {
-                            // for labeled switches, use empty scf.yield (returns handled after scf.while)
+                            if (self.label_context) |label_ctx| {
+                                if (label_ctx.return_flag_memref) |return_flag_memref| {
+                                    if (label_ctx.return_value_memref) |return_value_memref| {
+                                        const ret_loc = temp_lowerer.fileLoc(ret.span);
+                                        if (ret.value) |value_expr| {
+                                            const return_value = expr_lowerer.lowerExpression(&value_expr);
+                                            const value_to_store = helpers.ensureValue(&temp_lowerer, return_value, ret_loc);
+                                            const memref_type = c.oraValueGetType(return_value_memref);
+                                            const element_type = c.oraShapedTypeGetElementType(memref_type);
+                                            const final_value = helpers.convertValueToType(&temp_lowerer, value_to_store, element_type, ret.span, ret_loc);
+                                            helpers.storeToMemref(&temp_lowerer, final_value, return_value_memref, ret_loc);
+                                        } else if (self.current_function_return_type) |ret_type| {
+                                            const default_val = try helpers.createDefaultValueForType(&temp_lowerer, ret_type, ret_loc);
+                                            helpers.storeToMemref(&temp_lowerer, default_val, return_value_memref, ret_loc);
+                                        }
+                                        const true_val = helpers.createBoolConstant(&temp_lowerer, true, ret_loc);
+                                        helpers.storeToMemref(&temp_lowerer, true_val, return_flag_memref, ret_loc);
+                                    }
+                                }
+                            }
                             const ret_loc = temp_lowerer.fileLoc(ret.span);
                             const yield_op = self.ora_dialect.createScfYield(ret_loc);
                             h.appendOp(target_block, yield_op);
@@ -1152,7 +1210,6 @@ pub fn lowerSwitchCases(self: *const StatementLowerer, cases: []const lib.ast.Ex
                         },
                     }
                 }
-                // ensure block has a terminator
                 if (!has_terminator) {
                     const yield_op = self.ora_dialect.createScfYield(loc);
                     h.appendOp(target_block, yield_op);
@@ -1193,13 +1250,7 @@ pub fn lowerSwitchCases(self: *const StatementLowerer, cases: []const lib.ast.Ex
             } else {
                 // no return - use lowerBlockBody which handles break/continue properly
                 const ended_with_terminator = try self.lowerBlockBody(default_block, target_block);
-                // check if block ends with ora.break or ora.continue (which are not proper terminators for if regions)
-                const ends_with_break_or_continue = helpers.blockEndsWithBreak(self, target_block) or helpers.blockEndsWithContinue(self, target_block);
-                if (ends_with_break_or_continue) {
-                    // add scf.yield after ora.break/ora.continue to properly terminate the scf.if block
-                    const yield_op = self.ora_dialect.createScfYield(loc);
-                    h.appendOp(target_block, yield_op);
-                } else if (!ended_with_terminator) {
+                if (!ended_with_terminator) {
                     // block doesn't have a terminator, add scf.yield for scf.if block
                     const yield_op = self.ora_dialect.createScfYield(loc);
                     h.appendOp(target_block, yield_op);
@@ -1447,16 +1498,9 @@ pub fn lowerSwitchCases(self: *const StatementLowerer, cases: []const lib.ast.Ex
                     }
                 }
             } else {
-                // no return - use lowerBlockBody which handles break/continue properly
+                // no return - use lowerBlockBody and ensure the scf.if region terminates
                 const ended_with_terminator = try self.lowerBlockBody(block, then_block);
-                // check if block ends with ora.break or ora.continue (which are not proper terminators for scf.if regions)
-                const ends_with_break_or_continue = helpers.blockEndsWithBreak(self, then_block) or helpers.blockEndsWithContinue(self, then_block);
-                if (ends_with_break_or_continue) {
-                    // add scf.yield after ora.break/ora.continue to properly terminate the scf.if block
-                    const yield_op = self.ora_dialect.createScfYield(loc);
-                    h.appendOp(then_block, yield_op);
-                } else if (!ended_with_terminator) {
-                    // block doesn't have a terminator, add scf.yield for scf.if block
+                if (!ended_with_terminator) {
                     const yield_op = self.ora_dialect.createScfYield(loc);
                     h.appendOp(then_block, yield_op);
                 }
@@ -1555,16 +1599,9 @@ pub fn lowerSwitchCases(self: *const StatementLowerer, cases: []const lib.ast.Ex
                     }
                 }
             } else {
-                // no return - use lowerBlockBody which handles break/continue properly
+                // no return - use lowerBlockBody and ensure the scf.if region terminates
                 const ended_with_terminator = try self.lowerBlockBody(labeled.block, then_block);
-                // check if block ends with ora.break or ora.continue (which are not proper terminators for scf.if regions)
-                const ends_with_break_or_continue = helpers.blockEndsWithBreak(self, then_block) or helpers.blockEndsWithContinue(self, then_block);
-                if (ends_with_break_or_continue) {
-                    // add scf.yield after ora.break/ora.continue to properly terminate the scf.if block
-                    const yield_op = self.ora_dialect.createScfYield(loc);
-                    h.appendOp(then_block, yield_op);
-                } else if (!ended_with_terminator) {
-                    // block doesn't have a terminator, add scf.yield for scf.if block
+                if (!ended_with_terminator) {
                     const yield_op = self.ora_dialect.createScfYield(loc);
                     h.appendOp(then_block, yield_op);
                 }

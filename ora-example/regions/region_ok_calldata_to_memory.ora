@@ -1,0 +1,7 @@
+contract RegionOkCalldataToMemory {
+    fn ok(x: u256) -> u256 {
+        memory var tmp: u256 = x;
+        let sink: u256 = tmp;
+        return sink;
+    }
+}

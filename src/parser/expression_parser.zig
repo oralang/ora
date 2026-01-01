@@ -495,6 +495,33 @@ pub const ExpressionParser = struct {
                         std.mem.eql(u8, enum_name, "math");
 
                     if (!is_module_access and !is_assignment_target) {
+                        if (std.mem.eql(u8, enum_name, "error")) {
+                            var parameters: ?[]*ast.Expressions.ExprNode = null;
+                            if (self.base.match(.LeftParen)) {
+                                var args = std.ArrayList(*ast.Expressions.ExprNode){};
+                                defer args.deinit(self.base.arena.allocator());
+
+                                if (!self.base.check(.RightParen)) {
+                                    repeat: while (true) {
+                                        const arg = try self.parseExpression();
+                                        const arg_ptr = try self.base.arena.createNode(ast.Expressions.ExprNode);
+                                        arg_ptr.* = arg;
+                                        try args.append(self.base.arena.allocator(), arg_ptr);
+                                        if (!self.base.match(.Comma)) break :repeat;
+                                    }
+                                }
+
+                                _ = try self.base.consume(.RightParen, "Expected ')' after error parameters");
+                                parameters = try args.toOwnedSlice(self.base.arena.allocator());
+                            }
+
+                            return ast.Expressions.ExprNode{ .ErrorReturn = ast.Expressions.ErrorReturnExpr{
+                                .error_name = field_token.lexeme,
+                                .parameters = parameters,
+                                .span = self.base.spanFromToken(field_token),
+                            } };
+                        }
+
                         // treat as potential enum literal (only if not an assignment target)
                         const variant_name = try self.base.arena.createString(field_token.lexeme);
                         current_expr = ast.Expressions.ExprNode{ .EnumLiteral = ast.Expressions.EnumLiteralExpr{
