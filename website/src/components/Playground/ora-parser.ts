@@ -735,45 +735,69 @@ export interface ValidationResult {
 }
 
 export function validateOraSyntax(source: string): ValidationResult {
-  // Lexical analysis
-  const lexer = new Lexer(source);
-  const { tokens, errors: lexErrors } = lexer.scanTokens();
+  try {
+    // Handle empty or null source
+    if (!source || typeof source !== 'string') {
+      return {
+        success: false,
+        error_type: 'lexical',
+        error_message: 'Empty or invalid source code',
+        line: 1,
+        column: 1,
+        token_count: 0,
+      };
+    }
 
-  if (lexErrors.length > 0) {
-    const firstError = lexErrors[0];
+    // Lexical analysis
+    const lexer = new Lexer(source);
+    const { tokens, errors: lexErrors } = lexer.scanTokens();
+
+    if (lexErrors.length > 0) {
+      const firstError = lexErrors[0];
+      return {
+        success: false,
+        error_type: 'lexical',
+        error_message: firstError,
+        line: 1,
+        column: 1,
+        token_count: tokens.length,
+      };
+    }
+
+    // Syntax analysis
+    const parser = new Parser(tokens);
+    const { success, errors: parseErrors } = parser.parse();
+
+    if (!success && parseErrors.length > 0) {
+      const firstError = parseErrors[0];
+      return {
+        success: false,
+        error_type: 'syntax',
+        error_message: firstError.message,
+        line: firstError.line,
+        column: firstError.column,
+        token_count: tokens.length,
+      };
+    }
+
     return {
-      success: false,
-      error_type: 'lexical',
-      error_message: firstError,
-      line: 1,
-      column: 1,
+      success: true,
+      error_type: 'none',
+      error_message: '',
+      line: 0,
+      column: 0,
       token_count: tokens.length,
     };
-  }
-
-  // Syntax analysis
-  const parser = new Parser(tokens);
-  const { success, errors: parseErrors } = parser.parse();
-
-  if (!success && parseErrors.length > 0) {
-    const firstError = parseErrors[0];
+  } catch (error) {
+    // Catch any unexpected errors
     return {
       success: false,
       error_type: 'syntax',
-      error_message: firstError.message,
-      line: firstError.line,
-      column: firstError.column,
-      token_count: tokens.length,
+      error_message: error instanceof Error ? error.message : 'Unexpected parsing error',
+      line: 1,
+      column: 1,
+      token_count: 0,
     };
   }
-
-  return {
-    success: true,
-    error_type: 'none',
-    error_message: '',
-    line: 0,
-    column: 0,
-    token_count: tokens.length,
-  };
 }
 

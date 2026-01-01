@@ -1,7 +1,12 @@
 import React, { useState, useRef, useEffect } from 'react';
-import Editor from '@monaco-editor/react';
 import { validateOraSyntax } from './ora-parser';
 import styles from './styles.module.css';
+
+// Lazy load Monaco Editor to avoid SSR issues
+let Editor: any = null;
+if (typeof window !== 'undefined') {
+  Editor = require('@monaco-editor/react').default;
+}
 
 interface ValidationResult {
   success: boolean;
@@ -299,7 +304,13 @@ export default function Playground(): JSX.Element {
   const [isValidating, setIsValidating] = useState(false);
   const [selectedExample, setSelectedExample] = useState<string>('Simple Contract');
   const [sidebarOpen, setSidebarOpen] = useState<boolean>(true);
+  const [isMounted, setIsMounted] = useState(false);
   const editorRef = useRef<any>(null);
+
+  // Ensure component only renders on client
+  useEffect(() => {
+    setIsMounted(true);
+  }, []);
 
   // Handle editor mount
   const handleEditorDidMount = (editor: any, monaco: any) => {
@@ -358,25 +369,40 @@ export default function Playground(): JSX.Element {
     });
   };
 
-  // Validate syntax using JavaScript parser
+  // Validate syntax using JavaScript parser with timeout
   const validateSyntax = async (sourceCode: string) => {
     setIsValidating(true);
     
     try {
-      // Small delay for UI feedback
-      await new Promise(resolve => setTimeout(resolve, 50));
+      // Create a timeout promise
+      const timeoutPromise = new Promise<never>((_, reject) => {
+        setTimeout(() => reject(new Error('Validation timeout')), 3000);
+      });
+
+      // Race between validation and timeout
+      const validationPromise = Promise.resolve(validateOraSyntax(sourceCode));
       
-      const result = validateOraSyntax(sourceCode);
+      const result = await Promise.race([validationPromise, timeoutPromise]);
       setValidationResult(result);
     } catch (error) {
       console.error('Validation error:', error);
-      setValidationResult({
-        success: false,
-        error_type: 'syntax',
-        error_message: error instanceof Error ? error.message : 'Validation failed',
-        line: 1,
-        column: 1,
-      });
+      if (error instanceof Error && error.message === 'Validation timeout') {
+        setValidationResult({
+          success: false,
+          error_type: 'syntax',
+          error_message: 'Validation timed out (exceeded 3 seconds)',
+          line: 1,
+          column: 1,
+        });
+      } else {
+        setValidationResult({
+          success: false,
+          error_type: 'syntax',
+          error_message: error instanceof Error ? error.message : 'Validation failed',
+          line: 1,
+          column: 1,
+        });
+      }
     } finally {
       setIsValidating(false);
     }
@@ -468,33 +494,37 @@ export default function Playground(): JSX.Element {
           </div>
         )}
         <div className={styles.editorContainer}>
-          <Editor
-            height="100%"
-            language="ora"
-            value={code}
-            onChange={handleCodeChange}
-            onMount={handleEditorDidMount}
-            theme="vs-dark"
-            options={{
-              minimap: { enabled: false },
-              fontSize: 14,
-              lineNumbers: 'on',
-              scrollBeyondLastLine: false,
-              automaticLayout: true,
-              tabSize: 4,
-              wordWrap: 'on',
-              padding: { top: 0, bottom: 0 },
-              glyphMargin: true,
-              folding: true,
-              lineDecorationsWidth: 10,
-              lineNumbersMinChars: 3,
-              scrollbar: {
-                vertical: 'auto',
-                horizontal: 'auto',
-                useShadows: false,
-              },
-            }}
-          />
+          {isMounted && Editor ? (
+            <Editor
+              height="100%"
+              language="ora"
+              value={code}
+              onChange={handleCodeChange}
+              onMount={handleEditorDidMount}
+              theme="vs-dark"
+              options={{
+                minimap: { enabled: false },
+                fontSize: 14,
+                lineNumbers: 'on',
+                scrollBeyondLastLine: false,
+                automaticLayout: true,
+                tabSize: 4,
+                wordWrap: 'on',
+                padding: { top: 0, bottom: 0 },
+                glyphMargin: true,
+                folding: true,
+                lineDecorationsWidth: 10,
+                lineNumbersMinChars: 3,
+                scrollbar: {
+                  vertical: 'auto',
+                  horizontal: 'auto',
+                  useShadows: false,
+                },
+              }}
+            />
+          ) : (
+            <div className={styles.editorLoading}>Loading editor...</div>
+          )}
         </div>
 
         <div className={styles.sidebar}>

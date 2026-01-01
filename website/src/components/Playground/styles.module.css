@@ -160,6 +160,15 @@
   padding-top: 0;
 }
 
+.editorLoading {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  color: var(--ifm-color-emphasis-600);
+  font-size: 0.875rem;
+}
+
 .sidebar {
   width: 300px;
   border-left: 1px solid var(--ifm-color-emphasis-300);
