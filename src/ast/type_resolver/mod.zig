@@ -325,7 +325,6 @@ pub const TypeResolver = struct {
             func_scope = new_scope;
             self.current_scope = new_scope;
             self.core_resolver.current_scope = new_scope;
-
         }
         // ensure parameters exist in function scope (and are marked as calldata)
         if (func_scope) |scope| {

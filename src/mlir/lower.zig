@@ -882,7 +882,7 @@ pub fn lowerFunctionsToModuleWithErrors(ctx: c.MlirContext, nodes: []lib.AstNode
                                     string_val = value_expr.Literal.String.value;
                                 }
                             }
-                            
+
                             variants_slice[i] = .{
                                 .name = variant.name,
                                 .value = null, // Will be set to index during symbol table creation
