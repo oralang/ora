@@ -357,9 +357,17 @@ public:
         {
             module.walk([&](Operation *op)
                         {
-                if (isa<ora::SLoadOp>(op))
+                if (op->getDialect() && op->getDialect()->getNamespace() == "ora")
                 {
-                    llvm::errs() << "[OraToSIR] Remaining ora.sload at " << op->getLoc() << " type=" << op->getResult(0).getType() << "\n";
+                    llvm::errs() << "[OraToSIR] Remaining ora op: " << op->getName()
+                                 << " at " << op->getLoc()
+                                 << " op=" << op
+                                 << " block=" << op->getBlock();
+                    if (op->getNumResults() > 0)
+                    {
+                        llvm::errs() << " result0=" << op->getResult(0).getType();
+                    }
+                    llvm::errs() << "\n";
                 } });
             DBG("ERROR: Conversion failed!");
             signalPassFailure();

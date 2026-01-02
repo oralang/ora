@@ -119,7 +119,10 @@ LogicalResult ConvertSLoadOp::matchAndRewrite(
     typename ora::SLoadOp::Adaptor adaptor,
     ConversionPatternRewriter &rewriter) const
 {
-    llvm::errs() << "[OraToSIR] ConvertSLoadOp: " << op.getGlobalName() << "\n";
+    llvm::errs() << "[OraToSIR] ConvertSLoadOp: " << op.getGlobalName()
+                 << " op=" << op.getOperation()
+                 << " block=" << op.getOperation()->getBlock()
+                 << "\n";
     llvm::errs().flush();
 
     auto loc = op.getLoc();

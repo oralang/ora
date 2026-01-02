@@ -191,16 +191,13 @@ namespace mlir
         }
 
         // ---------------------------------------------------------------------
-        // Convert MLIR builtin integer types to sir.u256 (EVM uses 256-bit values)
+        // Keep MLIR builtin integer types as-is (used for indexing/arithmetic)
         // ---------------------------------------------------------------------
         if (auto intType = dyn_cast<mlir::IntegerType>(type))
         {
             if (intType.getWidth() <= 256)
             {
-                auto *ctx = type.getContext();
-                if (!ctx)
-                    return Type();
-                return sir::U256Type::get(ctx);
+                return type;
             }
         }
 

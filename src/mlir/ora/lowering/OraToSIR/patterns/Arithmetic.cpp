@@ -752,14 +752,25 @@ LogicalResult ConvertStringConstantOp::matchAndRewrite(
     // store length word at offset 0
     rewriter.create<sir::StoreOp>(loc, base, lengthConst);
 
-    for (size_t i = 0; i < bytes.size(); ++i)
+    // store payload as 32-byte words (EVM-friendly layout)
+    const size_t word_count = (bytes.size() + 31) / 32;
+    auto u256IntType = mlir::IntegerType::get(ctx, 256, mlir::IntegerType::Unsigned);
+    for (size_t w = 0; w < word_count; ++w)
     {
-        uint8_t byte = static_cast<uint8_t>(bytes[i]);
-        auto offsetAttr = mlir::IntegerAttr::get(ui64Type, 32 + i);
-        auto byteAttr = mlir::IntegerAttr::get(ui64Type, byte);
+        llvm::APInt word(256, 0);
+        for (size_t i = 0; i < 32; ++i)
+        {
+            const size_t idx = w * 32 + i;
+            const uint8_t byte = idx < bytes.size() ? static_cast<uint8_t>(bytes[idx]) : 0;
+            word = word.shl(8);
+            word = word | llvm::APInt(256, byte);
+        }
+        auto wordAttr = mlir::IntegerAttr::get(u256IntType, word);
+        Value wordConst = rewriter.create<sir::ConstOp>(loc, u256Type, wordAttr);
+        auto offsetAttr = mlir::IntegerAttr::get(ui64Type, 32 + w * 32);
         Value offsetConst = rewriter.create<sir::ConstOp>(loc, u256Type, offsetAttr);
-        Value byteConst = rewriter.create<sir::ConstOp>(loc, u256Type, byteAttr);
-        rewriter.create<sir::Store8Op>(loc, base, offsetConst, byteConst);
+        Value dataPtr = rewriter.create<sir::AddPtrOp>(loc, ptrType, base, offsetConst);
+        rewriter.create<sir::StoreOp>(loc, dataPtr, wordConst);
     }
 
     rewriter.replaceOp(op, base);
@@ -817,13 +828,25 @@ LogicalResult ConvertBytesConstantOp::matchAndRewrite(
 
     rewriter.create<sir::StoreOp>(loc, base, lengthConst);
 
-    for (size_t i = 0; i < bytes.size(); ++i)
+    // store payload as 32-byte words (EVM-friendly layout)
+    const size_t word_count = (bytes.size() + 31) / 32;
+    auto u256IntType = mlir::IntegerType::get(ctx, 256, mlir::IntegerType::Unsigned);
+    for (size_t w = 0; w < word_count; ++w)
     {
-        auto offsetAttr = mlir::IntegerAttr::get(ui64Type, 32 + i);
-        auto byteAttr = mlir::IntegerAttr::get(ui64Type, bytes[i]);
+        llvm::APInt word(256, 0);
+        for (size_t i = 0; i < 32; ++i)
+        {
+            const size_t idx = w * 32 + i;
+            const uint8_t byte = idx < bytes.size() ? bytes[idx] : 0;
+            word = word.shl(8);
+            word = word | llvm::APInt(256, byte);
+        }
+        auto wordAttr = mlir::IntegerAttr::get(u256IntType, word);
+        Value wordConst = rewriter.create<sir::ConstOp>(loc, u256Type, wordAttr);
+        auto offsetAttr = mlir::IntegerAttr::get(ui64Type, 32 + w * 32);
         Value offsetConst = rewriter.create<sir::ConstOp>(loc, u256Type, offsetAttr);
-        Value byteConst = rewriter.create<sir::ConstOp>(loc, u256Type, byteAttr);
-        rewriter.create<sir::Store8Op>(loc, base, offsetConst, byteConst);
+        Value dataPtr = rewriter.create<sir::AddPtrOp>(loc, ptrType, base, offsetConst);
+        rewriter.create<sir::StoreOp>(loc, dataPtr, wordConst);
     }
 
     rewriter.replaceOp(op, base);

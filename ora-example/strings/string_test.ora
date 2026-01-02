@@ -1,0 +1,13 @@
+contract StringTest {
+
+    storage var stored_string: string;
+   
+    pub fn init() {
+        stored_string = "Initial String This is a big string and should be longer than 32 characters";
+    }
+    
+    pub fn getStoredString() -> string {
+        return stored_string;
+    }
+}
+
