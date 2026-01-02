@@ -39,6 +39,25 @@ pub fn createErrorPlaceholder(ctx: c.MlirContext, block: c.MlirBlock, locations:
     return h.getResult(op, 0);
 }
 
+fn unwrapRefinementValue(
+    ctx: c.MlirContext,
+    block: c.MlirBlock,
+    locations: LocationTracker,
+    value: c.MlirValue,
+    span: lib.ast.SourceSpan,
+) c.MlirValue {
+    const value_type = c.oraValueGetType(value);
+    const base_type = c.oraRefinementTypeGetBaseType(value_type);
+    if (base_type.ptr != null) {
+        const loc = locations.createLocation(span);
+        const op = c.oraRefinementToBaseOpCreate(ctx, loc, value, block);
+        if (op.ptr != null) {
+            return h.getResult(op, 0);
+        }
+    }
+    return value;
+}
+
 /// Create arithmetic operation
 pub fn createArithmeticOp(ctx: c.MlirContext, block: c.MlirBlock, type_mapper: *const TypeMapper, _: *OraDialect, locations: LocationTracker, op_name: []const u8, lhs: c.MlirValue, rhs: c.MlirValue, span: lib.ast.SourceSpan) c.MlirValue {
     const arith_op_name = if (std.mem.eql(u8, op_name, "ora.add"))
@@ -54,143 +73,146 @@ pub fn createArithmeticOp(ctx: c.MlirContext, block: c.MlirBlock, type_mapper: *
     else
         op_name;
 
-    const lhs_type = c.oraValueGetType(lhs);
-    const rhs_type = c.oraValueGetType(rhs);
+    const lhs_unwrapped = unwrapRefinementValue(ctx, block, locations, lhs, span);
+    const rhs_unwrapped = unwrapRefinementValue(ctx, block, locations, rhs, span);
 
-    var rhs_converted = rhs;
+    const lhs_type = c.oraValueGetType(lhs_unwrapped);
+    const rhs_type = c.oraValueGetType(rhs_unwrapped);
+
+    var rhs_converted = rhs_unwrapped;
     if (!c.oraTypeEqual(lhs_type, rhs_type)) {
-        rhs_converted = type_mapper.createConversionOp(block, rhs, lhs_type, span);
+        rhs_converted = type_mapper.createConversionOp(block, rhs_unwrapped, lhs_type, span);
     }
 
     const loc = locations.createLocation(span);
     if (std.mem.eql(u8, arith_op_name, "arith.addi")) {
-        const op = c.oraArithAddIOpCreate(ctx, loc, lhs, rhs_converted);
+        const op = c.oraArithAddIOpCreate(ctx, loc, lhs_unwrapped, rhs_converted);
         h.appendOp(block, op);
         return h.getResult(op, 0);
     }
 
     if (std.mem.eql(u8, arith_op_name, "arith.subi")) {
-        const op = c.oraArithSubIOpCreate(ctx, loc, lhs, rhs_converted);
+        const op = c.oraArithSubIOpCreate(ctx, loc, lhs_unwrapped, rhs_converted);
         h.appendOp(block, op);
         return h.getResult(op, 0);
     }
 
     if (std.mem.eql(u8, arith_op_name, "arith.muli")) {
-        const op = c.oraArithMulIOpCreate(ctx, loc, lhs, rhs_converted);
+        const op = c.oraArithMulIOpCreate(ctx, loc, lhs_unwrapped, rhs_converted);
         h.appendOp(block, op);
         return h.getResult(op, 0);
     }
 
     if (std.mem.eql(u8, arith_op_name, "arith.divui")) {
-        const op = c.oraArithDivUIOpCreate(ctx, loc, lhs, rhs_converted);
+        const op = c.oraArithDivUIOpCreate(ctx, loc, lhs_unwrapped, rhs_converted);
         h.appendOp(block, op);
         return h.getResult(op, 0);
     }
 
     if (std.mem.eql(u8, arith_op_name, "arith.divsi")) {
-        const op = c.oraArithDivSIOpCreate(ctx, loc, lhs, rhs_converted);
+        const op = c.oraArithDivSIOpCreate(ctx, loc, lhs_unwrapped, rhs_converted);
         h.appendOp(block, op);
         return h.getResult(op, 0);
     }
 
     if (std.mem.eql(u8, arith_op_name, "arith.remui")) {
-        const op = c.oraArithRemUIOpCreate(ctx, loc, lhs, rhs_converted);
+        const op = c.oraArithRemUIOpCreate(ctx, loc, lhs_unwrapped, rhs_converted);
         h.appendOp(block, op);
         return h.getResult(op, 0);
     }
 
     if (std.mem.eql(u8, arith_op_name, "arith.remsi")) {
-        const op = c.oraArithRemSIOpCreate(ctx, loc, lhs, rhs_converted);
+        const op = c.oraArithRemSIOpCreate(ctx, loc, lhs_unwrapped, rhs_converted);
         h.appendOp(block, op);
         return h.getResult(op, 0);
     }
 
     if (std.mem.eql(u8, arith_op_name, "arith.andi")) {
-        const op = c.oraArithAndIOpCreate(ctx, loc, lhs, rhs_converted);
+        const op = c.oraArithAndIOpCreate(ctx, loc, lhs_unwrapped, rhs_converted);
         h.appendOp(block, op);
         return h.getResult(op, 0);
     }
 
     if (std.mem.eql(u8, arith_op_name, "arith.ori")) {
-        const op = c.oraArithOrIOpCreate(ctx, loc, lhs, rhs_converted);
+        const op = c.oraArithOrIOpCreate(ctx, loc, lhs_unwrapped, rhs_converted);
         h.appendOp(block, op);
         return h.getResult(op, 0);
     }
 
     if (std.mem.eql(u8, arith_op_name, "arith.xori")) {
-        const op = c.oraArithXorIOpCreate(ctx, loc, lhs, rhs_converted);
+        const op = c.oraArithXorIOpCreate(ctx, loc, lhs_unwrapped, rhs_converted);
         h.appendOp(block, op);
         return h.getResult(op, 0);
     }
 
     if (std.mem.eql(u8, arith_op_name, "arith.shli")) {
-        const op = c.oraArithShlIOpCreate(ctx, loc, lhs, rhs_converted);
+        const op = c.oraArithShlIOpCreate(ctx, loc, lhs_unwrapped, rhs_converted);
         h.appendOp(block, op);
         return h.getResult(op, 0);
     }
 
     if (std.mem.eql(u8, arith_op_name, "arith.shrsi")) {
-        const op = c.oraArithShrSIOpCreate(ctx, loc, lhs, rhs_converted);
+        const op = c.oraArithShrSIOpCreate(ctx, loc, lhs_unwrapped, rhs_converted);
         h.appendOp(block, op);
         return h.getResult(op, 0);
     }
 
     if (std.mem.eql(u8, arith_op_name, "arith.addi")) {
-        const op = c.oraArithAddIOpCreate(ctx, loc, lhs, rhs_converted);
+        const op = c.oraArithAddIOpCreate(ctx, loc, lhs_unwrapped, rhs_converted);
         h.appendOp(block, op);
         return h.getResult(op, 0);
     }
 
     if (std.mem.eql(u8, arith_op_name, "arith.subi")) {
-        const op = c.oraArithSubIOpCreate(ctx, loc, lhs, rhs_converted);
+        const op = c.oraArithSubIOpCreate(ctx, loc, lhs_unwrapped, rhs_converted);
         h.appendOp(block, op);
         return h.getResult(op, 0);
     }
 
     if (std.mem.eql(u8, arith_op_name, "arith.muli")) {
-        const op = c.oraArithMulIOpCreate(ctx, loc, lhs, rhs_converted);
+        const op = c.oraArithMulIOpCreate(ctx, loc, lhs_unwrapped, rhs_converted);
         h.appendOp(block, op);
         return h.getResult(op, 0);
     }
 
     if (std.mem.eql(u8, arith_op_name, "arith.divui")) {
-        const op = c.oraArithDivUIOpCreate(ctx, loc, lhs, rhs_converted);
+        const op = c.oraArithDivUIOpCreate(ctx, loc, lhs_unwrapped, rhs_converted);
         h.appendOp(block, op);
         return h.getResult(op, 0);
     }
 
     if (std.mem.eql(u8, arith_op_name, "arith.divsi")) {
-        const op = c.oraArithDivSIOpCreate(ctx, loc, lhs, rhs_converted);
+        const op = c.oraArithDivSIOpCreate(ctx, loc, lhs_unwrapped, rhs_converted);
         h.appendOp(block, op);
         return h.getResult(op, 0);
     }
 
     if (std.mem.eql(u8, arith_op_name, "arith.remui")) {
-        const op = c.oraArithRemUIOpCreate(ctx, loc, lhs, rhs_converted);
+        const op = c.oraArithRemUIOpCreate(ctx, loc, lhs_unwrapped, rhs_converted);
         h.appendOp(block, op);
         return h.getResult(op, 0);
     }
 
     if (std.mem.eql(u8, arith_op_name, "arith.remsi")) {
-        const op = c.oraArithRemSIOpCreate(ctx, loc, lhs, rhs_converted);
+        const op = c.oraArithRemSIOpCreate(ctx, loc, lhs_unwrapped, rhs_converted);
         h.appendOp(block, op);
         return h.getResult(op, 0);
     }
 
     if (std.mem.eql(u8, arith_op_name, "arith.andi")) {
-        const op = c.oraArithAndIOpCreate(ctx, loc, lhs, rhs_converted);
+        const op = c.oraArithAndIOpCreate(ctx, loc, lhs_unwrapped, rhs_converted);
         h.appendOp(block, op);
         return h.getResult(op, 0);
     }
 
     if (std.mem.eql(u8, arith_op_name, "arith.ori")) {
-        const op = c.oraArithOrIOpCreate(ctx, loc, lhs, rhs_converted);
+        const op = c.oraArithOrIOpCreate(ctx, loc, lhs_unwrapped, rhs_converted);
         h.appendOp(block, op);
         return h.getResult(op, 0);
     }
 
     if (std.mem.eql(u8, arith_op_name, "arith.xori")) {
-        const op = c.oraArithXorIOpCreate(ctx, loc, lhs, rhs_converted);
+        const op = c.oraArithXorIOpCreate(ctx, loc, lhs_unwrapped, rhs_converted);
         h.appendOp(block, op);
         return h.getResult(op, 0);
     }
@@ -201,8 +223,11 @@ pub fn createArithmeticOp(ctx: c.MlirContext, block: c.MlirBlock, type_mapper: *
 
 /// Create comparison operation
 pub fn createComparisonOp(ctx: c.MlirContext, block: c.MlirBlock, locations: LocationTracker, predicate: []const u8, lhs: c.MlirValue, rhs: c.MlirValue, span: lib.ast.SourceSpan) c.MlirValue {
-    const lhs_ty = c.oraValueGetType(lhs);
-    const rhs_ty = c.oraValueGetType(rhs);
+    const lhs_unwrapped = unwrapRefinementValue(ctx, block, locations, lhs, span);
+    const rhs_unwrapped = unwrapRefinementValue(ctx, block, locations, rhs, span);
+
+    const lhs_ty = c.oraValueGetType(lhs_unwrapped);
+    const rhs_ty = c.oraValueGetType(rhs_unwrapped);
     const is_lhs_address = c.oraTypeIsAddressType(lhs_ty);
     const is_rhs_address = c.oraTypeIsAddressType(rhs_ty);
     const loc = locations.createLocation(span);
@@ -210,14 +235,14 @@ pub fn createComparisonOp(ctx: c.MlirContext, block: c.MlirBlock, locations: Loc
     if (is_lhs_address or is_rhs_address) {
         const bool_ty = h.boolType(ctx);
         if (is_lhs_address and is_rhs_address) {
-            const op = c.oraCmpOpCreate(ctx, loc, h.strRef(predicate), lhs, rhs, bool_ty);
+            const op = c.oraCmpOpCreate(ctx, loc, h.strRef(predicate), lhs_unwrapped, rhs_unwrapped, bool_ty);
             h.appendOp(block, op);
             return h.getResult(op, 0);
         }
 
         const i160_ty = c.oraIntegerTypeCreate(ctx, 160);
-        const addr_operand = if (is_lhs_address) lhs else rhs;
-        const int_operand = if (is_lhs_address) rhs else lhs;
+        const addr_operand = if (is_lhs_address) lhs_unwrapped else rhs_unwrapped;
+        const int_operand = if (is_lhs_address) rhs_unwrapped else lhs_unwrapped;
         const int_ty = c.oraValueGetType(int_operand);
         const int_i160 = if (c.oraTypeIsAInteger(int_ty) and !c.oraTypeEqual(int_ty, i160_ty)) blk: {
             const int_width = c.oraIntegerTypeGetWidth(int_ty);
@@ -241,7 +266,7 @@ pub fn createComparisonOp(ctx: c.MlirContext, block: c.MlirBlock, locations: Loc
         return h.getResult(op, 0);
     } else {
         const bool_ty = h.boolType(ctx);
-        const op = c.oraCmpOpCreate(ctx, loc, h.strRef(predicate), lhs, rhs, bool_ty);
+        const op = c.oraCmpOpCreate(ctx, loc, h.strRef(predicate), lhs_unwrapped, rhs_unwrapped, bool_ty);
         h.appendOp(block, op);
         return h.getResult(op, 0);
     }

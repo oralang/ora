@@ -142,7 +142,11 @@ fn lowerLogicalAnd(
     const then_yield_op = self.ora_dialect.createScfYieldWithValues(&[_]c.MlirValue{rhs_val}, self.fileLoc(bin.span));
     h.appendOp(then_block, then_yield_op);
 
-    const false_val = then_lowerer.createBoolConstant(false, bin.span);
+    var else_lowerer = ExpressionLowerer.init(self.ctx, else_block, self.type_mapper, self.param_map, self.storage_map, self.local_var_map, self.symbol_table, self.builtin_registry, self.error_handler, self.locations, self.ora_dialect);
+    else_lowerer.current_function_return_type = self.current_function_return_type;
+    else_lowerer.current_function_return_type_info = self.current_function_return_type_info;
+    else_lowerer.in_try_block = self.in_try_block;
+    const false_val = else_lowerer.createBoolConstant(false, bin.span);
     const else_yield_op = self.ora_dialect.createScfYieldWithValues(&[_]c.MlirValue{false_val}, self.fileLoc(bin.span));
     h.appendOp(else_block, else_yield_op);
 

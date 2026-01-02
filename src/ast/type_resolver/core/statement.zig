@@ -190,12 +190,7 @@ fn resolveVariableDecl(
 
     // only set typ_owned = true if we're storing in a function scope, not a block scope
     // block scopes are temporary and shouldn't own types (they point to arena memory)
-    const is_function_scope = if (self.current_scope) |scope|
-        self.symbol_table.isFunctionScope(scope)
-    else
-        false;
-
-    if (needs_copy and is_function_scope) {
+    if (needs_copy) {
         // import copyOraTypeOwned from function_analyzer
         const copyOraTypeOwned = @import("../../../semantics/function_analyzer.zig").copyOraTypeOwned;
         if (copyOraTypeOwned(self.allocator, ot)) |copied_ora_type| {
@@ -208,7 +203,9 @@ fn resolveVariableDecl(
                 .span = final_type.span,
                 .region = var_decl.region,
             };
-            typ_owned_flag = true;
+            // keep copied refinement types alive for MLIR lowering; symbol table
+            // deinit would otherwise free them before MLIR runs.
+            typ_owned_flag = false;
         } else |_| {
             // if copying fails, we cannot safely store this type as it may contain pointers to temporary memory
             // this should be rare (usually only out of memory), but we need to handle it
@@ -230,6 +227,9 @@ fn resolveVariableDecl(
     if (!stored_type.isResolved()) {
         return TypeResolutionError.UnresolvedType;
     }
+    // update the AST node to point at the stored type so later passes have stable pointers
+    var_decl.type_info = stored_type;
+
     // final verification before storing
     if (stored_type.ora_type == null) {
         log.debug("[resolveVariableDecl] CRITICAL: Variable '{s}' has null ora_type before storing!\n", .{var_decl.name});

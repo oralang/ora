@@ -193,7 +193,28 @@ extern "C"
 
     void oraBlockAppendOwnedOperation(MlirBlock block, MlirOperation op)
     {
-        unwrap(block)->push_back(unwrap(op));
+        mlir::Block *blk = unwrap(block);
+        mlir::Operation *operation = unwrap(op);
+        if (blk == nullptr || operation == nullptr)
+        {
+            return;
+        }
+
+        if (blk->empty())
+        {
+            blk->push_back(operation);
+            return;
+        }
+
+        // If the last op is a terminator, insert before it so it stays last.
+        mlir::Operation *last = &blk->back();
+        if (last->hasTrait<mlir::OpTrait::IsTerminator>())
+        {
+            blk->getOperations().insert(mlir::Block::iterator(last), operation);
+            return;
+        }
+
+        blk->push_back(operation);
     }
 
     MlirOperation oraBlockGetFirstOperation(MlirBlock block)
@@ -4641,6 +4662,10 @@ MlirAttribute oraIntegerAttrCreateI64FromType(MlirType type, int64_t value)
         {
             auto builtinTy = mlir::IntegerType::get(context, oraIntTy.getWidth(), oraIntTy.getIsSigned() ? mlir::IntegerType::Signed : mlir::IntegerType::Unsigned);
             return wrap(IntegerAttr::get(builtinTy, value));
+        }
+        if (auto indexTy = llvm::dyn_cast<mlir::IndexType>(ty))
+        {
+            return wrap(IntegerAttr::get(indexTy, value));
         }
         // Handle ora::EnumType - extract underlying representation type
         if (auto enumTy = llvm::dyn_cast<ora::EnumType>(ty))

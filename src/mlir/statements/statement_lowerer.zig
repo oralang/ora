@@ -267,7 +267,7 @@ pub const StatementLowerer = struct {
                 return err;
             };
 
-            if (is_terminator) {
+            if (is_terminator or helpers.blockEndsWithTerminator(&stmt_lowerer, block)) {
                 has_terminator = true;
             }
         }
