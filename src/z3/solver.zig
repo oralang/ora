@@ -49,6 +49,14 @@ pub const Solver = struct {
         c.Z3_solver_reset(self.context.ctx, self.solver);
     }
 
+    pub fn push(self: *Solver) void {
+        c.Z3_solver_push(self.context.ctx, self.solver);
+    }
+
+    pub fn pop(self: *Solver) void {
+        c.Z3_solver_pop(self.context.ctx, self.solver, 1);
+    }
+
     // todo: Add methods for:
     // - push/pop (incremental solving)
     // - timeout management

@@ -301,9 +301,11 @@ pub fn insertExactDivisionGuard(
     span: lib.ast.SourceSpan,
 ) void {
     const loc = self.fileLoc(span);
-    const dividend_type = c.oraValueGetType(dividend);
+    const dividend_unwrapped = expr_helpers.unwrapRefinementValue(self.ctx, self.block, self.locations, dividend, span);
+    const divisor_unwrapped = expr_helpers.unwrapRefinementValue(self.ctx, self.block, self.locations, divisor, span);
+    const dividend_type = c.oraValueGetType(dividend_unwrapped);
 
-    const mod_op = c.oraArithRemUIOpCreate(self.ctx, loc, dividend, divisor);
+    const mod_op = c.oraArithRemUIOpCreate(self.ctx, loc, dividend_unwrapped, divisor_unwrapped);
     h.appendOp(self.block, mod_op);
     const remainder = h.getResult(mod_op, 0);
 
@@ -316,6 +318,15 @@ pub fn insertExactDivisionGuard(
     const condition = h.getResult(cmp_op, 0);
 
     const msg = "Refinement violation: Exact<T> division must have no remainder";
-    const assert_op = self.ora_dialect.createCfAssert(condition, msg, loc);
-    h.appendOp(self.block, assert_op);
+    const guard_op = self.ora_dialect.createRefinementGuard(condition, loc, msg);
+    h.appendOp(self.block, guard_op);
+
+    const guard_id = std.fmt.allocPrint(
+        std.heap.page_allocator,
+        "guard:{s}:{d}:{d}:exact_division",
+        .{ self.locations.filename, span.line, span.column },
+    ) catch return;
+    defer std.heap.page_allocator.free(guard_id);
+    c.oraOperationSetAttributeByName(guard_op, h.strRef("ora.guard_id"), h.stringAttr(self.ctx, guard_id));
+    c.oraOperationSetAttributeByName(guard_op, h.strRef("ora.refinement_kind"), h.stringAttr(self.ctx, "exact_division"));
 }

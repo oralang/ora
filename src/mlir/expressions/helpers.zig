@@ -39,7 +39,7 @@ pub fn createErrorPlaceholder(ctx: c.MlirContext, block: c.MlirBlock, locations:
     return h.getResult(op, 0);
 }
 
-fn unwrapRefinementValue(
+pub fn unwrapRefinementValue(
     ctx: c.MlirContext,
     block: c.MlirBlock,
     locations: LocationTracker,

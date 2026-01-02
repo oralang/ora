@@ -1,0 +1,56 @@
+// ============================================================================
+// SMT Guard Smoke Test
+// ============================================================================
+//
+// Intended to be run with --verify and --emit-mlir-sir to exercise:
+// - guard creation
+// - SMT discharge of guards
+// - guard cleanup before Ora -> SIR
+//
+// ============================================================================
+
+contract RefinementGuardSMT {
+    // SMT can prove this guard (requires implies non-zero)
+    pub fn provenNonZero(addr: NonZeroAddress)
+        requires(addr != std.constants.ZERO_ADDRESS)
+    {
+        let owner: NonZeroAddress = addr;
+    }
+
+    // SMT cannot prove this guard (no requires)
+    pub fn runtimeNonZero(addr: NonZeroAddress) {
+        let owner: NonZeroAddress = addr;
+    }
+
+    // SMT can prove MinValue
+    pub fn provenMin(value: MinValue<u256, 10>)
+        requires(value >= 10)
+    {
+        let v: MinValue<u256, 10> = value;
+    }
+
+    // SMT cannot prove MinValue
+    pub fn runtimeMin(value: MinValue<u256, 10>) {
+        let v: MinValue<u256, 10> = value;
+    }
+
+    // SMT can prove InRange
+    pub fn provenInRange(value: InRange<u256, 0, 100>)
+        requires(value >= 0)
+        requires(value <= 100)
+    {
+        let v: InRange<u256, 0, 100> = value;
+    }
+
+    // SMT can prove Exact division
+    pub fn provenExact(dividend: Exact<u256>, divisor: u256)
+        requires(dividend % divisor == 0)
+    {
+        let q: u256 = dividend / divisor;
+    }
+
+    // SMT cannot prove Exact division
+    pub fn runtimeExact(dividend: Exact<u256>, divisor: u256) {
+        let q: u256 = dividend / divisor;
+    }
+}

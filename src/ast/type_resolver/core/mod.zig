@@ -305,6 +305,7 @@ pub const TypeContext = struct {
 
 pub const CoreResolver = struct {
     allocator: std.mem.Allocator,
+    type_storage_allocator: std.mem.Allocator,
     symbol_table: *SymbolTable,
     current_scope: ?*Scope,
     in_try_block: bool = false,
@@ -319,6 +320,7 @@ pub const CoreResolver = struct {
 
     pub fn init(
         allocator: std.mem.Allocator,
+        type_storage_allocator: std.mem.Allocator,
         symbol_table: *SymbolTable,
         validation_sys: *validation.ValidationSystem,
         utils_sys: *utils.Utils,
@@ -326,6 +328,7 @@ pub const CoreResolver = struct {
     ) CoreResolver {
         return CoreResolver{
             .allocator = allocator,
+            .type_storage_allocator = type_storage_allocator,
             .symbol_table = symbol_table,
             .current_scope = &symbol_table.root,
             .in_try_block = false,

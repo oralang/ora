@@ -83,6 +83,7 @@ pub const VerificationResult = struct {
     success: bool,
     errors: ManagedArrayList(VerificationError),
     seen_keys: std.StringHashMap(void),
+    proven_guard_ids: std.StringHashMap(void),
     allocator: std.mem.Allocator,
 
     pub fn init(allocator: std.mem.Allocator) VerificationResult {
@@ -90,6 +91,7 @@ pub const VerificationResult = struct {
             .success = true,
             .errors = ManagedArrayList(VerificationError).init(allocator),
             .seen_keys = std.StringHashMap(void).init(allocator),
+            .proven_guard_ids = std.StringHashMap(void).init(allocator),
             .allocator = allocator,
         };
     }
@@ -104,6 +106,11 @@ pub const VerificationResult = struct {
             self.allocator.free(entry.key_ptr.*);
         }
         self.seen_keys.deinit();
+        var guard_iter = self.proven_guard_ids.iterator();
+        while (guard_iter.next()) |entry| {
+            self.allocator.free(entry.key_ptr.*);
+        }
+        self.proven_guard_ids.deinit();
     }
 
     pub fn addError(self: *VerificationResult, err: VerificationError) !void {

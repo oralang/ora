@@ -56,6 +56,7 @@ pub const TypeResolutionError = error{
 /// Main type resolver orchestrator
 pub const TypeResolver = struct {
     allocator: std.mem.Allocator,
+    type_storage_allocator: std.mem.Allocator,
     symbol_table: *SymbolTable,
     current_scope: ?*Scope = null,
 
@@ -68,14 +69,15 @@ pub const TypeResolver = struct {
     // function registry for call resolution
     function_registry: std.StringHashMap(*FunctionNode),
 
-    pub fn init(allocator: std.mem.Allocator, symbol_table: *SymbolTable) TypeResolver {
+    pub fn init(allocator: std.mem.Allocator, type_storage_allocator: std.mem.Allocator, symbol_table: *SymbolTable) TypeResolver {
         var utils_sys = utils.Utils.init(allocator);
         var refinement_sys = refinements.RefinementSystem.init(allocator, &utils_sys);
         var validation_sys = validation.ValidationSystem.init(&refinement_sys, &utils_sys);
-        const core_res = core.CoreResolver.init(allocator, symbol_table, &validation_sys, &utils_sys, &refinement_sys);
+        const core_res = core.CoreResolver.init(allocator, type_storage_allocator, symbol_table, &validation_sys, &utils_sys, &refinement_sys);
 
         return TypeResolver{
             .allocator = allocator,
+            .type_storage_allocator = type_storage_allocator,
             .symbol_table = symbol_table,
             .current_scope = &symbol_table.root,
             .core_resolver = core_res,

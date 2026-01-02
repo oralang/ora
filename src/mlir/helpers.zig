@@ -167,6 +167,11 @@ pub inline fn appendOp(block: c.MlirBlock, op: c.MlirOperation) void {
     c.oraBlockAppendOwnedOperation(block, op);
 }
 
+/// Insert operation before another operation in the same block
+pub inline fn insertOpBefore(block: c.MlirBlock, op: c.MlirOperation, before: c.MlirOperation) void {
+    c.oraBlockInsertOwnedOperationBefore(block, op, before);
+}
+
 /// Get result from operation
 pub inline fn getResult(op: c.MlirOperation, index: usize) c.MlirValue {
     return c.oraOperationGetResult(op, index);

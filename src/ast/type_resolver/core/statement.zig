@@ -193,7 +193,7 @@ fn resolveVariableDecl(
     if (needs_copy) {
         // import copyOraTypeOwned from function_analyzer
         const copyOraTypeOwned = @import("../../../semantics/function_analyzer.zig").copyOraTypeOwned;
-        if (copyOraTypeOwned(self.allocator, ot)) |copied_ora_type| {
+        if (copyOraTypeOwned(self.type_storage_allocator, ot)) |copied_ora_type| {
             // derive category from the copied type to ensure it's correct
             const derived_category = copied_ora_type.getCategory();
             stored_type = TypeInfo{

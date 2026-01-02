@@ -1011,6 +1011,23 @@ def Ora_AssertOp : Ora_Op<"assert"> {
   let assemblyFormat = "$condition (`,` $message^)? attr-dict `:` type($condition)";
 }
 
+def Ora_RefinementGuardOp : Ora_Op<"refinement_guard"> {
+  let summary = "Refinement guard operation";
+  let description = [{
+    Asserts a refinement constraint that may be discharged by SMT or emitted as
+    a runtime guard.
+
+    Example:
+    ```mlir
+    ora.refinement_guard %condition {ora.guard_id = "guard:foo"} : i1
+    ```
+  }];
+
+  let arguments = (ins I1:$condition, OptionalAttr<StrAttr>:$message);
+
+  let assemblyFormat = "$condition (`,` $message^)? attr-dict `:` type($condition)";
+}
+
 def Ora_DecreasesOp : Ora_Op<"decreases"> {
   let summary = "Loop termination measure";
   let description = [{

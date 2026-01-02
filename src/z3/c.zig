@@ -58,6 +58,11 @@ pub const Z3_solver_assert = c.Z3_solver_assert;
 pub const Z3_solver_check = c.Z3_solver_check;
 pub const Z3_solver_get_model = c.Z3_solver_get_model;
 pub const Z3_solver_reset = c.Z3_solver_reset;
+pub const Z3_solver_push = c.Z3_solver_push;
+pub const Z3_solver_pop = c.Z3_solver_pop;
+pub const Z3_solver_to_string = c.Z3_solver_to_string;
+pub const Z3_ast_to_string = c.Z3_ast_to_string;
+pub const Z3_get_version = c.Z3_get_version;
 
 // Bit-vector operations (for EVM u256)
 pub const Z3_mk_bv_sort = c.Z3_mk_bv_sort;
@@ -101,6 +106,8 @@ pub const Z3_mk_true = c.Z3_mk_true;
 pub const Z3_mk_false = c.Z3_mk_false;
 pub const Z3_mk_eq = c.Z3_mk_eq;
 pub const Z3_mk_extract = c.Z3_mk_extract;
+pub const Z3_mk_zero_ext = c.Z3_mk_zero_ext;
+pub const Z3_mk_sign_ext = c.Z3_mk_sign_ext;
 pub const Z3_mk_bool_sort = c.Z3_mk_bool_sort;
 
 // Sort queries

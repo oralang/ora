@@ -1028,6 +1028,18 @@ fn generateMlirOutput(allocator: std.mem.Allocator, ast_nodes: []lib.AstNode, fi
             try stdout.flush();
             std.process.exit(1);
         }
+
+        if (mlir_options.emit_mlir_sir) {
+            const refinement_guards = @import("mlir/refinement_guards.zig");
+            refinement_guards.cleanupRefinementGuards(h.ctx, final_module, &verification_result.proven_guard_ids);
+        }
+    }
+
+    if (!mlir_options.verify_z3 and mlir_options.emit_mlir_sir) {
+        var empty_guards = std.StringHashMap(void).init(mlir_allocator);
+        defer empty_guards.deinit();
+        const refinement_guards = @import("mlir/refinement_guards.zig");
+        refinement_guards.cleanupRefinementGuards(h.ctx, final_module, &empty_guards);
     }
 
     // run canonicalization on Ora MLIR before printing or conversion, unless

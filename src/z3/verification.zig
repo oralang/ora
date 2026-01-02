@@ -33,6 +33,7 @@ pub const VerificationAnnotation = struct {
         Ensures, // Function postcondition
         LoopInvariant, // Loop invariant
         ContractInvariant, // Contract-level invariant (future)
+        RefinementGuard, // Runtime refinement guard
     };
 };
 
@@ -77,6 +78,7 @@ pub const VerificationPass = struct {
     solver: Solver,
     encoder: Encoder,
     allocator: std.mem.Allocator,
+    debug_z3: bool,
 
     /// Map from function name to its annotations
     function_annotations: std.StringHashMap(FunctionAnnotations),
@@ -94,6 +96,8 @@ pub const VerificationPass = struct {
     function_name_storage: ManagedArrayList([]const u8),
     /// Storage for duplicated location file names
     location_storage: ManagedArrayList([]const u8),
+    /// Storage for duplicated guard ids
+    guard_id_storage: ManagedArrayList([]const u8),
 
     pub fn init(allocator: std.mem.Allocator) !VerificationPass {
         var context = try Context.init(allocator);
@@ -103,17 +107,22 @@ pub const VerificationPass = struct {
         errdefer solver.deinit();
 
         const encoder = Encoder.init(&context, allocator);
+        const debug_env = std.process.getEnvVarOwned(allocator, "ORA_Z3_DEBUG") catch null;
+        const debug_z3 = debug_env != null;
+        if (debug_env) |val| allocator.free(val);
 
         return VerificationPass{
             .context = context,
             .solver = solver,
             .encoder = encoder,
             .allocator = allocator,
+            .debug_z3 = debug_z3,
             .function_annotations = std.StringHashMap(FunctionAnnotations).init(allocator),
             .loop_invariants = ManagedArrayList(LoopInvariants).init(allocator),
             .encoded_annotations = ManagedArrayList(EncodedAnnotation).init(allocator),
             .function_name_storage = ManagedArrayList([]const u8).init(allocator),
             .location_storage = ManagedArrayList([]const u8).init(allocator),
+            .guard_id_storage = ManagedArrayList([]const u8).init(allocator),
         };
     }
 
@@ -132,6 +141,10 @@ pub const VerificationPass = struct {
             self.allocator.free(name);
         }
         self.location_storage.deinit();
+        for (self.guard_id_storage.items) |name| {
+            self.allocator.free(name);
+        }
+        self.guard_id_storage.deinit();
         self.encoded_annotations.deinit();
         self.encoder.deinit();
         self.solver.deinit();
@@ -303,21 +316,41 @@ pub const VerificationPass = struct {
             const num_operands = mlir.oraOperationGetNumOperands(op);
             if (num_operands >= 1) {
                 const condition_value = mlir.oraOperationGetOperand(op, 0);
-                try self.recordEncodedAnnotation(op, .Requires, condition_value);
+                try self.recordEncodedAnnotation(op, .Requires, condition_value, null);
             }
         } else if (std.mem.eql(u8, op_name, "ora.ensures")) {
             // extract ensures condition
             const num_operands = mlir.oraOperationGetNumOperands(op);
             if (num_operands >= 1) {
                 const condition_value = mlir.oraOperationGetOperand(op, 0);
-                try self.recordEncodedAnnotation(op, .Ensures, condition_value);
+                try self.recordEncodedAnnotation(op, .Ensures, condition_value, null);
             }
         } else if (std.mem.eql(u8, op_name, "ora.invariant")) {
             // extract invariant condition
             const num_operands = mlir.oraOperationGetNumOperands(op);
             if (num_operands >= 1) {
                 const condition_value = mlir.oraOperationGetOperand(op, 0);
-                try self.recordEncodedAnnotation(op, .LoopInvariant, condition_value);
+                try self.recordEncodedAnnotation(op, .LoopInvariant, condition_value, null);
+            }
+        } else if (std.mem.eql(u8, op_name, "ora.refinement_guard")) {
+            const num_operands = mlir.oraOperationGetNumOperands(op);
+            if (num_operands >= 1) {
+                const condition_value = mlir.oraOperationGetOperand(op, 0);
+                const guard_id = try self.getStringAttr(op, "ora.guard_id");
+                try self.recordEncodedAnnotation(op, .RefinementGuard, condition_value, guard_id);
+            }
+        } else if (std.mem.eql(u8, op_name, "cf.assert")) {
+            const num_operands = mlir.oraOperationGetNumOperands(op);
+            if (num_operands >= 1) {
+                const condition_value = mlir.oraOperationGetOperand(op, 0);
+                const requires_attr = mlir.oraOperationGetAttributeByName(op, mlir.oraStringRefCreate("ora.requires", 12));
+                if (!mlir.oraAttributeIsNull(requires_attr)) {
+                    try self.recordEncodedAnnotation(op, .Requires, condition_value, null);
+                }
+                const ensures_attr = mlir.oraOperationGetAttributeByName(op, mlir.oraStringRefCreate("ora.ensures", 11));
+                if (!mlir.oraAttributeIsNull(ensures_attr)) {
+                    try self.recordEncodedAnnotation(op, .Ensures, condition_value, null);
+                }
             }
         }
     }
@@ -338,11 +371,23 @@ pub const VerificationPass = struct {
         return dup;
     }
 
+    fn getStringAttr(self: *VerificationPass, op: mlir.MlirOperation, name: []const u8) !?[]const u8 {
+        const attr = mlir.oraOperationGetAttributeByName(op, mlir.oraStringRefCreate(name.ptr, name.len));
+        if (mlir.oraAttributeIsNull(attr)) return null;
+        const value_ref = mlir.oraStringAttrGetValue(attr);
+        if (value_ref.data == null or value_ref.length == 0) return null;
+        const value_slice = value_ref.data[0..value_ref.length];
+        const dup = try self.allocator.dupe(u8, value_slice);
+        try self.guard_id_storage.append(dup);
+        return dup;
+    }
+
     fn recordEncodedAnnotation(
         self: *VerificationPass,
         op: mlir.MlirOperation,
         kind: VerificationAnnotation.AnnotationKind,
         condition_value: mlir.MlirValue,
+        guard_id: ?[]const u8,
     ) !void {
         const function_name = self.current_function_name orelse "unknown";
         const encoded = try self.encoder.encodeValue(condition_value);
@@ -354,7 +399,24 @@ pub const VerificationPass = struct {
             .file = loc.file,
             .line = loc.line,
             .column = loc.column,
+            .guard_id = guard_id,
         });
+    }
+
+    fn logSolverState(self: *VerificationPass, label: []const u8) void {
+        if (!self.debug_z3) return;
+        const raw = z3.Z3_solver_to_string(self.context.ctx, self.solver.solver);
+        if (raw == null) return;
+        const c_str: [*:0]const u8 = @ptrCast(raw);
+        std.debug.print("[Z3] {s}:\n{s}\n", .{ label, std.mem.span(c_str) });
+    }
+
+    fn logAst(self: *VerificationPass, label: []const u8, ast: z3.Z3_ast) void {
+        if (!self.debug_z3) return;
+        const raw = z3.Z3_ast_to_string(self.context.ctx, ast);
+        if (raw == null) return;
+        const c_str: [*:0]const u8 = @ptrCast(raw);
+        std.debug.print("[Z3] {s}: {s}\n", .{ label, std.mem.span(c_str) });
     }
 
     pub fn runVerificationPass(self: *VerificationPass, mlir_module: mlir.MlirModule) !errors.VerificationResult {
@@ -384,9 +446,32 @@ pub const VerificationPass = struct {
             const annotations = entry.value_ptr.items;
             if (annotations.len == 0) continue;
 
-            self.solver.reset();
+            var base_annotations = ManagedArrayList(EncodedAnnotation).init(self.allocator);
+            defer base_annotations.deinit();
+            var guard_annotations = ManagedArrayList(EncodedAnnotation).init(self.allocator);
+            defer guard_annotations.deinit();
+
             for (annotations) |ann| {
+                if (ann.kind == .RefinementGuard) {
+                    guard_annotations.append(ann) catch {};
+                } else {
+                    base_annotations.append(ann) catch {};
+                }
+            }
+
+            self.solver.reset();
+            for (base_annotations.items) |ann| {
                 self.solver.assert(ann.condition);
+            }
+            if (self.debug_z3) {
+                var major: u32 = 0;
+                var minor: u32 = 0;
+                var build: u32 = 0;
+                var rev: u32 = 0;
+                z3.Z3_get_version(&major, &minor, &build, &rev);
+                std.debug.print("[Z3] version {d}.{d}.{d}.{d}\n", .{ major, minor, build, rev });
+                std.debug.print("[Z3] function {s} base constraints\n", .{fn_name});
+                self.logSolverState("base");
             }
 
             const status = self.solver.check();
@@ -422,6 +507,33 @@ pub const VerificationPass = struct {
                     });
                     return result;
                 },
+            }
+
+            // prove refinement guards: check base constraints => guard
+            for (guard_annotations.items) |ann| {
+                if (ann.guard_id == null) continue;
+                self.solver.push();
+                const not_guard = z3.Z3_mk_not(self.context.ctx, ann.condition);
+                self.solver.assert(not_guard);
+                if (self.debug_z3) {
+                    std.debug.print("[Z3] guard {s}\n", .{ann.guard_id.?});
+                    self.logAst("guard", ann.condition);
+                    self.logSolverState("guard");
+                }
+                const guard_status = self.solver.check();
+                if (self.debug_z3) {
+                    std.debug.print("[Z3] guard status {s}\n", .{switch (guard_status) {
+                        z3.Z3_L_FALSE => "UNSAT",
+                        z3.Z3_L_TRUE => "SAT",
+                        else => "UNKNOWN",
+                    }});
+                }
+                if (guard_status == z3.Z3_L_FALSE) {
+                    const guard_id = ann.guard_id.?;
+                    const key = try self.allocator.dupe(u8, guard_id);
+                    try result.proven_guard_ids.put(key, {});
+                }
+                self.solver.pop();
             }
         }
 
@@ -488,6 +600,7 @@ const EncodedAnnotation = struct {
     file: []const u8,
     line: u32,
     column: u32,
+    guard_id: ?[]const u8 = null,
 };
 
 fn parseLocationString(loc: []const u8) struct { file: []const u8, line: u32, column: u32 } {

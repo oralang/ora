@@ -407,13 +407,47 @@ pub const Encoder = struct {
             return try self.encodeCmpOp(predicate, operands);
         }
 
+        if (std.mem.eql(u8, op_name, "ora.cmp")) {
+            if (operands.len < 2) return error.InvalidOperandCount;
+            const predicate = self.getStringAttr(mlir_op, "predicate") orelse "eq";
+            if (std.mem.eql(u8, predicate, "eq")) return self.encodeComparisonOp(.Eq, operands[0], operands[1]);
+            if (std.mem.eql(u8, predicate, "ne")) return self.encodeComparisonOp(.Ne, operands[0], operands[1]);
+            if (std.mem.eql(u8, predicate, "lt") or std.mem.eql(u8, predicate, "ult")) return self.encodeComparisonOp(.Lt, operands[0], operands[1]);
+            if (std.mem.eql(u8, predicate, "le") or std.mem.eql(u8, predicate, "ule")) return self.encodeComparisonOp(.Le, operands[0], operands[1]);
+            if (std.mem.eql(u8, predicate, "gt") or std.mem.eql(u8, predicate, "ugt")) return self.encodeComparisonOp(.Gt, operands[0], operands[1]);
+            if (std.mem.eql(u8, predicate, "ge") or std.mem.eql(u8, predicate, "uge")) return self.encodeComparisonOp(.Ge, operands[0], operands[1]);
+            if (std.mem.eql(u8, predicate, "slt")) return z3.Z3_mk_bvslt(self.context.ctx, operands[0], operands[1]);
+            if (std.mem.eql(u8, predicate, "sle")) return z3.Z3_mk_bvsle(self.context.ctx, operands[0], operands[1]);
+            if (std.mem.eql(u8, predicate, "sgt")) return z3.Z3_mk_bvsgt(self.context.ctx, operands[0], operands[1]);
+            if (std.mem.eql(u8, predicate, "sge")) return z3.Z3_mk_bvsge(self.context.ctx, operands[0], operands[1]);
+            return error.UnsupportedPredicate;
+        }
+
         // constant operations
         if (std.mem.eql(u8, op_name, "arith.constant")) {
-            const value = self.getConstantValue(mlir_op);
+            const value_attr = mlir.oraOperationGetAttributeByName(mlir_op, mlir.oraStringRefCreate("value", 5));
+            const value_type = mlir.oraOperationGetResult(mlir_op, 0);
+            const mlir_type = mlir.oraValueGetType(value_type);
+            const is_addr = mlir.oraTypeIsAddressType(mlir_type);
+            const value = self.parseConstAttrValue(value_attr) orelse if (is_addr) 0 else self.getConstantValue(mlir_op);
+            const width: u32 = if (is_addr)
+                160
+            else if (mlir.oraTypeIsAInteger(mlir_type))
+                @intCast(mlir.oraIntegerTypeGetWidth(mlir_type))
+            else
+                256;
+            return try self.encodeConstantOp(value, width);
+        }
+
+        if (std.mem.eql(u8, op_name, "ora.const")) {
+            const value_attr = mlir.oraOperationGetAttributeByName(mlir_op, mlir.oraStringRefCreate("value", 5));
+            const value = self.parseConstAttrValue(value_attr) orelse return error.UnsupportedOperation;
             const value_type = mlir.oraOperationGetResult(mlir_op, 0);
             const mlir_type = mlir.oraValueGetType(value_type);
             const width: u32 = if (mlir.oraTypeIsAInteger(mlir_type))
                 @intCast(mlir.oraIntegerTypeGetWidth(mlir_type))
+            else if (mlir.oraTypeIsAddressType(mlir_type))
+                160
             else
                 256;
             return try self.encodeConstantOp(value, width);
@@ -439,6 +473,21 @@ pub const Encoder = struct {
             else
                 ShiftOp.ShrUnsigned;
             return self.encodeShiftOp(shift_op, operands[0], operands[1]);
+        }
+
+        if (std.mem.eql(u8, op_name, "arith.bitcast")) {
+            if (operands.len < 1) return error.InvalidOperandCount;
+            return operands[0];
+        }
+
+        if (std.mem.eql(u8, op_name, "arith.extui") or
+            std.mem.eql(u8, op_name, "arith.extsi") or
+            std.mem.eql(u8, op_name, "arith.trunci") or
+            std.mem.eql(u8, op_name, "arith.index_cast") or
+            std.mem.eql(u8, op_name, "arith.index_castui") or
+            std.mem.eql(u8, op_name, "arith.index_castsi"))
+        {
+            return try self.encodeUnaryIntCast(mlir_op, op_name, operands);
         }
 
         // arithmetic operations
@@ -497,6 +546,18 @@ pub const Encoder = struct {
                 const stored = self.encodeStore(operands[0], operands[1], operands[2]);
                 const num_results = mlir.oraOperationGetNumResults(mlir_op);
                 if (num_results > 0) return stored;
+            }
+        }
+
+        if (std.mem.eql(u8, op_name, "ora.refinement_to_base")) {
+            if (operands.len >= 1) {
+                return operands[0];
+            }
+        }
+
+        if (std.mem.eql(u8, op_name, "ora.i160.to.addr")) {
+            if (operands.len >= 1) {
+                return operands[0];
             }
         }
 
@@ -571,6 +632,25 @@ pub const Encoder = struct {
         return value.data[0..value.length];
     }
 
+    fn parseConstAttrValue(_: *Encoder, attr: mlir.MlirAttribute) ?u256 {
+        if (mlir.oraAttributeIsNull(attr)) return null;
+        const str = mlir.oraStringAttrGetValue(attr);
+        if (str.data != null and str.length > 0) {
+            const slice = str.data[0..str.length];
+            if (slice.len >= 2 and slice[0] == '0' and (slice[1] == 'x' or slice[1] == 'X')) {
+                return std.fmt.parseUnsigned(u256, slice[2..], 16) catch null;
+            }
+            return std.fmt.parseUnsigned(u256, slice, 10) catch null;
+        }
+        const int_value = mlir.oraIntegerAttrGetValueSInt(attr);
+        if (int_value < 0) {
+            if (int_value == -1) return 1;
+            const u64_value: u64 = @bitCast(@as(i64, int_value));
+            return @intCast(u64_value);
+        }
+        return @intCast(@as(i64, int_value));
+    }
+
     fn applyFieldFunction(
         self: *Encoder,
         field_name: []const u8,
@@ -641,7 +721,7 @@ pub const Encoder = struct {
     /// Encode MLIR arithmetic operation (arith.addi, arith.subi, etc.)
     pub fn encodeArithOp(self: *Encoder, op_name: []const u8, operands: []const z3.Z3_ast) !z3.Z3_ast {
         if (operands.len < 2) {
-            return error.InvalidOperandCount;
+            return error.UnsupportedOperation;
         }
 
         const lhs = operands[0];
@@ -662,6 +742,46 @@ pub const Encoder = struct {
         };
 
         return self.encodeArithmeticOp(arith_op, lhs, rhs);
+    }
+
+    fn getTypeBitWidth(_: *Encoder, ty: mlir.MlirType) ?u32 {
+        if (mlir.oraTypeIsIntegerType(ty)) {
+            const builtin = mlir.oraTypeToBuiltin(ty);
+            return @intCast(mlir.oraIntegerTypeGetWidth(builtin));
+        }
+        if (mlir.oraTypeIsAInteger(ty)) {
+            return @intCast(mlir.oraIntegerTypeGetWidth(ty));
+        }
+        return null;
+    }
+
+    fn encodeUnaryIntCast(
+        self: *Encoder,
+        mlir_op: mlir.MlirOperation,
+        op_name: []const u8,
+        operands: []const z3.Z3_ast,
+    ) !z3.Z3_ast {
+        if (operands.len < 1) return error.InvalidOperandCount;
+        const operand_value = mlir.oraOperationGetOperand(mlir_op, 0);
+        const operand_type = mlir.oraValueGetType(operand_value);
+        const result_value = mlir.oraOperationGetResult(mlir_op, 0);
+        const result_type = mlir.oraValueGetType(result_value);
+
+        const in_width = self.getTypeBitWidth(operand_type) orelse return operands[0];
+        const out_width = self.getTypeBitWidth(result_type) orelse return operands[0];
+        if (in_width == out_width) return operands[0];
+
+        if (out_width > in_width) {
+            const extend = out_width - in_width;
+            const is_signed = std.mem.eql(u8, op_name, "arith.extsi") or std.mem.eql(u8, op_name, "arith.index_castsi");
+            return if (is_signed)
+                z3.Z3_mk_sign_ext(self.context.ctx, extend, operands[0])
+            else
+                z3.Z3_mk_zero_ext(self.context.ctx, extend, operands[0]);
+        }
+
+        const high: u32 = out_width - 1;
+        return z3.Z3_mk_extract(self.context.ctx, high, 0, operands[0]);
     }
 
     /// Encode MLIR comparison operation (arith.cmpi)

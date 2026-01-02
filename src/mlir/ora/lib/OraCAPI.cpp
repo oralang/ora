@@ -191,8 +191,8 @@ extern "C"
         unwrap(module).erase();
     }
 
-    void oraBlockAppendOwnedOperation(MlirBlock block, MlirOperation op)
-    {
+void oraBlockAppendOwnedOperation(MlirBlock block, MlirOperation op)
+{
         mlir::Block *blk = unwrap(block);
         mlir::Operation *operation = unwrap(op);
         if (blk == nullptr || operation == nullptr)
@@ -255,6 +255,16 @@ extern "C"
             return MlirOperation{nullptr};
         }
         return wrap(operation->getNextNode());
+    }
+
+    void oraOperationErase(MlirOperation op)
+    {
+        mlir::Operation *operation = unwrap(op);
+        if (operation == nullptr)
+        {
+            return;
+        }
+        operation->erase();
     }
 
     MlirValue oraOperationGetResult(MlirOperation op, size_t index)
@@ -611,6 +621,32 @@ bool oraDialectRegister(MlirContext ctx)
     catch (...)
     {
         return false;
+    }
+}
+
+void oraBlockInsertOwnedOperationBefore(MlirBlock block, MlirOperation op, MlirOperation before)
+{
+    try
+    {
+        Block *blk = unwrap(block);
+        Operation *operation = unwrap(op);
+        Operation *beforeOp = unwrap(before);
+        if (!blk || !operation)
+        {
+            return;
+        }
+
+        if (beforeOp)
+        {
+            blk->getOperations().insert(Block::iterator(beforeOp), operation);
+        }
+        else
+        {
+            blk->getOperations().push_back(operation);
+        }
+    }
+    catch (...)
+    {
     }
 }
 
@@ -1911,6 +1947,42 @@ MlirOperation oraAssertOpCreate(MlirContext ctx, MlirLocation loc, MlirValue con
         assertOp->setAttr("gas_cost", gasCostAttr);
 
         return wrap(assertOp.getOperation());
+    }
+    catch (...)
+    {
+        return {nullptr};
+    }
+}
+
+MlirOperation oraRefinementGuardOpCreate(MlirContext ctx, MlirLocation loc, MlirValue condition, MlirStringRef message)
+{
+    try
+    {
+        MLIRContext *context = unwrap(ctx);
+        Location location = unwrap(loc);
+        Value conditionRef = unwrap(condition);
+
+        if (!oraDialectIsRegistered(ctx))
+        {
+            return {nullptr};
+        }
+
+        OpBuilder builder(context);
+
+        // Create refinement_guard operation - message is optional
+        StringAttr messageAttr = nullptr;
+        if (message.data != nullptr && message.length > 0)
+        {
+            messageAttr = StringAttr::get(context, unwrap(message));
+        }
+
+        auto guardOp = builder.create<RefinementGuardOp>(location, conditionRef, messageAttr);
+
+        // Add gas_cost attribute (guard operation has no runtime cost = 0)
+        auto gasCostAttr = IntegerAttr::get(::mlir::IntegerType::get(context, 64), 0);
+        guardOp->setAttr("gas_cost", gasCostAttr);
+
+        return wrap(guardOp.getOperation());
     }
     catch (...)
     {

@@ -26,6 +26,7 @@ pub const expressions = @import("expressions.zig");
 pub const statements = @import("statements.zig");
 pub const declarations = @import("declarations.zig");
 pub const memory = @import("memory.zig");
+pub const refinement_guards = @import("refinement_guards.zig");
 
 // Re-export commonly used types for convenience
 pub const TypeMapper = types.TypeMapper;

@@ -191,8 +191,17 @@ pub fn insertRefinementGuard(
 
             const msg = try std.fmt.allocPrint(self.allocator, "Refinement violation: expected MinValue<u256, {d}>", .{mv.min});
             defer self.allocator.free(msg);
-            const assert_op = self.ora_dialect.createCfAssert(condition, msg, loc);
-            h.appendOp(self.block, assert_op);
+            const guard_op = self.ora_dialect.createRefinementGuard(condition, loc, msg);
+            h.appendOp(self.block, guard_op);
+
+            const guard_id = try std.fmt.allocPrint(
+                self.allocator,
+                "guard:{s}:{d}:{d}:min_value",
+                .{ self.locations.filename, span.line, span.column },
+            );
+            defer self.allocator.free(guard_id);
+            c.oraOperationSetAttributeByName(guard_op, h.strRef("ora.guard_id"), h.stringAttr(self.ctx, guard_id));
+            c.oraOperationSetAttributeByName(guard_op, h.strRef("ora.refinement_kind"), h.stringAttr(self.ctx, "min_value"));
         },
         .max_value => |mv| {
             // generate: require(value <= max)
@@ -232,8 +241,17 @@ pub fn insertRefinementGuard(
 
             const msg = try std.fmt.allocPrint(self.allocator, "Refinement violation: expected MaxValue<u256, {d}>", .{mv.max});
             defer self.allocator.free(msg);
-            const assert_op = self.ora_dialect.createCfAssert(condition, msg, loc);
-            h.appendOp(self.block, assert_op);
+            const guard_op = self.ora_dialect.createRefinementGuard(condition, loc, msg);
+            h.appendOp(self.block, guard_op);
+
+            const guard_id = try std.fmt.allocPrint(
+                self.allocator,
+                "guard:{s}:{d}:{d}:max_value",
+                .{ self.locations.filename, span.line, span.column },
+            );
+            defer self.allocator.free(guard_id);
+            c.oraOperationSetAttributeByName(guard_op, h.strRef("ora.guard_id"), h.stringAttr(self.ctx, guard_id));
+            c.oraOperationSetAttributeByName(guard_op, h.strRef("ora.refinement_kind"), h.stringAttr(self.ctx, "max_value"));
         },
         .in_range => |ir| {
             // generate: require(min <= value <= max)
@@ -296,8 +314,59 @@ pub fn insertRefinementGuard(
 
             const msg = try std.fmt.allocPrint(self.allocator, "Refinement violation: expected InRange<u256, {d}, {d}>", .{ ir.min, ir.max });
             defer self.allocator.free(msg);
-            const assert_op = self.ora_dialect.createCfAssert(condition, msg, loc);
-            h.appendOp(self.block, assert_op);
+            const guard_op = self.ora_dialect.createRefinementGuard(condition, loc, msg);
+            h.appendOp(self.block, guard_op);
+
+            const guard_id = try std.fmt.allocPrint(
+                self.allocator,
+                "guard:{s}:{d}:{d}:in_range",
+                .{ self.locations.filename, span.line, span.column },
+            );
+            defer self.allocator.free(guard_id);
+            c.oraOperationSetAttributeByName(guard_op, h.strRef("ora.guard_id"), h.stringAttr(self.ctx, guard_id));
+            c.oraOperationSetAttributeByName(guard_op, h.strRef("ora.refinement_kind"), h.stringAttr(self.ctx, "in_range"));
+        },
+        .non_zero_address => {
+            const value_type = c.oraValueGetType(value);
+            const base_type = c.oraRefinementTypeGetBaseType(value_type);
+            const addr_value = if (base_type.ptr != null) blk: {
+                const convert_op = c.oraRefinementToBaseOpCreate(self.ctx, loc, value, self.block);
+                if (c.oraOperationIsNull(convert_op)) {
+                    reportRefinementGuardError(self, span, "Refinement guard creation failed: ora.refinement_to_base returned null", "Ensure the Ora dialect is registered before lowering.");
+                    return value;
+                }
+                break :blk h.getResult(convert_op, 0);
+            } else value;
+
+            const addr_to_i160 = c.oraAddrToI160OpCreate(self.ctx, loc, addr_value);
+            if (c.oraOperationIsNull(addr_to_i160)) {
+                reportRefinementGuardError(self, span, "Refinement guard creation failed: ora.addr.to.i160 returned null", "Ensure the Ora dialect is registered before lowering.");
+                return value;
+            }
+            h.appendOp(self.block, addr_to_i160);
+            const addr_i160 = h.getResult(addr_to_i160, 0);
+
+            const i160_ty = c.oraIntegerTypeCreate(self.ctx, 160);
+            const zero_attr = c.oraIntegerAttrCreateI64FromType(i160_ty, 0);
+            const zero_const = createConstantValue(self, zero_attr, i160_ty, loc);
+
+            const cmp_op = c.oraArithCmpIOpCreate(self.ctx, loc, 1, addr_i160, zero_const);
+            h.appendOp(self.block, cmp_op);
+            const condition = h.getResult(cmp_op, 0);
+
+            const msg = "Refinement violation: expected NonZeroAddress";
+            const guard_op = self.ora_dialect.createRefinementGuard(condition, loc, msg);
+            h.appendOp(self.block, guard_op);
+
+            const guard_id = try std.fmt.allocPrint(
+                self.allocator,
+                "guard:{s}:{d}:{d}:non_zero_address",
+                .{ self.locations.filename, span.line, span.column },
+            );
+            defer self.allocator.free(guard_id);
+
+            c.oraOperationSetAttributeByName(guard_op, h.strRef("ora.guard_id"), h.stringAttr(self.ctx, guard_id));
+            c.oraOperationSetAttributeByName(guard_op, h.strRef("ora.refinement_kind"), h.stringAttr(self.ctx, "non_zero_address"));
         },
         .exact, .scaled => {
             // exact and Scaled guards are inserted at specific operations (division, arithmetic)

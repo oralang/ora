@@ -55,12 +55,14 @@ extern "C"
     MLIR_CAPI_EXPORTED void oraModuleDestroy(MlirModule module);
 
     MLIR_CAPI_EXPORTED void oraBlockAppendOwnedOperation(MlirBlock block, MlirOperation op);
+    MLIR_CAPI_EXPORTED void oraBlockInsertOwnedOperationBefore(MlirBlock block, MlirOperation op, MlirOperation before);
     MLIR_CAPI_EXPORTED MlirOperation oraBlockGetFirstOperation(MlirBlock block);
     MLIR_CAPI_EXPORTED MlirOperation oraBlockGetTerminator(MlirBlock block);
     MLIR_CAPI_EXPORTED MlirValue oraBlockGetArgument(MlirBlock block, size_t index);
     MLIR_CAPI_EXPORTED bool oraBlockIsNull(MlirBlock block);
 
     MLIR_CAPI_EXPORTED MlirOperation oraOperationGetNextInBlock(MlirOperation op);
+    MLIR_CAPI_EXPORTED void oraOperationErase(MlirOperation op);
     MLIR_CAPI_EXPORTED MlirValue oraOperationGetResult(MlirOperation op, size_t index);
     MLIR_CAPI_EXPORTED MlirValue oraOperationGetOperand(MlirOperation op, size_t index);
     MLIR_CAPI_EXPORTED size_t oraOperationGetNumOperands(MlirOperation op);
@@ -390,6 +392,13 @@ extern "C"
 
     /// Create an ora.assert operation using the registered dialect
     MLIR_CAPI_EXPORTED MlirOperation oraAssertOpCreate(
+        MlirContext ctx,
+        MlirLocation loc,
+        MlirValue condition,
+        MlirStringRef message);
+
+    /// Create an ora.refinement_guard operation using the registered dialect
+    MLIR_CAPI_EXPORTED MlirOperation oraRefinementGuardOpCreate(
         MlirContext ctx,
         MlirLocation loc,
         MlirValue condition,

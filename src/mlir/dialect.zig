@@ -202,6 +202,20 @@ pub const OraDialect = struct {
         return c.oraAssertOpCreate(self.ctx, loc, condition, message_ref);
     }
 
+    /// Create ora.refinement_guard operation
+    pub fn createRefinementGuard(
+        self: *OraDialect,
+        condition: c.MlirValue,
+        loc: c.MlirLocation,
+        message: ?[]const u8,
+    ) c.MlirOperation {
+        if (!self.isRegistered()) {
+            @panic("Ora dialect must be registered before creating operations");
+        }
+        const message_ref = if (message) |msg| h.strRef(msg) else c.MlirStringRef{ .data = null, .length = 0 };
+        return c.oraRefinementGuardOpCreate(self.ctx, loc, condition, message_ref);
+    }
+
     /// Create ora.decreases operation for loop termination measures
     pub fn createDecreases(
         self: *OraDialect,
