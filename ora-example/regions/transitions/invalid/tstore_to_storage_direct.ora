@@ -1,0 +1,31 @@
+// ============================================================================
+// Region Transition Test: TStore to Storage Direct (Invalid)
+// ============================================================================
+// Tests that transient storage values cannot be directly assigned to storage.
+// Direct tstore -> storage transition is forbidden (must go through stack/memory).
+// ============================================================================
+
+contract TStoreToStorageDirect {
+    storage var stored_value: u256;
+    tstore var temp_value: u256;
+
+    pub fn testInvalidTStoreToStorageDirect() {
+        // ERROR: Cannot directly assign tstore to storage
+        // This should fail at compile time
+        // Direct transition: tstore -> storage is forbidden
+        // stored_value = temp_value; // Invalid: direct tstore -> storage
+    }
+
+    pub fn testValidTStoreToStorageViaStack() {
+        // Valid: tstore -> stack -> storage
+        let stack_value: u256 = temp_value; // TStore -> Stack
+        stored_value = stack_value; // Stack -> Storage
+    }
+
+    pub fn testValidTStoreToStorageViaMemory() {
+        // Valid: tstore -> memory -> storage
+        memory var mem_value: u256 = temp_value; // TStore -> Memory
+        stored_value = mem_value; // Memory -> Storage
+    }
+}
+

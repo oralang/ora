@@ -1,0 +1,109 @@
+// ============================================================================
+// Formal Verification: Loop Invariants
+// ============================================================================
+// Tests loop invariants for formal verification
+// ============================================================================
+
+contract LoopInvariants {
+    // Simple loop invariant
+    pub fn sumToN(n: u256) -> u256
+        requires(n <= 100)
+    {
+        var sum: u256 = 0;
+        var i: u256 = 1;
+        
+        while (i <= n)
+            invariant(sum == (i - 1) * i / 2)
+            invariant(i <= n + 1)
+        {
+            sum = sum + i;
+            i = i + 1;
+        }
+        
+        return sum;
+    }
+
+    // Loop invariant with array
+    pub fn sumArray(arr: [u256; 5]) -> u256
+    {
+        var sum: u256 = 0;
+        var i: u256 = 0;
+        
+        while (i < 5)
+            invariant(sum >= 0)
+            invariant(i <= 5)
+        {
+            sum = sum + arr[i];
+            i = i + 1;
+        }
+        
+        return sum;
+    }
+
+    // Loop invariant with storage
+    storage var total: u256 = 0;
+
+    pub fn accumulateToStorage(n: u256)
+        requires(n <= 100)
+        ensures(total == old(total) + n * (n + 1) / 2)
+    {
+        var i: u256 = 1;
+        
+        while (i <= n)
+            invariant(total == old(total) + (i - 1) * i / 2)
+            invariant(i <= n + 1)
+        {
+            total = total + i;
+            i = i + 1;
+        }
+    }
+
+    // Loop invariant with refinement type
+    pub fn sumRefined(n: MinValue<u256, 1>) -> MinValue<u256, 0>
+        requires(n >= 1)
+        requires(n <= 100)
+    {
+        var sum: u256 = 0;
+        var i: u256 = 1;
+        let base_n: u256 = n;
+        
+        while (i <= base_n)
+            invariant(sum >= 0)
+            invariant(i <= base_n + 1)
+        {
+            sum = sum + i;
+            i = i + 1;
+        }
+        
+        return sum;
+    }
+
+    // Nested loops with invariants
+    pub fn nestedSum(rows: u256, cols: u256) -> u256
+        requires(rows <= 10)
+        requires(cols <= 10)
+    {
+        var total: u256 = 0;
+        var i: u256 = 0;
+        
+        while (i < rows)
+            invariant(total >= 0)
+            invariant(i <= rows)
+        {
+            var j: u256 = 0;
+            
+            while (j < cols)
+                invariant(total >= 0)
+                invariant(j <= cols)
+            {
+                total = total + 1;
+                j = j + 1;
+            }
+            
+            i = i + 1;
+        }
+        
+        return total;
+    }
+}
+

@@ -1,0 +1,41 @@
+// ============================================================================
+// Region Coercion Test: No Implicit Calldata Write
+// ============================================================================
+// Tests that calldata cannot be written to (read-only)
+// ============================================================================
+
+contract NoImplicitCalldataWrite {
+    // ERROR: Cannot write to calldata parameter
+    pub fn testInvalidCalldataWrite(x: u256) {
+        // This should fail at compile time
+        // x = 100; // Invalid: calldata is read-only
+    }
+
+    // ERROR: Cannot create calldata variable and write to it
+    pub fn testInvalidCalldataVarWrite(x: u256) {
+        // This should fail at compile time
+        // calldata var calldata_var: u256 = x;
+        // calldata_var = 200; // Invalid: calldata is read-only
+    }
+
+    // ERROR: Cannot use compound assignment on calldata
+    pub fn testInvalidCalldataCompoundAssign(x: u256) {
+        // This should fail at compile time
+        // x += 10; // Invalid: calldata is read-only
+        // x -= 5;  // Invalid: calldata is read-only
+    }
+
+    // Valid: Can read from calldata
+    pub fn testValidCalldataRead(x: u256) {
+        let value: u256 = x; // Valid: calldata -> stack (read)
+    }
+
+    // Valid: Can copy calldata to other regions
+    pub fn testValidCalldataCopy(x: u256) {
+        let stack_val: u256 = x;        // Valid: calldata -> stack
+        memory var mem_val: u256 = x;    // Valid: calldata -> memory
+        storage var storage_val: u256;
+        storage_val = x;                // Valid: calldata -> storage (via stack)
+    }
+}
+

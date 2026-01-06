@@ -208,9 +208,18 @@ fn lowerHexLiteral(
     locations: LocationTracker,
     hex_lit: lib.ast.Expressions.HexLiteral,
 ) c.MlirValue {
-    const ty = c.oraIntegerTypeCreate(ctx, constants.DEFAULT_INTEGER_BITS);
+    const ty = blk: {
+        if (hex_lit.type_info.category == .Bytes) {
+            const bytes_ty = c.oraBytesTypeGet(ctx);
+            if (bytes_ty.ptr != null) break :blk bytes_ty;
+        }
+        break :blk c.oraIntegerTypeCreate(ctx, constants.DEFAULT_INTEGER_BITS);
+    };
     const loc = locations.createLocation(hex_lit.span);
-    const op = ora_dialect.createHexConstant(hex_lit.value, ty, loc);
+    const op = if (hex_lit.type_info.category == .Bytes)
+        ora_dialect.createBytesConstant(hex_lit.value, ty, loc)
+    else
+        ora_dialect.createHexConstant(hex_lit.value, ty, loc);
     h.appendOp(block, op);
     return h.getResult(op, 0);
 }

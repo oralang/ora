@@ -1,0 +1,42 @@
+// ============================================================================
+// Type System Test: Regions in Function Signatures
+// ============================================================================
+// Tests that regions are part of function parameter and return types
+// ============================================================================
+
+contract RegionFunctionSignatures {
+    storage var stored_value: u256;
+
+    // Function parameters are calldata region
+    pub fn testCalldataParams(x: u256, y: bool, addr: address) {
+        // x: u256 @calldata
+        // y: bool @calldata
+        // addr: address @calldata
+        let sum: u256 = x + 10;
+    }
+
+    // Function return types are stack region
+    pub fn testStackReturn() -> u256 {
+        return 100; // Returns u256 @stack
+    }
+
+    // Function can return storage value (stack copy)
+    pub fn testStorageReturn() -> u256 {
+        return stored_value; // Storage -> Stack (copy), returns u256 @stack
+    }
+
+    // Function can accept storage value (read)
+    pub fn testStorageParam() {
+        let stack_val: u256 = stored_value; // Storage -> Stack
+        testCalldataParams(stack_val, true, std.msg.sender());
+    }
+
+    // Note: Memory parameters and memory return types are not supported in function signatures
+    // Memory variables can only be declared inside function bodies
+    pub fn testMemoryInFunction() {
+        // Memory variables declared inside function
+        memory var mem_val: u256 = 100;
+        let stack_val: u256 = mem_val; // Memory -> Stack
+    }
+}
+

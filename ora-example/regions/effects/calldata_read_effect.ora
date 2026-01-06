@@ -1,0 +1,47 @@
+// ============================================================================
+// Region Effect Test: Calldata Read Effect
+// ============================================================================
+// Tests that reading from calldata records a read effect
+// ============================================================================
+
+contract CalldataReadEffect {
+    // Reading calldata parameter records read effect
+    pub fn testCalldataRead(x: u256) {
+        let value: u256 = x; // Calldata -> Stack: Read effect
+    }
+
+    // Multiple calldata reads record multiple read effects
+    pub fn testMultipleCalldataReads(x: u256, y: bool, addr: address) {
+        let v1: u256 = x;        // Read effect 1
+        let v2: bool = y;        // Read effect 2
+        let v3: address = addr;  // Read effect 3
+    }
+
+    // Calldata read in conditional records read effect
+    pub fn testCalldataReadInConditional(x: u256) {
+        if (x > 0) { // Calldata read: Read effect
+            let value: u256 = x; // Another read effect
+        }
+    }
+
+    // Calldata read in loop records read effect per iteration
+    pub fn testCalldataReadInLoop(x: u256) {
+        var i: u256 = 0;
+        while (i < 10) {
+            let value: u256 = x; // Read effect per iteration
+            i += 1;
+        }
+    }
+
+    // Calldata read in arithmetic records read effect
+    pub fn testCalldataReadArithmetic(x: u256, y: u256) {
+        let sum: u256 = x + y; // Two read effects
+    }
+
+    // Calldata read for function call records read effect
+    pub fn testCalldataForCall(amount: u256) {
+        // Using calldata parameter in function call
+        let call_result: u256 = amount; // Read effect
+    }
+}
+

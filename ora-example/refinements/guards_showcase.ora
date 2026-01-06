@@ -1,0 +1,78 @@
+// ============================================================================
+// Guard Showcase: SMT-proven vs Runtime Guards
+// ============================================================================
+//
+// Each refinement has two functions:
+// - Proven: has requires clauses that let SMT remove the guard
+// - Runtime: missing requires so the guard stays
+//
+// ============================================================================
+
+contract GuardShowcase {
+    // NonZeroAddress
+    pub fn provenNonZero(addr: NonZeroAddress)
+        requires(addr != std.constants.ZERO_ADDRESS)
+    {
+        let owner: NonZeroAddress = addr;
+    }
+
+    pub fn runtimeNonZero(addr: NonZeroAddress) {
+        let owner: NonZeroAddress = addr;
+    }
+
+    // MinValue
+    pub fn provenMin(value: MinValue<u256, 10>)
+        requires(value >= 10)
+    {
+        let v: MinValue<u256, 10> = value;
+    }
+
+    pub fn runtimeMin(value: MinValue<u256, 10>) {
+        let v: MinValue<u256, 10> = value;
+    }
+
+    // MaxValue
+    pub fn provenMax(value: MaxValue<u256, 100>)
+        requires(value <= 100)
+    {
+        let v: MaxValue<u256, 100> = value;
+    }
+
+    pub fn runtimeMax(value: MaxValue<u256, 100>) {
+        let v: MaxValue<u256, 100> = value;
+    }
+
+    // InRange
+    pub fn provenInRange(value: InRange<u256, 0, 100>)
+        requires(value >= 0)
+        requires(value <= 100)
+    {
+        let v: InRange<u256, 0, 100> = value;
+    }
+
+    pub fn runtimeInRange(value: InRange<u256, 0, 100>) {
+        let v: InRange<u256, 0, 100> = value;
+    }
+
+    // Exact division
+    pub fn provenExact(dividend: Exact<u256>, divisor: u256)
+        requires(dividend % divisor == 0)
+    {
+        let q: u256 = dividend / divisor;
+    }
+
+    pub fn runtimeExact(dividend: Exact<u256>, divisor: u256) {
+        let q: u256 = dividend / divisor;
+    }
+
+    // Scaled (type-level only, no guards expected)
+    pub fn scaledAdd(a: Scaled<u256, 18>, b: Scaled<u256, 18>)
+        requires(a >= 0)
+    {
+        let c: Scaled<u256, 18> = a + b;
+    }
+
+    pub fn scaledMul(a: Scaled<u256, 18>, b: Scaled<u256, 6>) {
+        let c: Scaled<u256, 24> = a * b;
+    }
+}

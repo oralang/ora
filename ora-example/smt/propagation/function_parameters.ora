@@ -1,0 +1,71 @@
+// ============================================================================
+// SMT Propagation: Function Parameters
+// ============================================================================
+// Tests how constraints propagate through function calls
+// ============================================================================
+
+contract FunctionParametersPropagation {
+    // Constraints propagate from parameter to local
+    pub fn propagateMinValue(value: MinValue<u256, 100>)
+        requires(value >= 100)
+    {
+        // Constraint propagates: value >= 100
+        let local: MinValue<u256, 100> = value;
+        // Guard should be removed - constraint proven
+    }
+
+    // Constraints propagate through arithmetic
+    pub fn propagateArithmetic(x: MinValue<u256, 10>)
+        requires(x >= 10)
+    {
+        // Constraint propagates: x >= 10
+        let doubled: u256 = x * 2;
+        // SMT should prove doubled >= 20
+    }
+
+    // Constraints propagate to return
+    pub fn propagateReturn(value: MinValue<u256, 100>) -> MinValue<u256, 100>
+        requires(value >= 100)
+    {
+        // Constraint propagates through return
+        return value;
+    }
+
+    // Constraints propagate through function call
+    fn helper(amount: MinValue<u256, 50>)
+        requires(amount >= 50)
+    {
+        let _: u256 = amount;
+    }
+
+    pub fn propagateThroughCall(value: MinValue<u256, 100>)
+        requires(value >= 100)
+    {
+        // Constraint propagates: value >= 100 implies value >= 50
+        helper(value);
+    }
+
+    // Constraints propagate through multiple parameters
+    pub fn propagateMultiple(
+        a: MinValue<u256, 10>,
+        b: MinValue<u256, 20>
+    )
+        requires(a >= 10)
+        requires(b >= 20)
+    {
+        // Both constraints propagate
+        let sum: u256 = a + b;
+        // SMT should prove sum >= 30
+    }
+
+    // Constraints propagate through InRange
+    pub fn propagateInRange(value: InRange<u256, 0, 100>)
+        requires(value >= 0)
+        requires(value <= 100)
+    {
+        // Constraints propagate: 0 <= value <= 100
+        let doubled: u256 = value * 2;
+        // SMT should prove 0 <= doubled <= 200
+    }
+}
+

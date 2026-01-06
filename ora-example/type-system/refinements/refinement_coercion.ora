@@ -1,0 +1,54 @@
+// ============================================================================
+// Type System Test: Refinement Type Coercion
+// ============================================================================
+// Tests refinement type coercions and conversions
+// ============================================================================
+
+contract RefinementCoercion {
+    // Coercion: Base type to refinement (requires guard)
+    pub fn testBaseToRefinement(value: u256) {
+        // Requires runtime guard
+        let min_value: MinValue<u256, 100> = value; // Guard inserted
+    }
+
+    // Coercion: Refinement to base type (no guard needed)
+    pub fn testRefinementToBase(value: MinValue<u256, 100>) {
+        let base: u256 = value; // No guard needed
+    }
+
+    // Coercion: More restrictive to less restrictive (subtyping)
+    pub fn testRestrictiveToLessRestrictive() {
+        let strict: MinValue<u256, 200> = 300;
+        let loose: MinValue<u256, 100> = strict; // No guard needed (subtyping)
+    }
+
+    // Coercion: Less restrictive to more restrictive (requires guard)
+    pub fn testLessRestrictiveToMoreRestrictive(value: MinValue<u256, 100>) {
+        // Requires guard: value >= 200
+        // This will insert a runtime guard since value >= 100 doesn't guarantee value >= 200
+        let strict: MinValue<u256, 200> = value; // Guard inserted at runtime
+    }
+
+    // Coercion: NonZeroAddress to address (subtyping)
+    pub fn testNonZeroToAddress(addr: NonZeroAddress) {
+        let address_val: address = addr; // No guard needed (subtyping)
+    }
+
+    // Coercion: Address to NonZeroAddress (requires guard)
+    pub fn testAddressToNonZero(addr: address) {
+        let nonzero: NonZeroAddress = addr; // Guard inserted
+    }
+
+    // Coercion: InRange narrowing (requires guard)
+    pub fn testInRangeNarrowing(value: InRange<u256, 0, 1000>) {
+        // Requires guard: value >= 100 && value <= 200
+        // This will insert runtime guards since value in [0,1000] doesn't guarantee value in [100,200]
+        let narrow: InRange<u256, 100, 200> = value; // Guard inserted at runtime
+    }
+
+    // Coercion: InRange widening (no guard needed)
+    pub fn testInRangeWidening(value: InRange<u256, 100, 200>) {
+        let wide: InRange<u256, 0, 1000> = value; // No guard needed (subtyping)
+    }
+}
+

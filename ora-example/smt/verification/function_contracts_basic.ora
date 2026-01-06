@@ -1,0 +1,64 @@
+// ============================================================================
+// Formal Verification: Basic Function Contracts
+// ============================================================================
+// Tests basic requires and ensures clauses in function contracts
+// ============================================================================
+
+contract FunctionContractsBasic {
+    storage var balance: u256 = 0;
+    storage var max_balance: u256 = 1000;
+
+    // Simple requires clause
+    pub fn deposit(amount: u256)
+        requires(amount > 0)
+        requires(balance + amount <= max_balance)
+    {
+        balance = balance + amount;
+    }
+
+    // Simple ensures clause
+    pub fn getBalance() -> u256
+        ensures(getBalance() >= 0)
+    {
+        return balance;
+    }
+
+    // Requires and ensures together
+    pub fn withdraw(amount: u256) -> u256
+        requires(amount > 0)
+        requires(amount <= balance)
+        ensures(balance == old(balance) - amount)
+    {
+        balance = balance - amount;
+        return balance;
+    }
+
+    // Multiple requires clauses
+    pub fn transfer(amount: u256, to: address) -> bool
+        requires(amount > 0)
+        requires(amount <= balance)
+        requires(to != std.constants.ZERO_ADDRESS)
+        ensures(balance == old(balance) - amount)
+    {
+        balance = balance - amount;
+        return true;
+    }
+
+    // Ensures with arithmetic expression
+    pub fn addToBalance(value: u256)
+        requires(value > 0)
+        ensures(balance == old(balance) + value)
+    {
+        balance = balance + value;
+    }
+
+    // Ensures with comparison
+    pub fn setMaxBalance(new_max: u256)
+        requires(new_max > 0)
+        ensures(max_balance == new_max)
+        ensures(max_balance >= balance)
+    {
+        max_balance = new_max;
+    }
+}
+

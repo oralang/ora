@@ -270,25 +270,52 @@ pub fn lowerStorageVariableDecl(self: *const StatementLowerer, var_decl: *const 
 
 /// Lower memory variable declarations
 pub fn lowerMemoryVariableDecl(self: *const StatementLowerer, var_decl: *const lib.ast.Statements.VariableDeclNode, mlir_type: c.MlirType, loc: c.MlirLocation) LoweringError!void {
-    // create memory allocation
-    const memref_type = h.memRefType(
-        self.ctx,
-        mlir_type,
-        0,
-        null,
-        h.nullAttr(),
-        self.memory_manager.getMemorySpaceAttribute(var_decl.region),
-    );
-    const alloca_op = self.memory_manager.createAllocaOp(memref_type, var_decl.region, var_decl.name, loc);
-    h.appendOp(self.block, alloca_op);
-    const alloca_result = h.getResult(alloca_op, 0);
+    var alloca_result: c.MlirValue = undefined;
 
     if (var_decl.value) |init_expr| {
-        // lower initializer and store to memory
+        // lower initializer first; array literals already produce a memref
         const init_value = helpers.lowerValueWithImplicitTry(self, &init_expr.*, var_decl.type_info);
+        const init_type = c.oraValueGetType(init_value);
 
-        const store_op = self.memory_manager.createStoreOp(init_value, alloca_result, var_decl.region, loc);
-        h.appendOp(self.block, store_op);
+        if (c.oraTypeIsAMemRef(init_type)) {
+            // reuse the initializer memref as the storage for this variable
+            alloca_result = init_value;
+        } else {
+            // create memory allocation and store initializer
+            const memref_type = if (c.oraTypeIsAMemRef(mlir_type))
+                mlir_type
+            else
+                h.memRefType(
+                    self.ctx,
+                    mlir_type,
+                    0,
+                    null,
+                    h.nullAttr(),
+                    self.memory_manager.getMemorySpaceAttribute(var_decl.region),
+                );
+            const alloca_op = self.memory_manager.createAllocaOp(memref_type, var_decl.region, var_decl.name, loc);
+            h.appendOp(self.block, alloca_op);
+            alloca_result = h.getResult(alloca_op, 0);
+
+            const store_op = self.memory_manager.createStoreOp(init_value, alloca_result, var_decl.region, loc);
+            h.appendOp(self.block, store_op);
+        }
+    } else {
+        // create memory allocation without initializer
+        const memref_type = if (c.oraTypeIsAMemRef(mlir_type))
+            mlir_type
+        else
+            h.memRefType(
+                self.ctx,
+                mlir_type,
+                0,
+                null,
+                h.nullAttr(),
+                self.memory_manager.getMemorySpaceAttribute(var_decl.region),
+            );
+        const alloca_op = self.memory_manager.createAllocaOp(memref_type, var_decl.region, var_decl.name, loc);
+        h.appendOp(self.block, alloca_op);
+        alloca_result = h.getResult(alloca_op, 0);
     }
 
     // store the memory reference in local variable map

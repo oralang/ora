@@ -1,0 +1,40 @@
+// ============================================================================
+// Type System Test: Type Annotations
+// ============================================================================
+// Tests explicit type annotations in Ora
+// ============================================================================
+
+contract TypeAnnotations {
+    // Variable declarations require explicit types
+    pub fn testVariableAnnotations() {
+        var counter: u256 = 0;
+        var active: bool = true;
+        var owner: address = std.msg.sender();
+        var name: string = "Contract";
+    }
+
+    // Function parameters require explicit types
+    pub fn testFunctionParams(x: u256, y: bool, addr: address) {
+        let sum: u256 = x + 10;
+    }
+
+    // Function return types require explicit types
+    pub fn testReturnType() -> u256 {
+        return 100;
+    }
+
+    // Storage variables require explicit types
+    storage var stored_counter: u256;
+    storage var stored_flag: bool;
+
+    // Memory variables require explicit types
+    pub fn testMemoryAnnotations() {
+        memory var temp: u256 = 100;
+        memory var temp_flag: bool = true;
+    }
+
+    // Transient storage variables require explicit types
+    tstore var temp_counter: u256;
+    tstore var temp_flag: bool;
+}
+

@@ -135,6 +135,9 @@ pub const TypeResolver = struct {
             .Constant => |*constant| {
                 try self.resolveConstant(constant, context);
             },
+            .ErrorDecl => |*error_decl| {
+                try self.resolveErrorDecl(error_decl, context);
+            },
             else => {
                 // other node types handled elsewhere
             },
@@ -186,6 +189,53 @@ pub const TypeResolver = struct {
         // update symbol table with resolved type
         const scope = if (self.current_scope) |s| s else &self.symbol_table.root;
         _ = self.symbol_table.updateSymbolType(scope, constant.name, constant.typ, false) catch {};
+    }
+
+    fn resolveErrorDecl(
+        self: *TypeResolver,
+        error_decl: *Statements.ErrorDeclNode,
+        _: core.TypeContext,
+    ) TypeResolutionError!void {
+        if (error_decl.parameters) |params| {
+            for (params) |*param| {
+                if (param.type_info.ora_type) |ot| {
+                    if (ot == .struct_type or ot == .enum_type or ot == .contract_type) {
+                        const type_name = switch (ot) {
+                            .struct_type => ot.struct_type,
+                            .enum_type => ot.enum_type,
+                            .contract_type => ot.contract_type,
+                            else => unreachable,
+                        };
+                        const root_scope: ?*const Scope = @as(?*const Scope, @ptrCast(&self.symbol_table.root));
+                        const type_symbol = SymbolTable.findUp(root_scope, type_name);
+                        if (type_symbol) |tsym| {
+                            switch (tsym.kind) {
+                                .Enum => {
+                                    param.type_info.ora_type = OraType{ .enum_type = type_name };
+                                    param.type_info.category = .Enum;
+                                },
+                                .Struct => {
+                                    param.type_info.ora_type = OraType{ .struct_type = type_name };
+                                    param.type_info.category = .Struct;
+                                },
+                                .Contract => {
+                                    param.type_info.ora_type = OraType{ .contract_type = type_name };
+                                    param.type_info.category = .Contract;
+                                },
+                                else => return TypeResolutionError.UnknownType,
+                            }
+                        } else {
+                            return TypeResolutionError.UnknownType;
+                        }
+                    } else {
+                        param.type_info.category = ot.getCategory();
+                    }
+                }
+                if (!param.type_info.isResolved()) {
+                    return TypeResolutionError.UnresolvedType;
+                }
+            }
+        }
     }
 
     fn resolveContract(

@@ -1,0 +1,97 @@
+// ============================================================================
+// SMT Complex: Inequality Chains
+// ============================================================================
+// Tests complex inequality proofs with chained constraints
+// ============================================================================
+
+contract InequalityChains {
+    // Chain: a < b < c
+    pub fn chainLessThan(a: u256, b: u256, c: u256)
+        requires(a < b)
+        requires(b < c)
+        ensures(a < c)
+    {
+        // SMT should prove a < c
+    }
+
+    // Chain: a <= b <= c
+    pub fn chainLessEqual(a: u256, b: u256, c: u256)
+        requires(a <= b)
+        requires(b <= c)
+        ensures(a <= c)
+    {
+        // SMT should prove a <= c
+    }
+
+    // Chain with arithmetic
+    pub fn chainArithmetic(x: u256, y: u256, z: u256)
+        requires(x < y)
+        requires(y < z)
+        ensures(x + y < y + z)
+        ensures(x + y < 2 * z)
+    {
+        // SMT should prove inequalities
+    }
+
+    // Chain with MinValue
+    pub fn chainMinValue(a: MinValue<u256, 10>, b: MinValue<u256, 20>, c: MinValue<u256, 30>)
+        requires(a >= 10)
+        requires(b >= 20)
+        requires(c >= 30)
+        requires(a < b)
+        requires(b < c)
+        ensures(a < c)
+        ensures(a + b < b + c)
+    {
+        // SMT should prove chains
+    }
+
+    // Chain with InRange
+    pub fn chainInRange(x: InRange<u256, 0, 100>, y: InRange<u256, 0, 100>)
+        requires(x >= 0)
+        requires(x <= 100)
+        requires(y >= 0)
+        requires(y <= 100)
+        requires(x < y)
+        ensures(x + y >= 0)
+        ensures(x + y <= 200)
+        ensures(x + y < 2 * y)
+    {
+        // SMT should prove bounds
+    }
+
+    // Transitive chain
+    pub fn transitiveChain(a: u256, b: u256, c: u256, d: u256)
+        requires(a <= b)
+        requires(b <= c)
+        requires(c <= d)
+        ensures(a <= d)
+        ensures(a + b <= c + d)
+    {
+        // SMT should prove transitivity
+    }
+
+    // Chain with subtraction
+    pub fn chainSubtraction(a: u256, b: u256, c: u256)
+        requires(a < b)
+        requires(b < c)
+        ensures(c - a > c - b)
+        ensures(c - a > 0)
+    {
+        // SMT should prove subtraction chain
+    }
+
+    // Chain with multiplication
+    pub fn chainMultiplication(x: InRange<u256, 1, 10>, y: InRange<u256, 1, 10>)
+        requires(x >= 1)
+        requires(x <= 10)
+        requires(y >= 1)
+        requires(y <= 10)
+        requires(x < y)
+        ensures(x * x < y * y)
+        ensures(x * x < 100)
+    {
+        // SMT should prove multiplication chain
+    }
+}
+

@@ -1,0 +1,95 @@
+// ============================================================================
+// SMT Complex: Multiple Constraints
+// ============================================================================
+// Tests multiple refinement types and constraints together
+// ============================================================================
+
+contract MultipleConstraints {
+    // Multiple refinement parameters
+    pub fn multipleRefinements(
+        amount: MinValue<u256, 100>,
+        limit: MaxValue<u256, 1000>,
+        rate: InRange<u256, 0, 100>,
+        addr: NonZeroAddress
+    )
+        requires(amount >= 100)
+        requires(limit <= 1000)
+        requires(rate >= 0)
+        requires(rate <= 100)
+        requires(addr != std.constants.ZERO_ADDRESS)
+        ensures(amount <= limit)
+        ensures(amount * rate / 100 <= limit)
+    {
+        let base_amount: u256 = amount;
+        let base_limit: u256 = limit;
+        let base_rate: u256 = rate;
+        let fee: u256 = base_amount * base_rate / 100;
+        // SMT should prove fee <= limit
+    }
+
+    // Constraints with storage
+    storage var balance: MinValue<u256, 0> = 0;
+    storage var max_balance: MaxValue<u256, 10000> = 10000;
+
+    pub fn transferWithConstraints(amount: MinValue<u256, 100>)
+        requires(amount >= 100)
+        requires(amount <= balance)
+        requires(balance <= max_balance)
+        ensures(balance >= 0)
+        ensures(balance <= max_balance)
+    {
+        let base_amount: u256 = amount;
+        balance = balance - base_amount;
+    }
+
+    // Constraints with arithmetic
+    pub fn calculateWithConstraints(
+        base: MinValue<u256, 100>,
+        multiplier: InRange<u256, 1, 10>,
+        divisor: MinValue<u256, 1>
+    ) -> MinValue<u256, 0>
+        requires(base >= 100)
+        requires(multiplier >= 1)
+        requires(multiplier <= 10)
+        requires(divisor >= 1)
+    {
+        let base_val: u256 = base;
+        let mult_val: u256 = multiplier;
+        let div_val: u256 = divisor;
+        let result_val: u256 = base_val * mult_val / div_val;
+        return result_val;
+    }
+
+    // Constraints in return
+    // TODO: Tuple return types `-> (Type1, Type2)` are not supported in Ora function signatures.
+    // For now, a workaround is to return an anonymous struct:
+    //   -> struct { a: MinValue<u256, 0>, b: MaxValue<u256, 100> }
+    // This allows returning multiple values with different refinement types.
+    // Note: Anonymous struct return types are supported, but the return statement syntax
+    // uses `.{ field: value }` instead of `struct { field: value }`.
+    pub fn returnMultipleConstraints(
+        value: InRange<u256, 0, 100>
+    ) -> struct { a: MinValue<u256, 0>, b: MaxValue<u256, 100> }
+        requires(value >= 0)
+        requires(value <= 100)
+    {
+        let base_value: u256 = value;
+        return .{ .a = base_value, .b = base_value };
+    }
+
+    // Nested constraints
+    pub fn nestedConstraints(
+        outer: InRange<u256, 0, 1000>,
+        inner: InRange<u256, 0, 100>
+    )
+        requires(outer >= 0)
+        requires(outer <= 1000)
+        requires(inner >= 0)
+        requires(inner <= 100)
+        requires(inner <= outer)
+        ensures(outer >= inner)
+    {
+        // SMT should prove nested constraints
+    }
+}
+

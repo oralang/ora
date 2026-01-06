@@ -1,0 +1,29 @@
+// ============================================================================
+// Region Transition Test: Calldata Write (Invalid)
+// ============================================================================
+// Tests that calldata variables cannot be written to.
+// Calldata is read-only - any write operation should fail.
+// ============================================================================
+
+contract CalldataWrite {
+    pub fn testInvalidCalldataWrite(x: u256) {
+        // ERROR: Cannot write to calldata parameter
+        // This should fail at compile time
+        // x = 100; // Invalid: calldata is read-only
+    }
+
+    pub fn testInvalidCalldataVarWrite(x: u256) {
+        // ERROR: Cannot write to calldata variable
+        // This should fail at compile time
+        // calldata var calldata_var: u256 = x;
+        // calldata_var = 200; // Invalid: calldata is read-only
+    }
+
+    pub fn testInvalidCalldataCompoundAssign(x: u256) {
+        // ERROR: Cannot use compound assignment on calldata
+        // This should fail at compile time
+        // x += 10; // Invalid: calldata is read-only
+        // x -= 5;  // Invalid: calldata is read-only
+    }
+}
+

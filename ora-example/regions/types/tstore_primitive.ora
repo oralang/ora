@@ -1,0 +1,40 @@
+// ============================================================================
+// Region Types Test: TStore Primitive Types
+// ============================================================================
+// Tests primitive types in transient storage region
+// ============================================================================
+
+contract TStorePrimitive {
+    // u256 in tstore
+    tstore var temp_counter: u256;
+    tstore var temp_balance: u256;
+
+    // bool in tstore
+    tstore var temp_flag: bool;
+    tstore var reentrancy_guard: bool;
+
+    // address in tstore
+    tstore var temp_owner: address;
+
+    pub fn testTStorePrimitives() {
+        temp_counter = 100;
+        temp_balance = 1000;
+        temp_flag = true;
+        reentrancy_guard = false;
+        temp_owner = std.msg.sender();
+    }
+
+    pub fn testTStoreRead() {
+        let counter: u256 = temp_counter; // TStore -> Stack
+        let flag: bool = temp_flag; // TStore -> Stack
+    }
+
+    pub fn testReentrancyPattern() {
+        if (reentrancy_guard == false) {
+            reentrancy_guard = true; // Set guard
+            // Do work...
+            reentrancy_guard = false; // Clear guard
+        }
+    }
+}
+

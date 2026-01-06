@@ -1,0 +1,57 @@
+// ============================================================================
+// SMT Guard Test: NonZeroAddress Proven
+// ============================================================================
+// Tests that SMT can prove NonZeroAddress constraints when requires clauses
+// provide sufficient information. Guards should be removed (no runtime cost).
+//
+// Run with: --verify --emit-mlir-sir
+// Expected: Guards removed in MLIR output (SMT discharge successful)
+// ============================================================================
+
+contract NonZeroAddressProven {
+    // SMT can prove NonZeroAddress from requires clause
+    pub fn provenNonZeroAddress(addr: NonZeroAddress)
+        requires(addr != std.constants.ZERO_ADDRESS)
+    {
+        // Guard should be removed - requires clause proves non-zero
+        let owner: NonZeroAddress = addr;
+    }
+
+    // SMT can prove NonZeroAddress from std.msg.sender (builtin)
+    pub fn provenNonZeroFromMsgSender() {
+        // Guard should be removed - std.msg.sender() never returns zero
+        let caller: NonZeroAddress = std.msg.sender();
+    }
+
+    // SMT can prove NonZeroAddress from std.transaction.sender (builtin)
+    pub fn provenNonZeroFromTransactionSender() {
+        // Guard should be removed - std.transaction.sender() never returns zero
+        let origin: NonZeroAddress = std.transaction.sender();
+    }
+
+    // SMT can prove NonZeroAddress from function parameter refinement
+    pub fn provenNonZeroFromRefinement(addr: NonZeroAddress)
+        requires(addr != std.constants.ZERO_ADDRESS)
+    {
+        // Guard should be removed - parameter already has NonZeroAddress
+        // and requires proves it
+        let owner: NonZeroAddress = addr;
+    }
+
+    // SMT can prove NonZeroAddress in return
+    pub fn provenNonZeroReturn(addr: NonZeroAddress) -> NonZeroAddress
+        requires(addr != std.constants.ZERO_ADDRESS)
+    {
+        // Guard should be removed for return
+        return addr;
+    }
+
+    // SMT can prove NonZeroAddress from conditional
+    pub fn provenNonZeroFromConditional(addr: address) {
+        if (addr != std.constants.ZERO_ADDRESS) {
+            // Guard should be removed - condition proves non-zero
+            let owner: NonZeroAddress = addr;
+        }
+    }
+}
+

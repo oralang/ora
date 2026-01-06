@@ -1,0 +1,24 @@
+// ============================================================================
+// Region Transition Test: TStore to Calldata (Invalid)
+// ============================================================================
+// Tests that transient storage values cannot be assigned to calldata variables.
+// This is an invalid transition: tstore -> calldata
+// Calldata is read-only and cannot be written to.
+// ============================================================================
+
+contract TStoreToCalldata {
+    tstore var temp_value: u256;
+
+    pub fn testInvalidTStoreToCalldata(x: u256) {
+        // ERROR: Cannot assign tstore to calldata parameter
+        // This should fail at compile time
+        // x = temp_value; // Invalid: tstore -> calldata
+    }
+
+    pub fn testInvalidTStoreToCalldataVar(x: u256) {
+        // ERROR: Cannot create calldata variable from tstore
+        // This should fail at compile time
+        // calldata var calldata_var: u256 = temp_value; // Invalid
+    }
+}
+

@@ -1,0 +1,96 @@
+// ============================================================================
+// Formal Verification: Ghost Variables
+// ============================================================================
+// Tests ghost variables (specification-only, not in bytecode)
+// ============================================================================
+
+contract GhostVariables {
+    storage var balance: u256 = 0;
+    storage var max_balance: u256 = 1000;
+    
+    // Ghost storage variable for verification
+    ghost storage sumOfBalances: u256 = 0;
+    
+    // Ghost storage variable with refinement type
+    ghost storage verifiedBalance: MinValue<u256, 0> = 0;
+    
+    // Ghost storage variable tracking invariants
+    ghost storage totalDeposits: u256 = 0;
+    ghost storage totalWithdrawals: u256 = 0;
+
+    // Regular function using ghost variable in ensures
+    pub fn deposit(amount: u256)
+        requires(amount > 0)
+        requires(balance + amount <= max_balance)
+        ensures(balance == old(balance) + amount)
+        ensures(sumOfBalances == old(sumOfBalances) + amount)
+        ensures(totalDeposits == old(totalDeposits) + amount)
+    {
+        balance = balance + amount;
+        sumOfBalances = sumOfBalances + amount;
+        totalDeposits = totalDeposits + amount;
+    }
+
+    // Regular function updating ghost variable
+    pub fn withdraw(amount: u256)
+        requires(amount > 0)
+        requires(amount <= balance)
+        ensures(balance == old(balance) - amount)
+        ensures(totalWithdrawals == old(totalWithdrawals) + amount)
+    {
+        balance = balance - amount;
+        totalWithdrawals = totalWithdrawals + amount;
+    }
+
+    // Ghost variable used in invariant
+    pub fn transfer(amount: u256)
+        requires(amount > 0)
+        requires(amount <= balance)
+        ensures(balance == old(balance) - amount)
+        ensures(sumOfBalances == old(sumOfBalances))
+    {
+        balance = balance - amount;
+        // sumOfBalances unchanged (internal transfer)
+    }
+
+    // Ghost variable with refinement type
+    pub fn setVerifiedBalance(value: MinValue<u256, 0>)
+        requires(value >= 0)
+        ensures(verifiedBalance == value)
+        ensures(verifiedBalance >= 0)
+    {
+        verifiedBalance = value;
+    }
+
+    // Multiple ghost variables
+    pub fn updateMultipleGhosts(deposit: u256, withdrawal: u256)
+        requires(deposit >= 0)
+        requires(withdrawal >= 0)
+        ensures(totalDeposits == old(totalDeposits) + deposit)
+        ensures(totalWithdrawals == old(totalWithdrawals) + withdrawal)
+    {
+        totalDeposits = totalDeposits + deposit;
+        totalWithdrawals = totalWithdrawals + withdrawal;
+    }
+
+    // Ghost variable in arithmetic
+    pub fn calculateNetFlow() -> u256
+        ensures(calculateNetFlow() == totalDeposits - totalWithdrawals)
+    {
+        return totalDeposits - totalWithdrawals;
+    }
+}
+
+contract GhostVariablesMemory {
+    // Ghost memory variable (if supported)
+    // Note: Ghost memory variables may not be supported - testing ghost storage only
+    pub fn testGhostMemory(value: u256)
+        requires(value > 0)
+    {
+        // Ghost memory variables may need to be declared at contract level
+        // For now, using regular memory variable
+        memory var temp: u256 = value;
+        let _: u256 = temp;
+    }
+}
+

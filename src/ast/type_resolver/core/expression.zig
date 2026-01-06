@@ -140,6 +140,16 @@ pub fn checkExpr(
     var typed = try synthExpr(self, expr);
     log.debug("[checkExpr] Synthesized type: category={s}\n", .{@tagName(typed.ty.category)});
 
+    // special case: allow hex literals to satisfy bytes expectations
+    if (expected.category == .Bytes and expr.* == .Literal) {
+        if (expr.Literal == .Hex) {
+            expr.Literal.Hex.type_info = expected;
+            var result = typed;
+            result.ty = expected;
+            return result;
+        }
+    }
+
     // special case: unwrap ErrorUnion to success type inside try blocks only
     // this handles cases like `var x: bool = transfer(...)` inside a try block
     if (self.in_try_block and (typed.ty.category == .ErrorUnion or typed.ty.category == .Union) and expected.category != .ErrorUnion and expected.category != .Unknown) {
@@ -335,6 +345,12 @@ fn synthAssignment(
     var value_typed = try synthExpr(self, assign.value);
     defer value_typed.deinit(self.allocator);
 
+    // special case: allow hex literals to satisfy bytes assignments
+    if (target_type.category == .Bytes and assign.value.* == .Literal and assign.value.Literal == .Hex) {
+        assign.value.Literal.Hex.type_info = target_type;
+        value_typed.ty = target_type;
+    }
+
     if (!self.validation.isAssignable(target_type, value_typed.ty)) {
         const got_str = formatTypeInfo(value_typed.ty, self.allocator) catch "unknown";
         const expected_str = formatTypeInfo(target_type, self.allocator) catch "unknown";
@@ -465,7 +481,11 @@ fn synthErrorReturn(
     err_ret: *ast.Expressions.ErrorReturnExpr,
 ) TypeResolutionError!Typed {
     // look up the error in the symbol table to verify it exists
-    const symbol = SymbolTable.findUp(self.current_scope, err_ret.error_name);
+    const scope = if (self.current_scope) |s| s else &self.symbol_table.root;
+    var symbol = self.symbol_table.safeFindUpOpt(scope, err_ret.error_name);
+    if (symbol == null and scope != &self.symbol_table.root) {
+        symbol = self.symbol_table.safeFindUpOpt(&self.symbol_table.root, err_ret.error_name);
+    }
     if (symbol == null) {
         return TypeResolutionError.UndefinedIdentifier;
     }
@@ -546,7 +566,11 @@ fn synthIdentifier(
     try @import("identifier.zig").resolveIdentifierType(self, id);
     var eff = Effect.pure();
     if (self.current_scope) |scope| {
-        if (SymbolTable.findUp(scope, id.name)) |sym| {
+        var sym_opt = self.symbol_table.safeFindUpOpt(scope, id.name);
+        if (sym_opt == null and scope != &self.symbol_table.root) {
+            sym_opt = self.symbol_table.safeFindUpOpt(&self.symbol_table.root, id.name);
+        }
+        if (sym_opt) |sym| {
             if (sym.region == .Storage or sym.region == .TStore) {
                 var slots = SlotSet.init(self.allocator);
                 try slots.add(self.allocator, sym.name);
@@ -687,7 +711,11 @@ fn synthCall(
         log.debug("[synthCall] Looking up function '{s}'\n", .{func_name});
 
         // first try symbol table
-        const symbol = SymbolTable.findUp(self.current_scope, func_name);
+        const scope = if (self.current_scope) |s| s else &self.symbol_table.root;
+        var symbol = self.symbol_table.safeFindUpOpt(scope, func_name);
+        if (symbol == null and scope != &self.symbol_table.root) {
+            symbol = self.symbol_table.safeFindUpOpt(&self.symbol_table.root, func_name);
+        }
 
         // if not in symbol table, check function registry
         if (symbol == null) {
@@ -942,7 +970,7 @@ pub fn inferExprRegion(self: *CoreResolver, expr: *ast.Expressions.ExprNode) Mem
                 break :blk MemoryRegion.Calldata;
             }
             if (self.current_scope) |scope| {
-                if (self.symbol_table.safeFindUp(scope, id.name)) |sym| {
+                if (self.symbol_table.safeFindUpOpt(scope, id.name)) |sym| {
                     break :blk sym.region orelse MemoryRegion.Stack;
                 }
             }
@@ -993,7 +1021,7 @@ fn resolveRegionSlot(
 ) ?[]const u8 {
     const base_name = findBaseIdentifier(target) orelse return null;
     if (self.current_scope) |scope| {
-        if (self.symbol_table.safeFindUp(scope, base_name)) |sym| {
+        if (self.symbol_table.safeFindUpOpt(scope, base_name)) |sym| {
             if (sym.region == region) return sym.name;
         }
     }

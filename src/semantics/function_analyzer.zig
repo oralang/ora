@@ -68,6 +68,42 @@ pub fn copyOraTypeOwned(allocator: std.mem.Allocator, src: ast.Types.OraType) !a
             new_elem.* = try copyOraTypeOwned(allocator, arr.elem.*);
             return ast.Types.OraType{ .array = .{ .elem = new_elem, .len = arr.len } };
         },
+        .map => |mapping| {
+            const new_key = try allocator.create(ast.Types.OraType);
+            new_key.* = try copyOraTypeOwned(allocator, mapping.key.*);
+            const new_value = try allocator.create(ast.Types.OraType);
+            new_value.* = try copyOraTypeOwned(allocator, mapping.value.*);
+            return ast.Types.OraType{ .map = .{ .key = new_key, .value = new_value } };
+        },
+        .tuple => |members| {
+            const new_members = try allocator.alloc(ast.Types.OraType, members.len);
+            for (members, 0..) |member, i| {
+                new_members[i] = try copyOraTypeOwned(allocator, member);
+            }
+            return ast.Types.OraType{ .tuple = new_members };
+        },
+        .function => |func| {
+            const new_params = try allocator.alloc(ast.Types.OraType, func.params.len);
+            for (func.params, 0..) |param, i| {
+                new_params[i] = try copyOraTypeOwned(allocator, param);
+            }
+            var new_ret: ?*const ast.Types.OraType = null;
+            if (func.return_type) |ret_ptr| {
+                const new_ret_ptr = try allocator.create(ast.Types.OraType);
+                new_ret_ptr.* = try copyOraTypeOwned(allocator, ret_ptr.*);
+                new_ret = new_ret_ptr;
+            }
+            return ast.Types.OraType{ .function = .{ .params = new_params, .return_type = new_ret } };
+        },
+        .anonymous_struct => |fields| {
+            const new_fields = try allocator.alloc(ast.Types.AnonymousStructFieldType, fields.len);
+            for (fields, 0..) |field, i| {
+                const new_field_type = try allocator.create(ast.Types.OraType);
+                new_field_type.* = try copyOraTypeOwned(allocator, field.typ.*);
+                new_fields[i] = .{ .name = field.name, .typ = new_field_type };
+            }
+            return ast.Types.OraType{ .anonymous_struct = new_fields };
+        },
         .exact => |e| {
             // copy the exact type recursively
             const new_e = try allocator.create(ast.Types.OraType);

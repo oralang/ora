@@ -90,7 +90,14 @@ pub fn isAssignable(
                 const success_ora_type = target_ora.error_union.*;
                 const success_category = success_ora_type.getCategory();
                 if (value_type.ora_type) |value_ora| {
-                    if (OraType.equals(value_ora, success_ora_type) and value_type.category == success_category) {
+                    if (value_type.category == success_category and
+                        (OraType.equals(value_ora, success_ora_type) or
+                        refinement_system.checkSubtype(
+                            value_ora,
+                            success_ora_type,
+                            compat.isBaseTypeCompatible,
+                        )))
+                    {
                         return true;
                     }
                 } else if (value_type.category == success_category) {
@@ -104,7 +111,14 @@ pub fn isAssignable(
                         const success_ora_type = first_type.error_union.*;
                         const success_category = success_ora_type.getCategory();
                         if (value_type.ora_type) |value_ora| {
-                            if (OraType.equals(value_ora, success_ora_type) and value_type.category == success_category) {
+                            if (value_type.category == success_category and
+                                (OraType.equals(value_ora, success_ora_type) or
+                                refinement_system.checkSubtype(
+                                    value_ora,
+                                    success_ora_type,
+                                    compat.isBaseTypeCompatible,
+                                )))
+                            {
                                 return true;
                             }
                         } else if (value_type.category == success_category) {

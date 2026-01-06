@@ -1,0 +1,38 @@
+// ============================================================================
+// Region Transition Test: Stack to Storage (Valid)
+// ============================================================================
+// Tests that stack values can be assigned to storage variables.
+// This is a valid transition: stack -> storage
+// ============================================================================
+
+contract StackToStorage {
+    storage var counter: u256;
+    storage var balance: u256;
+    storage var flag: bool;
+
+    pub fn testStackToStorage() {
+        // Stack value assigned to storage
+        let stack_value: u256 = 100;
+        counter = stack_value;
+
+        // Literal assigned to storage
+        balance = 1000;
+
+        // Boolean stack to storage
+        let stack_flag: bool = true;
+        flag = stack_flag;
+    }
+
+    pub fn testStackToStorageFromFunction(x: u256) {
+        // Function parameter (calldata -> stack) then stack -> storage
+        counter = x;
+    }
+
+    pub fn testStackToStorageFromArithmetic() {
+        let x: u256 = 10;
+        let y: u256 = 20;
+        let sum: u256 = x + y; // Stack value
+        counter = sum; // Stack -> Storage
+    }
+}
+

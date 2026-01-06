@@ -1,0 +1,52 @@
+// ============================================================================
+// Region Effect Test: Memory Write Effect
+// ============================================================================
+// Tests that writing to memory records a write effect
+// ============================================================================
+
+contract MemoryWriteEffect {
+    // Writing to memory variable records write effect
+    pub fn testMemoryWrite() {
+        memory var mem_value: u256;
+        mem_value = 100; // Stack -> Memory: Write effect
+    }
+
+    // Writing to memory array records write effect
+    pub fn testMemoryArrayWrite() {
+        memory var arr: [u256; 5];
+        arr[0] = 10; // Stack -> Memory array: Write effect
+    }
+
+    // Multiple memory writes record multiple write effects
+    pub fn testMultipleMemoryWrites() {
+        memory var mem1: u256;
+        memory var mem2: u256;
+        mem1 = 10;  // Write effect 1
+        mem2 = 20;  // Write effect 2
+    }
+
+    // Memory write in conditional records write effect
+    pub fn testMemoryWriteInConditional(x: u256) {
+        memory var mem_value: u256;
+        if (x > 0) {
+            mem_value = x; // Write effect
+        }
+    }
+
+    // Memory write in loop records write effect per iteration
+    pub fn testMemoryWriteInLoop() {
+        memory var arr: [u256; 10];
+        var i: u256 = 0;
+        while (i < 10) {
+            arr[i] = i; // Write effect per iteration
+            i += 1;
+        }
+    }
+
+    // Compound assignment records write effect
+    pub fn testMemoryCompoundAssign() {
+        memory var mem_value: u256 = 100;
+        mem_value += 10; // Read + Write effect
+    }
+}
+

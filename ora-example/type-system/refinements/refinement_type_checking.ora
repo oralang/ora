@@ -1,0 +1,55 @@
+// ============================================================================
+// Type System Test: Refinement Type Checking
+// ============================================================================
+// Tests that refinement types are checked correctly by type system
+// ============================================================================
+
+contract RefinementTypeChecking {
+    // MinValue type checking
+    pub fn testMinValueChecking(amount: MinValue<u256, 100>) {
+        // Parameter has MinValue<u256, 100> - guaranteed >= 100
+        let value: u256 = amount;
+    }
+
+    // MaxValue type checking
+    pub fn testMaxValueChecking(limit: MaxValue<u256, 1000>) {
+        // Parameter has MaxValue<u256, 1000> - guaranteed <= 1000
+        let value: u256 = limit;
+    }
+
+    // InRange type checking
+    pub fn testInRangeChecking(rate: InRange<u256, 0, 100>) {
+        // Parameter has InRange<u256, 0, 100> - guaranteed 0 <= rate <= 100
+        let value: u256 = rate;
+    }
+
+    // NonZeroAddress type checking
+    pub fn testNonZeroAddressChecking(addr: NonZeroAddress) {
+        // Parameter has NonZeroAddress - guaranteed != 0
+        let value: address = addr; // NonZeroAddress <: address
+    }
+
+    // Exact type checking
+    pub fn testExactChecking(total: Exact<u256>) {
+        // Parameter has Exact<u256> - guaranteed divisible
+        let value: u256 = total;
+    }
+
+    // Scaled type checking
+    pub fn testScaledChecking(amount: Scaled<u256, 18>) {
+        // Parameter has Scaled<u256, 18> - scaled by 10^18
+        let value: u256 = amount;
+    }
+
+    // Refinement type in return
+    pub fn testRefinementReturn() -> MinValue<u256, 100> {
+        return 200; // Literal >= 100
+    }
+
+    // Refinement type in variable
+    pub fn testRefinementVariable() {
+        let deposit: MinValue<u256, 1000> = 5000; // Literal >= 1000
+        let fee: BasisPoints<u256> = 250; // Literal in [0, 10000]
+    }
+}
+

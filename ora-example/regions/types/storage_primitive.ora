@@ -1,0 +1,42 @@
+// ============================================================================
+// Region Types Test: Storage Primitive Types
+// ============================================================================
+// Tests primitive types in storage region
+// ============================================================================
+
+contract StoragePrimitive {
+    // u256 in storage
+    storage var counter: u256;
+    storage var balance: u256;
+
+    // bool in storage
+    storage var active: bool;
+    storage var paused: bool;
+
+    // address in storage
+    storage var owner: address;
+    storage var admin: address;
+
+    // string in storage
+    storage var name: string;
+    storage var symbol: string;
+
+    // bytes in storage
+    storage var data: bytes;
+
+    pub fn testStoragePrimitives() {
+        counter = 100;
+        balance = 1000;
+        active = true;
+        paused = false;
+        owner = std.msg.sender();
+        name = "Token";
+        symbol = "TKN";
+        data = 0xdeadbeef;
+    }
+
+    pub fn testStorageRead() -> u256 {
+        return counter; // Storage -> Stack
+    }
+}
+

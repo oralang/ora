@@ -1,0 +1,119 @@
+ // ============================================================================
+  // Formal Verification: Ghost Functions and Variables Combined
+  // ============================================================================
+  // Tests ghost functions and variables working together
+  // ============================================================================
+
+  contract GhostCombined {
+    storage var balance: u256 = 0;
+    storage var max_balance: u256 = 1000;
+
+    // Ghost variables
+    ghost storage var sumOfBalances: u256 = 0;
+    ghost storage var transactionCount: u256 = 0;
+    ghost storage var averageTransaction: u256 = 0;
+
+    // Regular storage used in countToN
+    storage var counter: u256 = 0;
+
+    // Ghost function using ghost variables
+    ghost fn getTotalBalance() -> u256 {
+        return balance + sumOfBalances;
+    }
+
+    // Ghost function calculating average
+    ghost fn getAverageTransaction() -> u256 {
+        if (transactionCount == 0) {
+            return 0;
+        }
+        return sumOfBalances / transactionCount;
+    }
+
+    // Regular function updating ghost variables and using ghost function
+    pub fn deposit(amount: u256)
+        requires(amount > 0)
+        requires(balance + amount <= max_balance)
+        ensures(balance == old(balance) + amount)
+        ensures(sumOfBalances == old(sumOfBalances) + amount)
+        ensures(transactionCount == old(transactionCount) + 1)
+        ensures(getTotalBalance() == old(getTotalBalance()) + amount)
+    {
+        balance = balance + amount;
+        sumOfBalances = sumOfBalances + amount;
+        transactionCount = transactionCount + 1;
+        averageTransaction = getAverageTransaction();
+    }
+
+    // Ghost function with old() referencing ghost variables
+    ghost fn getOldTotalBalance() -> u256 {
+        return old(balance) + old(sumOfBalances);
+    }
+
+    // Function using ghost function with old()
+    pub fn transfer(amount: u256)
+        requires(amount > 0)
+        requires(amount <= balance)
+        ensures(balance == old(balance) - amount)
+        ensures(getTotalBalance() == getOldTotalBalance() - amount)
+    {
+        balance = balance - amount;
+    }
+
+    // Multiple ghost functions working together
+    ghost fn getBalanceRatio() -> u256 {
+        if (max_balance == 0) {
+            return 0;
+        }
+        return balance * 100 / max_balance;
+    }
+
+    ghost fn isBalanceHealthy() -> bool {
+        return getBalanceRatio() <= 80;
+    }
+
+    // Function using multiple ghost functions
+    pub fn checkHealth()
+        ensures(!isBalanceHealthy() || balance <= max_balance * 80 / 100)
+    {
+        if (!isBalanceHealthy()) {
+            // Balance too high, take action
+        }
+    }
+
+    // Ghost function with refinement types
+    ghost storage var verifiedSum: MinValue<u256, 0> = 0;
+
+    ghost fn getVerifiedTotal() -> MinValue<u256, 0> {
+        return verifiedSum;
+    }
+
+    // Function using ghost function with refinement
+    pub fn updateVerifiedSum(value: MinValue<u256, 0>)
+        requires(value >= 0)
+        ensures(getVerifiedTotal() == value)
+        ensures(getVerifiedTotal() >= 0)
+    {
+        verifiedSum = value;
+    }
+
+    // Ghost function in loop invariant
+    ghost fn expectedCounterValue(iterations: u256) -> u256 {
+        return iterations;
+    }
+
+    // Function with ghost function in loop
+    pub fn countToN(n: u256)
+        requires(n <= 100)
+        ensures(counter == expectedCounterValue(n))
+    {
+        counter = 0;
+        var i: u256 = 0;
+
+        while (i < n)
+            invariant(counter == expectedCounterValue(i))
+        {
+            counter = counter + 1;
+            i = i + 1;
+        }
+    }
+}

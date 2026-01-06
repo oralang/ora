@@ -113,6 +113,17 @@ namespace mlir
                 ConversionPatternRewriter &rewriter) const override;
         };
 
+        class ConvertHexConstantOp : public OpConversionPattern<ora::HexConstantOp>
+        {
+        public:
+            using OpConversionPattern::OpConversionPattern;
+
+            LogicalResult matchAndRewrite(
+                ora::HexConstantOp op,
+                typename ora::HexConstantOp::Adaptor adaptor,
+                ConversionPatternRewriter &rewriter) const override;
+        };
+
         class ConvertAddrToI160Op : public OpConversionPattern<ora::AddrToI160Op>
         {
         public:

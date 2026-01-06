@@ -80,7 +80,11 @@ pub fn areTypesCompatible(
                 const success_ora_type = type1_ora.error_union.*;
                 const success_category = success_ora_type.getCategory();
                 if (type2.ora_type) |type2_ora| {
-                    if (OraType.equals(type2_ora, success_ora_type) and type2.category == success_category) {
+                    if (type2.category == success_category and
+                        (OraType.equals(type2_ora, success_ora_type) or
+                        refinement_system.checkSubtype(type2_ora, success_ora_type, isBaseTypeCompatible) or
+                        refinement_system.checkSubtype(success_ora_type, type2_ora, isBaseTypeCompatible)))
+                    {
                         return true;
                     }
                 } else if (type2.category == success_category) {
@@ -94,7 +98,11 @@ pub fn areTypesCompatible(
                         const success_ora_type = first_type.error_union.*;
                         const success_category = success_ora_type.getCategory();
                         if (type2.ora_type) |type2_ora| {
-                            if (OraType.equals(type2_ora, success_ora_type) and type2.category == success_category) {
+                            if (type2.category == success_category and
+                                (OraType.equals(type2_ora, success_ora_type) or
+                                refinement_system.checkSubtype(type2_ora, success_ora_type, isBaseTypeCompatible) or
+                                refinement_system.checkSubtype(success_ora_type, type2_ora, isBaseTypeCompatible)))
+                            {
                                 return true;
                             }
                         } else if (type2.category == success_category) {

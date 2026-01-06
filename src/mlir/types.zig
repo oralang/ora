@@ -26,6 +26,70 @@ const ErrorHandler = @import("error_handling.zig").ErrorHandler;
 const math = std.math;
 const log = @import("log");
 
+fn hashOraType(hasher: *std.hash.Wyhash, ora_type: lib.ast.type_info.OraType) void {
+    const tag_val: u32 = @intFromEnum(std.meta.activeTag(ora_type));
+    hasher.update(std.mem.asBytes(&tag_val));
+    switch (ora_type) {
+        .u8, .u16, .u32, .u64, .u128, .u256, .i8, .i16, .i32, .i64, .i128, .i256, .bool, .string, .address, .bytes, .void, .non_zero_address => {},
+        .struct_type => |name| hasher.update(name),
+        .enum_type => |name| hasher.update(name),
+        .contract_type => |name| hasher.update(name),
+        .array => |arr| {
+            hashOraType(hasher, arr.elem.*);
+            hasher.update(std.mem.asBytes(&arr.len));
+        },
+        .slice => |elem| hashOraType(hasher, elem.*),
+        .map => |m| {
+            hashOraType(hasher, m.key.*);
+            hashOraType(hasher, m.value.*);
+        },
+        .tuple => |types| {
+            hasher.update(std.mem.asBytes(&types.len));
+            for (types) |t| hashOraType(hasher, t);
+        },
+        .function => |fn_ty| {
+            hasher.update(std.mem.asBytes(&fn_ty.params.len));
+            for (fn_ty.params) |p| hashOraType(hasher, p);
+            if (fn_ty.return_type) |ret| {
+                hashOraType(hasher, ret.*);
+            } else {
+                hashOraType(hasher, .{ .void = {} });
+            }
+        },
+        .error_union => |t| hashOraType(hasher, t.*),
+        ._union => |types| {
+            hasher.update(std.mem.asBytes(&types.len));
+            for (types) |t| hashOraType(hasher, t);
+        },
+        .anonymous_struct => |fields| {
+            hasher.update(std.mem.asBytes(&fields.len));
+            for (fields) |field| {
+                hasher.update(field.name);
+                hashOraType(hasher, field.typ.*);
+            }
+        },
+        .module => |name_opt| if (name_opt) |name| hasher.update(name),
+        .min_value => |mv| {
+            hashOraType(hasher, mv.base.*);
+            hasher.update(std.mem.asBytes(&mv.min));
+        },
+        .max_value => |mv| {
+            hashOraType(hasher, mv.base.*);
+            hasher.update(std.mem.asBytes(&mv.max));
+        },
+        .in_range => |ir| {
+            hashOraType(hasher, ir.base.*);
+            hasher.update(std.mem.asBytes(&ir.min));
+            hasher.update(std.mem.asBytes(&ir.max));
+        },
+        .scaled => |s| {
+            hashOraType(hasher, s.base.*);
+            hasher.update(std.mem.asBytes(&s.decimals));
+        },
+        .exact => |base| hashOraType(hasher, base.*),
+    }
+}
+
 /// Type alias for array struct to match AST definition
 const ArrayStruct = struct { elem: *const lib.ast.type_info.OraType, len: u64 };
 
@@ -560,9 +624,19 @@ pub const TypeMapper = struct {
 
     /// Convert anonymous struct type
     pub fn mapAnonymousStructType(self: *const TypeMapper, fields: []const lib.ast.type_info.AnonymousStructFieldType) c.MlirType {
-        _ = fields; // Anonymous struct field information
-        // for now, use i256 as placeholder for anonymous struct type
-        // in the future, this could be a proper MLIR struct type
+        var hasher = std.hash.Wyhash.init(0);
+        hashOraType(&hasher, .{ .anonymous_struct = fields });
+        const hash = hasher.final();
+        const name = std.fmt.allocPrint(self.inference_ctx.allocator, "__anon_struct_{x}", .{hash}) catch {
+            log.warn("Failed to allocate anonymous struct name; using i256 fallback\n", .{});
+            return c.oraIntegerTypeCreate(self.ctx, constants.DEFAULT_INTEGER_BITS);
+        };
+        const struct_name_ref = h.strRef(name);
+        const struct_type = c.oraStructTypeGet(self.ctx, struct_name_ref);
+        if (struct_type.ptr != null) {
+            return struct_type;
+        }
+        log.debug("WARNING: Anonymous struct type '{s}' could not be created. Using i256 fallback.\n", .{name});
         return c.oraIntegerTypeCreate(self.ctx, constants.DEFAULT_INTEGER_BITS);
     }
 
@@ -801,6 +875,16 @@ pub const TypeMapper = struct {
         // if types are already the same, no conversion needed
         if (types_equal) {
             return value;
+        }
+
+        // refinement -> base conversion
+        const refinement_base = c.oraRefinementTypeGetBaseType(value_type);
+        if (refinement_base.ptr != null and c.oraTypeEqual(refinement_base, target_type)) {
+            const loc = c.oraLocationUnknownGet(self.ctx);
+            const convert_op = c.oraRefinementToBaseOpCreate(self.ctx, loc, value, block);
+            if (convert_op.ptr != null) {
+                return h.getResult(convert_op, 0);
+            }
         }
 
         // check if types are integers or index types

@@ -53,4 +53,15 @@ contract RefinementGuardSMT {
     pub fn runtimeExact(dividend: Exact<u256>, divisor: u256) {
         let q: u256 = dividend / divisor;
     }
+
+    // Scaled arithmetic (no runtime guard, type-level only)
+    pub fn scaledAdd(a: Scaled<u256, 18>, b: Scaled<u256, 18>)
+        requires(a >= 0)
+    {
+        let c: Scaled<u256, 18> = a + b;
+    }
+
+    pub fn scaledMul(a: Scaled<u256, 18>, b: Scaled<u256, 6>) {
+        let c: Scaled<u256, 24> = a * b;
+    }
 }

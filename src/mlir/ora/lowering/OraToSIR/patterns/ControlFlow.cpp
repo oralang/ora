@@ -21,6 +21,14 @@ using namespace ora;
 // Debug logging macro
 #define DBG(msg) ORA_DEBUG_PREFIX("OraToSIR", msg)
 
+static Value ensureU256(ConversionPatternRewriter &rewriter, Location loc, Value value)
+{
+    auto u256Type = sir::U256Type::get(rewriter.getContext());
+    if (llvm::isa<sir::U256Type>(value.getType()))
+        return value;
+    return rewriter.create<sir::BitcastOp>(loc, u256Type, value);
+}
+
 // -----------------------------------------------------------------------------
 // Lower func.func - convert function signature types (ora.int -> u256)
 // -----------------------------------------------------------------------------
@@ -170,6 +178,77 @@ LogicalResult ConvertFuncOp::matchAndRewrite(
 }
 
 // -----------------------------------------------------------------------------
+// Lower ora.range -> (end - start [+1 if inclusive])
+// -----------------------------------------------------------------------------
+LogicalResult ConvertRangeOp::matchAndRewrite(
+    ora::RangeOp op,
+    typename ora::RangeOp::Adaptor adaptor,
+    ConversionPatternRewriter &rewriter) const
+{
+    auto loc = op.getLoc();
+    auto *ctx = rewriter.getContext();
+    auto u256Type = sir::U256Type::get(ctx);
+
+    Value start = ensureU256(rewriter, loc, adaptor.getStart());
+    Value end = ensureU256(rewriter, loc, adaptor.getEnd());
+
+    Value diff = rewriter.create<sir::SubOp>(loc, u256Type, end, start);
+
+    bool inclusive = false;
+    if (auto inclusiveAttr = op.getInclusiveAttr())
+        inclusive = inclusiveAttr.getValue();
+
+    if (inclusive)
+    {
+        auto ui64Type = mlir::IntegerType::get(ctx, 64, mlir::IntegerType::Unsigned);
+        auto oneAttr = mlir::IntegerAttr::get(ui64Type, 1);
+        Value one = rewriter.create<sir::ConstOp>(loc, u256Type, oneAttr);
+        diff = rewriter.create<sir::AddOp>(loc, u256Type, diff, one);
+    }
+
+    rewriter.replaceOp(op, diff);
+    return success();
+}
+
+// -----------------------------------------------------------------------------
+// Lower ora.try_catch -> passthrough of try operand (ignore catch region)
+// -----------------------------------------------------------------------------
+LogicalResult ConvertTryCatchOp::matchAndRewrite(
+    ora::TryOp op,
+    typename ora::TryOp::Adaptor adaptor,
+    ConversionPatternRewriter &rewriter) const
+{
+    auto resultType = op.getResult().getType();
+    if (auto *tc = getTypeConverter())
+    {
+        if (auto converted = tc->convertType(resultType))
+            resultType = converted;
+    }
+
+    Value value = adaptor.getTryOperation();
+    if (value.getType() != resultType)
+    {
+        if (llvm::isa<sir::PtrType>(resultType) && llvm::isa<sir::U256Type>(value.getType()))
+        {
+            Value casted = rewriter.create<sir::BitcastOp>(op.getLoc(), resultType, value);
+            rewriter.replaceOp(op, casted);
+            return success();
+        }
+        if (llvm::isa<sir::U256Type>(resultType) && llvm::isa<sir::PtrType>(value.getType()))
+        {
+            Value casted = rewriter.create<sir::BitcastOp>(op.getLoc(), resultType, value);
+            rewriter.replaceOp(op, casted);
+            return success();
+        }
+        // types should be equivalent after conversion; bail if they aren't
+        return failure();
+    }
+
+    rewriter.replaceOp(op, value);
+    return success();
+}
+
+// -----------------------------------------------------------------------------
 // Lower func.call - update call signature and materialize scalar return
 // -----------------------------------------------------------------------------
 LogicalResult ConvertCallOp::matchAndRewrite(
@@ -234,7 +313,6 @@ LogicalResult ConvertContractOp::matchAndRewrite(
     if (!parent || parent->empty())
         return rewriter.notifyMatchFailure(op, "missing parent region");
 
-    Block &moduleBlock = parent->front();
     Block &contractBlock = op.getBody().front();
 
     for (auto it = contractBlock.begin(); it != contractBlock.end();)
@@ -440,13 +518,19 @@ LogicalResult ConvertWhileOp::matchAndRewrite(
     auto &afterEntry = afterRegion.front();
     afterEntry.addArgument(i1Type, loc);
 
-    // Replace ora.break/ora.continue/ora.yield with scf.yield
+    // Replace ora.break/ora.continue/ora.yield with scf.yield (top-level only)
     SmallVector<ora::BreakOp, 4> breaks;
     SmallVector<ora::ContinueOp, 4> continues;
     SmallVector<ora::YieldOp, 4> yields;
-    afterRegion.walk([&](ora::BreakOp b) { breaks.push_back(b); });
-    afterRegion.walk([&](ora::ContinueOp c) { continues.push_back(c); });
-    afterRegion.walk([&](ora::YieldOp y) { yields.push_back(y); });
+    for (auto &inner : afterRegion.front())
+    {
+        if (auto b = dyn_cast<ora::BreakOp>(inner))
+            breaks.push_back(b);
+        else if (auto c = dyn_cast<ora::ContinueOp>(inner))
+            continues.push_back(c);
+        else if (auto y = dyn_cast<ora::YieldOp>(inner))
+            yields.push_back(y);
+    }
     for (auto b : breaks)
     {
         rewriter.setInsertionPoint(b);
@@ -568,13 +652,13 @@ LogicalResult ConvertBreakOp::matchAndRewrite(
     if (!parent)
         return rewriter.notifyMatchFailure(op, "break has no parent op");
 
-    if (isa<mlir::scf::ExecuteRegionOp, mlir::scf::IfOp>(parent))
+    if (isa<mlir::scf::ExecuteRegionOp, mlir::scf::IfOp, ora::IfOp, ora::TryOp, mlir::scf::WhileOp, ora::WhileOp, mlir::scf::ForOp>(parent))
     {
         rewriter.replaceOpWithNewOp<mlir::scf::YieldOp>(op, ValueRange{});
         return success();
     }
 
-    return rewriter.notifyMatchFailure(op, "break not in execute_region/if");
+    return rewriter.notifyMatchFailure(op, "break not in supported region");
 }
 
 LogicalResult ConvertContinueOp::matchAndRewrite(
@@ -586,13 +670,13 @@ LogicalResult ConvertContinueOp::matchAndRewrite(
     if (!parent)
         return rewriter.notifyMatchFailure(op, "continue has no parent op");
 
-    if (isa<mlir::scf::ExecuteRegionOp, mlir::scf::IfOp>(parent))
+    if (isa<mlir::scf::ExecuteRegionOp, mlir::scf::IfOp, ora::IfOp, ora::TryOp, mlir::scf::WhileOp, ora::WhileOp, mlir::scf::ForOp>(parent))
     {
         rewriter.replaceOpWithNewOp<mlir::scf::YieldOp>(op, ValueRange{});
         return success();
     }
 
-    return rewriter.notifyMatchFailure(op, "continue not in execute_region/if");
+    return rewriter.notifyMatchFailure(op, "continue not in supported region");
 }
 
 LogicalResult ConvertSwitchExprOp::matchAndRewrite(
@@ -792,19 +876,6 @@ LogicalResult ConvertSwitchOp::matchAndRewrite(
 
     if (defaultIdx < 0)
         return failure();
-
-    auto inlineCaseRegion = [&](mlir::Region &src, mlir::Region &dest) {
-        if (dest.empty())
-            rewriter.createBlock(&dest);
-        rewriter.inlineRegionBefore(src, dest, dest.end());
-        SmallVector<ora::YieldOp, 4> yields;
-        dest.walk([&](ora::YieldOp y) { yields.push_back(y); });
-        for (auto y : yields)
-        {
-            rewriter.setInsertionPoint(y);
-            rewriter.replaceOpWithNewOp<mlir::scf::YieldOp>(y, y.getOperands());
-        }
-    };
 
     auto inlineCaseRegionStmt = [&](mlir::Region &src, mlir::Region &dest) {
         if (dest.empty())

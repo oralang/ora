@@ -1,0 +1,45 @@
+// ============================================================================
+// Region Effect Test: Memory Read Effect
+// ============================================================================
+// Tests that reading from memory records a read effect
+// ============================================================================
+
+contract MemoryReadEffect {
+    // Reading memory variable records read effect
+    pub fn testMemoryRead() {
+        memory var mem_value: u256 = 100;
+        let stack_value: u256 = mem_value; // Memory -> Stack: Read effect
+    }
+
+    // Reading from memory array records read effect
+    pub fn testMemoryArrayRead() {
+        memory var arr: [u256; 5] = [1, 2, 3, 4, 5];
+        let value: u256 = arr[0]; // Memory array read: Read effect
+    }
+
+    // Multiple memory reads record multiple read effects
+    pub fn testMultipleMemoryReads() {
+        memory var mem1: u256 = 10;
+        memory var mem2: u256 = 20;
+        let sum: u256 = mem1 + mem2; // Two read effects
+    }
+
+    // Memory read in conditional records read effect
+    pub fn testMemoryReadInConditional() {
+        memory var mem_value: u256 = 100;
+        if (mem_value > 0) { // Memory read: Read effect
+            let value: u256 = mem_value; // Another read effect
+        }
+    }
+
+    // Memory read in loop records read effect per iteration
+    pub fn testMemoryReadInLoop() {
+        memory var mem_value: u256 = 100;
+        var i: u256 = 0;
+        while (i < 10) {
+            let value: u256 = mem_value; // Read effect per iteration
+            i += 1;
+        }
+    }
+}
+

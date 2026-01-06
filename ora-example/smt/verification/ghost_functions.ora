@@ -1,0 +1,169 @@
+// ============================================================================
+// Formal Verification: Ghost Functions
+// ============================================================================
+// Tests ghost functions (specification-only, not in bytecode)
+// ============================================================================
+
+contract GhostFunctions {
+    storage var balance: u256 = 0;
+    storage var max_balance: u256 = 1000;
+    
+    ghost storage sumOfBalances: u256 = 0;
+
+    // Ghost function for verification
+    ghost fn getTotalBalance() -> u256 {
+        return balance + sumOfBalances;
+    }
+
+    // Ghost function used in ensures clause
+    pub fn deposit(amount: u256)
+        requires(amount > 0)
+        requires(balance + amount <= max_balance)
+        ensures(balance == old(balance) + amount)
+        ensures(getTotalBalance() == old(getTotalBalance()) + amount)
+    {
+        balance = balance + amount;
+    }
+
+    // Ghost function with parameters
+    ghost fn calculateFee(amount: u256, rate: u256) -> u256 {
+        return amount * rate / 100;
+    }
+
+    // Ghost function used in ensures
+    pub fn transferWithFee(amount: u256, rate: u256)
+        requires(amount > 0)
+        requires(rate <= 100)
+        requires(amount <= balance)
+        ensures(balance == old(balance) - amount - calculateFee(amount, rate))
+    {
+        let fee: u256 = calculateFee(amount, rate);
+        balance = balance - amount - fee;
+    }
+
+    // Ghost function with refinement types
+    ghost fn getVerifiedBalance() -> MinValue<u256, 0> {
+        return balance;
+    }
+
+    // Ghost function used with refinement
+    pub fn setBalance(value: MinValue<u256, 0>)
+        requires(value >= 0)
+        ensures(getVerifiedBalance() == value)
+    {
+        let base_value: u256 = value;
+        balance = base_value;
+    }
+
+    // Ghost function with multiple parameters
+    ghost fn sumBalances(a: u256, b: u256, c: u256) -> u256 {
+        return a + b + c;
+    }
+
+    // Ghost function used in complex ensures
+    pub fn updateMultipleBalances(a: u256, b: u256, c: u256)
+        requires(a >= 0)
+        requires(b >= 0)
+        requires(c >= 0)
+        ensures(sumBalances(a, b, c) == old(sumBalances(a, b, c)))
+    {
+        // Balances unchanged
+    }
+
+    // Ghost function with InRange
+    ghost fn getPercentage(value: u256, total: u256) -> InRange<u256, 0, 100> {
+        if (total == 0) {
+            return 0;
+        }
+        let percentage: u256 = value * 100 / total;
+        return percentage;
+    }
+
+    // Ghost function used with InRange
+    pub fn calculatePercentage(value: u256, total: u256)
+        requires(value <= total)
+        requires(total > 0)
+        ensures(getPercentage(value, total) >= 0)
+        ensures(getPercentage(value, total) <= 100)
+    {
+        // Percentage calculation
+    }
+
+    // Ghost function calling other ghost function
+    ghost fn getNetBalance() -> u256 {
+        return getTotalBalance() - sumOfBalances;
+    }
+
+    // Ghost function used in ensures with old()
+    pub fn updateBalance(new_balance: u256)
+        requires(new_balance >= 0)
+        ensures(getTotalBalance() == old(getTotalBalance()) + (new_balance - old(balance)))
+    {
+        balance = new_balance;
+    }
+
+    // Ghost function with conditional logic
+    ghost fn getMaxBalance() -> u256 {
+        if (balance > max_balance) {
+            return balance;
+        } else {
+            return max_balance;
+        }
+    }
+
+    // Ghost function used in ensures
+    pub fn ensureMaxBalance()
+        ensures(getMaxBalance() <= max_balance)
+    {
+        if (balance > max_balance) {
+            balance = max_balance;
+        }
+    }
+}
+
+contract GhostFunctionsComplex {
+    storage var counter: u256 = 0;
+    storage var total: u256 = 0;
+
+    // Ghost function for loop verification
+    ghost fn expectedSum(n: u256) -> u256 {
+        return n * (n + 1) / 2;
+    }
+
+    // Ghost function used in loop invariant
+    pub fn sumToN(n: u256) -> u256
+        requires(n <= 100)
+        ensures(expectedSum(n) == sumToN(n))
+    {
+        var sum: u256 = 0;
+        var i: u256 = 1;
+        
+        while (i <= n)
+            invariant(sum == expectedSum(i - 1))
+        {
+            sum = sum + i;
+            i = i + 1;
+        }
+        
+        return sum;
+    }
+
+    // Ghost function with array
+    ghost fn arraySum(arr: [u256; 5]) -> u256 {
+        var sum: u256 = 0;
+        var i: u256 = 0;
+        while (i < 5) {
+            sum = sum + arr[i];
+            i = i + 1;
+        }
+        return sum;
+    }
+
+    // Ghost function used with array
+    pub fn verifyArraySum(arr: [u256; 5])
+        ensures(arraySum(arr) >= 0)
+    {
+        // Array sum verification
+    }
+}
+

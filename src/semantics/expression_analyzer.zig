@@ -23,7 +23,7 @@ pub const ExprAnalysis = struct {
     typ: ast.Types.TypeInfo,
 };
 
-// Removed: now using table.isScopeKnown() and table.safeFindUp() instead
+// Removed: now using table.isScopeKnown() and table.safeFindUpOpt() instead
 
 pub fn inferExprType(table: *state.SymbolTable, scope: *state.Scope, expr: ast.Expressions.ExprNode) ast.Types.TypeInfo {
     return switch (expr) {
@@ -36,7 +36,7 @@ pub fn inferExprType(table: *state.SymbolTable, scope: *state.Scope, expr: ast.E
             }
 
             if (table.isScopeKnown(scope)) {
-                if (table.safeFindUp(scope, id.name)) |sym| {
+                if (table.safeFindUpOpt(scope, id.name)) |sym| {
                     if (sym.typ) |ti| break :blk ti;
                 }
             }
@@ -140,7 +140,7 @@ pub fn inferExprType(table: *state.SymbolTable, scope: *state.Scope, expr: ast.E
             // prefer direct function symbol lookup for simple identifiers
             if (c.callee.* == .Identifier and table.isScopeKnown(scope)) {
                 const fname = c.callee.Identifier.name;
-                if (table.safeFindUp(scope, fname)) |sym| {
+                if (table.safeFindUpOpt(scope, fname)) |sym| {
                     if (sym.typ) |ti| {
                         if (ti.ora_type) |ot| switch (ot) {
                             .function => |fnty| {

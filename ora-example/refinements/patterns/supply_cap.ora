@@ -14,7 +14,7 @@ contract SupplyCap {
     
     /// Mint new tokens, respecting supply cap
     /// Returns new total supply
-    pub fn mint(to: NonZeroAddress, amount: MinValue<u256, 1>) -> !MaxValue<u256, 1_000_000_000> | ExceedsSupplyCap {
+    pub fn mint(to: NonZeroAddress, amount: MinValue<u256, 1>) -> !u256 | ExceedsSupplyCap {
         // Check if minting would exceed cap
         const new_supply: u256 = total_supply + amount;
         
@@ -38,7 +38,7 @@ contract SupplyCap {
     // ============================================================================
     
     /// Burn tokens, reducing total supply
-    pub fn burn(amount: MinValue<u256, 1>) -> !MaxValue<u256, 1_000_000_000> | InsufficientBalance {
+    pub fn burn(amount: MinValue<u256, 1>) -> !u256 | InsufficientBalance {
         const sender: address = std.msg.sender();
         const balance: u256 = balances[sender];
         

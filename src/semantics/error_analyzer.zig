@@ -154,7 +154,7 @@ fn validateExpressionErrors(
     switch (expr.*) {
         .ErrorReturn => |*error_return| {
             // validate that the error is declared (error.SomeError syntax)
-            if (state.SymbolTable.findUp(null, error_return.error_name)) |symbol| {
+            if (table.safeFindUpOpt(&table.root, error_return.error_name)) |symbol| {
                 if (symbol.kind != .Error) {
                     try diags.append(error_return.span);
                 }
@@ -176,7 +176,7 @@ fn validateExpressionErrors(
                 const callee_name = call.callee.Identifier.name;
 
                 // check if callee is an error
-                if (state.SymbolTable.findUp(null, callee_name)) |symbol| {
+                if (table.safeFindUpOpt(&table.root, callee_name)) |symbol| {
                     if (symbol.kind == .Error) {
                         // this is an error call - validate parameters
                         try validateErrorCall(table, callee_name, call.arguments, call.span, diags);
@@ -278,7 +278,7 @@ fn validateErrorUnionType(
                                 // first check in symbol table for error declarations
                                 if (table.error_signatures.get(error_name)) |_| {
                                     // found in error signatures - it's a valid error
-                                } else if (state.SymbolTable.findUp(null, error_name)) |symbol| {
+                                } else if (table.safeFindUpOpt(&table.root, error_name)) |symbol| {
                                     if (symbol.kind != .Error) {
                                         // not an error type
                                         if (type_info.span) |span| {

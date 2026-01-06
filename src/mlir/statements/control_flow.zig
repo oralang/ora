@@ -5,6 +5,7 @@
 
 const std = @import("std");
 const c = @import("mlir_c_api").c;
+const c_zig = @import("mlir_c_api");
 const lib = @import("ora_lib");
 const h = @import("../helpers.zig");
 const constants = @import("../lower.zig");
@@ -15,6 +16,13 @@ const ExpressionLowerer = @import("../expressions.zig").ExpressionLowerer;
 const helpers = @import("helpers.zig");
 const verification = @import("verification.zig");
 const log = @import("log");
+
+fn clearBlockTerminator(block: c.MlirBlock) void {
+    const term = c.oraBlockGetTerminator(block);
+    if (!c.oraOperationIsNull(term)) {
+        c.oraOperationErase(term);
+    }
+}
 
 /// Lower if statements using ora.if with then/else regions
 pub fn lowerIf(self: *const StatementLowerer, if_stmt: *const lib.ast.Statements.IfNode) LoweringError!void {
@@ -508,6 +516,7 @@ fn lowerSimpleForLoop(
     if (c.oraBlockIsNull(body_block)) {
         @panic("scf.for missing body block");
     }
+    clearBlockTerminator(body_block);
 
     // get the induction variable
     const induction_var = c.oraBlockGetArgument(body_block, 0);
@@ -593,6 +602,22 @@ fn lowerSimpleForLoop(
         const yield_op = self.ora_dialect.createScfYield(loc);
         h.appendOp(body_block, yield_op);
     }
+
+    // debug: log block operations to investigate scf.yield placement
+    const filename = self.locations.filename;
+    if (filename.len > 0) {
+        var op = c.oraBlockGetFirstOperation(body_block);
+        log.debug("Loop body ops for {s}:", .{filename});
+        while (!c.oraOperationIsNull(op)) {
+            const name_ref = c.oraOperationGetName(op);
+            if (name_ref.data != null) {
+                const name_slice = name_ref.data[0..name_ref.length];
+                log.debug("  op: {s}", .{name_slice});
+            }
+            c_zig.freeStringRef(name_ref);
+            op = c.oraOperationGetNextInBlock(op);
+        }
+    }
 }
 
 /// Lower indexed for loop (for (iterable) |item, index| body)
@@ -644,6 +669,7 @@ fn lowerIndexedForLoop(
     if (c.oraBlockIsNull(op_body_block)) {
         @panic("scf.for missing body block");
     }
+    clearBlockTerminator(op_body_block);
 
     // body-scoped expression lowerer to keep index/element IR in the loop region
     var body_expr_lowerer = ExpressionLowerer.init(
@@ -757,6 +783,7 @@ fn lowerDestructuredForLoop(self: *const StatementLowerer, pattern: lib.ast.Expr
     if (c.oraBlockIsNull(body_block)) {
         @panic("scf.for missing body block");
     }
+    clearBlockTerminator(body_block);
 
     // get the item variable
     const item_var = c.oraBlockGetArgument(body_block, 0);

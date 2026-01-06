@@ -225,6 +225,17 @@ pub const SymbolTable = struct {
         return null;
     }
 
+    /// Safe variant that bails if the scope pointer is unknown to the symbol table.
+    pub fn findScopeContainingSafe(self: *const SymbolTable, scope: ?*Scope, name: []const u8) ?struct { scope: *Scope, idx: usize } {
+        var cur = scope;
+        while (cur) |s| : (cur = s.parent) {
+            if (!self.isScopeKnown(s)) return null;
+            if (s.findInCurrent(name)) |idx| {
+                return .{ .scope = s, .idx = idx };
+            }
+        }
+        return null;
+    }
     /// Find the scope containing a symbol by name, searching from the given scope down into nested scopes first, then up
     /// This is needed when current_scope is set to a block scope but the symbol might be in a nested block scope
     fn findScopeContainingRecursive(scope: ?*Scope, name: []const u8) ?struct { scope: *Scope, idx: usize } {
@@ -270,7 +281,7 @@ pub const SymbolTable = struct {
         }
 
         // find the scope containing the symbol (searches up from given scope)
-        if (findScopeContaining(scope, name)) |found| {
+        if (self.findScopeContainingSafe(scope, name)) |found| {
             // found the symbol in a parent scope - deallocate old type if it was owned
             const old_symbol = &found.scope.symbols.items[found.idx];
             // only deallocate if the old type was owned AND has a valid ora_type
@@ -322,6 +333,14 @@ pub const SymbolTable = struct {
         while (cur) |s| : (cur = s.parent) {
             if (!self.isScopeKnown(s)) return null;
             if (s.findInCurrent(name)) |idx| return s.symbols.items[idx];
+        }
+        return null;
+    }
+
+    /// Safe findUp that accepts optional scopes.
+    pub fn safeFindUpOpt(self: *const SymbolTable, scope: ?*const Scope, name: []const u8) ?Symbol {
+        if (scope) |s| {
+            return self.safeFindUp(s, name);
         }
         return null;
     }

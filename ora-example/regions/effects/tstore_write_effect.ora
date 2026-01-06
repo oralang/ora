@@ -1,0 +1,50 @@
+// ============================================================================
+// Region Effect Test: TStore Write Effect
+// ============================================================================
+// Tests that writing to transient storage records a write effect
+// ============================================================================
+
+contract TStoreWriteEffect {
+    tstore var temp_counter: u256;
+    tstore var temp_flag: bool;
+
+    // Writing to tstore variable records write effect
+    pub fn testTStoreWrite() {
+        temp_counter = 100; // Stack -> TStore: Write effect
+    }
+
+    // Multiple tstore writes record multiple write effects
+    pub fn testMultipleTStoreWrites() {
+        temp_counter = 10;  // Write effect 1
+        temp_flag = true;   // Write effect 2
+    }
+
+    // TStore write in conditional records write effect
+    pub fn testTStoreWriteInConditional(x: u256) {
+        if (x > 0) {
+            temp_counter = x; // Write effect
+        }
+    }
+
+    // TStore write in loop records write effect per iteration
+    pub fn testTStoreWriteInLoop() {
+        var i: u256 = 0;
+        while (i < 10) {
+            temp_counter = i; // Write effect per iteration
+            i += 1;
+        }
+    }
+
+    // Compound assignment records write effect
+    pub fn testTStoreCompoundAssign() {
+        temp_counter += 10; // Read + Write effect
+    }
+
+    // TStore write for reentrancy protection pattern
+    pub fn testReentrancyGuard() {
+        temp_counter = 1; // Set guard: Write effect
+        // Do work...
+        temp_counter = 0; // Clear guard: Write effect
+    }
+}
+

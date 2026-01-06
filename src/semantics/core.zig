@@ -27,7 +27,7 @@ const stmt = @import("statement_analyzer.zig");
 const logs = @import("log_analyzer.zig");
 const errors = @import("error_analyzer.zig");
 const expr = @import("expression_analyzer.zig");
-// Unknown-identifier checking: safe by default using safeFindUp() and scope guards.
+// Unknown-identifier checking: safe by default using safeFindUpOpt() and scope guards.
 const ENABLE_UNKNOWN_WALKER: bool = true;
 const locals = @import("locals_binder.zig");
 const ManagedArrayList = std.array_list.Managed;

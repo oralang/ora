@@ -1,0 +1,66 @@
+// ============================================================================
+// Type System Test: Region Type Checking
+// ============================================================================
+// Tests that type checker enforces region compatibility
+// ============================================================================
+
+contract RegionTypeChecking {
+    storage var storage_val: u256;
+    tstore var tstore_val: u256;
+
+    // Valid: Storage -> Stack
+    pub fn testStorageToStack() {
+        let stack_val: u256 = storage_val; // Valid: storage -> stack
+    }
+
+    // Valid: Storage -> Memory
+    pub fn testStorageToMemory() {
+        memory var mem_val: u256 = storage_val; // Valid: storage -> memory
+        let _: u256 = mem_val; // Use the value
+    }
+
+    // Valid: Memory -> Stack
+    pub fn testMemoryToStack() {
+        memory var memory_val: u256 = 100;
+        let stack_val: u256 = memory_val; // Valid: memory -> stack
+    }
+
+    // Valid: Memory -> Storage
+    pub fn testMemoryToStorage() {
+        memory var memory_val: u256 = 200;
+        storage_val = memory_val; // Valid: memory -> storage
+    }
+
+    // Valid: TStore -> Stack
+    pub fn testTStoreToStack() {
+        let stack_val: u256 = tstore_val; // Valid: tstore -> stack
+    }
+
+    // Valid: TStore -> Memory
+    pub fn testTStoreToMemory() {
+        memory var mem_val: u256 = tstore_val; // Valid: tstore -> memory
+    }
+
+    // Valid: Stack -> Storage
+    pub fn testStackToStorage() {
+        let stack_val: u256 = 100;
+        storage_val = stack_val; // Valid: stack -> storage
+    }
+
+    // Valid: Stack -> TStore
+    pub fn testStackToTStore() {
+        let stack_val: u256 = 100;
+        tstore_val = stack_val; // Valid: stack -> tstore
+    }
+
+    // Valid: Calldata -> Stack
+    pub fn testCalldataToStack(x: u256) {
+        let stack_val: u256 = x; // Valid: calldata -> stack
+    }
+
+    // Valid: Calldata -> Memory
+    pub fn testCalldataToMemory(x: u256) {
+        memory var mem_val: u256 = x; // Valid: calldata -> memory
+    }
+}
+

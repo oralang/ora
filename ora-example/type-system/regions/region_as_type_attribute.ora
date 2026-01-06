@@ -1,0 +1,45 @@
+// ============================================================================
+// Type System Test: Region as Type Attribute
+// ============================================================================
+// Tests that regions are part of the type system - every type has a region
+// ============================================================================
+
+contract RegionAsTypeAttribute {
+    // Storage variables - region is part of type
+    storage var storage_counter: u256;  // Type: u256 @storage
+    storage var storage_flag: bool;      // Type: bool @storage
+
+    // Memory variables - region is part of type
+    pub fn testMemoryTypes() {
+        memory var memory_counter: u256;  // Type: u256 @memory
+        memory var memory_flag: bool;     // Type: bool @memory
+    }
+
+    // Transient storage variables - region is part of type
+    tstore var tstore_counter: u256;  // Type: u256 @tstore
+    tstore var tstore_flag: bool;     // Type: bool @tstore
+
+    // Stack variables (default) - region is part of type
+    pub fn testStackTypes() {
+        var stack_counter: u256 = 0;  // Type: u256 @stack
+        var stack_flag: bool = true;   // Type: bool @stack
+    }
+
+    // Function parameters - calldata region is part of type
+    pub fn testCalldataTypes(x: u256, flag: bool) {
+        // x: u256 @calldata
+        // flag: bool @calldata
+        let sum: u256 = x + 10;
+    }
+
+    // Type system distinguishes between same base type, different regions
+    pub fn testRegionDistinction() {
+        storage var storage_val: u256 = 100;
+        memory var memory_val: u256 = 200;
+        
+        // These are different types even though base type is same
+        // storage_val: u256 @storage
+        // memory_val: u256 @memory
+    }
+}
+

@@ -1,0 +1,51 @@
+// ============================================================================
+// Region Effect Test: Storage Read Effect
+// ============================================================================
+// Tests that reading from storage records a read effect
+// ============================================================================
+
+contract StorageReadEffect {
+    storage var counter: u256;
+    storage var balance: u256;
+    storage balances: map[address, u256];
+
+    // Reading storage variable records read effect
+    pub fn testStorageRead() {
+        let value: u256 = counter; // Storage -> Stack: Read effect
+    }
+
+    // Reading from storage map records read effect
+    pub fn testStorageMapRead(addr: address) {
+        let bal: u256 = balances[addr]; // Storage map read: Read effect
+    }
+
+    // Multiple storage reads record multiple read effects
+    pub fn testMultipleStorageReads() {
+        let c: u256 = counter;      // Read effect 1
+        let b: u256 = balance;       // Read effect 2
+        let sum: u256 = c + b;
+    }
+
+    // Storage read in conditional records read effect
+    pub fn testStorageReadInConditional() {
+        if (counter > 0) {           // Storage read: Read effect
+            let value: u256 = counter; // Another read effect
+        }
+    }
+
+    // Storage read in loop records read effect per iteration
+    pub fn testStorageReadInLoop() {
+        var i: u256 = 0;
+        while (i < 10) {
+            let value: u256 = counter; // Read effect per iteration
+            i += 1;
+        }
+    }
+
+    // Storage read from nested map records read effect
+    pub fn testNestedMapRead(owner: address, spender: address) {
+        storage allowances: map[address, map[address, u256]];
+        let allowance: u256 = allowances[owner][spender]; // Nested read effect
+    }
+}
+

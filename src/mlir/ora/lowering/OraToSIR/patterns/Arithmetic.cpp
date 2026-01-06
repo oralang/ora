@@ -854,6 +854,42 @@ LogicalResult ConvertBytesConstantOp::matchAndRewrite(
 }
 
 // -----------------------------------------------------------------------------
+// Convert ora.hex.constant → sir.const (u256)
+// -----------------------------------------------------------------------------
+LogicalResult ConvertHexConstantOp::matchAndRewrite(
+    ora::HexConstantOp op,
+    typename ora::HexConstantOp::Adaptor,
+    ConversionPatternRewriter &rewriter) const
+{
+    auto loc = op.getLoc();
+    auto valueAttr = op.getValueAttr();
+    auto strAttr = llvm::dyn_cast<mlir::StringAttr>(valueAttr);
+    if (!strAttr)
+    {
+        return rewriter.notifyMatchFailure(op, "hex constant missing value attribute");
+    }
+
+    auto raw = strAttr.getValue();
+    if (raw.starts_with("0x") || raw.starts_with("0X"))
+        raw = raw.drop_front(2);
+
+    if (raw.empty())
+    {
+        return rewriter.notifyMatchFailure(op, "hex constant has empty value");
+    }
+
+    llvm::APInt value(256, raw, 16);
+    auto ctx = op.getContext();
+    auto u256Type = sir::U256Type::get(ctx);
+    auto u256IntType = mlir::IntegerType::get(ctx, 256, mlir::IntegerType::Unsigned);
+    auto valueAttrU256 = mlir::IntegerAttr::get(u256IntType, value);
+
+    auto constOp = rewriter.create<sir::ConstOp>(loc, u256Type, valueAttrU256);
+    rewriter.replaceOp(op, constOp.getResult());
+    return success();
+}
+
+// -----------------------------------------------------------------------------
 // Lower ora.addr.to.i160 → sir.bitcast
 // -----------------------------------------------------------------------------
 LogicalResult ConvertAddrToI160Op::matchAndRewrite(
@@ -861,7 +897,6 @@ LogicalResult ConvertAddrToI160Op::matchAndRewrite(
     typename ora::AddrToI160Op::Adaptor adaptor,
     ConversionPatternRewriter &rewriter) const
 {
-    auto loc = op.getLoc();
     Value input = adaptor.getAddr();
     Type outType = op.getType();
 
@@ -914,7 +949,19 @@ LogicalResult ConvertRefinementToBaseOp::matchAndRewrite(
     typename ora::RefinementToBaseOp::Adaptor adaptor,
     ConversionPatternRewriter &rewriter) const
 {
-    rewriter.replaceOp(op, adaptor.getValue());
+    Type convertedType = this->getTypeConverter()->convertType(op.getType());
+    if (!convertedType)
+    {
+        return rewriter.notifyMatchFailure(op, "failed to convert refinement base type");
+    }
+
+    Value value = adaptor.getValue();
+    if (value.getType() != convertedType)
+    {
+        value = rewriter.create<sir::BitcastOp>(op.getLoc(), convertedType, value);
+    }
+
+    rewriter.replaceOp(op, value);
     return success();
 }
 
@@ -1158,8 +1205,12 @@ LogicalResult ConvertArithCmpIOp::matchAndRewrite(
         out = rewriter.create<sir::OrOp>(loc, resultType, gt, eq).getResult();
         break;
     }
+    // All enum values are handled above, but keeping default for defensive programming
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wcovered-switch-default"
     default:
         return rewriter.notifyMatchFailure(op, "unsupported cmp predicate");
+#pragma clang diagnostic pop
     }
 
     rewriter.replaceOp(op, out);

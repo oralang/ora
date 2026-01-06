@@ -1,0 +1,44 @@
+// ============================================================================
+// Region Types Test: Memory Primitive Types
+// ============================================================================
+// Tests primitive types in memory region
+// ============================================================================
+
+contract MemoryPrimitive {
+    pub fn testMemoryPrimitives() {
+        // u256 in memory
+        memory var counter: u256 = 100;
+        memory var balance: u256 = 1000;
+
+        // bool in memory
+        memory var active: bool = true;
+        memory var paused: bool = false;
+
+        // address in memory
+        memory var owner: address = std.msg.sender();
+        memory var admin: address = std.msg.sender();
+
+        // string in memory
+        memory var name: string = "Token";
+        memory var symbol: string = "TKN";
+
+        // bytes in memory
+        memory var data: bytes = 0xdeadbeef;
+
+        // Use memory values
+        let sum: u256 = counter + balance;
+    }
+
+    pub fn testMemoryFromCalldata(x: u256, flag: bool, addr: address) {
+        // Calldata -> Memory
+        memory var mem_x: u256 = x;
+        memory var mem_flag: bool = flag;
+        memory var mem_addr: address = addr;
+    }
+
+    pub fn testMemoryToStack() {
+        memory var mem_value: u256 = 100;
+        let stack_value: u256 = mem_value; // Memory -> Stack
+    }
+}
+

@@ -96,7 +96,7 @@ fn getExprSpan(e: ast.Expressions.ExprNode) ast.SourceSpan {
 // SECTION 1: Entry Points
 // ============================================================================
 
-// Removed: now using table.safeFindUp() instead
+// Removed: now using table.safeFindUpOpt() instead
 
 pub fn checkFunctionBody(
     allocator: std.mem.Allocator,
@@ -236,7 +236,7 @@ fn visitExprForUnknowns(issues: *ManagedArrayList(ast.SourceSpan), table: *state
     if (!table.isScopeKnown(scope)) return; // Defensive guard
     switch (expr_node) {
         .Identifier => |id| {
-            if (table.isScopeKnown(scope) and table.safeFindUp(scope, id.name) != null) {
+            if (table.isScopeKnown(scope) and table.safeFindUpOpt(scope, id.name) != null) {
                 // ok
             } else {
                 try issues.append(id.span);
@@ -650,7 +650,7 @@ fn checkExpr(issues: *ManagedArrayList(ast.SourceSpan), table: *state.SymbolTabl
                 }
             } else if (c.callee.* == .Identifier and table.isScopeKnown(scope)) {
                 const fname = c.callee.Identifier.name;
-                if (table.safeFindUp(scope, fname)) |sym| {
+                if (table.safeFindUpOpt(scope, fname)) |sym| {
                     if (sym.typ) |ti| {
                         if (ti.ora_type) |ot| switch (ot) {
                             .function => |fnty| {
@@ -798,7 +798,7 @@ fn walkBlock(issues: *ManagedArrayList(ast.SourceSpan), table: *state.SymbolTabl
                         if (a.target.* == .Identifier) {
                             const name = a.target.Identifier.name;
                             if (table.isScopeKnown(scope)) {
-                                if (table.safeFindUp(scope, name)) |sym| {
+                                if (table.safeFindUpOpt(scope, name)) |sym| {
                                     if (!sym.mutable) try issues.append(a.span);
                                 }
                             }
@@ -848,7 +848,7 @@ fn walkBlock(issues: *ManagedArrayList(ast.SourceSpan), table: *state.SymbolTabl
                         if (ca.target.* == .Identifier) {
                             const name = ca.target.Identifier.name;
                             if (table.isScopeKnown(scope)) {
-                                if (table.safeFindUp(scope, name)) |sym| {
+                                if (table.safeFindUpOpt(scope, name)) |sym| {
                                     if (!sym.mutable) try issues.append(ca.span);
                                 }
                             }

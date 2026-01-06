@@ -5252,7 +5252,6 @@ MlirOperation oraFuncFuncOpCreate(MlirContext ctx, MlirLocation loc, const MlirN
 {
     try
     {
-        MLIRContext *context = unwrap(ctx);
         Location location = unwrap(loc);
 
         OperationState state(location, "func.func");
@@ -5320,7 +5319,6 @@ MlirOperation oraOperationCreate(MlirContext ctx, MlirLocation loc, MlirStringRe
 {
     try
     {
-        MLIRContext *context = unwrap(ctx);
         Location location = unwrap(loc);
         StringRef nameRef = unwrap(name);
 

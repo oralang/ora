@@ -1051,7 +1051,26 @@ pub fn createInitializedStruct(
     fields: []lib.ast.Expressions.AnonymousStructField,
     span: lib.ast.SourceSpan,
 ) c.MlirValue {
-    const struct_ty = c.oraIntegerTypeCreate(self.ctx, constants.DEFAULT_INTEGER_BITS);
+    const struct_ty = blk: {
+        if (self.current_function_return_type_info) |ret_info| {
+            if (ret_info.ora_type) |ora_type| {
+                switch (ora_type) {
+                    .anonymous_struct => |ret_fields| {
+                        if (matchesAnonymousStructFields(fields, ret_fields)) {
+                            break :blk self.type_mapper.mapAnonymousStructType(ret_fields);
+                        }
+                    },
+                    else => {},
+                }
+            }
+        }
+        if (deriveAnonymousStructFields(fields)) |derived_fields| {
+            defer std.heap.page_allocator.free(derived_fields.types);
+            defer std.heap.page_allocator.free(derived_fields.fields);
+            break :blk self.type_mapper.mapAnonymousStructType(derived_fields.fields);
+        }
+        break :blk c.oraIntegerTypeCreate(self.ctx, constants.DEFAULT_INTEGER_BITS);
+    };
 
     var field_values = std.ArrayList(c.MlirValue){};
     defer field_values.deinit(std.heap.page_allocator);
@@ -1067,6 +1086,73 @@ pub fn createInitializedStruct(
     const struct_op = self.ora_dialect.createStructInit(field_values.items, struct_ty, self.fileLoc(span));
     h.appendOp(self.block, struct_op);
     return h.getResult(struct_op, 0);
+}
+
+fn matchesAnonymousStructFields(
+    fields: []lib.ast.Expressions.AnonymousStructField,
+    type_fields: []const lib.ast.type_info.AnonymousStructFieldType,
+) bool {
+    if (fields.len != type_fields.len) return false;
+    for (fields, 0..) |field, i| {
+        if (!std.mem.eql(u8, field.name, type_fields[i].name)) return false;
+    }
+    return true;
+}
+
+const DerivedAnonymousFields = struct {
+    fields: []lib.ast.type_info.AnonymousStructFieldType,
+    types: []lib.ast.type_info.OraType,
+};
+
+fn deriveAnonymousStructFields(
+    fields: []lib.ast.Expressions.AnonymousStructField,
+) ?DerivedAnonymousFields {
+    if (fields.len == 0) return null;
+    const types = std.heap.page_allocator.alloc(lib.ast.type_info.OraType, fields.len) catch return null;
+    const anon_fields = std.heap.page_allocator.alloc(lib.ast.type_info.AnonymousStructFieldType, fields.len) catch {
+        std.heap.page_allocator.free(types);
+        return null;
+    };
+
+    for (fields, 0..) |field, i| {
+        const type_info = getExprTypeInfo(field.value) orelse {
+            std.heap.page_allocator.free(types);
+            std.heap.page_allocator.free(anon_fields);
+            return null;
+        };
+        if (type_info.ora_type) |ora_type| {
+            types[i] = ora_type;
+            anon_fields[i] = .{ .name = field.name, .typ = &types[i] };
+        } else {
+            std.heap.page_allocator.free(types);
+            std.heap.page_allocator.free(anon_fields);
+            return null;
+        }
+    }
+
+    return .{ .fields = anon_fields, .types = types };
+}
+
+fn getExprTypeInfo(expr: *const lib.ast.Expressions.ExprNode) ?lib.ast.Types.TypeInfo {
+    return switch (expr.*) {
+        .Identifier => |id| id.type_info,
+        .Literal => |lit| switch (lit) {
+            .Integer => |int_lit| int_lit.type_info,
+            .String => |str_lit| str_lit.type_info,
+            .Bool => |bool_lit| bool_lit.type_info,
+            .Address => |addr_lit| addr_lit.type_info,
+            .Hex => |hex_lit| hex_lit.type_info,
+            .Binary => |bin_lit| bin_lit.type_info,
+            .Character => |char_lit| char_lit.type_info,
+            .Bytes => |bytes_lit| bytes_lit.type_info,
+        },
+        .Binary => |bin| bin.type_info,
+        .Unary => |unary| unary.type_info,
+        .Call => |call| call.type_info,
+        .FieldAccess => |fa| fa.type_info,
+        .Range => |range| range.type_info,
+        else => null,
+    };
 }
 
 /// Create expression capture operation

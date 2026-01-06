@@ -1,0 +1,78 @@
+// ============================================================================
+// Formal Verification: Assertions
+// ============================================================================
+// Tests runtime and ghost assertions
+// ============================================================================
+
+contract Assertions {
+    storage var balance: u256 = 0;
+
+    // Runtime assertion
+    pub fn checkBalance()
+        requires(balance >= 0)
+    {
+        assert(balance >= 0, "Balance must be non-negative");
+    }
+
+    // Runtime assertion with expression
+    pub fn checkSum(a: u256, b: u256)
+        requires(a >= 0)
+        requires(b >= 0)
+    {
+        let sum: u256 = a + b;
+        assert(sum >= a, "Sum must be >= a");
+        assert(sum >= b, "Sum must be >= b");
+    }
+
+    // Ghost assertion (for verification only, not in bytecode)
+    // Note: Ghost assertions may need different syntax - using regular assert for now
+    pub fn verifyInvariant()
+        requires(balance >= 0)
+    {
+        // Ghost assertion would be: ghost assert(balance >= 0, "Balance invariant");
+        // For now, using regular assert
+        assert(balance >= 0, "Balance invariant");
+    }
+
+    // Assertion with refinement type
+    pub fn checkRefinement(value: MinValue<u256, 100>)
+        requires(value >= 100)
+    {
+        let base_value: u256 = value;
+        assert(base_value >= 100, "Value must be >= 100");
+    }
+
+    // Assertion in conditional
+    pub fn conditionalCheck(condition: bool, value: u256)
+        requires(value >= 0)
+    {
+        if (condition) {
+            assert(value >= 0, "Value must be non-negative");
+        }
+    }
+
+    // Assertion in loop
+    pub fn loopAssertion(n: u256)
+        requires(n <= 100)
+    {
+        var i: u256 = 0;
+        while (i < n) {
+            assert(i < n, "Loop invariant");
+            i = i + 1;
+        }
+    }
+
+    // Multiple assertions
+    pub fn multipleChecks(a: u256, b: u256, c: u256)
+        requires(a > 0)
+        requires(b > 0)
+        requires(c > 0)
+    {
+        assert(a > 0, "a must be positive");
+        assert(b > 0, "b must be positive");
+        assert(c > 0, "c must be positive");
+        let product: u256 = a * b * c;
+        assert(product > 0, "Product must be positive");
+    }
+}
+

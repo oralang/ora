@@ -1,0 +1,46 @@
+// ============================================================================
+// Region Coercion Test: Implicit Storage to Stack
+// ============================================================================
+// Tests that storage -> stack transitions are allowed implicitly
+// ============================================================================
+
+contract ImplicitStorageToStack {
+    storage var counter: u256;
+    storage var balance: u256;
+    storage balances: map[address, u256];
+
+    // Implicit storage -> stack in assignment
+    pub fn testImplicitStorageToStack() {
+        let stack_value: u256 = counter; // Implicit: storage -> stack
+    }
+
+    // Implicit storage -> stack in arithmetic
+    pub fn testImplicitStorageInArithmetic() {
+        let sum: u256 = counter + balance; // Implicit: storage -> stack
+    }
+
+    // Implicit storage -> stack in comparison
+    pub fn testImplicitStorageInComparison() {
+        if (counter > 0) { // Implicit: storage -> stack
+            // ...
+        }
+    }
+
+    // Implicit storage -> stack in return
+    pub fn testImplicitStorageInReturn() -> u256 {
+        return counter; // Implicit: storage -> stack
+    }
+
+    // Implicit storage map -> stack
+    pub fn testImplicitStorageMap(addr: address) {
+        let bal: u256 = balances[addr]; // Implicit: storage -> stack
+    }
+
+    // Multiple implicit storage -> stack
+    pub fn testMultipleImplicitStorage() {
+        let c: u256 = counter; // Implicit
+        let b: u256 = balance;  // Implicit
+        let total: u256 = c + b;
+    }
+}
+

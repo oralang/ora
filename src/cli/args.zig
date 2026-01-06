@@ -17,7 +17,7 @@ pub const CliOptions = struct {
     cpp_lowering_stub: bool = false,
     canonicalize_mlir: bool = true,
     analyze_state: bool = false,
-    verify_z3: bool = false,
+    verify_z3: bool = true,
     debug: bool = false,
     mlir_opt_level: ?[]const u8 = null,
     // fmt options
@@ -69,6 +69,9 @@ pub fn parseArgs(args: []const []const u8) ParseError!CliOptions {
             i += 1;
         } else if (std.mem.eql(u8, arg, "--verify")) {
             opts.verify_z3 = true;
+            i += 1;
+        } else if (std.mem.eql(u8, arg, "--no-verify")) {
+            opts.verify_z3 = false;
             i += 1;
         } else if (std.mem.eql(u8, arg, "--debug")) {
             opts.debug = true;

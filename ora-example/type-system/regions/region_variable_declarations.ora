@@ -1,0 +1,52 @@
+// ============================================================================
+// Type System Test: Region in Variable Declarations
+// ============================================================================
+// Tests that region is specified in variable declarations
+// ============================================================================
+
+contract RegionVariableDeclarations {
+    // Storage variables - explicit storage region
+    storage var storage_counter: u256;
+    storage var storage_flag: bool;
+    storage var storage_address: address;
+
+    // Transient storage variables - explicit tstore region
+    tstore var tstore_counter: u256;
+    tstore var tstore_flag: bool;
+
+    // Memory variables - explicit memory region (in functions)
+    pub fn testMemoryDeclarations() {
+        memory var memory_counter: u256;
+        memory var memory_flag: bool;
+        memory_counter = 100;
+    }
+
+    // Stack variables - implicit stack region (default)
+    pub fn testStackDeclarations() {
+        var stack_counter: u256 = 0;  // Implicit @stack
+        var stack_flag: bool = true;   // Implicit @stack
+    }
+
+    // Region is part of type - same base type, different regions
+    pub fn testRegionInType() {
+        storage var storage_val: u256 = 100;  // u256 @storage
+        memory var memory_val: u256 = 200;     // u256 @memory
+        var stack_val: u256 = 300;             // u256 @stack
+        
+        // Type system distinguishes these as different types
+    }
+
+    // Initialization with region transitions
+    pub fn testRegionInitialization() {
+        // Storage -> Memory
+        memory var mem_val: u256 = storage_counter;
+        
+        // Storage -> Stack
+        var stack_val: u256 = storage_counter;
+        
+        // Stack -> Storage
+        var temp: u256 = 100;
+        storage_counter = temp;
+    }
+}
+

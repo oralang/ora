@@ -1,0 +1,52 @@
+// ============================================================================
+// Type System Test: Refinements in Function Types
+// ============================================================================
+// Tests refinement types in function parameters and return types
+// ============================================================================
+
+contract RefinementInFunctions {
+    error InvalidAmount(amount: u256);
+    // Refinement type in function parameter
+    pub fn testRefinementParameter(amount: MinValue<u256, 100>) {
+        // Parameter type: MinValue<u256, 100>
+        let value: u256 = amount;
+    }
+
+    // Refinement type in function return
+    pub fn testRefinementReturn() -> MinValue<u256, 100> {
+        return 200; // Return type: MinValue<u256, 100>
+    }
+
+    // Multiple refinement parameters
+    pub fn testMultipleRefinements(
+        amount: MinValue<u256, 100>,
+        limit: MaxValue<u256, 1000>,
+        rate: InRange<u256, 0, 100>,
+        addr: NonZeroAddress
+    ) {
+        let sum: u256 = amount + rate;
+    }
+
+    // Refinement in return with parameter
+    pub fn testRefinementReturnFromParam(value: MinValue<u256, 200>) -> MinValue<u256, 100> {
+        // More restrictive -> Less restrictive (subtyping)
+        return value;
+    }
+
+    // Refinement with requires clause
+    pub fn testRefinementWithRequires(amount: MinValue<u256, 100>)
+        requires(amount >= 100)
+    {
+        // Requires clause helps SMT prove guard
+        let value: MinValue<u256, 100> = amount;
+    }
+
+    // Refinement in error union return
+    // Note: Testing refinement types in error unions - using base type for error union
+    pub fn testRefinementErrorUnion(amount: MinValue<u256, 100>) -> !u256 | InvalidAmount {
+        // Convert refinement to base type for error union
+        let base_amount: u256 = amount;
+        return base_amount;
+    }
+}
+

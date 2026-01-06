@@ -24,9 +24,9 @@ pub fn parseAssertStatement(parser: *StatementParser) common.ParserError!ast.Sta
     const assert_token = parser.base.previous();
     _ = try parser.base.consume(.LeftParen, "Expected '(' after 'assert'");
 
-    // parse the condition expression
+    // parse the condition expression (disallow comma so we can parse message separately)
     parser.syncSubParsers();
-    const condition = try parser.expr_parser.parseExpression();
+    const condition = try parser.expr_parser.parseExpressionNoComma();
     parser.updateFromSubParser(parser.expr_parser.base.current);
 
     // optional message: assert(condition, "message")

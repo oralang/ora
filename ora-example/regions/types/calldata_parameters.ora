@@ -1,0 +1,46 @@
+// ============================================================================
+// Region Types Test: Calldata Parameters
+// ============================================================================
+// Tests that function parameters are calldata region
+// ============================================================================
+
+contract CalldataParameters {
+    // Function parameters are calldata region
+    pub fn testCalldataParams(x: u256, flag: bool, addr: address, name: string, data: bytes) {
+        // All parameters are calldata region (read-only)
+        
+        // Can read from calldata
+        let stack_x: u256 = x; // Calldata -> Stack
+        let stack_flag: bool = flag; // Calldata -> Stack
+        let stack_addr: address = addr; // Calldata -> Stack
+        
+        // Can copy calldata to other regions
+        memory var mem_x: u256 = x; // Calldata -> Memory
+        storage var storage_x: u256;
+        storage_x = x; // Calldata -> Storage (via stack)
+    }
+
+    // Cannot write to calldata parameters
+    pub fn testCalldataReadOnly(x: u256) {
+        // ERROR: Cannot write to calldata
+        // x = 100; // Invalid: calldata is read-only
+    }
+
+    // Calldata in arithmetic
+    pub fn testCalldataArithmetic(x: u256, y: u256) {
+        let sum: u256 = x + y; // Calldata reads
+    }
+
+    // Calldata in conditionals
+    pub fn testCalldataConditional(x: u256) {
+        if (x > 0) { // Calldata read
+            let value: u256 = x; // Calldata read
+        }
+    }
+
+    // Calldata in return
+    pub fn testCalldataReturn(x: u256) -> u256 {
+        return x; // Calldata -> Stack -> Return
+    }
+}
+

@@ -3,16 +3,18 @@
 // ==========================================
 // This file tests error declarations syntax
 
-// Simple error without parameters
-error InvalidInput;
+contract ErrorDeclarationsTest {
+    // Simple error without parameters
+    error InvalidInput;
 
-// Error with parameters
-error InsufficientBalance(required: u256, available: u256);
+    // Error with parameters
+    error InsufficientBalance(required: u256, available: u256);
 
-// Multiple errors
-error Unauthorized(caller: address, required: address);
-error TransferFailed;
-error InvalidAddress;
+    // Multiple errors
+    error Unauthorized(caller: address, required: address);
+    error TransferFailed;
+    error InvalidAddress;
 
-// Documentation comments on errors
-error DeadlineExpired(deadline: u256, current: u256);
+    // Documentation comments on errors
+    error DeadlineExpired(deadline: u256, current: u256);
+}

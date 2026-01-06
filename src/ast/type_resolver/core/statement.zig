@@ -260,8 +260,7 @@ fn resolveVariableDecl(
     if (self.current_scope) |scope| {
         // find the actual scope where the symbol is stored (could be in a block scope)
         // this ensures we update it in the correct scope
-        const semantics_state = @import("../../../semantics/state.zig");
-        if (semantics_state.SymbolTable.findScopeContaining(scope, var_decl.name)) |found| {
+        if (self.symbol_table.findScopeContainingSafe(scope, var_decl.name)) |found| {
             // found the symbol - update it in the scope where it's actually stored
             const old_symbol = &found.scope.symbols.items[found.idx];
             const type_info = @import("../../type_info.zig");
@@ -752,6 +751,21 @@ fn validateSwitchPattern(
         },
         .EnumValue => |ev| {
             // validate enum value matches condition enum type
+            if (condition_type.category == .Error or condition_type.category == .ErrorUnion) {
+                // error switch: allow bare error tags (no enum name) that resolve to declared errors
+                if (ev.enum_name.len == 0) {
+                    if (self.symbol_table.safeFindUpOpt(&self.symbol_table.root, ev.variant_name)) |sym| {
+                        if (sym.kind == .Error) {
+                            return;
+                        }
+                    }
+                }
+                log.debug(
+                    "[type_resolver] Switch error pattern did not match declared error: {s}\n",
+                    .{ ev.variant_name },
+                );
+                return TypeResolutionError.TypeMismatch;
+            }
             if (condition_type.ora_type) |cond_ora_type| {
                 switch (cond_ora_type) {
                     .enum_type => |enum_name| {

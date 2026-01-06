@@ -25,7 +25,7 @@ const MlirOptions = struct {
     opt_level: ?[]const u8,
     output_dir: ?[]const u8,
     canonicalize: bool = true,
-    verify_z3: bool = false,
+    verify_z3: bool = true,
     cpp_lowering_stub: bool = false,
 
     fn getOptimizationLevel(self: MlirOptions) OptimizationLevel {
@@ -220,7 +220,8 @@ fn printUsage() !void {
     try stdout.print("  --cpp-lowering-stub    - Use experimental C++ lowering stub (contract+func)\n", .{});
     try stdout.print("\nAnalysis Options:\n", .{});
     try stdout.print("  --analyze-state        - Analyze storage reads/writes per function\n", .{});
-    try stdout.print("  --verify               - Run Z3 verification on MLIR annotations\n", .{});
+    try stdout.print("  --verify               - Run Z3 verification on MLIR annotations (default)\n", .{});
+    try stdout.print("  --no-verify            - Disable Z3 verification\n", .{});
     try stdout.print("  --debug                - Enable compiler debug output\n", .{});
     try stdout.flush();
 }
@@ -1006,14 +1007,19 @@ fn generateMlirOutput(allocator: std.mem.Allocator, ast_nodes: []lib.AstNode, fi
         }
     }
 
+    var verification_result_opt: ?@import("z3/errors.zig").VerificationResult = null;
+    defer {
+        if (verification_result_opt) |*vr| {
+            vr.deinit();
+        }
+    }
     // run Z3 verification pass (formal verification)
     if (mlir_options.verify_z3) {
         const z3_verification = @import("z3/verification.zig");
         var verifier = try z3_verification.VerificationPass.init(mlir_allocator);
         defer verifier.deinit();
 
-        var verification_result = try verifier.runVerificationPass(final_module);
-        defer verification_result.deinit();
+        const verification_result = try verifier.runVerificationPass(final_module);
 
         if (!verification_result.success) {
             try stdout.print("❌ Z3 verification failed with {d} error(s):\n", .{verification_result.errors.items.len});
@@ -1029,17 +1035,7 @@ fn generateMlirOutput(allocator: std.mem.Allocator, ast_nodes: []lib.AstNode, fi
             std.process.exit(1);
         }
 
-        if (mlir_options.emit_mlir_sir) {
-            const refinement_guards = @import("mlir/refinement_guards.zig");
-            refinement_guards.cleanupRefinementGuards(h.ctx, final_module, &verification_result.proven_guard_ids);
-        }
-    }
-
-    if (!mlir_options.verify_z3 and mlir_options.emit_mlir_sir) {
-        var empty_guards = std.StringHashMap(void).init(mlir_allocator);
-        defer empty_guards.deinit();
-        const refinement_guards = @import("mlir/refinement_guards.zig");
-        refinement_guards.cleanupRefinementGuards(h.ctx, final_module, &empty_guards);
+        verification_result_opt = verification_result;
     }
 
     // run canonicalization on Ora MLIR before printing or conversion, unless
@@ -1050,6 +1046,17 @@ fn generateMlirOutput(allocator: std.mem.Allocator, ast_nodes: []lib.AstNode, fi
         if (!c.oraCanonicalizeOraMLIR(h.ctx, final_module)) {
             try stdout.print("Warning: Ora MLIR canonicalization failed\n", .{});
             try stdout.flush();
+        }
+    }
+
+    if (mlir_options.emit_mlir_sir) {
+        const refinement_guards = @import("mlir/refinement_guards.zig");
+        if (verification_result_opt) |*vr| {
+            refinement_guards.cleanupRefinementGuards(h.ctx, final_module, &vr.proven_guard_ids);
+        } else {
+            var empty_guards = std.StringHashMap(void).init(mlir_allocator);
+            defer empty_guards.deinit();
+            refinement_guards.cleanupRefinementGuards(h.ctx, final_module, &empty_guards);
         }
     }
 

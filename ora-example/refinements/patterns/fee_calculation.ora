@@ -14,21 +14,21 @@ contract FeeCalculation {
     
     /// Calculate fee from amount using basis points
     /// Returns u256 (not BasisPoints) since result may not be in [0, 10000]
-    fn calculateFee(amount: MinValue<u256, 1>, rate: BasisPoints<u256>) -> u256 {
+    fn calculateFee(amount: MinValue<u256, 1>) -> u256 {
         // fee = (amount * rate) / 10000
         // Note: Cannot use Exact here - need to handle division properly
-        return (amount * rate) / 10000;
+        return (amount * transfer_fee_rate) / 10000;
     }
     
     /// Calculate total required (amount + fee)
     /// Returns MinValue since amount is MinValue and fee >= 0
     fn calculateTotalRequired(amount: MinValue<u256, 1>) -> MinValue<u256, 1> {
-        const fee: u256 = calculateFee(amount, transfer_fee_rate);
+        const fee: u256 = calculateFee(amount);
         const total: u256 = amount + fee; // MinValue + u256 = u256 (conservative)
         
-        // Need to ensure total >= 1 for MinValue<u256, 1>
-        // In practice, this should be guaranteed if amount >= 1 and fee >= 0
-        return total; // May need guard or assertion
+        // Enforce MinValue at the boundary to insert a runtime guard if needed.
+        const total_min: MinValue<u256, 1> = total;
+        return total_min;
     }
     
     // ============================================================================

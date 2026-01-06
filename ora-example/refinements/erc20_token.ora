@@ -86,7 +86,9 @@ contract ERC20Token {
         
         // Check minimum transfer amount
         if (amount < min_transfer) {
-            return AmountBelowMinimum(amount, min_transfer);
+            const amount_value: u256 = amount;
+            const min_value: u256 = min_transfer;
+            return AmountBelowMinimum(amount_value, min_value);
         }
         
         // Get sender balance
@@ -97,7 +99,8 @@ contract ERC20Token {
         
         // Check sufficient balance
         if (sender_balance < total_required) {
-            return InsufficientBalance(sender_balance, total_required);
+            const required_value: u256 = total_required;
+            return InsufficientBalance(sender_balance, required_value);
         }
         
         // Execute transfer with fees
@@ -116,14 +119,17 @@ contract ERC20Token {
         // All parameters are refined types - compile-time and runtime validated
         
         if (amount < min_transfer) {
-            return AmountBelowMinimum(amount, min_transfer);
+            const amount_value: u256 = amount;
+            const min_value: u256 = min_transfer;
+            return AmountBelowMinimum(amount_value, min_value);
         }
         
         const from_balance = getBalance(from);
         const total_required = calculateTotalRequired(amount);
         
         if (from_balance < total_required) {
-            return InsufficientBalance(from_balance, total_required);
+            const required_value: u256 = total_required;
+            return InsufficientBalance(from_balance, required_value);
         }
         
         executeTransfer(from, to, amount);
@@ -159,7 +165,8 @@ contract ERC20Token {
         const sender_balance = getBalance(std.transaction.sender);
         
         if (sender_balance < amount) {
-            return InsufficientBalance(sender_balance, amount);
+            const amount_value: u256 = amount;
+            return InsufficientBalance(sender_balance, amount_value);
         }
         
         // Calculate burn amount (may include burn rate)
@@ -182,42 +189,32 @@ contract ERC20Token {
         // transfer_fee_rate is BasisPoints<u256> (0-10000)
         // Result is guaranteed to be >= amount (since fee >= 0)
         
-        const fee = calculateFee(amount, transfer_fee_rate);
-        const total = amount + fee; // MinValue + u256 = MinValue (type inference)
+        const fee_rate: u256 = transfer_fee_rate;
+        const exact_amount: Exact<u256> = amount;
+        const exact_rate: Exact<u256> = fee_rate;
+        const fee: u256 = (exact_amount * exact_rate) / 10000;
+        const total_raw: u256 = amount + fee; // MinValue + u256 = u256 (conservative)
+        const total: MinValue<u256, 1> = total_raw;
         
         // Type system ensures total >= amount >= 1, so result is MinValue<u256, 1>
         return total;
-    }
-    
-    /// Calculate fee using basis points
-    /// Demonstrates: BasisPoints arithmetic preserves type safety
-    fn calculateFee(
-        amount: MinValue<u256, 1>,
-        rate: BasisPoints<u256>
-    ) -> u256 {
-        // rate is in [0, 10000], so fee is in [0, amount]
-        // Using Exact<u256> for precise division
-        const exact_amount: Exact<u256> = amount;
-        const exact_rate: Exact<u256> = rate;
-        
-        // Exact division ensures no rounding errors
-        // fee = (amount * rate) / 10000
-        const fee = (exact_amount * exact_rate) / 10000;
-        
-        return fee;
     }
     
     /// Calculate burn amount with burn rate
     fn calculateBurnAmount(amount: MinValue<u256, 1>) -> MinValue<u256, 1> {
         // If burn_rate > 0, apply it; otherwise burn full amount
         if (burn_rate > 0) {
-            const burn_fee = calculateFee(amount, burn_rate);
-            const actual_burn = amount - burn_fee; // MinValue - u256 = MinValue (conservative)
+            const burn_rate_value: u256 = burn_rate;
+            const exact_amount: Exact<u256> = amount;
+            const exact_rate: Exact<u256> = burn_rate_value;
+            const burn_fee: u256 = (exact_amount * exact_rate) / 10000;
+            const actual_burn_raw: u256 = amount - burn_fee;
             
             // Ensure we don't burn more than available
-            if (actual_burn < 1) {
+            if (actual_burn_raw < 1) {
                 return 1; // Minimum burn amount
             }
+            const actual_burn: MinValue<u256, 1> = actual_burn_raw;
             return actual_burn;
         }
         return amount;
@@ -306,4 +303,3 @@ contract ERC20Token {
         setBalance(to, getBalance(to) + amount);
     }
 }
-

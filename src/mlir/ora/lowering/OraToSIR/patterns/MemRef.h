@@ -45,5 +45,16 @@ namespace mlir
                 ConversionPatternRewriter &rewriter) const override;
         };
 
+        class ConvertMemRefDimOp : public OpConversionPattern<mlir::memref::DimOp>
+        {
+        public:
+            using OpConversionPattern::OpConversionPattern;
+
+            LogicalResult matchAndRewrite(
+                mlir::memref::DimOp op,
+                typename mlir::memref::DimOp::Adaptor adaptor,
+                ConversionPatternRewriter &rewriter) const override;
+        };
+
     } // namespace ora
 } // namespace mlir

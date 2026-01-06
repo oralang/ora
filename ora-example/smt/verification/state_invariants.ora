@@ -1,0 +1,75 @@
+// ============================================================================
+  // Formal Verification: State Invariants
+  // ============================================================================
+  // Tests contract-level state invariants
+  // ============================================================================
+
+  contract StateInvariants {
+    storage var balance: u256 = 0;
+    storage var max_balance: u256 = 1000;
+    storage var min_balance: u256 = 0;
+
+    // State invariant: balance within bounds
+    invariant balance_ge_min(balance >= min_balance);
+    invariant balance_le_max(balance <= max_balance);
+
+    // Function that preserves invariant
+    pub fn deposit(amount: u256)
+        requires(amount > 0)
+        requires(balance + amount <= max_balance)
+        ensures(balance >= min_balance)
+        ensures(balance <= max_balance)
+    {
+        balance = balance + amount;
+    }
+
+    // Function that preserves invariant
+    pub fn withdraw(amount: u256)
+        requires(amount > 0)
+        requires(amount <= balance)
+        requires(balance - amount >= min_balance)
+        ensures(balance >= min_balance)
+        ensures(balance <= max_balance)
+    {
+        balance = balance - amount;
+    }
+
+    // Function that preserves invariant with refinement
+    pub fn setBalance(new_balance: InRange<u256, 0, 1000>)
+        requires(new_balance >= min_balance)
+        requires(new_balance <= max_balance)
+        ensures(balance >= min_balance)
+        ensures(balance <= max_balance)
+    {
+        let base_balance: u256 = new_balance;
+        balance = base_balance;
+    }
+}
+
+contract StateInvariantsMultiple {
+    storage var x: u256 = 0;
+    storage var y: u256 = 0;
+    storage var z: u256 = 0;
+
+    // Multiple invariants
+    invariant x_ge_0(x >= 0);
+    invariant y_ge_0(y >= 0);
+    invariant z_ge_0(z >= 0);
+    invariant sum_le_1000(x + y + z <= 1000);
+
+    // Function preserving all invariants
+    pub fn update(x_val: u256, y_val: u256, z_val: u256)
+        requires(x_val >= 0)
+        requires(y_val >= 0)
+        requires(z_val >= 0)
+        requires(x_val + y_val + z_val <= 1000)
+        ensures(x >= 0)
+        ensures(y >= 0)
+        ensures(z >= 0)
+        ensures(x + y + z <= 1000)
+    {
+        x = x_val;
+        y = y_val;
+        z = z_val;
+    }
+}

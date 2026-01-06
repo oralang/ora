@@ -1,0 +1,24 @@
+// ============================================================================
+// Region Transition Test: Storage to Calldata (Invalid)
+// ============================================================================
+// Tests that storage values cannot be assigned to calldata variables.
+// This is an invalid transition: storage -> calldata
+// Calldata is read-only and cannot be written to.
+// ============================================================================
+
+contract StorageToCalldata {
+    storage var stored_value: u256;
+
+    pub fn testInvalidStorageToCalldata(x: u256) {
+        // ERROR: Cannot assign storage to calldata parameter
+        // This should fail at compile time
+        // x = stored_value; // Invalid: storage -> calldata
+    }
+
+    pub fn testInvalidStorageToCalldataVar(x: u256) {
+        // ERROR: Cannot create calldata variable from storage
+        // This should fail at compile time
+        // calldata var calldata_var: u256 = stored_value; // Invalid
+    }
+}
+

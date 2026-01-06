@@ -1,0 +1,93 @@
+// ============================================================================
+// Formal Verification: Assume and Havoc
+// ============================================================================
+// Tests assume statements and havoc operations for formal verification
+// ============================================================================
+
+contract AssumeHavoc {
+    // Assume for verification
+    pub fn assumeExample(x: u256) -> u256
+        requires(x > 0)
+    {
+        assume(x < 100);
+        return x * 2;
+    }
+
+    // Assume with refinement
+    pub fn assumeRefinement(value: u256)
+        requires(value >= 0)
+    {
+        assume(value >= 100);
+        let refined: MinValue<u256, 100> = value;
+        let _: u256 = refined;
+    }
+
+    // Assume in conditional
+    pub fn assumeConditional(x: u256)
+        requires(x >= 0)
+    {
+        if (x > 50) {
+            assume(x <= 100);
+            let _: InRange<u256, 50, 100> = x;
+        }
+    }
+
+    // Havoc for modeling unknown state
+    pub fn havocExample() -> u256 {
+        var y: u256 = 10;
+        havoc y;
+        // After havoc, y can be any value
+        return y;
+    }
+
+    // Havoc with storage
+    storage var state: u256 = 0;
+
+    pub fn havocStorage()
+        ensures(state >= 0)
+    {
+        havoc state;
+        // After havoc, state can be any value
+        // But ensures clause must still hold
+        if (state < 0) {
+            state = 0;
+        }
+    }
+
+    // Multiple havoc
+    pub fn multipleHavoc() -> u256 {
+        var x: u256 = 5;
+        var y: u256 = 10;
+        havoc x;
+        havoc y;
+        return x + y;
+    }
+
+    // Assume after havoc
+    pub fn assumeAfterHavoc() -> u256 {
+        var x: u256 = 0;
+        havoc x;
+        assume(x >= 0);
+        assume(x <= 100);
+        return x;
+    }
+
+    // Havoc in loop (modeling non-deterministic loop)
+    pub fn havocLoop(n: u256) -> u256
+        requires(n <= 10)
+    {
+        var sum: u256 = 0;
+        var i: u256 = 0;
+        
+        while (i < n) {
+            var value: u256 = 0;
+            havoc value;
+            assume(value <= 100);
+            sum = sum + value;
+            i = i + 1;
+        }
+        
+        return sum;
+    }
+}
+

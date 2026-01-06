@@ -1,0 +1,47 @@
+// ============================================================================
+// Region Effect Test: TStore Read Effect
+// ============================================================================
+// Tests that reading from transient storage records a read effect
+// ============================================================================
+
+contract TStoreReadEffect {
+    tstore var temp_counter: u256;
+    tstore var temp_flag: bool;
+
+    // Reading tstore variable records read effect
+    pub fn testTStoreRead() {
+        let value: u256 = temp_counter; // TStore -> Stack: Read effect
+    }
+
+    // Multiple tstore reads record multiple read effects
+    pub fn testMultipleTStoreReads() {
+        let c: u256 = temp_counter; // Read effect 1
+        let f: bool = temp_flag;     // Read effect 2
+    }
+
+    // TStore read in conditional records read effect
+    pub fn testTStoreReadInConditional() {
+        if (temp_counter > 0) { // TStore read: Read effect
+            let value: u256 = temp_counter; // Another read effect
+        }
+    }
+
+    // TStore read in loop records read effect per iteration
+    pub fn testTStoreReadInLoop() {
+        var i: u256 = 0;
+        while (i < 10) {
+            let value: u256 = temp_counter; // Read effect per iteration
+            i += 1;
+        }
+    }
+
+    // TStore read for reentrancy protection pattern
+    pub fn testReentrancyPattern() {
+        if (temp_counter == 0) { // TStore read: Read effect
+            temp_counter = 1; // Set reentrancy guard
+            // Do work...
+            temp_counter = 0; // Clear guard
+        }
+    }
+}
+

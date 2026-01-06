@@ -55,6 +55,7 @@ public:
         patterns.add<ConvertMemRefLoadOp>(typeConverter, module.getContext());
         patterns.add<ConvertMemRefStoreOp>(typeConverter, module.getContext());
         patterns.add<ConvertMemRefAllocOp>(typeConverter, module.getContext());
+        patterns.add<ConvertMemRefDimOp>(typeConverter, module.getContext());
 
         ConversionTarget target(*module.getContext());
         target.addLegalDialect<mlir::BuiltinDialect>();
@@ -203,6 +204,7 @@ public:
             patterns.add<ConvertConstOp>(typeConverter, ctx);
             patterns.add<ConvertStringConstantOp>(typeConverter, ctx);
             patterns.add<ConvertBytesConstantOp>(typeConverter, ctx);
+            patterns.add<ConvertHexConstantOp>(typeConverter, ctx);
             patterns.add<ConvertAddrToI160Op>(typeConverter, ctx);
             patterns.add<ConvertI160ToAddrOp>(typeConverter, ctx);
             patterns.add<ConvertOldOp>(typeConverter, ctx);
@@ -227,6 +229,8 @@ public:
             patterns.add<ConvertMemRefStoreOp>(typeConverter, ctx, PatternBenefit(10));
         if (enable_memref_load)
             patterns.add<ConvertMemRefLoadOp>(typeConverter, ctx);
+        if (enable_memref_load)
+            patterns.add<ConvertMemRefDimOp>(typeConverter, ctx);
         if (enable_memref_alloc)
             patterns.add<ConvertMemRefAllocOp>(typeConverter, ctx);
         if (enable_storage)
@@ -249,6 +253,8 @@ public:
             patterns.add<ConvertContinueOp>(typeConverter, ctx);
             patterns.add<ConvertSwitchExprOp>(typeConverter, ctx);
             patterns.add<ConvertSwitchOp>(typeConverter, ctx);
+            patterns.add<ConvertTryCatchOp>(typeConverter, ctx);
+            patterns.add<ConvertRangeOp>(typeConverter, ctx);
         }
         patterns.add<EraseOpByName>("ora.enum.decl", ctx);
         patterns.add<EraseOpByName>("ora.error.decl", ctx);
@@ -379,7 +385,9 @@ public:
         RewritePatternSet cleanup(ctx);
         cleanup.add<FoldRedundantBitcastOp>(ctx);
         cleanup.add<FoldAndOneOp>(ctx);
-        if (failed(applyPatternsAndFoldGreedily(module, std::move(cleanup))))
+        GreedyRewriteConfig config;
+        config.enableFolding();
+        if (failed(applyPatternsGreedily(module, std::move(cleanup), config)))
         {
             DBG("ERROR: Post-conversion cleanup failed!");
             signalPassFailure();

@@ -22,7 +22,11 @@ pub fn lookupIdentifier(
     name: []const u8,
 ) ?TypeInfo {
     const scope = if (self.current_scope) |s| s else &self.symbol_table.root;
-    const symbol = self.symbol_table.safeFindUp(scope, name) orelse return null;
+    var symbol = self.symbol_table.safeFindUpOpt(scope, name);
+    if (symbol == null and scope != &self.symbol_table.root) {
+        symbol = self.symbol_table.safeFindUpOpt(&self.symbol_table.root, name);
+    }
+    if (symbol == null) return null;
     return symbol.typ;
 }
 
@@ -33,7 +37,10 @@ pub fn resolveIdentifierType(
 ) TypeResolutionError!void {
     // first try to find in symbol table (for variables, functions, etc.)
     const scope = if (self.current_scope) |s| s else &self.symbol_table.root;
-    const symbol = self.symbol_table.safeFindUp(scope, id.name);
+    var symbol = self.symbol_table.safeFindUpOpt(scope, id.name);
+    if (symbol == null and scope != &self.symbol_table.root) {
+        symbol = self.symbol_table.safeFindUpOpt(&self.symbol_table.root, id.name);
+    }
 
     // if not found in symbol table, check function registry as fallback
     // this handles cases where functions aren't in symbol table yet (e.g., ghost functions)

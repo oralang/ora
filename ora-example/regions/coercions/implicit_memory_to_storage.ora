@@ -1,0 +1,38 @@
+// ============================================================================
+// Region Coercion Test: Implicit Memory to Storage
+// ============================================================================
+// Tests that memory -> storage transitions are allowed implicitly
+// ============================================================================
+
+contract ImplicitMemoryToStorage {
+    storage var counter: u256;
+    storage var balance: u256;
+
+    // Implicit memory -> storage in assignment
+    pub fn testImplicitMemoryToStorage() {
+        memory var mem_value: u256 = 100;
+        counter = mem_value; // Implicit: memory -> storage
+    }
+
+    // Implicit memory -> storage from function parameter
+    pub fn testImplicitMemoryFromParam(x: u256) {
+        memory var mem_value: u256 = x; // Calldata -> memory
+        counter = mem_value; // Implicit: memory -> storage
+    }
+
+    // Implicit memory -> storage in arithmetic
+    pub fn testImplicitMemoryInArithmetic(x: u256) {
+        memory var mem1: u256 = x;
+        memory var mem2: u256 = 10;
+        counter = mem1 + mem2; // Implicit: memory -> storage
+    }
+
+    // Multiple implicit memory -> storage
+    pub fn testMultipleImplicitMemory() {
+        memory var mem1: u256 = 10;
+        memory var mem2: u256 = 20;
+        counter = mem1; // Implicit
+        balance = mem2; // Implicit
+    }
+}
+

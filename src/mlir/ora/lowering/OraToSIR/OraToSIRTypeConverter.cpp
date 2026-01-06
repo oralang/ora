@@ -83,7 +83,7 @@ namespace mlir
                           { return this->convertType(type.getBaseType()); });
             addConversion([this](ora::ExactType type) -> Type
                           { return this->convertType(type.getBaseType()); });
-            addConversion([this](ora::NonZeroAddressType type) -> Type
+            addConversion([](ora::NonZeroAddressType type) -> Type
                           { return sir::U256Type::get(type.getDialect().getContext()); });
 
             // =========================================================================
@@ -314,6 +314,12 @@ namespace mlir
                                             }
                                         }
 
+                                        // Convert sir.u256 to sir.ptr<1> when required by target types
+                                        if (llvm::isa<sir::PtrType>(type) && llvm::isa<sir::U256Type>(input.getType()))
+                                        {
+                                            return builder.create<sir::BitcastOp>(loc, type, input);
+                                        }
+
                                          auto maskForWidth = [&](unsigned width, bool is_signed) -> Value {
                                              if (width >= 256)
                                                  return Value();
@@ -527,7 +533,7 @@ namespace mlir
                                         // If trying to materialize to an Ora type, this is an error
                                         if (type.getDialect().getNamespace() == "ora")
                                         {
-                                            if (llvm::isa<ora::NonZeroAddressType, ora::MinValueType, ora::MaxValueType,
+                                            if (llvm::isa<ora::AddressType, ora::NonZeroAddressType, ora::MinValueType, ora::MaxValueType,
                                                           ora::InRangeType, ora::ScaledType, ora::ExactType>(type) &&
                                                 llvm::isa<sir::U256Type>(input.getType()))
                                             {

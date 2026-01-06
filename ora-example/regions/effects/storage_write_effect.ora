@@ -1,0 +1,56 @@
+// ============================================================================
+// Region Effect Test: Storage Write Effect
+// ============================================================================
+// Tests that writing to storage records a write effect
+// ============================================================================
+
+contract StorageWriteEffect {
+    storage var counter: u256;
+    storage var balance: u256;
+    storage balances: map[address, u256];
+
+    // Writing to storage variable records write effect
+    pub fn testStorageWrite() {
+        counter = 100; // Stack -> Storage: Write effect
+    }
+
+    // Writing to storage map records write effect
+    pub fn testStorageMapWrite(addr: address) {
+        balances[addr] = 1000; // Stack -> Storage map: Write effect
+    }
+
+    // Multiple storage writes record multiple write effects
+    pub fn testMultipleStorageWrites() {
+        counter = 10;   // Write effect 1
+        balance = 100;   // Write effect 2
+    }
+
+    // Storage write in conditional records write effect
+    pub fn testStorageWriteInConditional(x: u256) {
+        if (x > 0) {
+            counter = x; // Write effect
+        }
+    }
+
+    // Storage write in loop records write effect per iteration
+    pub fn testStorageWriteInLoop() {
+        var i: u256 = 0;
+        while (i < 10) {
+            counter = i; // Write effect per iteration
+            i += 1;
+        }
+    }
+
+    // Compound assignment records write effect
+    pub fn testStorageCompoundAssign() {
+        counter += 10;  // Read + Write effect
+        balance -= 5;   // Read + Write effect
+    }
+
+    // Storage write from nested map records write effect
+    pub fn testNestedMapWrite(owner: address, spender: address, amount: u256) {
+        storage allowances: map[address, map[address, u256]];
+        allowances[owner][spender] = amount; // Nested write effect
+    }
+}
+

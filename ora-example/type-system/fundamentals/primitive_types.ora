@@ -1,0 +1,49 @@
+// ============================================================================
+// Type System Test: Primitive Types
+// ============================================================================
+// Tests all primitive types in Ora's type system
+// ============================================================================
+
+contract PrimitiveTypes {
+    // u256 - 256-bit unsigned integer
+    pub fn testU256() {
+        var value: u256 = 0;
+        value = 1000;
+        value = 2**256 - 1; // Max u256
+    }
+
+    // bool - Boolean type
+    pub fn testBool() {
+        var flag: bool = true;
+        flag = false;
+        let bool_result: bool = true && false;
+    }
+
+    // address - 160-bit Ethereum address
+    pub fn testAddress() {
+        var addr: address = std.constants.ZERO_ADDRESS;
+        addr = std.msg.sender();
+        addr = 0x1234567890123456789012345678901234567890;
+    }
+
+    // string - Dynamic string type
+    pub fn testString() {
+        var str: string = "Hello, Ora!";
+        str = "Test string";
+    }
+
+    // bytes - Dynamic byte array
+    pub fn testBytes() {
+        var data: bytes = 0xdeadbeef;
+        data = 0x1234;
+    }
+
+    // Test type annotations are required
+    pub fn testTypeAnnotations() {
+        // Explicit type annotations
+        var x: u256 = 100;
+        var y: bool = true;
+        var z: address = std.msg.sender();
+    }
+}
+

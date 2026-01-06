@@ -1,0 +1,66 @@
+// ============================================================================
+// SMT Guard Test: InRange Proven
+// ============================================================================
+// Tests that SMT can prove InRange constraints when requires clauses provide
+// sufficient information. Guards should be removed (no runtime cost).
+//
+// Run with: --verify --emit-mlir-sir
+// Expected: Guards removed in MLIR output (SMT discharge successful)
+// ============================================================================
+
+contract InRangeProven {
+    // SMT can prove InRange constraint from requires clauses
+    pub fn provenInRange0to100(value: InRange<u256, 0, 100>)
+        requires(value >= 0)
+        requires(value <= 100)
+    {
+        // Guard should be removed - requires clauses prove constraint
+        let v: InRange<u256, 0, 100> = value;
+    }
+
+    // SMT can prove InRange from single requires with bounds
+    pub fn provenInRangeSingle(value: InRange<u256, 10, 1000>)
+        requires(value >= 10)
+        requires(value <= 1000)
+    {
+        // Guard should be removed
+        let v: InRange<u256, 10, 1000> = value;
+    }
+
+    // SMT can prove InRange from arithmetic
+    pub fn provenInRangeArithmetic(x: u256)
+        requires(x >= 50)
+        requires(x <= 200)
+    {
+        // Guard should be removed - x in [50, 200] implies x in [0, 1000]
+        let v: InRange<u256, 0, 1000> = x;
+    }
+
+    // SMT can prove InRange from function parameter refinement
+    pub fn provenInRangeFromRefinement(value: InRange<u256, 100, 500>)
+        requires(value >= 100)
+        requires(value <= 500)
+    {
+        // Guard should be removed - parameter already has InRange<u256, 100, 500>
+        let v: InRange<u256, 100, 500> = value;
+    }
+
+    // SMT can prove InRange in return
+    pub fn provenInRangeReturn(value: InRange<u256, 0, 100>) -> InRange<u256, 0, 100>
+        requires(value >= 0)
+        requires(value <= 100)
+    {
+        // Guard should be removed for return
+        return value;
+    }
+
+    // SMT can prove BasisPoints (alias for InRange<u256, 0, 10000>)
+    pub fn provenBasisPoints(fee: BasisPoints<u256>)
+        requires(fee >= 0)
+        requires(fee <= 10000)
+    {
+        // Guard should be removed
+        let v: BasisPoints<u256> = fee;
+    }
+}
+

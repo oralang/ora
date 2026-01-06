@@ -111,6 +111,54 @@ LogicalResult ConvertMemRefAllocOp::matchAndRewrite(
 }
 
 // -----------------------------------------------------------------------------
+// Convert memref.dim → sir.const (static shape only)
+// -----------------------------------------------------------------------------
+LogicalResult ConvertMemRefDimOp::matchAndRewrite(
+    mlir::memref::DimOp op,
+    typename mlir::memref::DimOp::Adaptor adaptor,
+    ConversionPatternRewriter &rewriter) const
+{
+    DBG("ConvertMemRefDimOp: matching dim");
+
+    auto loc = op.getLoc();
+    auto ctx = rewriter.getContext();
+    auto memrefType = llvm::dyn_cast<mlir::MemRefType>(op.getSource().getType());
+    if (!memrefType || !memrefType.hasStaticShape())
+    {
+        DBG("ConvertMemRefDimOp: dynamic shape not supported");
+        return failure();
+    }
+
+    // only handle constant dimension index
+    auto indexConst = adaptor.getIndex().getDefiningOp<mlir::arith::ConstantOp>();
+    if (!indexConst)
+    {
+        DBG("ConvertMemRefDimOp: non-constant index");
+        return failure();
+    }
+    auto indexAttr = llvm::dyn_cast<mlir::IntegerAttr>(indexConst.getValue());
+    if (!indexAttr)
+    {
+        DBG("ConvertMemRefDimOp: index not integer");
+        return failure();
+    }
+    int64_t dimIndex = indexAttr.getInt();
+    if (dimIndex < 0 || dimIndex >= static_cast<int64_t>(memrefType.getRank()))
+    {
+        DBG("ConvertMemRefDimOp: index out of bounds");
+        return failure();
+    }
+
+    int64_t dimSize = memrefType.getDimSize(dimIndex);
+    auto u256Type = sir::U256Type::get(ctx);
+    auto ui64Type = mlir::IntegerType::get(ctx, 64, mlir::IntegerType::Unsigned);
+    auto sizeAttr = mlir::IntegerAttr::get(ui64Type, static_cast<uint64_t>(dimSize));
+    auto sizeConst = rewriter.create<sir::ConstOp>(loc, u256Type, sizeAttr);
+    rewriter.replaceOp(op, sizeConst.getResult());
+    return success();
+}
+
+// -----------------------------------------------------------------------------
 // Convert memref.load → sir.addptr + sir.load
 // -----------------------------------------------------------------------------
 LogicalResult ConvertMemRefLoadOp::matchAndRewrite(
@@ -181,6 +229,14 @@ LogicalResult ConvertMemRefLoadOp::matchAndRewrite(
 
     // Load from the pointer
     auto u256Type = sir::U256Type::get(ctx);
+    Type desiredType = u256Type;
+    if (auto *tc = getTypeConverter())
+    {
+        if (Type converted = tc->convertType(op.getType()))
+        {
+            desiredType = converted;
+        }
+    }
     int64_t elemIndex = naming.extractElementIndex(indices.empty() ? Value() : indices[0]);
     if (elemIndex < 0)
     {
@@ -199,6 +255,11 @@ LogicalResult ConvertMemRefLoadOp::matchAndRewrite(
 
     Value loadResult = rewriter.create<sir::LoadOp>(loadLoc, u256Type, basePtr);
     naming.nameLoad(loadResult.getDefiningOp(), 0, elemIndex);
+
+    if (desiredType != u256Type)
+    {
+        loadResult = rewriter.create<sir::BitcastOp>(loadLoc, desiredType, loadResult);
+    }
 
     rewriter.replaceOp(op, loadResult);
     DBG("ConvertMemRefLoadOp: converted load to sir.load");

@@ -1,0 +1,62 @@
+// ============================================================================
+// SMT Guard Test: MinValue Proven
+// ============================================================================
+// Tests that SMT can prove MinValue constraints when requires clauses provide
+// sufficient information. Guards should be removed (no runtime cost).
+//
+// Run with: --verify --emit-mlir-sir
+// Expected: Guards removed in MLIR output (SMT discharge successful)
+// ============================================================================
+
+contract MinValueProven {
+    // SMT can prove MinValue constraint from requires clause
+    pub fn provenMinValue10(value: MinValue<u256, 10>)
+        requires(value >= 10)
+    {
+        // Guard should be removed - requires clause proves constraint
+        let v: MinValue<u256, 10> = value;
+    }
+
+    // SMT can prove MinValue with strict inequality
+    pub fn provenMinValueStrict(value: MinValue<u256, 100>)
+        requires(value > 99)
+    {
+        // Guard should be removed - value > 99 implies value >= 100
+        let v: MinValue<u256, 100> = value;
+    }
+
+    // SMT can prove MinValue from arithmetic
+    pub fn provenMinValueArithmetic(x: u256)
+        requires(x >= 50)
+    {
+        // Guard should be removed - x >= 50 implies x >= 10
+        let v: MinValue<u256, 10> = x;
+    }
+
+    // SMT can prove MinValue from multiple requires
+    pub fn provenMinValueMultiple(value: MinValue<u256, 1000>)
+        requires(value >= 1000)
+        requires(value <= 10000)
+    {
+        // Guard should be removed - value >= 1000 satisfies MinValue<u256, 1000>
+        let v: MinValue<u256, 1000> = value;
+    }
+
+    // SMT can prove MinValue from function parameter refinement
+    pub fn provenMinValueFromRefinement(value: MinValue<u256, 2000>)
+        requires(value >= 2000)
+    {
+        // Guard should be removed - parameter already has MinValue<u256, 2000>
+        // and requires proves it
+        let v: MinValue<u256, 2000> = value;
+    }
+
+    // SMT can prove MinValue in return
+    pub fn provenMinValueReturn(value: MinValue<u256, 100>) -> MinValue<u256, 100>
+        requires(value >= 100)
+    {
+        // Guard should be removed for return
+        return value;
+    }
+}
+

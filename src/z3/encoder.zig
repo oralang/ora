@@ -365,6 +365,10 @@ pub const Encoder = struct {
 
     /// Encode MLIR type to Z3 sort
     pub fn encodeMLIRType(self: *Encoder, mlir_type: mlir.MlirType) EncodeError!z3.Z3_sort {
+        const refinement_base = mlir.oraRefinementTypeGetBaseType(mlir_type);
+        if (!mlir.oraTypeIsNull(refinement_base)) {
+            return self.encodeMLIRType(refinement_base);
+        }
         if (mlir.oraTypeIsAddressType(mlir_type)) {
             return self.mkBitVectorSort(160);
         }

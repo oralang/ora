@@ -1,0 +1,56 @@
+// ============================================================================
+// Type System Test: Refinement Subtyping
+// ============================================================================
+// Tests refinement type subtyping rules
+// ============================================================================
+
+contract RefinementSubtyping {
+    // MinValue subtyping: More restrictive is subtype
+    pub fn testMinValueSubtyping() {
+        let strict: MinValue<u256, 1000> = 2000;
+        let loose: MinValue<u256, 100> = strict; // OK: 1000 >= 100
+    }
+
+    // MaxValue subtyping: More restrictive is subtype
+    pub fn testMaxValueSubtyping() {
+        let strict: MaxValue<u256, 100> = 50;
+        let loose: MaxValue<u256, 1000> = strict; // OK: 100 <= 1000
+    }
+
+    // InRange subtyping: Narrower range is subtype
+    pub fn testInRangeSubtyping() {
+        let narrow: InRange<u256, 100, 200> = 150;
+        let wide: InRange<u256, 0, 1000> = narrow; // OK: [100,200] ⊆ [0,1000]
+    }
+
+    // NonZeroAddress subtyping: NonZeroAddress <: address
+    pub fn testNonZeroAddressSubtyping() {
+        let nonzero: NonZeroAddress = std.msg.sender();
+        let addr: address = nonzero; // OK: NonZeroAddress <: address
+    }
+
+    // Refinement to base subtyping
+    pub fn testRefinementToBase() {
+        let refined: MinValue<u256, 100> = 200;
+        let base: u256 = refined; // OK: Refinement -> Base
+    }
+
+    // Function parameter subtyping
+    // Helper function that accepts less restrictive refinement
+    fn helperFunction(amount: MinValue<u256, 100>) -> MinValue<u256, 100> {
+        return amount;
+    }
+
+    pub fn testFunctionSubtyping() {
+        // Can pass more restrictive refinement to function expecting less restrictive
+        let strict: MinValue<u256, 200> = 300;
+        let subtyping_result: MinValue<u256, 100> = helperFunction(strict); // OK: More restrictive -> Less restrictive
+    }
+
+    // Return type subtyping
+    pub fn testReturnSubtyping() -> MinValue<u256, 100> {
+        let strict: MinValue<u256, 200> = 300;
+        return strict; // OK: More restrictive -> Less restrictive
+    }
+}
+

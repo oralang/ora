@@ -1,0 +1,42 @@
+// ============================================================================
+// Region Transition Test: Stack to TStore (Valid)
+// ============================================================================
+// Tests that stack values can be assigned to transient storage variables.
+// This is a valid transition: stack -> tstore
+// ============================================================================
+
+contract StackToTStore {
+    tstore var temp_counter: u256;
+    tstore var temp_flag: bool;
+    tstore var temp_address: address;
+
+    pub fn testStackToTStore() {
+        // Stack value assigned to tstore
+        let stack_value: u256 = 100;
+        temp_counter = stack_value;
+
+        // Literal assigned to tstore
+        temp_counter = 1000;
+
+        // Boolean stack to tstore
+        let stack_flag: bool = true;
+        temp_flag = stack_flag;
+
+        // Address stack to tstore
+        let stack_addr: address = std.msg.sender();
+        temp_address = stack_addr;
+    }
+
+    pub fn testStackToTStoreFromFunction(x: u256) {
+        // Function parameter (calldata -> stack) then stack -> tstore
+        temp_counter = x;
+    }
+
+    pub fn testStackToTStoreFromArithmetic() {
+        let x: u256 = 10;
+        let y: u256 = 20;
+        let sum: u256 = x + y; // Stack value
+        temp_counter = sum; // Stack -> TStore
+    }
+}
+

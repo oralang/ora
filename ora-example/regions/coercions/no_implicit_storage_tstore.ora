@@ -1,0 +1,48 @@
+// ============================================================================
+// Region Coercion Test: No Implicit Storage-TStore Direct Transfer
+// ============================================================================
+// Tests that direct storage <-> tstore transitions are forbidden
+// Must go through stack or memory
+// ============================================================================
+
+contract NoImplicitStorageTStore {
+    storage var stored_value: u256;
+    tstore var temp_value: u256;
+
+    // ERROR: Cannot directly assign storage to tstore
+    pub fn testInvalidStorageToTStoreDirect() {
+        // This should fail at compile time
+        // temp_value = stored_value; // Invalid: direct storage -> tstore
+    }
+
+    // ERROR: Cannot directly assign tstore to storage
+    pub fn testInvalidTStoreToStorageDirect() {
+        // This should fail at compile time
+        // stored_value = temp_value; // Invalid: direct tstore -> storage
+    }
+
+    // Valid: Storage -> Stack -> TStore
+    pub fn testValidStorageToTStoreViaStack() {
+        let stack_val: u256 = stored_value; // Storage -> Stack
+        temp_value = stack_val; // Stack -> TStore
+    }
+
+    // Valid: Storage -> Memory -> TStore
+    pub fn testValidStorageToTStoreViaMemory() {
+        memory var mem_val: u256 = stored_value; // Storage -> Memory
+        temp_value = mem_val; // Memory -> TStore
+    }
+
+    // Valid: TStore -> Stack -> Storage
+    pub fn testValidTStoreToStorageViaStack() {
+        let stack_val: u256 = temp_value; // TStore -> Stack
+        stored_value = stack_val; // Stack -> Storage
+    }
+
+    // Valid: TStore -> Memory -> Storage
+    pub fn testValidTStoreToStorageViaMemory() {
+        memory var mem_val: u256 = temp_value; // TStore -> Memory
+        stored_value = mem_val; // Memory -> Storage
+    }
+}
+

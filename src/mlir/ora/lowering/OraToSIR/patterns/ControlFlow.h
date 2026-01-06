@@ -124,5 +124,27 @@ namespace mlir
                 ConversionPatternRewriter &rewriter) const override;
         };
 
+        class ConvertRangeOp : public OpConversionPattern<ora::RangeOp>
+        {
+        public:
+            using OpConversionPattern::OpConversionPattern;
+
+            LogicalResult matchAndRewrite(
+                ora::RangeOp op,
+                typename ora::RangeOp::Adaptor adaptor,
+                ConversionPatternRewriter &rewriter) const override;
+        };
+
+        class ConvertTryCatchOp : public OpConversionPattern<ora::TryOp>
+        {
+        public:
+            using OpConversionPattern::OpConversionPattern;
+
+            LogicalResult matchAndRewrite(
+                ora::TryOp op,
+                typename ora::TryOp::Adaptor adaptor,
+                ConversionPatternRewriter &rewriter) const override;
+        };
+
     } // namespace ora
 } // namespace mlir

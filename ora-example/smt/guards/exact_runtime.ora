@@ -1,0 +1,55 @@
+// ============================================================================
+// SMT Guard Test: Exact Runtime
+// ============================================================================
+// Tests that runtime guards are inserted when SMT cannot prove Exact division
+// constraints. Guards should remain in MLIR output.
+//
+// Run with: --verify --emit-mlir-sir
+// Expected: Guards remain in MLIR output (runtime check required)
+// ============================================================================
+
+contract ExactRuntime {
+    // SMT cannot prove Exact division - no requires clause
+    pub fn runtimeExactDivision(dividend: Exact<u256>, divisor: u256) {
+        // Guard should remain - no requires clause to prove exact division
+        let q: u256 = dividend / divisor;
+    }
+
+    // SMT cannot prove Exact division - requires clause insufficient
+    pub fn runtimeExactDivisionInsufficient(dividend: Exact<u256>, divisor: u256)
+        requires(dividend > 0)
+    {
+        // Guard should remain - dividend > 0 does not prove divisibility
+        let q: u256 = dividend / divisor;
+    }
+
+    // SMT cannot prove Exact division from storage
+    pub fn runtimeExactDivisionFromStorage() {
+        storage var dividend: Exact<u256>;
+        storage var divisor: u256;
+        // Guard should remain - storage values unknown at compile time
+        let q: u256 = dividend / divisor;
+    }
+
+    // SMT cannot prove Exact division from function call
+    pub fn getDividend() -> Exact<u256> {
+        storage var value: Exact<u256>;
+        return value;
+    }
+
+    pub fn testCall() {
+        let dividend: Exact<u256> = getDividend();
+        let divisor: u256 = 10;
+        // Guard should remain - function return value unknown
+        let q: u256 = dividend / divisor;
+    }
+
+    // SMT cannot prove Exact division from arithmetic result
+    pub fn runtimeExactDivisionArithmetic(x: u256, y: u256) {
+        let sum: u256 = x + y;
+        // Guard should remain - sum may not be divisible by y
+        // Actually, Exact<u256> can't be created from sum without guard
+        // This test needs refinement
+    }
+}
+

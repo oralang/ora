@@ -1,0 +1,70 @@
+contract ControlFlowPropagation {
+    pub fn propagateIf(value: MinValue<u256, 100>)
+        requires(value >= 100)
+    {
+        if (value >= 150) {
+            let refined: MinValue<u256, 150> = value;
+            let base: u256 = refined;
+        }
+    }
+
+    pub fn propagateIfElse(value: u256)
+        requires(value >= 0)
+    {
+        if (value >= 100) {
+            let refined: MinValue<u256, 100> = value;
+            let base: u256 = refined;
+        } else {
+            // value < 100 and value >= 0
+        }
+    }
+
+    pub fn propagateNested(value: InRange<u256, 0, 200>)
+        requires(value >= 0)
+        requires(value <= 200)
+    {
+        if (value >= 50) {
+            if (value >= 100) {
+                let refined: InRange<u256, 100, 200> = value;
+                let base: u256 = refined;
+            }
+        }
+    }
+
+    pub fn propagateLoop(n: MinValue<u256, 1>)
+        requires(n >= 1)
+        requires(n <= 100)
+    {
+        var i: u256 = 0;
+        let base_n: u256 = n;
+
+        while (i < base_n)
+            invariant(i >= 0)
+            invariant(i <= base_n)
+        {
+            i = i + 1;
+        }
+    }
+
+    pub fn propagateSwitch(value: InRange<u256, 0, 3>)
+        requires(value >= 0)
+        requires(value <= 3)
+    {
+        switch (value) {
+            0 => { },
+            1 => { },
+            2 => { },
+            else => { }
+        }
+    }
+
+    pub fn propagateReturn(value: MinValue<u256, 100>) -> MinValue<u256, 100>
+        requires(value >= 100)
+    {
+        if (value >= 200) {
+            return value;
+        } else {
+            return value;
+        }
+    }
+}

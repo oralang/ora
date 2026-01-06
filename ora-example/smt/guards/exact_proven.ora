@@ -1,0 +1,53 @@
+// ============================================================================
+// SMT Guard Test: Exact Proven
+// ============================================================================
+// Tests that SMT can prove Exact division constraints when requires clauses
+// provide sufficient information. Guards should be removed (no runtime cost).
+//
+// Run with: --verify --emit-mlir-sir
+// Expected: Guards removed in MLIR output (SMT discharge successful)
+// ============================================================================
+
+contract ExactProven {
+    // SMT can prove Exact division from requires clause
+    pub fn provenExactDivision(dividend: Exact<u256>, divisor: u256)
+        requires(dividend % divisor == 0)
+    {
+        // Guard should be removed - requires clause proves exact division
+        let q: u256 = dividend / divisor;
+    }
+
+    // SMT can prove Exact division with known divisor
+    pub fn provenExactDivisionKnownDivisor(dividend: Exact<u256>)
+        requires(dividend % 10 == 0)
+    {
+        // Guard should be removed - dividend is divisible by 10
+        let q: u256 = dividend / 10;
+    }
+
+    // SMT can prove Exact division from arithmetic
+    pub fn provenExactDivisionArithmetic(x: Exact<u256>, y: u256)
+        requires(x % y == 0)
+        requires(y != 0)
+    {
+        // Guard should be removed
+        let q: u256 = x / y;
+    }
+
+    // SMT can prove Exact division in return
+    pub fn provenExactDivisionReturn(dividend: Exact<u256>, divisor: u256) -> u256
+        requires(dividend % divisor == 0)
+    {
+        // Guard should be removed for return
+        return dividend / divisor;
+    }
+
+    // SMT can prove Exact from multiplication result
+    pub fn provenExactFromMultiplication(x: u256, y: u256) {
+        let product: Exact<u256> = x * y;
+        // Product of two u256s is always divisible by both factors
+        let q1: u256 = product / x;
+        let q2: u256 = product / y;
+    }
+}
+

@@ -1,0 +1,53 @@
+// ============================================================================
+// SMT Guard Test: MaxValue Proven
+// ============================================================================
+// Tests that SMT can prove MaxValue constraints when requires clauses provide
+// sufficient information. Guards should be removed (no runtime cost).
+//
+// Run with: --verify --emit-mlir-sir
+// Expected: Guards removed in MLIR output (SMT discharge successful)
+// ============================================================================
+
+contract MaxValueProven {
+    // SMT can prove MaxValue constraint from requires clause
+    pub fn provenMaxValue100(value: MaxValue<u256, 100>)
+        requires(value <= 100)
+    {
+        // Guard should be removed - requires clause proves constraint
+        let v: MaxValue<u256, 100> = value;
+    }
+
+    // SMT can prove MaxValue with strict inequality
+    pub fn provenMaxValueStrict(value: MaxValue<u256, 1000>)
+        requires(value < 1001)
+    {
+        // Guard should be removed - value < 1001 implies value <= 1000
+        let v: MaxValue<u256, 1000> = value;
+    }
+
+    // SMT can prove MaxValue from arithmetic
+    pub fn provenMaxValueArithmetic(x: u256)
+        requires(x <= 50)
+    {
+        // Guard should be removed - x <= 50 implies x <= 100
+        let v: MaxValue<u256, 100> = x;
+    }
+
+    // SMT can prove MaxValue from function parameter refinement
+    pub fn provenMaxValueFromRefinement(value: MaxValue<u256, 5000>)
+        requires(value <= 5000)
+    {
+        // Guard should be removed - parameter already has MaxValue<u256, 5000>
+        // and requires proves it
+        let v: MaxValue<u256, 5000> = value;
+    }
+
+    // SMT can prove MaxValue in return
+    pub fn provenMaxValueReturn(value: MaxValue<u256, 1000>) -> MaxValue<u256, 1000>
+        requires(value <= 1000)
+    {
+        // Guard should be removed for return
+        return value;
+    }
+}
+

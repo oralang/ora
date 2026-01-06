@@ -268,9 +268,10 @@ pub fn lowerFieldAccess(
         defer registry.allocator.free(path);
 
         if (registry.lookup(path)) |builtin_info| {
-            if (!builtin_info.is_call) {
-                return lowerBuiltinConstant(self, &builtin_info, field.span);
+            if (builtin_info.is_call) {
+                return lowerBuiltinFieldCall(self, &builtin_info, field.span);
             }
+            return lowerBuiltinConstant(self, &builtin_info, field.span);
         }
     }
 
@@ -315,6 +316,35 @@ fn lowerBuiltinConstant(
     }
 
     const op = self.ora_dialect.createArithConstant(0, ty, self.fileLoc(span));
+    h.appendOp(self.block, op);
+    return h.getResult(op, 0);
+}
+
+/// Lower builtin "field access" that represents a call (e.g., std.transaction.sender).
+fn lowerBuiltinFieldCall(
+    self: *const ExpressionLowerer,
+    builtin_info: *const lib.semantics.builtins.BuiltinInfo,
+    span: lib.ast.SourceSpan,
+) c.MlirValue {
+    const op_name = std.fmt.allocPrint(std.heap.page_allocator, "ora.evm.{s}", .{builtin_info.evm_opcode}) catch {
+        log.err("Failed to allocate opcode name for builtin field call\n", .{});
+        return self.createErrorPlaceholder(span, "Failed to create builtin field call");
+    };
+    defer std.heap.page_allocator.free(op_name);
+
+    const location = self.fileLoc(span);
+    const result_type = self.type_mapper.toMlirType(.{
+        .ora_type = builtin_info.return_type,
+    });
+
+    const op = c.oraEvmOpCreate(
+        self.ctx,
+        location,
+        h.strRef(op_name),
+        null,
+        0,
+        result_type,
+    );
     h.appendOp(self.block, op);
     return h.getResult(op, 0);
 }
