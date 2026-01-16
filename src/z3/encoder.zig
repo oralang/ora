@@ -133,9 +133,13 @@ pub const Encoder = struct {
     };
 
     pub fn encodeBitwiseOp(self: *Encoder, op: BitwiseOp, lhs: z3.Z3_ast, rhs: z3.Z3_ast) !z3.Z3_ast {
-        const sort = z3.Z3_get_sort(self.context.ctx, lhs);
-        const kind = z3.Z3_get_sort_kind(self.context.ctx, sort);
-        if (kind == z3.Z3_BOOL_SORT) {
+        const lhs_sort = z3.Z3_get_sort(self.context.ctx, lhs);
+        const rhs_sort = z3.Z3_get_sort(self.context.ctx, rhs);
+        const lhs_kind = z3.Z3_get_sort_kind(self.context.ctx, lhs_sort);
+        const rhs_kind = z3.Z3_get_sort_kind(self.context.ctx, rhs_sort);
+
+        // If both are boolean, use boolean operations
+        if (lhs_kind == z3.Z3_BOOL_SORT and rhs_kind == z3.Z3_BOOL_SORT) {
             return switch (op) {
                 .And => z3.Z3_mk_and(self.context.ctx, 2, &[_]z3.Z3_ast{ lhs, rhs }),
                 .Or => z3.Z3_mk_or(self.context.ctx, 2, &[_]z3.Z3_ast{ lhs, rhs }),
@@ -143,10 +147,27 @@ pub const Encoder = struct {
             };
         }
 
+        // If mixed types (one bool, one bitvec), convert bool to bitvec
+        var lhs_bv = lhs;
+        var rhs_bv = rhs;
+        if (lhs_kind == z3.Z3_BOOL_SORT and rhs_kind == z3.Z3_BV_SORT) {
+            // Convert lhs bool to bitvec of same width as rhs
+            const width = z3.Z3_get_bv_sort_size(self.context.ctx, rhs_sort);
+            const one = z3.Z3_mk_unsigned_int64(self.context.ctx, 1, z3.Z3_mk_bv_sort(self.context.ctx, width));
+            const zero = z3.Z3_mk_unsigned_int64(self.context.ctx, 0, z3.Z3_mk_bv_sort(self.context.ctx, width));
+            lhs_bv = z3.Z3_mk_ite(self.context.ctx, lhs, one, zero);
+        } else if (rhs_kind == z3.Z3_BOOL_SORT and lhs_kind == z3.Z3_BV_SORT) {
+            // Convert rhs bool to bitvec of same width as lhs
+            const width = z3.Z3_get_bv_sort_size(self.context.ctx, lhs_sort);
+            const one = z3.Z3_mk_unsigned_int64(self.context.ctx, 1, z3.Z3_mk_bv_sort(self.context.ctx, width));
+            const zero = z3.Z3_mk_unsigned_int64(self.context.ctx, 0, z3.Z3_mk_bv_sort(self.context.ctx, width));
+            rhs_bv = z3.Z3_mk_ite(self.context.ctx, rhs, one, zero);
+        }
+
         return switch (op) {
-            .And => z3.Z3_mk_bvand(self.context.ctx, lhs, rhs),
-            .Or => z3.Z3_mk_bvor(self.context.ctx, lhs, rhs),
-            .Xor => z3.Z3_mk_bvxor(self.context.ctx, lhs, rhs),
+            .And => z3.Z3_mk_bvand(self.context.ctx, lhs_bv, rhs_bv),
+            .Or => z3.Z3_mk_bvor(self.context.ctx, lhs_bv, rhs_bv),
+            .Xor => z3.Z3_mk_bvxor(self.context.ctx, lhs_bv, rhs_bv),
         };
     }
 

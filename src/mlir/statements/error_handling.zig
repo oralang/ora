@@ -8,10 +8,23 @@ const c = @import("mlir_c_api").c;
 const lib = @import("ora_lib");
 const h = @import("../helpers.zig");
 const StatementLowerer = @import("statement_lowerer.zig").StatementLowerer;
+const LabelContext = @import("statement_lowerer.zig").LabelContext;
 const LoweringError = StatementLowerer.LoweringError;
 const helpers = @import("helpers.zig");
 const return_stmt = @import("return.zig");
 const log = @import("log");
+
+/// Check if we're inside a for/while loop context where we can't use ora.return
+fn isInsideLoopContext(label_context: ?*const LabelContext) bool {
+    var ctx_opt = label_context;
+    while (ctx_opt) |ctx| : (ctx_opt = ctx.parent) {
+        switch (ctx.label_type) {
+            .For, .While => return true,
+            .Block, .Switch => {},
+        }
+    }
+    return false;
+}
 
 fn getLastOperation(block: c.MlirBlock) c.MlirOperation {
     var op = c.oraBlockGetFirstOperation(block);
@@ -108,7 +121,9 @@ pub fn lowerTryBlock(self: *const StatementLowerer, try_stmt: *const lib.ast.Sta
     }
 
     // after try/catch, check return flag and return if needed
-    if (self.current_function_return_type) |ret_type| {
+    // Skip this if we're inside a for/while loop - scf.for/scf.while can't have ora.return
+    if (self.current_function_return_type != null and !isInsideLoopContext(self.label_context)) {
+        const ret_type = self.current_function_return_type.?;
         // load return flag
         const load_return_flag = c.oraMemrefLoadOpCreate(self.ctx, loc, return_flag_memref, null, 0, i1_type);
         h.appendOp(self.block, load_return_flag);

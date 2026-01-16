@@ -181,11 +181,33 @@ fn resolveVariableDecl(
 
             // assign inferred type to variable
             var_decl.type_info = typed.ty;
+
+            // If inside a try block and the initializer is an error union, record it
+            if (self.in_try_block) {
+                const is_error_union = typed.ty.category == .ErrorUnion or
+                    (typed.ty.category == .Union and typed.ty.ora_type != null and
+                    typed.ty.ora_type.? == ._union and typed.ty.ora_type.?._union.len > 0 and
+                    typed.ty.ora_type.?._union[0] == .error_union);
+                if (is_error_union) {
+                    self.last_try_error_union = typed.ty;
+                }
+            }
         } else {
             // type is explicit, check expression against it
             var checked = try expression.checkExpr(self, value_expr, var_decl.type_info);
             defer checked.deinit(self.allocator);
             init_effect = takeEffect(&checked);
+
+            // If inside a try block and the initializer is an error union, record it
+            if (self.in_try_block) {
+                const is_error_union = checked.ty.category == .ErrorUnion or
+                    (checked.ty.category == .Union and checked.ty.ora_type != null and
+                    checked.ty.ora_type.? == ._union and checked.ty.ora_type.?._union.len > 0 and
+                    checked.ty.ora_type.?._union[0] == .error_union);
+                if (is_error_union) {
+                    self.last_try_error_union = checked.ty;
+                }
+            }
 
             // validate refinement types if present
             if (var_decl.type_info.ora_type) |target_ora_type| {

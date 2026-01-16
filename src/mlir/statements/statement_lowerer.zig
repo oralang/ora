@@ -48,6 +48,18 @@ pub const LabelContext = struct {
     parent: ?*const LabelContext = null,
 };
 
+/// Check if we're inside a for/while loop context where we can't use ora.return
+fn isInsideLoopContext(label_context: ?*const LabelContext) bool {
+    var ctx_opt = label_context;
+    while (ctx_opt) |ctx| : (ctx_opt = ctx.parent) {
+        switch (ctx.label_type) {
+            .For, .While => return true,
+            .Block, .Switch => {},
+        }
+    }
+    return false;
+}
+
 /// Statement lowering system for converting Ora statements to MLIR operations
 pub const StatementLowerer = struct {
     ctx: c.MlirContext,
@@ -335,7 +347,9 @@ pub const StatementLowerer = struct {
 
             if (is_terminator or helpers.blockEndsWithTerminator(&stmt_lowerer, current_block)) {
                 has_terminator = true;
-            } else if (s.* == .TryBlock and stmt_idx == b.statements.len - 1 and self.current_function_return_type != null) {
+            } else if (s.* == .TryBlock and stmt_idx == b.statements.len - 1 and self.current_function_return_type != null and !isInsideLoopContext(self.label_context)) {
+                // Only generate return after try block if NOT inside a for/while loop
+                // (scf.for/scf.while require scf.yield, not ora.return)
                 const loc = self.fileLoc(self.getStatementSpan(s));
                 const ret_type = self.current_function_return_type.?;
                 const default_val = try helpers.createDefaultValueForType(self, ret_type, loc);

@@ -160,11 +160,15 @@ pub fn checkExpr(
                 // check if expected type matches the success type
                 if (expected.ora_type) |expected_ora_type| {
                     if (OraType.equals(success_ora_type, expected_ora_type) and success_category == expected.category) {
+                        // Record the error union type for catch block before unwrapping
+                        self.last_try_error_union = typed.ty;
                         // unwrap ErrorUnion to success type
                         typed.ty = expected;
                         return typed;
                     }
                 } else if (success_category == expected.category) {
+                    // Record the error union type for catch block before unwrapping
+                    self.last_try_error_union = typed.ty;
                     // categories match, create success type
                     const success_type = TypeInfo{
                         .category = success_category,
@@ -186,11 +190,15 @@ pub fn checkExpr(
                         // check if expected type matches the success type
                         if (expected.ora_type) |expected_ora_type| {
                             if (OraType.equals(success_ora_type, expected_ora_type) and success_category == expected.category) {
+                                // Record the error union type for catch block before unwrapping
+                                self.last_try_error_union = typed.ty;
                                 // unwrap ErrorUnion to success type
                                 typed.ty = expected;
                                 return typed;
                             }
                         } else if (success_category == expected.category) {
+                            // Record the error union type for catch block before unwrapping
+                            self.last_try_error_union = typed.ty;
                             // categories match, create success type
                             const success_type = TypeInfo{
                                 .category = success_category,
