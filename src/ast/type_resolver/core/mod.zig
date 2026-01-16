@@ -18,6 +18,7 @@ const MemoryRegion = @import("../../statements.zig").MemoryRegion;
 const validation = @import("../validation/mod.zig");
 const utils = @import("../utils/mod.zig");
 const refinements = @import("../refinements/mod.zig");
+const TypeResolutionError = @import("../mod.zig").TypeResolutionError;
 
 // ============================================================================
 // Core Types
@@ -308,7 +309,10 @@ pub const CoreResolver = struct {
     type_storage_allocator: std.mem.Allocator,
     symbol_table: *SymbolTable,
     current_scope: ?*Scope,
+    current_contract_name: ?[]const u8 = null,
     in_try_block: bool = false,
+    last_try_error_union: ?TypeInfo = null,
+    current_function_return_type: ?TypeInfo = null,
     validation: *validation.ValidationSystem,
     utils: *utils.Utils,
     refinement_system: *refinements.RefinementSystem,
@@ -330,8 +334,10 @@ pub const CoreResolver = struct {
             .allocator = allocator,
             .type_storage_allocator = type_storage_allocator,
             .symbol_table = symbol_table,
-            .current_scope = &symbol_table.root,
+            .current_scope = symbol_table.root,
+            .current_contract_name = null,
             .in_try_block = false,
+            .current_function_return_type = null,
             .validation = validation_sys,
             .utils = utils_sys,
             .refinement_system = refinement_sys,
@@ -352,6 +358,40 @@ pub const CoreResolver = struct {
     /// Check expression against expected type
     pub fn checkExpr(self: *CoreResolver, expr: *ast.Expressions.ExprNode, expected: TypeInfo) !Typed {
         return @import("expression.zig").checkExpr(self, expr, expected);
+    }
+
+    pub fn validateErrorUnionType(self: *CoreResolver, type_info: TypeInfo) TypeResolutionError!void {
+        if (type_info.ora_type) |ora_type| {
+            switch (ora_type) {
+                .error_union => {},
+                ._union => |union_types| {
+                    if (union_types.len == 0) return;
+                    for (union_types, 0..) |union_type, i| {
+                        if (i == 0) {
+                            if (union_type != .error_union) {
+                                return TypeResolutionError.InvalidErrorUsage;
+                            }
+                            continue;
+                        }
+
+                        switch (union_type) {
+                            .struct_type => |error_name| {
+                                if (self.symbol_table.error_signatures.get(error_name)) |_| {
+                                    continue;
+                                }
+                                const root_scope: ?*const Scope = @as(?*const Scope, @ptrCast(&self.symbol_table.root));
+                                if (SymbolTable.findUp(root_scope, error_name)) |symbol| {
+                                    if (symbol.kind == .Error) continue;
+                                }
+                                return TypeResolutionError.InvalidErrorUsage;
+                            },
+                            else => return TypeResolutionError.InvalidErrorUsage,
+                        }
+                    }
+                },
+                else => {},
+            }
+        }
     }
 
     /// Resolve types for a statement

@@ -12,6 +12,60 @@ const OraType = @import("../../type_info.zig").OraType;
 const SourceSpan = @import("../../source_span.zig").SourceSpan;
 const BinaryOp = @import("../../expressions.zig").BinaryOp;
 const extract = @import("../utils/extraction.zig");
+const TypeResolutionError = @import("../mod.zig").TypeResolutionError;
+
+/// Validate arithmetic operation between refinement types
+/// Returns error if operation is invalid (e.g., scale mismatch)
+pub fn validateArithmeticOperation(
+    operator: BinaryOp,
+    lhs_type: ?TypeInfo,
+    rhs_type: ?TypeInfo,
+) TypeResolutionError!void {
+    if (lhs_type == null or rhs_type == null) return;
+
+    const lhs = lhs_type.?;
+    const rhs = rhs_type.?;
+
+    const lhs_ora = lhs.ora_type orelse return;
+    const rhs_ora = rhs.ora_type orelse return;
+
+    // Check for scale mismatch in Scaled types
+    switch (lhs_ora) {
+        .scaled => |lhs_s| {
+            switch (rhs_ora) {
+                .scaled => |rhs_s| {
+                    // For addition/subtraction, scales must match
+                    if (operator == .Plus or operator == .Minus) {
+                        if (lhs_s.decimals != rhs_s.decimals) {
+                            return TypeResolutionError.TypeMismatch;
+                        }
+                    }
+                    // For multiplication, scales can differ (they add)
+                    // For division, scales can differ (they subtract)
+                },
+                else => {
+                    // Scaled + non-Scaled base type: only allowed if rhs is the base type
+                    // This is handled in inference, but we allow it here
+                },
+            }
+        },
+        else => {
+            // Check if RHS is Scaled and LHS is not
+            switch (rhs_ora) {
+                .scaled => |_| {
+                    // non-Scaled + Scaled: same rules apply
+                    switch (lhs_ora) {
+                        .scaled => {}, // Already handled above
+                        else => {
+                            // base type + Scaled is allowed (commutative)
+                        },
+                    }
+                },
+                else => {},
+            }
+        },
+    }
+}
 
 /// Infer arithmetic result type for refinement types
 pub fn inferArithmeticResultType(
@@ -29,7 +83,7 @@ pub fn inferArithmeticResultType(
     const lhs_ora = lhs.ora_type orelse return null;
     const rhs_ora = rhs.ora_type orelse return null;
 
-    // both must have compatible base types
+    // extract base types
     const lhs_base = extract.extractBaseType(lhs_ora) orelse return null;
     const rhs_base = extract.extractBaseType(rhs_ora) orelse return null;
 
@@ -38,13 +92,157 @@ pub fn inferArithmeticResultType(
         return null;
     }
 
+    // check if either operand is a refinement type
+    const lhs_is_refined = isRefinementType(lhs_ora);
+    const rhs_is_refined = isRefinementType(rhs_ora);
+
     // infer result type based on operator and refinement types
     return switch (operator) {
-        .Plus => inferAdditionResultType(lhs_ora, rhs_ora, lhs.span),
-        .Minus => inferSubtractionResultType(lhs_ora, rhs_ora, lhs.span),
-        .Star => inferMultiplicationResultType(lhs_ora, rhs_ora, lhs.span),
+        .Plus => blk: {
+            // try same-refinement inference first
+            if (inferAdditionResultType(lhs_ora, rhs_ora, lhs.span)) |result| {
+                break :blk result;
+            }
+            // handle mixed refinement + base type
+            if (lhs_is_refined and !rhs_is_refined) {
+                break :blk inferMixedAddition(lhs_ora, rhs_ora, lhs.span);
+            }
+            if (rhs_is_refined and !lhs_is_refined) {
+                break :blk inferMixedAddition(rhs_ora, lhs_ora, lhs.span);
+            }
+            break :blk null;
+        },
+        .Minus => blk: {
+            // try same-refinement inference first
+            if (inferSubtractionResultType(lhs_ora, rhs_ora, lhs.span)) |result| {
+                break :blk result;
+            }
+            // handle refinement - base type (only LHS refinement is meaningful)
+            if (lhs_is_refined and !rhs_is_refined) {
+                break :blk inferMixedSubtraction(lhs_ora, rhs_ora, lhs.span);
+            }
+            break :blk null;
+        },
+        .Star => blk: {
+            // try same-refinement inference first
+            if (inferMultiplicationResultType(lhs_ora, rhs_ora, lhs.span)) |result| {
+                break :blk result;
+            }
+            // handle mixed refinement * base type
+            if (lhs_is_refined and !rhs_is_refined) {
+                break :blk inferMixedMultiplication(lhs_ora, rhs_ora, lhs.span);
+            }
+            if (rhs_is_refined and !lhs_is_refined) {
+                break :blk inferMixedMultiplication(rhs_ora, lhs_ora, lhs.span);
+            }
+            break :blk null;
+        },
         .Slash, .Percent => null, // Division/modulo lose refinement information
         else => null, // Other operators don't preserve refinements
+    };
+}
+
+/// Check if an OraType is a refinement type
+fn isRefinementType(ora_type: OraType) bool {
+    return switch (ora_type) {
+        .min_value, .max_value, .in_range, .scaled, .exact, .non_zero_address => true,
+        else => false,
+    };
+}
+
+/// Infer result type for refinement + base type addition
+/// Conservative: preserve refinement structure but widen bounds
+fn inferMixedAddition(
+    refined_ora: OraType,
+    _: OraType, // base type (unused, just for compatibility check)
+    span: ?SourceSpan,
+) ?TypeInfo {
+    // For addition with unknown value, we lose the lower bound but keep structure
+    // MinValue<u256, 10> + u256 = u256 (conservative: unknown addition could be 0)
+    // MaxValue<u256, 100> + u256 = u256 (max is now unbounded)
+    // InRange<u256, 10, 100> + u256 = u256 (bounds are lost)
+    // Scaled preserves scale since it's a unit, not a bound
+    return switch (refined_ora) {
+        .scaled => |s| {
+            // Scaled<T, D> + T = Scaled<T, D> (scale is preserved)
+            const scaled_type = OraType{
+                .scaled = .{
+                    .base = s.base,
+                    .decimals = s.decimals,
+                },
+            };
+            return TypeInfo.inferred(TypeCategory.Integer, scaled_type, span orelse SourceSpan{ .line = 0, .column = 0, .length = 0 });
+        },
+        .min_value => |mv| {
+            // MinValue<T, N> + T = T (adding unknown could be 0, min is lost)
+            // But we can preserve MinValue<T, 0> as a conservative bound
+            const min_value_type = OraType{
+                .min_value = .{
+                    .base = mv.base,
+                    .min = mv.min, // Preserve: result is at least min if added value >= 0
+                },
+            };
+            return TypeInfo.inferred(TypeCategory.Integer, min_value_type, span orelse SourceSpan{ .line = 0, .column = 0, .length = 0 });
+        },
+        else => null, // Other refinements lose precision
+    };
+}
+
+/// Infer result type for refinement - base type subtraction
+fn inferMixedSubtraction(
+    refined_ora: OraType,
+    _: OraType, // base type
+    span: ?SourceSpan,
+) ?TypeInfo {
+    // For subtraction with unknown value, we typically lose bounds
+    // MinValue<u256, 100> - u256 = u256 (could underflow to 0 or revert)
+    // Scaled preserves scale
+    return switch (refined_ora) {
+        .scaled => |s| {
+            const scaled_type = OraType{
+                .scaled = .{
+                    .base = s.base,
+                    .decimals = s.decimals,
+                },
+            };
+            return TypeInfo.inferred(TypeCategory.Integer, scaled_type, span orelse SourceSpan{ .line = 0, .column = 0, .length = 0 });
+        },
+        .max_value => |mv| {
+            // MaxValue<T, N> - T = MaxValue<T, N> (subtraction doesn't increase max)
+            const max_value_type = OraType{
+                .max_value = .{
+                    .base = mv.base,
+                    .max = mv.max,
+                },
+            };
+            return TypeInfo.inferred(TypeCategory.Integer, max_value_type, span orelse SourceSpan{ .line = 0, .column = 0, .length = 0 });
+        },
+        else => null,
+    };
+}
+
+/// Infer result type for refinement * base type multiplication
+fn inferMixedMultiplication(
+    refined_ora: OraType,
+    _: OraType, // base type
+    span: ?SourceSpan,
+) ?TypeInfo {
+    // Scaled * T = T (scale is lost unless multiplier is 1/scale)
+    // MinValue<T, N> * T = T (multiplier could be 0)
+    // For multiplication, most bounds are lost unless multiplier is known
+    return switch (refined_ora) {
+        .min_value => |mv| {
+            // MinValue<T, N> * T where T >= 0 = MinValue<T, 0> (conservative)
+            // If the base type is unsigned, result min is 0
+            const min_value_type = OraType{
+                .min_value = .{
+                    .base = mv.base,
+                    .min = 0, // Conservative: multiplier could be 0
+                },
+            };
+            return TypeInfo.inferred(TypeCategory.Integer, min_value_type, span orelse SourceSpan{ .line = 0, .column = 0, .length = 0 });
+        },
+        else => null,
     };
 }
 

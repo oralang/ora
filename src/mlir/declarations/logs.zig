@@ -8,10 +8,17 @@ const lib = @import("ora_lib");
 const h = @import("../helpers.zig");
 const DeclarationLowerer = @import("mod.zig").DeclarationLowerer;
 const helpers = @import("helpers.zig");
+const log = @import("log");
 
 /// Lower log declarations with event type definitions and indexed field information (Requirements 7.3)
 pub fn lowerLogDecl(self: *const DeclarationLowerer, log_decl: *const lib.ast.LogDeclNode) c.MlirOperation {
     const loc = helpers.createFileLocation(self, log_decl.span);
+
+    if (self.symbol_table) |st| {
+        st.log_signatures.put(log_decl.name, log_decl.fields) catch {
+            log.warn("Failed to register log signature: {s}\n", .{log_decl.name});
+        };
+    }
 
     // collect log attributes
     var attributes = std.ArrayList(c.MlirNamedAttribute){};
@@ -124,6 +131,14 @@ pub fn lowerErrorDecl(self: *const DeclarationLowerer, error_decl: *const lib.as
     const error_decl_attr = h.boolAttr(self.ctx, 1);
     const error_decl_id = h.identifier(self.ctx, "ora.error_decl");
     attributes.append(std.heap.page_allocator, c.oraNamedAttributeGet(error_decl_id, error_decl_attr)) catch {};
+
+    if (self.symbol_table) |st| {
+        const err_id = st.getOrCreateErrorId(error_decl.name) catch 0;
+        const id_type = c.oraIntegerTypeCreate(self.ctx, 32);
+        const id_attr = h.intAttrCast(self.ctx, id_type, err_id);
+        const id_name = h.identifier(self.ctx, "ora.error_id");
+        attributes.append(std.heap.page_allocator, c.oraNamedAttributeGet(id_name, id_attr)) catch {};
+    }
 
     // create the error type and add it as a result
     const error_type = self.createErrorType(error_decl);

@@ -310,10 +310,25 @@ fn synthAssignment(
     assign: *ast.Expressions.AssignmentExpr,
 ) TypeResolutionError!Typed {
     // get target type from L-value (Identifier, FieldAccess, or Index)
+    // For identifiers, use the DECLARED type (not flow-refined) for assignment validation
     const target_type = blk: {
         switch (assign.target.*) {
             .Identifier => |*id| {
-                // ensure identifier type is resolved
+                // For assignment targets, use the DECLARED type, not flow-refined type.
+                // This allows `if (x == 0) { x = 1; }` to work correctly.
+                // Flow refinements constrain reads, not writes.
+                const declared_sym = SymbolTable.findDeclaredUp(
+                    @as(?*const Scope, @ptrCast(self.current_scope)),
+                    id.name,
+                );
+                if (declared_sym) |sym| {
+                    if (sym.typ) |typ| {
+                        // Update the identifier's type_info to the declared type
+                        id.type_info = typ;
+                        break :blk typ;
+                    }
+                }
+                // Fall back to normal resolution if no declared symbol found
                 try @import("identifier.zig").resolveIdentifierType(self, id);
                 break :blk id.type_info;
             },
@@ -481,10 +496,10 @@ fn synthErrorReturn(
     err_ret: *ast.Expressions.ErrorReturnExpr,
 ) TypeResolutionError!Typed {
     // look up the error in the symbol table to verify it exists
-    const scope = if (self.current_scope) |s| s else &self.symbol_table.root;
+    const scope = if (self.current_scope) |s| s else self.symbol_table.root;
     var symbol = self.symbol_table.safeFindUpOpt(scope, err_ret.error_name);
-    if (symbol == null and scope != &self.symbol_table.root) {
-        symbol = self.symbol_table.safeFindUpOpt(&self.symbol_table.root, err_ret.error_name);
+    if (symbol == null and scope != self.symbol_table.root) {
+        symbol = self.symbol_table.safeFindUpOpt(self.symbol_table.root, err_ret.error_name);
     }
     if (symbol == null) {
         return TypeResolutionError.UndefinedIdentifier;
@@ -493,6 +508,12 @@ fn synthErrorReturn(
     const found_symbol = symbol.?;
     if (found_symbol.kind != .Error) {
         return TypeResolutionError.TypeMismatch;
+    }
+
+    if (self.symbol_table.error_signatures.get(err_ret.error_name)) |params_opt| {
+        if (params_opt != null and params_opt.?.len > 0) {
+            return TypeResolutionError.InvalidErrorUsage;
+        }
     }
 
     // error returns are compatible with ErrorUnion types
@@ -515,6 +536,18 @@ fn synthTry(
     // synthesize the inner expression (should return an ErrorUnion)
     var inner_typed = try synthExpr(self, try_expr.expr);
     defer inner_typed.deinit(self.allocator);
+
+    if (!isErrorUnionTypeInfo(inner_typed.ty)) {
+        return TypeResolutionError.TypeMismatch;
+    }
+
+    // track the error union type for catch binding
+    self.last_try_error_union = inner_typed.ty;
+
+    const return_ty = self.current_function_return_type orelse TypeInfo.unknown();
+    if (!self.in_try_block and !isErrorUnionTypeInfo(return_ty)) {
+        return TypeResolutionError.ErrorUnionOutsideTry;
+    }
 
     // extract success type from ErrorUnion
     if (inner_typed.ty.category == .ErrorUnion) {
@@ -567,8 +600,8 @@ fn synthIdentifier(
     var eff = Effect.pure();
     if (self.current_scope) |scope| {
         var sym_opt = self.symbol_table.safeFindUpOpt(scope, id.name);
-        if (sym_opt == null and scope != &self.symbol_table.root) {
-            sym_opt = self.symbol_table.safeFindUpOpt(&self.symbol_table.root, id.name);
+        if (sym_opt == null and scope != self.symbol_table.root) {
+            sym_opt = self.symbol_table.safeFindUpOpt(self.symbol_table.root, id.name);
         }
         if (sym_opt) |sym| {
             if (sym.region == .Storage or sym.region == .TStore) {
@@ -594,6 +627,13 @@ fn synthBinary(
     // validate operator types
     try validateBinaryOperator(
         self,
+        bin.operator,
+        lhs_typed.ty,
+        rhs_typed.ty,
+    );
+
+    // validate refinement arithmetic constraints (e.g., scale mismatch)
+    try self.refinement_system.validateArithmetic(
         bin.operator,
         lhs_typed.ty,
         rhs_typed.ty,
@@ -711,10 +751,10 @@ fn synthCall(
         log.debug("[synthCall] Looking up function '{s}'\n", .{func_name});
 
         // first try symbol table
-        const scope = if (self.current_scope) |s| s else &self.symbol_table.root;
+        const scope = if (self.current_scope) |s| s else self.symbol_table.root;
         var symbol = self.symbol_table.safeFindUpOpt(scope, func_name);
-        if (symbol == null and scope != &self.symbol_table.root) {
-            symbol = self.symbol_table.safeFindUpOpt(&self.symbol_table.root, func_name);
+        if (symbol == null and scope != self.symbol_table.root) {
+            symbol = self.symbol_table.safeFindUpOpt(self.symbol_table.root, func_name);
         }
 
         // if not in symbol table, check function registry
@@ -816,6 +856,20 @@ fn synthCall(
             }
         } else if (found_symbol.kind == .Error) {
             // error call (e.g., InsufficientBalance(amount, balance))
+            if (self.symbol_table.error_signatures.get(func_name)) |params_opt| {
+                if (params_opt == null) {
+                    if (call.arguments.len > 0) {
+                        return TypeResolutionError.InvalidErrorUsage;
+                    }
+                } else {
+                    const params = params_opt.?;
+                    if (call.arguments.len != params.len) {
+                        return TypeResolutionError.InvalidErrorUsage;
+                    }
+                }
+            } else {
+                return TypeResolutionError.InvalidErrorUsage;
+            }
             // return Error type compatible with ErrorUnion
             const error_ty = TypeInfo{
                 .category = .Error,

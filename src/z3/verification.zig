@@ -34,6 +34,7 @@ pub const VerificationAnnotation = struct {
         LoopInvariant, // Loop invariant
         ContractInvariant, // Contract-level invariant (future)
         RefinementGuard, // Runtime refinement guard
+        Assume, // Verification-only assumption
     };
 };
 
@@ -339,6 +340,12 @@ pub const VerificationPass = struct {
                 const guard_id = try self.getStringAttr(op, "ora.guard_id");
                 try self.recordEncodedAnnotation(op, .RefinementGuard, condition_value, guard_id);
             }
+        } else if (std.mem.eql(u8, op_name, "ora.assume")) {
+            const num_operands = mlir.oraOperationGetNumOperands(op);
+            if (num_operands >= 1) {
+                const condition_value = mlir.oraOperationGetOperand(op, 0);
+                try self.recordEncodedAnnotation(op, .Assume, condition_value, null);
+            }
         } else if (std.mem.eql(u8, op_name, "cf.assert")) {
             const num_operands = mlir.oraOperationGetNumOperands(op);
             if (num_operands >= 1) {
@@ -454,7 +461,10 @@ pub const VerificationPass = struct {
             for (annotations) |ann| {
                 if (ann.kind == .RefinementGuard) {
                     guard_annotations.append(ann) catch {};
-                } else {
+                } else if (ann.kind != .Assume) {
+                    // Exclude Assume - those are branch-local assumptions that shouldn't
+                    // be asserted at function level (they represent branch conditions
+                    // which are mutually exclusive between if/else branches)
                     base_annotations.append(ann) catch {};
                 }
             }
@@ -481,14 +491,15 @@ pub const VerificationPass = struct {
                 },
                 z3.Z3_L_FALSE => {
                     std.debug.print("verification: {s} -> UNSAT\n", .{fn_name});
-                    const counterexample = self.buildCounterexample();
+                    // UNSAT means constraints are unsatisfiable - no counterexample exists
+                    // (counterexamples only make sense for SAT results)
                     try result.addError(.{
                         .error_type = .InvariantViolation,
                         .message = try std.fmt.allocPrint(self.allocator, "verification failed (UNSAT) in {s}", .{fn_name}),
                         .file = try self.allocator.dupe(u8, self.firstLocationFile(annotations)),
                         .line = self.firstLocationLine(annotations),
                         .column = self.firstLocationColumn(annotations),
-                        .counterexample = counterexample,
+                        .counterexample = null,
                         .allocator = self.allocator,
                     });
                     return result;
@@ -509,9 +520,41 @@ pub const VerificationPass = struct {
                 },
             }
 
-            // prove refinement guards: check base constraints => guard
+            // Process refinement guards incrementally:
+            // Each guard is checked in the context of all PREVIOUS guards (as assumptions)
+            // This allows us to detect when a later guard is unsatisfiable given earlier constraints
             for (guard_annotations.items) |ann| {
                 if (ann.guard_id == null) continue;
+
+                // First check: can the guard EVER be satisfied given previous guards?
+                // If (base_constraints AND previous_guards AND this_guard) is UNSAT, error!
+                self.solver.push();
+                self.solver.assert(ann.condition);
+                const satisfy_status = self.solver.check();
+                if (self.debug_z3) {
+                    std.debug.print("[Z3] guard satisfiability {s}\n", .{ann.guard_id.?});
+                    self.logAst("guard", ann.condition);
+                    self.logSolverState("satisfiability");
+                }
+                self.solver.pop();
+
+                if (satisfy_status == z3.Z3_L_FALSE) {
+                    // Guard can NEVER be satisfied given previous constraints - error!
+                    std.debug.print("verification: {s} guard {s} -> UNSATISFIABLE\n", .{ fn_name, ann.guard_id.? });
+                    // No counterexample for UNSAT - there's no satisfying assignment
+                    try result.addError(.{
+                        .error_type = .RefinementViolation,
+                        .message = try std.fmt.allocPrint(self.allocator, "refinement guard can never be satisfied in {s}: {s}", .{ fn_name, ann.guard_id.? }),
+                        .file = try self.allocator.dupe(u8, ann.file),
+                        .line = ann.line,
+                        .column = ann.column,
+                        .counterexample = null,
+                        .allocator = self.allocator,
+                    });
+                    return result;
+                }
+
+                // Second check: can the guard be violated? (to determine if it should be kept)
                 self.solver.push();
                 const not_guard = z3.Z3_mk_not(self.context.ctx, ann.condition);
                 self.solver.assert(not_guard);
@@ -534,6 +577,10 @@ pub const VerificationPass = struct {
                     try result.proven_guard_ids.put(key, {});
                 }
                 self.solver.pop();
+
+                // Add this guard to context for subsequent guards
+                // This builds up the constraint context incrementally
+                self.solver.assert(ann.condition);
             }
         }
 

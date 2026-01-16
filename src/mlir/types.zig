@@ -887,6 +887,16 @@ pub const TypeMapper = struct {
             }
         }
 
+        // base -> refinement conversion
+        const target_ref_base = c.oraRefinementTypeGetBaseType(target_type);
+        if (target_ref_base.ptr != null and c.oraTypeEqual(target_ref_base, value_type)) {
+            const loc = c.oraLocationUnknownGet(self.ctx);
+            const convert_op = c.oraBaseToRefinementOpCreate(self.ctx, loc, value, target_type, block);
+            if (convert_op.ptr != null) {
+                return h.getResult(convert_op, 0);
+            }
+        }
+
         // check if types are integers or index types
         // mlir index type can be converted to/from integers
         const value_is_int = c.oraTypeIsAInteger(value_type);

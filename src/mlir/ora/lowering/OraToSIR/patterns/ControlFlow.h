@@ -80,6 +80,17 @@ namespace mlir
                 ConversionPatternRewriter &rewriter) const override;
         };
 
+        class ConvertIsolatedIfOp : public OpConversionPattern<ora::IsolatedIfOp>
+        {
+        public:
+            using OpConversionPattern::OpConversionPattern;
+
+            LogicalResult matchAndRewrite(
+                ora::IsolatedIfOp op,
+                typename ora::IsolatedIfOp::Adaptor adaptor,
+                ConversionPatternRewriter &rewriter) const override;
+        };
+
         class ConvertBreakOp : public OpConversionPattern<ora::BreakOp>
         {
         public:

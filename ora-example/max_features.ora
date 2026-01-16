@@ -68,7 +68,7 @@ contract FeatureMaximizer {
         }
 
         // Requires/Ensures style checks embedded in helper calls
-        _ = self.helper_require_ensure(5);
+        helper_require_ensure(5);
 
         // Quantified expression usage
         //TOOD: Review this, forall exists are Formal Verification features, not a smart contract functionality.
@@ -98,9 +98,9 @@ contract FeatureMaximizer {
         comptime { var z: u256 = 0; z += 1; }
 
         // Error expression and try/catch statement
-        try self.may_fail()
-        catch |e| {
-            _ = e;
+        try { 
+            may_fail();
+        } catch(e) { // not using value, we should add warning
             log Transfer(OWNER, OWNER, 0);
         }
 

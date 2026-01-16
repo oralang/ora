@@ -291,18 +291,14 @@ fn lowerBuiltinConstant(
     });
 
     if (std.mem.eql(u8, builtin_info.full_path, "std.constants.ZERO_ADDRESS")) {
-        const addr_ty = self.type_mapper.toMlirType(.{
-            .ora_type = builtin_info.return_type,
-        });
-
         const i160_ty = c.oraIntegerTypeCreate(self.ctx, 160);
         const const_op = self.ora_dialect.createArithConstant(0, i160_ty, self.fileLoc(span));
         h.appendOp(self.block, const_op);
         const i160_value = h.getResult(const_op, 0);
 
-        const bitcast_op = c.oraArithBitcastOpCreate(self.ctx, self.fileLoc(span), i160_value, addr_ty);
-        h.appendOp(self.block, bitcast_op);
-        return h.getResult(bitcast_op, 0);
+        const addr_op = c.oraI160ToAddrOpCreate(self.ctx, self.fileLoc(span), i160_value);
+        h.appendOp(self.block, addr_op);
+        return h.getResult(addr_op, 0);
     }
 
     if (std.mem.eql(u8, builtin_info.full_path, "std.constants.U256_MAX") or

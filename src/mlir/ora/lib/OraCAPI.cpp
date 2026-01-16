@@ -479,6 +479,14 @@ void oraBlockAppendOwnedOperation(MlirBlock block, MlirOperation op)
                 return {nullptr, 0};
             }
 
+            // Normalize negative constant SSA names for readability (e.g., %c-1_i256 -> %c_neg1_i256).
+            std::string::size_type negPos = 0;
+            while ((negPos = mlirContent.find("%c-", negPos)) != std::string::npos)
+            {
+                mlirContent.replace(negPos, 3, "%c_neg");
+                negPos += 6;
+            }
+
             // Post-process the output to add line breaks for readability
             std::string formattedContent;
             formattedContent.reserve(mlirContent.size() * 1.1);
@@ -1102,6 +1110,48 @@ MlirOperation oraIfOpCreate(MlirContext ctx, MlirLocation loc, MlirValue conditi
     }
 }
 
+MlirOperation oraIsolatedIfOpCreate(MlirContext ctx, MlirLocation loc, MlirValue condition)
+{
+    try
+    {
+        MLIRContext *context = unwrap(ctx);
+        Location location = unwrap(loc);
+        Value conditionRef = unwrap(condition);
+
+        // Check if dialect is registered
+        if (!oraDialectIsRegistered(ctx))
+        {
+            return {nullptr};
+        }
+
+        OpBuilder builder(context);
+
+        TypeRange emptyResults;
+        auto ifOp = IsolatedIfOp::create(builder, location, emptyResults, conditionRef);
+
+        auto &thenRegion = ifOp.getThenRegion();
+        auto &elseRegion = ifOp.getElseRegion();
+        if (thenRegion.empty())
+        {
+            thenRegion.push_back(new Block());
+        }
+        if (elseRegion.empty())
+        {
+            elseRegion.push_back(new Block());
+        }
+
+        // Add gas_cost attribute (branch operation has cost = 10)
+        auto gasCostAttr = IntegerAttr::get(::mlir::IntegerType::get(context, 64), 10);
+        ifOp->setAttr("gas_cost", gasCostAttr);
+
+        return wrap(ifOp.getOperation());
+    }
+    catch (...)
+    {
+        return {nullptr};
+    }
+}
+
 MlirBlock oraIfOpGetThenBlock(MlirOperation ifOp)
 {
     try
@@ -1131,6 +1181,35 @@ MlirBlock oraIfOpGetThenBlock(MlirOperation ifOp)
     }
 }
 
+MlirBlock oraIsolatedIfOpGetThenBlock(MlirOperation ifOp)
+{
+    try
+    {
+        Operation *operation = unwrap(ifOp);
+        if (!operation)
+        {
+            return {nullptr};
+        }
+
+        auto op = dyn_cast<ora::IsolatedIfOp>(operation);
+        if (!op)
+        {
+            return {nullptr};
+        }
+
+        Region &thenRegion = op.getThenRegion();
+        if (thenRegion.empty())
+        {
+            thenRegion.push_back(new Block());
+        }
+        return wrap(&thenRegion.front());
+    }
+    catch (...)
+    {
+        return {nullptr};
+    }
+}
+
 MlirBlock oraIfOpGetElseBlock(MlirOperation ifOp)
 {
     try
@@ -1142,6 +1221,35 @@ MlirBlock oraIfOpGetElseBlock(MlirOperation ifOp)
         }
 
         auto op = dyn_cast<ora::IfOp>(operation);
+        if (!op)
+        {
+            return {nullptr};
+        }
+
+        Region &elseRegion = op.getElseRegion();
+        if (elseRegion.empty())
+        {
+            elseRegion.push_back(new Block());
+        }
+        return wrap(&elseRegion.front());
+    }
+    catch (...)
+    {
+        return {nullptr};
+    }
+}
+
+MlirBlock oraIsolatedIfOpGetElseBlock(MlirOperation ifOp)
+{
+    try
+    {
+        Operation *operation = unwrap(ifOp);
+        if (!operation)
+        {
+            return {nullptr};
+        }
+
+        auto op = dyn_cast<ora::IsolatedIfOp>(operation);
         if (!op)
         {
             return {nullptr};
@@ -1558,6 +1666,23 @@ MlirType oraMapTypeGetValueType(MlirType mapType)
     }
 }
 
+MlirType oraMapTypeGetKeyType(MlirType mapType)
+{
+    try
+    {
+        Type mapTypeRef = unwrap(mapType);
+        if (auto oraMapType = dyn_cast<ora::MapType>(mapTypeRef))
+        {
+            return wrap(oraMapType.getKeyType());
+        }
+        return {nullptr};
+    }
+    catch (...)
+    {
+        return {nullptr};
+    }
+}
+
 MlirType oraStructTypeGet(MlirContext ctx, MlirStringRef structName)
 {
     try
@@ -1822,6 +1947,44 @@ MlirOperation oraRefinementToBaseOpCreate(MlirContext ctx, MlirLocation loc, Mli
         }
 
         auto op = builder.create<ora::RefinementToBaseOp>(location, valueRef);
+        return wrap(op.getOperation());
+    }
+    catch (...)
+    {
+        return {nullptr};
+    }
+}
+
+MlirOperation oraBaseToRefinementOpCreate(MlirContext ctx, MlirLocation loc, MlirValue value, MlirType resultType, MlirBlock block)
+{
+    try
+    {
+        MLIRContext *context = unwrap(ctx);
+        Location location = unwrap(loc);
+        Value valueRef = unwrap(value);
+        Type resultTy = unwrap(resultType);
+        Block *blockRef = unwrap(block);
+
+        if (!oraDialectIsRegistered(ctx))
+        {
+            return {nullptr};
+        }
+
+        OpBuilder builder(context);
+        if (isa<BlockArgument>(valueRef))
+        {
+            builder.setInsertionPointToStart(blockRef);
+        }
+        else if (Operation *definingOp = valueRef.getDefiningOp())
+        {
+            builder.setInsertionPointAfter(definingOp);
+        }
+        else
+        {
+            builder.setInsertionPointToStart(blockRef);
+        }
+
+        auto op = builder.create<ora::BaseToRefinementOp>(location, resultTy, valueRef);
         return wrap(op.getOperation());
     }
     catch (...)

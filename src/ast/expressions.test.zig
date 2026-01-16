@@ -145,6 +145,45 @@ test "expressions: unary expression creation" {
     }
 }
 
+test "expressions: try expression creation" {
+    const allocator = testing.allocator;
+    var arena = ast_arena.AstArena.init(allocator);
+    defer arena.deinit();
+
+    var builder = ast_builder.AstBuilder.init(&arena);
+    defer builder.deinit();
+
+    const span_operand = ast.SourceSpan{ .line = 1, .column = 5, .length = 3, .byte_offset = 4 };
+    const span_try = ast.SourceSpan{ .line = 1, .column = 1, .length = 7, .byte_offset = 0 };
+
+    const operand = try builder.identifier("foo", span_operand);
+    const expr = try builder.expr().tryExpr(operand, span_try);
+
+    try testing.expect(expr.* == .Try);
+    if (expr.* == .Try) {
+        try testing.expect(expr.Try.expr.* == .Identifier);
+        try testing.expectEqual(span_try.line, expr.Try.span.line);
+    }
+}
+
+test "expressions: error return creation" {
+    const allocator = testing.allocator;
+    var arena = ast_arena.AstArena.init(allocator);
+    defer arena.deinit();
+
+    var builder = ast_builder.AstBuilder.init(&arena);
+    defer builder.deinit();
+
+    const span = ast.SourceSpan{ .line = 1, .column = 1, .length = 9, .byte_offset = 0 };
+    const expr = try builder.expr().errorReturn("Fail", span);
+
+    try testing.expect(expr.* == .ErrorReturn);
+    if (expr.* == .ErrorReturn) {
+        try testing.expect(std.mem.eql(u8, "Fail", expr.ErrorReturn.error_name));
+        try testing.expectEqual(span.line, expr.ErrorReturn.span.line);
+    }
+}
+
 test "expressions: nested binary expression" {
     const allocator = testing.allocator;
     var arena = ast_arena.AstArena.init(allocator);

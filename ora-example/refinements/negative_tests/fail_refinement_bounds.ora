@@ -1,0 +1,28 @@
+// NEGATIVE TEST: Should fail - refinement bounds violations
+// These test cases should fail SMT verification (UNSAT) or type checking
+
+contract RefinementBounds {
+    // ERROR: MaxValue<u256, 50> cannot satisfy MinValue<u256, 100>
+    // A value <= 50 cannot be >= 100
+    pub fn max_to_min_incompatible(x: MaxValue<u256, 50>) -> MinValue<u256, 100> {
+        return x;  // Should fail: provably unsatisfiable
+    }
+
+    // ERROR: InRange<u256, 0, 50> cannot satisfy MinValue<u256, 100>
+    // A value in [0, 50] cannot be >= 100
+    pub fn range_to_min_incompatible(x: InRange<u256, 0, 50>) -> MinValue<u256, 100> {
+        return x;  // Should fail: provably unsatisfiable
+    }
+
+    // ERROR: MinValue<u256, 200> cannot satisfy MaxValue<u256, 100>
+    // A value >= 200 cannot be <= 100
+    pub fn min_to_max_incompatible(x: MinValue<u256, 200>) -> MaxValue<u256, 100> {
+        return x;  // Should fail: provably unsatisfiable
+    }
+
+    // ERROR: InRange<u256, 0, 50> cannot satisfy InRange<u256, 100, 200>
+    // Ranges [0,50] and [100,200] don't overlap
+    pub fn disjoint_ranges(x: InRange<u256, 0, 50>) -> InRange<u256, 100, 200> {
+        return x;  // Should fail: provably unsatisfiable
+    }
+}

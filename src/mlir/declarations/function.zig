@@ -8,6 +8,7 @@ const lib = @import("ora_lib");
 const h = @import("../helpers.zig");
 const TypeMapper = @import("../types.zig").TypeMapper;
 const LocalVarMap = @import("../symbols.zig").LocalVarMap;
+const local_var_analysis = @import("../analysis/local_vars.zig");
 const ParamMap = @import("../symbols.zig").ParamMap;
 const StorageMap = @import("../memory.zig").StorageMap;
 const ExpressionLowerer = @import("../expressions.zig").ExpressionLowerer;
@@ -253,6 +254,16 @@ pub fn lowerFunction(self: *const DeclarationLowerer, func: *const lib.FunctionN
         }
     }
 
+    // analyze locals and mark SSA vs memref choices before lowering body
+    if (local_var_map) |lvm| {
+        var reprs = local_var_analysis.analyzeLocalVarReprs(std.heap.page_allocator, func);
+        defer reprs.deinit();
+        var it = reprs.iterator();
+        while (it.next()) |entry| {
+            lvm.setLocalVarKind(entry.key_ptr.*, entry.value_ptr.*) catch {};
+        }
+    }
+
     // add precondition assertions for requires clauses
     if (func.requires_clauses.len > 0) {
         lowerRequiresClauses(self, func.requires_clauses, block, &param_map, contract_storage_map, local_var_map orelse &local_vars) catch |err| {
@@ -261,7 +272,7 @@ pub fn lowerFunction(self: *const DeclarationLowerer, func: *const lib.FunctionN
     }
 
     // lower the function body
-    lowerFunctionBody(self, func, block, &param_map, contract_storage_map, local_var_map orelse &local_vars) catch |err| {
+    lowerFunctionBody(self, func, func_op, block, &param_map, contract_storage_map, local_var_map orelse &local_vars) catch |err| {
         // format error message based on error type
         const error_message = switch (err) {
             error.InvalidLValue => "Cannot assign to immutable variable",
@@ -341,7 +352,7 @@ pub fn lowerFunction(self: *const DeclarationLowerer, func: *const lib.FunctionN
 }
 
 /// Lower function body statements
-fn lowerFunctionBody(self: *const DeclarationLowerer, func: *const lib.FunctionNode, block: c.MlirBlock, param_map: *const ParamMap, storage_map: ?*const StorageMap, local_var_map: ?*LocalVarMap) LoweringError!void {
+fn lowerFunctionBody(self: *const DeclarationLowerer, func: *const lib.FunctionNode, func_op: c.MlirOperation, block: c.MlirBlock, param_map: *const ParamMap, storage_map: ?*const StorageMap, local_var_map: ?*LocalVarMap) LoweringError!void {
     // create a statement lowerer for this function
     const const_local_var_map = if (local_var_map) |lvm| @as(*const LocalVarMap, lvm) else null;
     var expr_lowerer = ExpressionLowerer.init(self.ctx, block, self.type_mapper, param_map, storage_map, const_local_var_map, self.symbol_table, self.builtin_registry, self.error_handler, self.locations, self.ora_dialect);
@@ -355,7 +366,8 @@ fn lowerFunctionBody(self: *const DeclarationLowerer, func: *const lib.FunctionN
     const function_return_type_info = if (func.return_type_info) |ret_info| ret_info else null;
     expr_lowerer.current_function_return_type = function_return_type;
     expr_lowerer.current_function_return_type_info = function_return_type_info;
-    const stmt_lowerer = StatementLowerer.init(self.ctx, block, self.type_mapper, &expr_lowerer, param_map, storage_map, local_var_map, self.locations, self.symbol_table, self.builtin_registry, std.heap.page_allocator, function_return_type, function_return_type_info, self.ora_dialect, func.ensures_clauses);
+    var stmt_lowerer = StatementLowerer.init(self.ctx, block, self.type_mapper, &expr_lowerer, param_map, storage_map, local_var_map, self.locations, self.symbol_table, self.builtin_registry, std.heap.page_allocator, function_return_type, function_return_type_info, self.ora_dialect, func.ensures_clauses);
+    stmt_lowerer.current_func_op = func_op;
 
     // lower the function body
     _ = try stmt_lowerer.lowerBlockBody(func.body, block);

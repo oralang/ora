@@ -65,12 +65,14 @@ pub const StatementLowerer = struct {
     current_function_return_type: ?c.MlirType,
     current_function_return_type_info: ?lib.ast.Types.TypeInfo,
     ora_dialect: *@import("../dialect.zig").OraDialect,
+    function_block: c.MlirBlock,
     label_context: ?*const LabelContext,
     ensures_clauses: []*lib.ast.Expressions.ExprNode = &[_]*lib.ast.Expressions.ExprNode{}, // Ensures clauses to check before returns
     in_try_block: bool = false, // Track if we're inside a try block (returns should not use ora.return)
     try_return_flag_memref: ?c.MlirValue = null, // Memref for return flag in try blocks
     try_return_value_memref: ?c.MlirValue = null, // Memref for return value in try blocks
     force_stack_memref: bool = false, // Force stack locals to lower as memrefs (e.g. labeled blocks)
+    current_func_op: ?c.MlirOperation = null, // Current function operation (for creating new blocks)
 
     pub fn init(ctx: c.MlirContext, block: c.MlirBlock, type_mapper: *const TypeMapper, expr_lowerer: *const ExpressionLowerer, param_map: ?*const ParamMap, storage_map: ?*const StorageMap, local_var_map: ?*LocalVarMap, locations: LocationTracker, symbol_table: ?*SymbolTable, builtin_registry: ?*const lib.semantics.builtins.BuiltinRegistry, allocator: std.mem.Allocator, function_return_type: ?c.MlirType, function_return_type_info: ?lib.ast.Types.TypeInfo, ora_dialect: *@import("../dialect.zig").OraDialect, ensures_clauses: []*lib.ast.Expressions.ExprNode) StatementLowerer {
         return .{
@@ -89,6 +91,7 @@ pub const StatementLowerer = struct {
             .current_function_return_type = function_return_type,
             .current_function_return_type_info = function_return_type_info,
             .ora_dialect = ora_dialect,
+            .function_block = block,
             .label_context = null,
             .ensures_clauses = ensures_clauses,
             .in_try_block = false,
@@ -97,12 +100,14 @@ pub const StatementLowerer = struct {
     }
 
     /// Main dispatch function for lowering statements
-    pub fn lowerStatement(self: *const StatementLowerer, stmt: *const lib.ast.Statements.StmtNode) LoweringError!void {
+    /// Returns an optional new block that subsequent statements should use
+    pub fn lowerStatement(self: *const StatementLowerer, stmt: *const lib.ast.Statements.StmtNode) LoweringError!?c.MlirBlock {
         _ = self.fileLoc(self.getStatementSpan(stmt));
 
         switch (stmt.*) {
             .Return => |ret| {
                 try return_stmt.lowerReturn(self, &ret);
+                return null;
             },
             .VariableDecl => |var_decl| {
                 log.debug("[statement_lowerer] Processing VariableDecl: {s}, region={any}\n", .{ var_decl.name, var_decl.region });
@@ -115,69 +120,90 @@ pub const StatementLowerer = struct {
                     log.debug("  ora_type: NULL\n", .{});
                 }
                 try variables.lowerVariableDecl(self, &var_decl);
+                return null;
             },
             .DestructuringAssignment => |assignment| {
                 try assignments.lowerDestructuringAssignment(self, &assignment);
+                return null;
             },
             .CompoundAssignment => |assignment| {
                 try assignments.lowerCompoundAssignment(self, &assignment);
+                return null;
             },
             .If => |if_stmt| {
-                try control_flow.lowerIf(self, &if_stmt);
+                return try control_flow.lowerIf(self, &if_stmt);
             },
             .While => |while_stmt| {
                 try control_flow.lowerWhile(self, &while_stmt);
+                return null;
             },
             .ForLoop => |for_stmt| {
                 try control_flow.lowerFor(self, &for_stmt);
+                return null;
             },
             .Switch => |switch_stmt| {
                 try control_flow.lowerSwitch(self, &switch_stmt);
+                return null;
             },
             .Break => |break_stmt| {
                 try labels.lowerBreak(self, &break_stmt);
+                return null;
             },
             .Continue => |continue_stmt| {
                 try labels.lowerContinue(self, &continue_stmt);
+                return null;
             },
             .Log => |log_stmt| {
                 try primitives.lowerLog(self, &log_stmt);
+                return null;
             },
             .Lock => |lock_stmt| {
                 try primitives.lowerLock(self, &lock_stmt);
+                return null;
             },
             .Unlock => |unlock_stmt| {
                 try primitives.lowerUnlock(self, &unlock_stmt);
+                return null;
             },
             .Assert => |assert_stmt| {
                 try verification.lowerAssert(self, &assert_stmt);
+                return null;
             },
             .TryBlock => |try_stmt| {
                 try error_handling.lowerTryBlock(self, &try_stmt);
+                return null;
             },
             .ErrorDecl => |error_decl| {
                 try error_handling.lowerErrorDecl(self, &error_decl);
+                return null;
             },
             .Invariant => |invariant| {
                 try verification.lowerInvariant(self, &invariant);
+                return null;
             },
             .Requires => |requires| {
                 try verification.lowerRequires(self, &requires);
+                return null;
             },
             .Ensures => |ensures| {
                 try verification.lowerEnsures(self, &ensures);
+                return null;
             },
             .Assume => |assume| {
                 try verification.lowerAssume(self, &assume);
+                return null;
             },
             .Havoc => |havoc| {
                 try verification.lowerHavoc(self, &havoc);
+                return null;
             },
             .Expr => |expr| {
                 try assignments.lowerExpressionStatement(self, &expr);
+                return null;
             },
             .LabeledBlock => |labeled_block| {
                 try labels.lowerLabeledBlock(self, &labeled_block);
+                return null;
             },
         }
     }
@@ -231,43 +257,90 @@ pub const StatementLowerer = struct {
     }
 
     /// Lower block body with proper error handling and location tracking
-    pub fn lowerBlockBody(self: *const StatementLowerer, b: lib.ast.Statements.BlockNode, block: c.MlirBlock) LoweringError!bool {
+    pub fn lowerBlockBody(self: *const StatementLowerer, b: lib.ast.Statements.BlockNode, initial_block: c.MlirBlock) LoweringError!bool {
         if (self.symbol_table) |st| {
             st.pushScope() catch {
                 log.debug("WARNING: Failed to push scope for block\n", .{});
             };
         }
 
-        var expr_lowerer = ExpressionLowerer.init(self.ctx, block, self.type_mapper, self.param_map, self.storage_map, self.local_var_map, self.symbol_table, self.builtin_registry, self.expr_lowerer.error_handler, self.locations, self.ora_dialect);
+        // Track current block - may change if partial returns create continue blocks
+        var current_block = initial_block;
+
+        var expr_lowerer = ExpressionLowerer.init(self.ctx, current_block, self.type_mapper, self.param_map, self.storage_map, self.local_var_map, self.symbol_table, self.builtin_registry, self.expr_lowerer.error_handler, self.locations, self.ora_dialect);
         expr_lowerer.current_function_return_type = self.current_function_return_type;
         expr_lowerer.current_function_return_type_info = self.current_function_return_type_info;
         expr_lowerer.in_try_block = self.in_try_block;
 
         var has_terminator = false;
 
-        for (b.statements) |*s| {
+        var stmt_idx: usize = 0;
+        while (stmt_idx < b.statements.len) : (stmt_idx += 1) {
             if (has_terminator) break;
 
+            const s = &b.statements[stmt_idx];
             const is_terminator = switch (s.*) {
                 .Break, .Continue, .Return => true,
                 else => false,
             };
 
-            var stmt_lowerer = StatementLowerer.init(self.ctx, block, self.type_mapper, &expr_lowerer, self.param_map, self.storage_map, self.local_var_map, self.locations, self.symbol_table, self.builtin_registry, self.allocator, self.current_function_return_type, self.current_function_return_type_info, self.ora_dialect, self.ensures_clauses);
+            // Check for pattern: if (with one branch returning) followed by return
+            // Transform: if (c) { return x; } return y; -> if (c) { return x; } else { return y; }
+            if (s.* == .If and stmt_idx + 1 < b.statements.len) {
+                const if_stmt = &s.If;
+                const next_stmt = &b.statements[stmt_idx + 1];
+                const then_returns = helpers.blockHasReturn(self, if_stmt.then_branch);
+                const else_returns = if (if_stmt.else_branch) |else_branch| helpers.blockHasReturn(self, else_branch) else false;
+
+                // If then returns but no else, and next statement is return, merge them
+                if (then_returns and !else_returns and if_stmt.else_branch == null and next_stmt.* == .Return) {
+                    expr_lowerer.block = current_block;
+                    var stmt_lowerer = StatementLowerer.init(self.ctx, current_block, self.type_mapper, &expr_lowerer, self.param_map, self.storage_map, self.local_var_map, self.locations, self.symbol_table, self.builtin_registry, self.allocator, self.current_function_return_type, self.current_function_return_type_info, self.ora_dialect, self.ensures_clauses);
+                    stmt_lowerer.force_stack_memref = self.force_stack_memref;
+                    stmt_lowerer.label_context = self.label_context;
+                    stmt_lowerer.in_try_block = self.in_try_block;
+                    stmt_lowerer.current_func_op = self.current_func_op;
+
+                    // Use lowerIfWithFollowingReturn which handles this pattern
+                    try control_flow.lowerIfWithFollowingReturn(&stmt_lowerer, if_stmt, &next_stmt.Return);
+                    has_terminator = true;
+                    stmt_idx += 1; // Skip the return statement as we've already handled it
+                    continue;
+                }
+            }
+
+            // Update expr_lowerer's block if it changed
+            expr_lowerer.block = current_block;
+
+            var stmt_lowerer = StatementLowerer.init(self.ctx, current_block, self.type_mapper, &expr_lowerer, self.param_map, self.storage_map, self.local_var_map, self.locations, self.symbol_table, self.builtin_registry, self.allocator, self.current_function_return_type, self.current_function_return_type_info, self.ora_dialect, self.ensures_clauses);
             stmt_lowerer.force_stack_memref = self.force_stack_memref;
             stmt_lowerer.label_context = self.label_context;
             stmt_lowerer.in_try_block = self.in_try_block;
             stmt_lowerer.try_return_flag_memref = self.try_return_flag_memref;
             stmt_lowerer.try_return_value_memref = self.try_return_value_memref;
+            stmt_lowerer.current_func_op = self.current_func_op;
 
-            stmt_lowerer.lowerStatement(s) catch |err| {
+            const maybe_new_block = stmt_lowerer.lowerStatement(s) catch |err| {
                 if (self.symbol_table) |st| {
                     st.popScope();
                 }
                 return err;
             };
 
-            if (is_terminator or helpers.blockEndsWithTerminator(&stmt_lowerer, block)) {
+            // If statement returns a new block, subsequent statements go there
+            if (maybe_new_block) |new_block| {
+                log.debug("[lowerBlockBody] Got new block from lowerStatement, updating current_block\n", .{});
+                current_block = new_block;
+            }
+
+            if (is_terminator or helpers.blockEndsWithTerminator(&stmt_lowerer, current_block)) {
+                has_terminator = true;
+            } else if (s.* == .TryBlock and stmt_idx == b.statements.len - 1 and self.current_function_return_type != null) {
+                const loc = self.fileLoc(self.getStatementSpan(s));
+                const ret_type = self.current_function_return_type.?;
+                const default_val = try helpers.createDefaultValueForType(self, ret_type, loc);
+                const ret_op = self.ora_dialect.createFuncReturnWithValue(default_val, loc);
+                h.appendOp(current_block, ret_op);
                 has_terminator = true;
             }
         }

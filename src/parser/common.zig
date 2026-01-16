@@ -15,7 +15,7 @@ const std = @import("std");
 const lexer = @import("../lexer.zig");
 const ast = @import("../ast.zig");
 const AstArena = @import("../ast/ast_arena.zig").AstArena;
-const log = @import("log");
+const diagnostics = @import("diagnostics.zig");
 
 const Token = lexer.Token;
 
@@ -123,11 +123,11 @@ pub const BaseParser = struct {
         }
 
         const current_token = self.peek();
-        log.err("Parser error at line {d}, column {d}: {s} (expected {s}, got {s})\n", .{ current_token.line, current_token.column, message, @tagName(token_type), @tagName(current_token.type) });
+        diagnostics.print("error: Parser error at line {d}, column {d}: {s} (expected {s}, got {s})\n", .{ current_token.line, current_token.column, message, @tagName(token_type), @tagName(current_token.type) });
 
         // add more context with the lexeme if available
         if (current_token.lexeme.len > 0) {
-            log.help("found '{s}'\n", .{current_token.lexeme});
+            diagnostics.print("help: found '{s}'\n", .{current_token.lexeme});
         }
 
         return error.ExpectedToken;
@@ -135,10 +135,10 @@ pub const BaseParser = struct {
 
     pub fn errorAtCurrent(self: *BaseParser, message: []const u8) !void {
         const current_token = self.peek();
-        log.err("Parser error at line {d}, column {d}: {s}\n", .{ current_token.line, current_token.column, message });
+        diagnostics.print("error: Parser error at line {d}, column {d}: {s}\n", .{ current_token.line, current_token.column, message });
         // add more context with the lexeme if available
         if (current_token.lexeme.len > 0) {
-            log.help("found '{s}'\n", .{current_token.lexeme});
+            diagnostics.print("help: found '{s}'\n", .{current_token.lexeme});
         }
         return error.UnexpectedToken;
     }
@@ -150,11 +150,11 @@ pub const BaseParser = struct {
             return self.advance();
         }
 
-        log.err("Parser error at line {d}, column {d}: {s} (got {s})\n", .{ current_token.line, current_token.column, message, @tagName(current_token.type) });
+        diagnostics.print("error: Parser error at line {d}, column {d}: {s} (got {s})\n", .{ current_token.line, current_token.column, message, @tagName(current_token.type) });
 
         // add more context with the lexeme if available
         if (current_token.lexeme.len > 0) {
-            log.help("found '{s}'\n", .{current_token.lexeme});
+            diagnostics.print("help: found '{s}'\n", .{current_token.lexeme});
         }
 
         return error.ExpectedToken;

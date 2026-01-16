@@ -321,7 +321,7 @@ pub const StatementParser = struct {
             repeat: while (true) {
                 // use expression parser for log arguments
                 self.syncSubParsers();
-                const arg = try self.expr_parser.parseExpression();
+                const arg = try self.expr_parser.parseExpressionNoComma();
                 self.updateFromSubParser(self.expr_parser.base.current);
                 try args.append(self.base.arena.allocator(), arg);
                 if (!self.base.match(.Comma)) break :repeat;

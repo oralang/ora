@@ -15,13 +15,15 @@
 
 const std = @import("std");
 const ast = @import("ast.zig");
-const core = @import("semantics/core.zig");
+const core_impl = @import("semantics/core.zig");
 const ManagedArrayList = std.array_list.Managed;
 
 // Export builtins module for use by MLIR lowering
 pub const builtins = @import("semantics/builtins.zig");
 // Export state module for type resolution
 pub const state = @import("semantics/state.zig");
+// Export core for tests and tools
+pub const core = core_impl;
 
 pub const Diagnostic = struct {
     message: []const u8,
@@ -75,9 +77,9 @@ pub fn validateLValues(allocator: std.mem.Allocator, nodes: []const ast.AstNode)
 // Unified entry point for semantics
 // Runs collection (phase 1) then checks (phase 2) and returns combined diagnostics with symbols
 pub fn analyze(allocator: std.mem.Allocator, nodes: []const ast.AstNode) !core.SemanticsResult {
-    var p1 = try core.analyzePhase1(allocator, nodes);
+    var p1 = try core_impl.analyzePhase1(allocator, nodes);
     // phase2 uses the same symbol table by reference
-    const p2_diags = try core.analyzePhase2(allocator, nodes, &p1.symbols);
+    const p2_diags = try core_impl.analyzePhase2(allocator, nodes, &p1.symbols);
 
     // combine diagnostics deterministically in encounter order (phase1 then phase2)
     var combined = ManagedArrayList(core.Diagnostic).init(allocator);

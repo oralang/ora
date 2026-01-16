@@ -41,6 +41,10 @@ pub const Symbol = struct {
     mutable: bool = false,
     region: ?ast.statements.MemoryRegion = null,
     typ_owned: bool = false,
+    /// True if this symbol's type was derived from control flow analysis
+    /// (e.g., inside `if (x == 0)`, x is flow-refined to have value 0).
+    /// Flow refinements should be used for reads but NOT for assignment targets.
+    is_flow_refinement: bool = false,
 };
 
 pub const FunctionEffect = union(enum) {
@@ -83,11 +87,11 @@ pub const FunctionEffect = union(enum) {
 
 pub const Scope = struct {
     name: ?[]const u8 = null,
-    symbols: std.ArrayList(Symbol),
+    symbols: std.ArrayListUnmanaged(Symbol) = .{},
     parent: ?*Scope = null,
 
     pub fn init(_: std.mem.Allocator, parent: ?*Scope, name: ?[]const u8) Scope {
-        return .{ .name = name, .symbols = std.ArrayList(Symbol){}, .parent = parent };
+        return .{ .name = name, .symbols = .{}, .parent = parent };
     }
 
     pub fn deinit(self: *Scope, allocator: std.mem.Allocator) void {
@@ -102,11 +106,14 @@ pub const Scope = struct {
 
 pub const SymbolTable = struct {
     allocator: std.mem.Allocator,
-    root: Scope,
+    root: *Scope, // Heap-allocated to avoid dangling pointers when table is copied
     scopes: std.ArrayList(*Scope),
     contract_scopes: std.StringHashMap(*Scope),
     function_scopes: std.StringHashMap(*Scope),
+    // top-level (non-contract) log signatures
     log_signatures: std.StringHashMap([]const ast.LogField),
+    // contract-scoped log signatures: contract name -> (event name -> fields)
+    contract_log_signatures: std.StringHashMap(std.StringHashMap([]const ast.LogField)),
     error_signatures: std.StringHashMap(?[]const ast.ParameterNode), // error name → parameters (null if no params)
     function_allowed_errors: std.StringHashMap([][]const u8),
     function_success_types: std.StringHashMap(ast.Types.OraType),
@@ -117,7 +124,9 @@ pub const SymbolTable = struct {
     builtin_registry: builtins.BuiltinRegistry, // Built-in stdlib functions/constants
 
     pub fn init(allocator: std.mem.Allocator) SymbolTable {
-        const root_scope = Scope.init(allocator, null, null);
+        // Allocate root scope on heap to avoid dangling pointers when table is copied/returned
+        const root_scope = allocator.create(Scope) catch @panic("Failed to allocate root scope");
+        root_scope.* = Scope.init(allocator, null, null);
         const builtin_reg = builtins.BuiltinRegistry.init(allocator) catch {
             log.err("Failed to initialize builtin registry\n", .{});
             @panic("Builtin registry initialization failed");
@@ -129,6 +138,7 @@ pub const SymbolTable = struct {
             .contract_scopes = std.StringHashMap(*Scope).init(allocator),
             .function_scopes = std.StringHashMap(*Scope).init(allocator),
             .log_signatures = std.StringHashMap([]const ast.LogField).init(allocator),
+            .contract_log_signatures = std.StringHashMap(std.StringHashMap([]const ast.LogField)).init(allocator),
             .error_signatures = std.StringHashMap(?[]const ast.ParameterNode).init(allocator),
             .function_allowed_errors = std.StringHashMap([][]const u8).init(allocator),
             .function_success_types = std.StringHashMap(ast.Types.OraType).init(allocator),
@@ -148,6 +158,9 @@ pub const SymbolTable = struct {
                 if (s.typ) |*ti| type_info_mod.deinitTypeInfo(self.allocator, ti);
             }
         }
+        // deinit root scope (heap-allocated)
+        self.root.deinit(self.allocator);
+        self.allocator.destroy(self.root);
         // deinit types in child scopes then deinit the scope containers
         for (self.scopes.items) |sc| {
             for (sc.symbols.items) |*sym| {
@@ -162,6 +175,11 @@ pub const SymbolTable = struct {
         self.contract_scopes.deinit();
         self.function_scopes.deinit();
         self.log_signatures.deinit();
+        var log_it = self.contract_log_signatures.valueIterator();
+        while (log_it.next()) |map_ptr| {
+            map_ptr.*.deinit();
+        }
+        self.contract_log_signatures.deinit();
         self.error_signatures.deinit();
         var it = self.function_allowed_errors.valueIterator();
         while (it.next()) |slice_ptr| {
@@ -193,7 +211,6 @@ pub const SymbolTable = struct {
         // note: struct_fields values are direct references to AST nodes, not owned copies
         self.struct_fields.deinit();
         self.builtin_registry.deinit();
-        self.root.deinit(self.allocator);
     }
 
     pub fn declare(self: *SymbolTable, scope: *Scope, sym: Symbol) !?Symbol {
@@ -210,6 +227,42 @@ pub const SymbolTable = struct {
             if (s.findInCurrent(name)) |idx| return s.symbols.items[idx];
         }
         return null;
+    }
+
+    /// Find the original declared symbol, skipping flow-refined shadowing symbols.
+    /// This is used for assignment targets where we want the declared type, not flow refinements.
+    pub fn findDeclaredUp(scope: ?*const Scope, name: []const u8) ?Symbol {
+        var cur = scope;
+        while (cur) |s| : (cur = s.parent) {
+            if (s.findInCurrent(name)) |idx| {
+                const sym = s.symbols.items[idx];
+                // Skip flow-refined symbols - they shadow the declared type
+                if (!sym.is_flow_refinement) {
+                    return sym;
+                }
+                // Continue up the scope chain to find the original
+            }
+        }
+        return null;
+    }
+
+    pub fn findEnclosingContractName(self: *const SymbolTable, scope: ?*const Scope) ?[]const u8 {
+        var cur = scope;
+        while (cur) |s| : (cur = s.parent) {
+            if (s.name) |scope_name| {
+                if (self.contract_scopes.get(scope_name) != null or
+                    self.contract_log_signatures.getPtr(scope_name) != null)
+                {
+                    return scope_name;
+                }
+            }
+        }
+        return null;
+    }
+
+    pub fn getContractLogSignatures(self: *SymbolTable, scope: ?*const Scope) ?*std.StringHashMap([]const ast.LogField) {
+        const contract_name = self.findEnclosingContractName(scope) orelse return null;
+        return self.contract_log_signatures.getPtr(contract_name);
     }
 
     /// Find the scope containing a symbol by name, searching from the given scope up to root
@@ -308,7 +361,7 @@ pub const SymbolTable = struct {
 
     /// Check if a scope is registered in the symbol table
     pub fn isScopeKnown(self: *const SymbolTable, scope: *const Scope) bool {
-        if (scope == &self.root) return true;
+        if (scope == self.root) return true;
         for (self.scopes.items) |sc| {
             if (sc == scope) return true;
         }

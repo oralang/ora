@@ -7,11 +7,12 @@ const std = @import("std");
 const c = @import("mlir_c_api").c;
 const c_zig = @import("mlir_c_api");
 const h = @import("../helpers.zig");
+const error_handling = @import("../error_handling.zig");
 const StatementLowerer = @import("statement_lowerer.zig").StatementLowerer;
 const lib = @import("ora_lib");
 const log = @import("log");
 
-fn isErrorUnionTypeInfo(ti: lib.ast.Types.TypeInfo) bool {
+pub fn isErrorUnionTypeInfo(ti: lib.ast.Types.TypeInfo) bool {
     if (ti.category == .ErrorUnion) return true;
     if (ti.ora_type) |ot| switch (ot) {
         .error_union => return true,
@@ -21,6 +22,139 @@ fn isErrorUnionTypeInfo(ti: lib.ast.Types.TypeInfo) bool {
     return false;
 }
 
+/// Encode a tagged error union into a single integer value.
+/// Layout: (payload << 1) | tag, where tag=0 for ok, tag=1 for error.
+pub fn encodeErrorUnionValue(
+    self: *const StatementLowerer,
+    payload: c.MlirValue,
+    is_error: bool,
+    target_type: c.MlirType,
+    target_block: c.MlirBlock,
+    span: lib.ast.SourceSpan,
+    loc: c.MlirLocation,
+) c.MlirValue {
+    // Check if target is an error union type - if so, extract the success type for encoding
+    const success_type = c.oraErrorUnionTypeGetSuccessType(target_type);
+    const encode_type = if (!c.oraTypeIsNull(success_type)) success_type else target_type;
+
+    const target_builtin = c.oraTypeToBuiltin(encode_type);
+    if (!c.oraTypeIsAInteger(target_builtin)) {
+        return payload;
+    }
+
+    const payload_conv = convertValueToType(self, payload, encode_type, span, loc);
+
+    const one_val = createArithConstantInBlock(self, target_block, 1, encode_type, loc);
+
+    const shifted_op = c.oraArithShlIOpCreate(self.ctx, loc, payload_conv, one_val);
+    h.appendOp(target_block, shifted_op);
+    const shifted_val = h.getResult(shifted_op, 0);
+
+    const tag_val_int: i64 = if (is_error) 1 else 0;
+    const tag_val = createArithConstantInBlock(self, target_block, tag_val_int, encode_type, loc);
+
+    const or_op = c.oraArithOrIOpCreate(self.ctx, loc, shifted_val, tag_val);
+    h.appendOp(target_block, or_op);
+    const encoded_val = h.getResult(or_op, 0);
+
+    // If the target is an error union type, wrap the encoded value using ora.error.ok or ora.error.err
+    if (!c.oraTypeIsNull(success_type)) {
+        const wrap_op = if (is_error)
+            c.oraErrorErrOpCreate(self.ctx, loc, encoded_val, target_type)
+        else
+            c.oraErrorOkOpCreate(self.ctx, loc, encoded_val, target_type);
+        h.appendOp(target_block, wrap_op);
+        return h.getResult(wrap_op, 0);
+    }
+    return encoded_val;
+}
+
+pub const ErrorUnionPayload = struct {
+    payload: c.MlirValue,
+    is_error: bool,
+};
+
+pub fn getErrorUnionPayload(
+    self: *const StatementLowerer,
+    value_expr: *const lib.ast.Expressions.ExprNode,
+    value: c.MlirValue,
+    target_type: c.MlirType,
+    target_block: c.MlirBlock,
+    loc: c.MlirLocation,
+) ErrorUnionPayload {
+    var payload = value;
+    var is_error = false;
+    var err_name: ?[]const u8 = null;
+
+    switch (value_expr.*) {
+        .ErrorReturn => |err_ret| {
+            is_error = true;
+            err_name = err_ret.error_name;
+        },
+        .Identifier => |ident| {
+            if (ident.type_info.category == .Error) {
+                is_error = true;
+                err_name = ident.name;
+            }
+        },
+        else => {},
+    }
+
+    if (is_error) {
+        const err_id = if (self.symbol_table) |st|
+            if (err_name) |name| st.getErrorId(name) else null
+        else
+            null;
+        const err_val: i64 = @intCast(err_id orelse 1);
+        // Use the success type for creating the constant, not the error union type
+        // Error union types can't be used directly with arith.constant
+        const const_type = blk: {
+            const success_ty = c.oraErrorUnionTypeGetSuccessType(target_type);
+            break :blk if (!c.oraTypeIsNull(success_ty)) success_ty else target_type;
+        };
+        payload = createArithConstantInBlock(self, target_block, err_val, const_type, loc);
+    }
+
+    return .{ .payload = payload, .is_error = is_error };
+}
+
+fn createArithConstantInFunction(
+    self: *const StatementLowerer,
+    value: i64,
+    target_type: c.MlirType,
+    loc: c.MlirLocation,
+) c.MlirValue {
+    var lowerer = self.*;
+    lowerer.block = self.function_block;
+    const op = lowerer.ora_dialect.createArithConstant(value, target_type, loc);
+    const first_op = c.oraBlockGetFirstOperation(lowerer.block);
+    if (!c.oraOperationIsNull(first_op)) {
+        h.insertOpBefore(lowerer.block, op, first_op);
+    } else {
+        h.appendOp(lowerer.block, op);
+    }
+    return h.getResult(op, 0);
+}
+
+fn createArithConstantInBlock(
+    self: *const StatementLowerer,
+    block: c.MlirBlock,
+    value: i64,
+    target_type: c.MlirType,
+    loc: c.MlirLocation,
+) c.MlirValue {
+    var lowerer = self.*;
+    lowerer.block = block;
+    const op = lowerer.ora_dialect.createArithConstant(value, target_type, loc);
+    const first_op = c.oraBlockGetFirstOperation(lowerer.block);
+    if (!c.oraOperationIsNull(first_op)) {
+        h.insertOpBefore(lowerer.block, op, first_op);
+    } else {
+        h.appendOp(lowerer.block, op);
+    }
+    return h.getResult(op, 0);
+}
+
 /// Lower a value expression, inserting an implicit try inside try blocks when appropriate.
 pub fn lowerValueWithImplicitTry(
     self: *const StatementLowerer,
@@ -28,13 +162,21 @@ pub fn lowerValueWithImplicitTry(
     expected_type: ?lib.ast.Types.TypeInfo,
 ) c.MlirValue {
     if (self.in_try_block) {
-        if (expr.* == .Call) {
-            const call = expr.Call;
-            if (isErrorUnionTypeInfo(call.type_info)) {
-                if (expected_type == null or !isErrorUnionTypeInfo(expected_type.?)) {
-                    var try_expr = lib.ast.Expressions.TryExpr{ .expr = @constCast(expr), .span = call.span };
-                    return self.expr_lowerer.lowerTry(&try_expr);
-                }
+        const needs_unwrap = blk: {
+            switch (expr.*) {
+                .Call => |call| break :blk isErrorUnionTypeInfo(call.type_info),
+                .Identifier => |id| break :blk isErrorUnionTypeInfo(id.type_info),
+                .FieldAccess => |fa| break :blk isErrorUnionTypeInfo(fa.type_info),
+                else => break :blk false,
+            }
+        };
+        if (needs_unwrap) {
+            if (expected_type == null or !isErrorUnionTypeInfo(expected_type.?)) {
+                var try_expr = lib.ast.Expressions.TryExpr{
+                    .expr = @constCast(expr),
+                    .span = error_handling.getSpanFromExpression(expr),
+                };
+                return self.expr_lowerer.lowerTry(&try_expr);
             }
         }
     }
@@ -77,7 +219,9 @@ pub fn storeToMemref(self: *const StatementLowerer, value: c.MlirValue, memref: 
         null,
         0,
     );
-    h.appendOp(self.block, store_op);
+    if (!c.oraOperationIsNull(store_op)) {
+        h.appendOp(self.block, store_op);
+    }
 }
 
 /// Convert a value to match a target type, using TypeMapper and bitcast as fallback
@@ -430,6 +574,27 @@ pub fn blockEndsWithTerminator(_: *const StatementLowerer, block: c.MlirBlock) b
     return false;
 }
 
+/// Check if a block ends with a specific terminator op name.
+pub fn blockEndsWithOpName(block: c.MlirBlock, op_name: []const u8) bool {
+    const last_op = c.oraBlockGetTerminator(block);
+    if (c.oraOperationIsNull(last_op)) {
+        return false;
+    }
+
+    const op_name_ref = c.oraOperationGetName(last_op);
+    const name_str = op_name_ref.data;
+    const name_len = op_name_ref.length;
+
+    if (name_str == null or name_len == 0) {
+        c_zig.freeStringRef(op_name_ref);
+        return false;
+    }
+
+    const matches = name_len == op_name.len and std.mem.eql(u8, name_str[0..name_len], op_name);
+    c_zig.freeStringRef(op_name_ref);
+    return matches;
+}
+
 /// Check if a block ends with ora.break (which is NOT a terminator)
 pub fn blockEndsWithBreak(_: *const StatementLowerer, block: c.MlirBlock) bool {
     _ = block;
@@ -521,6 +686,23 @@ pub fn blockHasReturn(self: *const StatementLowerer, block: lib.ast.Statements.B
 
 /// Create a default value for a given MLIR type
 pub fn createDefaultValueForType(self: *const StatementLowerer, mlir_type: c.MlirType, loc: c.MlirLocation) StatementLowerer.LoweringError!c.MlirValue {
+    // check if it's a refinement type and get its base type
+    const refinement_base = c.oraRefinementTypeGetBaseType(mlir_type);
+    if (refinement_base.ptr != null) {
+        // create a constant of the base type, then convert to refinement type
+        const base_const_op = self.ora_dialect.createArithConstant(0, refinement_base, loc);
+        h.appendOp(self.block, base_const_op);
+        const base_value = h.getResult(base_const_op, 0);
+
+        // convert base value to refinement type
+        const convert_op = c.oraBaseToRefinementOpCreate(self.ctx, loc, base_value, mlir_type, self.block);
+        if (convert_op.ptr != null) {
+            return h.getResult(convert_op, 0);
+        }
+        // fallback if conversion failed
+        return base_value;
+    }
+
     // check if it's an integer type
     if (c.oraTypeIsAInteger(mlir_type)) {
         // create a constant 0 value

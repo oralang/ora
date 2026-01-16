@@ -86,8 +86,11 @@ pub fn main() !void {
     const input_file: ?[]const u8 = parsed.input_file;
     const emit_tokens: bool = parsed.emit_tokens;
     const emit_ast: bool = parsed.emit_ast;
+    const emit_ast_format: ?[]const u8 = parsed.emit_ast_format;
+    const emit_typed_ast: bool = parsed.emit_typed_ast;
+    const emit_typed_ast_format: ?[]const u8 = parsed.emit_typed_ast_format;
     var emit_mlir: bool = parsed.emit_mlir;
-    var emit_mlir_sir: bool = parsed.emit_mlir_sir;
+    const emit_mlir_sir: bool = parsed.emit_mlir_sir;
     const emit_cfg: bool = parsed.emit_cfg;
     const emit_abi: bool = parsed.emit_abi;
     const emit_abi_solidity: bool = parsed.emit_abi_solidity;
@@ -139,12 +142,11 @@ pub fn main() !void {
 
     // determine compilation mode
     // if no --emit-X flag is set, default to MLIR generation
-    if (!emit_tokens and !emit_ast and !emit_mlir and !emit_mlir_sir and !emit_cfg and !emit_abi and !emit_abi_solidity) {
+    if (!emit_tokens and !emit_ast and !emit_typed_ast and !emit_mlir and !emit_mlir_sir and !emit_cfg and !emit_abi and !emit_abi_solidity) {
         emit_mlir = true; // Default: emit MLIR
     }
-    if (emit_mlir and !emit_mlir_sir) {
-        emit_mlir_sir = true;
-    }
+    // By default, emit Ora MLIR plus SIR MLIR when --emit-mlir is requested.
+    // emit-mlir should stop after Ora MLIR (and validation) unless explicitly asked for SIR
 
     // create MLIR options structure
     const mlir_options = MlirOptions{
@@ -168,16 +170,20 @@ pub fn main() !void {
 
     if (emit_abi or emit_abi_solidity) {
         try runAbiEmit(allocator, file_path, output_dir, emit_abi, emit_abi_solidity);
-        const only_abi = !(emit_tokens or emit_ast or emit_mlir or emit_mlir_sir);
+        const only_abi = !(emit_tokens or emit_ast or emit_typed_ast or emit_mlir or emit_mlir_sir);
         if (only_abi) return;
     }
 
     if (emit_tokens) {
         // stop after lexer
         try runLexer(allocator, file_path);
-    } else if (emit_ast) {
+    } else if (emit_ast or emit_typed_ast) {
         // stop after parser
-        try runParser(allocator, file_path);
+        const format = if (emit_typed_ast)
+            (emit_typed_ast_format orelse "tree")
+        else
+            (emit_ast_format orelse "tree");
+        try runParser(allocator, file_path, format, emit_typed_ast);
     } else if (emit_mlir) {
         // run full MLIR pipeline (Ora MLIR)
         try runMlirEmitAdvanced(allocator, file_path, mlir_options);
@@ -201,6 +207,9 @@ fn printUsage() !void {
     try stdout.print("  (default)              - Emit MLIR\n", .{});
     try stdout.print("  --emit-tokens          - Stop after lexical analysis (emit tokens)\n", .{});
     try stdout.print("  --emit-ast             - Stop after parsing (emit AST)\n", .{});
+    try stdout.print("  --emit-ast=json|tree   - Emit AST in JSON or tree format\n", .{});
+    try stdout.print("  --emit-typed-ast       - Stop after parsing (emit typed AST)\n", .{});
+    try stdout.print("  --emit-typed-ast=json|tree - Emit typed AST in JSON or tree format\n", .{});
     try stdout.print("  --emit-mlir            - Emit Ora MLIR and SIR MLIR (default)\n", .{});
     try stdout.print("  --emit-mlir-sir        - Emit SIR MLIR only (after conversion)\n", .{});
     try stdout.print("  --emit-cfg             - Generate control flow graph (Graphviz DOT format)\n", .{});
@@ -369,10 +378,16 @@ fn runLexer(allocator: std.mem.Allocator, file_path: []const u8) !void {
 // ============================================================================
 
 /// Run parser on file and display AST
-fn runParser(allocator: std.mem.Allocator, file_path: []const u8) !void {
+fn runParser(allocator: std.mem.Allocator, file_path: []const u8, format: []const u8, include_types: bool) !void {
     var stdout_buffer: [1024]u8 = undefined;
     var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
     const stdout = &stdout_writer.interface;
+
+    if (!std.mem.eql(u8, format, "tree") and !std.mem.eql(u8, format, "json")) {
+        try stdout.print("error: unsupported AST format '{s}' (use 'tree' or 'json')\n", .{format});
+        try stdout.flush();
+        std.process.exit(2);
+    }
 
     // read source file
     const source = std.fs.cwd().readFileAlloc(allocator, file_path, 1024 * 1024) catch |err| {
@@ -381,8 +396,10 @@ fn runParser(allocator: std.mem.Allocator, file_path: []const u8) !void {
     };
     defer allocator.free(source);
 
-    try stdout.print("Parsing {s}\n", .{file_path});
-    try stdout.print("==================================================\n", .{});
+    if (std.mem.eql(u8, format, "tree")) {
+        try stdout.print("Parsing {s}\n", .{file_path});
+        try stdout.print("==================================================\n", .{});
+    }
 
     // run lexer
     var lexer = lib.Lexer.init(allocator, source);
@@ -395,7 +412,9 @@ fn runParser(allocator: std.mem.Allocator, file_path: []const u8) !void {
     };
     defer allocator.free(tokens);
 
-    try stdout.print("Lexed {d} tokens\n", .{tokens.len});
+    if (std.mem.eql(u8, format, "tree")) {
+        try stdout.print("Lexed {d} tokens\n", .{tokens.len});
+    }
 
     // run parser - use parseWithArena to keep arena alive for AST printing
     var parse_result = lib.parser.parseWithArena(allocator, tokens) catch |err| {
@@ -406,12 +425,23 @@ fn runParser(allocator: std.mem.Allocator, file_path: []const u8) !void {
     defer parse_result.arena.deinit(); // Keep arena alive until after printing
     const ast_nodes = parse_result.nodes;
 
-    try stdout.print("Generated {d} AST nodes\n\n", .{ast_nodes.len});
-
-    // display AST summary
-    for (ast_nodes, 0..) |*node, i| {
-        try stdout.print("[{d}] ", .{i});
-        try printAstSummary(stdout, node, 0);
+    if (std.mem.eql(u8, format, "json")) {
+        var serializer = lib.AstSerializer.init(allocator, .{
+            .include_types = include_types,
+            .pretty_print = true,
+        });
+        defer serializer.deinit();
+        serializer.serialize(ast_nodes, stdout) catch |err| {
+            try stdout.print("error: failed to serialize AST: {s}\n", .{@errorName(err)});
+            try stdout.flush();
+            std.process.exit(1);
+        };
+    } else {
+        try stdout.print("Generated {d} AST nodes\n\n", .{ast_nodes.len});
+        for (ast_nodes, 0..) |*node, i| {
+            try stdout.print("[{d}] ", .{i});
+            try printAstSummary(stdout, node, 0);
+        }
     }
 
     try stdout.flush();

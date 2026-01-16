@@ -198,7 +198,6 @@ pub fn lowerSwitchExpression(
     if (c.oraOperationIsNull(switch_op)) {
         @panic("Failed to create ora.switch_expr operation");
     }
-    h.appendOp(self.block, switch_op);
 
     const StatementLowerer = @import("../statements.zig").StatementLowerer;
 
@@ -289,7 +288,7 @@ pub fn lowerSwitchExpression(
                                     const yield_op = self.ora_dialect.createYield(&[_]c.MlirValue{v}, loc);
                                     h.appendOp(case_block, yield_op);
                                 } else {
-                                    const default_val = createDefaultValueForType(self, result_type, loc) catch return condition;
+                                    const default_val = case_expr_lowerer.createDefaultValueForType(result_type, loc) catch return condition;
                                     const yield_op = self.ora_dialect.createYield(&[_]c.MlirValue{default_val}, loc);
                                     h.appendOp(case_block, yield_op);
                                 }
@@ -301,7 +300,7 @@ pub fn lowerSwitchExpression(
                                     const yield_op = self.ora_dialect.createYield(&[_]c.MlirValue{v}, loc);
                                     h.appendOp(case_block, yield_op);
                                 } else {
-                                    const default_val = createDefaultValueForType(self, result_type, loc) catch return condition;
+                                    const default_val = case_expr_lowerer.createDefaultValueForType(result_type, loc) catch return condition;
                                     const yield_op = self.ora_dialect.createYield(&[_]c.MlirValue{default_val}, loc);
                                     h.appendOp(case_block, yield_op);
                                 }
@@ -313,21 +312,21 @@ pub fn lowerSwitchExpression(
                                     const yield_op = self.ora_dialect.createYield(&[_]c.MlirValue{v}, loc);
                                     h.appendOp(case_block, yield_op);
                                 } else {
-                                    const default_val = createDefaultValueForType(self, result_type, loc) catch return condition;
+                                    const default_val = case_expr_lowerer.createDefaultValueForType(result_type, loc) catch return condition;
                                     const yield_op = self.ora_dialect.createYield(&[_]c.MlirValue{default_val}, loc);
                                     h.appendOp(case_block, yield_op);
                                 }
                                 break;
                             },
                             else => {
-                                temp_lowerer.lowerStatement(&stmt) catch {};
+                                _ = temp_lowerer.lowerStatement(&stmt) catch null;
                             },
                         }
                     }
                 } else {
                     var temp_lowerer = StatementLowerer.init(self.ctx, case_block, self.type_mapper, &case_expr_lowerer, self.param_map, self.storage_map, @constCast(self.local_var_map), self.locations, @constCast(self.symbol_table), self.builtin_registry, std.heap.page_allocator, result_type, null, self.ora_dialect, &[_]*lib.ast.Expressions.ExprNode{});
                     _ = temp_lowerer.lowerBlockBody(block, case_block) catch false;
-                    const default_val = createDefaultValueForType(self, result_type, loc) catch return condition;
+                    const default_val = case_expr_lowerer.createDefaultValueForType(result_type, loc) catch return condition;
                     const yield_op = self.ora_dialect.createYield(&[_]c.MlirValue{default_val}, loc);
                     h.appendOp(case_block, yield_op);
                 }
@@ -351,7 +350,7 @@ pub fn lowerSwitchExpression(
                                     const yield_op = self.ora_dialect.createYield(&[_]c.MlirValue{v}, loc);
                                     h.appendOp(case_block, yield_op);
                                 } else {
-                                    const default_val = createDefaultValueForType(self, result_type, loc) catch return condition;
+                                    const default_val = case_expr_lowerer.createDefaultValueForType(result_type, loc) catch return condition;
                                     const yield_op = self.ora_dialect.createYield(&[_]c.MlirValue{default_val}, loc);
                                     h.appendOp(case_block, yield_op);
                                 }
@@ -363,7 +362,7 @@ pub fn lowerSwitchExpression(
                                     const yield_op = self.ora_dialect.createYield(&[_]c.MlirValue{v}, loc);
                                     h.appendOp(case_block, yield_op);
                                 } else {
-                                    const default_val = createDefaultValueForType(self, result_type, loc) catch return condition;
+                                    const default_val = case_expr_lowerer.createDefaultValueForType(result_type, loc) catch return condition;
                                     const yield_op = self.ora_dialect.createYield(&[_]c.MlirValue{default_val}, loc);
                                     h.appendOp(case_block, yield_op);
                                 }
@@ -375,21 +374,21 @@ pub fn lowerSwitchExpression(
                                     const yield_op = self.ora_dialect.createYield(&[_]c.MlirValue{v}, loc);
                                     h.appendOp(case_block, yield_op);
                                 } else {
-                                    const default_val = createDefaultValueForType(self, result_type, loc) catch return condition;
+                                    const default_val = case_expr_lowerer.createDefaultValueForType(result_type, loc) catch return condition;
                                     const yield_op = self.ora_dialect.createYield(&[_]c.MlirValue{default_val}, loc);
                                     h.appendOp(case_block, yield_op);
                                 }
                                 break;
                             },
                             else => {
-                                temp_lowerer.lowerStatement(&stmt) catch {};
+                                _ = temp_lowerer.lowerStatement(&stmt) catch null;
                             },
                         }
                     }
                 } else {
                     var temp_lowerer = StatementLowerer.init(self.ctx, case_block, self.type_mapper, &case_expr_lowerer, self.param_map, self.storage_map, @constCast(self.local_var_map), self.locations, @constCast(self.symbol_table), self.builtin_registry, std.heap.page_allocator, result_type, null, self.ora_dialect, &[_]*lib.ast.Expressions.ExprNode{});
                     _ = temp_lowerer.lowerBlockBody(labeled.block, case_block) catch false;
-                    const default_val = createDefaultValueForType(self, result_type, loc) catch return condition;
+                    const default_val = case_expr_lowerer.createDefaultValueForType(result_type, loc) catch return condition;
                     const yield_op = self.ora_dialect.createYield(&[_]c.MlirValue{default_val}, loc);
                     h.appendOp(case_block, yield_op);
                 }
@@ -427,21 +426,21 @@ pub fn lowerSwitchExpression(
                             const yield_op = self.ora_dialect.createYield(&[_]c.MlirValue{v}, loc);
                             h.appendOp(default_block_mlir, yield_op);
                         } else {
-                            const default_val = createDefaultValueForType(self, result_type, loc) catch return condition;
+                            const default_val = default_expr_lowerer.createDefaultValueForType(result_type, loc) catch return condition;
                             const yield_op = self.ora_dialect.createYield(&[_]c.MlirValue{default_val}, loc);
                             h.appendOp(default_block_mlir, yield_op);
                         }
                         break;
                     },
                     else => {
-                        temp_lowerer.lowerStatement(&stmt) catch {};
+                        _ = temp_lowerer.lowerStatement(&stmt) catch null;
                     },
                 }
             }
         } else {
             var temp_lowerer = StatementLowerer.init(self.ctx, default_block_mlir, self.type_mapper, &default_expr_lowerer, self.param_map, self.storage_map, @constCast(self.local_var_map), self.locations, @constCast(self.symbol_table), self.builtin_registry, std.heap.page_allocator, result_type, null, self.ora_dialect, &[_]*lib.ast.Expressions.ExprNode{});
             _ = temp_lowerer.lowerBlockBody(default_block, default_block_mlir) catch false;
-            const default_val = createDefaultValueForType(self, result_type, loc) catch return condition;
+            const default_val = default_expr_lowerer.createDefaultValueForType(result_type, loc) catch return condition;
             const yield_op = self.ora_dialect.createYield(&[_]c.MlirValue{default_val}, loc);
             h.appendOp(default_block_mlir, yield_op);
         }
@@ -467,6 +466,8 @@ pub fn lowerSwitchExpression(
             case_values.items.len,
         );
     }
+
+    h.appendOp(self.block, switch_op);
 
     return h.getResult(switch_op, 0);
 }
@@ -668,13 +669,17 @@ pub fn lowerErrorReturn(
     error_ret: *const lib.ast.Expressions.ErrorReturnExpr,
 ) c.MlirValue {
     const ty = c.oraIntegerTypeCreate(self.ctx, constants.DEFAULT_INTEGER_BITS);
+    const error_code: i64 = if (self.symbol_table) |st|
+        @intCast(st.getErrorId(error_ret.error_name) orelse 1)
+    else
+        1;
     const error_id = h.identifier(self.ctx, "ora.error");
     const error_name_attr = h.stringAttr(self.ctx, error_ret.error_name);
 
     const attrs = [_]c.MlirNamedAttribute{
         c.oraNamedAttributeGet(error_id, error_name_attr),
     };
-    const op = self.ora_dialect.createArithConstantWithAttrs(1, ty, &attrs, self.fileLoc(error_ret.span));
+    const op = self.ora_dialect.createArithConstantWithAttrs(error_code, ty, &attrs, self.fileLoc(error_ret.span));
     h.appendOp(self.block, op);
     return h.getResult(op, 0);
 }
@@ -810,7 +815,7 @@ pub fn lowerLabeledBlock(
     const stmt_lowerer = StatementLowerer.init(self.ctx, block, self.type_mapper, self, self.param_map, self.storage_map, @constCast(self.local_var_map), self.locations, null, self.builtin_registry, std.heap.page_allocator, null, null, self.ora_dialect, &[_]*lib.ast.Expressions.ExprNode{});
 
     for (labeled_block.block.statements) |stmt| {
-        stmt_lowerer.lowerStatement(&stmt) catch |err| {
+        _ = stmt_lowerer.lowerStatement(&stmt) catch |err| {
             log.err("lowering statement in labeled block: {s}\n", .{@errorName(err)});
             return self.createConstant(0, labeled_block.span);
         };

@@ -9,6 +9,7 @@
 #include "patterns/MemRef.h"
 #include "patterns/ControlFlow.h"
 #include "patterns/EVM.h"
+#include "patterns/Logs.h"
 
 #include "OraDialect.h"
 #include "SIR/SIRDialect.h"
@@ -224,6 +225,7 @@ public:
             patterns.add<ConvertStructDeclOp>(typeConverter, ctx);
         }
         patterns.add<ConvertRefinementToBaseOp>(typeConverter, ctx);
+        patterns.add<ConvertBaseToRefinementOp>(typeConverter, ctx);
         patterns.add<ConvertEvmOp>(typeConverter, ctx);
         if (enable_memref_store)
             patterns.add<ConvertMemRefStoreOp>(typeConverter, ctx, PatternBenefit(10));
@@ -249,6 +251,7 @@ public:
         if (enable_control_flow)
         {
             patterns.add<ConvertIfOp>(typeConverter, ctx);
+            patterns.add<ConvertIsolatedIfOp>(typeConverter, ctx);
             patterns.add<ConvertBreakOp>(typeConverter, ctx);
             patterns.add<ConvertContinueOp>(typeConverter, ctx);
             patterns.add<ConvertSwitchExprOp>(typeConverter, ctx);
@@ -256,6 +259,7 @@ public:
             patterns.add<ConvertTryCatchOp>(typeConverter, ctx);
             patterns.add<ConvertRangeOp>(typeConverter, ctx);
         }
+        patterns.add<ConvertLogOp>(typeConverter, ctx);
         patterns.add<EraseOpByName>("ora.enum.decl", ctx);
         patterns.add<EraseOpByName>("ora.error.decl", ctx);
         patterns.add<EraseOpByName>("ora.log.decl", ctx);
@@ -272,12 +276,10 @@ public:
         target.addIllegalDialect<ora::OraDialect>();
         target.addIllegalOp<ora::ContractOp>();
         target.addIllegalOp<ora::StructDeclOp>();
-        target.addDynamicallyLegalOp<ora::SLoadOp>([](ora::SLoadOp op) {
-            return llvm::isa<mlir::RankedTensorType>(op.getResult().getType());
-        });
-        target.addDynamicallyLegalOp<ora::SStoreOp>([](ora::SStoreOp op) {
-            return llvm::isa<mlir::RankedTensorType>(op.getValue().getType());
-        });
+        target.addDynamicallyLegalOp<ora::SLoadOp>([](ora::SLoadOp op)
+                                                   { return llvm::isa<mlir::RankedTensorType>(op.getResult().getType()); });
+        target.addDynamicallyLegalOp<ora::SStoreOp>([](ora::SStoreOp op)
+                                                    { return llvm::isa<mlir::RankedTensorType>(op.getValue().getType()); });
         DBG("Marked Ora dialect as illegal");
         // Mark cf dialect as legal (cf.assert for bounds checking)
         target.addLegalDialect<mlir::cf::ControlFlowDialect>();
@@ -816,46 +818,65 @@ namespace mlir
 
         private:
             // Deduplicate constants: find all arith.constant with same value/type, replace uses
-            // IMPORTANT: Only deduplicate within each function, not across functions
+            // IMPORTANT: Only deduplicate constants in the SAME BLOCK to avoid dominance issues
+            // Constants inside nested regions (ora.if, scf.if, etc.) cannot be deduplicated
+            // with constants outside those regions.
             bool deduplicateConstants(ModuleOp module)
             {
                 bool changed = false;
 
                 module.walk([&](mlir::func::FuncOp funcOp)
                             {
-                    llvm::DenseMap<std::pair<uint64_t, Type>, arith::ConstantOp> constantMap;
-
-                    funcOp.walk([&](arith::ConstantOp constOp)
-                                {
-                        // Get value from attribute
-                        auto attr = constOp.getValue();
-                        if (!attr)
-                            return;
-                        uint64_t value = 0;
-                        if (auto intAttr = llvm::dyn_cast<mlir::IntegerAttr>(attr))
+                    // Process each block separately to avoid cross-region deduplication
+                    for (Block &block : funcOp.getBlocks())
+                    {
+                        llvm::DenseMap<std::pair<uint64_t, Type>, arith::ConstantOp> constantMap;
+                        llvm::SmallVector<arith::ConstantOp, 8> toErase;
+                        
+                        // Only process constants directly in this block, not in nested regions
+                        for (Operation &op : block.getOperations())
                         {
-                            value = intAttr.getValue().getZExtValue();
+                            auto constOp = dyn_cast<arith::ConstantOp>(&op);
+                            if (!constOp)
+                                continue;
+                                
+                            // Get value from attribute
+                            auto attr = constOp.getValue();
+                            if (!attr)
+                                continue;
+                            uint64_t value = 0;
+                            if (auto intAttr = llvm::dyn_cast<mlir::IntegerAttr>(attr))
+                            {
+                                value = intAttr.getValue().getZExtValue();
+                            }
+                            else
+                            {
+                                continue;
+                            }
+
+                            Type type = constOp.getResult().getType();
+                            auto key = std::make_pair(value, type);
+
+                            auto it = constantMap.find(key);
+                            if (it != constantMap.end())
+                            {
+                                // Replace all uses of this constant with the first one
+                                constOp.getResult().replaceAllUsesWith(it->second.getResult());
+                                toErase.push_back(constOp);
+                                changed = true;
+                            }
+                            else
+                            {
+                                constantMap[key] = constOp;
+                            }
                         }
-                        else
+                        
+                        // Erase duplicates after iteration is complete
+                        for (auto constOp : toErase)
                         {
-                            return;
-                        }
-
-                        Type type = constOp.getResult().getType();
-                        auto key = std::make_pair(value, type);
-
-                        auto it = constantMap.find(key);
-                        if (it != constantMap.end())
-                        {
-                            // Replace all uses of this constant with the first one
-                            constOp.getResult().replaceAllUsesWith(it->second.getResult());
                             constOp.erase();
-                            changed = true;
                         }
-                        else
-                        {
-                            constantMap[key] = constOp;
-                        } }); });
+                    } });
 
                 return changed;
             }
@@ -1002,6 +1023,24 @@ namespace mlir
                 module.walk([&](mlir::func::FuncOp funcOp)
                             {
                     DBG("Processing function: " << funcOp.getName());
+
+                    bool hasNullOperand = false;
+                    funcOp.walk([&](Operation *op)
+                                {
+                        for (auto operand : op->getOperands())
+                        {
+                            if (!operand)
+                            {
+                                hasNullOperand = true;
+                                break;
+                            }
+                        } });
+                    if (hasNullOperand || failed(mlir::verify(funcOp)))
+                    {
+                        DBG("Skipping canonicalization for function: " << funcOp.getName());
+                        module->setAttr("ora.dce_invalid", mlir::UnitAttr::get(module.getContext()));
+                        return;
+                    }
                     
                     // Print IR BEFORE DCE to see what we start with
                     if (mlir::ora::isDebugEnabled())

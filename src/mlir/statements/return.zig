@@ -6,6 +6,7 @@ const std = @import("std");
 const c = @import("mlir_c_api").c;
 const lib = @import("ora_lib");
 const h = @import("../helpers.zig");
+const log = @import("log");
 const StatementLowerer = @import("statement_lowerer.zig").StatementLowerer;
 const LoweringError = StatementLowerer.LoweringError;
 const helpers = @import("helpers.zig");
@@ -38,11 +39,20 @@ pub fn lowerReturn(self: *const StatementLowerer, ret: *const lib.ast.Statements
                 const memref_type = c.oraValueGetType(return_value_memref);
                 const element_type = c.oraShapedTypeGetElementType(memref_type);
 
-                // convert value to match memref element type
-                const final_value = helpers.convertValueToType(self, v, element_type, ret.span, loc);
+                const is_error_union = if (self.current_function_return_type_info) |ti|
+                    helpers.isErrorUnionTypeInfo(ti)
+                else
+                    false;
+
+                if (is_error_union) {
+                    const err_info = helpers.getErrorUnionPayload(self, &value_expr, v, element_type, self.block, loc);
+                    v = helpers.encodeErrorUnionValue(self, err_info.payload, err_info.is_error, element_type, self.block, ret.span, loc);
+                } else {
+                    v = helpers.convertValueToType(self, v, element_type, ret.span, loc);
+                }
 
                 // store return value
-                helpers.storeToMemref(self, final_value, return_value_memref, loc);
+                helpers.storeToMemref(self, v, return_value_memref, loc);
             }
         }
 
@@ -51,6 +61,7 @@ pub fn lowerReturn(self: *const StatementLowerer, ret: *const lib.ast.Statements
     }
 
     const loc = self.fileLoc(ret.span);
+    log.debug("[lowerReturn] self.block ptr = {*}, self.expr_lowerer.block ptr = {*}\n", .{ self.block.ptr, self.expr_lowerer.block.ptr });
 
     // insert ensures clause checks before return (postconditions must hold at every return point)
     if (self.ensures_clauses.len > 0) {
@@ -67,8 +78,17 @@ pub fn lowerReturn(self: *const StatementLowerer, ret: *const lib.ast.Statements
             }
         }
 
-        // convert return value to match function return type if available
+        // convert/wrap return value to match function return type if available
         const final_value = if (self.current_function_return_type) |ret_type| blk: {
+            const is_error_union = if (self.current_function_return_type_info) |ti|
+                helpers.isErrorUnionTypeInfo(ti)
+            else
+                false;
+            if (is_error_union) {
+                const err_info = helpers.getErrorUnionPayload(self, &e, v, ret_type, self.block, loc);
+                break :blk helpers.encodeErrorUnionValue(self, err_info.payload, err_info.is_error, ret_type, self.block, ret.span, loc);
+            }
+
             const value_type = c.oraValueGetType(v);
             if (!c.oraTypeEqual(value_type, ret_type)) {
                 // convert to match return type (e.g., i1 -> i256 for bool -> u256)
@@ -187,7 +207,17 @@ pub fn lowerReturnInControlFlow(self: *const StatementLowerer, ret: *const lib.a
             }
         }
 
-        const op = self.ora_dialect.createScfYieldWithValues(&[_]c.MlirValue{v}, loc);
+        // convert/wrap return value to match function return type if available
+        // this ensures literals like `return 1` coerce to refinement types like MinValue<u256, 1>
+        const final_value = if (self.current_function_return_type) |ret_type| blk: {
+            const value_type = c.oraValueGetType(v);
+            if (!c.oraTypeEqual(value_type, ret_type)) {
+                break :blk helpers.convertValueToType(self, v, ret_type, ret.span, loc);
+            }
+            break :blk v;
+        } else v;
+
+        const op = self.ora_dialect.createScfYieldWithValues(&[_]c.MlirValue{final_value}, loc);
         h.appendOp(self.block, op);
     } else {
         const op = self.ora_dialect.createScfYield(loc);

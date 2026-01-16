@@ -176,6 +176,78 @@ test "statements: while loop creation" {
     try testing.expectEqual(span_while.line, stmt.While.span.line);
 }
 
+test "statements: try/catch block creation" {
+    const allocator = testing.allocator;
+    var arena = ast_arena.AstArena.init(allocator);
+    defer arena.deinit();
+
+    var builder = ast_builder.AstBuilder.init(&arena);
+    defer builder.deinit();
+
+    const span_try = ast.SourceSpan{ .line = 1, .column = 1, .length = 10, .byte_offset = 0 };
+    const span_block = ast.SourceSpan{ .line = 1, .column = 5, .length = 2, .byte_offset = 4 };
+
+    var empty_statements = [_]ast.Statements.StmtNode{};
+    const try_block = try builder.block(empty_statements[0..], span_block);
+    const catch_block = ast.Statements.CatchBlock{
+        .error_variable = "e",
+        .block = try builder.block(empty_statements[0..], span_block),
+        .span = span_block,
+    };
+
+    const stmt = ast.Statements.StmtNode{ .TryBlock = .{
+        .try_block = try_block,
+        .catch_block = catch_block,
+        .span = span_try,
+    } };
+
+    try testing.expect(stmt == .TryBlock);
+    try testing.expect(stmt.TryBlock.catch_block != null);
+    try testing.expectEqual(span_try.line, stmt.TryBlock.span.line);
+}
+
+test "statements: switch statement creation" {
+    const allocator = testing.allocator;
+    var arena = ast_arena.AstArena.init(allocator);
+    defer arena.deinit();
+
+    var builder = ast_builder.AstBuilder.init(&arena);
+    defer builder.deinit();
+
+    const span_switch = ast.SourceSpan{ .line = 1, .column = 1, .length = 20, .byte_offset = 0 };
+    const span_cond = ast.SourceSpan{ .line = 1, .column = 8, .length = 1, .byte_offset = 7 };
+    const span_case = ast.SourceSpan{ .line = 1, .column = 12, .length = 1, .byte_offset = 11 };
+    const span_block = ast.SourceSpan{ .line = 1, .column = 14, .length = 2, .byte_offset = 13 };
+
+    const condition = try builder.identifier("x", span_cond);
+    var empty_statements = [_]ast.Statements.StmtNode{};
+    const body_block = try builder.block(empty_statements[0..], span_block);
+    const case_value = ast.Expressions.LiteralExpr{
+        .Integer = .{
+            .value = "0",
+            .type_info = ast.Types.CommonTypes.unknown_integer(),
+            .span = span_case,
+        },
+    };
+    const cases = try arena.allocator().alloc(ast.Expressions.SwitchCase, 1);
+    cases[0] = .{
+        .pattern = .{ .Literal = .{ .value = case_value, .span = span_case } },
+        .body = .{ .Block = body_block },
+        .span = span_case,
+    };
+
+    const stmt = ast.Statements.StmtNode{ .Switch = .{
+        .condition = condition.*,
+        .cases = cases,
+        .default_case = null,
+        .span = span_switch,
+    } };
+
+    try testing.expect(stmt == .Switch);
+    try testing.expectEqual(@as(usize, 1), stmt.Switch.cases.len);
+    try testing.expectEqual(span_switch.line, stmt.Switch.span.line);
+}
+
 // ============================================================================
 // Source Span Preservation Tests
 // ============================================================================

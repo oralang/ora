@@ -52,17 +52,20 @@ pub const ParamMap = struct {
 // Local variable mapping for function-local variables
 pub const LocalVarMap = struct {
     variables: std.StringHashMap(c.MlirValue),
+    kinds: std.StringHashMap(@import("analysis/local_vars.zig").LocalVarRepr),
     allocator: std.mem.Allocator,
 
     pub fn init(allocator: std.mem.Allocator) LocalVarMap {
         return .{
             .variables = std.StringHashMap(c.MlirValue).init(allocator),
+            .kinds = std.StringHashMap(@import("analysis/local_vars.zig").LocalVarRepr).init(allocator),
             .allocator = allocator,
         };
     }
 
     pub fn deinit(self: *LocalVarMap) void {
         self.variables.deinit();
+        self.kinds.deinit();
     }
 
     pub fn addLocalVar(self: *LocalVarMap, name: []const u8, value: c.MlirValue) !void {
@@ -75,6 +78,14 @@ pub const LocalVarMap = struct {
 
     pub fn hasLocalVar(self: *const LocalVarMap, name: []const u8) bool {
         return self.variables.contains(name);
+    }
+
+    pub fn setLocalVarKind(self: *LocalVarMap, name: []const u8, kind: @import("analysis/local_vars.zig").LocalVarRepr) !void {
+        try self.kinds.put(name, kind);
+    }
+
+    pub fn getLocalVarKind(self: *const LocalVarMap, name: []const u8) ?@import("analysis/local_vars.zig").LocalVarRepr {
+        return self.kinds.get(name);
     }
 };
 

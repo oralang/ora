@@ -256,6 +256,74 @@ test "statements: for loop" {
     // for loop - verify it's a for loop statement
 }
 
+test "statements: switch statement" {
+    const allocator = testing.allocator;
+    const source =
+        \\switch (x) {
+        \\  0 => { return 1; },
+        \\  else => { return 0; }
+        \\}
+    ;
+
+    var lex = lexer.Lexer.init(allocator, source);
+    defer lex.deinit();
+    const tokens = try lex.scanTokens();
+    defer allocator.free(tokens);
+
+    var arena = ast_arena.AstArena.init(allocator);
+    defer arena.deinit();
+    var stmt_parser = StatementParser.init(tokens, &arena);
+
+    const stmt = try stmt_parser.parseStatement();
+
+    try testing.expect(stmt == .Switch);
+}
+
+test "statements: try/catch block" {
+    const allocator = testing.allocator;
+    const source =
+        \\try {
+        \\  return 1;
+        \\} catch (e) {
+        \\  return 0;
+        \\}
+    ;
+
+    var lex = lexer.Lexer.init(allocator, source);
+    defer lex.deinit();
+    const tokens = try lex.scanTokens();
+    defer allocator.free(tokens);
+
+    var arena = ast_arena.AstArena.init(allocator);
+    defer arena.deinit();
+    var stmt_parser = StatementParser.init(tokens, &arena);
+
+    const stmt = try stmt_parser.parseStatement();
+
+    try testing.expect(stmt == .TryBlock);
+    if (stmt == .TryBlock) {
+        try testing.expect(stmt.TryBlock.catch_block != null);
+    }
+}
+
+test "statements: log statement" {
+    const allocator = testing.allocator;
+    const source = "log Transfer(1, 2);";
+
+    var lex = lexer.Lexer.init(allocator, source);
+    defer lex.deinit();
+    const tokens = try lex.scanTokens();
+    defer allocator.free(tokens);
+
+    var arena = ast_arena.AstArena.init(allocator);
+    defer arena.deinit();
+    var stmt_parser = StatementParser.init(tokens, &arena);
+
+    const stmt = try stmt_parser.parseStatement();
+
+    try testing.expect(stmt == .Log);
+}
+
 test "statements: break statement" {
     const allocator = testing.allocator;
     const source = "break;";

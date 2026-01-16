@@ -394,7 +394,12 @@ pub const Encoder = struct {
         const map_value_type = mlir.oraMapTypeGetValueType(mlir_type);
         if (!mlir.oraTypeIsNull(map_value_type)) {
             const value_sort = try self.encodeMLIRType(map_value_type);
-            const key_sort = self.mkBitVectorSort(256);
+            // Get the actual key type from the map (e.g., address is 160 bits, not 256)
+            const map_key_type = mlir.oraMapTypeGetKeyType(mlir_type);
+            const key_sort = if (!mlir.oraTypeIsNull(map_key_type))
+                try self.encodeMLIRType(map_key_type)
+            else
+                self.mkBitVectorSort(256); // fallback to 256-bit
             return self.mkArraySort(key_sort, value_sort);
         }
 
@@ -775,17 +780,29 @@ pub const Encoder = struct {
         const out_width = self.getTypeBitWidth(result_type) orelse return operands[0];
         if (in_width == out_width) return operands[0];
 
+        // Convert Bool sort to BitVec<1> if needed (Z3_mk_zero_ext/sign_ext require bitvector operands)
+        var operand = operands[0];
+        const sort = z3.Z3_get_sort(self.context.ctx, operand);
+        const kind = z3.Z3_get_sort_kind(self.context.ctx, sort);
+        if (kind == z3.Z3_BOOL_SORT) {
+            // Convert bool to bitvector<1>: ite(bool, bv1(1), bv1(0))
+            const bv1_sort = self.mkBitVectorSort(1);
+            const one = z3.Z3_mk_unsigned_int64(self.context.ctx, 1, bv1_sort);
+            const zero = z3.Z3_mk_unsigned_int64(self.context.ctx, 0, bv1_sort);
+            operand = z3.Z3_mk_ite(self.context.ctx, operand, one, zero);
+        }
+
         if (out_width > in_width) {
             const extend = out_width - in_width;
             const is_signed = std.mem.eql(u8, op_name, "arith.extsi") or std.mem.eql(u8, op_name, "arith.index_castsi");
             return if (is_signed)
-                z3.Z3_mk_sign_ext(self.context.ctx, extend, operands[0])
+                z3.Z3_mk_sign_ext(self.context.ctx, extend, operand)
             else
-                z3.Z3_mk_zero_ext(self.context.ctx, extend, operands[0]);
+                z3.Z3_mk_zero_ext(self.context.ctx, extend, operand);
         }
 
         const high: u32 = out_width - 1;
-        return z3.Z3_mk_extract(self.context.ctx, high, 0, operands[0]);
+        return z3.Z3_mk_extract(self.context.ctx, high, 0, operand);
     }
 
     /// Encode MLIR comparison operation (arith.cmpi)

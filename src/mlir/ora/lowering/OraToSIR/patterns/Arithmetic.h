@@ -168,6 +168,17 @@ namespace mlir
                 ConversionPatternRewriter &rewriter) const override;
         };
 
+        class ConvertBaseToRefinementOp : public OpConversionPattern<ora::BaseToRefinementOp>
+        {
+        public:
+            using OpConversionPattern::OpConversionPattern;
+
+            LogicalResult matchAndRewrite(
+                ora::BaseToRefinementOp op,
+                typename ora::BaseToRefinementOp::Adaptor adaptor,
+                ConversionPatternRewriter &rewriter) const override;
+        };
+
         class ConvertInvariantOp : public OpConversionPattern<ora::InvariantOp>
         {
         public:

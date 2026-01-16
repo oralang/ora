@@ -58,6 +58,18 @@ pub const RefinementSystem = struct {
         try validator.validateRefinementType(&self.config, &self.registry, ora_type);
     }
 
+    /// Validate arithmetic operation between refinement types
+    /// Returns error if operation is invalid (e.g., scale mismatch)
+    pub fn validateArithmetic(
+        self: *RefinementSystem,
+        operator: BinaryOp,
+        lhs_type: ?TypeInfo,
+        rhs_type: ?TypeInfo,
+    ) TypeResolutionError!void {
+        _ = self;
+        return arithmetic.validateArithmeticOperation(operator, lhs_type, rhs_type);
+    }
+
     /// Infer arithmetic result type
     pub fn inferArithmetic(
         self: *RefinementSystem,

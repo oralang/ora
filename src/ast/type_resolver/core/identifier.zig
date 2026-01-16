@@ -21,10 +21,10 @@ pub fn lookupIdentifier(
     self: *CoreResolver,
     name: []const u8,
 ) ?TypeInfo {
-    const scope = if (self.current_scope) |s| s else &self.symbol_table.root;
+    const scope = if (self.current_scope) |s| s else self.symbol_table.root;
     var symbol = self.symbol_table.safeFindUpOpt(scope, name);
-    if (symbol == null and scope != &self.symbol_table.root) {
-        symbol = self.symbol_table.safeFindUpOpt(&self.symbol_table.root, name);
+    if (symbol == null and scope != self.symbol_table.root) {
+        symbol = self.symbol_table.safeFindUpOpt(self.symbol_table.root, name);
     }
     if (symbol == null) return null;
     return symbol.typ;
@@ -36,10 +36,10 @@ pub fn resolveIdentifierType(
     id: *ast.Expressions.IdentifierExpr,
 ) TypeResolutionError!void {
     // first try to find in symbol table (for variables, functions, etc.)
-    const scope = if (self.current_scope) |s| s else &self.symbol_table.root;
+    const scope = if (self.current_scope) |s| s else self.symbol_table.root;
     var symbol = self.symbol_table.safeFindUpOpt(scope, id.name);
-    if (symbol == null and scope != &self.symbol_table.root) {
-        symbol = self.symbol_table.safeFindUpOpt(&self.symbol_table.root, id.name);
+    if (symbol == null and scope != self.symbol_table.root) {
+        symbol = self.symbol_table.safeFindUpOpt(self.symbol_table.root, id.name);
     }
 
     // if not found in symbol table, check function registry as fallback
@@ -57,7 +57,7 @@ pub fn resolveIdentifierType(
                     // search from root scope to find type declarations
                     // access symbol_table through CoreResolver
                     const root_scope: ?*const Scope = if (@hasField(@TypeOf(self.*), "symbol_table"))
-                        @as(?*const Scope, @ptrCast(&self.symbol_table.root))
+                        @as(?*const Scope, @ptrCast(self.symbol_table.root))
                     else
                         null;
                     const type_symbol = SymbolTable.findUp(root_scope, type_name);

@@ -195,7 +195,7 @@ pub const DeclarationParser = struct {
         _ = try self.base.consume(.Semicolon, "Expected ';' after error declaration");
 
         return ast.AstNode{ .LogDecl = ast.LogDeclNode{
-            .name = name_token.lexeme,
+            .name = try self.base.arena.createString(name_token.lexeme),
             .fields = try fields.toOwnedSlice(self.base.arena.allocator()),
             .span = self.base.spanFromToken(name_token),
         } };

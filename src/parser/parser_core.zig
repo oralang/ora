@@ -275,6 +275,10 @@ pub fn parseWithArena(allocator: Allocator, tokens: []const Token) ParserError!s
     var semantics_result = try semantics_core.analyzePhase1(allocator, nodes);
     defer allocator.free(semantics_result.diagnostics);
     defer semantics_result.symbols.deinit();
+    ensureLogSignatures(&semantics_result.symbols, nodes) catch |err| {
+        log.err("Failed to collect log signatures: {s}\n", .{@errorName(err)});
+        return ParserError.TypeResolutionFailed;
+    };
 
     // perform type resolution on the parsed AST
     const TypeResolver = @import("../ast/type_resolver/mod.zig").TypeResolver;
@@ -311,6 +315,10 @@ pub fn parse(allocator: Allocator, tokens: []const Token) ParserError![]AstNode 
     var semantics_result = try semantics_core.analyzePhase1(allocator, nodes);
     defer allocator.free(semantics_result.diagnostics);
     defer semantics_result.symbols.deinit();
+    ensureLogSignatures(&semantics_result.symbols, nodes) catch |err| {
+        log.err("Failed to collect log signatures: {s}\n", .{@errorName(err)});
+        return ParserError.TypeResolutionFailed;
+    };
 
     // perform type resolution on the parsed AST
     const TypeResolver = @import("../ast/type_resolver/mod.zig").TypeResolver;
@@ -330,4 +338,31 @@ pub fn parse(allocator: Allocator, tokens: []const Token) ParserError![]AstNode 
     };
 
     return nodes;
+}
+
+fn ensureLogSignatures(symbols: *@import("../semantics/state.zig").SymbolTable, nodes: []const AstNode) !void {
+    for (nodes) |node| switch (node) {
+        .LogDecl => |l| {
+            if (symbols.log_signatures.get(l.name) == null) {
+                try symbols.log_signatures.put(l.name, l.fields);
+            }
+        },
+        .Contract => |c| {
+            if (symbols.contract_log_signatures.getPtr(c.name) == null) {
+                const log_map = std.StringHashMap([]const ast.LogField).init(symbols.allocator);
+                try symbols.contract_log_signatures.put(c.name, log_map);
+            }
+            for (c.body) |member| switch (member) {
+                .LogDecl => |l| {
+                    if (symbols.contract_log_signatures.getPtr(c.name)) |log_map| {
+                        if (log_map.get(l.name) == null) {
+                            try log_map.put(l.name, l.fields);
+                        }
+                    }
+                },
+                else => {},
+            };
+        },
+        else => {},
+    };
 }

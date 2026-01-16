@@ -487,10 +487,13 @@ pub fn lowerIndexAssignment(self: *const StatementLowerer, index_expr: *const li
         // array indexing using memref.store
         // convert index to index type for memref operations
         const index_index = self.expr_lowerer.convertIndexToIndexType(index_val, index_expr.span);
+        // convert value to match element type (handles refinement types, etc.)
+        const element_type = c.oraShapedTypeGetElementType(target_type);
+        const store_value = self.expr_lowerer.convertToType(value, element_type, index_expr.span);
         const store_op = c.oraMemrefStoreOpCreate(
             self.ctx,
             loc,
-            value,
+            store_value,
             target,
             &[_]c.MlirValue{index_index},
             1,

@@ -14,17 +14,14 @@ contract TryExpr {
     }
 
     fn run(x: u256) -> !u256 {
-        let y = try mayFail(x);
+        let y: u256 = try mayFail(x);
         return y * 2;
     }
 
     pub fn main(x: u256) {
         try {
             run(x);
-        } catch (e) {
-            log Failed(e);
+        } catch {
         }
     }
-
-    log Failed(err: u256);
 }

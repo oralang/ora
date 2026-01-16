@@ -374,6 +374,7 @@ pub fn build(b: *std.Build) void {
     });
     mlir_types_test_mod.addImport("ora_lib", lib_mod);
     mlir_types_test_mod.addImport("mlir_c_api", mlir_c_mod);
+    mlir_types_test_mod.addImport("log", log_mod);
     const mlir_types_tests = b.addTest(.{ .root_module = mlir_types_test_mod });
     linkMlirLibraries(b, mlir_types_tests, mlir_step, ora_dialect_step, sir_dialect_step, target);
     test_step.dependOn(&b.addRunArtifact(mlir_types_tests).step);
@@ -387,6 +388,7 @@ pub fn build(b: *std.Build) void {
     });
     refinement_guard_test_mod.addImport("ora_lib", lib_mod);
     refinement_guard_test_mod.addImport("mlir_c_api", mlir_c_mod);
+    refinement_guard_test_mod.addImport("log", log_mod);
     const refinement_guard_tests = b.addTest(.{ .root_module = refinement_guard_test_mod });
     linkMlirLibraries(b, refinement_guard_tests, mlir_step, ora_dialect_step, sir_dialect_step, target);
     test_step.dependOn(&b.addRunArtifact(refinement_guard_tests).step);
@@ -400,6 +402,7 @@ pub fn build(b: *std.Build) void {
     });
     mlir_effects_test_mod.addImport("ora_lib", lib_mod);
     mlir_effects_test_mod.addImport("mlir_c_api", mlir_c_mod);
+    mlir_effects_test_mod.addImport("log", log_mod);
     const mlir_effects_tests = b.addTest(.{ .root_module = mlir_effects_test_mod });
     linkMlirLibraries(b, mlir_effects_tests, mlir_step, ora_dialect_step, sir_dialect_step, target);
     test_step.dependOn(&b.addRunArtifact(mlir_effects_tests).step);
@@ -424,6 +427,16 @@ pub fn build(b: *std.Build) void {
     ast_statements_test_mod.addImport("ora_root", lib_mod);
     const ast_statements_tests = b.addTest(.{ .root_module = ast_statements_test_mod });
     test_step.dependOn(&b.addRunArtifact(ast_statements_tests).step);
+
+    // ast tests - Type Resolver (logs)
+    const type_resolver_logs_test_mod = b.createModule(.{
+        .root_source_file = b.path("src/ast/type_resolver_logs.test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    type_resolver_logs_test_mod.addImport("ora_root", lib_mod);
+    const type_resolver_logs_tests = b.addTest(.{ .root_module = type_resolver_logs_test_mod });
+    test_step.dependOn(&b.addRunArtifact(type_resolver_logs_tests).step);
 
     // unit tests will be added here as they are created.
     // example pattern:

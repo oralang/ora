@@ -164,6 +164,17 @@ pub inline fn dynamicSize() i64 {
 
 /// Create and append operation to block in one step
 pub inline fn appendOp(block: c.MlirBlock, op: c.MlirOperation) void {
+    const name_ref = c.oraOperationGetName(op);
+    if (name_ref.data != null and name_ref.length == "arith.constant".len) {
+        const op_name = name_ref.data[0..name_ref.length];
+        if (std.mem.eql(u8, op_name, "arith.constant")) {
+            const first_op = c.oraBlockGetFirstOperation(block);
+            if (!c.oraOperationIsNull(first_op)) {
+                c.oraBlockInsertOwnedOperationBefore(block, op, first_op);
+                return;
+            }
+        }
+    }
     c.oraBlockAppendOwnedOperation(block, op);
 }
 

@@ -11,6 +11,8 @@
 const std = @import("std");
 const ast = @import("../../ast.zig");
 const helpers = @import("helpers.zig");
+const expressions = @import("expressions.zig");
+const statements = @import("statements.zig");
 
 // Forward declarations
 const AstSerializer = @import("../ast_serializer.zig").AstSerializer;
@@ -26,28 +28,49 @@ pub fn serializeContract(serializer: *AstSerializer, contract: *const ast.Contra
     }
 
     if (serializer.options.pretty_print and !serializer.options.compact_mode) {
-        try writer.print(",\n");
+        try writer.writeAll(",\n");
         try helpers.writeIndent(serializer, writer, indent + 1);
-        try writer.print("\"body\": [\n");
+        try writer.writeAll("\"body\": [\n");
     } else {
-        try writer.print(",\"body\":[");
+        try writer.writeAll(",\"body\":[");
     }
 
     for (contract.body, 0..) |*member, i| {
-        if (i > 0) try writer.print(",");
+        if (i > 0) try writer.writeAll(",");
         if (serializer.options.pretty_print and !serializer.options.compact_mode) {
-            try writer.print("\n");
+            try writer.writeAll("\n");
         }
         try serializer.serializeAstNode(member, writer, indent + 2, depth + 1);
     }
 
     if (serializer.options.pretty_print and !serializer.options.compact_mode) {
-        try writer.print("\n");
+        try writer.writeAll("\n");
         try helpers.writeIndent(serializer, writer, indent + 1);
-        try writer.print("]");
+        try writer.writeAll("]");
     } else {
-        try writer.print("]");
+        try writer.writeAll("]");
     }
+}
+
+/// Serialize contract invariant declaration
+pub fn serializeContractInvariant(serializer: *AstSerializer, invariant: *const ast.ContractInvariant, writer: anytype, indent: u32, depth: u32) SerializationError!void {
+    try helpers.writeField(serializer, writer, "type", "ContractInvariant", indent + 1, true);
+    try helpers.writeField(serializer, writer, "name", invariant.name, indent + 1, false);
+    try helpers.writeBoolField(serializer, writer, "specification_only", invariant.is_specification, indent + 1);
+
+    if (serializer.options.include_spans) {
+        try helpers.writeSpanField(serializer, writer, &invariant.span, indent + 1);
+    }
+
+    if (serializer.options.pretty_print and !serializer.options.compact_mode) {
+        try writer.writeAll(",\n");
+        try helpers.writeIndent(serializer, writer, indent + 1);
+        try writer.writeAll("\"condition\": ");
+    } else {
+        try writer.writeAll(",\"condition\":");
+    }
+
+    try expressions.serializeExpression(serializer, invariant.condition, writer, indent + 2, depth + 1);
 }
 
 /// Serialize function declaration
@@ -62,100 +85,100 @@ pub fn serializeFunction(serializer: *AstSerializer, function: *const ast.Functi
 
     // parameters
     if (serializer.options.pretty_print and !serializer.options.compact_mode) {
-        try writer.print(",\n");
+        try writer.writeAll(",\n");
         try helpers.writeIndent(serializer, writer, indent + 1);
-        try writer.print("\"parameters\": [\n");
+        try writer.writeAll("\"parameters\": [\n");
     } else {
-        try writer.print(",\"parameters\":[");
+        try writer.writeAll(",\"parameters\":[");
     }
 
     for (function.parameters, 0..) |*param, i| {
-        if (i > 0) try writer.print(",");
+        if (i > 0) try writer.writeAll(",");
         if (serializer.options.pretty_print and !serializer.options.compact_mode) {
-            try writer.print("\n");
+            try writer.writeAll("\n");
         }
         try serializer.serializeParameter(param, writer, indent + 2);
     }
 
     if (serializer.options.pretty_print and !serializer.options.compact_mode) {
-        try writer.print("\n");
+        try writer.writeAll("\n");
         try helpers.writeIndent(serializer, writer, indent + 1);
-        try writer.print("],\n");
+        try writer.writeAll("],\n");
         try helpers.writeIndent(serializer, writer, indent + 1);
-        try writer.print("\"return_type\": ");
+        try writer.writeAll("\"return_type\": ");
     } else {
-        try writer.print("],\"return_type\":");
+        try writer.writeAll("],\"return_type\":");
     }
 
     if (function.return_type_info) |ret_type_info| {
         try serializer.serializeTypeInfo(ret_type_info, writer);
     } else {
-        try writer.print("null");
+        try writer.writeAll("null");
     }
 
     // requires clauses
     if (function.requires_clauses.len > 0) {
         if (serializer.options.pretty_print and !serializer.options.compact_mode) {
-            try writer.print(",\n");
+            try writer.writeAll(",\n");
             try helpers.writeIndent(serializer, writer, indent + 1);
-            try writer.print("\"requires\": [\n");
+            try writer.writeAll("\"requires\": [\n");
         } else {
-            try writer.print(",\"requires\":[");
+            try writer.writeAll(",\"requires\":[");
         }
 
         for (function.requires_clauses, 0..) |clause, i| {
-            if (i > 0) try writer.print(",");
+            if (i > 0) try writer.writeAll(",");
             if (serializer.options.pretty_print and !serializer.options.compact_mode) {
-                try writer.print("\n");
+                try writer.writeAll("\n");
             }
-            try serializer.serializeExpression(clause, writer, indent + 2, depth + 1);
+            try expressions.serializeExpression(serializer, clause, writer, indent + 2, depth + 1);
         }
 
         if (serializer.options.pretty_print and !serializer.options.compact_mode) {
-            try writer.print("\n");
+            try writer.writeAll("\n");
             try helpers.writeIndent(serializer, writer, indent + 1);
-            try writer.print("]");
+            try writer.writeAll("]");
         } else {
-            try writer.print("]");
+            try writer.writeAll("]");
         }
     }
 
     // ensures clauses
     if (function.ensures_clauses.len > 0) {
         if (serializer.options.pretty_print and !serializer.options.compact_mode) {
-            try writer.print(",\n");
+            try writer.writeAll(",\n");
             try helpers.writeIndent(serializer, writer, indent + 1);
-            try writer.print("\"ensures\": [\n");
+            try writer.writeAll("\"ensures\": [\n");
         } else {
-            try writer.print(",\"ensures\":[");
+            try writer.writeAll(",\"ensures\":[");
         }
 
         for (function.ensures_clauses, 0..) |clause, i| {
-            if (i > 0) try writer.print(",");
+            if (i > 0) try writer.writeAll(",");
             if (serializer.options.pretty_print and !serializer.options.compact_mode) {
-                try writer.print("\n");
+                try writer.writeAll("\n");
             }
-            try serializer.serializeExpression(clause, writer, indent + 2, depth + 1);
+            try expressions.serializeExpression(serializer, clause, writer, indent + 2, depth + 1);
         }
 
         if (serializer.options.pretty_print and !serializer.options.compact_mode) {
-            try writer.print("\n");
+            try writer.writeAll("\n");
             try helpers.writeIndent(serializer, writer, indent + 1);
-            try writer.print("]");
+            try writer.writeAll("]");
         } else {
-            try writer.print("]");
+            try writer.writeAll("]");
         }
     }
 
     // function body
     if (serializer.options.pretty_print and !serializer.options.compact_mode) {
-        try writer.print(",\n");
+        try writer.writeAll(",\n");
         try helpers.writeIndent(serializer, writer, indent + 1);
-        try writer.print("\"body\": ");
+        try writer.writeAll("\"body\": ");
     } else {
-        try writer.print(",\"body\":");
+        try writer.writeAll(",\"body\":");
     }
-    try serializer.serializeBlock(&function.body, writer, indent + 1, depth + 1);
+    try statements.serializeBlock(serializer, &function.body, writer, indent + 1, depth + 1);
 }
 
 /// Serialize variable declaration
@@ -171,39 +194,39 @@ pub fn serializeVariableDecl(serializer: *AstSerializer, var_decl: *const ast.St
     }
 
     if (serializer.options.pretty_print and !serializer.options.compact_mode) {
-        try writer.print(",\n");
+        try writer.writeAll(",\n");
         try helpers.writeIndent(serializer, writer, indent + 1);
-        try writer.print("\"var_type\": ");
+        try writer.writeAll("\"var_type\": ");
     } else {
-        try writer.print(",\"var_type\":");
+        try writer.writeAll(",\"var_type\":");
     }
     try serializer.serializeTypeInfo(var_decl.type_info, writer);
 
     if (var_decl.value) |value| {
         if (serializer.options.pretty_print and !serializer.options.compact_mode) {
-            try writer.print(",\n");
+            try writer.writeAll(",\n");
             try helpers.writeIndent(serializer, writer, indent + 1);
-            try writer.print("\"value\": ");
+            try writer.writeAll("\"value\": ");
         } else {
-            try writer.print(",\"value\":");
+            try writer.writeAll(",\"value\":");
         }
-        try serializer.serializeExpression(value, writer, indent + 1, depth + 1);
+        try expressions.serializeExpression(serializer, value, writer, indent + 1, depth + 1);
     }
 
     if (var_decl.tuple_names) |tuple_names| {
         if (serializer.options.pretty_print and !serializer.options.compact_mode) {
-            try writer.print(",\n");
+            try writer.writeAll(",\n");
             try helpers.writeIndent(serializer, writer, indent + 1);
-            try writer.print("\"tuple_names\": [");
+            try writer.writeAll("\"tuple_names\": [");
         } else {
-            try writer.print(",\"tuple_names\":[");
+            try writer.writeAll(",\"tuple_names\":[");
         }
 
         for (tuple_names, 0..) |name, i| {
-            if (i > 0) try writer.print(",");
+            if (i > 0) try writer.writeAll(",");
             try writer.print("\"{s}\"", .{name});
         }
-        try writer.print("]");
+        try writer.writeAll("]");
     }
 }
 
@@ -218,46 +241,46 @@ pub fn serializeStructDecl(serializer: *AstSerializer, struct_decl: *const ast.S
     }
 
     if (serializer.options.pretty_print and !serializer.options.compact_mode) {
-        try writer.print(",\n");
+        try writer.writeAll(",\n");
         try helpers.writeIndent(serializer, writer, indent + 1);
-        try writer.print("\"fields\": [\n");
+        try writer.writeAll("\"fields\": [\n");
     } else {
-        try writer.print(",\"fields\":[");
+        try writer.writeAll(",\"fields\":[");
     }
 
     for (struct_decl.fields, 0..) |*field, i| {
-        if (i > 0) try writer.print(",");
+        if (i > 0) try writer.writeAll(",");
         if (serializer.options.pretty_print and !serializer.options.compact_mode) {
-            try writer.print("\n");
+            try writer.writeAll("\n");
             try helpers.writeIndent(serializer, writer, indent + 2);
-            try writer.print("{\n");
+            try writer.writeAll("{\n");
             try helpers.writeField(serializer, writer, "name", field.name, indent + 3, true);
-            try writer.print(",\n");
+            try writer.writeAll(",\n");
             try helpers.writeIndent(serializer, writer, indent + 3);
-            try writer.print("\"field_type\": ");
+            try writer.writeAll("\"field_type\": ");
             try serializer.serializeTypeInfo(field.type_info, writer);
             if (serializer.options.include_spans) {
-                try writer.print(",\n");
-                try helpers.writeSpanField(serializer, writer, &field.span, indent + 3);
+                try writer.writeAll(",\n");
+                try helpers.writeSpanFieldNoComma(serializer, writer, &field.span, indent + 3);
             }
-            try writer.print("\n");
+            try writer.writeAll("\n");
             try helpers.writeIndent(serializer, writer, indent + 2);
-            try writer.print("}");
+            try writer.writeAll("}");
         } else {
-            try writer.print("{\"name\":\"");
-            try writer.print(field.name);
-            try writer.print("\",\"field_type\":");
+            try writer.writeAll("{\"name\":\"");
+            try writer.writeAll(field.name);
+            try writer.writeAll("\",\"field_type\":");
             try serializer.serializeTypeInfo(field.type_info, writer);
-            try writer.print("}");
+            try writer.writeAll("}");
         }
     }
 
     if (serializer.options.pretty_print and !serializer.options.compact_mode) {
-        try writer.print("\n");
+        try writer.writeAll("\n");
         try helpers.writeIndent(serializer, writer, indent + 1);
-        try writer.print("]");
+        try writer.writeAll("]");
     } else {
-        try writer.print("]");
+        try writer.writeAll("]");
     }
 }
 
@@ -277,9 +300,9 @@ pub fn serializeEnumDecl(serializer: *AstSerializer, enum_decl: *const ast.EnumD
 
     // serialize the underlying type if present
     if (enum_decl.underlying_type_info) |underlying_type_info| {
-        try writer.print(",\n");
+        try writer.writeAll(",\n");
         try helpers.writeIndent(serializer, writer, indent + 1);
-        try writer.print("\"underlying_type\": ");
+        try writer.writeAll("\"underlying_type\": ");
         try serializer.serializeTypeInfo(underlying_type_info, writer);
     }
 
@@ -288,54 +311,54 @@ pub fn serializeEnumDecl(serializer: *AstSerializer, enum_decl: *const ast.EnumD
     }
 
     if (serializer.options.pretty_print and !serializer.options.compact_mode) {
-        try writer.print(",\n");
+        try writer.writeAll(",\n");
         try helpers.writeIndent(serializer, writer, indent + 1);
-        try writer.print("\"variants\": [\n");
+        try writer.writeAll("\"variants\": [\n");
     } else {
-        try writer.print(",\"variants\":[");
+        try writer.writeAll(",\"variants\":[");
     }
 
     for (enum_decl.variants, 0..) |*variant, i| {
-        if (i > 0) try writer.print(",");
+        if (i > 0) try writer.writeAll(",");
         if (serializer.options.pretty_print and !serializer.options.compact_mode) {
-            try writer.print("\n");
+            try writer.writeAll("\n");
             try helpers.writeIndent(serializer, writer, indent + 2);
-            try writer.print("{\n");
+            try writer.writeAll("{\n");
             try helpers.writeField(serializer, writer, "name", variant.name, indent + 3, true);
             if (variant.value) |*value| {
-                try writer.print(",\n");
+                try writer.writeAll(",\n");
                 try helpers.writeIndent(serializer, writer, indent + 3);
-                try writer.print("\"value\": ");
+                try writer.writeAll("\"value\": ");
 
                 // special handling for integer literals in enum variants to include enum's underlying type
                 if (value.* == .Literal and value.Literal == .Integer and enum_decl.underlying_type_info != null) {
                     // start object
-                    try writer.print("{\n");
+                    try writer.writeAll("{\n");
                     try helpers.writeIndent(serializer, writer, indent + 4);
-                    try writer.print("\"type\": \"Literal\",\n");
+                    try writer.writeAll("\"type\": \"Literal\",\n");
                     try helpers.writeIndent(serializer, writer, indent + 4);
 
                     // always use "Integer" for literal_type consistency
-                    try writer.print("\"literal_type\": \"Integer\",\n");
+                    try writer.writeAll("\"literal_type\": \"Integer\",\n");
 
                     // include type information
                     try helpers.writeIndent(serializer, writer, indent + 4);
-                    try writer.print("\"type_info\": ");
+                    try writer.writeAll("\"type_info\": ");
                     try serializer.serializeTypeInfo(value.Literal.Integer.type_info, writer);
-                    try writer.print(",\n");
+                    try writer.writeAll(",\n");
 
                     // write the value
                     try helpers.writeIndent(serializer, writer, indent + 4);
-                    try writer.print("\"value\": \"");
-                    try writer.print(value.Literal.Integer.value);
-                    try writer.print("\"");
+                    try writer.writeAll("\"value\": \"");
+                    try writer.writeAll(value.Literal.Integer.value);
+                    try writer.writeAll("\"");
 
                     // include span if needed
                     if (serializer.options.include_spans) {
-                        try writer.print(",\n");
+                        try writer.writeAll(",\n");
                         // custom span field handling for enum variant integer literals
                         try helpers.writeIndent(serializer, writer, indent + 4);
-                        try writer.print("\"span\": {\n");
+                        try writer.writeAll("\"span\": {\n");
                         try helpers.writeIndent(serializer, writer, indent + 5);
                         try writer.print("\"line\": {d},\n", .{value.Literal.Integer.span.line});
                         try helpers.writeIndent(serializer, writer, indent + 5);
@@ -343,106 +366,106 @@ pub fn serializeEnumDecl(serializer: *AstSerializer, enum_decl: *const ast.EnumD
                         try helpers.writeIndent(serializer, writer, indent + 5);
                         try writer.print("\"length\": {d},\n", .{value.Literal.Integer.span.length});
                         try helpers.writeIndent(serializer, writer, indent + 5);
-                        try writer.print("\"lexeme\": \"");
+                        try writer.writeAll("\"lexeme\": \"");
                         if (value.Literal.Integer.span.lexeme) |lexeme| {
-                            try writer.print(lexeme);
+                            try writer.writeAll(lexeme);
                         }
-                        try writer.print("\"\n");
+                        try writer.writeAll("\"\n");
                         try helpers.writeIndent(serializer, writer, indent + 4);
-                        try writer.print("}");
+                        try writer.writeAll("}");
                     }
 
                     // end object
-                    try writer.print("\n");
+                    try writer.writeAll("\n");
                     try helpers.writeIndent(serializer, writer, indent + 3);
-                    try writer.print("}");
+                    try writer.writeAll("}");
                 } else {
                     // regular expression serialization for non-integer or complex expressions
-                    try serializer.serializeExpression(value, writer, indent + 3, depth + 1);
+                    try expressions.serializeExpression(serializer, value, writer, indent + 3, depth + 1);
                 }
             }
 
             if (serializer.options.include_spans) {
-                try writer.print(",\n");
-                try helpers.writeSpanField(serializer, writer, &variant.span, indent + 3);
+                try writer.writeAll(",\n");
+                try helpers.writeSpanFieldNoComma(serializer, writer, &variant.span, indent + 3);
             }
-            try writer.print("\n");
+            try writer.writeAll("\n");
             try helpers.writeIndent(serializer, writer, indent + 2);
-            try writer.print("}");
+            try writer.writeAll("}");
         } else {
-            try writer.print("{\"name\":\"");
-            try writer.print(variant.name);
-            try writer.print("\"");
+            try writer.writeAll("{\"name\":\"");
+            try writer.writeAll(variant.name);
+            try writer.writeAll("\"");
             if (variant.value) |*value| {
-                try writer.print(",\"value\":");
+                try writer.writeAll(",\"value\":");
 
                 // special handling for integer literals in enum variants to include enum's underlying type
                 if (value.* == .Literal and value.Literal == .Integer and enum_decl.underlying_type_info != null) {
-                    try writer.print("{\"type\":\"Literal\",");
+                    try writer.writeAll("{\"type\":\"Literal\",");
 
                     // always use "Integer" for literal_type consistency
-                    try writer.print("\"literal_type\":\"Integer\",");
+                    try writer.writeAll("\"literal_type\":\"Integer\",");
 
                     // include type information
-                    try writer.print("\"type_info\":");
+                    try writer.writeAll("\"type_info\":");
                     try serializer.serializeTypeInfo(value.Literal.Integer.type_info, writer);
-                    try writer.print(",");
+                    try writer.writeAll(",");
 
                     // write the value
-                    try writer.print("\"value\":\"");
-                    try writer.print(value.Literal.Integer.value);
-                    try writer.print("\"");
+                    try writer.writeAll("\"value\":\"");
+                    try writer.writeAll(value.Literal.Integer.value);
+                    try writer.writeAll("\"");
 
                     // include span if needed
                     if (serializer.options.include_spans) {
                         const span = &value.Literal.Integer.span;
-                        try writer.print(",\"span\":{\"line\":");
+                        try writer.writeAll(",\"span\":{\"line\":");
                         try writer.print("{d}", .{span.line});
-                        try writer.print(",\"column\":");
+                        try writer.writeAll(",\"column\":");
                         try writer.print("{d}", .{span.column});
-                        try writer.print(",\"length\":");
+                        try writer.writeAll(",\"length\":");
                         try writer.print("{d}", .{span.length});
-                        try writer.print(",\"lexeme\":\"");
+                        try writer.writeAll(",\"lexeme\":\"");
                         if (span.lexeme) |lexeme| {
-                            try writer.print(lexeme);
+                            try writer.writeAll(lexeme);
                         } else {
-                            try writer.print("");
+                            try writer.writeAll("");
                         }
-                        try writer.print("\"}");
+                        try writer.writeAll("\"}");
                     }
 
-                    try writer.print("}");
+                    try writer.writeAll("}");
                 } else {
                     // regular expression serialization for non-integer or complex expressions
-                    try serializer.serializeExpression(value, writer, 0, depth + 1);
+                    try expressions.serializeExpression(serializer, value, writer, 0, depth + 1);
                 }
             }
 
             // include span for the variant itself
             if (serializer.options.include_spans) {
-                try writer.print(",\"span\":{\"line\":");
+                try writer.writeAll(",\"span\":{\"line\":");
                 try writer.print("{d}", .{variant.span.line});
-                try writer.print(",\"column\":");
+                try writer.writeAll(",\"column\":");
                 try writer.print("{d}", .{variant.span.column});
-                try writer.print(",\"length\":");
+                try writer.writeAll(",\"length\":");
                 try writer.print("{d}", .{variant.span.length});
-                try writer.print(",\"lexeme\":\"");
+                try writer.writeAll(",\"lexeme\":\"");
                 if (variant.span.lexeme) |lexeme| {
-                    try writer.print(lexeme);
+                    try writer.writeAll(lexeme);
                 }
-                try writer.print("\"}");
+                try writer.writeAll("\"}");
             }
 
-            try writer.print("}");
+            try writer.writeAll("}");
         }
     }
 
     if (serializer.options.pretty_print and !serializer.options.compact_mode) {
-        try writer.print("\n");
+        try writer.writeAll("\n");
         try helpers.writeIndent(serializer, writer, indent + 1);
-        try writer.print("]");
+        try writer.writeAll("]");
     } else {
-        try writer.print("]");
+        try writer.writeAll("]");
     }
 }
 
@@ -457,46 +480,46 @@ pub fn serializeLogDecl(serializer: *AstSerializer, log_decl: *const ast.LogDecl
     }
 
     if (serializer.options.pretty_print and !serializer.options.compact_mode) {
-        try writer.print(",\n");
+        try writer.writeAll(",\n");
         try helpers.writeIndent(serializer, writer, indent + 1);
-        try writer.print("\"fields\": [\n");
+        try writer.writeAll("\"fields\": [\n");
     } else {
-        try writer.print(",\"fields\":[");
+        try writer.writeAll(",\"fields\":[");
     }
 
     for (log_decl.fields, 0..) |*field, i| {
-        if (i > 0) try writer.print(",");
+        if (i > 0) try writer.writeAll(",");
         if (serializer.options.pretty_print and !serializer.options.compact_mode) {
-            try writer.print("\n");
+            try writer.writeAll("\n");
             try helpers.writeIndent(serializer, writer, indent + 2);
-            try writer.print("{\n");
+            try writer.writeAll("{\n");
             try helpers.writeField(serializer, writer, "name", field.name, indent + 3, true);
-            try writer.print(",\n");
+            try writer.writeAll(",\n");
             try helpers.writeIndent(serializer, writer, indent + 3);
-            try writer.print("\"field_type\": ");
+            try writer.writeAll("\"field_type\": ");
             try serializer.serializeTypeInfo(field.type_info, writer);
             if (serializer.options.include_spans) {
-                try writer.print(",\n");
-                try helpers.writeSpanField(serializer, writer, &field.span, indent + 3);
+                try writer.writeAll(",\n");
+                try helpers.writeSpanFieldNoComma(serializer, writer, &field.span, indent + 3);
             }
-            try writer.print("\n");
+            try writer.writeAll("\n");
             try helpers.writeIndent(serializer, writer, indent + 2);
-            try writer.print("}");
+            try writer.writeAll("}");
         } else {
-            try writer.print("{\"name\":\"");
-            try writer.print(field.name);
-            try writer.print("\",\"field_type\":");
+            try writer.writeAll("{\"name\":\"");
+            try writer.writeAll(field.name);
+            try writer.writeAll("\",\"field_type\":");
             try serializer.serializeTypeInfo(field.type_info, writer);
-            try writer.print("}");
+            try writer.writeAll("}");
         }
     }
 
     if (serializer.options.pretty_print and !serializer.options.compact_mode) {
-        try writer.print("\n");
+        try writer.writeAll("\n");
         try helpers.writeIndent(serializer, writer, indent + 1);
-        try writer.print("]");
+        try writer.writeAll("]");
     } else {
-        try writer.print("]");
+        try writer.writeAll("]");
     }
 }
 
@@ -533,49 +556,49 @@ pub fn serializeModule(serializer: *AstSerializer, module: *const ast.ModuleNode
         try helpers.writeField(serializer, writer, "name", "", indent + 1, false);
     }
 
-    try writer.print(",\n");
+    try writer.writeAll(",\n");
     try helpers.writeIndent(serializer, writer, indent + 1);
-    try writer.print("\"imports\": [");
+    try writer.writeAll("\"imports\": [");
     if (module.imports.len > 0) {
-        try writer.print("\n");
+        try writer.writeAll("\n");
         for (module.imports, 0..) |import, i| {
             try helpers.writeIndent(serializer, writer, indent + 2);
-            try writer.print("{\n");
+            try writer.writeAll("{\n");
             try serializeImport(serializer, &import, writer, indent + 2, depth + 1);
-            try writer.print("\n");
+            try writer.writeAll("\n");
             try helpers.writeIndent(serializer, writer, indent + 2);
-            try writer.print("}");
+            try writer.writeAll("}");
             if (i < module.imports.len - 1) {
-                try writer.print(",");
+                try writer.writeAll(",");
             }
-            try writer.print("\n");
+            try writer.writeAll("\n");
         }
         try helpers.writeIndent(serializer, writer, indent + 1);
     }
-    try writer.print("],\n");
+    try writer.writeAll("],\n");
 
     try helpers.writeIndent(serializer, writer, indent + 1);
-    try writer.print("\"declarations\": [");
+    try writer.writeAll("\"declarations\": [");
     if (module.declarations.len > 0) {
-        try writer.print("\n");
+        try writer.writeAll("\n");
         for (module.declarations, 0..) |decl, i| {
             try helpers.writeIndent(serializer, writer, indent + 2);
-            try writer.print("{\n");
+            try writer.writeAll("{\n");
             try serializer.serializeAstNode(&decl, writer, indent + 2, depth + 1);
-            try writer.print("\n");
+            try writer.writeAll("\n");
             try helpers.writeIndent(serializer, writer, indent + 2);
-            try writer.print("}");
+            try writer.writeAll("}");
             if (i < module.declarations.len - 1) {
-                try writer.print(",");
+                try writer.writeAll(",");
             }
-            try writer.print("\n");
+            try writer.writeAll("\n");
         }
         try helpers.writeIndent(serializer, writer, indent + 1);
     }
-    try writer.print("]");
+    try writer.writeAll("]");
 
     if (serializer.options.include_spans) {
-        try writer.print(",\n");
+        try writer.writeAll(",\n");
         try helpers.writeSpanField(serializer, writer, &module.span, indent + 1);
     }
 }
@@ -585,30 +608,30 @@ pub fn serializeConstant(serializer: *AstSerializer, constant: *const ast.Consta
     try helpers.writeField(serializer, writer, "type", "Constant", indent + 1, true);
     try helpers.writeField(serializer, writer, "name", constant.name, indent + 1, false);
 
-    try writer.print(",\n");
+    try writer.writeAll(",\n");
     try helpers.writeIndent(serializer, writer, indent + 1);
-    try writer.print("\"typ\": ");
+    try writer.writeAll("\"typ\": ");
     try serializer.serializeTypeInfo(constant.typ, writer);
 
-    try writer.print(",\n");
+    try writer.writeAll(",\n");
     try helpers.writeIndent(serializer, writer, indent + 1);
-    try writer.print("\"value\": {\n");
-    try serializer.serializeExpression(constant.value, writer, indent + 1, depth + 1);
-    try writer.print("\n");
+    try writer.writeAll("\"value\": {\n");
+    try expressions.serializeExpression(serializer, constant.value, writer, indent + 1, depth + 1);
+    try writer.writeAll("\n");
     try helpers.writeIndent(serializer, writer, indent + 1);
-    try writer.print("}");
+    try writer.writeAll("}");
 
-    try writer.print(",\n");
+    try writer.writeAll(",\n");
     try helpers.writeIndent(serializer, writer, indent + 1);
-    try writer.print("\"visibility\": \"");
+    try writer.writeAll("\"visibility\": \"");
     switch (constant.visibility) {
-        .Public => try writer.print("Public"),
-        .Private => try writer.print("Private"),
+        .Public => try writer.writeAll("Public"),
+        .Private => try writer.writeAll("Private"),
     }
-    try writer.print("\"");
+    try writer.writeAll("\"");
 
     if (serializer.options.include_spans) {
-        try writer.print(",\n");
+        try writer.writeAll(",\n");
         try helpers.writeSpanField(serializer, writer, &constant.span, indent + 1);
     }
 }

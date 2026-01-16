@@ -1,0 +1,19 @@
+// NEGATIVE TEST: Should fail - incompatible base types
+// Expected error: Type mismatch between bool and u256
+
+contract IncompatibleBaseTypes {
+    // ERROR: Cannot return bool where u256 is expected
+    pub fn bool_to_u256(x: bool) -> u256 {
+        return x;
+    }
+
+    // ERROR: Cannot return u256 where address is expected
+    pub fn u256_to_address(x: u256) -> address {
+        return x;
+    }
+
+    // ERROR: Cannot return address where bool is expected
+    pub fn address_to_bool(x: address) -> bool {
+        return x;
+    }
+}

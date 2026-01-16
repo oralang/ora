@@ -185,6 +185,10 @@ pub const SymbolTable = struct {
     constants: std.StringHashMap(*const lib.ast.ConstantNode),
     // function effect summaries from semantic analysis
     function_effects: std.StringHashMap(FunctionEffect),
+    // log event signatures from semantic analysis (borrowed AST slices)
+    log_signatures: std.StringHashMap([]const lib.ast.LogField),
+    // error ids for declared errors
+    error_ids: std.StringHashMap(u32),
 
     pub fn init(allocator: std.mem.Allocator) SymbolTable {
         var scopes = std.ArrayList(std.StringHashMap(SymbolInfo)){};
@@ -199,6 +203,8 @@ pub const SymbolTable = struct {
             .types = std.StringHashMap([]TypeSymbol).init(allocator),
             .constants = std.StringHashMap(*const lib.ast.ConstantNode).init(allocator),
             .function_effects = std.StringHashMap(FunctionEffect).init(allocator),
+            .log_signatures = std.StringHashMap([]const lib.ast.LogField).init(allocator),
+            .error_ids = std.StringHashMap(u32).init(allocator),
         };
     }
 
@@ -225,6 +231,8 @@ pub const SymbolTable = struct {
             eff.deinit(self.allocator);
         }
         self.function_effects.deinit();
+        self.log_signatures.deinit();
+        self.error_ids.deinit();
         while (type_iter.next()) |entry| {
             const type_array = entry.value_ptr.*;
             // first deinit the TypeSymbol's internal allocations
@@ -318,6 +326,17 @@ pub const SymbolTable = struct {
         };
 
         try self.scopes.items[self.current_scope].put(name, symbol_info);
+    }
+
+    pub fn getOrCreateErrorId(self: *SymbolTable, name: []const u8) !u32 {
+        if (self.error_ids.get(name)) |id| return id;
+        const next_id: u32 = @intCast(self.error_ids.count() + 1);
+        try self.error_ids.put(name, next_id);
+        return next_id;
+    }
+
+    pub fn getErrorId(self: *const SymbolTable, name: []const u8) ?u32 {
+        return self.error_ids.get(name);
     }
 
     /// Register a constant declaration for lazy value creation
@@ -520,6 +539,17 @@ pub fn convertSemanticSymbolTable(semantic_table: *const lib.semantics.state.Sym
             existing.* = stored;
         } else {
             try mlir_table.function_effects.put(name, stored);
+        }
+    }
+
+    var log_iter = semantic_table.log_signatures.iterator();
+    while (log_iter.next()) |entry| {
+        const name = entry.key_ptr.*;
+        const fields = entry.value_ptr.*;
+        if (mlir_table.log_signatures.getPtr(name)) |existing| {
+            existing.* = fields;
+        } else {
+            try mlir_table.log_signatures.put(name, fields);
         }
     }
 }
@@ -1297,7 +1327,7 @@ pub fn lowerFunctionsToModuleWithErrors(ctx: c.MlirContext, nodes: []lib.AstNode
                             // create a placeholder operation to allow compilation to continue
                             const expr_lowerer = ExpressionLowerer.init(ctx, body, &type_mapper, null, null, null, &symbol_table, &builtin_registry, &error_handler, locations, &ora_dialect);
                             const stmt_lowerer = StatementLowerer.init(ctx, body, &type_mapper, &expr_lowerer, null, null, null, locations, &symbol_table, &builtin_registry, std.heap.page_allocator, null, null, &ora_dialect, &[_]*lib.ast.Expressions.ExprNode{});
-                            stmt_lowerer.lowerStatement(stmt) catch {
+                            _ = stmt_lowerer.lowerStatement(stmt) catch {
                                 try error_handler.reportError(.MlirOperationFailed, error_handling.getSpanFromStatement(stmt), "failed to lower top-level statement", "check statement structure and dependencies");
                                 continue;
                             };
@@ -1374,7 +1404,7 @@ pub fn lowerFunctionsToModuleWithErrors(ctx: c.MlirContext, nodes: []lib.AstNode
                 // create a temporary statement lowerer for top-level statements
                 const expr_lowerer = ExpressionLowerer.init(ctx, body, &type_mapper, null, null, null, &symbol_table, null, &error_handler, locations, &ora_dialect);
                 const stmt_lowerer = StatementLowerer.init(ctx, body, &type_mapper, &expr_lowerer, null, null, null, locations, null, &builtin_registry, std.heap.page_allocator, null, null, &ora_dialect, &[_]*lib.ast.Expressions.ExprNode{});
-                stmt_lowerer.lowerStatement(stmt) catch {
+                _ = stmt_lowerer.lowerStatement(stmt) catch {
                     try error_handler.reportError(.MlirOperationFailed, error_handling.getSpanFromStatement(stmt), "failed to lower top-level statement", "check statement structure and dependencies");
                     continue;
                 };

@@ -130,7 +130,11 @@ pub fn lowerStackVariableDecl(self: *const StatementLowerer, var_decl: *const li
     // immutable locals (let/const) remain SSA values.
     const is_aggregate = isAggregateType(var_decl.type_info.ora_type);
     const is_scalar = isScalarValueType(var_decl.type_info.ora_type);
-    const needs_memref = self.force_stack_memref or ((var_decl.kind == .Var) and (is_aggregate or is_scalar));
+    const prefer_ssa = if (self.local_var_map) |lvm|
+        if (lvm.getLocalVarKind(var_decl.name)) |kind| kind == .SSA else false
+    else
+        false;
+    const needs_memref = self.force_stack_memref or ((var_decl.kind == .Var) and (is_aggregate or (is_scalar and !prefer_ssa)));
 
     log.debug(
         "[lowerStackVariableDecl] {s}: kind={any}, is_aggregate={}, is_scalar={}, force_memref={}, needs_memref={}\n",
@@ -272,6 +276,9 @@ pub fn lowerStorageVariableDecl(self: *const StatementLowerer, var_decl: *const 
 pub fn lowerMemoryVariableDecl(self: *const StatementLowerer, var_decl: *const lib.ast.Statements.VariableDeclNode, mlir_type: c.MlirType, loc: c.MlirLocation) LoweringError!void {
     var alloca_result: c.MlirValue = undefined;
 
+    // Get ora_type to determine if this is an array
+    const ora_type = var_decl.type_info.ora_type;
+
     if (var_decl.value) |init_expr| {
         // lower initializer first; array literals already produce a memref
         const init_value = helpers.lowerValueWithImplicitTry(self, &init_expr.*, var_decl.type_info);
@@ -282,37 +289,24 @@ pub fn lowerMemoryVariableDecl(self: *const StatementLowerer, var_decl: *const l
             alloca_result = init_value;
         } else {
             // create memory allocation and store initializer
-            const memref_type = if (c.oraTypeIsAMemRef(mlir_type))
-                mlir_type
-            else
-                h.memRefType(
-                    self.ctx,
-                    mlir_type,
-                    0,
-                    null,
-                    h.nullAttr(),
-                    self.memory_manager.getMemorySpaceAttribute(var_decl.region),
-                );
+            const memref_type = createMemrefTypeForVariable(self, mlir_type, ora_type, var_decl.region);
             const alloca_op = self.memory_manager.createAllocaOp(memref_type, var_decl.region, var_decl.name, loc);
             h.appendOp(self.block, alloca_op);
             alloca_result = h.getResult(alloca_op, 0);
 
-            const store_op = self.memory_manager.createStoreOp(init_value, alloca_result, var_decl.region, loc);
+            // Convert init_value to match memref element type (e.g., !ora.non_zero_address -> !ora.address)
+            const element_type = c.oraShapedTypeGetElementType(memref_type);
+            const store_value = if (!c.oraTypeEqual(init_type, element_type))
+                self.type_mapper.createConversionOp(self.block, init_value, element_type, var_decl.span)
+            else
+                init_value;
+
+            const store_op = self.memory_manager.createStoreOp(store_value, alloca_result, var_decl.region, loc);
             h.appendOp(self.block, store_op);
         }
     } else {
         // create memory allocation without initializer
-        const memref_type = if (c.oraTypeIsAMemRef(mlir_type))
-            mlir_type
-        else
-            h.memRefType(
-                self.ctx,
-                mlir_type,
-                0,
-                null,
-                h.nullAttr(),
-                self.memory_manager.getMemorySpaceAttribute(var_decl.region),
-            );
+        const memref_type = createMemrefTypeForVariable(self, mlir_type, ora_type, var_decl.region);
         const alloca_op = self.memory_manager.createAllocaOp(memref_type, var_decl.region, var_decl.name, loc);
         h.appendOp(self.block, alloca_op);
         alloca_result = h.getResult(alloca_op, 0);
@@ -325,6 +319,47 @@ pub fn lowerMemoryVariableDecl(self: *const StatementLowerer, var_decl: *const l
             return LoweringError.OutOfMemory;
         };
     }
+}
+
+/// Create the appropriate memref type for a variable, handling arrays specially
+fn createMemrefTypeForVariable(
+    self: *const StatementLowerer,
+    mlir_type: c.MlirType,
+    ora_type: ?lib.ast.type_info.OraType,
+    region: lib.ast.Statements.MemoryRegion,
+) c.MlirType {
+    // If already a memref, use it directly
+    if (c.oraTypeIsAMemRef(mlir_type)) {
+        return mlir_type;
+    }
+
+    // For arrays, create memref<NxT> with proper shape
+    if (ora_type) |ot| {
+        if (ot == .array) {
+            // Get element type from the array's nested ora_type
+            const elem_ora_type = ot.array.elem.*;
+            const elem_mlir_type = self.type_mapper.toMlirType(.{ .ora_type = elem_ora_type });
+            var shape_buf: [1]i64 = .{@intCast(ot.array.len)};
+            return h.memRefType(
+                self.ctx,
+                elem_mlir_type,
+                1,
+                &shape_buf[0],
+                h.nullAttr(),
+                self.memory_manager.getMemorySpaceAttribute(region),
+            );
+        }
+    }
+
+    // For scalars, create memref<T> (rank 0)
+    return h.memRefType(
+        self.ctx,
+        mlir_type,
+        0,
+        null,
+        h.nullAttr(),
+        self.memory_manager.getMemorySpaceAttribute(region),
+    );
 }
 
 /// Lower transient storage variable declarations

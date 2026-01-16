@@ -528,6 +528,66 @@ namespace mlir
             p.printOptionalAttrDict((*this)->getAttrs(), elidedAttrs);
         }
 
+        ::mlir::ParseResult IsolatedIfOp::parse(::mlir::OpAsmParser &parser, ::mlir::OperationState &result)
+        {
+            ::mlir::OpAsmParser::UnresolvedOperand condition;
+            if (parser.parseOperand(condition))
+                return ::mlir::failure();
+
+            if (parser.parseKeyword("then"))
+                return ::mlir::failure();
+
+            std::unique_ptr<::mlir::Region> thenRegion = std::make_unique<::mlir::Region>();
+            if (parser.parseRegion(*thenRegion))
+                return ::mlir::failure();
+
+            if (parser.parseKeyword("else"))
+                return ::mlir::failure();
+
+            std::unique_ptr<::mlir::Region> elseRegion = std::make_unique<::mlir::Region>();
+            if (parser.parseRegion(*elseRegion))
+                return ::mlir::failure();
+
+            ::llvm::SmallVector<::mlir::Type, 1> resultTypes;
+            if (parser.parseOptionalArrowTypeList(resultTypes))
+                return ::mlir::failure();
+            result.addTypes(resultTypes);
+
+            if (parser.parseOptionalAttrDict(result.attributes))
+                return ::mlir::failure();
+
+            if (parser.resolveOperand(condition, BoolType::get(parser.getContext()), result.operands))
+                return ::mlir::failure();
+
+            result.addRegion(std::move(thenRegion));
+            result.addRegion(std::move(elseRegion));
+
+            return ::mlir::success();
+        }
+
+        void IsolatedIfOp::print(::mlir::OpAsmPrinter &p)
+        {
+            p << " ";
+            p << getCondition();
+            p << " ";
+
+            p << "then ";
+            p.printRegion(getThenRegion());
+
+            p << " else ";
+            p.printRegion(getElseRegion());
+
+            if (!getResults().empty())
+            {
+                p << " -> ";
+                llvm::interleaveComma(getResults().getTypes(), p, [&](::mlir::Type type)
+                                      { p << type; });
+            }
+
+            SmallVector<StringRef> elidedAttrs;
+            p.printOptionalAttrDict((*this)->getAttrs(), elidedAttrs);
+        }
+
         //===----------------------------------------------------------------------===//
         // WhileOp Custom Parser/Printer
         //===----------------------------------------------------------------------===//

@@ -228,7 +228,8 @@ pub const ExpressionParser = struct {
 
         if (!self.base.check(.RightParen)) {
             repeat: while (true) {
-                const arg = try self.parseExpression();
+                // Use parseExpressionNoComma to avoid consuming commas as binary operators
+                const arg = try self.parseExpressionNoComma();
                 const arg_ptr = try self.base.arena.createNode(ast.Expressions.ExprNode);
                 arg_ptr.* = arg;
                 try arguments.append(self.base.arena.allocator(), arg_ptr);
@@ -459,6 +460,19 @@ pub const ExpressionParser = struct {
         // identifiers (including keywords that can be used as identifiers)
         if (self.base.match(.Identifier) or self.base.matchKeywordAsIdentifier()) {
             const token = self.base.previous();
+
+            // check if this is a labeled block expression (label: { ... })
+            if (self.base.check(.Colon) and self.base.current + 1 < self.base.tokens.len and
+                self.base.tokens[self.base.current + 1].type == .LeftBrace)
+            {
+                _ = self.base.advance(); // consume ':'
+                const block = try self.parseBlock();
+                return ast.Expressions.ExprNode{ .LabeledBlock = ast.Expressions.LabeledBlockExpr{
+                    .label = try self.base.arena.createString(token.lexeme),
+                    .block = block,
+                    .span = self.base.spanFromToken(token),
+                } };
+            }
 
             // check if this is struct instantiation (identifier followed by {)
             if (self.base.check(.LeftBrace)) {
@@ -861,34 +875,17 @@ pub const ExpressionParser = struct {
         return complex.parseRangeExpression(self);
     }
 
-    /// Parse a block (for comptime expressions)
-    /// This parses a block containing statements. For now, it only handles expression statements.
-    /// Full statement parsing would require access to StatementParser.
+    /// Parse a block (for comptime expressions and labeled blocks)
+    /// Delegates to StatementParser for full statement support including if, while, etc.
     fn parseBlock(self: *ExpressionParser) ParserError!ast.Statements.BlockNode {
-        _ = try self.base.consume(.LeftBrace, "Expected '{'");
+        const StatementParser = @import("statement_parser.zig").StatementParser;
+        var stmt_parser = StatementParser.init(self.base.tokens, self.base.arena);
+        stmt_parser.base.current = self.base.current;
+        stmt_parser.base.file_id = self.base.file_id;
+        stmt_parser.syncSubParsers();
 
-        var statements = std.ArrayList(ast.Statements.StmtNode){};
-        defer statements.deinit(self.base.arena.allocator());
-        errdefer {
-            for (statements.items) |*stmt| {
-                ast.deinitStmtNode(self.base.arena.allocator(), stmt);
-            }
-        }
-
-        while (!self.base.check(.RightBrace) and !self.base.isAtEnd()) {
-            // parse expression statement (simplified - full statement parsing requires StatementParser)
-            const expr = try self.parseExpression();
-            _ = self.base.match(.Semicolon);
-
-            const stmt = ast.Statements.StmtNode{ .Expr = expr };
-            try statements.append(self.base.arena.allocator(), stmt);
-        }
-
-        const end_token = try self.base.consume(.RightBrace, "Expected '}' after block");
-
-        return ast.Statements.BlockNode{
-            .statements = try statements.toOwnedSlice(self.base.arena.allocator()),
-            .span = ParserCommon.makeSpan(end_token),
-        };
+        const block = try stmt_parser.parseBlock();
+        self.base.current = stmt_parser.base.current;
+        return block;
     }
 };

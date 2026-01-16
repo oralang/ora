@@ -23,18 +23,18 @@ pub fn writeIndent(serializer: *AstSerializer, writer: anytype, level: u32) Seri
 
     var i: u32 = 0;
     while (i < level) : (i += 1) {
-        try writer.print("  ");
+        try writer.writeAll("  ");
     }
 }
 
 /// Write a string field
 pub fn writeField(serializer: *AstSerializer, writer: anytype, key: []const u8, value: []const u8, indent: u32, is_first: bool) SerializationError!void {
     if (serializer.options.pretty_print and !serializer.options.compact_mode) {
-        if (!is_first) try writer.print(",\n");
+        if (!is_first) try writer.writeAll(",\n");
         try writeIndent(serializer, writer, indent);
         try writer.print("\"{s}\": \"{s}\"", .{ key, value });
     } else {
-        if (!is_first) try writer.print(",");
+        if (!is_first) try writer.writeAll(",");
         try writer.print("\"{s}\":\"{s}\"", .{ key, value });
     }
 }
@@ -42,7 +42,7 @@ pub fn writeField(serializer: *AstSerializer, writer: anytype, key: []const u8, 
 /// Write a boolean field
 pub fn writeBoolField(serializer: *AstSerializer, writer: anytype, key: []const u8, value: bool, indent: u32) SerializationError!void {
     if (serializer.options.pretty_print and !serializer.options.compact_mode) {
-        try writer.print(",\n");
+        try writer.writeAll(",\n");
         try writeIndent(serializer, writer, indent);
         try writer.print("\"{s}\": {any}", .{ key, value });
     } else {
@@ -53,7 +53,7 @@ pub fn writeBoolField(serializer: *AstSerializer, writer: anytype, key: []const 
 /// Write a span field
 pub fn writeSpanField(serializer: *AstSerializer, writer: anytype, span: *const SourceSpan, indent: u32) SerializationError!void {
     if (serializer.options.pretty_print and !serializer.options.compact_mode) {
-        try writer.print(",\n");
+        try writer.writeAll(",\n");
         try writeIndent(serializer, writer, indent);
 
         // if lexeme is available and include_lexemes option is enabled, include it in the output
@@ -72,74 +72,105 @@ pub fn writeSpanField(serializer: *AstSerializer, writer: anytype, span: *const 
     }
 }
 
+/// Write a span field without adding a leading comma
+pub fn writeSpanFieldNoComma(serializer: *AstSerializer, writer: anytype, span: *const SourceSpan, indent: u32) SerializationError!void {
+    if (serializer.options.pretty_print and !serializer.options.compact_mode) {
+        try writeIndent(serializer, writer, indent);
+
+        if (serializer.options.include_lexemes and span.lexeme != null) {
+            try writer.print("\"span\": {{\"line\": {d}, \"column\": {d}, \"length\": {d}, \"lexeme\": \"{s}\"}}", .{ span.line, span.column, span.length, span.lexeme.? });
+        } else {
+            try writer.print("\"span\": {{\"line\": {d}, \"column\": {d}, \"length\": {d}}}", .{ span.line, span.column, span.length });
+        }
+    } else {
+        if (serializer.options.include_lexemes and span.lexeme != null) {
+            try writer.print("\"span\":{{\"line\":{d},\"column\":{d},\"length\":{d},\"lexeme\":\"{s}\"}}", .{ span.line, span.column, span.length, span.lexeme.? });
+        } else {
+            try writer.print("\"span\":{{\"line\":{d},\"column\":{d},\"length\":{d}}}", .{ span.line, span.column, span.length });
+        }
+    }
+}
+
 /// Serialize a parameter
 pub fn serializeParameter(serializer: *AstSerializer, param: *const ast.ParameterNode, writer: anytype, indent: u32) SerializationError!void {
     if (serializer.options.pretty_print and !serializer.options.compact_mode) {
         try writeIndent(serializer, writer, indent);
-        try writer.print("{\n");
+        try writer.writeAll("{\n");
         try writeField(serializer, writer, "name", param.name, indent + 1, true);
-        try writer.print(",\n");
+        try writer.writeAll(",\n");
         try writeIndent(serializer, writer, indent + 1);
-        try writer.print("\"param_type\": ");
+        try writer.writeAll("\"param_type\": ");
         try serializeTypeInfo(serializer, param.type_info, writer);
         if (serializer.options.include_spans) {
-            try writer.print(",\n");
-            try writeSpanField(serializer, writer, &param.span, indent + 1);
+            try writer.writeAll(",\n");
+            try writeSpanFieldNoComma(serializer, writer, &param.span, indent + 1);
         }
-        try writer.print("\n");
+        try writer.writeAll("\n");
         try writeIndent(serializer, writer, indent);
-        try writer.print("}");
+        try writer.writeAll("}");
     } else {
-        try writer.print("{\"name\":\"");
-        try writer.print(param.name);
-        try writer.print("\",\"param_type\":");
+        try writer.writeAll("{\"name\":\"");
+        try writer.writeAll(param.name);
+        try writer.writeAll("\",\"param_type\":");
         try serializeTypeInfo(serializer, param.type_info, writer);
-        try writer.print("}");
+        try writer.writeAll("}");
     }
+}
+
+/// Write a type_info field
+pub fn writeTypeInfoField(serializer: *AstSerializer, writer: anytype, type_info: *const ast.Types.TypeInfo, indent: u32) SerializationError!void {
+    if (serializer.options.pretty_print and !serializer.options.compact_mode) {
+        try writer.writeAll(",\n");
+        try writeIndent(serializer, writer, indent);
+        try writer.writeAll("\"type_info\": ");
+    } else {
+        try writer.writeAll(",\"type_info\":");
+    }
+    try serializeTypeInfo(serializer, type_info.*, writer);
 }
 
 /// Serialize type information
 pub fn serializeTypeInfo(_: *AstSerializer, type_info: ast.Types.TypeInfo, writer: anytype) SerializationError!void {
-    try writer.print("{");
+    try writer.writeAll("{");
 
     // write category
-    try writer.print("\"category\":\"");
-    try writer.print(@tagName(type_info.category));
-    try writer.print("\"");
+    try writer.writeAll("\"category\":\"");
+    try writer.writeAll(@tagName(type_info.category));
+    try writer.writeAll("\"");
 
     // write source
-    try writer.print(",\"source\":\"");
-    try writer.print(@tagName(type_info.source));
-    try writer.print("\"");
+    try writer.writeAll(",\"source\":\"");
+    try writer.writeAll(@tagName(type_info.source));
+    try writer.writeAll("\"");
 
     // write ORA type if present
     if (type_info.ora_type) |ora_type| {
-        try writer.print(",\"ora_type\":");
+        try writer.writeAll(",\"ora_type\":");
 
         switch (ora_type) {
             .struct_type => |name| {
-                try writer.print("{\"type\":\"struct_type\",\"name\":\"");
-                try writer.print(name);
-                try writer.print("\"}");
+                try writer.writeAll("{\"type\":\"struct_type\",\"name\":\"");
+                try writer.writeAll(name);
+                try writer.writeAll("\"}");
             },
             .enum_type => |name| {
-                try writer.print("{\"type\":\"enum_type\",\"name\":\"");
-                try writer.print(name);
-                try writer.print("\"}");
+                try writer.writeAll("{\"type\":\"enum_type\",\"name\":\"");
+                try writer.writeAll(name);
+                try writer.writeAll("\"}");
             },
             .contract_type => |name| {
-                try writer.print("{\"type\":\"contract_type\",\"name\":\"");
-                try writer.print(name);
-                try writer.print("\"}");
+                try writer.writeAll("{\"type\":\"contract_type\",\"name\":\"");
+                try writer.writeAll(name);
+                try writer.writeAll("\"}");
             },
             else => {
                 // for simple types just use the tag name
-                try writer.print("\"");
-                try writer.print(@tagName(ora_type));
-                try writer.print("\"");
+                try writer.writeAll("\"");
+                try writer.writeAll(@tagName(ora_type));
+                try writer.writeAll("\"");
             },
         }
     }
 
-    try writer.print("}");
+    try writer.writeAll("}");
 }

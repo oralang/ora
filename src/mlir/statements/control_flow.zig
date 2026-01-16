@@ -19,26 +19,155 @@ const log = @import("log");
 
 fn clearBlockTerminator(block: c.MlirBlock) void {
     const term = c.oraBlockGetTerminator(block);
-    if (!c.oraOperationIsNull(term)) {
+    if (c.oraOperationIsNull(term)) return;
+    
+    // Only erase actual terminator operations (ora.yield, scf.yield, func.return, etc.)
+    const name_ref = c.oraOperationGetName(term);
+    if (name_ref.data == null) return;
+    
+    const op_name = name_ref.data[0..name_ref.length];
+    
+    // List of known terminator operations
+    const is_terminator = std.mem.eql(u8, op_name, "ora.yield") or
+        std.mem.eql(u8, op_name, "scf.yield") or
+        std.mem.eql(u8, op_name, "ora.return") or
+        std.mem.eql(u8, op_name, "func.return") or
+        std.mem.eql(u8, op_name, "cf.br") or
+        std.mem.eql(u8, op_name, "cf.cond_br");
+    
+    if (is_terminator) {
         c.oraOperationErase(term);
     }
 }
 
 /// Lower if statements using ora.if with then/else regions
-pub fn lowerIf(self: *const StatementLowerer, if_stmt: *const lib.ast.Statements.IfNode) LoweringError!void {
+/// Returns an optional new "current block" when partial returns create a continue block
+/// that subsequent statements should be emitted to.
+pub fn lowerIf(self: *const StatementLowerer, if_stmt: *const lib.ast.Statements.IfNode) LoweringError!?c.MlirBlock {
+    log.debug("[lowerIf] ENTERING lowerIf\n", .{});
     const loc = self.fileLoc(if_stmt.span);
 
     // lower the condition expression
     const condition = self.expr_lowerer.lowerExpression(&if_stmt.condition);
 
-    // check if this if statement contains return statements
-    if (helpers.ifStatementHasReturns(self, if_stmt)) {
-        // for if statements with returns, use scf.if with scf.yield
+    // only use scf.if-with-returns when both branches return and we're not in a try block
+    const then_returns = helpers.blockHasReturn(self, if_stmt.then_branch);
+    const else_returns = if (if_stmt.else_branch) |else_branch| helpers.blockHasReturn(self, else_branch) else false;
+    if (then_returns and else_returns and !(self.in_try_block and self.try_return_flag_memref != null)) {
+        // for if statements where both branches return, use scf.if with scf.yield
         try lowerIfWithReturns(self, if_stmt, condition, loc);
-        return;
+        return null;
     }
 
-    // create the ora.if operation using C++ API (enables custom assembly formats)
+    // if only some branches return, lower using a return-flag memref approach
+    if ((then_returns or else_returns) and !(then_returns and else_returns)) {
+        log.debug("[lowerIf] PARTIAL RETURN PATH: then_returns={}, else_returns={}\n", .{ then_returns, else_returns });
+        const i1_type = h.boolType(self.ctx);
+        const empty_attr = c.oraNullAttrCreate();
+
+        var return_flag_memref = self.try_return_flag_memref;
+        var return_value_memref = self.try_return_value_memref;
+        const owns_memrefs = return_flag_memref == null;
+
+        if (owns_memrefs) {
+            const return_flag_memref_type = h.memRefType(self.ctx, i1_type, 0, null, empty_attr, empty_attr);
+            const return_flag_alloca = c.oraMemrefAllocaOpCreate(self.ctx, loc, return_flag_memref_type);
+            h.appendOp(self.block, return_flag_alloca);
+            return_flag_memref = h.getResult(return_flag_alloca, 0);
+
+            if (self.current_function_return_type) |ret_type| {
+                const return_value_memref_type = h.memRefType(self.ctx, ret_type, 0, null, empty_attr, empty_attr);
+                const return_value_alloca = c.oraMemrefAllocaOpCreate(self.ctx, loc, return_value_memref_type);
+                h.appendOp(self.block, return_value_alloca);
+                return_value_memref = h.getResult(return_value_alloca, 0);
+            }
+
+            const false_val = helpers.createBoolConstant(self, false, loc);
+            helpers.storeToMemref(self, false_val, return_flag_memref.?, loc);
+        }
+
+        var branch_lowerer = self.*;
+        branch_lowerer.in_try_block = true;
+        branch_lowerer.try_return_flag_memref = return_flag_memref;
+        branch_lowerer.try_return_value_memref = return_value_memref;
+
+        const if_op = self.ora_dialect.createIf(condition, loc);
+        const then_block = c.oraIfOpGetThenBlock(if_op);
+        const else_block = c.oraIfOpGetElseBlock(if_op);
+        if (c.oraBlockIsNull(then_block) or c.oraBlockIsNull(else_block)) {
+            @panic("ora.if missing then/else blocks");
+        }
+
+        clearBlockTerminator(then_block);
+        clearBlockTerminator(else_block);
+
+        _ = try branch_lowerer.lowerBlockBody(if_stmt.then_branch, then_block);
+        if (!helpers.blockEndsWithOpName(then_block, "ora.yield")) {
+            clearBlockTerminator(then_block);
+            const yield_op = self.ora_dialect.createYield(&[_]c.MlirValue{}, loc);
+            h.appendOp(then_block, yield_op);
+        }
+
+        if (if_stmt.else_branch) |else_branch| {
+            _ = try branch_lowerer.lowerBlockBody(else_branch, else_block);
+        }
+        if (!helpers.blockEndsWithOpName(else_block, "ora.yield")) {
+            clearBlockTerminator(else_block);
+            const yield_op = self.ora_dialect.createYield(&[_]c.MlirValue{}, loc);
+            h.appendOp(else_block, yield_op);
+        }
+
+        h.appendOp(self.block, if_op);
+
+        // After the partial return if, we need to check the return flag
+        // and either return (if flag is set) or continue (if flag is not set).
+        // We use cf.cond_br to create separate blocks since ora.return cannot be
+        // inside structured control flow regions.
+        
+        if (owns_memrefs and self.current_func_op != null) {
+            // Load the return flag
+            const load_flag = self.ora_dialect.createMemrefLoad(return_flag_memref.?, &[_]c.MlirValue{}, i1_type, loc);
+            h.appendOp(self.block, load_flag);
+            const flag_val = h.getResult(load_flag, 0);
+            
+            // Get the function operation to add new blocks
+            const func_op = self.current_func_op.?;
+            const func_region = c.oraOperationGetRegion(func_op, 0);
+            
+            // Create return and continue blocks (empty blocks with no arguments)
+            const return_block = c.mlirBlockCreate(0, null, null);
+            const continue_block = c.mlirBlockCreate(0, null, null);
+            
+            // Append blocks to function region
+            c.mlirRegionAppendOwnedBlock(func_region, return_block);
+            c.mlirRegionAppendOwnedBlock(func_region, continue_block);
+            
+            // Create conditional branch: if flag is true, go to return_block, else go to continue_block
+            const cond_br = c.oraCfCondBrOpCreate(self.ctx, loc, flag_val, return_block, continue_block);
+            h.appendOp(self.block, cond_br);
+            
+            // In return_block: load value and ora.return
+                if (return_value_memref) |ret_val_memref| {
+                    if (self.current_function_return_type) |ret_type| {
+                    const load_return_value = self.ora_dialect.createMemrefLoad(ret_val_memref, &[_]c.MlirValue{}, ret_type, loc);
+                    h.appendOp(return_block, load_return_value);
+                        const return_val = h.getResult(load_return_value, 0);
+                        const return_op = self.ora_dialect.createFuncReturnWithValue(return_val, loc);
+                    h.appendOp(return_block, return_op);
+                    }
+                } else {
+                    const return_op = self.ora_dialect.createFuncReturn(loc);
+                h.appendOp(return_block, return_op);
+                }
+
+            // Return the continue_block for subsequent statements
+            return continue_block;
+        }
+
+        return null;
+    }
+
+    // create ora.if for regular if statements (no returns)
     const if_op = self.ora_dialect.createIf(condition, loc);
 
     // get then and else regions
@@ -48,11 +177,14 @@ pub fn lowerIf(self: *const StatementLowerer, if_stmt: *const lib.ast.Statements
         @panic("ora.if missing then/else blocks");
     }
 
-    // lower else branch if present, otherwise add ora.yield to empty region
+    clearBlockTerminator(then_block);
+    clearBlockTerminator(else_block);
+
+    // lower else branch if present, otherwise add scf.yield to empty region
     if (if_stmt.else_branch) |else_branch| {
         _ = try self.lowerBlockBody(else_branch, else_block);
     } else {
-        // add ora.yield to empty else region to satisfy MLIR requirements
+        // add scf.yield to empty else region to satisfy MLIR requirements
         const yield_op = self.ora_dialect.createYield(&[_]c.MlirValue{}, loc);
         h.appendOp(else_block, yield_op);
     }
@@ -60,20 +192,98 @@ pub fn lowerIf(self: *const StatementLowerer, if_stmt: *const lib.ast.Statements
     // lower then branch FIRST (before creating the ora.if operation)
     _ = try self.lowerBlockBody(if_stmt.then_branch, then_block);
 
-    // add ora.yield to then region if it doesn't end with one
-    if (!helpers.blockEndsWithYield(self, then_block)) {
+    // add scf.yield to then region if it doesn't end with a terminator
+    if (!helpers.blockEndsWithOpName(then_block, "ora.yield")) {
+        clearBlockTerminator(then_block);
         const yield_op = self.ora_dialect.createYield(&[_]c.MlirValue{}, loc);
         h.appendOp(then_block, yield_op);
     }
 
-    // add ora.yield to else region if it doesn't end with one (for non-empty else branches)
-    if (if_stmt.else_branch != null and !helpers.blockEndsWithYield(self, else_block)) {
+    // add scf.yield to else region if it doesn't end with a terminator (for non-empty else branches)
+    if (if_stmt.else_branch != null and !helpers.blockEndsWithOpName(else_block, "ora.yield")) {
+        clearBlockTerminator(else_block);
         const yield_op = self.ora_dialect.createYield(&[_]c.MlirValue{}, loc);
         h.appendOp(else_block, yield_op);
     }
 
     // now append the scf.if operation to the block
     h.appendOp(self.block, if_op);
+    return null;
+}
+
+/// Lower if statement where then branch returns, followed by a return statement.
+/// This is transformed into an if-else where both branches return, using scf.if + scf.yield.
+pub fn lowerIfWithFollowingReturn(self: *const StatementLowerer, if_stmt: *const lib.ast.Statements.IfNode, following_return: *const lib.ast.Statements.ReturnNode) LoweringError!void {
+    const loc = self.fileLoc(if_stmt.span);
+    const condition = self.expr_lowerer.lowerExpression(&if_stmt.condition);
+
+    // Determine result type from the return statements
+    const result_type = self.current_function_return_type;
+    var result_types: [1]c.MlirType = undefined;
+    var result_slice: []c.MlirType = &[_]c.MlirType{};
+    if (result_type) |ret_type| {
+        result_types[0] = ret_type;
+        result_slice = result_types[0..1];
+    }
+
+    // Create scf.if with proper then/else regions
+    const op = self.ora_dialect.createScfIf(condition, result_slice, loc);
+    const then_block = c.oraScfIfOpGetThenBlock(op);
+    const else_block = c.oraScfIfOpGetElseBlock(op);
+    if (c.oraBlockIsNull(then_block) or c.oraBlockIsNull(else_block)) {
+        @panic("scf.if missing then/else blocks");
+    }
+
+    clearBlockTerminator(then_block);
+    clearBlockTerminator(else_block);
+
+    // Lower then branch (which has the return)
+    try lowerBlockBodyWithYield(self, if_stmt.then_branch, then_block, result_type);
+
+    // Lower else branch with the following return statement
+    if (result_type) |ret_type| {
+        var else_lowerer = self.*;
+        else_lowerer.block = else_block;
+        
+        var else_expr_lowerer = ExpressionLowerer.init(self.ctx, else_block, self.type_mapper, self.param_map, self.storage_map, self.local_var_map, self.symbol_table, self.builtin_registry, self.expr_lowerer.error_handler, self.locations, self.ora_dialect);
+        else_expr_lowerer.current_function_return_type = self.current_function_return_type;
+        else_lowerer.expr_lowerer = &else_expr_lowerer;
+        
+        if (following_return.value) |value_expr| {
+            const v = else_expr_lowerer.lowerExpression(&value_expr);
+            // Check if return type is error union and wrap accordingly
+            const is_error_union = if (self.current_function_return_type_info) |ti|
+                helpers.isErrorUnionTypeInfo(ti)
+            else
+                false;
+            const final_value = if (is_error_union) blk: {
+                const err_info = helpers.getErrorUnionPayload(&else_lowerer, &value_expr, v, ret_type, else_block, loc);
+                break :blk helpers.encodeErrorUnionValue(&else_lowerer, err_info.payload, err_info.is_error, ret_type, else_block, following_return.span, loc);
+            } else helpers.convertValueToType(&else_lowerer, v, ret_type, following_return.span, loc);
+            const yield_op = self.ora_dialect.createScfYieldWithValues(&[_]c.MlirValue{final_value}, loc);
+            h.appendOp(else_block, yield_op);
+        } else {
+            const default_val = try helpers.createDefaultValueForType(&else_lowerer, ret_type, loc);
+            const yield_op = self.ora_dialect.createScfYieldWithValues(&[_]c.MlirValue{default_val}, loc);
+            h.appendOp(else_block, yield_op);
+        }
+    } else {
+        const yield_op = self.ora_dialect.createScfYield(loc);
+        h.appendOp(else_block, yield_op);
+    }
+
+    // Append scf.if to current block
+    h.appendOp(self.block, op);
+
+    // Get the result and return it
+    if (result_type) |_| {
+        const result_value = h.getResult(op, 0);
+        const return_op = self.ora_dialect.createFuncReturnWithValue(result_value, loc);
+        h.appendOp(self.block, return_op);
+    } else {
+        const return_op = self.ora_dialect.createFuncReturn(loc);
+        h.appendOp(self.block, return_op);
+    }
 }
 
 /// Lower if statements with returns by using scf.if with scf.yield and single return
@@ -99,14 +309,19 @@ fn lowerIfWithReturns(self: *const StatementLowerer, if_stmt: *const lib.ast.Sta
         @panic("scf.if missing then/else blocks");
     }
 
+    clearBlockTerminator(then_block);
+    clearBlockTerminator(else_block);
+
     // lower then branch - replace return statements with scf.yield
     const then_has_return = helpers.blockHasReturn(self, if_stmt.then_branch);
-    try lowerBlockBodyWithYield(self, if_stmt.then_branch, then_block);
+    try lowerBlockBodyWithYield(self, if_stmt.then_branch, then_block, result_type);
 
     // if then branch doesn't end with a yield, add one with a default value
     if (!then_has_return and result_type != null) {
         if (result_type) |ret_type| {
-            const default_val = try helpers.createDefaultValueForType(self, ret_type, loc);
+            var yield_lowerer = self.*;
+            yield_lowerer.block = then_block;
+            const default_val = try helpers.createDefaultValueForType(&yield_lowerer, ret_type, loc);
             const yield_op = self.ora_dialect.createScfYieldWithValues(&[_]c.MlirValue{default_val}, loc);
             h.appendOp(then_block, yield_op);
         }
@@ -115,12 +330,14 @@ fn lowerIfWithReturns(self: *const StatementLowerer, if_stmt: *const lib.ast.Sta
     // lower else branch if present, otherwise add scf.yield with default value
     if (if_stmt.else_branch) |else_branch| {
         const else_has_return = helpers.blockHasReturn(self, else_branch);
-        try lowerBlockBodyWithYield(self, else_branch, else_block);
+        try lowerBlockBodyWithYield(self, else_branch, else_block, result_type);
 
         // if else branch doesn't end with a yield, add one with a default value
         if (!else_has_return and result_type != null) {
             if (result_type) |ret_type| {
-                const default_val = try helpers.createDefaultValueForType(self, ret_type, loc);
+                var yield_lowerer = self.*;
+                yield_lowerer.block = else_block;
+                const default_val = try helpers.createDefaultValueForType(&yield_lowerer, ret_type, loc);
                 const yield_op = self.ora_dialect.createScfYieldWithValues(&[_]c.MlirValue{default_val}, loc);
                 h.appendOp(else_block, yield_op);
             }
@@ -128,7 +345,9 @@ fn lowerIfWithReturns(self: *const StatementLowerer, if_stmt: *const lib.ast.Sta
     } else {
         // no else branch - add scf.yield with default value if needed
         if (result_type) |ret_type| {
-            const default_val = try helpers.createDefaultValueForType(self, ret_type, loc);
+            var yield_lowerer = self.*;
+            yield_lowerer.block = else_block;
+            const default_val = try helpers.createDefaultValueForType(&yield_lowerer, ret_type, loc);
             const yield_op = self.ora_dialect.createScfYieldWithValues(&[_]c.MlirValue{default_val}, loc);
             h.appendOp(else_block, yield_op);
         } else {
@@ -156,8 +375,12 @@ fn lowerIfWithReturns(self: *const StatementLowerer, if_stmt: *const lib.ast.Sta
 }
 
 /// Lower block body with yield - replaces return statements with scf.yield
-fn lowerBlockBodyWithYield(self: *const StatementLowerer, block_body: lib.ast.Statements.BlockNode, target_block: c.MlirBlock) LoweringError!void {
-    log.debug("[lowerBlockBodyWithYield] Starting, block has {} statements\n", .{block_body.statements.len});
+fn lowerBlockBodyWithYield(
+    self: *const StatementLowerer,
+    block_body: lib.ast.Statements.BlockNode,
+    target_block: c.MlirBlock,
+    expected_result_type: ?c.MlirType,
+) LoweringError!void {
     // create a temporary lowerer for this block by copying the current one and changing the block
     var temp_lowerer = self.*;
     temp_lowerer.block = target_block;
@@ -216,29 +439,54 @@ fn lowerBlockBodyWithYield(self: *const StatementLowerer, block_body: lib.ast.St
                             const memref_type = c.oraValueGetType(return_value_memref);
                             const element_type = c.oraShapedTypeGetElementType(memref_type);
 
-                            // convert value to match memref element type
-                            const final_value = helpers.convertValueToType(&temp_lowerer, v, element_type, ret.span, loc);
+                            const is_error_union = if (temp_lowerer.current_function_return_type_info) |ti|
+                                helpers.isErrorUnionTypeInfo(ti)
+                            else
+                                false;
+
+                            if (is_error_union) {
+                                const err_info = helpers.getErrorUnionPayload(&temp_lowerer, &value_expr, v, element_type, target_block, loc);
+                                v = helpers.encodeErrorUnionValue(&temp_lowerer, err_info.payload, err_info.is_error, element_type, target_block, ret.span, loc);
+                            } else {
+                                v = helpers.convertValueToType(&temp_lowerer, v, element_type, ret.span, loc);
+                            }
 
                             // store return value
-                            helpers.storeToMemref(&temp_lowerer, final_value, return_value_memref, loc);
+                            helpers.storeToMemref(&temp_lowerer, v, return_value_memref, loc);
                         }
                     }
 
-                    // use empty scf.yield to terminate the block (the actual return happens after try/catch)
-                    const yield_op = temp_lowerer.ora_dialect.createScfYield(loc);
-                    h.appendOp(target_block, yield_op);
+                    // terminate the block; if a result is expected, yield a default value
+                    if (expected_result_type) |ret_type| {
+                        var yield_lowerer = temp_lowerer;
+                        yield_lowerer.block = target_block;
+                        const default_val = try helpers.createDefaultValueForType(&yield_lowerer, ret_type, loc);
+                        const yield_op = temp_lowerer.ora_dialect.createScfYieldWithValues(&[_]c.MlirValue{default_val}, loc);
+                        h.appendOp(target_block, yield_op);
+                    } else {
+                        const yield_op = temp_lowerer.ora_dialect.createScfYield(loc);
+                        h.appendOp(target_block, yield_op);
+                    }
                     has_terminator = true;
                     continue;
                 }
 
                 // replace return with scf.yield (normal case, not in try block)
-                log.debug("[lowerBlockBodyWithYield] Converting return to scf.yield\n", .{});
                 const loc = temp_lowerer.fileLoc(ret.span);
 
                 if (ret.value) |e| {
                     const v = expr_lowerer.lowerExpression(&e);
-                    // convert return value to match function return type if available
+                    // convert/wrap return value to match function return type if available
                     const final_value = if (temp_lowerer.current_function_return_type) |ret_type| blk: {
+                        const is_error_union = if (temp_lowerer.current_function_return_type_info) |ti|
+                            helpers.isErrorUnionTypeInfo(ti)
+                        else
+                            false;
+                        if (is_error_union) {
+                            const err_info = helpers.getErrorUnionPayload(&temp_lowerer, &e, v, ret_type, target_block, loc);
+                            break :blk helpers.encodeErrorUnionValue(&temp_lowerer, err_info.payload, err_info.is_error, ret_type, target_block, ret.span, loc);
+                        }
+
                         const value_type = c.oraValueGetType(v);
                         if (!c.oraTypeEqual(value_type, ret_type)) {
                             // convert to match return type (e.g., i256 -> i8 for u8 return)
@@ -248,11 +496,9 @@ fn lowerBlockBodyWithYield(self: *const StatementLowerer, block_body: lib.ast.St
                     } else v;
                     const yield_op = temp_lowerer.ora_dialect.createScfYieldWithValues(&[_]c.MlirValue{final_value}, loc);
                     h.appendOp(target_block, yield_op);
-                    log.debug("[lowerBlockBodyWithYield] Added scf.yield with value\n", .{});
                 } else {
                     const yield_op = temp_lowerer.ora_dialect.createScfYield(loc);
                     h.appendOp(target_block, yield_op);
-                    log.debug("[lowerBlockBodyWithYield] Added scf.yield without value\n", .{});
                 }
                 has_terminator = true;
             },
@@ -280,11 +526,13 @@ fn lowerBlockBodyWithYield(self: *const StatementLowerer, block_body: lib.ast.St
 
                     // lower then branch
                     const then_has_return = helpers.blockHasReturn(&temp_lowerer, if_stmt.then_branch);
-                    try lowerBlockBodyWithYield(&temp_lowerer, if_stmt.then_branch, then_block);
+                    try lowerBlockBodyWithYield(&temp_lowerer, if_stmt.then_branch, then_block, result_type);
 
                     if (!then_has_return and result_type != null) {
                         if (result_type) |ret_type| {
-                            const default_val = try helpers.createDefaultValueForType(&temp_lowerer, ret_type, loc);
+                            var yield_lowerer = temp_lowerer;
+                            yield_lowerer.block = then_block;
+                            const default_val = try helpers.createDefaultValueForType(&yield_lowerer, ret_type, loc);
                             const yield_op = temp_lowerer.ora_dialect.createScfYieldWithValues(&[_]c.MlirValue{default_val}, loc);
                             h.appendOp(then_block, yield_op);
                         }
@@ -293,18 +541,22 @@ fn lowerBlockBodyWithYield(self: *const StatementLowerer, block_body: lib.ast.St
                     // lower else branch
                     if (if_stmt.else_branch) |else_branch| {
                         const else_has_return = helpers.blockHasReturn(&temp_lowerer, else_branch);
-                        try lowerBlockBodyWithYield(&temp_lowerer, else_branch, else_block);
+                        try lowerBlockBodyWithYield(&temp_lowerer, else_branch, else_block, result_type);
 
                         if (!else_has_return and result_type != null) {
                             if (result_type) |ret_type| {
-                                const default_val = try helpers.createDefaultValueForType(&temp_lowerer, ret_type, loc);
+                                var yield_lowerer = temp_lowerer;
+                                yield_lowerer.block = else_block;
+                                const default_val = try helpers.createDefaultValueForType(&yield_lowerer, ret_type, loc);
                                 const yield_op = temp_lowerer.ora_dialect.createScfYieldWithValues(&[_]c.MlirValue{default_val}, loc);
                                 h.appendOp(else_block, yield_op);
                             }
                         }
                     } else {
                         if (result_type) |ret_type| {
-                            const default_val = try helpers.createDefaultValueForType(&temp_lowerer, ret_type, loc);
+                            var yield_lowerer = temp_lowerer;
+                            yield_lowerer.block = else_block;
+                            const default_val = try helpers.createDefaultValueForType(&yield_lowerer, ret_type, loc);
                             const yield_op = temp_lowerer.ora_dialect.createScfYieldWithValues(&[_]c.MlirValue{default_val}, loc);
                             h.appendOp(else_block, yield_op);
                         } else {
@@ -340,14 +592,14 @@ fn lowerBlockBodyWithYield(self: *const StatementLowerer, block_body: lib.ast.St
                     // regular if statement without returns - lower normally
                     var temp_lowerer2 = temp_lowerer;
                     temp_lowerer2.expr_lowerer = &expr_lowerer;
-                    try lowerIf(&temp_lowerer2, &if_stmt);
+                    _ = try lowerIf(&temp_lowerer2, &if_stmt);
                 }
             },
             else => {
                 // lower other statements normally
                 var temp_lowerer2 = temp_lowerer;
                 temp_lowerer2.expr_lowerer = &expr_lowerer;
-                try temp_lowerer2.lowerStatement(&stmt);
+                _ = try temp_lowerer2.lowerStatement(&stmt);
             },
         }
     }
@@ -874,62 +1126,106 @@ fn extractIntegerFromExpr(self: *const StatementLowerer, expr: *const lib.ast.Ex
 }
 
 /// Lower switch statements using ora.switch operation
-/// Switch statements never produce values - they are control flow only
+/// Switch statements can produce a value when all cases return.
 pub fn lowerSwitch(self: *const StatementLowerer, switch_stmt: *const lib.ast.Statements.SwitchNode) LoweringError!void {
     const loc = self.fileLoc(switch_stmt.span);
 
     const condition_raw = self.expr_lowerer.lowerExpression(&switch_stmt.condition);
     const condition = helpers.ensureValue(self, condition_raw, loc);
 
-    // check if all cases have returns - if so, use scf.if pattern (like lowerIfWithReturns)
+    // NOTE: switch statements always lower to ora.switch to avoid dominance issues
+    // in nested scf.if chains when all cases return. Expression switches still
+    // use scf.if chains in expression lowering.
+
+    const total_cases = switch_stmt.cases.len + if (switch_stmt.default_case != null) @as(usize, 1) else 0;
+
+    // If any case can return, use a return-flag memref and return after the switch.
     var all_cases_return = true;
+    const has_default_case = switch_stmt.default_case != null;
+    var has_else_case = false;
+    var switch_has_return = false;
     for (switch_stmt.cases) |case| {
-        const case_has_return = switch (case.body) {
-            .Block => |block| helpers.blockHasReturn(self, block),
-            .LabeledBlock => |labeled| helpers.blockHasReturn(self, labeled.block),
-            .Expression => false, // Expressions don't return
-        };
-        if (!case_has_return) {
-            all_cases_return = false;
-            break;
+        if (case.pattern == .Else) {
+            has_else_case = true;
+        }
+        switch (case.body) {
+            .Block => |block| {
+                const case_returns = helpers.blockHasReturn(self, block);
+                if (case_returns) switch_has_return = true;
+                if (!case_returns) all_cases_return = false;
+            },
+            .LabeledBlock => |labeled| {
+                const case_returns = helpers.blockHasReturn(self, labeled.block);
+                if (case_returns) switch_has_return = true;
+                if (!case_returns) all_cases_return = false;
+            },
+            else => {},
+        }
+    }
+    if (!has_default_case and !has_else_case) {
+        all_cases_return = false;
+    }
+    if (!switch_has_return) {
+        if (switch_stmt.default_case) |default_block| {
+            if (helpers.blockHasReturn(self, default_block)) switch_has_return = true;
         }
     }
     if (switch_stmt.default_case) |default_block| {
-        if (!helpers.blockHasReturn(self, default_block)) {
-            all_cases_return = false;
-        }
-    } else {
-        // no default case means not all paths return
-        all_cases_return = false;
+        if (!helpers.blockHasReturn(self, default_block)) all_cases_return = false;
     }
 
-    // if all cases return, use scf.if pattern (lowerSwitchCases) instead of ora.switch
-    if (all_cases_return) {
-        // use lowerSwitchCases which creates nested scf.if with scf.yield
-        // this will create a chain of scf.if operations that yield values
-        const result_value = try lowerSwitchCases(self, switch_stmt.cases, condition, 0, self.block, loc, switch_stmt.default_case);
-
-        // after the switch, return the result from the scf.if chain
-        if (result_value) |result| {
+    const switch_returns_value = switch_has_return and all_cases_return and self.current_function_return_type != null;
+    if (switch_returns_value) {
+        // Lower to a result-yielding scf.if chain to avoid capturing outer values
+        // inside ora.switch case regions (dominance issues).
+        const chain_value = try lowerSwitchCases(self, switch_stmt.cases, condition, 0, self.block, loc, switch_stmt.default_case, self.current_function_return_type);
+        if (chain_value) |result| {
             const return_op = self.ora_dialect.createFuncReturnWithValue(result, loc);
             h.appendOp(self.block, return_op);
         }
         return;
     }
 
-    const total_cases = switch_stmt.cases.len + if (switch_stmt.default_case != null) @as(usize, 1) else 0;
+    var return_flag_memref: ?c.MlirValue = null;
+    var return_value_memref: ?c.MlirValue = null;
+    if (switch_has_return and !switch_returns_value) {
+        const i1_type = h.boolType(self.ctx);
+        const empty_attr = c.oraNullAttrCreate();
+        const return_flag_memref_type = h.memRefType(self.ctx, i1_type, 0, null, empty_attr, empty_attr);
+        const return_flag_alloca = c.oraMemrefAllocaOpCreate(self.ctx, loc, return_flag_memref_type);
+        h.appendOp(self.block, return_flag_alloca);
+        return_flag_memref = h.getResult(return_flag_alloca, 0);
+
+        if (self.current_function_return_type) |ret_type| {
+            const return_value_memref_type = h.memRefType(self.ctx, ret_type, 0, null, empty_attr, empty_attr);
+            const return_value_alloca = c.oraMemrefAllocaOpCreate(self.ctx, loc, return_value_memref_type);
+            h.appendOp(self.block, return_value_alloca);
+            return_value_memref = h.getResult(return_value_alloca, 0);
+        }
+
+        const false_val = helpers.createBoolConstant(self, false, loc);
+        helpers.storeToMemref(self, false_val, return_flag_memref.?, loc);
+    }
+    var switch_result_types: [1]c.MlirType = undefined;
+    var switch_result_ptr: ?[*]const c.MlirType = null;
+    var switch_result_count: usize = 0;
+    if (switch_returns_value) {
+        const ret_type = self.current_function_return_type.?;
+        switch_result_types[0] = ret_type;
+        switch_result_ptr = switch_result_types[0..].ptr;
+        switch_result_count = 1;
+    }
     const switch_op = c.oraSwitchOpCreateWithCases(
         self.ctx,
         loc,
         condition,
-        null,
-        0,
+        if (switch_result_ptr) |ptr| ptr else null,
+        switch_result_count,
         total_cases,
     );
     if (c.oraOperationIsNull(switch_op)) {
         @panic("Failed to create ora.switch operation");
     }
-    h.appendOp(self.block, switch_op);
 
     var case_values = std.ArrayList(i64){};
     defer case_values.deinit(self.allocator);
@@ -960,7 +1256,7 @@ pub fn lowerSwitch(self: *const StatementLowerer, switch_stmt: *const lib.ast.St
 
         switch (case.pattern) {
             .Literal => |lit| {
-                _ = self.expr_lowerer.lowerLiteral(&lit.value);
+                _ = case_expr_lowerer.lowerLiteral(&lit.value);
                 if (extractIntegerFromLiteral(self, &lit.value)) |val| {
                     case_values.append(self.allocator, val) catch {};
                     range_starts.append(self.allocator, 0) catch {};
@@ -974,8 +1270,8 @@ pub fn lowerSwitch(self: *const StatementLowerer, switch_stmt: *const lib.ast.St
                 }
             },
             .Range => |range| {
-                _ = self.expr_lowerer.lowerExpression(range.start);
-                _ = self.expr_lowerer.lowerExpression(range.end);
+                _ = case_expr_lowerer.lowerExpression(range.start);
+                _ = case_expr_lowerer.lowerExpression(range.end);
                 const start_val = extractIntegerFromExpr(self, range.start) orelse 0;
                 const end_val = extractIntegerFromExpr(self, range.end) orelse 0;
                 case_values.append(self.allocator, 0) catch {};
@@ -1002,36 +1298,129 @@ pub fn lowerSwitch(self: *const StatementLowerer, switch_stmt: *const lib.ast.St
             .Expression => |expr| {
                 // for switch statements, evaluate expression but don't yield its value
                 _ = case_expr_lowerer.lowerExpression(expr);
-                // switch statements terminate with empty yield (no value)
-                const yield_op = self.ora_dialect.createYield(&[_]c.MlirValue{}, loc);
-                h.appendOp(case_block, yield_op);
+                if (switch_returns_value) {
+                    const ret_type = self.current_function_return_type.?;
+                    const zero_op = self.ora_dialect.createArithConstant(0, ret_type, loc);
+                    h.appendOp(case_block, zero_op);
+                    const zero_val = h.getResult(zero_op, 0);
+                    const yield_op = self.ora_dialect.createYield(&[_]c.MlirValue{zero_val}, loc);
+                    h.appendOp(case_block, yield_op);
+                } else {
+                    const yield_op = self.ora_dialect.createYield(&[_]c.MlirValue{}, loc);
+                    h.appendOp(case_block, yield_op);
+                }
             },
             .Block => |block| {
-                const has_return = helpers.blockHasReturn(self, block);
-                if (has_return) {
-                    stmt_loop: for (block.statements) |stmt| {
+                if (switch_returns_value) {
+                    var temp_lowerer = self.*;
+                    temp_lowerer.block = case_block;
+                    temp_lowerer.label_context = &switch_ctx;
+                    var has_terminator = false;
+
+                    for (block.statements) |stmt| {
+                        if (has_terminator) break;
                         switch (stmt) {
                             .Return => |ret| {
-                                // return statements in switch cases should use ora.return (terminator)
-                                // no yield needed - ora.return is a proper terminator
-                                if (ret.value) |e| {
-                                    const v = case_expr_lowerer.lowerExpression(&e);
-                                    const return_op = self.ora_dialect.createFuncReturnWithValue(v, loc);
-                                    h.appendOp(case_block, return_op);
+                                var v: c.MlirValue = undefined;
+                                if (ret.value) |value_expr| {
+                                    v = case_expr_lowerer.lowerExpression(&value_expr);
+                                    if (temp_lowerer.current_function_return_type_info) |return_type_info| {
+                                        if (return_type_info.ora_type) |ora_type| {
+                                            v = try helpers.insertRefinementGuard(&temp_lowerer, v, ora_type, ret.span, ret.skip_guard);
+                                        }
+                                    }
+                                    const is_error_union = if (temp_lowerer.current_function_return_type_info) |ti|
+                                        helpers.isErrorUnionTypeInfo(ti)
+                                    else
+                                        false;
+                                    const ret_type = self.current_function_return_type.?;
+                                    if (is_error_union) {
+                                        const err_info = helpers.getErrorUnionPayload(&temp_lowerer, &value_expr, v, ret_type, case_block, loc);
+                                        v = helpers.encodeErrorUnionValue(&temp_lowerer, err_info.payload, err_info.is_error, ret_type, case_block, ret.span, loc);
+                                    } else {
+                                        v = helpers.convertValueToType(&temp_lowerer, v, ret_type, ret.span, loc);
+                                    }
                                 } else {
-                                    const return_op = self.ora_dialect.createFuncReturn(loc);
-                                    h.appendOp(case_block, return_op);
+                                    const ret_type = self.current_function_return_type.?;
+                                    const zero_op = temp_lowerer.ora_dialect.createArithConstant(0, ret_type, loc);
+                                    h.appendOp(case_block, zero_op);
+                                    v = h.getResult(zero_op, 0);
                                 }
-                                // break out of the for loop - return is a terminator, nothing should follow
-                                break :stmt_loop;
+
+                                const yield_op = self.ora_dialect.createYield(&[_]c.MlirValue{v}, loc);
+                                h.appendOp(case_block, yield_op);
+                                has_terminator = true;
                             },
                             else => {
-                                var temp_lowerer = self.*;
-                                temp_lowerer.block = case_block;
-                                temp_lowerer.label_context = &switch_ctx;
-                                try temp_lowerer.lowerStatement(&stmt);
+                                _ = try temp_lowerer.lowerStatement(&stmt);
                             },
                         }
+                    }
+
+                    if (!has_terminator) {
+                        const ret_type = self.current_function_return_type.?;
+                        const zero_op = self.ora_dialect.createArithConstant(0, ret_type, loc);
+                        h.appendOp(case_block, zero_op);
+                        const zero_val = h.getResult(zero_op, 0);
+                        const yield_op = self.ora_dialect.createYield(&[_]c.MlirValue{zero_val}, loc);
+                        h.appendOp(case_block, yield_op);
+                    }
+                } else if (switch_has_return) {
+                    var temp_lowerer = self.*;
+                    temp_lowerer.block = case_block;
+                    temp_lowerer.label_context = &switch_ctx;
+                    var has_terminator = false;
+
+                    for (block.statements) |stmt| {
+                        if (has_terminator) break;
+                        switch (stmt) {
+                            .Return => |ret| {
+                                if (return_flag_memref) |flag_memref| {
+                                    const true_val = helpers.createBoolConstant(&temp_lowerer, true, loc);
+                                    helpers.storeToMemref(&temp_lowerer, true_val, flag_memref, loc);
+                                }
+
+                                if (ret.value) |value_expr| {
+                                    if (return_value_memref) |value_memref| {
+                                        var v = case_expr_lowerer.lowerExpression(&value_expr);
+                                        if (temp_lowerer.current_function_return_type_info) |return_type_info| {
+                                            if (return_type_info.ora_type) |ora_type| {
+                                                v = try helpers.insertRefinementGuard(&temp_lowerer, v, ora_type, ret.span, ret.skip_guard);
+                                            }
+                                        }
+
+                                        const memref_type = c.oraValueGetType(value_memref);
+                                        const element_type = c.oraShapedTypeGetElementType(memref_type);
+
+                                        const is_error_union = if (temp_lowerer.current_function_return_type_info) |ti|
+                                            helpers.isErrorUnionTypeInfo(ti)
+                                        else
+                                            false;
+
+                                        if (is_error_union) {
+                                            const err_info = helpers.getErrorUnionPayload(&temp_lowerer, &value_expr, v, element_type, case_block, loc);
+                                            v = helpers.encodeErrorUnionValue(&temp_lowerer, err_info.payload, err_info.is_error, element_type, case_block, ret.span, loc);
+                                        } else {
+                                            v = helpers.convertValueToType(&temp_lowerer, v, element_type, ret.span, loc);
+                                        }
+
+                                        helpers.storeToMemref(&temp_lowerer, v, value_memref, loc);
+                                    }
+                                }
+
+                                const yield_op = self.ora_dialect.createYield(&[_]c.MlirValue{}, loc);
+                                h.appendOp(case_block, yield_op);
+                                has_terminator = true;
+                            },
+                            else => {
+                                _ = try temp_lowerer.lowerStatement(&stmt);
+                            },
+                        }
+                    }
+
+                    if (!has_terminator) {
+                        const yield_op = self.ora_dialect.createYield(&[_]c.MlirValue{}, loc);
+                        h.appendOp(case_block, yield_op);
                     }
                 } else {
                     var body_lowerer = self.*;
@@ -1046,31 +1435,116 @@ pub fn lowerSwitch(self: *const StatementLowerer, switch_stmt: *const lib.ast.St
                 }
             },
             .LabeledBlock => |labeled| {
-                const has_return = helpers.blockHasReturn(self, labeled.block);
-                if (has_return) {
-                    stmt_loop: for (labeled.block.statements) |stmt| {
+                if (switch_returns_value) {
+                    var temp_lowerer = self.*;
+                    temp_lowerer.block = case_block;
+                    temp_lowerer.label_context = &switch_ctx;
+                    var has_terminator = false;
+
+                    for (labeled.block.statements) |stmt| {
+                        if (has_terminator) break;
                         switch (stmt) {
                             .Return => |ret| {
-                                // return statements in switch cases should use ora.return (terminator)
-                                // no yield needed - ora.return is a proper terminator
-                                if (ret.value) |e| {
-                                    const v = case_expr_lowerer.lowerExpression(&e);
-                                    const return_op = self.ora_dialect.createFuncReturnWithValue(v, loc);
-                                    h.appendOp(case_block, return_op);
+                                var v: c.MlirValue = undefined;
+                                if (ret.value) |value_expr| {
+                                    v = case_expr_lowerer.lowerExpression(&value_expr);
+                                    if (temp_lowerer.current_function_return_type_info) |return_type_info| {
+                                        if (return_type_info.ora_type) |ora_type| {
+                                            v = try helpers.insertRefinementGuard(&temp_lowerer, v, ora_type, ret.span, ret.skip_guard);
+                                        }
+                                    }
+                                    const is_error_union = if (temp_lowerer.current_function_return_type_info) |ti|
+                                        helpers.isErrorUnionTypeInfo(ti)
+                                    else
+                                        false;
+                                    const ret_type = self.current_function_return_type.?;
+                                    if (is_error_union) {
+                                        const err_info = helpers.getErrorUnionPayload(&temp_lowerer, &value_expr, v, ret_type, case_block, loc);
+                                        v = helpers.encodeErrorUnionValue(&temp_lowerer, err_info.payload, err_info.is_error, ret_type, case_block, ret.span, loc);
+                                    } else {
+                                        v = helpers.convertValueToType(&temp_lowerer, v, ret_type, ret.span, loc);
+                                    }
                                 } else {
-                                    const return_op = self.ora_dialect.createFuncReturn(loc);
-                                    h.appendOp(case_block, return_op);
+                                    const ret_type = self.current_function_return_type.?;
+                                    const zero_op = temp_lowerer.ora_dialect.createArithConstant(0, ret_type, loc);
+                                    h.appendOp(case_block, zero_op);
+                                    v = h.getResult(zero_op, 0);
                                 }
-                                // break out of the for loop - return is a terminator, nothing should follow
-                                break :stmt_loop;
+
+                                const yield_op = self.ora_dialect.createYield(&[_]c.MlirValue{v}, loc);
+                                h.appendOp(case_block, yield_op);
+                                has_terminator = true;
                             },
                             else => {
-                                var temp_lowerer = self.*;
-                                temp_lowerer.block = case_block;
-                                temp_lowerer.label_context = &switch_ctx;
-                                try temp_lowerer.lowerStatement(&stmt);
+                                _ = try temp_lowerer.lowerStatement(&stmt);
                             },
                         }
+                    }
+
+                    if (!has_terminator) {
+                        const ret_type = self.current_function_return_type.?;
+                        const zero_op = self.ora_dialect.createArithConstant(0, ret_type, loc);
+                        h.appendOp(case_block, zero_op);
+                        const zero_val = h.getResult(zero_op, 0);
+                        const yield_op = self.ora_dialect.createYield(&[_]c.MlirValue{zero_val}, loc);
+                        h.appendOp(case_block, yield_op);
+                    }
+                } else if (switch_has_return) {
+                    var temp_lowerer = self.*;
+                    temp_lowerer.block = case_block;
+                    temp_lowerer.label_context = &switch_ctx;
+                    var has_terminator = false;
+
+                    for (labeled.block.statements) |stmt| {
+                        if (has_terminator) break;
+                        switch (stmt) {
+                            .Return => |ret| {
+                                if (return_flag_memref) |flag_memref| {
+                                    const true_val = helpers.createBoolConstant(&temp_lowerer, true, loc);
+                                    helpers.storeToMemref(&temp_lowerer, true_val, flag_memref, loc);
+                                }
+
+                                if (ret.value) |value_expr| {
+                                    if (return_value_memref) |value_memref| {
+                                        var v = case_expr_lowerer.lowerExpression(&value_expr);
+                                        if (temp_lowerer.current_function_return_type_info) |return_type_info| {
+                                            if (return_type_info.ora_type) |ora_type| {
+                                                v = try helpers.insertRefinementGuard(&temp_lowerer, v, ora_type, ret.span, ret.skip_guard);
+                                            }
+                                        }
+
+                                        const memref_type = c.oraValueGetType(value_memref);
+                                        const element_type = c.oraShapedTypeGetElementType(memref_type);
+
+                                        const is_error_union = if (temp_lowerer.current_function_return_type_info) |ti|
+                                            helpers.isErrorUnionTypeInfo(ti)
+                                        else
+                                            false;
+
+                                        if (is_error_union) {
+                                            const err_info = helpers.getErrorUnionPayload(&temp_lowerer, &value_expr, v, element_type, case_block, loc);
+                                            v = helpers.encodeErrorUnionValue(&temp_lowerer, err_info.payload, err_info.is_error, element_type, case_block, ret.span, loc);
+                                        } else {
+                                            v = helpers.convertValueToType(&temp_lowerer, v, element_type, ret.span, loc);
+                                        }
+
+                                        helpers.storeToMemref(&temp_lowerer, v, value_memref, loc);
+                                    }
+                                }
+
+                                const yield_op = self.ora_dialect.createYield(&[_]c.MlirValue{}, loc);
+                                h.appendOp(case_block, yield_op);
+                                has_terminator = true;
+                            },
+                            else => {
+                                _ = try temp_lowerer.lowerStatement(&stmt);
+                            },
+                        }
+                    }
+
+                    if (!has_terminator) {
+                        const yield_op = self.ora_dialect.createYield(&[_]c.MlirValue{}, loc);
+                        h.appendOp(case_block, yield_op);
                     }
                 } else {
                     var body_lowerer = self.*;
@@ -1101,34 +1575,180 @@ pub fn lowerSwitch(self: *const StatementLowerer, switch_stmt: *const lib.ast.St
             .parent = self.label_context,
         };
         const default_has_return = helpers.blockHasReturn(self, default_block);
-        if (default_has_return) {
+        if (default_has_return and switch_returns_value) {
             var default_expr_lowerer = ExpressionLowerer.init(self.ctx, default_block_mlir, self.type_mapper, self.expr_lowerer.param_map, self.expr_lowerer.storage_map, self.expr_lowerer.local_var_map, self.expr_lowerer.symbol_table, self.expr_lowerer.builtin_registry, self.expr_lowerer.error_handler, self.expr_lowerer.locations, self.ora_dialect);
             default_expr_lowerer.current_function_return_type = self.current_function_return_type;
             default_expr_lowerer.current_function_return_type_info = self.current_function_return_type_info;
             default_expr_lowerer.in_try_block = self.in_try_block;
+            var has_terminator = false;
+            var default_block_lowerer = self.*;
+            default_block_lowerer.block = default_block_mlir;
+            default_block_lowerer.label_context = &switch_ctx;
             stmt_loop: for (default_block.statements) |stmt| {
+                if (has_terminator) break;
                 switch (stmt) {
                     .Return => |ret| {
-                        // return statements in switch default case should use ora.return (terminator)
-                        // no yield needed - ora.return is a proper terminator
-                        if (ret.value) |e| {
-                            const v = default_expr_lowerer.lowerExpression(&e);
-                            const return_op = self.ora_dialect.createFuncReturnWithValue(v, loc);
-                            h.appendOp(default_block_mlir, return_op);
+                        var v: c.MlirValue = undefined;
+                        if (ret.value) |value_expr| {
+                            v = default_expr_lowerer.lowerExpression(&value_expr);
+                            if (default_block_lowerer.current_function_return_type_info) |return_type_info| {
+                                if (return_type_info.ora_type) |ora_type| {
+                                    v = try helpers.insertRefinementGuard(&default_block_lowerer, v, ora_type, ret.span, ret.skip_guard);
+                                }
+                            }
+
+                            const is_error_union = if (default_block_lowerer.current_function_return_type_info) |ti|
+                                helpers.isErrorUnionTypeInfo(ti)
+                            else
+                                false;
+                            const ret_type = self.current_function_return_type.?;
+                            if (is_error_union) {
+                                const err_info = helpers.getErrorUnionPayload(&default_block_lowerer, &value_expr, v, ret_type, default_block_mlir, loc);
+                                v = helpers.encodeErrorUnionValue(&default_block_lowerer, err_info.payload, err_info.is_error, ret_type, default_block_mlir, ret.span, loc);
+                            } else {
+                                v = helpers.convertValueToType(&default_block_lowerer, v, ret_type, ret.span, loc);
+                            }
                         } else {
-                            const return_op = self.ora_dialect.createFuncReturn(loc);
-                            h.appendOp(default_block_mlir, return_op);
+                            const ret_type = self.current_function_return_type.?;
+                            const zero_op = default_block_lowerer.ora_dialect.createArithConstant(0, ret_type, loc);
+                            h.appendOp(default_block_mlir, zero_op);
+                            v = h.getResult(zero_op, 0);
                         }
-                        // break out of the for loop - return is a terminator, nothing should follow
+
+                        const yield_op = self.ora_dialect.createYield(&[_]c.MlirValue{v}, loc);
+                        h.appendOp(default_block_mlir, yield_op);
+                        has_terminator = true;
                         break :stmt_loop;
                     },
                     else => {
                         var temp_lowerer = self.*;
                         temp_lowerer.block = default_block_mlir;
                         temp_lowerer.label_context = &switch_ctx;
-                        try temp_lowerer.lowerStatement(&stmt);
+                        _ = try temp_lowerer.lowerStatement(&stmt);
                     },
                 }
+            }
+            if (!has_terminator) {
+                const ret_type = self.current_function_return_type.?;
+                const zero_op = self.ora_dialect.createArithConstant(0, ret_type, loc);
+                h.appendOp(default_block_mlir, zero_op);
+                const zero_val = h.getResult(zero_op, 0);
+                const yield_op = self.ora_dialect.createYield(&[_]c.MlirValue{zero_val}, loc);
+                h.appendOp(default_block_mlir, yield_op);
+            }
+        } else if (default_has_return and switch_has_return) {
+            var default_expr_lowerer = ExpressionLowerer.init(self.ctx, default_block_mlir, self.type_mapper, self.expr_lowerer.param_map, self.expr_lowerer.storage_map, self.expr_lowerer.local_var_map, self.expr_lowerer.symbol_table, self.expr_lowerer.builtin_registry, self.expr_lowerer.error_handler, self.expr_lowerer.locations, self.ora_dialect);
+            default_expr_lowerer.current_function_return_type = self.current_function_return_type;
+            default_expr_lowerer.current_function_return_type_info = self.current_function_return_type_info;
+            default_expr_lowerer.in_try_block = self.in_try_block;
+            var has_terminator = false;
+            var default_block_lowerer = self.*;
+            default_block_lowerer.block = default_block_mlir;
+            default_block_lowerer.label_context = &switch_ctx;
+            stmt_loop_legacy: for (default_block.statements) |stmt| {
+                if (has_terminator) break;
+                switch (stmt) {
+                    .Return => |ret| {
+                        if (return_flag_memref) |flag_memref| {
+                            const true_val = helpers.createBoolConstant(&default_block_lowerer, true, loc);
+                            helpers.storeToMemref(&default_block_lowerer, true_val, flag_memref, loc);
+                        }
+
+                        if (ret.value) |value_expr| {
+                            if (return_value_memref) |value_memref| {
+                                var v = default_expr_lowerer.lowerExpression(&value_expr);
+                                if (default_block_lowerer.current_function_return_type_info) |return_type_info| {
+                                    if (return_type_info.ora_type) |ora_type| {
+                                        v = try helpers.insertRefinementGuard(&default_block_lowerer, v, ora_type, ret.span, ret.skip_guard);
+                                    }
+                                }
+
+                                const memref_type = c.oraValueGetType(value_memref);
+                                const element_type = c.oraShapedTypeGetElementType(memref_type);
+
+                                const is_error_union = if (default_block_lowerer.current_function_return_type_info) |ti|
+                                    helpers.isErrorUnionTypeInfo(ti)
+                                else
+                                    false;
+
+                                if (is_error_union) {
+                                    const err_info = helpers.getErrorUnionPayload(&default_block_lowerer, &value_expr, v, element_type, default_block_mlir, loc);
+                                    v = helpers.encodeErrorUnionValue(&default_block_lowerer, err_info.payload, err_info.is_error, element_type, default_block_mlir, ret.span, loc);
+                                } else {
+                                    v = helpers.convertValueToType(&default_block_lowerer, v, element_type, ret.span, loc);
+                                }
+
+                                helpers.storeToMemref(&default_block_lowerer, v, value_memref, loc);
+                            }
+                        }
+
+                        const yield_op = self.ora_dialect.createYield(&[_]c.MlirValue{}, loc);
+                        h.appendOp(default_block_mlir, yield_op);
+                        has_terminator = true;
+                        break :stmt_loop_legacy;
+                    },
+                    else => {
+                        var temp_lowerer = self.*;
+                        temp_lowerer.block = default_block_mlir;
+                        temp_lowerer.label_context = &switch_ctx;
+                        _ = try temp_lowerer.lowerStatement(&stmt);
+                    },
+                }
+            }
+            if (!has_terminator) {
+                const yield_op = self.ora_dialect.createYield(&[_]c.MlirValue{}, loc);
+                h.appendOp(default_block_mlir, yield_op);
+            }
+        } else if (switch_returns_value) {
+            var temp_lowerer = self.*;
+            temp_lowerer.block = default_block_mlir;
+            temp_lowerer.label_context = &switch_ctx;
+            var has_terminator = false;
+            for (default_block.statements) |stmt| {
+                if (has_terminator) break;
+                switch (stmt) {
+                    .Return => |ret| {
+                        var v: c.MlirValue = undefined;
+                        if (ret.value) |value_expr| {
+                            v = temp_lowerer.expr_lowerer.lowerExpression(&value_expr);
+                            if (temp_lowerer.current_function_return_type_info) |return_type_info| {
+                                if (return_type_info.ora_type) |ora_type| {
+                                    v = try helpers.insertRefinementGuard(&temp_lowerer, v, ora_type, ret.span, ret.skip_guard);
+                                }
+                            }
+                            const is_error_union = if (temp_lowerer.current_function_return_type_info) |ti|
+                                helpers.isErrorUnionTypeInfo(ti)
+                            else
+                                false;
+                            const ret_type = self.current_function_return_type.?;
+                            if (is_error_union) {
+                                const err_info = helpers.getErrorUnionPayload(&temp_lowerer, &value_expr, v, ret_type, default_block_mlir, loc);
+                                v = helpers.encodeErrorUnionValue(&temp_lowerer, err_info.payload, err_info.is_error, ret_type, default_block_mlir, ret.span, loc);
+                            } else {
+                                v = helpers.convertValueToType(&temp_lowerer, v, ret_type, ret.span, loc);
+                            }
+                        } else {
+                            const ret_type = self.current_function_return_type.?;
+                            const zero_op = temp_lowerer.ora_dialect.createArithConstant(0, ret_type, loc);
+                            h.appendOp(default_block_mlir, zero_op);
+                            v = h.getResult(zero_op, 0);
+                        }
+                        const yield_op = self.ora_dialect.createYield(&[_]c.MlirValue{v}, loc);
+                        h.appendOp(default_block_mlir, yield_op);
+                        has_terminator = true;
+                    },
+                    else => {
+                        _ = try temp_lowerer.lowerStatement(&stmt);
+                    },
+                }
+            }
+            if (!has_terminator) {
+                const ret_type = self.current_function_return_type.?;
+                const zero_op = self.ora_dialect.createArithConstant(0, ret_type, loc);
+                h.appendOp(default_block_mlir, zero_op);
+                const zero_val = h.getResult(zero_op, 0);
+                const yield_op = self.ora_dialect.createYield(&[_]c.MlirValue{zero_val}, loc);
+                h.appendOp(default_block_mlir, yield_op);
             }
         } else {
             var body_lowerer = self.*;
@@ -1164,20 +1784,77 @@ pub fn lowerSwitch(self: *const StatementLowerer, switch_stmt: *const lib.ast.St
         );
     }
 
-    // switch statements don't produce values - no return needed here
+    h.appendOp(self.block, switch_op);
+
+    // switch statements don't produce values - handle deferred return if needed
+    if (switch_has_return and !switch_returns_value) {
+        if (return_flag_memref) |flag_memref| {
+            const i1_type = h.boolType(self.ctx);
+            const load_return_flag = c.oraMemrefLoadOpCreate(self.ctx, loc, flag_memref, null, 0, i1_type);
+            h.appendOp(self.block, load_return_flag);
+            const should_return = h.getResult(load_return_flag, 0);
+
+            const return_if_op = self.ora_dialect.createIf(should_return, loc);
+            h.appendOp(self.block, return_if_op);
+
+            const return_if_then_block = c.oraIfOpGetThenBlock(return_if_op);
+            const return_if_else_block = c.oraIfOpGetElseBlock(return_if_op);
+            if (c.oraBlockIsNull(return_if_then_block) or c.oraBlockIsNull(return_if_else_block)) {
+                @panic("ora.if missing then/else blocks");
+            }
+
+            if (return_value_memref) |ret_val_memref| {
+                if (self.current_function_return_type) |ret_type| {
+                    const load_return_value = c.oraMemrefLoadOpCreate(self.ctx, loc, ret_val_memref, null, 0, ret_type);
+                    h.appendOp(return_if_then_block, load_return_value);
+                    const return_val = h.getResult(load_return_value, 0);
+                    const return_op = self.ora_dialect.createFuncReturnWithValue(return_val, loc);
+                    h.appendOp(return_if_then_block, return_op);
+                }
+            } else {
+                const return_op = self.ora_dialect.createFuncReturn(loc);
+                h.appendOp(return_if_then_block, return_op);
+            }
+
+            const yield_op = self.ora_dialect.createYield(&[_]c.MlirValue{}, loc);
+            h.appendOp(return_if_else_block, yield_op);
+        }
+    }
+
+    if (switch_has_return and all_cases_return) {
+        if (switch_returns_value) {
+            const switch_result = h.getResult(switch_op, 0);
+            const return_op = self.ora_dialect.createFuncReturnWithValue(switch_result, loc);
+            h.appendOp(self.block, return_op);
+        } else if (return_value_memref) |ret_val_memref| {
+            if (self.current_function_return_type) |ret_type| {
+                const load_return_value = c.oraMemrefLoadOpCreate(self.ctx, loc, ret_val_memref, null, 0, ret_type);
+                h.appendOp(self.block, load_return_value);
+                const return_val = h.getResult(load_return_value, 0);
+                const return_op = self.ora_dialect.createFuncReturnWithValue(return_val, loc);
+                h.appendOp(self.block, return_op);
+            }
+        } else {
+            const return_op = self.ora_dialect.createFuncReturn(loc);
+            h.appendOp(self.block, return_op);
+        }
+    }
     // the switch just executes and control flow continues to the next statement
 }
 
 /// Recursively lower switch cases as nested if-else-if chain
 /// For cases with returns, use scf.yield (like lowerIfWithReturns) instead of ora.return
 /// However, if we're inside a labeled switch (scf.while), we can't use result types
-pub fn lowerSwitchCases(self: *const StatementLowerer, cases: []const lib.ast.Expressions.SwitchCase, condition: c.MlirValue, case_idx: usize, target_block: c.MlirBlock, loc: c.MlirLocation, default_case: ?lib.ast.Statements.BlockNode) LoweringError!?c.MlirValue {
+pub fn lowerSwitchCases(self: *const StatementLowerer, cases: []const lib.ast.Expressions.SwitchCase, condition: c.MlirValue, case_idx: usize, target_block: c.MlirBlock, loc: c.MlirLocation, default_case: ?lib.ast.Statements.BlockNode, expected_result_type: ?c.MlirType) LoweringError!?c.MlirValue {
     log.debug("[lowerSwitchCases] case_idx={}, total_cases={}, has_default={}\n", .{ case_idx, cases.len, default_case != null });
 
     // determine if we need result type (if any case or default has return)
     // but NOT if we're inside a labeled switch (scf.while) - those can't yield values
     const is_labeled_switch = if (self.label_context) |ctx| ctx.label_type == .Switch else false;
     const result_type = if (!is_labeled_switch) blk: {
+        if (expected_result_type) |ret_type| break :blk ret_type;
+        if (self.in_try_block and self.try_return_flag_memref != null)
+            break :blk null;
         break :blk if (self.current_function_return_type) |ret_type| ret_type else null;
     } else null;
 
@@ -1228,7 +1905,7 @@ pub fn lowerSwitchCases(self: *const StatementLowerer, cases: []const lib.ast.Ex
                             has_terminator = true;
                         },
                         else => {
-                            try temp_lowerer.lowerStatement(&stmt);
+                            _ = try temp_lowerer.lowerStatement(&stmt);
                             const is_terminator = switch (stmt) {
                                 .Break, .Continue, .Return => true,
                                 else => false,
@@ -1244,14 +1921,16 @@ pub fn lowerSwitchCases(self: *const StatementLowerer, cases: []const lib.ast.Ex
             } else if (has_return) {
                 log.debug("[lowerSwitchCases] Non-labeled switch default with return - using lowerBlockBodyWithYield\n", .{});
                 // for non-labeled switches with returns, use lowerBlockBodyWithYield (converts to scf.yield)
-                try lowerBlockBodyWithYield(self, default_block, target_block);
+                try lowerBlockBodyWithYield(self, default_block, target_block, result_type);
 
                 // ensure block has a terminator (lowerBlockBodyWithYield already adds scf.yield for returns)
                 const has_yield = helpers.blockEndsWithYield(self, target_block);
                 if (!has_yield) {
                     // only add yield if lowerBlockBodyWithYield didn't add one (no return statement)
                     if (result_type) |ret_type| {
-                        const default_val = try helpers.createDefaultValueForType(self, ret_type, loc);
+                        var yield_lowerer = self.*;
+                        yield_lowerer.block = target_block;
+                        const default_val = try helpers.createDefaultValueForType(&yield_lowerer, ret_type, loc);
                         const yield_op = self.ora_dialect.createScfYieldWithValues(&[_]c.MlirValue{default_val}, loc);
                         h.appendOp(target_block, yield_op);
                     } else {
@@ -1265,7 +1944,9 @@ pub fn lowerSwitchCases(self: *const StatementLowerer, cases: []const lib.ast.Ex
                         h.appendOp(target_block, yield_op);
                     } else {
                         if (result_type) |ret_type| {
-                            const default_val = try helpers.createDefaultValueForType(self, ret_type, loc);
+                            var yield_lowerer = self.*;
+                            yield_lowerer.block = target_block;
+                            const default_val = try helpers.createDefaultValueForType(&yield_lowerer, ret_type, loc);
                             const yield_op = self.ora_dialect.createScfYieldWithValues(&[_]c.MlirValue{default_val}, loc);
                             h.appendOp(target_block, yield_op);
                         } else {
@@ -1350,13 +2031,27 @@ pub fn lowerSwitchCases(self: *const StatementLowerer, cases: []const lib.ast.Ex
             break :blk h.getResult(and_op, 0);
         },
         .EnumValue => |enum_val| blk: {
+            if (enum_val.enum_name.len == 0) {
+                if (self.symbol_table) |st| {
+                    if (st.getErrorId(enum_val.variant_name)) |err_id| {
+                        const cond_type = c.oraValueGetType(condition);
+                        const const_op = self.ora_dialect.createArithConstant(@intCast(err_id), cond_type, loc);
+                        h.appendOp(target_block, const_op);
+                        const err_const = h.getResult(const_op, 0);
+
+                        const cmp_op = c.oraArithCmpIOpCreate(self.ctx, loc, 0, condition, err_const);
+                        h.appendOp(target_block, cmp_op);
+                        break :blk h.getResult(cmp_op, 0);
+                    }
+                }
+            }
             if (self.symbol_table) |st| {
                 if (st.lookupType(enum_val.enum_name)) |enum_type| {
                     if (enum_type.getVariantIndex(enum_val.variant_name)) |variant_idx| {
                         // use the enum's underlying type (stored in mlir_type) instead of hardcoded i256
                         const enum_underlying_type = enum_type.mlir_type;
                         const const_op = self.ora_dialect.createArithConstant(@intCast(variant_idx), enum_underlying_type, loc);
-                        h.appendOp(self.block, const_op);
+                        h.appendOp(target_block, const_op);
                         const variant_const = h.getResult(const_op, 0);
 
                         const cmp_op = c.oraArithCmpIOpCreate(self.ctx, loc, 0, condition, variant_const);
@@ -1366,13 +2061,13 @@ pub fn lowerSwitchCases(self: *const StatementLowerer, cases: []const lib.ast.Ex
                 }
             }
             const const_op = self.ora_dialect.createArithConstant(0, h.boolType(self.ctx), loc);
-            h.appendOp(self.block, const_op);
+            h.appendOp(target_block, const_op);
             break :blk h.getResult(const_op, 0);
         },
         .Else => blk: {
             // else case always matches
             const const_op = self.ora_dialect.createArithConstant(1, h.boolType(self.ctx), loc);
-            h.appendOp(self.block, const_op);
+            h.appendOp(target_block, const_op);
             break :blk h.getResult(const_op, 0);
         },
     };
@@ -1431,7 +2126,9 @@ pub fn lowerSwitchCases(self: *const StatementLowerer, cases: []const lib.ast.Ex
             _ = case_expr_lowerer.lowerExpression(expr);
             // add appropriate yield - scf.if always uses scf.yield (even for labeled switches)
             if (result_type) |ret_type| {
-                const default_val = try helpers.createDefaultValueForType(self, ret_type, loc);
+                var yield_lowerer = self.*;
+                yield_lowerer.block = then_block;
+                const default_val = try helpers.createDefaultValueForType(&yield_lowerer, ret_type, loc);
                 const yield_op = self.ora_dialect.createScfYieldWithValues(&[_]c.MlirValue{default_val}, loc);
                 h.appendOp(then_block, yield_op);
             } else {
@@ -1492,7 +2189,7 @@ pub fn lowerSwitchCases(self: *const StatementLowerer, cases: []const lib.ast.Ex
                             has_terminator = true;
                         },
                         else => {
-                            try temp_lowerer.lowerStatement(&stmt);
+                            _ = try temp_lowerer.lowerStatement(&stmt);
                             const is_terminator = switch (stmt) {
                                 .Break, .Continue, .Return => true,
                                 else => false,
@@ -1509,14 +2206,16 @@ pub fn lowerSwitchCases(self: *const StatementLowerer, cases: []const lib.ast.Ex
             } else if (has_return) {
                 log.debug("[lowerSwitchCases] Non-labeled switch with return - using lowerBlockBodyWithYield\n", .{});
                 // for non-labeled switches with returns, use lowerBlockBodyWithYield (converts to scf.yield)
-                try lowerBlockBodyWithYield(self, block, then_block);
+                try lowerBlockBodyWithYield(self, block, then_block, result_type);
 
                 // ensure block has a terminator (lowerBlockBodyWithYield already adds scf.yield for returns)
                 const has_yield = helpers.blockEndsWithYield(self, then_block);
                 if (!has_yield) {
                     // only add yield if lowerBlockBodyWithYield didn't add one (no return statement)
                     if (result_type) |ret_type| {
-                        const default_val = try helpers.createDefaultValueForType(self, ret_type, loc);
+                        var yield_lowerer = self.*;
+                        yield_lowerer.block = then_block;
+                        const default_val = try helpers.createDefaultValueForType(&yield_lowerer, ret_type, loc);
                         const yield_op = self.ora_dialect.createScfYieldWithValues(&[_]c.MlirValue{default_val}, loc);
                         h.appendOp(then_block, yield_op);
                     } else {
@@ -1585,7 +2284,7 @@ pub fn lowerSwitchCases(self: *const StatementLowerer, cases: []const lib.ast.Ex
                             has_terminator = true;
                         },
                         else => {
-                            try temp_lowerer.lowerStatement(&stmt);
+                            _ = try temp_lowerer.lowerStatement(&stmt);
                             const is_terminator = switch (stmt) {
                                 .Break, .Continue, .Return => true,
                                 else => false,
@@ -1602,12 +2301,14 @@ pub fn lowerSwitchCases(self: *const StatementLowerer, cases: []const lib.ast.Ex
             } else if (has_return) {
                 log.debug("[lowerSwitchCases] Non-labeled switch with return - using lowerBlockBodyWithYield\n", .{});
                 // for non-labeled switches with returns, use lowerBlockBodyWithYield (converts to scf.yield)
-                try lowerBlockBodyWithYield(self, labeled.block, then_block);
+                try lowerBlockBodyWithYield(self, labeled.block, then_block, result_type);
 
                 // if no return and we have result_type, add default yield
                 if (result_type != null) {
                     if (result_type) |ret_type| {
-                        const default_val = try helpers.createDefaultValueForType(self, ret_type, loc);
+                        var yield_lowerer = self.*;
+                        yield_lowerer.block = then_block;
+                        const default_val = try helpers.createDefaultValueForType(&yield_lowerer, ret_type, loc);
                         const yield_op = self.ora_dialect.createScfYieldWithValues(&[_]c.MlirValue{default_val}, loc);
                         h.appendOp(then_block, yield_op);
                     }
@@ -1617,7 +2318,9 @@ pub fn lowerSwitchCases(self: *const StatementLowerer, cases: []const lib.ast.Ex
                 const has_yield = helpers.blockEndsWithYield(self, then_block);
                 if (!has_yield) {
                     if (result_type) |ret_type| {
-                        const default_val = try helpers.createDefaultValueForType(self, ret_type, loc);
+                        var yield_lowerer = self.*;
+                        yield_lowerer.block = then_block;
+                        const default_val = try helpers.createDefaultValueForType(&yield_lowerer, ret_type, loc);
                         const yield_op = self.ora_dialect.createScfYieldWithValues(&[_]c.MlirValue{default_val}, loc);
                         h.appendOp(then_block, yield_op);
                     } else {
@@ -1639,7 +2342,7 @@ pub fn lowerSwitchCases(self: *const StatementLowerer, cases: []const lib.ast.Ex
     // recursively lower remaining cases in else block
     // the recursive call will handle adding terminators to else_block (including default case)
     log.debug("[lowerSwitchCases] Recursively lowering remaining cases in else_block\n", .{});
-    const recursive_result = try lowerSwitchCases(self, cases, condition, case_idx + 1, else_block, loc, default_case);
+    const recursive_result = try lowerSwitchCases(self, cases, condition, case_idx + 1, else_block, loc, default_case, expected_result_type);
 
     // if the recursive call returned a result (nested scf.if), we need to yield it
     // this is the same pattern as nested if statements - yield the nested scf.if result
@@ -1648,8 +2351,10 @@ pub fn lowerSwitchCases(self: *const StatementLowerer, cases: []const lib.ast.Ex
             // ensure nested result matches the expected result type
             if (result_type) |ret_type| {
                 const nested_type = c.oraValueGetType(nested_result);
+                var yield_lowerer = self.*;
+                yield_lowerer.block = else_block;
                 const final_result = if (!c.oraTypeEqual(nested_type, ret_type))
-                    helpers.convertValueToType(self, nested_result, ret_type, cases[0].span, loc)
+                    helpers.convertValueToType(&yield_lowerer, nested_result, ret_type, cases[0].span, loc)
                 else
                     nested_result;
                 const yield_op = self.ora_dialect.createScfYieldWithValues(&[_]c.MlirValue{final_result}, loc);
@@ -1664,7 +2369,9 @@ pub fn lowerSwitchCases(self: *const StatementLowerer, cases: []const lib.ast.Ex
             const has_yield = helpers.blockEndsWithYield(self, else_block);
             if (!has_yield) {
                 if (result_type) |ret_type| {
-                    const default_val = try helpers.createDefaultValueForType(self, ret_type, loc);
+                    var yield_lowerer = self.*;
+                    yield_lowerer.block = else_block;
+                    const default_val = try helpers.createDefaultValueForType(&yield_lowerer, ret_type, loc);
                     const yield_op = self.ora_dialect.createScfYieldWithValues(&[_]c.MlirValue{default_val}, loc);
                     h.appendOp(else_block, yield_op);
                 } else {

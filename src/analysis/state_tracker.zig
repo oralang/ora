@@ -402,7 +402,7 @@ pub const StateTracker = struct {
     fn isStorageVariable(self: *StateTracker, name: []const u8) bool {
         // use symbol table lookup when available
         if (self.symbol_table) |table| {
-            const scope_to_search: ?*const Scope = if (self.root_scope) |rs| rs else &table.root;
+            const scope_to_search: ?*const Scope = if (self.root_scope) |rs| rs else table.root;
             if (SymbolTable.findUp(scope_to_search, name)) |symbol| {
                 return symbol.region == .Storage;
             }
@@ -425,7 +425,7 @@ pub fn analyzeContract(allocator: std.mem.Allocator, contract: *const ast.Contra
 
     // create contract scope
     const contract_scope = try allocator.create(Scope);
-    contract_scope.* = Scope.init(allocator, &symbol_table.root, contract.name);
+    contract_scope.* = Scope.init(allocator, symbol_table.root, contract.name);
     try symbol_table.scopes.append(allocator, contract_scope);
     try symbol_table.contract_scopes.put(contract.name, contract_scope);
 

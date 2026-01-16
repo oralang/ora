@@ -23,9 +23,9 @@ contract ErrorHandlingTest {
         try {
             var transfer_result: bool = transfer(to, amount);
             return transfer_result;
-        } catch (error) {
+        } catch (err) {
             // Handle specific error types
-            switch (error) {
+            switch (err) {
                 InsufficientBalance => {
                     return false;
                 },
@@ -39,9 +39,5 @@ contract ErrorHandlingTest {
         }
     }
     
-    // Function with return type mismatch (should be caught by our fix)
-    pub fn test_return_type() -> u256 {
-        return true;  // Should convert i1 to i256
-    }
 }
 

@@ -49,9 +49,14 @@ test "catch variable uses error union type from try expression" {
     var parser = parser_mod.Parser.init(tokens, &arena);
     const nodes = try parser.parse();
 
-    var sem = try semantics.analyze(allocator, nodes);
+    var sem = try semantics.core.analyzePhase1(allocator, nodes);
     defer sem.symbols.deinit();
     defer allocator.free(sem.diagnostics);
+
+    const TypeResolver = ora_root.TypeResolver;
+    var type_resolver = TypeResolver.init(allocator, arena.allocator(), &sem.symbols);
+    defer type_resolver.deinit();
+    try type_resolver.resolveTypes(nodes);
 
     var caller_fn: ?*ora_root.ast.FunctionNode = null;
     for (nodes) |*node| switch (node.*) {

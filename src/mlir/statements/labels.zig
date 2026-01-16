@@ -257,7 +257,7 @@ pub fn lowerLabeledBlock(self: *const StatementLowerer, labeled_block: *const li
         lowerer_with_label.label_context = &label_ctx;
         lowerer_with_label.force_stack_memref = true;
 
-        try lowerer_with_label.lowerStatement(&stmt);
+        _ = try lowerer_with_label.lowerStatement(&stmt);
 
         if (!helpers.blockEndsWithTerminator(&lowerer_with_label, then_block)) {
             const yield_op = self.ora_dialect.createScfYield(loc);
@@ -451,5 +451,14 @@ fn lowerSwitchCasesWithLabel(
 
     // lower switch cases - now in control_flow.zig
     // for labeled switches, we don't need the result (returns are handled inside scf.if regions)
-    _ = try control_flow.lowerSwitchCases(&lowerer_with_label, cases, condition, case_idx, target_block, loc, default_case);
+    _ = try control_flow.lowerSwitchCases(
+        &lowerer_with_label,
+        cases,
+        condition,
+        case_idx,
+        target_block,
+        loc,
+        default_case,
+        null,
+    );
 }

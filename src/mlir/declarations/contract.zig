@@ -68,6 +68,21 @@ fn lowerContractTypes(self: *const DeclarationLowerer, block: c.MlirBlock, contr
     }
 }
 
+fn registerLogSignatures(self: *const DeclarationLowerer, contract: *const lib.ContractNode) void {
+    if (self.symbol_table) |st| {
+        for (contract.body) |child| {
+            switch (child) {
+                .LogDecl => |log_decl| {
+                    st.log_signatures.put(log_decl.name, log_decl.fields) catch {
+                        log.warn("Failed to register log signature: {s}\n", .{log_decl.name});
+                    };
+                },
+                else => {},
+            }
+        }
+    }
+}
+
 /// Lower contract declarations with enhanced metadata and inheritance support
 pub fn lowerContract(self: *const DeclarationLowerer, contract: *const lib.ContractNode) c.MlirOperation {
     // create the contract operation using C++ API
@@ -146,6 +161,9 @@ pub fn lowerContract(self: *const DeclarationLowerer, contract: *const lib.Contr
             else => {},
         }
     }
+
+    // pre-register log signatures before lowering functions
+    registerLogSignatures(self, contract);
 
     // second pass: first register all struct/enum types, then process functions and variables
     // this ensures types are available when functions use them

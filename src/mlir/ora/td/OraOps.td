@@ -125,6 +125,25 @@ def Ora_RefinementToBaseOp : Ora_PureOp<"refinement_to_base"> {
   }];
 }
 
+def Ora_BaseToRefinementOp : Ora_PureOp<"base_to_refinement"> {
+  let summary = "Convert base type to refinement type";
+  let description = [{
+    Converts a base type value (e.g., i256) to a refinement type
+    (e.g., !ora.in_range<i256, ...>). This is a type-level conversion
+    with no runtime representation change.
+
+    Example:
+    ```mlir
+    %refined = ora.base_to_refinement %base : i256 -> !ora.in_range<i256, 0, 0, 0, 0, 0, 0, 0, 100>
+    ```
+  }];
+
+  let arguments = (ins AnyType:$value);
+  let results = (outs AnyType:$result);
+
+  let assemblyFormat = "$value attr-dict `:` type($value) `->` type($result)";
+}
+
 //===----------------------------------------------------------------------===//
 // Storage Operations
 //===----------------------------------------------------------------------===//
@@ -592,6 +611,31 @@ def Ora_IfOp : Ora_Op<"if"> {
                         AnyRegion:$elseRegion);
   
   // Custom parser/printer for prettier syntax with "then"/"else" keywords
+  let hasCustomAssemblyFormat = 1;
+}
+
+def Ora_IsolatedIfOp : Ora_Op<"isolated_if", [IsolatedFromAbove]> {
+  let summary = "Isolated conditional operation";
+  let description = [{
+    Executes one of two regions based on a condition. This variant is isolated
+    from the parent scope, so values from the parent region must be passed
+    explicitly.
+
+    Example:
+    ```mlir
+    ora.isolated_if %condition then {
+      ora.yield
+    } else {
+      ora.yield
+    }
+    ```
+  }];
+
+  let arguments = (ins I1:$condition);
+  let results = (outs Variadic<AnyType>:$results);
+  let regions = (region AnyRegion:$thenRegion,
+                        AnyRegion:$elseRegion);
+
   let hasCustomAssemblyFormat = 1;
 }
 

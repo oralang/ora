@@ -39,6 +39,39 @@ pub const LockDelta = core.LockDelta;
 pub const Obligation = core.Obligation;
 pub const TypeContext = core.TypeContext;
 
+const SpecContext = enum { None, Requires, Ensures, Invariant };
+
+fn validateSpecUsageExpr(expr_node: *ast.Expressions.ExprNode, ctx: SpecContext) ?SourceSpan {
+    switch (expr_node.*) {
+        .Quantified => if (ctx == .None) return expr_node.Quantified.span,
+        .Old => if (ctx != .Ensures) return expr_node.Old.span,
+        else => {},
+    }
+
+    switch (expr_node.*) {
+        .Binary => |*b| {
+            if (validateSpecUsageExpr(b.lhs, ctx)) |sp| return sp;
+            if (validateSpecUsageExpr(b.rhs, ctx)) |sp| return sp;
+        },
+        .Unary => |*u| {
+            if (validateSpecUsageExpr(u.operand, ctx)) |sp| return sp;
+        },
+        .Assignment => |*a| {
+            if (validateSpecUsageExpr(a.value, ctx)) |sp| return sp;
+        },
+        .Call => |*c| {
+            if (validateSpecUsageExpr(c.callee, ctx)) |sp| return sp;
+            for (c.arguments) |arg| if (validateSpecUsageExpr(arg, ctx)) |sp| return sp;
+        },
+        .Tuple => |*t| {
+            for (t.elements) |e| if (validateSpecUsageExpr(e, ctx)) |sp| return sp;
+        },
+        else => {},
+    }
+
+    return null;
+}
+
 /// Type resolution errors
 pub const TypeResolutionError = error{
     UnknownType,
@@ -46,6 +79,8 @@ pub const TypeResolutionError = error{
     RegionMismatch,
     CircularReference,
     InvalidEnumValue,
+    InvalidSpecUsage,
+    InvalidErrorUsage,
     OutOfMemory,
     IncompatibleTypes,
     UndefinedIdentifier,
@@ -79,7 +114,7 @@ pub const TypeResolver = struct {
             .allocator = allocator,
             .type_storage_allocator = type_storage_allocator,
             .symbol_table = symbol_table,
-            .current_scope = &symbol_table.root,
+            .current_scope = symbol_table.root,
             .core_resolver = core_res,
             .refinement_system = refinement_sys,
             .validation_system = validation_sys,
@@ -125,6 +160,9 @@ pub const TypeResolver = struct {
             },
             .Function => |*function| {
                 try self.resolveFunction(function, context);
+            },
+            .LogDecl => |*log_decl| {
+                try self.resolveLogDecl(log_decl, context);
             },
             .VariableDecl => |*var_decl| {
                 // convert to StmtNode for statement resolver
@@ -185,9 +223,10 @@ pub const TypeResolver = struct {
             var checked = try self.core_resolver.checkExpr(constant.value, constant.typ);
             defer checked.deinit(self.allocator);
         }
+        try self.core_resolver.validateErrorUnionType(constant.typ);
 
         // update symbol table with resolved type
-        const scope = if (self.current_scope) |s| s else &self.symbol_table.root;
+        const scope = if (self.current_scope) |s| s else self.symbol_table.root;
         _ = self.symbol_table.updateSymbolType(scope, constant.name, constant.typ, false) catch {};
     }
 
@@ -206,7 +245,7 @@ pub const TypeResolver = struct {
                             .contract_type => ot.contract_type,
                             else => unreachable,
                         };
-                        const root_scope: ?*const Scope = @as(?*const Scope, @ptrCast(&self.symbol_table.root));
+                        const root_scope: ?*const Scope = @as(?*const Scope, @ptrCast(self.symbol_table.root));
                         const type_symbol = SymbolTable.findUp(root_scope, type_name);
                         if (type_symbol) |tsym| {
                             switch (tsym.kind) {
@@ -238,6 +277,52 @@ pub const TypeResolver = struct {
         }
     }
 
+    fn resolveLogDecl(
+        self: *TypeResolver,
+        log_decl: *ast.LogDeclNode,
+        _: core.TypeContext,
+    ) TypeResolutionError!void {
+        for (log_decl.fields) |*field| {
+            if (field.type_info.ora_type) |ot| {
+                if (ot == .struct_type) {
+                    const type_name = ot.struct_type;
+                    const root_scope: ?*const Scope = @as(?*const Scope, @ptrCast(self.symbol_table.root));
+                    const type_symbol = SymbolTable.findUp(root_scope, type_name);
+                    if (type_symbol) |tsym| {
+                        switch (tsym.kind) {
+                            .Enum => {
+                                field.type_info.ora_type = OraType{ .enum_type = type_name };
+                                field.type_info.category = .Enum;
+                            },
+                            .Struct => {
+                                field.type_info.ora_type = OraType{ .struct_type = type_name };
+                                field.type_info.category = .Struct;
+                            },
+                            .Contract => {
+                                field.type_info.ora_type = OraType{ .contract_type = type_name };
+                                field.type_info.category = .Contract;
+                            },
+                            else => return TypeResolutionError.UnknownType,
+                        }
+                    } else {
+                        return TypeResolutionError.UnknownType;
+                    }
+                } else {
+                    var derived_category = ot.getCategory();
+                    if (ot == ._union and ot._union.len > 0 and ot._union[0] == .error_union) {
+                        derived_category = .ErrorUnion;
+                    }
+                    field.type_info.category = derived_category;
+                }
+            } else {
+                return TypeResolutionError.UnresolvedType;
+            }
+            if (!field.type_info.isResolved()) {
+                return TypeResolutionError.UnresolvedType;
+            }
+        }
+    }
+
     fn resolveContract(
         self: *TypeResolver,
         contract: *ContractNode,
@@ -245,6 +330,7 @@ pub const TypeResolver = struct {
     ) TypeResolutionError!void {
         // set current scope to contract scope if it exists
         const prev_scope = self.current_scope;
+        const prev_contract_name = self.core_resolver.current_contract_name;
         if (self.symbol_table.contract_scopes.get(contract.name)) |contract_scope| {
             self.current_scope = contract_scope;
             self.core_resolver.current_scope = contract_scope;
@@ -252,13 +338,30 @@ pub const TypeResolver = struct {
         } else {
             log.debug("[resolveContract] WARNING: Contract scope '{s}' not found!\n", .{contract.name});
         }
+        self.core_resolver.current_contract_name = contract.name;
+        const prev_return_type = self.core_resolver.current_function_return_type;
         defer {
             self.current_scope = prev_scope;
             self.core_resolver.current_scope = prev_scope;
+            self.core_resolver.current_function_return_type = prev_return_type;
+            self.core_resolver.current_contract_name = prev_contract_name;
         }
 
         // resolve constants first, then other members
         // this ensures constants are available when resolving functions that use them
+        if (self.symbol_table.contract_log_signatures.getPtr(contract.name) == null) {
+            const log_map = std.StringHashMap([]const ast.LogField).init(self.allocator);
+            try self.symbol_table.contract_log_signatures.put(contract.name, log_map);
+        }
+        for (contract.body) |*child| {
+            if (child.* == .LogDecl) {
+                const log_decl = &child.LogDecl;
+                try self.resolveLogDecl(log_decl, context);
+                if (self.symbol_table.contract_log_signatures.getPtr(contract.name)) |log_map| {
+                    try log_map.put(log_decl.name, log_decl.fields);
+                }
+            }
+        }
         for (contract.body) |*child| {
             if (child.* == .Constant) {
                 try self.resolveNodeTypes(child, context);
@@ -282,7 +385,7 @@ pub const TypeResolver = struct {
             if (param.type_info.ora_type) |ot| {
                 if (ot == .struct_type) {
                     const type_name = ot.struct_type;
-                    const root_scope: ?*const Scope = @as(?*const Scope, @ptrCast(&self.symbol_table.root));
+                    const root_scope: ?*const Scope = @as(?*const Scope, @ptrCast(self.symbol_table.root));
                     const type_symbol = SymbolTable.findUp(root_scope, type_name);
                     if (type_symbol) |tsym| {
                         if (tsym.kind == .Enum) {
@@ -313,6 +416,7 @@ pub const TypeResolver = struct {
             if (!param.type_info.isResolved()) {
                 return TypeResolutionError.UnresolvedType;
             }
+            try self.core_resolver.validateErrorUnionType(param.type_info);
         }
 
         // return type should be explicit or void
@@ -322,7 +426,7 @@ pub const TypeResolver = struct {
                 if (ot == .struct_type) {
                     const type_name = ot.struct_type;
                     // look up symbol to see if it's actually an enum
-                    const root_scope: ?*const Scope = @as(?*const Scope, @ptrCast(&self.symbol_table.root));
+                    const root_scope: ?*const Scope = @as(?*const Scope, @ptrCast(self.symbol_table.root));
                     const type_symbol = SymbolTable.findUp(root_scope, type_name);
                     if (type_symbol) |tsym| {
                         if (tsym.kind == .Enum) {
@@ -357,6 +461,7 @@ pub const TypeResolver = struct {
             if (!ret_type.isResolved()) {
                 return TypeResolutionError.UnresolvedType;
             }
+            try self.core_resolver.validateErrorUnionType(ret_type.*);
         }
 
         // get or create function scope for variable declarations
@@ -366,6 +471,9 @@ pub const TypeResolver = struct {
             func_scope = scope;
             self.current_scope = scope;
             self.core_resolver.current_scope = scope;
+            if (scope.parent == null and prev_scope != null) {
+                scope.parent = prev_scope;
+            }
         } else {
             // create function scope if it doesn't exist
             // use current_scope as parent (should be contract scope if inside contract)
@@ -410,15 +518,18 @@ pub const TypeResolver = struct {
 
         // resolve requires/ensures expressions
         for (function.requires_clauses) |clause| {
+            if (validateSpecUsageExpr(clause, .Requires)) |_| return TypeResolutionError.InvalidSpecUsage;
             var typed = try self.core_resolver.synthExpr(clause);
             defer typed.deinit(self.allocator);
         }
         for (function.ensures_clauses) |clause| {
+            if (validateSpecUsageExpr(clause, .Ensures)) |_| return TypeResolutionError.InvalidSpecUsage;
             var typed = try self.core_resolver.synthExpr(clause);
             defer typed.deinit(self.allocator);
         }
 
         // resolve all statements in function body
+        self.core_resolver.current_function_return_type = function.return_type_info;
         // note: We don't set block scopes here to avoid double-frees during deinit
         // variables declared in blocks will be found via findUp from the function scope
         var func_effect = Effect.pure();
@@ -443,6 +554,7 @@ pub const TypeResolver = struct {
         // validate return statements in function body
         try self.validateReturnStatements(function);
     }
+
 
     /// Validate all return statements in a function
     fn validateReturnStatements(
@@ -579,27 +691,27 @@ pub const TypeResolver = struct {
                 }
             },
             .If => |*if_stmt| {
-                // check both branches
-                try self.validateReturnInBlock(&if_stmt.then_branch, expected_return_type);
+                // check both branches - use stmt pointer for scope key
+                try self.validateReturnInBlockWithKey(&if_stmt.then_branch, expected_return_type, stmt, 0);
                 if (if_stmt.else_branch) |*else_branch| {
-                    try self.validateReturnInBlock(else_branch, expected_return_type);
+                    try self.validateReturnInBlockWithKey(else_branch, expected_return_type, stmt, 1);
                 }
             },
             .While => |*while_stmt| {
                 // check loop body
-                try self.validateReturnInBlock(&while_stmt.body, expected_return_type);
+                try self.validateReturnInBlockWithKey(&while_stmt.body, expected_return_type, stmt, 0);
             },
             .ForLoop => |*for_stmt| {
                 // check loop body
-                try self.validateReturnInBlock(&for_stmt.body, expected_return_type);
+                try self.validateReturnInBlockWithKey(&for_stmt.body, expected_return_type, stmt, 0);
             },
             .LabeledBlock => |*labeled_block| {
-                try self.validateReturnInBlock(&labeled_block.block, expected_return_type);
+                try self.validateReturnInBlockWithKey(&labeled_block.block, expected_return_type, stmt, 0);
             },
             .TryBlock => |*try_block| {
-                try self.validateReturnInBlock(&try_block.try_block, expected_return_type);
+                try self.validateReturnInBlockWithKey(&try_block.try_block, expected_return_type, stmt, 0);
                 if (try_block.catch_block) |*catch_block| {
-                    try self.validateReturnInBlock(&catch_block.block, expected_return_type);
+                    try self.validateReturnInBlockWithKey(&catch_block.block, expected_return_type, stmt, 1);
                 }
             },
             else => {
@@ -642,13 +754,38 @@ pub const TypeResolver = struct {
         };
     }
 
-    /// Validate return statements in a block
+    /// Validate return statements in a block using statement-based key
+    fn validateReturnInBlockWithKey(
+        self: *TypeResolver,
+        block: *Statements.BlockNode,
+        expected_return_type: ?TypeInfo,
+        parent_stmt: *Statements.StmtNode,
+        block_id: usize,
+    ) TypeResolutionError!void {
+        // set scope for this block using stmt-based key (matches locals_binder)
+        const prev_scope = self.current_scope;
+        const block_key: usize = @intFromPtr(parent_stmt) * 4 + block_id;
+        if (self.symbol_table.block_scopes.get(block_key)) |block_scope| {
+            self.current_scope = block_scope;
+            self.core_resolver.current_scope = block_scope;
+        }
+        defer {
+            self.current_scope = prev_scope;
+            self.core_resolver.current_scope = prev_scope;
+        }
+
+        for (block.statements) |*stmt| {
+            try self.validateReturnInStatement(stmt, expected_return_type);
+        }
+    }
+
+    /// Validate return statements in a block (legacy - for function body)
     fn validateReturnInBlock(
         self: *TypeResolver,
         block: *Statements.BlockNode,
         expected_return_type: ?TypeInfo,
     ) TypeResolutionError!void {
-        // set scope for this block if it exists
+        // set scope for this block if it exists (function body uses block pointer)
         const prev_scope = self.current_scope;
         const block_key: usize = @intFromPtr(block);
         if (self.symbol_table.block_scopes.get(block_key)) |block_scope| {

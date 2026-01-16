@@ -7,6 +7,9 @@
 contract FeeCalculation {
     storage var transfer_fee_rate: BasisPoints<u256>;
     storage var min_transfer: MinValue<u256, 1>;
+    storage var balances: map[address, u256];
+    
+    error InsufficientBalance;
     
     // ============================================================================
     // Fee Calculation with BasisPoints
@@ -45,10 +48,10 @@ contract FeeCalculation {
         const total_required: u256 = calculateTotalRequired(amount);
         
         // Get balance (would need storage map)
-        // const balance = balances[std.msg.sender()];
-        // if (balance < total_required) {
-        //     return InsufficientBalance;
-        // }
+        const balance = balances[std.msg.sender()];
+        if (balance < total_required) {
+            return InsufficientBalance;
+        }
         
         // Execute transfer (would need implementation)
         return true;
