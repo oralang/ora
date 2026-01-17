@@ -1412,6 +1412,12 @@ pub fn lowerSwitch(self: *const StatementLowerer, switch_stmt: *const lib.ast.St
                                 h.appendOp(case_block, yield_op);
                                 has_terminator = true;
                             },
+                            // Break and Continue are also terminators - lowerBreak/lowerContinue
+                            // will add the appropriate yield, so we just need to mark as terminated
+                            .Break, .Continue => {
+                                _ = try temp_lowerer.lowerStatement(&stmt);
+                                has_terminator = true;
+                            },
                             else => {
                                 _ = try temp_lowerer.lowerStatement(&stmt);
                             },

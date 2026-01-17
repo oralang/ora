@@ -69,18 +69,19 @@ test "catch variable uses error union type from try expression" {
     };
     try testing.expect(caller_fn != null);
 
-    var catch_block: ?*ora_root.ast.Statements.CatchBlock = null;
+    var try_stmt: ?*ora_root.ast.Statements.StmtNode = null;
     for (caller_fn.?.body.statements) |*stmt| {
         if (stmt.* == .TryBlock) {
-            if (stmt.TryBlock.catch_block) |*cb| {
-                catch_block = cb;
+            if (stmt.TryBlock.catch_block != null) {
+                try_stmt = stmt;
                 break;
             }
         }
     }
-    try testing.expect(catch_block != null);
+    try testing.expect(try_stmt != null);
 
-    const catch_key: usize = @intFromPtr(&catch_block.?.block);
+    // Key is computed as: @intFromPtr(stmt) * 4 + block_id (1 for catch block)
+    const catch_key: usize = @intFromPtr(try_stmt.?) * 4 + 1;
     const catch_scope = sem.symbols.block_scopes.get(catch_key) orelse return error.TestExpectedEqual;
     const idx = catch_scope.findInCurrent("e") orelse return error.TestExpectedEqual;
     const sym = catch_scope.symbols.items[idx];

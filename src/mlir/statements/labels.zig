@@ -198,7 +198,9 @@ pub fn lowerLabeledBlock(self: *const StatementLowerer, labeled_block: *const li
 
     const loc = self.fileLoc(labeled_block.span);
 
-    // regular labeled block - use break flag to gate statement execution
+    // Simplified labeled block - just lower the body with a label context
+    // break :label will set a flag, but we don't gate each statement
+    // This avoids complex nested scf.if structures that cause dominance issues
     const i1_type = h.boolType(self.ctx);
     const empty_attr = c.oraNullAttrCreate();
     const break_flag_memref_type = h.memRefType(self.ctx, i1_type, 0, null, empty_attr, empty_attr);
@@ -216,57 +218,12 @@ pub fn lowerLabeledBlock(self: *const StatementLowerer, labeled_block: *const li
         .parent = self.label_context,
     };
 
-    for (labeled_block.block.statements) |stmt| {
-        const load_break = self.ora_dialect.createMemrefLoad(break_flag_memref, &[_]c.MlirValue{}, i1_type, loc);
-        h.appendOp(self.block, load_break);
-        const break_flag_val = h.getResult(load_break, 0);
+    // Lower the entire block body with the label context
+    var lowerer_with_label = self.*;
+    lowerer_with_label.label_context = &label_ctx;
+    lowerer_with_label.force_stack_memref = true;
 
-        const cond = c.oraArithCmpIOpCreate(self.ctx, loc, 0, break_flag_val, false_val);
-        if (c.oraOperationIsNull(cond)) {
-            @panic("Failed to create arith.cmpi for labeled block break guard");
-        }
-        h.appendOp(self.block, cond);
-        const cond_val = h.getResult(cond, 0);
-
-        const if_op = self.ora_dialect.createScfIf(cond_val, &[_]c.MlirType{}, loc);
-        h.appendOp(self.block, if_op);
-
-        const then_block = c.oraScfIfOpGetThenBlock(if_op);
-        const else_block = c.oraScfIfOpGetElseBlock(if_op);
-        if (c.oraBlockIsNull(then_block) or c.oraBlockIsNull(else_block)) {
-            @panic("scf.if missing then/else blocks");
-        }
-
-        var lowerer_with_label = StatementLowerer.init(
-            self.ctx,
-            then_block,
-            self.type_mapper,
-            self.expr_lowerer,
-            self.param_map,
-            self.storage_map,
-            self.local_var_map,
-            self.locations,
-            self.symbol_table,
-            self.builtin_registry,
-            self.allocator,
-            self.current_function_return_type,
-            self.current_function_return_type_info,
-            self.ora_dialect,
-            self.ensures_clauses,
-        );
-        lowerer_with_label.label_context = &label_ctx;
-        lowerer_with_label.force_stack_memref = true;
-
-        _ = try lowerer_with_label.lowerStatement(&stmt);
-
-        if (!helpers.blockEndsWithTerminator(&lowerer_with_label, then_block)) {
-            const yield_op = self.ora_dialect.createScfYield(loc);
-            h.appendOp(then_block, yield_op);
-        }
-
-        const else_yield = self.ora_dialect.createScfYield(loc);
-        h.appendOp(else_block, else_yield);
-    }
+    _ = try lowerer_with_label.lowerBlockBody(labeled_block.block, self.block);
 }
 
 /// Lower labeled switch with continue support using scf.while

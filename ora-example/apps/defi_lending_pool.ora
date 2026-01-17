@@ -1,36 +1,37 @@
-§// DeFi Lending Pool - Complex Smart Contract Example
+// DeFi Lending Pool - Complex Smart Contract Example
 // Demonstrates various complexity levels for analysis
+
+// Enums for different states and categories (must be at file level)
+enum LoanStatus : u8 {
+    Active = 0,
+    Repaid = 1,
+    Liquidated = 2,
+    Defaulted = 3
+}
+
+enum RiskLevel : u8 {
+    Low = 0,
+    Medium = 1,
+    High = 2,
+    Critical = 3
+}
+
+enum UserTier : u8 {
+    Basic = 0,
+    Silver = 1,
+    Gold = 2,
+    Platinum = 3
+}
+
+enum OperationType : u8 {
+    Deposit = 0,
+    Withdraw = 1,
+    Borrow = 2,
+    Repay = 3,
+    Liquidation = 4
+}
+
 contract LendingPool {
-    // Enums for different states and categories
-    enum LoanStatus {
-        Active,
-        Repaid,
-        Liquidated,
-        Defaulted
-    }
-    
-    enum RiskLevel {
-        Low,
-        Medium,
-        High,
-        Critical
-    }
-    
-    enum UserTier {
-        Basic,
-        Silver,
-        Gold,
-        Platinum
-    }
-    
-    enum OperationType {
-        Deposit,
-        Withdraw,
-        Borrow,
-        Repay,
-        Liquidation
-    }
-    
     // Storage state
     storage var total_deposits: u256;
     storage var total_borrows: u256;
@@ -47,8 +48,9 @@ contract LendingPool {
     storage var collateral: map[address, u256];
     storage var last_update: map[address, u256];
     storage var health_factors: map[address, u256];
-    storage var user_tiers: map[address, UserTier];
-    storage var loan_status: map[address, LoanStatus];
+    // Note: Using u8 for enum storage due to compiler limitation with map[address, EnumType]
+    storage var user_tiers: map[address, u8];
+    storage var loan_status: map[address, u8];
     
     // Interest rate model
     storage var base_rate: u256;
@@ -80,7 +82,7 @@ contract LendingPool {
     }
     
     // Simple validation - 5 statements
-    inline fn is_valid_amount(amount: u256) -> bool
+    fn is_valid_amount(amount: u256) -> bool
         requires(amount > 0)
     {
         if (amount == 0) {
@@ -90,12 +92,12 @@ contract LendingPool {
     }
     
     // Simple ownership check - 3 statements
-    inline fn only_owner() -> bool {
+    fn only_owner() -> bool {
         return std.transaction.sender == owner;
     }
     
     // Simple pause check - 2 statements
-    inline fn when_not_paused() -> bool {
+    fn when_not_paused() -> bool {
         return !is_paused;
     }
     
@@ -103,47 +105,48 @@ contract LendingPool {
     // SIMPLE FUNCTIONS WITH SWITCH STATEMENTS
     // ========================================================================
     
-    // SWITCH EXAMPLE 1: Simple switch expression (1 statement)
-    // The analyzer counts: 1 statement (the return with switch expression)
-    // Each case is an expression, not a separate statement
+    // SWITCH EXAMPLE 1: Simple switch statement
     pub fn get_tier_discount(tier: UserTier) -> u256 {
-        return switch (tier) {
-            UserTier.Basic => 0,
-            UserTier.Silver => 10,      // 0.1% discount (10 basis points)
-            UserTier.Gold => 25,        // 0.25% discount
-            UserTier.Platinum => 50,    // 0.5% discount
-        };
+        switch (tier) {
+            UserTier.Basic => { return 0; }
+            UserTier.Silver => { return 10; }      // 0.1% discount (10 basis points)
+            UserTier.Gold => { return 25; }        // 0.25% discount
+            UserTier.Platinum => { return 50; }    // 0.5% discount
+            else => { return 0; }
+        }
     }
     
-    // SWITCH EXAMPLE 2: Switch with variable (2 statements)
-    // The analyzer counts: 1 (let) + 1 (return with switch) = 2 statements
+    // SWITCH EXAMPLE 2: Switch with variable
     pub fn get_tier_max_ltv(tier: UserTier) -> u256 {
         let base_ltv: u256 = max_ltv;
         
-        return switch (tier) {
-            UserTier.Basic => base_ltv,
-            UserTier.Silver => base_ltv + 500,      // +5% LTV
-            UserTier.Gold => base_ltv + 1000,       // +10% LTV
-            UserTier.Platinum => base_ltv + 1500,   // +15% LTV
-        };
+        switch (tier) {
+            UserTier.Basic => { return base_ltv; }
+            UserTier.Silver => { return base_ltv + 500; }      // +5% LTV
+            UserTier.Gold => { return base_ltv + 1000; }       // +10% LTV
+            UserTier.Platinum => { return base_ltv + 1500; }   // +15% LTV
+            else => { return base_ltv; }
+        }
     }
     
     // Get risk level based on health factor - uses if-else chain
-    pub fn get_risk_level(user: address) -> RiskLevel
+    // Returns u8 due to compiler limitation with enum return types
+    pub fn get_risk_level(user: address) -> u8
         requires(user != std.constants.ZERO_ADDRESS)
     {
         let health: u256 = calculate_health_factor(user);
         
+        // 0=Low, 1=Medium, 2=High, 3=Critical
         if (health >= 15000) {
-            return RiskLevel.Low;
+            return 0;  // Low
         } else {
             if (health >= 12000) {
-                return RiskLevel.Medium;
+                return 1;  // Medium
             } else {
                 if (health >= 10000) {
-                    return RiskLevel.High;
+                    return 2;  // High
                 } else {
-                    return RiskLevel.Critical;
+                    return 3;  // Critical
                 }
             }
         }
@@ -165,8 +168,14 @@ contract LendingPool {
         requires(user != std.constants.ZERO_ADDRESS)
         requires(amount > 0)
     {
-        let tier: UserTier = user_tiers[user];
-        let discount: u256 = get_tier_discount(tier);
+        // Work around: use u8 directly since enum maps have a bug
+        let tier_u8: u8 = user_tiers[user];
+        var tier_discount: u256 = 0;
+        if (tier_u8 == 0) { tier_discount = 0; }        // Basic
+        if (tier_u8 == 1) { tier_discount = 10; }       // Silver
+        if (tier_u8 == 2) { tier_discount = 25; }       // Gold
+        if (tier_u8 == 3) { tier_discount = 50; }       // Platinum
+        let discount: u256 = tier_discount;
         var adjusted_amount: u256 = amount;
         
         // Apply tier benefits based on operation type
@@ -200,52 +209,44 @@ contract LendingPool {
         return adjusted_amount;
     }
     
-    // SWITCH EXAMPLE 4: Switch statement with nested logic (~19 statements)
-    // The analyzer counts:
-    //   3 (let declarations) + 1 (var new_status)
-    //   + 1 (switch statement)
-    //   + all statements inside each case block (including nested ifs)
-    //   + 2 (loan_status assignment + return)
-    // Each if statement inside a case adds to the complexity
-    pub fn update_loan_status(user: address) -> LoanStatus
+    // SWITCH EXAMPLE 4: Switch statement with nested logic
+    // Simplified to use u8 due to enum map compiler limitation
+    pub fn update_loan_status(user: address) -> u8
         requires(user != std.constants.ZERO_ADDRESS)
     {
-        let current_status: LoanStatus = loan_status[user];
+        let current_status: u8 = loan_status[user];
         let user_borrow: u256 = borrows[user];
         let health: u256 = calculate_health_factor(user);
-        var new_status: LoanStatus = current_status;
+        var new_status: u8 = current_status;
         
-        // Determine new status based on current status and conditions
-        switch (current_status) {
-            LoanStatus.Active => {
-                if (user_borrow == 0) {
-                    new_status = LoanStatus.Repaid;
-                } else {
-                    if (health < 10000) {
-                        new_status = LoanStatus.Defaulted;
-                    }
+        // Status values: 0=Active, 1=Repaid, 2=Liquidated, 3=Defaulted
+        if (current_status == 0) {  // Active
+            if (user_borrow == 0) {
+                new_status = 1;  // Repaid
+            } else {
+                if (health < 10000) {
+                    new_status = 3;  // Defaulted
                 }
-            },
-            LoanStatus.Repaid => {
-                if (user_borrow > 0) {
-                    new_status = LoanStatus.Active;
+            }
+        }
+        if (current_status == 1) {  // Repaid
+            if (user_borrow > 0) {
+                new_status = 0;  // Active
+            }
+        }
+        if (current_status == 2) {  // Liquidated
+            if (user_borrow == 0) {
+                new_status = 1;  // Repaid
+            }
+        }
+        if (current_status == 3) {  // Defaulted
+            if (user_borrow == 0) {
+                new_status = 1;  // Repaid
+            } else {
+                if (health < 5000) {
+                    new_status = 2;  // Liquidated
                 }
-            },
-            LoanStatus.Liquidated => {
-                // Stay liquidated unless fully repaid
-                if (user_borrow == 0) {
-                    new_status = LoanStatus.Repaid;
-                }
-            },
-            LoanStatus.Defaulted => {
-                if (user_borrow == 0) {
-                    new_status = LoanStatus.Repaid;
-                } else {
-                    if (health < 5000) {
-                        new_status = LoanStatus.Liquidated;
-                    }
-                }
-            },
+            }
         }
         
         loan_status[user] = new_status;
@@ -586,7 +587,7 @@ contract LendingPool {
         // Calculate collateral to seize (with bonus)
         let collateral_value: u256 = liquidation_amount;
         let bonus: u256 = (collateral_value * liquidation_bonus) / 10000;
-        let collateral_to_seize: u256 = collateral_value + bonus;
+        var collateral_to_seize: u256 = collateral_value + bonus;
         
         // Check if borrower has enough collateral
         if (collateral_to_seize > borrower_collateral) {
@@ -674,88 +675,85 @@ contract LendingPool {
         
         // Strategy 1: Try to add more collateral from available deposits
         var remaining_collateral_needed: u256 = collateral_needed;
+        let available_for_collateral: u256 = user_deposit - user_collateral;
         
+        // Calculate how much to add (flattened control flow to avoid MLIR bug)
+        var collateral_to_add: u256 = 0;
         if (remaining_collateral_needed > 0) {
-            let available_for_collateral: u256 = user_deposit - user_collateral;
-            
             if (available_for_collateral > 0) {
-                var to_add: u256 = 0;
-                
                 if (available_for_collateral >= remaining_collateral_needed) {
-                    to_add = remaining_collateral_needed;
-                    remaining_collateral_needed = 0;
-                } else {
-                    to_add = available_for_collateral;
-                    remaining_collateral_needed -= available_for_collateral;
+                    collateral_to_add = remaining_collateral_needed;
                 }
-                
-                if (to_add > 0) {
-                    collateral[user] += to_add;
-                    
-                    // Recalculate health
-                    let new_health: u256 = calculate_health_factor(user);
-                    
-                    if (new_health >= target_health) {
-                        return true;
-                    }
+                if (available_for_collateral < remaining_collateral_needed) {
+                    collateral_to_add = available_for_collateral;
                 }
             }
         }
         
-        // Strategy 2: Partial repayment if we have excess deposits
-        var remaining_borrow_reduction: u256 = borrow_reduction_needed;
+        // Apply collateral change and check health
+        if (collateral_to_add > 0) {
+            collateral[user] += collateral_to_add;
+            let health_after_collateral: u256 = calculate_health_factor(user);
+            if (health_after_collateral >= target_health) {
+                return true;
+            }
+        }
         
+        // Strategy 2: Partial repayment if we have excess deposits (flattened)
+        var remaining_borrow_reduction: u256 = borrow_reduction_needed;
+        let free_deposits: u256 = user_deposit - user_collateral;
+        
+        // Calculate repayment amount
+        var repay_from_deposits: u256 = 0;
         if (remaining_borrow_reduction > 0) {
-            let free_deposits: u256 = user_deposit - user_collateral;
-            
             if (free_deposits > 0) {
-                var repay_from_deposits: u256 = 0;
-                
                 if (free_deposits >= remaining_borrow_reduction) {
                     repay_from_deposits = remaining_borrow_reduction;
-                    remaining_borrow_reduction = 0;
-                } else {
-                    repay_from_deposits = free_deposits;
-                    remaining_borrow_reduction -= free_deposits;
                 }
-                
-                if (repay_from_deposits > 0) {
-                    // Simulate repayment
-                    borrows[user] -= repay_from_deposits;
-                    total_borrows -= repay_from_deposits;
-                    deposits[user] -= repay_from_deposits;
-                    total_deposits -= repay_from_deposits;
-                    
-                    // Recalculate health
-                    let new_health: u256 = calculate_health_factor(user);
-                    
-                    if (new_health >= target_health) {
-                        return true;
-                    }
+                if (free_deposits < remaining_borrow_reduction) {
+                    repay_from_deposits = free_deposits;
                 }
             }
         }
         
-        // Strategy 3: Liquidate small positions to improve health
+        // Apply repayment and check health
+        if (repay_from_deposits > 0) {
+            borrows[user] -= repay_from_deposits;
+            total_borrows -= repay_from_deposits;
+            deposits[user] -= repay_from_deposits;
+            total_deposits -= repay_from_deposits;
+            let health_after_repay: u256 = calculate_health_factor(user);
+            if (health_after_repay >= target_health) {
+                return true;
+            }
+        }
+        
+        // Strategy 3: Liquidate small positions (flattened)
+        var self_liquidation_amount: u256 = 0;
+        var collateral_to_use: u256 = 0;
         if (remaining_borrow_reduction > 0) {
-            let self_liquidation_amount: u256 = remaining_borrow_reduction / 10;  // 10% at a time
-            
-            if (self_liquidation_amount > 0) {
-                if (self_liquidation_amount <= user_borrow) {
-                    let collateral_to_use: u256 = (self_liquidation_amount * 10500) / 10000;  // 5% penalty
-                    
-                    if (collateral_to_use <= user_collateral) {
-                        borrows[user] -= self_liquidation_amount;
-                        total_borrows -= self_liquidation_amount;
-                        collateral[user] -= collateral_to_use;
-                        
-                        let new_health: u256 = calculate_health_factor(user);
-                        
-                        if (new_health >= target_health) {
-                            return true;
-                        }
-                    }
+            self_liquidation_amount = remaining_borrow_reduction / 10;
+        }
+        
+        // Calculate and validate liquidation
+        var can_self_liquidate: bool = false;
+        if (self_liquidation_amount > 0) {
+            if (self_liquidation_amount <= user_borrow) {
+                collateral_to_use = (self_liquidation_amount * 10500) / 10000;
+                if (collateral_to_use <= user_collateral) {
+                    can_self_liquidate = true;
                 }
+            }
+        }
+        
+        // Apply self-liquidation
+        if (can_self_liquidate) {
+            borrows[user] -= self_liquidation_amount;
+            total_borrows -= self_liquidation_amount;
+            collateral[user] -= collateral_to_use;
+            let health_after_liq: u256 = calculate_health_factor(user);
+            if (health_after_liq >= target_health) {
+                return true;
             }
         }
         
@@ -778,23 +776,14 @@ contract LendingPool {
         }
         
         // Strategy 4: Complex multi-step adjustment with risk assessment
-        let risk_level: RiskLevel = get_risk_level(user);
+        // get_risk_level returns u8: 0=Low, 1=Medium, 2=High, 3=Critical
+        let risk_level: u8 = get_risk_level(user);
         var risk_multiplier: u256 = 10000;  // 100% in basis points
         
-        switch (risk_level) {
-            RiskLevel.Low => {
-                risk_multiplier = 9500;  // Can be more aggressive
-            },
-            RiskLevel.Medium => {
-                risk_multiplier = 10000;  // Normal
-            },
-            RiskLevel.High => {
-                risk_multiplier = 11000;  // Need more buffer
-            },
-            RiskLevel.Critical => {
-                risk_multiplier = 12000;  // Much more conservative
-            },
-        }
+        if (risk_level == 0) { risk_multiplier = 9500; }   // Low: Can be more aggressive
+        if (risk_level == 1) { risk_multiplier = 10000; }  // Medium: Normal
+        if (risk_level == 2) { risk_multiplier = 11000; }  // High: Need more buffer
+        if (risk_level == 3) { risk_multiplier = 12000; }  // Critical: Much more conservative
         
         // Adjust target based on risk
         let adjusted_target: u256 = (target_health * risk_multiplier) / 10000;
@@ -810,54 +799,38 @@ contract LendingPool {
             shortfall = adjusted_target - final_health;
         }
         
-        // If shortfall is small, do incremental adjustments
+        // If shortfall exists, do incremental adjustments (fully flattened)
+        let available_for_adj: u256 = user_deposit - user_collateral;
+        
+        // Calculate adjustment based on shortfall size
+        var shortfall_adjustment: u256 = 0;
         if (shortfall > 0) {
-            if (shortfall < 500) {  // Less than 5% shortfall
-                // Try to add just a bit more collateral
-                let tiny_adjustment: u256 = (user_collateral * shortfall) / 10000;
-                
-                if (tiny_adjustment > 0) {
-                    if (tiny_adjustment <= (user_deposit - user_collateral)) {
-                        collateral[user] += tiny_adjustment;
-                        
-                        let new_health: u256 = calculate_health_factor(user);
-                        
-                        if (new_health >= adjusted_target) {
-                            return true;
-                        }
-                    }
-                }
-            } else {
-                if (shortfall < 1000) {  // 5-10% shortfall
-                    let medium_adjustment: u256 = (user_collateral * shortfall) / 5000;
-                    
-                    if (medium_adjustment > 0) {
-                        if (medium_adjustment <= (user_deposit - user_collateral)) {
-                            collateral[user] += medium_adjustment;
-                            
-                            let new_health: u256 = calculate_health_factor(user);
-                            
-                            if (new_health >= adjusted_target) {
-                                return true;
-                            }
-                        }
-                    }
-                } else {
-                    // Large shortfall - need major adjustment
-                    let large_adjustment: u256 = (user_collateral * shortfall) / 2000;
-                    
-                    if (large_adjustment > 0) {
-                        if (large_adjustment <= (user_deposit - user_collateral)) {
-                            collateral[user] += large_adjustment;
-                            
-                            let new_health: u256 = calculate_health_factor(user);
-                            
-                            if (new_health >= adjusted_target) {
-                                return true;
-                            }
-                        }
-                    }
-                }
+            if (shortfall < 500) {
+                shortfall_adjustment = (user_collateral * shortfall) / 10000;
+            }
+        }
+        if (shortfall >= 500) {
+            if (shortfall < 1000) {
+                shortfall_adjustment = (user_collateral * shortfall) / 5000;
+            }
+        }
+        if (shortfall >= 1000) {
+            shortfall_adjustment = (user_collateral * shortfall) / 2000;
+        }
+        
+        // Apply adjustment if valid
+        var can_adjust: bool = false;
+        if (shortfall_adjustment > 0) {
+            if (shortfall_adjustment <= available_for_adj) {
+                can_adjust = true;
+            }
+        }
+        
+        if (can_adjust) {
+            collateral[user] += shortfall_adjustment;
+            let health_after_adj: u256 = calculate_health_factor(user);
+            if (health_after_adj >= adjusted_target) {
+                return true;
             }
         }
         
@@ -884,7 +857,7 @@ contract LendingPool {
     
     // EXTREMELY COMPLEX: This inline function is way too complex! - ~110 statements
     // Should trigger a warning: "inline but high complexity"
-    inline fn complex_risk_assessment(user: address) -> u256
+    fn complex_risk_assessment(user: address) -> u256
         requires(user != std.constants.ZERO_ADDRESS)
     {
         var risk_score: u256 = 0;

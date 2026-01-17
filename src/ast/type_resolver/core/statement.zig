@@ -79,28 +79,31 @@ fn buildSwitchAssumeExpr(
     pattern: *const ast.Expressions.SwitchPattern,
     span: ast.SourceSpan,
 ) !?*ast.Expressions.ExprNode {
+    // Use type_storage_allocator (arena) instead of general allocator
+    // These nodes are inserted into the AST and freed with it
+    const arena = self.type_storage_allocator;
     switch (pattern.*) {
         .Else => return null,
         .Literal => |lit| {
-            const lit_node = try self.allocator.create(ast.Expressions.ExprNode);
+            const lit_node = try arena.create(ast.Expressions.ExprNode);
             lit_node.* = .{ .Literal = lit.value };
-            return try ast.Expressions.createBinaryExpr(self.allocator, condition, .EqualEqual, lit_node, span);
+            return try ast.Expressions.createBinaryExpr(arena, condition, .EqualEqual, lit_node, span);
         },
         .EnumValue => |ev| {
             if (ev.enum_name.len == 0) return null;
-            const enum_node = try self.allocator.create(ast.Expressions.ExprNode);
+            const enum_node = try arena.create(ast.Expressions.ExprNode);
             enum_node.* = .{ .EnumLiteral = .{
                 .enum_name = ev.enum_name,
                 .variant_name = ev.variant_name,
                 .span = span,
             } };
-            return try ast.Expressions.createBinaryExpr(self.allocator, condition, .EqualEqual, enum_node, span);
+            return try ast.Expressions.createBinaryExpr(arena, condition, .EqualEqual, enum_node, span);
         },
         .Range => |range| {
-            const start_cmp = try ast.Expressions.createBinaryExpr(self.allocator, condition, .GreaterEqual, range.start, span);
+            const start_cmp = try ast.Expressions.createBinaryExpr(arena, condition, .GreaterEqual, range.start, span);
             const end_op: ast.Expressions.BinaryOp = if (range.inclusive) .LessEqual else .Less;
-            const end_cmp = try ast.Expressions.createBinaryExpr(self.allocator, condition, end_op, range.end, span);
-            return try ast.Expressions.createBinaryExpr(self.allocator, start_cmp, .And, end_cmp, span);
+            const end_cmp = try ast.Expressions.createBinaryExpr(arena, condition, end_op, range.end, span);
+            return try ast.Expressions.createBinaryExpr(arena, start_cmp, .And, end_cmp, span);
         },
     }
 }
