@@ -281,6 +281,22 @@ pub fn inferAdditionResultType(
                 };
                 return TypeInfo.inferred(TypeCategory.Integer, min_value_type, span orelse SourceSpan{ .line = 0, .column = 0, .length = 0 });
             },
+            .in_range => |rhs_ir| {
+                // MinValue<u256, 100> + InRange<u256, 0, 10000> = InRange<u256, 100, 10100>
+                if (!OraType.equals(lhs_mv.base.*, rhs_ir.base.*)) {
+                    return null;
+                }
+                const result_min = lhs_mv.min + rhs_ir.min;
+                const result_max = lhs_mv.min + rhs_ir.max;
+                const in_range_type = OraType{
+                    .in_range = .{
+                        .base = rhs_ir.base,
+                        .min = result_min,
+                        .max = result_max,
+                    },
+                };
+                return TypeInfo.inferred(TypeCategory.Integer, in_range_type, span orelse SourceSpan{ .line = 0, .column = 0, .length = 0 });
+            },
             else => null,
         },
         .max_value => |lhs_mv| switch (rhs_ora) {
@@ -305,6 +321,22 @@ pub fn inferAdditionResultType(
                 }
                 const result_min = lhs_ir.min + rhs_ir.min;
                 const result_max = lhs_ir.max + rhs_ir.max;
+                const in_range_type = OraType{
+                    .in_range = .{
+                        .base = lhs_ir.base,
+                        .min = result_min,
+                        .max = result_max,
+                    },
+                };
+                return TypeInfo.inferred(TypeCategory.Integer, in_range_type, span orelse SourceSpan{ .line = 0, .column = 0, .length = 0 });
+            },
+            .min_value => |rhs_mv| {
+                // InRange<u256, 0, 10000> + MinValue<u256, 100> = InRange<u256, 100, 10100>
+                if (!OraType.equals(lhs_ir.base.*, rhs_mv.base.*)) {
+                    return null;
+                }
+                const result_min = lhs_ir.min + rhs_mv.min;
+                const result_max = lhs_ir.max + rhs_mv.min;
                 const in_range_type = OraType{
                     .in_range = .{
                         .base = lhs_ir.base,

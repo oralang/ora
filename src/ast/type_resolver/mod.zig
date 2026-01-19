@@ -282,6 +282,7 @@ pub const TypeResolver = struct {
         log_decl: *ast.LogDeclNode,
         _: core.TypeContext,
     ) TypeResolutionError!void {
+        var indexed_count: usize = 0;
         for (log_decl.fields) |*field| {
             if (field.type_info.ora_type) |ot| {
                 if (ot == .struct_type) {
@@ -320,6 +321,16 @@ pub const TypeResolver = struct {
             if (!field.type_info.isResolved()) {
                 return TypeResolutionError.UnresolvedType;
             }
+            if (field.indexed) {
+                indexed_count += 1;
+                switch (field.type_info.category) {
+                    .Integer, .String, .Bool, .Address, .Bytes, .Hex => {},
+                    else => return TypeResolutionError.TypeMismatch,
+                }
+            }
+        }
+        if (indexed_count > 3) {
+            return TypeResolutionError.TypeMismatch;
         }
     }
 
@@ -554,7 +565,6 @@ pub const TypeResolver = struct {
         // validate return statements in function body
         try self.validateReturnStatements(function);
     }
-
 
     /// Validate all return statements in a function
     fn validateReturnStatements(

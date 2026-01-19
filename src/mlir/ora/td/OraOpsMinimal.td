@@ -77,6 +77,8 @@ def Ora_GlobalOp : Ora_Op<"global"> {
     TypeAttr:$type,
     AnyAttr:$init
   );
+
+  let traits = [Symbol, MemoryEffects<[MemWrite]>];
   
   // Custom parser/printer needed for type-attr syntax
   // let assemblyFormat = "$sym_name `:` type-attr($type) `=` $init attr-dict";

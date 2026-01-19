@@ -30,6 +30,23 @@ pub fn lowerIdentifier(
     if (self.param_map) |pm| {
         if (pm.getParamIndex(identifier.name)) |param_index| {
             if (pm.getBlockArgument(identifier.name)) |block_arg| {
+                if (self.prefer_refinement_base_cache) {
+                    if (pm.getBaseArgument(identifier.name)) |base_arg| {
+                        return base_arg;
+                    }
+                    if (self.refinement_base_cache) |cache| {
+                        const key = if (c.mlirValueIsABlockArgument(block_arg)) blk: {
+                            const owner = c.mlirBlockArgumentGetOwner(block_arg);
+                            const arg_no = c.mlirBlockArgumentGetArgNumber(block_arg);
+                            const block_key = @intFromPtr(owner.ptr);
+                            const arg_key: usize = @intCast(arg_no);
+                            break :blk block_key ^ (arg_key *% 0x9e3779b97f4a7c15);
+                        } else @intFromPtr(block_arg.ptr);
+                        if (cache.get(key)) |cached| {
+                            return cached;
+                        }
+                    }
+                }
                 return block_arg;
             } else {
                 log.debug("FATAL ERROR: Function parameter '{s}' at index {d} not found - compilation aborted\n", .{ identifier.name, param_index });
@@ -85,6 +102,8 @@ pub fn lowerIdentifier(
                     if (c.oraTypeIsAInteger(element_type)) {
                         is_scalar = true;
                     } else if (c.oraTypeEqual(element_type, bool_ty)) {
+                        is_scalar = true;
+                    } else if (c.oraRefinementTypeGetBaseType(element_type).ptr != null) {
                         is_scalar = true;
                     }
                 }
@@ -452,7 +471,14 @@ pub fn convertIndexToIndexType(
         return index;
     }
 
-    var current_value = index;
+    var current_value = expr_helpers.unwrapRefinementValue(
+        self.ctx,
+        self.block,
+        self.locations,
+        self.refinement_base_cache,
+        index,
+        span,
+    );
     const current_type = c.oraValueGetType(current_value);
 
     if (c.oraTypeIsAInteger(current_type)) {

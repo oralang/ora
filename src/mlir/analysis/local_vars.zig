@@ -2,7 +2,7 @@
 // Local Variable Representation Analysis
 // ============================================================================
 // Decide whether a stack local can be lowered as SSA or requires a memref slot.
-// ============================================================================ 
+// ============================================================================
 
 const std = @import("std");
 const lib = @import("ora_lib");

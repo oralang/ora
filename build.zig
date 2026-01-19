@@ -28,6 +28,7 @@ pub fn build(b: *std.Build) void {
     const enable_mlir_timing = b.option(bool, "mlir-timing", "Enable MLIR pass timing by default") orelse false;
     const mlir_opt_level = b.option([]const u8, "mlir-opt", "Default MLIR optimization level (none, basic, aggressive)") orelse "basic";
     const enable_mlir_passes = b.option([]const u8, "mlir-passes", "Default MLIR pass pipeline") orelse null;
+    const skip_mlir_build = b.option(bool, "skip-mlir", "Skip MLIR/SIR/Ora dialect CMake builds (use existing libs)") orelse false;
 
     // this creates a "module", which represents a collection of source files alongside
     // some compilation options, such as optimization mode and linked system libraries.
@@ -124,10 +125,10 @@ pub fn build(b: *std.Build) void {
     exe.addIncludePath(sir_dialect_include_path);
 
     // build and link MLIR (required) - only for executable, not library
-    const mlir_step = buildMlirLibraries(b, target, optimize);
+    const mlir_step = if (skip_mlir_build) null else buildMlirLibraries(b, target, optimize);
     // build SIR dialect first (Ora dialect depends on it)
-    const sir_dialect_step = buildSIRDialectLibrary(b, mlir_step, target, optimize);
-    const ora_dialect_step = buildOraDialectLibrary(b, mlir_step, sir_dialect_step, target, optimize);
+    const sir_dialect_step = if (skip_mlir_build) null else buildSIRDialectLibrary(b, mlir_step.?, target, optimize);
+    const ora_dialect_step = if (skip_mlir_build) null else buildOraDialectLibrary(b, mlir_step.?, sir_dialect_step.?, target, optimize);
     linkMlirLibraries(b, exe, mlir_step, ora_dialect_step, sir_dialect_step, target);
 
     // build and link Z3 (for formal verification) - only for executable
@@ -210,6 +211,9 @@ pub fn build(b: *std.Build) void {
     // add step to test MLIR functionality
     const test_mlir_step = b.step("test-mlir", "Run MLIR-specific tests");
     test_mlir_step.dependOn(b.getInstallStep());
+
+    const fast_step = b.step("fast", "Fast build (use -Dskip-mlir=true)");
+    fast_step.dependOn(b.getInstallStep());
 
     // test suite - Unit tests are co-located with source files
     // tests are added to build.zig as they are created (e.g., src/lexer.test.zig)
@@ -951,11 +955,18 @@ fn buildSIRDialectLibraryImpl(step: *std.Build.Step, options: std.Build.Step.Mak
 }
 
 /// Link MLIR to the given executable using the installed prefix
-fn linkMlirLibraries(b: *std.Build, exe: *std.Build.Step.Compile, mlir_step: *std.Build.Step, ora_dialect_step: *std.Build.Step, sir_dialect_step: *std.Build.Step, target: std.Build.ResolvedTarget) void {
-    // depend on MLIR build and dialect builds
-    exe.step.dependOn(mlir_step);
-    exe.step.dependOn(ora_dialect_step);
-    exe.step.dependOn(sir_dialect_step);
+fn linkMlirLibraries(
+    b: *std.Build,
+    exe: *std.Build.Step.Compile,
+    mlir_step: ?*std.Build.Step,
+    ora_dialect_step: ?*std.Build.Step,
+    sir_dialect_step: ?*std.Build.Step,
+    target: std.Build.ResolvedTarget,
+) void {
+    // depend on MLIR build and dialect builds when requested
+    if (mlir_step) |step| exe.step.dependOn(step);
+    if (ora_dialect_step) |step| exe.step.dependOn(step);
+    if (sir_dialect_step) |step| exe.step.dependOn(step);
 
     const include_path = b.path("vendor/mlir/include");
     const lib_path = b.path("vendor/mlir/lib");

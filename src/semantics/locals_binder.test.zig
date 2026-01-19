@@ -10,19 +10,14 @@ const parser_mod = ora_root.parser;
 const semantics = ora_root.semantics;
 const AstArena = ora_root.AstArena;
 
-fn isErrorUnionType(ti: ora_root.ast.Types.TypeInfo) bool {
-    if (ti.category == .ErrorUnion) return true;
+fn isU256Type(ti: ora_root.ast.Types.TypeInfo) bool {
     if (ti.ora_type) |ot| {
-        return switch (ot) {
-            .error_union => true,
-            ._union => |members| members.len > 0 and members[0] == .error_union,
-            else => false,
-        };
+        return ot == .u256;
     }
-    return false;
+    return ti.category == .Integer;
 }
 
-test "catch variable uses error union type from try expression" {
+test "catch variable is u256 payload" {
     const allocator = testing.allocator;
     const source =
         \\error Foo;
@@ -86,5 +81,5 @@ test "catch variable uses error union type from try expression" {
     const idx = catch_scope.findInCurrent("e") orelse return error.TestExpectedEqual;
     const sym = catch_scope.symbols.items[idx];
     try testing.expect(sym.typ != null);
-    try testing.expect(isErrorUnionType(sym.typ.?));
+    try testing.expect(isU256Type(sym.typ.?));
 }

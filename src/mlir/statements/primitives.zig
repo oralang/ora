@@ -18,6 +18,33 @@ pub fn lowerLog(self: *const StatementLowerer, log_stmt: *const lib.ast.Statemen
     const loc = self.fileLoc(log_stmt.span);
     const log_debug = std.process.hasEnvVar(self.allocator, "ORA_LOG_DEBUG") catch false;
 
+    const sig_fields_opt = if (self.symbol_table) |st|
+        st.log_signatures.get(log_stmt.event_name)
+    else
+        null;
+    if (sig_fields_opt == null) {
+        if (self.expr_lowerer.error_handler) |handler| {
+            handler.reportError(
+                .UndefinedSymbol,
+                log_stmt.span,
+                "log event not declared in contract",
+                "add a log declaration or check the event name",
+            ) catch {};
+        }
+        return;
+    }
+    if (sig_fields_opt.?.len != log_stmt.args.len) {
+        if (self.expr_lowerer.error_handler) |handler| {
+            handler.reportError(
+                .TypeMismatch,
+                log_stmt.span,
+                "log argument count does not match signature",
+                "check event parameter count",
+            ) catch {};
+        }
+        return;
+    }
+
     // lower and add log arguments as operands
     var operands: []c.MlirValue = &[_]c.MlirValue{};
     var operands_allocated = false;
@@ -26,14 +53,12 @@ pub fn lowerLog(self: *const StatementLowerer, log_stmt: *const lib.ast.Statemen
     if (log_stmt.args.len > 0) {
         operands = try self.allocator.alloc(c.MlirValue, log_stmt.args.len);
         operands_allocated = true;
-
-        const sig_fields_opt = if (self.symbol_table) |st| st.log_signatures.get(log_stmt.event_name) else null;
         for (log_stmt.args, 0..) |*arg, i| {
             const expected_type = if (sig_fields_opt != null and i < sig_fields_opt.?.len)
                 sig_fields_opt.?[i].type_info
             else
                 null;
-            var value = helpers.lowerValueWithImplicitTry(self, arg, expected_type);
+            var value = helpers.lowerValueWithImplicitTry(@constCast(self), arg, expected_type);
             if (c.oraValueIsNull(value)) {
                 if (self.expr_lowerer.error_handler) |handler| {
                     handler.reportError(

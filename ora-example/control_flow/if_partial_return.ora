@@ -1,0 +1,28 @@
+// ==========================================
+// Partial Return Inside Try Block
+// ==========================================
+// Ensures try/catch lowering uses yields without memref-phi.
+
+error E1;
+
+contract PartialReturnInTry {
+    pub fn mayFail(x: u256) -> !u256 | E1 {
+        if (x == 0) {
+            return error.E1;
+        }
+        return x;
+    }
+
+    pub fn partial_return(x: u256) -> u256 {
+        try {
+            var y: u256 = mayFail(x);
+            if (y == 0) {
+                return 1;
+            }
+        } catch (e) {
+            return 2;
+        }
+
+        return 3;
+    }
+}

@@ -70,6 +70,8 @@ fn lowerContractTypes(self: *const DeclarationLowerer, block: c.MlirBlock, contr
 
 fn registerLogSignatures(self: *const DeclarationLowerer, contract: *const lib.ContractNode) void {
     if (self.symbol_table) |st| {
+        // contract-scoped log signatures: clear previous contract entries
+        st.log_signatures.clearRetainingCapacity();
         for (contract.body) |child| {
             switch (child) {
                 .LogDecl => |log_decl| {
@@ -90,6 +92,17 @@ pub fn lowerContract(self: *const DeclarationLowerer, contract: *const lib.Contr
     const contract_op = c.oraContractOpCreate(self.ctx, helpers.createFileLocation(self, contract.span), name_ref);
     if (contract_op.ptr == null) {
         @panic("Failed to create ora.contract operation");
+    }
+
+    if (self.symbol_table) |st| {
+        st.pushScope() catch {
+            log.err("Failed to push contract scope for {s}\n", .{contract.name});
+        };
+        // contract-scoped tables
+        st.log_signatures.clearRetainingCapacity();
+        st.error_ids.clearRetainingCapacity();
+        st.constants.clearRetainingCapacity();
+        defer st.popScope();
     }
 
     // set additional attributes using C API (attributes are just metadata)

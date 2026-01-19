@@ -1,0 +1,7 @@
+contract LogOkIndexed {
+    log Transfer(indexed from: address, indexed to: address, amount: u256);
+
+    pub fn run(from: address, to: address, amount: u256) {
+        log Transfer(from, to, amount);
+    }
+}

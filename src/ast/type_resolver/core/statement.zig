@@ -189,8 +189,8 @@ fn resolveVariableDecl(
             if (self.in_try_block) {
                 const is_error_union = typed.ty.category == .ErrorUnion or
                     (typed.ty.category == .Union and typed.ty.ora_type != null and
-                    typed.ty.ora_type.? == ._union and typed.ty.ora_type.?._union.len > 0 and
-                    typed.ty.ora_type.?._union[0] == .error_union);
+                        typed.ty.ora_type.? == ._union and typed.ty.ora_type.?._union.len > 0 and
+                        typed.ty.ora_type.?._union[0] == .error_union);
                 if (is_error_union) {
                     self.last_try_error_union = typed.ty;
                 }
@@ -205,8 +205,8 @@ fn resolveVariableDecl(
             if (self.in_try_block) {
                 const is_error_union = checked.ty.category == .ErrorUnion or
                     (checked.ty.category == .Union and checked.ty.ora_type != null and
-                    checked.ty.ora_type.? == ._union and checked.ty.ora_type.?._union.len > 0 and
-                    checked.ty.ora_type.?._union[0] == .error_union);
+                        checked.ty.ora_type.? == ._union and checked.ty.ora_type.?._union.len > 0 and
+                        checked.ty.ora_type.?._union[0] == .error_union);
                 if (is_error_union) {
                     self.last_try_error_union = checked.ty;
                 }
@@ -743,6 +743,8 @@ fn resolveTryBlock(
         const catch_block_key = getBlockScopeKey(stmt, 1);
         if (self.symbol_table.block_scopes.get(catch_block_key)) |catch_scope| {
             self.current_scope = catch_scope;
+        } else {
+            return TypeResolutionError.UnresolvedType;
         }
         defer {
             self.current_scope = prev_scope;
@@ -750,12 +752,18 @@ fn resolveTryBlock(
 
         self.in_try_block = false;
         if (catch_block.error_variable) |ename| {
-            const inferred_error_union = self.last_try_error_union orelse return TypeResolutionError.InvalidErrorUsage;
+            _ = self.last_try_error_union orelse return TypeResolutionError.InvalidErrorUsage;
+            // Bind catch error variable to error id payload type (u256).
+            var error_type = CommonTypes.u256_type();
+            error_type.span = catch_block.span;
+            error_type.source = .inferred;
             // update symbol type in catch scope
             if (self.current_scope) |scope| {
-                _ = self.symbol_table.updateSymbolType(scope, ename, inferred_error_union, false) catch {
+                _ = self.symbol_table.updateSymbolType(scope, ename, error_type, false) catch {
                     return TypeResolutionError.UnresolvedType;
                 };
+            } else {
+                return TypeResolutionError.UnresolvedType;
             }
         }
         for (catch_block.block.statements) |*catch_stmt| {
@@ -981,7 +989,7 @@ fn validateSwitchPattern(
         },
         .EnumValue => |ev| {
             // validate enum value matches condition enum type
-            if (condition_type.category == .Error or condition_type.category == .ErrorUnion) {
+            if (condition_type.category == .Error or condition_type.category == .ErrorUnion or condition_type.category == .Integer) {
                 // error switch: allow bare error tags (no enum name) that resolve to declared errors
                 if (ev.enum_name.len == 0) {
                     if (self.symbol_table.safeFindUpOpt(self.current_scope, ev.variant_name)) |sym| {
@@ -1466,6 +1474,10 @@ fn resolveLog(
     var sig_fields_opt: ?[]const ast.LogField = null;
     if (self.symbol_table.getContractLogSignatures(self.current_scope)) |log_map| {
         sig_fields_opt = log_map.get(log_stmt.event_name);
+    } else if (self.current_contract_name) |contract_name| {
+        if (self.symbol_table.contract_log_signatures.getPtr(contract_name)) |log_map| {
+            sig_fields_opt = log_map.get(log_stmt.event_name);
+        }
     }
     if (sig_fields_opt == null) {
         return TypeResolutionError.UndefinedIdentifier;

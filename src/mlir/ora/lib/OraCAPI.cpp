@@ -5383,27 +5383,33 @@ MlirOperation oraLogOpCreate(MlirContext ctx, MlirLocation loc, MlirStringRef ev
         Location location = unwrap(loc);
         context->getOrLoadDialect<ora::OraDialect>();
 
-        OpBuilder builder(context);
-
         // Convert MlirValue array to SmallVector<Value>
         SmallVector<Value> params;
+        if (numParameters > 0 && parameters == nullptr)
+        {
+            return {nullptr};
+        }
         params.reserve(numParameters);
         for (size_t i = 0; i < numParameters; ++i)
         {
             params.push_back(unwrap(parameters[i]));
         }
 
-        // Create the log operation
+        // Create the log operation via OperationState (no insertion point needed)
+        OperationState state(location, "ora.log");
+        state.addOperands(params);
+
         StringRef eventNameRef = unwrap(eventName);
         auto eventNameAttr = StringAttr::get(context, eventNameRef);
-        auto op = builder.create<ora::LogOp>(location, eventNameAttr, params);
+        state.addAttribute("event_name", eventNameAttr);
 
         // Add gas cost attribute (logging has cost based on data size)
         // Base cost + per-byte cost (simplified to fixed cost for now)
-        auto gasCostAttr = builder.getI64IntegerAttr(375 + (numParameters * 375));
-        op->setAttr("gas_cost", gasCostAttr);
+        auto gasCostAttr = IntegerAttr::get(::mlir::IntegerType::get(context, 64), 375 + (numParameters * 375));
+        state.addAttribute("gas_cost", gasCostAttr);
 
-        return wrap(op.getOperation());
+        Operation *op = Operation::create(state);
+        return wrap(op);
     }
     catch (...)
     {
@@ -5662,7 +5668,12 @@ MlirOperation oraTryOpCreate(MlirContext ctx, MlirLocation loc, MlirValue tryOpe
         // Create the try_catch operation
         auto op = builder.create<ora::TryOp>(location, resultTy, tryOp);
 
-        // Ensure the catch region has at least one block
+        // Ensure the try/catch regions have at least one block
+        if (op.getTryRegion().empty())
+        {
+            OpBuilder::InsertionGuard guard(builder);
+            builder.createBlock(&op.getTryRegion());
+        }
         if (op.getCatchRegion().empty())
         {
             OpBuilder::InsertionGuard guard(builder);
@@ -5674,6 +5685,35 @@ MlirOperation oraTryOpCreate(MlirContext ctx, MlirLocation loc, MlirValue tryOpe
         op->setAttr("gas_cost", gasCostAttr);
 
         return wrap(op.getOperation());
+    }
+    catch (...)
+    {
+        return {nullptr};
+    }
+}
+
+MlirBlock oraTryOpGetTryBlock(MlirOperation tryOp)
+{
+    try
+    {
+        Operation *operation = unwrap(tryOp);
+        if (!operation)
+        {
+            return {nullptr};
+        }
+
+        auto op = dyn_cast<ora::TryOp>(operation);
+        if (!op)
+        {
+            return {nullptr};
+        }
+
+        if (op.getTryRegion().empty())
+        {
+            return {nullptr};
+        }
+
+        return wrap(&op.getTryRegion().front());
     }
     catch (...)
     {
@@ -5704,6 +5744,103 @@ MlirBlock oraTryOpGetCatchBlock(MlirOperation tryOp)
         }
 
         return wrap(&catchRegion.front());
+    }
+    catch (...)
+    {
+        return {nullptr};
+    }
+}
+
+MlirOperation oraTryStmtOpCreate(MlirContext ctx, MlirLocation loc, const MlirType *resultTypes, size_t numResults)
+{
+    try
+    {
+        MLIRContext *context = unwrap(ctx);
+        Location location = unwrap(loc);
+
+        if (!oraDialectIsRegistered(ctx))
+        {
+            return {nullptr};
+        }
+
+        OpBuilder builder(context);
+        llvm::SmallVector<Type, 4> resultStorage;
+        TypeRange results = unwrapList(numResults, resultTypes, resultStorage);
+        auto op = builder.create<ora::TryStmtOp>(location, results);
+
+        if (op.getTryRegion().empty())
+        {
+            OpBuilder::InsertionGuard guard(builder);
+            builder.createBlock(&op.getTryRegion());
+        }
+        if (op.getCatchRegion().empty())
+        {
+            OpBuilder::InsertionGuard guard(builder);
+            builder.createBlock(&op.getCatchRegion());
+        }
+
+        auto gasCostAttr = IntegerAttr::get(::mlir::IntegerType::get(context, 64), 5);
+        op->setAttr("gas_cost", gasCostAttr);
+
+        return wrap(op.getOperation());
+    }
+    catch (...)
+    {
+        return {nullptr};
+    }
+}
+
+MlirBlock oraTryStmtOpGetTryBlock(MlirOperation tryStmtOp)
+{
+    try
+    {
+        Operation *operation = unwrap(tryStmtOp);
+        if (!operation)
+        {
+            return {nullptr};
+        }
+
+        auto op = dyn_cast<ora::TryStmtOp>(operation);
+        if (!op)
+        {
+            return {nullptr};
+        }
+
+        if (op.getTryRegion().empty())
+        {
+            return {nullptr};
+        }
+
+        return wrap(&op.getTryRegion().front());
+    }
+    catch (...)
+    {
+        return {nullptr};
+    }
+}
+
+MlirBlock oraTryStmtOpGetCatchBlock(MlirOperation tryStmtOp)
+{
+    try
+    {
+        Operation *operation = unwrap(tryStmtOp);
+        if (!operation)
+        {
+            return {nullptr};
+        }
+
+        auto op = dyn_cast<ora::TryStmtOp>(operation);
+        if (!op)
+        {
+            return {nullptr};
+        }
+
+        if (op.getCatchRegion().empty())
+        {
+            return {nullptr};
+        }
+
+        return wrap(&op.getCatchRegion().front());
     }
     catch (...)
     {

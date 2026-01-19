@@ -288,7 +288,10 @@ fn runFmt(allocator: std.mem.Allocator, file_path: []const u8, check: bool, diff
     };
 
     // Read source file
-    const source = try std.fs.cwd().readFileAlloc(allocator, file_path, std.math.maxInt(usize));
+    const source = std.fs.cwd().readFileAlloc(allocator, file_path, std.math.maxInt(usize)) catch |err| {
+        std.debug.print("error: cannot read file '{s}': {s}\n", .{ file_path, @errorName(err) });
+        std.process.exit(1);
+    };
     defer allocator.free(source);
 
     // Format
@@ -340,8 +343,9 @@ fn runLexer(allocator: std.mem.Allocator, file_path: []const u8) !void {
 
     // read source file
     const source = std.fs.cwd().readFileAlloc(allocator, file_path, 1024 * 1024) catch |err| {
-        try stdout.print("Error reading file {s}: {s}\n", .{ file_path, @errorName(err) });
-        return;
+        try stdout.print("error: cannot read file '{s}': {s}\n", .{ file_path, @errorName(err) });
+        try stdout.flush();
+        std.process.exit(1);
     };
     defer allocator.free(source);
 
@@ -391,8 +395,9 @@ fn runParser(allocator: std.mem.Allocator, file_path: []const u8, format: []cons
 
     // read source file
     const source = std.fs.cwd().readFileAlloc(allocator, file_path, 1024 * 1024) catch |err| {
-        try stdout.print("Error reading file {s}: {s}\n", .{ file_path, @errorName(err) });
-        return;
+        try stdout.print("error: cannot read file '{s}': {s}\n", .{ file_path, @errorName(err) });
+        try stdout.flush();
+        std.process.exit(1);
     };
     defer allocator.free(source);
 
@@ -486,8 +491,9 @@ fn runStateAnalysis(allocator: std.mem.Allocator, file_path: []const u8) !void {
 
     // read source file
     const source = std.fs.cwd().readFileAlloc(allocator, file_path, 1024 * 1024) catch |err| {
-        try stdout.print("Error reading file {s}: {s}\n", .{ file_path, @errorName(err) });
-        return;
+        try stdout.print("error: cannot read file '{s}': {s}\n", .{ file_path, @errorName(err) });
+        try stdout.flush();
+        std.process.exit(1);
     };
     defer allocator.free(source);
 
@@ -619,8 +625,9 @@ fn runCFGGeneration(allocator: std.mem.Allocator, file_path: []const u8, mlir_op
 
     // read source file
     const source = std.fs.cwd().readFileAlloc(allocator, file_path, 1024 * 1024) catch |err| {
-        try stdout.print("Error reading file {s}: {s}\n", .{ file_path, @errorName(err) });
-        return;
+        try stdout.print("error: cannot read file '{s}': {s}\n", .{ file_path, @errorName(err) });
+        try stdout.flush();
+        std.process.exit(1);
     };
     defer allocator.free(source);
 
@@ -720,8 +727,9 @@ fn runAbiEmit(
 
     // read source file
     const source = std.fs.cwd().readFileAlloc(allocator, file_path, 1024 * 1024) catch |err| {
-        try stdout.print("Error reading file {s}: {s}\n", .{ file_path, @errorName(err) });
-        return;
+        try stdout.print("error: cannot read file '{s}': {s}\n", .{ file_path, @errorName(err) });
+        try stdout.flush();
+        std.process.exit(1);
     };
     defer allocator.free(source);
 
@@ -799,8 +807,9 @@ fn runMlirEmitAdvanced(allocator: std.mem.Allocator, file_path: []const u8, mlir
 
     // read source file
     const source = std.fs.cwd().readFileAlloc(allocator, file_path, 1024 * 1024) catch |err| {
-        try stdout.print("Error reading file {s}: {s}\n", .{ file_path, @errorName(err) });
-        return;
+        try stdout.print("error: cannot read file '{s}': {s}\n", .{ file_path, @errorName(err) });
+        try stdout.flush();
+        std.process.exit(1);
     };
     defer allocator.free(source);
 

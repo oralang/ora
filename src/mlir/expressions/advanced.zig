@@ -219,6 +219,8 @@ pub fn lowerSwitchExpression(
         }
 
         var case_expr_lowerer = ExpressionLowerer.init(self.ctx, case_block, self.type_mapper, self.param_map, self.storage_map, self.local_var_map, self.symbol_table, self.builtin_registry, self.error_handler, self.locations, self.ora_dialect);
+        case_expr_lowerer.refinement_base_cache = self.refinement_base_cache;
+        case_expr_lowerer.refinement_guard_cache = self.refinement_guard_cache;
         case_expr_lowerer.current_function_return_type = self.current_function_return_type;
         case_expr_lowerer.current_function_return_type_info = self.current_function_return_type_info;
         case_expr_lowerer.in_try_block = self.in_try_block;
@@ -279,7 +281,7 @@ pub fn lowerSwitchExpression(
                 }
 
                 if (has_terminator) {
-                    var temp_lowerer = StatementLowerer.init(self.ctx, case_block, self.type_mapper, &case_expr_lowerer, self.param_map, self.storage_map, @constCast(self.local_var_map), self.locations, @constCast(self.symbol_table), self.builtin_registry, std.heap.page_allocator, result_type, null, self.ora_dialect, &[_]*lib.ast.Expressions.ExprNode{});
+                    var temp_lowerer = StatementLowerer.init(self.ctx, case_block, self.type_mapper, &case_expr_lowerer, self.param_map, self.storage_map, @constCast(self.local_var_map), self.locations, @constCast(self.symbol_table), self.builtin_registry, std.heap.page_allocator, self.refinement_guard_cache, result_type, null, self.ora_dialect, &[_]*lib.ast.Expressions.ExprNode{});
                     for (block.statements) |stmt| {
                         switch (stmt) {
                             .Return => |ret| {
@@ -324,7 +326,7 @@ pub fn lowerSwitchExpression(
                         }
                     }
                 } else {
-                    var temp_lowerer = StatementLowerer.init(self.ctx, case_block, self.type_mapper, &case_expr_lowerer, self.param_map, self.storage_map, @constCast(self.local_var_map), self.locations, @constCast(self.symbol_table), self.builtin_registry, std.heap.page_allocator, result_type, null, self.ora_dialect, &[_]*lib.ast.Expressions.ExprNode{});
+                    var temp_lowerer = StatementLowerer.init(self.ctx, case_block, self.type_mapper, &case_expr_lowerer, self.param_map, self.storage_map, @constCast(self.local_var_map), self.locations, @constCast(self.symbol_table), self.builtin_registry, std.heap.page_allocator, self.refinement_guard_cache, result_type, null, self.ora_dialect, &[_]*lib.ast.Expressions.ExprNode{});
                     _ = temp_lowerer.lowerBlockBody(block, case_block) catch false;
                     const default_val = case_expr_lowerer.createDefaultValueForType(result_type, loc) catch return condition;
                     const yield_op = self.ora_dialect.createYield(&[_]c.MlirValue{default_val}, loc);
@@ -341,7 +343,7 @@ pub fn lowerSwitchExpression(
                 }
 
                 if (has_terminator) {
-                    var temp_lowerer = StatementLowerer.init(self.ctx, case_block, self.type_mapper, &case_expr_lowerer, self.param_map, self.storage_map, @constCast(self.local_var_map), self.locations, @constCast(self.symbol_table), self.builtin_registry, std.heap.page_allocator, result_type, null, self.ora_dialect, &[_]*lib.ast.Expressions.ExprNode{});
+                    var temp_lowerer = StatementLowerer.init(self.ctx, case_block, self.type_mapper, &case_expr_lowerer, self.param_map, self.storage_map, @constCast(self.local_var_map), self.locations, @constCast(self.symbol_table), self.builtin_registry, std.heap.page_allocator, self.refinement_guard_cache, result_type, null, self.ora_dialect, &[_]*lib.ast.Expressions.ExprNode{});
                     for (labeled.block.statements) |stmt| {
                         switch (stmt) {
                             .Return => |ret| {
@@ -386,7 +388,7 @@ pub fn lowerSwitchExpression(
                         }
                     }
                 } else {
-                    var temp_lowerer = StatementLowerer.init(self.ctx, case_block, self.type_mapper, &case_expr_lowerer, self.param_map, self.storage_map, @constCast(self.local_var_map), self.locations, @constCast(self.symbol_table), self.builtin_registry, std.heap.page_allocator, result_type, null, self.ora_dialect, &[_]*lib.ast.Expressions.ExprNode{});
+                    var temp_lowerer = StatementLowerer.init(self.ctx, case_block, self.type_mapper, &case_expr_lowerer, self.param_map, self.storage_map, @constCast(self.local_var_map), self.locations, @constCast(self.symbol_table), self.builtin_registry, std.heap.page_allocator, self.refinement_guard_cache, result_type, null, self.ora_dialect, &[_]*lib.ast.Expressions.ExprNode{});
                     _ = temp_lowerer.lowerBlockBody(labeled.block, case_block) catch false;
                     const default_val = case_expr_lowerer.createDefaultValueForType(result_type, loc) catch return condition;
                     const yield_op = self.ora_dialect.createYield(&[_]c.MlirValue{default_val}, loc);
@@ -405,6 +407,8 @@ pub fn lowerSwitchExpression(
         }
 
         var default_expr_lowerer = ExpressionLowerer.init(self.ctx, default_block_mlir, self.type_mapper, self.param_map, self.storage_map, self.local_var_map, self.symbol_table, self.builtin_registry, self.error_handler, self.locations, self.ora_dialect);
+        default_expr_lowerer.refinement_base_cache = self.refinement_base_cache;
+        default_expr_lowerer.refinement_guard_cache = self.refinement_guard_cache;
         default_expr_lowerer.current_function_return_type = self.current_function_return_type;
         default_expr_lowerer.current_function_return_type_info = self.current_function_return_type_info;
         default_expr_lowerer.in_try_block = self.in_try_block;
@@ -417,7 +421,7 @@ pub fn lowerSwitchExpression(
             }
         }
         if (default_has_return) {
-            var temp_lowerer = StatementLowerer.init(self.ctx, default_block_mlir, self.type_mapper, &default_expr_lowerer, self.param_map, self.storage_map, @constCast(self.local_var_map), self.locations, @constCast(self.symbol_table), self.builtin_registry, std.heap.page_allocator, result_type, null, self.ora_dialect, &[_]*lib.ast.Expressions.ExprNode{});
+            var temp_lowerer = StatementLowerer.init(self.ctx, default_block_mlir, self.type_mapper, &default_expr_lowerer, self.param_map, self.storage_map, @constCast(self.local_var_map), self.locations, @constCast(self.symbol_table), self.builtin_registry, std.heap.page_allocator, self.refinement_guard_cache, result_type, null, self.ora_dialect, &[_]*lib.ast.Expressions.ExprNode{});
             for (default_block.statements) |stmt| {
                 switch (stmt) {
                     .Return => |ret| {
@@ -438,7 +442,7 @@ pub fn lowerSwitchExpression(
                 }
             }
         } else {
-            var temp_lowerer = StatementLowerer.init(self.ctx, default_block_mlir, self.type_mapper, &default_expr_lowerer, self.param_map, self.storage_map, @constCast(self.local_var_map), self.locations, @constCast(self.symbol_table), self.builtin_registry, std.heap.page_allocator, result_type, null, self.ora_dialect, &[_]*lib.ast.Expressions.ExprNode{});
+            var temp_lowerer = StatementLowerer.init(self.ctx, default_block_mlir, self.type_mapper, &default_expr_lowerer, self.param_map, self.storage_map, @constCast(self.local_var_map), self.locations, @constCast(self.symbol_table), self.builtin_registry, std.heap.page_allocator, self.refinement_guard_cache, result_type, null, self.ora_dialect, &[_]*lib.ast.Expressions.ExprNode{});
             _ = temp_lowerer.lowerBlockBody(default_block, default_block_mlir) catch false;
             const default_val = default_expr_lowerer.createDefaultValueForType(result_type, loc) catch return condition;
             const yield_op = self.ora_dialect.createYield(&[_]c.MlirValue{default_val}, loc);
@@ -615,38 +619,80 @@ pub fn lowerTry(
     else
         false;
 
-    // use the C++ API which automatically creates the catch region
-    const op = self.ora_dialect.createTry(expr_value, result_type, loc);
+    if (should_propagate and !c.oraTypeIsNull(success_ty)) {
+        const is_err_op = self.ora_dialect.createErrorIsError(expr_value, loc);
+        h.appendOp(self.block, is_err_op);
+        const is_err_val = h.getResult(is_err_op, 0);
+
+        const if_op = self.ora_dialect.createIf(is_err_val, loc);
+        h.appendOp(self.block, if_op);
+
+        const then_block = c.oraIfOpGetThenBlock(if_op);
+        const else_block = c.oraIfOpGetElseBlock(if_op);
+        if (c.oraBlockIsNull(then_block) or c.oraBlockIsNull(else_block)) {
+            @panic("ora.if missing then/else blocks");
+        }
+
+        const err_ty = c.oraIntegerTypeCreate(self.ctx, constants.DEFAULT_INTEGER_BITS);
+        const get_err_op = self.ora_dialect.createErrorGetError(expr_value, err_ty, loc);
+        h.appendOp(then_block, get_err_op);
+        const err_val = h.getResult(get_err_op, 0);
+
+        const err_union_op = self.ora_dialect.createErrorErr(err_val, expr_ty, loc);
+        h.appendOp(then_block, err_union_op);
+        const err_union_val = h.getResult(err_union_op, 0);
+
+        const return_op = self.ora_dialect.createFuncReturnWithValue(err_union_val, loc);
+        h.appendOp(then_block, return_op);
+
+        const else_yield_op = self.ora_dialect.createYield(&[_]c.MlirValue{}, loc);
+        h.appendOp(else_block, else_yield_op);
+
+        const unwrap_op = self.ora_dialect.createErrorUnwrap(expr_value, result_type, loc);
+        h.appendOp(self.block, unwrap_op);
+        return h.getResult(unwrap_op, 0);
+    }
+
+    // use ora.try_stmt with explicit try/catch regions
+    const op = self.ora_dialect.createTryStmt(&[_]c.MlirType{result_type}, loc);
     h.appendOp(self.block, op);
 
+    // populate try region with the expression value
+    const try_block = c.oraTryStmtOpGetTryBlock(op);
+    if (!c.oraBlockIsNull(try_block)) {
+        const first_op = c.oraBlockGetFirstOperation(try_block);
+        if (c.oraOperationIsNull(first_op)) {
+            const unwrap_op = self.ora_dialect.createErrorUnwrap(expr_value, result_type, loc);
+            h.appendOp(try_block, unwrap_op);
+            const unwrapped = h.getResult(unwrap_op, 0);
+            const yield_op = self.ora_dialect.createYield(&[_]c.MlirValue{unwrapped}, loc);
+            h.appendOp(try_block, yield_op);
+        }
+    }
+
     // ensure the catch region has a terminator to avoid empty block errors
-    const catch_block = c.oraTryOpGetCatchBlock(op);
+    const catch_block = c.oraTryStmtOpGetCatchBlock(op);
     if (!c.oraBlockIsNull(catch_block)) {
         const first_op = c.oraBlockGetFirstOperation(catch_block);
         if (c.oraOperationIsNull(first_op)) {
-            if (should_propagate) {
-                const return_op = self.ora_dialect.createFuncReturnWithValue(expr_value, loc);
-                h.appendOp(catch_block, return_op);
-            } else {
-                if (!self.in_try_block) {
-                    if (self.error_handler) |handler| {
-                        handler.reportError(.TypeMismatch, try_expr.span, "try expression requires an error union return type", "change the function return type to '!T' or use try/catch block") catch {};
-                    }
+            if (!self.in_try_block) {
+                if (self.error_handler) |handler| {
+                    handler.reportError(.TypeMismatch, try_expr.span, "try expression requires an error union return type", "change the function return type to '!T' or use try/catch block") catch {};
                 }
-                var catch_lowerer = self.*;
-                catch_lowerer.block = catch_block;
-                if (c.oraTypeEqual(result_type, c.oraNoneTypeCreate(self.ctx))) {
+            }
+            var catch_lowerer = self.*;
+            catch_lowerer.block = catch_block;
+            if (c.oraTypeEqual(result_type, c.oraNoneTypeCreate(self.ctx))) {
+                const yield_op = self.ora_dialect.createYield(&[_]c.MlirValue{}, loc);
+                h.appendOp(catch_block, yield_op);
+            } else {
+                const default_val = catch_lowerer.createDefaultValueForType(result_type, loc) catch {
                     const yield_op = self.ora_dialect.createYield(&[_]c.MlirValue{}, loc);
                     h.appendOp(catch_block, yield_op);
-                } else {
-                    const default_val = catch_lowerer.createDefaultValueForType(result_type, loc) catch {
-                        const yield_op = self.ora_dialect.createYield(&[_]c.MlirValue{}, loc);
-                        h.appendOp(catch_block, yield_op);
-                        return h.getResult(op, 0);
-                    };
-                    const yield_op = self.ora_dialect.createYield(&[_]c.MlirValue{default_val}, loc);
-                    h.appendOp(catch_block, yield_op);
-                }
+                    return h.getResult(op, 0);
+                };
+                const yield_op = self.ora_dialect.createYield(&[_]c.MlirValue{default_val}, loc);
+                h.appendOp(catch_block, yield_op);
             }
         }
     }
@@ -812,7 +858,7 @@ pub fn lowerLabeledBlock(
         @panic("scf.execute_region missing body block");
     }
 
-    const stmt_lowerer = StatementLowerer.init(self.ctx, block, self.type_mapper, self, self.param_map, self.storage_map, @constCast(self.local_var_map), self.locations, null, self.builtin_registry, std.heap.page_allocator, null, null, self.ora_dialect, &[_]*lib.ast.Expressions.ExprNode{});
+    const stmt_lowerer = StatementLowerer.init(self.ctx, block, self.type_mapper, self, self.param_map, self.storage_map, @constCast(self.local_var_map), self.locations, null, self.builtin_registry, std.heap.page_allocator, self.refinement_guard_cache, null, null, self.ora_dialect, &[_]*lib.ast.Expressions.ExprNode{});
 
     for (labeled_block.block.statements) |stmt| {
         _ = stmt_lowerer.lowerStatement(&stmt) catch |err| {

@@ -115,6 +115,5 @@ pub fn analyzePhase2(allocator: std.mem.Allocator, nodes: []const ast.AstNode, s
         else => {},
     };
 
-
     return try diags.toOwnedSlice();
 }

@@ -1,0 +1,12 @@
+struct Pair {
+    left: u256;
+    right: u256;
+}
+
+contract LogFailIndexedType {
+    log Bad(indexed p: Pair);
+
+    pub fn run(p: Pair) {
+        log Bad(p);
+    }
+}

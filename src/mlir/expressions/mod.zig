@@ -59,6 +59,9 @@ pub const ExpressionLowerer = struct {
     in_try_block: bool = false,
     current_function_return_type: ?c.MlirType = null,
     current_function_return_type_info: ?lib.ast.Types.TypeInfo = null,
+    refinement_base_cache: ?*std.AutoHashMap(usize, c.MlirValue) = null,
+    refinement_guard_cache: ?*std.AutoHashMap(u128, void) = null,
+    prefer_refinement_base_cache: bool = false,
     pub fn init(ctx: c.MlirContext, block: c.MlirBlock, type_mapper: *const TypeMapper, param_map: ?*const ParamMap, storage_map: ?*const StorageMap, local_var_map: ?*const LocalVarMap, symbol_table: ?*const SymbolTable, builtin_registry: ?*const builtins.BuiltinRegistry, error_handler: ?*ErrorHandler, locations: LocationTracker, ora_dialect: *OraDialect) ExpressionLowerer {
         return .{
             .ctx = ctx,
@@ -75,6 +78,9 @@ pub const ExpressionLowerer = struct {
             .in_try_block = false,
             .current_function_return_type = null,
             .current_function_return_type_info = null,
+            .refinement_base_cache = null,
+            .refinement_guard_cache = null,
+            .prefer_refinement_base_cache = false,
         };
     }
 
@@ -365,12 +371,12 @@ pub const ExpressionLowerer = struct {
 
     /// Helper function to create arithmetic operations
     pub fn createArithmeticOp(self: *const ExpressionLowerer, op_name: []const u8, lhs: c.MlirValue, rhs: c.MlirValue, _: c.MlirType, span: lib.ast.SourceSpan) c.MlirValue {
-        return expr_helpers.createArithmeticOp(self.ctx, self.block, self.type_mapper, self.ora_dialect, self.locations, op_name, lhs, rhs, span);
+        return expr_helpers.createArithmeticOp(self.ctx, self.block, self.type_mapper, self.ora_dialect, self.locations, self.refinement_base_cache, op_name, lhs, rhs, span);
     }
 
     /// Helper function to create comparison operations
     pub fn createComparisonOp(self: *const ExpressionLowerer, predicate: []const u8, lhs: c.MlirValue, rhs: c.MlirValue, span: lib.ast.SourceSpan) c.MlirValue {
-        return expr_helpers.createComparisonOp(self.ctx, self.block, self.locations, predicate, lhs, rhs, span);
+        return expr_helpers.createComparisonOp(self.ctx, self.block, self.locations, self.refinement_base_cache, predicate, lhs, rhs, span);
     }
 
     /// Helper function to get common type for binary operations
@@ -380,6 +386,40 @@ pub const ExpressionLowerer = struct {
 
     /// Helper function to convert value to target type
     pub fn convertToType(self: *const ExpressionLowerer, value: c.MlirValue, target_ty: c.MlirType, span: lib.ast.SourceSpan) c.MlirValue {
+        const value_type = c.oraValueGetType(value);
+        const loc = self.fileLoc(span);
+
+        // refinement -> base conversion with source span
+        const refinement_base = c.oraRefinementTypeGetBaseType(value_type);
+        if (refinement_base.ptr != null and c.oraTypeEqual(refinement_base, target_ty)) {
+            const convert_op = c.oraRefinementToBaseOpCreate(self.ctx, loc, value, self.block);
+            if (convert_op.ptr != null) {
+                return h.getResult(convert_op, 0);
+            }
+        }
+
+        // base -> refinement conversion with source span
+        const target_ref_base = c.oraRefinementTypeGetBaseType(target_ty);
+        if (target_ref_base.ptr != null and c.oraTypeEqual(target_ref_base, value_type)) {
+            const convert_op = c.oraBaseToRefinementOpCreate(self.ctx, loc, value, target_ty, self.block);
+            if (convert_op.ptr != null) {
+                return h.getResult(convert_op, 0);
+            }
+        }
+
+        // refinement -> refinement conversion with source span
+        if (refinement_base.ptr != null and target_ref_base.ptr != null) {
+            const to_base_op = c.oraRefinementToBaseOpCreate(self.ctx, loc, value, self.block);
+            if (to_base_op.ptr != null) {
+                const base_val = h.getResult(to_base_op, 0);
+                const base_converted = self.type_mapper.createConversionOp(self.block, base_val, target_ref_base, span);
+                const to_ref_op = c.oraBaseToRefinementOpCreate(self.ctx, loc, base_converted, target_ty, self.block);
+                if (to_ref_op.ptr != null) {
+                    return h.getResult(to_ref_op, 0);
+                }
+            }
+        }
+
         return self.type_mapper.createConversionOp(self.block, value, target_ty, span);
     }
 

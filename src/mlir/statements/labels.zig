@@ -399,6 +399,7 @@ fn lowerSwitchCasesWithLabel(
         self.symbol_table,
         self.builtin_registry,
         self.allocator,
+        self.refinement_guard_cache,
         self.current_function_return_type,
         self.current_function_return_type_info,
         self.ora_dialect,

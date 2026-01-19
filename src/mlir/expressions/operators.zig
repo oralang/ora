@@ -12,6 +12,7 @@ const TypeMapper = @import("../types.zig").TypeMapper;
 const LocationTracker = @import("../locations.zig").LocationTracker;
 const OraDialect = @import("../dialect.zig").OraDialect;
 const expr_helpers = @import("helpers.zig");
+const guard_helpers = @import("../refinement_guard_helpers.zig");
 
 /// ExpressionLowerer type (forward declaration)
 const ExpressionLowerer = @import("mod.zig").ExpressionLowerer;
@@ -126,6 +127,8 @@ fn lowerLogicalAnd(
     }
 
     var then_lowerer = ExpressionLowerer.init(self.ctx, then_block, self.type_mapper, self.param_map, self.storage_map, self.local_var_map, self.symbol_table, self.builtin_registry, self.error_handler, self.locations, self.ora_dialect);
+    then_lowerer.refinement_base_cache = self.refinement_base_cache;
+    then_lowerer.refinement_guard_cache = self.refinement_guard_cache;
     then_lowerer.current_function_return_type = self.current_function_return_type;
     then_lowerer.current_function_return_type_info = self.current_function_return_type_info;
     then_lowerer.in_try_block = self.in_try_block;
@@ -143,6 +146,8 @@ fn lowerLogicalAnd(
     h.appendOp(then_block, then_yield_op);
 
     var else_lowerer = ExpressionLowerer.init(self.ctx, else_block, self.type_mapper, self.param_map, self.storage_map, self.local_var_map, self.symbol_table, self.builtin_registry, self.error_handler, self.locations, self.ora_dialect);
+    else_lowerer.refinement_base_cache = self.refinement_base_cache;
+    else_lowerer.refinement_guard_cache = self.refinement_guard_cache;
     else_lowerer.current_function_return_type = self.current_function_return_type;
     else_lowerer.current_function_return_type_info = self.current_function_return_type_info;
     else_lowerer.in_try_block = self.in_try_block;
@@ -177,6 +182,8 @@ fn lowerLogicalOr(
     }
 
     var then_lowerer = ExpressionLowerer.init(self.ctx, then_block, self.type_mapper, self.param_map, self.storage_map, self.local_var_map, self.symbol_table, self.builtin_registry, self.error_handler, self.locations, self.ora_dialect);
+    then_lowerer.refinement_base_cache = self.refinement_base_cache;
+    then_lowerer.refinement_guard_cache = self.refinement_guard_cache;
     then_lowerer.current_function_return_type = self.current_function_return_type;
     then_lowerer.current_function_return_type_info = self.current_function_return_type_info;
     then_lowerer.in_try_block = self.in_try_block;
@@ -186,6 +193,8 @@ fn lowerLogicalOr(
     h.appendOp(then_block, then_yield_op);
 
     var else_lowerer = ExpressionLowerer.init(self.ctx, else_block, self.type_mapper, self.param_map, self.storage_map, self.local_var_map, self.symbol_table, self.builtin_registry, self.error_handler, self.locations, self.ora_dialect);
+    else_lowerer.refinement_base_cache = self.refinement_base_cache;
+    else_lowerer.refinement_guard_cache = self.refinement_guard_cache;
     else_lowerer.current_function_return_type = self.current_function_return_type;
     else_lowerer.current_function_return_type_info = self.current_function_return_type_info;
     else_lowerer.in_try_block = self.in_try_block;
@@ -301,8 +310,8 @@ pub fn insertExactDivisionGuard(
     span: lib.ast.SourceSpan,
 ) void {
     const loc = self.fileLoc(span);
-    const dividend_unwrapped = expr_helpers.unwrapRefinementValue(self.ctx, self.block, self.locations, dividend, span);
-    const divisor_unwrapped = expr_helpers.unwrapRefinementValue(self.ctx, self.block, self.locations, divisor, span);
+    const dividend_unwrapped = expr_helpers.unwrapRefinementValue(self.ctx, self.block, self.locations, self.refinement_base_cache, dividend, span);
+    const divisor_unwrapped = expr_helpers.unwrapRefinementValue(self.ctx, self.block, self.locations, self.refinement_base_cache, divisor, span);
     const dividend_type = c.oraValueGetType(dividend_unwrapped);
 
     const mod_op = c.oraArithRemUIOpCreate(self.ctx, loc, dividend_unwrapped, divisor_unwrapped);
@@ -318,15 +327,17 @@ pub fn insertExactDivisionGuard(
     const condition = h.getResult(cmp_op, 0);
 
     const msg = "Refinement violation: Exact<T> division must have no remainder";
-    const guard_op = self.ora_dialect.createRefinementGuard(condition, loc, msg);
-    h.appendOp(self.block, guard_op);
-
-    const guard_id = std.fmt.allocPrint(
+    guard_helpers.emitRefinementGuard(
+        self.ctx,
+        self.block,
+        self.ora_dialect,
+        self.locations,
+        self.refinement_guard_cache,
+        span,
+        condition,
+        msg,
+        "exact_division",
+        null,
         std.heap.page_allocator,
-        "guard:{s}:{d}:{d}:exact_division",
-        .{ self.locations.filename, span.line, span.column },
-    ) catch return;
-    defer std.heap.page_allocator.free(guard_id);
-    c.oraOperationSetAttributeByName(guard_op, h.strRef("ora.guard_id"), h.stringAttr(self.ctx, guard_id));
-    c.oraOperationSetAttributeByName(guard_op, h.strRef("ora.refinement_kind"), h.stringAttr(self.ctx, "exact_division"));
+    );
 }

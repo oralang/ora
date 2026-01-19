@@ -1480,6 +1480,22 @@ pub const OraDialect = struct {
         return op;
     }
 
+    /// Create ora.try_stmt operation
+    pub fn createTryStmt(
+        self: *OraDialect,
+        result_types: []const c.MlirType,
+        loc: c.MlirLocation,
+    ) c.MlirOperation {
+        if (!self.isRegistered()) {
+            @panic("Ora dialect must be registered before creating operations");
+        }
+        const op = c.oraTryStmtOpCreate(self.ctx, loc, result_types.ptr, result_types.len);
+        if (op.ptr == null) {
+            @panic("Failed to create ora.try_stmt operation");
+        }
+        return op;
+    }
+
     //===----------------------------------------------------------------------===//
     // loop Operations
     //===----------------------------------------------------------------------===//

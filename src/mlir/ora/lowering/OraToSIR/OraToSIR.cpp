@@ -257,6 +257,11 @@ public:
             patterns.add<ConvertSwitchExprOp>(typeConverter, ctx);
             patterns.add<ConvertSwitchOp>(typeConverter, ctx);
             patterns.add<ConvertTryCatchOp>(typeConverter, ctx);
+            patterns.add<ConvertErrorOkOp>(typeConverter, ctx);
+            patterns.add<ConvertErrorErrOp>(typeConverter, ctx);
+            patterns.add<ConvertErrorIsErrorOp>(typeConverter, ctx);
+            patterns.add<ConvertErrorUnwrapOp>(typeConverter, ctx);
+            patterns.add<ConvertErrorGetErrorOp>(typeConverter, ctx);
             patterns.add<ConvertRangeOp>(typeConverter, ctx);
         }
         patterns.add<ConvertLogOp>(typeConverter, ctx);

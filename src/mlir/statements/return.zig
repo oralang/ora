@@ -19,23 +19,13 @@ pub fn lowerReturn(self: *const StatementLowerer, ret: *const lib.ast.Statements
         const loc = self.fileLoc(ret.span);
         const return_flag_memref = self.try_return_flag_memref.?;
 
-        // set return flag to true
         const true_val = helpers.createBoolConstant(self, true, loc);
         helpers.storeToMemref(self, true_val, return_flag_memref, loc);
 
-        // store return value if present
         if (ret.value) |value_expr| {
             if (self.try_return_value_memref) |return_value_memref| {
                 var v = self.expr_lowerer.lowerExpression(&value_expr);
 
-                // insert refinement guard if return type is a refinement type
-                if (self.current_function_return_type_info) |return_type_info| {
-                    if (return_type_info.ora_type) |ora_type| {
-                        v = try helpers.insertRefinementGuard(self, v, ora_type, ret.span, ret.skip_guard);
-                    }
-                }
-
-                // get target type from memref element type
                 const memref_type = c.oraValueGetType(return_value_memref);
                 const element_type = c.oraShapedTypeGetElementType(memref_type);
 
@@ -51,12 +41,10 @@ pub fn lowerReturn(self: *const StatementLowerer, ret: *const lib.ast.Statements
                     v = helpers.convertValueToType(self, v, element_type, ret.span, loc);
                 }
 
-                // store return value
                 helpers.storeToMemref(self, v, return_value_memref, loc);
             }
         }
 
-        // return early - the actual ora.return will be handled after the try block
         return;
     }
 
@@ -71,13 +59,6 @@ pub fn lowerReturn(self: *const StatementLowerer, ret: *const lib.ast.Statements
     if (ret.value) |e| {
         var v = self.expr_lowerer.lowerExpression(&e);
 
-        // insert refinement guard if return type is a refinement type
-        if (self.current_function_return_type_info) |return_type_info| {
-            if (return_type_info.ora_type) |ora_type| {
-                v = try helpers.insertRefinementGuard(self, v, ora_type, ret.span, ret.skip_guard);
-            }
-        }
-
         // convert/wrap return value to match function return type if available
         const final_value = if (self.current_function_return_type) |ret_type| blk: {
             const is_error_union = if (self.current_function_return_type_info) |ti|
@@ -87,6 +68,11 @@ pub fn lowerReturn(self: *const StatementLowerer, ret: *const lib.ast.Statements
             if (is_error_union) {
                 const err_info = helpers.getErrorUnionPayload(self, &e, v, ret_type, self.block, loc);
                 break :blk helpers.encodeErrorUnionValue(self, err_info.payload, err_info.is_error, ret_type, self.block, ret.span, loc);
+            }
+            if (self.current_function_return_type_info) |ti| {
+                if (ti.ora_type) |ora_type| {
+                    v = try helpers.insertRefinementGuard(self, v, ora_type, ret.span, null, ret.skip_guard);
+                }
             }
 
             const value_type = c.oraValueGetType(v);
@@ -198,14 +184,7 @@ pub fn lowerReturnInControlFlow(self: *const StatementLowerer, ret: *const lib.a
     const loc = self.fileLoc(ret.span);
 
     if (ret.value) |e| {
-        var v = self.expr_lowerer.lowerExpression(&e);
-
-        // insert refinement guard if return type is a refinement type
-        if (self.current_function_return_type_info) |return_type_info| {
-            if (return_type_info.ora_type) |ora_type| {
-                v = try helpers.insertRefinementGuard(self, v, ora_type, ret.span, ret.skip_guard);
-            }
-        }
+        const v = self.expr_lowerer.lowerExpression(&e);
 
         // convert/wrap return value to match function return type if available
         // this ensures literals like `return 1` coerce to refinement types like MinValue<u256, 1>

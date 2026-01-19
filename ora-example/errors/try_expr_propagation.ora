@@ -1,0 +1,24 @@
+// ============================================================================
+// Try Expression Propagation
+// ============================================================================
+
+contract TryExprPropagation {
+    error E1;
+
+    fn mayFail(x: u256) -> !u256 | E1 {
+        if (x == 0) {
+            return E1;
+        }
+        return x + 1;
+    }
+
+    fn unwrapWithTry(x: u256) -> !u256 | E1 {
+        let y: u256 = try mayFail(x);
+        return y + 1;
+    }
+
+    fn propagateNested(x: u256) -> !u256 | E1 {
+        let y: u256 = try unwrapWithTry(x);
+        return y;
+    }
+}

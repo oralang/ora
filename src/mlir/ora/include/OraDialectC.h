@@ -1386,10 +1386,23 @@ extern "C"
         MlirValue tryOperation,
         MlirType resultType);
 
-    MLIR_CAPI_EXPORTED MlirBlock oraTryOpGetCatchBlock(MlirOperation tryOp);
+    MLIR_CAPI_EXPORTED MlirBlock oraTryOpGetTryBlock(MlirOperation tryOp);
 
-    /// Create an ora.for operation
-    MLIR_CAPI_EXPORTED MlirOperation oraForOpCreate(
+MLIR_CAPI_EXPORTED MlirBlock oraTryOpGetCatchBlock(MlirOperation tryOp);
+
+/// Create an ora.try_stmt operation
+MLIR_CAPI_EXPORTED MlirOperation oraTryStmtOpCreate(
+    MlirContext ctx,
+    MlirLocation loc,
+    const MlirType *resultTypes,
+    size_t numResults);
+
+MLIR_CAPI_EXPORTED MlirBlock oraTryStmtOpGetTryBlock(MlirOperation tryStmtOp);
+
+MLIR_CAPI_EXPORTED MlirBlock oraTryStmtOpGetCatchBlock(MlirOperation tryStmtOp);
+
+/// Create an ora.for operation
+MLIR_CAPI_EXPORTED MlirOperation oraForOpCreate(
         MlirContext ctx,
         MlirLocation loc,
         MlirValue collection);

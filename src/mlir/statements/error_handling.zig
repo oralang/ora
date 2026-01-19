@@ -11,8 +11,9 @@ const StatementLowerer = @import("statement_lowerer.zig").StatementLowerer;
 const LabelContext = @import("statement_lowerer.zig").LabelContext;
 const LoweringError = StatementLowerer.LoweringError;
 const helpers = @import("helpers.zig");
-const return_stmt = @import("return.zig");
+const ExpressionLowerer = @import("../expressions/mod.zig").ExpressionLowerer;
 const log = @import("log");
+const constants = @import("../lower.zig");
 
 /// Check if we're inside a for/while loop context where we can't use ora.return
 fn isInsideLoopContext(label_context: ?*const LabelContext) bool {
@@ -26,145 +27,163 @@ fn isInsideLoopContext(label_context: ?*const LabelContext) bool {
     return false;
 }
 
-fn getLastOperation(block: c.MlirBlock) c.MlirOperation {
-    var op = c.oraBlockGetFirstOperation(block);
-    var last: c.MlirOperation = c.MlirOperation{};
-    while (!c.oraOperationIsNull(op)) {
-        last = op;
-        op = c.oraOperationGetNextInBlock(op);
-    }
-    return last;
-}
+// Lower block body with ora.yield for try/catch regions (no memref return shims).
+fn lowerBlockBodyWithYield(
+    self: *const StatementLowerer,
+    block_body: lib.ast.Statements.BlockNode,
+    target_block: c.MlirBlock,
+    expected_result_type: ?c.MlirType,
+) LoweringError!void {
+    var temp_lowerer = self.*;
+    temp_lowerer.block = target_block;
 
-fn findTryCatchOperandAfter(block: c.MlirBlock, last_before: c.MlirOperation) ?c.MlirValue {
-    var op = if (c.oraOperationIsNull(last_before))
-        c.oraBlockGetFirstOperation(block)
-    else
-        c.oraOperationGetNextInBlock(last_before);
+    var expr_lowerer = ExpressionLowerer.init(
+        self.ctx,
+        target_block,
+        self.expr_lowerer.type_mapper,
+        self.expr_lowerer.param_map,
+        self.expr_lowerer.storage_map,
+        self.expr_lowerer.local_var_map,
+        self.expr_lowerer.symbol_table,
+        self.expr_lowerer.builtin_registry,
+        self.expr_lowerer.error_handler,
+        self.expr_lowerer.locations,
+        self.ora_dialect,
+    );
+    expr_lowerer.refinement_base_cache = self.expr_lowerer.refinement_base_cache;
+    expr_lowerer.refinement_guard_cache = self.expr_lowerer.refinement_guard_cache;
+    expr_lowerer.current_function_return_type = self.current_function_return_type;
+    expr_lowerer.current_function_return_type_info = self.current_function_return_type_info;
+    expr_lowerer.in_try_block = self.in_try_block;
+    temp_lowerer.expr_lowerer = &expr_lowerer;
 
-    var last_try_operand: ?c.MlirValue = null;
-    while (!c.oraOperationIsNull(op)) {
-        const name_ref = c.oraOperationGetName(op);
-        if (name_ref.length > 0 and std.mem.eql(u8, name_ref.data[0..name_ref.length], "ora.try_catch")) {
-            if (c.oraOperationGetNumOperands(op) > 0) {
-                last_try_operand = c.oraOperationGetOperand(op, 0);
-            }
+    var has_terminator = false;
+
+    for (block_body.statements) |stmt| {
+        if (has_terminator) break;
+
+        switch (stmt) {
+            .Return => |ret| {
+                const loc = temp_lowerer.fileLoc(ret.span);
+                if (expected_result_type) |ret_type| {
+                    var v: c.MlirValue = undefined;
+                    if (ret.value) |value_expr| {
+                        v = expr_lowerer.lowerExpression(&value_expr);
+
+                        const is_error_union = if (temp_lowerer.current_function_return_type_info) |ti|
+                            helpers.isErrorUnionTypeInfo(ti)
+                        else
+                            false;
+
+                        if (is_error_union) {
+                            const err_info = helpers.getErrorUnionPayload(&temp_lowerer, &value_expr, v, ret_type, target_block, loc);
+                            v = helpers.encodeErrorUnionValue(&temp_lowerer, err_info.payload, err_info.is_error, ret_type, target_block, ret.span, loc);
+                        } else {
+                            const value_type = c.oraValueGetType(v);
+                            if (!c.oraTypeEqual(value_type, ret_type)) {
+                                v = helpers.convertValueToType(&temp_lowerer, v, ret_type, ret.span, loc);
+                            }
+                        }
+                    } else {
+                        v = try helpers.createDefaultValueForType(&temp_lowerer, ret_type, loc);
+                    }
+
+                    const yield_op = temp_lowerer.ora_dialect.createYield(&[_]c.MlirValue{v}, loc);
+                    h.appendOp(target_block, yield_op);
+                } else {
+                    const yield_op = temp_lowerer.ora_dialect.createYield(&[_]c.MlirValue{}, loc);
+                    h.appendOp(target_block, yield_op);
+                }
+                has_terminator = true;
+            },
+            else => {
+                expr_lowerer.block = temp_lowerer.block;
+                const maybe_new_block = try temp_lowerer.lowerStatement(&stmt);
+                if (maybe_new_block) |new_block| {
+                    temp_lowerer.block = new_block;
+                    expr_lowerer.block = new_block;
+                }
+                if (helpers.blockEndsWithTerminator(&temp_lowerer, temp_lowerer.block)) {
+                    has_terminator = true;
+                }
+            },
         }
-        c.oraStringRefFree(name_ref);
-        op = c.oraOperationGetNextInBlock(op);
     }
 
-    return last_try_operand;
+    if (!has_terminator and !helpers.blockEndsWithTerminator(&temp_lowerer, temp_lowerer.block)) {
+        const yield_op = temp_lowerer.ora_dialect.createYield(&[_]c.MlirValue{}, self.fileLoc(block_body.span));
+        h.appendOp(temp_lowerer.block, yield_op);
+    }
 }
+
+// legacy helpers removed (try/catch now uses ora.try_stmt regions directly)
 
 /// Lower try-catch statements with exception handling
 pub fn lowerTryBlock(self: *const StatementLowerer, try_stmt: *const lib.ast.Statements.TryBlockNode) LoweringError!void {
     const loc = self.fileLoc(try_stmt.span);
-    const i1_type = h.boolType(self.ctx);
-    const empty_attr = c.oraNullAttrCreate();
+    const try_has_return = helpers.blockHasReturn(self, try_stmt.try_block);
+    const catch_has_return = if (try_stmt.catch_block) |cb|
+        helpers.blockHasReturn(self, cb.block)
+    else
+        false;
 
-    // create memrefs for return flag and return value (similar to labeled blocks)
-    // this allows returns inside try blocks to store their values instead of using ora.return
-    const return_flag_memref_type = h.memRefType(self.ctx, i1_type, 0, null, empty_attr, empty_attr);
-    const return_flag_alloca = c.oraMemrefAllocaOpCreate(self.ctx, loc, return_flag_memref_type);
-    h.appendOp(self.block, return_flag_alloca);
-    const return_flag_memref = h.getResult(return_flag_alloca, 0);
+    const result_type_opt: ?c.MlirType = if ((try_has_return or catch_has_return) and self.current_function_return_type != null)
+        self.current_function_return_type.?
+    else
+        null;
 
-    // return value memref (only if function has return type)
-    const return_value_memref = if (self.current_function_return_type) |ret_type| blk: {
-        const return_value_memref_type = h.memRefType(self.ctx, ret_type, 0, null, empty_attr, empty_attr);
-        const return_value_alloca = c.oraMemrefAllocaOpCreate(self.ctx, loc, return_value_memref_type);
-        h.appendOp(self.block, return_value_alloca);
-        break :blk h.getResult(return_value_alloca, 0);
-    } else null;
+    const result_types = if (result_type_opt) |rt| &[_]c.MlirType{rt} else &[_]c.MlirType{};
+    const try_stmt_op = self.ora_dialect.createTryStmt(result_types, loc);
+    h.appendOp(self.block, try_stmt_op);
 
-    // initialize return flag to false
-    const false_val = helpers.createBoolConstant(self, false, loc);
-    helpers.storeToMemref(self, false_val, return_flag_memref, loc);
+    const try_block = c.oraTryStmtOpGetTryBlock(try_stmt_op);
+    const catch_block_mlir = c.oraTryStmtOpGetCatchBlock(try_stmt_op);
+    if (c.oraBlockIsNull(try_block) or c.oraBlockIsNull(catch_block_mlir)) {
+        @panic("ora.try_stmt missing try/catch blocks");
+    }
 
-    // create a new StatementLowerer with in_try_block flag and memrefs set
     var try_lowerer = self.*;
+    try_lowerer.block = try_block;
     try_lowerer.in_try_block = true;
-    try_lowerer.try_return_flag_memref = return_flag_memref;
-    try_lowerer.try_return_value_memref = return_value_memref;
+    try_lowerer.try_return_flag_memref = null;
+    try_lowerer.try_return_value_memref = null;
+    try lowerBlockBodyWithYield(&try_lowerer, try_stmt.try_block, try_block, result_type_opt);
+    if (!helpers.blockEndsWithTerminator(&try_lowerer, try_block)) {
+        const yield_op = self.ora_dialect.createYield(&[_]c.MlirValue{}, loc);
+        h.appendOp(try_block, yield_op);
+    }
 
-    const last_before_try = getLastOperation(self.block);
-
-    // lower the try block body with the flag and memrefs set
-    _ = try try_lowerer.lowerBlockBody(try_stmt.try_block, self.block);
-
-    // if there's a catch block, lower it after the try block
     if (try_stmt.catch_block) |catch_block| {
-        // if there's an error variable, create a placeholder value and add it to LocalVarMap
-        if (catch_block.error_variable) |error_var_name| {
-            const error_value = findTryCatchOperandAfter(self.block, last_before_try) orelse blk: {
-                const error_type = c.oraIntegerTypeCreate(self.ctx, 256);
-                const error_const_op = self.ora_dialect.createArithConstant(0, error_type, loc);
-                h.appendOp(self.block, error_const_op);
-                break :blk h.getResult(error_const_op, 0);
-            };
+        var catch_lowerer = self.*;
+        catch_lowerer.block = catch_block_mlir;
+        catch_lowerer.in_try_block = true;
+        catch_lowerer.try_return_flag_memref = null;
+        catch_lowerer.try_return_value_memref = null;
 
-            // add error variable to LocalVarMap so it can be referenced in the catch block
-            if (self.local_var_map) |lvm| {
-                lvm.addLocalVar(error_var_name, error_value) catch {
+        if (catch_block.error_variable) |error_var_name| {
+            const err_type = c.oraIntegerTypeCreate(self.ctx, constants.DEFAULT_INTEGER_BITS);
+            const err_val = c.mlirBlockAddArgument(catch_block_mlir, err_type, loc);
+            if (catch_lowerer.local_var_map) |lvm| {
+                lvm.addLocalVar(error_var_name, err_val) catch {
                     log.warn("Failed to add error variable '{s}' to local var map\n", .{error_var_name});
                 };
             }
         }
 
-        // catch block is also inside try context, so set the flag and memrefs
-        var catch_lowerer = self.*;
-        catch_lowerer.in_try_block = true;
-        catch_lowerer.try_return_flag_memref = return_flag_memref;
-        catch_lowerer.try_return_value_memref = return_value_memref;
-        _ = try catch_lowerer.lowerBlockBody(catch_block.block, self.block);
+        try lowerBlockBodyWithYield(&catch_lowerer, catch_block.block, catch_block_mlir, result_type_opt);
+        if (!helpers.blockEndsWithTerminator(&catch_lowerer, catch_block_mlir)) {
+            const yield_op = self.ora_dialect.createYield(&[_]c.MlirValue{}, loc);
+            h.appendOp(catch_block_mlir, yield_op);
+        }
+    } else {
+        const yield_op = self.ora_dialect.createYield(&[_]c.MlirValue{}, loc);
+        h.appendOp(catch_block_mlir, yield_op);
     }
 
-    // after try/catch, check return flag and return if needed
-    // Skip this if we're inside a for/while loop - scf.for/scf.while can't have ora.return
-    if (self.current_function_return_type != null and !isInsideLoopContext(self.label_context)) {
-        const ret_type = self.current_function_return_type.?;
-        // load return flag
-        const load_return_flag = c.oraMemrefLoadOpCreate(self.ctx, loc, return_flag_memref, null, 0, i1_type);
-        h.appendOp(self.block, load_return_flag);
-        const should_return = h.getResult(load_return_flag, 0);
-
-        // use ora.if to check return flag (ora.if allows ora.return inside its regions)
-        const return_if_op = self.ora_dialect.createIf(should_return, loc);
-        h.appendOp(self.block, return_if_op);
-
-        // get the then and else blocks from ora.if
-        const return_if_then_block = c.oraIfOpGetThenBlock(return_if_op);
-        const return_if_else_block = c.oraIfOpGetElseBlock(return_if_op);
-        if (c.oraBlockIsNull(return_if_then_block) or c.oraBlockIsNull(return_if_else_block)) {
-            @panic("ora.if missing then/else blocks");
-        }
-
-        // then block: load return value and return directly
-        if (return_value_memref) |ret_val_memref| {
-            const load_return_value = c.oraMemrefLoadOpCreate(self.ctx, loc, ret_val_memref, null, 0, ret_type);
-            h.appendOp(return_if_then_block, load_return_value);
-            const return_val = h.getResult(load_return_value, 0);
-
-            // insert ensures clause checks before return
-            if (self.ensures_clauses.len > 0) {
-                try return_stmt.lowerEnsuresBeforeReturn(self, return_if_then_block, try_stmt.span);
-            }
-
-            const return_op = self.ora_dialect.createFuncReturnWithValue(return_val, loc);
-            h.appendOp(return_if_then_block, return_op);
-        } else {
-            // no return value
-            if (self.ensures_clauses.len > 0) {
-                try return_stmt.lowerEnsuresBeforeReturn(self, return_if_then_block, try_stmt.span);
-            }
-            const return_op = self.ora_dialect.createFuncReturn(loc);
-            h.appendOp(return_if_then_block, return_op);
-        }
-
-        // else block: empty yield (no return, function continues to next statement)
-        const else_yield_op = self.ora_dialect.createYield(&[_]c.MlirValue{}, loc);
-        h.appendOp(return_if_else_block, else_yield_op);
+    if (result_type_opt != null and try_has_return and catch_has_return and !isInsideLoopContext(self.label_context)) {
+        const result_val = h.getResult(try_stmt_op, 0);
+        const ret_op = self.ora_dialect.createFuncReturnWithValue(result_val, loc);
+        h.appendOp(self.block, ret_op);
     }
 }
 

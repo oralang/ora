@@ -157,5 +157,60 @@ namespace mlir
                 ConversionPatternRewriter &rewriter) const override;
         };
 
+        class ConvertErrorOkOp : public OpConversionPattern<ora::ErrorOkOp>
+        {
+        public:
+            using OpConversionPattern::OpConversionPattern;
+
+            LogicalResult matchAndRewrite(
+                ora::ErrorOkOp op,
+                typename ora::ErrorOkOp::Adaptor adaptor,
+                ConversionPatternRewriter &rewriter) const override;
+        };
+
+        class ConvertErrorErrOp : public OpConversionPattern<ora::ErrorErrOp>
+        {
+        public:
+            using OpConversionPattern::OpConversionPattern;
+
+            LogicalResult matchAndRewrite(
+                ora::ErrorErrOp op,
+                typename ora::ErrorErrOp::Adaptor adaptor,
+                ConversionPatternRewriter &rewriter) const override;
+        };
+
+        class ConvertErrorIsErrorOp : public OpConversionPattern<ora::ErrorIsErrorOp>
+        {
+        public:
+            using OpConversionPattern::OpConversionPattern;
+
+            LogicalResult matchAndRewrite(
+                ora::ErrorIsErrorOp op,
+                typename ora::ErrorIsErrorOp::Adaptor adaptor,
+                ConversionPatternRewriter &rewriter) const override;
+        };
+
+        class ConvertErrorUnwrapOp : public OpConversionPattern<ora::ErrorUnwrapOp>
+        {
+        public:
+            using OpConversionPattern::OpConversionPattern;
+
+            LogicalResult matchAndRewrite(
+                ora::ErrorUnwrapOp op,
+                typename ora::ErrorUnwrapOp::Adaptor adaptor,
+                ConversionPatternRewriter &rewriter) const override;
+        };
+
+        class ConvertErrorGetErrorOp : public OpConversionPattern<ora::ErrorGetErrorOp>
+        {
+        public:
+            using OpConversionPattern::OpConversionPattern;
+
+            LogicalResult matchAndRewrite(
+                ora::ErrorGetErrorOp op,
+                typename ora::ErrorGetErrorOp::Adaptor adaptor,
+                ConversionPatternRewriter &rewriter) const override;
+        };
+
     } // namespace ora
 } // namespace mlir

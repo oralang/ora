@@ -40,7 +40,7 @@ pub fn lowerExpressionStatement(self: *const StatementLowerer, expr: *const lib.
         },
         else => {
             // lower other expression statements
-            _ = helpers.lowerValueWithImplicitTry(self, expr, null);
+            _ = helpers.lowerValueWithImplicitTry(@constCast(self), expr, null);
         },
     }
 }
@@ -54,31 +54,36 @@ pub fn lowerAssignmentExpression(self: *const StatementLowerer, assign: *const l
         .FieldAccess => |fa| expected_type = fa.type_info,
         else => {},
     }
-    var value = helpers.lowerValueWithImplicitTry(self, assign.value, expected_type);
-
-    // insert refinement guard if target type is a refinement type
-    // get type from target identifier if it's an identifier
-    if (assign.target.* == .Identifier) {
-        const ident = &assign.target.Identifier;
-        if (ident.type_info.ora_type) |target_ora_type| {
-            // use skip_guard flag (set during type resolution if optimization applies)
-            // skip_guard is set in synthAssignment when: constant satisfies constraint,
-            // subtyping applies, or value comes from trusted builtin
-            value = try helpers.insertRefinementGuard(self, value, target_ora_type, assign.span, assign.skip_guard);
+    var value = helpers.lowerValueWithImplicitTry(@constCast(self), assign.value, expected_type);
+    const target_ora_type: ?lib.ast.Types.OraType = if (expected_type) |ti| ti.ora_type else null;
+    const should_guard_here = switch (assign.target.*) {
+        .Identifier => false,
+        else => true,
+    };
+    if (should_guard_here) {
+        if (target_ora_type) |ora_type| {
+            value = try helpers.insertRefinementGuard(self, value, ora_type, assign.span, null, assign.skip_guard);
         }
     }
 
     // resolve the lvalue and generate appropriate store operation
-    try lowerLValueAssignment(self, assign.target, value, getExpressionSpan(assign.target));
+    try lowerLValueAssignment(self, assign.target, value, getExpressionSpan(assign.target), target_ora_type, assign.skip_guard);
 }
 
 /// Lower lvalue assignments (handles identifiers, field access, array indexing)
-pub fn lowerLValueAssignment(self: *const StatementLowerer, target: *const lib.ast.Expressions.ExprNode, value: c.MlirValue, span: lib.ast.SourceSpan) LoweringError!void {
+pub fn lowerLValueAssignment(
+    self: *const StatementLowerer,
+    target: *const lib.ast.Expressions.ExprNode,
+    value: c.MlirValue,
+    span: lib.ast.SourceSpan,
+    target_ora_type: ?lib.ast.Types.OraType,
+    skip_guard: bool,
+) LoweringError!void {
     const loc = self.fileLoc(span);
 
     switch (target.*) {
         .Identifier => |ident| {
-            try lowerIdentifierAssignment(self, &ident, value, loc);
+            try lowerIdentifierAssignment(self, &ident, value, loc, target_ora_type, skip_guard);
         },
         .FieldAccess => |field_access| {
             try lowerFieldAccessAssignment(self, &field_access, value, loc);
@@ -101,7 +106,14 @@ pub fn lowerLValueAssignment(self: *const StatementLowerer, target: *const lib.a
 }
 
 /// Lower identifier assignments
-pub fn lowerIdentifierAssignment(self: *const StatementLowerer, ident: *const lib.ast.Expressions.IdentifierExpr, value: c.MlirValue, loc: c.MlirLocation) LoweringError!void {
+pub fn lowerIdentifierAssignment(
+    self: *const StatementLowerer,
+    ident: *const lib.ast.Expressions.IdentifierExpr,
+    value: c.MlirValue,
+    loc: c.MlirLocation,
+    target_ora_type: ?lib.ast.Types.OraType,
+    skip_guard: bool,
+) LoweringError!void {
     // check symbol table first for memory region information
     if (self.symbol_table) |st| {
         log.debug("[lowerIdentifierAssignment] Looking up symbol: {s}\n", .{ident.name});
@@ -188,8 +200,13 @@ pub fn lowerIdentifierAssignment(self: *const StatementLowerer, ident: *const li
                                 const element_type = c.oraShapedTypeGetElementType(var_type);
                                 const value_type = c.oraValueGetType(value);
                                 log.debug("[ASSIGN Stack] Variable: {s}, value_type != element_type: {}, value_is_ora: {}, element_is_ora: {}\n", .{ ident.name, !c.oraTypeEqual(value_type, element_type), c.oraTypeIsIntegerType(value_type), c.oraTypeIsIntegerType(element_type) });
+                                var store_value = value;
+                                const guard_type = target_ora_type orelse ident.type_info.ora_type;
+                                if (guard_type) |ora_type| {
+                                    store_value = try helpers.insertRefinementGuard(self, store_value, ora_type, ident.span, ident.name, skip_guard);
+                                }
                                 // always convert to ensure type compatibility
-                                const store_value = self.expr_lowerer.convertToType(value, element_type, ident.span);
+                                store_value = self.expr_lowerer.convertToType(store_value, element_type, ident.span);
                                 const store_value_type = c.oraValueGetType(store_value);
                                 log.debug("[ASSIGN Stack] After conversion: types_equal: {}, store_value_is_ora: {}, element_is_ora: {}\n", .{ c.oraTypeEqual(store_value_type, element_type), c.oraTypeIsIntegerType(store_value_type), c.oraTypeIsIntegerType(element_type) });
                                 const store_op = self.ora_dialect.createMemrefStore(store_value, var_value, &[_]c.MlirValue{}, loc);

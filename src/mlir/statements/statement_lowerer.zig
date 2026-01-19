@@ -74,6 +74,7 @@ pub const StatementLowerer = struct {
     builtin_registry: ?*const lib.semantics.builtins.BuiltinRegistry,
     memory_manager: MemoryManager,
     allocator: std.mem.Allocator,
+    refinement_guard_cache: ?*std.AutoHashMap(u128, void) = null,
     current_function_return_type: ?c.MlirType,
     current_function_return_type_info: ?lib.ast.Types.TypeInfo,
     ora_dialect: *@import("../dialect.zig").OraDialect,
@@ -83,10 +84,15 @@ pub const StatementLowerer = struct {
     in_try_block: bool = false, // Track if we're inside a try block (returns should not use ora.return)
     try_return_flag_memref: ?c.MlirValue = null, // Memref for return flag in try blocks
     try_return_value_memref: ?c.MlirValue = null, // Memref for return value in try blocks
+    active_condition_span: ?lib.ast.SourceSpan = null, // Reuse condition values for assume lowering
+    active_condition_value: ?c.MlirValue = null,
+    active_condition_safe: bool = false,
+    active_condition_expr: ?*const lib.ast.Expressions.ExprNode = null,
     force_stack_memref: bool = false, // Force stack locals to lower as memrefs (e.g. labeled blocks)
     current_func_op: ?c.MlirOperation = null, // Current function operation (for creating new blocks)
+    last_block: ?c.MlirBlock = null, // Last block used by lowerBlockBody
 
-    pub fn init(ctx: c.MlirContext, block: c.MlirBlock, type_mapper: *const TypeMapper, expr_lowerer: *const ExpressionLowerer, param_map: ?*const ParamMap, storage_map: ?*const StorageMap, local_var_map: ?*LocalVarMap, locations: LocationTracker, symbol_table: ?*SymbolTable, builtin_registry: ?*const lib.semantics.builtins.BuiltinRegistry, allocator: std.mem.Allocator, function_return_type: ?c.MlirType, function_return_type_info: ?lib.ast.Types.TypeInfo, ora_dialect: *@import("../dialect.zig").OraDialect, ensures_clauses: []*lib.ast.Expressions.ExprNode) StatementLowerer {
+    pub fn init(ctx: c.MlirContext, block: c.MlirBlock, type_mapper: *const TypeMapper, expr_lowerer: *const ExpressionLowerer, param_map: ?*const ParamMap, storage_map: ?*const StorageMap, local_var_map: ?*LocalVarMap, locations: LocationTracker, symbol_table: ?*SymbolTable, builtin_registry: ?*const lib.semantics.builtins.BuiltinRegistry, allocator: std.mem.Allocator, refinement_guard_cache: ?*std.AutoHashMap(u128, void), function_return_type: ?c.MlirType, function_return_type_info: ?lib.ast.Types.TypeInfo, ora_dialect: *@import("../dialect.zig").OraDialect, ensures_clauses: []*lib.ast.Expressions.ExprNode) StatementLowerer {
         return .{
             .ctx = ctx,
             .block = block,
@@ -100,6 +106,7 @@ pub const StatementLowerer = struct {
             .builtin_registry = builtin_registry,
             .memory_manager = MemoryManager.init(ctx, ora_dialect),
             .allocator = allocator,
+            .refinement_guard_cache = refinement_guard_cache,
             .current_function_return_type = function_return_type,
             .current_function_return_type_info = function_return_type_info,
             .ora_dialect = ora_dialect,
@@ -108,6 +115,10 @@ pub const StatementLowerer = struct {
             .ensures_clauses = ensures_clauses,
             .in_try_block = false,
             .force_stack_memref = false,
+            .active_condition_span = null,
+            .active_condition_value = null,
+            .active_condition_safe = false,
+            .active_condition_expr = null,
         };
     }
 
@@ -201,8 +212,8 @@ pub const StatementLowerer = struct {
                 try verification.lowerEnsures(self, &ensures);
                 return null;
             },
-            .Assume => |assume| {
-                try verification.lowerAssume(self, &assume);
+            .Assume => |*assume| {
+                try verification.lowerAssume(self, assume);
                 return null;
             },
             .Havoc => |havoc| {
@@ -280,6 +291,8 @@ pub const StatementLowerer = struct {
         var current_block = initial_block;
 
         var expr_lowerer = ExpressionLowerer.init(self.ctx, current_block, self.type_mapper, self.param_map, self.storage_map, self.local_var_map, self.symbol_table, self.builtin_registry, self.expr_lowerer.error_handler, self.locations, self.ora_dialect);
+        expr_lowerer.refinement_base_cache = self.expr_lowerer.refinement_base_cache;
+        expr_lowerer.refinement_guard_cache = self.refinement_guard_cache;
         expr_lowerer.current_function_return_type = self.current_function_return_type;
         expr_lowerer.current_function_return_type_info = self.current_function_return_type_info;
         expr_lowerer.in_try_block = self.in_try_block;
@@ -307,7 +320,7 @@ pub const StatementLowerer = struct {
                 // If then returns but no else, and next statement is return, merge them
                 if (then_returns and !else_returns and if_stmt.else_branch == null and next_stmt.* == .Return) {
                     expr_lowerer.block = current_block;
-                    var stmt_lowerer = StatementLowerer.init(self.ctx, current_block, self.type_mapper, &expr_lowerer, self.param_map, self.storage_map, self.local_var_map, self.locations, self.symbol_table, self.builtin_registry, self.allocator, self.current_function_return_type, self.current_function_return_type_info, self.ora_dialect, self.ensures_clauses);
+                    var stmt_lowerer = StatementLowerer.init(self.ctx, current_block, self.type_mapper, &expr_lowerer, self.param_map, self.storage_map, self.local_var_map, self.locations, self.symbol_table, self.builtin_registry, self.allocator, self.refinement_guard_cache, self.current_function_return_type, self.current_function_return_type_info, self.ora_dialect, self.ensures_clauses);
                     stmt_lowerer.force_stack_memref = self.force_stack_memref;
                     stmt_lowerer.label_context = self.label_context;
                     stmt_lowerer.in_try_block = self.in_try_block;
@@ -324,7 +337,7 @@ pub const StatementLowerer = struct {
             // Update expr_lowerer's block if it changed
             expr_lowerer.block = current_block;
 
-            var stmt_lowerer = StatementLowerer.init(self.ctx, current_block, self.type_mapper, &expr_lowerer, self.param_map, self.storage_map, self.local_var_map, self.locations, self.symbol_table, self.builtin_registry, self.allocator, self.current_function_return_type, self.current_function_return_type_info, self.ora_dialect, self.ensures_clauses);
+            var stmt_lowerer = StatementLowerer.init(self.ctx, current_block, self.type_mapper, &expr_lowerer, self.param_map, self.storage_map, self.local_var_map, self.locations, self.symbol_table, self.builtin_registry, self.allocator, self.refinement_guard_cache, self.current_function_return_type, self.current_function_return_type_info, self.ora_dialect, self.ensures_clauses);
             stmt_lowerer.force_stack_memref = self.force_stack_memref;
             stmt_lowerer.label_context = self.label_context;
             stmt_lowerer.in_try_block = self.in_try_block;
@@ -340,12 +353,24 @@ pub const StatementLowerer = struct {
             };
 
             // If statement returns a new block, subsequent statements go there
+            const created_new_block = maybe_new_block != null;
             if (maybe_new_block) |new_block| {
                 log.debug("[lowerBlockBody] Got new block from lowerStatement, updating current_block\n", .{});
                 current_block = new_block;
+                if (stmt_idx == b.statements.len - 1 and !helpers.blockEndsWithTerminator(&stmt_lowerer, current_block)) {
+                    const next_block = c.oraBlockGetNextInRegion(current_block);
+                    if (c.mlirBlockIsNull(next_block)) {
+                        log.debug("[lowerBlockBody] No next block in region for tail continue block\n", .{});
+                    } else {
+                        const loc = self.fileLoc(self.getStatementSpan(s));
+                        const br = self.ora_dialect.createCfBr(next_block, loc);
+                        h.appendOp(current_block, br);
+                        has_terminator = true;
+                    }
+                }
             }
 
-            if (is_terminator or helpers.blockEndsWithTerminator(&stmt_lowerer, current_block)) {
+            if (is_terminator or (!created_new_block and helpers.blockEndsWithTerminator(&stmt_lowerer, current_block))) {
                 has_terminator = true;
             } else if (s.* == .TryBlock and stmt_idx == b.statements.len - 1 and self.current_function_return_type != null and !isInsideLoopContext(self.label_context)) {
                 // Only generate return after try block if NOT inside a for/while loop
@@ -363,7 +388,48 @@ pub const StatementLowerer = struct {
             st.popScope();
         }
 
+        @constCast(self).last_block = current_block;
         return has_terminator;
+    }
+
+    fn fixEmptyBlocksInOp(self: *const StatementLowerer, op: c.MlirOperation) void {
+        const num_regions = c.oraOperationGetNumRegions(op);
+        var region_idx: usize = 0;
+        while (region_idx < num_regions) : (region_idx += 1) {
+            const region = c.oraOperationGetRegion(op, region_idx);
+            fixEmptyBlocksInRegion(self, region);
+        }
+    }
+
+    fn fixEmptyBlocksInRegion(self: *const StatementLowerer, region: c.MlirRegion) void {
+        if (c.oraRegionIsNull(region)) return;
+
+        var block = c.oraRegionGetFirstBlock(region);
+        while (!c.mlirBlockIsNull(block)) : (block = c.oraBlockGetNextInRegion(block)) {
+            var op = c.oraBlockGetFirstOperation(block);
+            while (!c.oraOperationIsNull(op)) : (op = c.oraOperationGetNextInBlock(op)) {
+                fixEmptyBlocksInOp(self, op);
+            }
+
+            if (!helpers.blockEndsWithTerminator(self, block)) {
+                const first_op = c.oraBlockGetFirstOperation(block);
+                if (c.oraOperationIsNull(first_op)) {
+                    const next_block = c.oraBlockGetNextInRegion(block);
+                    if (!c.mlirBlockIsNull(next_block)) {
+                        const br = self.ora_dialect.createCfBr(next_block, h.unknownLoc(self.ctx));
+                        h.appendOp(block, br);
+                    }
+                }
+            }
+        }
+    }
+
+    pub fn fixEmptyBlocks(self: *const StatementLowerer) void {
+        if (self.current_func_op) |func_op| {
+            if (!c.oraOperationIsNull(func_op)) {
+                fixEmptyBlocksInOp(self, func_op);
+            }
+        }
     }
 
     /// Create file location for operations

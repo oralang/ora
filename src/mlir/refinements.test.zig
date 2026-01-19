@@ -40,6 +40,9 @@ test "refinement guard reports error for null value" {
         mlir.MlirValue{ .ptr = null },
         refinement_type,
         span,
+        null,
+        null,
+        null,
     );
 
     try testing.expect(handler.hasErrors());
@@ -80,7 +83,7 @@ test "non_zero_address refinement emits guard op" {
     const refinement_type = lib.ast.type_info.OraType{ .non_zero_address = {} };
     const span = lib.ast.SourceSpan{ .line = 1, .column = 1, .length = 1 };
 
-    try lowerer.insertRefinementGuard(block, addr_value, refinement_type, span);
+    try lowerer.insertRefinementGuard(block, addr_value, refinement_type, span, null, null, null);
 
     var found_guard = false;
     var current = mlir.oraBlockGetFirstOperation(block);

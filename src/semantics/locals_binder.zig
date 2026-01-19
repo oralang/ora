@@ -19,6 +19,7 @@
 const std = @import("std");
 const ast = @import("../ast.zig");
 const state = @import("state.zig");
+const type_info = @import("../ast/type_info.zig");
 fn mapBlockScope(table: *state.SymbolTable, block: *const ast.Statements.BlockNode, scope: *state.Scope) !void {
     const key: usize = @intFromPtr(block);
     try table.block_scopes.put(key, scope);
@@ -42,7 +43,6 @@ fn createChildScope(table: *state.SymbolTable, parent: *state.Scope, name: ?[]co
     try table.scopes.append(table.allocator, sc);
     return sc;
 }
-
 
 pub fn bindFunctionLocals(table: *state.SymbolTable, fn_scope: *state.Scope, f: *const ast.FunctionNode) !void {
     // associate the function body block with the function scope
@@ -142,7 +142,9 @@ fn bindBlock(table: *state.SymbolTable, scope: *state.Scope, block: *const ast.S
                     const catch_scope = try createChildScope(table, scope, scope.name);
                     try mapBlockScopeFromStmt(table, stmt, 1, catch_scope);
                     if (cb.error_variable) |ename| {
-                        const sym = state.Symbol{ .name = ename, .kind = .Var, .typ = null, .span = cb.span, .mutable = false };
+                        var error_type = type_info.CommonTypes.u256_type();
+                        error_type.span = cb.span;
+                        const sym = state.Symbol{ .name = ename, .kind = .Var, .typ = error_type, .span = cb.span, .mutable = false };
                         _ = try table.declare(catch_scope, sym);
                     }
                     try bindBlock(table, catch_scope, &cb.block);

@@ -166,10 +166,10 @@ pub fn lowerStackVariableDecl(self: *const StatementLowerer, var_decl: *const li
 
         // initialize the variable if there's an initializer
         if (var_decl.value) |init_expr| {
-            var init_value = helpers.lowerValueWithImplicitTry(self, &init_expr.*, var_decl.type_info);
+            var init_value = helpers.lowerValueWithImplicitTry(@constCast(self), &init_expr.*, var_decl.type_info);
 
             // insert refinement guard for variable initialization (skip if optimized)
-            init_value = try helpers.insertRefinementGuard(self, init_value, ora_type, var_decl.span, var_decl.skip_guard);
+            init_value = try helpers.insertRefinementGuard(self, init_value, ora_type, var_decl.span, var_decl.name, var_decl.skip_guard);
 
             // ensure value type matches memref element type (both should be Ora types now)
             const element_type = c.oraShapedTypeGetElementType(memref_type);
@@ -182,7 +182,7 @@ pub fn lowerStackVariableDecl(self: *const StatementLowerer, var_decl: *const li
             var default_value = try createDefaultValue(self, mlir_type, var_decl.kind, loc);
 
             // insert refinement guard for default value
-            default_value = try helpers.insertRefinementGuard(self, default_value, ora_type, var_decl.span, var_decl.skip_guard);
+            default_value = try helpers.insertRefinementGuard(self, default_value, ora_type, var_decl.span, var_decl.name, var_decl.skip_guard);
 
             // ensure value type matches memref element type (both should be Ora types now)
             const element_type = c.oraShapedTypeGetElementType(memref_type);
@@ -213,7 +213,7 @@ pub fn lowerStackVariableDecl(self: *const StatementLowerer, var_decl: *const li
 
         if (var_decl.value) |init_expr| {
             // lower the initializer expression
-            init_value = helpers.lowerValueWithImplicitTry(self, &init_expr.*, var_decl.type_info);
+            init_value = helpers.lowerValueWithImplicitTry(@constCast(self), &init_expr.*, var_decl.type_info);
 
             // ensure the initializer value matches the declared type
             // this is critical for structs - if map load returns i256, convert it to struct type
@@ -223,7 +223,7 @@ pub fn lowerStackVariableDecl(self: *const StatementLowerer, var_decl: *const li
                 init_value = self.expr_lowerer.convertToType(init_value, expected_type, var_decl.span);
 
                 // insert refinement guard for variable initialization (skip if optimized)
-                init_value = try helpers.insertRefinementGuard(self, init_value, ora_type, var_decl.span, var_decl.skip_guard);
+                init_value = try helpers.insertRefinementGuard(self, init_value, ora_type, var_decl.span, var_decl.name, var_decl.skip_guard);
             }
         } else {
             // create default value based on variable kind
@@ -231,7 +231,7 @@ pub fn lowerStackVariableDecl(self: *const StatementLowerer, var_decl: *const li
 
             // insert refinement guard for default value (skip if optimized)
             if (var_decl.type_info.ora_type) |ora_type| {
-                init_value = try helpers.insertRefinementGuard(self, init_value, ora_type, var_decl.span, var_decl.skip_guard);
+                init_value = try helpers.insertRefinementGuard(self, init_value, ora_type, var_decl.span, var_decl.name, var_decl.skip_guard);
             }
         }
 
@@ -257,7 +257,7 @@ pub fn lowerStorageVariableDecl(self: *const StatementLowerer, var_decl: *const 
     // storage variables are typically handled at the contract level
     // if there's an initializer, we need to generate a store operation
     if (var_decl.value) |init_expr| {
-        const init_value = helpers.lowerValueWithImplicitTry(self, &init_expr.*, var_decl.type_info);
+        const init_value = helpers.lowerValueWithImplicitTry(@constCast(self), &init_expr.*, var_decl.type_info);
 
         // generate storage store operation
         const store_op = self.memory_manager.createStorageStore(init_value, var_decl.name, loc);
@@ -281,7 +281,7 @@ pub fn lowerMemoryVariableDecl(self: *const StatementLowerer, var_decl: *const l
 
     if (var_decl.value) |init_expr| {
         // lower initializer first; array literals already produce a memref
-        const init_value = helpers.lowerValueWithImplicitTry(self, &init_expr.*, var_decl.type_info);
+        const init_value = helpers.lowerValueWithImplicitTry(@constCast(self), &init_expr.*, var_decl.type_info);
         const init_type = c.oraValueGetType(init_value);
 
         if (c.oraTypeIsAMemRef(init_type)) {

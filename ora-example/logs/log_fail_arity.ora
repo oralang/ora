@@ -1,0 +1,8 @@
+contract LogFailArity {
+    log Transfer(from: address, amount: u256);
+
+    pub fn run(addr: address) {
+        // Missing amount argument: should fail type resolution / lowering.
+        log Transfer(addr);
+    }
+}
