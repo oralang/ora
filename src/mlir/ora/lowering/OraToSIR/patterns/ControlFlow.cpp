@@ -211,13 +211,16 @@ LogicalResult ConvertRangeOp::matchAndRewrite(
 }
 
 // -----------------------------------------------------------------------------
-// Lower ora.try_catch -> passthrough of try operand (ignore catch region)
+// Lower ora.try_catch -> scf.if with catch region
 // -----------------------------------------------------------------------------
 LogicalResult ConvertTryCatchOp::matchAndRewrite(
     ora::TryOp op,
     typename ora::TryOp::Adaptor adaptor,
     ConversionPatternRewriter &rewriter) const
 {
+    auto loc = op.getLoc();
+    auto *ctx = rewriter.getContext();
+
     auto resultType = op.getResult().getType();
     if (auto *tc = getTypeConverter())
     {
@@ -226,25 +229,245 @@ LogicalResult ConvertTryCatchOp::matchAndRewrite(
     }
 
     Value value = adaptor.getTryOperation();
-    if (value.getType() != resultType)
+    if (!llvm::isa<ora::ErrorUnionType>(op.getTryOperation().getType()))
     {
-        if (llvm::isa<sir::PtrType>(resultType) && llvm::isa<sir::U256Type>(value.getType()))
+        if (value.getType() != resultType)
         {
-            Value casted = rewriter.create<sir::BitcastOp>(op.getLoc(), resultType, value);
-            rewriter.replaceOp(op, casted);
-            return success();
+            if (llvm::isa<sir::PtrType>(resultType) && llvm::isa<sir::U256Type>(value.getType()))
+            {
+                Value casted = rewriter.create<sir::BitcastOp>(loc, resultType, value);
+                rewriter.replaceOp(op, casted);
+                return success();
+            }
+            if (llvm::isa<sir::U256Type>(resultType) && llvm::isa<sir::PtrType>(value.getType()))
+            {
+                Value casted = rewriter.create<sir::BitcastOp>(loc, resultType, value);
+                rewriter.replaceOp(op, casted);
+                return success();
+            }
+            return failure();
         }
-        if (llvm::isa<sir::U256Type>(resultType) && llvm::isa<sir::PtrType>(value.getType()))
-        {
-            Value casted = rewriter.create<sir::BitcastOp>(op.getLoc(), resultType, value);
-            rewriter.replaceOp(op, casted);
-            return success();
-        }
-        // types should be equivalent after conversion; bail if they aren't
-        return failure();
+
+        rewriter.replaceOp(op, value);
+        return success();
     }
 
-    rewriter.replaceOp(op, value);
+    auto u256Type = sir::U256Type::get(ctx);
+    auto i1Type = mlir::IntegerType::get(ctx, 1);
+    auto ui64Type = mlir::IntegerType::get(ctx, 64, mlir::IntegerType::Unsigned);
+    auto oneAttr = mlir::IntegerAttr::get(ui64Type, 1);
+    Value one = rewriter.create<sir::ConstOp>(loc, u256Type, oneAttr);
+
+    Value valueU256 = value;
+    if (valueU256.getType() != u256Type)
+        valueU256 = rewriter.create<sir::BitcastOp>(loc, u256Type, valueU256);
+
+    Value masked = rewriter.create<sir::AndOp>(loc, u256Type, valueU256, one);
+    Value isErrU256 = rewriter.create<sir::EqOp>(loc, u256Type, masked, one);
+    Value isErr = rewriter.create<sir::BitcastOp>(loc, i1Type, isErrU256);
+
+    SmallVector<Type> resultTypes;
+    resultTypes.push_back(resultType);
+    auto ifOp = rewriter.create<mlir::scf::IfOp>(loc, resultTypes, isErr, /*withElseRegion=*/true);
+
+    rewriter.inlineRegionBefore(op.getCatchRegion(), ifOp.getThenRegion(), ifOp.getThenRegion().end());
+
+    auto replaceYield = [&](mlir::Region &region) -> LogicalResult {
+        SmallVector<ora::YieldOp, 4> yields;
+        region.walk([&](ora::YieldOp y) { yields.push_back(y); });
+        for (auto y : yields)
+        {
+            rewriter.setInsertionPoint(y);
+            rewriter.replaceOpWithNewOp<mlir::scf::YieldOp>(y, y.getOperands());
+        }
+        return success();
+    };
+
+    if (failed(replaceYield(ifOp.getThenRegion())))
+        return failure();
+
+    // else branch runs try region and yields its value
+    auto &tryRegion = op.getTryRegion();
+    if (!tryRegion.empty())
+    {
+        auto &tryBlock = tryRegion.front();
+        auto *term = tryBlock.getTerminator();
+        auto yieldOp = dyn_cast_or_null<ora::YieldOp>(term);
+        if (!yieldOp || yieldOp.getNumOperands() != 1)
+            return failure();
+
+        Value tryVal = yieldOp.getOperand(0);
+        term->erase();
+        rewriter.inlineBlockBefore(&tryBlock, &ifOp.getElseRegion().front(), ifOp.getElseRegion().front().begin());
+        rewriter.setInsertionPointToStart(&ifOp.getElseRegion().front());
+        rewriter.create<mlir::scf::YieldOp>(loc, ValueRange{tryVal});
+    }
+    else
+    {
+        // fallback: yield unwrapped payload
+        Value unwrapped = rewriter.create<sir::ShrOp>(loc, u256Type, one, valueU256);
+        if (resultType != u256Type)
+            unwrapped = rewriter.create<sir::BitcastOp>(loc, resultType, unwrapped);
+        rewriter.setInsertionPointToStart(&ifOp.getElseRegion().front());
+        rewriter.create<mlir::scf::YieldOp>(loc, ValueRange{unwrapped});
+    }
+
+    rewriter.replaceOp(op, ifOp.getResults());
+    return success();
+}
+
+// -----------------------------------------------------------------------------
+// Lower ora.error.ok / ora.error.err -> pack payload into tagged value
+// Layout: (payload << 1) | tag, where tag=0 for ok, tag=1 for error.
+// -----------------------------------------------------------------------------
+LogicalResult ConvertErrorOkOp::matchAndRewrite(
+    ora::ErrorOkOp op,
+    typename ora::ErrorOkOp::Adaptor adaptor,
+    ConversionPatternRewriter &rewriter) const
+{
+    auto *ctx = rewriter.getContext();
+    auto loc = op.getLoc();
+    auto u256Type = sir::U256Type::get(ctx);
+    auto ui64Type = mlir::IntegerType::get(ctx, 64, mlir::IntegerType::Unsigned);
+    auto oneAttr = mlir::IntegerAttr::get(ui64Type, 1);
+    auto zeroAttr = mlir::IntegerAttr::get(ui64Type, 0);
+    Value one = rewriter.create<sir::ConstOp>(loc, u256Type, oneAttr);
+    Value zero = rewriter.create<sir::ConstOp>(loc, u256Type, zeroAttr);
+
+    auto resultType = op.getResult().getType();
+    if (auto *tc = getTypeConverter())
+        if (auto converted = tc->convertType(resultType))
+            resultType = converted;
+
+    Value value = adaptor.getValue();
+    if (value.getType() != u256Type)
+        value = rewriter.create<sir::BitcastOp>(loc, u256Type, value);
+
+    Value shifted = rewriter.create<sir::ShlOp>(loc, u256Type, one, value);
+    Value packed = rewriter.create<sir::OrOp>(loc, u256Type, shifted, zero);
+    if (resultType != u256Type)
+        packed = rewriter.create<sir::BitcastOp>(loc, resultType, packed);
+
+    rewriter.replaceOp(op, packed);
+    return success();
+}
+
+LogicalResult ConvertErrorErrOp::matchAndRewrite(
+    ora::ErrorErrOp op,
+    typename ora::ErrorErrOp::Adaptor adaptor,
+    ConversionPatternRewriter &rewriter) const
+{
+    auto *ctx = rewriter.getContext();
+    auto loc = op.getLoc();
+    auto u256Type = sir::U256Type::get(ctx);
+    auto ui64Type = mlir::IntegerType::get(ctx, 64, mlir::IntegerType::Unsigned);
+    auto oneAttr = mlir::IntegerAttr::get(ui64Type, 1);
+    Value one = rewriter.create<sir::ConstOp>(loc, u256Type, oneAttr);
+
+    auto resultType = op.getResult().getType();
+    if (auto *tc = getTypeConverter())
+        if (auto converted = tc->convertType(resultType))
+            resultType = converted;
+
+    Value value = adaptor.getValue();
+    if (value.getType() != u256Type)
+        value = rewriter.create<sir::BitcastOp>(loc, u256Type, value);
+
+    Value shifted = rewriter.create<sir::ShlOp>(loc, u256Type, one, value);
+    Value packed = rewriter.create<sir::OrOp>(loc, u256Type, shifted, one);
+    if (resultType != u256Type)
+        packed = rewriter.create<sir::BitcastOp>(loc, resultType, packed);
+
+    rewriter.replaceOp(op, packed);
+    return success();
+}
+
+// -----------------------------------------------------------------------------
+// Lower ora.error.is_error -> check LSB of encoded value
+// -----------------------------------------------------------------------------
+LogicalResult ConvertErrorIsErrorOp::matchAndRewrite(
+    ora::ErrorIsErrorOp op,
+    typename ora::ErrorIsErrorOp::Adaptor adaptor,
+    ConversionPatternRewriter &rewriter) const
+{
+    auto *ctx = rewriter.getContext();
+    auto loc = op.getLoc();
+    auto u256Type = sir::U256Type::get(ctx);
+    auto i1Type = mlir::IntegerType::get(ctx, 1);
+    auto ui64Type = mlir::IntegerType::get(ctx, 64, mlir::IntegerType::Unsigned);
+    auto oneAttr = mlir::IntegerAttr::get(ui64Type, 1);
+    Value one = rewriter.create<sir::ConstOp>(loc, u256Type, oneAttr);
+
+    Value value = adaptor.getValue();
+    if (value.getType() != u256Type)
+        value = rewriter.create<sir::BitcastOp>(loc, u256Type, value);
+
+    Value masked = rewriter.create<sir::AndOp>(loc, u256Type, value, one);
+    Value isErrU256 = rewriter.create<sir::EqOp>(loc, u256Type, masked, one);
+    Value isErr = rewriter.create<sir::BitcastOp>(loc, i1Type, isErrU256);
+
+    rewriter.replaceOp(op, isErr);
+    return success();
+}
+
+// -----------------------------------------------------------------------------
+// Lower ora.error.unwrap / ora.error.get_error -> shift right by 1
+// -----------------------------------------------------------------------------
+LogicalResult ConvertErrorUnwrapOp::matchAndRewrite(
+    ora::ErrorUnwrapOp op,
+    typename ora::ErrorUnwrapOp::Adaptor adaptor,
+    ConversionPatternRewriter &rewriter) const
+{
+    auto *ctx = rewriter.getContext();
+    auto loc = op.getLoc();
+    auto u256Type = sir::U256Type::get(ctx);
+    auto ui64Type = mlir::IntegerType::get(ctx, 64, mlir::IntegerType::Unsigned);
+    auto oneAttr = mlir::IntegerAttr::get(ui64Type, 1);
+    Value one = rewriter.create<sir::ConstOp>(loc, u256Type, oneAttr);
+
+    auto resultType = op.getResult().getType();
+    if (auto *tc = getTypeConverter())
+        if (auto converted = tc->convertType(resultType))
+            resultType = converted;
+
+    Value value = adaptor.getValue();
+    if (value.getType() != u256Type)
+        value = rewriter.create<sir::BitcastOp>(loc, u256Type, value);
+
+    Value shifted = rewriter.create<sir::ShrOp>(loc, u256Type, one, value);
+    if (resultType != u256Type)
+        shifted = rewriter.create<sir::BitcastOp>(loc, resultType, shifted);
+
+    rewriter.replaceOp(op, shifted);
+    return success();
+}
+
+LogicalResult ConvertErrorGetErrorOp::matchAndRewrite(
+    ora::ErrorGetErrorOp op,
+    typename ora::ErrorGetErrorOp::Adaptor adaptor,
+    ConversionPatternRewriter &rewriter) const
+{
+    auto *ctx = rewriter.getContext();
+    auto loc = op.getLoc();
+    auto u256Type = sir::U256Type::get(ctx);
+    auto ui64Type = mlir::IntegerType::get(ctx, 64, mlir::IntegerType::Unsigned);
+    auto oneAttr = mlir::IntegerAttr::get(ui64Type, 1);
+    Value one = rewriter.create<sir::ConstOp>(loc, u256Type, oneAttr);
+
+    auto resultType = op.getResult().getType();
+    if (auto *tc = getTypeConverter())
+        if (auto converted = tc->convertType(resultType))
+            resultType = converted;
+
+    Value value = adaptor.getValue();
+    if (value.getType() != u256Type)
+        value = rewriter.create<sir::BitcastOp>(loc, u256Type, value);
+
+    Value shifted = rewriter.create<sir::ShrOp>(loc, u256Type, one, value);
+    if (resultType != u256Type)
+        shifted = rewriter.create<sir::BitcastOp>(loc, resultType, shifted);
+
+    rewriter.replaceOp(op, shifted);
     return success();
 }
 
@@ -643,6 +866,95 @@ LogicalResult ConvertIfOp::matchAndRewrite(
     return success();
 }
 
+LogicalResult ConvertIsolatedIfOp::matchAndRewrite(
+    ora::IsolatedIfOp op,
+    typename ora::IsolatedIfOp::Adaptor adaptor,
+    ConversionPatternRewriter &rewriter) const
+{
+    auto loc = op.getLoc();
+    auto ctx = rewriter.getContext();
+
+    SmallVector<Type> resultTypes;
+    if (auto *tc = getTypeConverter())
+    {
+        for (Type t : op.getResultTypes())
+        {
+            Type converted = tc->convertType(t);
+            if (!converted)
+                return rewriter.notifyMatchFailure(op, "failed to convert if result type");
+            resultTypes.push_back(converted);
+        }
+    }
+
+    Value cond = adaptor.getCondition();
+    auto i1Type = mlir::IntegerType::get(ctx, 1);
+    if (auto intType = dyn_cast<mlir::IntegerType>(cond.getType()))
+    {
+        if (intType.getWidth() != 1)
+        {
+            auto zero = rewriter.create<mlir::arith::ConstantOp>(
+                loc,
+                intType,
+                rewriter.getIntegerAttr(intType, 0));
+            cond = rewriter.create<mlir::arith::CmpIOp>(
+                loc,
+                mlir::arith::CmpIPredicate::ne,
+                cond,
+                zero);
+        }
+    }
+    else if (llvm::isa<sir::U256Type>(cond.getType()))
+    {
+        auto i256Type = mlir::IntegerType::get(ctx, 256);
+        auto zero = rewriter.create<mlir::arith::ConstantOp>(
+            loc,
+            i256Type,
+            rewriter.getIntegerAttr(i256Type, 0));
+        auto condI256 = rewriter.create<sir::BitcastOp>(loc, i256Type, cond);
+        cond = rewriter.create<mlir::arith::CmpIOp>(
+            loc,
+            mlir::arith::CmpIPredicate::ne,
+            condI256,
+            zero);
+    }
+
+    if (cond.getType() != i1Type)
+    {
+        return rewriter.notifyMatchFailure(op, "if condition is not i1 after conversion");
+    }
+
+    auto ifOp = rewriter.create<mlir::scf::IfOp>(loc, resultTypes, cond, /*withElseRegion=*/true);
+
+    rewriter.inlineRegionBefore(op.getThenRegion(), ifOp.getThenRegion(), ifOp.getThenRegion().end());
+    rewriter.inlineRegionBefore(op.getElseRegion(), ifOp.getElseRegion(), ifOp.getElseRegion().end());
+
+    auto replaceYield = [&](mlir::Region &region) -> LogicalResult {
+        SmallVector<ora::YieldOp, 4> yields;
+        region.walk([&](ora::YieldOp y) { yields.push_back(y); });
+        for (auto y : yields)
+        {
+            if (resultTypes.empty() && y.getNumOperands() != 0)
+            {
+                return rewriter.notifyMatchFailure(op, "if has yields but no results");
+            }
+            rewriter.setInsertionPoint(y);
+            if (resultTypes.empty())
+                rewriter.replaceOpWithNewOp<mlir::scf::YieldOp>(y, ValueRange{});
+            else
+                rewriter.replaceOpWithNewOp<mlir::scf::YieldOp>(y, y.getOperands());
+        }
+        return success();
+    };
+
+    if (failed(replaceYield(ifOp.getThenRegion())))
+        return failure();
+    if (failed(replaceYield(ifOp.getElseRegion())))
+        return failure();
+
+    rewriter.replaceOp(op, ifOp.getResults());
+    return success();
+}
+
 LogicalResult ConvertBreakOp::matchAndRewrite(
     ora::BreakOp op,
     typename ora::BreakOp::Adaptor /*adaptor*/,
@@ -652,7 +964,7 @@ LogicalResult ConvertBreakOp::matchAndRewrite(
     if (!parent)
         return rewriter.notifyMatchFailure(op, "break has no parent op");
 
-    if (isa<mlir::scf::ExecuteRegionOp, mlir::scf::IfOp, ora::IfOp, ora::TryOp, mlir::scf::WhileOp, ora::WhileOp, mlir::scf::ForOp>(parent))
+    if (isa<mlir::scf::ExecuteRegionOp, mlir::scf::IfOp, ora::IfOp, ora::IsolatedIfOp, ora::TryOp, mlir::scf::WhileOp, ora::WhileOp, mlir::scf::ForOp>(parent))
     {
         rewriter.replaceOpWithNewOp<mlir::scf::YieldOp>(op, ValueRange{});
         return success();
@@ -670,7 +982,7 @@ LogicalResult ConvertContinueOp::matchAndRewrite(
     if (!parent)
         return rewriter.notifyMatchFailure(op, "continue has no parent op");
 
-    if (isa<mlir::scf::ExecuteRegionOp, mlir::scf::IfOp, ora::IfOp, ora::TryOp, mlir::scf::WhileOp, ora::WhileOp, mlir::scf::ForOp>(parent))
+    if (isa<mlir::scf::ExecuteRegionOp, mlir::scf::IfOp, ora::IfOp, ora::IsolatedIfOp, ora::TryOp, mlir::scf::WhileOp, ora::WhileOp, mlir::scf::ForOp>(parent))
     {
         rewriter.replaceOpWithNewOp<mlir::scf::YieldOp>(op, ValueRange{});
         return success();

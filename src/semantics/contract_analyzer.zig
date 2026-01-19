@@ -22,6 +22,10 @@ pub fn collectContractSymbols(table: *state.SymbolTable, root: *state.Scope, c: 
     contract_scope.* = state.Scope.init(table.allocator, root, c.name);
     try table.scopes.append(table.allocator, contract_scope);
     try table.contract_scopes.put(c.name, contract_scope);
+    if (table.contract_log_signatures.getPtr(c.name) == null) {
+        const log_map = std.StringHashMap([]const ast.LogField).init(table.allocator);
+        try table.contract_log_signatures.put(c.name, log_map);
+    }
     for (c.body) |*member| switch (member.*) {
         .Function => |*f| try fun.collectFunctionSymbols(table, contract_scope, f),
         .VariableDecl => |v| {
@@ -42,7 +46,9 @@ pub fn collectContractSymbols(table: *state.SymbolTable, root: *state.Scope, c: 
             const sym = state.Symbol{ .name = l.name, .kind = .Log, .span = l.span };
             _ = try table.declare(contract_scope, sym);
             // record log signature for semantic checks
-            try table.log_signatures.put(l.name, l.fields);
+            if (table.contract_log_signatures.getPtr(c.name)) |log_map| {
+                try log_map.put(l.name, l.fields);
+            }
         },
         .ErrorDecl => |err| {
             const sym = state.Symbol{ .name = err.name, .kind = .Error, .span = err.span };

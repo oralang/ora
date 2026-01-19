@@ -23,6 +23,7 @@ pub const VerificationErrorType = enum {
     InvariantViolation,
     PreconditionViolation,
     PostconditionViolation,
+    RefinementViolation,
     UnreachableCode,
     Unknown,
 };

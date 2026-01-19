@@ -1,0 +1,6 @@
+contract LogFailUnknown {
+    pub fn run() {
+        // No log declaration for MissingEvent.
+        log MissingEvent();
+    }
+}

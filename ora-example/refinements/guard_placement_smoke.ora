@@ -1,0 +1,46 @@
+// Guard placement smoke tests for refinements
+contract GuardPlacementSmoke {
+    // Assignment to refinement type should guard on init and assignment
+    pub fn assign_refinement() -> MinValue<u256, 10> {
+        var x: MinValue<u256, 10> = 10;
+        x = 12;
+        return x;
+    }
+
+    // Return refinement from expression should guard at return
+    pub fn return_expr_refinement(a: u256) -> MinValue<u256, 0> {
+        return a + 1;
+    }
+
+    // Assignment from non-constant expression should guard on assignment
+    pub fn assign_refinement_nonconst(a: u256) -> MinValue<u256, 0> {
+        var x: MinValue<u256, 0> = 0;
+        x = a + 1;
+        return x;
+    }
+
+    // If/else assignments into refinement variable should guard on assignment
+    pub fn if_assign_refinement(a: u256) -> MinValue<u256, 0> {
+        var x: MinValue<u256, 0> = 0;
+        if (a > 0) {
+            x = 1;
+        } else {
+            x = 2;
+        }
+        return x;
+    }
+
+    // Switch assignments into refinement variable should guard on assignment
+    pub fn switch_assign_refinement(a: u256) -> MinValue<u256, 0> {
+        var x: MinValue<u256, 0> = 0;
+        switch (a) {
+            0 => {
+                x = 0;
+            },
+            else => {
+                x = 1;
+            }
+        }
+        return x;
+    }
+}

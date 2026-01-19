@@ -1073,6 +1073,22 @@ pub const OraDialect = struct {
         return op;
     }
 
+    /// Create ora.isolated_if operation using C++ API
+    pub fn createIsolatedIf(
+        self: *OraDialect,
+        condition: c.MlirValue,
+        loc: c.MlirLocation,
+    ) c.MlirOperation {
+        if (!self.isRegistered()) {
+            @panic("Ora dialect must be registered before creating operations");
+        }
+        const op = c.oraIsolatedIfOpCreate(self.ctx, loc, condition);
+        if (op.ptr == null) {
+            @panic("Failed to create ora.isolated_if operation");
+        }
+        return op;
+    }
+
     /// Create scf.if operation (legacy - for compatibility)
     pub fn createScfIf(
         self: *OraDialect,
@@ -1460,6 +1476,22 @@ pub const OraDialect = struct {
         const op = c.oraTryOpCreate(self.ctx, loc, try_operation, result_type);
         if (op.ptr == null) {
             @panic("Failed to create ora.try_catch operation");
+        }
+        return op;
+    }
+
+    /// Create ora.try_stmt operation
+    pub fn createTryStmt(
+        self: *OraDialect,
+        result_types: []const c.MlirType,
+        loc: c.MlirLocation,
+    ) c.MlirOperation {
+        if (!self.isRegistered()) {
+            @panic("Ora dialect must be registered before creating operations");
+        }
+        const op = c.oraTryStmtOpCreate(self.ctx, loc, result_types.ptr, result_types.len);
+        if (op.ptr == null) {
+            @panic("Failed to create ora.try_stmt operation");
         }
         return op;
     }

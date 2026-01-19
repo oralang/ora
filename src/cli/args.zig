@@ -9,6 +9,9 @@ pub const CliOptions = struct {
     input_file: ?[]const u8 = null,
     emit_tokens: bool = false,
     emit_ast: bool = false,
+    emit_ast_format: ?[]const u8 = null,
+    emit_typed_ast: bool = false,
+    emit_typed_ast_format: ?[]const u8 = null,
     emit_mlir: bool = false,
     emit_mlir_sir: bool = false,
     emit_cfg: bool = false,
@@ -48,6 +51,17 @@ pub fn parseArgs(args: []const []const u8) ParseError!CliOptions {
             i += 1;
         } else if (std.mem.eql(u8, arg, "--emit-ast")) {
             opts.emit_ast = true;
+            i += 1;
+        } else if (std.mem.startsWith(u8, arg, "--emit-ast=")) {
+            opts.emit_ast = true;
+            opts.emit_ast_format = arg["--emit-ast=".len..];
+            i += 1;
+        } else if (std.mem.eql(u8, arg, "--emit-typed-ast")) {
+            opts.emit_typed_ast = true;
+            i += 1;
+        } else if (std.mem.startsWith(u8, arg, "--emit-typed-ast=")) {
+            opts.emit_typed_ast = true;
+            opts.emit_typed_ast_format = arg["--emit-typed-ast=".len..];
             i += 1;
         } else if (std.mem.eql(u8, arg, "--emit-mlir")) {
             opts.emit_mlir = true;

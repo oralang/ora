@@ -1,0 +1,28 @@
+// ============================================================================
+// Error Union with Bool Payload
+// ============================================================================
+
+contract ErrorUnionBool {
+    error E1;
+
+    fn mayFail(x: u256) -> !bool | E1 {
+        if (x == 0) {
+            return E1;
+        }
+        return true;
+    }
+
+    fn unwrapWithTry(x: u256) -> !bool | E1 {
+        let ok: bool = try mayFail(x);
+        return ok;
+    }
+
+    fn handleWithCatch(x: u256) -> bool {
+        try {
+            let ok: bool = mayFail(x);
+            return ok;
+        } catch {
+            return false;
+        }
+    }
+}

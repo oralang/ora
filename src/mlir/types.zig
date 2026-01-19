@@ -616,7 +616,12 @@ pub const TypeMapper = struct {
 
     /// Convert union type
     pub fn mapUnionType(self: *const TypeMapper, union_info: anytype) c.MlirType {
-        _ = union_info; // Union variant types information
+        // Union variant types information.
+        // If this is an error union (first member is error_union), map to !ora.error_union<T>.
+        if (union_info.len > 0 and union_info[0] == .error_union) {
+            return self.mapErrorUnionType(union_info[0].error_union);
+        }
+
         // for now, use i256 as placeholder for union type
         // in the future, this could be a proper MLIR union type or custom type
         return c.oraIntegerTypeCreate(self.ctx, constants.DEFAULT_INTEGER_BITS);
@@ -884,6 +889,30 @@ pub const TypeMapper = struct {
             const convert_op = c.oraRefinementToBaseOpCreate(self.ctx, loc, value, block);
             if (convert_op.ptr != null) {
                 return h.getResult(convert_op, 0);
+            }
+        }
+
+        // base -> refinement conversion
+        const target_ref_base = c.oraRefinementTypeGetBaseType(target_type);
+        if (target_ref_base.ptr != null and c.oraTypeEqual(target_ref_base, value_type)) {
+            const loc = c.oraLocationUnknownGet(self.ctx);
+            const convert_op = c.oraBaseToRefinementOpCreate(self.ctx, loc, value, target_type, block);
+            if (convert_op.ptr != null) {
+                return h.getResult(convert_op, 0);
+            }
+        }
+
+        // refinement -> refinement conversion
+        if (refinement_base.ptr != null and target_ref_base.ptr != null) {
+            const loc = c.oraLocationUnknownGet(self.ctx);
+            const to_base_op = c.oraRefinementToBaseOpCreate(self.ctx, loc, value, block);
+            if (to_base_op.ptr != null) {
+                const base_val = h.getResult(to_base_op, 0);
+                const base_converted = self.createConversionOp(block, base_val, target_ref_base, null);
+                const to_ref_op = c.oraBaseToRefinementOpCreate(self.ctx, loc, base_converted, target_type, block);
+                if (to_ref_op.ptr != null) {
+                    return h.getResult(to_ref_op, 0);
+                }
             }
         }
 

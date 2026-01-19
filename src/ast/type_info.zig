@@ -66,6 +66,9 @@ pub const TypeInfo = struct {
 
     /// Check if type is fully resolved
     pub fn isResolved(self: TypeInfo) bool {
+        if (self.category == .Error) {
+            return true;
+        }
         return self.ora_type != null and self.category != .Unknown;
     }
 

@@ -461,9 +461,8 @@ pub fn parseQuantifiedExpression(parser: *ExpressionParser) ParserError!ast.Expr
         condition = cond_ptr;
     }
 
-    // expect "=>" (parsed as two tokens: = and >)
-    _ = try parser.base.consume(.Equal, "Expected '=>' after quantifier condition");
-    _ = try parser.base.consume(.Greater, "Expected '>' after '=' in '=>'");
+    // expect "=>" (single Arrow token)
+    _ = try parser.base.consume(.Arrow, "Expected '=>' after quantifier condition");
 
     // parse body expression
     const body_expr = try parser.parseExpression();

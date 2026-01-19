@@ -1,0 +1,14 @@
+// NEGATIVE TEST: Should fail - incompatible scale decimals
+// Expected error: Scale mismatch - cannot add different scales
+
+contract ScaleMismatch {
+    // ERROR: Cannot add Scaled<u256, 18> to Scaled<u256, 6> directly
+    pub fn add_different_scales(x: Scaled<u256, 18>, y: Scaled<u256, 6>) -> Scaled<u256, 18> {
+        return x + y;  // Should fail: different scales
+    }
+
+    // ERROR: Cannot return Scaled<u256, 6> where Scaled<u256, 18> is expected
+    pub fn wrong_scale_return(x: Scaled<u256, 6>) -> Scaled<u256, 18> {
+        return x;  // Should fail: scale mismatch
+    }
+}

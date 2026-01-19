@@ -1,0 +1,56 @@
+// Test refinement propagation through arithmetic operations
+// This validates that refinement types are preserved/computed correctly
+
+contract RefinementArithmetic {
+    // Test MinValue propagation
+    pub fn test_min_value_addition(x: MinValue<u256, 100>) -> MinValue<u256, 100> {
+        // MinValue<u256, 100> + u256 should preserve MinValue<u256, 100>
+        // (adding a non-negative value to a min-100 value keeps it >= 100)
+        let y: u256 = 50;
+        let res = x + y;  // Should be at least MinValue<u256, 100>
+        return res;
+    }
+
+    pub fn test_min_value_same_type(x: MinValue<u256, 100>, y: MinValue<u256, 50>) -> MinValue<u256, 150> {
+        // MinValue<u256, 100> + MinValue<u256, 50> = MinValue<u256, 150>
+        return x + y;
+    }
+
+    // Test MaxValue propagation
+    pub fn test_max_value_subtraction(x: MaxValue<u256, 1000>) -> MaxValue<u256, 1000> {
+        // MaxValue<u256, 1000> - u256 should preserve MaxValue<u256, 1000>
+        // (subtracting anything from a max-1000 value keeps it <= 1000)
+        let y: u256 = 100;
+        let res = x - y;  // Should be at most MaxValue<u256, 1000>
+        return res;
+    }
+
+    pub fn test_max_value_same_type(x: MaxValue<u256, 1000>, y: MaxValue<u256, 500>) -> MaxValue<u256, 1500> {
+        // MaxValue<u256, 1000> + MaxValue<u256, 500> = MaxValue<u256, 1500>
+        return x + y;
+    }
+
+    // Test InRange propagation
+    pub fn test_in_range_same_type(x: InRange<u256, 10, 100>, y: InRange<u256, 20, 200>) -> InRange<u256, 30, 300> {
+        // InRange<u256, 10, 100> + InRange<u256, 20, 200> = InRange<u256, 30, 300>
+        return x + y;
+    }
+
+    // Test Scaled propagation (scale is a unit, preserved through add/sub)
+    pub fn test_scaled_addition(x: Scaled<u256, 18>, y: Scaled<u256, 18>) -> Scaled<u256, 18> {
+        // Scaled<u256, 18> + Scaled<u256, 18> = Scaled<u256, 18>
+        return x + y;
+    }
+
+    pub fn test_scaled_mixed(x: Scaled<u256, 18>) -> Scaled<u256, 18> {
+        // Scaled<u256, 18> + u256 = Scaled<u256, 18> (scale preserved)
+        let y: u256 = 1000000000000000000; // 1e18
+        return x + y;
+    }
+
+    // Test multiplication propagation
+    pub fn test_scaled_multiplication(x: Scaled<u256, 18>, y: Scaled<u256, 18>) -> Scaled<u256, 36> {
+        // Scaled<u256, 18> * Scaled<u256, 18> = Scaled<u256, 36>
+        return x * y;
+    }
+}

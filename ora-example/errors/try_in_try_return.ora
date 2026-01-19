@@ -1,0 +1,23 @@
+// ============================================================================
+// Try Expression inside Try Block with Return
+// ============================================================================
+
+contract TryInTryReturn {
+    error E1;
+
+    fn mayFail(x: u256) -> !u256 | E1 {
+        if (x == 0) {
+            return E1;
+        }
+        return x + 1;
+    }
+
+    fn tryInsideTry(x: u256) -> u256 {
+        try {
+            let y: u256 = try mayFail(x);
+            return y + 1;
+        } catch (e) {
+            return e;
+        }
+    }
+}

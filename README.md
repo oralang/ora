@@ -56,6 +56,12 @@ See available commands and flags:
 # Parse and validate a file
 ./zig-out/bin/ora parse <path>
 
+# Format Ora source code
+./zig-out/bin/ora fmt <path>
+
+# Check if code is formatted (useful for CI)
+./zig-out/bin/ora fmt --check <path>
+
 # Emit MLIR (Ora dialect)
 ./zig-out/bin/ora emit-mlir <path>
 

@@ -19,17 +19,20 @@ const lib = @import("ora_lib");
 pub const ParamMap = struct {
     names: std.StringHashMap(usize), // parameter name -> block argument index
     block_args: std.StringHashMap(c.MlirValue), // parameter name -> block argument value
+    base_args: std.StringHashMap(c.MlirValue), // parameter name -> base (refinement_to_base) value
 
     pub fn init(allocator: std.mem.Allocator) ParamMap {
         return .{
             .names = std.StringHashMap(usize).init(allocator),
             .block_args = std.StringHashMap(c.MlirValue).init(allocator),
+            .base_args = std.StringHashMap(c.MlirValue).init(allocator),
         };
     }
 
     pub fn deinit(self: *ParamMap) void {
         self.names.deinit();
         self.block_args.deinit();
+        self.base_args.deinit();
     }
 
     pub fn addParam(self: *ParamMap, name: []const u8, index: usize) !void {
@@ -47,22 +50,33 @@ pub const ParamMap = struct {
     pub fn getBlockArgument(self: *const ParamMap, name: []const u8) ?c.MlirValue {
         return self.block_args.get(name);
     }
+
+    pub fn setBaseArgument(self: *ParamMap, name: []const u8, base_arg: c.MlirValue) !void {
+        try self.base_args.put(name, base_arg);
+    }
+
+    pub fn getBaseArgument(self: *const ParamMap, name: []const u8) ?c.MlirValue {
+        return self.base_args.get(name);
+    }
 };
 
 // Local variable mapping for function-local variables
 pub const LocalVarMap = struct {
     variables: std.StringHashMap(c.MlirValue),
+    kinds: std.StringHashMap(@import("analysis/local_vars.zig").LocalVarRepr),
     allocator: std.mem.Allocator,
 
     pub fn init(allocator: std.mem.Allocator) LocalVarMap {
         return .{
             .variables = std.StringHashMap(c.MlirValue).init(allocator),
+            .kinds = std.StringHashMap(@import("analysis/local_vars.zig").LocalVarRepr).init(allocator),
             .allocator = allocator,
         };
     }
 
     pub fn deinit(self: *LocalVarMap) void {
         self.variables.deinit();
+        self.kinds.deinit();
     }
 
     pub fn addLocalVar(self: *LocalVarMap, name: []const u8, value: c.MlirValue) !void {
@@ -75,6 +89,14 @@ pub const LocalVarMap = struct {
 
     pub fn hasLocalVar(self: *const LocalVarMap, name: []const u8) bool {
         return self.variables.contains(name);
+    }
+
+    pub fn setLocalVarKind(self: *LocalVarMap, name: []const u8, kind: @import("analysis/local_vars.zig").LocalVarRepr) !void {
+        try self.kinds.put(name, kind);
+    }
+
+    pub fn getLocalVarKind(self: *const LocalVarMap, name: []const u8) ?@import("analysis/local_vars.zig").LocalVarRepr {
+        return self.kinds.get(name);
     }
 };
 

@@ -39,27 +39,49 @@ pub fn createErrorPlaceholder(ctx: c.MlirContext, block: c.MlirBlock, locations:
     return h.getResult(op, 0);
 }
 
+fn refinementCacheKey(value: c.MlirValue) usize {
+    if (c.mlirValueIsABlockArgument(value)) {
+        const owner = c.mlirBlockArgumentGetOwner(value);
+        const arg_no = c.mlirBlockArgumentGetArgNumber(value);
+        const block_key = @intFromPtr(owner.ptr);
+        const arg_key: usize = @intCast(arg_no);
+        return block_key ^ (arg_key *% 0x9e3779b97f4a7c15);
+    }
+    return @intFromPtr(value.ptr);
+}
+
 pub fn unwrapRefinementValue(
     ctx: c.MlirContext,
     block: c.MlirBlock,
     locations: LocationTracker,
+    refinement_base_cache: ?*std.AutoHashMap(usize, c.MlirValue),
     value: c.MlirValue,
     span: lib.ast.SourceSpan,
 ) c.MlirValue {
     const value_type = c.oraValueGetType(value);
     const base_type = c.oraRefinementTypeGetBaseType(value_type);
     if (base_type.ptr != null) {
+        if (refinement_base_cache) |cache| {
+            const key = refinementCacheKey(value);
+            if (cache.get(key)) |cached| {
+                return cached;
+            }
+        }
         const loc = locations.createLocation(span);
         const op = c.oraRefinementToBaseOpCreate(ctx, loc, value, block);
         if (op.ptr != null) {
-            return h.getResult(op, 0);
+            const base_value = h.getResult(op, 0);
+            if (refinement_base_cache) |cache| {
+                cache.put(refinementCacheKey(value), base_value) catch {};
+            }
+            return base_value;
         }
     }
     return value;
 }
 
 /// Create arithmetic operation
-pub fn createArithmeticOp(ctx: c.MlirContext, block: c.MlirBlock, type_mapper: *const TypeMapper, _: *OraDialect, locations: LocationTracker, op_name: []const u8, lhs: c.MlirValue, rhs: c.MlirValue, span: lib.ast.SourceSpan) c.MlirValue {
+pub fn createArithmeticOp(ctx: c.MlirContext, block: c.MlirBlock, type_mapper: *const TypeMapper, _: *OraDialect, locations: LocationTracker, refinement_base_cache: ?*std.AutoHashMap(usize, c.MlirValue), op_name: []const u8, lhs: c.MlirValue, rhs: c.MlirValue, span: lib.ast.SourceSpan) c.MlirValue {
     const arith_op_name = if (std.mem.eql(u8, op_name, "ora.add"))
         "arith.addi"
     else if (std.mem.eql(u8, op_name, "ora.sub"))
@@ -73,8 +95,8 @@ pub fn createArithmeticOp(ctx: c.MlirContext, block: c.MlirBlock, type_mapper: *
     else
         op_name;
 
-    const lhs_unwrapped = unwrapRefinementValue(ctx, block, locations, lhs, span);
-    const rhs_unwrapped = unwrapRefinementValue(ctx, block, locations, rhs, span);
+    const lhs_unwrapped = unwrapRefinementValue(ctx, block, locations, refinement_base_cache, lhs, span);
+    const rhs_unwrapped = unwrapRefinementValue(ctx, block, locations, refinement_base_cache, rhs, span);
 
     const lhs_type = c.oraValueGetType(lhs_unwrapped);
     const rhs_type = c.oraValueGetType(rhs_unwrapped);
@@ -222,9 +244,9 @@ pub fn createArithmeticOp(ctx: c.MlirContext, block: c.MlirBlock, type_mapper: *
 }
 
 /// Create comparison operation
-pub fn createComparisonOp(ctx: c.MlirContext, block: c.MlirBlock, locations: LocationTracker, predicate: []const u8, lhs: c.MlirValue, rhs: c.MlirValue, span: lib.ast.SourceSpan) c.MlirValue {
-    const lhs_unwrapped = unwrapRefinementValue(ctx, block, locations, lhs, span);
-    const rhs_unwrapped = unwrapRefinementValue(ctx, block, locations, rhs, span);
+pub fn createComparisonOp(ctx: c.MlirContext, block: c.MlirBlock, locations: LocationTracker, refinement_base_cache: ?*std.AutoHashMap(usize, c.MlirValue), predicate: []const u8, lhs: c.MlirValue, rhs: c.MlirValue, span: lib.ast.SourceSpan) c.MlirValue {
+    const lhs_unwrapped = unwrapRefinementValue(ctx, block, locations, refinement_base_cache, lhs, span);
+    const rhs_unwrapped = unwrapRefinementValue(ctx, block, locations, refinement_base_cache, rhs, span);
 
     const lhs_ty = c.oraValueGetType(lhs_unwrapped);
     const rhs_ty = c.oraValueGetType(rhs_unwrapped);

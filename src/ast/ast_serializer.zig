@@ -62,10 +62,11 @@ pub const FormatterFn = *const fn (node: *const AstNode, writer: anytype, option
 pub const SerializationError = error{
     OutOfMemory,
     WriteError,
+    WriteFailed,
     MaxDepthExceeded,
     InvalidNode,
     FormatterError,
-} || std.fmt.BufPrintError || std.fs.File.WriteError || std.ArrayList(u8).Writer.Error;
+} || std.fmt.BufPrintError || std.fs.File.WriteError || std.ArrayList(u8).Writer.Error || std.io.Writer.Error;
 
 /// Enhanced AST serializer with comprehensive customization options
 pub const AstSerializer = struct {
@@ -116,13 +117,13 @@ pub const AstSerializer = struct {
         var wrote_any = false;
 
         if (pretty) {
-            try writer.print("{\n");
+            try writer.writeAll("{\n");
             try self.writeIndent(writer, 1);
-            try writer.print("\"type\": \"AST\",\n");
+            try writer.writeAll("\"type\": \"AST\",\n");
             try self.writeIndent(writer, 1);
-            try writer.print("\"nodes\": [\n");
+            try writer.writeAll("\"nodes\": [\n");
         } else {
-            try writer.print("{\"type\":\"AST\",\"nodes\":[");
+            try writer.writeAll("{\"type\":\"AST\",\"nodes\":[");
         }
 
         var i: usize = 0;
@@ -131,9 +132,9 @@ pub const AstSerializer = struct {
             for (nodes[i..end]) |*node| {
                 if (wrote_any) {
                     if (pretty) {
-                        try writer.print(",\n");
+                        try writer.writeAll(",\n");
                     } else {
-                        try writer.print(",");
+                        try writer.writeAll(",");
                     }
                 }
                 try self.serializeAstNode(node, writer, if (pretty) 2 else 0, 1);
@@ -143,12 +144,12 @@ pub const AstSerializer = struct {
         }
 
         if (pretty) {
-            if (nodes.len > 0) try writer.print("\n");
+            if (nodes.len > 0) try writer.writeAll("\n");
             try self.writeIndent(writer, 1);
-            try writer.print("]\n");
-            try writer.print("}\n");
+            try writer.writeAll("]\n");
+            try writer.writeAll("}\n");
         } else {
-            try writer.print("]}");
+            try writer.writeAll("]}");
         }
     }
 
@@ -160,33 +161,33 @@ pub const AstSerializer = struct {
         }
 
         if (self.options.pretty_print and !self.options.compact_mode) {
-            try writer.print("{\n");
+            try writer.writeAll("{\n");
             try self.writeIndent(writer, 1);
-            try writer.print("\"type\": \"AST\",\n");
+            try writer.writeAll("\"type\": \"AST\",\n");
             try self.writeIndent(writer, 1);
-            try writer.print("\"nodes\": [\n");
+            try writer.writeAll("\"nodes\": [\n");
 
             for (nodes, 0..) |*node, i| {
-                if (i > 0) try writer.print(",\n");
+                if (i > 0) try writer.writeAll(",\n");
                 try self.serializeAstNode(node, writer, 2, depth + 1);
             }
 
-            try writer.print("\n");
+            try writer.writeAll("\n");
             try self.writeIndent(writer, 1);
-            try writer.print("]\n");
-            try writer.print("}\n");
+            try writer.writeAll("]\n");
+            try writer.writeAll("}\n");
         } else {
             // compact mode
-            try writer.print("{\"type\":\"AST\",\"nodes\":[");
+            try writer.writeAll("{\"type\":\"AST\",\"nodes\":[");
             for (nodes, 0..) |*node, i| {
-                if (i > 0) try writer.print(",");
+                if (i > 0) try writer.writeAll(",");
                 try self.serializeAstNode(node, writer, 0, depth + 1);
             }
-            try writer.print("]}");
+            try writer.writeAll("]}");
         }
     }
 
-    fn serializeAstNode(self: *AstSerializer, node: *const AstNode, writer: anytype, indent: u32, depth: u32) SerializationError!void {
+    pub fn serializeAstNode(self: *AstSerializer, node: *const AstNode, writer: anytype, indent: u32, depth: u32) SerializationError!void {
         // check depth limit before serializing
         if (self.options.max_depth) |max_depth| {
             if (depth >= max_depth) {
@@ -204,14 +205,15 @@ pub const AstSerializer = struct {
 
         if (self.options.pretty_print and !self.options.compact_mode) {
             try self.writeIndent(writer, indent);
-            try writer.print("{\n");
+            try writer.writeAll("{\n");
         } else {
-            try writer.print("{");
+            try writer.writeAll("{");
         }
 
         switch (node.*) {
             .Module => |*module| try declarations.serializeModule(self, module, writer, indent, depth),
             .Contract => |*contract| try declarations.serializeContract(self, contract, writer, indent, depth),
+            .ContractInvariant => |*invariant| try declarations.serializeContractInvariant(self, invariant, writer, indent, depth),
             .Function => |*function| try declarations.serializeFunction(self, function, writer, indent, depth),
             .Constant => |*constant| try declarations.serializeConstant(self, constant, writer, indent, depth),
             .VariableDecl => |*var_decl| try declarations.serializeVariableDecl(self, var_decl, writer, indent, depth),
@@ -227,11 +229,11 @@ pub const AstSerializer = struct {
         }
 
         if (self.options.pretty_print and !self.options.compact_mode) {
-            try writer.print("\n");
+            try writer.writeAll("\n");
             try self.writeIndent(writer, indent);
-            try writer.print("}");
+            try writer.writeAll("}");
         } else {
-            try writer.print("}");
+            try writer.writeAll("}");
         }
     }
 
@@ -241,12 +243,24 @@ pub const AstSerializer = struct {
     // pattern serializers moved to serializer/patterns.zig
     // type serializers remain here
     // ========================================================================
-    fn serializeParameter(self: *AstSerializer, param: *const ast.ParameterNode, writer: anytype, indent: u32) SerializationError!void {
+    pub fn serializeParameter(self: *AstSerializer, param: *const ast.ParameterNode, writer: anytype, indent: u32) SerializationError!void {
         return helpers.serializeParameter(self, param, writer, indent);
     }
 
-    fn serializeTypeInfo(self: *AstSerializer, type_info: ast.Types.TypeInfo, writer: anytype) SerializationError!void {
+    pub fn serializeTypeInfo(self: *AstSerializer, type_info: ast.Types.TypeInfo, writer: anytype) SerializationError!void {
         return helpers.serializeTypeInfo(self, type_info, writer);
+    }
+
+    pub fn serializeExpression(self: *AstSerializer, expr: *const ExprNode, writer: anytype, indent: u32, depth: u32) SerializationError!void {
+        return expressions.serializeExpression(self, expr, writer, indent, depth);
+    }
+
+    pub fn serializeBlock(self: *AstSerializer, block: *const ast.Statements.BlockNode, writer: anytype, indent: u32, depth: u32) SerializationError!void {
+        return statements.serializeBlock(self, block, writer, indent, depth);
+    }
+
+    pub fn serializeStatement(self: *AstSerializer, stmt: *const StmtNode, writer: anytype, indent: u32, depth: u32) SerializationError!void {
+        return statements.serializeStatement(self, stmt, writer, indent, depth);
     }
 
     // helper functions for writing formatted output - delegate to helpers module

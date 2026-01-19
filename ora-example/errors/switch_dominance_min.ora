@@ -1,0 +1,20 @@
+ contract SwitchDominance {
+      error E1;
+      error E2;
+
+      pub fn test(x: u256) -> !bool | E1 | E2 {
+        var myResult: bool = true;
+          // Force error union into switch
+          switch (x) {
+              0 => {
+                  return E1;
+              },
+              1 => {
+                  return E2;
+              },
+              else => {
+                  return myResult;
+              }
+          }
+      }
+  }

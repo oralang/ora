@@ -41,13 +41,35 @@ pub fn isAssignable(
     }
 
     // allow base-to-refinement assignment with a runtime guard
-    // (e.g., address -> NonZeroAddress), guard insertion is handled later
+    // (e.g., address -> NonZeroAddress, u256 -> MinValue<u256,1>)
+    // guard insertion is handled later
     if (target_type.ora_type) |target_ora| {
         if (value_type.ora_type) |value_ora| {
             const target_base = utils_sys.extractBaseType(target_ora) orelse target_ora;
             const value_base = utils_sys.extractBaseType(value_ora) orelse value_ora;
-            if (!OraType.equals(target_ora, target_base) and OraType.equals(value_base, target_base)) {
+            // Only allow if:
+            // 1. Target is a refinement type (target_ora != target_base)
+            // 2. Base types match
+            // 3. Value is NOT already a refinement (refinement-to-refinement must be subtype-checked)
+            const target_is_refinement = !OraType.equals(target_ora, target_base);
+            const value_is_refinement = !OraType.equals(value_ora, value_base);
+            if (target_is_refinement and !value_is_refinement and OraType.equals(value_base, target_base)) {
                 return true;
+            }
+
+            // allow refinement-to-refinement assignment with a runtime guard
+            // when refinement kinds are compatible (e.g., MinValue -> InRange)
+            if (target_is_refinement and value_is_refinement and OraType.equals(value_base, target_base)) {
+                if (isExactRefinement(target_ora) or isExactRefinement(value_ora)) {
+                    // Exact is an orthogonal numeric refinement; allow on matching base.
+                    return value_base.isInteger();
+                }
+
+                if (sameRefinementKind(target_ora, value_ora) or
+                    (isNumericRefinement(target_ora) and isNumericRefinement(value_ora)))
+                {
+                    return true;
+                }
             }
         }
     }
@@ -64,9 +86,19 @@ pub fn isAssignable(
         }
 
         if (target_type.ora_type != null and value_type.ora_type != null) {
-            const target_base = utils_sys.extractBaseType(target_type.ora_type.?);
-            const value_base = utils_sys.extractBaseType(value_type.ora_type.?);
+            const target_ora = target_type.ora_type.?;
+            const value_ora = value_type.ora_type.?;
+            const target_base = utils_sys.extractBaseType(target_ora);
+            const value_base = utils_sys.extractBaseType(value_ora);
             if (target_base != null and value_base != null) {
+                // If BOTH are refinement types, don't fall through to base compatibility
+                // (subtyping check at the top of the function should have handled compatible refinements)
+                const target_is_refinement = !OraType.equals(target_ora, target_base.?);
+                const value_is_refinement = !OraType.equals(value_ora, value_base.?);
+                if (target_is_refinement and value_is_refinement) {
+                    // Both are refinements - subtyping check already failed, reject
+                    return false;
+                }
                 // only allow widening: value_base <: target_base
                 // this means value_base must be narrower or equal to target_base
                 if (compat.isBaseTypeCompatible(value_base.?, target_base.?)) {
@@ -92,11 +124,11 @@ pub fn isAssignable(
                 if (value_type.ora_type) |value_ora| {
                     if (value_type.category == success_category and
                         (OraType.equals(value_ora, success_ora_type) or
-                        refinement_system.checkSubtype(
-                            value_ora,
-                            success_ora_type,
-                            compat.isBaseTypeCompatible,
-                        )))
+                            refinement_system.checkSubtype(
+                                value_ora,
+                                success_ora_type,
+                                compat.isBaseTypeCompatible,
+                            )))
                     {
                         return true;
                     }
@@ -113,11 +145,11 @@ pub fn isAssignable(
                         if (value_type.ora_type) |value_ora| {
                             if (value_type.category == success_category and
                                 (OraType.equals(value_ora, success_ora_type) or
-                                refinement_system.checkSubtype(
-                                    value_ora,
-                                    success_ora_type,
-                                    compat.isBaseTypeCompatible,
-                                )))
+                                    refinement_system.checkSubtype(
+                                        value_ora,
+                                        success_ora_type,
+                                        compat.isBaseTypeCompatible,
+                                    )))
                             {
                                 return true;
                             }
@@ -171,4 +203,28 @@ fn isNumericType(type_info: TypeInfo) bool {
 
     // category is Integer but no ora_type - assume numeric
     return true;
+}
+
+fn sameRefinementKind(target: OraType, value: OraType) bool {
+    return switch (target) {
+        .min_value => value == .min_value,
+        .max_value => value == .max_value,
+        .in_range => value == .in_range,
+        .non_zero_address => value == .non_zero_address,
+        else => false,
+    };
+}
+
+fn isNumericRefinement(ora_type: OraType) bool {
+    return switch (ora_type) {
+        .min_value, .max_value, .in_range => true,
+        else => false,
+    };
+}
+
+fn isExactRefinement(ora_type: OraType) bool {
+    return switch (ora_type) {
+        .exact => true,
+        else => false,
+    };
 }

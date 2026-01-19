@@ -7,11 +7,15 @@ const std = @import("std");
 const c = @import("mlir_c_api").c;
 const c_zig = @import("mlir_c_api");
 const h = @import("../helpers.zig");
+const error_handling = @import("../error_handling.zig");
 const StatementLowerer = @import("statement_lowerer.zig").StatementLowerer;
 const lib = @import("ora_lib");
 const log = @import("log");
+const constants = @import("../lower.zig");
+const expr_helpers = @import("../expressions/helpers.zig");
+const guard_helpers = @import("../refinement_guard_helpers.zig");
 
-fn isErrorUnionTypeInfo(ti: lib.ast.Types.TypeInfo) bool {
+pub fn isErrorUnionTypeInfo(ti: lib.ast.Types.TypeInfo) bool {
     if (ti.category == .ErrorUnion) return true;
     if (ti.ora_type) |ot| switch (ot) {
         .error_union => return true,
@@ -21,21 +25,190 @@ fn isErrorUnionTypeInfo(ti: lib.ast.Types.TypeInfo) bool {
     return false;
 }
 
+fn unwrapRefinementValueWithCache(self: *const StatementLowerer, value: c.MlirValue, span: lib.ast.SourceSpan) c.MlirValue {
+    const value_type = c.oraValueGetType(value);
+    const base_type = c.oraRefinementTypeGetBaseType(value_type);
+    if (base_type.ptr == null) {
+        return value;
+    }
+
+    const unwrapped = expr_helpers.unwrapRefinementValue(self.ctx, self.block, self.locations, self.expr_lowerer.refinement_base_cache, value, span);
+    const unwrapped_type = c.oraValueGetType(unwrapped);
+    if (!c.oraTypeEqual(unwrapped_type, base_type)) {
+        reportRefinementGuardError(self, span, "Refinement guard creation failed: ora.refinement_to_base returned null", "Ensure the Ora dialect is registered before lowering.");
+        return value;
+    }
+    return unwrapped;
+}
+
+fn refinementCacheKey(value: c.MlirValue) usize {
+    if (c.mlirValueIsABlockArgument(value)) {
+        const owner = c.mlirBlockArgumentGetOwner(value);
+        const arg_no = c.mlirBlockArgumentGetArgNumber(value);
+        const block_key = @intFromPtr(owner.ptr);
+        const arg_key: usize = @intCast(arg_no);
+        return block_key ^ (arg_key *% 0x9e3779b97f4a7c15);
+    }
+    return @intFromPtr(value.ptr);
+}
+
+/// Wrap an error union payload without encoding. Encoding happens in Ora→SIR.
+pub fn encodeErrorUnionValue(
+    self: *const StatementLowerer,
+    payload: c.MlirValue,
+    is_error: bool,
+    target_type: c.MlirType,
+    target_block: c.MlirBlock,
+    span: lib.ast.SourceSpan,
+    loc: c.MlirLocation,
+) c.MlirValue {
+    // Check if target is an error union type - if so, extract the success type for wrapping
+    const success_type = c.oraErrorUnionTypeGetSuccessType(target_type);
+    const error_id_type = c.oraIntegerTypeCreate(self.ctx, constants.DEFAULT_INTEGER_BITS);
+    const encode_type = if (is_error)
+        error_id_type
+    else if (!c.oraTypeIsNull(success_type))
+        success_type
+    else
+        target_type;
+
+    const target_builtin = c.oraTypeToBuiltin(encode_type);
+    if (!c.oraTypeIsAInteger(target_builtin)) {
+        return payload;
+    }
+
+    const payload_conv = convertValueToType(self, payload, encode_type, span, loc);
+
+    // If the target is an error union type, wrap the payload using ora.error.ok or ora.error.err
+    if (!c.oraTypeIsNull(success_type)) {
+        const wrap_op = if (is_error)
+            c.oraErrorErrOpCreate(self.ctx, loc, payload_conv, target_type)
+        else
+            c.oraErrorOkOpCreate(self.ctx, loc, payload_conv, target_type);
+        h.appendOp(target_block, wrap_op);
+        return h.getResult(wrap_op, 0);
+    }
+    return payload_conv;
+}
+
+pub const ErrorUnionPayload = struct {
+    payload: c.MlirValue,
+    is_error: bool,
+};
+
+pub fn getErrorUnionPayload(
+    self: *const StatementLowerer,
+    value_expr: *const lib.ast.Expressions.ExprNode,
+    value: c.MlirValue,
+    target_type: c.MlirType,
+    target_block: c.MlirBlock,
+    loc: c.MlirLocation,
+) ErrorUnionPayload {
+    _ = target_type;
+    var payload = value;
+    var is_error = false;
+    var err_name: ?[]const u8 = null;
+
+    switch (value_expr.*) {
+        .ErrorReturn => |err_ret| {
+            is_error = true;
+            err_name = err_ret.error_name;
+        },
+        .Identifier => |ident| {
+            if (ident.type_info.category == .Error) {
+                is_error = true;
+                err_name = ident.name;
+            }
+        },
+        else => {},
+    }
+
+    if (is_error) {
+        const err_id = if (self.symbol_table) |st|
+            if (err_name) |name| st.getErrorId(name) else null
+        else
+            null;
+        const err_val: i64 = @intCast(err_id orelse 1);
+        const const_type = c.oraIntegerTypeCreate(self.ctx, constants.DEFAULT_INTEGER_BITS);
+        payload = createArithConstantInBlock(self, target_block, err_val, const_type, loc);
+    }
+
+    return .{ .payload = payload, .is_error = is_error };
+}
+
+fn createArithConstantInFunction(
+    self: *const StatementLowerer,
+    value: i64,
+    target_type: c.MlirType,
+    loc: c.MlirLocation,
+) c.MlirValue {
+    var lowerer = self.*;
+    lowerer.block = self.function_block;
+    const op = lowerer.ora_dialect.createArithConstant(value, target_type, loc);
+    const first_op = c.oraBlockGetFirstOperation(lowerer.block);
+    if (!c.oraOperationIsNull(first_op)) {
+        h.insertOpBefore(lowerer.block, op, first_op);
+    } else {
+        h.appendOp(lowerer.block, op);
+    }
+    return h.getResult(op, 0);
+}
+
+fn createArithConstantInBlock(
+    self: *const StatementLowerer,
+    block: c.MlirBlock,
+    value: i64,
+    target_type: c.MlirType,
+    loc: c.MlirLocation,
+) c.MlirValue {
+    var lowerer = self.*;
+    lowerer.block = block;
+    const op = lowerer.ora_dialect.createArithConstant(value, target_type, loc);
+    const first_op = c.oraBlockGetFirstOperation(lowerer.block);
+    if (!c.oraOperationIsNull(first_op)) {
+        h.insertOpBefore(lowerer.block, op, first_op);
+    } else {
+        h.appendOp(lowerer.block, op);
+    }
+    return h.getResult(op, 0);
+}
+
 /// Lower a value expression, inserting an implicit try inside try blocks when appropriate.
 pub fn lowerValueWithImplicitTry(
-    self: *const StatementLowerer,
+    self: *StatementLowerer,
     expr: *const lib.ast.Expressions.ExprNode,
     expected_type: ?lib.ast.Types.TypeInfo,
 ) c.MlirValue {
     if (self.in_try_block) {
-        if (expr.* == .Call) {
-            const call = expr.Call;
-            if (isErrorUnionTypeInfo(call.type_info)) {
-                if (expected_type == null or !isErrorUnionTypeInfo(expected_type.?)) {
-                    var try_expr = lib.ast.Expressions.TryExpr{ .expr = @constCast(expr), .span = call.span };
-                    return self.expr_lowerer.lowerTry(&try_expr);
+        const needs_unwrap = blk: {
+            switch (expr.*) {
+                .Call => |call| break :blk isErrorUnionTypeInfo(call.type_info),
+                .Identifier => |id| break :blk isErrorUnionTypeInfo(id.type_info),
+                .FieldAccess => |fa| break :blk isErrorUnionTypeInfo(fa.type_info),
+                else => break :blk false,
+            }
+        };
+        if (needs_unwrap) {
+            if (expected_type == null or !isErrorUnionTypeInfo(expected_type.?)) {
+                const expr_value = self.expr_lowerer.lowerExpression(expr);
+                if (c.oraValueIsNull(expr_value)) return expr_value;
+
+                const expr_ty = c.oraValueGetType(expr_value);
+                const success_ty = c.oraErrorUnionTypeGetSuccessType(expr_ty);
+                if (!c.oraTypeIsNull(success_ty)) {
+                    const loc = self.fileLoc(error_handling.getSpanFromExpression(expr));
+                    // Inside a try block, unwrap directly to avoid nested ora.try_stmt.
+                    const unwrap_op = self.ora_dialect.createErrorUnwrap(expr_value, success_ty, loc);
+                    h.appendOp(self.block, unwrap_op);
+                    return h.getResult(unwrap_op, 0);
                 }
             }
+
+            var try_expr = lib.ast.Expressions.TryExpr{
+                .expr = @constCast(expr),
+                .span = error_handling.getSpanFromExpression(expr),
+            };
+            return self.expr_lowerer.lowerTry(&try_expr);
         }
     }
     return self.expr_lowerer.lowerExpression(expr);
@@ -77,7 +250,9 @@ pub fn storeToMemref(self: *const StatementLowerer, value: c.MlirValue, memref: 
         null,
         0,
     );
-    h.appendOp(self.block, store_op);
+    if (!c.oraOperationIsNull(store_op)) {
+        h.appendOp(self.block, store_op);
+    }
 }
 
 /// Convert a value to match a target type, using TypeMapper and bitcast as fallback
@@ -96,7 +271,7 @@ pub fn convertValueToType(
     }
 
     // try TypeMapper conversion first
-    const converted = self.type_mapper.createConversionOp(self.block, value, target_type, span);
+    const converted = self.expr_lowerer.convertToType(value, target_type, span);
     const converted_type = c.oraValueGetType(converted);
 
     // check if conversion succeeded
@@ -105,6 +280,13 @@ pub fn convertValueToType(
     }
 
     // fallback: try bitcast for same-width integer types
+    // avoid bitcast when refinement types are involved; use explicit refinement ops
+    const value_ref_base = c.oraRefinementTypeGetBaseType(value_type);
+    const target_ref_base = c.oraRefinementTypeGetBaseType(target_type);
+    if (value_ref_base.ptr != null or target_ref_base.ptr != null) {
+        return converted;
+    }
+
     const value_builtin = c.oraTypeToBuiltin(value_type);
     const target_builtin = c.oraTypeToBuiltin(target_type);
 
@@ -138,6 +320,7 @@ pub fn insertRefinementGuard(
     value: c.MlirValue,
     ora_type: lib.ast.Types.OraType,
     span: lib.ast.SourceSpan,
+    var_name: ?[]const u8,
     skip_guard: bool,
 ) StatementLowerer.LoweringError!c.MlirValue {
     if (c.oraValueIsNull(value)) {
@@ -150,14 +333,25 @@ pub fn insertRefinementGuard(
         return value;
     }
 
+    const value_type = c.oraValueGetType(value);
+    const base_type = c.oraRefinementTypeGetBaseType(value_type);
+    if (base_type.ptr != null) {
+        if (self.expr_lowerer.refinement_base_cache) |cache| {
+            const target_mlir = self.type_mapper.toMlirType(.{ .ora_type = ora_type });
+            const same_refinement = c.oraTypeEqual(value_type, target_mlir);
+            if (same_refinement and cache.contains(refinementCacheKey(value))) {
+                // Same refinement already unwrapped in this block; avoid re-guarding.
+                return value;
+            }
+        }
+    }
+
     const loc = self.fileLoc(span);
 
     switch (ora_type) {
         .min_value => |mv| {
             // generate: require(value >= min)
-            const value_type = c.oraValueGetType(value);
             // extract base type from refinement type for operations
-            const base_type = c.oraRefinementTypeGetBaseType(value_type);
             const min_type = if (base_type.ptr != null) base_type else value_type;
             // for u256 values, create attribute from string to support full precision
             const min_attr = if (mv.min > std.math.maxInt(i64)) blk: {
@@ -173,41 +367,30 @@ pub fn insertRefinementGuard(
             };
             const min_const = createConstantValue(self, min_attr, min_type, loc);
 
-            // extract base type from value if it's a refinement type
-            const value_base_type = c.oraRefinementTypeGetBaseType(value_type);
-            const actual_value = if (value_base_type.ptr != null) blk: {
-                // convert refinement type to base type using ora.refinement_to_base
-                const convert_op = c.oraRefinementToBaseOpCreate(self.ctx, loc, value, self.block);
-                if (c.oraOperationIsNull(convert_op)) {
-                    reportRefinementGuardError(self, span, "Refinement guard creation failed: ora.refinement_to_base returned null", "Ensure the Ora dialect is registered before lowering.");
-                    return value;
-                }
-                // operation is already inserted by oraRefinementToBaseOpCreate, no need to append
-                break :blk h.getResult(convert_op, 0);
-            } else value;
+            const actual_value = unwrapRefinementValueWithCache(self, value, span);
             const cmp_op = c.oraArithCmpIOpCreate(self.ctx, loc, 5, actual_value, min_const);
             h.appendOp(self.block, cmp_op);
             const condition = h.getResult(cmp_op, 0);
 
             const msg = try std.fmt.allocPrint(self.allocator, "Refinement violation: expected MinValue<u256, {d}>", .{mv.min});
             defer self.allocator.free(msg);
-            const guard_op = self.ora_dialect.createRefinementGuard(condition, loc, msg);
-            h.appendOp(self.block, guard_op);
-
-            const guard_id = try std.fmt.allocPrint(
+            guard_helpers.emitRefinementGuard(
+                self.ctx,
+                self.block,
+                self.ora_dialect,
+                self.locations,
+                self.refinement_guard_cache,
+                span,
+                condition,
+                msg,
+                "min_value",
+                var_name,
                 self.allocator,
-                "guard:{s}:{d}:{d}:min_value",
-                .{ self.locations.filename, span.line, span.column },
             );
-            defer self.allocator.free(guard_id);
-            c.oraOperationSetAttributeByName(guard_op, h.strRef("ora.guard_id"), h.stringAttr(self.ctx, guard_id));
-            c.oraOperationSetAttributeByName(guard_op, h.strRef("ora.refinement_kind"), h.stringAttr(self.ctx, "min_value"));
         },
         .max_value => |mv| {
             // generate: require(value <= max)
-            const value_type = c.oraValueGetType(value);
             // extract base type from refinement type for operations
-            const base_type = c.oraRefinementTypeGetBaseType(value_type);
             const max_type = if (base_type.ptr != null) base_type else value_type;
             // for u256 values, create attribute from string to support full precision
             const max_attr = if (mv.max > std.math.maxInt(i64)) blk: {
@@ -223,41 +406,30 @@ pub fn insertRefinementGuard(
             };
             const max_const = createConstantValue(self, max_attr, max_type, loc);
 
-            // extract base type from value if it's a refinement type
-            const value_base_type = c.oraRefinementTypeGetBaseType(value_type);
-            const actual_value = if (value_base_type.ptr != null) blk: {
-                // convert refinement type to base type using ora.refinement_to_base
-                const convert_op = c.oraRefinementToBaseOpCreate(self.ctx, loc, value, self.block);
-                if (c.oraOperationIsNull(convert_op)) {
-                    reportRefinementGuardError(self, span, "Refinement guard creation failed: ora.refinement_to_base returned null", "Ensure the Ora dialect is registered before lowering.");
-                    return value;
-                }
-                // operation is already inserted by oraRefinementToBaseOpCreate, no need to append
-                break :blk h.getResult(convert_op, 0);
-            } else value;
+            const actual_value = unwrapRefinementValueWithCache(self, value, span);
             const cmp_op = c.oraArithCmpIOpCreate(self.ctx, loc, 3, actual_value, max_const);
             h.appendOp(self.block, cmp_op);
             const condition = h.getResult(cmp_op, 0);
 
             const msg = try std.fmt.allocPrint(self.allocator, "Refinement violation: expected MaxValue<u256, {d}>", .{mv.max});
             defer self.allocator.free(msg);
-            const guard_op = self.ora_dialect.createRefinementGuard(condition, loc, msg);
-            h.appendOp(self.block, guard_op);
-
-            const guard_id = try std.fmt.allocPrint(
+            guard_helpers.emitRefinementGuard(
+                self.ctx,
+                self.block,
+                self.ora_dialect,
+                self.locations,
+                self.refinement_guard_cache,
+                span,
+                condition,
+                msg,
+                "max_value",
+                var_name,
                 self.allocator,
-                "guard:{s}:{d}:{d}:max_value",
-                .{ self.locations.filename, span.line, span.column },
             );
-            defer self.allocator.free(guard_id);
-            c.oraOperationSetAttributeByName(guard_op, h.strRef("ora.guard_id"), h.stringAttr(self.ctx, guard_id));
-            c.oraOperationSetAttributeByName(guard_op, h.strRef("ora.refinement_kind"), h.stringAttr(self.ctx, "max_value"));
         },
         .in_range => |ir| {
             // generate: require(min <= value <= max)
-            const value_type = c.oraValueGetType(value);
             // extract base type from refinement type for operations
-            const base_type = c.oraRefinementTypeGetBaseType(value_type);
             const op_type = if (base_type.ptr != null) base_type else value_type;
             // for u256 values, create attributes from strings to support full precision
             const min_attr = if (ir.min > std.math.maxInt(i64)) blk: {
@@ -286,18 +458,7 @@ pub fn insertRefinementGuard(
             const max_const = createConstantValue(self, max_attr, op_type, loc);
 
             // check: value >= min
-            // extract base type from value if it's a refinement type
-            const value_base_type = c.oraRefinementTypeGetBaseType(value_type);
-            const actual_value = if (value_base_type.ptr != null) blk: {
-                // convert refinement type to base type using ora.refinement_to_base
-                const convert_op = c.oraRefinementToBaseOpCreate(self.ctx, loc, value, self.block);
-                if (c.oraOperationIsNull(convert_op)) {
-                    reportRefinementGuardError(self, span, "Refinement guard creation failed: ora.refinement_to_base returned null", "Ensure the Ora dialect is registered before lowering.");
-                    return value;
-                }
-                // operation is already inserted by oraRefinementToBaseOpCreate, no need to append
-                break :blk h.getResult(convert_op, 0);
-            } else value;
+            const actual_value = unwrapRefinementValueWithCache(self, value, span);
             const min_cmp_op = c.oraArithCmpIOpCreate(self.ctx, loc, 5, actual_value, min_const);
             h.appendOp(self.block, min_cmp_op);
             const min_check = h.getResult(min_cmp_op, 0);
@@ -314,29 +475,25 @@ pub fn insertRefinementGuard(
 
             const msg = try std.fmt.allocPrint(self.allocator, "Refinement violation: expected InRange<u256, {d}, {d}>", .{ ir.min, ir.max });
             defer self.allocator.free(msg);
-            const guard_op = self.ora_dialect.createRefinementGuard(condition, loc, msg);
-            h.appendOp(self.block, guard_op);
-
-            const guard_id = try std.fmt.allocPrint(
+            guard_helpers.emitRefinementGuard(
+                self.ctx,
+                self.block,
+                self.ora_dialect,
+                self.locations,
+                self.refinement_guard_cache,
+                span,
+                condition,
+                msg,
+                "in_range",
+                var_name,
                 self.allocator,
-                "guard:{s}:{d}:{d}:in_range",
-                .{ self.locations.filename, span.line, span.column },
             );
-            defer self.allocator.free(guard_id);
-            c.oraOperationSetAttributeByName(guard_op, h.strRef("ora.guard_id"), h.stringAttr(self.ctx, guard_id));
-            c.oraOperationSetAttributeByName(guard_op, h.strRef("ora.refinement_kind"), h.stringAttr(self.ctx, "in_range"));
         },
         .non_zero_address => {
-            const value_type = c.oraValueGetType(value);
-            const base_type = c.oraRefinementTypeGetBaseType(value_type);
-            const addr_value = if (base_type.ptr != null) blk: {
-                const convert_op = c.oraRefinementToBaseOpCreate(self.ctx, loc, value, self.block);
-                if (c.oraOperationIsNull(convert_op)) {
-                    reportRefinementGuardError(self, span, "Refinement guard creation failed: ora.refinement_to_base returned null", "Ensure the Ora dialect is registered before lowering.");
-                    return value;
-                }
-                break :blk h.getResult(convert_op, 0);
-            } else value;
+            const addr_value = if (base_type.ptr != null)
+                unwrapRefinementValueWithCache(self, value, span)
+            else
+                value;
 
             const addr_to_i160 = c.oraAddrToI160OpCreate(self.ctx, loc, addr_value);
             if (c.oraOperationIsNull(addr_to_i160)) {
@@ -355,18 +512,19 @@ pub fn insertRefinementGuard(
             const condition = h.getResult(cmp_op, 0);
 
             const msg = "Refinement violation: expected NonZeroAddress";
-            const guard_op = self.ora_dialect.createRefinementGuard(condition, loc, msg);
-            h.appendOp(self.block, guard_op);
-
-            const guard_id = try std.fmt.allocPrint(
+            guard_helpers.emitRefinementGuard(
+                self.ctx,
+                self.block,
+                self.ora_dialect,
+                self.locations,
+                self.refinement_guard_cache,
+                span,
+                condition,
+                msg,
+                "non_zero_address",
+                var_name,
                 self.allocator,
-                "guard:{s}:{d}:{d}:non_zero_address",
-                .{ self.locations.filename, span.line, span.column },
             );
-            defer self.allocator.free(guard_id);
-
-            c.oraOperationSetAttributeByName(guard_op, h.strRef("ora.guard_id"), h.stringAttr(self.ctx, guard_id));
-            c.oraOperationSetAttributeByName(guard_op, h.strRef("ora.refinement_kind"), h.stringAttr(self.ctx, "non_zero_address"));
         },
         .exact, .scaled => {
             // exact and Scaled guards are inserted at specific operations (division, arithmetic)
@@ -410,6 +568,8 @@ pub fn blockEndsWithTerminator(_: *const StatementLowerer, block: c.MlirBlock) b
         "ora.return",
         "func.return",
         "scf.condition",
+        "cf.br",
+        "cf.cond_br",
     };
 
     if (name_str == null or name_len == 0) {
@@ -428,6 +588,27 @@ pub fn blockEndsWithTerminator(_: *const StatementLowerer, block: c.MlirBlock) b
 
     c_zig.freeStringRef(op_name_ref);
     return false;
+}
+
+/// Check if a block ends with a specific terminator op name.
+pub fn blockEndsWithOpName(block: c.MlirBlock, op_name: []const u8) bool {
+    const last_op = c.oraBlockGetTerminator(block);
+    if (c.oraOperationIsNull(last_op)) {
+        return false;
+    }
+
+    const op_name_ref = c.oraOperationGetName(last_op);
+    const name_str = op_name_ref.data;
+    const name_len = op_name_ref.length;
+
+    if (name_str == null or name_len == 0) {
+        c_zig.freeStringRef(op_name_ref);
+        return false;
+    }
+
+    const matches = name_len == op_name.len and std.mem.eql(u8, name_str[0..name_len], op_name);
+    c_zig.freeStringRef(op_name_ref);
+    return matches;
 }
 
 /// Check if a block ends with ora.break (which is NOT a terminator)
@@ -515,12 +696,106 @@ pub fn blockHasReturn(self: *const StatementLowerer, block: lib.ast.Statements.B
         if (stmt == .If) {
             if (ifStatementHasReturns(self, &stmt.If)) return true;
         }
+        if (stmt == .Switch) {
+            if (switchStatementHasReturns(self, &stmt.Switch)) return true;
+        }
+        if (stmt == .TryBlock) {
+            if (blockHasReturn(self, stmt.TryBlock.try_block)) return true;
+            if (stmt.TryBlock.catch_block) |catch_block| {
+                if (blockHasReturn(self, catch_block.block)) return true;
+            }
+        }
+        if (stmt == .While) {
+            if (blockHasReturn(self, stmt.While.body)) return true;
+        }
+        if (stmt == .ForLoop) {
+            if (blockHasReturn(self, stmt.ForLoop.body)) return true;
+        }
+        if (stmt == .LabeledBlock) {
+            if (blockHasReturn(self, stmt.LabeledBlock.block)) return true;
+        }
+    }
+    return false;
+}
+
+/// Get the span from an expression node
+pub fn getExprSpan(expr: *const lib.ast.Expressions.ExprNode) lib.ast.SourceSpan {
+    return switch (expr.*) {
+        .Identifier => |ident| ident.span,
+        .Literal => |lit| switch (lit) {
+            .Integer => |int| int.span,
+            .String => |str| str.span,
+            .Bool => |bool_lit| bool_lit.span,
+            .Address => |addr| addr.span,
+            .Hex => |hex| hex.span,
+            .Binary => |bin| bin.span,
+            .Character => |char| char.span,
+            .Bytes => |bytes| bytes.span,
+        },
+        .Binary => |bin| bin.span,
+        .Unary => |unary| unary.span,
+        .Assignment => |assign| assign.span,
+        .CompoundAssignment => |comp_assign| comp_assign.span,
+        .Call => |call| call.span,
+        .Index => |index| index.span,
+        .FieldAccess => |field| field.span,
+        .Cast => |cast| cast.span,
+        .Comptime => |comptime_expr| comptime_expr.span,
+        .Old => |old| old.span,
+        .Tuple => |tuple| tuple.span,
+        .SwitchExpression => |switch_expr| switch_expr.span,
+        .Quantified => |quantified| quantified.span,
+        .Try => |try_expr| try_expr.span,
+        .ErrorReturn => |error_ret| error_ret.span,
+        .ErrorCast => |error_cast| error_cast.span,
+        .Shift => |shift| shift.span,
+        .StructInstantiation => |struct_inst| struct_inst.span,
+        .AnonymousStruct => |anon_struct| anon_struct.span,
+        .Range => |range| range.span,
+        .LabeledBlock => |labeled_block| labeled_block.span,
+        .Destructuring => |destructuring| destructuring.span,
+        .EnumLiteral => |enum_lit| enum_lit.span,
+        .ArrayLiteral => |array_lit| array_lit.span,
+    };
+}
+
+fn switchStatementHasReturns(self: *const StatementLowerer, switch_stmt: *const lib.ast.Statements.SwitchNode) bool {
+    for (switch_stmt.cases) |case| {
+        switch (case.body) {
+            .Block => |block| {
+                if (blockHasReturn(self, block)) return true;
+            },
+            .LabeledBlock => |labeled| {
+                if (blockHasReturn(self, labeled.block)) return true;
+            },
+            else => {},
+        }
+    }
+    if (switch_stmt.default_case) |default_block| {
+        if (blockHasReturn(self, default_block)) return true;
     }
     return false;
 }
 
 /// Create a default value for a given MLIR type
 pub fn createDefaultValueForType(self: *const StatementLowerer, mlir_type: c.MlirType, loc: c.MlirLocation) StatementLowerer.LoweringError!c.MlirValue {
+    // check if it's a refinement type and get its base type
+    const refinement_base = c.oraRefinementTypeGetBaseType(mlir_type);
+    if (refinement_base.ptr != null) {
+        // create a constant of the base type, then convert to refinement type
+        const base_const_op = self.ora_dialect.createArithConstant(0, refinement_base, loc);
+        h.appendOp(self.block, base_const_op);
+        const base_value = h.getResult(base_const_op, 0);
+
+        // convert base value to refinement type
+        const convert_op = c.oraBaseToRefinementOpCreate(self.ctx, loc, base_value, mlir_type, self.block);
+        if (convert_op.ptr != null) {
+            return h.getResult(convert_op, 0);
+        }
+        // fallback if conversion failed
+        return base_value;
+    }
+
     // check if it's an integer type
     if (c.oraTypeIsAInteger(mlir_type)) {
         // create a constant 0 value
@@ -530,7 +805,6 @@ pub fn createDefaultValueForType(self: *const StatementLowerer, mlir_type: c.Mli
     }
 
     // for other types, create a zero constant (simplified)
-    const constants = @import("../lower.zig");
     const zero_type = c.oraIntegerTypeCreate(self.ctx, constants.DEFAULT_INTEGER_BITS);
     const const_op = self.ora_dialect.createArithConstant(0, zero_type, loc);
     h.appendOp(self.block, const_op);

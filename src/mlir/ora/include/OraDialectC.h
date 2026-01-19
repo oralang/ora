@@ -213,6 +213,16 @@ extern "C"
     MLIR_CAPI_EXPORTED MlirBlock oraIfOpGetThenBlock(MlirOperation ifOp);
     MLIR_CAPI_EXPORTED MlirBlock oraIfOpGetElseBlock(MlirOperation ifOp);
 
+    /// Create an ora.isolated_if operation using the registered dialect
+    /// Returns null operation if the dialect is not registered or creation fails
+    MLIR_CAPI_EXPORTED MlirOperation oraIsolatedIfOpCreate(
+        MlirContext ctx,
+        MlirLocation loc,
+        MlirValue condition);
+
+    MLIR_CAPI_EXPORTED MlirBlock oraIsolatedIfOpGetThenBlock(MlirOperation ifOp);
+    MLIR_CAPI_EXPORTED MlirBlock oraIsolatedIfOpGetElseBlock(MlirOperation ifOp);
+
     /// Create an ora.while operation using the registered dialect
     /// Returns null operation if the dialect is not registered or creation fails
     MLIR_CAPI_EXPORTED MlirOperation oraWhileOpCreate(
@@ -306,6 +316,10 @@ extern "C"
     /// Returns null type if the input is not a map type
     MLIR_CAPI_EXPORTED MlirType oraMapTypeGetValueType(MlirType mapType);
 
+    /// Extract the key type from an Ora map type !ora.map<keyType, valueType>
+    /// Returns null type if the input is not a map type
+    MLIR_CAPI_EXPORTED MlirType oraMapTypeGetKeyType(MlirType mapType);
+
     //===----------------------------------------------------------------------===//
     // Refinement Type Creation
     //===----------------------------------------------------------------------===//
@@ -370,6 +384,16 @@ extern "C"
         MlirContext ctx,
         MlirLocation loc,
         MlirValue value,
+        MlirBlock block);
+
+    /// Create an ora.base_to_refinement operation
+    /// Converts a base type value to a refinement type
+    /// block: The block to insert the operation into (for block arguments, use the block containing the argument)
+    MLIR_CAPI_EXPORTED MlirOperation oraBaseToRefinementOpCreate(
+        MlirContext ctx,
+        MlirLocation loc,
+        MlirValue value,
+        MlirType resultType,
         MlirBlock block);
 
     /// Create an ora.requires operation using the registered dialect
@@ -1362,10 +1386,23 @@ extern "C"
         MlirValue tryOperation,
         MlirType resultType);
 
-    MLIR_CAPI_EXPORTED MlirBlock oraTryOpGetCatchBlock(MlirOperation tryOp);
+    MLIR_CAPI_EXPORTED MlirBlock oraTryOpGetTryBlock(MlirOperation tryOp);
 
-    /// Create an ora.for operation
-    MLIR_CAPI_EXPORTED MlirOperation oraForOpCreate(
+MLIR_CAPI_EXPORTED MlirBlock oraTryOpGetCatchBlock(MlirOperation tryOp);
+
+/// Create an ora.try_stmt operation
+MLIR_CAPI_EXPORTED MlirOperation oraTryStmtOpCreate(
+    MlirContext ctx,
+    MlirLocation loc,
+    const MlirType *resultTypes,
+    size_t numResults);
+
+MLIR_CAPI_EXPORTED MlirBlock oraTryStmtOpGetTryBlock(MlirOperation tryStmtOp);
+
+MLIR_CAPI_EXPORTED MlirBlock oraTryStmtOpGetCatchBlock(MlirOperation tryStmtOp);
+
+/// Create an ora.for operation
+MLIR_CAPI_EXPORTED MlirOperation oraForOpCreate(
         MlirContext ctx,
         MlirLocation loc,
         MlirValue collection);

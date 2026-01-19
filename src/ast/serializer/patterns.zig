@@ -24,9 +24,9 @@ const SerializationError = @import("../ast_serializer.zig").SerializationError;
 pub fn serializeLoopPattern(serializer: *AstSerializer, pattern: *const ast.Statements.LoopPattern, writer: anytype, indent: u32) SerializationError!void {
     if (serializer.options.pretty_print and !serializer.options.compact_mode) {
         try helpers.writeIndent(serializer, writer, indent);
-        try writer.print("{\n");
+        try writer.writeAll("{\n");
     } else {
-        try writer.print("{");
+        try writer.writeAll("{");
     }
 
     switch (pattern.*) {
@@ -48,11 +48,11 @@ pub fn serializeLoopPattern(serializer: *AstSerializer, pattern: *const ast.Stat
         .Destructured => |destructured| {
             try helpers.writeField(serializer, writer, "type", "Destructured", indent + 1, true);
             if (serializer.options.pretty_print and !serializer.options.compact_mode) {
-                try writer.print(",\n");
+                try writer.writeAll(",\n");
                 try helpers.writeIndent(serializer, writer, indent + 1);
-                try writer.print("\"pattern\": ");
+                try writer.writeAll("\"pattern\": ");
             } else {
-                try writer.print(",\"pattern\":");
+                try writer.writeAll(",\"pattern\":");
             }
             try serializeDestructuringPattern(serializer, &destructured.pattern, writer, indent + 1);
             if (serializer.options.include_spans) {
@@ -62,11 +62,11 @@ pub fn serializeLoopPattern(serializer: *AstSerializer, pattern: *const ast.Stat
     }
 
     if (serializer.options.pretty_print and !serializer.options.compact_mode) {
-        try writer.print("\n");
+        try writer.writeAll("\n");
         try helpers.writeIndent(serializer, writer, indent);
-        try writer.print("}");
+        try writer.writeAll("}");
     } else {
-        try writer.print("}");
+        try writer.writeAll("}");
     }
 }
 
@@ -79,21 +79,21 @@ pub fn serializeSwitchCase(serializer: *AstSerializer, case: *const ast.Switch.C
 
     // serialize the pattern
     if (serializer.options.pretty_print and !serializer.options.compact_mode) {
-        try writer.print(",\n");
+        try writer.writeAll(",\n");
         try helpers.writeIndent(serializer, writer, indent + 1);
-        try writer.print("\"pattern\": ");
+        try writer.writeAll("\"pattern\": ");
     } else {
-        try writer.print(",\"pattern\":");
+        try writer.writeAll(",\"pattern\":");
     }
     try serializeSwitchPattern(serializer, &case.pattern, writer, indent + 1);
 
     // serialize the body
     if (serializer.options.pretty_print and !serializer.options.compact_mode) {
-        try writer.print(",\n");
+        try writer.writeAll(",\n");
         try helpers.writeIndent(serializer, writer, indent + 1);
-        try writer.print("\"body\": ");
+        try writer.writeAll("\"body\": ");
     } else {
-        try writer.print(",\"body\":");
+        try writer.writeAll(",\"body\":");
     }
     try serializeSwitchBody(serializer, &case.body, writer, indent + 1, depth + 1);
 }
@@ -102,9 +102,9 @@ pub fn serializeSwitchCase(serializer: *AstSerializer, case: *const ast.Switch.C
 pub fn serializeSwitchPattern(serializer: *AstSerializer, pattern: *const ast.Switch.Pattern, writer: anytype, indent: u32) SerializationError!void {
     if (serializer.options.pretty_print and !serializer.options.compact_mode) {
         try helpers.writeIndent(serializer, writer, indent);
-        try writer.print("{\n");
+        try writer.writeAll("{\n");
     } else {
-        try writer.print("{");
+        try writer.writeAll("{");
     }
 
     switch (pattern.*) {
@@ -114,11 +114,11 @@ pub fn serializeSwitchPattern(serializer: *AstSerializer, pattern: *const ast.Sw
                 try helpers.writeSpanField(serializer, writer, &literal.span, indent + 1);
             }
             if (serializer.options.pretty_print and !serializer.options.compact_mode) {
-                try writer.print(",\n");
+                try writer.writeAll(",\n");
                 try helpers.writeIndent(serializer, writer, indent + 1);
-                try writer.print("\"value\": ");
+                try writer.writeAll("\"value\": ");
             } else {
-                try writer.print(",\"value\":");
+                try writer.writeAll(",\"value\":");
             }
             try expressions.serializeLiteral(serializer, &literal.value, writer, indent + 1);
         },
@@ -130,20 +130,20 @@ pub fn serializeSwitchPattern(serializer: *AstSerializer, pattern: *const ast.Sw
             try helpers.writeBoolField(serializer, writer, "inclusive", range.inclusive, indent + 1);
 
             if (serializer.options.pretty_print and !serializer.options.compact_mode) {
-                try writer.print(",\n");
+                try writer.writeAll(",\n");
                 try helpers.writeIndent(serializer, writer, indent + 1);
-                try writer.print("\"start\": ");
+                try writer.writeAll("\"start\": ");
             } else {
-                try writer.print(",\"start\":");
+                try writer.writeAll(",\"start\":");
             }
             try expressions.serializeExpression(serializer, range.start, writer, indent + 1, 0);
 
             if (serializer.options.pretty_print and !serializer.options.compact_mode) {
-                try writer.print(",\n");
+                try writer.writeAll(",\n");
                 try helpers.writeIndent(serializer, writer, indent + 1);
-                try writer.print("\"end\": ");
+                try writer.writeAll("\"end\": ");
             } else {
-                try writer.print(",\"end\":");
+                try writer.writeAll(",\"end\":");
             }
             try expressions.serializeExpression(serializer, range.end, writer, indent + 1, 0);
         },
@@ -164,11 +164,11 @@ pub fn serializeSwitchPattern(serializer: *AstSerializer, pattern: *const ast.Sw
     }
 
     if (serializer.options.pretty_print and !serializer.options.compact_mode) {
-        try writer.print("\n");
+        try writer.writeAll("\n");
         try helpers.writeIndent(serializer, writer, indent);
-        try writer.print("}");
+        try writer.writeAll("}");
     } else {
-        try writer.print("}");
+        try writer.writeAll("}");
     }
 }
 
@@ -184,20 +184,20 @@ pub fn serializeSwitchBody(serializer: *AstSerializer, body: *const ast.Switch.B
         .LabeledBlock => |*labeled| {
             if (serializer.options.pretty_print and !serializer.options.compact_mode) {
                 try helpers.writeIndent(serializer, writer, indent);
-                try writer.print("{\n");
+                try writer.writeAll("{\n");
             } else {
-                try writer.print("{");
+                try writer.writeAll("{");
             }
 
             try helpers.writeField(serializer, writer, "type", "LabeledBlock", indent + 1, true);
             try helpers.writeField(serializer, writer, "label", labeled.label, indent + 1, false);
 
             if (serializer.options.pretty_print and !serializer.options.compact_mode) {
-                try writer.print(",\n");
+                try writer.writeAll(",\n");
                 try helpers.writeIndent(serializer, writer, indent + 1);
-                try writer.print("\"block\": ");
+                try writer.writeAll("\"block\": ");
             } else {
-                try writer.print(",\"block\":");
+                try writer.writeAll(",\"block\":");
             }
             try statements.serializeBlock(serializer, &labeled.block, writer, indent + 1, depth + 1);
 
@@ -206,11 +206,11 @@ pub fn serializeSwitchBody(serializer: *AstSerializer, body: *const ast.Switch.B
             }
 
             if (serializer.options.pretty_print and !serializer.options.compact_mode) {
-                try writer.print("\n");
+                try writer.writeAll("\n");
                 try helpers.writeIndent(serializer, writer, indent);
-                try writer.print("}");
+                try writer.writeAll("}");
             } else {
-                try writer.print("}");
+                try writer.writeAll("}");
             }
         },
     }
@@ -220,70 +220,70 @@ pub fn serializeSwitchBody(serializer: *AstSerializer, body: *const ast.Switch.B
 pub fn serializeDestructuringPattern(serializer: *AstSerializer, pattern: *const ast.Expressions.DestructuringPattern, writer: anytype, indent: u32) SerializationError!void {
     if (serializer.options.pretty_print and !serializer.options.compact_mode) {
         try helpers.writeIndent(serializer, writer, indent);
-        try writer.print("{\n");
+        try writer.writeAll("{\n");
     } else {
-        try writer.print("{");
+        try writer.writeAll("{");
     }
 
     switch (pattern.*) {
         .Struct => |fields| {
             try helpers.writeField(serializer, writer, "type", "Struct", indent + 1, true);
             if (serializer.options.pretty_print and !serializer.options.compact_mode) {
-                try writer.print(",\n");
+                try writer.writeAll(",\n");
                 try helpers.writeIndent(serializer, writer, indent + 1);
-                try writer.print("\"fields\": [");
+                try writer.writeAll("\"fields\": [");
             } else {
-                try writer.print(",\"fields\":[");
+                try writer.writeAll(",\"fields\":[");
             }
             for (fields, 0..) |*field, i| {
-                if (i > 0) try writer.print(",");
-                try writer.print("\"");
-                try writer.print(field.name);
-                try writer.print("\"");
+                if (i > 0) try writer.writeAll(",");
+                try writer.writeAll("\"");
+                try writer.writeAll(field.name);
+                try writer.writeAll("\"");
             }
-            try writer.print("]");
+            try writer.writeAll("]");
         },
         .Tuple => |names| {
             try helpers.writeField(serializer, writer, "type", "Tuple", indent + 1, true);
             if (serializer.options.pretty_print and !serializer.options.compact_mode) {
-                try writer.print(",\n");
+                try writer.writeAll(",\n");
                 try helpers.writeIndent(serializer, writer, indent + 1);
-                try writer.print("\"elements\": [");
+                try writer.writeAll("\"elements\": [");
             } else {
-                try writer.print(",\"elements\":[");
+                try writer.writeAll(",\"elements\":[");
             }
             for (names, 0..) |name, i| {
-                if (i > 0) try writer.print(",");
-                try writer.print("\"");
-                try writer.print(name);
-                try writer.print("\"");
+                if (i > 0) try writer.writeAll(",");
+                try writer.writeAll("\"");
+                try writer.writeAll(name);
+                try writer.writeAll("\"");
             }
-            try writer.print("]");
+            try writer.writeAll("]");
         },
         .Array => |names| {
             try helpers.writeField(serializer, writer, "type", "Array", indent + 1, true);
             if (serializer.options.pretty_print and !serializer.options.compact_mode) {
-                try writer.print(",\n");
+                try writer.writeAll(",\n");
                 try helpers.writeIndent(serializer, writer, indent + 1);
-                try writer.print("\"elements\": [");
+                try writer.writeAll("\"elements\": [");
             } else {
-                try writer.print(",\"elements\":[");
+                try writer.writeAll(",\"elements\":[");
             }
             for (names, 0..) |name, i| {
-                if (i > 0) try writer.print(",");
-                try writer.print("\"");
-                try writer.print(name);
-                try writer.print("\"");
+                if (i > 0) try writer.writeAll(",");
+                try writer.writeAll("\"");
+                try writer.writeAll(name);
+                try writer.writeAll("\"");
             }
-            try writer.print("]");
+            try writer.writeAll("]");
         },
     }
 
     if (serializer.options.pretty_print and !serializer.options.compact_mode) {
-        try writer.print("\n");
+        try writer.writeAll("\n");
         try helpers.writeIndent(serializer, writer, indent);
-        try writer.print("}");
+        try writer.writeAll("}");
     } else {
-        try writer.print("}");
+        try writer.writeAll("}");
     }
 }

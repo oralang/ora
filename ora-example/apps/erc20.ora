@@ -40,7 +40,7 @@ contract ERC20Token {
     
     // Transfer tokens from sender to recipient
     // Uses refinement types to ensure non-negative amounts and non-zero recipient
-    pub fn transfer(recipient: NonZeroAddress, amount: MinValue<u256, 0>) -> !bool | InsufficientBalance {
+    pub fn transfer(recipient: NonZeroAddress, amount: MinValue<u256, 0>) -> !bool {
         // recipient: @calldata (function parameter, NonZeroAddress - guaranteed non-zero at compile time)
         // amount: @calldata (function parameter with refinement type)
         
@@ -51,7 +51,7 @@ contract ERC20Token {
         
         // Check sufficient balance (runtime check required - sender_balance is from storage)
         if (sender_balance < amount) {  // @stack < @calldata: allowed comparison
-            return error.InsufficientBalance(amount, sender_balance);  // error values are @stack
+            return error.InvalidAmount;  // error values are @stack
         }
         
         // After the check, we know sender_balance >= amount
@@ -90,7 +90,7 @@ contract ERC20Token {
     }
     
     // Transfer from one address to another using allowance
-    pub fn transferFrom(sender: address, recipient: NonZeroAddress, amount: MinValue<u256, 0>) -> !bool | InsufficientBalance | InsufficientAllowance {
+    pub fn transferFrom(sender: address, recipient: NonZeroAddress, amount: MinValue<u256, 0>) -> !bool {
         // sender: @calldata (function parameter, can be any address including zero)
         // recipient: @calldata (function parameter, NonZeroAddress - guaranteed non-zero at compile time)
         // amount: @calldata (function parameter with refinement type)
@@ -103,13 +103,13 @@ contract ERC20Token {
         // Check allowance
         let current_allowance: u256 = allowances[sender][spender];  // @stack: nested storage map read (@storage[@calldata][@stack]) returns stack value
         if (current_allowance < amount) {  // @stack < @calldata: allowed comparison
-            return error.InsufficientAllowance(amount, current_allowance);  // @stack: error value
+            return error.InvalidAmount;  // @stack: error value
         }
         
         // Check sender balance (runtime check required - sender_balance is from storage)
         let sender_balance: u256 = balances[sender];  // @stack: storage map read (@storage[@calldata]) returns stack value
         if (sender_balance < amount) {  // @stack < @calldata: allowed comparison
-            return error.InsufficientBalance(amount, sender_balance);  // @stack: error value
+            return error.InvalidAmount;  // @stack: error value
         }
         
         // After the check, we know sender_balance >= amount and current_allowance >= amount
@@ -127,18 +127,5 @@ contract ERC20Token {
         return true;  // @stack: return value
     }
     
-    // Helper function to safely transfer with error handling
-    pub fn safeTransfer(recipient: NonZeroAddress, amount: MinValue<u256, 0>) {
-        // recipient: @calldata (function parameter, NonZeroAddress - guaranteed non-zero at compile time)
-        // amount: @calldata (function parameter with refinement type)
-        try {
-            let result = transfer(recipient, amount);  // @stack: function call returns stack value (error union)
-            // Transfer succeeded - result is true (@stack)
-        } catch (e) {
-            // Handle transfer errors
-            // e: @stack (error value from error union)
-            // e can be InsufficientBalance (TransferToZeroAddress removed - compile-time guarantee)
-        }
-    }
 }
 

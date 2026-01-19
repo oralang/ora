@@ -1,0 +1,7 @@
+contract LogFailIndexedCount {
+    log TooMany(indexed a: address, indexed b: address, indexed c: address, indexed d: address);
+
+    pub fn run(a: address, b: address, c: address, d: address) {
+        log TooMany(a, b, c, d);
+    }
+}

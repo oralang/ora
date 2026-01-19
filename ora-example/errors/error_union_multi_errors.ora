@@ -1,0 +1,36 @@
+// ============================================================================
+// Error Union with Multiple Errors
+// ============================================================================
+
+contract ErrorUnionMultiErrors {
+    error E1;
+    error E2;
+    error E3;
+
+    fn mayFail(x: u256) -> !u256 | E1 | E2 | E3 {
+        if (x == 0) {
+            return E1;
+        }
+        if (x == 1) {
+            return E2;
+        }
+        if (x == 2) {
+            return E3;
+        }
+        return x + 1;
+    }
+
+    fn unwrapWithTry(x: u256) -> !u256 | E1 | E2 | E3 {
+        let y: u256 = try mayFail(x);
+        return y;
+    }
+
+    fn handleWithCatch(x: u256) -> u256 {
+        try {
+            let y: u256 = mayFail(x);
+            return y;
+        } catch (e) {
+            return e;
+        }
+    }
+}

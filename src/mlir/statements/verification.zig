@@ -7,7 +7,7 @@ const std = @import("std");
 const c = @import("mlir_c_api").c;
 const lib = @import("ora_lib");
 const h = @import("../helpers.zig");
-const h_helpers = @import("../helpers.zig");
+const stmt_helpers = @import("helpers.zig");
 const StatementLowerer = @import("statement_lowerer.zig").StatementLowerer;
 const LoweringError = StatementLowerer.LoweringError;
 
@@ -83,7 +83,18 @@ pub fn lowerEnsures(self: *const StatementLowerer, ensures: *const lib.ast.State
 /// Lower assume statements for formal verification assumptions
 pub fn lowerAssume(self: *const StatementLowerer, assume: *const lib.ast.Statements.AssumeNode) LoweringError!void {
     const loc = self.fileLoc(assume.span);
-    const condition = self.expr_lowerer.lowerExpression(&assume.condition);
+    const condition = blk: {
+        if (self.active_condition_safe) {
+            if (self.active_condition_value) |val| {
+                if (self.active_condition_expr) |expr_ptr| {
+                    if (expr_ptr == &assume.condition) {
+                        break :blk val;
+                    }
+                }
+            }
+        }
+        break :blk self.expr_lowerer.lowerExpression(&assume.condition);
+    };
 
     const op = self.ora_dialect.createAssume(condition, loc);
     addVerificationAttributesToOp(self, op, "assume", "verification_assumption");

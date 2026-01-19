@@ -8,6 +8,7 @@ const lib = @import("ora_lib");
 const h = @import("../helpers.zig");
 const TypeMapper = @import("../types.zig").TypeMapper;
 const LocalVarMap = @import("../symbols.zig").LocalVarMap;
+const local_var_analysis = @import("../analysis/local_vars.zig");
 const ParamMap = @import("../symbols.zig").ParamMap;
 const StorageMap = @import("../memory.zig").StorageMap;
 const ExpressionLowerer = @import("../expressions.zig").ExpressionLowerer;
@@ -16,7 +17,19 @@ const LoweringError = StatementLowerer.LoweringError;
 const DeclarationLowerer = @import("mod.zig").DeclarationLowerer;
 const helpers = @import("helpers.zig");
 const refinements = @import("refinements.zig");
+const expr_helpers = @import("../expressions/helpers.zig");
 const log = @import("log");
+
+fn refinementCacheKey(value: c.MlirValue) usize {
+    if (c.mlirValueIsABlockArgument(value)) {
+        const owner = c.mlirBlockArgumentGetOwner(value);
+        const arg_no = c.mlirBlockArgumentGetArgNumber(value);
+        const block_key = @intFromPtr(owner.ptr);
+        const arg_key: usize = @intCast(arg_no);
+        return block_key ^ (arg_key *% 0x9e3779b97f4a7c15);
+    }
+    return @intFromPtr(value.ptr);
+}
 
 /// Lower function declarations with enhanced features
 pub fn lowerFunction(self: *const DeclarationLowerer, func: *const lib.FunctionNode, contract_storage_map: ?*StorageMap, local_var_map: ?*LocalVarMap) c.MlirOperation {
@@ -240,6 +253,12 @@ pub fn lowerFunction(self: *const DeclarationLowerer, func: *const lib.FunctionN
         }
     }
 
+    // share refinement caches across parameters, preconditions, and body lowering
+    var refinement_base_cache = std.AutoHashMap(usize, c.MlirValue).init(std.heap.page_allocator);
+    defer refinement_base_cache.deinit();
+    var refinement_guard_cache = std.AutoHashMap(u128, void).init(std.heap.page_allocator);
+    defer refinement_guard_cache.deinit();
+
     // map parameter names to block arguments
     for (func.parameters, 0..) |param, i| {
         const block_arg = c.oraBlockGetArgument(block, @intCast(i));
@@ -247,21 +266,33 @@ pub fn lowerFunction(self: *const DeclarationLowerer, func: *const lib.FunctionN
 
         // insert refinement type guards for parameters
         if (param.type_info.ora_type) |ora_type| {
-            refinements.insertRefinementGuard(self, block, block_arg, ora_type, param.span) catch |err| {
+            refinements.insertRefinementGuard(self, block, block_arg, ora_type, param.span, param.name, &refinement_base_cache, &refinement_guard_cache) catch |err| {
                 log.err("inserting refinement guard for parameter {s}: {s}\n", .{ param.name, @errorName(err) });
             };
+            const base_value = expr_helpers.unwrapRefinementValue(self.ctx, block, self.locations, &refinement_base_cache, block_arg, param.span);
+            param_map.setBaseArgument(param.name, base_value) catch {};
+        }
+    }
+
+    // analyze locals and mark SSA vs memref choices before lowering body
+    if (local_var_map) |lvm| {
+        var reprs = local_var_analysis.analyzeLocalVarReprs(std.heap.page_allocator, func);
+        defer reprs.deinit();
+        var it = reprs.iterator();
+        while (it.next()) |entry| {
+            lvm.setLocalVarKind(entry.key_ptr.*, entry.value_ptr.*) catch {};
         }
     }
 
     // add precondition assertions for requires clauses
     if (func.requires_clauses.len > 0) {
-        lowerRequiresClauses(self, func.requires_clauses, block, &param_map, contract_storage_map, local_var_map orelse &local_vars) catch |err| {
+        lowerRequiresClauses(self, func.requires_clauses, block, &param_map, contract_storage_map, local_var_map orelse &local_vars, &refinement_base_cache) catch |err| {
             log.err("lowering requires clauses: {s}\n", .{@errorName(err)});
         };
     }
 
     // lower the function body
-    lowerFunctionBody(self, func, block, &param_map, contract_storage_map, local_var_map orelse &local_vars) catch |err| {
+    lowerFunctionBody(self, func, func_op, block, &param_map, contract_storage_map, local_var_map orelse &local_vars, &refinement_base_cache, &refinement_guard_cache) catch |err| {
         // format error message based on error type
         const error_message = switch (err) {
             error.InvalidLValue => "Cannot assign to immutable variable",
@@ -341,10 +372,14 @@ pub fn lowerFunction(self: *const DeclarationLowerer, func: *const lib.FunctionN
 }
 
 /// Lower function body statements
-fn lowerFunctionBody(self: *const DeclarationLowerer, func: *const lib.FunctionNode, block: c.MlirBlock, param_map: *const ParamMap, storage_map: ?*const StorageMap, local_var_map: ?*LocalVarMap) LoweringError!void {
+fn lowerFunctionBody(self: *const DeclarationLowerer, func: *const lib.FunctionNode, func_op: c.MlirOperation, block: c.MlirBlock, param_map: *const ParamMap, storage_map: ?*const StorageMap, local_var_map: ?*LocalVarMap, refinement_base_cache: *std.AutoHashMap(usize, c.MlirValue), refinement_guard_cache: *std.AutoHashMap(u128, void)) LoweringError!void {
     // create a statement lowerer for this function
     const const_local_var_map = if (local_var_map) |lvm| @as(*const LocalVarMap, lvm) else null;
     var expr_lowerer = ExpressionLowerer.init(self.ctx, block, self.type_mapper, param_map, storage_map, const_local_var_map, self.symbol_table, self.builtin_registry, self.error_handler, self.locations, self.ora_dialect);
+    expr_lowerer.refinement_base_cache = refinement_base_cache;
+    expr_lowerer.prefer_refinement_base_cache = true;
+    expr_lowerer.prefer_refinement_base_cache = true;
+    expr_lowerer.refinement_guard_cache = refinement_guard_cache;
 
     // get the function's return type
     const function_return_type = if (func.return_type_info) |ret_info|
@@ -355,16 +390,29 @@ fn lowerFunctionBody(self: *const DeclarationLowerer, func: *const lib.FunctionN
     const function_return_type_info = if (func.return_type_info) |ret_info| ret_info else null;
     expr_lowerer.current_function_return_type = function_return_type;
     expr_lowerer.current_function_return_type_info = function_return_type_info;
-    const stmt_lowerer = StatementLowerer.init(self.ctx, block, self.type_mapper, &expr_lowerer, param_map, storage_map, local_var_map, self.locations, self.symbol_table, self.builtin_registry, std.heap.page_allocator, function_return_type, function_return_type_info, self.ora_dialect, func.ensures_clauses);
+    var stmt_lowerer = StatementLowerer.init(self.ctx, block, self.type_mapper, &expr_lowerer, param_map, storage_map, local_var_map, self.locations, self.symbol_table, self.builtin_registry, std.heap.page_allocator, refinement_guard_cache, function_return_type, function_return_type_info, self.ora_dialect, func.ensures_clauses);
+    stmt_lowerer.current_func_op = func_op;
 
     // lower the function body
     _ = try stmt_lowerer.lowerBlockBody(func.body, block);
+    stmt_lowerer.fixEmptyBlocks();
 }
 
 /// Lower requires clauses as precondition assertions with enhanced verification metadata (Requirements 6.4)
-fn lowerRequiresClauses(self: *const DeclarationLowerer, requires_clauses: []*lib.ast.Expressions.ExprNode, block: c.MlirBlock, param_map: *const ParamMap, storage_map: ?*const StorageMap, local_var_map: ?*LocalVarMap) LoweringError!void {
+fn lowerRequiresClauses(self: *const DeclarationLowerer, requires_clauses: []*lib.ast.Expressions.ExprNode, block: c.MlirBlock, param_map: *const ParamMap, storage_map: ?*const StorageMap, local_var_map: ?*LocalVarMap, refinement_base_cache: *std.AutoHashMap(usize, c.MlirValue)) LoweringError!void {
     const const_local_var_map = if (local_var_map) |lvm| @as(*const LocalVarMap, lvm) else null;
-    const expr_lowerer = ExpressionLowerer.init(self.ctx, block, self.type_mapper, param_map, storage_map, const_local_var_map, self.symbol_table, self.builtin_registry, self.error_handler, self.locations, self.ora_dialect);
+    var expr_lowerer = ExpressionLowerer.init(self.ctx, block, self.type_mapper, param_map, storage_map, const_local_var_map, self.symbol_table, self.builtin_registry, self.error_handler, self.locations, self.ora_dialect);
+    expr_lowerer.refinement_base_cache = refinement_base_cache;
+    expr_lowerer.prefer_refinement_base_cache = true;
+    if (param_map.base_args.count() > 0) {
+        var it = param_map.base_args.iterator();
+        while (it.next()) |entry| {
+            const name = entry.key_ptr.*;
+            if (param_map.getBlockArgument(name)) |block_arg| {
+                refinement_base_cache.put(refinementCacheKey(block_arg), entry.value_ptr.*) catch {};
+            }
+        }
+    }
 
     for (requires_clauses, 0..) |clause, i| {
         // lower the requires expression
@@ -416,7 +464,8 @@ fn lowerRequiresClauses(self: *const DeclarationLowerer, requires_clauses: []*li
 /// Lower ensures clauses as postcondition assertions with enhanced verification metadata (Requirements 6.5)
 fn lowerEnsuresClauses(self: *const DeclarationLowerer, ensures_clauses: []*lib.ast.Expressions.ExprNode, block: c.MlirBlock, param_map: *const ParamMap, storage_map: ?*const StorageMap, local_var_map: ?*LocalVarMap) LoweringError!void {
     const const_local_var_map = if (local_var_map) |lvm| @as(*const LocalVarMap, lvm) else null;
-    const expr_lowerer = ExpressionLowerer.init(self.ctx, block, self.type_mapper, param_map, storage_map, const_local_var_map, self.symbol_table, self.builtin_registry, self.error_handler, self.locations, self.ora_dialect);
+    var expr_lowerer = ExpressionLowerer.init(self.ctx, block, self.type_mapper, param_map, storage_map, const_local_var_map, self.symbol_table, self.builtin_registry, self.error_handler, self.locations, self.ora_dialect);
+    expr_lowerer.prefer_refinement_base_cache = true;
 
     for (ensures_clauses, 0..) |clause, i| {
         // lower the ensures expression

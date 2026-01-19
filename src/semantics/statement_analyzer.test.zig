@@ -7,24 +7,17 @@ const testing = std.testing;
 const ora_root = @import("ora_root");
 const lexer = ora_root.lexer;
 const parser_mod = ora_root.parser;
-const semantics = ora_root.semantics;
-const AstArena = ora_root.AstArena;
-
-fn analyzeSource(allocator: std.mem.Allocator, source: []const u8) ![]semantics.Diagnostic {
-    var arena = AstArena.init(allocator);
-    defer arena.deinit();
-
+fn expectTypeResolutionError(allocator: std.mem.Allocator, source: []const u8) !void {
     var lex = lexer.Lexer.init(allocator, source);
     defer lex.deinit();
     const tokens = try lex.scanTokens();
     defer allocator.free(tokens);
 
-    var parser = parser_mod.Parser.init(tokens, &arena);
-    const nodes = try parser.parse();
-
-    var sem = try semantics.analyze(allocator, nodes);
-    defer sem.symbols.deinit();
-    return sem.diagnostics;
+    _ = parser_mod.parseWithArena(allocator, tokens) catch |err| {
+        try testing.expect(err == parser_mod.ParserError.TypeResolutionFailed);
+        return;
+    };
+    return error.TestUnexpectedResult;
 }
 
 test "try requires error union operand" {
@@ -37,9 +30,7 @@ test "try requires error union operand" {
         \\}
     ;
 
-    const diags = try analyzeSource(allocator, source);
-    defer allocator.free(diags);
-    try testing.expect(diags.len > 0);
+    try expectTypeResolutionError(allocator, source);
 }
 
 test "error union call must be handled in expression statement" {
@@ -52,9 +43,7 @@ test "error union call must be handled in expression statement" {
         \\}
     ;
 
-    const diags = try analyzeSource(allocator, source);
-    defer allocator.free(diags);
-    try testing.expect(diags.len > 0);
+    try expectTypeResolutionError(allocator, source);
 }
 
 test "error union assignment to non error type is rejected" {
@@ -68,9 +57,7 @@ test "error union assignment to non error type is rejected" {
         \\}
     ;
 
-    const diags = try analyzeSource(allocator, source);
-    defer allocator.free(diags);
-    try testing.expect(diags.len > 0);
+    try expectTypeResolutionError(allocator, source);
 }
 
 test "error union can be assigned to error union variable" {
@@ -84,7 +71,10 @@ test "error union can be assigned to error union variable" {
         \\}
     ;
 
-    const diags = try analyzeSource(allocator, source);
-    defer allocator.free(diags);
-    try testing.expectEqual(@as(usize, 0), diags.len);
+    var lex = lexer.Lexer.init(allocator, source);
+    defer lex.deinit();
+    const tokens = try lex.scanTokens();
+    defer allocator.free(tokens);
+
+    _ = try parser_mod.parseWithArena(allocator, tokens);
 }

@@ -111,6 +111,96 @@ test "expressions: identifier" {
     try testing.expect(expr == .Identifier);
 }
 
+test "expressions: function call" {
+    const allocator = testing.allocator;
+    const source = "foo(1, 2)";
+
+    var lex = lexer.Lexer.init(allocator, source);
+    defer lex.deinit();
+    const tokens = try lex.scanTokens();
+    defer allocator.free(tokens);
+
+    var arena = ast_arena.AstArena.init(allocator);
+    defer arena.deinit();
+    var expr_parser = ExpressionParser.init(tokens, &arena);
+
+    const expr = try expr_parser.parseExpression();
+
+    try testing.expect(expr == .Call);
+}
+
+test "expressions: field access" {
+    const allocator = testing.allocator;
+    const source = "foo().bar";
+
+    var lex = lexer.Lexer.init(allocator, source);
+    defer lex.deinit();
+    const tokens = try lex.scanTokens();
+    defer allocator.free(tokens);
+
+    var arena = ast_arena.AstArena.init(allocator);
+    defer arena.deinit();
+    var expr_parser = ExpressionParser.init(tokens, &arena);
+
+    const expr = try expr_parser.parseExpression();
+
+    try testing.expect(expr == .FieldAccess);
+}
+
+test "expressions: index access" {
+    const allocator = testing.allocator;
+    const source = "arr[0]";
+
+    var lex = lexer.Lexer.init(allocator, source);
+    defer lex.deinit();
+    const tokens = try lex.scanTokens();
+    defer allocator.free(tokens);
+
+    var arena = ast_arena.AstArena.init(allocator);
+    defer arena.deinit();
+    var expr_parser = ExpressionParser.init(tokens, &arena);
+
+    const expr = try expr_parser.parseExpression();
+
+    try testing.expect(expr == .Index);
+}
+
+test "expressions: try expression" {
+    const allocator = testing.allocator;
+    const source = "try mayFail()";
+
+    var lex = lexer.Lexer.init(allocator, source);
+    defer lex.deinit();
+    const tokens = try lex.scanTokens();
+    defer allocator.free(tokens);
+
+    var arena = ast_arena.AstArena.init(allocator);
+    defer arena.deinit();
+    var expr_parser = ExpressionParser.init(tokens, &arena);
+
+    const expr = try expr_parser.parseExpression();
+
+    try testing.expect(expr == .Try);
+}
+
+test "expressions: error return expression" {
+    const allocator = testing.allocator;
+    const source = "error.Fail";
+
+    var lex = lexer.Lexer.init(allocator, source);
+    defer lex.deinit();
+    const tokens = try lex.scanTokens();
+    defer allocator.free(tokens);
+
+    var arena = ast_arena.AstArena.init(allocator);
+    defer arena.deinit();
+    var expr_parser = ExpressionParser.init(tokens, &arena);
+
+    const expr = try expr_parser.parseExpression();
+
+    try testing.expect(expr == .ErrorReturn);
+}
+
 // ============================================================================
 // Binary Expression Tests
 // ============================================================================

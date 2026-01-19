@@ -27,6 +27,7 @@ pub fn parseContract(
     expr_parser: *ExpressionParser,
 ) !ast.AstNode {
     const name_token = try parser.base.consume(.Identifier, "Expected contract name");
+    const name = try parser.base.arena.createString(name_token.lexeme);
 
     _ = try parser.base.consume(.LeftBrace, "Expected '{' after contract declaration");
 
@@ -47,7 +48,7 @@ pub fn parseContract(
     _ = try parser.base.consume(.RightBrace, "Expected '}' after contract body");
 
     return ast.AstNode{ .Contract = ast.ContractNode{
-        .name = name_token.lexeme,
+        .name = name,
         .attributes = &[_]u8{},
         .body = try body.toOwnedSlice(parser.base.arena.allocator()),
         .span = parser.base.spanFromToken(name_token),

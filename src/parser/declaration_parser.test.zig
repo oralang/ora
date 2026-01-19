@@ -370,3 +370,53 @@ test "declarations: const import with alias" {
         }
     }
 }
+
+// ============================================================================
+// Error and Log Declaration Tests
+// ============================================================================
+
+test "declarations: error declaration" {
+    const allocator = testing.allocator;
+    const source = "error InvalidAmount(amount: u256);";
+
+    var lex = lexer.Lexer.init(allocator, source);
+    defer lex.deinit();
+    const tokens = try lex.scanTokens();
+    defer allocator.free(tokens);
+
+    var arena = ast_arena.AstArena.init(allocator);
+    defer arena.deinit();
+    var parser_instance = parser.Parser.init(tokens, &arena);
+
+    const nodes = try parser_instance.parse();
+    defer arena.allocator().free(nodes);
+
+    try testing.expect(nodes.len == 1);
+    try testing.expect(nodes[0] == .ErrorDecl);
+    if (nodes[0] == .ErrorDecl) {
+        try testing.expect(std.mem.eql(u8, "InvalidAmount", nodes[0].ErrorDecl.name));
+    }
+}
+
+test "declarations: log declaration" {
+    const allocator = testing.allocator;
+    const source = "log Transfer(from: address, amount: u256);";
+
+    var lex = lexer.Lexer.init(allocator, source);
+    defer lex.deinit();
+    const tokens = try lex.scanTokens();
+    defer allocator.free(tokens);
+
+    var arena = ast_arena.AstArena.init(allocator);
+    defer arena.deinit();
+    var parser_instance = parser.Parser.init(tokens, &arena);
+
+    const nodes = try parser_instance.parse();
+    defer arena.allocator().free(nodes);
+
+    try testing.expect(nodes.len == 1);
+    try testing.expect(nodes[0] == .LogDecl);
+    if (nodes[0] == .LogDecl) {
+        try testing.expect(std.mem.eql(u8, "Transfer", nodes[0].LogDecl.name));
+    }
+}

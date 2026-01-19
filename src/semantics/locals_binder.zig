@@ -19,11 +19,22 @@
 const std = @import("std");
 const ast = @import("../ast.zig");
 const state = @import("state.zig");
-const expr = @import("expression_analyzer.zig");
-
+const type_info = @import("../ast/type_info.zig");
 fn mapBlockScope(table: *state.SymbolTable, block: *const ast.Statements.BlockNode, scope: *state.Scope) !void {
     const key: usize = @intFromPtr(block);
     try table.block_scopes.put(key, scope);
+}
+
+/// Map a block scope using the statement pointer as the key base.
+/// This avoids issues with stack copies when switching on union values.
+/// block_id: 0 = primary block (then/body/try), 1 = secondary block (else/catch)
+fn mapBlockScopeFromStmt(table: *state.SymbolTable, stmt: *const ast.Statements.StmtNode, block_id: usize, scope: *state.Scope) !void {
+    const key: usize = @intFromPtr(stmt) * 4 + block_id;
+    try table.block_scopes.put(key, scope);
+}
+
+fn getBlockScopeKey(stmt: *const ast.Statements.StmtNode, block_id: usize) usize {
+    return @intFromPtr(stmt) * 4 + block_id;
 }
 
 fn createChildScope(table: *state.SymbolTable, parent: *state.Scope, name: ?[]const u8) !*state.Scope {
@@ -31,171 +42,6 @@ fn createChildScope(table: *state.SymbolTable, parent: *state.Scope, name: ?[]co
     sc.* = state.Scope.init(table.allocator, parent, name);
     try table.scopes.append(table.allocator, sc);
     return sc;
-}
-
-fn isErrorUnionType(ti: ast.Types.TypeInfo) bool {
-    if (ti.category == .ErrorUnion) return true;
-    if (ti.ora_type) |ot| {
-        return switch (ot) {
-            .error_union => true,
-            ._union => |members| blk: {
-                if (members.len == 0) break :blk false;
-                break :blk members[0] == .error_union;
-            },
-            else => false,
-        };
-    }
-    return false;
-}
-
-fn findErrorUnionInExprPtr(table: *state.SymbolTable, scope: *state.Scope, expr_ptr: *ast.Expressions.ExprNode) ?ast.Types.TypeInfo {
-    return findErrorUnionInExpr(table, scope, expr_ptr.*);
-}
-
-fn findErrorUnionInExpr(table: *state.SymbolTable, scope: *state.Scope, expr_node: ast.Expressions.ExprNode) ?ast.Types.TypeInfo {
-    switch (expr_node) {
-        .Try => |t| {
-            const inner = expr.inferExprType(table, scope, t.expr.*);
-            if (isErrorUnionType(inner)) return inner;
-            return findErrorUnionInExprPtr(table, scope, t.expr);
-        },
-        .Call => |c| {
-            const ti = expr.inferExprType(table, scope, expr_node);
-            if (isErrorUnionType(ti)) return ti;
-            if (findErrorUnionInExprPtr(table, scope, c.callee)) |found| return found;
-            for (c.arguments) |arg| {
-                if (findErrorUnionInExprPtr(table, scope, arg)) |found| return found;
-            }
-            return null;
-        },
-        .Binary => |b| {
-            if (findErrorUnionInExprPtr(table, scope, b.lhs)) |found| return found;
-            return findErrorUnionInExprPtr(table, scope, b.rhs);
-        },
-        .Unary => |u| return findErrorUnionInExprPtr(table, scope, u.operand),
-        .Assignment => |a| {
-            if (findErrorUnionInExprPtr(table, scope, a.target)) |found| return found;
-            return findErrorUnionInExprPtr(table, scope, a.value);
-        },
-        .CompoundAssignment => |ca| {
-            if (findErrorUnionInExprPtr(table, scope, ca.target)) |found| return found;
-            return findErrorUnionInExprPtr(table, scope, ca.value);
-        },
-        .Index => |ix| {
-            if (findErrorUnionInExprPtr(table, scope, ix.target)) |found| return found;
-            return findErrorUnionInExprPtr(table, scope, ix.index);
-        },
-        .FieldAccess => |fa| return findErrorUnionInExprPtr(table, scope, fa.target),
-        .Cast => |c| return findErrorUnionInExprPtr(table, scope, c.operand),
-        .Tuple => |t| {
-            for (t.elements) |el| {
-                if (findErrorUnionInExprPtr(table, scope, el)) |found| return found;
-            }
-            return null;
-        },
-        .SwitchExpression => |sw| {
-            if (findErrorUnionInExprPtr(table, scope, sw.condition)) |found| return found;
-            for (sw.cases) |case| {
-                switch (case.body) {
-                    .Expression => |expr_ptr| {
-                        if (findErrorUnionInExprPtr(table, scope, expr_ptr)) |found| return found;
-                    },
-                    .Block => |*blk| if (findErrorUnionInBlock(table, scope, blk)) |found| return found,
-                    .LabeledBlock => |lb| if (findErrorUnionInBlock(table, scope, &lb.block)) |found| return found,
-                }
-            }
-            if (sw.default_case) |*defb| return findErrorUnionInBlock(table, scope, defb);
-            return null;
-        },
-        .AnonymousStruct => |as| {
-            for (as.fields) |f| {
-                if (findErrorUnionInExprPtr(table, scope, f.value)) |found| return found;
-            }
-            return null;
-        },
-        .ArrayLiteral => |al| {
-            for (al.elements) |el| {
-                if (findErrorUnionInExprPtr(table, scope, el)) |found| return found;
-            }
-            return null;
-        },
-        .StructInstantiation => |si| {
-            if (findErrorUnionInExprPtr(table, scope, si.struct_name)) |found| return found;
-            for (si.fields) |f| {
-                if (findErrorUnionInExprPtr(table, scope, f.value)) |found| return found;
-            }
-            return null;
-        },
-        .Destructuring => |d| return findErrorUnionInExprPtr(table, scope, d.value),
-        .Range => |r| {
-            if (findErrorUnionInExprPtr(table, scope, r.start)) |found| return found;
-            return findErrorUnionInExprPtr(table, scope, r.end);
-        },
-        .Shift => |sh| {
-            if (findErrorUnionInExprPtr(table, scope, sh.mapping)) |found| return found;
-            if (findErrorUnionInExprPtr(table, scope, sh.source)) |found| return found;
-            if (findErrorUnionInExprPtr(table, scope, sh.dest)) |found| return found;
-            return findErrorUnionInExprPtr(table, scope, sh.amount);
-        },
-        .Quantified => |q| {
-            if (q.condition) |cond| {
-                if (findErrorUnionInExprPtr(table, scope, cond)) |found| return found;
-            }
-            return findErrorUnionInExprPtr(table, scope, q.body);
-        },
-        else => return null,
-    }
-}
-
-fn findErrorUnionInBlock(table: *state.SymbolTable, scope: *state.Scope, block: *const ast.Statements.BlockNode) ?ast.Types.TypeInfo {
-    for (block.statements) |stmt| {
-        switch (stmt) {
-            .VariableDecl => |v| {
-                if (v.value) |val| {
-                    if (findErrorUnionInExprPtr(table, scope, val)) |found| return found;
-                }
-            },
-            .Expr => |e| if (findErrorUnionInExpr(table, scope, e)) |found| return found,
-            .Return => |r| if (r.value) |v| {
-                if (findErrorUnionInExpr(table, scope, v)) |found| return found;
-            },
-            .CompoundAssignment => |ca| {
-                if (findErrorUnionInExprPtr(table, scope, ca.target)) |found| return found;
-                if (findErrorUnionInExprPtr(table, scope, ca.value)) |found| return found;
-            },
-            .If => |iff| {
-                if (findErrorUnionInExpr(table, scope, iff.condition)) |found| return found;
-                if (findErrorUnionInBlock(table, scope, &iff.then_branch)) |found| return found;
-                if (iff.else_branch) |*eb| if (findErrorUnionInBlock(table, scope, eb)) |found| return found;
-            },
-            .While => |wh| {
-                if (findErrorUnionInExpr(table, scope, wh.condition)) |found| return found;
-                if (findErrorUnionInBlock(table, scope, &wh.body)) |found| return found;
-            },
-            .ForLoop => |fl| {
-                if (findErrorUnionInExpr(table, scope, fl.iterable)) |found| return found;
-                if (findErrorUnionInBlock(table, scope, &fl.body)) |found| return found;
-            },
-            .TryBlock => |tb| {
-                if (findErrorUnionInBlock(table, scope, &tb.try_block)) |found| return found;
-                if (tb.catch_block) |cb| if (findErrorUnionInBlock(table, scope, &cb.block)) |found| return found;
-            },
-            .Switch => |sw| {
-                if (findErrorUnionInExpr(table, scope, sw.condition)) |found| return found;
-                for (sw.cases) |*case| {
-                    switch (case.body) {
-                        .Block => |*blk| if (findErrorUnionInBlock(table, scope, blk)) |found| return found,
-                        .Expression => |expr_ptr| if (findErrorUnionInExprPtr(table, scope, expr_ptr)) |found| return found,
-                        .LabeledBlock => |*lb| if (findErrorUnionInBlock(table, scope, &lb.block)) |found| return found,
-                    }
-                }
-                if (sw.default_case) |*defb| if (findErrorUnionInBlock(table, scope, defb)) |found| return found;
-            },
-            else => {},
-        }
-    }
-
-    return null;
 }
 
 pub fn bindFunctionLocals(table: *state.SymbolTable, fn_scope: *state.Scope, f: *const ast.FunctionNode) !void {
@@ -206,15 +52,7 @@ pub fn bindFunctionLocals(table: *state.SymbolTable, fn_scope: *state.Scope, f: 
 }
 
 fn declareVar(table: *state.SymbolTable, scope: *state.Scope, v: ast.statements.VariableDeclNode) !void {
-    var resolved_type = v.type_info;
-    if (resolved_type.ora_type == null) {
-        if (v.value) |val_ptr| {
-            const inferred = expr.inferExprType(table, scope, val_ptr.*);
-            if (inferred.ora_type != null) {
-                resolved_type = inferred;
-            }
-        }
-    }
+    const resolved_type = v.type_info;
     const sym = state.Symbol{
         .name = v.name,
         .kind = .Var,
@@ -273,45 +111,40 @@ fn bindBlock(table: *state.SymbolTable, scope: *state.Scope, block: *const ast.S
             .Expr => |_| {},
             .CompoundAssignment => |_| {},
             .If => |*iff| {
-                // then branch
+                // then branch - use stmt pointer for consistent key
                 const then_scope = try createChildScope(table, scope, scope.name);
-                try mapBlockScope(table, &iff.then_branch, then_scope);
+                try mapBlockScopeFromStmt(table, stmt, 0, then_scope);
                 try bindBlock(table, then_scope, &iff.then_branch);
                 // else branch
                 if (iff.else_branch) |*eb| {
                     const else_scope = try createChildScope(table, scope, scope.name);
-                    try mapBlockScope(table, eb, else_scope);
+                    try mapBlockScopeFromStmt(table, stmt, 1, else_scope);
                     try bindBlock(table, else_scope, eb);
                 }
             },
             .While => |*wh| {
                 const body_scope = try createChildScope(table, scope, scope.name);
-                try mapBlockScope(table, &wh.body, body_scope);
+                try mapBlockScopeFromStmt(table, stmt, 0, body_scope);
                 try bindBlock(table, body_scope, &wh.body);
             },
             .ForLoop => |*fl| {
                 const body_scope = try createChildScope(table, scope, scope.name);
-                try mapBlockScope(table, &fl.body, body_scope);
+                try mapBlockScopeFromStmt(table, stmt, 0, body_scope);
                 // bind the loop variables in the body scope
                 try bindForPattern(table, body_scope, fl.pattern);
                 try bindBlock(table, body_scope, &fl.body);
             },
             .TryBlock => |*tb| {
                 const try_scope = try createChildScope(table, scope, scope.name);
-                try mapBlockScope(table, &tb.try_block, try_scope);
+                try mapBlockScopeFromStmt(table, stmt, 0, try_scope);
                 try bindBlock(table, try_scope, &tb.try_block);
                 if (tb.catch_block) |*cb| {
                     const catch_scope = try createChildScope(table, scope, scope.name);
-                    try mapBlockScope(table, &cb.block, catch_scope);
+                    try mapBlockScopeFromStmt(table, stmt, 1, catch_scope);
                     if (cb.error_variable) |ename| {
-                        const inferred_error_union = findErrorUnionInBlock(table, try_scope, &tb.try_block);
-                        const error_type_info = inferred_error_union orelse @import("../ast/type_info.zig").TypeInfo{
-                            .category = .Error,
-                            .ora_type = null,
-                            .source = .inferred,
-                            .span = cb.span,
-                        };
-                        const sym = state.Symbol{ .name = ename, .kind = .Var, .typ = error_type_info, .span = cb.span, .mutable = false };
+                        var error_type = type_info.CommonTypes.u256_type();
+                        error_type.span = cb.span;
+                        const sym = state.Symbol{ .name = ename, .kind = .Var, .typ = error_type, .span = cb.span, .mutable = false };
                         _ = try table.declare(catch_scope, sym);
                     }
                     try bindBlock(table, catch_scope, &cb.block);
@@ -319,7 +152,7 @@ fn bindBlock(table: *state.SymbolTable, scope: *state.Scope, block: *const ast.S
             },
             .LabeledBlock => |*lb| {
                 const inner_scope = try createChildScope(table, scope, scope.name);
-                try mapBlockScope(table, &lb.block, inner_scope);
+                try mapBlockScopeFromStmt(table, stmt, 0, inner_scope);
                 try bindBlock(table, inner_scope, &lb.block);
             },
             .Switch => |*sw| {

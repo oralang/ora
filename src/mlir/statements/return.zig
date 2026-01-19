@@ -6,6 +6,7 @@ const std = @import("std");
 const c = @import("mlir_c_api").c;
 const lib = @import("ora_lib");
 const h = @import("../helpers.zig");
+const log = @import("log");
 const StatementLowerer = @import("statement_lowerer.zig").StatementLowerer;
 const LoweringError = StatementLowerer.LoweringError;
 const helpers = @import("helpers.zig");
@@ -18,39 +19,37 @@ pub fn lowerReturn(self: *const StatementLowerer, ret: *const lib.ast.Statements
         const loc = self.fileLoc(ret.span);
         const return_flag_memref = self.try_return_flag_memref.?;
 
-        // set return flag to true
         const true_val = helpers.createBoolConstant(self, true, loc);
         helpers.storeToMemref(self, true_val, return_flag_memref, loc);
 
-        // store return value if present
         if (ret.value) |value_expr| {
             if (self.try_return_value_memref) |return_value_memref| {
                 var v = self.expr_lowerer.lowerExpression(&value_expr);
 
-                // insert refinement guard if return type is a refinement type
-                if (self.current_function_return_type_info) |return_type_info| {
-                    if (return_type_info.ora_type) |ora_type| {
-                        v = try helpers.insertRefinementGuard(self, v, ora_type, ret.span, ret.skip_guard);
-                    }
-                }
-
-                // get target type from memref element type
                 const memref_type = c.oraValueGetType(return_value_memref);
                 const element_type = c.oraShapedTypeGetElementType(memref_type);
 
-                // convert value to match memref element type
-                const final_value = helpers.convertValueToType(self, v, element_type, ret.span, loc);
+                const is_error_union = if (self.current_function_return_type_info) |ti|
+                    helpers.isErrorUnionTypeInfo(ti)
+                else
+                    false;
 
-                // store return value
-                helpers.storeToMemref(self, final_value, return_value_memref, loc);
+                if (is_error_union) {
+                    const err_info = helpers.getErrorUnionPayload(self, &value_expr, v, element_type, self.block, loc);
+                    v = helpers.encodeErrorUnionValue(self, err_info.payload, err_info.is_error, element_type, self.block, ret.span, loc);
+                } else {
+                    v = helpers.convertValueToType(self, v, element_type, ret.span, loc);
+                }
+
+                helpers.storeToMemref(self, v, return_value_memref, loc);
             }
         }
 
-        // return early - the actual ora.return will be handled after the try block
         return;
     }
 
     const loc = self.fileLoc(ret.span);
+    log.debug("[lowerReturn] self.block ptr = {*}, self.expr_lowerer.block ptr = {*}\n", .{ self.block.ptr, self.expr_lowerer.block.ptr });
 
     // insert ensures clause checks before return (postconditions must hold at every return point)
     if (self.ensures_clauses.len > 0) {
@@ -60,15 +59,22 @@ pub fn lowerReturn(self: *const StatementLowerer, ret: *const lib.ast.Statements
     if (ret.value) |e| {
         var v = self.expr_lowerer.lowerExpression(&e);
 
-        // insert refinement guard if return type is a refinement type
-        if (self.current_function_return_type_info) |return_type_info| {
-            if (return_type_info.ora_type) |ora_type| {
-                v = try helpers.insertRefinementGuard(self, v, ora_type, ret.span, ret.skip_guard);
-            }
-        }
-
-        // convert return value to match function return type if available
+        // convert/wrap return value to match function return type if available
         const final_value = if (self.current_function_return_type) |ret_type| blk: {
+            const is_error_union = if (self.current_function_return_type_info) |ti|
+                helpers.isErrorUnionTypeInfo(ti)
+            else
+                false;
+            if (is_error_union) {
+                const err_info = helpers.getErrorUnionPayload(self, &e, v, ret_type, self.block, loc);
+                break :blk helpers.encodeErrorUnionValue(self, err_info.payload, err_info.is_error, ret_type, self.block, ret.span, loc);
+            }
+            if (self.current_function_return_type_info) |ti| {
+                if (ti.ora_type) |ora_type| {
+                    v = try helpers.insertRefinementGuard(self, v, ora_type, ret.span, null, ret.skip_guard);
+                }
+            }
+
             const value_type = c.oraValueGetType(v);
             if (!c.oraTypeEqual(value_type, ret_type)) {
                 // convert to match return type (e.g., i1 -> i256 for bool -> u256)
@@ -178,16 +184,19 @@ pub fn lowerReturnInControlFlow(self: *const StatementLowerer, ret: *const lib.a
     const loc = self.fileLoc(ret.span);
 
     if (ret.value) |e| {
-        var v = self.expr_lowerer.lowerExpression(&e);
+        const v = self.expr_lowerer.lowerExpression(&e);
 
-        // insert refinement guard if return type is a refinement type
-        if (self.current_function_return_type_info) |return_type_info| {
-            if (return_type_info.ora_type) |ora_type| {
-                v = try helpers.insertRefinementGuard(self, v, ora_type, ret.span, ret.skip_guard);
+        // convert/wrap return value to match function return type if available
+        // this ensures literals like `return 1` coerce to refinement types like MinValue<u256, 1>
+        const final_value = if (self.current_function_return_type) |ret_type| blk: {
+            const value_type = c.oraValueGetType(v);
+            if (!c.oraTypeEqual(value_type, ret_type)) {
+                break :blk helpers.convertValueToType(self, v, ret_type, ret.span, loc);
             }
-        }
+            break :blk v;
+        } else v;
 
-        const op = self.ora_dialect.createScfYieldWithValues(&[_]c.MlirValue{v}, loc);
+        const op = self.ora_dialect.createScfYieldWithValues(&[_]c.MlirValue{final_value}, loc);
         h.appendOp(self.block, op);
     } else {
         const op = self.ora_dialect.createScfYield(loc);

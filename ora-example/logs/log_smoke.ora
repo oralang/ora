@@ -1,0 +1,13 @@
+// Minimal log feature smoke test
+contract LogSmoke {
+    log Transfer(from: address, to: address, amount: u256);
+    log Ping();
+
+    pub fn emitTransfer(to: address, amount: u256) {
+        log Transfer(std.transaction.sender, to, amount);
+    }
+
+    pub fn emitPing() {
+        log Ping();
+    }
+}

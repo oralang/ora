@@ -966,6 +966,30 @@ LogicalResult ConvertRefinementToBaseOp::matchAndRewrite(
 }
 
 // -----------------------------------------------------------------------------
+// Convert ora.base_to_refinement → passthrough value
+// -----------------------------------------------------------------------------
+LogicalResult ConvertBaseToRefinementOp::matchAndRewrite(
+    ora::BaseToRefinementOp op,
+    typename ora::BaseToRefinementOp::Adaptor adaptor,
+    ConversionPatternRewriter &rewriter) const
+{
+    Type convertedType = this->getTypeConverter()->convertType(op.getType());
+    if (!convertedType)
+    {
+        return rewriter.notifyMatchFailure(op, "failed to convert base to refinement type");
+    }
+
+    Value value = adaptor.getValue();
+    if (value.getType() != convertedType)
+    {
+        value = rewriter.create<sir::BitcastOp>(op.getLoc(), convertedType, value);
+    }
+
+    rewriter.replaceOp(op, value);
+    return success();
+}
+
+// -----------------------------------------------------------------------------
 // Verification ops lowered away for Ora → SIR
 // -----------------------------------------------------------------------------
 LogicalResult ConvertInvariantOp::matchAndRewrite(

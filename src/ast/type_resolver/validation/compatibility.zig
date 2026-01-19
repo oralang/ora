@@ -52,6 +52,17 @@ pub fn areTypesCompatible(
         if (OraType.equals(t1_ora, t2_ora)) {
             return true;
         }
+
+        // if both are refinement types, check if base types are compatible
+        // (for binary operations, same base type is sufficient)
+        if (isRefinementType(t1_ora) and isRefinementType(t2_ora)) {
+            const t1_base = extractRefinementBase(t1_ora);
+            const t2_base = extractRefinementBase(t2_ora);
+            if (t1_base != null and t2_base != null) {
+                return isBaseTypeCompatible(t1_base.?, t2_base.?);
+            }
+            return false;
+        }
     }
 
     // error category is compatible with ErrorUnion category
@@ -82,8 +93,8 @@ pub fn areTypesCompatible(
                 if (type2.ora_type) |type2_ora| {
                     if (type2.category == success_category and
                         (OraType.equals(type2_ora, success_ora_type) or
-                        refinement_system.checkSubtype(type2_ora, success_ora_type, isBaseTypeCompatible) or
-                        refinement_system.checkSubtype(success_ora_type, type2_ora, isBaseTypeCompatible)))
+                            refinement_system.checkSubtype(type2_ora, success_ora_type, isBaseTypeCompatible) or
+                            refinement_system.checkSubtype(success_ora_type, type2_ora, isBaseTypeCompatible)))
                     {
                         return true;
                     }
@@ -100,8 +111,8 @@ pub fn areTypesCompatible(
                         if (type2.ora_type) |type2_ora| {
                             if (type2.category == success_category and
                                 (OraType.equals(type2_ora, success_ora_type) or
-                                refinement_system.checkSubtype(type2_ora, success_ora_type, isBaseTypeCompatible) or
-                                refinement_system.checkSubtype(success_ora_type, type2_ora, isBaseTypeCompatible)))
+                                    refinement_system.checkSubtype(type2_ora, success_ora_type, isBaseTypeCompatible) or
+                                    refinement_system.checkSubtype(success_ora_type, type2_ora, isBaseTypeCompatible)))
                             {
                                 return true;
                             }
@@ -156,4 +167,25 @@ fn getTypeIndex(ora_type: OraType, hierarchy: []const OraType) ?usize {
         if (OraType.equals(ora_type, t)) return i;
     }
     return null;
+}
+
+/// Check if a type is a refinement type (min_value, max_value, in_range, etc.)
+fn isRefinementType(ora_type: OraType) bool {
+    return switch (ora_type) {
+        .min_value, .max_value, .in_range, .scaled, .exact, .non_zero_address => true,
+        else => false,
+    };
+}
+
+/// Extract the base type from a refinement type
+fn extractRefinementBase(ora_type: OraType) ?OraType {
+    return switch (ora_type) {
+        .min_value => |mv| mv.base.*,
+        .max_value => |mv| mv.base.*,
+        .in_range => |ir| ir.base.*,
+        .scaled => |s| s.base.*,
+        .exact => |e| e.*,
+        .non_zero_address => .address,
+        else => null,
+    };
 }

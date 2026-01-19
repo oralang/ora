@@ -1,0 +1,31 @@
+// ============================================================================
+// Error Union Encoding Smoke
+// ============================================================================
+
+contract ErrorUnionEncoding {
+    error E1;
+
+    pub fn mayFail(x: u256) -> !u256 | E1 {
+        if (x == 0) {
+            return E1;
+        }
+        return x;
+    }
+
+    // Forces ora.error.is_error + ora.error.unwrap
+    pub fn unwrapWithTry(x: u256) -> !u256 | E1 {
+        let y: u256 = try mayFail(x);
+        return y + 1;
+    }
+
+    // Forces ora.error.get_error
+    pub fn handleWithCatch(x: u256) -> u256 {
+        try {
+            let y: u256 = mayFail(x);
+            return y;
+        } catch (e) {
+            let _err: u256 = e;
+            return _err;
+        }
+    }
+}

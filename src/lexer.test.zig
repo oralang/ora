@@ -56,6 +56,32 @@ test "keywords: all keywords recognized" {
     }
 }
 
+test "keywords: error handling and verification keywords recognized" {
+    const allocator = testing.allocator;
+    const keywords = [_]struct { source: []const u8, expected: lexer.TokenType }{
+        .{ .source = "error", .expected = .Error },
+        .{ .source = "try", .expected = .Try },
+        .{ .source = "catch", .expected = .Catch },
+        .{ .source = "requires", .expected = .Requires },
+        .{ .source = "ensures", .expected = .Ensures },
+        .{ .source = "invariant", .expected = .Invariant },
+        .{ .source = "ghost", .expected = .Ghost },
+        .{ .source = "assert", .expected = .Assert },
+        .{ .source = "log", .expected = .Log },
+        .{ .source = "switch", .expected = .Switch },
+    };
+
+    for (keywords) |kw| {
+        var lex = lexer.Lexer.init(allocator, kw.source);
+        defer lex.deinit();
+
+        const tokens = try lex.scanTokens();
+        defer allocator.free(tokens);
+
+        try testing.expectEqual(kw.expected, tokens[0].type);
+    }
+}
+
 test "operators: arithmetic operators" {
     const allocator = testing.allocator;
     const operators = [_]struct { source: []const u8, expected: lexer.TokenType }{
@@ -64,6 +90,30 @@ test "operators: arithmetic operators" {
         .{ .source = "*", .expected = .Star },
         .{ .source = "/", .expected = .Slash },
         .{ .source = "%", .expected = .Percent },
+    };
+
+    for (operators) |op| {
+        var lex = lexer.Lexer.init(allocator, op.source);
+        defer lex.deinit();
+
+        const tokens = try lex.scanTokens();
+        defer allocator.free(tokens);
+
+        try testing.expectEqual(op.expected, tokens[0].type);
+    }
+}
+
+test "operators: comparison and logical operators" {
+    const allocator = testing.allocator;
+    const operators = [_]struct { source: []const u8, expected: lexer.TokenType }{
+        .{ .source = "==", .expected = .EqualEqual },
+        .{ .source = "!=", .expected = .BangEqual },
+        .{ .source = "<", .expected = .Less },
+        .{ .source = "<=", .expected = .LessEqual },
+        .{ .source = ">", .expected = .Greater },
+        .{ .source = ">=", .expected = .GreaterEqual },
+        .{ .source = "&&", .expected = .AmpersandAmpersand },
+        .{ .source = "||", .expected = .PipePipe },
     };
 
     for (operators) |op| {
@@ -205,4 +255,26 @@ test "edge cases: whitespace only" {
     // should have at least EOF (whitespace is trivia)
     try testing.expect(tokens.len >= 1);
     try testing.expectEqual(lexer.TokenType.Eof, tokens[tokens.len - 1].type);
+}
+
+test "edge cases: comments are skipped" {
+    const allocator = testing.allocator;
+    const source =
+        \\contract Test {
+        \\  // line comment
+        \\  /* block comment */
+        \\  fn run() { }
+        \\}
+    ;
+
+    var lex = lexer.Lexer.init(allocator, source);
+    defer lex.deinit();
+
+    const tokens = try lex.scanTokens();
+    defer allocator.free(tokens);
+
+    try testing.expect(tokens.len >= 4);
+    try testing.expectEqual(lexer.TokenType.Contract, tokens[0].type);
+    try testing.expectEqual(lexer.TokenType.Identifier, tokens[1].type);
+    try testing.expectEqual(lexer.TokenType.LeftBrace, tokens[2].type);
 }

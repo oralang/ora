@@ -51,6 +51,8 @@ fn walkBlock(
         const next = c.oraOperationGetNextInBlock(current);
         if (isRefinementGuard(current)) {
             handleRefinementGuard(ctx, block, current, proven_guard_ids, debug_enabled);
+        } else if (isVerificationOp(current)) {
+            handleVerificationOp(ctx, block, current, debug_enabled);
         } else {
             walkOperation(ctx, current, proven_guard_ids, debug_enabled);
         }
@@ -62,6 +64,20 @@ fn isRefinementGuard(op: c.MlirOperation) bool {
     const name = c.oraOperationGetName(op);
     if (name.data == null or name.length == 0) return false;
     return std.mem.eql(u8, name.data[0..name.length], "ora.refinement_guard");
+}
+
+fn isVerificationOp(op: c.MlirOperation) bool {
+    const name = c.oraOperationGetName(op);
+    if (name.data == null or name.length == 0) return false;
+    const op_name = name.data[0..name.length];
+    return std.mem.eql(u8, op_name, "ora.assume") or
+        std.mem.eql(u8, op_name, "ora.assert") or
+        std.mem.eql(u8, op_name, "ora.invariant") or
+        std.mem.eql(u8, op_name, "ora.requires") or
+        std.mem.eql(u8, op_name, "ora.ensures") or
+        std.mem.eql(u8, op_name, "ora.havoc") or
+        std.mem.eql(u8, op_name, "ora.decreases") or
+        std.mem.eql(u8, op_name, "ora.increases");
 }
 
 fn handleRefinementGuard(
@@ -99,6 +115,43 @@ fn handleRefinementGuard(
         }
     }
 
+    c.oraOperationErase(op);
+}
+
+fn handleVerificationOp(
+    ctx: c.MlirContext,
+    block: c.MlirBlock,
+    op: c.MlirOperation,
+    debug_enabled: bool,
+) void {
+    const name = c.oraOperationGetName(op);
+    if (name.data == null or name.length == 0) return;
+    const op_name = name.data[0..name.length];
+
+    if (std.mem.eql(u8, op_name, "ora.assert")) {
+        const context_attr = c.oraOperationGetAttributeByName(op, h.strRef("ora.verification_context"));
+        const context = getStringAttr(context_attr);
+        const is_ghost = context != null and std.mem.eql(u8, context.?, "ghost_assertion");
+        if (!is_ghost) {
+            const condition = c.oraOperationGetOperand(op, 0);
+            const message_attr = c.oraOperationGetAttributeByName(op, h.strRef("message"));
+            const message = getStringAttr(message_attr) orelse "Assertion failed";
+            const loc = c.oraOperationGetLocation(op);
+            const assert_op = c.oraCfAssertOpCreate(ctx, loc, condition, h.strRef(message));
+            if (assert_op.ptr != null) {
+                h.insertOpBefore(block, assert_op, op);
+            }
+        }
+        if (debug_enabled) {
+            std.debug.print("[verification-cleanup] removed assert ({s})\n", .{context orelse "unknown"});
+        }
+        c.oraOperationErase(op);
+        return;
+    }
+
+    if (debug_enabled) {
+        std.debug.print("[verification-cleanup] removed {s}\n", .{op_name});
+    }
     c.oraOperationErase(op);
 }
 

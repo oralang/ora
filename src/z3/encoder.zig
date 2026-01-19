@@ -133,9 +133,13 @@ pub const Encoder = struct {
     };
 
     pub fn encodeBitwiseOp(self: *Encoder, op: BitwiseOp, lhs: z3.Z3_ast, rhs: z3.Z3_ast) !z3.Z3_ast {
-        const sort = z3.Z3_get_sort(self.context.ctx, lhs);
-        const kind = z3.Z3_get_sort_kind(self.context.ctx, sort);
-        if (kind == z3.Z3_BOOL_SORT) {
+        const lhs_sort = z3.Z3_get_sort(self.context.ctx, lhs);
+        const rhs_sort = z3.Z3_get_sort(self.context.ctx, rhs);
+        const lhs_kind = z3.Z3_get_sort_kind(self.context.ctx, lhs_sort);
+        const rhs_kind = z3.Z3_get_sort_kind(self.context.ctx, rhs_sort);
+
+        // If both are boolean, use boolean operations
+        if (lhs_kind == z3.Z3_BOOL_SORT and rhs_kind == z3.Z3_BOOL_SORT) {
             return switch (op) {
                 .And => z3.Z3_mk_and(self.context.ctx, 2, &[_]z3.Z3_ast{ lhs, rhs }),
                 .Or => z3.Z3_mk_or(self.context.ctx, 2, &[_]z3.Z3_ast{ lhs, rhs }),
@@ -143,10 +147,27 @@ pub const Encoder = struct {
             };
         }
 
+        // If mixed types (one bool, one bitvec), convert bool to bitvec
+        var lhs_bv = lhs;
+        var rhs_bv = rhs;
+        if (lhs_kind == z3.Z3_BOOL_SORT and rhs_kind == z3.Z3_BV_SORT) {
+            // Convert lhs bool to bitvec of same width as rhs
+            const width = z3.Z3_get_bv_sort_size(self.context.ctx, rhs_sort);
+            const one = z3.Z3_mk_unsigned_int64(self.context.ctx, 1, z3.Z3_mk_bv_sort(self.context.ctx, width));
+            const zero = z3.Z3_mk_unsigned_int64(self.context.ctx, 0, z3.Z3_mk_bv_sort(self.context.ctx, width));
+            lhs_bv = z3.Z3_mk_ite(self.context.ctx, lhs, one, zero);
+        } else if (rhs_kind == z3.Z3_BOOL_SORT and lhs_kind == z3.Z3_BV_SORT) {
+            // Convert rhs bool to bitvec of same width as lhs
+            const width = z3.Z3_get_bv_sort_size(self.context.ctx, lhs_sort);
+            const one = z3.Z3_mk_unsigned_int64(self.context.ctx, 1, z3.Z3_mk_bv_sort(self.context.ctx, width));
+            const zero = z3.Z3_mk_unsigned_int64(self.context.ctx, 0, z3.Z3_mk_bv_sort(self.context.ctx, width));
+            rhs_bv = z3.Z3_mk_ite(self.context.ctx, rhs, one, zero);
+        }
+
         return switch (op) {
-            .And => z3.Z3_mk_bvand(self.context.ctx, lhs, rhs),
-            .Or => z3.Z3_mk_bvor(self.context.ctx, lhs, rhs),
-            .Xor => z3.Z3_mk_bvxor(self.context.ctx, lhs, rhs),
+            .And => z3.Z3_mk_bvand(self.context.ctx, lhs_bv, rhs_bv),
+            .Or => z3.Z3_mk_bvor(self.context.ctx, lhs_bv, rhs_bv),
+            .Xor => z3.Z3_mk_bvxor(self.context.ctx, lhs_bv, rhs_bv),
         };
     }
 
@@ -394,7 +415,12 @@ pub const Encoder = struct {
         const map_value_type = mlir.oraMapTypeGetValueType(mlir_type);
         if (!mlir.oraTypeIsNull(map_value_type)) {
             const value_sort = try self.encodeMLIRType(map_value_type);
-            const key_sort = self.mkBitVectorSort(256);
+            // Get the actual key type from the map (e.g., address is 160 bits, not 256)
+            const map_key_type = mlir.oraMapTypeGetKeyType(mlir_type);
+            const key_sort = if (!mlir.oraTypeIsNull(map_key_type))
+                try self.encodeMLIRType(map_key_type)
+            else
+                self.mkBitVectorSort(256); // fallback to 256-bit
             return self.mkArraySort(key_sort, value_sort);
         }
 
@@ -775,17 +801,29 @@ pub const Encoder = struct {
         const out_width = self.getTypeBitWidth(result_type) orelse return operands[0];
         if (in_width == out_width) return operands[0];
 
+        // Convert Bool sort to BitVec<1> if needed (Z3_mk_zero_ext/sign_ext require bitvector operands)
+        var operand = operands[0];
+        const sort = z3.Z3_get_sort(self.context.ctx, operand);
+        const kind = z3.Z3_get_sort_kind(self.context.ctx, sort);
+        if (kind == z3.Z3_BOOL_SORT) {
+            // Convert bool to bitvector<1>: ite(bool, bv1(1), bv1(0))
+            const bv1_sort = self.mkBitVectorSort(1);
+            const one = z3.Z3_mk_unsigned_int64(self.context.ctx, 1, bv1_sort);
+            const zero = z3.Z3_mk_unsigned_int64(self.context.ctx, 0, bv1_sort);
+            operand = z3.Z3_mk_ite(self.context.ctx, operand, one, zero);
+        }
+
         if (out_width > in_width) {
             const extend = out_width - in_width;
             const is_signed = std.mem.eql(u8, op_name, "arith.extsi") or std.mem.eql(u8, op_name, "arith.index_castsi");
             return if (is_signed)
-                z3.Z3_mk_sign_ext(self.context.ctx, extend, operands[0])
+                z3.Z3_mk_sign_ext(self.context.ctx, extend, operand)
             else
-                z3.Z3_mk_zero_ext(self.context.ctx, extend, operands[0]);
+                z3.Z3_mk_zero_ext(self.context.ctx, extend, operand);
         }
 
         const high: u32 = out_width - 1;
-        return z3.Z3_mk_extract(self.context.ctx, high, 0, operands[0]);
+        return z3.Z3_mk_extract(self.context.ctx, high, 0, operand);
     }
 
     /// Encode MLIR comparison operation (arith.cmpi)

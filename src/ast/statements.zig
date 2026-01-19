@@ -421,9 +421,9 @@ pub const CompoundAssignmentNode = struct {
     span: SourceSpan,
 };
 
-/// Free a block node - forward declaration to avoid circular imports
+/// Free a block node - statements are arena-allocated, freed with arena
 pub fn deinitBlockNode(allocator: std.mem.Allocator, block: *BlockNode) void {
     _ = allocator;
     _ = block;
-    // implementation will be moved to main ast.zig
+    // Arena allocator frees all AST memory at once - no individual cleanup needed
 }

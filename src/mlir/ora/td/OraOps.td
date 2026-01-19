@@ -125,6 +125,25 @@ def Ora_RefinementToBaseOp : Ora_PureOp<"refinement_to_base"> {
   }];
 }
 
+def Ora_BaseToRefinementOp : Ora_PureOp<"base_to_refinement"> {
+  let summary = "Convert base type to refinement type";
+  let description = [{
+    Converts a base type value (e.g., i256) to a refinement type
+    (e.g., !ora.in_range<i256, ...>). This is a type-level conversion
+    with no runtime representation change.
+
+    Example:
+    ```mlir
+    %refined = ora.base_to_refinement %base : i256 -> !ora.in_range<i256, 0, 0, 0, 0, 0, 0, 0, 100>
+    ```
+  }];
+
+  let arguments = (ins AnyType:$value);
+  let results = (outs AnyType:$result);
+
+  let assemblyFormat = "$value attr-dict `:` type($value) `->` type($result)";
+}
+
 //===----------------------------------------------------------------------===//
 // Storage Operations
 //===----------------------------------------------------------------------===//
@@ -147,6 +166,8 @@ def Ora_GlobalOp : Ora_Op<"global"> {
     TypeAttr:$type,
     AnyAttr:$init
   );
+
+  let traits = [Symbol, MemoryEffects<[MemWrite]>];
   
   let hasCustomAssemblyFormat = 1;
   
@@ -595,6 +616,31 @@ def Ora_IfOp : Ora_Op<"if"> {
   let hasCustomAssemblyFormat = 1;
 }
 
+def Ora_IsolatedIfOp : Ora_Op<"isolated_if", [IsolatedFromAbove]> {
+  let summary = "Isolated conditional operation";
+  let description = [{
+    Executes one of two regions based on a condition. This variant is isolated
+    from the parent scope, so values from the parent region must be passed
+    explicitly.
+
+    Example:
+    ```mlir
+    ora.isolated_if %condition then {
+      ora.yield
+    } else {
+      ora.yield
+    }
+    ```
+  }];
+
+  let arguments = (ins I1:$condition);
+  let results = (outs Variadic<AnyType>:$results);
+  let regions = (region AnyRegion:$thenRegion,
+                        AnyRegion:$elseRegion);
+
+  let hasCustomAssemblyFormat = 1;
+}
+
 def Ora_YieldOp : Ora_Op<"yield", [Terminator]> {
   let summary = "Yield operation";
   let description = [{
@@ -763,6 +809,8 @@ def Ora_EnumDeclOp : Ora_Op<"enum.decl"> {
   
   let arguments = (ins StrAttr:$name, TypeAttr:$repr_type);
   let regions = (region AnyRegion:$variants);
+
+  let traits = [Symbol, MemoryEffects<[MemWrite]>];
   
   // Custom parser/printer needed for type-attr syntax
   // let assemblyFormat = "$name `:` type-attr($repr_type) region($variants) attr-dict";
@@ -806,6 +854,8 @@ def Ora_StructDeclOp : Ora_Op<"struct.decl"> {
   
   let arguments = (ins StrAttr:$name);
   let regions = (region AnyRegion:$fields);
+
+  let traits = [Symbol, MemoryEffects<[MemWrite]>];
   
   // Regions need custom parser/printer when combined with attributes
   // let assemblyFormat = "$name region($fields) attr-dict";
@@ -961,6 +1011,7 @@ def Ora_RequiresOp : Ora_Op<"requires"> {
   let arguments = (ins I1:$condition);
   
   let assemblyFormat = "$condition attr-dict `:` type($condition)";
+  let traits = [MemoryEffects<[MemWrite]>];
 }
 
 def Ora_EnsuresOp : Ora_Op<"ensures"> {
@@ -977,6 +1028,7 @@ def Ora_EnsuresOp : Ora_Op<"ensures"> {
   let arguments = (ins I1:$condition);
   
   let assemblyFormat = "$condition attr-dict `:` type($condition)";
+  let traits = [MemoryEffects<[MemWrite]>];
 }
 
 def Ora_InvariantOp : Ora_Op<"invariant"> {
@@ -993,6 +1045,7 @@ def Ora_InvariantOp : Ora_Op<"invariant"> {
   let arguments = (ins I1:$condition);
   
   let assemblyFormat = "$condition attr-dict `:` type($condition)";
+  let traits = [MemoryEffects<[MemWrite]>];
 }
 
 def Ora_AssertOp : Ora_Op<"assert"> {
@@ -1009,6 +1062,7 @@ def Ora_AssertOp : Ora_Op<"assert"> {
   let arguments = (ins I1:$condition, OptionalAttr<StrAttr>:$message);
   
   let assemblyFormat = "$condition (`,` $message^)? attr-dict `:` type($condition)";
+  let traits = [MemoryEffects<[MemWrite]>];
 }
 
 def Ora_RefinementGuardOp : Ora_Op<"refinement_guard"> {
@@ -1026,6 +1080,7 @@ def Ora_RefinementGuardOp : Ora_Op<"refinement_guard"> {
   let arguments = (ins I1:$condition, OptionalAttr<StrAttr>:$message);
 
   let assemblyFormat = "$condition (`,` $message^)? attr-dict `:` type($condition)";
+  let traits = [MemoryEffects<[MemWrite]>];
 }
 
 def Ora_DecreasesOp : Ora_Op<"decreases"> {
@@ -1043,6 +1098,7 @@ def Ora_DecreasesOp : Ora_Op<"decreases"> {
   let arguments = (ins AnyType:$measure);
   
   let assemblyFormat = "$measure attr-dict `:` type($measure)";
+  let traits = [MemoryEffects<[MemWrite]>];
 }
 
 def Ora_IncreasesOp : Ora_Op<"increases"> {
@@ -1060,6 +1116,7 @@ def Ora_IncreasesOp : Ora_Op<"increases"> {
   let arguments = (ins AnyType:$measure);
   
   let assemblyFormat = "$measure attr-dict `:` type($measure)";
+  let traits = [MemoryEffects<[MemWrite]>];
 }
 
 def Ora_AssumeOp : Ora_Op<"assume"> {
@@ -1077,6 +1134,7 @@ def Ora_AssumeOp : Ora_Op<"assume"> {
   let arguments = (ins I1:$condition);
   
   let assemblyFormat = "$condition attr-dict `:` type($condition)";
+  let traits = [MemoryEffects<[MemWrite]>];
 }
 
 def Ora_HavocOp : Ora_Op<"havoc"> {
@@ -1094,6 +1152,7 @@ def Ora_HavocOp : Ora_Op<"havoc"> {
   let arguments = (ins StrAttr:$variable_name);
   
   let assemblyFormat = "$variable_name attr-dict";
+  let traits = [MemoryEffects<[MemWrite]>];
 }
 
 def Ora_OldOp : Ora_PureOp<"old"> {
@@ -1169,6 +1228,23 @@ def Ora_LogOp : Ora_Op<"log"> {
   let arguments = (ins StrAttr:$event_name, Variadic<AnyType>:$parameters);
   
   // let assemblyFormat = "$event_name `(` $parameters `)` attr-dict `:` type($parameters)";
+
+  let traits = [MemoryEffects<[MemWrite]>];
+}
+
+def Ora_LogDeclOp : Ora_Op<"log.decl"> {
+  let summary = "Event log declaration";
+  let description = [{
+    Declares an event log signature within a contract.
+
+    Example:
+    ```mlir
+    "ora.log.decl"() {sym_name = "Transfer", ora.field_names = ["from"], ora.field_types = [!ora.address]}
+    ```
+  }];
+
+  let arguments = (ins StrAttr:$sym_name);
+  let traits = [Symbol, MemoryEffects<[MemWrite]>];
 }
 
 //===----------------------------------------------------------------------===//
@@ -1210,6 +1286,21 @@ def Ora_UnlockOp : Ora_Op<"unlock"> {
 //===----------------------------------------------------------------------===//
 // Error Handling Operations
 //===----------------------------------------------------------------------===//
+
+def Ora_ErrorDeclOp : Ora_Op<"error.decl"> {
+  let summary = "Error declaration";
+  let description = [{
+    Declares an error variant within a contract.
+
+    Example:
+    ```mlir
+    "ora.error.decl"() {sym_name = "E1", ora.error_id = 1 : i32, ora.error_decl = true}
+    ```
+  }];
+
+  let arguments = (ins StrAttr:$sym_name);
+  let traits = [Symbol, MemoryEffects<[MemWrite]>];
+}
 
 def Ora_ErrorOkOp : Ora_PureOp<"error.ok"> {
   let summary = "Construct a successful error union value";
@@ -1323,9 +1414,36 @@ def Ora_TryOp : Ora_Op<"try_catch"> {
   
   let arguments = (ins AnyType:$try_operation);
   let results = (outs AnyType:$result);
-  let regions = (region AnyRegion:$catch_region);
+  let regions = (region AnyRegion:$try_region,
+                        AnyRegion:$catch_region);
+  let traits = [RecursiveMemoryEffects];
   
   // let assemblyFormat = "$try_operation attr-dict `:` type($try_operation) `->` type($result) `catch` region($catch_region)";
+}
+
+def Ora_TryStmtOp : Ora_Op<"try_stmt"> {
+  let summary = "Try-catch statement";
+  let description = [{
+    Executes a try region and, on error, executes a catch region.
+    Regions may yield a value when used in return-oriented lowering.
+
+    Example:
+    ```mlir
+    %result = ora.try_stmt : i256 {
+      %v = arith.constant 1 : i256
+      ora.yield %v : i256
+    } catch {
+      %v = arith.constant 0 : i256
+      ora.yield %v : i256
+    }
+    ```
+  }];
+
+  let arguments = (ins);
+  let results = (outs Variadic<AnyType>:$results);
+  let regions = (region AnyRegion:$try_region,
+                        AnyRegion:$catch_region);
+  let traits = [RecursiveMemoryEffects];
 }
 
 //===----------------------------------------------------------------------===//
@@ -1430,7 +1548,7 @@ def Ora_ReturnOp : Ora_Op<"return", [Terminator]> {
 // Switch Operations
 //===----------------------------------------------------------------------===//
 
-def Ora_SwitchOp : Ora_Op<"switch"> {
+def Ora_SwitchOp : Ora_Op<"switch", [RecursiveMemoryEffects]> {
   let summary = "Switch operation";
   let description = [{
     Executes one of multiple regions based on a value.
@@ -1487,7 +1605,7 @@ def Ora_SwitchOp : Ora_Op<"switch"> {
   let hasCustomAssemblyFormat = 1;
 }
 
-def Ora_SwitchExprOp : Ora_PureOp<"switch_expr"> {
+def Ora_SwitchExprOp : Ora_Op<"switch_expr", [RecursiveMemoryEffects]> {
   let summary = "Switch expression";
   let description = [{
     Switch expression that returns a value based on pattern matching.

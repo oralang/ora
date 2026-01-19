@@ -59,6 +59,15 @@ namespace mlir
                 }
                 return sir::U256Type::get(ctx); });
 
+            // ora.error_union<T> → sir.u256 (tagged payload encoding)
+            addConversion([](ora::ErrorUnionType type) -> Type
+                          {
+                auto *ctx = type.getDialect().getContext();
+                if (!ctx) {
+                    return Type();
+                }
+                return sir::U256Type::get(ctx); });
+
             // ora.map → sir.u256 (map values live in storage, represent as u256 handles)
             addConversion([](ora::MapType type) -> Type
                           {
@@ -117,6 +126,8 @@ namespace mlir
             if (isa<ora::AddressType>(type))
                 return u256();
             if (isa<ora::MapType>(type))
+                return u256();
+            if (isa<ora::ErrorUnionType>(type))
                 return u256();
             if (isa<ora::StructType>(type))
                 return sir::PtrType::get(ctx, /*addrSpace*/ 1);

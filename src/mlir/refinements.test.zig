@@ -24,6 +24,7 @@ test "refinement guard reports error for null value" {
     defer mapper.deinit();
 
     var ora_dialect = OraDialect.init(ctx, allocator);
+    try ora_dialect.register();
 
     const locations = LocationTracker.init(ctx);
     const lowerer = DeclarationLowerer.withErrorHandlerAndDialect(ctx, &mapper, locations, &handler, &ora_dialect);
@@ -39,6 +40,9 @@ test "refinement guard reports error for null value" {
         mlir.MlirValue{ .ptr = null },
         refinement_type,
         span,
+        null,
+        null,
+        null,
     );
 
     try testing.expect(handler.hasErrors());
@@ -56,6 +60,7 @@ test "non_zero_address refinement emits guard op" {
     defer mapper.deinit();
 
     var ora_dialect = OraDialect.init(ctx, allocator);
+    try ora_dialect.register();
 
     const locations = LocationTracker.init(ctx);
     const lowerer = DeclarationLowerer.withErrorHandlerAndDialect(ctx, &mapper, locations, &handler, &ora_dialect);
@@ -75,11 +80,10 @@ test "non_zero_address refinement emits guard op" {
     mlir.oraBlockAppendOwnedOperation(block, addr_op);
     const addr_value = mlir.oraOperationGetResult(addr_op, 0);
 
-    const base_type = lib.ast.type_info.OraType{ .address = {} };
-    const refinement_type = lib.ast.type_info.OraType{ .non_zero_address = .{ .base = &base_type } };
+    const refinement_type = lib.ast.type_info.OraType{ .non_zero_address = {} };
     const span = lib.ast.SourceSpan{ .line = 1, .column = 1, .length = 1 };
 
-    try lowerer.insertRefinementGuard(block, addr_value, refinement_type, span);
+    try lowerer.insertRefinementGuard(block, addr_value, refinement_type, span, null, null, null);
 
     var found_guard = false;
     var current = mlir.oraBlockGetFirstOperation(block);
