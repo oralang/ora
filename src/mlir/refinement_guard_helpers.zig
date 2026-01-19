@@ -29,6 +29,7 @@ pub fn emitRefinementGuard(
     const name_slice = var_name orelse "";
     var hasher_hi = std.hash.Wyhash.init(0);
     var hasher_lo = std.hash.Wyhash.init(1);
+    const span_is_unknown = span.line == 0 or span.column == 0 or span.length == 0;
     hasher_hi.update(locations.filename);
     hasher_hi.update(std.mem.asBytes(&span.line));
     hasher_hi.update(std.mem.asBytes(&span.column));
@@ -41,6 +42,11 @@ pub fn emitRefinementGuard(
     hasher_lo.update(std.mem.asBytes(&span.length));
     hasher_lo.update(refinement_kind);
     hasher_lo.update(name_slice);
+    if (span_is_unknown) {
+        const cond_key: usize = @intFromPtr(condition.ptr);
+        hasher_hi.update(std.mem.asBytes(&cond_key));
+        hasher_lo.update(std.mem.asBytes(&cond_key));
+    }
     const key: u128 = (@as(u128, hasher_hi.final()) << 64) | hasher_lo.final();
     if (guard_cache) |cache| {
         if (cache.contains(key)) {
