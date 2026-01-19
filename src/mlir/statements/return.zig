@@ -19,6 +19,11 @@ pub fn lowerReturn(self: *const StatementLowerer, ret: *const lib.ast.Statements
         const loc = self.fileLoc(ret.span);
         const return_flag_memref = self.try_return_flag_memref.?;
 
+        // insert ensures clause checks before recording the try-return
+        if (self.ensures_clauses.len > 0) {
+            try lowerEnsuresBeforeReturn(self, self.block, ret.span);
+        }
+
         const true_val = helpers.createBoolConstant(self, true, loc);
         helpers.storeToMemref(self, true_val, return_flag_memref, loc);
 
@@ -38,6 +43,11 @@ pub fn lowerReturn(self: *const StatementLowerer, ret: *const lib.ast.Statements
                     const err_info = helpers.getErrorUnionPayload(self, &value_expr, v, element_type, self.block, loc);
                     v = helpers.encodeErrorUnionValue(self, err_info.payload, err_info.is_error, element_type, self.block, ret.span, loc);
                 } else {
+                    if (self.current_function_return_type_info) |ti| {
+                        if (ti.ora_type) |ora_type| {
+                            v = try helpers.insertRefinementGuard(self, v, ora_type, ret.span, null, ret.skip_guard);
+                        }
+                    }
                     v = helpers.convertValueToType(self, v, element_type, ret.span, loc);
                 }
 
@@ -184,11 +194,24 @@ pub fn lowerReturnInControlFlow(self: *const StatementLowerer, ret: *const lib.a
     const loc = self.fileLoc(ret.span);
 
     if (ret.value) |e| {
-        const v = self.expr_lowerer.lowerExpression(&e);
+        var v = self.expr_lowerer.lowerExpression(&e);
 
         // convert/wrap return value to match function return type if available
         // this ensures literals like `return 1` coerce to refinement types like MinValue<u256, 1>
         const final_value = if (self.current_function_return_type) |ret_type| blk: {
+            const is_error_union = if (self.current_function_return_type_info) |ti|
+                helpers.isErrorUnionTypeInfo(ti)
+            else
+                false;
+            if (is_error_union) {
+                const err_info = helpers.getErrorUnionPayload(self, &e, v, ret_type, self.block, loc);
+                break :blk helpers.encodeErrorUnionValue(self, err_info.payload, err_info.is_error, ret_type, self.block, ret.span, loc);
+            }
+            if (self.current_function_return_type_info) |ti| {
+                if (ti.ora_type) |ora_type| {
+                    v = try helpers.insertRefinementGuard(self, v, ora_type, ret.span, null, ret.skip_guard);
+                }
+            }
             const value_type = c.oraValueGetType(v);
             if (!c.oraTypeEqual(value_type, ret_type)) {
                 break :blk helpers.convertValueToType(self, v, ret_type, ret.span, loc);

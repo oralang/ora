@@ -197,8 +197,8 @@ pub const StatementLowerer = struct {
                 return null;
             },
             .ErrorDecl => |error_decl| {
-                try error_handling.lowerErrorDecl(self, &error_decl);
-                return null;
+                log.err("Error declaration reached statement lowering: {s}\n", .{error_decl.name});
+                return LoweringError.UnsupportedStatement;
             },
             .Invariant => |invariant| {
                 try verification.lowerInvariant(self, &invariant);
@@ -416,8 +416,15 @@ pub const StatementLowerer = struct {
                 if (c.oraOperationIsNull(first_op)) {
                     const next_block = c.oraBlockGetNextInRegion(block);
                     if (!c.mlirBlockIsNull(next_block)) {
-                        const br = self.ora_dialect.createCfBr(next_block, h.unknownLoc(self.ctx));
-                        h.appendOp(block, br);
+                        // Only insert cf.br in function CFG regions (not in region-based ops).
+                        const parent_op = c.mlirBlockGetParentOperation(block);
+                        if (!c.oraOperationIsNull(parent_op)) {
+                            const name_ref = c.oraOperationGetName(parent_op);
+                            if (name_ref.data != null and std.mem.eql(u8, name_ref.data[0..name_ref.length], "func.func")) {
+                                const br = self.ora_dialect.createCfBr(next_block, h.unknownLoc(self.ctx));
+                                h.appendOp(block, br);
+                            }
+                        }
                     }
                 }
             }

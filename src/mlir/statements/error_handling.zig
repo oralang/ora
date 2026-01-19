@@ -3,7 +3,6 @@
 // ============================================================================
 // Error handling operations: try/catch, error declarations
 
-const std = @import("std");
 const c = @import("mlir_c_api").c;
 const lib = @import("ora_lib");
 const h = @import("../helpers.zig");
@@ -187,35 +186,4 @@ pub fn lowerTryBlock(self: *const StatementLowerer, try_stmt: *const lib.ast.Sta
     }
 }
 
-/// Lower error declarations
-pub fn lowerErrorDecl(self: *const StatementLowerer, error_decl: *const lib.ast.Statements.ErrorDeclNode) LoweringError!void {
-    const loc = self.fileLoc(error_decl.span);
-
-    // add error name as attribute
-    const name_ref = c.oraStringRefCreate(error_decl.name.ptr, error_decl.name.len);
-    const name_attr = c.oraStringAttrCreate(self.ctx, name_ref);
-    const name_id = h.identifier(self.ctx, "name");
-    var attrs = std.ArrayList(c.MlirNamedAttribute){};
-    defer attrs.deinit(self.allocator);
-    attrs.append(self.allocator, c.oraNamedAttributeGet(name_id, name_attr)) catch {};
-
-    // handle error parameters if present
-    if (error_decl.parameters) |parameters| {
-        for (parameters) |param| {
-            const param_ref = c.oraStringRefCreate(param.name.ptr, param.name.len);
-            const param_attr = c.oraStringAttrCreate(self.ctx, param_ref);
-            const param_id = h.identifier(self.ctx, "param");
-            attrs.append(self.allocator, c.oraNamedAttributeGet(param_id, param_attr)) catch {};
-        }
-    }
-
-    const op = c.oraErrorDeclOpCreate(
-        self.ctx,
-        loc,
-        null,
-        0,
-        if (attrs.items.len == 0) null else attrs.items.ptr,
-        attrs.items.len,
-    );
-    h.appendOp(self.block, op);
-}
+// Error declarations are lowered at the declaration pass, not here.
