@@ -13,6 +13,7 @@
 // ============================================================================
 
 const std = @import("std");
+const builtin = @import("builtin");
 const lexer = @import("../lexer.zig");
 const ast = @import("../ast.zig");
 const ast_arena = @import("../ast/ast_arena.zig");
@@ -276,7 +277,9 @@ pub fn parseWithArena(allocator: Allocator, tokens: []const Token) ParserError!s
     defer allocator.free(semantics_result.diagnostics);
     defer semantics_result.symbols.deinit();
     ensureLogSignatures(&semantics_result.symbols, nodes) catch |err| {
-        log.err("Failed to collect log signatures: {s}\n", .{@errorName(err)});
+        if (!builtin.is_test) {
+            log.err("Failed to collect log signatures: {s}\n", .{@errorName(err)});
+        }
         return ParserError.TypeResolutionFailed;
     };
 
@@ -287,13 +290,15 @@ pub fn parseWithArena(allocator: Allocator, tokens: []const Token) ParserError!s
     type_resolver.resolveTypes(nodes) catch |err| {
         // type resolution errors (especially TypeMismatch) should stop compilation
         // these indicate invalid type assignments that cannot be safely compiled
-        log.err("Type resolution failed: {s}\n", .{@errorName(err)});
-        if (err == @import("../ast/type_resolver/mod.zig").TypeResolutionError.ErrorUnionOutsideTry) {
-            log.help("use `try` to unwrap error unions or wrap the code in a try/catch block\n", .{});
+        if (!builtin.is_test) {
+            log.err("Type resolution failed: {s}\n", .{@errorName(err)});
+            if (err == @import("../ast/type_resolver/mod.zig").TypeResolutionError.ErrorUnionOutsideTry) {
+                log.help("use `try` to unwrap error unions or wrap the code in a try/catch block\n", .{});
+            }
+            // best-effort stack trace in debug builds
+            const trace = @errorReturnTrace();
+            if (trace) |t| std.debug.dumpStackTrace(t.*);
         }
-        // best-effort stack trace in debug builds
-        const trace = @errorReturnTrace();
-        if (trace) |t| std.debug.dumpStackTrace(t.*);
         return ParserError.TypeResolutionFailed;
     };
 
@@ -316,7 +321,9 @@ pub fn parse(allocator: Allocator, tokens: []const Token) ParserError![]AstNode 
     defer allocator.free(semantics_result.diagnostics);
     defer semantics_result.symbols.deinit();
     ensureLogSignatures(&semantics_result.symbols, nodes) catch |err| {
-        log.err("Failed to collect log signatures: {s}\n", .{@errorName(err)});
+        if (!builtin.is_test) {
+            log.err("Failed to collect log signatures: {s}\n", .{@errorName(err)});
+        }
         return ParserError.TypeResolutionFailed;
     };
 
@@ -327,13 +334,15 @@ pub fn parse(allocator: Allocator, tokens: []const Token) ParserError![]AstNode 
     type_resolver.resolveTypes(nodes) catch |err| {
         // type resolution errors (especially TypeMismatch) should stop compilation
         // these indicate invalid type assignments that cannot be safely compiled
-        log.err("Type resolution failed: {s}\n", .{@errorName(err)});
-        if (err == @import("../ast/type_resolver/mod.zig").TypeResolutionError.ErrorUnionOutsideTry) {
-            log.help("use `try` to unwrap error unions or wrap the code in a try/catch block\n", .{});
+        if (!builtin.is_test) {
+            log.err("Type resolution failed: {s}\n", .{@errorName(err)});
+            if (err == @import("../ast/type_resolver/mod.zig").TypeResolutionError.ErrorUnionOutsideTry) {
+                log.help("use `try` to unwrap error unions or wrap the code in a try/catch block\n", .{});
+            }
+            // best-effort stack trace in debug builds
+            const trace = @errorReturnTrace();
+            if (trace) |t| std.debug.dumpStackTrace(t.*);
         }
-        // best-effort stack trace in debug builds
-        const trace = @errorReturnTrace();
-        if (trace) |t| std.debug.dumpStackTrace(t.*);
         return ParserError.TypeResolutionFailed;
     };
 
