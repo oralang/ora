@@ -4,35 +4,22 @@ sidebar_position: 7
 
 # Standard Library
 
-Comprehensive reference for Ora's built-in standard library.
+Reference for Ora's built-in standard library (`std.*`). These built-ins expose
+low-level EVM primitives with explicit behavior and strong typing.
 
 ## Overview
 
-The Ora standard library provides direct access to EVM primitives through a minimal set of built-in functions and constants:
-
-- **Zero-overhead**: Compiles directly to EVM opcodes
-- **Type-safe**: Full compile-time type checking
-- **Always available**: No imports needed - just use `std`
+- The standard library is minimal and intentionally low-level.
+- APIs may evolve as the compiler and backend stabilize.
+- Examples may omit types for readability; the current compiler may require
+  explicit type annotations for locals.
 
 ## Philosophy
 
-Ora's standard library is designed for direct EVM access without abstraction overhead:
-
-1. Map cleanly to EVM opcodes (one-to-one correspondence)
-2. Prevent common bugs through static type checking
-3. Provide explicit, predictable behavior
-4. Guarantee zero runtime overhead
-
-## Available Features
-
-The standard library includes 17 built-in functions and constants:
-
-| Category | Functions |
-|----------|-----------|
-| Block Data | 5 functions for current block information |
-| Transaction Data | 2 functions for transaction context |
-| Message Data | 3 functions for call information |
-| Constants | 5 pre-defined constant values |
+1. Map closely to EVM semantics
+2. Prefer explicitness over abstraction
+3. Keep built-ins auditable and predictable
+4. Avoid hidden runtime effects
 
 ---
 
@@ -379,7 +366,7 @@ let timestamp = std.block.timestamp();
 ```
 
 ```sir
-// Generated sensei-ir (SIR)
+// Generated Sensei-IR (SIR)
 fn main:
   entry -> result {
     result = timestamp
@@ -478,11 +465,12 @@ contract SimpleToken {
 The standard library compiles in three stages:
 
 ```
-Ora Source          →  MLIR IR          →  sensei-ir (SIR)  →  EVM Bytecode
+Ora Source          →  MLIR IR          →  Sensei-IR (SIR)  →  EVM Bytecode
 std.msg.sender()       ora.evm.caller()    caller operation    CALLER (0x33)
 ```
 
-Each built-in maps to a single EVM opcode, guaranteeing zero overhead.
+Each built-in maps to an EVM opcode or a small, direct sequence. The exact
+lowering depends on the backend stage and target.
 
 ---
 
@@ -522,7 +510,8 @@ Use `std.msg.sender()` for most access control!
 
 ### Q: What's the gas cost?
 
-**A**: All built-ins compile to single EVM opcodes (2 gas each for most). Zero function call overhead.
+**A**: Gas cost depends on the opcode and context. Built-ins aim to
+lower directly without user-visible runtime wrappers.
 
 ### Q: Can I redefine `std`?
 
@@ -539,4 +528,3 @@ Use `std.msg.sender()` for most access control!
 - [Language Basics](language-basics.md) - Core language features
 - [MLIR Integration](specifications/mlir.md) - Compiler internals
 - [Examples](examples.md) - More example contracts
-

@@ -1,6 +1,6 @@
 # Ora ABI v0.1
 
-This document defines **Ora ABI** as a professional, tooling-first interface layer for smart contracts, with strong support for UI/UX, code generation, and stable type identities.
+**Ora ABI** is a professional, tooling-first interface layer for smart contracts, with strong support for UI/UX, code generation, and stable type identities.
 
 Ora ABI is split into two layers:
 

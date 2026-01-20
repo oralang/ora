@@ -1,95 +1,48 @@
 # Specifications
 
-This section contains the formal specifications and technical documentation for the Ora smart contract language.
+Formal specifications and technical references for the
+Ora language and compiler. Aimed to be precise, but the
+implementation evolves quickly, so treat them as living specs.
 
-## Language Specifications
+## Language specifications
 
 ### [Grammar](./grammar.md)
-Complete BNF and EBNF grammar specifications for the Ora language, including:
-- Formal syntax rules
-- Operator precedence
-- Language constructs
-- Reserved keywords
-- Memory region annotations
+Formal BNF and EBNF grammar for Ora syntax.
 
 ### [MLIR Integration](./mlir.md)
-Comprehensive documentation of Ora's MLIR lowering system, covering:
-- LLVM MLIR integration
-- Type mapping strategies
-- Memory region semantics
-- Expression and statement lowering
-- Pass management and optimization
+Ora MLIR semantics, lowering strategy, and IR structure.
+
+### [Sensei-IR (SIR)](./sensei-ir.md)
+Backend IR used for Ora lowering toward EVM bytecode.
 
 ### [Formal Verification](../formal-verification.md)
-Z3 SMT solver integration for mathematical proof of contract properties:
-- Preconditions and postconditions (`requires`, `ensures`)
-- Contract and loop invariants
-- Quantified expressions (`forall`, `exists`)
-- Ghost code for specification
-- Verification condition generation
+Research-oriented description of the verification model and constraints.
 
 ### [API Documentation](./api.md)
-Complete API reference for the Ora compiler:
-- CLI commands and flags
-- Library interfaces
-- Compilation pipeline
-- Error handling
-- Performance benchmarks
+Compiler CLI and library interfaces.
 
 ### [State Analysis](../state-analysis.md)
-Automatic storage access tracking and optimization:
-- Function property detection (stateless, readonly, state-modifying)
-- Dead store detection (contract-level analysis)
-- Missing validation warnings
-- Constructor-specific checks
-- Gas optimization insights
+Experimental analysis pass for storage access and state effects.
 
-## Implementation Status
+## Status and alignment
 
-Each specification includes implementation status indicators:
-- ✅ **Complete**: Feature is fully implemented and tested (79% success rate - 76/96 examples)
-- 🚧 **In Progress**: Partially implemented, actively being developed
-- 📋 **Planned**: Designed but not yet started
+For the implemented baseline, see:
 
-### Current Status Summary
+- `TYPE_SYSTEM_STATE.md`
+- `FIRST_PHASE_COMPLETENESS.md`
+- `docs/ORA_FEATURE_TEST_REPORT.md`
 
-| Component | Status | Notes |
-|-----------|--------|-------|
-| Lexer | ✅ Complete | All tokens, trivia support |
-| Parser | ✅ Complete | 79% success rate (76/96 examples) |
-| Type System | ✅ Complete | Full type checking and validation |
-| Semantics | ✅ Complete | Region and error validation |
-| MLIR | ✅ Complete | 81 operations, lowering and optimization |
-| State Analysis | ✅ Complete | Automatic tracking & warnings |
-| Structs | ✅ Complete | Declaration, instantiation, field operations |
-| Enums | ✅ Complete | Declaration with explicit values |
-| Control Flow | ✅ Complete | if/else, switch statements |
-| Arithmetic | ✅ Complete | All operations (add, sub, mul, div, rem, power) |
-| Memory Ops | ✅ Complete | mload, mstore, mload8, mstore8 |
-| Transient Storage | ✅ Complete | tload, tstore operations |
-| Maps | ✅ Complete | Map get/store operations |
-| sensei-ir Backend | 🚧 In Progress | Lowering to sensei-ir (SIR) in development |
-| For Loops | 🚧 In Progress | Capture syntax in development |
-| Error Handling | 🚧 In Progress | Try-catch improvements needed |
-| Type Inference | 🚧 In Progress | Currently requires explicit types |
-| Standard Lib | 🚧 In Progress | Basic utilities |
-| Z3 Verification | 🚧 In Progress | Grammar & AST complete, VC generation in progress |
+For research context and rationale, see:
+
+- [Type System](../research/type-system)
+- [Comptime](../research/comptime)
+- [SMT Verification](../research/smt-verification)
+- [Refinement Types](../research/refinement-types)
+
+These documents are closer to compiler reality than any single narrative page.
 
 ## Contributing
 
-These specifications are living documents that evolve with the language. Contributions are welcome:
-
-1. **Grammar improvements**: Help refine language syntax
-2. **HIR enhancements**: Extend the intermediate representation
-3. **Verification advances**: Improve formal verification capabilities
-4. **API extensions**: Add new compiler features
-
-## Quick Navigation
-
-- **New to Ora?** Start with the [Grammar](./grammar.md) specification
-- **Writing contracts?** Check out [State Analysis](../state-analysis.md) for automatic optimization
-- **Formal verification?** See the [Formal Verification](../formal-verification.md) guide for Z3 integration
-- **Compiler development?** Explore [MLIR Integration](./mlir.md) and [API](./api.md) docs
-- **Language implementation?** All specifications work together
-
-These specifications provide the foundation for understanding and extending the Ora language. 
+If you update a specification, also update the corresponding implementation
+notes or tests. Specs should either describe the current behavior or clearly
+label the gaps.

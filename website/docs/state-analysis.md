@@ -1,18 +1,21 @@
 # State Analysis
 
-Ora's compiler includes sophisticated **state change tracking** that automatically analyzes storage access patterns in your smart contracts, helping you write more efficient, secure, and maintainable code.
+Ora experiments with **state change tracking** to analyze storage access
+patterns and surface potential issues. This pass is evolving and may change
+as the compiler matures.
 
 ## Overview
 
-State analysis runs automatically during compilation and provides insights about:
+When enabled, state analysis provides insights about:
 - 📊 **Storage reads and writes**: Which functions access which variables
 - 🔍 **Function properties**: Stateless, readonly, or state-modifying
 - ⚠️ **Potential issues**: Dead stores, missing validation, unused variables
 - ⚡ **Gas optimization**: Identify expensive storage operations
 
-## Automatic Analysis
+## Analysis Output
 
-Every compilation includes state analysis with **zero overhead**:
+Some builds include state analysis output by default, and others require
+explicit flags. Treat the following output as illustrative:
 
 ```bash
 ora contract.ora
@@ -27,7 +30,7 @@ ora contract.ora
    💬 Add validation checks before modifying storage (e.g., require conditions)
 ```
 
-**Clean output**: Only warnings are shown. No noise during compilation!
+Output format and severity levels may change as the analysis stabilizes.
 
 ## Detailed Analysis Mode
 
@@ -77,7 +80,7 @@ pub fn add(a: u256, b: u256) -> u256 {
 ```
 
 **Benefits**:
-- Can be inlined for gas savings
+- Easier to reason about and verify
 - Safe to call from any context
 - Predictable behavior
 
@@ -205,8 +208,8 @@ contract SimpleToken {
     }
     
     pub fn transfer(recipient: address, amount: u256) -> bool {
-        let sender = std.msg.sender();
-        let senderBalance = balances[sender];
+        var sender: address = std.msg.sender();
+        var senderBalance: u256 = balances[sender];
         
         if (senderBalance < amount) {
             return false;
@@ -374,4 +377,3 @@ Smart contracts interact with expensive storage operations. State analysis helps
 5. **Better code**: Clear understanding of side effects
 
 State analysis is **always on**, helping you write better Ora contracts automatically! 🚀
-

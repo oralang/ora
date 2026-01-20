@@ -1,1028 +1,265 @@
 /**
- * Any CSS included here will be global. The classic template
- * bundles Infima by default. Infima is a CSS framework designed to
- * work well for content-centric websites.
+ * Global theme overrides for Ora.
  */
+@import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;600;700&family=IBM+Plex+Serif:wght@400;600&display=swap');
 
-/* You can override the default Infima variables here. */
 :root {
-  /* Ora Brand Colors - Updated to match website-v2 */
-  --ifm-color-primary: #2563eb;
-  --ifm-color-primary-dark: #1d4ed8;
-  --ifm-color-primary-darker: #1e40af;
-  --ifm-color-primary-darkest: #1e3a8a;
-  --ifm-color-primary-light: #3b82f6;
-  --ifm-color-primary-lighter: #60a5fa;
-  --ifm-color-primary-lightest: #93c5fd;
+  --ora-ink: #0b2a2c;
+  --ora-cream: #f6f1e7;
+  --ora-teal: #0e6b6a;
+  --ora-teal-dark: #0b5656;
+  --ora-teal-light: #1a807c;
+  --ora-sand: #f4b86a;
+  --ora-moss: #3b5d50;
+  --ora-stone: #e6efe7;
+  --ora-card: #ffffff;
+  --ora-shadow: rgba(11, 42, 44, 0.12);
 
-  /* Primary color scale (50-900) */
-  --ora-primary-50: #eff6ff;
-  --ora-primary-100: #dbeafe;
-  --ora-primary-200: #bfdbfe;
-  --ora-primary-300: #93c5fd;
-  --ora-primary-400: #60a5fa;
-  --ora-primary-500: #3b82f6;
-  --ora-primary-600: #2563eb;
-  --ora-primary-700: #1d4ed8;
-  --ora-primary-800: #1e40af;
-  --ora-primary-900: #1e3a8a;
+  --ifm-color-primary: var(--ora-teal);
+  --ifm-color-primary-dark: var(--ora-teal-dark);
+  --ifm-color-primary-darker: #0a4d4d;
+  --ifm-color-primary-darkest: #083c3c;
+  --ifm-color-primary-light: var(--ora-teal-light);
+  --ifm-color-primary-lighter: #2c928d;
+  --ifm-color-primary-lightest: #46a6a1;
 
-  /* Enhanced code styling for Ora */
-  --ifm-code-font-size: 95%;
-  --ifm-code-background: rgba(37, 99, 235, 0.1);
-  --ifm-code-color: #2563eb;
-  --docusaurus-highlighted-code-line-bg: rgba(37, 99, 235, 0.1);
+  --ifm-background-color: var(--ora-cream);
+  --ifm-background-surface-color: var(--ora-card);
+  --ifm-toc-border-color: rgba(11, 42, 44, 0.12);
+  --ifm-navbar-background-color: var(--ora-cream);
+  --ifm-footer-background-color: #0f1f1f;
+  --ifm-footer-color: #f6f1e7;
 
-  /* Custom Ora accent colors */
-  --ora-accent-purple: #7c3aed;
-  --ora-accent-blue: #2563eb;
-  --ora-accent-cyan: #06b6d4;
-  --ora-info: #0284c7;
+  --ifm-font-family-base: 'IBM Plex Serif', ui-serif, serif;
+  --ifm-font-family-monospace: 'JetBrains Mono', 'Fira Code', Monaco, monospace;
+  --ifm-heading-font-family: 'Space Grotesk', ui-sans-serif, system-ui;
 
-  /* Status colors - Updated to match website-v2 */
-  --ora-success: #059669;
-  --ora-success-50: #ecfdf5;
-  --ora-success-100: #d1fae5;
-  --ora-success-200: #a7f3d0;
-  --ora-success-300: #6ee7b7;
-  --ora-success-400: #34d399;
-  --ora-success-500: #10b981;
-  --ora-success-600: #059669;
-  --ora-success-700: #047857;
-  --ora-success-800: #065f46;
-  --ora-success-900: #064e3b;
+  --ifm-code-font-size: 92%;
+  --ifm-code-background: rgba(14, 107, 106, 0.08);
+  --ifm-code-color: #0b5656;
+  --docusaurus-highlighted-code-line-bg: rgba(14, 107, 106, 0.12);
+  --ifm-pre-background: #0f1f1f;
+  --ifm-pre-padding: 1.2rem;
 
-  --ora-warning: #d97706;
-  --ora-warning-50: #fffbeb;
-  --ora-warning-100: #fef3c7;
-  --ora-warning-200: #fde68a;
-  --ora-warning-300: #fcd34d;
-  --ora-warning-400: #fbbf24;
-  --ora-warning-500: #f59e0b;
-  --ora-warning-600: #d97706;
-  --ora-warning-700: #b45309;
-  --ora-warning-800: #92400e;
-  --ora-warning-900: #78350f;
-
-  --ora-error: #dc2626;
-  --ora-error-50: #fef2f2;
-  --ora-error-100: #fee2e2;
-  --ora-error-200: #fecaca;
-  --ora-error-300: #fca5a5;
-  --ora-error-400: #f87171;
-  --ora-error-500: #ef4444;
-  --ora-error-600: #dc2626;
-  --ora-error-700: #b91c1c;
-  --ora-error-800: #991b1b;
-  --ora-error-900: #7f1d1d;
-
-  /* Neutral/Gray colors - Updated to match website-v2 */
-  --ora-gray-50: #f9fafb;
-  --ora-gray-100: #f3f4f6;
-  --ora-gray-200: #e5e7eb;
-  --ora-gray-300: #d1d5db;
-  --ora-gray-400: #9ca3af;
-  --ora-gray-500: #6b7280;
-  --ora-gray-600: #4b5563;
-  --ora-gray-700: #374151;
-  --ora-gray-800: #1f2937;
-  --ora-gray-900: #111827;
-
-  /* Typography improvements */
-  --ifm-font-family-base: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-  --ifm-font-family-monospace: 'JetBrains Mono', 'Fira Code', Monaco, 'Cascadia Code', 'Roboto Mono', monospace;
-  --ifm-h1-font-size: 2.5rem;
-  --ifm-h2-font-size: 2rem;
-  --ifm-h3-font-size: 1.5rem;
+  --ifm-card-border-radius: 16px;
 }
 
-/* For readability concerns, you should choose a lighter palette in dark mode. */
 [data-theme='dark'] {
-  --ifm-color-primary: #60a5fa;
-  --ifm-color-primary-dark: #3b82f6;
-  --ifm-color-primary-darker: #2563eb;
-  --ifm-color-primary-darkest: #1d4ed8;
-  --ifm-color-primary-light: #93c5fd;
-  --ifm-color-primary-lighter: #bfdbfe;
-  --ifm-color-primary-lightest: #dbeafe;
-
-  --ifm-code-background: rgba(37, 99, 235, 0.15);
-  --ifm-code-color: #93c5fd;
-  --docusaurus-highlighted-code-line-bg: rgba(37, 99, 235, 0.2);
-
-  /* Dark mode background adjustments - Updated to match website-v2 */
-  --ifm-background-color: #0f172a;
-  --ifm-background-surface-color: #1e293b;
-  --ora-dark-bg: #0f172a;
-  --ora-dark-surface: #1e293b;
-  --ora-dark-border: #334155;
-}
-
-/* Enhanced code block styling */
-.prism-code {
-  font-family: var(--ifm-font-family-monospace);
-  font-size: 0.9rem;
-  line-height: 1.6;
-}
-
-/* Typography System - Responsive font sizes matching website-v2 */
-h1 {
-  font-size: 1.875rem; /* 3xl */
-  line-height: 2.25rem;
-}
-
-@media (min-width: 768px) {
-  h1 {
-    font-size: 2.25rem; /* 4xl */
-    line-height: 2.5rem;
-  }
-}
-
-@media (min-width: 1024px) {
-  h1 {
-    font-size: 3rem; /* 5xl */
-    line-height: 1;
-  }
-}
-
-h2 {
-  font-size: 1.5rem; /* 2xl */
-  line-height: 2rem;
-}
-
-@media (min-width: 768px) {
-  h2 {
-    font-size: 1.875rem; /* 3xl */
-    line-height: 2.25rem;
-  }
-}
-
-@media (min-width: 1024px) {
-  h2 {
-    font-size: 2.25rem; /* 4xl */
-    line-height: 2.5rem;
-  }
-}
-
-h3 {
-  font-size: 1.25rem; /* xl */
-  line-height: 1.75rem;
-}
-
-@media (min-width: 768px) {
-  h3 {
-    font-size: 1.5rem; /* 2xl */
-    line-height: 2rem;
-  }
-}
-
-@media (min-width: 1024px) {
-  h3 {
-    font-size: 1.875rem; /* 3xl */
-    line-height: 2.25rem;
-  }
-}
-
-h4 {
-  font-size: 1.125rem; /* lg */
-  line-height: 1.75rem;
-}
-
-@media (min-width: 768px) {
-  h4 {
-    font-size: 1.25rem; /* xl */
-    line-height: 1.75rem;
-  }
-}
-
-@media (min-width: 1024px) {
-  h4 {
-    font-size: 1.5rem; /* 2xl */
-    line-height: 2rem;
-  }
-}
-
-h5 {
-  font-size: 1rem; /* base */
-  line-height: 1.5rem;
-}
-
-@media (min-width: 768px) {
-  h5 {
-    font-size: 1.125rem; /* lg */
-    line-height: 1.75rem;
-  }
-}
-
-@media (min-width: 1024px) {
-  h5 {
-    font-size: 1.25rem; /* xl */
-    line-height: 1.75rem;
-  }
-}
-
-h6 {
-  font-size: 0.875rem; /* sm */
-  line-height: 1.25rem;
-}
-
-@media (min-width: 768px) {
-  h6 {
-    font-size: 1rem; /* base */
-    line-height: 1.5rem;
-  }
-}
-
-@media (min-width: 1024px) {
-  h6 {
-    font-size: 1.125rem; /* lg */
-    line-height: 1.75rem;
-  }
-}
-
-/* Shadow utilities - Matching website-v2 */
-.shadow-soft {
-  box-shadow: 0 2px 15px -3px rgba(0, 0, 0, 0.07), 0 10px 20px -2px rgba(0, 0, 0, 0.04);
-}
-
-.shadow-medium {
-  box-shadow: 0 4px 25px -5px rgba(0, 0, 0, 0.1), 0 10px 10px -5px rgba(0, 0, 0, 0.04);
-}
-
-.shadow-large {
-  box-shadow: 0 10px 40px -10px rgba(0, 0, 0, 0.1), 0 2px 10px -2px rgba(0, 0, 0, 0.04);
-}
-
-.shadow-glow {
-  box-shadow: 0 0 20px rgba(37, 99, 235, 0.3);
-}
-
-/* Animations - Matching website-v2 */
-@keyframes fadeIn {
-  from {
-    opacity: 0;
-  }
-  to {
-    opacity: 1;
-  }
-}
-
-@keyframes slideUp {
-  from {
-    transform: translateY(10px);
-    opacity: 0;
-  }
-  to {
-    transform: translateY(0);
-    opacity: 1;
-  }
-}
-
-@keyframes fadeInUp {
-  from {
-    opacity: 0;
-    transform: translateY(30px);
-  }
-  to {
-    opacity: 1;
-    transform: translateY(0);
-  }
-}
-
-.animate-fade-in {
-  animation: fadeIn 0.5s ease-in-out;
-}
-
-.animate-slide-up {
-  animation: slideUp 0.3s ease-out;
-}
-
-.animate-fade-in-up {
-  animation: fadeInUp 0.6s ease-out forwards;
-}
-
-.animate-pulse-slow {
-  animation: pulse 3s cubic-bezier(0.4, 0, 0.6, 1) infinite;
-}
-
-/* Utility classes */
-.text-gradient {
-  background: linear-gradient(to right, var(--ora-primary-600), #2563eb);
-  -webkit-background-clip: text;
-  -webkit-text-fill-color: transparent;
-  background-clip: text;
-}
-
-.bg-gradient-ora {
-  background: linear-gradient(to bottom right, var(--ora-primary-500), #2563eb);
-}
-
-/* Transition utilities - Matching website-v2 */
-.transition-all {
-  transition-property: all;
-  transition-timing-function: cubic-bezier(0.4, 0, 0.2, 1);
-  transition-duration: 200ms;
-}
-
-.transition-all-slow {
-  transition-property: all;
-  transition-timing-function: cubic-bezier(0.4, 0, 0.2, 1);
-  transition-duration: 300ms;
-}
-
-.transition-colors {
-  transition-property: color, background-color, border-color, text-decoration-color, fill, stroke;
-  transition-timing-function: cubic-bezier(0.4, 0, 0.2, 1);
-  transition-duration: 200ms;
-}
-
-.transition-opacity {
-  transition-property: opacity;
-  transition-timing-function: cubic-bezier(0.4, 0, 0.2, 1);
-  transition-duration: 200ms;
-}
-
-.transition-transform {
-  transition-property: transform;
-  transition-timing-function: cubic-bezier(0.4, 0, 0.2, 1);
-  transition-duration: 200ms;
-}
-
-/* Enhanced code block styles - Updated to match website-v2 */
-.code-block {
-  border-radius: 0.5rem; /* rounded-lg */
-  border: 1px solid var(--ora-gray-200);
-  background: var(--ora-gray-50);
-  font-family: var(--ifm-font-family-monospace);
-  font-size: 0.875rem; /* text-sm */
-  overflow-x: auto;
-}
-
-[data-theme='dark'] .code-block {
-  border-color: var(--ora-gray-700);
-  background: var(--ora-gray-900);
-}
-
-.code-block-header {
-  background: var(--ora-gray-100);
-  padding: 0.5rem 1rem; /* px-4 py-2 */
-  border-bottom: 1px solid var(--ora-gray-200);
-  font-size: 0.875rem; /* text-sm */
-  color: var(--ora-gray-600);
-  font-weight: 500;
-}
-
-[data-theme='dark'] .code-block-header {
-  background: var(--ora-gray-800);
-  border-color: var(--ora-gray-700);
-  color: var(--ora-gray-400);
-}
-
-.code-block-content {
-  padding: 1rem; /* p-4 */
-}
-
-.code-example {
-  border: 1px solid var(--ora-gray-200);
-  border-radius: 0.5rem; /* rounded-lg */
-  overflow: hidden;
-}
-
-[data-theme='dark'] .code-example {
-  border-color: var(--ora-gray-700);
-}
-
-.code-example-header {
-  background: var(--ora-gray-50);
-  padding: 0.75rem 1rem; /* px-4 py-3 */
-  border-bottom: 1px solid var(--ora-gray-200);
-}
-
-[data-theme='dark'] .code-example-header {
-  background: var(--ora-gray-800);
-  border-color: var(--ora-gray-700);
-}
-
-.code-example-content {
-  background: var(--ora-gray-900);
-  color: var(--ora-gray-100);
-}
-
-.code-line-highlight {
-  background: rgba(234, 179, 8, 0.2); /* yellow-500/20 */
-  border-left: 2px solid #eab308; /* yellow-500 */
-  margin-left: -1rem;
-  margin-right: -1rem;
-  padding-left: 1rem;
-  padding-right: 1rem;
-}
-
-.code-line-numbers {
-  color: var(--ora-gray-500);
-  text-align: right;
-  padding-right: 1rem;
-  user-select: none;
-  min-width: 2rem;
-}
-
-/* Ora language syntax highlighting - Updated colors */
-.token.keyword {
-  color: var(--ora-primary-600);
-  font-weight: 600;
-}
-
-[data-theme='dark'] .token.keyword {
-  color: var(--ora-primary-400);
-}
-
-.token.type {
-  color: var(--ora-success-600);
-  font-weight: 500;
-}
-
-[data-theme='dark'] .token.type {
-  color: var(--ora-success-400);
-}
-
-.token.builtin {
-  color: #06b6d4; /* cyan-600 */
-  font-weight: 500;
-}
-
-[data-theme='dark'] .token.builtin {
-  color: #22d3ee; /* cyan-400 */
-}
-
-.token.stdlib {
-  color: var(--ora-success-600);
-  font-weight: 500;
-}
-
-[data-theme='dark'] .token.stdlib {
-  color: var(--ora-success-400);
-}
-
-.token.function {
-  color: #2563eb; /* blue-600 */
-  font-weight: 500;
-}
-
-[data-theme='dark'] .token.function {
-  color: #60a5fa; /* blue-400 */
-}
-
-.token.string {
-  color: var(--ora-success-600);
-}
-
-[data-theme='dark'] .token.string {
-  color: #34d399; /* emerald-400 */
-}
-
-.token.number {
-  color: var(--ora-warning-600);
-}
-
-[data-theme='dark'] .token.number {
-  color: #fbbf24; /* amber-400 */
-}
-
-.token.comment {
-  color: var(--ora-gray-500);
-  font-style: italic;
-}
-
-[data-theme='dark'] .token.comment {
-  color: #94a3b8; /* slate-400 */
-}
-
-.token.operator {
-  color: var(--ora-gray-700);
-}
-
-[data-theme='dark'] .token.operator {
-  color: var(--ora-gray-300);
-}
-
-.token.punctuation {
-  color: var(--ora-gray-600);
-}
-
-[data-theme='dark'] .token.punctuation {
-  color: #94a3b8; /* slate-400 */
-}
-
-.token.annotation {
-  color: #06b6d4; /* cyan-600 */
-  font-weight: 500;
-}
-
-[data-theme='dark'] .token.annotation {
-  color: #22d3ee; /* cyan-400 */
-}
-
-.token.error-type {
-  color: var(--ora-error-600);
-  font-weight: 500;
-}
-
-[data-theme='dark'] .token.error-type {
-  color: #f87171; /* red-400 */
-}
-
-.token.attribute {
-  color: #7c3aed; /* purple-600 */
-  font-style: italic;
-}
-
-[data-theme='dark'] .token.attribute {
-  color: #a78bfa; /* purple-400 */
-}
-
-.token.property {
-  color: #9333ea; /* purple-600 */
+  --ifm-background-color: #0b2a2c;
+  --ifm-background-surface-color: #132b2c;
+  --ifm-navbar-background-color: #0b2a2c;
+  --ifm-color-primary: #5fb9b1;
+  --ifm-color-primary-dark: #4aa59d;
+  --ifm-color-primary-darker: #3f9089;
+  --ifm-color-primary-darkest: #2e706a;
+  --ifm-color-primary-light: #76c7c0;
+  --ifm-color-primary-lighter: #8ad2cc;
+  --ifm-color-primary-lightest: #a6e1dd;
+  --ifm-code-background: rgba(95, 185, 177, 0.12);
+  --ifm-code-color: #cbe9e6;
+  --docusaurus-highlighted-code-line-bg: rgba(95, 185, 177, 0.2);
+  --ifm-footer-background-color: #0b2a2c;
 }
 
-[data-theme='dark'] .token.property {
-  color: #c084fc; /* purple-400 */
+body {
+  color: var(--ora-ink);
 }
 
-/* Hero section enhancements - Updated to match website-v2 */
-.hero {
-  background: linear-gradient(135deg, var(--ora-primary-600) 0%, #2563eb 100%);
-  color: white;
+h1, h2, h3, h4, h5, h6 {
+  font-family: var(--ifm-heading-font-family);
+  letter-spacing: -0.01em;
 }
 
-.hero .hero__title {
-  font-size: 3.5rem;
-  font-weight: 700;
+.navbar {
+  box-shadow: none;
+  border-bottom: 1px solid rgba(11, 42, 44, 0.12);
 }
 
-.hero .hero__subtitle {
-  font-size: 1.25rem;
-  opacity: 0.9;
+.navbar__title,
+.navbar__brand {
+  font-family: var(--ifm-heading-font-family);
+  letter-spacing: 0.01em;
 }
 
-/* Button enhancements - Updated to match website-v2 */
-.button--primary {
-  background: var(--ora-primary-600);
-  color: white;
-  border: none;
-  font-weight: 600;
-  transition: all 0.2s ease;
-  box-shadow: 0 1px 2px 0 rgba(0, 0, 0, 0.05);
+a {
+  text-decoration: none;
 }
 
-.button--primary:hover {
-  background: var(--ora-primary-700);
-  transform: translateY(-1px);
-  box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06);
+a:hover {
+  text-decoration: underline;
 }
 
-.button--primary:focus {
-  outline: 2px solid var(--ora-primary-500);
-  outline-offset: 2px;
+.button {
+  font-family: var(--ifm-heading-font-family);
+  border-radius: 999px;
+  letter-spacing: 0.02em;
 }
 
 .button--secondary {
-  background: var(--ora-gray-100);
-  color: var(--ora-gray-900);
-  border: none;
-  font-weight: 600;
-  transition: all 0.2s ease;
+  background: var(--ora-sand);
+  border-color: var(--ora-sand);
+  color: #0b2a2c;
 }
 
 .button--secondary:hover {
-  background: var(--ora-gray-200);
+  background: #f0a94a;
+  border-color: #f0a94a;
+  color: #0b2a2c;
 }
 
-[data-theme='dark'] .button--secondary {
-  background: var(--ora-gray-800);
-  color: var(--ora-gray-100);
+.button--outline.button--secondary {
+  border-color: #f6f1e7;
+  color: #f6f1e7;
 }
 
-[data-theme='dark'] .button--secondary:hover {
-  background: var(--ora-gray-700);
-}
-
-.button--outline {
-  background: transparent;
-  color: var(--ora-gray-700);
-  border: 1px solid var(--ora-gray-300);
-  font-weight: 600;
-  transition: all 0.2s ease;
-}
-
-.button--outline:hover {
-  background: var(--ora-gray-50);
-}
-
-[data-theme='dark'] .button--outline {
-  color: var(--ora-gray-300);
-  border-color: var(--ora-gray-600);
-}
-
-[data-theme='dark'] .button--outline:hover {
-  background: var(--ora-gray-800);
-}
-
-/* Card enhancements - Updated to match website-v2 */
-.card {
-  background: white;
-  border-radius: 0.75rem; /* rounded-xl */
-  border: 1px solid var(--ora-gray-200);
-  padding: 1.5rem; /* p-6 */
-  transition: all 0.3s ease;
-  box-shadow: 0 2px 15px -3px rgba(0, 0, 0, 0.07), 0 10px 20px -2px rgba(0, 0, 0, 0.04);
-}
-
-[data-theme='dark'] .card {
-  background: var(--ora-gray-900);
-  border-color: var(--ora-gray-800);
-}
-
-.card:hover {
-  transform: translateY(-4px);
-  box-shadow: 0 10px 40px -10px rgba(0, 0, 0, 0.1), 0 2px 10px -2px rgba(0, 0, 0, 0.04);
-}
-
-.feature-card {
-  background: white;
-  border-radius: 0.75rem;
-  border: 1px solid var(--ora-gray-200);
-  padding: 1.5rem;
-  transition: all 0.3s ease;
-  box-shadow: 0 2px 15px -3px rgba(0, 0, 0, 0.07), 0 10px 20px -2px rgba(0, 0, 0, 0.04);
-}
-
-[data-theme='dark'] .feature-card {
-  background: var(--ora-gray-900);
-  border-color: var(--ora-gray-800);
-}
-
-.feature-card:hover {
-  transform: translateY(-4px);
-  box-shadow: 0 10px 40px -10px rgba(0, 0, 0, 0.1), 0 2px 10px -2px rgba(0, 0, 0, 0.04);
-}
-
-/* Navigation improvements - Updated to match website-v2 */
-.navbar {
-  backdrop-filter: blur(8px);
-  -webkit-backdrop-filter: blur(8px);
-  background: rgba(255, 255, 255, 0.8);
-  border-bottom: 1px solid var(--ora-gray-200);
-}
-
-[data-theme='dark'] .navbar {
-  background: rgba(15, 23, 42, 0.8);
-  border-bottom: 1px solid var(--ora-gray-800);
-}
-
-/* Footer styling - Updated to match website-v2 */
-.footer {
-  background: linear-gradient(135deg, #1e293b 0%, #0f172a 100%);
-}
-
-/* Sidebar and TOC styling - Matching website-v2 */
 .theme-doc-sidebar-container {
-  border-right: 1px solid var(--ora-gray-200);
+  border-right: 1px solid rgba(11, 42, 44, 0.08);
+  background: linear-gradient(180deg, #ffffff 0%, #f8f4ed 100%);
 }
 
-[data-theme='dark'] .theme-doc-sidebar-container {
-  border-color: var(--ora-gray-800);
+.menu__list {
+  padding-top: 0.6rem;
 }
 
-.table-of-contents {
-  border-left: 1px solid var(--ora-gray-200);
-}
-
-[data-theme='dark'] .table-of-contents {
-  border-color: var(--ora-gray-800);
-}
-
-/* Custom scrollbar - Matching website-v2 */
-::-webkit-scrollbar {
-  width: 8px;
-  height: 8px;
-}
-
-::-webkit-scrollbar-track {
-  background: var(--ora-gray-100);
-}
-
-[data-theme='dark'] ::-webkit-scrollbar-track {
-  background: var(--ora-gray-800);
-}
-
-::-webkit-scrollbar-thumb {
-  background: var(--ora-gray-300);
-  border-radius: 9999px;
-}
-
-[data-theme='dark'] ::-webkit-scrollbar-thumb {
-  background: var(--ora-gray-600);
-}
-
-::-webkit-scrollbar-thumb:hover {
-  background: var(--ora-gray-400);
-}
-
-[data-theme='dark'] ::-webkit-scrollbar-thumb:hover {
-  background: var(--ora-gray-500);
-}
-
-/* Sidebar and TOC styling - Matching website-v2 */
-.theme-doc-sidebar-container {
-  border-right: 1px solid var(--ora-gray-200);
-}
-
-[data-theme='dark'] .theme-doc-sidebar-container {
-  border-color: var(--ora-gray-800);
-}
-
-.table-of-contents {
-  border-left: 1px solid var(--ora-gray-200);
-}
-
-[data-theme='dark'] .table-of-contents {
-  border-color: var(--ora-gray-800);
-}
-
-/* Custom scrollbar - Matching website-v2 */
-::-webkit-scrollbar {
-  width: 8px;
-  height: 8px;
-}
-
-::-webkit-scrollbar-track {
-  background: var(--ora-gray-100);
-}
-
-[data-theme='dark'] ::-webkit-scrollbar-track {
-  background: var(--ora-gray-800);
-}
-
-::-webkit-scrollbar-thumb {
-  background: var(--ora-gray-300);
-  border-radius: 9999px;
-}
-
-[data-theme='dark'] ::-webkit-scrollbar-thumb {
-  background: var(--ora-gray-600);
-}
-
-::-webkit-scrollbar-thumb:hover {
-  background: var(--ora-gray-400);
-}
-
-[data-theme='dark'] ::-webkit-scrollbar-thumb:hover {
-  background: var(--ora-gray-500);
-}
-
-/* Blog enhancements */
-.blog-post-item {
-  border-radius: 0.75rem; /* rounded-lg */
-  border: 1px solid var(--ora-gray-200);
-  transition: all 0.3s ease;
-  margin-bottom: 2rem;
-}
-
-[data-theme='dark'] .blog-post-item {
-  border-color: var(--ora-gray-800);
-}
-
-.blog-post-item:hover {
-  transform: translateY(-4px);
-  box-shadow: 0 10px 40px -10px rgba(0, 0, 0, 0.1), 0 2px 10px -2px rgba(0, 0, 0, 0.04);
-}
-
-.blog-post-item header h2 {
-  font-size: 2rem;
-  margin-bottom: 0.5rem;
-}
-
-.blog-post-item .avatar__intro {
-  display: flex;
-  flex-direction: column;
-}
-
-.blog-post-item time {
-  color: var(--ifm-color-primary);
-  font-weight: 600;
-}
-
-/* Blog tags - Updated to match website-v2 */
-.blog-tags {
-  display: flex;
-  gap: 0.5rem;
-  flex-wrap: wrap;
-}
-
-.blog-tags a {
-  background: var(--ora-primary-100);
-  color: var(--ora-primary-600);
-  padding: 0.25rem 0.75rem;
-  border-radius: 0.75rem; /* rounded-lg */
-  font-size: 0.85rem;
-  font-weight: 600;
-  text-decoration: none;
-  transition: all 0.2s ease;
-}
-
-[data-theme='dark'] .blog-tags a {
-  background: var(--ora-primary-900);
-  color: var(--ora-primary-200);
-}
-
-.blog-tags a:hover {
-  background: var(--ora-primary-600);
-  color: white;
-}
-
-[data-theme='dark'] .blog-tags a:hover {
-  background: var(--ora-primary-700);
-}
-
-/* Status badges in content - Updated to match website-v2 */
-.badge-container {
-  display: inline-flex;
-  gap: 0.5rem;
-  margin: 1rem 0;
-}
-
-.status-badge {
-  display: inline-flex;
-  align-items: center;
-  padding: 0.25rem 0.75rem; /* px-3 py-1 */
-  border-radius: 9999px; /* rounded-full */
+.menu__link {
   font-weight: 500;
-  font-size: 0.875rem; /* text-sm */
-  transition: colors 0.2s ease;
+  border-radius: 8px;
+  padding: 0.45rem 0.7rem;
 }
 
-.status-badge.implemented,
-.status-badge.working {
-  background: var(--ora-success-100);
-  color: var(--ora-success-800);
+.menu__link--active {
+  background: rgba(14, 107, 106, 0.12);
+  color: var(--ora-teal-dark);
 }
 
-[data-theme='dark'] .status-badge.implemented,
-[data-theme='dark'] .status-badge.working {
-  background: var(--ora-success-900);
-  color: var(--ora-success-200);
+.menu__link:hover {
+  background: rgba(14, 107, 106, 0.08);
 }
 
-.status-badge.in-progress {
-  background: var(--ora-warning-100);
-  color: var(--ora-warning-800);
-}
-
-[data-theme='dark'] .status-badge.in-progress {
-  background: var(--ora-warning-900);
-  color: var(--ora-warning-200);
-}
-
-.status-badge.planned {
-  background: var(--ora-gray-100);
-  color: var(--ora-gray-800);
-}
-
-[data-theme='dark'] .status-badge.planned {
-  background: var(--ora-gray-800);
-  color: var(--ora-gray-200);
-}
-
-/* Badge variants - Additional badge styles */
-.badge {
-  display: inline-flex;
-  align-items: center;
-  padding: 0.25rem 0.625rem; /* px-2.5 py-1 */
-  border-radius: 9999px; /* rounded-full */
-  font-weight: 500;
-  font-size: 0.875rem; /* text-sm */
-  transition: colors 0.2s ease;
-}
-
-.badge--primary {
-  background: var(--ora-primary-100);
-  color: var(--ora-primary-800);
-}
-
-[data-theme='dark'] .badge--primary {
-  background: var(--ora-primary-900);
-  color: var(--ora-primary-200);
-}
-
-.badge--success {
-  background: var(--ora-success-100);
-  color: var(--ora-success-800);
-}
-
-[data-theme='dark'] .badge--success {
-  background: var(--ora-success-900);
-  color: var(--ora-success-200);
-}
-
-.badge--warning {
-  background: var(--ora-warning-100);
-  color: var(--ora-warning-800);
-}
-
-[data-theme='dark'] .badge--warning {
-  background: var(--ora-warning-900);
-  color: var(--ora-warning-200);
-}
-
-.badge--error {
-  background: var(--ora-error-100);
-  color: var(--ora-error-800);
-}
-
-[data-theme='dark'] .badge--error {
-  background: var(--ora-error-900);
-  color: var(--ora-error-200);
-}
-
-.badge--info {
-  background: #dbeafe;
-  color: #1e40af;
-}
-
-[data-theme='dark'] .badge--info {
-  background: #1e3a8a;
-  color: #bfdbfe;
-}
-
-/* Markdown table enhancements - Updated to match website-v2 */
-.markdown table {
-  border-collapse: collapse;
-  width: 100%;
-  margin: 2rem 0;
-}
-
-.markdown table th {
-  background: var(--ora-primary-100);
-  font-weight: 600;
-  padding: 0.75rem 1rem;
-  text-align: left;
-}
-
-[data-theme='dark'] .markdown table th {
-  background: var(--ora-primary-900);
-}
-
-.markdown table td {
-  padding: 0.75rem 1rem;
-  border-bottom: 1px solid var(--ora-gray-200);
-}
-
-[data-theme='dark'] .markdown table td {
-  border-color: var(--ora-gray-700);
-}
-
-.markdown table tr:hover {
-  background: var(--ora-primary-50);
-}
-
-[data-theme='dark'] .markdown table tr:hover {
-  background: var(--ora-primary-900);
-}
-
-/* Admonitions enhancement */
-.admonition {
+.theme-doc-markdown pre {
+  background: #0f1f1f;
   border-radius: 12px;
-  margin: 1.5rem 0;
+  border: 1px solid rgba(244, 184, 106, 0.2);
+  box-shadow: 0 16px 40px rgba(0, 0, 0, 0.15);
 }
 
-/* Blog author avatar styling */
-.avatar__photo {
-  width: 48px !important;
-  height: 48px !important;
-  object-fit: cover;
-  border: 2px solid var(--ifm-color-primary);
+.theme-doc-markdown code {
+  border-radius: 6px;
 }
 
-.avatar--vertical .avatar__photo {
-  width: 100px !important;
-  height: 100px !important;
+.theme-doc-markdown pre code {
+  color: #f6f1e7;
 }
 
-.blog-post-item .avatar__photo {
-  width: 40px !important;
-  height: 40px !important;
+.theme-code-block {
+  border-radius: 14px;
+  overflow: hidden;
 }
 
-/* Responsive design improvements */
-@media (max-width: 768px) {
-  .hero .hero__title {
-    font-size: 2.5rem;
+.theme-code-block::before {
+  content: "";
+  display: block;
+  height: 20px;
+  background: linear-gradient(90deg, rgba(244, 184, 106, 0.22), rgba(14, 107, 106, 0.22));
+}
+
+.theme-code-block .prism-code {
+  margin-top: -20px;
+  padding-top: 1.6rem;
+}
+
+.alert {
+  border-radius: 14px;
+  border: 1px solid rgba(11, 42, 44, 0.08);
+  box-shadow: 0 12px 30px rgba(11, 42, 44, 0.08);
+}
+
+.alert--info {
+  background: #e6f3f2;
+  border-color: rgba(14, 107, 106, 0.3);
+}
+
+.alert--warning {
+  background: #fff3e0;
+  border-color: rgba(244, 184, 106, 0.6);
+}
+
+.theme-doc-markdown blockquote {
+  border-left: 4px solid var(--ora-sand);
+  background: rgba(244, 184, 106, 0.12);
+  padding: 0.9rem 1.1rem;
+  border-radius: 12px;
+  box-shadow: 0 10px 30px rgba(11, 42, 44, 0.06);
+}
+
+.theme-doc-markdown ul,
+.theme-doc-markdown ol {
+  padding-left: 1.6rem;
+}
+
+.theme-doc-markdown ul li::marker {
+  color: var(--ora-teal);
+}
+
+.theme-doc-markdown ol li::marker {
+  color: var(--ora-moss);
+  font-weight: 600;
+}
+
+.theme-doc-markdown table {
+  border-collapse: collapse;
+  border-radius: 14px;
+  overflow: hidden;
+  box-shadow: 0 16px 40px rgba(11, 42, 44, 0.08);
+}
+
+.theme-doc-markdown table thead {
+  background: rgba(14, 107, 106, 0.12);
+}
+
+.theme-doc-markdown table th,
+.theme-doc-markdown table td {
+  border: 1px solid rgba(11, 42, 44, 0.08);
+  padding: 0.7rem 0.9rem;
+}
+
+.theme-doc-markdown table tbody tr:nth-child(even) {
+  background: rgba(11, 42, 44, 0.03);
+}
+
+.pagination-nav__link {
+  border-radius: 14px;
+  border: 1px solid rgba(11, 42, 44, 0.12);
+  box-shadow: 0 12px 30px rgba(11, 42, 44, 0.08);
+  background: #ffffff;
+}
+
+.pagination-nav__link:hover {
+  border-color: rgba(14, 107, 106, 0.5);
+  transform: translateY(-2px);
+}
+
+.table-of-contents__link {
+  font-size: 0.9rem;
+  border-radius: 8px;
+  padding: 0.2rem 0.5rem;
+}
+
+.table-of-contents__link--active {
+  background: rgba(14, 107, 106, 0.12);
+  color: var(--ora-teal-dark);
+}
+
+.theme-doc-footer-tags-row {
+  margin-top: 1.5rem;
+}
+
+@media (max-width: 996px) {
+  .navbar {
+    border-bottom: 1px solid rgba(11, 42, 44, 0.12);
   }
 
-  .hero .hero__subtitle {
-    font-size: 1.1rem;
-  }
-
-  .blog-post-item header h2 {
-    font-size: 1.5rem;
+  .theme-doc-sidebar-container {
+    background: var(--ifm-background-surface-color);
   }
 }

@@ -25,7 +25,7 @@ When a user reports “the compiler is broken”, you do this:
    - typed fields wrong / type errors → type resolver / semantics
    - MLIR wrong → lowering
    - verifier complains → MLIR verifier / legality / passes
-   - conversion fails → Ora → SIR patterns
+   - conversion fails → Ora → Sensei-IR (SIR) patterns
    - Z3 fails → encoder/constraints
 
 ---
@@ -65,7 +65,7 @@ When a user reports “the compiler is broken”, you do this:
 - the lowering is producing an illegal op shape, or
 - the verifier is missing/too strict for the intended feature
 
-### Symptom: Ora → SIR conversion fails
+### Symptom: Ora → Sensei-IR (SIR) conversion fails
 **Likely area:** missing conversion pattern(s)  
 **Fix style:** add a conversion pattern and a test that fails before and passes after.
 

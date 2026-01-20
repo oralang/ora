@@ -14,7 +14,7 @@ By the end of your first day, you should be able to:
 
 You’ll learn Ora by looking at what it produces:
 
-**Tokens → AST → Typed AST → Ora MLIR → (verification & passes) → SIR**
+**Tokens → AST → Typed AST → Ora MLIR → (verification & passes) → Sensei-IR (SIR)**
 
 This ladder is your map for both development and debugging.
 

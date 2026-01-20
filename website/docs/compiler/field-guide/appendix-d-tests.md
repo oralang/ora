@@ -31,7 +31,7 @@ The best tests are:
 - illegal IR is rejected early
 - legal IR passes verifier
 
-### Conversion (Ora → SIR) tests
+### Conversion (Ora → Sensei-IR (SIR)) tests
 - specific ops are convertible
 - missing patterns fail loudly with clear diagnostics
 

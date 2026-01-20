@@ -1,18 +1,21 @@
 # Ora Compiler API Documentation
 
-> **⚠️ Development Status**: This documentation describes the target API. Many features are still under development and may not be fully functional.
+> **⚠️ Development Status**: Evolving API surface. Names
+> and availability may differ from the current CLI. Use `./zig-out/bin/ora --help`
+> for authoritative commands.
 
 ## Overview
 
-The Ora compiler is a domain-specific language compiler for smart contract development with formal verification capabilities. The compiler follows a multi-phase architecture:
+The Ora compiler is a domain-specific language compiler for smart contract
+development with formal verification capabilities. The current architecture is
+multi-phase:
 
-1. **Lexical Analysis** - Tokenization of source code ✅ *Implemented*
-2. **Syntax Analysis** - Abstract Syntax Tree generation ✅ *Implemented*
-3. **Semantic Analysis** - Type checking and validation ✅ *Implemented*
-4. **HIR Generation** - High-level Intermediate Representation ✅ *Implemented*
-5. **MLIR Lowering** - Conversion to MLIR intermediate representation ✅ *Implemented*
-6. **sensei-ir Lowering** - Conversion to sensei-ir (SIR) 🚧 *In Development*
-7. **Bytecode Generation** - EVM bytecode compilation via sensei-ir 🚧 *In Development*
+1. **Lexical Analysis** - Tokenization of source code
+2. **Syntax Analysis** - Abstract Syntax Tree generation
+3. **Semantic Analysis** - Type checking and validation
+4. **Ora MLIR Lowering** - Conversion to Ora-specific MLIR
+5. **Sensei-IR Lowering** - Conversion to SIR
+6. **Bytecode Generation** - EVM bytecode via SIR
 
 ## CLI Commands
 
@@ -21,54 +24,50 @@ The Ora compiler is a domain-specific language compiler for smart contract devel
 ora <command> <file>
 ```
 
-### Available Commands
+### Common Commands
 
-- `lex <file>` - Tokenize a .ora file ✅
-- `parse <file>` - Parse a .ora file to AST ✅
-- `analyze <file>` - Perform semantic analysis ✅
-- `ir <file>` - Generate and validate IR from source ✅
-- `hir <file>` - Generate HIR and save to JSON file ✅
-- `sir <file>` - Generate sensei-ir (SIR) code from MLIR 🚧 *In Development*
-- `bytecode <file>` - Generate EVM bytecode from sensei-ir 🚧 *In Development*
-- `compile <file>` - Full compilation pipeline ✅
+Command names can change; confirm with `--help`. Common entry points include:
+
+- `parse <file>` - Parse a .ora file to AST
+- `fmt <file>` - Format Ora source
+- `emit-mlir <file>` - Emit Ora MLIR
+- `emit-sir <file>` - Emit SIR MLIR (where supported)
+- `emit-abi <file>` - Emit Ora ABI
 
 ### Examples
 
 ```bash
-# Compile a simple contract
-./zig-out/bin/ora compile examples/simple_storage_test.ora
+# Parse a simple contract
+./zig-out/bin/ora parse ora-example/smoke.ora
 
-# Generate just the bytecode
-./zig-out/bin/ora bytecode examples/simple_token.ora
+# Emit Ora MLIR
+./zig-out/bin/ora emit-mlir ora-example/smoke.ora
 
-# Generate sensei-ir (SIR) intermediate code
-./zig-out/bin/ora sir examples/simple_storage_test.ora
-
-# Analyze for type errors and formal verification
-./zig-out/bin/ora analyze examples/formal_verification_test.ora
-
-# Generate HIR for debugging
-./zig-out/bin/ora hir examples/simple_token.ora
+# Emit SIR MLIR (where supported)
+./zig-out/bin/ora emit-sir ora-example/smoke.ora
 ```
 
 ## Library API
 
+The library API is not yet stabilized. The following snippets are illustrative
+and may not match current names or types.
+
 ### Core Modules
 
 #### `SIRLowering`
-Lowers MLIR to sensei-ir (SIR) intermediate representation.
+Lowers MLIR to Sensei-IR (SIR) intermediate representation.
 
 ```zig
 // Note: API is under development
-// This will lower MLIR operations to sensei-ir (SIR) format
+// This will lower MLIR operations to Sensei-IR (SIR) format
 ```
 
 #### `SIRBackend`
-Generates EVM bytecode from sensei-ir (SIR).
+Generates EVM bytecode from Sensei-IR (SIR).
 
 ```zig
 // Note: API is under development
-// This will use the sensei-ir debug-backend to generate EVM bytecode
+// This will use the Sensei-IR debug-backend to generate EVM bytecode
 ```
 
 #### `IRBuilder`
@@ -170,13 +169,13 @@ pub fn compileOraFile(allocator: std.mem.Allocator, file_path: []const u8) ![]u8
     try ir_builder.buildFromAST(ast_nodes);
     const hir_program = ir_builder.getProgramPtr();
     
-    // 6. Lower to sensei-ir (SIR)
+    // 6. Lower to Sensei-IR (SIR)
     // Note: API is under development
-    // This will lower MLIR to sensei-ir (SIR) format
+    // This will lower MLIR to Sensei-IR (SIR) format
     
-    // 7. Generate EVM bytecode from sensei-ir
+    // 7. Generate EVM bytecode from Sensei-IR
     // Note: API is under development
-    // This will use the sensei-ir debug-backend to generate bytecode
+    // This will use the Sensei-IR debug-backend to generate bytecode
     
     // Return bytecode (caller owns)
     return allocator.dupe(u8, compile_result.bytecode);
@@ -292,10 +291,11 @@ const result = try compiler.compileFile("my_contract.ora");
 
 ### Overview
 
-Ora provides a built-in standard library (`std`) for zero-overhead access to EVM primitives. No imports needed.
+Ora provides a built-in standard library (`std`) for direct access to EVM
+primitives. No imports needed.
 
 **Key Features**:
-- Zero-overhead (compiles to direct EVM opcodes)
+- Direct lowering to EVM-facing ops
 - Type-safe (full compile-time checking)
 - Always available
 
@@ -367,8 +367,8 @@ AST:
        ↓ (MLIR Lowering)
 MLIR:
   %0 = ora.evm.caller() : i160
-       ↓ (sensei-ir Lowering)
-sensei-ir (SIR):
+       ↓ (Sensei-IR Lowering)
+Sensei-IR (SIR):
   fn main:
     entry -> result {
       result = caller
@@ -408,33 +408,19 @@ let timestamp: address = std.block.timestamp(); // ❌ Compile error
 
 ---
 
-## Current Implementation Status
+## Capability Snapshot
 
-### Implemented
 - Lexical analysis with all Ora keywords
 - Parser supporting contracts, functions, variables, and expressions
 - AST generation with memory region support
 - Type system with primitive and complex types
-- Standard Library (17 built-in functions and constants)
+- Standard library built-ins
 - MLIR lowering with automatic validation
 - SSA transformation via mem2reg
 - HIR generation and validation
-- MLIR lowering and optimization
-- sensei-ir (SIR) lowering 🚧 *In Development*
-- Bytecode compilation via sensei-ir 🚧 *In Development*
+- Sensei-IR (SIR) lowering and bytecode compilation
 - Semantic analysis with builtin validation
 - Effect tracking and analysis
-
-### In Development
-- Formal verification framework
-- Advanced optimization passes
-- Error handling improvements
-- Cross-contract calls
-
-### Planned
-- Language server protocol support
-- Debugger integration
-- Package manager integration
 
 ## Memory Management
 
@@ -479,9 +465,9 @@ zig build test-examples -- examples/simple_token.ora
 
 ## Integration
 
-### Building with sensei-ir Support
+### Building with Sensei-IR Support
 
-The build system includes sensei-ir as a submodule:
+The build system includes Sensei-IR as a submodule:
 
 ```bash
 zig build        # Build everything
@@ -489,13 +475,13 @@ zig build test   # Run tests
 zig build docs   # Generate documentation
 ```
 
-### sensei-ir Integration
+### Sensei-IR Integration
 
-Ora uses sensei-ir (SIR) as its backend for EVM bytecode generation:
+Ora uses Sensei-IR (SIR) as its backend for EVM bytecode generation:
 
-- `sensei-ir-main/` - sensei-ir submodule (Rust-based EVM IR)
+- `sensei-ir-main/` - Sensei-IR submodule (Rust-based EVM IR)
 - Integration via FFI or direct library linking (under development)
-- The sensei-ir debug-backend generates EVM bytecode from SIR
+- The Sensei-IR debug-backend generates EVM bytecode from SIR
 
 This architecture provides a clean, language-agnostic IR for EVM compilation.
 
@@ -507,7 +493,7 @@ This architecture provides a clean, language-agnostic IR for EVM compilation.
 - **Semantic Analysis**: ~50K nodes/second
 - **HIR Generation**: ~75K nodes/second
 - **MLIR Lowering**: ~50K nodes/second
-- **sensei-ir Lowering**: 🚧 *Benchmarks pending*
+- **Sensei-IR Lowering**: benchmarks pending
 
 ### Memory Usage
 - **Typical contract**: 1-5MB peak memory

@@ -4,19 +4,18 @@ sidebar_position: 4
 
 # Examples
 
-Working Ora code examples demonstrating current language features.
+Feature-focused Ora snippets that mirror the current compiler surface.
 
-> **✅ Validated**: All examples below compile successfully with the current compiler.  
-> See [`ora-example/README.md`](https://github.com/oralang/Ora/blob/main/ora-example/README.md) for complete list and testing status.
+> For the full set, see `ora-example/` in the repo and run the validation script.
 
-## Simple Storage
+## Contract + Storage
 
 ```ora
-contract SimpleStorage {
+contract Counter {
     storage var value: u256;
 
-    pub fn set(new_value: u256) {
-        value = new_value;
+    pub fn inc(delta: u256) {
+        value = value + delta;
     }
 
     pub fn get() -> u256 {
@@ -25,18 +24,18 @@ contract SimpleStorage {
 }
 ```
 
-## Region Transitions (validated)
+## Regions (storage ↔ stack)
 
 ```ora
 storage var s: u32;
 
 fn f() -> void {
-    let x: u32 = s;  // storage -> stack read
+    var x: u32 = s;  // storage -> stack read
     s = x;           // stack -> storage write
 }
 ```
 
-## Error Unions (partial)
+## Error Unions
 
 ```ora
 error InsufficientBalance;
@@ -50,126 +49,114 @@ fn transfer(to: address, amount: u256) -> !u256 | InsufficientBalance | InvalidA
 }
 ```
 
-## Switch (basic expression)
+## Refinement Types (guards)
+
+```ora
+fn withdraw(amount: MinValue<u256, 1>) -> bool {
+    // amount is guaranteed > 0 or guarded at runtime
+    return true;
+}
+```
+
+## Switch (expression)
 
 ```ora
 fn classify(x: u32) -> u32 {
-    switch (true) {
-        x == 0 => 0,
-        x < 10 => 1,
-        else   => 2,
-    }
+    var out: u32 = switch (x) {
+        0 => 0,
+        1...9 => 1,
+        else => 2,
+    };
+    return out;
 }
 ```
 
-## Switch (advanced)
-
-### 1) Statement form with expression arms
+## Structs and Maps
 
 ```ora
-fn tally(kind: u32) -> void {
-    var counter: u32 = 0;
-    switch (kind) {
-        0 => counter += 1;,
-        1 => counter += 2;,
-        else => counter = 0;,
-    }
+struct User {
+    balance: u256;
+    active: bool;
+}
+
+storage var users: map[address, User];
+
+fn credit(who: address, amount: u256) {
+    var user: User = users[who];
+    user.balance = user.balance + amount;
+    users[who] = user;
 }
 ```
 
-- Note: statement arms using expressions must end with `;`. Commas between arms are optional.
-
-### 2) Statement form with block bodies
+## Enums
 
 ```ora
-fn update(kind: u32) -> void {
-    var counter: u32 = 0;
-    switch (kind) {
-        0 => {
-            counter += 1;
-        },
-        1 => {
-            counter += 2;
-        },
-        else => {
-            counter = 0;
-        },
-    }
-}
-```
+enum Status : u8 { Pending, Active, Closed }
 
-### 3) Range patterns (inclusive)
-
-```ora
-fn grade(score: u32) -> u8 {
-    var g: u8 = 0;
-    switch (score) {
-        0...59   => g = 0;,
-        60...69  => g = 1;,
-        70...79  => g = 2;,
-        80...89  => g = 3;,
-        90...100 => g = 4;,
-        else     => g = 5;,
-    }
-    return g;
-}
-```
-
-### 4) Enum variant patterns (qualified)
-
-```ora
-enum Status : u8 { Pending, Active, Suspended, Closed }
-
-fn describe(s: Status) -> u32 {
+fn is_active(s: Status) -> bool {
     switch (s) {
-        Status.Pending   => 0,
-        Status.Active    => 1,
-        Status.Suspended => 2,
-        else             => 3,
+        Status.Active => return true,
+        else => return false,
     }
 }
 ```
 
-## Testing Examples
+## Logs
 
-All examples in `ora-example/` are validated automatically:
+```ora
+log Transfer(sender: address, recipient: address, amount: u256);
+
+fn emit_transfer(from: address, to: address, amount: u256) {
+    log Transfer(from, to, amount);
+}
+```
+
+## Specifications (requires/ensures)
+
+```ora
+pub fn transfer(to: address, amount: u256) -> bool
+    requires amount > 0
+    ensures  amount > 0
+{
+    // implementation
+    return true;
+}
+```
+
+## Assert vs Assume
+
+```ora
+fn check(x: u256) {
+    assume(x >= 0);   // verification-only
+    assert(x >= 0);   // runtime-visible
+}
+```
+
+## While + Invariant
+
+```ora
+fn sum(n: u256) -> u256 {
+    var i: u256 = 0;
+    var acc: u256 = 0;
+
+    while (i < n)
+        invariant(i <= n)
+    {
+        acc = acc + i;
+        i = i + 1;
+    }
+
+    return acc;
+}
+```
+
+## Validate examples locally
 
 ```bash
 # Validate all examples
 ./scripts/validate-examples.sh
 
-# Test a specific example
+# Parse a specific example
 ./zig-out/bin/ora parse ora-example/smoke.ora
-
-# Inspect example in detail
-./zig-out/bin/ora lex ora-example/smoke.ora     # Show tokens
-./zig-out/bin/ora parse ora-example/smoke.ora   # Show AST
-./zig-out/bin/ora ast ora-example/smoke.ora     # Generate JSON
 ```
 
-## More Examples
-
-**Repository Examples:**
-- [`ora-example/`](https://github.com/oralang/Ora/tree/main/ora-example) - 23+ working examples
-- [`tests/fixtures/semantics/valid/`](https://github.com/oralang/Ora/tree/main/tests/fixtures/semantics/valid) - Test fixtures
-- [`tests/fixtures/parser/`](https://github.com/oralang/Ora/tree/main/tests/fixtures/parser) - Parser tests
-
-## Example Status
-
-Current validation: **23/29 examples pass** (79%)
-
-**Working Features:**
-- Basic contracts and functions
-- Storage, memory, transient storage
-- Structs and enums
-- Switch statements
-- Error declarations
-- Event logs
-- While loops
-
-**In Progress:**
-- For loops with captures
-- Advanced error handling
-- Some complex expressions
-
-See [Language Basics](./language-basics.md) for detailed feature documentation. 

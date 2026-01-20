@@ -92,7 +92,7 @@ Key locations:
 Responsibilities:
 - verify dialect invariants
 - canonicalize/optimize
-- convert Ora → SIR as a legality boundary
+- convert Ora → Sensei-IR (SIR) as a legality boundary
 - optionally run SMT verification passes
 
 Key locations:

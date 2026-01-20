@@ -49,7 +49,7 @@ Type resolution answers:
 - what is the type of `value + delta`? (u256)
 - is `requires(delta > 0)` valid? (a boolean constraint)
 
-This is where many important rules live, including rules around error unions and `try`.
+Many important rules live here, including rules around error unions and `try`.
 
 ## 4.5 MLIR: the program becomes explicit operations
 

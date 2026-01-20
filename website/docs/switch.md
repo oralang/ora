@@ -18,7 +18,7 @@ Ora provides a powerful switch that works as both a statement and an expression.
 ### Basics
 
 ```ora
-let x: u256 = 3;
+var x: u256 = 3;
 
 // Switch as a statement
 switch (x) {
@@ -29,7 +29,7 @@ switch (x) {
 }
 
 // Switch as an expression
-let y = switch (x) {
+var y: u256 = switch (x) {
   0 => 10,
   1...9 => 20,
   else => 30
@@ -48,7 +48,7 @@ Notes:
 
 ```ora
 enum Color { Red, Green, Blue }
-let c: Color = .Red;
+var c: Color = .Red;
 
 switch (c) {
   Color.Red => { log "R"; },
@@ -74,7 +74,7 @@ label: switch (x) {
   1 => { continue :label 2; },
   else => { log "done" }
 }
-``;
+```
 
 Arms in switch statements may be blocks or labeled blocks:
 
@@ -89,7 +89,7 @@ switch (x) {
 In contrast, switch expressions only allow expression bodies:
 
 ```ora
-let v = switch (x) {
+var v: u256 = switch (x) {
   0 => 10,
   else => 42
 };
@@ -133,5 +133,3 @@ switch (c) {
 - Prefer explicit enum coverage to catch additions of new variants.
 - Use labeled switches to write state-machine-like control flow without loops.
 - Keep switch expressions simple: return a single, consistent type across all arms.
-
-

@@ -11,11 +11,11 @@ This chapter is for when you’re adding real language features and need end-to-
 In Ora, “legal” in practice means:
 1) the Ora MLIR is structurally valid and passes dialect verification  
 2) the program survives passes/canonicalization without breaking invariants  
-3) the IR can be converted to SIR (the backend-supported subset)
+3) the IR can be converted to Sensei-IR (SIR) (the backend-supported subset)
 
 A useful mental model:
-- **Ora → SIR conversion is a hard boundary.**
-- If a feature reaches SIR, it is in a subset the backend knows how to handle.
+- **Ora → Sensei-IR (SIR) conversion is a hard boundary.**
+- If a feature reaches Sensei-IR (SIR), it is in a subset the backend knows how to handle.
 
 ## 8.2 Passes and canonicalization
 

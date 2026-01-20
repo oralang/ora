@@ -65,7 +65,7 @@ Now re-run:
 - MLIR won’t be produced because the AST isn’t structurally valid.
 
 ### Conclusion (phase-local)
-✅ **This is a parser/grammar/recovery issue**.
+✅ **Parser/grammar/recovery issue**.
 
 ### Where fixes usually live
 - parser modules (`src/parser/*`)
@@ -79,7 +79,7 @@ Now re-run:
 
 ## Failure 2 — Type resolution failure (structure is fine, meaning is wrong)
 
-Here we create a program that parses cleanly, but violates a typing rule. This is the most common onboarding confusion: “It parses, why doesn’t it compile?”
+Here we create a program that parses cleanly, but violates a typing rule. Most common onboarding confusion: “It parses, why doesn’t it compile?”
 
 ### Step 1: Create a file that uses an error union
 
@@ -122,7 +122,7 @@ contract SafeMath {
 In Ora, error unions must be **unwrapped** (typically with `try`) before you can use the success value.
 
 ### Conclusion (phase-local)
-✅ **This is a typing rule issue (type resolver), not a parser issue.**
+✅ **Typing rule issue (type resolver), not a parser issue.**
 
 ### Where fixes usually live
 - type resolver rules (`src/ast/type_resolver/*`)
@@ -182,7 +182,7 @@ Now, **change the body** to include the specific feature you’re working on (or
   - or it emits an obviously incomplete/empty region for the construct
 
 ### Conclusion (phase-local)
-✅ **This is a lowering coverage issue**.
+✅ **Lowering coverage issue**.
 
 ### Where fixes usually live
 - `src/mlir/lower.zig`

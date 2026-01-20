@@ -62,6 +62,12 @@ const config: Config = {
     ],
   ],
 
+  markdown: {
+    mermaid: true,
+  },
+
+  themes: ['@docusaurus/theme-mermaid'],
+
   themeConfig: {
     // Replace with your project's social card
     image: 'img/ora-social-card.jpg',
@@ -101,11 +107,6 @@ const config: Config = {
         {
           to: '/docs/compiler/field-guide',
           label: 'Field Guide',
-          position: 'left',
-        },
-        {
-          to: '/playground',
-          label: 'Playground',
           position: 'left',
         },
         {
@@ -209,7 +210,7 @@ const config: Config = {
           ],
         },
       ],
-      copyright: `Copyright © 2025 Ora Language Project. Pre-ASUKA Alpha - Not for production use.`,
+      copyright: `Copyright © 2025 Ora Language Project.`,
     },
     colorMode: {
       defaultMode: 'dark',

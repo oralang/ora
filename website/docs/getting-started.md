@@ -4,38 +4,40 @@ sidebar_position: 2
 
 # Getting Started
 
-Set up the Ora development environment and try the current implementation.
+Set up the Ora development environment and run the current compiler.
 
-> Ora is an experimental project and NOT ready for production use. Syntax and features change frequently.
+> Ora is experimental and not ready for production use. Syntax and features
+> change frequently.
 
 ## Prerequisites
 
 - Zig 0.15.x
-- Git (for submodules)
+- CMake
+- Git
+- Z3
+- MLIR
 
 ## Installation
-
-### Clone and Build
 
 ```bash
 # Clone the repository
 git clone https://github.com/oralang/Ora.git
 cd Ora
 
-# Initialize submodules (includes sensei-ir)
-git submodule update --init --recursive
+# Run the setup helper
+./setup.sh
 
 # Build the compiler
 zig build
 
-# Run tests to verify installation
+# Run tests
 zig build test
 ```
 
-### Verify Installation
+## Verify the install
 
 ```bash
-# View CLI help and available commands
+# View CLI help
 ./zig-out/bin/ora --help
 
 # Compile an example contract
@@ -44,14 +46,11 @@ zig build test
 # Format Ora source code
 ./zig-out/bin/ora fmt contract.ora
 
-# Analyze storage access patterns
-./zig-out/bin/ora --analyze-state ora-example/smoke.ora
-
-# Generate MLIR intermediate representation
-./zig-out/bin/ora --emit-mlir ora-example/smoke.ora
+# Emit Ora MLIR
+./zig-out/bin/ora emit-mlir ora-example/smoke.ora
 ```
 
-## Try Your First Contract (current syntax)
+## Try your first contract
 
 ```ora
 contract SimpleStorage {
@@ -73,7 +72,7 @@ Parse and inspect:
 ./zig-out/bin/ora parse simple_test.ora
 ```
 
-Format your code:
+## Formatting
 
 ```bash
 # Format a file in-place
@@ -89,67 +88,16 @@ Format your code:
 ./zig-out/bin/ora fmt --stdout simple_test.ora
 ```
 
-> 📖 For complete formatter documentation, see [Code Formatter](./code-formatter.md)
+See [Code Formatter](./code-formatter.md) for details.
 
-## Current Implementation Status
+## Exploring the repo
 
-**✅ What Works:** (79% success rate - 76/96 examples)
-- Contract parsing and AST generation
-- Complete type checking and semantic analysis
-- Storage, memory, and transient storage operations
-- Switch statements (expression and statement forms)
-- Struct declarations, instantiation, and field operations
-- Enum declarations with explicit values
-- Arithmetic operations (add, sub, mul, div, rem, power)
-- Control flow (if/else, switch)
-- Map operations (get/store)
-- Memory operations (mload, mstore, mload8, mstore8)
-- MLIR lowering with 81 operations
-- **Code formatter** (`ora fmt`) - Canonical, deterministic code formatting
+- `ora-example/` contains runnable samples.
+- `tests/fixtures/` contains parser and semantics fixtures.
+- `GRAMMAR.bnf` and `GRAMMAR.ebnf` describe the current grammar.
+- [Sensei-IR (SIR)](./specifications/sensei-ir.md) describes the backend IR.
 
-**🚧 In Development:**
-- Complete sensei-ir (SIR) lowering and EVM code generation
-- Advanced for-loop syntax
-- Standard library
-- Formal verification (`requires`/`ensures` full implementation)
+## Status
 
-## Exploring Examples
-
-Use repo fixtures and examples to explore:
-
-- Semantics fixtures: `tests/fixtures/semantics/{valid,invalid}`
-- Parser fixtures: `tests/fixtures/parser/{...}`
-- Example snippets: `ora-example/` (reference language constructs; some may be experimental)
-
-## Development Tips
-
-- Run the full suite: `zig build test`
-- For quick inspection, prefer `ora lex|parse|ast` on small files
-- Grammar references: `GRAMMAR.bnf`, `GRAMMAR.ebnf`
-
-## Building Variants
-
-```bash
-# Clean build
-zig build clean && zig build
-
-# Debug build
-zig build -Doptimize=Debug
-
-# Release build
-zig build -Doptimize=ReleaseFast
-```
-
-## Current Limitations
-
-**Not Yet Available:**
-- Standard library (in development)
-- Complete Yul code generation
-- Advanced for-loop capture syntax
-- Full formal verification
-
-**Important Notes:**
-- Syntax may change before ASUKA release
-- Not ready for production use
-- Some examples demonstrate planned features
-- See [roadmap](./roadmap-to-asuka.md) for development timeline 
+- Examples in `ora-example/` are aligned with the current compiler behavior.
+- Expect breaking changes before ASUKA.

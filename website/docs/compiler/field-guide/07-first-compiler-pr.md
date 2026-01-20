@@ -1,6 +1,6 @@
 # Your First Compiler PR (guided "safe" changes)
 
-This chapter gives you three starter PRs. Each PR is designed to be:
+This chapter gives you three starter PRs. Each PR is scoped to be:
 - small enough to finish
 - valuable even if you’re new
 - easy to review
@@ -42,7 +42,7 @@ Pick one lowering error and add:
 
 ## PR 3 — Add one missing conversion pattern (Lane B starter)
 
-**Goal:** fix a concrete “Ora → SIR conversion failed” issue.
+**Goal:** fix a concrete “Ora → Sensei-IR (SIR) conversion failed” issue.
 
 ### What to do
 1) find the illegal or unsupported op in the emitted MLIR  

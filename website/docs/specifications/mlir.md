@@ -1,8 +1,13 @@
 # MLIR Intermediate Representation
 
+> Mixed implementation notes with design intent. For the current
+> Ora op set, see `src/mlir/ora/td/OraOps.td` in the repo. Examples are
+> illustrative and may require explicit type annotations in the current
+> compiler.
+
 ## Overview
 
-The Ora compiler includes a comprehensive MLIR (Multi-Level Intermediate Representation) lowering system that provides an intermediate representation for advanced analysis, optimization, and alternative code generation paths. This system lowers to sensei-ir (SIR) for EVM bytecode generation and enables sophisticated compiler transformations.
+The Ora compiler includes a comprehensive MLIR (Multi-Level Intermediate Representation) lowering system that provides an intermediate representation for advanced analysis, optimization, and alternative code generation paths. This system lowers to Sensei-IR (SIR) for EVM bytecode generation and enables sophisticated compiler transformations.
 
 ## What is MLIR?
 
@@ -19,7 +24,7 @@ The Ora compiler integrates with the existing MLIR framework to provide Ora-spec
 The Ora compiler integrates with the LLVM MLIR framework (https://mlir.llvm.org) to:
 1. **Represent Ora semantics** in a structured intermediate form using MLIR operations and types
 2. **Enable advanced analysis** for verification and optimization using MLIR's pass infrastructure
-3. **Lower to sensei-ir (SIR)** for EVM bytecode generation via the sensei-ir backend
+3. **Lower to Sensei-IR (SIR)** for EVM bytecode generation via the Sensei-IR backend
 4. **Provide debugging information** with source location preservation using MLIR's location tracking
 
 Our implementation provides Ora-specific dialects, operations, and lowering passes that work within the existing MLIR ecosystem.
@@ -368,7 +373,7 @@ ora --emit-bytecode contract.ora
 ora --emit-mlir contract.ora
 ```
 
-**View sensei-ir (SIR) intermediate code:**
+**View Sensei-IR (SIR) intermediate code:**
 ```bash
 ora --emit-sir contract.ora
 ```
@@ -384,17 +389,17 @@ ora --mlir-passes="canonicalize,cse,mem2reg" contract.ora
 
 ### Automatic MLIR Validation
 
-The compiler automatically validates MLIR correctness before sensei-ir lowering:
+The compiler automatically validates MLIR correctness before Sensei-IR lowering:
 
 ```
 $ ora contract.ora
 Parsing contract.ora...
 Performing semantic analysis...
 Lowering to MLIR...
-Validating MLIR before sensei-ir lowering...
+Validating MLIR before Sensei-IR lowering...
 ✅ MLIR validation passed
-Lowering to sensei-ir (SIR)...
-Compiling to EVM bytecode via sensei-ir...
+Lowering to Sensei-IR (SIR)...
+Compiling to EVM bytecode via Sensei-IR...
 Successfully compiled to EVM bytecode!
 ```
 
@@ -417,8 +422,8 @@ The MLIR lowering pipeline:
 3. **MLIR Lowering**: AST → MLIR module (with source locations)
 4. **MLIR Validation**: Structural and semantic checks (automatic)
 5. **MLIR Optimization**: CSE, canonicalization, mem2reg, SCCP, LICM
-6. **sensei-ir Lowering**: MLIR → sensei-ir (SIR) 🚧 *In Development*
-7. **Bytecode Generation**: sensei-ir → EVM bytecode via sensei-ir debug-backend 🚧 *In Development*
+6. **Sensei-IR Lowering**: MLIR → Sensei-IR (SIR)
+7. **Bytecode Generation**: Sensei-IR → EVM bytecode via Sensei-IR debug-backend
 
 ## SSA Transformation
 
@@ -518,7 +523,7 @@ let sender = std.msg.sender();
 %sender = ora.evm.caller() : i160 loc("contract.ora":11:17)
 ```
 
-**sensei-ir (SIR)**:
+**Sensei-IR (SIR)**:
 ```sir
 fn main:
   entry -> timestamp sender {
@@ -532,7 +537,7 @@ fn main:
 
 All standard library calls are **inlined** at the MLIR level - no function call overhead:
 
-| Ora Built-in | MLIR Operation | sensei-ir Operation | Overhead |
+| Ora Built-in | MLIR Operation | Sensei-IR Operation | Overhead |
 |--------------|----------------|-------------------|----------|
 | `std.block.timestamp()` | `ora.evm.timestamp` | `timestamp` | **Zero** |
 | `std.msg.sender()` | `ora.evm.caller` | `caller` | **Zero** |
@@ -559,7 +564,7 @@ let invalid = std.block.fake(); // Error: unknown built-in
 
 ### Source Location Preservation
 
-All MLIR operations preserve **exact** source location information (97% coverage):
+All MLIR operations preserve source location information where available:
 
 ```mlir
 %result = arith.addi %a, %b : i256 loc("contract.ora":15:8)
@@ -600,16 +605,16 @@ Standard MLIR passes optimize the IR:
 | **SCCP** | Sparse Conditional Constant Propagation | Constant folding |
 | **LICM** | Loop-Invariant Code Motion | Hoist invariants |
 
-**Result**: Significant gas savings in generated EVM bytecode!
+**Result**: Reduces redundant IR and simplifies lowering; exact impact
+depends on backend maturity.
 
 ## Performance Characteristics
 
-The MLIR lowering system is designed for:
+The MLIR lowering system targets:
 
-- **Fast compilation:** Efficient lowering algorithms
-- **Memory efficiency:** Minimal overhead during compilation
-- **Scalability:** Handles large smart contracts
-- **Deterministic output:** Consistent results for testing
+- **Predictable compilation:** Deterministic output for tests
+- **Modular passes:** Clear transformation stages
+- **Traceability:** Source locations preserved where available
 
 ## Implementation Features
 
@@ -617,19 +622,19 @@ The MLIR lowering system is designed for:
 
 | Feature | Coverage |
 |---------|----------|
-| AST → MLIR Lowering | Complete |
-| Source Location Tracking | 97% |
+| AST → MLIR Lowering | Implemented |
+| Source Location Tracking | Implemented (coverage varies by pass) |
 | Automatic Validation | Yes |
-| Type System Mapping | Complete |
-| Standard Library | 17 built-ins |
+| Type System Mapping | Implemented |
+| Standard Library | EVM-facing built-ins |
 | SSA Transformation | mem2reg pass |
-| Optimization Passes | 5 passes (CSE, canonicalization, mem2reg, SCCP, LICM) |
+| Optimization Passes | Core passes (CSE, canonicalization, mem2reg, SCCP, LICM) |
 | Storage Operations | sload, sstore, tload, tstore |
 | Control Flow | if, while, for, switch |
-| Function Calls | Complete |
-| sensei-ir Lowering | 🚧 In Development |
+| Function Calls | Implemented |
+| Sensei-IR Lowering | Supported |
 
-### In Development
+### Active Areas
 
 - Formal verification integration
 - Custom Ora dialect registration
@@ -653,7 +658,7 @@ contract SimpleToken {
     storage allowances: doublemap[address, address, u256];
     
     pub fn initialize(initialSupply: u256) -> bool {
-        let deployer = std.msg.sender();
+        var deployer: address = std.msg.sender();
         totalSupply = initialSupply;
         balances[deployer] = initialSupply;
         return true;

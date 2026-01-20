@@ -240,10 +240,10 @@ pub fn freeze_account()
 
 ## Compilation Pipeline Integration
 
-Struct definitions flow through Ora's complete compilation pipeline:
+Struct definitions flow through the active front-end pipeline:
 
-1. **Parsing**: Creates structured AST nodes for struct declarations
-2. **Semantic Analysis**: Validates field types, cross-references, and memory region compatibility
-3. **Type Checking**: Ensures type safety and proper field access patterns
-4. **HIR Generation**: Optimizes struct operations and memory layout
-5. **sensei-ir Lowering**: Lowers to sensei-ir (SIR) for efficient EVM bytecode generation with optimized memory operations
+1. **Parsing**: Creates AST nodes for struct declarations
+2. **Semantic Analysis**: Validates field types and region compatibility
+3. **Type Checking**: Ensures type safety and field access rules
+4. **Ora MLIR Emission**: Lowers struct operations into explicit Ora ops
+5. **Backend Lowering**: Further lowering to Sensei-IR (SIR) and EVM

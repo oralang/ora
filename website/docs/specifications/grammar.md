@@ -1,6 +1,6 @@
 # Language Grammar
 
-This document provides the complete formal grammar specification for the Ora smart contract language.
+Complete formal grammar specification for the Ora smart contract language.
 
 ## Grammar Notation
 

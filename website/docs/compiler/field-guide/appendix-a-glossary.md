@@ -1,6 +1,6 @@
 # Appendix A — Glossary
 
-**Artifact ladder** — Tokens → AST → Typed AST → MLIR → SIR.
+**Artifact ladder** — Tokens → AST → Typed AST → MLIR → Sensei-IR (SIR).
 
 **AST** — Abstract Syntax Tree. The structured representation of the program produced by the parser.
 
@@ -16,9 +16,9 @@
 
 **Dialect verification** — Structural invariants checked on IR (distinct from SMT verification).
 
-**Legality** — Whether an op/program shape is supported and convertible (in practice, whether it can be converted to SIR).
+**Legality** — Whether an op/program shape is supported and convertible (in practice, whether it can be converted to Sensei-IR (SIR)).
 
-**Ora → SIR conversion** — Lowering pass that converts Ora IR to SIR IR (backend subset).
+**Ora → Sensei-IR (SIR) conversion** — Lowering pass that converts Ora IR to Sensei-IR (SIR) IR (backend subset).
 
 **SMT verification** — Constraint solving using a solver (e.g., Z3) to validate requires/ensures/invariants.
 

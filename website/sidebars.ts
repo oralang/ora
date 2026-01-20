@@ -2,24 +2,60 @@ import type { SidebarsConfig } from '@docusaurus/plugin-content-docs';
 
 // This runs in Node.js - Don't use client-side code here (browser APIs, JSX...)
 
-/**
- * Creating a sidebar enables you to:
- - create an ordered group of docs
- - render a sidebar for each doc of that group
- - provide next/previous navigation
-
- The sidebars can be generated from the filesystem, or explicitly defined here.
-
- Create as many sidebars as you want.
- */
 const sidebars: SidebarsConfig = {
-  // Main documentation sidebar - minimal essential pages
   tutorialSidebar: [
     'intro',
     'getting-started',
     'language-basics',
     'examples',
     'code-formatter',
+    'standard-library',
+    {
+      type: 'category',
+      label: 'Language Features',
+      items: [
+        'switch',
+        'struct-types',
+        'memory-regions',
+        'error-unions',
+        'refinement-types',
+        'logs-and-events',
+      ],
+    },
+    {
+      type: 'category',
+      label: 'Tooling',
+      items: [
+        'state-analysis',
+      ],
+    },
+    {
+      type: 'category',
+      label: 'Specifications',
+      items: [
+        'specifications/index',
+        'specifications/grammar',
+        'specifications/mlir',
+        'specifications/sensei-ir',
+        'specifications/api',
+      ],
+    },
+    {
+      type: 'category',
+      label: 'Research',
+      items: [
+        'research/index',
+        'research/research-snapshot',
+        'formal-verification',
+        'research/compiler-architecture',
+        'design-documents',
+        'design-documents/type-system-v0.1',
+        'research/type-system',
+        'research/comptime',
+        'research/smt-verification',
+        'research/refinement-types',
+      ],
+    },
     {
       type: 'category',
       label: 'Compiler Field Guide',
@@ -49,27 +85,9 @@ const sidebars: SidebarsConfig = {
     },
     {
       type: 'category',
-      label: 'Language Features',
-      items: [
-        'switch',
-        'struct-types',
-      ],
-    },
-    {
-      type: 'category',
       label: 'Optimization',
       items: [
         'inline-functions',
-      ],
-    },
-    {
-      type: 'category',
-      label: 'Specifications',
-      items: [
-        'specifications/index',
-        'specifications/grammar',
-        'specifications/mlir',
-        'specifications/api',
       ],
     },
     {
@@ -80,6 +98,7 @@ const sidebars: SidebarsConfig = {
         'specs/abi',
       ],
     },
+    'roadmap-to-asuka',
   ],
 };
 

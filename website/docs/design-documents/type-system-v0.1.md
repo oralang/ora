@@ -1,7 +1,7 @@
 # Ora Type System – Working Design Document (v0.1)
 
-This document outlines the **initial design direction** of the Ora type system, defines core language concepts, incorporates the Solidity comparison table, and clarifies the philosophical lineage (Zig-first with selective Rust-inspired safety).  
-It is a **working, evolving design document**, not a final specification.
+Initial design direction for the Ora type system, defining core language concepts, incorporating the Solidity comparison table, and clarifying the philosophical lineage (Zig-first with selective Rust-inspired safety).  
+**Working, evolving design document**, not a final specification.
 
 Ora is designed for deterministic, explicit, auditable smart contract development on the EVM.  
 It inherits:
@@ -154,7 +154,7 @@ let token = external<ERC20>(addr);
 token.transfer(alice, 100);
 ```
 
-This is purely syntactic sugar:
+Purely syntactic sugar:
 - compiler generates ABI stubs  
 - no runtime conformance guarantee  
 
@@ -260,5 +260,4 @@ Ora establishes:
 - strong EVM alignment  
 - predictable audit-friendly semantics  
 
-This document serves as the foundation for future RFCs and the formal type system specification.
-
+Foundation for future RFCs and the formal type system specification.

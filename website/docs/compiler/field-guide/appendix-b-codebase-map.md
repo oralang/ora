@@ -1,6 +1,6 @@
 # Appendix B — Codebase Map (quick reference)
 
-This is a navigation aid. If you’re unsure where something lives, start here.
+Navigation aid. If you’re unsure where something lives, start here.
 
 ## CLI / Orchestration
 - `src/main.zig`
@@ -19,7 +19,7 @@ This is a navigation aid. If you’re unsure where something lives, start here.
 - MLIR modules: `src/mlir/*`
 - Verification: `src/mlir/verification.zig`
 - Pass pipeline: `src/mlir/pass_manager.zig`
-- Ora → SIR conversion patterns: `src/mlir/ora/lowering/OraToSIR/*`
+- Ora → Sensei-IR (SIR) conversion patterns: `src/mlir/ora/lowering/OraToSIR/*`
 
 ## SMT / Z3
 - Z3 integration: `src/z3/*` (notably `encoder.zig`)

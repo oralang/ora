@@ -18,7 +18,7 @@ Use this checklist when adding a new language feature. The goal is end-to-end co
    - emit Ora ops for new node forms
 8) **Verification**
    - dialect invariants (if needed)
-9) **Ora → SIR conversion**
+9) **Ora → Sensei-IR (SIR) conversion**
    - conversion patterns for legality boundary
 10) **Tests**
    - minimal repros + regression tests (lexer/parser/types/lowering/conversion)

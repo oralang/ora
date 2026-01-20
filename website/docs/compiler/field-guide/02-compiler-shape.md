@@ -41,10 +41,10 @@ Think of each phase as a team member with a job and a promise:
 - **Output:** verified, optimized IR; optionally SMT results  
 - **Promise:** invalid programs are rejected early; valid programs are normalized for the backend
 
-### Ora → SIR conversion
+### Ora → Sensei-IR (SIR) conversion
 - **Input:** Ora MLIR  
-- **Output:** SIR MLIR  
-- **Promise:** whatever reaches SIR is in the “legal” subset supported by the backend
+- **Output:** Sensei-IR (SIR) MLIR  
+- **Promise:** whatever reaches Sensei-IR (SIR) is in the “legal” subset supported by the backend
 
 ## 2.2 The one design choice to remember: typed AST
 
@@ -58,7 +58,7 @@ That means:
 ## 2.3 Where to stand when you’re confused
 
 If you feel lost:
-- go back to the artifact ladder (Tokens → AST → Typed AST → MLIR → SIR)
+- go back to the artifact ladder (Tokens → AST → Typed AST → MLIR → Sensei-IR (SIR))
 - run the phase you think is failing in isolation
 - inspect the artifact
 
