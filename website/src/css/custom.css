@@ -25,6 +25,8 @@
 
   --ifm-background-color: var(--ora-cream);
   --ifm-background-surface-color: var(--ora-card);
+  --ifm-font-color-base: var(--ora-ink);
+  --ifm-font-color-secondary: rgba(11, 42, 44, 0.72);
   --ifm-toc-border-color: rgba(11, 42, 44, 0.12);
   --ifm-navbar-background-color: var(--ora-cream);
   --ifm-footer-background-color: #0f1f1f;
@@ -57,12 +59,14 @@
   --ifm-color-primary-lightest: #a6e1dd;
   --ifm-code-background: rgba(95, 185, 177, 0.12);
   --ifm-code-color: #cbe9e6;
+  --ifm-font-color-base: #f6f1e7;
+  --ifm-font-color-secondary: rgba(246, 241, 231, 0.72);
   --docusaurus-highlighted-code-line-bg: rgba(95, 185, 177, 0.2);
   --ifm-footer-background-color: #0b2a2c;
 }
 
 body {
-  color: var(--ora-ink);
+  color: var(--ifm-font-color-base);
 }
 
 h1, h2, h3, h4, h5, h6 {
@@ -262,4 +266,33 @@ a:hover {
   .theme-doc-sidebar-container {
     background: var(--ifm-background-surface-color);
   }
+}
+
+[data-theme='dark'] .theme-doc-sidebar-container {
+  border-right: 1px solid rgba(95, 185, 177, 0.2);
+  background: linear-gradient(180deg, #0f1f1f 0%, #132b2c 100%);
+}
+
+[data-theme='dark'] .menu__link {
+  color: rgba(246, 241, 231, 0.82);
+}
+
+[data-theme='dark'] .menu__link--active {
+  background: rgba(95, 185, 177, 0.18);
+  color: #f6f1e7;
+}
+
+[data-theme='dark'] .menu__link:hover {
+  background: rgba(95, 185, 177, 0.12);
+  color: #f6f1e7;
+}
+
+[data-theme='dark'] .pagination-nav__link {
+  background: #132b2c;
+  border-color: rgba(95, 185, 177, 0.24);
+  box-shadow: 0 12px 30px rgba(0, 0, 0, 0.35);
+}
+
+[data-theme='dark'] .theme-doc-markdown table tbody tr:nth-child(even) {
+  background: rgba(246, 241, 231, 0.04);
 }
