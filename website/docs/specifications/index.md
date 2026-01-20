@@ -21,9 +21,6 @@ Research-oriented description of the verification model and constraints.
 ### [API Documentation](./api.md)
 Compiler CLI and library interfaces.
 
-### [State Analysis](../state-analysis.md)
-Experimental analysis pass for storage access and state effects.
-
 ## Status and alignment
 
 For the implemented baseline, see:

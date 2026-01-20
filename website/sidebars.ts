@@ -24,13 +24,6 @@ const sidebars: SidebarsConfig = {
     },
     {
       type: 'category',
-      label: 'Tooling',
-      items: [
-        'state-analysis',
-      ],
-    },
-    {
-      type: 'category',
       label: 'Specifications',
       items: [
         'specifications/index',
