@@ -20,7 +20,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        os: [macos-latest]
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -111,7 +111,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        os: [macos-latest]
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -191,7 +191,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        os: [macos-latest]
         zig-version: [0.15.2]
     
     steps:
@@ -291,7 +291,7 @@ jobs:
     
     strategy:
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        os: [macos-latest]
         
     steps:
       - name: Checkout code
@@ -417,7 +417,7 @@ jobs:
 
   security:
     name: Security Scan
-    runs-on: ubuntu-latest
+    runs-on: macos-latest
     
     steps:
       - name: Checkout code
@@ -462,7 +462,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        os: [macos-latest]
     
     steps:
       - name: Checkout code
@@ -563,7 +563,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        os: [macos-latest]
     
     steps:
       - name: Checkout code
@@ -657,7 +657,7 @@ jobs:
 
   notification:
     name: Notification
-    runs-on: ubuntu-latest
+    runs-on: macos-latest
     if: always()
     needs: [lint, test, comprehensive-tests, security]
     

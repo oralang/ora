@@ -4,8 +4,6 @@ on:
   push:
     tags:
       - 'v*.*.*'
-    branches:
-      - main
   schedule:
     # Run nightly at 2 AM UTC
     - cron: '0 2 * * *'
