@@ -16,7 +16,11 @@ env:
 jobs:
   mlir-build:
     name: Build MLIR (once)
-    runs-on: macos-latest
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -32,9 +36,27 @@ jobs:
         shell: bash
         run: |
           echo "🔧 Installing system dependencies for ${{ runner.os }}..."
-          brew update
-          brew install boost openssl cmake
-          echo "✅ macOS dependencies installed"
+          case "${{ runner.os }}" in
+            Linux)
+              sudo apt-get update -qq
+              sudo apt-get install -y \
+                build-essential \
+                cmake \
+                clang \
+                libc++-dev \
+                libc++abi-dev \
+                libboost-all-dev \
+                libssl-dev \
+                pkg-config \
+                git
+              echo "✅ Linux dependencies installed"
+              ;;
+            macOS)
+              brew update
+              brew install boost openssl cmake
+              echo "✅ macOS dependencies installed"
+              ;;
+          esac
 
       - name: Cache Zig artifacts
         uses: actions/cache@v4
@@ -85,7 +107,11 @@ jobs:
 
   lint:
     name: Lint and Format  
-    runs-on: macos-latest  # Changed to macOS to match other jobs
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -165,7 +191,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-latest] # Linux disabled temporarily, focusing on macOS
+        os: [ubuntu-latest, macos-latest]
         zig-version: [0.15.2]
     
     steps:
@@ -223,6 +249,17 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-zig-${{ matrix.zig-version }}-
 
+      - name: Clone LLVM/MLIR for build
+        shell: bash
+        run: |
+          echo "📦 Cloning LLVM/MLIR (shallow clone for faster CI)..."
+          if [ ! -d "vendor/llvm-project" ]; then
+            git clone --depth=1 --branch=release/19.x https://github.com/llvm/llvm-project.git vendor/llvm-project
+            echo "✅ LLVM/MLIR cloned"
+          else
+            echo "✅ LLVM/MLIR already present"
+          fi
+
       - name: Download MLIR artifact
         uses: actions/download-artifact@v4
         with:
@@ -254,7 +291,7 @@ jobs:
     
     strategy:
       matrix:
-        os: [macos-latest] # Linux disabled temporarily, focusing on macOS
+        os: [ubuntu-latest, macos-latest]
         
     steps:
       - name: Checkout code
@@ -309,6 +346,17 @@ jobs:
           key: ${{ runner.os }}-zig-${{ env.ZIG_VERSION }}-${{ hashFiles('build.zig', 'build.zig.zon') }}
           restore-keys: |
             ${{ runner.os }}-zig-${{ env.ZIG_VERSION }}-
+
+      - name: Clone LLVM/MLIR for build
+        shell: bash
+        run: |
+          echo "📦 Cloning LLVM/MLIR (shallow clone for faster CI)..."
+          if [ ! -d "vendor/llvm-project" ]; then
+            git clone --depth=1 --branch=release/19.x https://github.com/llvm/llvm-project.git vendor/llvm-project
+            echo "✅ LLVM/MLIR cloned"
+          else
+            echo "✅ LLVM/MLIR already present"
+          fi
 
       - name: Download MLIR artifact
         uses: actions/download-artifact@v4
@@ -391,26 +439,30 @@ jobs:
           # Check for common security patterns
           echo "🔍 Checking for unsafe patterns..."
           if grep -r "unsafe" src/ 2>/dev/null; then
-            echo "⚠️  Found unsafe code patterns"
-          else
-            echo "✅ No unsafe patterns found"
+            echo "❌ Found unsafe code patterns"
+            exit 1
           fi
+          echo "✅ No unsafe patterns found"
           
           # Check for TODO/FIXME security notes
           echo "🔍 Checking for security TODOs..."
           if grep -r -i "todo.*security\|fixme.*security" src/ 2>/dev/null; then
-            echo "⚠️  Found security-related TODOs"
-          else
-            echo "✅ No security TODOs found"
+            echo "❌ Found security-related TODOs"
+            exit 1
           fi
+          echo "✅ No security TODOs found"
           
           echo "✅ Security scan completed"
 
   performance:
     name: Performance Benchmarks
-    runs-on: macos-latest  # Changed to macOS to match other jobs
+    runs-on: ${{ matrix.os }}
     if: github.event_name == 'schedule' || contains(github.event.pull_request.labels.*.name, 'performance')
     needs: [mlir-build]
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
     
     steps:
       - name: Checkout code
@@ -463,6 +515,17 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-zig-${{ env.ZIG_VERSION }}-
 
+      - name: Clone LLVM/MLIR for build
+        shell: bash
+        run: |
+          echo "📦 Cloning LLVM/MLIR (shallow clone for faster CI)..."
+          if [ ! -d "vendor/llvm-project" ]; then
+            git clone --depth=1 --branch=release/19.x https://github.com/llvm/llvm-project.git vendor/llvm-project
+            echo "✅ LLVM/MLIR cloned"
+          else
+            echo "✅ LLVM/MLIR already present"
+          fi
+
       - name: Download MLIR artifact
         uses: actions/download-artifact@v4
         with:
@@ -494,9 +557,13 @@ jobs:
 
   release:
     name: Release Check
-    runs-on: macos-latest  # Changed to macOS to match other jobs
+    runs-on: ${{ matrix.os }}
     if: github.ref == 'refs/heads/main'
     needs: [lint, test, comprehensive-tests, security]
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
     
     steps:
       - name: Checkout code
@@ -563,8 +630,7 @@ jobs:
         run: |
           echo "🎯 Building release version..."
           # Linux and Windows builds disabled temporarily, focusing on macOS
-          # zig build -Doptimize=ReleaseFast -Dtarget=x86_64-linux
-          # zig build -Doptimize=ReleaseFast -Dtarget=x86_64-windows
+          zig build -Doptimize=ReleaseFast
           echo "✅ Release builds completed (macOS only)"
 
       - name: Create release summary
