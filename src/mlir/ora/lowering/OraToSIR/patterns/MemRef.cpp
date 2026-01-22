@@ -130,13 +130,13 @@ LogicalResult ConvertMemRefDimOp::matchAndRewrite(
     }
 
     // only handle constant dimension index
-    auto indexConst = adaptor.getIndex().getDefiningOp<mlir::arith::ConstantOp>();
+    auto indexConst = adaptor.getIndex().getDefiningOp<sir::ConstOp>();
     if (!indexConst)
     {
         DBG("ConvertMemRefDimOp: non-constant index");
         return failure();
     }
-    auto indexAttr = llvm::dyn_cast<mlir::IntegerAttr>(indexConst.getValue());
+    auto indexAttr = llvm::dyn_cast<mlir::IntegerAttr>(indexConst.getValueAttr());
     if (!indexAttr)
     {
         DBG("ConvertMemRefDimOp: index not integer");

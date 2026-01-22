@@ -200,6 +200,14 @@ void oraBlockAppendOwnedOperation(MlirBlock block, MlirOperation op)
             return;
         }
 
+        if (auto contractOp = llvm::dyn_cast<mlir::ora::ContractOp>(operation))
+        {
+            if (auto moduleOp = llvm::dyn_cast<mlir::ModuleOp>(blk->getParentOp()))
+            {
+                moduleOp->setLoc(contractOp.getLoc());
+            }
+        }
+
         if (blk->empty())
         {
             blk->push_back(operation);
@@ -762,6 +770,7 @@ MlirModule oraLowerContractStub(MlirContext ctx, MlirLocation loc, MlirStringRef
         builder.setInsertionPointToStart(moduleOp.getBody());
 
         auto contractOp = builder.create<ContractOp>(location, contractRef);
+        moduleOp->setLoc(contractOp.getLoc());
         auto &bodyRegion = contractOp.getBody();
         if (bodyRegion.empty())
         {
@@ -858,6 +867,7 @@ MlirModule oraLowerContractStubWithSig(
         builder.setInsertionPointToStart(moduleOp.getBody());
 
         auto contractOp = builder.create<ContractOp>(location, contractRef);
+        moduleOp->setLoc(contractOp.getLoc());
         auto &bodyRegion = contractOp.getBody();
         if (bodyRegion.empty())
         {

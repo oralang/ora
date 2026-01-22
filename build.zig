@@ -616,6 +616,7 @@ fn buildMlirLibrariesImpl(step: *std.Build.Step, options: std.Build.Step.MakeOpt
         "-DLLVM_ENABLE_TERMINFO=OFF",
         "-DLLVM_ENABLE_RTTI=ON",
         "-DLLVM_ENABLE_EH=ON",
+        "-DLLVM_ENABLE_PIC=ON",
         "-DLLVM_BUILD_LLVM_DYLIB=OFF",
         "-DLLVM_LINK_LLVM_DYLIB=OFF",
         "-DLLVM_BUILD_TOOLS=ON", // needed for tblgen

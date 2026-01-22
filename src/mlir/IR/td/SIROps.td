@@ -51,6 +51,16 @@ def StringConstantOp : SIR_Op<"string.constant"> {
 }
 
 // ==========================================================================
+// Metadata
+// ==========================================================================
+
+def ErrorDeclOp : SIR_Op<"error.decl", [NoMemoryEffect]> {
+  let summary = "Error declaration metadata";
+  let arguments = (ins StrAttr:$sym_name);
+  let assemblyFormat = "attr-dict";
+}
+
+// ==========================================================================
 // Arithmetic Operations (binary, word-wise)
 // ==========================================================================
 
@@ -791,6 +801,35 @@ def StaticCallOp : SIR_Op<"staticcall"> {
 // Return & termination ops.
 // You already have a ReturnOp, we keep it and add stop/revert/invalid/selfdestruct.
 
+// CFG ops.
+
+def BrOp : SIR_Op<"br", [Terminator]> {
+  let summary = "Unconditional branch";
+  let arguments = (ins Variadic<AnyType>:$destOperands);
+  let successors = (successor AnySuccessor:$dest);
+  let assemblyFormat =
+    "$dest (`(` $destOperands^ `:` type($destOperands) `)`)? attr-dict";
+}
+
+def CondBrOp : SIR_Op<"cond_br", [Terminator, AttrSizedOperandSegments]> {
+  let summary = "Conditional branch";
+  let arguments = (ins SIR_U256:$cond,
+                       Variadic<AnyType>:$trueOperands,
+                       Variadic<AnyType>:$falseOperands);
+  let successors = (successor AnySuccessor:$trueDest, AnySuccessor:$falseDest);
+  let assemblyFormat =
+    "$cond `:` type($cond) `,` $trueDest (`(` $trueOperands^ `:` type($trueOperands) `)`)? `,` "
+    "$falseDest (`(` $falseOperands^ `:` type($falseOperands) `)`)? attr-dict";
+}
+
+def SwitchOp : SIR_Op<"switch", [Terminator]> {
+  let summary = "Switch on selector";
+  let arguments = (ins SIR_U256:$selector, I64ArrayAttr:$caseValues);
+  let successors = (successor AnySuccessor:$defaultDest, VariadicSuccessor<AnySuccessor>:$caseDests);
+  let assemblyFormat =
+    "$selector `:` type($selector) `,` `[` $caseValues `]` `,` $caseDests `,` $defaultDest attr-dict";
+}
+
 def ReturnOp : SIR_Op<"return", [Terminator]> {
   let summary = "Return a pointer + size";
   let arguments = (ins SIR_Ptr:$ptr, SIR_U256:$len);
@@ -798,26 +837,26 @@ def ReturnOp : SIR_Op<"return", [Terminator]> {
     "$ptr `:` type($ptr) `,` $len `:` type($len) attr-dict";
 }
 
-def StopOp : SIR_Op<"stop"> {
+def StopOp : SIR_Op<"stop", [Terminator]> {
   let summary = "STOP";
   let arguments = (ins);
   let assemblyFormat = "attr-dict";
 }
 
-def RevertOp : SIR_Op<"revert"> {
+def RevertOp : SIR_Op<"revert", [Terminator]> {
   let summary = "REVERT";
   let arguments = (ins SIR_Ptr:$ptr, SIR_U256:$len);
   let assemblyFormat =
     "$ptr `:` type($ptr) `,` $len `:` type($len) attr-dict";
 }
 
-def InvalidOp : SIR_Op<"invalid"> {
+def InvalidOp : SIR_Op<"invalid", [Terminator]> {
   let summary = "INVALID";
   let arguments = (ins);
   let assemblyFormat = "attr-dict";
 }
 
-def SelfDestructOp : SIR_Op<"selfdestruct"> {
+def SelfDestructOp : SIR_Op<"selfdestruct", [Terminator]> {
   let summary = "SELFDESTRUCT";
   let arguments = (ins SIR_U256:$beneficiary);
   let assemblyFormat =
@@ -870,7 +909,7 @@ def NoOpOp : SIR_Op<"noop"> {
 // Internal Return
 // ==========================================================================
 
-def IRetOp : SIR_Op<"iret"> {
+def IRetOp : SIR_Op<"iret", [Terminator]> {
   let summary = "Internal function return";
   let arguments = (ins Variadic<SIR_U256Type>:$values);
   let assemblyFormat =

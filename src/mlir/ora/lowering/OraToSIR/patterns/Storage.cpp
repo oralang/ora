@@ -6,10 +6,9 @@
 #include "SIR/SIRDialect.h"
 
 #include "mlir/IR/BuiltinTypes.h"
+#include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/IR/SymbolTable.h"
-#include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
-#include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/Transforms/DialectConversion.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/raw_ostream.h"
@@ -30,30 +29,6 @@ static void setResultName(Operation *op, unsigned resultIndex, StringRef name)
     op->setAttr(attrName, nameAttr);
 }
 
-static Value indexToU256(Location loc, Value indexVal, ConversionPatternRewriter &rewriter)
-{
-    auto *ctx = rewriter.getContext();
-    auto i64Type = mlir::IntegerType::get(ctx, 64, mlir::IntegerType::Unsigned);
-    auto i256Type = mlir::IntegerType::get(ctx, 256, mlir::IntegerType::Unsigned);
-    auto u256Type = sir::U256Type::get(ctx);
-
-    Value i64Val = rewriter.create<mlir::arith::IndexCastOp>(loc, i64Type, indexVal);
-    Value i256Val = rewriter.create<mlir::arith::ExtUIOp>(loc, i256Type, i64Val);
-    return rewriter.create<sir::BitcastOp>(loc, u256Type, i256Val);
-}
-
-static Value u256ToIndex(Location loc, Value valueU256, ConversionPatternRewriter &rewriter)
-{
-    auto *ctx = rewriter.getContext();
-    auto i64Type = mlir::IntegerType::get(ctx, 64, mlir::IntegerType::Unsigned);
-    auto i256Type = mlir::IntegerType::get(ctx, 256, mlir::IntegerType::Unsigned);
-    auto indexType = rewriter.getIndexType();
-
-    Value i256Val = rewriter.create<sir::BitcastOp>(loc, i256Type, valueU256);
-    Value i64Val = rewriter.create<mlir::arith::TruncIOp>(loc, i64Type, i256Val);
-    return rewriter.create<mlir::arith::IndexCastOp>(loc, indexType, i64Val);
-}
-
 static Value computeWordCount(Location loc, Value lengthU256, ConversionPatternRewriter &rewriter)
 {
     auto *ctx = rewriter.getContext();
@@ -64,6 +39,28 @@ static Value computeWordCount(Location loc, Value lengthU256, ConversionPatternR
     Value divisor = rewriter.create<sir::ConstOp>(loc, u256Type, mlir::IntegerAttr::get(ui64Type, 32));
     Value sum = rewriter.create<sir::AddOp>(loc, u256Type, lengthU256, addend);
     return rewriter.create<sir::DivOp>(loc, u256Type, sum, divisor);
+}
+
+static Value ensureU256Value(ConversionPatternRewriter &rewriter, Location loc, Value value)
+{
+    if (llvm::isa<sir::U256Type>(value.getType()))
+        return value;
+    auto u256Type = sir::U256Type::get(rewriter.getContext());
+    return rewriter.create<sir::BitcastOp>(loc, u256Type, value);
+}
+
+static uint64_t getElementWordCount(Type elementType)
+{
+    (void)elementType;
+    // v0.1: word-aligned elements only.
+    return 1;
+}
+
+static Value buildIndexFromU256(ConversionPatternRewriter &rewriter, Location loc, Value value)
+{
+    if (llvm::isa<mlir::IndexType>(value.getType()))
+        return value;
+    return rewriter.create<sir::BitcastOp>(loc, rewriter.getIndexType(), value);
 }
 
 // -----------------------------------------------------------------------------
@@ -79,22 +76,21 @@ static Value findOrCreateSlotConstant(Operation *op, uint64_t slotIndex,
     auto ui64Type = mlir::IntegerType::get(ctx, 64, mlir::IntegerType::Unsigned);
     auto slotAttr = mlir::IntegerAttr::get(ui64Type, slotIndex);
 
-    // Look for existing sir.const with same value in the function
+    // Look for existing slot constant with the same name.
     Value existingConst;
     Operation *parentFunc = op->getParentOfType<mlir::func::FuncOp>();
     if (parentFunc)
     {
         parentFunc->walk([&](sir::ConstOp constOp)
                          {
-            if (auto attr = constOp.getValueAttr()) {
-                if (auto intAttr = llvm::dyn_cast<mlir::IntegerAttr>(attr)) {
-                    if (intAttr.getUInt() == slotIndex) {
-                        // Found existing constant - reuse it
-                        existingConst = constOp.getResult();
-                        return WalkResult::interrupt();
-                    }
-                }
-            }
+            auto nameAttr = constOp->getAttrOfType<StringAttr>("sir.result_name_0");
+            if (!nameAttr)
+                return WalkResult::advance();
+            if (nameAttr.getValue() != ("slot_" + globalName).str())
+                return WalkResult::advance();
+            // Found existing slot constant - reuse it
+            existingConst = constOp.getResult();
+            return WalkResult::interrupt();
             return WalkResult::advance(); });
     }
 
@@ -132,8 +128,33 @@ LogicalResult ConvertSLoadOp::matchAndRewrite(
 
     if (llvm::isa<mlir::RankedTensorType>(op.getResult().getType()))
     {
-        llvm::errs() << "[OraToSIR]   sload is tensor type, skipping\n";
-        return failure();
+        auto slotIndexOpt = computeGlobalSlot(globalName, op.getOperation());
+        if (!slotIndexOpt)
+            return rewriter.notifyMatchFailure(op, "missing ora.slot_index for array sload");
+        uint64_t slotIndex = *slotIndexOpt;
+        Value slotConst = findOrCreateSlotConstant(op.getOperation(), slotIndex, globalName, rewriter);
+        if (auto slotOp = slotConst.getDefiningOp<sir::ConstOp>())
+        {
+            setResultName(slotOp, 0, ("slot_" + globalName).str());
+        }
+        rewriter.replaceOp(op, slotConst);
+        return success();
+    }
+
+    // If this is a map type, return the base slot handle (do not load storage).
+    if (llvm::isa<ora::MapType>(op.getResult().getType()))
+    {
+        auto slotIndexOpt = computeGlobalSlot(globalName, op.getOperation());
+        if (!slotIndexOpt)
+            return rewriter.notifyMatchFailure(op, "missing ora.slot_index for map sload");
+        uint64_t slotIndex = *slotIndexOpt;
+        Value slotConst = findOrCreateSlotConstant(op.getOperation(), slotIndex, globalName, rewriter);
+        if (auto slotOp = slotConst.getDefiningOp<sir::ConstOp>())
+        {
+            setResultName(slotOp, 0, ("slot_" + globalName).str());
+        }
+        rewriter.replaceOp(op, slotConst);
+        return success();
     }
 
     // Check if result type is dynamic bytes (string, bytes, or enum with string repr)
@@ -169,7 +190,10 @@ LogicalResult ConvertSLoadOp::matchAndRewrite(
     }
 
     // Compute storage slot index from ora.global operation
-    uint64_t slotIndex = computeGlobalSlot(globalName, op.getOperation());
+    auto slotIndexOpt = computeGlobalSlot(globalName, op.getOperation());
+    if (!slotIndexOpt)
+        return rewriter.notifyMatchFailure(op, "missing ora.slot_index for sload");
+    uint64_t slotIndex = *slotIndexOpt;
     DBG("  -> slot index: " << slotIndex);
 
     // Find or create slot constant (reuse if already exists in function)
@@ -213,27 +237,37 @@ LogicalResult ConvertSLoadOp::matchAndRewrite(
         rewriter.create<sir::StoreOp>(loc, basePtr, length);
 
         Value wordCount = computeWordCount(loc, length, rewriter);
-        Value upper = u256ToIndex(loc, wordCount, rewriter);
-        Value lower = rewriter.create<mlir::arith::ConstantIndexOp>(loc, 0);
-        Value step = rewriter.create<mlir::arith::ConstantIndexOp>(loc, 1);
-        auto forOp = rewriter.create<mlir::scf::ForOp>(loc, lower, upper, step);
+        auto ui64Type = mlir::IntegerType::get(ctx, 64, mlir::IntegerType::Unsigned);
+        Value zero = rewriter.create<sir::ConstOp>(loc, u256, mlir::IntegerAttr::get(ui64Type, 0));
+        Value one = rewriter.create<sir::ConstOp>(loc, u256, mlir::IntegerAttr::get(ui64Type, 1));
 
-        {
-            OpBuilder::InsertionGuard guard(rewriter);
-            rewriter.setInsertionPointToStart(forOp.getBody());
-            Value iv = forOp.getInductionVar();
-            Value ivU256 = indexToU256(loc, iv, rewriter);
-            Value one = rewriter.create<sir::ConstOp>(loc, u256, mlir::IntegerAttr::get(mlir::IntegerType::get(ctx, 64, mlir::IntegerType::Unsigned), 1));
+        Block *parentBlock = op->getBlock();
+        Region *parentRegion = parentBlock->getParent();
+        auto afterBlock = rewriter.splitBlock(parentBlock, Block::iterator(op));
+        auto condBlock = rewriter.createBlock(parentRegion, afterBlock->getIterator(), {u256}, {loc});
+        auto bodyBlock = rewriter.createBlock(parentRegion, afterBlock->getIterator(), {u256}, {loc});
 
-            Value slotOffset = rewriter.create<sir::AddOp>(loc, u256, ivU256, one);
-            Value slot = rewriter.create<sir::AddOp>(loc, u256, slotConst, slotOffset);
-            Value wordVal = rewriter.create<sir::SLoadOp>(loc, u256, slot);
+        rewriter.setInsertionPoint(op);
+        rewriter.create<sir::BrOp>(loc, ValueRange{zero}, condBlock);
 
-            Value wordBytes = rewriter.create<sir::MulOp>(loc, u256, ivU256, wordSize);
-            Value dataOffset = rewriter.create<sir::AddOp>(loc, u256, wordBytes, wordSize);
-            Value dataPtr = rewriter.create<sir::AddPtrOp>(loc, convertedResultType, basePtr, dataOffset);
-            rewriter.create<sir::StoreOp>(loc, dataPtr, wordVal);
-        }
+        rewriter.setInsertionPointToStart(condBlock);
+        Value iv = condBlock->getArgument(0);
+        Value lt = rewriter.create<sir::LtOp>(loc, u256, iv, wordCount);
+        rewriter.create<sir::CondBrOp>(loc, lt, ValueRange{iv}, ValueRange{}, bodyBlock, afterBlock);
+
+        rewriter.setInsertionPointToStart(bodyBlock);
+        Value ivU256 = bodyBlock->getArgument(0);
+        Value slotOffset = rewriter.create<sir::AddOp>(loc, u256, ivU256, one);
+        Value slot = rewriter.create<sir::AddOp>(loc, u256, slotConst, slotOffset);
+        Value wordVal = rewriter.create<sir::SLoadOp>(loc, u256, slot);
+
+        Value wordBytes = rewriter.create<sir::MulOp>(loc, u256, ivU256, wordSize);
+        Value dataOffset = rewriter.create<sir::AddOp>(loc, u256, wordBytes, wordSize);
+        Value dataPtr = rewriter.create<sir::AddPtrOp>(loc, convertedResultType, basePtr, dataOffset);
+        rewriter.create<sir::StoreOp>(loc, dataPtr, wordVal);
+
+        Value next = rewriter.create<sir::AddOp>(loc, u256, ivU256, one);
+        rewriter.create<sir::BrOp>(loc, ValueRange{next}, condBlock);
 
         rewriter.replaceOp(op, basePtr);
         llvm::errs() << "[OraToSIR]   replaced with dynamic bytes load\n";
@@ -284,7 +318,10 @@ LogicalResult ConvertSStoreOp::matchAndRewrite(
     const bool isDynamicBytes = llvm::isa<ora::StringType, ora::BytesType>(op.getValue().getType());
 
     // Compute storage slot index from ora.global operation
-    uint64_t slotIndex = computeGlobalSlot(globalName, op.getOperation());
+    auto slotIndexOpt = computeGlobalSlot(globalName, op.getOperation());
+    if (!slotIndexOpt)
+        return rewriter.notifyMatchFailure(op, "missing ora.slot_index for sstore");
+    uint64_t slotIndex = *slotIndexOpt;
 
     // Find or create slot constant (reuse if already exists in function)
     Value slot = findOrCreateSlotConstant(op.getOperation(), slotIndex, globalName, rewriter);
@@ -313,29 +350,39 @@ LogicalResult ConvertSStoreOp::matchAndRewrite(
         rewriter.create<sir::SStoreOp>(loc, slot, length);
 
         Value wordCount = computeWordCount(loc, length, rewriter);
-        Value upper = u256ToIndex(loc, wordCount, rewriter);
-        Value lower = rewriter.create<mlir::arith::ConstantIndexOp>(loc, 0);
-        Value step = rewriter.create<mlir::arith::ConstantIndexOp>(loc, 1);
-        auto forOp = rewriter.create<mlir::scf::ForOp>(loc, lower, upper, step);
+        auto ui64Type = mlir::IntegerType::get(ctx, 64, mlir::IntegerType::Unsigned);
+        Value zero = rewriter.create<sir::ConstOp>(loc, u256Type, mlir::IntegerAttr::get(ui64Type, 0));
+        Value one = rewriter.create<sir::ConstOp>(loc, u256Type, mlir::IntegerAttr::get(ui64Type, 1));
+        Value wordSize = rewriter.create<sir::ConstOp>(loc, u256Type, mlir::IntegerAttr::get(ui64Type, 32));
 
-        {
-            OpBuilder::InsertionGuard guard(rewriter);
-            rewriter.setInsertionPointToStart(forOp.getBody());
-            Value iv = forOp.getInductionVar();
-            Value ivU256 = indexToU256(loc, iv, rewriter);
-            Value one = rewriter.create<sir::ConstOp>(loc, u256Type, mlir::IntegerAttr::get(mlir::IntegerType::get(ctx, 64, mlir::IntegerType::Unsigned), 1));
-            Value wordSize = rewriter.create<sir::ConstOp>(loc, u256Type, mlir::IntegerAttr::get(mlir::IntegerType::get(ctx, 64, mlir::IntegerType::Unsigned), 32));
+        Block *parentBlock = op->getBlock();
+        Region *parentRegion = parentBlock->getParent();
+        auto afterBlock = rewriter.splitBlock(parentBlock, Block::iterator(op));
+        auto condBlock = rewriter.createBlock(parentRegion, afterBlock->getIterator(), {u256Type}, {loc});
+        auto bodyBlock = rewriter.createBlock(parentRegion, afterBlock->getIterator(), {u256Type}, {loc});
 
-            Value slotOffset = rewriter.create<sir::AddOp>(loc, u256Type, ivU256, one);
-            Value slotAddr = rewriter.create<sir::AddOp>(loc, u256Type, slot, slotOffset);
+        rewriter.setInsertionPoint(op);
+        rewriter.create<sir::BrOp>(loc, ValueRange{zero}, condBlock);
 
-            Value wordBytes = rewriter.create<sir::MulOp>(loc, u256Type, ivU256, wordSize);
-            Value dataOffset = rewriter.create<sir::AddOp>(loc, u256Type, wordBytes, wordSize);
-            Value dataPtr = rewriter.create<sir::AddPtrOp>(loc, ptrType, basePtr, dataOffset);
-            Value wordVal = rewriter.create<sir::LoadOp>(loc, u256Type, dataPtr);
+        rewriter.setInsertionPointToStart(condBlock);
+        Value iv = condBlock->getArgument(0);
+        Value lt = rewriter.create<sir::LtOp>(loc, u256Type, iv, wordCount);
+        rewriter.create<sir::CondBrOp>(loc, lt, ValueRange{iv}, ValueRange{}, bodyBlock, afterBlock);
 
-            rewriter.create<sir::SStoreOp>(loc, slotAddr, wordVal);
-        }
+        rewriter.setInsertionPointToStart(bodyBlock);
+        Value ivU256 = bodyBlock->getArgument(0);
+        Value slotOffset = rewriter.create<sir::AddOp>(loc, u256Type, ivU256, one);
+        Value slotAddr = rewriter.create<sir::AddOp>(loc, u256Type, slot, slotOffset);
+
+        Value wordBytes = rewriter.create<sir::MulOp>(loc, u256Type, ivU256, wordSize);
+        Value dataOffset = rewriter.create<sir::AddOp>(loc, u256Type, wordBytes, wordSize);
+        Value dataPtr = rewriter.create<sir::AddPtrOp>(loc, ptrType, basePtr, dataOffset);
+        Value wordVal = rewriter.create<sir::LoadOp>(loc, u256Type, dataPtr);
+
+        rewriter.create<sir::SStoreOp>(loc, slotAddr, wordVal);
+
+        Value next = rewriter.create<sir::AddOp>(loc, u256Type, ivU256, one);
+        rewriter.create<sir::BrOp>(loc, ValueRange{next}, condBlock);
 
         rewriter.eraseOp(op);
         return success();
@@ -388,7 +435,10 @@ LogicalResult ConvertTLoadOp::matchAndRewrite(
         return rewriter.notifyMatchFailure(op, "tload missing key attribute");
     }
 
-    uint64_t slotIndex = computeGlobalSlot(keyAttr.getValue(), op.getOperation());
+    auto slotIndexOpt = computeGlobalSlot(keyAttr.getValue(), op.getOperation());
+    if (!slotIndexOpt)
+        return rewriter.notifyMatchFailure(op, "missing ora.slot_index for tload");
+    uint64_t slotIndex = *slotIndexOpt;
     auto slotAttr = mlir::IntegerAttr::get(ui64Type, slotIndex);
     Value slotConst = rewriter.create<sir::ConstOp>(loc, u256, slotAttr);
 
@@ -416,7 +466,10 @@ LogicalResult ConvertTStoreOp::matchAndRewrite(
         return rewriter.notifyMatchFailure(op, "tstore missing key attribute");
     }
 
-    uint64_t slotIndex = computeGlobalSlot(keyAttr.getValue(), op.getOperation());
+    auto slotIndexOpt = computeGlobalSlot(keyAttr.getValue(), op.getOperation());
+    if (!slotIndexOpt)
+        return rewriter.notifyMatchFailure(op, "missing ora.slot_index for tstore");
+    uint64_t slotIndex = *slotIndexOpt;
     auto slotAttr = mlir::IntegerAttr::get(ui64Type, slotIndex);
     Value slotConst = rewriter.create<sir::ConstOp>(loc, u256, slotAttr);
 
@@ -549,7 +602,10 @@ LogicalResult ConvertMapGetOp::matchAndRewrite(
         }
 
         // Compute storage slot for the map/array from ora.global operation
-        uint64_t mapSlotIndex = computeGlobalSlot(globalName, op.getOperation());
+        auto mapSlotIndexOpt = computeGlobalSlot(globalName, op.getOperation());
+        if (!mapSlotIndexOpt)
+            return rewriter.notifyMatchFailure(op, "missing ora.slot_index for map_get");
+        uint64_t mapSlotIndex = *mapSlotIndexOpt;
         mapSlot = findOrCreateSlotConstant(op.getOperation(), mapSlotIndex, globalName, rewriter);
         // Set name: "slot_" + globalName
         if (auto slotOp = mapSlot.getDefiningOp<sir::ConstOp>())
@@ -753,6 +809,57 @@ LogicalResult ConvertMapStoreOp::matchAndRewrite(
         value = rewriter.create<sir::BitcastOp>(loc, u256Type, value);
     }
 
+    if (auto tensorType = llvm::dyn_cast<mlir::RankedTensorType>(originalMapOperand.getType()))
+    {
+        Value baseSlot = convertedMapOperand;
+        if (!llvm::isa<sir::U256Type>(baseSlot.getType()))
+        {
+            return rewriter.notifyMatchFailure(op, "array base slot is not u256");
+        }
+        Value indexU256 = ensureU256Value(rewriter, loc, key);
+        uint64_t elemWords = getElementWordCount(tensorType.getElementType());
+        Value slot = Value();
+        if (tensorType.hasStaticShape())
+        {
+            if (elemWords != 1)
+            {
+                auto ui64Type = mlir::IntegerType::get(ctx, 64, mlir::IntegerType::Unsigned);
+                Value elemWordsConst = rewriter.create<sir::ConstOp>(
+                    loc, u256Type, mlir::IntegerAttr::get(ui64Type, elemWords));
+                Value offset = rewriter.create<sir::MulOp>(loc, u256Type, indexU256, elemWordsConst);
+                slot = rewriter.create<sir::AddOp>(loc, u256Type, baseSlot, offset);
+            }
+            else
+            {
+                slot = rewriter.create<sir::AddOp>(loc, u256Type, baseSlot, indexU256);
+            }
+        }
+        else
+        {
+            auto ui64Type = mlir::IntegerType::get(ctx, 64, mlir::IntegerType::Unsigned);
+            Value size32 = rewriter.create<sir::ConstOp>(
+                loc, u256Type, mlir::IntegerAttr::get(ui64Type, 32));
+            auto ptrType = sir::PtrType::get(ctx, /*addrSpace*/ 1);
+            Value tmp = rewriter.create<sir::MallocOp>(loc, ptrType, size32);
+            rewriter.create<sir::StoreOp>(loc, tmp, baseSlot);
+            Value hash = rewriter.create<sir::KeccakOp>(loc, u256Type, tmp, size32);
+            if (elemWords != 1)
+            {
+                auto ui64Type = mlir::IntegerType::get(ctx, 64, mlir::IntegerType::Unsigned);
+                Value elemWordsConst = rewriter.create<sir::ConstOp>(
+                    loc, u256Type, mlir::IntegerAttr::get(ui64Type, elemWords));
+                Value offset = rewriter.create<sir::MulOp>(loc, u256Type, indexU256, elemWordsConst);
+                slot = rewriter.create<sir::AddOp>(loc, u256Type, hash, offset);
+            }
+            else
+            {
+                slot = rewriter.create<sir::AddOp>(loc, u256Type, hash, indexU256);
+            }
+        }
+        rewriter.replaceOpWithNewOp<sir::SStoreOp>(op, slot, value);
+        return success();
+    }
+
     Value mapSlot = Value();
     llvm::StringRef globalName;
     if (llvm::isa<sir::U256Type>(convertedMapOperand.getType()))
@@ -788,7 +895,10 @@ LogicalResult ConvertMapStoreOp::matchAndRewrite(
         }
 
         // Compute storage slot for the map/array from ora.global operation
-        uint64_t mapSlotIndex = computeGlobalSlot(globalName, op.getOperation());
+        auto mapSlotIndexOpt = computeGlobalSlot(globalName, op.getOperation());
+        if (!mapSlotIndexOpt)
+            return rewriter.notifyMatchFailure(op, "missing ora.slot_index for map_store");
+        uint64_t mapSlotIndex = *mapSlotIndexOpt;
         mapSlot = findOrCreateSlotConstant(op.getOperation(), mapSlotIndex, globalName, rewriter);
         // Set name: "slot_" + globalName
         if (auto slotOp = mapSlot.getDefiningOp<sir::ConstOp>())
@@ -826,5 +936,148 @@ LogicalResult ConvertMapStoreOp::matchAndRewrite(
     // Erase the map_store operation (it has no results)
     rewriter.eraseOp(op);
     DBG("ConvertMapStoreOp: replaced with keccak256 + sstore");
+    return success();
+}
+
+// -----------------------------------------------------------------------------
+// Lower tensor.extract for storage arrays -> sir.sload base_slot + index
+// -----------------------------------------------------------------------------
+LogicalResult ConvertTensorExtractOp::matchAndRewrite(
+    mlir::tensor::ExtractOp op,
+    typename mlir::tensor::ExtractOp::Adaptor adaptor,
+    ConversionPatternRewriter &rewriter) const
+{
+    auto loc = op.getLoc();
+    auto ctx = rewriter.getContext();
+    auto u256Type = sir::U256Type::get(ctx);
+
+    auto tensorType = llvm::dyn_cast<mlir::RankedTensorType>(op.getTensor().getType());
+    if (!tensorType)
+        return rewriter.notifyMatchFailure(op, "tensor.extract without ranked tensor");
+    if (tensorType.getRank() != 1)
+        return rewriter.notifyMatchFailure(op, "only 1D arrays supported");
+
+    Value base = adaptor.getTensor();
+    if (!llvm::isa<sir::U256Type>(base.getType()))
+        return rewriter.notifyMatchFailure(op, "array base is not u256");
+
+    if (adaptor.getIndices().size() != 1)
+        return rewriter.notifyMatchFailure(op, "expected single index");
+
+    Value indexU256 = ensureU256Value(rewriter, loc, adaptor.getIndices()[0]);
+    uint64_t elemWords = getElementWordCount(tensorType.getElementType());
+
+    Value loaded = Value();
+    bool isStorageArray = false;
+    if (auto def = op.getTensor().getDefiningOp())
+    {
+        if (llvm::isa<ora::SLoadOp>(def))
+            isStorageArray = true;
+    }
+
+    if (tensorType.hasStaticShape() || isStorageArray)
+    {
+        Value baseSlot = base;
+        if (!tensorType.hasStaticShape())
+        {
+            auto ui64Type = mlir::IntegerType::get(ctx, 64, mlir::IntegerType::Unsigned);
+            Value size32 = rewriter.create<sir::ConstOp>(
+                loc, u256Type, mlir::IntegerAttr::get(ui64Type, 32));
+            auto ptrType = sir::PtrType::get(ctx, /*addrSpace*/ 1);
+            Value tmp = rewriter.create<sir::MallocOp>(loc, ptrType, size32);
+            rewriter.create<sir::StoreOp>(loc, tmp, baseSlot);
+            baseSlot = rewriter.create<sir::KeccakOp>(loc, u256Type, tmp, size32);
+        }
+        Value slot = baseSlot;
+        if (elemWords != 1)
+        {
+            auto ui64Type = mlir::IntegerType::get(ctx, 64, mlir::IntegerType::Unsigned);
+            Value elemWordsConst = rewriter.create<sir::ConstOp>(
+                loc, u256Type, mlir::IntegerAttr::get(ui64Type, elemWords));
+            Value offset = rewriter.create<sir::MulOp>(loc, u256Type, indexU256, elemWordsConst);
+            slot = rewriter.create<sir::AddOp>(loc, u256Type, baseSlot, offset);
+        }
+        else
+        {
+            slot = rewriter.create<sir::AddOp>(loc, u256Type, baseSlot, indexU256);
+        }
+        loaded = rewriter.create<sir::SLoadOp>(loc, u256Type, slot);
+    }
+    else
+    {
+        auto ptrType = sir::PtrType::get(ctx, /*addrSpace*/ 1);
+        Value ptr = rewriter.create<sir::BitcastOp>(loc, ptrType, base);
+        auto ui64Type = mlir::IntegerType::get(ctx, 64, mlir::IntegerType::Unsigned);
+        Value wordSize = rewriter.create<sir::ConstOp>(
+            loc, u256Type, mlir::IntegerAttr::get(ui64Type, 32));
+        Value dataPtr = rewriter.create<sir::AddPtrOp>(loc, ptrType, ptr, wordSize);
+        Value offsetBytes = rewriter.create<sir::MulOp>(loc, u256Type, indexU256, wordSize);
+        Value elemPtr = rewriter.create<sir::AddPtrOp>(loc, ptrType, dataPtr, offsetBytes);
+        loaded = rewriter.create<sir::LoadOp>(loc, u256Type, elemPtr);
+    }
+
+    Type desiredType = u256Type;
+    if (auto *tc = getTypeConverter())
+    {
+        if (Type converted = tc->convertType(op.getType()))
+            desiredType = converted;
+    }
+    if (desiredType != u256Type)
+        loaded = rewriter.create<sir::BitcastOp>(loc, desiredType, loaded);
+
+    rewriter.replaceOp(op, loaded);
+    return success();
+}
+
+// -----------------------------------------------------------------------------
+// Lower tensor.dim for arrays/slices
+// -----------------------------------------------------------------------------
+LogicalResult ConvertTensorDimOp::matchAndRewrite(
+    mlir::tensor::DimOp op,
+    typename mlir::tensor::DimOp::Adaptor adaptor,
+    ConversionPatternRewriter &rewriter) const
+{
+    auto loc = op.getLoc();
+    auto ctx = rewriter.getContext();
+    auto tensorType = llvm::dyn_cast<mlir::RankedTensorType>(op.getSource().getType());
+    if (!tensorType)
+        return rewriter.notifyMatchFailure(op, "tensor.dim on non-ranked tensor");
+
+    if (tensorType.hasStaticShape())
+    {
+        int64_t dim = tensorType.getDimSize(0);
+        auto ui64Type = mlir::IntegerType::get(ctx, 64, mlir::IntegerType::Unsigned);
+        auto u256Type = sir::U256Type::get(ctx);
+        Value dimConst = rewriter.create<sir::ConstOp>(loc, u256Type, mlir::IntegerAttr::get(ui64Type, dim));
+        Value idx = buildIndexFromU256(rewriter, loc, dimConst);
+        rewriter.replaceOp(op, idx);
+        return success();
+    }
+
+    Value base = adaptor.getSource();
+    if (!llvm::isa<sir::U256Type>(base.getType()))
+        return rewriter.notifyMatchFailure(op, "slice base is not u256");
+    auto u256Type = sir::U256Type::get(ctx);
+
+    bool isStorageArray = false;
+    if (auto def = op.getSource().getDefiningOp())
+    {
+        if (llvm::isa<ora::SLoadOp>(def))
+            isStorageArray = true;
+    }
+
+    if (isStorageArray)
+    {
+        Value length = rewriter.create<sir::SLoadOp>(loc, u256Type, base);
+        Value idx = buildIndexFromU256(rewriter, loc, length);
+        rewriter.replaceOp(op, idx);
+        return success();
+    }
+
+    auto ptrType = sir::PtrType::get(ctx, /*addrSpace*/ 1);
+    Value ptr = rewriter.create<sir::BitcastOp>(loc, ptrType, base);
+    Value length = rewriter.create<sir::LoadOp>(loc, u256Type, ptr);
+    Value idx = buildIndexFromU256(rewriter, loc, length);
+    rewriter.replaceOp(op, idx);
     return success();
 }

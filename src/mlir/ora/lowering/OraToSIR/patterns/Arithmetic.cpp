@@ -27,17 +27,14 @@ static SIRNamingHelper &getNamingHelper(Operation *op)
     static SIRNamingHelper helper;
     return helper;
 }
-static mlir::arith::ConstantOp findOriginalConstant(Value val)
+static sir::ConstOp findOriginalConstant(Value val)
 {
     Operation *defOp = val.getDefiningOp();
     if (!defOp)
         return nullptr;
 
-    if (auto constOp = dyn_cast<mlir::arith::ConstantOp>(defOp))
+    if (auto constOp = dyn_cast<sir::ConstOp>(defOp))
         return constOp;
-
-    if (dyn_cast<sir::ConstOp>(defOp))
-        return nullptr;
 
     if (auto bitcastOp = dyn_cast<sir::BitcastOp>(defOp))
     {
@@ -84,19 +81,16 @@ LogicalResult ConvertAddOp::matchAndRewrite(
     // The type converter may have converted the type but not the operation
     if (auto constOp = findOriginalConstant(lhs))
     {
-        // Convert arith.constant to sir.const
-        auto valueAttr = constOp.getValue();
+        auto valueAttr = constOp.getValueAttr();
         if (auto intAttr = llvm::dyn_cast<mlir::IntegerAttr>(valueAttr))
         {
-            int64_t intValue = intAttr.getInt();
-            uint64_t uintValue = static_cast<uint64_t>(intValue);
+            uint64_t uintValue = intAttr.getValue().getZExtValue();
             auto ui64Type = mlir::IntegerType::get(op.getContext(), 64, mlir::IntegerType::Unsigned);
             auto valueAttrU64 = mlir::IntegerAttr::get(ui64Type, uintValue);
             lhsU256 = rewriter.create<sir::ConstOp>(loc, u256Type, valueAttrU64);
         }
         else
         {
-            // If already u256 type, use as-is, otherwise bitcast
             if (llvm::isa<sir::U256Type>(lhs.getType()))
                 lhsU256 = lhs;
             else
@@ -131,7 +125,7 @@ LogicalResult ConvertAddOp::matchAndRewrite(
     if (auto constOp = findOriginalConstant(rhs))
     {
         // Convert arith.constant to sir.const
-        auto valueAttr = constOp.getValue();
+        auto valueAttr = constOp.getValueAttr();
         if (auto intAttr = llvm::dyn_cast<mlir::IntegerAttr>(valueAttr))
         {
             int64_t intValue = intAttr.getInt();
@@ -203,7 +197,7 @@ LogicalResult ConvertMulOp::matchAndRewrite(
     if (auto constOp = findOriginalConstant(lhs))
     {
         // Convert arith.constant to sir.const
-        auto valueAttr = constOp.getValue();
+        auto valueAttr = constOp.getValueAttr();
         if (auto intAttr = llvm::dyn_cast<mlir::IntegerAttr>(valueAttr))
         {
             int64_t intValue = intAttr.getInt();
@@ -249,7 +243,7 @@ LogicalResult ConvertMulOp::matchAndRewrite(
     if (auto constOp = findOriginalConstant(rhs))
     {
         // Convert arith.constant to sir.const
-        auto valueAttr = constOp.getValue();
+        auto valueAttr = constOp.getValueAttr();
         if (auto intAttr = llvm::dyn_cast<mlir::IntegerAttr>(valueAttr))
         {
             int64_t intValue = intAttr.getInt();
@@ -316,7 +310,7 @@ LogicalResult ConvertSubOp::matchAndRewrite(
     // Convert LHS to u256 if needed (same logic as ConvertAddOp)
     if (auto constOp = findOriginalConstant(lhs))
     {
-        auto valueAttr = constOp.getValue();
+        auto valueAttr = constOp.getValueAttr();
         if (auto intAttr = llvm::dyn_cast<mlir::IntegerAttr>(valueAttr))
         {
             int64_t intValue = intAttr.getInt();
@@ -355,7 +349,7 @@ LogicalResult ConvertSubOp::matchAndRewrite(
 
     if (auto constOp = findOriginalConstant(rhs))
     {
-        auto valueAttr = constOp.getValue();
+        auto valueAttr = constOp.getValueAttr();
         if (auto intAttr = llvm::dyn_cast<mlir::IntegerAttr>(valueAttr))
         {
             int64_t intValue = intAttr.getInt();
@@ -419,7 +413,7 @@ LogicalResult ConvertDivOp::matchAndRewrite(
     // Convert LHS to u256 if needed (same logic as ConvertAddOp)
     if (auto constOp = findOriginalConstant(lhs))
     {
-        auto valueAttr = constOp.getValue();
+        auto valueAttr = constOp.getValueAttr();
         if (auto intAttr = llvm::dyn_cast<mlir::IntegerAttr>(valueAttr))
         {
             int64_t intValue = intAttr.getInt();
@@ -458,7 +452,7 @@ LogicalResult ConvertDivOp::matchAndRewrite(
 
     if (auto constOp = findOriginalConstant(rhs))
     {
-        auto valueAttr = constOp.getValue();
+        auto valueAttr = constOp.getValueAttr();
         if (auto intAttr = llvm::dyn_cast<mlir::IntegerAttr>(valueAttr))
         {
             int64_t intValue = intAttr.getInt();
@@ -522,7 +516,7 @@ LogicalResult ConvertRemOp::matchAndRewrite(
     // Convert LHS to u256 if needed (same logic as ConvertAddOp)
     if (auto constOp = findOriginalConstant(lhs))
     {
-        auto valueAttr = constOp.getValue();
+        auto valueAttr = constOp.getValueAttr();
         if (auto intAttr = llvm::dyn_cast<mlir::IntegerAttr>(valueAttr))
         {
             int64_t intValue = intAttr.getInt();
@@ -561,7 +555,7 @@ LogicalResult ConvertRemOp::matchAndRewrite(
 
     if (auto constOp = findOriginalConstant(rhs))
     {
-        auto valueAttr = constOp.getValue();
+        auto valueAttr = constOp.getValueAttr();
         if (auto intAttr = llvm::dyn_cast<mlir::IntegerAttr>(valueAttr))
         {
             int64_t intValue = intAttr.getInt();
@@ -697,7 +691,7 @@ LogicalResult ConvertCmpOp::matchAndRewrite(
 }
 
 // -----------------------------------------------------------------------------
-// Convert ora.const → arith.constant
+// Convert ora.const → sir.const
 // -----------------------------------------------------------------------------
 LogicalResult ConvertConstOp::matchAndRewrite(
     ora::ConstOp op,
@@ -714,9 +708,35 @@ LogicalResult ConvertConstOp::matchAndRewrite(
         return rewriter.notifyMatchFailure(op, "const value is not a typed attribute");
     }
 
-    auto constOp = rewriter.create<mlir::arith::ConstantOp>(loc, resultType, typedAttr);
+    auto intAttr = llvm::dyn_cast<mlir::IntegerAttr>(typedAttr);
+    if (!intAttr)
+    {
+        return rewriter.notifyMatchFailure(op, "const value is not an integer");
+    }
+
+    auto *typeConverter = getTypeConverter();
+    if (!typeConverter)
+    {
+        return rewriter.notifyMatchFailure(op, "missing type converter");
+    }
+
+    auto convertedType = typeConverter->convertType(resultType);
+    if (!convertedType)
+    {
+        return rewriter.notifyMatchFailure(op, "unable to convert const type");
+    }
+
+    auto u256Type = sir::U256Type::get(op.getContext());
+    auto ui64Type = mlir::IntegerType::get(op.getContext(), 64, mlir::IntegerType::Unsigned);
+    auto valueAttrU64 = mlir::IntegerAttr::get(ui64Type, intAttr.getValue().getZExtValue());
+    auto constOp = rewriter.create<sir::ConstOp>(loc, u256Type, valueAttrU64);
     constOp->setAttr("ora.name", op.getNameAttr());
-    rewriter.replaceOp(op, constOp.getResult());
+
+    Value result = constOp.getResult();
+    if (convertedType != u256Type)
+        result = rewriter.create<sir::BitcastOp>(loc, convertedType, result);
+
+    rewriter.replaceOp(op, result);
     return success();
 }
 
@@ -1092,14 +1112,7 @@ LogicalResult ConvertArithConstantOp::matchAndRewrite(
         return rewriter.notifyMatchFailure(op, "missing type converter");
     }
 
-    // Only convert if the result type is not already legal in SIR
-    if (typeConverter->isLegal(resultType))
-    {
-        DBG("ConvertArithConstantOp: not an Ora type, skipping");
-        return failure();
-    }
-
-    DBG("ConvertArithConstantOp: converting Ora constant to sir.const");
+    DBG("ConvertArithConstantOp: converting arith.constant to sir.const");
 
     auto valueAttr = op.getValue();
     if (!valueAttr)
@@ -1169,6 +1182,10 @@ LogicalResult ConvertArithCmpIOp::matchAndRewrite(
 
     Value lhs = adaptor.getLhs();
     Value rhs = adaptor.getRhs();
+    if (!llvm::isa<sir::U256Type>(lhs.getType()))
+        lhs = rewriter.create<sir::BitcastOp>(loc, u256Type, lhs);
+    if (!llvm::isa<sir::U256Type>(rhs.getType()))
+        rhs = rewriter.create<sir::BitcastOp>(loc, u256Type, rhs);
     const auto pred = op.getPredicate();
 
     auto mkEq = [&]() { return rewriter.create<sir::EqOp>(loc, resultType, lhs, rhs).getResult(); };
@@ -1595,21 +1612,27 @@ LogicalResult FoldAndOneOp::matchAndRewrite(
     auto lhs = op.getLhs();
     auto rhs = op.getRhs();
 
-    if (auto lhs_const = lhs.getDefiningOp<sir::ConstOp>())
+    if (auto lhsConst = lhs.getDefiningOp<sir::ConstOp>())
     {
-        if (lhs_const.getValue() == 1)
+        if (auto intAttr = llvm::dyn_cast<IntegerAttr>(lhsConst.getValueAttr()))
         {
-            rewriter.replaceOp(op, rhs);
-            return success();
+            if (intAttr.getValue().getZExtValue() == 1)
+            {
+                rewriter.replaceOp(op, rhs);
+                return success();
+            }
         }
     }
 
-    if (auto rhs_const = rhs.getDefiningOp<sir::ConstOp>())
+    if (auto rhsConst = rhs.getDefiningOp<sir::ConstOp>())
     {
-        if (rhs_const.getValue() == 1)
+        if (auto intAttr = llvm::dyn_cast<IntegerAttr>(rhsConst.getValueAttr()))
         {
-            rewriter.replaceOp(op, lhs);
-            return success();
+            if (intAttr.getValue().getZExtValue() == 1)
+            {
+                rewriter.replaceOp(op, lhs);
+                return success();
+            }
         }
     }
 

@@ -202,17 +202,8 @@ int64_t SIRNamingHelper::extractElementIndex(Value indexValue) const
     if (!defOp)
         return -1;
 
-    // Check if it's a constant operation (arith.constant)
-    if (auto constOp = dyn_cast<mlir::arith::ConstantOp>(defOp))
-    {
-        auto attr = constOp.getValue();
-        if (auto intAttr = llvm::dyn_cast<mlir::IntegerAttr>(attr))
-        {
-            return intAttr.getInt();
-        }
-    }
     // Check if it's a sir.const operation
-    else if (auto sirConstOp = dyn_cast<sir::ConstOp>(defOp))
+    if (auto sirConstOp = dyn_cast<sir::ConstOp>(defOp))
     {
         auto attr = sirConstOp.getValueAttr();
         if (auto intAttr = llvm::dyn_cast<mlir::IntegerAttr>(attr))

@@ -2,8 +2,10 @@
 
 #include "mlir/Transforms/DialectConversion.h"
 #include "mlir/IR/BuiltinTypes.h"
+#include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "OraDialect.h"
 #include "SIR/SIRDialect.h"
+#include <optional>
 
 namespace mlir
 {
@@ -16,14 +18,13 @@ namespace mlir
         // -----------------------------------------------------------------------------
         // Utility: Lookup global slot index from ora.global operation
         // -----------------------------------------------------------------------------
-        inline uint64_t computeGlobalSlot(StringRef name, Operation *op)
+        inline std::optional<uint64_t> computeGlobalSlot(StringRef name, Operation *op)
         {
             // Get the module to look up the ora.global operation
             ModuleOp module = op->getParentOfType<ModuleOp>();
             if (!module)
             {
-                // Fallback to hash if we can't find the module
-                return std::hash<std::string>{}(name.str());
+                return std::nullopt;
             }
 
             // Look up the ora.global operation by name using SymbolTable
@@ -31,8 +32,7 @@ namespace mlir
             auto globalOp = symbolTable.lookup<ora::GlobalOp>(name);
             if (!globalOp)
             {
-                // Fallback to hash if global not found
-                return std::hash<std::string>{}(name.str());
+                return std::nullopt;
             }
 
             // Check if the global has a slot index attribute
@@ -42,8 +42,7 @@ namespace mlir
                 return slotAttr.getUInt();
             }
 
-            // If no slot index attribute, fall back to a stable hash of the name.
-            return std::hash<std::string>{}(name.str());
+            return std::nullopt;
         }
 
         // Storage operation conversions
@@ -122,6 +121,28 @@ namespace mlir
             LogicalResult matchAndRewrite(
                 ora::MapStoreOp op,
                 typename ora::MapStoreOp::Adaptor adaptor,
+                ConversionPatternRewriter &rewriter) const override;
+        };
+
+        class ConvertTensorExtractOp : public OpConversionPattern<mlir::tensor::ExtractOp>
+        {
+        public:
+            using OpConversionPattern::OpConversionPattern;
+
+            LogicalResult matchAndRewrite(
+                mlir::tensor::ExtractOp op,
+                typename mlir::tensor::ExtractOp::Adaptor adaptor,
+                ConversionPatternRewriter &rewriter) const override;
+        };
+
+        class ConvertTensorDimOp : public OpConversionPattern<mlir::tensor::DimOp>
+        {
+        public:
+            using OpConversionPattern::OpConversionPattern;
+
+            LogicalResult matchAndRewrite(
+                mlir::tensor::DimOp op,
+                typename mlir::tensor::DimOp::Adaptor adaptor,
                 ConversionPatternRewriter &rewriter) const override;
         };
 

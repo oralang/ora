@@ -43,6 +43,103 @@
 
 using namespace mlir;
 using namespace ora;
+
+static void normalizeFuncTerminators(mlir::func::FuncOp funcOp)
+{
+    mlir::IRRewriter rewriter(funcOp.getContext());
+    for (Block &block : funcOp.getBody())
+    {
+        Operation *terminator = nullptr;
+        for (Operation &op : block)
+        {
+            if (op.hasTrait<mlir::OpTrait::IsTerminator>())
+            {
+                terminator = &op;
+                break;
+            }
+        }
+        if (!terminator)
+        {
+            rewriter.setInsertionPointToEnd(&block);
+            rewriter.create<sir::InvalidOp>(funcOp.getLoc());
+            continue;
+        }
+        if (terminator->getNextNode())
+        {
+            llvm::errs() << "[OraToSIR] ERROR: Terminator has trailing ops in function "
+                         << funcOp.getName() << " at " << terminator->getLoc() << "\n";
+        }
+    }
+}
+
+static void assignGlobalSlots(ModuleOp module)
+{
+    auto *ctx = module.getContext();
+    auto ui64Type = mlir::IntegerType::get(ctx, 64, mlir::IntegerType::Unsigned);
+
+    auto assignInBlock = [&](Block &block)
+    {
+        uint64_t slot = 0;
+        for (Operation &op : block)
+        {
+            auto globalOp = dyn_cast<ora::GlobalOp>(op);
+            if (!globalOp)
+                continue;
+            if (globalOp->getAttrOfType<IntegerAttr>("ora.slot_index"))
+            {
+                slot++;
+                continue;
+            }
+            globalOp->setAttr("ora.slot_index", mlir::IntegerAttr::get(ui64Type, slot));
+            slot++;
+        }
+    };
+
+    module.walk([&](ora::ContractOp contractOp)
+                { assignInBlock(contractOp.getBody().front()); });
+
+    if (module.getBody()->empty())
+        return;
+    assignInBlock(module.getBodyRegion().front());
+}
+
+static void inlineContractsAndEraseDecls(ModuleOp module)
+{
+    // Inline contract bodies into the module block and erase contract wrappers.
+    SmallVector<ora::ContractOp, 4> contracts;
+    module.walk([&](ora::ContractOp contractOp) { contracts.push_back(contractOp); });
+
+    if (!contracts.empty())
+    {
+        module->setLoc(contracts.front().getLoc());
+    }
+
+    for (auto contractOp : contracts)
+    {
+        Block &contractBlock = contractOp.getBody().front();
+        for (auto it = contractBlock.begin(); it != contractBlock.end();)
+        {
+            Operation *inner = &*it++;
+            if (llvm::isa<ora::YieldOp>(inner))
+            {
+                inner->erase();
+                continue;
+            }
+            inner->moveBefore(contractOp);
+        }
+        contractOp.erase();
+    }
+
+    // Drop decl-only ops that are metadata-only at this stage.
+    module.walk([&](Operation *op)
+                {
+        StringRef name = op->getName().getStringRef();
+        if (name == "ora.enum.decl" || name == "ora.log.decl" ||
+            name == "ora.import" || name == "ora.tstore.global" || name == "ora.memory.global")
+        {
+            op->erase();
+        } });
+}
 class MemRefEliminationPass : public PassWrapper<MemRefEliminationPass, OperationPass<ModuleOp>>
 {
 public:
@@ -63,6 +160,8 @@ public:
         target.addLegalDialect<sir::SIRDialect>();
         target.addLegalDialect<ora::OraDialect>();
         target.addLegalDialect<mlir::func::FuncDialect>();
+        // Keep arith legal only in the memref elimination stage.
+        // Keep arith legal only in the memref elimination stage.
         target.addLegalDialect<mlir::arith::ArithDialect>();
         target.addLegalDialect<mlir::cf::ControlFlowDialect>();
         target.addIllegalDialect<mlir::memref::MemRefDialect>();
@@ -145,6 +244,11 @@ public:
 
         ModuleOp module = getOperation();
         MLIRContext *ctx = module.getContext();
+        if (ctx)
+            ctx->printOpOnDiagnostic(false);
+
+        assignGlobalSlots(module);
+        inlineContractsAndEraseDecls(module);
 
         llvm::errs() << "[OraToSIR] Starting Ora → SIR conversion pass\n";
         llvm::errs() << "[OraToSIR] ========================================\n";
@@ -243,6 +347,8 @@ public:
             patterns.add<ConvertTStoreOp>(typeConverter, ctx);
             patterns.add<ConvertMapGetOp>(typeConverter, ctx, PatternBenefit(5));
             patterns.add<ConvertMapStoreOp>(typeConverter, ctx, PatternBenefit(5));
+            patterns.add<ConvertTensorExtractOp>(typeConverter, ctx);
+            patterns.add<ConvertTensorDimOp>(typeConverter, ctx);
         }
         if (enable_return)
             patterns.add<ConvertReturnOp>(typeConverter, ctx);
@@ -257,6 +363,12 @@ public:
             patterns.add<ConvertSwitchExprOp>(typeConverter, ctx);
             patterns.add<ConvertSwitchOp>(typeConverter, ctx);
             patterns.add<ConvertTryCatchOp>(typeConverter, ctx);
+            patterns.add<ConvertTryStmtOp>(typeConverter, ctx);
+            patterns.add<ConvertCfBrOp>(typeConverter, ctx);
+            patterns.add<ConvertCfCondBrOp>(typeConverter, ctx);
+            patterns.add<ConvertCfAssertOp>(typeConverter, ctx);
+            patterns.add<ConvertScfIfOp>(typeConverter, ctx);
+            patterns.add<ConvertScfForOp>(typeConverter, ctx);
             patterns.add<ConvertErrorOkOp>(typeConverter, ctx);
             patterns.add<ConvertErrorErrOp>(typeConverter, ctx);
             patterns.add<ConvertErrorIsErrorOp>(typeConverter, ctx);
@@ -264,9 +376,9 @@ public:
             patterns.add<ConvertErrorGetErrorOp>(typeConverter, ctx);
             patterns.add<ConvertRangeOp>(typeConverter, ctx);
         }
+        patterns.add<ConvertErrorDeclOp>(typeConverter, ctx);
         patterns.add<ConvertLogOp>(typeConverter, ctx);
         patterns.add<EraseOpByName>("ora.enum.decl", ctx);
-        patterns.add<EraseOpByName>("ora.error.decl", ctx);
         patterns.add<EraseOpByName>("ora.log.decl", ctx);
         patterns.add<EraseOpByName>("ora.import", ctx);
         patterns.add<EraseOpByName>("ora.tstore.global", ctx);
@@ -281,33 +393,16 @@ public:
         target.addIllegalDialect<ora::OraDialect>();
         target.addIllegalOp<ora::ContractOp>();
         target.addIllegalOp<ora::StructDeclOp>();
-        target.addDynamicallyLegalOp<ora::SLoadOp>([](ora::SLoadOp op)
-                                                   { return llvm::isa<mlir::RankedTensorType>(op.getResult().getType()); });
-        target.addDynamicallyLegalOp<ora::SStoreOp>([](ora::SStoreOp op)
-                                                    { return llvm::isa<mlir::RankedTensorType>(op.getValue().getType()); });
+        // All sload/sstore must be legalized; no dynamic legality allowed.
         DBG("Marked Ora dialect as illegal");
-        // Mark cf dialect as legal (cf.assert for bounds checking)
-        target.addLegalDialect<mlir::cf::ControlFlowDialect>();
-        DBG("Marked cf dialect as legal");
-        target.addLegalDialect<mlir::scf::SCFDialect>();
-        DBG("Marked scf dialect as legal");
-        target.addLegalDialect<mlir::tensor::TensorDialect>();
+        // SIR-only: cf/scf must be eliminated before final output.
+        target.addIllegalDialect<mlir::cf::ControlFlowDialect>();
+        DBG("Marked cf dialect as illegal");
+        target.addIllegalDialect<mlir::scf::SCFDialect>();
+        DBG("Marked scf dialect as illegal");
+        target.addIllegalDialect<mlir::tensor::TensorDialect>();
         DBG("Marked tensor dialect as legal");
-        target.addDynamicallyLegalDialect<mlir::arith::ArithDialect>(
-            [&](Operation *op)
-            {
-                for (Value operand : op->getOperands())
-                {
-                    if (!typeConverter.isLegal(operand.getType()))
-                        return false;
-                }
-                for (Type resultType : op->getResultTypes())
-                {
-                    if (!typeConverter.isLegal(resultType))
-                        return false;
-                }
-                return true;
-            });
+        target.addIllegalDialect<mlir::arith::ArithDialect>();
 
         target.addDynamicallyLegalDialect<mlir::func::FuncDialect>(
             [&](Operation *op)
@@ -327,11 +422,24 @@ public:
                     }
                     return true;
                 }
+                if (auto callOp = dyn_cast<mlir::func::CallOp>(op))
+                {
+                    for (Type operandType : callOp.getOperandTypes())
+                    {
+                        if (!typeConverter.isLegal(operandType))
+                            return false;
+                    }
+                    for (Type resultType : callOp.getResultTypes())
+                    {
+                        if (!typeConverter.isLegal(resultType))
+                            return false;
+                    }
+                    return true;
+                }
                 return true;
             });
 
         target.addIllegalOp<ora::AddOp, ora::SubOp, ora::MulOp, ora::DivOp, ora::RemOp, ora::MapGetOp, ora::MapStoreOp, ora::ReturnOp>();
-
         target.addIllegalOp<ora::GlobalOp>();
 
         // Count operations before conversion
@@ -389,17 +497,51 @@ public:
 
         DBG("Conversion completed successfully!");
 
-        RewritePatternSet cleanup(ctx);
-        cleanup.add<FoldRedundantBitcastOp>(ctx);
-        cleanup.add<FoldAndOneOp>(ctx);
-        GreedyRewriteConfig config;
-        config.enableFolding();
-        if (failed(applyPatternsGreedily(module, std::move(cleanup), config)))
+        // Guard: fail if any illegal dialect ops remain after conversion.
+        bool illegalFound = false;
+        module.walk([&](Operation *op)
+                    {
+            if (op->getDialect())
+            {
+                StringRef ns = op->getDialect()->getNamespace();
+                if (ns == "ora" || ns == "cf" || ns == "scf" || ns == "tensor" || ns == "arith" || ns == "memref")
+                {
+                    llvm::errs() << "[OraToSIR] ERROR: Illegal op remains: " << op->getName()
+                                 << " at " << op->getLoc() << "\n";
+                    illegalFound = true;
+                }
+            } });
+        if (illegalFound)
         {
-            DBG("ERROR: Post-conversion cleanup failed!");
             signalPassFailure();
             return;
         }
+
+        // Guard: ensure every block in every function has a terminator.
+        module.walk([&](mlir::func::FuncOp funcOp)
+                    { normalizeFuncTerminators(funcOp); });
+
+        bool missingTerminator = false;
+        module.walk([&](mlir::func::FuncOp funcOp)
+                    {
+            for (Block &block : funcOp.getBody())
+            {
+                if (block.empty() || !block.back().hasTrait<mlir::OpTrait::IsTerminator>())
+                {
+                    llvm::errs() << "[OraToSIR] ERROR: Missing terminator in function "
+                                 << funcOp.getName() << " at " << funcOp.getLoc() << "\n";
+                    llvm::errs() << "[OraToSIR]   Block contents:\n";
+                    block.dump();
+                    missingTerminator = true;
+                }
+            } });
+        if (missingTerminator)
+        {
+            signalPassFailure();
+            return;
+        }
+
+        DBG("Skipping post-conversion cleanup patterns (FoldRedundantBitcastOp/FoldAndOneOp)");
 
         // Remove gas_cost attributes from all operations (Ora MLIR specific, not SIR)
         module.walk([&](Operation *op)
@@ -835,18 +977,18 @@ namespace mlir
                     // Process each block separately to avoid cross-region deduplication
                     for (Block &block : funcOp.getBlocks())
                     {
-                        llvm::DenseMap<std::pair<uint64_t, Type>, arith::ConstantOp> constantMap;
-                        llvm::SmallVector<arith::ConstantOp, 8> toErase;
+                        llvm::DenseMap<std::pair<uint64_t, Type>, sir::ConstOp> constantMap;
+                        llvm::SmallVector<sir::ConstOp, 8> toErase;
                         
                         // Only process constants directly in this block, not in nested regions
                         for (Operation &op : block.getOperations())
                         {
-                            auto constOp = dyn_cast<arith::ConstantOp>(&op);
+                            auto constOp = dyn_cast<sir::ConstOp>(&op);
                             if (!constOp)
                                 continue;
                                 
                             // Get value from attribute
-                            auto attr = constOp.getValue();
+                            auto attr = constOp.getValueAttr();
                             if (!attr)
                                 continue;
                             uint64_t value = 0;
@@ -895,8 +1037,8 @@ namespace mlir
                 module.walk([&](ora::AddOp addOp)
                             {
                     auto getConstantValue = [](Value val) -> std::optional<uint64_t> {
-                        if (auto constOp = val.getDefiningOp<arith::ConstantOp>()) {
-                            if (auto intAttr = llvm::dyn_cast<mlir::IntegerAttr>(constOp.getValue())) {
+                        if (auto constOp = val.getDefiningOp<sir::ConstOp>()) {
+                            if (auto intAttr = llvm::dyn_cast<mlir::IntegerAttr>(constOp.getValueAttr())) {
                                 return intAttr.getValue().getZExtValue();
                             }
                         }
@@ -910,9 +1052,14 @@ namespace mlir
                         uint64_t result = *lhsVal + *rhsVal;
                         OpBuilder builder(addOp);
                         auto resultType = addOp.getResult().getType();
-                        auto valueAttr = mlir::IntegerAttr::get(resultType, result);
-                        auto newConst = builder.create<arith::ConstantOp>(addOp.getLoc(), resultType, valueAttr);
-                        addOp.getResult().replaceAllUsesWith(newConst.getResult());
+                        auto u256Type = sir::U256Type::get(addOp.getContext());
+                        auto ui64Type = mlir::IntegerType::get(addOp.getContext(), 64, mlir::IntegerType::Unsigned);
+                        auto valueAttr = mlir::IntegerAttr::get(ui64Type, result);
+                        auto newConst = builder.create<sir::ConstOp>(addOp.getLoc(), u256Type, valueAttr);
+                        Value resultVal = newConst.getResult();
+                        if (resultType != u256Type)
+                            resultVal = builder.create<sir::BitcastOp>(addOp.getLoc(), resultType, resultVal);
+                        addOp.getResult().replaceAllUsesWith(resultVal);
                         addOp.erase();
                         changed = true;
                     } });
@@ -921,8 +1068,8 @@ namespace mlir
                 module.walk([&](ora::MulOp mulOp)
                             {
                     auto getConstantValue = [](Value val) -> std::optional<uint64_t> {
-                        if (auto constOp = val.getDefiningOp<arith::ConstantOp>()) {
-                            if (auto intAttr = llvm::dyn_cast<mlir::IntegerAttr>(constOp.getValue())) {
+                        if (auto constOp = val.getDefiningOp<sir::ConstOp>()) {
+                            if (auto intAttr = llvm::dyn_cast<mlir::IntegerAttr>(constOp.getValueAttr())) {
                                 return intAttr.getValue().getZExtValue();
                             }
                         }
@@ -936,9 +1083,14 @@ namespace mlir
                         uint64_t result = *lhsVal * *rhsVal;
                         OpBuilder builder(mulOp);
                         auto resultType = mulOp.getResult().getType();
-                        auto valueAttr = mlir::IntegerAttr::get(resultType, result);
-                        auto newConst = builder.create<arith::ConstantOp>(mulOp.getLoc(), resultType, valueAttr);
-                        mulOp.getResult().replaceAllUsesWith(newConst.getResult());
+                        auto u256Type = sir::U256Type::get(mulOp.getContext());
+                        auto ui64Type = mlir::IntegerType::get(mulOp.getContext(), 64, mlir::IntegerType::Unsigned);
+                        auto valueAttr = mlir::IntegerAttr::get(ui64Type, result);
+                        auto newConst = builder.create<sir::ConstOp>(mulOp.getLoc(), u256Type, valueAttr);
+                        Value resultVal = newConst.getResult();
+                        if (resultType != u256Type)
+                            resultVal = builder.create<sir::BitcastOp>(mulOp.getLoc(), resultType, resultVal);
+                        mulOp.getResult().replaceAllUsesWith(resultVal);
                         mulOp.erase();
                         changed = true;
                     } });

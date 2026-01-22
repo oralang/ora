@@ -2,6 +2,8 @@
 
 #include "mlir/Transforms/DialectConversion.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
+#include "mlir/Dialect/ControlFlow/IR/ControlFlowOps.h"
+#include "mlir/Dialect/SCF/IR/SCF.h"
 #include "OraDialect.h"
 #include "SIR/SIRDialect.h"
 
@@ -55,6 +57,17 @@ namespace mlir
             LogicalResult matchAndRewrite(
                 ora::ContractOp op,
                 typename ora::ContractOp::Adaptor adaptor,
+                ConversionPatternRewriter &rewriter) const override;
+        };
+
+        class ConvertErrorDeclOp : public OpConversionPattern<ora::ErrorDeclOp>
+        {
+        public:
+            using OpConversionPattern::OpConversionPattern;
+
+            LogicalResult matchAndRewrite(
+                ora::ErrorDeclOp op,
+                typename ora::ErrorDeclOp::Adaptor adaptor,
                 ConversionPatternRewriter &rewriter) const override;
         };
 
@@ -135,6 +148,61 @@ namespace mlir
                 ConversionPatternRewriter &rewriter) const override;
         };
 
+        class ConvertCfBrOp : public OpConversionPattern<mlir::cf::BranchOp>
+        {
+        public:
+            using OpConversionPattern::OpConversionPattern;
+
+            LogicalResult matchAndRewrite(
+                mlir::cf::BranchOp op,
+                typename mlir::cf::BranchOp::Adaptor adaptor,
+                ConversionPatternRewriter &rewriter) const override;
+        };
+
+        class ConvertCfCondBrOp : public OpConversionPattern<mlir::cf::CondBranchOp>
+        {
+        public:
+            using OpConversionPattern::OpConversionPattern;
+
+            LogicalResult matchAndRewrite(
+                mlir::cf::CondBranchOp op,
+                typename mlir::cf::CondBranchOp::Adaptor adaptor,
+                ConversionPatternRewriter &rewriter) const override;
+        };
+
+        class ConvertCfAssertOp : public OpConversionPattern<mlir::cf::AssertOp>
+        {
+        public:
+            using OpConversionPattern::OpConversionPattern;
+
+            LogicalResult matchAndRewrite(
+                mlir::cf::AssertOp op,
+                typename mlir::cf::AssertOp::Adaptor adaptor,
+                ConversionPatternRewriter &rewriter) const override;
+        };
+
+        class ConvertScfIfOp : public OpConversionPattern<mlir::scf::IfOp>
+        {
+        public:
+            using OpConversionPattern::OpConversionPattern;
+
+            LogicalResult matchAndRewrite(
+                mlir::scf::IfOp op,
+                typename mlir::scf::IfOp::Adaptor adaptor,
+                ConversionPatternRewriter &rewriter) const override;
+        };
+
+        class ConvertScfForOp : public OpConversionPattern<mlir::scf::ForOp>
+        {
+        public:
+            using OpConversionPattern::OpConversionPattern;
+
+            LogicalResult matchAndRewrite(
+                mlir::scf::ForOp op,
+                typename mlir::scf::ForOp::Adaptor adaptor,
+                ConversionPatternRewriter &rewriter) const override;
+        };
+
         class ConvertRangeOp : public OpConversionPattern<ora::RangeOp>
         {
         public:
@@ -154,6 +222,17 @@ namespace mlir
             LogicalResult matchAndRewrite(
                 ora::TryOp op,
                 typename ora::TryOp::Adaptor adaptor,
+                ConversionPatternRewriter &rewriter) const override;
+        };
+
+        class ConvertTryStmtOp : public OpConversionPattern<ora::TryStmtOp>
+        {
+        public:
+            using OpConversionPattern::OpConversionPattern;
+
+            LogicalResult matchAndRewrite(
+                ora::TryStmtOp op,
+                typename ora::TryStmtOp::Adaptor adaptor,
                 ConversionPatternRewriter &rewriter) const override;
         };
 

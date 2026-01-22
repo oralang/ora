@@ -90,7 +90,7 @@ pub fn main() !void {
     const emit_typed_ast: bool = parsed.emit_typed_ast;
     const emit_typed_ast_format: ?[]const u8 = parsed.emit_typed_ast_format;
     var emit_mlir: bool = parsed.emit_mlir;
-    const emit_mlir_sir: bool = parsed.emit_mlir_sir;
+    var emit_mlir_sir: bool = parsed.emit_mlir_sir;
     const emit_cfg: bool = parsed.emit_cfg;
     const emit_abi: bool = parsed.emit_abi;
     const emit_abi_solidity: bool = parsed.emit_abi_solidity;
@@ -146,7 +146,9 @@ pub fn main() !void {
         emit_mlir = true; // Default: emit MLIR
     }
     // By default, emit Ora MLIR plus SIR MLIR when --emit-mlir is requested.
-    // emit-mlir should stop after Ora MLIR (and validation) unless explicitly asked for SIR
+    if (emit_mlir and !emit_mlir_sir) {
+        emit_mlir_sir = true;
+    }
 
     // create MLIR options structure
     const mlir_options = MlirOptions{
