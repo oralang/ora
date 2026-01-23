@@ -18,6 +18,7 @@ const MemoryRegion = @import("../../statements.zig").MemoryRegion;
 const validation = @import("../validation/mod.zig");
 const utils = @import("../utils/mod.zig");
 const refinements = @import("../refinements/mod.zig");
+const log = @import("log");
 const TypeResolutionError = @import("../mod.zig").TypeResolutionError;
 
 // ============================================================================
@@ -87,9 +88,19 @@ pub const Effect = union(enum) {
     pub fn deinit(self: *Effect, allocator: std.mem.Allocator) void {
         switch (self.*) {
             .Pure => {},
-            .Reads => |*slots| slots.deinit(allocator),
-            .Writes => |*slots| slots.deinit(allocator),
+            .Reads => |*slots| {
+                log.debug("Effect.deinit Reads slots=0x{x}", .{@intFromPtr(slots)});
+                slots.deinit(allocator);
+            },
+            .Writes => |*slots| {
+                log.debug("Effect.deinit Writes slots=0x{x}", .{@intFromPtr(slots)});
+                slots.deinit(allocator);
+            },
             .ReadsWrites => |*rw| {
+                log.debug("Effect.deinit ReadsWrites reads=0x{x} writes=0x{x}", .{
+                    @intFromPtr(&rw.reads),
+                    @intFromPtr(&rw.writes),
+                });
                 rw.reads.deinit(allocator);
                 rw.writes.deinit(allocator);
             },
@@ -106,7 +117,7 @@ pub fn combineEffects(
         fn copy(alloc: std.mem.Allocator, set: SlotSet) SlotSet {
             var out = SlotSet.init(alloc);
             for (set.slots.items) |slot| {
-                out.add(alloc, slot) catch {};
+                out.addWithSrc(alloc, slot, @src()) catch {};
             }
             return out;
         }
@@ -115,7 +126,7 @@ pub fn combineEffects(
             var out = @This().copy(alloc, a);
             for (b.slots.items) |slot| {
                 if (!out.contains(slot)) {
-                    out.add(alloc, slot) catch {};
+                    out.addWithSrc(alloc, slot, @src()) catch {};
                 }
             }
             return out;
@@ -212,8 +223,18 @@ pub const SlotSet = struct {
         self.slots.deinit(allocator);
     }
 
-    pub fn add(self: *SlotSet, allocator: std.mem.Allocator, slot: []const u8) !void {
+    pub inline fn add(self: *SlotSet, allocator: std.mem.Allocator, slot: []const u8) !void {
+        return self.addWithSrc(allocator, slot, @src());
+    }
+
+    pub fn addWithSrc(
+        self: *SlotSet,
+        allocator: std.mem.Allocator,
+        slot: []const u8,
+        src: std.builtin.SourceLocation,
+    ) !void {
         try self.slots.append(allocator, slot);
+        _ = src;
     }
 
     pub fn contains(self: *const SlotSet, slot: []const u8) bool {

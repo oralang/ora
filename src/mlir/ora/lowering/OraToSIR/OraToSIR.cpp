@@ -18,6 +18,7 @@
 #include "mlir/IR/BuiltinDialect.h"
 #include "mlir/IR/BuiltinTypes.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
+#include "mlir/Interfaces/SideEffectInterfaces.h"
 #include "mlir/Dialect/ControlFlow/IR/ControlFlow.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
@@ -25,6 +26,7 @@
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/Transforms/DialectConversion.h"
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
+#include "llvm/ADT/DenseMap.h"
 #include "mlir/IR/PatternMatch.h"
 #include "mlir/Analysis/DataFlow/LivenessAnalysis.h"
 #include "mlir/Interfaces/SideEffectInterfaces.h"
@@ -76,6 +78,7 @@ static void assignGlobalSlots(ModuleOp module)
 {
     auto *ctx = module.getContext();
     auto ui64Type = mlir::IntegerType::get(ctx, 64, mlir::IntegerType::Unsigned);
+    SmallVector<NamedAttribute> slotAttrs;
 
     auto assignInBlock = [&](Block &block)
     {
@@ -87,10 +90,22 @@ static void assignGlobalSlots(ModuleOp module)
                 continue;
             if (globalOp->getAttrOfType<IntegerAttr>("ora.slot_index"))
             {
+                auto nameAttr = globalOp->getAttrOfType<StringAttr>("sym_name");
+                auto slotAttr = globalOp->getAttrOfType<IntegerAttr>("ora.slot_index");
+                if (nameAttr && slotAttr)
+                {
+                    slotAttrs.push_back(NamedAttribute(nameAttr, slotAttr));
+                }
                 slot++;
                 continue;
             }
-            globalOp->setAttr("ora.slot_index", mlir::IntegerAttr::get(ui64Type, slot));
+            auto slotAttr = mlir::IntegerAttr::get(ui64Type, slot);
+            globalOp->setAttr("ora.slot_index", slotAttr);
+            auto nameAttr = globalOp->getAttrOfType<StringAttr>("sym_name");
+            if (nameAttr)
+            {
+                slotAttrs.push_back(NamedAttribute(nameAttr, slotAttr));
+            }
             slot++;
         }
     };
@@ -101,6 +116,11 @@ static void assignGlobalSlots(ModuleOp module)
     if (module.getBody()->empty())
         return;
     assignInBlock(module.getBodyRegion().front());
+
+    if (!slotAttrs.empty())
+    {
+        module->setAttr("ora.global_slots", DictionaryAttr::get(ctx, slotAttrs));
+    }
 }
 
 static void inlineContractsAndEraseDecls(ModuleOp module)
@@ -211,6 +231,50 @@ public:
                     loadOp->erase();
                     changed = true;
                 } });
+
+            module.walk([&](Block *block)
+                        {
+                llvm::DenseMap<Attribute, Value> consts;
+                for (Operation &op : llvm::make_early_inc_range(*block))
+                {
+                    auto constOp = dyn_cast<sir::ConstOp>(&op);
+                    if (!constOp)
+                        continue;
+
+                    Attribute key = constOp.getValueAttr();
+                    auto it = consts.find(key);
+                    if (it != consts.end())
+                    {
+                        constOp.replaceAllUsesWith(it->second);
+                        constOp.erase();
+                        changed = true;
+                        continue;
+                    }
+                    consts.insert({key, constOp.getResult()});
+                } });
+
+            module.walk([&](Operation *op)
+                        {
+                if (!op->use_empty())
+                    return;
+                if (op->getNumRegions() != 0)
+                    return;
+                if (op->hasTrait<mlir::OpTrait::IsTerminator>())
+                    return;
+
+                if (auto iface = dyn_cast<MemoryEffectOpInterface>(op))
+                {
+                    if (!iface.hasNoEffect())
+                        return;
+                }
+                else if (!op->hasTrait<mlir::OpTrait::ConstantLike>())
+                {
+                    return;
+                }
+
+                op->erase();
+                changed = true;
+            });
         }
 
         DBG("SIRCleanupPass: cleanup completed");
@@ -256,7 +320,6 @@ public:
 
         ora::OraToSIRTypeConverter typeConverter;
 
-        RewritePatternSet patterns(ctx);
         // Pattern toggles for crash bisecting (set to false to isolate)
         const bool enable_contract = true;
         const bool enable_func = true;
@@ -267,6 +330,8 @@ public:
         const bool enable_storage = true;
         const bool enable_return = true;
         const bool enable_control_flow = true;
+
+        RewritePatternSet patterns(ctx);
 
         if (enable_contract)
             patterns.add<ConvertContractOp>(typeConverter, ctx);
@@ -351,7 +416,11 @@ public:
             patterns.add<ConvertTensorDimOp>(typeConverter, ctx);
         }
         if (enable_return)
+        {
+            patterns.add<ConvertReturnOpFallback>(&typeConverter, ctx, PatternBenefit(100));
+            patterns.add<ConvertReturnOpRaw>(typeConverter, ctx);
             patterns.add<ConvertReturnOp>(typeConverter, ctx);
+        }
         if (enable_control_flow)
             patterns.add<ConvertWhileOp>(typeConverter, ctx);
         if (enable_control_flow)
@@ -476,6 +545,35 @@ public:
         // Apply conversion
         if (failed(applyFullConversion(module, target, std::move(patterns))))
         {
+            module.walk([&](mlir::UnrealizedConversionCastOp castOp) {
+                llvm::errs() << "[OraToSIR] Remaining cast at " << castOp.getLoc() << " : ";
+                for (auto t : castOp.getOperandTypes())
+                    llvm::errs() << t << " ";
+                llvm::errs() << "-> ";
+                for (auto t : castOp.getResultTypes())
+                    llvm::errs() << t << " ";
+                llvm::errs() << "\n";
+                for (auto result : castOp.getResults())
+                {
+                    for (auto &use : result.getUses())
+                    {
+                        Operation *user = use.getOwner();
+                        llvm::errs() << "[OraToSIR]   used by " << user->getName()
+                                     << " at " << user->getLoc() << "\n";
+                    }
+                }
+            });
+            module.walk([&](ora::ReturnOp ret) {
+                llvm::errs() << "[OraToSIR] Remaining ora.return at " << ret.getLoc()
+                             << " operands=[";
+                for (auto it : llvm::enumerate(ret.getOperands()))
+                {
+                    if (it.index() > 0)
+                        llvm::errs() << ", ";
+                    llvm::errs() << it.value().getType();
+                }
+                llvm::errs() << "]\n";
+            });
             module.walk([&](Operation *op)
                         {
                 if (op->getDialect() && op->getDialect()->getNamespace() == "ora")
@@ -487,6 +585,17 @@ public:
                     if (op->getNumResults() > 0)
                     {
                         llvm::errs() << " result0=" << op->getResult(0).getType();
+                    }
+                    if (auto ret = dyn_cast<ora::ReturnOp>(op))
+                    {
+                        llvm::errs() << " operands=[";
+                        for (auto it : llvm::enumerate(ret.getOperands()))
+                        {
+                            if (it.index() > 0)
+                                llvm::errs() << ", ";
+                            llvm::errs() << it.value().getType();
+                        }
+                        llvm::errs() << "]";
                     }
                     llvm::errs() << "\n";
                 } });
@@ -541,7 +650,19 @@ public:
             return;
         }
 
-        DBG("Skipping post-conversion cleanup patterns (FoldRedundantBitcastOp/FoldAndOneOp)");
+        {
+            RewritePatternSet cleanupPatterns(ctx);
+            cleanupPatterns.add<FoldRedundantBitcastOp>(ctx);
+            cleanupPatterns.add<FoldAndOneOp>(ctx);
+            cleanupPatterns.add<FoldEqSameOp>(ctx);
+            cleanupPatterns.add<FoldEqConstOp>(ctx);
+            cleanupPatterns.add<FoldIsZeroConstOp>(ctx);
+            cleanupPatterns.add<FoldCondBrSameDestOp>(ctx);
+            cleanupPatterns.add<FoldCondBrDoubleIsZeroOp>(ctx);
+            cleanupPatterns.add<FoldCondBrConstOp>(ctx);
+            cleanupPatterns.add<FoldBrToBrOp>(ctx);
+            (void)applyPatternsGreedily(module, std::move(cleanupPatterns));
+        }
 
         // Remove gas_cost attributes from all operations (Ora MLIR specific, not SIR)
         module.walk([&](Operation *op)

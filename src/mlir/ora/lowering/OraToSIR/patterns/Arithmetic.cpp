@@ -1638,3 +1638,74 @@ LogicalResult FoldAndOneOp::matchAndRewrite(
 
     return failure();
 }
+
+// -----------------------------------------------------------------------------
+// Fold sir.eq with identical operands -> const 1
+// -----------------------------------------------------------------------------
+LogicalResult FoldEqSameOp::matchAndRewrite(
+    sir::EqOp op,
+    PatternRewriter &rewriter) const
+{
+    if (op.getLhs() != op.getRhs())
+        return failure();
+
+    auto *ctx = rewriter.getContext();
+    auto u256Type = sir::U256Type::get(ctx);
+    auto u256IntType = mlir::IntegerType::get(ctx, 256, mlir::IntegerType::Unsigned);
+    auto oneAttr = mlir::IntegerAttr::get(u256IntType, 1);
+    Value one = rewriter.create<sir::ConstOp>(op.getLoc(), u256Type, oneAttr);
+    rewriter.replaceOp(op, one);
+    return success();
+}
+
+// -----------------------------------------------------------------------------
+// Fold sir.eq with constant operands -> const 0/1
+// -----------------------------------------------------------------------------
+LogicalResult FoldEqConstOp::matchAndRewrite(
+    sir::EqOp op,
+    PatternRewriter &rewriter) const
+{
+    auto lhsConst = op.getLhs().getDefiningOp<sir::ConstOp>();
+    auto rhsConst = op.getRhs().getDefiningOp<sir::ConstOp>();
+    if (!lhsConst || !rhsConst)
+        return failure();
+
+    auto lhsAttr = llvm::dyn_cast<IntegerAttr>(lhsConst.getValueAttr());
+    auto rhsAttr = llvm::dyn_cast<IntegerAttr>(rhsConst.getValueAttr());
+    if (!lhsAttr || !rhsAttr)
+        return failure();
+
+    auto *ctx = rewriter.getContext();
+    auto u256Type = sir::U256Type::get(ctx);
+    auto u256IntType = mlir::IntegerType::get(ctx, 256, mlir::IntegerType::Unsigned);
+    uint64_t isEqual = lhsAttr.getValue() == rhsAttr.getValue() ? 1 : 0;
+    auto resultAttr = mlir::IntegerAttr::get(u256IntType, isEqual);
+    Value result = rewriter.create<sir::ConstOp>(op.getLoc(), u256Type, resultAttr);
+    rewriter.replaceOp(op, result);
+    return success();
+}
+
+// -----------------------------------------------------------------------------
+// Fold sir.iszero of constant -> const 0/1
+// -----------------------------------------------------------------------------
+LogicalResult FoldIsZeroConstOp::matchAndRewrite(
+    sir::IsZeroOp op,
+    PatternRewriter &rewriter) const
+{
+    auto constOp = op.getX().getDefiningOp<sir::ConstOp>();
+    if (!constOp)
+        return failure();
+
+    auto intAttr = llvm::dyn_cast<IntegerAttr>(constOp.getValueAttr());
+    if (!intAttr)
+        return failure();
+
+    auto *ctx = rewriter.getContext();
+    auto u256Type = sir::U256Type::get(ctx);
+    auto u256IntType = mlir::IntegerType::get(ctx, 256, mlir::IntegerType::Unsigned);
+    uint64_t isZero = intAttr.getValue().isZero() ? 1 : 0;
+    auto resultAttr = mlir::IntegerAttr::get(u256IntType, isZero);
+    Value result = rewriter.create<sir::ConstOp>(op.getLoc(), u256Type, resultAttr);
+    rewriter.replaceOp(op, result);
+    return success();
+}

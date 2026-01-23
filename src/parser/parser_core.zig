@@ -286,7 +286,7 @@ pub fn parseWithArena(allocator: Allocator, tokens: []const Token) ParserError!s
     // perform type resolution on the parsed AST
     const TypeResolver = @import("../ast/type_resolver/mod.zig").TypeResolver;
     var type_resolver = TypeResolver.init(allocator, ast_arena_instance.allocator(), &semantics_result.symbols);
-    defer type_resolver.deinit();
+    errdefer type_resolver.deinit();
     type_resolver.resolveTypes(nodes) catch |err| {
         // type resolution errors (especially TypeMismatch) should stop compilation
         // these indicate invalid type assignments that cannot be safely compiled
@@ -301,6 +301,7 @@ pub fn parseWithArena(allocator: Allocator, tokens: []const Token) ParserError!s
         }
         return ParserError.TypeResolutionFailed;
     };
+    type_resolver.deinit();
 
     return .{ .nodes = nodes, .arena = ast_arena_instance };
 }
@@ -330,7 +331,7 @@ pub fn parse(allocator: Allocator, tokens: []const Token) ParserError![]AstNode 
     // perform type resolution on the parsed AST
     const TypeResolver = @import("../ast/type_resolver/mod.zig").TypeResolver;
     var type_resolver = TypeResolver.init(allocator, ast_arena_instance.allocator(), &semantics_result.symbols);
-    defer type_resolver.deinit();
+    errdefer type_resolver.deinit();
     type_resolver.resolveTypes(nodes) catch |err| {
         // type resolution errors (especially TypeMismatch) should stop compilation
         // these indicate invalid type assignments that cannot be safely compiled
@@ -345,6 +346,7 @@ pub fn parse(allocator: Allocator, tokens: []const Token) ParserError![]AstNode 
         }
         return ParserError.TypeResolutionFailed;
     };
+    type_resolver.deinit();
 
     return nodes;
 }

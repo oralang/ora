@@ -158,7 +158,7 @@ def SignExtendOp : SIR_Op<"signextend"> {
 // Comparison Operations
 // ==========================================================================
 
-def LtOp : SIR_Op<"lt"> {
+def LtOp : SIR_PureOp<"lt"> {
   let summary = "Unsigned less-than";
   let arguments = (ins SIR_U256:$lhs, SIR_U256:$rhs);
   let results   = (outs SIR_U256:$res); // 0 or 1
@@ -166,7 +166,7 @@ def LtOp : SIR_Op<"lt"> {
     "$lhs `:` type($lhs) `,` $rhs `:` type($rhs) attr-dict `:` type($res)";
 }
 
-def GtOp : SIR_Op<"gt"> {
+def GtOp : SIR_PureOp<"gt"> {
   let summary = "Unsigned greater-than";
   let arguments = (ins SIR_U256:$lhs, SIR_U256:$rhs);
   let results   = (outs SIR_U256:$res);
@@ -190,7 +190,7 @@ def SGtOp : SIR_Op<"sgt"> {
     "$lhs `:` type($lhs) `,` $rhs `:` type($rhs) attr-dict `:` type($res)";
 }
 
-def EqOp : SIR_Op<"eq"> {
+def EqOp : SIR_PureOp<"eq"> {
   let summary = "Equality comparison";
   let arguments = (ins SIR_U256:$lhs, SIR_U256:$rhs);
   let results   = (outs SIR_U256:$res); // 0 or 1
@@ -198,7 +198,7 @@ def EqOp : SIR_Op<"eq"> {
     "$lhs `:` type($lhs) `,` $rhs `:` type($rhs) attr-dict `:` type($res)";
 }
 
-def IsZeroOp : SIR_Op<"iszero"> {
+def IsZeroOp : SIR_PureOp<"iszero"> {
   let summary = "Zero check";
   let arguments = (ins SIR_U256:$x);
   let results   = (outs SIR_U256:$res); // 0 or 1
@@ -219,7 +219,7 @@ def SelectOp : SIR_PureOp<"select"> {
 // Bitwise Operations
 // ==========================================================================
 
-def AndOp : SIR_Op<"and"> {
+def AndOp : SIR_PureOp<"and"> {
   let summary = "Bitwise AND";
   let arguments = (ins SIR_U256:$lhs, SIR_U256:$rhs);
   let results   = (outs SIR_U256:$res);
@@ -227,7 +227,7 @@ def AndOp : SIR_Op<"and"> {
     "$lhs `:` type($lhs) `,` $rhs `:` type($rhs) attr-dict `:` type($res)";
 }
 
-def OrOp : SIR_Op<"or"> {
+def OrOp : SIR_PureOp<"or"> {
   let summary = "Bitwise OR";
   let arguments = (ins SIR_U256:$lhs, SIR_U256:$rhs);
   let results   = (outs SIR_U256:$res);
@@ -235,7 +235,7 @@ def OrOp : SIR_Op<"or"> {
     "$lhs `:` type($lhs) `,` $rhs `:` type($rhs) attr-dict `:` type($res)";
 }
 
-def XorOp : SIR_Op<"xor"> {
+def XorOp : SIR_PureOp<"xor"> {
   let summary = "Bitwise XOR";
   let arguments = (ins SIR_U256:$lhs, SIR_U256:$rhs);
   let results   = (outs SIR_U256:$res);
@@ -259,7 +259,7 @@ def ByteOp : SIR_Op<"byte"> {
     "$i `:` type($i) `,` $x `:` type($x) attr-dict `:` type($res)";
 }
 
-def ShlOp : SIR_Op<"shl"> {
+def ShlOp : SIR_PureOp<"shl"> {
   let summary = "Logical shift left";
   let arguments = (ins SIR_U256:$shift, SIR_U256:$x);
   let results   = (outs SIR_U256:$res);
@@ -267,7 +267,7 @@ def ShlOp : SIR_Op<"shl"> {
     "$shift `:` type($shift) `,` $x `:` type($x) attr-dict `:` type($res)";
 }
 
-def ShrOp : SIR_Op<"shr"> {
+def ShrOp : SIR_PureOp<"shr"> {
   let summary = "Logical shift right";
   let arguments = (ins SIR_U256:$shift, SIR_U256:$x);
   let results   = (outs SIR_U256:$res);

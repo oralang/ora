@@ -138,6 +138,7 @@ pub fn checkExpr(
     // synthesize type first, then validate compatibility.
     // future optimization: use expected type during synthesis for better error messages.
     var typed = try synthExpr(self, expr);
+    errdefer typed.deinit(self.allocator);
     log.debug("[checkExpr] Synthesized type: category={s}\n", .{@tagName(typed.ty.category)});
 
     // special case: allow hex literals to satisfy bytes expectations
@@ -342,8 +343,9 @@ fn synthAssignment(
             },
             .FieldAccess => |*fa| {
                 // ensure field access type is resolved
-                _ = try synthFieldAccess(self, fa);
-                break :blk fa.type_info;
+                var field_typed = try synthFieldAccess(self, fa);
+                defer field_typed.deinit(self.allocator);
+                break :blk field_typed.ty;
             },
             .Index => |*idx| {
                 // ensure index type is resolved and get element type
@@ -614,7 +616,7 @@ fn synthIdentifier(
         if (sym_opt) |sym| {
             if (sym.region == .Storage or sym.region == .TStore) {
                 var slots = SlotSet.init(self.allocator);
-                try slots.add(self.allocator, sym.name);
+                try slots.addWithSrc(self.allocator, sym.name, @src());
                 eff = Effect.reads(slots);
             }
         }
@@ -1107,7 +1109,7 @@ fn regionReadEffect(self: *CoreResolver, expr: *ast.Expressions.ExprNode, region
     if (region == .Storage or region == .TStore) {
         if (resolveRegionSlot(self, expr, region)) |slot_name| {
             var slots = SlotSet.init(self.allocator);
-            try slots.add(self.allocator, slot_name);
+            try slots.addWithSrc(self.allocator, slot_name, @src());
             return Effect.reads(slots);
         }
     }
@@ -1118,7 +1120,7 @@ fn regionWriteEffect(self: *CoreResolver, expr: *ast.Expressions.ExprNode, regio
     if (region == .Storage or region == .TStore) {
         if (resolveRegionSlot(self, expr, region)) |slot_name| {
             var slots = SlotSet.init(self.allocator);
-            try slots.add(self.allocator, slot_name);
+            try slots.addWithSrc(self.allocator, slot_name, @src());
             return Effect.writes(slots);
         }
     }

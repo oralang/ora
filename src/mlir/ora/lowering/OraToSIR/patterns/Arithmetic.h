@@ -464,5 +464,35 @@ namespace mlir
                 PatternRewriter &rewriter) const override;
         };
 
+        class FoldEqSameOp : public OpRewritePattern<sir::EqOp>
+        {
+        public:
+            using OpRewritePattern::OpRewritePattern;
+
+            LogicalResult matchAndRewrite(
+                sir::EqOp op,
+                PatternRewriter &rewriter) const override;
+        };
+
+        class FoldIsZeroConstOp : public OpRewritePattern<sir::IsZeroOp>
+        {
+        public:
+            using OpRewritePattern::OpRewritePattern;
+
+            LogicalResult matchAndRewrite(
+                sir::IsZeroOp op,
+                PatternRewriter &rewriter) const override;
+        };
+
+        class FoldEqConstOp : public OpRewritePattern<sir::EqOp>
+        {
+        public:
+            using OpRewritePattern::OpRewritePattern;
+
+            LogicalResult matchAndRewrite(
+                sir::EqOp op,
+                PatternRewriter &rewriter) const override;
+        };
+
     } // namespace ora
 } // namespace mlir

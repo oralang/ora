@@ -32,6 +32,16 @@ namespace mlir
             auto globalOp = symbolTable.lookup<ora::GlobalOp>(name);
             if (!globalOp)
             {
+                auto slotsAttr = module->getAttrOfType<DictionaryAttr>("ora.global_slots");
+                if (!slotsAttr)
+                    return std::nullopt;
+                auto slotAttr = slotsAttr.get(name);
+                if (!slotAttr)
+                    return std::nullopt;
+                if (auto intAttr = llvm::dyn_cast<IntegerAttr>(slotAttr))
+                {
+                    return intAttr.getUInt();
+                }
                 return std::nullopt;
             }
 

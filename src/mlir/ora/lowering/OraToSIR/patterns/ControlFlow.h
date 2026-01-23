@@ -25,6 +25,56 @@ namespace mlir
                 ora::ReturnOp op,
                 typename ora::ReturnOp::Adaptor adaptor,
                 ConversionPatternRewriter &rewriter) const override;
+
+            LogicalResult matchAndRewrite(
+                ora::ReturnOp op,
+                OneToNOpAdaptor adaptor,
+                ConversionPatternRewriter &rewriter) const override;
+        };
+
+        class ConvertReturnOpRaw : public OpConversionPattern<ora::ReturnOp>
+        {
+        public:
+            using OpConversionPattern::OpConversionPattern;
+
+            LogicalResult matchAndRewrite(
+                ora::ReturnOp op,
+                typename ora::ReturnOp::Adaptor adaptor,
+                ConversionPatternRewriter &rewriter) const override;
+        };
+
+        class ConvertReturnOpFallback final : public ConversionPattern
+        {
+        public:
+            ConvertReturnOpFallback(const TypeConverter *typeConverter, MLIRContext *ctx, PatternBenefit benefit = 1)
+                : ConversionPattern(ora::ReturnOp::getOperationName(), benefit, ctx),
+                  typeConverter(typeConverter)
+            {
+            }
+
+            LogicalResult matchAndRewrite(
+                Operation *op,
+                ArrayRef<Value> operands,
+                ConversionPatternRewriter &rewriter) const override;
+
+        private:
+            const TypeConverter *typeConverter;
+        };
+
+        class ConvertReturnOpPre : public OpRewritePattern<ora::ReturnOp>
+        {
+        public:
+            ConvertReturnOpPre(const TypeConverter *typeConverter, MLIRContext *ctx)
+                : OpRewritePattern<ora::ReturnOp>(ctx), typeConverter(typeConverter)
+            {
+            }
+
+            LogicalResult matchAndRewrite(
+                ora::ReturnOp op,
+                PatternRewriter &rewriter) const override;
+
+        private:
+            const TypeConverter *typeConverter;
         };
 
         class ConvertFuncOp : public OpConversionPattern<mlir::func::FuncOp>
@@ -289,6 +339,46 @@ namespace mlir
                 ora::ErrorGetErrorOp op,
                 typename ora::ErrorGetErrorOp::Adaptor adaptor,
                 ConversionPatternRewriter &rewriter) const override;
+        };
+
+        class FoldCondBrSameDestOp : public OpRewritePattern<sir::CondBrOp>
+        {
+        public:
+            using OpRewritePattern::OpRewritePattern;
+
+            LogicalResult matchAndRewrite(
+                sir::CondBrOp op,
+                PatternRewriter &rewriter) const override;
+        };
+
+        class FoldCondBrDoubleIsZeroOp : public OpRewritePattern<sir::CondBrOp>
+        {
+        public:
+            using OpRewritePattern::OpRewritePattern;
+
+            LogicalResult matchAndRewrite(
+                sir::CondBrOp op,
+                PatternRewriter &rewriter) const override;
+        };
+
+        class FoldCondBrConstOp : public OpRewritePattern<sir::CondBrOp>
+        {
+        public:
+            using OpRewritePattern::OpRewritePattern;
+
+            LogicalResult matchAndRewrite(
+                sir::CondBrOp op,
+                PatternRewriter &rewriter) const override;
+        };
+
+        class FoldBrToBrOp : public OpRewritePattern<sir::BrOp>
+        {
+        public:
+            using OpRewritePattern::OpRewritePattern;
+
+            LogicalResult matchAndRewrite(
+                sir::BrOp op,
+                PatternRewriter &rewriter) const override;
         };
 
     } // namespace ora

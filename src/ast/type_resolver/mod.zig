@@ -553,14 +553,13 @@ pub const TypeResolver = struct {
         // note: Function call argument validation happens in synthCall
         // via function_registry which is set on core_resolver
 
-        const stored_effect = functionEffectFromCore(self.allocator, func_effect);
+        const stored_effect = functionEffectFromCore(self.allocator, &func_effect);
         if (self.symbol_table.function_effects.getPtr(function.name)) |existing| {
             existing.deinit(self.allocator);
             existing.* = stored_effect;
         } else {
             try self.symbol_table.function_effects.put(function.name, stored_effect);
         }
-        func_effect.deinit(self.allocator);
 
         // validate return statements in function body
         try self.validateReturnStatements(function);
@@ -732,9 +731,9 @@ pub const TypeResolver = struct {
 
     fn functionEffectFromCore(
         allocator: std.mem.Allocator,
-        eff: Effect,
+        eff: *Effect,
     ) FunctionEffect {
-        return switch (eff) {
+        const result = switch (eff.*) {
             .Pure => FunctionEffect.pure(),
             .Reads => |slots| blk: {
                 var list = std.ArrayList([]const u8){};
@@ -762,6 +761,9 @@ pub const TypeResolver = struct {
                 break :blk FunctionEffect.readsWrites(reads, writes);
             },
         };
+        eff.deinit(allocator);
+        eff.* = Effect.pure();
+        return result;
     }
 
     /// Validate return statements in a block using statement-based key
