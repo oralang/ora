@@ -278,13 +278,10 @@ namespace mlir
                                                         return v;
                                                     if (auto intTy = dyn_cast<mlir::IntegerType>(v.getType()))
                                                     {
-                                                        if (intTy.getWidth() == 1)
-                                                        {
-                                                            builder.getContext()->getOrLoadDialect<mlir::arith::ArithDialect>();
-                                                            auto i256 = mlir::IntegerType::get(builder.getContext(), 256);
-                                                            Value ext = builder.create<mlir::arith::ExtUIOp>(loc, i256, v);
-                                                            return builder.create<sir::BitcastOp>(loc, u256Type, ext);
-                                                        }
+                                                    if (intTy.getWidth() == 1)
+                                                    {
+                                                            return builder.create<sir::BitcastOp>(loc, u256Type, v);
+                                                    }
                                                     }
                                                     return builder.create<sir::BitcastOp>(loc, u256Type, v);
                                                 };
@@ -314,10 +311,7 @@ namespace mlir
                                             {
                                                 if (intType.getWidth() == 1)
                                                 {
-                                                    builder.getContext()->getOrLoadDialect<mlir::arith::ArithDialect>();
-                                                    auto i256 = mlir::IntegerType::get(builder.getContext(), 256);
-                                                    Value ext = builder.create<mlir::arith::ExtUIOp>(loc, i256, input);
-                                                    return builder.create<sir::BitcastOp>(loc, type, ext);
+                                                    return builder.create<sir::BitcastOp>(loc, type, input);
                                                 }
                                                 Value value = builder.create<sir::BitcastOp>(loc, type, input);
                                                 if (intType.getWidth() < 256)

@@ -1216,7 +1216,14 @@ LogicalResult ConvertCallOp::matchAndRewrite(
     }
 
     SmallVector<Type> convertedTypes;
-    if (failed(typeConverter->convertType(oldResultTypes.front(), convertedTypes)) || convertedTypes.empty())
+    if (llvm::isa<ora::ErrorUnionType>(oldResultTypes.front()))
+    {
+        auto ctx = op.getContext();
+        auto u256Type = sir::U256Type::get(ctx);
+        convertedTypes.push_back(u256Type);
+        convertedTypes.push_back(u256Type);
+    }
+    else if (failed(typeConverter->convertType(oldResultTypes.front(), convertedTypes)) || convertedTypes.empty())
     {
         if (Type converted = typeConverter->convertType(oldResultTypes.front()))
             convertedTypes.push_back(converted);
@@ -1414,6 +1421,31 @@ static LogicalResult convertOraReturn(
     {
         if (!isNarrowErrorUnion(errType))
         {
+            if (operands.size() == 1)
+            {
+                if (auto cast = operands[0].getDefiningOp<mlir::UnrealizedConversionCastOp>())
+                {
+                    if (cast.getNumOperands() == 2)
+                    {
+                        llvm::errs() << "[OraToSIR] ConvertReturnOp: wide error_union split (cast operands) at " << loc << "\n";
+                        Value tag = ensureU256(rewriter, loc, cast.getOperand(0));
+                        Value payload = ensureU256(rewriter, loc, cast.getOperand(1));
+
+                        auto sizeAttr = mlir::IntegerAttr::get(ui64Type, 64);
+                        Value sizeConst = rewriter.create<sir::ConstOp>(loc, u256Type, sizeAttr);
+                        Value mem = rewriter.create<sir::MallocOp>(loc, ptrType, sizeConst);
+
+                        rewriter.create<sir::StoreOp>(loc, mem, tag);
+                        Value offset = rewriter.create<sir::ConstOp>(loc, u256Type, mlir::IntegerAttr::get(ui64Type, 32));
+                        Value mem2 = rewriter.create<sir::AddPtrOp>(loc, ptrType, mem, offset);
+                        rewriter.create<sir::StoreOp>(loc, mem2, payload);
+
+                        rewriter.create<sir::ReturnOp>(loc, mem, sizeConst);
+                        rewriter.eraseOp(op);
+                        return success();
+                    }
+                }
+            }
             if (operands.size() == 2)
             {
                 llvm::errs() << "[OraToSIR] ConvertReturnOp: wide error_union split (2 operands) at " << loc << "\n";
@@ -1647,6 +1679,8 @@ LogicalResult ConvertReturnOpPre::matchAndRewrite(
     auto errType = llvm::dyn_cast<ora::ErrorUnionType>(op.getOperand(0).getType());
     if (!errType || isNarrowErrorUnion(errType))
         return failure();
+    if (op.getOperand(0).getDefiningOp<scf::IfOp>())
+        return failure();
     SmallVector<Value> operands;
     operands.append(op.getOperands().begin(), op.getOperands().end());
     return convertOraReturn(op, operands, typeConverter, rewriter);
@@ -1765,14 +1799,43 @@ LogicalResult ConvertIfOp::matchAndRewrite(
             elseYields.push_back(y);
     });
 
-    Block *thenBlock = op.getThenRegion().empty() ? nullptr : &op.getThenRegion().front();
-    Block *elseBlock = op.getElseRegion().empty() ? nullptr : &op.getElseRegion().front();
+    SmallVector<Block *> thenBlocks;
+    SmallVector<Block *> elseBlocks;
+    for (Block &b : op.getThenRegion())
+        thenBlocks.push_back(&b);
+    for (Block &b : op.getElseRegion())
+        elseBlocks.push_back(&b);
+
+    Block *thenBlock = thenBlocks.empty() ? nullptr : thenBlocks.front();
+    Block *elseBlock = elseBlocks.empty() ? nullptr : elseBlocks.front();
     rewriter.inlineRegionBefore(op.getThenRegion(), *parentRegion, mergeBlock->getIterator());
     rewriter.inlineRegionBefore(op.getElseRegion(), *parentRegion, mergeBlock->getIterator());
     if (!thenBlock)
         thenBlock = rewriter.createBlock(parentRegion, mergeBlock->getIterator());
     if (!elseBlock)
         elseBlock = rewriter.createBlock(parentRegion, mergeBlock->getIterator());
+
+    auto lowerReturnsInBlocks = [&](ArrayRef<Block *> blocks) -> LogicalResult {
+        for (Block *block : blocks)
+        {
+            for (auto &blockOp : llvm::make_early_inc_range(*block))
+            {
+                auto retOp = llvm::dyn_cast<ora::ReturnOp>(&blockOp);
+                if (!retOp)
+                    continue;
+                SmallVector<Value> rawOperands;
+                rawOperands.append(retOp.getOperands().begin(), retOp.getOperands().end());
+                if (failed(convertOraReturn(retOp, rawOperands, tc, rewriter)))
+                    return rewriter.notifyMatchFailure(retOp, "failed to lower ora.return in if region");
+            }
+        }
+        return success();
+    };
+
+    if (failed(lowerReturnsInBlocks(thenBlocks)))
+        return failure();
+    if (failed(lowerReturnsInBlocks(elseBlocks)))
+        return failure();
 
     auto replaceYield = [&](ArrayRef<ora::YieldOp> yields, Block *block) -> LogicalResult {
         for (auto y : yields)
@@ -1822,6 +1885,7 @@ LogicalResult ConvertIfOp::matchAndRewrite(
     rewriter.setInsertionPointToEnd(parentBlock);
     Value condU256 = toCondU256(rewriter, loc, adaptor.getCondition());
     rewriter.create<sir::CondBrOp>(loc, condU256, ValueRange{}, ValueRange{}, thenBlock, elseBlock);
+
     rewriter.setInsertionPointToStart(mergeBlock);
     op->replaceAllUsesWith(mergeBlock->getArguments());
     rewriter.eraseOp(op);
@@ -2672,13 +2736,12 @@ LogicalResult ConvertScfIfOp::matchAndRewrite(
         auto retOp = llvm::dyn_cast<ora::ReturnOp>(&blockOp);
         if (!retOp)
             continue;
-        llvm::errs() << "[OraToSIR] ConvertScfIfOp: lowering ora.return in mergeBlock at "
-                     << retOp.getLoc() << "\n";
+
         SmallVector<Value> rawOperands;
-        if (retOp.getNumOperands() == 1 && resultTypeGroups.size() == 1 && resultTypeGroups[0].size() == 2)
+        if (retOp.getNumOperands() == 1 &&
+            resultTypeGroups.size() == 1 &&
+            resultTypeGroups[0].size() == 2)
         {
-            llvm::errs() << "[OraToSIR] ConvertScfIfOp: using merge args for wide return at "
-                         << retOp.getLoc() << "\n";
             rawOperands.push_back(mergeBlock->getArgument(0));
             rawOperands.push_back(mergeBlock->getArgument(1));
         }
@@ -2686,6 +2749,7 @@ LogicalResult ConvertScfIfOp::matchAndRewrite(
         {
             rawOperands.append(retOp.getOperands().begin(), retOp.getOperands().end());
         }
+
         if (failed(convertOraReturn(retOp, rawOperands, tc, rewriter)))
             return rewriter.notifyMatchFailure(retOp, "failed to lower ora.return in scf.if merge block");
     }
