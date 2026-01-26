@@ -77,6 +77,96 @@ namespace mlir
             const TypeConverter *typeConverter;
         };
 
+        class NormalizeErrorOkOp : public OpRewritePattern<ora::ErrorOkOp>
+        {
+        public:
+            using OpRewritePattern::OpRewritePattern;
+
+            LogicalResult matchAndRewrite(
+                ora::ErrorOkOp op,
+                PatternRewriter &rewriter) const override;
+        };
+
+        class NormalizeErrorErrOp : public OpRewritePattern<ora::ErrorErrOp>
+        {
+        public:
+            using OpRewritePattern::OpRewritePattern;
+
+            LogicalResult matchAndRewrite(
+                ora::ErrorErrOp op,
+                PatternRewriter &rewriter) const override;
+        };
+
+        class NormalizeErrorIsErrorOp : public OpRewritePattern<ora::ErrorIsErrorOp>
+        {
+        public:
+            using OpRewritePattern::OpRewritePattern;
+
+            LogicalResult matchAndRewrite(
+                ora::ErrorIsErrorOp op,
+                PatternRewriter &rewriter) const override;
+        };
+
+        class NormalizeErrorUnwrapOp : public OpRewritePattern<ora::ErrorUnwrapOp>
+        {
+        public:
+            using OpRewritePattern::OpRewritePattern;
+
+            LogicalResult matchAndRewrite(
+                ora::ErrorUnwrapOp op,
+                PatternRewriter &rewriter) const override;
+        };
+
+        class NormalizeErrorGetErrorOp : public OpRewritePattern<ora::ErrorGetErrorOp>
+        {
+        public:
+            using OpRewritePattern::OpRewritePattern;
+
+            LogicalResult matchAndRewrite(
+                ora::ErrorGetErrorOp op,
+                PatternRewriter &rewriter) const override;
+        };
+
+        class NormalizeErrorUnionCastOp : public OpRewritePattern<mlir::UnrealizedConversionCastOp>
+        {
+        public:
+            using OpRewritePattern::OpRewritePattern;
+
+            LogicalResult matchAndRewrite(
+                mlir::UnrealizedConversionCastOp op,
+                PatternRewriter &rewriter) const override;
+        };
+
+        class NormalizeReturnOp : public OpRewritePattern<ora::ReturnOp>
+        {
+        public:
+            using OpRewritePattern::OpRewritePattern;
+
+            LogicalResult matchAndRewrite(
+                ora::ReturnOp op,
+                PatternRewriter &rewriter) const override;
+        };
+
+        class NormalizeScfYieldOp : public OpRewritePattern<mlir::scf::YieldOp>
+        {
+        public:
+            using OpRewritePattern::OpRewritePattern;
+
+            LogicalResult matchAndRewrite(
+                mlir::scf::YieldOp op,
+                PatternRewriter &rewriter) const override;
+        };
+
+        class NormalizeOraYieldOp : public OpRewritePattern<ora::YieldOp>
+        {
+        public:
+            using OpRewritePattern::OpRewritePattern;
+
+            LogicalResult matchAndRewrite(
+                ora::YieldOp op,
+                PatternRewriter &rewriter) const override;
+        };
+
         class ConvertFuncOp : public OpConversionPattern<mlir::func::FuncOp>
         {
         public:
@@ -234,12 +324,30 @@ namespace mlir
         class ConvertScfIfOp : public OpConversionPattern<mlir::scf::IfOp>
         {
         public:
-            using OpConversionPattern::OpConversionPattern;
+            ConvertScfIfOp(TypeConverter &typeConverter,
+                           MLIRContext *ctx,
+                           bool lowerReturnsInMergeBlock = true)
+                : OpConversionPattern<mlir::scf::IfOp>(typeConverter, ctx),
+                  lowerReturnsInMergeBlock(lowerReturnsInMergeBlock)
+            {
+            }
+
+            ConvertScfIfOp(TypeConverter &typeConverter,
+                           MLIRContext *ctx,
+                           bool lowerReturnsInMergeBlock,
+                           PatternBenefit benefit)
+                : OpConversionPattern<mlir::scf::IfOp>(typeConverter, ctx, benefit),
+                  lowerReturnsInMergeBlock(lowerReturnsInMergeBlock)
+            {
+            }
 
             LogicalResult matchAndRewrite(
                 mlir::scf::IfOp op,
                 typename mlir::scf::IfOp::Adaptor adaptor,
                 ConversionPatternRewriter &rewriter) const override;
+
+        private:
+            bool lowerReturnsInMergeBlock = true;
         };
 
         class ConvertScfForOp : public OpConversionPattern<mlir::scf::ForOp>

@@ -114,7 +114,7 @@ static void assignGlobalSlots(ModuleOp module)
                 { assignInBlock(contractOp.getBody().front()); });
 
     if (module.getBody()->empty())
-        return;
+        // Phase 1: proceed with Ora -> SIR conversion after normalization.
     assignInBlock(module.getBodyRegion().front());
 
     if (!slotAttrs.empty())
@@ -328,6 +328,7 @@ public:
         const bool enable_memref_alloc = true;
         const bool enable_memref_load = true;
         const bool enable_memref_store = true;
+        const bool enable_struct = false;
         const bool enable_storage = true;
         const bool enable_return = true;
         const bool enable_control_flow = true;
@@ -388,6 +389,9 @@ public:
             patterns.add<ConvertIncreasesOp>(typeConverter, ctx);
             patterns.add<ConvertHavocOp>(typeConverter, ctx);
             patterns.add<ConvertQuantifiedOp>(typeConverter, ctx);
+        }
+        if (enable_struct)
+        {
             patterns.add<ConvertStructInstantiateOp>(typeConverter, ctx);
             patterns.add<ConvertStructInitOp>(typeConverter, ctx);
             patterns.add<ConvertStructFieldExtractOp>(typeConverter, ctx);
@@ -452,23 +456,36 @@ public:
         // Ora ops are illegal by default; no Ora ops should remain after conversion
         target.addIllegalDialect<ora::OraDialect>();
         target.addIllegalOp<ora::ContractOp>();
-        target.addIllegalOp<ora::StructDeclOp>();
         target.addLegalOp<ora::ReturnOp>();
         target.addLegalOp<ora::ErrorOkOp>();
         target.addLegalOp<ora::ErrorErrOp>();
         target.addLegalOp<ora::ErrorIsErrorOp>();
         target.addLegalOp<ora::ErrorUnwrapOp>();
         target.addLegalOp<ora::ErrorGetErrorOp>();
+        target.addLegalOp<ora::IfOp>();
+        target.addLegalOp<ora::YieldOp>();
+        target.addLegalOp<ora::ContinueOp>();
+        target.addLegalOp<ora::TryStmtOp>();
+        target.addLegalOp<ora::SwitchOp>();
+        if (!enable_struct)
+        {
+            target.addLegalOp<ora::StructInstantiateOp>();
+            target.addLegalOp<ora::StructInitOp>();
+            target.addLegalOp<ora::StructFieldExtractOp>();
+            target.addLegalOp<ora::StructFieldUpdateOp>();
+            target.addLegalOp<ora::StructDeclOp>();
+        }
         // All sload/sstore must be legalized; no dynamic legality allowed.
         DBG("Marked Ora dialect as illegal");
-        // SIR-only: cf/scf must be eliminated before final output.
-        target.addIllegalDialect<mlir::cf::ControlFlowDialect>();
-        DBG("Marked cf dialect as illegal");
+        // Phase 1: keep cf/scf/tensor/arith legal; lower later.
+        target.addLegalDialect<mlir::cf::ControlFlowDialect>();
+        DBG("Marked cf dialect as legal");
         target.addLegalDialect<mlir::scf::SCFDialect>();
         DBG("Marked scf dialect as legal");
-        target.addIllegalDialect<mlir::tensor::TensorDialect>();
+        target.addLegalDialect<mlir::tensor::TensorDialect>();
         DBG("Marked tensor dialect as legal");
-        target.addIllegalDialect<mlir::arith::ArithDialect>();
+        target.addLegalDialect<mlir::memref::MemRefDialect>();
+        target.addLegalDialect<mlir::arith::ArithDialect>();
 
         target.addDynamicallyLegalDialect<mlir::func::FuncDialect>(
             [&](Operation *op)
@@ -529,6 +546,25 @@ public:
                     oraReturnOps++;
                 } });
         DBG("Before conversion: " << totalOps << " total ops, " << oraOps << " Ora ops, " << oraReturnOps << " ora.return ops");
+
+        // Phase 0 only: normalize error_union ops into explicit packing/unpacking.
+        {
+            RewritePatternSet phase0Patterns(ctx);
+            phase0Patterns.add<NormalizeErrorOkOp>(ctx);
+            phase0Patterns.add<NormalizeErrorErrOp>(ctx);
+            phase0Patterns.add<NormalizeErrorIsErrorOp>(ctx);
+            phase0Patterns.add<NormalizeErrorUnwrapOp>(ctx);
+            phase0Patterns.add<NormalizeErrorGetErrorOp>(ctx);
+            phase0Patterns.add<NormalizeErrorUnionCastOp>(ctx);
+            phase0Patterns.add<NormalizeScfYieldOp>(ctx);
+            phase0Patterns.add<NormalizeOraYieldOp>(ctx);
+            phase0Patterns.add<NormalizeReturnOp>(ctx);
+            if (failed(applyPatternsGreedily(module, std::move(phase0Patterns))))
+            {
+                signalPassFailure();
+                return;
+            }
+        }
 
         // Debug: Walk the module to see what map operations exist
         module.walk([&](Operation *op)
@@ -604,6 +640,8 @@ public:
 
         DBG("Conversion completed successfully!");
 
+        // Continue into Phase 2 (error-union control flow lowering).
+
         // Pre-pass: lower "safe" ora.return cases (ConvertReturnOpPre is guarded).
         {
             RewritePatternSet prePatterns(ctx);
@@ -618,7 +656,6 @@ public:
         // Second phase: lower any remaining ora.return after control flow rewrites.
         {
             RewritePatternSet phase2Patterns(ctx);
-            phase2Patterns.add<ConvertScfIfOp>(typeConverter, ctx);
             phase2Patterns.add<ConvertErrorOkOp>(typeConverter, ctx);
             phase2Patterns.add<ConvertErrorErrOp>(typeConverter, ctx);
             phase2Patterns.add<ConvertErrorIsErrorOp>(typeConverter, ctx);
@@ -626,9 +663,6 @@ public:
             phase2Patterns.add<ConvertErrorGetErrorOp>(typeConverter, ctx);
             phase2Patterns.add<ConvertArithExtUIOp>(typeConverter, ctx);
             phase2Patterns.add<ConvertArithIndexCastUIOp>(typeConverter, ctx);
-            phase2Patterns.add<ConvertReturnOpFallback>(&typeConverter, ctx, PatternBenefit(100));
-            phase2Patterns.add<ConvertReturnOpRaw>(typeConverter, ctx);
-            phase2Patterns.add<ConvertReturnOp>(typeConverter, ctx);
 
             ConversionTarget phase2Target(*ctx);
             phase2Target.addLegalDialect<mlir::BuiltinDialect>();
@@ -636,15 +670,23 @@ public:
             phase2Target.addLegalDialect<mlir::func::FuncDialect>();
             phase2Target.addLegalDialect<mlir::cf::ControlFlowDialect>();
             phase2Target.addLegalDialect<mlir::tensor::TensorDialect>();
+            phase2Target.addLegalDialect<mlir::memref::MemRefDialect>();
             phase2Target.addLegalOp<mlir::UnrealizedConversionCastOp>();
-            phase2Target.addIllegalDialect<mlir::scf::SCFDialect>();
-            phase2Target.addIllegalDialect<mlir::arith::ArithDialect>();
-            phase2Target.addIllegalOp<ora::ReturnOp>();
+            // Keep scf/arith legal in this phase; only lower error-union control flow.
+            phase2Target.addLegalDialect<mlir::scf::SCFDialect>();
+            phase2Target.addLegalDialect<mlir::arith::ArithDialect>();
+            phase2Target.addLegalOp<ora::ReturnOp>();
             phase2Target.addIllegalOp<ora::ErrorOkOp>();
             phase2Target.addIllegalOp<ora::ErrorErrOp>();
             phase2Target.addIllegalOp<ora::ErrorIsErrorOp>();
             phase2Target.addIllegalOp<ora::ErrorUnwrapOp>();
             phase2Target.addIllegalOp<ora::ErrorGetErrorOp>();
+            // Keep higher-level control flow legal for now.
+            phase2Target.addLegalOp<ora::IfOp>();
+            phase2Target.addLegalOp<ora::YieldOp>();
+            phase2Target.addLegalOp<ora::ContinueOp>();
+            phase2Target.addLegalOp<ora::TryStmtOp>();
+            phase2Target.addLegalOp<ora::SwitchOp>();
             phase2Target.addLegalDialect<ora::OraDialect>();
 
             if (failed(applyFullConversion(module, phase2Target, std::move(phase2Patterns))))
@@ -654,46 +696,95 @@ public:
             }
         }
 
-        // Phase 3: cleanup remaining arith casts emitted by materializations.
+        // Phase 3a: lower scf.if results carrying error unions (leave ora.return for now).
         {
-            RewritePatternSet phase3Patterns(ctx);
-            phase3Patterns.add<ConvertArithExtUIOp>(typeConverter, ctx);
-            phase3Patterns.add<ConvertArithIndexCastUIOp>(typeConverter, ctx);
-            phase3Patterns.add<ConvertArithTruncIOp>(typeConverter, ctx);
+            RewritePatternSet phase3aPatterns(ctx);
+            phase3aPatterns.add<ConvertScfIfOp>(typeConverter, ctx, /*lowerReturnsInMergeBlock=*/false, PatternBenefit(10));
 
-            ConversionTarget phase3Target(*ctx);
-            phase3Target.addLegalDialect<mlir::BuiltinDialect>();
-            phase3Target.addLegalDialect<sir::SIRDialect>();
-            phase3Target.addLegalDialect<mlir::func::FuncDialect>();
-            phase3Target.addLegalDialect<mlir::cf::ControlFlowDialect>();
-            phase3Target.addLegalDialect<mlir::scf::SCFDialect>();
-            phase3Target.addLegalDialect<mlir::tensor::TensorDialect>();
-            phase3Target.addLegalOp<mlir::UnrealizedConversionCastOp>();
-            phase3Target.addIllegalDialect<mlir::arith::ArithDialect>();
-            phase3Target.addIllegalOp<mlir::arith::ExtUIOp>();
-            phase3Target.addIllegalOp<mlir::arith::IndexCastUIOp>();
-            phase3Target.addIllegalOp<mlir::arith::TruncIOp>();
-            phase3Target.addLegalDialect<ora::OraDialect>();
+            ConversionTarget phase3aTarget(*ctx);
+            phase3aTarget.addLegalDialect<mlir::BuiltinDialect>();
+            phase3aTarget.addLegalDialect<sir::SIRDialect>();
+            phase3aTarget.addLegalDialect<mlir::func::FuncDialect>();
+            phase3aTarget.addLegalDialect<mlir::cf::ControlFlowDialect>();
+            phase3aTarget.addLegalDialect<mlir::tensor::TensorDialect>();
+            phase3aTarget.addLegalDialect<mlir::memref::MemRefDialect>();
+            phase3aTarget.addLegalDialect<mlir::arith::ArithDialect>();
+            phase3aTarget.addLegalDialect<mlir::scf::SCFDialect>();
+            phase3aTarget.addLegalOp<mlir::UnrealizedConversionCastOp>();
+            phase3aTarget.addIllegalOp<mlir::scf::IfOp>();
+            phase3aTarget.addLegalOp<ora::ReturnOp>();
+            phase3aTarget.addLegalOp<ora::IfOp>();
+            phase3aTarget.addLegalOp<ora::YieldOp>();
+            phase3aTarget.addLegalOp<ora::ContinueOp>();
+            phase3aTarget.addLegalOp<ora::TryStmtOp>();
+            phase3aTarget.addLegalOp<ora::SwitchOp>();
+            phase3aTarget.addLegalDialect<ora::OraDialect>();
 
-            if (failed(applyFullConversion(module, phase3Target, std::move(phase3Patterns))))
+            if (failed(applyFullConversion(module, phase3aTarget, std::move(phase3aPatterns))))
             {
                 signalPassFailure();
                 return;
             }
         }
 
-        // Guard: fail if any illegal dialect ops remain after conversion.
+        // Phase 3b: lower ora.return after scf.if has been normalized.
+        {
+            RewritePatternSet phase3bPatterns(ctx);
+            phase3bPatterns.add<ConvertReturnOpFallback>(&typeConverter, ctx, PatternBenefit(1));
+            phase3bPatterns.add<ConvertReturnOpRaw>(typeConverter, ctx, PatternBenefit(1));
+            phase3bPatterns.add<ConvertReturnOp>(typeConverter, ctx, PatternBenefit(1));
+
+            ConversionTarget phase3bTarget(*ctx);
+            phase3bTarget.addLegalDialect<mlir::BuiltinDialect>();
+            phase3bTarget.addLegalDialect<sir::SIRDialect>();
+            phase3bTarget.addLegalDialect<mlir::func::FuncDialect>();
+            phase3bTarget.addLegalDialect<mlir::cf::ControlFlowDialect>();
+            phase3bTarget.addLegalDialect<mlir::tensor::TensorDialect>();
+            phase3bTarget.addLegalDialect<mlir::memref::MemRefDialect>();
+            phase3bTarget.addLegalDialect<mlir::arith::ArithDialect>();
+            phase3bTarget.addLegalDialect<mlir::scf::SCFDialect>();
+            phase3bTarget.addLegalOp<mlir::UnrealizedConversionCastOp>();
+            phase3bTarget.addIllegalOp<ora::ReturnOp>();
+            phase3bTarget.addLegalOp<ora::IfOp>();
+            phase3bTarget.addLegalOp<ora::YieldOp>();
+            phase3bTarget.addLegalOp<ora::ContinueOp>();
+            phase3bTarget.addLegalOp<ora::TryStmtOp>();
+            phase3bTarget.addLegalOp<ora::SwitchOp>();
+            phase3bTarget.addLegalDialect<ora::OraDialect>();
+
+            if (failed(applyFullConversion(module, phase3bTarget, std::move(phase3bPatterns))))
+            {
+                signalPassFailure();
+                return;
+            }
+        }
+
+
+        // Guard: fail if any ops remain that should have been lowered by this stage.
         bool illegalFound = false;
         module.walk([&](Operation *op)
                     {
             if (op->getDialect())
             {
                 StringRef ns = op->getDialect()->getNamespace();
-                if (ns == "ora" || ns == "cf" || ns == "scf" || ns == "tensor" || ns == "arith" || ns == "memref")
+                // Control-flow and high-level ops are allowed to remain for later phases.
+                if (ns == "cf" || ns == "scf" || ns == "tensor" || ns == "arith" || ns == "memref")
+                    return;
+
+                if (ns == "ora")
                 {
-                    llvm::errs() << "[OraToSIR] ERROR: Illegal op remains: " << op->getName()
-                                 << " at " << op->getLoc() << "\n";
-                    illegalFound = true;
+                    // These should be gone by now.
+                    if (isa<ora::ReturnOp,
+                            ora::ErrorOkOp,
+                            ora::ErrorErrOp,
+                            ora::ErrorIsErrorOp,
+                            ora::ErrorUnwrapOp,
+                            ora::ErrorGetErrorOp>(op))
+                    {
+                        llvm::errs() << "[OraToSIR] ERROR: Illegal op remains: " << op->getName()
+                                     << " at " << op->getLoc() << "\n";
+                        illegalFound = true;
+                    }
                 }
             } });
         if (illegalFound)

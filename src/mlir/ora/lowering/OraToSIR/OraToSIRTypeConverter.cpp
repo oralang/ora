@@ -134,6 +134,20 @@ namespace mlir
                     return sir::U256Type::get(ctx);
                 return Type(); });
 
+            // Preserve structs in phase 1 (no lowering yet).
+            addConversion([](ora::StructType type) -> Type
+                          { return type; });
+
+            // Preserve tensor/memref types in phase 1 (no element conversion yet).
+            addConversion([](RankedTensorType type) -> Type
+                          { return type; });
+            addConversion([](UnrankedTensorType type) -> Type
+                          { return type; });
+            addConversion([](MemRefType type) -> Type
+                          { return type; });
+            addConversion([](UnrankedMemRefType type) -> Type
+                          { return type; });
+
             // ora.map → sir.u256 (map values live in storage, represent as u256 handles)
             addConversion([](ora::MapType type) -> Type
                           {
@@ -143,9 +157,9 @@ namespace mlir
                 }
                 return sir::U256Type::get(ctx); });
 
-            // ora.struct → sir.ptr<1> (structs lowered to packed memory)
+            // ora.struct passes through in phase 1 (no lowering yet).
             addConversion([&](ora::StructType type) -> Type
-                          { return sir::PtrType::get(type.getDialect().getContext(), /*addrSpace*/ 1); });
+                          { return type; });
 
             // refinement types → base type (erased to underlying representation)
             addConversion([this](ora::MinValueType type) -> Type
@@ -182,17 +196,11 @@ namespace mlir
             addConversion([](mlir::NoneType type) -> Type { return type; });
             addConversion([](mlir::IndexType type) -> Type { return type; });
 
-            // Tensor types represent storage array handles (lower to base slot u256).
+            // Tensor/memref types pass through in phase 1 (no lowering yet).
             addConversion([](mlir::RankedTensorType type) -> Type
-                          { return sir::U256Type::get(type.getContext()); });
-
-            // MemRef types are lowered to memory pointers.
+                          { return type; });
             addConversion([](mlir::MemRefType type) -> Type
-                          {
-                auto *ctx = type.getContext();
-                if (!ctx)
-                    return Type();
-                return sir::PtrType::get(ctx, /*addrSpace*/ 1); });
+                          { return type; });
 
             // =========================================================================
             // 3. Function signature conversion
@@ -558,6 +566,21 @@ namespace mlir
                                         if (llvm::isa<mlir::IndexType>(type) && llvm::isa<sir::U256Type>(input.getType()))
                                         {
                                             return builder.create<sir::BitcastOp>(loc, type, input);
+                                        }
+
+                                        if (auto errType = dyn_cast<ora::ErrorUnionType>(type))
+                                        {
+                                            if (isNarrowErrorUnion(errType))
+                                            {
+                                                Value packed = input;
+                                                if (!llvm::isa<sir::U256Type>(packed.getType()))
+                                                {
+                                                    packed = builder.create<sir::BitcastOp>(loc, sir::U256Type::get(builder.getContext()), packed);
+                                                }
+                                                auto cast = builder.create<mlir::UnrealizedConversionCastOp>(loc, type, packed);
+                                                cast->setAttr("ora.normalized_error_union", builder.getUnitAttr());
+                                                return cast.getResult(0);
+                                            }
                                         }
 
                                         // If trying to materialize to an Ora type, this is an error
