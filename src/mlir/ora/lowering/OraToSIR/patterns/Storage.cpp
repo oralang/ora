@@ -1022,6 +1022,9 @@ LogicalResult ConvertTensorExtractOp::matchAndRewrite(
         if (Type converted = tc->convertType(op.getType()))
             desiredType = converted;
     }
+    // Force address elements to remain as sir.u256 to avoid back-materialization.
+    if (llvm::isa<ora::AddressType, ora::NonZeroAddressType>(op.getType()))
+        desiredType = u256Type;
     if (desiredType != u256Type)
         loaded = rewriter.create<sir::BitcastOp>(loc, desiredType, loaded);
 

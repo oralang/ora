@@ -1475,6 +1475,78 @@ LogicalResult ConvertArithXOrIOp::matchAndRewrite(
 }
 
 // -----------------------------------------------------------------------------
+// Convert arith.shli → sir.shl
+// -----------------------------------------------------------------------------
+LogicalResult ConvertArithShlIOp::matchAndRewrite(
+    mlir::arith::ShLIOp op,
+    typename mlir::arith::ShLIOp::Adaptor adaptor,
+    ConversionPatternRewriter &rewriter) const
+{
+    auto loc = op.getLoc();
+    Value shift = ensureU256(rewriter, loc, adaptor.getRhs());
+    Value value = ensureU256(rewriter, loc, adaptor.getLhs());
+    auto u256Type = sir::U256Type::get(op.getContext());
+    auto shifted = rewriter.create<sir::ShlOp>(loc, u256Type, shift, value).getResult();
+
+    auto *typeConverter = getTypeConverter();
+    if (!typeConverter)
+    {
+        return rewriter.notifyMatchFailure(op, "missing type converter");
+    }
+    auto resultType = typeConverter->convertType(op.getResult().getType());
+    if (!resultType)
+    {
+        return rewriter.notifyMatchFailure(op, "unable to convert shli result type");
+    }
+    if (resultType == u256Type)
+    {
+        rewriter.replaceOp(op, shifted);
+    }
+    else
+    {
+        auto casted = rewriter.create<sir::BitcastOp>(loc, resultType, shifted);
+        rewriter.replaceOp(op, casted.getResult());
+    }
+    return success();
+}
+
+// -----------------------------------------------------------------------------
+// Convert arith.shrui → sir.shr
+// -----------------------------------------------------------------------------
+LogicalResult ConvertArithShrUIOp::matchAndRewrite(
+    mlir::arith::ShRUIOp op,
+    typename mlir::arith::ShRUIOp::Adaptor adaptor,
+    ConversionPatternRewriter &rewriter) const
+{
+    auto loc = op.getLoc();
+    Value shift = ensureU256(rewriter, loc, adaptor.getRhs());
+    Value value = ensureU256(rewriter, loc, adaptor.getLhs());
+    auto u256Type = sir::U256Type::get(op.getContext());
+    auto shifted = rewriter.create<sir::ShrOp>(loc, u256Type, shift, value).getResult();
+
+    auto *typeConverter = getTypeConverter();
+    if (!typeConverter)
+    {
+        return rewriter.notifyMatchFailure(op, "missing type converter");
+    }
+    auto resultType = typeConverter->convertType(op.getResult().getType());
+    if (!resultType)
+    {
+        return rewriter.notifyMatchFailure(op, "unable to convert shrui result type");
+    }
+    if (resultType == u256Type)
+    {
+        rewriter.replaceOp(op, shifted);
+    }
+    else
+    {
+        auto casted = rewriter.create<sir::BitcastOp>(loc, resultType, shifted);
+        rewriter.replaceOp(op, casted.getResult());
+    }
+    return success();
+}
+
+// -----------------------------------------------------------------------------
 // Convert arith.select → sir.select
 // -----------------------------------------------------------------------------
 LogicalResult ConvertArithSelectOp::matchAndRewrite(

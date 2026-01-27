@@ -400,6 +400,28 @@ namespace mlir
                 ConversionPatternRewriter &rewriter) const override;
         };
 
+        class ConvertArithShlIOp : public OpConversionPattern<mlir::arith::ShLIOp>
+        {
+        public:
+            using OpConversionPattern::OpConversionPattern;
+
+            LogicalResult matchAndRewrite(
+                mlir::arith::ShLIOp op,
+                typename mlir::arith::ShLIOp::Adaptor adaptor,
+                ConversionPatternRewriter &rewriter) const override;
+        };
+
+        class ConvertArithShrUIOp : public OpConversionPattern<mlir::arith::ShRUIOp>
+        {
+        public:
+            using OpConversionPattern::OpConversionPattern;
+
+            LogicalResult matchAndRewrite(
+                mlir::arith::ShRUIOp op,
+                typename mlir::arith::ShRUIOp::Adaptor adaptor,
+                ConversionPatternRewriter &rewriter) const override;
+        };
+
         class ConvertArithSelectOp : public OpConversionPattern<mlir::arith::SelectOp>
         {
         public:

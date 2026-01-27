@@ -325,9 +325,9 @@ public:
         const bool enable_contract = true;
         const bool enable_func = true;
         const bool enable_arith = true;
-        const bool enable_memref_alloc = true;
-        const bool enable_memref_load = true;
-        const bool enable_memref_store = true;
+        const bool enable_memref_alloc = false;
+        const bool enable_memref_load = false;
+        const bool enable_memref_store = false;
         const bool enable_struct = false;
         const bool enable_storage = true;
         const bool enable_return = true;
@@ -644,8 +644,9 @@ public:
 
         // Pre-pass: lower "safe" ora.return cases (ConvertReturnOpPre is guarded).
         {
+            ora::OraToSIRTypeConverter preTypeConverter;
             RewritePatternSet prePatterns(ctx);
-            prePatterns.add<ConvertReturnOpPre>(&typeConverter, ctx);
+            prePatterns.add<ConvertReturnOpPre>(&preTypeConverter, ctx);
             if (failed(applyPatternsGreedily(module, std::move(prePatterns))))
             {
                 signalPassFailure();
@@ -655,14 +656,15 @@ public:
 
         // Second phase: lower any remaining ora.return after control flow rewrites.
         {
+            ora::OraToSIRTypeConverter phase2TypeConverter;
             RewritePatternSet phase2Patterns(ctx);
-            phase2Patterns.add<ConvertErrorOkOp>(typeConverter, ctx);
-            phase2Patterns.add<ConvertErrorErrOp>(typeConverter, ctx);
-            phase2Patterns.add<ConvertErrorIsErrorOp>(typeConverter, ctx);
-            phase2Patterns.add<ConvertErrorUnwrapOp>(typeConverter, ctx);
-            phase2Patterns.add<ConvertErrorGetErrorOp>(typeConverter, ctx);
-            phase2Patterns.add<ConvertArithExtUIOp>(typeConverter, ctx);
-            phase2Patterns.add<ConvertArithIndexCastUIOp>(typeConverter, ctx);
+            phase2Patterns.add<ConvertErrorOkOp>(phase2TypeConverter, ctx);
+            phase2Patterns.add<ConvertErrorErrOp>(phase2TypeConverter, ctx);
+            phase2Patterns.add<ConvertErrorIsErrorOp>(phase2TypeConverter, ctx);
+            phase2Patterns.add<ConvertErrorUnwrapOp>(phase2TypeConverter, ctx);
+            phase2Patterns.add<ConvertErrorGetErrorOp>(phase2TypeConverter, ctx);
+            phase2Patterns.add<ConvertArithExtUIOp>(phase2TypeConverter, ctx);
+            phase2Patterns.add<ConvertArithIndexCastUIOp>(phase2TypeConverter, ctx);
 
             ConversionTarget phase2Target(*ctx);
             phase2Target.addLegalDialect<mlir::BuiltinDialect>();
@@ -698,8 +700,12 @@ public:
 
         // Phase 3a: lower scf.if results carrying error unions (leave ora.return for now).
         {
+            ora::OraToSIRTypeConverter phase3aTypeConverter;
             RewritePatternSet phase3aPatterns(ctx);
-            phase3aPatterns.add<ConvertScfIfOp>(typeConverter, ctx, /*lowerReturnsInMergeBlock=*/false, PatternBenefit(10));
+            phase3aPatterns.add<ConvertScfIfOp>(phase3aTypeConverter, ctx, /*lowerReturnsInMergeBlock=*/true, PatternBenefit(10));
+            phase3aPatterns.add<ConvertReturnOpFallback>(&phase3aTypeConverter, ctx, PatternBenefit(1));
+            phase3aPatterns.add<ConvertReturnOpRaw>(phase3aTypeConverter, ctx, PatternBenefit(1));
+            phase3aPatterns.add<ConvertReturnOp>(phase3aTypeConverter, ctx, PatternBenefit(1));
 
             ConversionTarget phase3aTarget(*ctx);
             phase3aTarget.addLegalDialect<mlir::BuiltinDialect>();
@@ -712,7 +718,7 @@ public:
             phase3aTarget.addLegalDialect<mlir::scf::SCFDialect>();
             phase3aTarget.addLegalOp<mlir::UnrealizedConversionCastOp>();
             phase3aTarget.addIllegalOp<mlir::scf::IfOp>();
-            phase3aTarget.addLegalOp<ora::ReturnOp>();
+            phase3aTarget.addIllegalOp<ora::ReturnOp>();
             phase3aTarget.addLegalOp<ora::IfOp>();
             phase3aTarget.addLegalOp<ora::YieldOp>();
             phase3aTarget.addLegalOp<ora::ContinueOp>();
@@ -729,10 +735,11 @@ public:
 
         // Phase 3b: lower ora.return after scf.if has been normalized.
         {
+            ora::OraToSIRTypeConverter phase3bTypeConverter;
             RewritePatternSet phase3bPatterns(ctx);
-            phase3bPatterns.add<ConvertReturnOpFallback>(&typeConverter, ctx, PatternBenefit(1));
-            phase3bPatterns.add<ConvertReturnOpRaw>(typeConverter, ctx, PatternBenefit(1));
-            phase3bPatterns.add<ConvertReturnOp>(typeConverter, ctx, PatternBenefit(1));
+            phase3bPatterns.add<ConvertReturnOpFallback>(&phase3bTypeConverter, ctx, PatternBenefit(1));
+            phase3bPatterns.add<ConvertReturnOpRaw>(phase3bTypeConverter, ctx, PatternBenefit(1));
+            phase3bPatterns.add<ConvertReturnOp>(phase3bTypeConverter, ctx, PatternBenefit(1));
 
             ConversionTarget phase3bTarget(*ctx);
             phase3bTarget.addLegalDialect<mlir::BuiltinDialect>();
@@ -759,6 +766,218 @@ public:
             }
         }
 
+        // Phase 4: lower scf.for + memref ops (stack temps) to SIR.
+        {
+            ora::OraToSIRTypeConverter phase4TypeConverter;
+            phase4TypeConverter.setEnableMemRefLowering(true);
+
+            RewritePatternSet phase4Patterns(ctx);
+            phase4Patterns.add<ConvertScfForOp>(phase4TypeConverter, ctx);
+            phase4Patterns.add<ConvertMemRefAllocOp>(phase4TypeConverter, ctx);
+            phase4Patterns.add<ConvertMemRefLoadOp>(phase4TypeConverter, ctx);
+            phase4Patterns.add<ConvertMemRefStoreOp>(phase4TypeConverter, ctx);
+            phase4Patterns.add<ConvertMemRefDimOp>(phase4TypeConverter, ctx);
+
+            ConversionTarget phase4Target(*ctx);
+            phase4Target.addLegalDialect<mlir::BuiltinDialect>();
+            phase4Target.addLegalDialect<sir::SIRDialect>();
+            phase4Target.addLegalDialect<mlir::func::FuncDialect>();
+            phase4Target.addLegalDialect<mlir::cf::ControlFlowDialect>();
+            phase4Target.addLegalDialect<mlir::arith::ArithDialect>();
+            phase4Target.addLegalDialect<mlir::scf::SCFDialect>();
+            phase4Target.addLegalDialect<mlir::tensor::TensorDialect>();
+            phase4Target.addLegalOp<mlir::UnrealizedConversionCastOp>();
+            phase4Target.addIllegalDialect<mlir::memref::MemRefDialect>();
+            phase4Target.addIllegalOp<mlir::scf::ForOp>();
+            phase4Target.addIllegalOp<ora::ReturnOp>();
+            phase4Target.addLegalOp<ora::IfOp>();
+            phase4Target.addLegalOp<ora::YieldOp>();
+            phase4Target.addLegalOp<ora::ContinueOp>();
+            phase4Target.addLegalOp<ora::TryStmtOp>();
+            phase4Target.addLegalOp<ora::SwitchOp>();
+            phase4Target.addLegalDialect<ora::OraDialect>();
+
+            ConversionConfig phase4Config;
+            phase4Config.buildMaterializations = false;
+            if (failed(applyFullConversion(module, phase4Target, std::move(phase4Patterns), phase4Config)))
+            {
+                signalPassFailure();
+                return;
+            }
+        }
+
+        // Phase 5: lower remaining Ora control flow + structs.
+        {
+            ora::OraToSIRTypeConverter phase5TypeConverter;
+            phase5TypeConverter.setEnableStructLowering(true);
+            phase5TypeConverter.setEnableTensorLowering(true);
+            llvm::errs() << "[OraToSIR] Phase5 start\n";
+            RewritePatternSet phase5Patterns(ctx);
+            phase5Patterns.add<ConvertFuncOp>(phase5TypeConverter, ctx);
+            phase5Patterns.add<ConvertCallOp>(phase5TypeConverter, ctx);
+            phase5Patterns.add<ConvertReturnOpPre>(&phase5TypeConverter, ctx);
+            phase5Patterns.add<ConvertReturnOpFallback>(&phase5TypeConverter, ctx, PatternBenefit(1));
+            phase5Patterns.add<ConvertReturnOpRaw>(phase5TypeConverter, ctx, PatternBenefit(1));
+            phase5Patterns.add<ConvertReturnOp>(phase5TypeConverter, ctx, PatternBenefit(1));
+            phase5Patterns.add<ConvertIfOp>(phase5TypeConverter, ctx);
+            phase5Patterns.add<ConvertContinueOp>(phase5TypeConverter, ctx);
+            phase5Patterns.add<ConvertSwitchOp>(phase5TypeConverter, ctx);
+            phase5Patterns.add<ConvertTryStmtOp>(phase5TypeConverter, ctx);
+            phase5Patterns.add<NormalizeOraYieldOp>(ctx);
+            phase5Patterns.add<NormalizeErrorUnionCastOp>(ctx);
+            phase5Patterns.add<ConvertUnrealizedConversionCastOp>(phase5TypeConverter, ctx);
+            phase5Patterns.add<StripNormalizedErrorUnionCastOp>(phase5TypeConverter, ctx);
+            phase5Patterns.add<ConvertCfBrOp>(phase5TypeConverter, ctx);
+            phase5Patterns.add<ConvertCfCondBrOp>(phase5TypeConverter, ctx);
+            phase5Patterns.add<ConvertCfAssertOp>(phase5TypeConverter, ctx);
+            phase5Patterns.add<ConvertArithConstantOp>(phase5TypeConverter, ctx);
+            phase5Patterns.add<ConvertArithCmpIOp>(phase5TypeConverter, ctx);
+            phase5Patterns.add<ConvertArithAddIOp>(phase5TypeConverter, ctx);
+            phase5Patterns.add<ConvertArithSubIOp>(phase5TypeConverter, ctx);
+            phase5Patterns.add<ConvertArithMulIOp>(phase5TypeConverter, ctx);
+            phase5Patterns.add<ConvertArithDivUIOp>(phase5TypeConverter, ctx);
+            phase5Patterns.add<ConvertArithRemUIOp>(phase5TypeConverter, ctx);
+            phase5Patterns.add<ConvertArithDivSIOp>(phase5TypeConverter, ctx);
+            phase5Patterns.add<ConvertArithAndIOp>(phase5TypeConverter, ctx);
+            phase5Patterns.add<ConvertArithOrIOp>(phase5TypeConverter, ctx);
+            phase5Patterns.add<ConvertArithXOrIOp>(phase5TypeConverter, ctx);
+            phase5Patterns.add<ConvertArithShlIOp>(phase5TypeConverter, ctx);
+            phase5Patterns.add<ConvertArithShrUIOp>(phase5TypeConverter, ctx);
+            phase5Patterns.add<ConvertArithSelectOp>(phase5TypeConverter, ctx);
+            phase5Patterns.add<ConvertArithExtUIOp>(phase5TypeConverter, ctx);
+            phase5Patterns.add<ConvertArithIndexCastUIOp>(phase5TypeConverter, ctx);
+            phase5Patterns.add<ConvertArithTruncIOp>(phase5TypeConverter, ctx);
+            phase5Patterns.add<ConvertMemRefAllocOp>(phase5TypeConverter, ctx);
+            phase5Patterns.add<ConvertMemRefLoadOp>(phase5TypeConverter, ctx);
+            phase5Patterns.add<ConvertMemRefStoreOp>(phase5TypeConverter, ctx);
+            phase5Patterns.add<ConvertMemRefDimOp>(phase5TypeConverter, ctx);
+            phase5Patterns.add<ConvertTensorExtractOp>(phase5TypeConverter, ctx);
+            phase5Patterns.add<ConvertTensorDimOp>(phase5TypeConverter, ctx);
+            phase5Patterns.add<ConvertStructInitOp>(phase5TypeConverter, ctx);
+            phase5Patterns.add<ConvertStructInstantiateOp>(phase5TypeConverter, ctx);
+            phase5Patterns.add<ConvertStructFieldExtractOp>(phase5TypeConverter, ctx);
+            phase5Patterns.add<ConvertStructFieldUpdateOp>(phase5TypeConverter, ctx);
+            phase5Patterns.add<ConvertStructDeclOp>(phase5TypeConverter, ctx);
+            phase5Patterns.add<StripStructMaterializeOp>(phase5TypeConverter, ctx);
+            phase5Patterns.add<StripAddressMaterializeOp>(phase5TypeConverter, ctx);
+
+            ConversionTarget phase5Target(*ctx);
+            phase5Target.addLegalDialect<mlir::BuiltinDialect>();
+            phase5Target.addLegalDialect<sir::SIRDialect>();
+            // func.call legality is handled by the dynamic check below.
+            phase5Target.addLegalDialect<mlir::func::FuncDialect>();
+            phase5Target.addIllegalDialect<mlir::cf::ControlFlowDialect>();
+            phase5Target.addIllegalDialect<mlir::arith::ArithDialect>();
+            phase5Target.addLegalDialect<mlir::scf::SCFDialect>();
+            phase5Target.addIllegalDialect<mlir::tensor::TensorDialect>();
+            phase5Target.addIllegalDialect<mlir::memref::MemRefDialect>();
+            phase5Target.addIllegalOp<mlir::UnrealizedConversionCastOp>();
+            phase5Target.addDynamicallyLegalOp<mlir::func::CallOp>(
+                [&](mlir::func::CallOp op)
+                {
+                    for (Type operandType : op.getOperandTypes())
+                    {
+                        if (!phase5TypeConverter.isLegal(operandType))
+                            return false;
+                    }
+                    for (Type resultType : op.getResultTypes())
+                    {
+                        if (!phase5TypeConverter.isLegal(resultType))
+                            return false;
+                    }
+                    return true;
+                });
+            phase5Target.addIllegalOp<ora::ReturnOp>();
+            phase5Target.addLegalOp<mlir::func::FuncOp>();
+            phase5Target.addIllegalOp<ora::IfOp>();
+            phase5Target.addIllegalOp<ora::YieldOp>();
+            phase5Target.addIllegalOp<ora::ContinueOp>();
+            phase5Target.addIllegalOp<ora::TryStmtOp>();
+            phase5Target.addIllegalOp<ora::SwitchOp>();
+            phase5Target.addIllegalOp<ora::StructInitOp>();
+            phase5Target.addIllegalOp<ora::StructInstantiateOp>();
+            phase5Target.addIllegalOp<ora::StructFieldExtractOp>();
+            phase5Target.addIllegalOp<ora::StructFieldUpdateOp>();
+            phase5Target.addIllegalOp<ora::StructDeclOp>();
+            phase5Target.addLegalDialect<ora::OraDialect>();
+
+            // Debug: report any unrealized casts still present before phase5.
+            for (auto castOp : module.getOps<mlir::UnrealizedConversionCastOp>())
+            {
+                llvm::errs() << "[OraToSIR] Phase5 pre-scan: unrealized cast at "
+                             << castOp.getLoc() << " operands=" << castOp.getNumOperands()
+                             << " results=" << castOp.getNumResults() << "\n";
+            }
+            llvm::errs().flush();
+
+            if (failed(applyFullConversion(module, phase5Target, std::move(phase5Patterns))))
+            {
+                signalPassFailure();
+                return;
+            }
+
+            // Cleanup: strip any remaining normalized error_union casts that should be packed u256.
+            SmallVector<mlir::UnrealizedConversionCastOp, 8> normalizedCasts;
+            module.walk([&](mlir::UnrealizedConversionCastOp op) {
+                if (!op->hasAttr("ora.normalized_error_union"))
+                    return;
+                if (op.getNumOperands() != 1 || op.getNumResults() != 1)
+                    return;
+                if (!llvm::isa<sir::U256Type>(op.getOperand(0).getType()))
+                    return;
+                normalizedCasts.push_back(op);
+            });
+            for (auto castOp : normalizedCasts)
+            {
+                castOp.getResult(0).replaceAllUsesWith(castOp.getOperand(0));
+                castOp.erase();
+            }
+
+            // Debug: ensure no unrealized casts remain after phase5.
+            bool leftoverUnrealized = false;
+            for (auto castOp : module.getOps<mlir::UnrealizedConversionCastOp>())
+            {
+                leftoverUnrealized = true;
+                llvm::errs() << "[OraToSIR] Phase5 post-scan: unrealized cast at "
+                             << castOp.getLoc() << " operands=" << castOp.getNumOperands()
+                             << " results=" << castOp.getNumResults() << "\n";
+            }
+            llvm::errs().flush();
+            if (leftoverUnrealized)
+            {
+                module.emitError("[OraToSIR] Phase5 post-scan: unrealized casts remain");
+                signalPassFailure();
+                return;
+            }
+
+            // Debug: dump final module after phase5 so "after conversion" is truly post-phase5.
+            llvm::errs() << "\n//===----------------------------------------------------------------------===//\n";
+            llvm::errs() << "// SIR MLIR (after phase5)\n";
+            llvm::errs() << "//===----------------------------------------------------------------------===//\n\n";
+            module.print(llvm::errs());
+            llvm::errs() << "\n";
+            llvm::errs().flush();
+
+            // Extra guard: detect any remaining unrealized casts by name (robust to type registration issues).
+            int64_t unrealizedByName = 0;
+            module.walk([&](Operation *op) {
+                if (op->getName().getStringRef() == "builtin.unrealized_conversion_cast")
+                {
+                    ++unrealizedByName;
+                    llvm::errs() << "[OraToSIR] Phase5 name-scan: unrealized cast at "
+                                 << op->getLoc() << " operands=" << op->getNumOperands()
+                                 << " results=" << op->getNumResults() << "\n";
+                }
+            });
+            llvm::errs().flush();
+            if (unrealizedByName > 0)
+            {
+                module.emitError("[OraToSIR] Phase5 name-scan: unrealized casts remain");
+                signalPassFailure();
+                return;
+            }
+
+        }
 
         // Guard: fail if any ops remain that should have been lowered by this stage.
         bool illegalFound = false;

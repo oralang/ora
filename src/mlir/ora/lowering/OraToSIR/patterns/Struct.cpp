@@ -280,3 +280,54 @@ LogicalResult ConvertStructDeclOp::matchAndRewrite(
     rewriter.eraseOp(op);
     return success();
 }
+
+LogicalResult StripStructMaterializeOp::matchAndRewrite(
+    mlir::UnrealizedConversionCastOp op,
+    mlir::UnrealizedConversionCastOp::Adaptor adaptor,
+    ConversionPatternRewriter &rewriter) const
+{
+    if (op.getNumOperands() != 1 || op.getNumResults() != 1)
+    {
+        return rewriter.notifyMatchFailure(op, "expected single operand/result");
+    }
+
+    if (!llvm::isa<ora::StructType>(op.getResult(0).getType()))
+    {
+        return rewriter.notifyMatchFailure(op, "not a struct materialization");
+    }
+
+    Value input = adaptor.getOperands()[0];
+    if (!llvm::isa<sir::PtrType>(input.getType()))
+    {
+        return rewriter.notifyMatchFailure(op, "expected sir.ptr operand");
+    }
+
+    rewriter.replaceOp(op, input);
+    return success();
+}
+
+LogicalResult StripAddressMaterializeOp::matchAndRewrite(
+    mlir::UnrealizedConversionCastOp op,
+    mlir::UnrealizedConversionCastOp::Adaptor adaptor,
+    ConversionPatternRewriter &rewriter) const
+{
+    if (op.getNumOperands() != 1 || op.getNumResults() != 1)
+    {
+        return rewriter.notifyMatchFailure(op, "expected single operand/result");
+    }
+
+    Type resultType = op.getResult(0).getType();
+    if (!llvm::isa<ora::AddressType, ora::NonZeroAddressType>(resultType))
+    {
+        return rewriter.notifyMatchFailure(op, "not an address materialization");
+    }
+
+    Value input = adaptor.getOperands()[0];
+    if (!llvm::isa<sir::U256Type>(input.getType()))
+    {
+        return rewriter.notifyMatchFailure(op, "expected sir.u256 operand");
+    }
+
+    rewriter.replaceOp(op, input);
+    return success();
+}

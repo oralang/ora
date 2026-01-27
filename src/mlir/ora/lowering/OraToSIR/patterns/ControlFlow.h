@@ -137,6 +137,28 @@ namespace mlir
                 PatternRewriter &rewriter) const override;
         };
 
+        class ConvertUnrealizedConversionCastOp : public OpConversionPattern<mlir::UnrealizedConversionCastOp>
+        {
+        public:
+            using OpConversionPattern::OpConversionPattern;
+
+            LogicalResult matchAndRewrite(
+                mlir::UnrealizedConversionCastOp op,
+                mlir::UnrealizedConversionCastOp::Adaptor adaptor,
+                ConversionPatternRewriter &rewriter) const override;
+        };
+
+        class StripNormalizedErrorUnionCastOp : public OpConversionPattern<mlir::UnrealizedConversionCastOp>
+        {
+        public:
+            using OpConversionPattern::OpConversionPattern;
+
+            LogicalResult matchAndRewrite(
+                mlir::UnrealizedConversionCastOp op,
+                mlir::UnrealizedConversionCastOp::Adaptor adaptor,
+                ConversionPatternRewriter &rewriter) const override;
+        };
+
         class NormalizeReturnOp : public OpRewritePattern<ora::ReturnOp>
         {
         public:

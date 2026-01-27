@@ -27,6 +27,8 @@ namespace
             return intType.getWidth();
         if (auto intType = llvm::dyn_cast<mlir::IntegerType>(type))
             return intType.getWidth();
+        if (auto intType = llvm::dyn_cast<mlir::IntegerType>(type))
+            return intType.getWidth();
         if (llvm::isa<ora::BoolType>(type))
             return 1u;
         if (llvm::isa<ora::AddressType>(type))
@@ -134,19 +136,37 @@ namespace mlir
                     return sir::U256Type::get(ctx);
                 return Type(); });
 
-            // Preserve structs in phase 1 (no lowering yet).
-            addConversion([](ora::StructType type) -> Type
-                          { return type; });
+            // Preserve structs until we explicitly enable lowering.
+            addConversion([this](ora::StructType type) -> Type
+                          {
+                if (enableStructLowering)
+                    return sir::PtrType::get(type.getContext(), /*addrSpace*/ 1);
+                return type;
+            });
 
-            // Preserve tensor/memref types in phase 1 (no element conversion yet).
-            addConversion([](RankedTensorType type) -> Type
-                          { return type; });
-            addConversion([](UnrankedTensorType type) -> Type
-                          { return type; });
-            addConversion([](MemRefType type) -> Type
-                          { return type; });
-            addConversion([](UnrankedMemRefType type) -> Type
-                          { return type; });
+            // Preserve tensor types until we explicitly enable lowering.
+            addConversion([this](RankedTensorType type) -> Type
+                          {
+                if (enableTensorLowering)
+                    return sir::U256Type::get(type.getContext());
+                return type; });
+            addConversion([this](UnrankedTensorType type) -> Type
+                          {
+                if (enableTensorLowering)
+                    return sir::U256Type::get(type.getContext());
+                return type; });
+            addConversion([this](MemRefType type) -> Type
+                          {
+                if (enableMemRefLowering)
+                    return sir::PtrType::get(type.getContext(), /*addrSpace*/ 1);
+                return type;
+            });
+            addConversion([this](UnrankedMemRefType type) -> Type
+                          {
+                if (enableMemRefLowering)
+                    return sir::PtrType::get(type.getContext(), /*addrSpace*/ 1);
+                return type;
+            });
 
             // ora.map → sir.u256 (map values live in storage, represent as u256 handles)
             addConversion([](ora::MapType type) -> Type
@@ -157,9 +177,13 @@ namespace mlir
                 }
                 return sir::U256Type::get(ctx); });
 
-            // ora.struct passes through in phase 1 (no lowering yet).
-            addConversion([&](ora::StructType type) -> Type
-                          { return type; });
+            // ora.struct passes through until we enable lowering.
+            addConversion([this](ora::StructType type) -> Type
+                          {
+                if (enableStructLowering)
+                    return sir::PtrType::get(type.getContext(), /*addrSpace*/ 1);
+                return type;
+            });
 
             // refinement types → base type (erased to underlying representation)
             addConversion([this](ora::MinValueType type) -> Type
@@ -196,9 +220,12 @@ namespace mlir
             addConversion([](mlir::NoneType type) -> Type { return type; });
             addConversion([](mlir::IndexType type) -> Type { return type; });
 
-            // Tensor/memref types pass through in phase 1 (no lowering yet).
-            addConversion([](mlir::RankedTensorType type) -> Type
-                          { return type; });
+            // Tensor types pass through unless tensor lowering is enabled.
+            addConversion([this](mlir::RankedTensorType type) -> Type
+                          {
+                if (enableTensorLowering)
+                    return sir::U256Type::get(type.getContext());
+                return type; });
             addConversion([](mlir::MemRefType type) -> Type
                           { return type; });
 
@@ -245,6 +272,10 @@ namespace mlir
                                                  (void)tensorType;
                                                  return builder.create<mlir::UnrealizedConversionCastOp>(loc, type, input).getResult(0);
                                              }
+                                            if (llvm::isa<ora::AddressType, ora::NonZeroAddressType>(input.getType()))
+                                            {
+                                                return builder.create<mlir::UnrealizedConversionCastOp>(loc, type, input).getResult(0);
+                                            }
                                          }
 
                                          auto makeMask = [&](unsigned width) -> Value {
@@ -510,9 +541,25 @@ namespace mlir
                                          return Value(); // Don't handle other cases
                                      });
 
+            // Allow memref -> sir.ptr materialization during memref lowering.
+            addSourceMaterialization([this](OpBuilder &builder, Type type, ValueRange inputs, Location loc) -> Value
+                                     {
+                                         if (!enableMemRefLowering)
+                                             return Value();
+                                         if (inputs.size() != 1)
+                                             return Value();
+                                         Value input = inputs[0];
+                                         if (!llvm::isa<sir::PtrType>(type))
+                                             return Value();
+                                         if (!llvm::isa<mlir::MemRefType, mlir::UnrankedMemRefType>(input.getType()))
+                                             return Value();
+                                         auto cast = builder.create<mlir::UnrealizedConversionCastOp>(loc, type, input);
+                                         return cast.getResult(0);
+                                     });
+
             // We should NEVER materialize from SIR back to Ora - this indicates a bug
             // Return nullptr to indicate we can't materialize (will cause conversion to fail)
-            addSourceMaterialization([](OpBuilder &builder, Type type, ValueRange inputs, Location loc) -> Value
+            addSourceMaterialization([this](OpBuilder &builder, Type type, ValueRange inputs, Location loc) -> Value
                                      {
                                          auto makeMask = [&](unsigned width) -> Value {
                                              if (width >= 256)
@@ -575,10 +622,35 @@ namespace mlir
                                                 Value packed = input;
                                                 if (!llvm::isa<sir::U256Type>(packed.getType()))
                                                 {
-                                                    packed = builder.create<sir::BitcastOp>(loc, sir::U256Type::get(builder.getContext()), packed);
+                                                    if (llvm::isa<mlir::IntegerType>(packed.getType()))
+                                                    {
+                                                        packed = builder.create<sir::BitcastOp>(loc, sir::U256Type::get(builder.getContext()), packed);
+                                                    }
+                                                    else
+                                                    {
+                                                        return Value();
+                                                    }
                                                 }
                                                 auto cast = builder.create<mlir::UnrealizedConversionCastOp>(loc, type, packed);
                                                 cast->setAttr("ora.normalized_error_union", builder.getUnitAttr());
+                                                return cast.getResult(0);
+                                            }
+                                        }
+
+                                        if (enableStructLowering && llvm::isa<ora::StructType>(type))
+                                        {
+                                            if (llvm::isa<sir::PtrType>(input.getType()))
+                                            {
+                                                auto cast = builder.create<mlir::UnrealizedConversionCastOp>(loc, type, input);
+                                                return cast.getResult(0);
+                                            }
+                                        }
+
+                                        if (enableTensorLowering && llvm::isa<ora::AddressType, ora::NonZeroAddressType>(type))
+                                        {
+                                            if (llvm::isa<sir::U256Type>(input.getType()))
+                                            {
+                                                auto cast = builder.create<mlir::UnrealizedConversionCastOp>(loc, type, input);
                                                 return cast.getResult(0);
                                             }
                                         }

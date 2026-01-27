@@ -67,5 +67,27 @@ namespace mlir
                 ConversionPatternRewriter &rewriter) const override;
         };
 
+        class StripStructMaterializeOp : public OpConversionPattern<mlir::UnrealizedConversionCastOp>
+        {
+        public:
+            using OpConversionPattern::OpConversionPattern;
+
+            LogicalResult matchAndRewrite(
+                mlir::UnrealizedConversionCastOp op,
+                mlir::UnrealizedConversionCastOp::Adaptor adaptor,
+                ConversionPatternRewriter &rewriter) const override;
+        };
+
+        class StripAddressMaterializeOp : public OpConversionPattern<mlir::UnrealizedConversionCastOp>
+        {
+        public:
+            using OpConversionPattern::OpConversionPattern;
+
+            LogicalResult matchAndRewrite(
+                mlir::UnrealizedConversionCastOp op,
+                mlir::UnrealizedConversionCastOp::Adaptor adaptor,
+                ConversionPatternRewriter &rewriter) const override;
+        };
+
     } // namespace ora
 } // namespace mlir

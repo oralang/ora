@@ -175,8 +175,9 @@ LogicalResult ConvertMemRefLoadOp::matchAndRewrite(
     Value memref = adaptor.getMemref();
     if (!llvm::isa<sir::PtrType>(memref.getType()))
     {
-        DBG("ConvertMemRefLoadOp: memref not converted to pointer, type: " << memref.getType());
-        return failure();
+        auto ptrType = sir::PtrType::get(ctx, /*addrSpace*/ 1);
+        auto cast = rewriter.create<mlir::UnrealizedConversionCastOp>(loc, ptrType, memref);
+        memref = cast.getResult(0);
     }
 
     // Get index (if any)
@@ -285,8 +286,12 @@ LogicalResult ConvertMemRefStoreOp::matchAndRewrite(
 
     if (!llvm::isa<sir::PtrType>(memref.getType()))
     {
-        DBG("ConvertMemRefStoreOp: memref not converted to pointer, type: " << memref.getType());
-        return failure();
+        llvm::errs() << "[OraToSIR] ConvertMemRefStoreOp: memref type not lowered: "
+                     << memref.getType() << " value type=" << value.getType()
+                     << " at " << loc << "\n";
+        auto ptrType = sir::PtrType::get(ctx, /*addrSpace*/ 1);
+        auto cast = rewriter.create<mlir::UnrealizedConversionCastOp>(loc, ptrType, memref);
+        memref = cast.getResult(0);
     }
 
     // Ensure value is u256

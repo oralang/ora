@@ -48,6 +48,34 @@ static Value toIndex(ConversionPatternRewriter &rewriter, Location loc, Value va
     return rewriter.create<sir::BitcastOp>(loc, rewriter.getIndexType(), value);
 }
 
+static FailureOr<uint64_t> getStructFieldCount(Operation *op, StringRef structName)
+{
+    ModuleOp module = op->getParentOfType<ModuleOp>();
+    if (!module)
+        return failure();
+
+    ora::StructDeclOp structDecl = nullptr;
+    module.walk([&](ora::StructDeclOp declOp)
+                {
+                    auto nameAttr = declOp->getAttrOfType<StringAttr>("name");
+                    if (nameAttr && nameAttr.getValue() == structName)
+                    {
+                        structDecl = declOp;
+                        return WalkResult::interrupt();
+                    }
+                    return WalkResult::advance();
+                });
+
+    if (!structDecl)
+        return failure();
+
+    auto fieldTypesAttr = structDecl->getAttrOfType<ArrayAttr>("ora.field_types");
+    if (!fieldTypesAttr)
+        return failure();
+
+    return static_cast<uint64_t>(fieldTypesAttr.size());
+}
+
 static FailureOr<Value> phase0ToI256(PatternRewriter &rewriter, Location loc, Value value)
 {
     auto i256Type = mlir::IntegerType::get(rewriter.getContext(), 256);
@@ -185,6 +213,19 @@ static LogicalResult materializeWideErrorUnion(
             outValues.push_back(toU256(castOp.getOperand(1)));
             return success();
         }
+        if (castOp.getNumOperands() == 1)
+        {
+            // Treat a normalized ora.error_union cast as packed u256.
+            if (castOp->hasAttr("ora.normalized_error_union"))
+            {
+                Value packed = toU256(castOp.getOperand(0));
+                Value tag = rewriter.create<sir::AndOp>(loc, u256Type, packed, one);
+                Value payload = rewriter.create<sir::ShrOp>(loc, u256Type, packed, one);
+                outValues.push_back(tag);
+                outValues.push_back(payload);
+                return success();
+            }
+        }
     }
 
     if (auto errType = llvm::dyn_cast<ora::ErrorUnionType>(operand.getType()))
@@ -192,12 +233,11 @@ static LogicalResult materializeWideErrorUnion(
         if (!isNarrowErrorUnion(errType))
         {
             llvm::errs() << "[OraToSIR] materializeWideErrorUnion: fallback split at " << loc << "\n";
-            auto castOp = rewriter.create<mlir::UnrealizedConversionCastOp>(
-                loc,
-                TypeRange{u256Type, u256Type},
-                operand);
-            outValues.push_back(toU256(castOp.getResult(0)));
-            outValues.push_back(toU256(castOp.getResult(1)));
+            Value packed = toU256(operand);
+            Value tag = rewriter.create<sir::AndOp>(loc, u256Type, packed, one);
+            Value payload = rewriter.create<sir::ShrOp>(loc, u256Type, packed, one);
+            outValues.push_back(tag);
+            outValues.push_back(payload);
             return success();
         }
     }
@@ -788,9 +828,25 @@ LogicalResult ConvertTryStmtOp::matchAndRewrite(
                 continue;
             }
             if (y.getNumOperands() != resultTypes.size())
+            {
+                llvm::errs() << "[OraToSIR] ConvertTryStmtOp: yield arity mismatch at "
+                             << y.getLoc() << " yield=" << y.getNumOperands()
+                             << " results=" << resultTypes.size() << "\n";
                 return rewriter.notifyMatchFailure(y, "try_stmt yield arity mismatch");
+            }
             if (hasOpsAfterTerminator(y.getOperation()))
+            {
+                if (resultTypes.empty())
+                {
+                    // Statement-only try_stmt can drop yields even if loop control rewrites
+                    // inserted ops after the yield.
+                    rewriter.eraseOp(y);
+                    continue;
+                }
+                llvm::errs() << "[OraToSIR] ConvertTryStmtOp: yield has trailing ops at "
+                             << y.getLoc() << "\n";
                 return rewriter.notifyMatchFailure(y, "yield has trailing ops");
+            }
             rewriter.setInsertionPoint(y);
             SmallVector<Value> convertedOperands;
             convertedOperands.reserve(y.getNumOperands());
@@ -1567,6 +1623,61 @@ static LogicalResult convertOraReturn(
             rewriter.eraseOp(op);
             return success();
         }
+    }
+
+    if (auto structType = llvm::dyn_cast<ora::StructType>(origType))
+    {
+        FailureOr<uint64_t> fieldCount = getStructFieldCount(op.getOperation(), structType.getName());
+        if (failed(fieldCount))
+        {
+            if (auto initOp = op.getOperand(0).getDefiningOp<ora::StructInitOp>())
+            {
+                fieldCount = static_cast<uint64_t>(initOp.getFieldValues().size());
+            }
+            else if (auto instOp = op.getOperand(0).getDefiningOp<ora::StructInstantiateOp>())
+            {
+                fieldCount = static_cast<uint64_t>(instOp.getFieldValues().size());
+            }
+        }
+        Value sizeConst;
+        if (succeeded(fieldCount))
+        {
+            const uint64_t byteSize = (*fieldCount) * 32ULL;
+            auto sizeAttr = mlir::IntegerAttr::get(ui64Type, byteSize);
+            sizeConst = rewriter.create<sir::ConstOp>(loc, u256Type, sizeAttr);
+        }
+
+        if (!llvm::isa<sir::PtrType>(retVal.getType()))
+        {
+            if (llvm::isa<ora::StructType>(retVal.getType()))
+            {
+                retVal = rewriter.create<mlir::UnrealizedConversionCastOp>(loc, ptrType, retVal).getResult(0);
+            }
+            else if (tc)
+            {
+                Type convertedType = tc->convertType(origType);
+                if (convertedType && convertedType != retVal.getType())
+                    retVal = rewriter.create<sir::BitcastOp>(loc, convertedType, retVal);
+            }
+        }
+
+        if (!llvm::isa<sir::PtrType>(retVal.getType()))
+            return rewriter.notifyMatchFailure(op, "struct return expects SIR ptr value");
+
+        if (!sizeConst)
+        {
+            if (auto mallocOp = retVal.getDefiningOp<sir::MallocOp>())
+            {
+                sizeConst = mallocOp.getSize();
+            }
+        }
+
+        if (!sizeConst)
+            return rewriter.notifyMatchFailure(op, "failed to resolve struct byte size");
+
+        rewriter.create<sir::ReturnOp>(loc, retVal, sizeConst);
+        rewriter.eraseOp(op);
+        return success();
     }
 
     if (operands.size() == 2)
@@ -2413,6 +2524,128 @@ LogicalResult NormalizeErrorUnionCastOp::matchAndRewrite(
     if (!packed)
         return failure();
 
+    rewriter.replaceOp(op, packed);
+    return success();
+}
+
+LogicalResult ConvertUnrealizedConversionCastOp::matchAndRewrite(
+    mlir::UnrealizedConversionCastOp op,
+    mlir::UnrealizedConversionCastOp::Adaptor adaptor,
+    ConversionPatternRewriter &rewriter) const
+{
+    // Handle 1->1, 1->2 (split), and 2->1 (pack) casts.
+    if (op.getNumOperands() < 1 || op.getNumOperands() > 2 ||
+        op.getNumResults() < 1 || op.getNumResults() > 2)
+        return failure();
+
+    Value input = adaptor.getOperands().front();
+    Type resultType = op.getResult(0).getType();
+    auto loc = op.getLoc();
+
+    if (op->hasAttr("ora.normalized_error_union"))
+    {
+        llvm::errs() << "[OraToSIR] ConvertUnrealizedConversionCastOp: normalized at "
+                     << loc << " operandType=" << input.getType()
+                     << " resultType=" << resultType << "\n";
+        llvm::errs().flush();
+        if (op.getNumOperands() != 1 || op.getNumResults() != 1)
+            return failure();
+        Value packed = ensureU256(rewriter, loc, input);
+        rewriter.replaceOp(op, packed);
+        return success();
+    }
+
+    // Handle ora.error_union without normalized attribute: treat as packed u256.
+    if (op.getNumOperands() == 1 && op.getNumResults() == 1)
+    {
+        if (llvm::isa<ora::ErrorUnionType>(resultType))
+        {
+            Value packed = ensureU256(rewriter, loc, input);
+            rewriter.replaceOp(op, packed);
+            return success();
+        }
+    }
+
+    // Wide error_union materialization: split packed u256 into (tag, payload).
+    if (op.getNumOperands() == 1 && op.getNumResults() == 2)
+    {
+        auto u256Ty = sir::U256Type::get(rewriter.getContext());
+        if (op.getResult(0).getType() == u256Ty && op.getResult(1).getType() == u256Ty)
+        {
+            Value packed = ensureU256(rewriter, loc, input);
+            auto u256IntTy = mlir::IntegerType::get(rewriter.getContext(), 256, mlir::IntegerType::Unsigned);
+            Value one = rewriter.create<sir::ConstOp>(loc, u256Ty,
+                                                      mlir::IntegerAttr::get(u256IntTy, 1));
+            Value tag = rewriter.create<sir::AndOp>(loc, u256Ty, packed, one);
+            Value payload = rewriter.create<sir::ShrOp>(loc, u256Ty, packed, one);
+            rewriter.replaceOp(op, {tag, payload});
+            return success();
+        }
+    }
+
+    // Wide error_union packing: combine (tag, payload) into packed u256.
+    if (op.getNumOperands() == 2 && op.getNumResults() == 1 && llvm::isa<sir::U256Type>(resultType))
+    {
+        Value tag = ensureU256(rewriter, loc, op.getOperand(0));
+        Value payload = ensureU256(rewriter, loc, op.getOperand(1));
+        auto u256Ty = sir::U256Type::get(rewriter.getContext());
+        auto u256IntTy = mlir::IntegerType::get(rewriter.getContext(), 256, mlir::IntegerType::Unsigned);
+        Value one = rewriter.create<sir::ConstOp>(loc, u256Ty,
+                                                  mlir::IntegerAttr::get(u256IntTy, 1));
+        Value tag1 = rewriter.create<sir::AndOp>(loc, u256Ty, tag, one);
+        Value payloadShift = rewriter.create<sir::ShlOp>(loc, u256Ty, payload, one);
+        Value packed = rewriter.create<sir::OrOp>(loc, u256Ty, payloadShift, tag1);
+        rewriter.replaceOp(op, packed);
+        return success();
+    }
+
+    if (input.getType() == resultType)
+    {
+        rewriter.replaceOp(op, input);
+        return success();
+    }
+
+    if (llvm::isa<sir::U256Type>(resultType))
+    {
+        Value packed = ensureU256(rewriter, loc, input);
+        rewriter.replaceOp(op, packed);
+        return success();
+    }
+
+    if (llvm::isa<sir::PtrType>(resultType))
+    {
+        Value casted = rewriter.create<sir::BitcastOp>(loc, resultType, input);
+        rewriter.replaceOp(op, casted);
+        return success();
+    }
+
+    if (llvm::isa<mlir::IntegerType>(resultType))
+    {
+        Value casted = rewriter.create<sir::BitcastOp>(loc, resultType, input);
+        rewriter.replaceOp(op, casted);
+        return success();
+    }
+
+    return failure();
+}
+
+LogicalResult StripNormalizedErrorUnionCastOp::matchAndRewrite(
+    mlir::UnrealizedConversionCastOp op,
+    mlir::UnrealizedConversionCastOp::Adaptor adaptor,
+    ConversionPatternRewriter &rewriter) const
+{
+    if (!op->hasAttr("ora.normalized_error_union"))
+        return failure();
+    if (op.getNumOperands() != 1 || op.getNumResults() != 1)
+        return failure();
+
+    auto errType = llvm::dyn_cast<ora::ErrorUnionType>(op.getResult(0).getType());
+    if (!errType)
+        return failure();
+
+    Value operand = adaptor.getOperands().front();
+    auto loc = op.getLoc();
+    auto packed = ensureU256(rewriter, loc, operand);
     rewriter.replaceOp(op, packed);
     return success();
 }
