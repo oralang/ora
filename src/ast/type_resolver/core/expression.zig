@@ -310,8 +310,29 @@ fn synthEnumLiteral(
     self: *CoreResolver,
     el: *ast.Expressions.EnumLiteralExpr,
 ) TypeResolutionError!Typed {
-    const enum_ty = TypeInfo.fromOraType(OraType{ .enum_type = el.enum_name });
-    return Typed.init(enum_ty, Effect.pure(), self.allocator);
+    // if the enum type exists, treat as proper enum literal
+    const root_scope: ?*const Scope = @as(?*const Scope, @ptrCast(self.symbol_table.root));
+    const type_symbol = SymbolTable.findUp(root_scope, el.enum_name);
+    if (type_symbol) |tsym| {
+        if (tsym.kind == .Enum) {
+            const enum_ty = TypeInfo.fromOraType(OraType{ .enum_type = el.enum_name });
+            return Typed.init(enum_ty, Effect.pure(), self.allocator);
+        }
+    }
+
+    // fallback: reinterpret as field access (e.g., history.length)
+    var ident_expr = ast.Expressions.ExprNode{ .Identifier = ast.Expressions.IdentifierExpr{
+        .name = el.enum_name,
+        .type_info = TypeInfo.unknown(),
+        .span = el.span,
+    } };
+    var field_expr = ast.Expressions.FieldAccessExpr{
+        .target = &ident_expr,
+        .field = el.variant_name,
+        .type_info = TypeInfo.unknown(),
+        .span = el.span,
+    };
+    return synthFieldAccess(self, &field_expr);
 }
 
 fn synthAssignment(
@@ -950,6 +971,17 @@ fn synthFieldAccess(
 
     // get the type of the base
     const target_type = base_typed.ty;
+
+    // allow pseudo-field access on arrays/slices (e.g., .length)
+    if ((target_type.category == .Array or target_type.category == .Slice) and
+        std.mem.eql(u8, fa.field, "length"))
+    {
+        var len_info = TypeInfo.fromOraType(.u256);
+        len_info.region = base_typed.ty.region;
+        fa.type_info = len_info;
+        const eff = takeEffect(&base_typed);
+        return Typed.init(len_info, eff, self.allocator);
+    }
 
     // check if the type is a struct
     if (target_type.category == .Struct) {

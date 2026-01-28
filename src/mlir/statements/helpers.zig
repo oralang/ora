@@ -718,6 +718,8 @@ pub fn blockHasReturn(self: *const StatementLowerer, block: lib.ast.Statements.B
     return false;
 }
 
+/// Check if a block always returns on all control-flow paths (conservative).
+
 /// Get the span from an expression node
 pub fn getExprSpan(expr: *const lib.ast.Expressions.ExprNode) lib.ast.SourceSpan {
     return switch (expr.*) {

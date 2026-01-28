@@ -226,8 +226,12 @@ namespace mlir
                 if (enableTensorLowering)
                     return sir::U256Type::get(type.getContext());
                 return type; });
-            addConversion([](mlir::MemRefType type) -> Type
-                          { return type; });
+            addConversion([this](mlir::MemRefType type) -> Type
+                          {
+                if (enableMemRefLowering)
+                    return sir::PtrType::get(type.getContext(), /*addrSpace*/ 1);
+                return type;
+            });
 
             // =========================================================================
             // 3. Function signature conversion
@@ -265,6 +269,18 @@ namespace mlir
                                              return Value();
 
                                          Value input = inputs[0];
+
+                                         // Materialize refinement -> base via ora.refinement_to_base.
+                                         if (llvm::isa<mlir::IntegerType>(type))
+                                         {
+                                             if (llvm::isa<ora::MinValueType, ora::MaxValueType, ora::InRangeType,
+                                                           ora::ScaledType, ora::ExactType, ora::NonZeroAddressType>(input.getType()))
+                                             {
+                                                 auto cast = builder.create<ora::RefinementToBaseOp>(loc, type, input);
+                                                 return cast.getResult();
+                                             }
+                                         }
+
                                          if (llvm::isa<sir::U256Type>(type))
                                          {
                                              if (auto tensorType = llvm::dyn_cast<mlir::RankedTensorType>(input.getType()))
@@ -553,8 +569,7 @@ namespace mlir
                                              return Value();
                                          if (!llvm::isa<mlir::MemRefType, mlir::UnrankedMemRefType>(input.getType()))
                                              return Value();
-                                         auto cast = builder.create<mlir::UnrealizedConversionCastOp>(loc, type, input);
-                                         return cast.getResult(0);
+                                         return builder.create<sir::BitcastOp>(loc, type, input);
                                      });
 
             // We should NEVER materialize from SIR back to Ora - this indicates a bug
@@ -653,6 +668,21 @@ namespace mlir
                                                 auto cast = builder.create<mlir::UnrealizedConversionCastOp>(loc, type, input);
                                                 return cast.getResult(0);
                                             }
+                                        }
+
+                                        if (llvm::isa<ora::StringType, ora::BytesType>(type))
+                                        {
+                                            auto cast = builder.create<mlir::UnrealizedConversionCastOp>(loc, type, input);
+                                            return cast.getResult(0);
+                                        }
+
+                                        // Allow materializing into refinement types via ora.base_to_refinement.
+                                        if (llvm::isa<ora::MinValueType, ora::MaxValueType, ora::InRangeType,
+                                                     ora::ScaledType, ora::ExactType, ora::NonZeroAddressType>(type))
+                                        {
+                                            // The refinement op is type-level; it can wrap an already-converted value.
+                                            auto cast = builder.create<ora::BaseToRefinementOp>(loc, type, input);
+                                            return cast.getResult();
                                         }
 
                                         // If trying to materialize to an Ora type, this is an error

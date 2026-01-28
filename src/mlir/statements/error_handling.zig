@@ -125,7 +125,6 @@ pub fn lowerTryBlock(self: *const StatementLowerer, try_stmt: *const lib.ast.Sta
         helpers.blockHasReturn(self, cb.block)
     else
         false;
-
     const result_type_opt: ?c.MlirType = if ((try_has_return or catch_has_return) and self.current_function_return_type != null)
         self.current_function_return_type.?
     else

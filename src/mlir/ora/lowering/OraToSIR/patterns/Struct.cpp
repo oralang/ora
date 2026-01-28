@@ -331,3 +331,29 @@ LogicalResult StripAddressMaterializeOp::matchAndRewrite(
     rewriter.replaceOp(op, input);
     return success();
 }
+
+LogicalResult StripBytesMaterializeOp::matchAndRewrite(
+    mlir::UnrealizedConversionCastOp op,
+    mlir::UnrealizedConversionCastOp::Adaptor adaptor,
+    ConversionPatternRewriter &rewriter) const
+{
+    if (op.getNumOperands() != 1 || op.getNumResults() != 1)
+    {
+        return rewriter.notifyMatchFailure(op, "expected single operand/result");
+    }
+
+    Type resultType = op.getResult(0).getType();
+    if (!llvm::isa<ora::StringType, ora::BytesType>(resultType))
+    {
+        return rewriter.notifyMatchFailure(op, "not a bytes/string materialization");
+    }
+
+    Value input = adaptor.getOperands()[0];
+    if (!llvm::isa<sir::PtrType>(input.getType()))
+    {
+        return rewriter.notifyMatchFailure(op, "expected sir.ptr operand");
+    }
+
+    rewriter.replaceOp(op, input);
+    return success();
+}

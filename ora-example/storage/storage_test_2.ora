@@ -38,12 +38,12 @@ contract StorageTest2 {
     
     // Slice operations
     fn addToHistory(value: u256) {
-        // Note: slice operations would need to be implemented
-        // For now, this is just a placeholder
+        // Touch length to exercise slice access in Ora MLIR
+        let _len: u256 = history.length;
+        let _val: u256 = value;
     }
     
     fn getHistoryLength() -> u256 {
-        // Note: slice length would need to be implemented
-        return 0;
+        return history.length;
     }
 }

@@ -1,0 +1,44 @@
+// ============================================================================
+// Error Union Split (tag + payload) regression
+// ============================================================================
+
+contract ErrorUnionSplit {
+    error E1;
+    error E2(code: u256);
+
+    // Return either value or payload error (forces tag+payload split)
+    pub fn mayFailPayload(x: u256) -> !u256 | E2 {
+        if (x == 0) {
+            return E2(42);
+        }
+        return x + 1;
+    }
+
+    // Return either bool, tag-only error, or payload error
+    pub fn mayFailMixed(x: u256) -> !bool | E1 | E2 {
+        if (x == 0) {
+            return E1;
+        }
+        if (x == 1) {
+            return E2(7);
+        }
+        return true;
+    }
+
+    // Forces ora.error.is_error + ora.error.unwrap on payload union
+    pub fn unwrapPayload(x: u256) -> !u256 | E2 {
+        let y: u256 = try mayFailPayload(x);
+        return y + 2;
+    }
+
+    // Forces ora.error.get_error for payload union
+    pub fn catchPayload(x: u256) -> u256 {
+        try {
+            let y: u256 = mayFailPayload(x);
+            return y;
+        } catch (e) {
+            let code: u256 = e;
+            return code;
+        }
+    }
+}

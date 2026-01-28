@@ -1,0 +1,18 @@
+// Branch guard_id stability test
+// Expect same guard_id for identical refinement guards across branches.
+
+contract GuardIdStability {
+    pub fn branch_guard(flag: bool, x: u256) -> u256 {
+        var out: u256 = 0;
+
+        if (flag) {
+            let y: MinValue<u256, 10> = x;
+            out = y;
+        } else {
+            let y: MinValue<u256, 10> = x;
+            out = y;
+        }
+
+        return out;
+    }
+}

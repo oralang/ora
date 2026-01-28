@@ -295,7 +295,14 @@ pub fn lowerFieldAccess(
     }
 
     const target = self.lowerExpression(field.target);
-    _ = c.oraValueGetType(target);
+    const target_type = c.oraValueGetType(target);
+
+    if ((c.oraTypeIsAMemRef(target_type) or c.oraTypeIsAShaped(target_type)) and
+        std.mem.eql(u8, field.field, "length"))
+    {
+        return createPseudoFieldAccess(self, target, field.field, field.span);
+    }
+
     return createStructFieldExtract(self, target, field.field, field.span);
 }
 

@@ -6,6 +6,7 @@
 #include "SIR/SIRDialect.h"
 
 #include "mlir/IR/BuiltinTypes.h"
+#include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Transforms/DialectConversion.h"
@@ -130,19 +131,32 @@ LogicalResult ConvertMemRefDimOp::matchAndRewrite(
     }
 
     // only handle constant dimension index
-    auto indexConst = adaptor.getIndex().getDefiningOp<sir::ConstOp>();
-    if (!indexConst)
+    int64_t dimIndex = -1;
+    if (auto indexConst = adaptor.getIndex().getDefiningOp<sir::ConstOp>())
+    {
+        auto indexAttr = llvm::dyn_cast<mlir::IntegerAttr>(indexConst.getValueAttr());
+        if (!indexAttr)
+        {
+            DBG("ConvertMemRefDimOp: index not integer");
+            return failure();
+        }
+        dimIndex = indexAttr.getInt();
+    }
+    else if (auto indexConst = adaptor.getIndex().getDefiningOp<mlir::arith::ConstantOp>())
+    {
+        auto indexAttr = llvm::dyn_cast<mlir::IntegerAttr>(indexConst.getValue());
+        if (!indexAttr)
+        {
+            DBG("ConvertMemRefDimOp: arith index not integer");
+            return failure();
+        }
+        dimIndex = indexAttr.getInt();
+    }
+    else
     {
         DBG("ConvertMemRefDimOp: non-constant index");
         return failure();
     }
-    auto indexAttr = llvm::dyn_cast<mlir::IntegerAttr>(indexConst.getValueAttr());
-    if (!indexAttr)
-    {
-        DBG("ConvertMemRefDimOp: index not integer");
-        return failure();
-    }
-    int64_t dimIndex = indexAttr.getInt();
     if (dimIndex < 0 || dimIndex >= static_cast<int64_t>(memrefType.getRank()))
     {
         DBG("ConvertMemRefDimOp: index out of bounds");
@@ -176,11 +190,10 @@ LogicalResult ConvertMemRefLoadOp::matchAndRewrite(
     if (!llvm::isa<sir::PtrType>(memref.getType()))
     {
         auto ptrType = sir::PtrType::get(ctx, /*addrSpace*/ 1);
-        auto cast = rewriter.create<mlir::UnrealizedConversionCastOp>(loc, ptrType, memref);
-        memref = cast.getResult(0);
+        memref = rewriter.create<sir::BitcastOp>(loc, ptrType, memref);
     }
 
-    // Get index (if any)
+    // Get indices (if any)
     auto indices = adaptor.getIndices();
     Value basePtr = memref;
 
@@ -188,12 +201,15 @@ LogicalResult ConvertMemRefLoadOp::matchAndRewrite(
 
     if (!indices.empty())
     {
-        // Calculate offset: index * element_size (32 bytes)
-        Value index = indices[0];
-        auto u256Type = sir::U256Type::get(ctx);
+        auto memrefType = llvm::dyn_cast<mlir::MemRefType>(op.getMemref().getType());
+        if (!memrefType || !memrefType.hasStaticShape())
+        {
+            DBG("ConvertMemRefLoadOp: non-static memref shape not supported");
+            return failure();
+        }
 
-        // Extract element index for naming
-        int64_t elemIndex = naming.extractElementIndex(index);
+        // Extract element index for naming (best-effort from first index)
+        int64_t elemIndex = naming.extractElementIndex(indices.front());
         if (elemIndex < 0)
         {
             elemIndex = naming.getNextElemIndex();
@@ -205,21 +221,45 @@ LogicalResult ConvertMemRefLoadOp::matchAndRewrite(
             mlir::StringAttr::get(ctx, elemLocName),
             loc);
 
-        // Convert index to u256 if needed
-        if (!llvm::isa<sir::U256Type>(index.getType()))
-        {
-            index = rewriter.create<sir::BitcastOp>(elemLoc, u256Type, index);
-        }
+        auto u256Type = sir::U256Type::get(ctx);
+        auto ui64Type = mlir::IntegerType::get(ctx, 64, mlir::IntegerType::Unsigned);
 
         // Create element size constant (32 bytes)
-        auto ui64Type = mlir::IntegerType::get(ctx, 64, mlir::IntegerType::Unsigned);
         auto elementSizeAttr = mlir::IntegerAttr::get(ui64Type, 32ULL);
         Value elementSize = rewriter.create<sir::ConstOp>(elemLoc, u256Type, elementSizeAttr);
         naming.nameConst(elementSize.getDefiningOp(), 0, 32, "elem_size");
 
-        // Calculate offset: index * 32
+        // Compute linearized offset in bytes: ((i0 * stride0) + (i1 * stride1) + ...) * elem_size
+        Value linear = rewriter.create<sir::ConstOp>(
+            elemLoc, u256Type, mlir::IntegerAttr::get(ui64Type, 0));
+
+        auto shape = memrefType.getShape();
+        const int64_t rank = static_cast<int64_t>(shape.size());
+        if (static_cast<int64_t>(indices.size()) != rank)
+        {
+            DBG("ConvertMemRefLoadOp: index count does not match memref rank");
+            return failure();
+        }
+
+        int64_t stride = 1;
+        for (int64_t i = rank - 1; i >= 0; --i)
+        {
+            Value idx = indices[i];
+            if (!llvm::isa<sir::U256Type>(idx.getType()))
+            {
+                idx = rewriter.create<sir::BitcastOp>(elemLoc, u256Type, idx);
+            }
+
+            Value strideConst = rewriter.create<sir::ConstOp>(
+                elemLoc, u256Type, mlir::IntegerAttr::get(ui64Type, static_cast<uint64_t>(stride)));
+            Value scaled = rewriter.create<sir::MulOp>(elemLoc, u256Type, idx, strideConst);
+            linear = rewriter.create<sir::AddOp>(elemLoc, u256Type, linear, scaled);
+
+            stride *= shape[i];
+        }
+
         unsigned offsetIndex = naming.getNextOffsetIndex();
-        Value offset = rewriter.create<sir::MulOp>(elemLoc, u256Type, index, elementSize);
+        Value offset = rewriter.create<sir::MulOp>(elemLoc, u256Type, linear, elementSize);
         naming.nameOffset(offset.getDefiningOp(), 0, offsetIndex);
 
         // Add offset to base pointer
@@ -290,8 +330,7 @@ LogicalResult ConvertMemRefStoreOp::matchAndRewrite(
                      << memref.getType() << " value type=" << value.getType()
                      << " at " << loc << "\n";
         auto ptrType = sir::PtrType::get(ctx, /*addrSpace*/ 1);
-        auto cast = rewriter.create<mlir::UnrealizedConversionCastOp>(loc, ptrType, memref);
-        memref = cast.getResult(0);
+        memref = rewriter.create<sir::BitcastOp>(loc, ptrType, memref);
     }
 
     // Ensure value is u256
@@ -303,17 +342,21 @@ LogicalResult ConvertMemRefStoreOp::matchAndRewrite(
 
     auto &naming = getNamingHelper(op);
 
-    // Get index (if any)
+    // Get indices (if any)
     auto indices = adaptor.getIndices();
     Value storePtr = memref;
 
     if (!indices.empty())
     {
-        // Calculate offset: index * element_size (32 bytes)
-        Value index = indices[0];
+        auto memrefType = llvm::dyn_cast<mlir::MemRefType>(op.getMemref().getType());
+        if (!memrefType || !memrefType.hasStaticShape())
+        {
+            DBG("ConvertMemRefStoreOp: non-static memref shape not supported");
+            return failure();
+        }
 
-        // Extract element index for naming
-        int64_t elemIndex = naming.extractElementIndex(index);
+        // Extract element index for naming (best-effort from first index)
+        int64_t elemIndex = naming.extractElementIndex(indices.front());
         if (elemIndex < 0)
         {
             elemIndex = naming.getNextElemIndex();
@@ -325,21 +368,44 @@ LogicalResult ConvertMemRefStoreOp::matchAndRewrite(
             mlir::StringAttr::get(ctx, elemLocName),
             loc);
 
-        // Convert index to u256 if needed
-        if (!llvm::isa<sir::U256Type>(index.getType()))
-        {
-            index = rewriter.create<sir::BitcastOp>(elemLoc, u256Type, index);
-        }
+        auto ui64Type = mlir::IntegerType::get(ctx, 64, mlir::IntegerType::Unsigned);
 
         // Create element size constant (32 bytes)
-        auto ui64Type = mlir::IntegerType::get(ctx, 64, mlir::IntegerType::Unsigned);
         auto elementSizeAttr = mlir::IntegerAttr::get(ui64Type, 32ULL);
         Value elementSize = rewriter.create<sir::ConstOp>(elemLoc, u256Type, elementSizeAttr);
         naming.nameConst(elementSize.getDefiningOp(), 0, 32, "elem_size");
 
-        // Calculate offset: index * 32
+        // Compute linearized offset in bytes: ((i0 * stride0) + (i1 * stride1) + ...) * elem_size
+        Value linear = rewriter.create<sir::ConstOp>(
+            elemLoc, u256Type, mlir::IntegerAttr::get(ui64Type, 0));
+
+        auto shape = memrefType.getShape();
+        const int64_t rank = static_cast<int64_t>(shape.size());
+        if (static_cast<int64_t>(indices.size()) != rank)
+        {
+            DBG("ConvertMemRefStoreOp: index count does not match memref rank");
+            return failure();
+        }
+
+        int64_t stride = 1;
+        for (int64_t i = rank - 1; i >= 0; --i)
+        {
+            Value idx = indices[i];
+            if (!llvm::isa<sir::U256Type>(idx.getType()))
+            {
+                idx = rewriter.create<sir::BitcastOp>(elemLoc, u256Type, idx);
+            }
+
+            Value strideConst = rewriter.create<sir::ConstOp>(
+                elemLoc, u256Type, mlir::IntegerAttr::get(ui64Type, static_cast<uint64_t>(stride)));
+            Value scaled = rewriter.create<sir::MulOp>(elemLoc, u256Type, idx, strideConst);
+            linear = rewriter.create<sir::AddOp>(elemLoc, u256Type, linear, scaled);
+
+            stride *= shape[i];
+        }
+
         unsigned offsetIndex = naming.getNextOffsetIndex();
-        Value offset = rewriter.create<sir::MulOp>(elemLoc, u256Type, index, elementSize);
+        Value offset = rewriter.create<sir::MulOp>(elemLoc, u256Type, linear, elementSize);
         naming.nameOffset(offset.getDefiningOp(), 0, offsetIndex);
 
         // Add offset to base pointer

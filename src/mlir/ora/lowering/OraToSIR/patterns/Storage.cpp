@@ -814,7 +814,38 @@ LogicalResult ConvertMapStoreOp::matchAndRewrite(
         Value baseSlot = convertedMapOperand;
         if (!llvm::isa<sir::U256Type>(baseSlot.getType()))
         {
-            return rewriter.notifyMatchFailure(op, "array base slot is not u256");
+            // Try to recover base slot from global name if tensor wasn't converted.
+            llvm::StringRef globalName = getGlobalNameFromMapOperand(originalMapOperand, op.getOperation());
+            if (globalName.empty())
+            {
+                // Look backwards for most recent ora.sload if needed.
+                mlir::Block *block = op->getBlock();
+                auto it = mlir::Block::iterator(op.getOperation());
+                while (it != block->begin())
+                {
+                    --it;
+                    if (auto sloadOp = llvm::dyn_cast<ora::SLoadOp>(*it))
+                    {
+                        globalName = sloadOp.getGlobalName();
+                        break;
+                    }
+                }
+            }
+            if (globalName.empty())
+            {
+                return rewriter.notifyMatchFailure(op, "array base slot is not u256");
+            }
+            auto slotIndexOpt = computeGlobalSlot(globalName, op.getOperation());
+            if (!slotIndexOpt)
+            {
+                return rewriter.notifyMatchFailure(op, "missing ora.slot_index for array map_store");
+            }
+            uint64_t slotIndex = *slotIndexOpt;
+            baseSlot = findOrCreateSlotConstant(op.getOperation(), slotIndex, globalName, rewriter);
+            if (auto slotOp = baseSlot.getDefiningOp<sir::ConstOp>())
+            {
+                setResultName(slotOp, 0, ("slot_" + globalName).str());
+            }
         }
         Value indexU256 = ensureU256Value(rewriter, loc, key);
         uint64_t elemWords = getElementWordCount(tensorType.getElementType());
@@ -954,17 +985,41 @@ LogicalResult ConvertTensorExtractOp::matchAndRewrite(
     auto tensorType = llvm::dyn_cast<mlir::RankedTensorType>(op.getTensor().getType());
     if (!tensorType)
         return rewriter.notifyMatchFailure(op, "tensor.extract without ranked tensor");
-    if (tensorType.getRank() != 1)
-        return rewriter.notifyMatchFailure(op, "only 1D arrays supported");
-
     Value base = adaptor.getTensor();
     if (!llvm::isa<sir::U256Type>(base.getType()))
         return rewriter.notifyMatchFailure(op, "array base is not u256");
 
-    if (adaptor.getIndices().size() != 1)
-        return rewriter.notifyMatchFailure(op, "expected single index");
+    if (static_cast<int64_t>(adaptor.getIndices().size()) != tensorType.getRank())
+        return rewriter.notifyMatchFailure(op, "index count does not match tensor rank");
 
-    Value indexU256 = ensureU256Value(rewriter, loc, adaptor.getIndices()[0]);
+    // Compute linearized index for multi-dim tensors (row-major).
+    Value indexU256 = Value();
+    if (tensorType.getRank() == 1)
+    {
+        indexU256 = ensureU256Value(rewriter, loc, adaptor.getIndices()[0]);
+    }
+    else
+    {
+        if (!tensorType.hasStaticShape())
+            return rewriter.notifyMatchFailure(op, "non-static tensor shape not supported");
+
+        auto ui64Type = mlir::IntegerType::get(ctx, 64, mlir::IntegerType::Unsigned);
+        Value linear = rewriter.create<sir::ConstOp>(
+            loc, u256Type, mlir::IntegerAttr::get(ui64Type, 0));
+
+        auto shape = tensorType.getShape();
+        int64_t stride = 1;
+        for (int64_t i = tensorType.getRank() - 1; i >= 0; --i)
+        {
+            Value idx = ensureU256Value(rewriter, loc, adaptor.getIndices()[i]);
+            Value strideConst = rewriter.create<sir::ConstOp>(
+                loc, u256Type, mlir::IntegerAttr::get(ui64Type, static_cast<uint64_t>(stride)));
+            Value scaled = rewriter.create<sir::MulOp>(loc, u256Type, idx, strideConst);
+            linear = rewriter.create<sir::AddOp>(loc, u256Type, linear, scaled);
+            stride *= shape[i];
+        }
+        indexU256 = linear;
+    }
     uint64_t elemWords = getElementWordCount(tensorType.getElementType());
 
     Value loaded = Value();

@@ -85,28 +85,54 @@ static void assignGlobalSlots(ModuleOp module)
         uint64_t slot = 0;
         for (Operation &op : block)
         {
-            auto globalOp = dyn_cast<ora::GlobalOp>(op);
-            if (!globalOp)
-                continue;
-            if (globalOp->getAttrOfType<IntegerAttr>("ora.slot_index"))
+            if (auto globalOp = dyn_cast<ora::GlobalOp>(op))
             {
+                if (globalOp->getAttrOfType<IntegerAttr>("ora.slot_index"))
+                {
+                    auto nameAttr = globalOp->getAttrOfType<StringAttr>("sym_name");
+                    auto slotAttr = globalOp->getAttrOfType<IntegerAttr>("ora.slot_index");
+                    if (nameAttr && slotAttr)
+                    {
+                        slotAttrs.push_back(NamedAttribute(nameAttr, slotAttr));
+                    }
+                    slot++;
+                    continue;
+                }
+                auto slotAttr = mlir::IntegerAttr::get(ui64Type, slot);
+                globalOp->setAttr("ora.slot_index", slotAttr);
                 auto nameAttr = globalOp->getAttrOfType<StringAttr>("sym_name");
-                auto slotAttr = globalOp->getAttrOfType<IntegerAttr>("ora.slot_index");
-                if (nameAttr && slotAttr)
+                if (nameAttr)
                 {
                     slotAttrs.push_back(NamedAttribute(nameAttr, slotAttr));
                 }
                 slot++;
                 continue;
             }
-            auto slotAttr = mlir::IntegerAttr::get(ui64Type, slot);
-            globalOp->setAttr("ora.slot_index", slotAttr);
-            auto nameAttr = globalOp->getAttrOfType<StringAttr>("sym_name");
-            if (nameAttr)
+
+            // Also assign slots to non-ora.global storage-like declarations.
+            auto opName = op.getName().getStringRef();
+            if (opName == "ora.tstore.global" || opName == "ora.memory.global")
             {
+                auto nameAttr = op.getAttrOfType<StringAttr>("sym_name");
+                if (!nameAttr)
+                {
+                    continue;
+                }
+                if (op.getAttrOfType<IntegerAttr>("ora.slot_index"))
+                {
+                    auto slotAttr = op.getAttrOfType<IntegerAttr>("ora.slot_index");
+                    if (slotAttr)
+                    {
+                        slotAttrs.push_back(NamedAttribute(nameAttr, slotAttr));
+                    }
+                    slot++;
+                    continue;
+                }
+                auto slotAttr = mlir::IntegerAttr::get(ui64Type, slot);
+                op.setAttr("ora.slot_index", slotAttr);
                 slotAttrs.push_back(NamedAttribute(nameAttr, slotAttr));
+                slot++;
             }
-            slot++;
         }
     };
 
@@ -170,10 +196,7 @@ public:
 
         RewritePatternSet patterns(module.getContext());
 
-        patterns.add<ConvertMemRefLoadOp>(typeConverter, module.getContext());
-        patterns.add<ConvertMemRefStoreOp>(typeConverter, module.getContext());
-        patterns.add<ConvertMemRefAllocOp>(typeConverter, module.getContext());
-        patterns.add<ConvertMemRefDimOp>(typeConverter, module.getContext());
+        // Memref lowering happens in Phase 4; keep this pass free of memref patterns.
 
         ConversionTarget target(*module.getContext());
         target.addLegalDialect<mlir::BuiltinDialect>();
@@ -333,6 +356,10 @@ public:
         const bool enable_return = true;
         const bool enable_control_flow = true;
 
+        if (enable_storage)
+            typeConverter.setEnableTensorLowering(true);
+        // Memref lowering happens in Phase 4.
+
         RewritePatternSet patterns(ctx);
 
         if (enable_contract)
@@ -401,14 +428,7 @@ public:
         patterns.add<ConvertRefinementToBaseOp>(typeConverter, ctx);
         patterns.add<ConvertBaseToRefinementOp>(typeConverter, ctx);
         patterns.add<ConvertEvmOp>(typeConverter, ctx);
-        if (enable_memref_store)
-            patterns.add<ConvertMemRefStoreOp>(typeConverter, ctx, PatternBenefit(10));
-        if (enable_memref_load)
-            patterns.add<ConvertMemRefLoadOp>(typeConverter, ctx);
-        if (enable_memref_load)
-            patterns.add<ConvertMemRefDimOp>(typeConverter, ctx);
-        if (enable_memref_alloc)
-            patterns.add<ConvertMemRefAllocOp>(typeConverter, ctx);
+        // Memref lowering happens in Phase 4; do not add memref patterns here.
         if (enable_storage)
         {
             patterns.add<ConvertSLoadOp>(typeConverter, ctx);
@@ -455,6 +475,12 @@ public:
         DBG("Marked SIR dialect as legal");
         // Ora ops are illegal by default; no Ora ops should remain after conversion
         target.addIllegalDialect<ora::OraDialect>();
+
+        if (enable_storage)
+        {
+            // Force storage-related tensor ops to lower when arrays/maps are enabled.
+            target.addIllegalOp<mlir::tensor::ExtractOp, mlir::tensor::DimOp>();
+        }
         target.addIllegalOp<ora::ContractOp>();
         target.addLegalOp<ora::ReturnOp>();
         target.addLegalOp<ora::ErrorOkOp>();
@@ -467,6 +493,7 @@ public:
         target.addLegalOp<ora::ContinueOp>();
         target.addLegalOp<ora::TryStmtOp>();
         target.addLegalOp<ora::SwitchOp>();
+        target.addLegalOp<mlir::UnrealizedConversionCastOp>();
         if (!enable_struct)
         {
             target.addLegalOp<ora::StructInstantiateOp>();
@@ -484,7 +511,14 @@ public:
         DBG("Marked scf dialect as legal");
         target.addLegalDialect<mlir::tensor::TensorDialect>();
         DBG("Marked tensor dialect as legal");
-        target.addLegalDialect<mlir::memref::MemRefDialect>();
+        if (enable_memref_alloc || enable_memref_load || enable_memref_store)
+        {
+            target.addIllegalDialect<mlir::memref::MemRefDialect>();
+        }
+        else
+        {
+            target.addLegalDialect<mlir::memref::MemRefDialect>();
+        }
         target.addLegalDialect<mlir::arith::ArithDialect>();
 
         target.addDynamicallyLegalDialect<mlir::func::FuncDialect>(
@@ -798,6 +832,7 @@ public:
             phase4Target.addLegalDialect<ora::OraDialect>();
 
             ConversionConfig phase4Config;
+            // Avoid ptr<->memref materializations; memref ops must be fully rewritten.
             phase4Config.buildMaterializations = false;
             if (failed(applyFullConversion(module, phase4Target, std::move(phase4Patterns), phase4Config)))
             {
@@ -811,6 +846,7 @@ public:
             ora::OraToSIRTypeConverter phase5TypeConverter;
             phase5TypeConverter.setEnableStructLowering(true);
             phase5TypeConverter.setEnableTensorLowering(true);
+            phase5TypeConverter.setEnableMemRefLowering(true);
             llvm::errs() << "[OraToSIR] Phase5 start\n";
             RewritePatternSet phase5Patterns(ctx);
             phase5Patterns.add<ConvertFuncOp>(phase5TypeConverter, ctx);
@@ -847,12 +883,11 @@ public:
             phase5Patterns.add<ConvertArithExtUIOp>(phase5TypeConverter, ctx);
             phase5Patterns.add<ConvertArithIndexCastUIOp>(phase5TypeConverter, ctx);
             phase5Patterns.add<ConvertArithTruncIOp>(phase5TypeConverter, ctx);
-            phase5Patterns.add<ConvertMemRefAllocOp>(phase5TypeConverter, ctx);
-            phase5Patterns.add<ConvertMemRefLoadOp>(phase5TypeConverter, ctx);
-            phase5Patterns.add<ConvertMemRefStoreOp>(phase5TypeConverter, ctx);
-            phase5Patterns.add<ConvertMemRefDimOp>(phase5TypeConverter, ctx);
+            // Memref lowering happens in Phase 4; do not add memref patterns here.
             phase5Patterns.add<ConvertTensorExtractOp>(phase5TypeConverter, ctx);
             phase5Patterns.add<ConvertTensorDimOp>(phase5TypeConverter, ctx);
+            phase5Patterns.add<ConvertBaseToRefinementOp>(phase5TypeConverter, ctx);
+            phase5Patterns.add<ConvertRefinementToBaseOp>(phase5TypeConverter, ctx);
             phase5Patterns.add<ConvertStructInitOp>(phase5TypeConverter, ctx);
             phase5Patterns.add<ConvertStructInstantiateOp>(phase5TypeConverter, ctx);
             phase5Patterns.add<ConvertStructFieldExtractOp>(phase5TypeConverter, ctx);
@@ -860,6 +895,7 @@ public:
             phase5Patterns.add<ConvertStructDeclOp>(phase5TypeConverter, ctx);
             phase5Patterns.add<StripStructMaterializeOp>(phase5TypeConverter, ctx);
             phase5Patterns.add<StripAddressMaterializeOp>(phase5TypeConverter, ctx);
+            phase5Patterns.add<StripBytesMaterializeOp>(phase5TypeConverter, ctx);
 
             ConversionTarget phase5Target(*ctx);
             phase5Target.addLegalDialect<mlir::BuiltinDialect>();
@@ -899,6 +935,8 @@ public:
             phase5Target.addIllegalOp<ora::StructFieldExtractOp>();
             phase5Target.addIllegalOp<ora::StructFieldUpdateOp>();
             phase5Target.addIllegalOp<ora::StructDeclOp>();
+            phase5Target.addIllegalOp<ora::BaseToRefinementOp>();
+            phase5Target.addIllegalOp<ora::RefinementToBaseOp>();
             phase5Target.addLegalDialect<ora::OraDialect>();
 
             // Debug: report any unrealized casts still present before phase5.
@@ -928,6 +966,23 @@ public:
                 normalizedCasts.push_back(op);
             });
             for (auto castOp : normalizedCasts)
+            {
+                castOp.getResult(0).replaceAllUsesWith(castOp.getOperand(0));
+                castOp.erase();
+            }
+
+            // Cleanup: strip ptr -> ora.struct materializations that slipped through.
+            SmallVector<mlir::UnrealizedConversionCastOp, 8> structCasts;
+            module.walk([&](mlir::UnrealizedConversionCastOp op) {
+                if (op.getNumOperands() != 1 || op.getNumResults() != 1)
+                    return;
+                if (!llvm::isa<ora::StructType>(op.getResult(0).getType()))
+                    return;
+                if (!llvm::isa<sir::PtrType>(op.getOperand(0).getType()))
+                    return;
+                structCasts.push_back(op);
+            });
+            for (auto castOp : structCasts)
             {
                 castOp.getResult(0).replaceAllUsesWith(castOp.getOperand(0));
                 castOp.erase();

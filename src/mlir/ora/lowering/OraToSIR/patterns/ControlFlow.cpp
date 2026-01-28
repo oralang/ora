@@ -2542,6 +2542,30 @@ LogicalResult ConvertUnrealizedConversionCastOp::matchAndRewrite(
     Type resultType = op.getResult(0).getType();
     auto loc = op.getLoc();
 
+    // Refinement materializations: route through ora.{base_to_refinement,refinement_to_base}
+    // so phase5 patterns can erase them.
+    if (op.getNumOperands() == 1 && op.getNumResults() == 1)
+    {
+        auto isRefinement = [](Type ty) {
+            return llvm::isa<ora::MinValueType, ora::MaxValueType, ora::InRangeType,
+                             ora::ScaledType, ora::ExactType, ora::NonZeroAddressType>(ty);
+        };
+
+        if (isRefinement(resultType) && !isRefinement(input.getType()))
+        {
+            auto cast = rewriter.create<ora::BaseToRefinementOp>(loc, resultType, input);
+            rewriter.replaceOp(op, cast.getResult());
+            return success();
+        }
+
+        if (!isRefinement(resultType) && isRefinement(input.getType()))
+        {
+            auto cast = rewriter.create<ora::RefinementToBaseOp>(loc, resultType, input);
+            rewriter.replaceOp(op, cast.getResult());
+            return success();
+        }
+    }
+
     if (op->hasAttr("ora.normalized_error_union"))
     {
         llvm::errs() << "[OraToSIR] ConvertUnrealizedConversionCastOp: normalized at "
@@ -2553,6 +2577,83 @@ LogicalResult ConvertUnrealizedConversionCastOp::matchAndRewrite(
         Value packed = ensureU256(rewriter, loc, input);
         rewriter.replaceOp(op, packed);
         return success();
+    }
+
+    // Memref → ptr materialization during memref lowering.
+    if (op.getNumOperands() == 1 && op.getNumResults() == 1)
+    {
+        if (llvm::isa<sir::PtrType>(resultType) &&
+            llvm::isa<mlir::MemRefType, mlir::UnrankedMemRefType>(input.getType()))
+        {
+            auto cast = rewriter.create<sir::BitcastOp>(loc, resultType, input);
+            rewriter.replaceOp(op, cast.getResult());
+            return success();
+        }
+    }
+
+    // Cancel ptr -> memref -> ptr chains created by materialization.
+    if (op.getNumOperands() == 1 && op.getNumResults() == 1)
+    {
+        if (llvm::isa<mlir::MemRefType, mlir::UnrankedMemRefType>(resultType) &&
+            llvm::isa<sir::PtrType>(input.getType()))
+        {
+            for (Operation *user : op->getUsers())
+            {
+                if (auto userCast = dyn_cast<mlir::UnrealizedConversionCastOp>(user))
+                {
+                    if (userCast.getNumResults() != 1 ||
+                        !llvm::isa<sir::PtrType>(userCast.getResult(0).getType()))
+                        return failure();
+                    continue;
+                }
+                if (auto userBitcast = dyn_cast<sir::BitcastOp>(user))
+                {
+                    if (!llvm::isa<sir::PtrType>(userBitcast.getResult().getType()))
+                        return failure();
+                    continue;
+                }
+                return failure();
+            }
+
+            // All users are ptr casts; replace them and drop the memref cast.
+            for (Operation *user : llvm::make_early_inc_range(op->getUsers()))
+            {
+                if (auto userCast = dyn_cast<mlir::UnrealizedConversionCastOp>(user))
+                {
+                    rewriter.replaceOp(userCast, input);
+                    continue;
+                }
+                if (auto userBitcast = dyn_cast<sir::BitcastOp>(user))
+                {
+                    rewriter.replaceOp(userBitcast, input);
+                    continue;
+                }
+            }
+            rewriter.eraseOp(op);
+            return success();
+        }
+    }
+
+    // Strip ptr -> ora.string/ora.bytes materializations.
+    if (op.getNumOperands() == 1 && op.getNumResults() == 1)
+    {
+        if (llvm::isa<ora::StringType, ora::BytesType>(resultType) &&
+            llvm::isa<sir::PtrType>(input.getType()))
+        {
+            rewriter.replaceOp(op, input);
+            return success();
+        }
+    }
+
+    // Strip ptr -> ora.struct materializations.
+    if (op.getNumOperands() == 1 && op.getNumResults() == 1)
+    {
+        if (llvm::isa<ora::StructType>(resultType) &&
+            llvm::isa<sir::PtrType>(input.getType()))
+        {
+            rewriter.replaceOp(op, input);
+            return success();
+        }
     }
 
     // Handle ora.error_union without normalized attribute: treat as packed u256.
