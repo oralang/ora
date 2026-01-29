@@ -683,18 +683,122 @@ static LogicalResult rewriteErrorUnwrapInTryStmt(
         Value one = rewriter.create<sir::ConstOp>(loc, u256Type, oneAttr);
         Value payloadU256;
         Value isErrU256;
-        if (numOperands == 2)
+        SmallVector<Value> wideParts;
+        llvm::errs() << "[OraToSIR] TryStmt unwrap at " << loc
+                     << " operand#0 type=" << unwrap->getOperand(0).getType()
+                     << " numOperands=" << numOperands << "\n";
+        auto wideRes = materializeWideErrorUnion(rewriter, loc, unwrap->getOperand(0), wideParts);
+        llvm::errs() << "[OraToSIR] materializeWideErrorUnion result="
+                     << (succeeded(wideRes) ? "success" : "failure")
+                     << " parts=" << wideParts.size() << "\n";
+        if (succeeded(wideRes) && wideParts.size() == 2)
         {
-            Value tag = ensureU256(rewriter, loc, unwrap->getOperand(0));
-            payloadU256 = ensureU256(rewriter, loc, unwrap->getOperand(1));
+            Value tag = ensureU256(rewriter, loc, wideParts[0]);
+            payloadU256 = ensureU256(rewriter, loc, wideParts[1]);
+            llvm::errs() << "[OraToSIR] wide parts tag=" << wideParts[0].getType()
+                         << " payload=" << wideParts[1].getType() << "\n";
             isErrU256 = rewriter.create<sir::EqOp>(loc, u256Type, tag, one);
         }
-        else
+        if (!isErrU256)
         {
-            Value valueU256 = ensureU256(rewriter, loc, unwrap->getOperand(0));
-            Value masked = rewriter.create<sir::AndOp>(loc, u256Type, valueU256, one);
-            isErrU256 = rewriter.create<sir::EqOp>(loc, u256Type, masked, one);
-            payloadU256 = rewriter.create<sir::ShrOp>(loc, u256Type, one, valueU256);
+            llvm::errs() << "[OraToSIR] fallback unwrap path numOperands=" << numOperands << "\n";
+            if (numOperands == 2)
+            {
+                Value tag = ensureU256(rewriter, loc, unwrap->getOperand(0));
+                payloadU256 = ensureU256(rewriter, loc, unwrap->getOperand(1));
+                isErrU256 = rewriter.create<sir::EqOp>(loc, u256Type, tag, one);
+            }
+            else
+            {
+                auto stripCasts = [](Value v) {
+                    // Peel trivial casts so we can recover the original source.
+                    for (int i = 0; i < 8 && v; ++i)
+                    {
+                        if (auto bc = v.getDefiningOp<sir::BitcastOp>())
+                        {
+                            v = bc.getOperand();
+                            continue;
+                        }
+                        if (auto uc = v.getDefiningOp<mlir::UnrealizedConversionCastOp>())
+                        {
+                            if (uc->getNumOperands() == 1)
+                            {
+                                v = uc.getOperand(0);
+                                continue;
+                            }
+                        }
+                        break;
+                    }
+                    return v;
+                };
+
+                Value raw = unwrap->getOperand(0);
+                Value peeled = stripCasts(raw);
+                Value valueU256 = ensureU256(rewriter, loc, raw);
+                auto findExistingPayload = [&](Value basePtr) -> Value {
+                    Block *blk = unwrap->getBlock();
+                    for (auto it = blk->begin(), end = Block::iterator(unwrap); it != end; ++it)
+                    {
+                        auto load = dyn_cast<sir::LoadOp>(&*it);
+                        if (!load)
+                            continue;
+                        auto addPtr = load.getPtr().getDefiningOp<sir::AddPtrOp>();
+                        if (!addPtr || addPtr.getBase() != basePtr)
+                            continue;
+                        auto offConst = addPtr.getOffset().getDefiningOp<sir::ConstOp>();
+                        if (!offConst)
+                            continue;
+                        if (offConst.getValue() == 32)
+                            return load.getResult();
+                    }
+                    return Value();
+                };
+                // If operand is a cast from an ora.error_union, re-materialize wide parts.
+                if (auto cast = peeled.getDefiningOp<mlir::UnrealizedConversionCastOp>())
+                {
+                    if (cast->getNumOperands() == 1 &&
+                        llvm::isa<ora::ErrorUnionType>(cast.getOperand(0).getType()))
+                    {
+                        SmallVector<Value> castParts;
+                        if (succeeded(materializeWideErrorUnion(rewriter, loc, cast.getOperand(0), castParts)) &&
+                            castParts.size() == 2)
+                        {
+                            Value tag = ensureU256(rewriter, loc, castParts[0]);
+                            payloadU256 = ensureU256(rewriter, loc, castParts[1]);
+                            isErrU256 = rewriter.create<sir::EqOp>(loc, u256Type, tag, one);
+                        }
+                    }
+                }
+                if (isErrU256)
+                {
+                    // already handled via castParts
+                }
+                else
+                // If the unwrap operand is already the tag loaded from a pointer,
+                // recover the payload from base+32 instead of using packed shift.
+                if (auto load = peeled.getDefiningOp<sir::LoadOp>())
+                {
+                    Value basePtr = load.getPtr();
+                    if (Value existing = findExistingPayload(basePtr))
+                    {
+                        payloadU256 = ensureU256(rewriter, loc, existing);
+                    }
+                    else
+                    {
+                        Value offs = rewriter.create<sir::ConstOp>(loc, u256Type,
+                                                                  mlir::IntegerAttr::get(u256IntType, 32));
+                        Value payloadPtr = rewriter.create<sir::AddPtrOp>(loc, basePtr.getType(), basePtr, offs);
+                        payloadU256 = rewriter.create<sir::LoadOp>(loc, u256Type, payloadPtr);
+                    }
+                    isErrU256 = rewriter.create<sir::EqOp>(loc, u256Type, valueU256, one);
+                }
+                else
+                {
+                    Value masked = rewriter.create<sir::AndOp>(loc, u256Type, valueU256, one);
+                    isErrU256 = rewriter.create<sir::EqOp>(loc, u256Type, masked, one);
+                    payloadU256 = rewriter.create<sir::ShrOp>(loc, u256Type, one, valueU256);
+                }
+            }
         }
 
         Type resultType = unwrap.getResult().getType();
@@ -761,8 +865,11 @@ LogicalResult ConvertTryStmtOp::matchAndRewrite(
 
     SmallVector<ora::ErrorUnwrapOp, 4> unwraps;
     op.getTryRegion().walk([&](ora::ErrorUnwrapOp u) {
-        if (u->getParentOp() == op.getOperation())
+        if (u->getParentOfType<ora::TryStmtOp>() == op)
             unwraps.push_back(u);
+    });
+    op.getTryRegion().walk([&](Operation *opInTry) {
+        llvm::errs() << "[OraToSIR] TryRegion op: " << opInTry->getName() << "\n";
     });
 
     SmallVector<ora::YieldOp, 4> tryYields;
@@ -829,6 +936,46 @@ LogicalResult ConvertTryStmtOp::matchAndRewrite(
             }
             if (y.getNumOperands() != resultTypes.size())
             {
+                // Allow empty yield for value-typed try_stmt by supplying default zeros.
+                if (y.getNumOperands() == 0 && !resultTypes.empty())
+                {
+                    rewriter.setInsertionPoint(y);
+                    SmallVector<Value> defaults;
+                    defaults.reserve(resultTypes.size());
+                    auto *ctx = rewriter.getContext();
+                    auto u256Ty = sir::U256Type::get(ctx);
+                    auto ui64Ty = mlir::IntegerType::get(ctx, 64, mlir::IntegerType::Unsigned);
+                    auto zero64 = mlir::IntegerAttr::get(ui64Ty, 0);
+                    for (Type targetType : resultTypes)
+                    {
+                        Value v;
+                        if (auto sirTy = llvm::dyn_cast<sir::U256Type>(targetType))
+                        {
+                            (void)sirTy;
+                            v = rewriter.create<sir::ConstOp>(loc, u256Ty, zero64);
+                        }
+                        else if (auto intTy = llvm::dyn_cast<mlir::IntegerType>(targetType))
+                        {
+                            v = rewriter.create<sir::ConstOp>(loc, u256Ty, zero64);
+                            if (!llvm::isa<sir::U256Type>(intTy))
+                                v = rewriter.create<sir::BitcastOp>(loc, intTy, v);
+                        }
+                        else if (llvm::isa<sir::PtrType>(targetType))
+                        {
+                            Value z = rewriter.create<sir::ConstOp>(loc, u256Ty, zero64);
+                            v = rewriter.create<sir::BitcastOp>(loc, targetType, z);
+                        }
+                        else
+                        {
+                            // Fallback: try zero u256 then bitcast.
+                            Value z = rewriter.create<sir::ConstOp>(loc, u256Ty, zero64);
+                            v = rewriter.create<sir::BitcastOp>(loc, targetType, z);
+                        }
+                        defaults.push_back(v);
+                    }
+                    rewriter.replaceOpWithNewOp<sir::BrOp>(y, defaults, mergeBlock);
+                    continue;
+                }
                 llvm::errs() << "[OraToSIR] ConvertTryStmtOp: yield arity mismatch at "
                              << y.getLoc() << " yield=" << y.getNumOperands()
                              << " results=" << resultTypes.size() << "\n";
@@ -2431,6 +2578,8 @@ LogicalResult NormalizeErrorUnwrapOp::matchAndRewrite(
     ora::ErrorUnwrapOp op,
     PatternRewriter &rewriter) const
 {
+    if (op->getParentOfType<ora::TryStmtOp>())
+        return failure();
     auto loc = op.getLoc();
     auto i256Type = mlir::IntegerType::get(rewriter.getContext(), 256);
     auto oneAttr = rewriter.getIntegerAttr(i256Type, 1);

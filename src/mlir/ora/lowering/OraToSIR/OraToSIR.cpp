@@ -452,7 +452,6 @@ public:
             patterns.add<ConvertSwitchExprOp>(typeConverter, ctx);
             patterns.add<ConvertSwitchOp>(typeConverter, ctx);
             patterns.add<ConvertTryCatchOp>(typeConverter, ctx);
-            patterns.add<ConvertTryStmtOp>(typeConverter, ctx);
             patterns.add<ConvertCfBrOp>(typeConverter, ctx);
             patterns.add<ConvertCfCondBrOp>(typeConverter, ctx);
             patterns.add<ConvertCfAssertOp>(typeConverter, ctx);
@@ -692,6 +691,7 @@ public:
         {
             ora::OraToSIRTypeConverter phase2TypeConverter;
             RewritePatternSet phase2Patterns(ctx);
+            phase2Patterns.add<ConvertTryStmtOp>(phase2TypeConverter, ctx);
             phase2Patterns.add<ConvertErrorOkOp>(phase2TypeConverter, ctx);
             phase2Patterns.add<ConvertErrorErrOp>(phase2TypeConverter, ctx);
             phase2Patterns.add<ConvertErrorIsErrorOp>(phase2TypeConverter, ctx);
@@ -721,7 +721,7 @@ public:
             phase2Target.addLegalOp<ora::IfOp>();
             phase2Target.addLegalOp<ora::YieldOp>();
             phase2Target.addLegalOp<ora::ContinueOp>();
-            phase2Target.addLegalOp<ora::TryStmtOp>();
+            phase2Target.addIllegalOp<ora::TryStmtOp>();
             phase2Target.addLegalOp<ora::SwitchOp>();
             phase2Target.addLegalDialect<ora::OraDialect>();
 

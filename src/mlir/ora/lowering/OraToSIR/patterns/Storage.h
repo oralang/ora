@@ -24,6 +24,7 @@ namespace mlir
             ModuleOp module = op->getParentOfType<ModuleOp>();
             if (!module)
             {
+                llvm::errs() << "[OraToSIR] computeGlobalSlot: no module for name=" << name << "\n";
                 return std::nullopt;
             }
 
@@ -32,17 +33,39 @@ namespace mlir
             auto globalOp = symbolTable.lookup<ora::GlobalOp>(name);
             if (!globalOp)
             {
+                auto ctx = module.getContext();
                 auto slotsAttr = module->getAttrOfType<DictionaryAttr>("ora.global_slots");
-                if (!slotsAttr)
-                    return std::nullopt;
-                auto slotAttr = slotsAttr.get(name);
-                if (!slotAttr)
-                    return std::nullopt;
-                if (auto intAttr = llvm::dyn_cast<IntegerAttr>(slotAttr))
+                uint64_t nextSlot = 0;
+                SmallVector<NamedAttribute, 8> entries;
+                if (slotsAttr)
                 {
-                    return intAttr.getUInt();
+                    for (auto it : slotsAttr)
+                    {
+                        entries.push_back(it);
+                        if (auto intAttr = llvm::dyn_cast<IntegerAttr>(it.getValue()))
+                        {
+                            uint64_t v = intAttr.getUInt();
+                            if (v >= nextSlot)
+                                nextSlot = v + 1;
+                        }
+                    }
+                    if (auto slotAttr = slotsAttr.get(name))
+                    {
+                        if (auto intAttr = llvm::dyn_cast<IntegerAttr>(slotAttr))
+                            return intAttr.getUInt();
+                        return std::nullopt;
+                    }
                 }
-                return std::nullopt;
+
+                // Fallback: synthesize a slot for undeclared storage names.
+                auto ui64Ty = mlir::IntegerType::get(ctx, 64, mlir::IntegerType::Unsigned);
+                auto nameAttr = StringAttr::get(ctx, name);
+                auto slotAttr = IntegerAttr::get(ui64Ty, nextSlot);
+                entries.push_back(NamedAttribute(nameAttr, slotAttr));
+                module->setAttr("ora.global_slots", DictionaryAttr::get(ctx, entries));
+                llvm::errs() << "[OraToSIR] computeGlobalSlot: synthesized slot " << nextSlot
+                             << " for name=" << name << "\n";
+                return nextSlot;
             }
 
             // Check if the global has a slot index attribute
