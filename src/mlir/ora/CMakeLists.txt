@@ -94,6 +94,8 @@ add_mlir_dialect_library(MLIROraDialectC
   lib/OraDialect.cpp
   lowering/OraToSIR/OraToSIR.cpp
   lowering/OraToSIR/OraToSIRTypeConverter.cpp
+  lowering/OraToSIR/SIRTextLegalizer.cpp
+  lowering/OraToSIR/SIRTextEmitter.cpp
   lowering/OraToSIR/patterns/Naming.cpp
   lowering/OraToSIR/patterns/Arithmetic.cpp
   lowering/OraToSIR/patterns/Struct.cpp
@@ -135,6 +137,7 @@ install(FILES
   include/OraGasConstants.h
   lowering/OraToSIR/OraToSIR.h
   lowering/OraToSIR/OraToSIRTypeConverter.h
+  lowering/OraToSIR/SIRTextEmitter.h
   ${PROJECT_BINARY_DIR}/OraDialect.h.inc
   ${PROJECT_BINARY_DIR}/OraTypes.h.inc
   ${PROJECT_BINARY_DIR}/OraOps.h.inc

@@ -8,6 +8,7 @@
 #include "OraDialect.h"
 #include "OraToSIR.h"
 #include "OraDebug.h"
+#include "SIRTextEmitter.h"
 #include "SIR/SIRDialect.h"
 #include "mlir/CAPI/IR.h"
 #include "mlir/CAPI/Support.h"
@@ -6441,6 +6442,51 @@ bool oraConvertToSIR(MlirContext ctx, MlirModule module)
     catch (...)
     {
         return false;
+    }
+}
+
+//===----------------------------------------------------------------------===//
+// SIR Text Legalizer / Emitter
+//===----------------------------------------------------------------------===//
+
+bool oraLegalizeSIRText(MlirContext ctx, MlirModule module)
+{
+    try
+    {
+        MLIRContext *context = unwrap(ctx);
+        ModuleOp moduleOp = unwrap(module);
+
+        if (!oraDialectRegister(ctx))
+        {
+            return false;
+        }
+
+        context->getOrLoadDialect<sir::SIRDialect>();
+
+        PassManager pm(context, "builtin.module");
+        pm.enableVerifier(false);
+        pm.addPass(createSIRTextLegalizerPass());
+
+        return mlir::succeeded(pm.run(moduleOp));
+    }
+    catch (...)
+    {
+        return false;
+    }
+}
+
+MlirStringRef oraEmitSIRText(MlirContext ctx, MlirModule module)
+{
+    try
+    {
+        (void)ctx;
+        ModuleOp moduleOp = unwrap(module);
+        std::string out = mlir::ora::emitSIRText(moduleOp);
+        return oraStringRefCreate(out.data(), out.size());
+    }
+    catch (...)
+    {
+        return oraStringRefCreate(nullptr, 0);
     }
 }
 

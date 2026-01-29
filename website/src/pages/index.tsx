@@ -21,7 +21,7 @@ function HomepageHeader() {
           </div>
 
           <Heading as="h1" className={styles.heroTitle}>
-            {siteConfig.title}
+            <span className={styles.oraGradient}>Ora</span> Development Notebook
           </Heading>
           <p className={styles.heroSubtitle}>{siteConfig.tagline}</p>
 
@@ -51,6 +51,9 @@ function HomepageHeader() {
         </div>
 
         <div className={styles.heroRight}>
+          <div className={styles.heroLogo}>
+            <img src="/img/logo-round.png" alt="Ora Logo" className={styles.logoImage} />
+          </div>
           <div className={styles.heroCard}>
             <div className={styles.heroCardTitle}>Pipeline</div>
             <div className={styles.pipeline}

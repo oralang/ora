@@ -769,34 +769,44 @@ static LogicalResult rewriteErrorUnwrapInTryStmt(
                         }
                     }
                 }
+                bool isWideErr = false;
                 if (isErrU256)
                 {
                     // already handled via castParts
                 }
                 else
-                // If the unwrap operand is already the tag loaded from a pointer,
-                // recover the payload from base+32 instead of using packed shift.
-                if (auto load = peeled.getDefiningOp<sir::LoadOp>())
                 {
-                    Value basePtr = load.getPtr();
-                    if (Value existing = findExistingPayload(basePtr))
-                    {
-                        payloadU256 = ensureU256(rewriter, loc, existing);
-                    }
-                    else
-                    {
-                        Value offs = rewriter.create<sir::ConstOp>(loc, u256Type,
-                                                                  mlir::IntegerAttr::get(u256IntType, 32));
-                        Value payloadPtr = rewriter.create<sir::AddPtrOp>(loc, basePtr.getType(), basePtr, offs);
-                        payloadU256 = rewriter.create<sir::LoadOp>(loc, u256Type, payloadPtr);
-                    }
-                    isErrU256 = rewriter.create<sir::EqOp>(loc, u256Type, valueU256, one);
+                    if (auto errType = llvm::dyn_cast<ora::ErrorUnionType>(unwrap->getOperand(0).getType()))
+                        isWideErr = !isNarrowErrorUnion(errType);
                 }
-                else
+
+                // If the unwrap operand is already the tag loaded from a pointer,
+                // recover the payload from base+32 for wide error unions.
+                if (isWideErr)
+                {
+                    if (auto load = peeled.getDefiningOp<sir::LoadOp>())
+                    {
+                        Value basePtr = load.getPtr();
+                        if (Value existing = findExistingPayload(basePtr))
+                        {
+                            payloadU256 = ensureU256(rewriter, loc, existing);
+                        }
+                        else
+                        {
+                            Value offs = rewriter.create<sir::ConstOp>(loc, u256Type,
+                                                                      mlir::IntegerAttr::get(u256IntType, 32));
+                            Value payloadPtr = rewriter.create<sir::AddPtrOp>(loc, basePtr.getType(), basePtr, offs);
+                            payloadU256 = rewriter.create<sir::LoadOp>(loc, u256Type, payloadPtr);
+                        }
+                        Value masked = rewriter.create<sir::AndOp>(loc, u256Type, valueU256, one);
+                        isErrU256 = rewriter.create<sir::EqOp>(loc, u256Type, masked, one);
+                    }
+                }
+                if (!isErrU256)
                 {
                     Value masked = rewriter.create<sir::AndOp>(loc, u256Type, valueU256, one);
                     isErrU256 = rewriter.create<sir::EqOp>(loc, u256Type, masked, one);
-                    payloadU256 = rewriter.create<sir::ShrOp>(loc, u256Type, one, valueU256);
+                    payloadU256 = rewriter.create<sir::ShrOp>(loc, u256Type, valueU256, one);
                 }
             }
         }
@@ -1294,7 +1304,8 @@ LogicalResult ConvertErrorIsErrorOp::matchAndRewrite(
     else
     {
         Value tag = ensureU256(rewriter, loc, operands[0]);
-        isErrU256 = rewriter.create<sir::EqOp>(loc, u256Type, tag, one);
+        Value masked = rewriter.create<sir::AndOp>(loc, u256Type, tag, one);
+        isErrU256 = rewriter.create<sir::EqOp>(loc, u256Type, masked, one);
     }
     Value isErr = rewriter.create<sir::BitcastOp>(loc, i1Type, isErrU256);
 
@@ -1334,7 +1345,7 @@ LogicalResult ConvertErrorUnwrapOp::matchAndRewrite(
 
     Value payload = ensureU256(rewriter, loc, operands[0]);
     if (operands.size() == 1)
-        payload = rewriter.create<sir::ShrOp>(loc, u256Type, one, payload);
+        payload = rewriter.create<sir::ShrOp>(loc, u256Type, payload, one);
     else
         payload = ensureU256(rewriter, loc, operands[1]);
 
@@ -1369,7 +1380,7 @@ LogicalResult ConvertErrorGetErrorOp::matchAndRewrite(
 
     Value payload = ensureU256(rewriter, loc, operands[0]);
     if (operands.size() == 1)
-        payload = rewriter.create<sir::ShrOp>(loc, u256Type, one, payload);
+        payload = rewriter.create<sir::ShrOp>(loc, u256Type, payload, one);
     else
         payload = ensureU256(rewriter, loc, operands[1]);
 
@@ -1486,12 +1497,19 @@ LogicalResult ConvertCallOp::matchAndRewrite(
     }
 
     SmallVector<Type> convertedTypes;
-    if (llvm::isa<ora::ErrorUnionType>(oldResultTypes.front()))
+    if (auto errType = llvm::dyn_cast<ora::ErrorUnionType>(oldResultTypes.front()))
     {
         auto ctx = op.getContext();
         auto u256Type = sir::U256Type::get(ctx);
-        convertedTypes.push_back(u256Type);
-        convertedTypes.push_back(u256Type);
+        if (isNarrowErrorUnion(errType))
+        {
+            convertedTypes.push_back(u256Type);
+        }
+        else
+        {
+            convertedTypes.push_back(u256Type);
+            convertedTypes.push_back(u256Type);
+        }
     }
     else if (failed(typeConverter->convertType(oldResultTypes.front(), convertedTypes)) || convertedTypes.empty())
     {
@@ -2067,6 +2085,37 @@ LogicalResult ConvertWhileOp::matchAndRewrite(
     Value condU256 = toCondU256(rewriter, loc, adaptor.getCondition());
     rewriter.create<sir::CondBrOp>(loc, condU256, ValueRange{}, ValueRange{}, bodyBlock, afterBlock);
 
+    for (auto y : yields)
+    {
+        Block *yBlock = y->getBlock();
+        bool hasLoopControl = false;
+        for (auto br : yBlock->getOps<ora::BreakOp>())
+        {
+            (void)br;
+            hasLoopControl = true;
+            break;
+        }
+        if (!hasLoopControl)
+        {
+            for (auto cont : yBlock->getOps<ora::ContinueOp>())
+            {
+                (void)cont;
+                hasLoopControl = true;
+                break;
+            }
+        }
+        if (hasLoopControl)
+        {
+            rewriter.eraseOp(y);
+            continue;
+        }
+        if (hasOpsAfterTerminator(y.getOperation()))
+            return rewriter.notifyMatchFailure(y, "yield has trailing ops");
+        rewriter.setInsertionPoint(y);
+        rewriter.create<sir::BrOp>(y.getLoc(), ValueRange{}, condBlock);
+        rewriter.eraseOp(y);
+    }
+
     for (auto b : breaks)
     {
         rewriter.setInsertionPoint(b);
@@ -2078,14 +2127,6 @@ LogicalResult ConvertWhileOp::matchAndRewrite(
         rewriter.setInsertionPoint(c);
         rewriter.create<sir::BrOp>(c.getLoc(), ValueRange{}, condBlock);
         rewriter.eraseOp(c);
-    }
-    for (auto y : yields)
-    {
-        if (hasOpsAfterTerminator(y.getOperation()))
-            return rewriter.notifyMatchFailure(y, "yield has trailing ops");
-        rewriter.setInsertionPoint(y);
-        rewriter.create<sir::BrOp>(y.getLoc(), ValueRange{}, condBlock);
-        rewriter.eraseOp(y);
     }
 
     if (bodyBlock->empty() || !bodyBlock->back().hasTrait<mlir::OpTrait::IsTerminator>())
@@ -2178,6 +2219,18 @@ LogicalResult ConvertIfOp::matchAndRewrite(
     auto replaceYield = [&](ArrayRef<ora::YieldOp> yields, Block *block) -> LogicalResult {
         for (auto y : yields)
         {
+            bool hasLoopControl = false;
+            y->getBlock()->walk([&](Operation *nested) {
+                if (llvm::isa<ora::BreakOp, ora::ContinueOp>(nested))
+                    hasLoopControl = true;
+            });
+            if (hasLoopControl)
+            {
+                if (!resultTypes.empty())
+                    return rewriter.notifyMatchFailure(op, "if yield in loop-control block with results");
+                rewriter.eraseOp(y);
+                continue;
+            }
             if (resultTypes.empty() && y.getNumOperands() != 0)
                 return rewriter.notifyMatchFailure(op, "if has yields but no results");
             if (!resultTypes.empty() && y.getNumOperands() != resultTypes.size())
@@ -2295,6 +2348,18 @@ LogicalResult ConvertIsolatedIfOp::matchAndRewrite(
     auto replaceYield = [&](ArrayRef<ora::YieldOp> yields, Block *block) -> LogicalResult {
         for (auto y : yields)
         {
+            bool hasLoopControl = false;
+            y->getBlock()->walk([&](Operation *nested) {
+                if (llvm::isa<ora::BreakOp, ora::ContinueOp>(nested))
+                    hasLoopControl = true;
+            });
+            if (hasLoopControl)
+            {
+                if (!resultTypes.empty())
+                    return rewriter.notifyMatchFailure(op, "if yield in loop-control block with results");
+                rewriter.eraseOp(y);
+                continue;
+            }
             if (resultTypes.empty() && y.getNumOperands() != 0)
                 return rewriter.notifyMatchFailure(op, "if has yields but no results");
             if (!resultTypes.empty() && y.getNumOperands() != resultTypes.size())
@@ -3682,7 +3747,6 @@ LogicalResult ConvertScfForOp::matchAndRewrite(
         if (cont->getParentOfType<mlir::scf::ForOp>() == op)
             continues.push_back(cont);
     });
-
     SmallVector<Block *, 4> movedBlocks;
     for (Block &b : bodyRegion)
         movedBlocks.push_back(&b);
@@ -3752,15 +3816,13 @@ LogicalResult ConvertScfForOp::matchAndRewrite(
 
     for (auto br : breaks)
     {
-        Block *brBlock = br->getBlock();
-        rewriter.setInsertionPointToEnd(brBlock);
+        rewriter.setInsertionPoint(br);
         rewriter.create<sir::BrOp>(br.getLoc(), ValueRange{}, afterBlock);
         rewriter.eraseOp(br);
     }
     for (auto cont : continues)
     {
-        Block *contBlock = cont->getBlock();
-        rewriter.setInsertionPointToEnd(contBlock);
+        rewriter.setInsertionPoint(cont);
         Value bodyIv = bodyBlock->getArgument(0);
         Value nextU256 = rewriter.create<sir::AddOp>(
             loc,
@@ -3776,6 +3838,8 @@ LogicalResult ConvertScfForOp::matchAndRewrite(
     {
         if (b->empty() || !b->back().hasTrait<mlir::OpTrait::IsTerminator>())
         {
+            if (b->getNumArguments() == 0)
+                continue;
             rewriter.setInsertionPointToEnd(b);
             Value nextU256 = rewriter.create<sir::AddOp>(
                 loc,

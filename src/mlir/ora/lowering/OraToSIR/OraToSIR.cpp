@@ -490,6 +490,7 @@ public:
         target.addLegalOp<ora::ErrorGetErrorOp>();
         target.addLegalOp<ora::IfOp>();
         target.addLegalOp<ora::YieldOp>();
+        target.addLegalOp<ora::BreakOp>();
         target.addLegalOp<ora::ContinueOp>();
         target.addLegalOp<ora::TryStmtOp>();
         target.addLegalOp<ora::SwitchOp>();
@@ -747,6 +748,8 @@ public:
             phase2bPatterns.add<ConvertArithExtUIOp>(phase2bTypeConverter, ctx);
             phase2bPatterns.add<ConvertArithIndexCastUIOp>(phase2bTypeConverter, ctx);
             phase2bPatterns.add<ConvertScfIfOp>(phase2bTypeConverter, ctx, /*lowerReturnsInMergeBlock=*/true, PatternBenefit(10));
+            phase2bPatterns.add<ConvertIfOp>(phase2bTypeConverter, ctx);
+            phase2bPatterns.add<ConvertIsolatedIfOp>(phase2bTypeConverter, ctx);
             phase2bPatterns.add<ConvertReturnOpFallback>(&phase2bTypeConverter, ctx, PatternBenefit(1));
             phase2bPatterns.add<ConvertReturnOpRaw>(phase2bTypeConverter, ctx, PatternBenefit(1));
             phase2bPatterns.add<ConvertReturnOp>(phase2bTypeConverter, ctx, PatternBenefit(1));
@@ -776,7 +779,7 @@ public:
             phase2bTarget.addIllegalOp<ora::ErrorIsErrorOp>();
             phase2bTarget.addIllegalOp<ora::ErrorUnwrapOp>();
             phase2bTarget.addIllegalOp<ora::ErrorGetErrorOp>();
-            phase2bTarget.addLegalOp<ora::IfOp>();
+            phase2bTarget.addIllegalOp<ora::IfOp>();
             phase2bTarget.addLegalOp<ora::YieldOp>();
             phase2bTarget.addLegalOp<ora::ContinueOp>();
             phase2bTarget.addLegalOp<ora::SwitchOp>();
@@ -870,6 +873,8 @@ public:
 
             RewritePatternSet phase4Patterns(ctx);
             phase4Patterns.add<ConvertScfForOp>(phase4TypeConverter, ctx);
+            phase4Patterns.add<ConvertIfOp>(phase4TypeConverter, ctx);
+            phase4Patterns.add<ConvertIsolatedIfOp>(phase4TypeConverter, ctx);
             phase4Patterns.add<ConvertMemRefAllocOp>(phase4TypeConverter, ctx);
             phase4Patterns.add<ConvertMemRefLoadOp>(phase4TypeConverter, ctx);
             phase4Patterns.add<ConvertMemRefStoreOp>(phase4TypeConverter, ctx);
@@ -887,7 +892,7 @@ public:
             phase4Target.addIllegalDialect<mlir::memref::MemRefDialect>();
             phase4Target.addIllegalOp<mlir::scf::ForOp>();
             phase4Target.addIllegalOp<ora::ReturnOp>();
-            phase4Target.addLegalOp<ora::IfOp>();
+            phase4Target.addIllegalOp<ora::IfOp>();
             phase4Target.addLegalOp<ora::YieldOp>();
             phase4Target.addLegalOp<ora::ContinueOp>();
             phase4Target.addLegalOp<ora::TryStmtOp>();

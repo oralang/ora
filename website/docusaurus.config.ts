@@ -75,7 +75,8 @@ const config: Config = {
       title: 'Ora Notebook',
       logo: {
         alt: 'Ora Logo',
-        src: 'img/logo.svg',
+        src: 'img/logo.png',
+        srcDark: 'img/logo.png',
       },
       items: [
         {

@@ -1509,6 +1509,23 @@ MLIR_CAPI_EXPORTED MlirOperation oraForOpCreate(
         MlirModule module);
 
     //===----------------------------------------------------------------------===//
+    // SIR Text Legalizer / Emitter
+    //===----------------------------------------------------------------------===//
+
+    /// Validate SIR MLIR for Sensei text emission
+    /// Returns true on success, false on failure
+    MLIR_CAPI_EXPORTED bool oraLegalizeSIRText(
+        MlirContext ctx,
+        MlirModule module);
+
+    /// Emit Sensei SIR text from a SIR MLIR module
+    /// Returns null string ref on failure
+    /// The caller must free the returned string using oraStringRefFree
+    MLIR_CAPI_EXPORTED MlirStringRef oraEmitSIRText(
+        MlirContext ctx,
+        MlirModule module);
+
+    //===----------------------------------------------------------------------===//
     // Integer Attribute Creation with Full Precision (u256 support)
     //===----------------------------------------------------------------------===//
 

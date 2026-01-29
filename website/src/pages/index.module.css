@@ -1,11 +1,17 @@
-@import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;600;700&family=IBM+Plex+Serif:wght@400;600&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap');
 
 :global(:root) {
-  --ora-ink: #0b2a2c;
-  --ora-cream: #f6f1e7;
-  --ora-teal: #0e6b6a;
-  --ora-sand: #f4b86a;
-  --ora-moss: #3b5d50;
+  --ora-ink: #1a0a1a;
+  --ora-cream: #fef9f5;
+  --ora-primary: #DC143C;
+  --ora-accent: #FFA500;
+  --ora-secondary: #800080;
+  --ora-yellow-orange: #FFA500;
+  --ora-red-orange: #FF4500;
+  --ora-crimson: #DC143C;
+  --ora-magenta: #FF1493;
+  --ora-purple: #800080;
+  --ora-indigo: #4B0082;
 }
 
 /* Hero Banner */
@@ -13,7 +19,7 @@
   padding: 4.5rem 0 3.5rem;
   position: relative;
   overflow: hidden;
-  background: linear-gradient(135deg, #0b2a2c 0%, #0e6b6a 50%, #f4b86a 100%);
+  background: linear-gradient(135deg, var(--ora-indigo) 0%, var(--ora-purple) 20%, var(--ora-magenta) 40%, var(--ora-crimson) 60%, var(--ora-red-orange) 80%, var(--ora-yellow-orange) 100%);
 }
 
 .heroBanner::before,
@@ -28,7 +34,7 @@
 .heroBanner::before {
   width: 360px;
   height: 360px;
-  background: #f6f1e7;
+  background: #fef9f5;
   top: -120px;
   right: -120px;
 }
@@ -36,7 +42,7 @@
 .heroBanner::after {
   width: 280px;
   height: 280px;
-  background: #1f8a70;
+  background: var(--ora-purple);
   bottom: -140px;
   left: -80px;
 }
@@ -46,12 +52,35 @@
   grid-template-columns: 1.2fr 0.8fr;
   gap: 2.5rem;
   align-items: center;
-  color: #f6f1e7;
+  color: #fef9f5;
 }
 
 .heroLeft {
   position: relative;
   z-index: 1;
+}
+
+.heroLogo {
+  display: flex;
+  justify-content: center;
+  margin-bottom: 2rem;
+}
+
+.logoImage {
+  height: 200px;
+  width: auto;
+  max-width: 100%;
+  filter: drop-shadow(0 8px 24px rgba(0, 0, 0, 0.4));
+  animation: float 6s ease-in-out infinite;
+}
+
+@keyframes float {
+  0%, 100% {
+    transform: translateY(0px);
+  }
+  50% {
+    transform: translateY(-10px);
+  }
 }
 
 .heroRight {
@@ -67,25 +96,46 @@
 }
 
 .badge {
-  background: rgba(255, 255, 255, 0.16);
+  background: linear-gradient(135deg, rgba(255, 255, 255, 0.2) 0%, rgba(255, 255, 255, 0.12) 100%);
   padding: 0.4rem 0.9rem;
   border-radius: 999px;
   font-weight: 600;
   font-size: 0.8rem;
-  color: #f6f1e7;
+  color: #fef9f5;
   letter-spacing: 0.02em;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  backdrop-filter: blur(10px);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.2);
 }
 
 .heroTitle {
-  font-family: 'Space Grotesk', ui-sans-serif, system-ui;
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
   font-size: 3.2rem;
-  line-height: 1.05;
+  font-weight: 700;
+  line-height: 1.1;
+  letter-spacing: -0.02em;
   margin-bottom: 0.6rem;
+  color: #fef9f5 !important;
+  background: none !important;
+  -webkit-background-clip: unset !important;
+  -webkit-text-fill-color: #fef9f5 !important;
+  background-clip: unset !important;
+}
+
+.heroTitle .oraGradient {
+  background: linear-gradient(135deg, #FFEAA7 0%, #FFD93D 40%, #FFA726 80%, #FF9800 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+  display: inline-block;
+  filter: drop-shadow(0 2px 6px rgba(0, 0, 0, 0.5));
+  text-shadow: 0 0 30px rgba(255, 234, 167, 0.6);
 }
 
 .heroSubtitle {
-  font-family: 'IBM Plex Serif', ui-serif, serif;
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
   font-size: 1.2rem;
+  font-weight: 400;
   opacity: 0.9;
   margin-bottom: 1.2rem;
 }
@@ -105,26 +155,42 @@
 }
 
 .heroCard {
-  background: rgba(11, 42, 44, 0.78);
-  border: 1px solid rgba(244, 184, 106, 0.4);
+  background: linear-gradient(135deg, rgba(26, 10, 26, 0.85) 0%, rgba(46, 8, 84, 0.8) 100%);
+  border: 2px solid transparent;
   border-radius: 18px;
   padding: 1.8rem;
-  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.2);
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3), 0 0 40px rgba(255, 165, 0, 0.1);
+  backdrop-filter: blur(10px);
+  position: relative;
+}
+
+.heroCard::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: 18px;
+  padding: 2px;
+  background: linear-gradient(135deg, rgba(255, 165, 0, 0.5), rgba(220, 20, 60, 0.5), rgba(128, 0, 128, 0.5));
+  -webkit-mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
+  -webkit-mask-composite: xor;
+  mask-composite: exclude;
+  pointer-events: none;
 }
 
 .heroCardTitle {
   text-transform: uppercase;
   letter-spacing: 0.12em;
   font-size: 0.75rem;
-  color: #f4b86a;
+  color: var(--ora-accent);
   margin-bottom: 0.8rem;
 }
 
 .pipeline {
-  font-family: 'Space Grotesk', ui-sans-serif, system-ui;
+  font-family: 'JetBrains Mono', 'Fira Code', 'Consolas', monospace;
   font-size: 1rem;
+  font-weight: 500;
   line-height: 1.5;
-  color: #f6f1e7;
+  color: #fef9f5;
   margin-bottom: 1.2rem;
 }
 
@@ -143,13 +209,19 @@
 }
 
 .heroCardLinks a {
-  color: #f6f1e7;
+  color: #fef9f5;
   text-decoration: none;
-  border-bottom: 1px solid rgba(246, 241, 231, 0.4);
+  border-bottom: 2px solid transparent;
+  background: linear-gradient(90deg, transparent, transparent) no-repeat;
+  background-size: 0% 2px;
+  background-position: bottom;
+  transition: background-size 0.3s ease, color 0.3s ease;
 }
 
 .heroCardLinks a:hover {
-  border-bottom-color: #f4b86a;
+  color: var(--ora-accent);
+  background-image: linear-gradient(90deg, var(--ora-yellow-orange), var(--ora-crimson));
+  background-size: 100% 2px;
 }
 
 /* Features Section */
@@ -165,9 +237,15 @@
 }
 
 .sectionHeader h2 {
-  font-family: 'Space Grotesk', ui-sans-serif, system-ui;
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
   font-size: 2.4rem;
+  font-weight: 700;
+  letter-spacing: -0.02em;
   margin-bottom: 0.5rem;
+  background: linear-gradient(135deg, var(--ora-crimson) 0%, var(--ora-purple) 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
 }
 
 .sectionHeader p {
@@ -182,22 +260,42 @@
 }
 
 .featureCard {
-  background: #ffffff;
-  border: 1px solid rgba(11, 42, 44, 0.08);
+  background: linear-gradient(135deg, #ffffff 0%, #fff5f0 100%);
+  border: 1px solid rgba(26, 10, 26, 0.08);
   border-radius: 16px;
   padding: 1.8rem;
-  box-shadow: 0 10px 30px rgba(11, 42, 44, 0.08);
+  box-shadow: 0 10px 30px rgba(26, 10, 26, 0.08);
   transition: transform 0.25s ease, box-shadow 0.25s ease;
+  position: relative;
+  overflow: hidden;
+}
+
+.featureCard::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 3px;
+  background: linear-gradient(90deg, var(--ora-yellow-orange), var(--ora-crimson), var(--ora-purple));
+  opacity: 0.3;
+  transition: opacity 0.25s ease;
 }
 
 .featureCard:hover {
   transform: translateY(-6px);
-  box-shadow: 0 20px 40px rgba(11, 42, 44, 0.12);
+  box-shadow: 0 20px 40px rgba(220, 20, 60, 0.15);
+  background: linear-gradient(135deg, #ffffff 0%, #fff5f0 50%, #ffe6f0 100%);
+}
+
+.featureCard:hover::before {
+  opacity: 1;
 }
 
 .featureCard h3 {
   font-size: 1.4rem;
   margin-bottom: 1rem;
+  color: var(--ora-primary);
 }
 
 .featureCard ul {
@@ -216,24 +314,33 @@
   content: "•";
   position: absolute;
   left: 0;
-  color: var(--ora-teal);
+  color: var(--ora-primary);
   font-weight: 700;
 }
 
 .cardLink {
-  color: var(--ora-teal);
+  color: var(--ora-primary);
   font-weight: 600;
   text-decoration: none;
+  background: linear-gradient(90deg, var(--ora-primary), var(--ora-purple));
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+  transition: all 0.3s ease;
 }
 
 .cardLink:hover {
-  text-decoration: underline;
+  background: linear-gradient(90deg, var(--ora-yellow-orange), var(--ora-crimson), var(--ora-purple));
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+  text-decoration: none;
 }
 
 /* Code Section */
 .codeSection {
   padding: 4rem 0;
-  background: #fff;
+  background: linear-gradient(180deg, #fff 0%, #fff5f0 50%, #fff 100%);
 }
 
 .codeContainer {
@@ -241,17 +348,29 @@
   margin: 0 auto;
   border-radius: 14px;
   overflow: hidden;
-  box-shadow: 0 16px 40px rgba(11, 42, 44, 0.15);
+  box-shadow: 0 16px 40px rgba(26, 10, 26, 0.15), 0 0 60px rgba(220, 20, 60, 0.1);
+  border: 1px solid rgba(255, 165, 0, 0.2);
 }
 
 .codeBlock {
   margin: 0;
   padding: 2rem;
-  background: #0f1f1f;
-  color: #f6f1e7;
+  background: linear-gradient(135deg, #1a0a1a 0%, #2E0854 100%);
+  color: #fef9f5;
   font-size: 0.9rem;
   line-height: 1.6;
   overflow-x: auto;
+  position: relative;
+}
+
+.codeBlock::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 2px;
+  background: linear-gradient(90deg, var(--ora-yellow-orange), var(--ora-crimson), var(--ora-magenta), var(--ora-purple));
 }
 
 .codeActions {
@@ -265,7 +384,7 @@
 /* Research Strip */
 .researchStrip {
   padding: 3.5rem 0;
-  background: linear-gradient(120deg, #f6f1e7 0%, #e6efe7 60%, #f7e4c6 100%);
+  background: linear-gradient(120deg, #fef9f5 0%, #fff5f0 60%, #ffe6f0 100%);
 }
 
 .researchGrid {
@@ -284,25 +403,46 @@
   color: var(--ora-ink);
   font-weight: 600;
   text-decoration: none;
-  border-bottom: 1px solid rgba(11, 42, 44, 0.2);
+  border-bottom: 2px solid transparent;
+  background: linear-gradient(90deg, transparent, transparent) no-repeat;
+  background-size: 0% 2px;
+  background-position: bottom;
+  transition: background-size 0.3s ease, color 0.3s ease;
   width: fit-content;
 }
 
 .researchLinks a:hover {
-  border-bottom-color: var(--ora-sand);
+  color: var(--ora-primary);
+  background-image: linear-gradient(90deg, var(--ora-yellow-orange), var(--ora-crimson), var(--ora-purple));
+  background-size: 100% 2px;
 }
 
 /* Contribute Section */
 .contribute {
   padding: 4rem 0;
-  background: #0f1f1f;
-  color: #f6f1e7;
+  background: linear-gradient(135deg, #1a0a1a 0%, #2E0854 50%, #1a0a1a 100%);
+  color: #fef9f5;
+  position: relative;
+}
+
+.contribute::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 1px;
+  background: linear-gradient(90deg, transparent, var(--ora-yellow-orange), var(--ora-crimson), var(--ora-purple), transparent);
 }
 
 .contribute h2 {
   text-align: center;
   font-size: 2.4rem;
   margin-bottom: 0.6rem;
+  background: linear-gradient(135deg, var(--ora-yellow-orange) 0%, var(--ora-crimson) 50%, var(--ora-purple) 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
 }
 
 .contribute>.container>p {
@@ -319,22 +459,49 @@
 }
 
 .contributeCard {
-  background: rgba(255, 255, 255, 0.08);
-  border: 1px solid rgba(244, 184, 106, 0.25);
+  background: linear-gradient(135deg, rgba(255, 255, 255, 0.1) 0%, rgba(255, 255, 255, 0.05) 100%);
+  border: 1px solid rgba(255, 165, 0, 0.25);
   border-radius: 16px;
   padding: 1.8rem;
   text-align: center;
-  transition: transform 0.25s ease, box-shadow 0.25s ease;
+  transition: transform 0.25s ease, box-shadow 0.25s ease, border-color 0.25s ease;
+  backdrop-filter: blur(10px);
+  position: relative;
+}
+
+.contributeCard::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: 16px;
+  padding: 1px;
+  background: linear-gradient(135deg, rgba(255, 165, 0, 0.3), rgba(220, 20, 60, 0.3), rgba(128, 0, 128, 0.3));
+  -webkit-mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
+  -webkit-mask-composite: xor;
+  mask-composite: exclude;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.25s ease;
 }
 
 .contributeCard:hover {
   transform: translateY(-6px);
-  box-shadow: 0 18px 45px rgba(0, 0, 0, 0.25);
+  box-shadow: 0 18px 45px rgba(0, 0, 0, 0.35), 0 0 30px rgba(255, 165, 0, 0.2);
+  background: linear-gradient(135deg, rgba(255, 255, 255, 0.15) 0%, rgba(255, 255, 255, 0.08) 100%);
+  border-color: rgba(255, 165, 0, 0.5);
+}
+
+.contributeCard:hover::before {
+  opacity: 1;
 }
 
 .contributeCard h3 {
   font-size: 1.4rem;
   margin-bottom: 1rem;
+  background: linear-gradient(135deg, var(--ora-yellow-orange) 0%, var(--ora-crimson) 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
 }
 
 .contributeCard p {
@@ -343,7 +510,7 @@
 }
 
 .contributeCard a {
-  color: #f4b86a;
+  color: var(--ora-accent);
   font-weight: 600;
   text-decoration: none;
 }
@@ -360,6 +527,15 @@
 
   .heroTitle {
     font-size: 2.6rem;
+  }
+
+  .heroLogo {
+    order: -1;
+    margin-bottom: 1.5rem;
+  }
+
+  .logoImage {
+    height: 150px;
   }
 
   .researchGrid {
