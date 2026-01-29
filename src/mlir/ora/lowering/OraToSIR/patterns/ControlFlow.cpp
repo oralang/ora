@@ -3441,8 +3441,16 @@ LogicalResult ConvertScfIfOp::matchAndRewrite(
 
     SmallVector<mlir::scf::YieldOp, 4> thenYields;
     SmallVector<mlir::scf::YieldOp, 4> elseYields;
-    op.getThenRegion().walk([&](mlir::scf::YieldOp y) { thenYields.push_back(y); });
-    op.getElseRegion().walk([&](mlir::scf::YieldOp y) { elseYields.push_back(y); });
+    for (Block &b : op.getThenRegion())
+    {
+        if (auto y = dyn_cast<mlir::scf::YieldOp>(b.getTerminator()))
+            thenYields.push_back(y);
+    }
+    for (Block &b : op.getElseRegion())
+    {
+        if (auto y = dyn_cast<mlir::scf::YieldOp>(b.getTerminator()))
+            elseYields.push_back(y);
+    }
     llvm::errs() << "[OraToSIR] ConvertScfIfOp: thenYields=" << thenYields.size()
                  << " elseYields=" << elseYields.size() << " at " << loc << "\n";
 
