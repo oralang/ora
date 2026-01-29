@@ -32,6 +32,7 @@
 #include "mlir/Interfaces/SideEffectInterfaces.h"
 #include "mlir/Pass/PassManager.h"
 #include "mlir/Transforms/Passes.h"
+#include "mlir/Transforms/RegionUtils.h"
 #include "mlir/IR/Verifier.h"
 #include "mlir/IR/IRMapping.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
@@ -729,6 +730,68 @@ public:
             {
                 signalPassFailure();
                 return;
+            }
+        }
+
+        // Phase 2b: re-run try_stmt/return lowering to catch any ops introduced
+        // by region inlining during Phase 2 (e.g., nested try_stmt returns).
+        {
+            ora::OraToSIRTypeConverter phase2bTypeConverter;
+            RewritePatternSet phase2bPatterns(ctx);
+            phase2bPatterns.add<ConvertTryStmtOp>(phase2bTypeConverter, ctx);
+            phase2bPatterns.add<ConvertErrorOkOp>(phase2bTypeConverter, ctx);
+            phase2bPatterns.add<ConvertErrorErrOp>(phase2bTypeConverter, ctx);
+            phase2bPatterns.add<ConvertErrorIsErrorOp>(phase2bTypeConverter, ctx);
+            phase2bPatterns.add<ConvertErrorUnwrapOp>(phase2bTypeConverter, ctx);
+            phase2bPatterns.add<ConvertErrorGetErrorOp>(phase2bTypeConverter, ctx);
+            phase2bPatterns.add<ConvertArithExtUIOp>(phase2bTypeConverter, ctx);
+            phase2bPatterns.add<ConvertArithIndexCastUIOp>(phase2bTypeConverter, ctx);
+            phase2bPatterns.add<ConvertScfIfOp>(phase2bTypeConverter, ctx, /*lowerReturnsInMergeBlock=*/true, PatternBenefit(10));
+            phase2bPatterns.add<ConvertReturnOpFallback>(&phase2bTypeConverter, ctx, PatternBenefit(1));
+            phase2bPatterns.add<ConvertReturnOpRaw>(phase2bTypeConverter, ctx, PatternBenefit(1));
+            phase2bPatterns.add<ConvertReturnOp>(phase2bTypeConverter, ctx, PatternBenefit(1));
+
+            ConversionTarget phase2bTarget(*ctx);
+            phase2bTarget.addLegalDialect<mlir::BuiltinDialect>();
+            phase2bTarget.addLegalDialect<sir::SIRDialect>();
+            phase2bTarget.addLegalDialect<mlir::func::FuncDialect>();
+            phase2bTarget.addLegalDialect<mlir::cf::ControlFlowDialect>();
+            phase2bTarget.addLegalDialect<mlir::tensor::TensorDialect>();
+            phase2bTarget.addLegalDialect<mlir::memref::MemRefDialect>();
+            phase2bTarget.addLegalDialect<mlir::scf::SCFDialect>();
+            phase2bTarget.addLegalDialect<mlir::arith::ArithDialect>();
+            phase2bTarget.addLegalOp<mlir::UnrealizedConversionCastOp>();
+            phase2bTarget.addIllegalOp<mlir::scf::IfOp>();
+            phase2bTarget.addDynamicallyLegalOp<ora::ReturnOp>([](ora::ReturnOp op) {
+                Block *block = op->getBlock();
+                if (!block)
+                    return false;
+                if (block->isEntryBlock())
+                    return false;
+                return block->hasNoPredecessors();
+            });
+            phase2bTarget.addIllegalOp<ora::TryStmtOp>();
+            phase2bTarget.addIllegalOp<ora::ErrorOkOp>();
+            phase2bTarget.addIllegalOp<ora::ErrorErrOp>();
+            phase2bTarget.addIllegalOp<ora::ErrorIsErrorOp>();
+            phase2bTarget.addIllegalOp<ora::ErrorUnwrapOp>();
+            phase2bTarget.addIllegalOp<ora::ErrorGetErrorOp>();
+            phase2bTarget.addLegalOp<ora::IfOp>();
+            phase2bTarget.addLegalOp<ora::YieldOp>();
+            phase2bTarget.addLegalOp<ora::ContinueOp>();
+            phase2bTarget.addLegalOp<ora::SwitchOp>();
+            phase2bTarget.addLegalDialect<ora::OraDialect>();
+
+            if (failed(applyFullConversion(module, phase2bTarget, std::move(phase2bPatterns))))
+            {
+                signalPassFailure();
+                return;
+            }
+
+            // Drop any dead blocks introduced by try_stmt inlining before later phases.
+            {
+                mlir::IRRewriter cleanupRewriter(ctx);
+                (void)mlir::eraseUnreachableBlocks(cleanupRewriter, module.getOperation()->getRegions());
             }
         }
 
