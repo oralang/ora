@@ -2225,6 +2225,23 @@ LogicalResult ConvertIfOp::matchAndRewrite(
     rewriter.create<sir::CondBrOp>(loc, condU256, ValueRange{}, ValueRange{}, thenBlock, elseBlock);
 
     rewriter.setInsertionPointToStart(mergeBlock);
+    bool resultsUnused = llvm::all_of(op.getResults(), [](Value v) { return v.use_empty(); });
+    if (resultsUnused && !resultTypes.empty())
+    {
+        // Preserve side effects of the switch expression even if its result is unused.
+        auto *ctx2 = rewriter.getContext();
+        auto u256Type2 = sir::U256Type::get(ctx2);
+        auto ui64Type2 = mlir::IntegerType::get(ctx2, 64, mlir::IntegerType::Unsigned);
+        for (auto arg : mergeBlock->getArguments())
+        {
+            Value val = arg;
+            if (val.getType() != u256Type2)
+                val = rewriter.create<sir::BitcastOp>(loc, u256Type2, val);
+            Value size = rewriter.create<sir::ConstOp>(loc, u256Type2, mlir::IntegerAttr::get(ui64Type2, 32));
+            Value ptr = rewriter.create<sir::MallocOp>(loc, sir::PtrType::get(ctx2, 1), size);
+            rewriter.create<sir::StoreOp>(loc, ptr, val);
+        }
+    }
     op->replaceAllUsesWith(mergeBlock->getArguments());
     rewriter.eraseOp(op);
     return success();
@@ -2399,8 +2416,7 @@ LogicalResult ConvertSwitchExprOp::matchAndRewrite(
         caseIdxs.push_back(i);
     }
 
-    if (defaultIdx < 0)
-        return failure();
+    Block *defaultBlock = nullptr;
 
     Block *parentBlock = op->getBlock();
     Region *parentRegion = parentBlock->getParent();
@@ -2464,7 +2480,17 @@ LogicalResult ConvertSwitchExprOp::matchAndRewrite(
         return rewriter.create<sir::ConstOp>(loc, u256Type, mlir::IntegerAttr::get(ui64Type, v));
     };
 
-    Block *defaultBlock = caseBlocks[defaultIdx];
+    if (defaultIdx >= 0)
+    {
+        defaultBlock = caseBlocks[defaultIdx];
+    }
+    else
+    {
+        defaultBlock = rewriter.createBlock(parentRegion, mergeBlock->getIterator());
+        rewriter.setInsertionPointToEnd(defaultBlock);
+        rewriter.create<sir::InvalidOp>(loc);
+    }
+
     if (caseIdxs.empty())
     {
         rewriter.setInsertionPointToEnd(parentBlock);

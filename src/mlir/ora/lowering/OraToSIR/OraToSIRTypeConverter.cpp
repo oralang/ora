@@ -294,6 +294,14 @@ namespace mlir
                                             }
                                          }
 
+                                         if (llvm::isa<sir::PtrType>(type))
+                                         {
+                                             if (llvm::isa<ora::StringType, ora::BytesType>(input.getType()))
+                                             {
+                                                 return builder.create<mlir::UnrealizedConversionCastOp>(loc, type, input).getResult(0);
+                                             }
+                                         }
+
                                          auto makeMask = [&](unsigned width) -> Value {
                                              if (width >= 256)
                                                  return Value();
