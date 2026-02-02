@@ -12,6 +12,8 @@ on:
 env:
   # Use the latest stable Zig version
   ZIG_VERSION: 0.15.2
+  HOMEBREW_NO_AUTO_UPDATE: 1
+  HOMEBREW_NO_INSTALL_CLEANUP: 1
 
 jobs:
   mlir-build:
@@ -52,7 +54,6 @@ jobs:
               echo "✅ Linux dependencies installed"
               ;;
             macOS)
-              brew update
               brew install boost openssl cmake
               echo "✅ macOS dependencies installed"
               ;;
@@ -143,7 +144,6 @@ jobs:
               echo "✅ Linux dependencies installed"
               ;;
             macOS)
-              brew update
               brew install boost openssl cmake
               echo "✅ macOS dependencies installed"
               ;;
@@ -226,7 +226,6 @@ jobs:
               echo "✅ Linux dependencies installed"
               ;;
             macOS)
-              brew update
               brew install boost openssl cmake
               echo "✅ macOS dependencies installed"
               ;;
@@ -249,35 +248,24 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-zig-${{ matrix.zig-version }}-
 
-      - name: Clone LLVM/MLIR for build
-        shell: bash
-        run: |
-          echo "📦 Cloning LLVM/MLIR (shallow clone for faster CI)..."
-          if [ ! -d "vendor/llvm-project" ]; then
-            git clone --depth=1 --branch=release/19.x https://github.com/llvm/llvm-project.git vendor/llvm-project
-            echo "✅ LLVM/MLIR cloned"
-          else
-            echo "✅ LLVM/MLIR already present"
-          fi
-
       - name: Download MLIR artifact
         uses: actions/download-artifact@v4
         with:
           name: mlir-${{ runner.os }}
           path: vendor/mlir
 
-      - name: Build project
+      - name: Build project (cached MLIR)
         shell: bash
         run: |
           echo "🔨 Building Ora compiler..."
-          zig build
+          zig build -Dskip-mlir=true
           echo "✅ Build successful"
 
       - name: Run unit tests
         shell: bash
         run: |
           echo "🧪 Running unit test suite..."
-          zig build test || {
+          zig build test -Dskip-mlir=true || {
             echo "❌ Unit tests failed"
             exit 1
           }
@@ -324,7 +312,6 @@ jobs:
               echo "✅ Linux dependencies installed"
               ;;
             macOS)
-              brew update
               brew install boost openssl cmake
               echo "✅ macOS dependencies installed"
               ;;
@@ -347,28 +334,17 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-zig-${{ env.ZIG_VERSION }}-
 
-      - name: Clone LLVM/MLIR for build
-        shell: bash
-        run: |
-          echo "📦 Cloning LLVM/MLIR (shallow clone for faster CI)..."
-          if [ ! -d "vendor/llvm-project" ]; then
-            git clone --depth=1 --branch=release/19.x https://github.com/llvm/llvm-project.git vendor/llvm-project
-            echo "✅ LLVM/MLIR cloned"
-          else
-            echo "✅ LLVM/MLIR already present"
-          fi
-
       - name: Download MLIR artifact
         uses: actions/download-artifact@v4
         with:
           name: mlir-${{ runner.os }}
           path: vendor/mlir
 
-      - name: Build compiler (includes MLIR)
+      - name: Build compiler (cached MLIR)
         shell: bash
         run: |
           echo "🔨 Building Ora compiler..."
-          zig build
+          zig build -Dskip-mlir=true
           echo "✅ Build successful"
 
       - name: Setup Python
@@ -495,7 +471,6 @@ jobs:
               echo "✅ Linux dependencies installed"
               ;;
             macOS)
-              brew update
               brew install boost openssl cmake
               echo "✅ macOS dependencies installed"
               ;;
@@ -515,17 +490,6 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-zig-${{ env.ZIG_VERSION }}-
 
-      - name: Clone LLVM/MLIR for build
-        shell: bash
-        run: |
-          echo "📦 Cloning LLVM/MLIR (shallow clone for faster CI)..."
-          if [ ! -d "vendor/llvm-project" ]; then
-            git clone --depth=1 --branch=release/19.x https://github.com/llvm/llvm-project.git vendor/llvm-project
-            echo "✅ LLVM/MLIR cloned"
-          else
-            echo "✅ LLVM/MLIR already present"
-          fi
-
       - name: Download MLIR artifact
         uses: actions/download-artifact@v4
         with:
@@ -536,7 +500,7 @@ jobs:
         shell: bash
         run: |
           echo "🚀 Building optimized version..."
-          zig build -Doptimize=ReleaseFast
+          zig build -Dskip-mlir=true -Doptimize=ReleaseFast
 
       - name: Run performance tests
         shell: bash
@@ -551,7 +515,7 @@ jobs:
           
           # Memory usage tests
           echo "💾 Checking memory usage..."
-          /usr/bin/time -v zig build 2>&1 | grep -E "(Maximum resident set size|User time|System time)" || echo "⚠️  Memory profiling failed"
+          /usr/bin/time -v zig build -Dskip-mlir=true 2>&1 | grep -E "(Maximum resident set size|User time|System time)" || echo "⚠️  Memory profiling failed"
           
           echo "✅ Performance benchmarks completed"
 
@@ -596,7 +560,6 @@ jobs:
               echo "✅ Linux dependencies installed"
               ;;
             macOS)
-              brew update
               brew install boost openssl cmake
               echo "✅ macOS dependencies installed"
               ;;
