@@ -84,15 +84,17 @@ jobs:
         uses: actions/cache@v4
         with:
           path: vendor/mlir/
-          key: ${{ runner.os }}-mlir-build-${{ hashFiles('vendor/llvm-project/.git/HEAD', 'build.zig') }}
+          key: ${{ runner.os }}-mlir-build-${{ hashFiles('vendor/llvm-project/.git/HEAD', 'build.zig', 'src/mlir/ora/**', 'src/mlir/IR/**') }}
           restore-keys: |
             ${{ runner.os }}-mlir-build-
 
       - name: Build MLIR libraries if needed
         shell: bash
         run: |
-          if [ -d "vendor/mlir/lib" ] && [ "$(ls -A vendor/mlir/lib/*.a 2>/dev/null | wc -l)" -gt 0 ]; then
-            echo "✅ MLIR libraries already built and cached"
+          if [ -d "vendor/mlir/lib" ] && \
+             (ls -A vendor/mlir/lib/libMLIROraDialectC.* >/dev/null 2>&1) && \
+             (ls -A vendor/mlir/lib/libMLIRSIRDialect.* >/dev/null 2>&1); then
+            echo "✅ MLIR + dialect libraries already built and cached"
           else
             echo "🔨 Building MLIR libraries..."
             zig build
