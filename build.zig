@@ -163,6 +163,42 @@ pub fn build(b: *std.Build) void {
     const run_step = b.step("run", "Run the app");
     run_step.dependOn(&run_cmd.step);
 
+    // Sensei SIR CLI integration (vendored Rust tool)
+    const sensei_root = "vendor/sensei/senseic";
+    const sensei_cargo = b.fmt("{s}/Cargo.toml", .{sensei_root});
+    if (std.fs.cwd().access(sensei_cargo, .{}) catch null) |_| {
+        const sensei_build_cmd = b.addSystemCommand(&[_][]const u8{
+            "cargo",
+            "build",
+            "-p",
+            "sir-cli",
+            "--release",
+        });
+        sensei_build_cmd.setCwd(b.path(sensei_root));
+
+        const sensei_build_step = b.step("sensei-sir", "Build Sensei SIR CLI");
+        sensei_build_step.dependOn(&sensei_build_cmd.step);
+
+        if (@import("builtin").os.tag != .windows) {
+            const sir_bin = b.fmt("{s}/target/release/sir", .{sensei_root});
+            const sample_input = "tests/sensei/sample.sir";
+            const e2e_script = b.fmt(
+                "out=$({s} {s}); test \"${{out#0x}}\" != \"$out\" -a ${{#out}} -gt 2",
+                .{ sir_bin, sample_input },
+            );
+
+            const sensei_e2e_cmd = b.addSystemCommand(&[_][]const u8{
+                "bash",
+                "-lc",
+                e2e_script,
+            });
+            sensei_e2e_cmd.step.dependOn(&sensei_build_cmd.step);
+
+            const sensei_e2e_step = b.step("sensei-e2e", "Run Sensei SIR -> bytecode smoke test");
+            sensei_e2e_step.dependOn(&sensei_e2e_cmd.step);
+        }
+    }
+
     // create optimization demo executable
     const optimization_demo_mod = b.createModule(.{
         .root_source_file = b.path("examples/demos/optimization_demo.zig"),

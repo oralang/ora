@@ -690,9 +690,7 @@ pub fn lowerDestructuringPattern(self: *const StatementLowerer, pattern: lib.ast
 /// Lower expression-level compound assignment expressions
 pub fn lowerCompoundAssignmentExpr(self: *const StatementLowerer, assignment: *const lib.ast.Expressions.CompoundAssignmentExpr) LoweringError!void {
     // compound assignments delegated to expression lowering
-    // expression-level handling managed by binary operation lowering
-    _ = self;
-    _ = assignment;
+    _ = self.expr_lowerer.lowerCompoundAssignment(assignment);
 }
 
 /// Lower compound assignment statements

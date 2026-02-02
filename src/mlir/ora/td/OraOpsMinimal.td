@@ -92,7 +92,8 @@ def Ora_GlobalOp : Ora_Op<"global"> {
   }];
 }
 
-def Ora_SLoadOp : Ora_Op<"sload"> {
+def Ora_SLoadOp : Ora_Op<"sload",
+    [DeclareOpInterfaceMethods<MemoryEffectsOpInterface>]> {
   let summary = "Load value from storage";
   let description = [{
     Loads a value from the specified global storage variable.
@@ -117,7 +118,8 @@ def Ora_SLoadOp : Ora_Op<"sload"> {
   }];
 }
 
-def Ora_SStoreOp : Ora_Op<"sstore"> {
+def Ora_SStoreOp : Ora_Op<"sstore",
+    [DeclareOpInterfaceMethods<MemoryEffectsOpInterface>]> {
   let summary = "Store value to storage";
   let description = [{
     Stores a value to the specified global storage variable.
@@ -134,7 +136,6 @@ def Ora_SStoreOp : Ora_Op<"sstore"> {
   
   // Custom parser/printer for cleaner syntax
   // let assemblyFormat = "$value `,` $global attr-dict `:` type($value)";
-  
   let extraClassDeclaration = [{
     /// Get the value being stored
     ::mlir::Value getStoredValue() { return getValue(); }

@@ -1781,27 +1781,8 @@ namespace mlir
                 {
                     changed = false;
 
-                    // Remove unused storage stores (if the stored value is never used)
-                    module.walk([&](ora::SStoreOp storeOp)
-                                {
-                        // Check if the stored value has any uses beyond this store
-                        Value storedValue = storeOp.getValue();
-                        if (storedValue.hasOneUse())
-                        {
-                            // Only used by this store, safe to remove
-                            storeOp.erase();
-                            changed = true;
-                        } });
-
-                    // Remove unused memory stores
-                    module.walk([&](ora::MStoreOp storeOp)
-                                {
-                        Value storedValue = storeOp.getValue();
-                        if (storedValue.hasOneUse())
-                        {
-                            storeOp.erase();
-                            changed = true;
-                        } });
+                    // Do not remove stores: they are side-effecting even if their
+                    // input value has no other uses.
                 }
 
                 DBG("Ora cleanup completed");

@@ -223,7 +223,6 @@ def Ora_SStoreOp : Ora_Op<"sstore",
   let arguments = (ins AnyType:$value, StrAttr:$global);
   
   let assemblyFormat = "$value `,` $global `:` type($value) attr-dict";
-  
   let extraClassDeclaration = [{
     /// Get the value being stored
     ::mlir::Value getStoredValue() { return getValue(); }
@@ -728,7 +727,7 @@ def Ora_MStore8Op : Ora_Op<"mstore8",
   }];
   
   let arguments = (ins AnyType:$base, AnyType:$offset, AnyType:$value);
-  
+
   let assemblyFormat = "$base `,` $offset `,` $value attr-dict `:` type($base) `,` type($offset) `,` type($value)";
 }
 

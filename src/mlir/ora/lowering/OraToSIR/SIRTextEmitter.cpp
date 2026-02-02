@@ -358,6 +358,29 @@ namespace
             return;
         }
 
+        if (auto salloc = dyn_cast<sir::SAllocOp>(op))
+        {
+            if (auto cst = salloc.getSize().getDefiningOp<sir::ConstOp>())
+            {
+                if (auto intAttr = dyn_cast<IntegerAttr>(cst.getValueAttr()))
+                {
+                    os << " " << formatInt(intAttr.getValue());
+                    return;
+                }
+            }
+        }
+        if (auto sallocany = dyn_cast<sir::SAllocAnyOp>(op))
+        {
+            if (auto cst = sallocany.getSize().getDefiningOp<sir::ConstOp>())
+            {
+                if (auto intAttr = dyn_cast<IntegerAttr>(cst.getValueAttr()))
+                {
+                    os << " " << formatInt(intAttr.getValue());
+                    return;
+                }
+            }
+        }
+
         if (!op.getOperands().empty())
         {
             os << " ";

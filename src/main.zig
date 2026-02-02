@@ -23,6 +23,7 @@ const MlirOptions = struct {
     emit_mlir: bool,
     emit_mlir_sir: bool,
     emit_sir_text: bool,
+    emit_bytecode: bool,
     opt_level: ?[]const u8,
     output_dir: ?[]const u8,
     debug_enabled: bool = false,
@@ -98,6 +99,7 @@ pub fn main() !void {
     var emit_mlir: bool = parsed.emit_mlir;
     var emit_mlir_sir: bool = parsed.emit_mlir_sir;
     const emit_sir_text: bool = parsed.emit_sir_text;
+    const emit_bytecode: bool = parsed.emit_bytecode;
     const emit_cfg: bool = parsed.emit_cfg;
     const emit_abi: bool = parsed.emit_abi;
     const emit_abi_solidity: bool = parsed.emit_abi_solidity;
@@ -149,11 +151,11 @@ pub fn main() !void {
 
     // determine compilation mode
     // if no --emit-X flag is set, default to MLIR generation
-    if (!emit_tokens and !emit_ast and !emit_typed_ast and !emit_mlir and !emit_mlir_sir and !emit_sir_text and !emit_cfg and !emit_abi and !emit_abi_solidity) {
+    if (!emit_tokens and !emit_ast and !emit_typed_ast and !emit_mlir and !emit_mlir_sir and !emit_sir_text and !emit_bytecode and !emit_cfg and !emit_abi and !emit_abi_solidity) {
         emit_mlir = true; // Default: emit MLIR
     }
     // By default, emit Ora MLIR plus SIR MLIR when --emit-mlir is requested.
-    if ((emit_mlir or emit_sir_text) and !emit_mlir_sir) {
+    if ((emit_mlir or emit_sir_text or emit_bytecode) and !emit_mlir_sir) {
         emit_mlir_sir = true;
     }
 
@@ -162,6 +164,7 @@ pub fn main() !void {
         .emit_mlir = emit_mlir,
         .emit_mlir_sir = emit_mlir_sir,
         .emit_sir_text = emit_sir_text,
+        .emit_bytecode = emit_bytecode,
         .opt_level = mlir_opt_level,
         .output_dir = output_dir,
         .debug_enabled = debug_enabled,
@@ -181,7 +184,7 @@ pub fn main() !void {
 
     if (emit_abi or emit_abi_solidity) {
         try runAbiEmit(allocator, file_path, output_dir, emit_abi, emit_abi_solidity);
-        const only_abi = !(emit_tokens or emit_ast or emit_typed_ast or emit_mlir or emit_mlir_sir or emit_sir_text);
+        const only_abi = !(emit_tokens or emit_ast or emit_typed_ast or emit_mlir or emit_mlir_sir or emit_sir_text or emit_bytecode);
         if (only_abi) return;
     }
 
@@ -227,6 +230,7 @@ fn printUsage() !void {
     try stdout.print("  --emit-mlir-sir        - Emit SIR MLIR only (after conversion)\n", .{});
     try stdout.print("  --emit-sir             - Alias for --emit-mlir-sir\n", .{});
     try stdout.print("  --emit-sir-text        - Emit Sensei SIR text (after conversion)\n", .{});
+    try stdout.print("  --emit-bytecode        - Emit EVM bytecode from Sensei SIR text\n", .{});
     try stdout.print("  --emit-cfg             - Generate control flow graph (Graphviz DOT format)\n", .{});
     try stdout.print("  --emit-abi             - Emit Ora ABI manifest JSON\n", .{});
     try stdout.print("  --emit-abi-solidity    - Emit Solidity-compatible ABI JSON\n", .{});
@@ -850,7 +854,7 @@ fn runMlirEmitAdvanced(allocator: std.mem.Allocator, file_path: []const u8, mlir
 
     // run state analysis automatically during compilation
     // skip state analysis output when emitting MLIR to keep output clean
-    if (!mlir_options.emit_mlir and !mlir_options.emit_mlir_sir and !mlir_options.emit_sir_text) {
+    if (!mlir_options.emit_mlir and !mlir_options.emit_mlir_sir and !mlir_options.emit_sir_text and !mlir_options.emit_bytecode) {
         try runStateAnalysisForContracts(allocator, ast_nodes);
     }
 
@@ -893,6 +897,132 @@ fn mapReturnTypeTag(type_info: ?lib.ast.Types.TypeInfo) OraTypeTag {
         }
     }
     return .Void;
+}
+
+fn resolveSenseiSirPath(allocator: std.mem.Allocator) ![]const u8 {
+    if (std.posix.getenv("ORA_SENSEI_SIR")) |path| {
+        return allocator.dupe(u8, path);
+    }
+
+    const default_path = "vendor/sensei/senseic/target/release/sir";
+    if (std.fs.cwd().access(default_path, .{}) catch null) |_| {
+        return allocator.dupe(u8, default_path);
+    }
+
+    return error.SenseiSirNotFound;
+}
+
+fn emitBytecodeFromSirText(
+    allocator: std.mem.Allocator,
+    sir_text: []const u8,
+    file_path: []const u8,
+    output_dir: ?[]const u8,
+    stdout: anytype,
+) !void {
+    const sir_path = try resolveSenseiSirPath(allocator);
+    defer allocator.free(sir_path);
+
+    const basename = std.fs.path.stem(file_path);
+    const sir_extension = ".sir";
+    const sir_filename = try std.mem.concat(allocator, u8, &[_][]const u8{ basename, sir_extension });
+    defer allocator.free(sir_filename);
+
+    const temp_dir = "/tmp/ora_sir";
+    std.fs.makeDirAbsolute(temp_dir) catch |err| switch (err) {
+        error.PathAlreadyExists => {},
+        else => return err,
+    };
+    const sir_file_path = try std.fs.path.join(allocator, &[_][]const u8{ temp_dir, sir_filename });
+    defer allocator.free(sir_file_path);
+
+    var sir_file = try std.fs.createFileAbsolute(sir_file_path, .{});
+    defer sir_file.close();
+    try sir_file.writeAll(sir_text);
+
+    var argv = [_][]const u8{ sir_path, sir_file_path };
+    var child = std.process.Child.init(&argv, allocator);
+    child.stdin_behavior = .Ignore;
+    child.stdout_behavior = .Pipe;
+    child.stderr_behavior = .Pipe;
+
+    try child.spawn();
+
+    const max_output = 16 * 1024 * 1024;
+    const stdout_bytes = try child.stdout.?.readToEndAlloc(allocator, max_output);
+    defer allocator.free(stdout_bytes);
+    const stderr_bytes = try child.stderr.?.readToEndAlloc(allocator, max_output);
+    defer allocator.free(stderr_bytes);
+
+    const term = try child.wait();
+    switch (term) {
+        .Exited => |code| {
+            if (code != 0) {
+                var stderr_buffer: [1024]u8 = undefined;
+                var stderr_writer = std.fs.File.stderr().writer(&stderr_buffer);
+                const stderr = &stderr_writer.interface;
+                const trimmed_stderr = std.mem.trim(u8, stderr_bytes, " \n\r\t");
+                if (trimmed_stderr.len > 0) {
+                    try stderr.writeAll(trimmed_stderr);
+                    try stderr.writeAll("\n");
+                } else {
+                    const trimmed_stdout = std.mem.trim(u8, stdout_bytes, " \n\r\t");
+                    if (trimmed_stdout.len > 0) {
+                        try stderr.writeAll(trimmed_stdout);
+                        try stderr.writeAll("\n");
+                    }
+                }
+                try stdout.print("Error: sensei sir failed ({d})\n", .{code});
+                try stdout.print("SIR input saved to {s}\n", .{sir_file_path});
+                return error.SenseiSirFailed;
+            }
+        },
+        else => {
+            try stdout.print("Error: sensei sir terminated unexpectedly\n", .{});
+            try stdout.print("SIR input saved to {s}\n", .{sir_file_path});
+            return error.SenseiSirFailed;
+        },
+    }
+
+    const bytecode = std.mem.trim(u8, stdout_bytes, " \n\r\t");
+    if (bytecode.len == 0) {
+        try stdout.print("Error: sensei sir produced empty bytecode\n", .{});
+        try stdout.print("SIR input saved to {s}\n", .{sir_file_path});
+        return error.SenseiSirFailed;
+    }
+
+    if (output_dir) |out_dir| {
+        const out_is_file = std.mem.endsWith(u8, out_dir, ".hex") or
+            std.mem.endsWith(u8, out_dir, ".bytecode") or
+            std.mem.endsWith(u8, out_dir, ".bin");
+
+        if (out_is_file) {
+            var out_file = if (std.fs.path.isAbsolute(out_dir))
+                try std.fs.createFileAbsolute(out_dir, .{})
+            else
+                try std.fs.cwd().createFile(out_dir, .{});
+            defer out_file.close();
+            try out_file.writeAll(bytecode);
+            try stdout.print("Bytecode saved to {s}\n", .{out_dir});
+        } else {
+            std.fs.cwd().makeDir(out_dir) catch |err| switch (err) {
+                error.PathAlreadyExists => {},
+                else => return err,
+            };
+
+            const extension = ".hex";
+            const filename = try std.mem.concat(allocator, u8, &[_][]const u8{ basename, extension });
+            defer allocator.free(filename);
+            const output_file = try std.fs.path.join(allocator, &[_][]const u8{ out_dir, filename });
+            defer allocator.free(output_file);
+
+            var out_file = try std.fs.cwd().createFile(output_file, .{});
+            defer out_file.close();
+            try out_file.writeAll(bytecode);
+            try stdout.print("Bytecode saved to {s}\n", .{output_file});
+        }
+    } else {
+        try stdout.print("{s}\n", .{bytecode});
+    }
 }
 
 const StubTarget = struct {
@@ -964,7 +1094,7 @@ fn generateMlirOutput(allocator: std.mem.Allocator, ast_nodes: []lib.AstNode, fi
     const h = mlir.createContext(mlir_allocator);
     defer mlir.destroyContext(h);
 
-    const quiet_mlir_output = mlir_options.emit_mlir_sir and !mlir_options.emit_mlir and !mlir_options.emit_sir_text;
+    const quiet_mlir_output = mlir_options.emit_mlir_sir and !mlir_options.emit_mlir and !mlir_options.emit_sir_text and !mlir_options.emit_bytecode;
     const final_module = if (mlir_options.cpp_lowering_stub) blk: {
         const target = getCppStubTarget(ast_nodes);
         const loc = c.oraLocationUnknownGet(h.ctx);
@@ -1160,7 +1290,7 @@ fn generateMlirOutput(allocator: std.mem.Allocator, ast_nodes: []lib.AstNode, fi
         }
     }
 
-    const emit_sir_mlir_output = mlir_options.emit_mlir_sir and !mlir_options.emit_sir_text;
+    const emit_sir_mlir_output = mlir_options.emit_mlir_sir and !mlir_options.emit_sir_text and !mlir_options.emit_bytecode;
 
     // output SIR MLIR after conversion
     if (emit_sir_mlir_output) {
@@ -1211,7 +1341,7 @@ fn generateMlirOutput(allocator: std.mem.Allocator, ast_nodes: []lib.AstNode, fi
     }
 
     // emit SIR text after conversion
-    if (mlir_options.emit_sir_text) {
+    if (mlir_options.emit_sir_text or mlir_options.emit_bytecode) {
         if (!c.oraBuildSIRDispatcher(h.ctx, final_module)) {
             try stdout.print("Error: SIR dispatcher build failed\n", .{});
             try stdout.flush();
@@ -1235,24 +1365,33 @@ fn generateMlirOutput(allocator: std.mem.Allocator, ast_nodes: []lib.AstNode, fi
         }
 
         const sir_text = sir_text_ref.data[0..sir_text_ref.length];
-        if (mlir_options.output_dir) |output_dir| {
-            std.fs.cwd().makeDir(output_dir) catch |err| switch (err) {
-                error.PathAlreadyExists => {},
-                else => return err,
-            };
+        if (mlir_options.emit_sir_text) {
+            if (mlir_options.output_dir) |output_dir| {
+                std.fs.cwd().makeDir(output_dir) catch |err| switch (err) {
+                    error.PathAlreadyExists => {},
+                    else => return err,
+                };
 
-            const basename = std.fs.path.stem(file_path);
-            const extension = ".sir";
-            const filename = try std.mem.concat(allocator, u8, &[_][]const u8{ basename, extension });
-            defer allocator.free(filename);
-            const output_file = try std.fs.path.join(allocator, &[_][]const u8{ output_dir, filename });
-            defer allocator.free(output_file);
+                const basename = std.fs.path.stem(file_path);
+                const extension = ".sir";
+                const filename = try std.mem.concat(allocator, u8, &[_][]const u8{ basename, extension });
+                defer allocator.free(filename);
+                const output_file = try std.fs.path.join(allocator, &[_][]const u8{ output_dir, filename });
+                defer allocator.free(output_file);
 
-            var sir_file = try std.fs.cwd().createFile(output_file, .{});
-            defer sir_file.close();
-            try sir_file.writeAll(sir_text);
-        } else {
-            try stdout.print("{s}", .{sir_text});
+                var sir_file = try std.fs.cwd().createFile(output_file, .{});
+                defer sir_file.close();
+                try sir_file.writeAll(sir_text);
+            } else {
+                try stdout.print("{s}", .{sir_text});
+            }
+        }
+
+        if (mlir_options.emit_bytecode) {
+            if (mlir_options.emit_sir_text and mlir_options.output_dir == null) {
+                try stdout.print("\n", .{});
+            }
+            try emitBytecodeFromSirText(allocator, sir_text, file_path, mlir_options.output_dir, stdout);
         }
     }
 

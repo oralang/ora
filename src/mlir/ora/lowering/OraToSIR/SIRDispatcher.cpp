@@ -214,7 +214,46 @@ namespace mlir
                         }
                     }
 
-                    // Collect public functions and selectors
+                    auto u256Type = sir::U256Type::get(ctx);
+                    auto ptrType = sir::PtrType::get(ctx, 1);
+                    auto i64Type = builder.getI64Type();
+
+                    // Rewrite all non-entry functions: sir.return -> sir.iret (ptr as u256).
+                    for (func::FuncOp func : module.getOps<func::FuncOp>())
+                    {
+                        if (func.getName() == "init" || func.getName() == "main")
+                            continue;
+                        if (userInit && func == userInit)
+                            continue;
+
+                        bool hasReturn = false;
+                        for (Block &block : func.getBlocks())
+                        {
+                            if (!block.getTerminator())
+                                continue;
+                            if (auto ret = dyn_cast<sir::ReturnOp>(block.getTerminator()))
+                            {
+                                builder.setInsertionPoint(ret);
+                                Value ptr = ret.getPtr();
+                                Value len = ret.getLen();
+                                Value ptr_u = builder.create<sir::BitcastOp>(loc, u256Type, ptr);
+                                builder.create<sir::IRetOp>(loc, ValueRange{ptr_u, len});
+                                ret.erase();
+                                hasReturn = true;
+                            }
+                        }
+                        if (hasReturn)
+                        {
+                            auto ft = func.getFunctionType();
+                            SmallVector<Type, 4> results;
+                            results.push_back(u256Type);
+                            results.push_back(u256Type);
+                            auto newType = builder.getFunctionType(ft.getInputs(), results);
+                            func.setType(newType);
+                        }
+                    }
+
+                    // Collect public functions and selectors (after return rewriting).
                     SmallVector<PubFuncInfo, 8> pubFuncs;
                     for (func::FuncOp func : module.getOps<func::FuncOp>())
                     {
@@ -331,45 +370,6 @@ namespace mlir
                         sym->erase();
                     if (auto sym = SymbolTable::lookupSymbolIn(module, StringRef("main")))
                         sym->erase();
-
-                    auto u256Type = sir::U256Type::get(ctx);
-                    auto ptrType = sir::PtrType::get(ctx, 1);
-                    auto i64Type = builder.getI64Type();
-
-                    // Rewrite all non-entry functions: sir.return -> sir.iret (ptr as u256).
-                    for (func::FuncOp func : module.getOps<func::FuncOp>())
-                    {
-                        if (func.getName() == "init" || func.getName() == "main")
-                            continue;
-                        if (userInit && func == userInit)
-                            continue;
-
-                        bool hasReturn = false;
-                        for (Block &block : func.getBlocks())
-                        {
-                            if (!block.getTerminator())
-                                continue;
-                            if (auto ret = dyn_cast<sir::ReturnOp>(block.getTerminator()))
-                            {
-                                builder.setInsertionPoint(ret);
-                                Value ptr = ret.getPtr();
-                                Value len = ret.getLen();
-                                Value ptr_u = builder.create<sir::BitcastOp>(loc, u256Type, ptr);
-                                builder.create<sir::IRetOp>(loc, ValueRange{ptr_u, len});
-                                ret.erase();
-                                hasReturn = true;
-                            }
-                        }
-                        if (hasReturn)
-                        {
-                            auto ft = func.getFunctionType();
-                            SmallVector<Type, 4> results;
-                            results.push_back(u256Type);
-                            results.push_back(u256Type);
-                            auto newType = builder.getFunctionType(ft.getInputs(), results);
-                            func.setType(newType);
-                        }
-                    }
 
                     // Align sir.icall result types with updated callee signatures.
                     module.walk([&](sir::ICallOp icall) {

@@ -4,3 +4,6 @@
 [submodule "vendor/z3"]
 	path = vendor/z3
 	url = https://github.com/Z3Prover/z3.git
+[submodule "vendor/sensei"]
+	path = vendor/sensei
+	url = https://github.com/senseilang/sensei-monorepo.git

@@ -38,3 +38,11 @@ test "emit-sir-text sets emit_sir_text" {
     try testing.expect(parsed.emit_sir_text);
     try testing.expectEqualStrings("contract.ora", parsed.input_file.?);
 }
+
+test "emit-bytecode sets emit_bytecode" {
+    const args = [_][]const u8{ "--emit-bytecode", "contract.ora" };
+    const parsed = try cli.parseArgs(&args);
+
+    try testing.expect(parsed.emit_bytecode);
+    try testing.expectEqualStrings("contract.ora", parsed.input_file.?);
+}
