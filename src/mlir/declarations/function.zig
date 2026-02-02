@@ -204,36 +204,36 @@ pub fn lowerFunction(self: *const DeclarationLowerer, func: *const lib.FunctionN
             for (parts.items) |p| std.heap.page_allocator.free(p);
         }
         if (selector_ok) {
-                const joined = std.mem.join(std.heap.page_allocator, ",", parts.items) catch |err| {
-                    log.err("Failed to build ABI signature for {s}: {s}\n", .{ func.name, @errorName(err) });
-                    if (self.error_handler) |eh| {
-                        eh.reportError(.MlirOperationFailed, func.span, "Failed to build ABI signature", @errorName(err)) catch {};
-                    }
-                    return c.MlirOperation{ .ptr = null };
-                };
-                defer std.heap.page_allocator.free(joined);
+            const joined = std.mem.join(std.heap.page_allocator, ",", parts.items) catch |err| {
+                log.err("Failed to build ABI signature for {s}: {s}\n", .{ func.name, @errorName(err) });
+                if (self.error_handler) |eh| {
+                    eh.reportError(.MlirOperationFailed, func.span, "Failed to build ABI signature", @errorName(err)) catch {};
+                }
+                return c.MlirOperation{ .ptr = null };
+            };
+            defer std.heap.page_allocator.free(joined);
 
-                const sig = std.fmt.allocPrint(std.heap.page_allocator, "{s}({s})", .{ func.name, joined }) catch |err| {
-                    log.err("Failed to build ABI signature for {s}: {s}\n", .{ func.name, @errorName(err) });
-                    if (self.error_handler) |eh| {
-                        eh.reportError(.MlirOperationFailed, func.span, "Failed to build ABI signature", @errorName(err)) catch {};
-                    }
-                    return c.MlirOperation{ .ptr = null };
-                };
-                defer std.heap.page_allocator.free(sig);
+            const sig = std.fmt.allocPrint(std.heap.page_allocator, "{s}({s})", .{ func.name, joined }) catch |err| {
+                log.err("Failed to build ABI signature for {s}: {s}\n", .{ func.name, @errorName(err) });
+                if (self.error_handler) |eh| {
+                    eh.reportError(.MlirOperationFailed, func.span, "Failed to build ABI signature", @errorName(err)) catch {};
+                }
+                return c.MlirOperation{ .ptr = null };
+            };
+            defer std.heap.page_allocator.free(sig);
 
-                const selector = keccakSelectorHex(std.heap.page_allocator, sig) catch |err| {
-                    log.err("Failed to compute selector for {s}: {s}\n", .{ func.name, @errorName(err) });
-                    if (self.error_handler) |eh| {
-                        eh.reportError(.MlirOperationFailed, func.span, "Failed to compute selector", @errorName(err)) catch {};
-                    }
-                    return c.MlirOperation{ .ptr = null };
-                };
-                defer std.heap.page_allocator.free(selector);
+            const selector = keccakSelectorHex(std.heap.page_allocator, sig) catch |err| {
+                log.err("Failed to compute selector for {s}: {s}\n", .{ func.name, @errorName(err) });
+                if (self.error_handler) |eh| {
+                    eh.reportError(.MlirOperationFailed, func.span, "Failed to compute selector", @errorName(err)) catch {};
+                }
+                return c.MlirOperation{ .ptr = null };
+            };
+            defer std.heap.page_allocator.free(selector);
 
-                const sel_attr = c.oraStringAttrCreate(self.ctx, h.strRef(selector));
-                const sel_id = h.identifier(self.ctx, "ora.selector");
-                attributes.append(std.heap.page_allocator, c.oraNamedAttributeGet(sel_id, sel_attr)) catch {};
+            const sel_attr = c.oraStringAttrCreate(self.ctx, h.strRef(selector));
+            const sel_id = h.identifier(self.ctx, "ora.selector");
+            attributes.append(std.heap.page_allocator, c.oraNamedAttributeGet(sel_id, sel_attr)) catch {};
         }
         if (!selector_ok) {
             if (self.error_handler) |eh| {
