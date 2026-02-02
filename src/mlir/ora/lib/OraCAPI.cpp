@@ -138,6 +138,11 @@ extern "C"
         delete unwrap(ctx);
     }
 
+    void oraSetDebugEnabled(bool enabled)
+    {
+        mlir::ora::setDebugEnabled(enabled);
+    }
+
     MlirDialectRegistry oraDialectRegistryCreate()
     {
         return wrap(new mlir::DialectRegistry());
@@ -6387,8 +6392,11 @@ bool oraConvertToSIR(MlirContext ctx, MlirModule module)
         pm.enableVerifier(false);
 
         LogicalResult result = pm.run(moduleOp);
-        llvm::errs() << "[OraCAPI] pm.run() completed\n";
-        llvm::errs().flush();
+        if (mlir::ora::isDebugEnabled())
+        {
+            llvm::errs() << "[OraCAPI] pm.run() completed\n";
+            llvm::errs().flush();
+        }
 
         if (failed(result))
         {
@@ -6397,12 +6405,18 @@ bool oraConvertToSIR(MlirContext ctx, MlirModule module)
             // Pass failed - this will be logged by MLIR's error handling
             return false;
         }
-        llvm::errs() << "[OraCAPI] Pass execution completed successfully\n";
-        llvm::errs().flush();
+        if (mlir::ora::isDebugEnabled())
+        {
+            llvm::errs() << "[OraCAPI] Pass execution completed successfully\n";
+            llvm::errs().flush();
+        }
 
         // Verify the module is still valid after conversion
-        llvm::errs() << "[OraCAPI] Verifying module validity...\n";
-        llvm::errs().flush();
+        if (mlir::ora::isDebugEnabled())
+        {
+            llvm::errs() << "[OraCAPI] Verifying module validity...\n";
+            llvm::errs().flush();
+        }
 
         if (!moduleOp)
         {
@@ -6418,24 +6432,36 @@ bool oraConvertToSIR(MlirContext ctx, MlirModule module)
         }
         else
         {
+        if (mlir::ora::isDebugEnabled())
+        {
             llvm::errs() << "[OraCAPI] Module has " << moduleOp->getNumRegions() << " region(s)\n";
             llvm::errs().flush();
+        }
 
             // Check first region
             auto &firstRegion = moduleOp->getRegion(0);
-            llvm::errs() << "[OraCAPI] First region has " << firstRegion.getBlocks().size() << " block(s)\n";
-            llvm::errs().flush();
+            if (mlir::ora::isDebugEnabled())
+            {
+                llvm::errs() << "[OraCAPI] First region has " << firstRegion.getBlocks().size() << " block(s)\n";
+                llvm::errs().flush();
+            }
 
             if (!firstRegion.empty())
             {
                 auto &firstBlock = firstRegion.front();
-                llvm::errs() << "[OraCAPI] First block has " << firstBlock.getOperations().size() << " operation(s)\n";
-                llvm::errs().flush();
+                if (mlir::ora::isDebugEnabled())
+                {
+                    llvm::errs() << "[OraCAPI] First block has " << firstBlock.getOperations().size() << " operation(s)\n";
+                    llvm::errs().flush();
+                }
             }
         }
 
-        llvm::errs() << "[OraCAPI] Module verification complete\n";
-        llvm::errs().flush();
+        if (mlir::ora::isDebugEnabled())
+        {
+            llvm::errs() << "[OraCAPI] Module verification complete\n";
+            llvm::errs().flush();
+        }
 
         return true;
     }
@@ -6475,6 +6501,32 @@ bool oraLegalizeSIRText(MlirContext ctx, MlirModule module)
     }
 }
 
+bool oraBuildSIRDispatcher(MlirContext ctx, MlirModule module)
+{
+    try
+    {
+        MLIRContext *context = unwrap(ctx);
+        ModuleOp moduleOp = unwrap(module);
+
+        if (!oraDialectRegister(ctx))
+        {
+            return false;
+        }
+
+        context->getOrLoadDialect<sir::SIRDialect>();
+
+        PassManager pm(context, "builtin.module");
+        pm.enableVerifier(false);
+        pm.addPass(createSIRDispatcherPass());
+
+        return mlir::succeeded(pm.run(moduleOp));
+    }
+    catch (...)
+    {
+        return false;
+    }
+}
+
 MlirStringRef oraEmitSIRText(MlirContext ctx, MlirModule module)
 {
     try
@@ -6482,7 +6534,13 @@ MlirStringRef oraEmitSIRText(MlirContext ctx, MlirModule module)
         (void)ctx;
         ModuleOp moduleOp = unwrap(module);
         std::string out = mlir::ora::emitSIRText(moduleOp);
-        return oraStringRefCreate(out.data(), out.size());
+        if (out.empty())
+            return oraStringRefCreate(nullptr, 0);
+        char *buf = static_cast<char *>(std::malloc(out.size()));
+        if (!buf)
+            return oraStringRefCreate(nullptr, 0);
+        std::memcpy(buf, out.data(), out.size());
+        return oraStringRefCreate(buf, out.size());
     }
     catch (...)
     {

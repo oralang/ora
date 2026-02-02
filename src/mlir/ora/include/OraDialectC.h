@@ -42,6 +42,7 @@ extern "C"
 
     MLIR_CAPI_EXPORTED MlirContext oraContextCreate();
     MLIR_CAPI_EXPORTED void oraContextDestroy(MlirContext ctx);
+    MLIR_CAPI_EXPORTED void oraSetDebugEnabled(bool enabled);
     MLIR_CAPI_EXPORTED MlirDialectRegistry oraDialectRegistryCreate();
     MLIR_CAPI_EXPORTED void oraDialectRegistryDestroy(MlirDialectRegistry registry);
     MLIR_CAPI_EXPORTED void oraRegisterAllDialects(MlirDialectRegistry registry);
@@ -1515,6 +1516,12 @@ MLIR_CAPI_EXPORTED MlirOperation oraForOpCreate(
     /// Validate SIR MLIR for Sensei text emission
     /// Returns true on success, false on failure
     MLIR_CAPI_EXPORTED bool oraLegalizeSIRText(
+        MlirContext ctx,
+        MlirModule module);
+
+    /// Build Solidity-style dispatcher for public functions
+    /// Returns true on success, false on failure
+    MLIR_CAPI_EXPORTED bool oraBuildSIRDispatcher(
         MlirContext ctx,
         MlirModule module);
 

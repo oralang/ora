@@ -28,6 +28,9 @@ namespace mlir
         /// Create a legalizer pass to validate SIR MLIR for text emission
         std::unique_ptr<Pass> createSIRTextLegalizerPass();
 
+        /// Create a pass to build a Solidity-style dispatcher for public functions
+        std::unique_ptr<Pass> createSIRDispatcherPass();
+
         /// Create a pass to optimize Ora operations (constant deduplication, constant folding)
         std::unique_ptr<Pass> createOraOptimizationPass();
 

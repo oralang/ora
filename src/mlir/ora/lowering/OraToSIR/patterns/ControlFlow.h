@@ -481,6 +481,16 @@ namespace mlir
                 PatternRewriter &rewriter) const override;
         };
 
+        class NormalizeCondBrOperandsOp : public OpRewritePattern<sir::CondBrOp>
+        {
+        public:
+            using OpRewritePattern::OpRewritePattern;
+
+            LogicalResult matchAndRewrite(
+                sir::CondBrOp op,
+                PatternRewriter &rewriter) const override;
+        };
+
         class FoldCondBrDoubleIsZeroOp : public OpRewritePattern<sir::CondBrOp>
         {
         public:

@@ -10,6 +10,8 @@
 #include "mlir/IR/SymbolTable.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Transforms/DialectConversion.h"
+#include "mlir/IR/Dominance.h"
+#include "llvm/ADT/Hashing.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/raw_ostream.h"
 
@@ -17,6 +19,110 @@
 
 using namespace mlir;
 using namespace ora;
+
+namespace {
+    struct MapHashKey
+    {
+        void *func = nullptr;
+        const void *keyVal = nullptr;
+        const void *mapVal = nullptr;
+        uint64_t mapConst = 0;
+        bool mapIsConst = false;
+    };
+
+    struct MapHashKeyInfo
+    {
+        static inline MapHashKey getEmptyKey()
+        {
+            return MapHashKey{reinterpret_cast<void *>(-1), reinterpret_cast<void *>(-1), reinterpret_cast<void *>(-1), 0, false};
+        }
+        static inline MapHashKey getTombstoneKey()
+        {
+            return MapHashKey{reinterpret_cast<void *>(-2), reinterpret_cast<void *>(-2), reinterpret_cast<void *>(-2), 0, false};
+        }
+        static unsigned getHashValue(const MapHashKey &k)
+        {
+            uintptr_t h1 = reinterpret_cast<uintptr_t>(k.func);
+            uintptr_t h2 = reinterpret_cast<uintptr_t>(k.keyVal);
+            uintptr_t h3 = k.mapIsConst ? static_cast<uintptr_t>(k.mapConst) : reinterpret_cast<uintptr_t>(k.mapVal);
+            return static_cast<unsigned>(llvm::hash_combine(h1, h2, h3, k.mapIsConst));
+        }
+        static bool isEqual(const MapHashKey &a, const MapHashKey &b)
+        {
+            if (a.func != b.func)
+                return false;
+            if (a.keyVal != b.keyVal)
+                return false;
+            if (a.mapIsConst != b.mapIsConst)
+                return false;
+            if (a.mapIsConst)
+                return a.mapConst == b.mapConst;
+            return a.mapVal == b.mapVal;
+        }
+    };
+
+    static llvm::DenseMap<MapHashKey, Value, MapHashKeyInfo> mapHashCache;
+
+    static bool getConstU64(Value v, uint64_t &out)
+    {
+        if (auto cst = v.getDefiningOp<sir::ConstOp>())
+        {
+            if (auto intAttr = dyn_cast<IntegerAttr>(cst.getValueAttr()))
+            {
+                out = intAttr.getValue().getZExtValue();
+                return true;
+            }
+        }
+        return false;
+    }
+
+    static MapHashKey makeMapHashKey(Operation *funcOp, Value mapSlot, Value key)
+    {
+        MapHashKey k;
+        k.func = funcOp ? reinterpret_cast<void *>(funcOp) : nullptr;
+        k.keyVal = key.getAsOpaquePointer();
+        uint64_t constVal = 0;
+        if (getConstU64(mapSlot, constVal))
+        {
+            k.mapIsConst = true;
+            k.mapConst = constVal;
+        }
+        else
+        {
+            k.mapIsConst = false;
+            k.mapVal = mapSlot.getAsOpaquePointer();
+        }
+        return k;
+    }
+
+    static Value lookupCachedMapHash(Operation *funcOp, Operation *anchor, Value mapSlot, Value key)
+    {
+        MapHashKey k = makeMapHashKey(funcOp, mapSlot, key);
+        auto it = mapHashCache.find(k);
+        if (it == mapHashCache.end())
+            return Value();
+        Value hash = it->second;
+        if (!anchor || !hash)
+            return hash;
+        if (auto *def = hash.getDefiningOp())
+        {
+            auto func = anchor->getParentOfType<func::FuncOp>();
+            if (func)
+            {
+                DominanceInfo dom(func);
+                if (dom.dominates(def, anchor))
+                    return hash;
+            }
+        }
+        return Value();
+    }
+
+    static void storeCachedMapHash(Operation *funcOp, Value mapSlot, Value key, Value hash)
+    {
+        MapHashKey k = makeMapHashKey(funcOp, mapSlot, key);
+        mapHashCache[k] = hash;
+    }
+} // namespace
 
 // Debug logging macro
 #define DBG(msg) ORA_DEBUG_PREFIX("OraToSIR", msg)
@@ -220,7 +326,8 @@ LogicalResult ConvertSLoadOp::matchAndRewrite(
     }
     // Fallback: if this is an Ora type that isn't a known scalar, treat as dynamic bytes.
     if (!isDynamicBytes && resultType.getDialect().getNamespace() == "ora" &&
-        !llvm::isa<ora::IntegerType, ora::BoolType, ora::AddressType, ora::MapType, ora::StructType, ora::EnumType>(resultType))
+        !llvm::isa<ora::IntegerType, ora::BoolType, ora::AddressType, ora::MapType, ora::StructType, ora::EnumType,
+                   ora::MinValueType, ora::MaxValueType, ora::InRangeType, ora::ScaledType, ora::ExactType, ora::NonZeroAddressType>(resultType))
     {
         isDynamicBytes = true;
     }
@@ -578,6 +685,7 @@ LogicalResult ConvertMapGetOp::matchAndRewrite(
     Value originalMapOperand = op.getMap();
     Value convertedMapOperand = adaptor.getMap();
     Value key = adaptor.getKey();
+    Value keyForCache = key;
 
     // Convert key to SIR u256 if needed
     if (!llvm::isa<sir::U256Type>(key.getType()))
@@ -614,27 +722,37 @@ LogicalResult ConvertMapGetOp::matchAndRewrite(
         }
     }
 
-    // Allocate 64 bytes for key + slot
-    auto size64Attr = mlir::IntegerAttr::get(ui64Type, 64ULL);
-    Value size64 = rewriter.create<sir::ConstOp>(loc, u256Type, size64Attr);
-    Value slotKey = rewriter.create<sir::MallocOp>(loc, ptrType, size64);
-    setResultName(slotKey.getDefiningOp(), 0, "ptr");
-
-    // Store key at offset 0
-    rewriter.create<sir::StoreOp>(loc, slotKey, key);
-
-    // Store map slot at offset 32
-    auto offset32Attr = mlir::IntegerAttr::get(ui64Type, 32ULL);
-    Value offset32 = rewriter.create<sir::ConstOp>(loc, u256Type, offset32Attr);
-    Value slotKeyPlus32 = rewriter.create<sir::AddPtrOp>(loc, ptrType, slotKey, offset32);
-    setResultName(slotKeyPlus32.getDefiningOp(), 0, "ptr_off");
-    rewriter.create<sir::StoreOp>(loc, slotKeyPlus32, mapSlot);
-
-    // Compute keccak256 hash
-    Value hash = rewriter.create<sir::KeccakOp>(loc, u256Type, slotKey, size64);
-    if (!globalName.empty())
+    auto funcOp = op->getParentOfType<func::FuncOp>();
+    Value hash = lookupCachedMapHash(funcOp, op.getOperation(), mapSlot, keyForCache);
+    if (hash)
     {
-        setResultName(hash.getDefiningOp(), 0, ("hash_" + globalName).str());
+        DBG("ConvertMapGetOp: reused cached keccak256 hash");
+    }
+    else
+    {
+        // Allocate 64 bytes for key + slot
+        auto size64Attr = mlir::IntegerAttr::get(ui64Type, 64ULL);
+        Value size64 = rewriter.create<sir::ConstOp>(loc, u256Type, size64Attr);
+        Value slotKey = rewriter.create<sir::MallocOp>(loc, ptrType, size64);
+        setResultName(slotKey.getDefiningOp(), 0, "ptr");
+
+        // Store key at offset 0
+        rewriter.create<sir::StoreOp>(loc, slotKey, key);
+
+        // Store map slot at offset 32
+        auto offset32Attr = mlir::IntegerAttr::get(ui64Type, 32ULL);
+        Value offset32 = rewriter.create<sir::ConstOp>(loc, u256Type, offset32Attr);
+        Value slotKeyPlus32 = rewriter.create<sir::AddPtrOp>(loc, ptrType, slotKey, offset32);
+        setResultName(slotKeyPlus32.getDefiningOp(), 0, "ptr_off");
+        rewriter.create<sir::StoreOp>(loc, slotKeyPlus32, mapSlot);
+
+        // Compute keccak256 hash
+        hash = rewriter.create<sir::KeccakOp>(loc, u256Type, slotKey, size64);
+        if (!globalName.empty())
+        {
+            setResultName(hash.getDefiningOp(), 0, ("hash_" + globalName).str());
+        }
+        storeCachedMapHash(funcOp, mapSlot, keyForCache, hash);
     }
 
     // Get the expected result type from ora.map_get and convert it
@@ -797,6 +915,7 @@ LogicalResult ConvertMapStoreOp::matchAndRewrite(
     Value originalMapOperand = op.getMap();
     Value convertedMapOperand = adaptor.getMap();
     Value key = adaptor.getKey();
+    Value keyForCache = key;
     Value value = adaptor.getValue();
 
     // Convert key and value to SIR u256 if needed
@@ -938,27 +1057,37 @@ LogicalResult ConvertMapStoreOp::matchAndRewrite(
         }
     }
 
-    // Allocate 64 bytes for key + slot
-    auto size64Attr = mlir::IntegerAttr::get(ui64Type, 64ULL);
-    Value size64 = rewriter.create<sir::ConstOp>(loc, u256Type, size64Attr);
-    Value slotKey = rewriter.create<sir::MallocOp>(loc, ptrType, size64);
-    setResultName(slotKey.getDefiningOp(), 0, "ptr");
-
-    // Store key at offset 0
-    rewriter.create<sir::StoreOp>(loc, slotKey, key);
-
-    // Store map slot at offset 32
-    auto offset32Attr = mlir::IntegerAttr::get(ui64Type, 32ULL);
-    Value offset32 = rewriter.create<sir::ConstOp>(loc, u256Type, offset32Attr);
-    Value slotKeyPlus32 = rewriter.create<sir::AddPtrOp>(loc, ptrType, slotKey, offset32);
-    setResultName(slotKeyPlus32.getDefiningOp(), 0, "ptr_off");
-    rewriter.create<sir::StoreOp>(loc, slotKeyPlus32, mapSlot);
-
-    // Compute keccak256 hash
-    Value hash = rewriter.create<sir::KeccakOp>(loc, u256Type, slotKey, size64);
-    if (!globalName.empty())
+    auto funcOp = op->getParentOfType<func::FuncOp>();
+    Value hash = lookupCachedMapHash(funcOp, op.getOperation(), mapSlot, keyForCache);
+    if (hash)
     {
-        setResultName(hash.getDefiningOp(), 0, ("hash_" + globalName).str());
+        DBG("ConvertMapStoreOp: reused cached keccak256 hash");
+    }
+    else
+    {
+        // Allocate 64 bytes for key + slot
+        auto size64Attr = mlir::IntegerAttr::get(ui64Type, 64ULL);
+        Value size64 = rewriter.create<sir::ConstOp>(loc, u256Type, size64Attr);
+        Value slotKey = rewriter.create<sir::MallocOp>(loc, ptrType, size64);
+        setResultName(slotKey.getDefiningOp(), 0, "ptr");
+
+        // Store key at offset 0
+        rewriter.create<sir::StoreOp>(loc, slotKey, key);
+
+        // Store map slot at offset 32
+        auto offset32Attr = mlir::IntegerAttr::get(ui64Type, 32ULL);
+        Value offset32 = rewriter.create<sir::ConstOp>(loc, u256Type, offset32Attr);
+        Value slotKeyPlus32 = rewriter.create<sir::AddPtrOp>(loc, ptrType, slotKey, offset32);
+        setResultName(slotKeyPlus32.getDefiningOp(), 0, "ptr_off");
+        rewriter.create<sir::StoreOp>(loc, slotKeyPlus32, mapSlot);
+
+        // Compute keccak256 hash
+        hash = rewriter.create<sir::KeccakOp>(loc, u256Type, slotKey, size64);
+        if (!globalName.empty())
+        {
+            setResultName(hash.getDefiningOp(), 0, ("hash_" + globalName).str());
+        }
+        storeCachedMapHash(funcOp, mapSlot, keyForCache, hash);
     }
 
     // Store to storage using the hash

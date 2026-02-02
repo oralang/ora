@@ -694,8 +694,6 @@ public:
             ora::OraToSIRTypeConverter phase2TypeConverter;
             RewritePatternSet phase2Patterns(ctx);
             phase2Patterns.add<ConvertTryStmtOp>(phase2TypeConverter, ctx);
-            phase2Patterns.add<ConvertErrorOkOp>(phase2TypeConverter, ctx);
-            phase2Patterns.add<ConvertErrorErrOp>(phase2TypeConverter, ctx);
             phase2Patterns.add<ConvertErrorIsErrorOp>(phase2TypeConverter, ctx);
             phase2Patterns.add<ConvertErrorUnwrapOp>(phase2TypeConverter, ctx);
             phase2Patterns.add<ConvertErrorGetErrorOp>(phase2TypeConverter, ctx);
@@ -714,11 +712,11 @@ public:
             phase2Target.addLegalDialect<mlir::scf::SCFDialect>();
             phase2Target.addLegalDialect<mlir::arith::ArithDialect>();
             phase2Target.addLegalOp<ora::ReturnOp>();
-            phase2Target.addIllegalOp<ora::ErrorOkOp>();
-            phase2Target.addIllegalOp<ora::ErrorErrOp>();
             phase2Target.addIllegalOp<ora::ErrorIsErrorOp>();
             phase2Target.addIllegalOp<ora::ErrorUnwrapOp>();
             phase2Target.addIllegalOp<ora::ErrorGetErrorOp>();
+            phase2Target.addLegalOp<ora::ErrorOkOp>();
+            phase2Target.addLegalOp<ora::ErrorErrOp>();
             // Keep higher-level control flow legal for now.
             phase2Target.addLegalOp<ora::IfOp>();
             phase2Target.addLegalOp<ora::YieldOp>();
@@ -726,6 +724,7 @@ public:
             phase2Target.addIllegalOp<ora::TryStmtOp>();
             phase2Target.addLegalOp<ora::SwitchOp>();
             phase2Target.addLegalDialect<ora::OraDialect>();
+
 
             if (failed(applyFullConversion(module, phase2Target, std::move(phase2Patterns))))
             {
@@ -915,7 +914,7 @@ public:
             phase5TypeConverter.setEnableStructLowering(true);
             phase5TypeConverter.setEnableTensorLowering(true);
             phase5TypeConverter.setEnableMemRefLowering(true);
-            llvm::errs() << "[OraToSIR] Phase5 start\n";
+            ORA_DEBUG_PREFIX("OraToSIR", "Phase5 start");
             RewritePatternSet phase5Patterns(ctx);
             phase5Patterns.add<ConvertFuncOp>(phase5TypeConverter, ctx);
             phase5Patterns.add<ConvertCallOp>(phase5TypeConverter, ctx);
@@ -1008,13 +1007,16 @@ public:
             phase5Target.addLegalDialect<ora::OraDialect>();
 
             // Debug: report any unrealized casts still present before phase5.
-            for (auto castOp : module.getOps<mlir::UnrealizedConversionCastOp>())
+            if (mlir::ora::isDebugEnabled())
             {
-                llvm::errs() << "[OraToSIR] Phase5 pre-scan: unrealized cast at "
-                             << castOp.getLoc() << " operands=" << castOp.getNumOperands()
-                             << " results=" << castOp.getNumResults() << "\n";
+                for (auto castOp : module.getOps<mlir::UnrealizedConversionCastOp>())
+                {
+                    llvm::errs() << "[OraToSIR] Phase5 pre-scan: unrealized cast at "
+                                 << castOp.getLoc() << " operands=" << castOp.getNumOperands()
+                                 << " results=" << castOp.getNumResults() << "\n";
+                }
+                llvm::errs().flush();
             }
-            llvm::errs().flush();
 
             if (failed(applyFullConversion(module, phase5Target, std::move(phase5Patterns))))
             {
@@ -1058,14 +1060,26 @@ public:
 
             // Debug: ensure no unrealized casts remain after phase5.
             bool leftoverUnrealized = false;
-            for (auto castOp : module.getOps<mlir::UnrealizedConversionCastOp>())
+            if (mlir::ora::isDebugEnabled())
             {
-                leftoverUnrealized = true;
-                llvm::errs() << "[OraToSIR] Phase5 post-scan: unrealized cast at "
-                             << castOp.getLoc() << " operands=" << castOp.getNumOperands()
-                             << " results=" << castOp.getNumResults() << "\n";
+                for (auto castOp : module.getOps<mlir::UnrealizedConversionCastOp>())
+                {
+                    leftoverUnrealized = true;
+                    llvm::errs() << "[OraToSIR] Phase5 post-scan: unrealized cast at "
+                                 << castOp.getLoc() << " operands=" << castOp.getNumOperands()
+                                 << " results=" << castOp.getNumResults() << "\n";
+                }
+                llvm::errs().flush();
             }
-            llvm::errs().flush();
+            else
+            {
+                for (auto castOp : module.getOps<mlir::UnrealizedConversionCastOp>())
+                {
+                    (void)castOp;
+                    leftoverUnrealized = true;
+                    break;
+                }
+            }
             if (leftoverUnrealized)
             {
                 module.emitError("[OraToSIR] Phase5 post-scan: unrealized casts remain");
@@ -1074,12 +1088,15 @@ public:
             }
 
             // Debug: dump final module after phase5 so "after conversion" is truly post-phase5.
-            llvm::errs() << "\n//===----------------------------------------------------------------------===//\n";
-            llvm::errs() << "// SIR MLIR (after phase5)\n";
-            llvm::errs() << "//===----------------------------------------------------------------------===//\n\n";
-            module.print(llvm::errs());
-            llvm::errs() << "\n";
-            llvm::errs().flush();
+            if (mlir::ora::isDebugEnabled())
+            {
+                llvm::errs() << "\n//===----------------------------------------------------------------------===//\n";
+                llvm::errs() << "// SIR MLIR (after phase5)\n";
+                llvm::errs() << "//===----------------------------------------------------------------------===//\n\n";
+                module.print(llvm::errs());
+                llvm::errs() << "\n";
+                llvm::errs().flush();
+            }
 
             // Extra guard: detect any remaining unrealized casts by name (robust to type registration issues).
             int64_t unrealizedByName = 0;
@@ -1087,12 +1104,18 @@ public:
                 if (op->getName().getStringRef() == "builtin.unrealized_conversion_cast")
                 {
                     ++unrealizedByName;
-                    llvm::errs() << "[OraToSIR] Phase5 name-scan: unrealized cast at "
-                                 << op->getLoc() << " operands=" << op->getNumOperands()
-                                 << " results=" << op->getNumResults() << "\n";
+                    if (mlir::ora::isDebugEnabled())
+                    {
+                        llvm::errs() << "[OraToSIR] Phase5 name-scan: unrealized cast at "
+                                     << op->getLoc() << " operands=" << op->getNumOperands()
+                                     << " results=" << op->getNumResults() << "\n";
+                    }
                 }
             });
-            llvm::errs().flush();
+            if (mlir::ora::isDebugEnabled())
+            {
+                llvm::errs().flush();
+            }
             if (unrealizedByName > 0)
             {
                 module.emitError("[OraToSIR] Phase5 name-scan: unrealized casts remain");
@@ -1167,6 +1190,7 @@ public:
             cleanupPatterns.add<FoldEqConstOp>(ctx);
             cleanupPatterns.add<FoldIsZeroConstOp>(ctx);
             cleanupPatterns.add<FoldCondBrSameDestOp>(ctx);
+            cleanupPatterns.add<NormalizeCondBrOperandsOp>(ctx);
             cleanupPatterns.add<FoldCondBrDoubleIsZeroOp>(ctx);
             cleanupPatterns.add<FoldCondBrConstOp>(ctx);
             cleanupPatterns.add<FoldBrToBrOp>(ctx);

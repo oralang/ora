@@ -22,8 +22,10 @@ const ManagedArrayList = std.array_list.Managed;
 const MlirOptions = struct {
     emit_mlir: bool,
     emit_mlir_sir: bool,
+    emit_sir_text: bool,
     opt_level: ?[]const u8,
     output_dir: ?[]const u8,
+    debug_enabled: bool = false,
     canonicalize: bool = true,
     verify_z3: bool = true,
     cpp_lowering_stub: bool = false,
@@ -69,9 +71,10 @@ pub fn main() !void {
         return;
     }
 
-    // Check for fmt command
+    // Check for subcommands
     const is_fmt_command = args.len >= 2 and std.mem.eql(u8, args[1], "fmt");
-    const args_to_parse = if (is_fmt_command) args[2..] else args[1..];
+    const is_compile_command = args.len >= 2 and std.mem.eql(u8, args[1], "compile");
+    const args_to_parse = if (is_fmt_command or is_compile_command) args[2..] else args[1..];
 
     var parsed = cli_args.parseArgs(args_to_parse) catch {
         try printUsage();
@@ -80,6 +83,9 @@ pub fn main() !void {
 
     if (is_fmt_command) {
         parsed.fmt = true;
+    }
+    if (is_compile_command) {
+        parsed.emit_sir_text = true;
     }
 
     const output_dir: ?[]const u8 = parsed.output_dir;
@@ -91,6 +97,7 @@ pub fn main() !void {
     const emit_typed_ast_format: ?[]const u8 = parsed.emit_typed_ast_format;
     var emit_mlir: bool = parsed.emit_mlir;
     var emit_mlir_sir: bool = parsed.emit_mlir_sir;
+    const emit_sir_text: bool = parsed.emit_sir_text;
     const emit_cfg: bool = parsed.emit_cfg;
     const emit_abi: bool = parsed.emit_abi;
     const emit_abi_solidity: bool = parsed.emit_abi_solidity;
@@ -142,11 +149,11 @@ pub fn main() !void {
 
     // determine compilation mode
     // if no --emit-X flag is set, default to MLIR generation
-    if (!emit_tokens and !emit_ast and !emit_typed_ast and !emit_mlir and !emit_mlir_sir and !emit_cfg and !emit_abi and !emit_abi_solidity) {
+    if (!emit_tokens and !emit_ast and !emit_typed_ast and !emit_mlir and !emit_mlir_sir and !emit_sir_text and !emit_cfg and !emit_abi and !emit_abi_solidity) {
         emit_mlir = true; // Default: emit MLIR
     }
     // By default, emit Ora MLIR plus SIR MLIR when --emit-mlir is requested.
-    if (emit_mlir and !emit_mlir_sir) {
+    if ((emit_mlir or emit_sir_text) and !emit_mlir_sir) {
         emit_mlir_sir = true;
     }
 
@@ -154,8 +161,10 @@ pub fn main() !void {
     const mlir_options = MlirOptions{
         .emit_mlir = emit_mlir,
         .emit_mlir_sir = emit_mlir_sir,
+        .emit_sir_text = emit_sir_text,
         .opt_level = mlir_opt_level,
         .output_dir = output_dir,
+        .debug_enabled = debug_enabled,
         .canonicalize = canonicalize_mlir,
         .verify_z3 = verify_z3,
         .cpp_lowering_stub = cpp_lowering_stub,
@@ -172,7 +181,7 @@ pub fn main() !void {
 
     if (emit_abi or emit_abi_solidity) {
         try runAbiEmit(allocator, file_path, output_dir, emit_abi, emit_abi_solidity);
-        const only_abi = !(emit_tokens or emit_ast or emit_typed_ast or emit_mlir or emit_mlir_sir);
+        const only_abi = !(emit_tokens or emit_ast or emit_typed_ast or emit_mlir or emit_mlir_sir or emit_sir_text);
         if (only_abi) return;
     }
 
@@ -205,8 +214,10 @@ fn printUsage() !void {
     const stdout = &stdout_writer.interface;
     try stdout.print("Ora Compiler v0.1 - Asuka\n", .{});
     try stdout.print("Usage: ora [options] <file.ora>\n", .{});
+    try stdout.print("       ora compile [options] <file.ora>\n", .{});
     try stdout.print("\nCompilation Control:\n", .{});
     try stdout.print("  (default)              - Emit MLIR\n", .{});
+    try stdout.print("  compile                - Emit SIR text (Sensei format)\n", .{});
     try stdout.print("  --emit-tokens          - Stop after lexical analysis (emit tokens)\n", .{});
     try stdout.print("  --emit-ast             - Stop after parsing (emit AST)\n", .{});
     try stdout.print("  --emit-ast=json|tree   - Emit AST in JSON or tree format\n", .{});
@@ -214,6 +225,8 @@ fn printUsage() !void {
     try stdout.print("  --emit-typed-ast=json|tree - Emit typed AST in JSON or tree format\n", .{});
     try stdout.print("  --emit-mlir            - Emit Ora MLIR and SIR MLIR (default)\n", .{});
     try stdout.print("  --emit-mlir-sir        - Emit SIR MLIR only (after conversion)\n", .{});
+    try stdout.print("  --emit-sir             - Alias for --emit-mlir-sir\n", .{});
+    try stdout.print("  --emit-sir-text        - Emit Sensei SIR text (after conversion)\n", .{});
     try stdout.print("  --emit-cfg             - Generate control flow graph (Graphviz DOT format)\n", .{});
     try stdout.print("  --emit-abi             - Emit Ora ABI manifest JSON\n", .{});
     try stdout.print("  --emit-abi-solidity    - Emit Solidity-compatible ABI JSON\n", .{});
@@ -837,7 +850,7 @@ fn runMlirEmitAdvanced(allocator: std.mem.Allocator, file_path: []const u8, mlir
 
     // run state analysis automatically during compilation
     // skip state analysis output when emitting MLIR to keep output clean
-    if (!mlir_options.emit_mlir) {
+    if (!mlir_options.emit_mlir and !mlir_options.emit_mlir_sir and !mlir_options.emit_sir_text) {
         try runStateAnalysisForContracts(allocator, ast_nodes);
     }
 
@@ -951,6 +964,7 @@ fn generateMlirOutput(allocator: std.mem.Allocator, ast_nodes: []lib.AstNode, fi
     const h = mlir.createContext(mlir_allocator);
     defer mlir.destroyContext(h);
 
+    const quiet_mlir_output = mlir_options.emit_mlir_sir and !mlir_options.emit_mlir and !mlir_options.emit_sir_text;
     const final_module = if (mlir_options.cpp_lowering_stub) blk: {
         const target = getCppStubTarget(ast_nodes);
         const loc = c.oraLocationUnknownGet(h.ctx);
@@ -1010,7 +1024,7 @@ fn generateMlirOutput(allocator: std.mem.Allocator, ast_nodes: []lib.AstNode, fi
         }
 
         // print warnings if any
-        if (lowering_result.warnings.len > 0) {
+        if (!quiet_mlir_output and lowering_result.warnings.len > 0) {
             try stdout.print("MLIR lowering completed with {d} warnings:\n", .{lowering_result.warnings.len});
             for (lowering_result.warnings) |warn| {
                 try stdout.print("  - {s}\n", .{warn.message});
@@ -1018,11 +1032,13 @@ fn generateMlirOutput(allocator: std.mem.Allocator, ast_nodes: []lib.AstNode, fi
         }
 
         // print pass results if available
-        if (lowering_result.pass_result) |pass_result| {
-            if (pass_result.success) {
-                try stdout.print("Pass pipeline executed successfully\n", .{});
-            } else {
-                try stdout.print("Pass pipeline failed: {s}\n", .{pass_result.error_message orelse "unknown error"});
+        if (!quiet_mlir_output) {
+            if (lowering_result.pass_result) |pass_result| {
+                if (pass_result.success) {
+                    try stdout.print("Pass pipeline executed successfully\n", .{});
+                } else {
+                    try stdout.print("Pass pipeline failed: {s}\n", .{pass_result.error_message orelse "unknown error"});
+                }
             }
         }
 
@@ -1119,7 +1135,24 @@ fn generateMlirOutput(allocator: std.mem.Allocator, ast_nodes: []lib.AstNode, fi
 
     // convert Ora to SIR if emitting SIR MLIR
     if (mlir_options.emit_mlir_sir) {
+        if (quiet_mlir_output) {
+            c.oraSetDebugEnabled(false);
+        } else {
+            c.oraSetDebugEnabled(mlir_options.debug_enabled);
+        }
+        var saved_stderr: ?std.posix.fd_t = null;
+        var null_fd: ?std.posix.fd_t = null;
+        if (quiet_mlir_output) {
+            saved_stderr = try std.posix.dup(std.posix.STDERR_FILENO);
+            null_fd = try std.posix.open("/dev/null", .{ .ACCMODE = .WRONLY }, 0);
+            _ = try std.posix.dup2(null_fd.?, std.posix.STDERR_FILENO);
+        }
         const conversion_success = c.oraConvertToSIR(h.ctx, final_module);
+        if (quiet_mlir_output) {
+            _ = std.posix.dup2(saved_stderr.?, std.posix.STDERR_FILENO) catch {};
+            if (saved_stderr) |fd| std.posix.close(fd);
+            if (null_fd) |fd| std.posix.close(fd);
+        }
         if (!conversion_success) {
             try stdout.print("Error: Ora to SIR conversion failed\n", .{});
             try stdout.flush();
@@ -1127,12 +1160,16 @@ fn generateMlirOutput(allocator: std.mem.Allocator, ast_nodes: []lib.AstNode, fi
         }
     }
 
+    const emit_sir_mlir_output = mlir_options.emit_mlir_sir and !mlir_options.emit_sir_text;
+
     // output SIR MLIR after conversion
-    if (mlir_options.emit_mlir_sir) {
-        try stdout.print("//===----------------------------------------------------------------------===//\n", .{});
-        try stdout.print("// SIR MLIR (after conversion)\n", .{});
-        try stdout.print("//===----------------------------------------------------------------------===//\n\n", .{});
-        try stdout.flush();
+    if (emit_sir_mlir_output) {
+        if (!quiet_mlir_output) {
+            try stdout.print("//===----------------------------------------------------------------------===//\n", .{});
+            try stdout.print("// SIR MLIR (after conversion)\n", .{});
+            try stdout.print("//===----------------------------------------------------------------------===//\n\n", .{});
+            try stdout.flush();
+        }
 
         const module_op_sir = c.oraModuleGetOperation(final_module);
         const mlir_str_sir = c.oraOperationPrintToString(module_op_sir);
@@ -1170,6 +1207,52 @@ fn generateMlirOutput(allocator: std.mem.Allocator, ast_nodes: []lib.AstNode, fi
         } else {
             // print to stdout
             try stdout.print("{s}", .{mlir_content_sir});
+        }
+    }
+
+    // emit SIR text after conversion
+    if (mlir_options.emit_sir_text) {
+        if (!c.oraBuildSIRDispatcher(h.ctx, final_module)) {
+            try stdout.print("Error: SIR dispatcher build failed\n", .{});
+            try stdout.flush();
+            std.process.exit(1);
+        }
+        if (!c.oraLegalizeSIRText(h.ctx, final_module)) {
+            try stdout.print("Error: SIR text legalizer failed\n", .{});
+            try stdout.flush();
+            std.process.exit(1);
+        }
+
+        const sir_text_ref = c.oraEmitSIRText(h.ctx, final_module);
+        defer if (sir_text_ref.data != null) {
+            const mlir_c = @import("mlir_c_api");
+            mlir_c.freeStringRef(sir_text_ref);
+        };
+
+        if (sir_text_ref.data == null or sir_text_ref.length == 0) {
+            try stdout.print("Failed to emit SIR text\n", .{});
+            return;
+        }
+
+        const sir_text = sir_text_ref.data[0..sir_text_ref.length];
+        if (mlir_options.output_dir) |output_dir| {
+            std.fs.cwd().makeDir(output_dir) catch |err| switch (err) {
+                error.PathAlreadyExists => {},
+                else => return err,
+            };
+
+            const basename = std.fs.path.stem(file_path);
+            const extension = ".sir";
+            const filename = try std.mem.concat(allocator, u8, &[_][]const u8{ basename, extension });
+            defer allocator.free(filename);
+            const output_file = try std.fs.path.join(allocator, &[_][]const u8{ output_dir, filename });
+            defer allocator.free(output_file);
+
+            var sir_file = try std.fs.cwd().createFile(output_file, .{});
+            defer sir_file.close();
+            try sir_file.writeAll(sir_text);
+        } else {
+            try stdout.print("{s}", .{sir_text});
         }
     }
 

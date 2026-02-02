@@ -8,8 +8,6 @@
 #define ORA_DEBUG_H
 
 #include "llvm/Support/raw_ostream.h"
-#include <cstdlib>
-#include <cstring>
 
 namespace mlir
 {
@@ -17,27 +15,13 @@ namespace mlir
     {
         /// Global debug flag - can be set via environment variable ORA_DEBUG
         /// or programmatically via setDebugEnabled()
-        inline bool &getDebugFlag()
-        {
-            static bool debugEnabled = []()
-            {
-                const char *env = std::getenv("ORA_DEBUG");
-                return env != nullptr && (std::strcmp(env, "1") == 0 || std::strcmp(env, "true") == 0);
-            }();
-            return debugEnabled;
-        }
+        bool &getDebugFlag();
 
         /// Set debug flag programmatically
-        inline void setDebugEnabled(bool enabled)
-        {
-            getDebugFlag() = enabled;
-        }
+        void setDebugEnabled(bool enabled);
 
         /// Check if debug is enabled
-        inline bool isDebugEnabled()
-        {
-            return getDebugFlag();
-        }
+        bool isDebugEnabled();
     } // namespace ora
 } // namespace mlir
 

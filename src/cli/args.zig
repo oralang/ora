@@ -14,6 +14,7 @@ pub const CliOptions = struct {
     emit_typed_ast_format: ?[]const u8 = null,
     emit_mlir: bool = false,
     emit_mlir_sir: bool = false,
+    emit_sir_text: bool = false,
     emit_cfg: bool = false,
     emit_abi: bool = false,
     emit_abi_solidity: bool = false,
@@ -66,8 +67,11 @@ pub fn parseArgs(args: []const []const u8) ParseError!CliOptions {
         } else if (std.mem.eql(u8, arg, "--emit-mlir")) {
             opts.emit_mlir = true;
             i += 1;
-        } else if (std.mem.eql(u8, arg, "--emit-mlir-sir")) {
+        } else if (std.mem.eql(u8, arg, "--emit-mlir-sir") or std.mem.eql(u8, arg, "--emit-sir")) {
             opts.emit_mlir_sir = true;
+            i += 1;
+        } else if (std.mem.eql(u8, arg, "--emit-sir-text")) {
+            opts.emit_sir_text = true;
             i += 1;
         } else if (std.mem.eql(u8, arg, "--emit-cfg")) {
             opts.emit_cfg = true;

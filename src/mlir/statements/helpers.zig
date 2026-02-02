@@ -348,6 +348,33 @@ pub fn insertRefinementGuard(
 
     const loc = self.fileLoc(span);
 
+    const is_unsigned = switch (ora_type) {
+        .u8, .u16, .u32, .u64, .u128, .u256 => true,
+        .min_value => |mv| switch (mv.base.*) {
+            .u8, .u16, .u32, .u64, .u128, .u256 => true,
+            else => false,
+        },
+        .max_value => |mv| switch (mv.base.*) {
+            .u8, .u16, .u32, .u64, .u128, .u256 => true,
+            else => false,
+        },
+        .in_range => |ir| switch (ir.base.*) {
+            .u8, .u16, .u32, .u64, .u128, .u256 => true,
+            else => false,
+        },
+        .scaled => |s| switch (s.base.*) {
+            .u8, .u16, .u32, .u64, .u128, .u256 => true,
+            else => false,
+        },
+        .exact => |e| switch (e.*) {
+            .u8, .u16, .u32, .u64, .u128, .u256 => true,
+            else => false,
+        },
+        else => false,
+    };
+    const pred_ge: i64 = if (is_unsigned) 9 else 5; // uge or sge
+    const pred_le: i64 = if (is_unsigned) 7 else 3; // ule or sle
+
     switch (ora_type) {
         .min_value => |mv| {
             // generate: require(value >= min)
@@ -368,7 +395,7 @@ pub fn insertRefinementGuard(
             const min_const = createConstantValue(self, min_attr, min_type, loc);
 
             const actual_value = unwrapRefinementValueWithCache(self, value, span);
-            const cmp_op = c.oraArithCmpIOpCreate(self.ctx, loc, 5, actual_value, min_const);
+            const cmp_op = c.oraArithCmpIOpCreate(self.ctx, loc, pred_ge, actual_value, min_const);
             h.appendOp(self.block, cmp_op);
             const condition = h.getResult(cmp_op, 0);
 
@@ -407,7 +434,7 @@ pub fn insertRefinementGuard(
             const max_const = createConstantValue(self, max_attr, max_type, loc);
 
             const actual_value = unwrapRefinementValueWithCache(self, value, span);
-            const cmp_op = c.oraArithCmpIOpCreate(self.ctx, loc, 3, actual_value, max_const);
+            const cmp_op = c.oraArithCmpIOpCreate(self.ctx, loc, pred_le, actual_value, max_const);
             h.appendOp(self.block, cmp_op);
             const condition = h.getResult(cmp_op, 0);
 
@@ -459,12 +486,12 @@ pub fn insertRefinementGuard(
 
             // check: value >= min
             const actual_value = unwrapRefinementValueWithCache(self, value, span);
-            const min_cmp_op = c.oraArithCmpIOpCreate(self.ctx, loc, 5, actual_value, min_const);
+            const min_cmp_op = c.oraArithCmpIOpCreate(self.ctx, loc, pred_ge, actual_value, min_const);
             h.appendOp(self.block, min_cmp_op);
             const min_check = h.getResult(min_cmp_op, 0);
 
             // check: value <= max
-            const max_cmp_op = c.oraArithCmpIOpCreate(self.ctx, loc, 3, actual_value, max_const);
+            const max_cmp_op = c.oraArithCmpIOpCreate(self.ctx, loc, pred_le, actual_value, max_const);
             h.appendOp(self.block, max_cmp_op);
             const max_check = h.getResult(max_cmp_op, 0);
 

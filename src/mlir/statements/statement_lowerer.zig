@@ -384,6 +384,22 @@ pub const StatementLowerer = struct {
             }
         }
 
+        if (!has_terminator and b.statements.len > 0) {
+            const last_stmt = &b.statements[b.statements.len - 1];
+            if (last_stmt.* == .Return) {
+                expr_lowerer.block = current_block;
+                var stmt_lowerer = StatementLowerer.init(self.ctx, current_block, self.type_mapper, &expr_lowerer, self.param_map, self.storage_map, self.local_var_map, self.locations, self.symbol_table, self.builtin_registry, self.allocator, self.refinement_guard_cache, self.current_function_return_type, self.current_function_return_type_info, self.ora_dialect, self.ensures_clauses);
+                stmt_lowerer.force_stack_memref = self.force_stack_memref;
+                stmt_lowerer.label_context = self.label_context;
+                stmt_lowerer.in_try_block = self.in_try_block;
+                stmt_lowerer.try_return_flag_memref = self.try_return_flag_memref;
+                stmt_lowerer.try_return_value_memref = self.try_return_value_memref;
+                stmt_lowerer.current_func_op = self.current_func_op;
+                try return_stmt.lowerReturn(&stmt_lowerer, &last_stmt.Return);
+                has_terminator = true;
+            }
+        }
+
         if (self.symbol_table) |st| {
             st.popScope();
         }

@@ -91,11 +91,13 @@ add_public_tablegen_target(MLIROraOpsIncGen)
 # Note: We include OraDialect.cpp because OraDialectC.cpp needs the full OraDialect implementation
 add_mlir_dialect_library(MLIROraDialectC
   lib/OraCAPI.cpp
+  lib/OraDebug.cpp
   lib/OraDialect.cpp
   lowering/OraToSIR/OraToSIR.cpp
   lowering/OraToSIR/OraToSIRTypeConverter.cpp
   lowering/OraToSIR/SIRTextLegalizer.cpp
   lowering/OraToSIR/SIRTextEmitter.cpp
+  lowering/OraToSIR/SIRDispatcher.cpp
   lowering/OraToSIR/patterns/Naming.cpp
   lowering/OraToSIR/patterns/Arithmetic.cpp
   lowering/OraToSIR/patterns/Struct.cpp

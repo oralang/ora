@@ -191,6 +191,12 @@ pub fn lowerContract(self: *const DeclarationLowerer, contract: *const lib.Contr
                 var local_var_map = LocalVarMap.init(std.heap.page_allocator);
                 defer local_var_map.deinit();
                 const func_op = self.lowerFunction(&f, &storage_map, &local_var_map);
+                if (c.oraOperationIsNull(func_op)) {
+                    if (self.error_handler) |eh| {
+                        eh.reportError(.MlirOperationFailed, f.span, "failed to lower function in contract", null) catch {};
+                    }
+                    return c.MlirOperation{ .ptr = null };
+                }
                 h.appendOp(block, func_op);
             },
             .VariableDecl => |var_decl| {

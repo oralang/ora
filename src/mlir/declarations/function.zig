@@ -19,6 +19,105 @@ const helpers = @import("helpers.zig");
 const refinements = @import("refinements.zig");
 const expr_helpers = @import("../expressions/helpers.zig");
 const log = @import("log");
+const crypto = std.crypto;
+
+fn canonicalAbiType(allocator: std.mem.Allocator, ora_type: lib.ast.Types.TypeInfo) ![]const u8 {
+    const ot = ora_type.ora_type orelse return error.InvalidType;
+    return switch (ot) {
+        .u8 => allocator.dupe(u8, "uint8"),
+        .u16 => allocator.dupe(u8, "uint16"),
+        .u32 => allocator.dupe(u8, "uint32"),
+        .u64 => allocator.dupe(u8, "uint64"),
+        .u128 => allocator.dupe(u8, "uint128"),
+        .u256 => allocator.dupe(u8, "uint256"),
+        .i8 => allocator.dupe(u8, "int8"),
+        .i16 => allocator.dupe(u8, "int16"),
+        .i32 => allocator.dupe(u8, "int32"),
+        .i64 => allocator.dupe(u8, "int64"),
+        .i128 => allocator.dupe(u8, "int128"),
+        .i256 => allocator.dupe(u8, "int256"),
+        .bool => allocator.dupe(u8, "bool"),
+        .address => allocator.dupe(u8, "address"),
+        .bytes => allocator.dupe(u8, "bytes"),
+        .string => allocator.dupe(u8, "string"),
+        .array => |arr| {
+            const elem_info = lib.ast.Types.TypeInfo.fromOraType(arr.elem.*);
+            const elem = try canonicalAbiType(allocator, elem_info);
+            defer allocator.free(elem);
+            return std.fmt.allocPrint(allocator, "{s}[{d}]", .{ elem, arr.len });
+        },
+        .slice => |elem| {
+            const elem_info = lib.ast.Types.TypeInfo.fromOraType(elem.*);
+            const elem_str = try canonicalAbiType(allocator, elem_info);
+            defer allocator.free(elem_str);
+            return std.fmt.allocPrint(allocator, "{s}[]", .{elem_str});
+        },
+        .tuple => |members| {
+            var parts = std.ArrayList([]const u8){};
+            defer parts.deinit(allocator);
+            for (members) |m| {
+                const mi = lib.ast.Types.TypeInfo.fromOraType(m);
+                const ms = try canonicalAbiType(allocator, mi);
+                try parts.append(allocator, ms);
+            }
+            defer {
+                for (parts.items) |p| allocator.free(p);
+            }
+            const joined = try std.mem.join(allocator, ",", parts.items);
+            defer allocator.free(joined);
+            return std.fmt.allocPrint(allocator, "({s})", .{joined});
+        },
+        .error_union => |succ| {
+            const si = lib.ast.Types.TypeInfo.fromOraType(succ.*);
+            return canonicalAbiType(allocator, si);
+        },
+        ._union => |members| {
+            if (members.len > 0 and members[0] == .error_union) {
+                const si = lib.ast.Types.TypeInfo.fromOraType(members[0].error_union.*);
+                return canonicalAbiType(allocator, si);
+            }
+            return error.InvalidType;
+        },
+        .min_value => |mv| {
+            const base_info = lib.ast.Types.TypeInfo.fromOraType(mv.base.*);
+            return canonicalAbiType(allocator, base_info);
+        },
+        .max_value => |mv| {
+            const base_info = lib.ast.Types.TypeInfo.fromOraType(mv.base.*);
+            return canonicalAbiType(allocator, base_info);
+        },
+        .in_range => |ir| {
+            const base_info = lib.ast.Types.TypeInfo.fromOraType(ir.base.*);
+            return canonicalAbiType(allocator, base_info);
+        },
+        .scaled => |s| {
+            const base_info = lib.ast.Types.TypeInfo.fromOraType(s.base.*);
+            return canonicalAbiType(allocator, base_info);
+        },
+        .exact => |e| {
+            const base_info = lib.ast.Types.TypeInfo.fromOraType(e.*);
+            return canonicalAbiType(allocator, base_info);
+        },
+        .non_zero_address => allocator.dupe(u8, "address"),
+        else => error.InvalidType,
+    };
+}
+
+fn keccakSelectorHex(allocator: std.mem.Allocator, signature: []const u8) ![]const u8 {
+    var hash: [32]u8 = undefined;
+    crypto.hash.sha3.Keccak256.hash(signature, &hash, .{});
+    const selector = hash[0..4];
+    var buf: [8]u8 = undefined;
+    var i: usize = 0;
+    while (i < selector.len) : (i += 1) {
+        const byte = selector[i];
+        const hi = std.fmt.hex_charset[byte >> 4];
+        const lo = std.fmt.hex_charset[byte & 0x0f];
+        buf[i * 2] = hi;
+        buf[i * 2 + 1] = lo;
+    }
+    return std.fmt.allocPrint(allocator, "0x{s}", .{buf[0..]});
+}
 
 fn refinementCacheKey(value: c.MlirValue) usize {
     if (c.mlirValueIsABlockArgument(value)) {
@@ -81,6 +180,90 @@ pub fn lowerFunction(self: *const DeclarationLowerer, func: *const lib.FunctionN
     };
     const visibility_id = h.identifier(self.ctx, "ora.visibility");
     attributes.append(std.heap.page_allocator, c.oraNamedAttributeGet(visibility_id, visibility_attr)) catch {};
+
+    // Compute and attach selector for public functions (Solidity-style ABI)
+    if (func.visibility == .Public) {
+        var parts = std.ArrayList([]const u8){};
+        defer parts.deinit(std.heap.page_allocator);
+        var abi_param_attrs = std.ArrayList(c.MlirAttribute){};
+        defer abi_param_attrs.deinit(std.heap.page_allocator);
+        const selector_ok = true;
+        for (func.parameters) |param| {
+            const s = canonicalAbiType(std.heap.page_allocator, param.type_info) catch |err| {
+                log.err("ABI type unsupported for selector generation in {s}: {s}\n", .{ func.name, @errorName(err) });
+                if (self.error_handler) |eh| {
+                    eh.reportError(.MlirOperationFailed, func.span, "ABI type unsupported for selector generation", @errorName(err)) catch {};
+                }
+                return c.MlirOperation{ .ptr = null };
+            };
+            parts.append(std.heap.page_allocator, s) catch {};
+            const s_attr = c.oraStringAttrCreate(self.ctx, h.strRef(s));
+            abi_param_attrs.append(std.heap.page_allocator, s_attr) catch {};
+        }
+        defer {
+            for (parts.items) |p| std.heap.page_allocator.free(p);
+        }
+        if (selector_ok) {
+                const joined = std.mem.join(std.heap.page_allocator, ",", parts.items) catch |err| {
+                    log.err("Failed to build ABI signature for {s}: {s}\n", .{ func.name, @errorName(err) });
+                    if (self.error_handler) |eh| {
+                        eh.reportError(.MlirOperationFailed, func.span, "Failed to build ABI signature", @errorName(err)) catch {};
+                    }
+                    return c.MlirOperation{ .ptr = null };
+                };
+                defer std.heap.page_allocator.free(joined);
+
+                const sig = std.fmt.allocPrint(std.heap.page_allocator, "{s}({s})", .{ func.name, joined }) catch |err| {
+                    log.err("Failed to build ABI signature for {s}: {s}\n", .{ func.name, @errorName(err) });
+                    if (self.error_handler) |eh| {
+                        eh.reportError(.MlirOperationFailed, func.span, "Failed to build ABI signature", @errorName(err)) catch {};
+                    }
+                    return c.MlirOperation{ .ptr = null };
+                };
+                defer std.heap.page_allocator.free(sig);
+
+                const selector = keccakSelectorHex(std.heap.page_allocator, sig) catch |err| {
+                    log.err("Failed to compute selector for {s}: {s}\n", .{ func.name, @errorName(err) });
+                    if (self.error_handler) |eh| {
+                        eh.reportError(.MlirOperationFailed, func.span, "Failed to compute selector", @errorName(err)) catch {};
+                    }
+                    return c.MlirOperation{ .ptr = null };
+                };
+                defer std.heap.page_allocator.free(selector);
+
+                const sel_attr = c.oraStringAttrCreate(self.ctx, h.strRef(selector));
+                const sel_id = h.identifier(self.ctx, "ora.selector");
+                attributes.append(std.heap.page_allocator, c.oraNamedAttributeGet(sel_id, sel_attr)) catch {};
+        }
+        if (!selector_ok) {
+            if (self.error_handler) |eh| {
+                eh.reportError(.MlirOperationFailed, func.span, "Failed to compute ABI selector", null) catch {};
+            }
+            return c.MlirOperation{ .ptr = null };
+        }
+
+        // Attach ABI param type list for dispatcher decoding.
+        const abi_params_id = h.identifier(self.ctx, "ora.abi_params");
+        const abi_params_attr = c.oraArrayAttrCreate(self.ctx, @intCast(abi_param_attrs.items.len), abi_param_attrs.items.ptr);
+        attributes.append(std.heap.page_allocator, c.oraNamedAttributeGet(abi_params_id, abi_params_attr)) catch {};
+
+        // Attach ABI return type if present.
+        if (func.return_type_info) |ret_info| {
+            const ret_str = canonicalAbiType(std.heap.page_allocator, ret_info) catch |err| {
+                log.err("ABI return type unsupported in {s}: {s}\n", .{ func.name, @errorName(err) });
+                if (self.error_handler) |eh| {
+                    eh.reportError(.MlirOperationFailed, func.span, "ABI return type unsupported", @errorName(err)) catch {};
+                }
+                return c.MlirOperation{ .ptr = null };
+            };
+            defer std.heap.page_allocator.free(ret_str);
+            if (ret_str.len > 0) {
+                const ret_attr = c.oraStringAttrCreate(self.ctx, h.strRef(ret_str));
+                const ret_id = h.identifier(self.ctx, "ora.abi_return");
+                attributes.append(std.heap.page_allocator, c.oraNamedAttributeGet(ret_id, ret_attr)) catch {};
+            }
+        }
+    }
 
     // add function effect metadata (pure/writes + slot list)
     if (self.symbol_table) |table| {

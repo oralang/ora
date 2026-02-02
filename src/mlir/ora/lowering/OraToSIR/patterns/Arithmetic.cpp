@@ -51,12 +51,74 @@ static sir::ConstOp findOriginalConstant(Value val)
     return nullptr;
 }
 
+static bool isZeroConst(Value val)
+{
+    if (auto constOp = findOriginalConstant(val))
+    {
+        if (auto intAttr = mlir::dyn_cast<mlir::IntegerAttr>(constOp.getValueAttr()))
+            return intAttr.getValue().isZero();
+    }
+    if (auto arithConst = val.getDefiningOp<mlir::arith::ConstantOp>())
+    {
+        if (auto intAttr = mlir::dyn_cast<mlir::IntegerAttr>(arithConst.getValue()))
+            return intAttr.getValue().isZero();
+    }
+    if (auto addrCast = val.getDefiningOp<ora::I160ToAddrOp>())
+        return isZeroConst(addrCast.getI160());
+    if (auto bitcastOp = val.getDefiningOp<sir::BitcastOp>())
+        return isZeroConst(bitcastOp.getInput());
+    if (auto castOp = val.getDefiningOp<mlir::UnrealizedConversionCastOp>())
+    {
+        if (castOp.getInputs().size() == 1)
+            return isZeroConst(castOp.getInputs()[0]);
+    }
+    return false;
+}
+
+static bool isMask160Const(Value val)
+{
+    if (auto constOp = findOriginalConstant(val))
+    {
+        if (auto intAttr = mlir::dyn_cast<mlir::IntegerAttr>(constOp.getValueAttr()))
+        {
+            llvm::APInt maskValue(256, 0);
+            maskValue.setLowBits(160);
+            return intAttr.getValue() == maskValue;
+        }
+    }
+    return false;
+}
+
+static bool isAlreadyMasked160(Value val)
+{
+    if (auto andOp = val.getDefiningOp<sir::AndOp>())
+    {
+        return isMask160Const(andOp.getLhs()) || isMask160Const(andOp.getRhs());
+    }
+    return false;
+}
+
 static Value ensureU256(ConversionPatternRewriter &rewriter, Location loc, Value value)
 {
     auto u256Type = sir::U256Type::get(rewriter.getContext());
     if (llvm::isa<sir::U256Type>(value.getType()))
         return value;
     return rewriter.create<sir::BitcastOp>(loc, u256Type, value);
+}
+
+static Value maskAddressTo160(ConversionPatternRewriter &rewriter, Location loc, Value value)
+{
+    auto ctx = rewriter.getContext();
+    auto u256Type = sir::U256Type::get(ctx);
+    if (isZeroConst(value) || isAlreadyMasked160(value))
+        return ensureU256(rewriter, loc, value);
+    Value v = ensureU256(rewriter, loc, value);
+
+    llvm::APInt maskValue(256, 0);
+    maskValue.setLowBits(160);
+    auto maskAttr = mlir::IntegerAttr::get(u256Type, maskValue);
+    Value mask = rewriter.create<sir::ConstOp>(loc, u256Type, maskAttr);
+    return rewriter.create<sir::AndOp>(loc, u256Type, v, mask);
 }
 
 // -----------------------------------------------------------------------------
@@ -611,8 +673,14 @@ LogicalResult ConvertCmpOp::matchAndRewrite(
     auto ctx = rewriter.getContext();
 
     auto predicate = op.getPredicate();
-    Value lhs = ensureU256(rewriter, loc, adaptor.getLhs());
-    Value rhs = ensureU256(rewriter, loc, adaptor.getRhs());
+    Value lhs = adaptor.getLhs();
+    Value rhs = adaptor.getRhs();
+    if (llvm::isa<ora::AddressType, ora::NonZeroAddressType>(op.getLhs().getType()))
+        lhs = maskAddressTo160(rewriter, loc, lhs);
+    if (llvm::isa<ora::AddressType, ora::NonZeroAddressType>(op.getRhs().getType()))
+        rhs = maskAddressTo160(rewriter, loc, rhs);
+    lhs = ensureU256(rewriter, loc, lhs);
+    rhs = ensureU256(rewriter, loc, rhs);
     auto u256Type = sir::U256Type::get(ctx);
 
     auto makeEq = [&]() -> Value {
@@ -938,6 +1006,12 @@ LogicalResult ConvertI160ToAddrOp::matchAndRewrite(
 
     auto u256Type = sir::U256Type::get(ctx);
     Value cast = rewriter.create<sir::BitcastOp>(loc, u256Type, input);
+
+    if (isZeroConst(input))
+    {
+        rewriter.replaceOp(op, cast);
+        return success();
+    }
 
     llvm::APInt maskValue(256, 0);
     maskValue.setLowBits(160);

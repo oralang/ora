@@ -205,6 +205,19 @@ static LogicalResult materializeWideErrorUnion(
         outValues.push_back(toU256(errOp.getValue()));
         return success();
     }
+    if (auto cst = operand.getDefiningOp<sir::ConstOp>())
+    {
+        if (cst->hasAttr("ora.error_id"))
+        {
+            outValues.push_back(one);
+            outValues.push_back(toU256(operand));
+            return success();
+        }
+        // Treat raw constants as ok payloads for wide unions.
+        outValues.push_back(zero);
+        outValues.push_back(toU256(operand));
+        return success();
+    }
     if (auto castOp = operand.getDefiningOp<mlir::UnrealizedConversionCastOp>())
     {
         if (castOp.getNumOperands() == 2)
@@ -232,7 +245,6 @@ static LogicalResult materializeWideErrorUnion(
     {
         if (!isNarrowErrorUnion(errType))
         {
-            llvm::errs() << "[OraToSIR] materializeWideErrorUnion: fallback split at " << loc << "\n";
             Value packed = toU256(operand);
             Value tag = rewriter.create<sir::AndOp>(loc, u256Type, packed, one);
             Value payload = rewriter.create<sir::ShrOp>(loc, u256Type, packed, one);
@@ -296,26 +308,34 @@ static LogicalResult getErrorUnionEncodingTypes(const TypeConverter *typeConvert
     if (!typeConverter)
         return failure();
     if (failed(typeConverter->convertType(resultType, convertedTypes)))
+        convertedTypes.clear();
+
+    if (auto errType = llvm::dyn_cast<ora::ErrorUnionType>(resultType))
     {
-        if (auto errType = llvm::dyn_cast<ora::ErrorUnionType>(resultType))
+        auto *ctx = resultType.getContext();
+        if (!ctx)
+            return failure();
+        auto u256 = sir::U256Type::get(ctx);
+        const bool narrow = isNarrowErrorUnion(errType);
+        if (narrow)
         {
-            auto *ctx = resultType.getContext();
-            if (!ctx)
-                return failure();
-            auto u256 = sir::U256Type::get(ctx);
-            if (isNarrowErrorUnion(errType))
+            if (convertedTypes.size() != 1 || !isa<sir::U256Type>(convertedTypes.front()))
             {
+                convertedTypes.clear();
                 convertedTypes.push_back(u256);
             }
-            else
+        }
+        else
+        {
+            if (convertedTypes.size() != 2)
             {
+                convertedTypes.clear();
                 convertedTypes.push_back(u256);
                 convertedTypes.push_back(u256);
             }
         }
-        if (convertedTypes.empty())
-            return failure();
     }
+
     if (convertedTypes.empty())
         return failure();
     return success();
@@ -684,75 +704,127 @@ static LogicalResult rewriteErrorUnwrapInTryStmt(
         Value payloadU256;
         Value isErrU256;
         SmallVector<Value> wideParts;
-        llvm::errs() << "[OraToSIR] TryStmt unwrap at " << loc
-                     << " operand#0 type=" << unwrap->getOperand(0).getType()
-                     << " numOperands=" << numOperands << "\n";
-        auto wideRes = materializeWideErrorUnion(rewriter, loc, unwrap->getOperand(0), wideParts);
-        llvm::errs() << "[OraToSIR] materializeWideErrorUnion result="
-                     << (succeeded(wideRes) ? "success" : "failure")
-                     << " parts=" << wideParts.size() << "\n";
-        if (succeeded(wideRes) && wideParts.size() == 2)
+        auto stripCasts = [](Value v) {
+            // Peel trivial casts so we can recover the original source.
+            for (int i = 0; i < 8 && v; ++i)
+            {
+                if (auto bc = v.getDefiningOp<sir::BitcastOp>())
+                {
+                    v = bc.getOperand();
+                    continue;
+                }
+                if (auto uc = v.getDefiningOp<mlir::UnrealizedConversionCastOp>())
+                {
+                    if (uc->getNumOperands() == 1)
+                    {
+                        v = uc.getOperand(0);
+                        continue;
+                    }
+                }
+                break;
+            }
+            return v;
+        };
+        auto findExistingPayload = [&](Value basePtr) -> Value {
+            Block *blk = unwrap->getBlock();
+            for (auto it = blk->begin(), end = Block::iterator(unwrap); it != end; ++it)
+            {
+                auto load = dyn_cast<sir::LoadOp>(&*it);
+                if (!load)
+                    continue;
+                if (auto addPtr = load.getPtr().getDefiningOp<sir::AddPtrOp>())
+                {
+                    if (addPtr.getBase() != basePtr)
+                        continue;
+                    auto offConst = addPtr.getOffset().getDefiningOp<sir::ConstOp>();
+                    if (!offConst)
+                        continue;
+                    if (offConst.getValue() == 32)
+                        return load.getResult();
+                }
+                if (auto addOp = load.getPtr().getDefiningOp<sir::AddOp>())
+                {
+                    Value lhs = addOp.getLhs();
+                    Value rhs = addOp.getRhs();
+                    Value base = lhs == basePtr ? rhs : (rhs == basePtr ? lhs : Value());
+                    if (!base)
+                        continue;
+                    auto offConst = base.getDefiningOp<sir::ConstOp>();
+                    if (!offConst)
+                        continue;
+                    if (offConst.getValue() == 32)
+                        return load.getResult();
+                }
+            }
+            return Value();
+        };
+
+        // Prefer wide layout when we see a tag load with a matching payload load (base+32).
+        Value raw0 = unwrap->getOperand(0);
+        Value peeled0 = stripCasts(raw0);
+        // If we already have a masked tag (tag & 1), recover the original tag load and payload.
+        if (auto andOp = peeled0.getDefiningOp<sir::AndOp>())
         {
-            Value tag = ensureU256(rewriter, loc, wideParts[0]);
-            payloadU256 = ensureU256(rewriter, loc, wideParts[1]);
-            llvm::errs() << "[OraToSIR] wide parts tag=" << wideParts[0].getType()
-                         << " payload=" << wideParts[1].getType() << "\n";
-            isErrU256 = rewriter.create<sir::EqOp>(loc, u256Type, tag, one);
+            Value lhs = andOp.getLhs();
+            Value rhs = andOp.getRhs();
+            auto lhsC = lhs.getDefiningOp<sir::ConstOp>();
+            auto rhsC = rhs.getDefiningOp<sir::ConstOp>();
+            Value tagCandidate;
+            if (lhsC && lhsC.getValue() == 1)
+                tagCandidate = rhs;
+            else if (rhsC && rhsC.getValue() == 1)
+                tagCandidate = lhs;
+            if (tagCandidate)
+            {
+                Value peeledTag = stripCasts(tagCandidate);
+                if (auto tagLoad = peeledTag.getDefiningOp<sir::LoadOp>())
+                {
+                    Value basePtr = tagLoad.getPtr();
+                    if (Value existing = findExistingPayload(basePtr))
+                    {
+                        payloadU256 = ensureU256(rewriter, loc, existing);
+                        Value maskedTag = ensureU256(rewriter, loc, andOp.getResult());
+                        isErrU256 = rewriter.create<sir::EqOp>(loc, u256Type, maskedTag, one);
+                    }
+                }
+            }
+        }
+        if (auto tagLoad = peeled0.getDefiningOp<sir::LoadOp>())
+        {
+            Value basePtr = tagLoad.getPtr();
+            if (Value existing = findExistingPayload(basePtr))
+            {
+                Value tag = ensureU256(rewriter, loc, tagLoad.getResult());
+                payloadU256 = ensureU256(rewriter, loc, existing);
+                Value maskedTag = rewriter.create<sir::AndOp>(loc, u256Type, tag, one);
+                isErrU256 = rewriter.create<sir::EqOp>(loc, u256Type, maskedTag, one);
+            }
         }
         if (!isErrU256)
         {
-            llvm::errs() << "[OraToSIR] fallback unwrap path numOperands=" << numOperands << "\n";
+            auto wideRes = materializeWideErrorUnion(rewriter, loc, unwrap->getOperand(0), wideParts);
+            if (succeeded(wideRes) && wideParts.size() == 2)
+            {
+                Value tag = ensureU256(rewriter, loc, wideParts[0]);
+                payloadU256 = ensureU256(rewriter, loc, wideParts[1]);
+                Value maskedTag = rewriter.create<sir::AndOp>(loc, u256Type, tag, one);
+                isErrU256 = rewriter.create<sir::EqOp>(loc, u256Type, maskedTag, one);
+            }
+        }
+        if (!isErrU256)
+        {
             if (numOperands == 2)
             {
                 Value tag = ensureU256(rewriter, loc, unwrap->getOperand(0));
                 payloadU256 = ensureU256(rewriter, loc, unwrap->getOperand(1));
-                isErrU256 = rewriter.create<sir::EqOp>(loc, u256Type, tag, one);
+                Value maskedTag = rewriter.create<sir::AndOp>(loc, u256Type, tag, one);
+                isErrU256 = rewriter.create<sir::EqOp>(loc, u256Type, maskedTag, one);
             }
             else
             {
-                auto stripCasts = [](Value v) {
-                    // Peel trivial casts so we can recover the original source.
-                    for (int i = 0; i < 8 && v; ++i)
-                    {
-                        if (auto bc = v.getDefiningOp<sir::BitcastOp>())
-                        {
-                            v = bc.getOperand();
-                            continue;
-                        }
-                        if (auto uc = v.getDefiningOp<mlir::UnrealizedConversionCastOp>())
-                        {
-                            if (uc->getNumOperands() == 1)
-                            {
-                                v = uc.getOperand(0);
-                                continue;
-                            }
-                        }
-                        break;
-                    }
-                    return v;
-                };
-
                 Value raw = unwrap->getOperand(0);
                 Value peeled = stripCasts(raw);
                 Value valueU256 = ensureU256(rewriter, loc, raw);
-                auto findExistingPayload = [&](Value basePtr) -> Value {
-                    Block *blk = unwrap->getBlock();
-                    for (auto it = blk->begin(), end = Block::iterator(unwrap); it != end; ++it)
-                    {
-                        auto load = dyn_cast<sir::LoadOp>(&*it);
-                        if (!load)
-                            continue;
-                        auto addPtr = load.getPtr().getDefiningOp<sir::AddPtrOp>();
-                        if (!addPtr || addPtr.getBase() != basePtr)
-                            continue;
-                        auto offConst = addPtr.getOffset().getDefiningOp<sir::ConstOp>();
-                        if (!offConst)
-                            continue;
-                        if (offConst.getValue() == 32)
-                            return load.getResult();
-                    }
-                    return Value();
-                };
                 // If operand is a cast from an ora.error_union, re-materialize wide parts.
                 if (auto cast = peeled.getDefiningOp<mlir::UnrealizedConversionCastOp>())
                 {
@@ -765,42 +837,34 @@ static LogicalResult rewriteErrorUnwrapInTryStmt(
                         {
                             Value tag = ensureU256(rewriter, loc, castParts[0]);
                             payloadU256 = ensureU256(rewriter, loc, castParts[1]);
-                            isErrU256 = rewriter.create<sir::EqOp>(loc, u256Type, tag, one);
+                            Value maskedTag = rewriter.create<sir::AndOp>(loc, u256Type, tag, one);
+                            isErrU256 = rewriter.create<sir::EqOp>(loc, u256Type, maskedTag, one);
                         }
                     }
                 }
-                bool isWideErr = false;
                 if (isErrU256)
                 {
                     // already handled via castParts
                 }
-                else
-                {
-                    if (auto errType = llvm::dyn_cast<ora::ErrorUnionType>(unwrap->getOperand(0).getType()))
-                        isWideErr = !isNarrowErrorUnion(errType);
-                }
 
                 // If the unwrap operand is already the tag loaded from a pointer,
                 // recover the payload from base+32 for wide error unions.
-                if (isWideErr)
+                if (auto load = peeled.getDefiningOp<sir::LoadOp>())
                 {
-                    if (auto load = peeled.getDefiningOp<sir::LoadOp>())
+                    Value basePtr = load.getPtr();
+                    if (Value existing = findExistingPayload(basePtr))
                     {
-                        Value basePtr = load.getPtr();
-                        if (Value existing = findExistingPayload(basePtr))
-                        {
-                            payloadU256 = ensureU256(rewriter, loc, existing);
-                        }
-                        else
-                        {
-                            Value offs = rewriter.create<sir::ConstOp>(loc, u256Type,
-                                                                      mlir::IntegerAttr::get(u256IntType, 32));
-                            Value payloadPtr = rewriter.create<sir::AddPtrOp>(loc, basePtr.getType(), basePtr, offs);
-                            payloadU256 = rewriter.create<sir::LoadOp>(loc, u256Type, payloadPtr);
-                        }
-                        Value masked = rewriter.create<sir::AndOp>(loc, u256Type, valueU256, one);
-                        isErrU256 = rewriter.create<sir::EqOp>(loc, u256Type, masked, one);
+                        payloadU256 = ensureU256(rewriter, loc, existing);
                     }
+                    else
+                    {
+                        Value offs = rewriter.create<sir::ConstOp>(loc, u256Type,
+                                                                  mlir::IntegerAttr::get(u256IntType, 32));
+                        Value payloadPtr = rewriter.create<sir::AddPtrOp>(loc, basePtr.getType(), basePtr, offs);
+                        payloadU256 = rewriter.create<sir::LoadOp>(loc, u256Type, payloadPtr);
+                    }
+                    Value masked = rewriter.create<sir::AndOp>(loc, u256Type, valueU256, one);
+                    isErrU256 = rewriter.create<sir::EqOp>(loc, u256Type, masked, one);
                 }
                 if (!isErrU256)
                 {
@@ -1065,8 +1129,6 @@ LogicalResult ConvertTryStmtOp::matchAndRewrite(
                          << mergeBlock->getNumArguments() << "\n";
             return rewriter.notifyMatchFailure(op, "try_stmt result/merge mismatch");
         }
-        llvm::errs() << "[OraToSIR] ConvertTryStmtOp: replace results="
-                     << op.getNumResults() << "\n";
         rewriter.setInsertionPointToStart(mergeBlock);
         op->replaceAllUsesWith(mergeBlock->getArguments());
         rewriter.eraseOp(op);
@@ -1084,7 +1146,6 @@ LogicalResult ConvertErrorOkOp::matchAndRewrite(
     typename ora::ErrorOkOp::Adaptor adaptor,
     ConversionPatternRewriter &rewriter) const
 {
-    llvm::errs() << "[OraToSIR] ConvertErrorOkOp::matchAndRewrite() called at " << op.getLoc() << "\n";
     auto *ctx = rewriter.getContext();
     auto loc = op.getLoc();
     auto u256Type = sir::U256Type::get(ctx);
@@ -1093,15 +1154,26 @@ LogicalResult ConvertErrorOkOp::matchAndRewrite(
     SmallVector<Type> resultTypes;
     if (failed(getErrorUnionEncodingTypes(getTypeConverter(), op.getResult().getType(), resultTypes)))
     {
-        llvm::errs() << "[OraToSIR] ConvertErrorOkOp: failed to get encoding types at " << loc << "\n";
         return failure();
     }
-    llvm::errs() << "[OraToSIR] ConvertErrorOkOp: resultTypes=" << resultTypes.size() << " at " << loc << "\n";
+    if (auto errType = llvm::dyn_cast<ora::ErrorUnionType>(op.getResult().getType()))
+    {
+        if (!isNarrowErrorUnion(errType) && resultTypes.size() == 1)
+        {
+            resultTypes.clear();
+            resultTypes.push_back(u256Type);
+            resultTypes.push_back(u256Type);
+        }
+    }
 
     Value value = adaptor.getValue();
     value = ensureU256(rewriter, loc, value);
+    if (auto cst = value.getDefiningOp<sir::ConstOp>())
+        cst->setAttr("ora.error_id", rewriter.getUnitAttr());
 
-    if (resultTypes.size() == 1)
+    const bool isWide = llvm::isa<ora::ErrorUnionType>(op.getResult().getType()) &&
+                        !isNarrowErrorUnion(llvm::cast<ora::ErrorUnionType>(op.getResult().getType()));
+    if (!isWide && resultTypes.size() == 1)
     {
         auto oneAttr = mlir::IntegerAttr::get(u256IntType, 1);
         auto zeroAttr = mlir::IntegerAttr::get(u256IntType, 0);
@@ -1125,7 +1197,6 @@ LogicalResult ConvertErrorErrOp::matchAndRewrite(
     typename ora::ErrorErrOp::Adaptor adaptor,
     ConversionPatternRewriter &rewriter) const
 {
-    llvm::errs() << "[OraToSIR] ConvertErrorErrOp::matchAndRewrite() called at " << op.getLoc() << "\n";
     auto *ctx = rewriter.getContext();
     auto loc = op.getLoc();
     auto u256Type = sir::U256Type::get(ctx);
@@ -1134,15 +1205,24 @@ LogicalResult ConvertErrorErrOp::matchAndRewrite(
     SmallVector<Type> resultTypes;
     if (failed(getErrorUnionEncodingTypes(getTypeConverter(), op.getResult().getType(), resultTypes)))
     {
-        llvm::errs() << "[OraToSIR] ConvertErrorErrOp: failed to get encoding types at " << loc << "\n";
         return failure();
     }
-    llvm::errs() << "[OraToSIR] ConvertErrorErrOp: resultTypes=" << resultTypes.size() << " at " << loc << "\n";
+    if (auto errType = llvm::dyn_cast<ora::ErrorUnionType>(op.getResult().getType()))
+    {
+        if (!isNarrowErrorUnion(errType) && resultTypes.size() == 1)
+        {
+            resultTypes.clear();
+            resultTypes.push_back(u256Type);
+            resultTypes.push_back(u256Type);
+        }
+    }
 
     Value value = adaptor.getValue();
     value = ensureU256(rewriter, loc, value);
 
-    if (resultTypes.size() == 1)
+    const bool isWide = llvm::isa<ora::ErrorUnionType>(op.getResult().getType()) &&
+                        !isNarrowErrorUnion(llvm::cast<ora::ErrorUnionType>(op.getResult().getType()));
+    if (!isWide && resultTypes.size() == 1)
     {
         auto oneAttr = mlir::IntegerAttr::get(u256IntType, 1);
         Value one = rewriter.create<sir::ConstOp>(loc, u256Type, oneAttr);
@@ -1173,6 +1253,44 @@ LogicalResult FoldCondBrSameDestOp::matchAndRewrite(
         return failure();
 
     rewriter.replaceOpWithNewOp<sir::BrOp>(op, op.getTrueOperands(), op.getTrueDest());
+    return success();
+}
+
+// -----------------------------------------------------------------------------
+// Normalize sir.cond_br with differing operands by inserting relay blocks.
+// -----------------------------------------------------------------------------
+LogicalResult NormalizeCondBrOperandsOp::matchAndRewrite(
+    sir::CondBrOp op,
+    PatternRewriter &rewriter) const
+{
+    if (llvm::equal(op.getTrueOperands(), op.getFalseOperands()))
+        return failure();
+
+    Region *parent = op->getParentRegion();
+    if (!parent)
+        return failure();
+
+    Block *srcBlock = op->getBlock();
+    auto insertIt = Region::iterator(srcBlock);
+    ++insertIt;
+
+    Block *trueRelay = rewriter.createBlock(parent, insertIt);
+    Block *falseRelay = rewriter.createBlock(parent, insertIt);
+
+    rewriter.setInsertionPointToEnd(trueRelay);
+    rewriter.create<sir::BrOp>(op.getLoc(), op.getTrueOperands(), op.getTrueDest());
+
+    rewriter.setInsertionPointToEnd(falseRelay);
+    rewriter.create<sir::BrOp>(op.getLoc(), op.getFalseOperands(), op.getFalseDest());
+
+    rewriter.setInsertionPoint(op);
+    rewriter.replaceOpWithNewOp<sir::CondBrOp>(
+        op,
+        op.getCond(),
+        ValueRange{},
+        ValueRange{},
+        trueRelay,
+        falseRelay);
     return success();
 }
 
@@ -1343,11 +1461,142 @@ LogicalResult ConvertErrorUnwrapOp::matchAndRewrite(
     if (operands.empty())
         return failure();
 
-    Value payload = ensureU256(rewriter, loc, operands[0]);
+    auto stripCasts = [](Value v) {
+        for (int i = 0; i < 8 && v; ++i)
+        {
+            if (auto bc = v.getDefiningOp<sir::BitcastOp>())
+            {
+                v = bc.getOperand();
+                continue;
+            }
+            if (auto uc = v.getDefiningOp<mlir::UnrealizedConversionCastOp>())
+            {
+                if (uc->getNumOperands() == 1)
+                {
+                    v = uc.getOperand(0);
+                    continue;
+                }
+            }
+            break;
+        }
+        return v;
+    };
+    auto isConstOne = [](Value v) -> bool {
+        if (auto c = v.getDefiningOp<sir::ConstOp>())
+            return c.getValue() == 1;
+        return false;
+    };
+    auto isOffset32 = [](sir::ConstOp c) -> bool {
+        if (!c)
+            return false;
+        return c.getValue() == 32;
+    };
+    auto findExistingPayload = [&](Value basePtr) -> Value {
+        Block *blk = op->getBlock();
+        for (auto it = blk->begin(), end = Block::iterator(op); it != end; ++it)
+        {
+            auto load = dyn_cast<sir::LoadOp>(&*it);
+            if (!load)
+                continue;
+            if (auto addPtr = load.getPtr().getDefiningOp<sir::AddPtrOp>())
+            {
+                if (addPtr.getBase() != basePtr)
+                    continue;
+                auto offConst = addPtr.getOffset().getDefiningOp<sir::ConstOp>();
+                if (isOffset32(offConst))
+                    return load.getResult();
+            }
+            if (auto addOp = load.getPtr().getDefiningOp<sir::AddOp>())
+            {
+                Value lhs = addOp.getLhs();
+                Value rhs = addOp.getRhs();
+                Value base = lhs == basePtr ? rhs : (rhs == basePtr ? lhs : Value());
+                if (!base)
+                    continue;
+                auto offConst = base.getDefiningOp<sir::ConstOp>();
+                if (isOffset32(offConst))
+                    return load.getResult();
+            }
+        }
+        return Value();
+    };
+    auto findExistingPayloadInFunc = [&](Value basePtr) -> Value {
+        if (!basePtr)
+            return Value();
+        auto func = op->getParentOfType<func::FuncOp>();
+        if (!func)
+            return Value();
+        Value found;
+        func.walk([&](sir::LoadOp load) {
+            if (found)
+                return;
+            if (auto addPtr = load.getPtr().getDefiningOp<sir::AddPtrOp>())
+            {
+                if (addPtr.getBase() != basePtr)
+                    return;
+                auto offConst = addPtr.getOffset().getDefiningOp<sir::ConstOp>();
+                if (isOffset32(offConst))
+                    found = load.getResult();
+            }
+            if (auto addOp = load.getPtr().getDefiningOp<sir::AddOp>())
+            {
+                Value lhs = addOp.getLhs();
+                Value rhs = addOp.getRhs();
+                Value base = lhs == basePtr ? rhs : (rhs == basePtr ? lhs : Value());
+                if (!base)
+                    return;
+                auto offConst = base.getDefiningOp<sir::ConstOp>();
+                if (isOffset32(offConst))
+                    found = load.getResult();
+            }
+        });
+        return found;
+    };
+
+    Value payload;
     if (operands.size() == 1)
-        payload = rewriter.create<sir::ShrOp>(loc, u256Type, payload, one);
+    {
+        Value raw = operands[0];
+        Value peeled = stripCasts(raw);
+        sir::LoadOp tagLoad;
+        if (auto tl = peeled.getDefiningOp<sir::LoadOp>())
+            tagLoad = tl;
+        if (!tagLoad)
+        {
+            if (auto andOp = peeled.getDefiningOp<sir::AndOp>())
+            {
+                Value lhs = andOp.getLhs();
+                Value rhs = andOp.getRhs();
+                if (isConstOne(lhs))
+                    std::swap(lhs, rhs);
+                if (isConstOne(rhs))
+                {
+                    Value cand = stripCasts(lhs);
+                    tagLoad = cand.getDefiningOp<sir::LoadOp>();
+                }
+            }
+        }
+        if (tagLoad)
+        {
+            if (Value existing = findExistingPayload(tagLoad.getPtr()))
+            {
+                payload = ensureU256(rewriter, loc, existing);
+            }
+            else if (Value existing = findExistingPayloadInFunc(tagLoad.getPtr()))
+            {
+                payload = ensureU256(rewriter, loc, existing);
+            }
+        }
+        if (!payload)
+        {
+            payload = ensureU256(rewriter, loc, raw);
+            payload = rewriter.create<sir::ShrOp>(loc, u256Type, payload, one);
+        }
+    }
     else
+    {
         payload = ensureU256(rewriter, loc, operands[1]);
+    }
 
     if (resultType != u256Type)
         payload = rewriter.create<sir::BitcastOp>(loc, resultType, payload);
@@ -1378,11 +1627,142 @@ LogicalResult ConvertErrorGetErrorOp::matchAndRewrite(
     if (operands.empty())
         return failure();
 
-    Value payload = ensureU256(rewriter, loc, operands[0]);
+    auto stripCasts = [](Value v) {
+        for (int i = 0; i < 8 && v; ++i)
+        {
+            if (auto bc = v.getDefiningOp<sir::BitcastOp>())
+            {
+                v = bc.getOperand();
+                continue;
+            }
+            if (auto uc = v.getDefiningOp<mlir::UnrealizedConversionCastOp>())
+            {
+                if (uc->getNumOperands() == 1)
+                {
+                    v = uc.getOperand(0);
+                    continue;
+                }
+            }
+            break;
+        }
+        return v;
+    };
+    auto isConstOne = [](Value v) -> bool {
+        if (auto c = v.getDefiningOp<sir::ConstOp>())
+            return c.getValue() == 1;
+        return false;
+    };
+    auto isOffset32b = [](sir::ConstOp c) -> bool {
+        if (!c)
+            return false;
+        return c.getValue() == 32;
+    };
+    auto findExistingPayload = [&](Value basePtr) -> Value {
+        Block *blk = op->getBlock();
+        for (auto it = blk->begin(), end = Block::iterator(op); it != end; ++it)
+        {
+            auto load = dyn_cast<sir::LoadOp>(&*it);
+            if (!load)
+                continue;
+            if (auto addPtr = load.getPtr().getDefiningOp<sir::AddPtrOp>())
+            {
+                if (addPtr.getBase() != basePtr)
+                    continue;
+                auto offConst = addPtr.getOffset().getDefiningOp<sir::ConstOp>();
+                if (isOffset32b(offConst))
+                    return load.getResult();
+            }
+            if (auto addOp = load.getPtr().getDefiningOp<sir::AddOp>())
+            {
+                Value lhs = addOp.getLhs();
+                Value rhs = addOp.getRhs();
+                Value base = lhs == basePtr ? rhs : (rhs == basePtr ? lhs : Value());
+                if (!base)
+                    continue;
+                auto offConst = base.getDefiningOp<sir::ConstOp>();
+                if (isOffset32b(offConst))
+                    return load.getResult();
+            }
+        }
+        return Value();
+    };
+    auto findExistingPayloadInFunc = [&](Value basePtr) -> Value {
+        if (!basePtr)
+            return Value();
+        auto func = op->getParentOfType<func::FuncOp>();
+        if (!func)
+            return Value();
+        Value found;
+        func.walk([&](sir::LoadOp load) {
+            if (found)
+                return;
+            if (auto addPtr = load.getPtr().getDefiningOp<sir::AddPtrOp>())
+            {
+                if (addPtr.getBase() != basePtr)
+                    return;
+                auto offConst = addPtr.getOffset().getDefiningOp<sir::ConstOp>();
+                if (isOffset32b(offConst))
+                    found = load.getResult();
+            }
+            if (auto addOp = load.getPtr().getDefiningOp<sir::AddOp>())
+            {
+                Value lhs = addOp.getLhs();
+                Value rhs = addOp.getRhs();
+                Value base = lhs == basePtr ? rhs : (rhs == basePtr ? lhs : Value());
+                if (!base)
+                    return;
+                auto offConst = base.getDefiningOp<sir::ConstOp>();
+                if (isOffset32b(offConst))
+                    found = load.getResult();
+            }
+        });
+        return found;
+    };
+
+    Value payload;
     if (operands.size() == 1)
-        payload = rewriter.create<sir::ShrOp>(loc, u256Type, payload, one);
+    {
+        Value raw = operands[0];
+        Value peeled = stripCasts(raw);
+        sir::LoadOp tagLoad;
+        if (auto tl = peeled.getDefiningOp<sir::LoadOp>())
+            tagLoad = tl;
+        if (!tagLoad)
+        {
+            if (auto andOp = peeled.getDefiningOp<sir::AndOp>())
+            {
+                Value lhs = andOp.getLhs();
+                Value rhs = andOp.getRhs();
+                if (isConstOne(lhs))
+                    std::swap(lhs, rhs);
+                if (isConstOne(rhs))
+                {
+                    Value cand = stripCasts(lhs);
+                    tagLoad = cand.getDefiningOp<sir::LoadOp>();
+                }
+            }
+        }
+        if (tagLoad)
+        {
+            if (Value existing = findExistingPayload(tagLoad.getPtr()))
+            {
+                payload = ensureU256(rewriter, loc, existing);
+            }
+            else if (Value existing = findExistingPayloadInFunc(tagLoad.getPtr()))
+            {
+                payload = ensureU256(rewriter, loc, existing);
+            }
+        }
+        if (!payload)
+        {
+            payload = ensureU256(rewriter, loc, raw);
+            payload = rewriter.create<sir::ShrOp>(loc, u256Type, payload, one);
+        }
+    }
     else
+    {
         payload = ensureU256(rewriter, loc, operands[1]);
+    }
 
     if (resultType != u256Type)
         payload = rewriter.create<sir::BitcastOp>(loc, resultType, payload);
@@ -1421,7 +1801,8 @@ LogicalResult ConvertCallOp::matchAndRewrite(
         auto u256IntType = mlir::IntegerType::get(ctx, 256, mlir::IntegerType::Unsigned);
         auto idVal = errIdAttr.getValue().zextOrTrunc(256);
         auto idAttr = mlir::IntegerAttr::get(u256IntType, idVal);
-        Value idConst = rewriter.create<sir::ConstOp>(op.getLoc(), u256Type, idAttr);
+        auto idConst = rewriter.create<sir::ConstOp>(op.getLoc(), u256Type, idAttr);
+        idConst->setAttr("ora.error_id", errIdAttr);
 
         if (oldResultTypes.empty())
         {
@@ -1469,7 +1850,36 @@ LogicalResult ConvertCallOp::matchAndRewrite(
         }
     }
 
-    if (!oldResultTypes.empty())
+    bool usedCalleeSig = false;
+    if (!calleeName.empty())
+    {
+        if (auto module = op->getParentOfType<mlir::ModuleOp>())
+        {
+            if (Operation *symbol = mlir::SymbolTable::lookupSymbolIn(module, calleeName))
+            {
+                if (auto calleeFunc = dyn_cast<func::FuncOp>(symbol))
+                {
+                    newResultTypes.append(calleeFunc.getFunctionType().getResults().begin(),
+                                          calleeFunc.getFunctionType().getResults().end());
+                    usedCalleeSig = true;
+                }
+            }
+        }
+        if (!usedCalleeSig)
+        {
+            auto calleeAttr = mlir::StringAttr::get(op.getContext(), calleeName);
+            if (Operation *symbol = mlir::SymbolTable::lookupNearestSymbolFrom(op, calleeAttr))
+            {
+                if (auto calleeFunc = dyn_cast<func::FuncOp>(symbol))
+                {
+                    newResultTypes.append(calleeFunc.getFunctionType().getResults().begin(),
+                                          calleeFunc.getFunctionType().getResults().end());
+                    usedCalleeSig = true;
+                }
+            }
+        }
+    }
+    if (!usedCalleeSig && !oldResultTypes.empty())
     {
         auto ptrType = sir::PtrType::get(op.getContext(), /*addrSpace*/ 1);
         auto u256Type = sir::U256Type::get(op.getContext());
@@ -1477,10 +1887,10 @@ LogicalResult ConvertCallOp::matchAndRewrite(
         newResultTypes.push_back(u256Type);
     }
 
-    auto newCall = rewriter.create<mlir::func::CallOp>(
+    auto newCall = rewriter.create<sir::ICallOp>(
         op.getLoc(),
-        op.getCallee(),
         newResultTypes,
+        SymbolRefAttr::get(op.getContext(), op.getCallee()),
         adaptor.getOperands());
 
     if (oldResultTypes.empty())
@@ -1522,7 +1932,10 @@ LogicalResult ConvertCallOp::matchAndRewrite(
         return rewriter.notifyMatchFailure(op, "unable to convert call result type");
     }
 
-    auto ptr = newCall.getResult(0);
+    auto ptrType = sir::PtrType::get(op.getContext(), /*addrSpace*/ 1);
+    Value ptr_u = newCall.getResult(0);
+    Value ptr = llvm::isa<sir::PtrType>(ptr_u.getType()) ? ptr_u
+                                                         : rewriter.create<sir::BitcastOp>(op.getLoc(), ptrType, ptr_u);
     if (convertedTypes.size() == 1)
     {
         if (llvm::isa<ora::BytesType>(oldResultTypes.front()) ||
@@ -1546,7 +1959,9 @@ LogicalResult ConvertCallOp::matchAndRewrite(
     Value ptr2 = rewriter.create<sir::AddPtrOp>(op.getLoc(), ptr.getType(), ptr, offset);
     auto tag = rewriter.create<sir::LoadOp>(op.getLoc(), u256Type, ptr);
     auto payload = rewriter.create<sir::LoadOp>(op.getLoc(), u256Type, ptr2);
-    op->replaceAllUsesWith(ValueRange{tag.getResult(), payload.getResult()});
+    Value one = rewriter.create<sir::ConstOp>(op.getLoc(), u256Type, mlir::IntegerAttr::get(u256IntType, 1));
+    Value maskedTag = rewriter.create<sir::AndOp>(op.getLoc(), u256Type, tag.getResult(), one);
+    op->replaceAllUsesWith(ValueRange{maskedTag, payload.getResult()});
     rewriter.eraseOp(op);
     return success();
 }
@@ -1731,6 +2146,8 @@ static LogicalResult convertOraReturn(
                         llvm::errs() << "[OraToSIR] ConvertReturnOp: wide error_union split (cast operands) at " << loc << "\n";
                         Value tag = ensureU256(rewriter, loc, cast.getOperand(0));
                         Value payload = ensureU256(rewriter, loc, cast.getOperand(1));
+                        Value one = rewriter.create<sir::ConstOp>(loc, u256Type, mlir::IntegerAttr::get(ui64Type, 1));
+                        tag = rewriter.create<sir::AndOp>(loc, u256Type, tag, one);
 
                         auto sizeAttr = mlir::IntegerAttr::get(ui64Type, 64);
                         Value sizeConst = rewriter.create<sir::ConstOp>(loc, u256Type, sizeAttr);
@@ -1752,6 +2169,8 @@ static LogicalResult convertOraReturn(
                 llvm::errs() << "[OraToSIR] ConvertReturnOp: wide error_union split (2 operands) at " << loc << "\n";
                 Value tag = ensureU256(rewriter, loc, operands[0]);
                 Value payload = ensureU256(rewriter, loc, operands[1]);
+                Value one = rewriter.create<sir::ConstOp>(loc, u256Type, mlir::IntegerAttr::get(ui64Type, 1));
+                tag = rewriter.create<sir::AndOp>(loc, u256Type, tag, one);
 
                 auto sizeAttr = mlir::IntegerAttr::get(ui64Type, 64);
                 Value sizeConst = rewriter.create<sir::ConstOp>(loc, u256Type, sizeAttr);
@@ -1769,11 +2188,36 @@ static LogicalResult convertOraReturn(
 
             SmallVector<Value> parts;
             if (failed(materializeWideErrorUnion(rewriter, loc, op.getOperand(0), parts)) || parts.size() != 2)
-                return rewriter.notifyMatchFailure(op, "failed to materialize wide error_union return");
+            {
+                // Fallback: treat operand as ok payload unless explicitly marked error_id.
+                Value payload = ensureU256(rewriter, loc, op.getOperand(0));
+                auto ui64Type = mlir::IntegerType::get(ctx, 64, mlir::IntegerType::Unsigned);
+                Value tag = rewriter.create<sir::ConstOp>(loc, u256Type, mlir::IntegerAttr::get(ui64Type, 0));
+                if (auto cst = op.getOperand(0).getDefiningOp<sir::ConstOp>())
+                {
+                    if (cst->hasAttr("ora.error_id"))
+                        tag = rewriter.create<sir::ConstOp>(loc, u256Type, mlir::IntegerAttr::get(ui64Type, 1));
+                }
+
+                auto sizeAttr = mlir::IntegerAttr::get(ui64Type, 64);
+                Value sizeConst = rewriter.create<sir::ConstOp>(loc, u256Type, sizeAttr);
+                Value mem = rewriter.create<sir::MallocOp>(loc, ptrType, sizeConst);
+
+                rewriter.create<sir::StoreOp>(loc, mem, tag);
+                Value offset = rewriter.create<sir::ConstOp>(loc, u256Type, mlir::IntegerAttr::get(ui64Type, 32));
+                Value mem2 = rewriter.create<sir::AddPtrOp>(loc, ptrType, mem, offset);
+                rewriter.create<sir::StoreOp>(loc, mem2, payload);
+
+                rewriter.create<sir::ReturnOp>(loc, mem, sizeConst);
+                rewriter.eraseOp(op);
+                return success();
+            }
 
             llvm::errs() << "[OraToSIR] ConvertReturnOp: wide error_union split (materialized) at " << loc << "\n";
             Value tag = ensureU256(rewriter, loc, parts[0]);
             Value payload = ensureU256(rewriter, loc, parts[1]);
+            Value one = rewriter.create<sir::ConstOp>(loc, u256Type, mlir::IntegerAttr::get(ui64Type, 1));
+            tag = rewriter.create<sir::AndOp>(loc, u256Type, tag, one);
 
             auto sizeAttr = mlir::IntegerAttr::get(ui64Type, 64);
             Value sizeConst = rewriter.create<sir::ConstOp>(loc, u256Type, sizeAttr);
@@ -2616,6 +3060,12 @@ LogicalResult NormalizeErrorOkOp::matchAndRewrite(
     ora::ErrorOkOp op,
     PatternRewriter &rewriter) const
 {
+    if (auto errType = llvm::dyn_cast<ora::ErrorUnionType>(op.getType()))
+    {
+        bool narrow = isNarrowErrorUnion(errType);
+        if (!narrow)
+            return failure();
+    }
     if (op.getValue().getType() == op.getType())
     {
         rewriter.replaceOp(op, op.getValue());
@@ -2633,6 +3083,12 @@ LogicalResult NormalizeErrorErrOp::matchAndRewrite(
     ora::ErrorErrOp op,
     PatternRewriter &rewriter) const
 {
+    if (auto errType = llvm::dyn_cast<ora::ErrorUnionType>(op.getType()))
+    {
+        bool narrow = isNarrowErrorUnion(errType);
+        if (!narrow)
+            return failure();
+    }
     if (op.getValue().getType() == op.getType())
     {
         rewriter.replaceOp(op, op.getValue());
@@ -2650,6 +3106,9 @@ LogicalResult NormalizeErrorIsErrorOp::matchAndRewrite(
     ora::ErrorIsErrorOp op,
     PatternRewriter &rewriter) const
 {
+    if (auto errType = llvm::dyn_cast<ora::ErrorUnionType>(op.getValue().getType()))
+        if (!isNarrowErrorUnion(errType))
+            return failure();
     auto loc = op.getLoc();
     auto i256Type = mlir::IntegerType::get(rewriter.getContext(), 256);
     auto oneAttr = rewriter.getIntegerAttr(i256Type, 1);
@@ -2671,6 +3130,9 @@ LogicalResult NormalizeErrorUnwrapOp::matchAndRewrite(
 {
     if (op->getParentOfType<ora::TryStmtOp>())
         return failure();
+    if (auto errType = llvm::dyn_cast<ora::ErrorUnionType>(op.getValue().getType()))
+        if (!isNarrowErrorUnion(errType))
+            return failure();
     auto loc = op.getLoc();
     auto i256Type = mlir::IntegerType::get(rewriter.getContext(), 256);
     auto oneAttr = rewriter.getIntegerAttr(i256Type, 1);
@@ -2692,6 +3154,9 @@ LogicalResult NormalizeErrorGetErrorOp::matchAndRewrite(
     ora::ErrorGetErrorOp op,
     PatternRewriter &rewriter) const
 {
+    if (auto errType = llvm::dyn_cast<ora::ErrorUnionType>(op.getValue().getType()))
+        if (!isNarrowErrorUnion(errType))
+            return failure();
     auto loc = op.getLoc();
     auto i256Type = mlir::IntegerType::get(rewriter.getContext(), 256);
     auto oneAttr = rewriter.getIntegerAttr(i256Type, 1);
@@ -2721,6 +3186,8 @@ LogicalResult NormalizeErrorUnionCastOp::matchAndRewrite(
 
     auto errType = llvm::dyn_cast<ora::ErrorUnionType>(op.getResult(0).getType());
     if (!errType)
+        return failure();
+    if (!isNarrowErrorUnion(errType))
         return failure();
 
     Value operand = op.getOperand(0);
@@ -2899,8 +3366,10 @@ LogicalResult ConvertUnrealizedConversionCastOp::matchAndRewrite(
     // Handle ora.error_union without normalized attribute: treat as packed u256.
     if (op.getNumOperands() == 1 && op.getNumResults() == 1)
     {
-        if (llvm::isa<ora::ErrorUnionType>(resultType))
+        if (auto errType = llvm::dyn_cast<ora::ErrorUnionType>(resultType))
         {
+            if (!isNarrowErrorUnion(errType))
+                return failure();
             Value packed = ensureU256(rewriter, loc, input);
             rewriter.replaceOp(op, packed);
             return success();
@@ -2924,21 +3393,7 @@ LogicalResult ConvertUnrealizedConversionCastOp::matchAndRewrite(
         }
     }
 
-    // Wide error_union packing: combine (tag, payload) into packed u256.
-    if (op.getNumOperands() == 2 && op.getNumResults() == 1 && llvm::isa<sir::U256Type>(resultType))
-    {
-        Value tag = ensureU256(rewriter, loc, op.getOperand(0));
-        Value payload = ensureU256(rewriter, loc, op.getOperand(1));
-        auto u256Ty = sir::U256Type::get(rewriter.getContext());
-        auto u256IntTy = mlir::IntegerType::get(rewriter.getContext(), 256, mlir::IntegerType::Unsigned);
-        Value one = rewriter.create<sir::ConstOp>(loc, u256Ty,
-                                                  mlir::IntegerAttr::get(u256IntTy, 1));
-        Value tag1 = rewriter.create<sir::AndOp>(loc, u256Ty, tag, one);
-        Value payloadShift = rewriter.create<sir::ShlOp>(loc, u256Ty, payload, one);
-        Value packed = rewriter.create<sir::OrOp>(loc, u256Ty, payloadShift, tag1);
-        rewriter.replaceOp(op, packed);
-        return success();
-    }
+    // Disable wide error_union packing to keep tag/payload in separate words.
 
     if (input.getType() == resultType)
     {
@@ -3005,6 +3460,11 @@ LogicalResult NormalizeReturnOp::matchAndRewrite(
     {
         if (auto errType = llvm::dyn_cast<ora::ErrorUnionType>(operand.getType()))
         {
+            if (!isNarrowErrorUnion(errType))
+            {
+                newOperands.push_back(operand);
+                continue;
+            }
             if (auto okOp = operand.getDefiningOp<ora::ErrorOkOp>())
             {
                 auto packed = phase0PackErrorUnion(rewriter, op.getLoc(), okOp.getValue(), errType, false);
@@ -3047,6 +3507,11 @@ LogicalResult NormalizeScfYieldOp::matchAndRewrite(
     {
         if (auto errType = llvm::dyn_cast<ora::ErrorUnionType>(operand.getType()))
         {
+            if (!isNarrowErrorUnion(errType))
+            {
+                newOperands.push_back(operand);
+                continue;
+            }
             if (auto okOp = operand.getDefiningOp<ora::ErrorOkOp>())
             {
                 auto packed = phase0PackErrorUnion(rewriter, op.getLoc(), okOp.getValue(), errType, false);
@@ -3089,6 +3554,11 @@ LogicalResult NormalizeOraYieldOp::matchAndRewrite(
     {
         if (auto errType = llvm::dyn_cast<ora::ErrorUnionType>(operand.getType()))
         {
+            if (!isNarrowErrorUnion(errType))
+            {
+                newOperands.push_back(operand);
+                continue;
+            }
             if (auto okOp = operand.getDefiningOp<ora::ErrorOkOp>())
             {
                 auto packed = phase0PackErrorUnion(rewriter, op.getLoc(), okOp.getValue(), errType, false);
