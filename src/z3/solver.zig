@@ -49,12 +49,26 @@ pub const Solver = struct {
         c.Z3_solver_reset(self.context.ctx, self.solver);
     }
 
+    pub fn loadFromSmtlib(self: *Solver, smtlib: [:0]const u8) void {
+        c.Z3_solver_from_string(self.context.ctx, self.solver, smtlib.ptr);
+    }
+
     pub fn push(self: *Solver) void {
         c.Z3_solver_push(self.context.ctx, self.solver);
     }
 
     pub fn pop(self: *Solver) void {
         c.Z3_solver_pop(self.context.ctx, self.solver, 1);
+    }
+
+    pub fn setTimeoutMs(self: *Solver, timeout_ms: u32) void {
+        const params = c.Z3_mk_params(self.context.ctx) orelse return;
+        c.Z3_params_inc_ref(self.context.ctx, params);
+        defer c.Z3_params_dec_ref(self.context.ctx, params);
+
+        const sym = c.Z3_mk_string_symbol(self.context.ctx, "timeout");
+        c.Z3_params_set_uint(self.context.ctx, params, sym, timeout_ms);
+        c.Z3_solver_set_params(self.context.ctx, self.solver, params);
     }
 
     // todo: Add methods for:

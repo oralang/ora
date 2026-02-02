@@ -60,3 +60,67 @@ test "encodeConstantOp uses bool sort for i1" {
     const sort_kind = z3.Z3_get_sort_kind(z3_ctx.ctx, z3.Z3_get_sort(z3_ctx.ctx, ast));
     try testing.expectEqual(@as(u32, z3.Z3_BOOL_SORT), @as(u32, @intCast(sort_kind)));
 }
+
+test "encodeSLoad returns global value with correct sort" {
+    var z3_ctx = try Context.init(testing.allocator);
+    defer z3_ctx.deinit();
+
+    var encoder = Encoder.init(&z3_ctx, testing.allocator);
+    defer encoder.deinit();
+
+    const mlir_ctx = mlir.oraContextCreate();
+    defer mlir.oraContextDestroy(mlir_ctx);
+
+    _ = mlir.oraDialectRegister(mlir_ctx);
+
+    const loc = mlir.oraLocationUnknownGet(mlir_ctx);
+    const ty_i256 = mlir.oraIntegerTypeCreate(mlir_ctx, 256);
+    const name_ref = mlir.oraStringRefCreate("counter".ptr, "counter".len);
+    const op = mlir.oraSLoadOpCreate(mlir_ctx, loc, name_ref, ty_i256);
+    const ast = try encoder.encodeOperation(op);
+    const sort_kind = z3.Z3_get_sort_kind(z3_ctx.ctx, z3.Z3_get_sort(z3_ctx.ctx, ast));
+    try testing.expectEqual(@as(u32, z3.Z3_BV_SORT), @as(u32, @intCast(sort_kind)));
+}
+
+test "encodeSLoad for map returns array sort" {
+    var z3_ctx = try Context.init(testing.allocator);
+    defer z3_ctx.deinit();
+
+    var encoder = Encoder.init(&z3_ctx, testing.allocator);
+    defer encoder.deinit();
+
+    const mlir_ctx = mlir.oraContextCreate();
+    defer mlir.oraContextDestroy(mlir_ctx);
+
+    _ = mlir.oraDialectRegister(mlir_ctx);
+
+    const loc = mlir.oraLocationUnknownGet(mlir_ctx);
+    const addr_ty = mlir.oraAddressTypeGet(mlir_ctx);
+    const value_ty = mlir.oraIntegerTypeCreate(mlir_ctx, 256);
+    const map_ty = mlir.oraMapTypeGet(mlir_ctx, addr_ty, value_ty);
+    const name_ref = mlir.oraStringRefCreate("balances".ptr, "balances".len);
+    const op = mlir.oraSLoadOpCreate(mlir_ctx, loc, name_ref, map_ty);
+    const ast = try encoder.encodeOperation(op);
+    const sort_kind = z3.Z3_get_sort_kind(z3_ctx.ctx, z3.Z3_get_sort(z3_ctx.ctx, ast));
+    try testing.expectEqual(@as(u32, z3.Z3_ARRAY_SORT), @as(u32, @intCast(sort_kind)));
+}
+
+test "encodeValue errors on unsupported operation" {
+    var z3_ctx = try Context.init(testing.allocator);
+    defer z3_ctx.deinit();
+
+    var encoder = Encoder.init(&z3_ctx, testing.allocator);
+    defer encoder.deinit();
+
+    const mlir_ctx = mlir.oraContextCreate();
+    defer mlir.oraContextDestroy(mlir_ctx);
+
+    _ = mlir.oraDialectRegister(mlir_ctx);
+
+    const loc = mlir.oraLocationUnknownGet(mlir_ctx);
+    const string_ty = mlir.oraStringTypeGet(mlir_ctx);
+    const value_ref = mlir.oraStringRefCreate("hello".ptr, 5);
+    const op = mlir.oraStringConstantOpCreate(mlir_ctx, loc, value_ref, string_ty);
+    const result = mlir.oraOperationGetResult(op, 0);
+    try testing.expectError(error.UnsupportedOperation, encoder.encodeValue(result));
+}

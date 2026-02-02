@@ -69,9 +69,8 @@ test "mlir emits storage readwrite effects on functions" {
     const source =
         \\contract Test {
         \\    storage var balance: u256;
-        \\    pub fn bump() -> void {
+        \\    pub fn bump() {
         \\        balance = balance + 1;
-        \\        return;
         \\    }
         \\}
     ;

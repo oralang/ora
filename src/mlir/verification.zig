@@ -42,6 +42,7 @@ pub const OraVerification = struct {
     /// Run all verification passes on a module
     pub fn verifyModule(self: *Self, module: c.MlirModule) !VerificationResult {
         // reset error handler for new verification run
+        self.error_handler.deinit();
         self.error_handler = ErrorHandler.init(self.allocator);
 
         const module_op = c.oraModuleGetOperation(module);

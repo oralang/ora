@@ -88,6 +88,10 @@ pub fn main() !void {
     if (is_compile_command) {
         parsed.emit_sir_text = true;
     }
+    if (parsed.show_version) {
+        try printVersion();
+        return;
+    }
 
     const output_dir: ?[]const u8 = parsed.output_dir;
     const input_file: ?[]const u8 = parsed.input_file;
@@ -154,8 +158,8 @@ pub fn main() !void {
     if (!emit_tokens and !emit_ast and !emit_typed_ast and !emit_mlir and !emit_mlir_sir and !emit_sir_text and !emit_bytecode and !emit_cfg and !emit_abi and !emit_abi_solidity) {
         emit_mlir = true; // Default: emit MLIR
     }
-    // By default, emit Ora MLIR plus SIR MLIR when --emit-mlir is requested.
-    if ((emit_mlir or emit_sir_text or emit_bytecode) and !emit_mlir_sir) {
+    // Emit SIR MLIR only when explicitly requested or needed for SIR text/bytecode.
+    if ((emit_sir_text or emit_bytecode) and !emit_mlir_sir) {
         emit_mlir_sir = true;
     }
 
@@ -218,6 +222,7 @@ fn printUsage() !void {
     try stdout.print("Ora Compiler v0.1 - Asuka\n", .{});
     try stdout.print("Usage: ora [options] <file.ora>\n", .{});
     try stdout.print("       ora compile [options] <file.ora>\n", .{});
+    try stdout.print("       ora -v | --version\n", .{});
     try stdout.print("\nCompilation Control:\n", .{});
     try stdout.print("  (default)              - Emit MLIR\n", .{});
     try stdout.print("  compile                - Emit SIR text (Sensei format)\n", .{});
@@ -226,7 +231,7 @@ fn printUsage() !void {
     try stdout.print("  --emit-ast=json|tree   - Emit AST in JSON or tree format\n", .{});
     try stdout.print("  --emit-typed-ast       - Stop after parsing (emit typed AST)\n", .{});
     try stdout.print("  --emit-typed-ast=json|tree - Emit typed AST in JSON or tree format\n", .{});
-    try stdout.print("  --emit-mlir            - Emit Ora MLIR and SIR MLIR (default)\n", .{});
+    try stdout.print("  --emit-mlir            - Emit Ora MLIR only (default)\n", .{});
     try stdout.print("  --emit-mlir-sir        - Emit SIR MLIR only (after conversion)\n", .{});
     try stdout.print("  --emit-sir             - Alias for --emit-mlir-sir\n", .{});
     try stdout.print("  --emit-sir-text        - Emit Sensei SIR text (after conversion)\n", .{});
@@ -234,6 +239,7 @@ fn printUsage() !void {
     try stdout.print("  --emit-cfg             - Generate control flow graph (Graphviz DOT format)\n", .{});
     try stdout.print("  --emit-abi             - Emit Ora ABI manifest JSON\n", .{});
     try stdout.print("  --emit-abi-solidity    - Emit Solidity-compatible ABI JSON\n", .{});
+    try stdout.print("  -v, --version          - Show version and logo\n", .{});
     try stdout.print("\nOutput Options:\n", .{});
     try stdout.print("  -o <file>              - Write output to <file> (e.g., -o out.hex, -o out.mlir)\n", .{});
     try stdout.print("  -o <dir>/              - Write artifacts to <dir>/ (e.g., -o build/)\n", .{});
@@ -251,6 +257,66 @@ fn printUsage() !void {
     try stdout.print("  --verify               - Run Z3 verification on MLIR annotations (default)\n", .{});
     try stdout.print("  --no-verify            - Disable Z3 verification\n", .{});
     try stdout.print("  --debug                - Enable compiler debug output\n", .{});
+    try stdout.flush();
+}
+
+fn printVersion() !void {
+    var stdout_buffer: [8192]u8 = undefined;
+    var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
+    const stdout = &stdout_writer.interface;
+    const logo =
+        \\=================
+        \\                                       +====-----------====
+        \\                                      +++++==---------==+=+=+
+        \\                                    ++++++++==-------=+++++++++
+        \\                                  ++++++++++===-----==+++++++++++
+        \\                    +++          *++++++++++=====-====++++++++++*#         ++++
+        \\                  +++++++        ##*++++++++==========++++++++*###        +++++++
+        \\                 ++++++++++      ####*++++++===========+++++**####      ++++++++++
+        \\                   ++++++++++    ######*+++======+======+++*######    ++++++++++
+        \\                    =++++++++    ########+=====+++++=====+########    ++++++++
+        \\                    ++=++++++      ########+=++******+=+########      +++++++++
+        \\                   =++++++***        ########*********########        +**+++++++
+        \\                   ++++++++**      ############*****############      **++++++++
+        \\             ======++++++++++    #######*########*#########*######    +++++++++++=====
+        \\           =====+++++++++++++    ######   ###############   ######    +++++++++++++=====
+        \\         ======++++++++++++++    ######     ###########     ######    +++++++++++++++=====
+        \\         ++==++++++   +++++++    #######    ###########    *######    +++++++   +++++++=++
+        \\         ++++++++   ++++++++*      #############################      +++++++++   ++++++++
+        \\         +++++++    =++++++          #########################          +++++++    +++++++
+        \\         ++++++++     -++         ###############################         +++    +++++++++
+        \\         ++++++++++               ##%#########################%%%               ++++++++++
+        \\         +++++++++*##      +###########################################       ##**++++++++
+        \\           +++++*######    =######%############################%%######     ######*+++++
+        \\             +*##########  =######%%%#########################%%%######   *#########*+
+        \\               *###################%%%#######################%%%####################
+        \\                **##################%%%%###################%%%%%%*################
+        \\           ##     +*############  ##%%%%%%################%%%%%%%  **############     ##
+        \\         #*####     +*########    #############################%%    **#######      %#####
+        \\        #*######                  #%%#########################%%%                  ########
+        \\      ##########%%%%%%%%   =#%%%%%%%%%%##*##################%%%%%%%%%%%    #%%%%%%%%#########
+        \\    ############%%%%%%%%   =#%%%%%%%%%%% +################ %%%%%%%%%%%%%  =#%%%%%%%############
+        \\   ########**###%%%%%%%%   =#%%%%%%%%%   +################   %%%%%%%%%%%  =#%%%%%%%####*#########
+        \\ ##########  *#%%%%%%%%%%%%#%%%%%%%%%   *#%%%%%##*##%%%%%%    ##%%%%%%%%####%%%%%%%%##  *#########
+        \\ *#######     ##%%%%%%%##%%%%%%%%%%   *##%%%%%%#* =*%%%%%%%%    ###%%%%%%%%%%%%%%%%%      *#######
+        \\ ######         ##############%##    ###%%%%%##     +#%%%%%###    **#############%%        *######
+        \\ ######## ##%                      ##########%        *#########                      ### *#######
+        \\  *##########%                   *#########%            ##########                  %############
+        \\   *########%%%%               ##########%    *%   %@    ##########                %%%##########
+        \\     #######%%%     %%%%%%%%# ##########    %%%%   %%%@    ########## #%%%%%%%%     ##########
+        \\      ######%      %%%%%%%%%% #########   %%%%%%   %%%%%    *######## #%%%%%%%%%      ######
+        \\        ###      %%%%%%%%%%%@ #######    %%%%%%%   %%%%%%     *###### #%%%%%%%%%%%     *###
+        \\               %%%%%%%%%@%@@@ ##%%%%%%    #%%%%%   %%%%%%    %%%%%%%% #%%%%%%%%%%%%%
+        \\                %%%%%%%%%%%   %%%%%%%%% %%%%%%%%   %%%%%%%  %%%%%%%%%   %%%%%%%%%%%
+        \\                              *#%%%%%%%%%%%%%%%%   %%%%%%%%%%%%%%%%%%
+        \\                                #%%%%%%%%%%%%%%%   %%%%%%%%%%%%%%%%
+        \\                                  %%%%%@@@@%%%%     #%%%@@@@%%%%%
+        \\                                   %%@@@@@@@@@       #%@@@@@@@%
+        \\                                     %@@@@@@           %@@@@@@
+        \\                                       %@@@             %@@@
+    ;
+    try stdout.print("{s}\n", .{logo});
+    try stdout.print("Ora Compiler v0.1 - Asuka\n", .{});
     try stdout.flush();
 }
 
@@ -1249,6 +1315,11 @@ fn generateMlirOutput(allocator: std.mem.Allocator, ast_nodes: []lib.AstNode, fi
 
     // output Ora MLIR (after canonicalization, before conversion)
     if (mlir_options.emit_mlir) {
+        try stdout.print("//===----------------------------------------------------------------------===//\n", .{});
+        try stdout.print("// Ora MLIR (before conversion)\n", .{});
+        try stdout.print("//===----------------------------------------------------------------------===//\n\n", .{});
+        try stdout.flush();
+
         const module_op_ora = c.oraModuleGetOperation(final_module);
         const mlir_str_ora = c.oraOperationPrintToString(module_op_ora);
         defer if (mlir_str_ora.data != null) {

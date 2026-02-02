@@ -1,0 +1,16 @@
+// Simple storage counter app
+contract Counter {
+    storage var counter: u256 = 0;
+
+    pub fn init() {
+        counter = 0;
+    }
+
+    pub fn increment() {
+        counter += 1;
+    }
+
+    pub fn get() -> u256 {
+        return counter;
+    }
+}

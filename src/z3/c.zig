@@ -37,6 +37,7 @@ pub const Z3_solver = c.Z3_solver;
 pub const Z3_ast = c.Z3_ast;
 pub const Z3_sort = c.Z3_sort;
 pub const Z3_symbol = c.Z3_symbol;
+pub const Z3_func_decl = c.Z3_func_decl;
 pub const Z3_model = c.Z3_model;
 pub const Z3_lbool = c.Z3_lbool;
 pub const Z3_config = c.Z3_config;
@@ -61,8 +62,14 @@ pub const Z3_solver_reset = c.Z3_solver_reset;
 pub const Z3_solver_push = c.Z3_solver_push;
 pub const Z3_solver_pop = c.Z3_solver_pop;
 pub const Z3_solver_to_string = c.Z3_solver_to_string;
+pub const Z3_solver_from_string = c.Z3_solver_from_string;
+pub const Z3_solver_set_params = c.Z3_solver_set_params;
 pub const Z3_ast_to_string = c.Z3_ast_to_string;
 pub const Z3_get_version = c.Z3_get_version;
+pub const Z3_mk_params = c.Z3_mk_params;
+pub const Z3_params_inc_ref = c.Z3_params_inc_ref;
+pub const Z3_params_dec_ref = c.Z3_params_dec_ref;
+pub const Z3_params_set_uint = c.Z3_params_set_uint;
 
 // Bit-vector operations (for EVM u256)
 pub const Z3_mk_bv_sort = c.Z3_mk_bv_sort;
@@ -79,6 +86,8 @@ pub const Z3_mk_bvslt = c.Z3_mk_bvslt;
 pub const Z3_mk_bvsle = c.Z3_mk_bvsle;
 pub const Z3_mk_bvsgt = c.Z3_mk_bvsgt;
 pub const Z3_mk_bvsge = c.Z3_mk_bvsge;
+
+pub const Z3_mk_tuple_sort = c.Z3_mk_tuple_sort;
 pub const Z3_mk_bvand = c.Z3_mk_bvand;
 pub const Z3_mk_bvor = c.Z3_mk_bvor;
 pub const Z3_mk_bvxor = c.Z3_mk_bvxor;

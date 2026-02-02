@@ -43,11 +43,12 @@ contract ExactProven {
     }
 
     // SMT can prove Exact from multiplication result
-    pub fn provenExactFromMultiplication(x: u256, y: u256) {
+    pub fn provenExactFromMultiplication(x: u256, y: u256)
+        requires(x == 0 || y == 0 || x <= std.constants.U256_MAX / y)
+    {
         let product: Exact<u256> = x * y;
         // Product of two u256s is always divisible by both factors
         let q1: u256 = product / x;
         let q2: u256 = product / y;
     }
 }
-

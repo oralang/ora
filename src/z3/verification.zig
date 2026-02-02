@@ -80,6 +80,10 @@ pub const VerificationPass = struct {
     encoder: Encoder,
     allocator: std.mem.Allocator,
     debug_z3: bool,
+    timeout_ms: ?u32,
+    parallel: bool,
+    max_workers: usize,
+    filter_function_name: ?[]const u8 = null,
 
     /// Map from function name to its annotations
     function_annotations: std.StringHashMap(FunctionAnnotations),
@@ -112,12 +116,39 @@ pub const VerificationPass = struct {
         const debug_z3 = debug_env != null;
         if (debug_env) |val| allocator.free(val);
 
+        const timeout_env = std.process.getEnvVarOwned(allocator, "ORA_Z3_TIMEOUT_MS") catch null;
+        var timeout_ms: ?u32 = 60_000;
+        if (timeout_env) |val| {
+            timeout_ms = std.fmt.parseInt(u32, val, 10) catch null;
+            allocator.free(val);
+        }
+
+        const parallel_env = std.process.getEnvVarOwned(allocator, "ORA_Z3_PARALLEL") catch null;
+        const parallel = if (parallel_env) |val| blk: {
+            defer allocator.free(val);
+            break :blk parseBoolEnv(val);
+        } else true;
+
+        const workers_env = std.process.getEnvVarOwned(allocator, "ORA_Z3_WORKERS") catch null;
+        var max_workers: usize = std.Thread.getCpuCount() catch 1;
+        if (workers_env) |val| {
+            max_workers = std.fmt.parseInt(usize, val, 10) catch max_workers;
+            allocator.free(val);
+        }
+
+        if (timeout_ms) |ms| {
+            solver.setTimeoutMs(ms);
+        }
+
         return VerificationPass{
             .context = context,
             .solver = solver,
             .encoder = encoder,
             .allocator = allocator,
             .debug_z3 = debug_z3,
+            .timeout_ms = timeout_ms,
+            .parallel = parallel,
+            .max_workers = max_workers,
             .function_annotations = std.StringHashMap(FunctionAnnotations).init(allocator),
             .loop_invariants = ManagedArrayList(LoopInvariants).init(allocator),
             .encoded_annotations = ManagedArrayList(EncodedAnnotation).init(allocator),
@@ -146,6 +177,11 @@ pub const VerificationPass = struct {
             self.allocator.free(name);
         }
         self.guard_id_storage.deinit();
+        for (self.encoded_annotations.items) |ann| {
+            if (ann.extra_constraints.len > 0) {
+                self.allocator.free(ann.extra_constraints);
+            }
+        }
         self.encoded_annotations.deinit();
         self.encoder.deinit();
         self.solver.deinit();
@@ -310,6 +346,11 @@ pub const VerificationPass = struct {
         else
             op_name_ref.data[0..op_name_ref.length];
 
+        if (self.filter_function_name) |target_fn| {
+            const current = self.current_function_name orelse return;
+            if (!std.mem.eql(u8, current, target_fn)) return;
+        }
+
         // check for verification operations
         if (std.mem.eql(u8, op_name, "ora.requires")) {
             // extract requires condition
@@ -398,11 +439,13 @@ pub const VerificationPass = struct {
     ) !void {
         const function_name = self.current_function_name orelse "unknown";
         const encoded = try self.encoder.encodeValue(condition_value);
+        const extra_constraints = try self.encoder.takeConstraints(self.allocator);
         const loc = try self.getLocationInfo(op);
         try self.encoded_annotations.append(.{
             .function_name = function_name,
             .kind = kind,
             .condition = encoded,
+            .extra_constraints = extra_constraints,
             .file = loc.file,
             .line = loc.line,
             .column = loc.column,
@@ -427,8 +470,367 @@ pub const VerificationPass = struct {
     }
 
     pub fn runVerificationPass(self: *VerificationPass, mlir_module: mlir.MlirModule) !errors.VerificationResult {
+        if (self.parallel) {
+            return try self.runVerificationPassParallel(mlir_module);
+        }
+
         try self.extractAnnotationsFromMLIR(mlir_module);
         var result = errors.VerificationResult.init(self.allocator);
+
+        var by_function = std.StringHashMap(ManagedArrayList(EncodedAnnotation)).init(self.allocator);
+        defer {
+            var it = by_function.iterator();
+            while (it.next()) |entry| {
+                entry.value_ptr.deinit();
+            }
+            by_function.deinit();
+        }
+
+        for (self.encoded_annotations.items) |ann| {
+            const entry = try by_function.getOrPut(ann.function_name);
+            if (!entry.found_existing) {
+                entry.value_ptr.* = ManagedArrayList(EncodedAnnotation).init(self.allocator);
+            }
+            try entry.value_ptr.append(ann);
+        }
+
+        var it = by_function.iterator();
+        while (it.next()) |entry| {
+            const fn_name = entry.key_ptr.*;
+            const annotations = entry.value_ptr.items;
+            if (annotations.len == 0) continue;
+            var timer = try std.time.Timer.start();
+
+            var base_annotations = ManagedArrayList(EncodedAnnotation).init(self.allocator);
+            defer base_annotations.deinit();
+            var guard_annotations = ManagedArrayList(EncodedAnnotation).init(self.allocator);
+            defer guard_annotations.deinit();
+
+            for (annotations) |ann| {
+                if (ann.kind == .RefinementGuard) {
+                    guard_annotations.append(ann) catch {};
+                } else if (ann.kind != .Assume) {
+                    // Exclude Assume - those are branch-local assumptions that shouldn't
+                    // be asserted at function level (they represent branch conditions
+                    // which are mutually exclusive between if/else branches)
+                    base_annotations.append(ann) catch {};
+                }
+            }
+
+            self.solver.reset();
+            for (base_annotations.items) |ann| {
+                for (ann.extra_constraints) |cst| {
+                    self.solver.assert(cst);
+                }
+                self.solver.assert(ann.condition);
+            }
+            if (self.debug_z3) {
+                var major: u32 = 0;
+                var minor: u32 = 0;
+                var build: u32 = 0;
+                var rev: u32 = 0;
+                z3.Z3_get_version(&major, &minor, &build, &rev);
+                std.debug.print("[Z3] version {d}.{d}.{d}.{d}\n", .{ major, minor, build, rev });
+                std.debug.print("[Z3] function {s} base constraints\n", .{fn_name});
+                self.logSolverState("base");
+            }
+
+            std.debug.print("verification: {s} [base] start\n", .{fn_name});
+            timer.reset();
+            const status = self.solver.check();
+            const elapsed_ms = timer.read() / std.time.ns_per_ms;
+            switch (status) {
+                z3.Z3_L_TRUE => {
+                    std.debug.print("verification: {s} [base] -> SAT ({d}ms)\n", .{ fn_name, elapsed_ms });
+                },
+                z3.Z3_L_FALSE => {
+                    std.debug.print("verification: {s} [base] -> UNSAT ({d}ms)\n", .{ fn_name, elapsed_ms });
+                    // UNSAT means constraints are unsatisfiable - no counterexample exists
+                    // (counterexamples only make sense for SAT results)
+                    try result.addError(.{
+                        .error_type = .InvariantViolation,
+                        .message = try std.fmt.allocPrint(self.allocator, "verification failed (UNSAT) in {s}", .{fn_name}),
+                        .file = try self.allocator.dupe(u8, self.firstLocationFile(annotations)),
+                        .line = self.firstLocationLine(annotations),
+                        .column = self.firstLocationColumn(annotations),
+                        .counterexample = null,
+                        .allocator = self.allocator,
+                    });
+                    return result;
+                },
+                else => {
+                    std.debug.print("verification: {s} [base] -> UNKNOWN ({d}ms)\n", .{ fn_name, elapsed_ms });
+                    const counterexample = self.buildCounterexample();
+                    try result.addError(.{
+                        .error_type = .Unknown,
+                        .message = try std.fmt.allocPrint(self.allocator, "verification result unknown in {s}", .{fn_name}),
+                        .file = try self.allocator.dupe(u8, self.firstLocationFile(annotations)),
+                        .line = self.firstLocationLine(annotations),
+                        .column = self.firstLocationColumn(annotations),
+                        .counterexample = counterexample,
+                        .allocator = self.allocator,
+                    });
+                    return result;
+                },
+            }
+
+            // Process refinement guards incrementally:
+            // Each guard is checked in the context of all PREVIOUS guards (as assumptions)
+            // This allows us to detect when a later guard is unsatisfiable given earlier constraints
+            for (guard_annotations.items) |ann| {
+                if (ann.guard_id == null) continue;
+
+                // First check: can the guard EVER be satisfied given previous guards?
+                // If (base_constraints AND previous_guards AND this_guard) is UNSAT, error!
+                self.solver.push();
+                for (ann.extra_constraints) |cst| {
+                    self.solver.assert(cst);
+                }
+                self.solver.assert(ann.condition);
+                std.debug.print("verification: {s} guard {s} [satisfy] start\n", .{ fn_name, ann.guard_id.? });
+                timer.reset();
+                const satisfy_status = self.solver.check();
+                const satisfy_ms = timer.read() / std.time.ns_per_ms;
+                if (self.debug_z3) {
+                    std.debug.print("[Z3] guard satisfiability {s}\n", .{ann.guard_id.?});
+                    self.logAst("guard", ann.condition);
+                    self.logSolverState("satisfiability");
+                }
+                self.solver.pop();
+
+                if (satisfy_status == z3.Z3_L_FALSE) {
+                    // Guard can NEVER be satisfied given previous constraints - error!
+                    std.debug.print("verification: {s} guard {s} [satisfy] -> UNSATISFIABLE ({d}ms)\n", .{ fn_name, ann.guard_id.?, satisfy_ms });
+                    // No counterexample for UNSAT - there's no satisfying assignment
+                    try result.addError(.{
+                        .error_type = .RefinementViolation,
+                        .message = try std.fmt.allocPrint(self.allocator, "refinement guard can never be satisfied in {s}: {s}", .{ fn_name, ann.guard_id.? }),
+                        .file = try self.allocator.dupe(u8, ann.file),
+                        .line = ann.line,
+                        .column = ann.column,
+                        .counterexample = null,
+                        .allocator = self.allocator,
+                    });
+                    return result;
+                }
+                std.debug.print("verification: {s} guard {s} [satisfy] -> SAT ({d}ms)\n", .{ fn_name, ann.guard_id.?, satisfy_ms });
+
+                // Second check: can the guard be violated? (to determine if it should be kept)
+                self.solver.push();
+                for (ann.extra_constraints) |cst| {
+                    self.solver.assert(cst);
+                }
+                const not_guard = z3.Z3_mk_not(self.context.ctx, ann.condition);
+                self.solver.assert(not_guard);
+                if (self.debug_z3) {
+                    std.debug.print("[Z3] guard {s}\n", .{ann.guard_id.?});
+                    self.logAst("guard", ann.condition);
+                    self.logSolverState("guard");
+                }
+                std.debug.print("verification: {s} guard {s} [violate] start\n", .{ fn_name, ann.guard_id.? });
+                timer.reset();
+                const guard_status = self.solver.check();
+                const violate_ms = timer.read() / std.time.ns_per_ms;
+                if (self.debug_z3) {
+                    std.debug.print("[Z3] guard status {s}\n", .{switch (guard_status) {
+                        z3.Z3_L_FALSE => "UNSAT",
+                        z3.Z3_L_TRUE => "SAT",
+                        else => "UNKNOWN",
+                    }});
+                }
+                std.debug.print("verification: {s} guard {s} [violate] -> {s} ({d}ms)\n", .{
+                    fn_name,
+                    ann.guard_id.?,
+                    switch (guard_status) {
+                        z3.Z3_L_FALSE => "UNSAT",
+                        z3.Z3_L_TRUE => "SAT",
+                        else => "UNKNOWN",
+                    },
+                    violate_ms,
+                });
+                if (guard_status == z3.Z3_L_FALSE) {
+                    const guard_id = ann.guard_id.?;
+                    const key = try self.allocator.dupe(u8, guard_id);
+                    try result.proven_guard_ids.put(key, {});
+                }
+                self.solver.pop();
+
+                // Add this guard to context for subsequent guards
+                // This builds up the constraint context incrementally
+                for (ann.extra_constraints) |cst| {
+                    self.solver.assert(cst);
+                }
+                self.solver.assert(ann.condition);
+            }
+        }
+
+        return result;
+    }
+
+    fn runVerificationPassParallel(self: *VerificationPass, mlir_module: mlir.MlirModule) !errors.VerificationResult {
+        try self.extractAnnotationsFromMLIR(mlir_module);
+        var queries = try self.buildPreparedQueries();
+        defer {
+            for (queries.items) |*query| {
+                query.deinit(self.allocator);
+            }
+            queries.deinit();
+        }
+
+        if (queries.items.len == 0) {
+            return errors.VerificationResult.init(self.allocator);
+        }
+
+        var thread_safe_allocator = std.heap.ThreadSafeAllocator{ .child_allocator = std.heap.page_allocator };
+        const worker_allocator = thread_safe_allocator.allocator();
+
+        const total_queries = queries.items.len;
+        const worker_count = @min(self.max_workers, total_queries);
+
+        const QueryResult = struct {
+            status: z3.Z3_lbool = z3.Z3_L_UNDEF,
+            elapsed_ms: u64 = 0,
+            err: ?anyerror = null,
+        };
+
+        const results = try worker_allocator.alloc(QueryResult, total_queries);
+        for (results) |*entry| {
+            entry.* = .{};
+        }
+        defer worker_allocator.free(results);
+
+        const WorkState = struct {
+            queries: []const PreparedQuery,
+            next_index: std.atomic.Value(usize),
+            results: []QueryResult,
+            allocator: std.mem.Allocator,
+            timeout_ms: ?u32,
+        };
+
+        var state = WorkState{
+            .queries = queries.items,
+            .next_index = std.atomic.Value(usize).init(0),
+            .results = results,
+            .allocator = worker_allocator,
+            .timeout_ms = self.timeout_ms,
+        };
+
+        const Worker = struct {
+            fn run(ctx: *WorkState) void {
+                var context = Context.init(ctx.allocator) catch return;
+                defer context.deinit();
+
+                var solver = Solver.init(&context, ctx.allocator) catch return;
+                defer solver.deinit();
+
+                if (ctx.timeout_ms) |ms| {
+                    solver.setTimeoutMs(ms);
+                }
+
+                while (true) {
+                    const idx = ctx.next_index.fetchAdd(1, .seq_cst);
+                    if (idx >= ctx.queries.len) break;
+
+                    const query = ctx.queries[idx];
+                    solver.reset();
+                    solver.loadFromSmtlib(query.smtlib_z);
+
+                    std.debug.print("{s} start\n", .{query.log_prefix});
+                    var timer = std.time.Timer.start() catch |err| {
+                        ctx.results[idx].err = err;
+                        continue;
+                    };
+                    const status = solver.check();
+                    const elapsed_ms = timer.read() / std.time.ns_per_ms;
+
+                    std.debug.print("{s} -> {s} ({d}ms)\n", .{
+                        query.log_prefix,
+                        switch (status) {
+                            z3.Z3_L_FALSE => "UNSAT",
+                            z3.Z3_L_TRUE => "SAT",
+                            else => "UNKNOWN",
+                        },
+                        elapsed_ms,
+                    });
+                    if (status == z3.Z3_L_UNDEF) {
+                        std.debug.print("note: Z3 returned UNKNOWN (likely timeout). Consider adding stronger constraints or increasing ORA_Z3_TIMEOUT_MS.\n", .{});
+                    }
+
+                    ctx.results[idx].status = status;
+                    ctx.results[idx].elapsed_ms = elapsed_ms;
+                }
+            }
+        };
+
+        var threads = try worker_allocator.alloc(std.Thread, worker_count);
+        defer worker_allocator.free(threads);
+
+        var launched: usize = 0;
+        while (launched < worker_count) : (launched += 1) {
+            threads[launched] = try std.Thread.spawn(.{}, Worker.run, .{&state});
+        }
+        for (threads[0..launched]) |t| t.join();
+
+        var combined = errors.VerificationResult.init(self.allocator);
+
+        for (results, 0..) |entry, idx| {
+            if (entry.err) |err| return err;
+            const query = queries.items[idx];
+            switch (query.kind) {
+                .Base => {
+                    if (entry.status == z3.Z3_L_FALSE) {
+                        try combined.addError(.{
+                            .error_type = .InvariantViolation,
+                            .message = try std.fmt.allocPrint(self.allocator, "verification failed (UNSAT) in {s}", .{query.function_name}),
+                            .file = try self.allocator.dupe(u8, query.file),
+                            .line = query.line,
+                            .column = query.column,
+                            .counterexample = null,
+                            .allocator = self.allocator,
+                        });
+                    } else if (entry.status == z3.Z3_L_UNDEF) {
+                        const counterexample = null;
+                        try combined.addError(.{
+                            .error_type = .Unknown,
+                            .message = try std.fmt.allocPrint(self.allocator, "verification result unknown in {s}", .{query.function_name}),
+                            .file = try self.allocator.dupe(u8, query.file),
+                            .line = query.line,
+                            .column = query.column,
+                            .counterexample = counterexample,
+                            .allocator = self.allocator,
+                        });
+                    }
+                },
+                .GuardSatisfy => {
+                    if (entry.status == z3.Z3_L_FALSE) {
+                        try combined.addError(.{
+                            .error_type = .RefinementViolation,
+                            .message = try std.fmt.allocPrint(self.allocator, "refinement guard can never be satisfied in {s}: {s}", .{ query.function_name, query.guard_id.? }),
+                            .file = try self.allocator.dupe(u8, query.file),
+                            .line = query.line,
+                            .column = query.column,
+                            .counterexample = null,
+                            .allocator = self.allocator,
+                        });
+                    }
+                },
+                .GuardViolate => {
+                    if (entry.status == z3.Z3_L_FALSE) {
+                        const guard_id = query.guard_id.?;
+                        if (!combined.proven_guard_ids.contains(guard_id)) {
+                            const key = try self.allocator.dupe(u8, guard_id);
+                            try combined.proven_guard_ids.put(key, {});
+                        }
+                    }
+                },
+            }
+        }
+
+        return combined;
+    }
+
+    fn buildPreparedQueries(self: *VerificationPass) !ManagedArrayList(PreparedQuery) {
+        var queries = ManagedArrayList(PreparedQuery).init(self.allocator);
 
         var by_function = std.StringHashMap(ManagedArrayList(EncodedAnnotation)).init(self.allocator);
         defer {
@@ -462,129 +864,99 @@ pub const VerificationPass = struct {
                 if (ann.kind == .RefinementGuard) {
                     guard_annotations.append(ann) catch {};
                 } else if (ann.kind != .Assume) {
-                    // Exclude Assume - those are branch-local assumptions that shouldn't
-                    // be asserted at function level (they represent branch conditions
-                    // which are mutually exclusive between if/else branches)
                     base_annotations.append(ann) catch {};
                 }
             }
 
-            self.solver.reset();
+            var base_constraints = ManagedArrayList(z3.Z3_ast).init(self.allocator);
+            defer base_constraints.deinit();
+
             for (base_annotations.items) |ann| {
-                self.solver.assert(ann.condition);
-            }
-            if (self.debug_z3) {
-                var major: u32 = 0;
-                var minor: u32 = 0;
-                var build: u32 = 0;
-                var rev: u32 = 0;
-                z3.Z3_get_version(&major, &minor, &build, &rev);
-                std.debug.print("[Z3] version {d}.{d}.{d}.{d}\n", .{ major, minor, build, rev });
-                std.debug.print("[Z3] function {s} base constraints\n", .{fn_name});
-                self.logSolverState("base");
+                try addConstraintSlice(&base_constraints, ann.extra_constraints);
+                try base_constraints.append(ann.condition);
             }
 
-            const status = self.solver.check();
-            switch (status) {
-                z3.Z3_L_TRUE => {
-                    std.debug.print("verification: {s} -> SAT\n", .{fn_name});
-                },
-                z3.Z3_L_FALSE => {
-                    std.debug.print("verification: {s} -> UNSAT\n", .{fn_name});
-                    // UNSAT means constraints are unsatisfiable - no counterexample exists
-                    // (counterexamples only make sense for SAT results)
-                    try result.addError(.{
-                        .error_type = .InvariantViolation,
-                        .message = try std.fmt.allocPrint(self.allocator, "verification failed (UNSAT) in {s}", .{fn_name}),
-                        .file = try self.allocator.dupe(u8, self.firstLocationFile(annotations)),
-                        .line = self.firstLocationLine(annotations),
-                        .column = self.firstLocationColumn(annotations),
-                        .counterexample = null,
-                        .allocator = self.allocator,
-                    });
-                    return result;
-                },
-                else => {
-                    std.debug.print("verification: {s} -> UNKNOWN\n", .{fn_name});
-                    const counterexample = self.buildCounterexample();
-                    try result.addError(.{
-                        .error_type = .Unknown,
-                        .message = try std.fmt.allocPrint(self.allocator, "verification result unknown in {s}", .{fn_name}),
-                        .file = try self.allocator.dupe(u8, self.firstLocationFile(annotations)),
-                        .line = self.firstLocationLine(annotations),
-                        .column = self.firstLocationColumn(annotations),
-                        .counterexample = counterexample,
-                        .allocator = self.allocator,
-                    });
-                    return result;
-                },
-            }
+            const base_smtlib = try buildSmtlibForConstraints(self.allocator, &self.solver, base_constraints.items);
+            const base_log_prefix = try std.fmt.allocPrint(self.allocator, "verification: {s} [base]", .{fn_name});
+            try queries.append(.{
+                .kind = .Base,
+                .function_name = fn_name,
+                .file = self.firstLocationFile(annotations),
+                .line = self.firstLocationLine(annotations),
+                .column = self.firstLocationColumn(annotations),
+                .smtlib_z = base_smtlib,
+                .log_prefix = base_log_prefix,
+            });
 
-            // Process refinement guards incrementally:
-            // Each guard is checked in the context of all PREVIOUS guards (as assumptions)
-            // This allows us to detect when a later guard is unsatisfiable given earlier constraints
+            var previous_guards = ManagedArrayList(EncodedAnnotation).init(self.allocator);
+            defer previous_guards.deinit();
+
             for (guard_annotations.items) |ann| {
                 if (ann.guard_id == null) continue;
 
-                // First check: can the guard EVER be satisfied given previous guards?
-                // If (base_constraints AND previous_guards AND this_guard) is UNSAT, error!
-                self.solver.push();
-                self.solver.assert(ann.condition);
-                const satisfy_status = self.solver.check();
-                if (self.debug_z3) {
-                    std.debug.print("[Z3] guard satisfiability {s}\n", .{ann.guard_id.?});
-                    self.logAst("guard", ann.condition);
-                    self.logSolverState("satisfiability");
-                }
-                self.solver.pop();
+                var guard_base = ManagedArrayList(z3.Z3_ast).init(self.allocator);
+                defer guard_base.deinit();
+                try addConstraintSlice(&guard_base, base_constraints.items);
 
-                if (satisfy_status == z3.Z3_L_FALSE) {
-                    // Guard can NEVER be satisfied given previous constraints - error!
-                    std.debug.print("verification: {s} guard {s} -> UNSATISFIABLE\n", .{ fn_name, ann.guard_id.? });
-                    // No counterexample for UNSAT - there's no satisfying assignment
-                    try result.addError(.{
-                        .error_type = .RefinementViolation,
-                        .message = try std.fmt.allocPrint(self.allocator, "refinement guard can never be satisfied in {s}: {s}", .{ fn_name, ann.guard_id.? }),
-                        .file = try self.allocator.dupe(u8, ann.file),
-                        .line = ann.line,
-                        .column = ann.column,
-                        .counterexample = null,
-                        .allocator = self.allocator,
-                    });
-                    return result;
+                for (previous_guards.items) |prev| {
+                    try addConstraintSlice(&guard_base, prev.extra_constraints);
+                    try guard_base.append(prev.condition);
                 }
 
-                // Second check: can the guard be violated? (to determine if it should be kept)
-                self.solver.push();
+                // Satisfy query
+                var satisfy_constraints = ManagedArrayList(z3.Z3_ast).init(self.allocator);
+                defer satisfy_constraints.deinit();
+                try addConstraintSlice(&satisfy_constraints, guard_base.items);
+                try addConstraintSlice(&satisfy_constraints, ann.extra_constraints);
+                try satisfy_constraints.append(ann.condition);
+
+                const satisfy_smtlib = try buildSmtlibForConstraints(self.allocator, &self.solver, satisfy_constraints.items);
+                const satisfy_log_prefix = try std.fmt.allocPrint(
+                    self.allocator,
+                    "verification: {s} guard {s} [satisfy]",
+                    .{ fn_name, ann.guard_id.? },
+                );
+                try queries.append(.{
+                    .kind = .GuardSatisfy,
+                    .function_name = fn_name,
+                    .guard_id = ann.guard_id,
+                    .file = ann.file,
+                    .line = ann.line,
+                    .column = ann.column,
+                    .smtlib_z = satisfy_smtlib,
+                    .log_prefix = satisfy_log_prefix,
+                });
+
+                // Violate query
+                var violate_constraints = ManagedArrayList(z3.Z3_ast).init(self.allocator);
+                defer violate_constraints.deinit();
+                try addConstraintSlice(&violate_constraints, guard_base.items);
+                try addConstraintSlice(&violate_constraints, ann.extra_constraints);
                 const not_guard = z3.Z3_mk_not(self.context.ctx, ann.condition);
-                self.solver.assert(not_guard);
-                if (self.debug_z3) {
-                    std.debug.print("[Z3] guard {s}\n", .{ann.guard_id.?});
-                    self.logAst("guard", ann.condition);
-                    self.logSolverState("guard");
-                }
-                const guard_status = self.solver.check();
-                if (self.debug_z3) {
-                    std.debug.print("[Z3] guard status {s}\n", .{switch (guard_status) {
-                        z3.Z3_L_FALSE => "UNSAT",
-                        z3.Z3_L_TRUE => "SAT",
-                        else => "UNKNOWN",
-                    }});
-                }
-                if (guard_status == z3.Z3_L_FALSE) {
-                    const guard_id = ann.guard_id.?;
-                    const key = try self.allocator.dupe(u8, guard_id);
-                    try result.proven_guard_ids.put(key, {});
-                }
-                self.solver.pop();
+                try violate_constraints.append(not_guard);
 
-                // Add this guard to context for subsequent guards
-                // This builds up the constraint context incrementally
-                self.solver.assert(ann.condition);
+                const violate_smtlib = try buildSmtlibForConstraints(self.allocator, &self.solver, violate_constraints.items);
+                const violate_log_prefix = try std.fmt.allocPrint(
+                    self.allocator,
+                    "verification: {s} guard {s} [violate]",
+                    .{ fn_name, ann.guard_id.? },
+                );
+                try queries.append(.{
+                    .kind = .GuardViolate,
+                    .function_name = fn_name,
+                    .guard_id = ann.guard_id,
+                    .file = ann.file,
+                    .line = ann.line,
+                    .column = ann.column,
+                    .smtlib_z = violate_smtlib,
+                    .log_prefix = violate_log_prefix,
+                });
+
+                try previous_guards.append(ann);
             }
         }
 
-        return result;
+        return queries;
     }
 
     fn getLocationInfo(self: *VerificationPass, op: mlir.MlirOperation) !struct { file: []const u8, line: u32, column: u32 } {
@@ -644,11 +1016,177 @@ const EncodedAnnotation = struct {
     function_name: []const u8,
     kind: VerificationAnnotation.AnnotationKind,
     condition: z3.Z3_ast,
+    extra_constraints: []const z3.Z3_ast,
     file: []const u8,
     line: u32,
     column: u32,
     guard_id: ?[]const u8 = null,
 };
+
+const QueryKind = enum {
+    Base,
+    GuardSatisfy,
+    GuardViolate,
+};
+
+const PreparedQuery = struct {
+    kind: QueryKind,
+    function_name: []const u8,
+    guard_id: ?[]const u8 = null,
+    file: []const u8,
+    line: u32,
+    column: u32,
+    smtlib_z: [:0]const u8,
+    log_prefix: []const u8,
+
+    fn deinit(self: *PreparedQuery, allocator: std.mem.Allocator) void {
+        allocator.free(self.smtlib_z);
+        allocator.free(self.log_prefix);
+    }
+};
+
+fn parseBoolEnv(value: []const u8) bool {
+    if (std.mem.eql(u8, value, "1")) return true;
+    if (std.ascii.eqlIgnoreCase(value, "true")) return true;
+    if (std.ascii.eqlIgnoreCase(value, "yes")) return true;
+    return false;
+}
+
+fn collectFunctionNames(allocator: std.mem.Allocator, mlir_module: mlir.MlirModule) !ManagedArrayList([]const u8) {
+    var names = ManagedArrayList([]const u8).init(allocator);
+    var seen = std.StringHashMap(void).init(allocator);
+    defer {
+        var it = seen.iterator();
+        while (it.next()) |entry| {
+            allocator.free(entry.key_ptr.*);
+        }
+        seen.deinit();
+    }
+
+    const module_op = mlir.oraModuleGetOperation(mlir_module);
+    const num_regions = mlir.oraOperationGetNumRegions(module_op);
+    for (0..@intCast(num_regions)) |region_idx| {
+        const region = mlir.oraOperationGetRegion(module_op, @intCast(region_idx));
+        try collectFunctionNamesInRegion(allocator, region, &names, &seen);
+    }
+
+    return names;
+}
+
+fn collectFunctionNamesInRegion(
+    allocator: std.mem.Allocator,
+    region: mlir.MlirRegion,
+    names: *ManagedArrayList([]const u8),
+    seen: *std.StringHashMap(void),
+) !void {
+    var current_block = mlir.oraRegionGetFirstBlock(region);
+    while (!mlir.oraBlockIsNull(current_block)) {
+        var current_op = mlir.oraBlockGetFirstOperation(current_block);
+        while (!mlir.oraOperationIsNull(current_op)) {
+            const op_name_ref = mlir.oraOperationGetName(current_op);
+            defer @import("mlir_c_api").freeStringRef(op_name_ref);
+            const op_name = if (op_name_ref.data == null or op_name_ref.length == 0)
+                ""
+            else
+                op_name_ref.data[0..op_name_ref.length];
+
+            if (std.mem.eql(u8, op_name, "func.func")) {
+                const name_attr = mlir.oraOperationGetAttributeByName(current_op, mlir.oraStringRefCreate("sym_name", 8));
+                if (!mlir.oraAttributeIsNull(name_attr)) {
+                    const name_ref = mlir.oraStringAttrGetValue(name_attr);
+                    if (name_ref.data != null and name_ref.length > 0) {
+                        const name_slice = name_ref.data[0..name_ref.length];
+                        if (!seen.contains(name_slice)) {
+                            const name_copy = try allocator.dupe(u8, name_slice);
+                            try seen.put(name_copy, {});
+                            try names.append(name_copy);
+                        }
+                    }
+                }
+            }
+
+            const num_regions = mlir.oraOperationGetNumRegions(current_op);
+            for (0..@intCast(num_regions)) |region_idx| {
+                const nested_region = mlir.oraOperationGetRegion(current_op, @intCast(region_idx));
+                try collectFunctionNamesInRegion(allocator, nested_region, names, seen);
+            }
+
+            current_op = mlir.oraOperationGetNextInBlock(current_op);
+        }
+        current_block = mlir.oraBlockGetNextInRegion(current_block);
+    }
+}
+
+fn mergeVerificationResults(
+    allocator: std.mem.Allocator,
+    dest: *errors.VerificationResult,
+    src: *errors.VerificationResult,
+) !void {
+    if (!src.success) {
+        dest.success = false;
+    }
+
+    for (src.errors.items) |err| {
+        const cloned = try cloneVerificationError(allocator, err);
+        try dest.addError(cloned);
+    }
+
+    var it = src.proven_guard_ids.iterator();
+    while (it.next()) |entry| {
+        const key = entry.key_ptr.*;
+        if (!dest.proven_guard_ids.contains(key)) {
+            const key_copy = try allocator.dupe(u8, key);
+            try dest.proven_guard_ids.put(key_copy, {});
+        }
+    }
+}
+
+fn cloneVerificationError(allocator: std.mem.Allocator, err: errors.VerificationError) !errors.VerificationError {
+    const message = try allocator.dupe(u8, err.message);
+    errdefer allocator.free(message);
+    const file = try allocator.dupe(u8, err.file);
+    errdefer allocator.free(file);
+    const counterexample = if (err.counterexample) |ce| try cloneCounterexample(allocator, ce) else null;
+
+    return errors.VerificationError{
+        .error_type = err.error_type,
+        .message = message,
+        .file = file,
+        .line = err.line,
+        .column = err.column,
+        .counterexample = counterexample,
+        .allocator = allocator,
+    };
+}
+
+fn cloneCounterexample(allocator: std.mem.Allocator, ce: errors.Counterexample) !errors.Counterexample {
+    var copy = errors.Counterexample.init(allocator);
+    var it = ce.variables.iterator();
+    while (it.next()) |entry| {
+        try copy.addVariable(entry.key_ptr.*, entry.value_ptr.*);
+    }
+    return copy;
+}
+
+fn addConstraintSlice(list: *ManagedArrayList(z3.Z3_ast), constraints: []const z3.Z3_ast) !void {
+    for (constraints) |cst| {
+        try list.append(cst);
+    }
+}
+
+fn buildSmtlibForConstraints(
+    allocator: std.mem.Allocator,
+    solver: *Solver,
+    constraints: []const z3.Z3_ast,
+) ![:0]const u8 {
+    solver.reset();
+    for (constraints) |cst| {
+        solver.assert(cst);
+    }
+    const raw = z3.Z3_solver_to_string(solver.context.ctx, solver.solver);
+    const smtlib = if (raw == null) "" else std.mem.span(raw);
+    return try allocator.dupeZ(u8, smtlib);
+}
 
 fn parseLocationString(loc: []const u8) struct { file: []const u8, line: u32, column: u32 } {
     const last = std.mem.lastIndexOfScalar(u8, loc, ':') orelse return .{ .file = "", .line = 0, .column = 0 };

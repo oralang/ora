@@ -1,0 +1,56 @@
+// End-to-end refinement + dispatcher test
+// Exercises:
+// - pub functions (dispatcher)
+// - NonZeroAddress / MinValue / MaxValue / InRange
+// - storage map + basic arithmetic
+
+contract RefinementDispatcherE2E {
+    storage owner: NonZeroAddress;
+    storage limit: MaxValue<u256, 1_000_000>;
+    storage balances: map[address, u256];
+    storage fee_bps: BasisPoints<u256>;
+
+    // constructor-like initializer (pub to test dispatcher)
+    pub fn init(
+        initial_owner: NonZeroAddress,
+        cap: MaxValue<u256, 1_000_000>,
+        fee: BasisPoints<u256>
+    )
+        requires(initial_owner != std.constants.ZERO_ADDRESS)
+    {
+        owner = initial_owner;
+        limit = cap;
+        fee_bps = fee;
+    }
+
+    // deposit with refinement guard
+    pub fn deposit(amount: MinValue<u256, 1>) -> u256 {
+        const sender: address = std.msg.sender;
+        const prev: u256 = balances[sender];
+        const next: u256 = prev + amount;
+        balances[sender] = next;
+        return next;
+    }
+
+    // update owner (refinement guard)
+    pub fn setOwner(new_owner: NonZeroAddress)
+        requires(new_owner != std.constants.ZERO_ADDRESS)
+    {
+        owner = new_owner;
+    }
+
+    // update limit
+    pub fn setLimit(new_limit: MaxValue<u256, 1_000_000>) {
+        limit = new_limit;
+    }
+
+    // read limit
+    pub fn getLimit() -> MaxValue<u256, 1_000_000> {
+        return limit;
+    }
+
+    // check against limit
+    pub fn isOverLimit(value: u256) -> bool {
+        return value > limit;
+    }
+}
