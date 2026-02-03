@@ -1,0 +1,10 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/smt/verification/ghost_variables.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @deposit
+// CHECK-LABEL: func.func @withdraw
+// CHECK-LABEL: func.func @transfer
+// CHECK-LABEL: func.func @setVerifiedBalance
+// CHECK-LABEL: func.func @updateMultipleGhosts
+// CHECK-LABEL: func.func @calculateNetFlow
+// CHECK-LABEL: func.func @testGhostMemory

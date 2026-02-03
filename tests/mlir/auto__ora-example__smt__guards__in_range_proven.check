@@ -1,0 +1,9 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/smt/guards/in_range_proven.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @provenInRange0to100
+// CHECK-LABEL: func.func @provenInRangeSingle
+// CHECK-LABEL: func.func @provenInRangeArithmetic
+// CHECK-LABEL: func.func @provenInRangeFromRefinement
+// CHECK-LABEL: func.func @provenInRangeReturn
+// CHECK-LABEL: func.func @provenBasisPoints

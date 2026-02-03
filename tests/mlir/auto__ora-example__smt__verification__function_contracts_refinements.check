@@ -1,0 +1,9 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/smt/verification/function_contracts_refinements.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @depositRefined
+// CHECK-LABEL: func.func @getRefinedBalance
+// CHECK-LABEL: func.func @setPercentage
+// CHECK-LABEL: func.func @setOwner
+// CHECK-LABEL: func.func @transferRefined
+// CHECK-LABEL: func.func @calculateFee

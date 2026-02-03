@@ -1,0 +1,8 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/refinements/arithmetic_test.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @testAddition
+// CHECK-LABEL: func.func @testSubtraction
+// CHECK-LABEL: func.func @testMultiplication
+// CHECK-LABEL: func.func @testRealWorldExamples
+// CHECK-LABEL: func.func @testChainedOperations

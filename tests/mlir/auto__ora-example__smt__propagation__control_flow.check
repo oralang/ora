@@ -1,0 +1,9 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/smt/propagation/control_flow.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @propagateIf
+// CHECK-LABEL: func.func @propagateIfElse
+// CHECK-LABEL: func.func @propagateNested
+// CHECK-LABEL: func.func @propagateLoop
+// CHECK-LABEL: func.func @propagateSwitch
+// CHECK-LABEL: func.func @propagateReturn

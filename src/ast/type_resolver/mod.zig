@@ -30,6 +30,7 @@ const core = @import("core/mod.zig");
 const refinements = @import("refinements/mod.zig");
 const validation = @import("validation/mod.zig");
 const utils = @import("utils/mod.zig");
+const comptime_fold = @import("comptime_fold.zig");
 const log = @import("log");
 
 // Re-export core types
@@ -142,6 +143,16 @@ pub const TypeResolver = struct {
         for (nodes) |*node| {
             try self.resolveNodeTypes(node, core.TypeContext{});
         }
+
+        // third pass: Fold constant expressions after types are resolved
+        var fold_ctx = comptime_fold.FoldContext{
+            .allocator = self.allocator,
+            .type_storage_allocator = self.type_storage_allocator,
+            .symbol_table = self.symbol_table,
+            .core_resolver = &self.core_resolver,
+            .current_scope = self.current_scope,
+        };
+        try comptime_fold.foldConstants(&fold_ctx, nodes);
     }
 
     /// Resolve types for a single node (public API)

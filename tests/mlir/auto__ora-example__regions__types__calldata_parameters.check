@@ -1,0 +1,8 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/regions/types/calldata_parameters.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @testCalldataParams
+// CHECK-LABEL: func.func @testCalldataReadOnly
+// CHECK-LABEL: func.func @testCalldataArithmetic
+// CHECK-LABEL: func.func @testCalldataConditional
+// CHECK-LABEL: func.func @testCalldataReturn

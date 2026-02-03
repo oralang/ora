@@ -1,0 +1,21 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/smt/verification/ghost_functions.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @getTotalBalance
+// CHECK-LABEL: func.func @deposit
+// CHECK-LABEL: func.func @calculateFee
+// CHECK-LABEL: func.func @transferWithFee
+// CHECK-LABEL: func.func @getVerifiedBalance
+// CHECK-LABEL: func.func @setBalance
+// CHECK-LABEL: func.func @sumBalances
+// CHECK-LABEL: func.func @updateMultipleBalances
+// CHECK-LABEL: func.func @getPercentage
+// CHECK-LABEL: func.func @calculatePercentage
+// CHECK-LABEL: func.func @getNetBalance
+// CHECK-LABEL: func.func @updateBalance
+// CHECK-LABEL: func.func @getMaxBalance
+// CHECK-LABEL: func.func @ensureMaxBalance
+// CHECK-LABEL: func.func @expectedSum
+// CHECK-LABEL: func.func @sumToN
+// CHECK-LABEL: func.func @arraySum
+// CHECK-LABEL: func.func @verifyArraySum

@@ -1,0 +1,11 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/type-system/refinements/refinement_type_checking.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @testMinValueChecking
+// CHECK-LABEL: func.func @testMaxValueChecking
+// CHECK-LABEL: func.func @testInRangeChecking
+// CHECK-LABEL: func.func @testNonZeroAddressChecking
+// CHECK-LABEL: func.func @testExactChecking
+// CHECK-LABEL: func.func @testScaledChecking
+// CHECK-LABEL: func.func @testRefinementReturn
+// CHECK-LABEL: func.func @testRefinementVariable

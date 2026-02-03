@@ -1,0 +1,8 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/refinements/guard_placement_smoke.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @assign_refinement
+// CHECK-LABEL: func.func @return_expr_refinement
+// CHECK-LABEL: func.func @assign_refinement_nonconst
+// CHECK-LABEL: func.func @if_assign_refinement
+// CHECK-LABEL: func.func @switch_assign_refinement

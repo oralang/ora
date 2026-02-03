@@ -1,0 +1,10 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/smt/guards/max_value_runtime.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @runtimeMaxValue100
+// CHECK-LABEL: func.func @runtimeMaxValueInsufficient
+// CHECK-LABEL: func.func @runtimeMaxValueFromStorage
+// CHECK-LABEL: func.func @runtimeMaxValueFromCall
+// CHECK-LABEL: func.func @testCall
+// CHECK-LABEL: func.func @runtimeMaxValueArithmetic
+// CHECK-LABEL: func.func @runtimeMaxValueConditional

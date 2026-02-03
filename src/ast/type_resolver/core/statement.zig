@@ -185,6 +185,13 @@ fn resolveVariableDecl(
             // assign inferred type to variable
             var_decl.type_info = typed.ty;
 
+            // if the inferred type is a refinement, validate and compute guard skip
+            if (var_decl.type_info.ora_type) |target_ora_type| {
+                try self.refinement_system.validate(target_ora_type);
+                try validateLiteralAgainstRefinement(self, value_expr, target_ora_type);
+                var_decl.skip_guard = shouldSkipGuard(self, value_expr, target_ora_type);
+            }
+
             // If inside a try block and the initializer is an error union, record it
             if (self.in_try_block) {
                 const is_error_union = typed.ty.category == .ErrorUnion or
@@ -249,6 +256,15 @@ fn resolveVariableDecl(
             value_expr,
         );
         mergeEffects(self.allocator, &init_effect, region_eff);
+
+        if (var_decl.kind != .Var) {
+            const const_result = self.evaluateConstantExpressionWithLookup(value_expr) catch .NotConstant;
+            if (const_result != .NotConstant) {
+                if (self.current_scope) |scope| {
+                    try self.setComptimeValue(scope, var_decl.name, const_result);
+                }
+            }
+        }
     } else {
         // no initializer - type must be explicit
         if (!var_decl.type_info.isResolved()) {
@@ -1203,8 +1219,9 @@ fn deriveBranchRefinements(
     }
     if (ident == null) return RefinementList.initEmpty();
 
-    const const_val = try self.utils.evaluateConstantExpression(value_expr);
-    const value = const_val orelse return RefinementList.initEmpty();
+    const const_val = try self.evaluateConstantExpressionWithLookup(value_expr);
+    if (const_val != .Integer) return RefinementList.initEmpty();
+    const value = const_val.Integer;
 
     const sym = SymbolTable.findUp(self.current_scope, ident.?) orelse return RefinementList.initEmpty();
     const sym_type = sym.typ orelse return RefinementList.initEmpty();
@@ -1277,19 +1294,19 @@ fn deriveSwitchRefinement(
     return switch (pattern.*) {
         .Literal => |lit| blk: {
             var lit_expr = ast.Expressions.ExprNode{ .Literal = lit.value };
-            const const_val = try self.utils.evaluateConstantExpression(&lit_expr);
-            const value = const_val orelse break :blk null;
+            const const_val = try self.evaluateConstantExpressionWithLookup(&lit_expr);
+            if (const_val != .Integer) break :blk null;
+            const value = const_val.Integer;
             const refined_type = try buildRefinedType(self, base_ora, value, value, lit.span);
             // typ_owned = false: allocated with arena, not symbol table's allocator
             break :blk RefinementOverride{ .name = name, .type_info = refined_type, .typ_owned = false };
         },
         .Range => |range| blk: {
-            const start_val = try self.utils.evaluateConstantExpression(@constCast(range.start));
-            const end_val = try self.utils.evaluateConstantExpression(@constCast(range.end));
-            const start_num = start_val orelse break :blk null;
-            const end_num = end_val orelse break :blk null;
-            const min_val: u256 = start_num;
-            var max_val: u256 = end_num;
+            const start_val = try self.evaluateConstantExpressionWithLookup(@constCast(range.start));
+            const end_val = try self.evaluateConstantExpressionWithLookup(@constCast(range.end));
+            if (start_val != .Integer or end_val != .Integer) break :blk null;
+            const min_val: u256 = start_val.Integer;
+            var max_val: u256 = end_val.Integer;
             if (!range.inclusive and max_val > 0) {
                 max_val -= 1;
             }
@@ -1525,10 +1542,10 @@ pub fn shouldSkipGuard(
     target_ora_type: ast.type_info.OraType,
 ) bool {
     // optimization 1: Check if value is a compile-time constant that satisfies the constraint
-    const constant_result = self.utils.evaluateConstantExpression(value_expr) catch return false;
-    if (constant_result) |constant_value| {
-        if (constantSatisfiesRefinement(constant_value, target_ora_type)) {
-            return true; // Constant satisfies constraint - skip guard
+    const constant_result = self.evaluateConstantExpressionWithLookup(value_expr) catch return false;
+    if (constant_result == .Integer) {
+        if (constantSatisfiesRefinement(constant_result.Integer, target_ora_type)) {
+            return true;
         }
     }
 
@@ -1629,15 +1646,13 @@ fn validateLiteralAgainstRefinement(
     target_ora_type: ast.type_info.OraType,
 ) TypeResolutionError!void {
     // evaluate the constant expression
-    const constant_result = self.utils.evaluateConstantExpression(expr) catch {
+    const constant_result = self.evaluateConstantExpressionWithLookup(expr) catch {
         // evaluation error (e.g., overflow) - let runtime guard handle it
         return;
     };
 
-    const constant_value = constant_result orelse {
-        // not a compile-time constant - let runtime guard handle it
-        return;
-    };
+    if (constant_result != .Integer) return;
+    const constant_value = constant_result.Integer;
 
     // validate against refinement constraints
     switch (target_ora_type) {

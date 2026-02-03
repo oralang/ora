@@ -1,0 +1,14 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/refinements/errors/type_mismatch_errors.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @testMinValueToExactError
+// CHECK-LABEL: func.func @testBasisPointsToExactError
+// CHECK-LABEL: func.func @testExactToMinValueError
+// CHECK-LABEL: func.func @testScaledToMinValueError
+// CHECK-LABEL: func.func @testNarrowMinValueError
+// CHECK-LABEL: func.func @testNarrowMaxValueError
+// CHECK-LABEL: func.func @testNarrowInRangeError
+// CHECK-LABEL: func.func @testWrongBaseTypeError
+// CHECK-LABEL: func.func @testCompletelyDifferentTypeError
+// CHECK-LABEL: func.func @testArithmeticRefinementLoss
+// CHECK-LABEL: func.func @testBasisPointsOverflow

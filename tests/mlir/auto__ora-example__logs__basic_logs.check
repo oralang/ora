@@ -1,0 +1,4 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/logs/basic_logs.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK: module

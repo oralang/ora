@@ -1,0 +1,13 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/refinements/compatibility/invalid_conversions.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @testMinValueToExact
+// CHECK-LABEL: func.func @testBasisPointsToExact
+// CHECK-LABEL: func.func @testExactToMinValue
+// CHECK-LABEL: func.func @testScaledToMinValue
+// CHECK-LABEL: func.func @testMinValueToScaled
+// CHECK-LABEL: func.func @testLowerMinToHigherMin
+// CHECK-LABEL: func.func @testHigherMaxToLowerMax
+// CHECK-LABEL: func.func @testWiderRangeToNarrowerRange
+// CHECK-LABEL: func.func @testWrongBaseType
+// CHECK-LABEL: func.func @testAddressToMinValue

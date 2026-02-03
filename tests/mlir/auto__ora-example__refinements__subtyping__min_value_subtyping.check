@@ -1,0 +1,10 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/refinements/subtyping/min_value_subtyping.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @testHigherMinToLowerMin
+// CHECK-LABEL: func.func @testVeryHighMinToLowMin
+// CHECK-LABEL: func.func @testModerateSubtyping
+// CHECK-LABEL: func.func @acceptMinValue1000
+// CHECK-LABEL: func.func @testSubtypingIn
+// CHECK-LABEL: func.func @returnMinValue1000
+// CHECK-LABEL: func.func @testVariableAssignment

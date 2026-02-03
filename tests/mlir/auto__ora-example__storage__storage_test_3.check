@@ -1,0 +1,10 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/storage/storage_test_3.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @init
+// CHECK-LABEL: func.func @createUser
+// CHECK-LABEL: func.func @getUser
+// CHECK-LABEL: func.func @updateUserBalance
+// CHECK-LABEL: func.func @deactivateUser
+// CHECK-LABEL: func.func @getTotalUsers
+// CHECK-LABEL: func.func @getOwner

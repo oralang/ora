@@ -1,0 +1,8 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/switch/switch_cases.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @testSwitchStatement
+// CHECK-LABEL: func.func @testSwitchExpression
+// CHECK-LABEL: func.func @testSwitchWithRanges
+// CHECK-LABEL: func.func @testSwitchExpressionWithRanges
+// CHECK-LABEL: func.func @testSwitchMultipleCases

@@ -1,0 +1,6 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/errors/error_union_encoding.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @mayFail
+// CHECK-LABEL: func.func @unwrapWithTry
+// CHECK-LABEL: func.func @handleWithCatch

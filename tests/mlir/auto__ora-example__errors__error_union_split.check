@@ -1,0 +1,7 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/errors/error_union_split.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @mayFailPayload
+// CHECK-LABEL: func.func @mayFailMixed
+// CHECK-LABEL: func.func @unwrapPayload
+// CHECK-LABEL: func.func @catchPayload

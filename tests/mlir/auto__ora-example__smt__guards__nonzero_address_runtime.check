@@ -1,0 +1,9 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/smt/guards/nonzero_address_runtime.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @runtimeNonZeroAddress
+// CHECK-LABEL: func.func @runtimeNonZeroFromStorage
+// CHECK-LABEL: func.func @getAddress
+// CHECK-LABEL: func.func @testCall
+// CHECK-LABEL: func.func @runtimeNonZeroFromAddressParam
+// CHECK-LABEL: func.func @runtimeNonZeroFromArithmetic

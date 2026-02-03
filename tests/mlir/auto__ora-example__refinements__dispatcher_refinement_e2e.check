@@ -1,0 +1,9 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/refinements/dispatcher_refinement_e2e.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @init
+// CHECK-LABEL: func.func @deposit
+// CHECK-LABEL: func.func @setOwner
+// CHECK-LABEL: func.func @setLimit
+// CHECK-LABEL: func.func @getLimit
+// CHECK-LABEL: func.func @isOverLimit

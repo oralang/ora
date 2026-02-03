@@ -1,0 +1,12 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/subtyping/base_type_subtyping/integer_width.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @testU8ToU16
+// CHECK-LABEL: func.func @testU16ToU32
+// CHECK-LABEL: func.func @testU32ToU64
+// CHECK-LABEL: func.func @testU64ToU128
+// CHECK-LABEL: func.func @testU128ToU256
+// CHECK-LABEL: func.func @testU8ToU256
+// CHECK-LABEL: func.func @acceptU256
+// CHECK-LABEL: func.func @testSubtypingIn
+// CHECK-LABEL: func.func @testVariableAssignment

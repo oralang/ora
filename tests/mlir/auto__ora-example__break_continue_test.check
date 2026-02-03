@@ -1,0 +1,11 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/break_continue_test.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @testUnlabeledBreak
+// CHECK-LABEL: func.func @testUnlabeledContinue
+// CHECK-LABEL: func.func @testLabeledBreak
+// CHECK-LABEL: func.func @testLabeledContinue
+// CHECK-LABEL: func.func @testLabeledSwitchContinue
+// CHECK-LABEL: func.func @testLabeledSwitchContinueValue
+// CHECK-LABEL: func.func @testBreakInSwitch
+// CHECK-LABEL: func.func @testLabeledBlockBreak

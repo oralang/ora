@@ -67,6 +67,7 @@ pub const AstSerializer = ast_serializer.AstSerializer;
 pub const SerializationOptions = ast_serializer.SerializationOptions;
 /// Type resolver entry point
 pub const TypeResolver = @import("ast/type_resolver/mod.zig").TypeResolver;
+pub const const_eval = @import("const_eval.zig");
 
 // Core analysis types
 /// Type representation (unified AST type info)

@@ -1,0 +1,8 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/type-system/regions/region_function_signatures.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @testCalldataParams
+// CHECK-LABEL: func.func @testStackReturn
+// CHECK-LABEL: func.func @testStorageReturn
+// CHECK-LABEL: func.func @testStorageParam
+// CHECK-LABEL: func.func @testMemoryInFunction

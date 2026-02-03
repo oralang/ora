@@ -1,0 +1,9 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/regions/coercions/no_implicit_storage_tstore.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @testInvalidStorageToTStoreDirect
+// CHECK-LABEL: func.func @testInvalidTStoreToStorageDirect
+// CHECK-LABEL: func.func @testValidStorageToTStoreViaStack
+// CHECK-LABEL: func.func @testValidStorageToTStoreViaMemory
+// CHECK-LABEL: func.func @testValidTStoreToStorageViaStack
+// CHECK-LABEL: func.func @testValidTStoreToStorageViaMemory

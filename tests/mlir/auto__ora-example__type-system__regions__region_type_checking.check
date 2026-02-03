@@ -1,0 +1,13 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/type-system/regions/region_type_checking.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @testStorageToStack
+// CHECK-LABEL: func.func @testStorageToMemory
+// CHECK-LABEL: func.func @testMemoryToStack
+// CHECK-LABEL: func.func @testMemoryToStorage
+// CHECK-LABEL: func.func @testTStoreToStack
+// CHECK-LABEL: func.func @testTStoreToMemory
+// CHECK-LABEL: func.func @testStackToStorage
+// CHECK-LABEL: func.func @testStackToTStore
+// CHECK-LABEL: func.func @testCalldataToStack
+// CHECK-LABEL: func.func @testCalldataToMemory

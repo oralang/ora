@@ -1,0 +1,10 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/regions/effects/function_effect_summary.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @testStorageReadOnly
+// CHECK-LABEL: func.func @testStorageWriteOnly
+// CHECK-LABEL: func.func @testStorageReadWrite
+// CHECK-LABEL: func.func @testTStoreEffects
+// CHECK-LABEL: func.func @testCalldataEffects
+// CHECK-LABEL: func.func @testMemoryEffects
+// CHECK-LABEL: func.func @testAllEffects

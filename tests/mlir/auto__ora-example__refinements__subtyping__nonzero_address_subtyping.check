@@ -1,0 +1,9 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/refinements/subtyping/nonzero_address_subtyping.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @testNonZeroAddressToAddress
+// CHECK-LABEL: func.func @acceptAddress
+// CHECK-LABEL: func.func @testSubtypingIn
+// CHECK-LABEL: func.func @returnAddress
+// CHECK-LABEL: func.func @testVariableAssignment
+// CHECK-LABEL: func.func @testAddressToNonZeroAddress

@@ -1,0 +1,8 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/regions/coercions/no_implicit_calldata_write.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @testInvalidCalldataWrite
+// CHECK-LABEL: func.func @testInvalidCalldataVarWrite
+// CHECK-LABEL: func.func @testInvalidCalldataCompoundAssign
+// CHECK-LABEL: func.func @testValidCalldataRead
+// CHECK-LABEL: func.func @testValidCalldataCopy

@@ -1,0 +1,6 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/no_return_test.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @increment
+// CHECK-LABEL: func.func @add
+// CHECK-LABEL: func.func @getCounter

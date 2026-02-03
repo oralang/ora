@@ -1,0 +1,9 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/regions/effects/calldata_read_effect.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @testCalldataRead
+// CHECK-LABEL: func.func @testMultipleCalldataReads
+// CHECK-LABEL: func.func @testCalldataReadInConditional
+// CHECK-LABEL: func.func @testCalldataReadInLoop
+// CHECK-LABEL: func.func @testCalldataReadArithmetic
+// CHECK-LABEL: func.func @testCalldataForCall

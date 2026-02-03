@@ -1,0 +1,9 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/refinements/subtyping/max_value_subtyping.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @testLowerMaxToHigherMax
+// CHECK-LABEL: func.func @testVeryLowMaxToHighMax
+// CHECK-LABEL: func.func @acceptMaxValue1000
+// CHECK-LABEL: func.func @testSubtypingIn
+// CHECK-LABEL: func.func @returnMaxValue1000
+// CHECK-LABEL: func.func @testVariableAssignment

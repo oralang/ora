@@ -1,0 +1,9 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/smt/guards/nonzero_address_proven.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @provenNonZeroAddress
+// CHECK-LABEL: func.func @provenNonZeroFromMsgSender
+// CHECK-LABEL: func.func @provenNonZeroFromTransactionSender
+// CHECK-LABEL: func.func @provenNonZeroFromRefinement
+// CHECK-LABEL: func.func @provenNonZeroReturn
+// CHECK-LABEL: func.func @provenNonZeroFromConditional

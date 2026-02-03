@@ -1,0 +1,10 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/smt/guards/min_value_runtime.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @runtimeMinValue10
+// CHECK-LABEL: func.func @runtimeMinValueInsufficient
+// CHECK-LABEL: func.func @runtimeMinValueFromStorage
+// CHECK-LABEL: func.func @runtimeMinValueFromCall
+// CHECK-LABEL: func.func @testCall
+// CHECK-LABEL: func.func @runtimeMinValueArithmetic
+// CHECK-LABEL: func.func @runtimeMinValueConditional

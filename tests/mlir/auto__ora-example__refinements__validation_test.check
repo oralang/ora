@@ -1,0 +1,11 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/refinements/validation_test.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @testValidMinValue
+// CHECK-LABEL: func.func @testInvalidMinValue
+// CHECK-LABEL: func.func @testValidInRange
+// CHECK-LABEL: func.func @testInvalidInRange
+// CHECK-LABEL: func.func @testValidMaxValue
+// CHECK-LABEL: func.func @testInvalidMaxValue
+// CHECK-LABEL: func.func @testValidReturn
+// CHECK-LABEL: func.func @testInvalidReturn

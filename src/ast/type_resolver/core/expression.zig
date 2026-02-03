@@ -70,6 +70,7 @@ pub fn synthExpr(
         .Range => |*range_expr| synthRange(self, range_expr),
         .Assignment => |*assign| synthAssignment(self, assign),
         .StructInstantiation => |*si| synthStructInstantiation(self, si),
+        .Comptime => |*comptime_expr| synthComptime(self, comptime_expr),
         else => {
             // unhandled expression types - return unknown
             // todo: Implement remaining expression types (Range, etc.)
@@ -80,6 +81,39 @@ pub fn synthExpr(
             );
         },
     };
+}
+
+fn synthComptime(
+    self: *CoreResolver,
+    comptime_expr: *ast.Expressions.ComptimeExpr,
+) TypeResolutionError!Typed {
+    // Comptime blocks should contain a return or expression statement.
+    for (comptime_expr.block.statements) |*stmt| {
+        switch (stmt.*) {
+            .Return => |ret| {
+                if (ret.value) |*expr| {
+                    const typed = try synthExpr(self, @constCast(expr));
+                    comptime_expr.type_info = typed.ty;
+                    return typed;
+                }
+            },
+            .Expr => |expr_node| {
+                const typed = try synthExpr(self, @constCast(&expr_node));
+                comptime_expr.type_info = typed.ty;
+                return typed;
+            },
+            else => {
+                // For now, only support pure expression/return in comptime blocks.
+                return TypeResolutionError.TypeMismatch;
+            },
+        }
+    }
+
+    return Typed.init(
+        TypeInfo.unknown(),
+        Effect.pure(),
+        self.allocator,
+    );
 }
 
 fn synthStructInstantiation(
@@ -125,6 +159,10 @@ pub fn checkExpr(
     expected: TypeInfo,
 ) TypeResolutionError!Typed {
     log.debug("[checkExpr] Checking expression type={any}, expected category={s}\n", .{ @tagName(expr.*), @tagName(expected.category) });
+
+    if (expr.* == .Comptime and expected.category != .Unknown) {
+        return checkComptime(self, &expr.Comptime, expected);
+    }
 
     // special case: if expression is ErrorReturn and expected is ErrorUnion, allow it
     if (expr.* == .ErrorReturn and expected.category == .ErrorUnion) {
@@ -265,6 +303,34 @@ pub fn checkExpr(
     }
 
     return typed;
+}
+
+fn checkComptime(
+    self: *CoreResolver,
+    comptime_expr: *ast.Expressions.ComptimeExpr,
+    expected: TypeInfo,
+) TypeResolutionError!Typed {
+    for (comptime_expr.block.statements) |*stmt| {
+        switch (stmt.*) {
+            .Return => |ret| {
+                if (ret.value) |*expr| {
+                    const typed = try checkExpr(self, @constCast(expr), expected);
+                    comptime_expr.type_info = typed.ty;
+                    return typed;
+                }
+            },
+            .Expr => |expr_node| {
+                const typed = try checkExpr(self, @constCast(&expr_node), expected);
+                comptime_expr.type_info = typed.ty;
+                return typed;
+            },
+            else => {
+                return TypeResolutionError.TypeMismatch;
+            },
+        }
+    }
+
+    return TypeResolutionError.TypeMismatch;
 }
 
 // ============================================================================
@@ -963,6 +1029,19 @@ fn synthFieldAccess(
                 return Typed.init(fa.type_info, Effect.pure(), self.allocator);
             }
         }
+    }
+
+    // handle anonymous struct literal field access: (.{ .a = 1 }).a
+    if (fa.target.* == .AnonymousStruct) {
+        const anon = &fa.target.AnonymousStruct;
+        for (anon.fields) |*field| {
+            if (!std.mem.eql(u8, field.name, fa.field)) continue;
+            var field_typed = try synthExpr(self, field.value);
+            defer field_typed.deinit(self.allocator);
+            fa.type_info = field_typed.ty;
+            return Typed.init(field_typed.ty, takeEffect(&field_typed), self.allocator);
+        }
+        return TypeResolutionError.TypeMismatch;
     }
 
     // resolve base expression

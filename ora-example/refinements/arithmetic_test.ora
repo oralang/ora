@@ -58,9 +58,9 @@ contract ArithmeticRefinements {
         let diff4 = e - f; // Type: MaxValue<u256, 500> (1000 - 500)
         
         // InRange - InRange = InRange
-        let g: InRange<u256, 10, 100> = 50;
-        let h: InRange<u256, 20, 200> = 100;
-        let diff5 = g - h; // Type: InRange<u256, 0, 80> (min: 10-200, max: 100-20)
+        let g: InRange<u256, 100, 100> = 100;
+        let h: InRange<u256, 20, 50> = 50;
+        let diff5 = g - h; // Type: InRange<u256, 50, 80> (min: 100-50, max: 100-20)
     }
     
     // ============================================================================
@@ -147,4 +147,3 @@ contract ArithmeticRefinements {
         let result2 = result1 - b; // Type: MinValue<u256, 500> (conservative: 1000 - 500)
     }
 }
-

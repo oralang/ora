@@ -1,0 +1,6 @@
+// INPUT: ora-example/storage/storage_test_1.ora
+// CHECK-LABEL: func.func @getCounter
+// CHECK: ora.sload "counter"
+// CHECK-LABEL: func.func @setCounter
+// CHECK: ora.sstore %{{.*}}, "counter"
+// CHECK-NOT: builtin.unrealized_conversion_cast

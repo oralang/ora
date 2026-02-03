@@ -1,0 +1,8 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/smt/verification/loop_invariants.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @sumToN
+// CHECK-LABEL: func.func @sumArray
+// CHECK-LABEL: func.func @accumulateToStorage
+// CHECK-LABEL: func.func @sumRefined
+// CHECK-LABEL: func.func @nestedSum

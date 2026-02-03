@@ -15,6 +15,7 @@ const expr_helpers = @import("helpers.zig");
 const expr_access = @import("access.zig");
 const expr_literals = @import("literals.zig");
 const log = @import("log");
+const const_eval = lib.const_eval;
 
 /// ExpressionLowerer type (forward declaration)
 const ExpressionLowerer = @import("mod.zig").ExpressionLowerer;
@@ -42,37 +43,126 @@ pub fn lowerComptime(
     comptime_expr: *const lib.ast.Expressions.ComptimeExpr,
 ) c.MlirValue {
     const loc = self.fileLoc(comptime_expr.span);
-    var result_value: ?c.MlirValue = null;
-    var result_type: ?c.MlirType = null;
+    var result_expr: ?*const lib.ast.Expressions.ExprNode = null;
 
     for (comptime_expr.block.statements) |*stmt| {
         switch (stmt.*) {
             .Return => |ret| {
                 if (ret.value) |*expr| {
-                    result_value = self.lowerExpression(expr);
-                    result_type = c.oraValueGetType(result_value.?);
+                    result_expr = expr;
                     break;
                 }
             },
             .Expr => |expr_node| {
-                result_value = self.lowerExpression(&expr_node);
-                result_type = c.oraValueGetType(result_value.?);
+                result_expr = &expr_node;
                 break;
             },
             else => {},
         }
     }
 
-    const ty = result_type orelse c.oraIntegerTypeCreate(self.ctx, constants.DEFAULT_INTEGER_BITS);
+    const ty = blk: {
+        if (comptime_expr.type_info.ora_type != null) {
+            break :blk self.type_mapper.toMlirType(comptime_expr.type_info);
+        }
+        if (result_expr) |expr| {
+            if (getExpressionTypeInfo(expr)) |expr_type| {
+                if (expr_type.ora_type != null) {
+                    break :blk self.type_mapper.toMlirType(expr_type);
+                }
+            }
+        }
+        if (self.error_handler) |handler| {
+            handler.reportError(.TypeMismatch, comptime_expr.span, "Missing Ora type for comptime expression", "ensure comptime expression is typed during type resolution") catch {};
+        }
+        break :blk c.oraNoneTypeCreate(self.ctx);
+    };
     const comptime_id = h.identifier(self.ctx, "ora.comptime");
     const comptime_attr = h.boolAttr(self.ctx, 1);
 
     const attrs = [_]c.MlirNamedAttribute{
         c.oraNamedAttributeGet(comptime_id, comptime_attr),
     };
+
+    if (result_expr) |expr| {
+        const eval_result = const_eval.evaluateConstantExpression(std.heap.page_allocator, @constCast(expr)) catch |err| {
+            log.err("comptime evaluation failed: {s}\n", .{@errorName(err)});
+            if (self.error_handler) |handler| {
+                handler.reportError(.InternalError, comptime_expr.span, "comptime evaluation failed", null) catch {};
+            }
+            const op = self.ora_dialect.createArithConstantWithAttrs(0, ty, &attrs, loc);
+            h.appendOp(self.block, op);
+            return h.getResult(op, 0);
+        };
+
+        switch (eval_result) {
+            .Integer => |value| {
+                if (value > @as(u256, @intCast(std.math.maxInt(i64)))) {
+                    log.err("comptime constant too large for MLIR i64 attribute\n", .{});
+                    if (self.error_handler) |handler| {
+                        handler.reportError(.CompilationLimit, comptime_expr.span, "comptime constant too large for MLIR i64 attribute", null) catch {};
+                    }
+                    const op = self.ora_dialect.createArithConstantWithAttrs(0, ty, &attrs, loc);
+                    h.appendOp(self.block, op);
+                    return h.getResult(op, 0);
+                }
+                const op = self.ora_dialect.createArithConstantWithAttrs(@intCast(value), ty, &attrs, loc);
+                h.appendOp(self.block, op);
+                return h.getResult(op, 0);
+            },
+            .Bool => |value| {
+                const op = self.ora_dialect.createArithConstantWithAttrs(if (value) 1 else 0, ty, &attrs, loc);
+                h.appendOp(self.block, op);
+                return h.getResult(op, 0);
+            },
+            .Array, .Range => {
+                log.err("comptime expression is not a scalar constant yet\n", .{});
+                if (self.error_handler) |handler| {
+                    handler.reportError(.UnsupportedFeature, comptime_expr.span, "comptime expression is not a scalar constant", "use a scalar constant expression") catch {};
+                }
+            },
+            .NotConstant => {
+                log.err("comptime expression is not a compile-time constant yet\n", .{});
+                if (self.error_handler) |handler| {
+                    handler.reportError(.UnsupportedFeature, comptime_expr.span, "comptime expression is not a compile-time constant", "remove comptime or make inputs const") catch {};
+                }
+            },
+            .Error => {
+                log.err("comptime expression evaluation error\n", .{});
+                if (self.error_handler) |handler| {
+                    handler.reportError(.InternalError, comptime_expr.span, "comptime expression evaluation error", null) catch {};
+                }
+            },
+        }
+    }
+
+    // fallback: emit a placeholder constant
     const op = self.ora_dialect.createArithConstantWithAttrs(0, ty, &attrs, loc);
     h.appendOp(self.block, op);
     return h.getResult(op, 0);
+}
+
+fn getExpressionTypeInfo(expr: *const lib.ast.Expressions.ExprNode) ?lib.ast.type_info.TypeInfo {
+    return switch (expr.*) {
+        .Identifier => |id| id.type_info,
+        .Literal => |lit| switch (lit) {
+            .Integer => |int_lit| int_lit.type_info,
+            .String => |str_lit| str_lit.type_info,
+            .Bool => |bool_lit| bool_lit.type_info,
+            .Address => |addr_lit| addr_lit.type_info,
+            .Hex => |hex_lit| hex_lit.type_info,
+            .Binary => |bin_lit| bin_lit.type_info,
+            .Character => |char_lit| char_lit.type_info,
+            .Bytes => |bytes_lit| bytes_lit.type_info,
+        },
+        .Binary => |bin| bin.type_info,
+        .Unary => |unary| unary.type_info,
+        .Call => |call| call.type_info,
+        .FieldAccess => |fa| fa.type_info,
+        .Cast => |cast| cast.target_type,
+        .ErrorCast => |ecast| ecast.target_type,
+        .Index, .Assignment, .CompoundAssignment, .Comptime, .Old, .Tuple, .SwitchExpression, .Quantified, .Try, .ErrorReturn, .Shift, .StructInstantiation, .AnonymousStruct, .Range, .LabeledBlock, .Destructuring, .EnumLiteral, .ArrayLiteral => null,
+    };
 }
 
 /// Lower old expressions (for verification)

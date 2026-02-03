@@ -1,0 +1,6 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/comptime/comptime_basics.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @basic_arithmetic
+// CHECK-LABEL: func.func @refined_constants
+// CHECK-LABEL: func.func @comptime_block_example

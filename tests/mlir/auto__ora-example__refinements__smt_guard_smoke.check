@@ -1,0 +1,12 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/refinements/smt_guard_smoke.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @provenNonZero
+// CHECK-LABEL: func.func @runtimeNonZero
+// CHECK-LABEL: func.func @provenMin
+// CHECK-LABEL: func.func @runtimeMin
+// CHECK-LABEL: func.func @provenInRange
+// CHECK-LABEL: func.func @provenExact
+// CHECK-LABEL: func.func @runtimeExact
+// CHECK-LABEL: func.func @scaledAdd
+// CHECK-LABEL: func.func @scaledMul

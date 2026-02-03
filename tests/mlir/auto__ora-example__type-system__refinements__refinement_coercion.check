@@ -1,0 +1,11 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/type-system/refinements/refinement_coercion.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @testBaseToRefinement
+// CHECK-LABEL: func.func @testRefinementToBase
+// CHECK-LABEL: func.func @testRestrictiveToLessRestrictive
+// CHECK-LABEL: func.func @testLessRestrictiveToMoreRestrictive
+// CHECK-LABEL: func.func @testNonZeroToAddress
+// CHECK-LABEL: func.func @testAddressToNonZero
+// CHECK-LABEL: func.func @testInRangeNarrowing
+// CHECK-LABEL: func.func @testInRangeWidening

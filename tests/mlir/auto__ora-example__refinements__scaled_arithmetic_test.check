@@ -1,0 +1,9 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/refinements/scaled_arithmetic_test.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @testScaledAddition
+// CHECK-LABEL: func.func @testScaledSubtraction
+// CHECK-LABEL: func.func @testScaledMultiplication
+// CHECK-LABEL: func.func @calculateTokenAmount
+// CHECK-LABEL: func.func @addTokenAmounts
+// CHECK-LABEL: func.func @testScaleMismatch

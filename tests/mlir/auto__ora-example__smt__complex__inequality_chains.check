@@ -1,0 +1,11 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/smt/complex/inequality_chains.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @chainLessThan
+// CHECK-LABEL: func.func @chainLessEqual
+// CHECK-LABEL: func.func @chainArithmetic
+// CHECK-LABEL: func.func @chainMinValue
+// CHECK-LABEL: func.func @chainInRange
+// CHECK-LABEL: func.func @transitiveChain
+// CHECK-LABEL: func.func @chainSubtraction
+// CHECK-LABEL: func.func @chainMultiplication

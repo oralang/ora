@@ -1,0 +1,8 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/smt/guards/exact_proven.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @provenExactDivision
+// CHECK-LABEL: func.func @provenExactDivisionKnownDivisor
+// CHECK-LABEL: func.func @provenExactDivisionArithmetic
+// CHECK-LABEL: func.func @provenExactDivisionReturn
+// CHECK-LABEL: func.func @provenExactFromMultiplication

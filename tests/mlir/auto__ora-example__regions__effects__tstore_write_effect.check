@@ -1,0 +1,9 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/regions/effects/tstore_write_effect.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @testTStoreWrite
+// CHECK-LABEL: func.func @testMultipleTStoreWrites
+// CHECK-LABEL: func.func @testTStoreWriteInConditional
+// CHECK-LABEL: func.func @testTStoreWriteInLoop
+// CHECK-LABEL: func.func @testTStoreCompoundAssign
+// CHECK-LABEL: func.func @testReentrancyGuard

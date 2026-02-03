@@ -1,0 +1,6 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/regions/types/memory_primitive.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @testMemoryPrimitives
+// CHECK-LABEL: func.func @testMemoryFromCalldata
+// CHECK-LABEL: func.func @testMemoryToStack

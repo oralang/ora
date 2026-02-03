@@ -1,0 +1,20 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/state_test.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @add
+// CHECK-LABEL: func.func @getCounter
+// CHECK-LABEL: func.func @getBalance
+// CHECK-LABEL: func.func @setCounter
+// CHECK-LABEL: func.func @incrementCounter
+// CHECK-LABEL: func.func @transfer
+// CHECK-LABEL: func.func @checkBalance
+// CHECK-LABEL: func.func @getBalanceOrDefault
+// CHECK-LABEL: func.func @sumBalances
+// CHECK-LABEL: func.func @writeUnused
+// CHECK-LABEL: func.func @getOwnerBalance
+// CHECK-LABEL: func.func @complexRead
+// CHECK-LABEL: func.func @initialize
+// CHECK-LABEL: func.func @calculateFee
+// CHECK-LABEL: func.func @reset
+// CHECK-LABEL: func.func @updateConfigFromCounter
+// CHECK-LABEL: func.func @swapCounterAndConfig

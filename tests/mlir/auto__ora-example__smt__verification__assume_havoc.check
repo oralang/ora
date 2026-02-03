@@ -1,0 +1,11 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/smt/verification/assume_havoc.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @assumeExample
+// CHECK-LABEL: func.func @assumeRefinement
+// CHECK-LABEL: func.func @assumeConditional
+// CHECK-LABEL: func.func @havocExample
+// CHECK-LABEL: func.func @havocStorage
+// CHECK-LABEL: func.func @multipleHavoc
+// CHECK-LABEL: func.func @assumeAfterHavoc
+// CHECK-LABEL: func.func @havocLoop

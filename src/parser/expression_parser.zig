@@ -669,6 +669,7 @@ pub const ExpressionParser = struct {
             return ast.Expressions.ExprNode{ .Comptime = ast.Expressions.ComptimeExpr{
                 .block = block,
                 .span = self.base.spanFromToken(comptime_token),
+                .type_info = ast.type_info.TypeInfo.unknown(),
             } };
         }
 

@@ -1,0 +1,9 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/type-system/refinements/refinement_in_functions.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @testRefinementParameter
+// CHECK-LABEL: func.func @testRefinementReturn
+// CHECK-LABEL: func.func @testMultipleRefinements
+// CHECK-LABEL: func.func @testRefinementReturnFromParam
+// CHECK-LABEL: func.func @testRefinementWithRequires
+// CHECK-LABEL: func.func @testRefinementErrorUnion

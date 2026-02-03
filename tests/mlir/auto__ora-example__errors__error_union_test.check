@@ -1,0 +1,7 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/errors/error_union_test.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @test1
+// CHECK-LABEL: func.func @test2
+// CHECK-LABEL: func.func @test3
+// CHECK-LABEL: func.func @test4

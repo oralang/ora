@@ -1,0 +1,8 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/regions/effects/tstore_read_effect.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @testTStoreRead
+// CHECK-LABEL: func.func @testMultipleTStoreReads
+// CHECK-LABEL: func.func @testTStoreReadInConditional
+// CHECK-LABEL: func.func @testTStoreReadInLoop
+// CHECK-LABEL: func.func @testReentrancyPattern

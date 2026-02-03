@@ -1,0 +1,7 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/type-system/regions/region_as_type_attribute.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @testMemoryTypes
+// CHECK-LABEL: func.func @testStackTypes
+// CHECK-LABEL: func.func @testCalldataTypes
+// CHECK-LABEL: func.func @testRegionDistinction

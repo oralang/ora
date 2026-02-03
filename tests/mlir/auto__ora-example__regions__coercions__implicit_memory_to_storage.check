@@ -1,0 +1,7 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/regions/coercions/implicit_memory_to_storage.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @testImplicitMemoryToStorage
+// CHECK-LABEL: func.func @testImplicitMemoryFromParam
+// CHECK-LABEL: func.func @testImplicitMemoryInArithmetic
+// CHECK-LABEL: func.func @testMultipleImplicitMemory

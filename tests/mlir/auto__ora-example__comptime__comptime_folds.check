@@ -1,0 +1,9 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/comptime/comptime_folds.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @compare_bool
+// CHECK-LABEL: func.func @bitwise_and_shift
+// CHECK-LABEL: func.func @shift_ops
+// CHECK-LABEL: func.func @switch_expr
+// CHECK-LABEL: func.func @array_literal_sum
+// CHECK-LABEL: func.func @struct_field_access

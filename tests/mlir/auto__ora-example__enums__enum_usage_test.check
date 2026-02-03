@@ -1,0 +1,10 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/enums/enum_usage_test.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @init
+// CHECK-LABEL: func.func @getStatus
+// CHECK-LABEL: func.func @setStatus
+// CHECK-LABEL: func.func @isActive
+// CHECK-LABEL: func.func @processStatus
+// CHECK-LABEL: func.func @setError
+// CHECK-LABEL: func.func @getLastError

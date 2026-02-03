@@ -1,0 +1,15 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/smt/verification/ghost_combined.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @getTotalBalance
+// CHECK-LABEL: func.func @getAverageTransaction
+// CHECK-LABEL: func.func @deposit
+// CHECK-LABEL: func.func @getOldTotalBalance
+// CHECK-LABEL: func.func @transfer
+// CHECK-LABEL: func.func @getBalanceRatio
+// CHECK-LABEL: func.func @isBalanceHealthy
+// CHECK-LABEL: func.func @checkHealth
+// CHECK-LABEL: func.func @getVerifiedTotal
+// CHECK-LABEL: func.func @updateVerifiedSum
+// CHECK-LABEL: func.func @expectedCounterValue
+// CHECK-LABEL: func.func @countToN

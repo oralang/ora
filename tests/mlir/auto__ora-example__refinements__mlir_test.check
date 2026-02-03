@@ -1,0 +1,11 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/refinements/mlir_test.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @testMinValue
+// CHECK-LABEL: func.func @testMaxValue
+// CHECK-LABEL: func.func @testInRange
+// CHECK-LABEL: func.func @testScaled
+// CHECK-LABEL: func.func @testExact
+// CHECK-LABEL: func.func @testNonZeroAddress
+// CHECK-LABEL: func.func @testVariables
+// CHECK-LABEL: func.func @testReturn

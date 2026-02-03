@@ -1,0 +1,9 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/functions/basic_functions.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @simple_function
+// CHECK-LABEL: func.func @function_with_params
+// CHECK-LABEL: func.func @function_with_return
+// CHECK-LABEL: func.func @add
+// CHECK-LABEL: func.func @calculate_fee
+// CHECK-LABEL: func.func @safe_subtract

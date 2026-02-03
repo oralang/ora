@@ -1,0 +1,16 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/refinements/arithmetic/refinement_arithmetic.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @testMinValuePlusMinValue
+// CHECK-LABEL: func.func @testMinValuePlusBase
+// CHECK-LABEL: func.func @testMinValueMinusBase
+// CHECK-LABEL: func.func @testMaxValuePlusMaxValue
+// CHECK-LABEL: func.func @testMaxValuePlusBase
+// CHECK-LABEL: func.func @testInRangePlusInRange
+// CHECK-LABEL: func.func @testInRangeMinusInRange
+// CHECK-LABEL: func.func @testBasisPointsPlusBasisPoints
+// CHECK-LABEL: func.func @testBasisPointsTimesBasisPoints
+// CHECK-LABEL: func.func @testScaledPlusScaled
+// CHECK-LABEL: func.func @testScaledTimesScaled
+// CHECK-LABEL: func.func @testMinValuePlusMaxValue
+// CHECK-LABEL: func.func @testInRangePlusMinValue

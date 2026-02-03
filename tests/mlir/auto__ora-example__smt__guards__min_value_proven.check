@@ -1,0 +1,9 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/smt/guards/min_value_proven.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @provenMinValue10
+// CHECK-LABEL: func.func @provenMinValueStrict
+// CHECK-LABEL: func.func @provenMinValueArithmetic
+// CHECK-LABEL: func.func @provenMinValueMultiple
+// CHECK-LABEL: func.func @provenMinValueFromRefinement
+// CHECK-LABEL: func.func @provenMinValueReturn

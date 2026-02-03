@@ -1,0 +1,11 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/subtyping/valid/base_to_refinement.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @testBaseToMinValue
+// CHECK-LABEL: func.func @testBaseToMaxValue
+// CHECK-LABEL: func.func @testBaseToInRange
+// CHECK-LABEL: func.func @testAddressToNonZeroAddress
+// CHECK-LABEL: func.func @testTrustedBuiltinToNonZeroAddress
+// CHECK-LABEL: func.func @testLiteralMinValue
+// CHECK-LABEL: func.func @testLiteralMaxValue
+// CHECK-LABEL: func.func @testLiteralInRange

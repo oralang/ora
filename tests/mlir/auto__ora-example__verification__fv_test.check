@@ -1,0 +1,10 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/verification/fv_test.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @transfer
+// CHECK-LABEL: func.func @deposit
+// CHECK-LABEL: func.func @getTotalBalance
+// CHECK-LABEL: func.func @withdraw
+// CHECK-LABEL: func.func @loop_example
+// CHECK-LABEL: func.func @assume_example
+// CHECK-LABEL: func.func @havoc_example

@@ -1,0 +1,13 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/refinements/guards/builtin_guards.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @testTransactionSenderNoGuard
+// CHECK-LABEL: func.func @testMsgSenderNoGuard
+// CHECK-LABEL: func.func @testRuntimeAddressGuard
+// CHECK-LABEL: func.func @testStorageAddressGuard
+// CHECK-LABEL: func.func @testLiteralMinValueNoGuard
+// CHECK-LABEL: func.func @testRuntimeMinValueGuard
+// CHECK-LABEL: func.func @testLiteralMaxValueNoGuard
+// CHECK-LABEL: func.func @testRuntimeMaxValueGuard
+// CHECK-LABEL: func.func @testLiteralInRangeNoGuard
+// CHECK-LABEL: func.func @testRuntimeInRangeGuard

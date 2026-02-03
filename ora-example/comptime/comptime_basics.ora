@@ -1,0 +1,24 @@
+contract ComptimeBasics {
+    pub fn basic_arithmetic() -> u256 {
+        const a: u256 = 10;
+        const b: u256 = 20;
+        const c: u256 = a * b + 5;
+        return c;
+    }
+
+    pub fn refined_constants() {
+        const x: MinValue<u256, 100> = 200;
+        const y: MinValue<u256, 50> = 100;
+        const prod = x * y; // comptime: 20000
+
+        const r: InRange<u256, 20, 200> = 55;
+        const sum = r + 5; // comptime: 60
+    }
+
+    pub fn comptime_block_example() -> u256 {
+        const res: u256 = comptime {
+            return 42;
+        };
+        return res;
+    }
+}

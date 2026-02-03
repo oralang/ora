@@ -706,6 +706,28 @@ pub const Encoder = struct {
             }
         }
 
+        if (std.mem.eql(u8, op_name, "memref.alloca")) {
+            const num_results = mlir.oraOperationGetNumResults(mlir_op);
+            if (num_results >= 1) {
+                const result_value = mlir.oraOperationGetResult(mlir_op, 0);
+                const result_type = mlir.oraValueGetType(result_value);
+                const result_sort = try self.encodeMLIRType(result_type);
+                const op_id = @intFromPtr(mlir_op.ptr);
+                return try self.mkUndefValue(result_sort, "memref_alloca", op_id);
+            }
+        }
+
+        if (std.mem.eql(u8, op_name, "memref.load")) {
+            const num_results = mlir.oraOperationGetNumResults(mlir_op);
+            if (num_results >= 1) {
+                const result_value = mlir.oraOperationGetResult(mlir_op, 0);
+                const result_type = mlir.oraValueGetType(result_value);
+                const result_sort = try self.encodeMLIRType(result_type);
+                const op_id = @intFromPtr(mlir_op.ptr);
+                return try self.mkUndefValue(result_sort, "memref_load", op_id);
+            }
+        }
+
         // unsupported operation - caller may treat as unknown symbol.
         std.debug.print("z3 encoder unsupported op: {s}\n", .{op_name});
         return error.UnsupportedOperation;

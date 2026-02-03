@@ -1,0 +1,18 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/array_operations.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @initializeArray
+// CHECK-LABEL: func.func @getNumber
+// CHECK-LABEL: func.func @setNumber
+// CHECK-LABEL: func.func @processMemoryArray
+// CHECK-LABEL: func.func @multipleArrays
+// CHECK-LABEL: func.func @computedIndex
+// CHECK-LABEL: func.func @arrayArithmetic
+// CHECK-LABEL: func.func @nestedAccess
+// CHECK-LABEL: func.func @modifyAndReturn
+// CHECK-LABEL: func.func @complexComputation
+// CHECK-LABEL: func.func @copyArray
+// CHECK-LABEL: func.func @copyAndTransform
+// CHECK-LABEL: func.func @reverseCopy
+// CHECK-LABEL: func.func @partialCopy
+// CHECK-LABEL: func.func @constantFolding

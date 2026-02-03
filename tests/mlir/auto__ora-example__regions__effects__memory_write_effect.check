@@ -1,0 +1,9 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/regions/effects/memory_write_effect.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @testMemoryWrite
+// CHECK-LABEL: func.func @testMemoryArrayWrite
+// CHECK-LABEL: func.func @testMultipleMemoryWrites
+// CHECK-LABEL: func.func @testMemoryWriteInConditional
+// CHECK-LABEL: func.func @testMemoryWriteInLoop
+// CHECK-LABEL: func.func @testMemoryCompoundAssign

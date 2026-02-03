@@ -1,0 +1,11 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/refinements/guards/assignment_guards.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @testStorageAssignment
+// CHECK-LABEL: func.func @testStorageAssignmentFromBuiltin
+// CHECK-LABEL: func.func @testLocalAssignment
+// CHECK-LABEL: func.func @testSubtypingAssignment
+// CHECK-LABEL: func.func @testReturnGuard
+// CHECK-LABEL: func.func @testReturnSubtyping
+// CHECK-LABEL: func.func @testParameterGuard
+// CHECK-LABEL: func.func @testCallSiteGuard

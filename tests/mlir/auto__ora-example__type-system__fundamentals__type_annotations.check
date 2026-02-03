@@ -1,0 +1,7 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/type-system/fundamentals/type_annotations.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @testVariableAnnotations
+// CHECK-LABEL: func.func @testFunctionParams
+// CHECK-LABEL: func.func @testReturnType
+// CHECK-LABEL: func.func @testMemoryAnnotations

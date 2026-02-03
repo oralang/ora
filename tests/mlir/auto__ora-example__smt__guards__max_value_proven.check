@@ -1,0 +1,8 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/smt/guards/max_value_proven.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @provenMaxValue100
+// CHECK-LABEL: func.func @provenMaxValueStrict
+// CHECK-LABEL: func.func @provenMaxValueArithmetic
+// CHECK-LABEL: func.func @provenMaxValueFromRefinement
+// CHECK-LABEL: func.func @provenMaxValueReturn

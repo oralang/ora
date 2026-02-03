@@ -1,0 +1,9 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/regions/coercions/implicit_storage_to_stack.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @testImplicitStorageToStack
+// CHECK-LABEL: func.func @testImplicitStorageInArithmetic
+// CHECK-LABEL: func.func @testImplicitStorageInComparison
+// CHECK-LABEL: func.func @testImplicitStorageInReturn
+// CHECK-LABEL: func.func @testImplicitStorageMap
+// CHECK-LABEL: func.func @testMultipleImplicitStorage

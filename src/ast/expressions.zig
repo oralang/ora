@@ -431,6 +431,7 @@ pub const CastExpr = struct {
 pub const ComptimeExpr = struct {
     block: BlockNode,
     span: SourceSpan,
+    type_info: TypeInfo = TypeInfo.unknown(),
 };
 
 /// old() expressions for postconditions

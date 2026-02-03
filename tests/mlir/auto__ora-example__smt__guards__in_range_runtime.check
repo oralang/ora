@@ -1,0 +1,11 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/smt/guards/in_range_runtime.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @runtimeInRange0to100
+// CHECK-LABEL: func.func @runtimeInRangeInsufficientLower
+// CHECK-LABEL: func.func @runtimeInRangeInsufficientUpper
+// CHECK-LABEL: func.func @runtimeInRangeFromStorage
+// CHECK-LABEL: func.func @runtimeInRangeFromCall
+// CHECK-LABEL: func.func @testCall
+// CHECK-LABEL: func.func @runtimeInRangeArithmetic
+// CHECK-LABEL: func.func @runtimeBasisPoints

@@ -1,0 +1,12 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/test_std_builtins.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @recordInfo
+// CHECK-LABEL: func.func @getTimestamp
+// CHECK-LABEL: func.func @getBlockNumber
+// CHECK-LABEL: func.func @getCoinbase
+// CHECK-LABEL: func.func @getOrigin
+// CHECK-LABEL: func.func @getSender
+// CHECK-LABEL: func.func @getValue
+// CHECK-LABEL: func.func @getZeroAddress
+// CHECK-LABEL: func.func @getMaxU256

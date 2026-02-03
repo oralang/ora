@@ -1,0 +1,10 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/smt/propagation/function_parameters.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @propagateMinValue
+// CHECK-LABEL: func.func @propagateArithmetic
+// CHECK-LABEL: func.func @propagateReturn
+// CHECK-LABEL: func.func @helper
+// CHECK-LABEL: func.func @propagateThroughCall
+// CHECK-LABEL: func.func @propagateMultiple
+// CHECK-LABEL: func.func @propagateInRange

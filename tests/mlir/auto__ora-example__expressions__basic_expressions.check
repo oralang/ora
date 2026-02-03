@@ -1,0 +1,10 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/expressions/basic_expressions.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @testLiterals
+// CHECK-LABEL: func.func @testArithmetic
+// CHECK-LABEL: func.func @testUnary
+// CHECK-LABEL: func.func @testParentheses
+// CHECK-LABEL: func.func @testPrecedence
+// CHECK-LABEL: func.func @testLogical
+// CHECK-LABEL: func.func @testComparisons

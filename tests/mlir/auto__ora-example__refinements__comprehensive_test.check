@@ -1,0 +1,15 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/refinements/comprehensive_test.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @testMinValue
+// CHECK-LABEL: func.func @testMaxValue
+// CHECK-LABEL: func.func @testInRange
+// CHECK-LABEL: func.func @testScaled
+// CHECK-LABEL: func.func @testExact
+// CHECK-LABEL: func.func @testNonZero
+// CHECK-LABEL: func.func @testBasisPoints
+// CHECK-LABEL: func.func @testSubtyping
+// CHECK-LABEL: func.func @testFunctionParams
+// CHECK-LABEL: func.func @testFunctionReturns
+// CHECK-LABEL: func.func @testAssignments
+// CHECK-LABEL: func.func @testArithmetic

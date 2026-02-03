@@ -1,0 +1,8 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/math_operations.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @add
+// CHECK-LABEL: func.func @multiply
+// CHECK-LABEL: func.func @incrementCounter
+// CHECK-LABEL: func.func @getCounter
+// CHECK-LABEL: func.func @accumulate

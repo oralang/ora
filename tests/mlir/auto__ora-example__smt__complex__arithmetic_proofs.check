@@ -1,0 +1,10 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/smt/complex/arithmetic_proofs.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @addPreservesMin
+// CHECK-LABEL: func.func @multiplyBounds
+// CHECK-LABEL: func.func @subtractSafe
+// CHECK-LABEL: func.func @divideBounds
+// CHECK-LABEL: func.func @moduloBounds
+// CHECK-LABEL: func.func @arithmeticChain
+// CHECK-LABEL: func.func @powerBounds
