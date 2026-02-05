@@ -67,6 +67,58 @@ pub fn lowerStruct(self: *const DeclarationLowerer, struct_decl: *const lib.ast.
     return op;
 }
 
+/// Lower anonymous struct declarations (used for tuples/anonymous structs)
+pub fn lowerAnonymousStruct(
+    self: *const DeclarationLowerer,
+    name: []const u8,
+    fields: []const lib.ast.type_info.AnonymousStructFieldType,
+) c.MlirOperation {
+    const loc = h.unknownLoc(self.ctx);
+
+    var attributes = std.ArrayList(c.MlirNamedAttribute){};
+    defer attributes.deinit(std.heap.page_allocator);
+
+    const name_ref = c.oraStringRefCreate(name.ptr, name.len);
+    const name_attr = c.oraStringAttrCreate(self.ctx, name_ref);
+    const name_id = h.identifier(self.ctx, "sym_name");
+    attributes.append(std.heap.page_allocator, c.oraNamedAttributeGet(name_id, name_attr)) catch {};
+
+    var field_names = std.ArrayList(c.MlirAttribute){};
+    defer field_names.deinit(std.heap.page_allocator);
+    var field_types = std.ArrayList(c.MlirAttribute){};
+    defer field_types.deinit(std.heap.page_allocator);
+
+    for (fields) |field| {
+        const field_name_ref = c.oraStringRefCreate(field.name.ptr, field.name.len);
+        const field_name_attr = c.oraStringAttrCreate(self.ctx, field_name_ref);
+        field_names.append(std.heap.page_allocator, field_name_attr) catch {};
+
+        const field_type = self.type_mapper.toMlirType(.{ .ora_type = field.typ.* });
+        const field_type_attr = c.oraTypeAttrCreateFromType(field_type);
+        field_types.append(std.heap.page_allocator, field_type_attr) catch {};
+    }
+
+    if (field_names.items.len > 0) {
+        const field_names_array = c.oraArrayAttrCreate(self.ctx, @intCast(field_names.items.len), field_names.items.ptr);
+        const field_names_id = h.identifier(self.ctx, "ora.field_names");
+        attributes.append(std.heap.page_allocator, c.oraNamedAttributeGet(field_names_id, field_names_array)) catch {};
+
+        const field_types_array = c.oraArrayAttrCreate(self.ctx, @intCast(field_types.items.len), field_types.items.ptr);
+        const field_types_id = h.identifier(self.ctx, "ora.field_types");
+        attributes.append(std.heap.page_allocator, c.oraNamedAttributeGet(field_types_id, field_types_array)) catch {};
+    }
+
+    const struct_decl_attr = h.boolAttr(self.ctx, 1);
+    const struct_decl_id = h.identifier(self.ctx, "ora.struct_decl");
+    attributes.append(std.heap.page_allocator, c.oraNamedAttributeGet(struct_decl_id, struct_decl_attr)) catch {};
+
+    const op = self.ora_dialect.createStructDecl(name, loc);
+    for (attributes.items) |attr| {
+        c.oraOperationSetAttributeByName(op, c.oraIdentifierStr(attr.name), attr.attribute);
+    }
+    return op;
+}
+
 /// Lower enum declarations with enum type definitions and variant information (Requirements 7.2)
 pub fn lowerEnum(self: *const DeclarationLowerer, enum_decl: *const lib.ast.EnumDeclNode) c.MlirOperation {
     const loc = helpers.createFileLocation(self, enum_decl.span);

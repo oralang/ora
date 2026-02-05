@@ -214,13 +214,14 @@ pub fn parseParenthesizedOrTuple(parser: *ExpressionParser) ParserError!ast.Expr
         var empty_elements = std.ArrayList(*ast.Expressions.ExprNode){};
         defer empty_elements.deinit(parser.base.arena.allocator());
 
-        return ast.Expressions.ExprNode{ .Tuple = ast.Expressions.TupleExpr{
+        const tuple_expr = ast.Expressions.ExprNode{ .Tuple = ast.Expressions.TupleExpr{
             .elements = try empty_elements.toOwnedSlice(parser.base.arena.allocator()),
             .span = parser.base.spanFromToken(paren_token),
         } };
+        return tuple_expr;
     }
 
-    const first_expr = try parser.parseExpression();
+    const first_expr = try parser.parseExpressionNoComma();
 
     // check if it's a tuple (has comma)
     if (parser.base.match(.Comma)) {
@@ -235,7 +236,7 @@ pub fn parseParenthesizedOrTuple(parser: *ExpressionParser) ParserError!ast.Expr
         // handle trailing comma case: (a,)
         if (!parser.base.check(.RightParen)) {
             repeat: while (true) {
-                const element = try parser.parseExpression();
+                const element = try parser.parseExpressionNoComma();
                 const element_ptr = try parser.base.arena.createNode(ast.Expressions.ExprNode);
                 element_ptr.* = element;
                 try elements.append(parser.base.arena.allocator(), element_ptr);
@@ -247,10 +248,11 @@ pub fn parseParenthesizedOrTuple(parser: *ExpressionParser) ParserError!ast.Expr
 
         _ = try parser.base.consume(.RightParen, "Expected ')' after tuple elements");
 
-        return ast.Expressions.ExprNode{ .Tuple = ast.Expressions.TupleExpr{
+        const tuple_expr = ast.Expressions.ExprNode{ .Tuple = ast.Expressions.TupleExpr{
             .elements = try elements.toOwnedSlice(parser.base.arena.allocator()),
             .span = parser.base.spanFromToken(paren_token),
         } };
+        return tuple_expr;
     } else {
         // single parenthesized expression
         _ = try parser.base.consume(.RightParen, "Expected ')' after expression");

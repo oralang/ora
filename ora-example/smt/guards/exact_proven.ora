@@ -11,6 +11,7 @@
 contract ExactProven {
     // SMT can prove Exact division from requires clause
     pub fn provenExactDivision(dividend: Exact<u256>, divisor: u256)
+        requires(divisor != 0)
         requires(dividend % divisor == 0)
     {
         // Guard should be removed - requires clause proves exact division
@@ -19,6 +20,7 @@ contract ExactProven {
 
     // SMT can prove Exact division with known divisor
     pub fn provenExactDivisionKnownDivisor(dividend: Exact<u256>)
+        requires(10 != 0)
         requires(dividend % 10 == 0)
     {
         // Guard should be removed - dividend is divisible by 10
@@ -36,6 +38,7 @@ contract ExactProven {
 
     // SMT can prove Exact division in return
     pub fn provenExactDivisionReturn(dividend: Exact<u256>, divisor: u256) -> u256
+        requires(divisor != 0)
         requires(dividend % divisor == 0)
     {
         // Guard should be removed for return

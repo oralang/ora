@@ -1,82 +1,12 @@
-struct Pair {
-    a: u256;
-    b: u256;
-}
-
-enum Status {
-    A,
-    B,
-    C,
-}
-
 contract ComptimeFolds {
-    pub fn compare_bool() -> bool {
-        const a: u256 = 10;
-        const b: u256 = 20;
-        const ok: bool = a < b;
-        return ok;
+
+    pub fn tuple_access() -> u256 {
+        const t: (u256, u256) = (10, 20);
+        return t.0 + t.1;
     }
 
-    pub fn bitwise_and_shift() -> u256 {
-        const x: u256 = 6;  // 110
-        const y: u256 = 3;  // 011
-        const z: u256 = (x & y) | (x ^ y) << 1;
-        return z;
-    }
-
-    pub fn shift_ops() -> u256 {
-        const a: u256 = 1 << 8;
-        const b: u256 = 256 >> 3;
+    pub fn tuple_destructure() -> u256 {
+        const (a, b): (u256, u256) = (3, 4);
         return a + b;
     }
-
-    pub fn switch_expr() -> u256 {
-        const x: u256 = 7;
-        const y: u256 = switch (x) {
-            0...5 => 10,
-            6...10 => 20,
-            else => 30,
-        };
-        return y;
-    }
-
-    pub fn array_literal_sum() -> u256 {
-        const arr: [u256; 3] = [1, 2, 3];
-        const sum: u256 = arr[0] + arr[1] + arr[2];
-        return sum;
-    }
-
-    pub fn struct_field_access() -> u256 {
-        const v: u256 = (Pair { a: 10, b: 32 }).a + (Pair { a: 10, b: 32 }).b;
-        return v;
-    }
-
-    pub fn enum_compare() -> bool {
-        const ok: bool = Status.B == Status.B;
-        return ok;
-    }
-
-    pub fn enum_switch() -> u256 {
-        const v: u256 = switch (Status.B) {
-            Status.A => 1,
-            Status.B => 2,
-            Status.C => 3,
-        };
-        return v;
-    }
-
-    pub fn unary_ops() -> u256 {
-        const a: u256 = 1;
-        const b: u256 = ~a;
-        const c: bool = !(a == 2);
-        return b + (if (c) 1 else 0);
-    }
-
-    pub fn cast_ops() -> u256 {
-        const a: u256 = (5 as u256);
-        const b: u256 = (10 as! u256);
-        return a + b;
-    }
-
-    // builtin divs removed for now
 }

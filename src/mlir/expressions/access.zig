@@ -92,6 +92,12 @@ pub fn lowerIdentifier(
     if (self.local_var_map) |lvm| {
         if (lvm.getLocalVar(identifier.name)) |local_var_ref| {
             const var_type = c.oraValueGetType(local_var_ref);
+            log.debug("[lowerIdentifier] local var '{s}' type={any} memref={} shaped={}\n", .{
+                identifier.name,
+                var_type,
+                c.oraTypeIsAMemRef(var_type),
+                c.oraTypeIsAShaped(var_type),
+            });
 
             if (c.oraTypeIsAMemRef(var_type)) {
                 const element_type = c.oraShapedTypeGetElementType(var_type);
@@ -501,6 +507,44 @@ pub fn convertIndexToIndexType(
     const index_cast_op = c.oraArithIndexCastUIOpCreate(self.ctx, self.fileLoc(span), current_value, mlir_index_type);
     h.appendOp(self.block, index_cast_op);
     return h.getResult(index_cast_op, 0);
+}
+
+/// Convert index value to default integer type (u256)
+pub fn convertIndexToIntegerType(
+    self: *const ExpressionLowerer,
+    index: c.MlirValue,
+    span: lib.ast.SourceSpan,
+) c.MlirValue {
+    const int_type = c.oraIntegerTypeCreate(self.ctx, constants.DEFAULT_INTEGER_BITS);
+    const index_type = c.oraValueGetType(index);
+
+    if (c.oraTypeEqual(index_type, int_type)) {
+        return index;
+    }
+
+    var current_value = expr_helpers.unwrapRefinementValue(
+        self.ctx,
+        self.block,
+        self.locations,
+        self.refinement_base_cache,
+        index,
+        span,
+    );
+    const current_type = c.oraValueGetType(current_value);
+
+    if (c.oraTypeIsAInteger(current_type)) {
+        const width = c.oraIntegerTypeGetWidth(current_type);
+        const signless_type = c.oraIntegerTypeCreate(self.ctx, width);
+        if (!c.oraTypeEqual(current_type, signless_type)) {
+            const signless_cast_op = c.oraArithBitcastOpCreate(self.ctx, self.fileLoc(span), current_value, signless_type);
+            h.appendOp(self.block, signless_cast_op);
+            current_value = h.getResult(signless_cast_op, 0);
+        }
+    }
+
+    const cast_op = c.oraArithIndexCastUIOpCreate(self.ctx, self.fileLoc(span), current_value, int_type);
+    h.appendOp(self.block, cast_op);
+    return h.getResult(cast_op, 0);
 }
 
 /// Create array index load with bounds checking

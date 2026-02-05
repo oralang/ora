@@ -52,6 +52,20 @@ pub fn bindFunctionLocals(table: *state.SymbolTable, fn_scope: *state.Scope, f: 
 }
 
 fn declareVar(table: *state.SymbolTable, scope: *state.Scope, v: ast.statements.VariableDeclNode) !void {
+    if (v.tuple_names) |names| {
+        for (names) |name| {
+            const sym = state.Symbol{
+                .name = name,
+                .kind = .Var,
+                .typ = v.type_info,
+                .span = v.span,
+                .mutable = (v.kind == .Var),
+                .region = v.region,
+            };
+            _ = try table.declare(scope, sym);
+        }
+        return;
+    }
     const resolved_type = v.type_info;
     const sym = state.Symbol{
         .name = v.name,

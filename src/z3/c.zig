@@ -118,6 +118,13 @@ pub const Z3_mk_extract = c.Z3_mk_extract;
 pub const Z3_mk_zero_ext = c.Z3_mk_zero_ext;
 pub const Z3_mk_sign_ext = c.Z3_mk_sign_ext;
 pub const Z3_mk_bool_sort = c.Z3_mk_bool_sort;
+pub const Z3_mk_string_sort = c.Z3_mk_string_sort;
+pub const Z3_is_string_sort = c.Z3_is_string_sort;
+pub const Z3_mk_string = c.Z3_mk_string;
+pub const Z3_mk_str_lt = c.Z3_mk_str_lt;
+pub const Z3_mk_str_le = c.Z3_mk_str_le;
+pub const Z3_mk_seq_concat = c.Z3_mk_seq_concat;
+pub const Z3_mk_seq_length = c.Z3_mk_seq_length;
 
 // Sort queries
 pub const Z3_get_sort = c.Z3_get_sort;

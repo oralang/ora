@@ -21,8 +21,12 @@ pub const Encoder = struct {
 
     /// Map from MLIR value to Z3 AST (for caching encoded values)
     value_map: std.HashMap(u64, z3.Z3_ast, std.hash_map.AutoContext(u64), std.hash_map.default_max_load_percentage),
+    /// Cache for old() encodings of MLIR values (separate from current-state encodings).
+    value_map_old: std.HashMap(u64, z3.Z3_ast, std.hash_map.AutoContext(u64), std.hash_map.default_max_load_percentage),
     /// Map from global storage name to Z3 AST (for consistent storage symbols)
     global_map: std.StringHashMap(z3.Z3_ast),
+    /// Map from global storage name to Z3 AST (for old() storage symbols)
+    global_old_map: std.StringHashMap(z3.Z3_ast),
     /// Keep Z3 symbol names alive for the life of the encoder.
     string_storage: std.ArrayList([]u8),
     /// Pending constraints emitted during encoding (e.g., error.unwrap validity).
@@ -35,7 +39,9 @@ pub const Encoder = struct {
             .context = context,
             .allocator = allocator,
             .value_map = std.HashMap(u64, z3.Z3_ast, std.hash_map.AutoContext(u64), std.hash_map.default_max_load_percentage).init(allocator),
+            .value_map_old = std.HashMap(u64, z3.Z3_ast, std.hash_map.AutoContext(u64), std.hash_map.default_max_load_percentage).init(allocator),
             .global_map = std.StringHashMap(z3.Z3_ast).init(allocator),
+            .global_old_map = std.StringHashMap(z3.Z3_ast).init(allocator),
             .string_storage = std.ArrayList([]u8){},
             .pending_constraints = std.ArrayList(z3.Z3_ast){},
             .error_union_sorts = std.HashMap(u64, ErrorUnionSort, std.hash_map.AutoContext(u64), std.hash_map.default_max_load_percentage).init(allocator),
@@ -48,6 +54,11 @@ pub const Encoder = struct {
             self.allocator.free(entry.key_ptr.*);
         }
         self.global_map.deinit();
+        var old_it = self.global_old_map.iterator();
+        while (old_it.next()) |entry| {
+            self.allocator.free(entry.key_ptr.*);
+        }
+        self.global_old_map.deinit();
         for (self.string_storage.items) |buf| {
             self.allocator.free(buf);
         }
@@ -55,6 +66,7 @@ pub const Encoder = struct {
         self.pending_constraints.deinit(self.allocator);
         self.error_union_sorts.deinit();
         self.value_map.deinit();
+        self.value_map_old.deinit();
     }
 
     //===----------------------------------------------------------------------===//
@@ -113,6 +125,20 @@ pub const Encoder = struct {
 
         const symbol = z3.Z3_mk_string_symbol(self.context.ctx, name_copy);
         return z3.Z3_mk_const(self.context.ctx, symbol, sort);
+    }
+
+    /// Get or create a global storage symbol for "old" values
+    fn getOrCreateOldGlobal(self: *Encoder, name: []const u8, sort: z3.Z3_sort) EncodeError!z3.Z3_ast {
+        if (self.global_old_map.get(name)) |existing| {
+            return existing;
+        }
+
+        const prefixed = try std.fmt.allocPrint(self.allocator, "old_{s}", .{name});
+        defer self.allocator.free(prefixed);
+        const symbol = try self.mkVariable(prefixed, sort);
+        const key = try self.allocator.dupe(u8, name);
+        try self.global_old_map.put(key, symbol);
+        return symbol;
     }
 
     fn mkSymbol(self: *Encoder, name: []const u8) EncodeError!z3.Z3_symbol {
@@ -290,6 +316,17 @@ pub const Encoder = struct {
         lhs: z3.Z3_ast,
         rhs: z3.Z3_ast,
     ) z3.Z3_ast {
+        const lhs_sort = z3.Z3_get_sort(self.context.ctx, lhs);
+        if (z3.Z3_is_string_sort(self.context.ctx, lhs_sort)) {
+            return switch (op) {
+                .Eq => z3.Z3_mk_eq(self.context.ctx, lhs, rhs),
+                .Ne => z3.Z3_mk_not(self.context.ctx, z3.Z3_mk_eq(self.context.ctx, lhs, rhs)),
+                .Lt => z3.Z3_mk_str_lt(self.context.ctx, lhs, rhs),
+                .Le => z3.Z3_mk_str_le(self.context.ctx, lhs, rhs),
+                .Gt => z3.Z3_mk_str_lt(self.context.ctx, rhs, lhs),
+                .Ge => z3.Z3_mk_str_le(self.context.ctx, rhs, lhs),
+            };
+        }
         return switch (op) {
             .Eq => z3.Z3_mk_eq(self.context.ctx, lhs, rhs),
             .Ne => z3.Z3_mk_not(self.context.ctx, z3.Z3_mk_eq(self.context.ctx, lhs, rhs)),
@@ -386,9 +423,15 @@ pub const Encoder = struct {
     // mlir Operation Encoding
     //===----------------------------------------------------------------------===//
 
+    const EncodeMode = enum { Current, Old };
+
     /// Encode an MLIR operation to Z3 AST
     /// This is the main entry point for encoding MLIR operations
     pub fn encodeOperation(self: *Encoder, mlir_op: mlir.MlirOperation) EncodeError!z3.Z3_ast {
+        return self.encodeOperationWithMode(mlir_op, .Current);
+    }
+
+    fn encodeOperationWithMode(self: *Encoder, mlir_op: mlir.MlirOperation, mode: EncodeMode) EncodeError!z3.Z3_ast {
         // get operation name
         const op_name_ref = mlir.oraOperationGetName(mlir_op);
         defer @import("mlir_c_api").freeStringRef(op_name_ref);
@@ -407,26 +450,41 @@ pub const Encoder = struct {
 
         for (0..num_ops) |i| {
             const operand_value = mlir.oraOperationGetOperand(mlir_op, @intCast(i));
-            operands[i] = try self.encodeValue(operand_value);
+            operands[i] = try self.encodeValueWithMode(operand_value, mode);
         }
 
         // dispatch based on operation name
-        return try self.dispatchOperation(op_name, operands, mlir_op);
+        return try self.dispatchOperation(op_name, operands, mlir_op, mode);
     }
 
     /// Encode an MLIR value to Z3 AST (with caching)
     pub fn encodeValue(self: *Encoder, mlir_value: mlir.MlirValue) EncodeError!z3.Z3_ast {
+        return self.encodeValueWithMode(mlir_value, .Current);
+    }
+
+    /// Encode an MLIR value to Z3 AST (with caching), using the provided mode.
+    fn encodeValueWithMode(self: *Encoder, mlir_value: mlir.MlirValue, mode: EncodeMode) EncodeError!z3.Z3_ast {
         // check cache first
         const value_id = @intFromPtr(mlir_value.ptr);
-        if (self.value_map.get(value_id)) |cached| {
-            return cached;
+        if (mode == .Current) {
+            if (self.value_map.get(value_id)) |cached| {
+                return cached;
+            }
+        } else {
+            if (self.value_map_old.get(value_id)) |cached| {
+                return cached;
+            }
         }
 
         if (mlir.oraValueIsAOpResult(mlir_value)) {
             const defining_op = mlir.oraOpResultGetOwner(mlir_value);
             if (!mlir.oraOperationIsNull(defining_op)) {
-                if (self.encodeOperation(defining_op)) |encoded| {
-                    try self.value_map.put(value_id, encoded);
+                if (self.encodeOperationWithMode(defining_op, mode)) |encoded| {
+                    if (mode == .Current) {
+                        try self.value_map.put(value_id, encoded);
+                    } else {
+                        try self.value_map_old.put(value_id, encoded);
+                    }
                     return encoded;
                 } else |err| {
                     return err;
@@ -442,6 +500,7 @@ pub const Encoder = struct {
         const encoded = try self.mkVariable(var_name, sort);
 
         // cache the result
+        // For block arguments, keep a single symbol shared across modes.
         try self.value_map.put(value_id, encoded);
         return encoded;
     }
@@ -454,6 +513,13 @@ pub const Encoder = struct {
         }
         if (mlir.oraTypeIsAddressType(mlir_type)) {
             return self.mkBitVectorSort(160);
+        }
+        {
+            const type_ctx = mlir.mlirTypeGetContext(mlir_type);
+            const string_ty = mlir.oraStringTypeGet(type_ctx);
+            if (!mlir.oraTypeIsNull(string_ty) and mlir.oraTypeEqual(mlir_type, string_ty)) {
+                return z3.Z3_mk_string_sort(self.context.ctx);
+            }
         }
 
         if (mlir.oraTypeIsIntegerType(mlir_type)) {
@@ -497,7 +563,7 @@ pub const Encoder = struct {
     }
 
     /// Dispatch operation to appropriate encoder based on operation name
-    fn dispatchOperation(self: *Encoder, op_name: []const u8, operands: []const z3.Z3_ast, mlir_op: mlir.MlirOperation) EncodeError!z3.Z3_ast {
+    fn dispatchOperation(self: *Encoder, op_name: []const u8, operands: []const z3.Z3_ast, mlir_op: mlir.MlirOperation, mode: EncodeMode) EncodeError!z3.Z3_ast {
         // comparison operations
         if (std.mem.eql(u8, op_name, "arith.cmpi")) {
             // get predicate from attributes
@@ -549,6 +615,20 @@ pub const Encoder = struct {
             else
                 256;
             return try self.encodeConstantOp(value, width);
+        }
+
+        if (std.mem.eql(u8, op_name, "ora.string.constant")) {
+            const value = self.getStringAttr(mlir_op, "value") orelse return error.UnsupportedOperation;
+            const value_z = try self.allocator.dupeZ(u8, value);
+            defer self.allocator.free(value_z);
+            return z3.Z3_mk_string(self.context.ctx, value_z.ptr);
+        }
+
+        if (std.mem.eql(u8, op_name, "ora.old")) {
+            const num_operands = mlir.oraOperationGetNumOperands(mlir_op);
+            if (num_operands < 1) return error.InvalidOperandCount;
+            const operand_value = mlir.oraOperationGetOperand(mlir_op, 0);
+            return self.encodeValueWithMode(operand_value, .Old);
         }
 
         if (std.mem.eql(u8, op_name, "arith.andi") or std.mem.eql(u8, op_name, "arith.ori") or std.mem.eql(u8, op_name, "arith.xori")) {
@@ -621,6 +701,9 @@ pub const Encoder = struct {
             const result_value = mlir.oraOperationGetResult(mlir_op, 0);
             const result_type = mlir.oraValueGetType(result_value);
             const result_sort = try self.encodeMLIRType(result_type);
+            if (mode == .Old) {
+                return try self.getOrCreateOldGlobal(global_name, result_sort);
+            }
             return try self.getOrCreateGlobal(global_name, result_sort);
         }
 
@@ -725,6 +808,68 @@ pub const Encoder = struct {
                 const result_sort = try self.encodeMLIRType(result_type);
                 const op_id = @intFromPtr(mlir_op.ptr);
                 return try self.mkUndefValue(result_sort, "memref_load", op_id);
+            }
+        }
+
+        if (std.mem.eql(u8, op_name, "tensor.extract")) {
+            const num_results = mlir.oraOperationGetNumResults(mlir_op);
+            if (num_results >= 1) {
+                const result_value = mlir.oraOperationGetResult(mlir_op, 0);
+                const result_type = mlir.oraValueGetType(result_value);
+                const result_sort = try self.encodeMLIRType(result_type);
+                const op_id = @intFromPtr(mlir_op.ptr);
+                return try self.mkUndefValue(result_sort, "tensor_extract", op_id);
+            }
+        }
+
+        if (std.mem.eql(u8, op_name, "ora.evm.origin")) {
+            const num_results = mlir.oraOperationGetNumResults(mlir_op);
+            if (num_results >= 1) {
+                const result_value = mlir.oraOperationGetResult(mlir_op, 0);
+                const result_type = mlir.oraValueGetType(result_value);
+                const result_sort = try self.encodeMLIRType(result_type);
+                const op_id = @intFromPtr(mlir_op.ptr);
+                return try self.mkUndefValue(result_sort, "evm_origin", op_id);
+            }
+        }
+
+        if (std.mem.eql(u8, op_name, "ora.evm.caller")) {
+            const num_results = mlir.oraOperationGetNumResults(mlir_op);
+            if (num_results >= 1) {
+                const result_value = mlir.oraOperationGetResult(mlir_op, 0);
+                const result_type = mlir.oraValueGetType(result_value);
+                const result_sort = try self.encodeMLIRType(result_type);
+                const op_id = @intFromPtr(mlir_op.ptr);
+                return try self.mkUndefValue(result_sort, "evm_caller", op_id);
+            }
+        }
+
+        if (std.mem.eql(u8, op_name, "ora.evm.timestamp")) {
+            const num_results = mlir.oraOperationGetNumResults(mlir_op);
+            if (num_results >= 1) {
+                const result_value = mlir.oraOperationGetResult(mlir_op, 0);
+                const result_type = mlir.oraValueGetType(result_value);
+                const result_sort = try self.encodeMLIRType(result_type);
+                const op_id = @intFromPtr(mlir_op.ptr);
+                return try self.mkUndefValue(result_sort, "evm_timestamp", op_id);
+            }
+        }
+
+        if (std.mem.eql(u8, op_name, "ora.tload")) {
+            const num_results = mlir.oraOperationGetNumResults(mlir_op);
+            if (num_results >= 1) {
+                const result_value = mlir.oraOperationGetResult(mlir_op, 0);
+                const result_type = mlir.oraValueGetType(result_value);
+                const result_sort = try self.encodeMLIRType(result_type);
+                const op_id = @intFromPtr(mlir_op.ptr);
+                return try self.mkUndefValue(result_sort, "tload", op_id);
+            }
+        }
+
+        if (std.mem.eql(u8, op_name, "ora.tstore")) {
+            const num_results = mlir.oraOperationGetNumResults(mlir_op);
+            if (num_results == 0) {
+                return self.encodeBoolConstant(true);
             }
         }
 

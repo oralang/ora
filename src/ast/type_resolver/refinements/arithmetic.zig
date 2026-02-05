@@ -13,6 +13,7 @@ const SourceSpan = @import("../../source_span.zig").SourceSpan;
 const BinaryOp = @import("../../expressions.zig").BinaryOp;
 const extract = @import("../utils/extraction.zig");
 const TypeResolutionError = @import("../mod.zig").TypeResolutionError;
+const log = @import("log");
 
 /// Validate arithmetic operation between refinement types
 /// Returns error if operation is invalid (e.g., scale mismatch)
@@ -466,6 +467,10 @@ pub fn inferMultiplicationResultType(
     rhs_ora: OraType,
     span: ?SourceSpan,
 ) ?TypeInfo {
+    log.debug(
+        "[inferMultiplicationResultType] lhs={s} rhs={s} at {any}\n",
+        .{ @tagName(lhs_ora), @tagName(rhs_ora), span },
+    );
     return switch (lhs_ora) {
         .scaled => |lhs_s| switch (rhs_ora) {
             .scaled => |rhs_s| {
@@ -498,6 +503,20 @@ pub fn inferMultiplicationResultType(
                 };
                 return TypeInfo.inferred(TypeCategory.Integer, min_value_type, span orelse SourceSpan{ .line = 0, .column = 0, .length = 0 });
             },
+            .max_value => |rhs_mv| {
+                // MinValue<u256, N> * MaxValue<u256, M> = MinValue<u256, N*M>
+                if (!OraType.equals(lhs_mv.base.*, rhs_mv.base.*)) {
+                    return null;
+                }
+                const result_min = lhs_mv.min * rhs_mv.max;
+                const min_value_type = OraType{
+                    .min_value = .{
+                        .base = lhs_mv.base,
+                        .min = result_min,
+                    },
+                };
+                return TypeInfo.inferred(TypeCategory.Integer, min_value_type, span orelse SourceSpan{ .line = 0, .column = 0, .length = 0 });
+            },
             else => null,
         },
         .max_value => |lhs_mv| switch (rhs_ora) {
@@ -514,6 +533,20 @@ pub fn inferMultiplicationResultType(
                     },
                 };
                 return TypeInfo.inferred(TypeCategory.Integer, max_value_type, span orelse SourceSpan{ .line = 0, .column = 0, .length = 0 });
+            },
+            .min_value => |rhs_mv| {
+                // maxValue<u256, M> * MinValue<u256, N> = MinValue<u256, M*N>
+                if (!OraType.equals(lhs_mv.base.*, rhs_mv.base.*)) {
+                    return null;
+                }
+                const result_min = lhs_mv.max * rhs_mv.min;
+                const min_value_type = OraType{
+                    .min_value = .{
+                        .base = lhs_mv.base,
+                        .min = result_min,
+                    },
+                };
+                return TypeInfo.inferred(TypeCategory.Integer, min_value_type, span orelse SourceSpan{ .line = 0, .column = 0, .length = 0 });
             },
             else => null,
         },

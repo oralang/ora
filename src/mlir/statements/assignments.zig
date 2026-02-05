@@ -586,12 +586,9 @@ pub fn lowerDestructuringPattern(self: *const StatementLowerer, pattern: lib.ast
         .Tuple => |elements| {
             // similar to struct destructuring but for tuple elements
             for (elements, 0..) |element_name, i| {
-                // create llvm.extractvalue operation for each tuple element
-                const result_ty = c.oraIntegerTypeCreate(self.ctx, constants.DEFAULT_INTEGER_BITS);
-                const indices = [_]u32{@intCast(i)};
-                const extract_op = self.ora_dialect.createLlvmExtractvalue(value, &indices, result_ty, loc);
-                h.appendOp(self.block, extract_op);
-                const element_value = h.getResult(extract_op, 0);
+                var field_buf: [16]u8 = undefined;
+                const field_name = std.fmt.bufPrint(&field_buf, "{d}", .{i}) catch "0";
+                const element_value = self.expr_lowerer.createStructFieldExtract(value, field_name, dummy_span);
 
                 if (self.local_var_map) |lvm| {
                     if (lvm.getLocalVar(element_name)) |var_value| {

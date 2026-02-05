@@ -30,10 +30,18 @@ const TypeContext = @import("mod.zig").TypeContext;
 const validation = @import("../validation/mod.zig");
 const refinements = @import("../refinements/mod.zig");
 const utils = @import("../utils/mod.zig");
+const extract = utils.extract;
 const FunctionNode = ast.FunctionNode;
 const log = @import("log");
 
 const CoreResolver = @import("mod.zig").CoreResolver;
+
+fn isRefinementOraType(ora_type: OraType) bool {
+    return switch (ora_type) {
+        .min_value, .max_value, .in_range, .scaled, .exact, .non_zero_address => true,
+        else => false,
+    };
+}
 
 fn isErrorUnionTypeInfo(type_info: TypeInfo) bool {
     if (type_info.category == .ErrorUnion) return true;
@@ -63,6 +71,8 @@ pub fn synthExpr(
         .FieldAccess => |*fa| synthFieldAccess(self, fa),
         .Index => |*idx| synthIndex(self, idx),
         .EnumLiteral => |*el| synthEnumLiteral(self, el),
+        .ArrayLiteral => |*arr| synthArrayLiteral(self, arr),
+        .Tuple => |*tuple_expr| synthTuple(self, tuple_expr),
         .Old => |*old_expr| synthOld(self, old_expr),
         .ErrorReturn => |*err_ret| synthErrorReturn(self, err_ret),
         .Try => |*try_expr| synthTry(self, try_expr),
@@ -175,6 +185,9 @@ pub fn checkExpr(
 
     // synthesize type first, then validate compatibility.
     // future optimization: use expected type during synthesis for better error messages.
+    if (expr.* == .ArrayLiteral and (expected.category == .Array or expected.category == .Slice)) {
+        return checkArrayLiteral(self, &expr.ArrayLiteral, expected);
+    }
     var typed = try synthExpr(self, expr);
     errdefer typed.deinit(self.allocator);
     log.debug("[checkExpr] Synthesized type: category={s}\n", .{@tagName(typed.ty.category)});
@@ -399,6 +412,107 @@ fn synthEnumLiteral(
         .span = el.span,
     };
     return synthFieldAccess(self, &field_expr);
+}
+
+fn synthTuple(
+    self: *CoreResolver,
+    tuple_expr: *ast.Expressions.TupleExpr,
+) TypeResolutionError!Typed {
+    var types = std.ArrayList(TypeInfo){};
+    defer types.deinit(self.allocator);
+
+    var combined_eff = Effect.pure();
+
+    for (tuple_expr.elements) |elem| {
+        var elem_typed = try synthExpr(self, elem);
+        defer elem_typed.deinit(self.allocator);
+        try types.append(self.allocator, elem_typed.ty);
+        mergeEffects(self.allocator, &combined_eff, takeEffect(&elem_typed));
+    }
+
+    const ora_types = try self.type_storage_allocator.alloc(OraType, types.items.len);
+    for (types.items, 0..) |t, i| {
+        var resolved = t;
+        if (resolved.ora_type == null and resolved.category == .Integer) {
+            resolved.ora_type = .u256;
+            resolved.source = .default;
+            types.items[i] = resolved;
+        }
+        if (resolved.ora_type == null) return TypeResolutionError.UnresolvedType;
+        ora_types[i] = resolved.ora_type.?;
+    }
+
+    const tuple_type = TypeInfo{
+        .category = .Tuple,
+        .ora_type = OraType{ .tuple = ora_types },
+        .source = .inferred,
+        .span = tuple_expr.span,
+    };
+
+    return Typed.init(tuple_type, combined_eff, self.allocator);
+}
+
+fn synthArrayLiteral(
+    self: *CoreResolver,
+    arr: *ast.Expressions.ArrayLiteralExpr,
+) TypeResolutionError!Typed {
+    var combined_eff = Effect.pure();
+
+    if (arr.elements.len == 0) {
+        return Typed.init(TypeInfo.unknown(), combined_eff, self.allocator);
+    }
+
+    var first_typed = try synthExpr(self, arr.elements[0]);
+    defer first_typed.deinit(self.allocator);
+    mergeEffects(self.allocator, &combined_eff, takeEffect(&first_typed));
+
+    if (first_typed.ty.ora_type == null) return TypeResolutionError.UnresolvedType;
+    const elem_ora = first_typed.ty.ora_type.?;
+
+    for (arr.elements[1..]) |elem| {
+        var elem_typed = try synthExpr(self, elem);
+        defer elem_typed.deinit(self.allocator);
+        mergeEffects(self.allocator, &combined_eff, takeEffect(&elem_typed));
+
+        if (elem_typed.ty.ora_type == null) return TypeResolutionError.UnresolvedType;
+        if (!OraType.equals(elem_typed.ty.ora_type.?, elem_ora)) {
+            return TypeResolutionError.TypeMismatch;
+        }
+    }
+
+    const elem_ptr = try self.type_storage_allocator.create(OraType);
+    elem_ptr.* = elem_ora;
+    const array_type = TypeInfo{
+        .category = .Array,
+        .ora_type = OraType{ .array = .{ .elem = elem_ptr, .len = @intCast(arr.elements.len) } },
+        .source = .inferred,
+        .span = arr.span,
+    };
+    return Typed.init(array_type, combined_eff, self.allocator);
+}
+
+fn checkArrayLiteral(
+    self: *CoreResolver,
+    arr: *ast.Expressions.ArrayLiteralExpr,
+    expected: TypeInfo,
+) TypeResolutionError!Typed {
+    const ora_ty = expected.ora_type orelse return TypeResolutionError.TypeMismatch;
+    const elem_ora = switch (ora_ty) {
+        .array => |arr_ty| arr_ty.elem.*,
+        .slice => |elem_ptr| elem_ptr.*,
+        else => return TypeResolutionError.TypeMismatch,
+    };
+    const elem_ty = TypeInfo.fromOraType(elem_ora);
+    arr.element_type = elem_ty;
+
+    var combined_eff = Effect.pure();
+    for (arr.elements) |elem| {
+        var checked = try checkExpr(self, elem, elem_ty);
+        defer checked.deinit(self.allocator);
+        mergeEffects(self.allocator, &combined_eff, takeEffect(&checked));
+    }
+
+    return Typed.init(expected, combined_eff, self.allocator);
 }
 
 fn synthAssignment(
@@ -751,6 +865,17 @@ fn synthBinary(
             )) |inferred| {
                 break :blk inferred;
             } else {
+                // If we couldn't infer a refinement result, drop refinement to base type.
+                // This avoids incorrectly narrowing types (e.g. MaxValue * MinValue).
+                if ((lhs_typed.ty.ora_type != null and isRefinementOraType(lhs_typed.ty.ora_type.?)) or
+                    (rhs_typed.ty.ora_type != null and isRefinementOraType(rhs_typed.ty.ora_type.?)))
+                {
+                    if (lhs_typed.ty.ora_type) |lhs_ot| {
+                        if (extract.extractBaseType(lhs_ot)) |base| {
+                            break :blk TypeInfo.inferred(TypeCategory.Integer, base, lhs_typed.ty.span);
+                        }
+                    }
+                }
                 // fallback to lhs type, but ensure it's resolved
                 var fallback_type = lhs_typed.ty;
                 if (fallback_type.ora_type) |ot| {
@@ -1062,6 +1187,25 @@ fn synthFieldAccess(
         return Typed.init(len_info, eff, self.allocator);
     }
 
+    // tuple field access (t.0, t.1, ...)
+    if (target_type.category == .Tuple) {
+        if (target_type.ora_type) |ora_ty| {
+            if (ora_ty == .tuple) {
+                const field_str = if (fa.field.len > 0 and fa.field[0] == '_') fa.field[1..] else fa.field;
+                const index = std.fmt.parseInt(usize, field_str, 10) catch return TypeResolutionError.TypeMismatch;
+                if (index >= ora_ty.tuple.len) return TypeResolutionError.TypeMismatch;
+                const elem_ora_type = ora_ty.tuple[index];
+                const elem_type_info = TypeInfo.inferred(elem_ora_type.getCategory(), elem_ora_type, fa.span);
+                var updated = elem_type_info;
+                updated.region = base_typed.ty.region;
+                fa.type_info = updated;
+
+                const eff = takeEffect(&base_typed);
+                return Typed.init(updated, eff, self.allocator);
+            }
+        }
+    }
+
     // check if the type is a struct
     if (target_type.category == .Struct) {
         // extract struct name from ora_type
@@ -1108,12 +1252,16 @@ fn synthIndex(
     // for array types, extract the element type
     var combined_eff = takeEffect(&target_typed);
     mergeEffects(self.allocator, &combined_eff, takeEffect(&index_typed));
-    if (target_type.category == .Array) {
+    if (target_type.category == .Array or target_type.category == .Slice) {
         // extract element type from ora_type
         if (target_type.ora_type) |ora_ty| {
-            if (ora_ty == .array) {
-                const elem_ora_type = ora_ty.array.elem.*;
-                const elem_type_info = TypeInfo.inferred(elem_ora_type.getCategory(), elem_ora_type, null);
+            const elem_ora_type = switch (ora_ty) {
+                .array => |arr_ty| arr_ty.elem.*,
+                .slice => |elem_ptr| elem_ptr.*,
+                else => null,
+            };
+            if (elem_ora_type) |elem_ora| {
+                const elem_type_info = TypeInfo.inferred(elem_ora.getCategory(), elem_ora, null);
                 var updated = elem_type_info;
                 updated.region = target_typed.ty.region;
                 return Typed.init(updated, combined_eff, self.allocator);

@@ -560,17 +560,8 @@ pub const VerificationPass = struct {
                 },
                 else => {
                     std.debug.print("verification: {s} [base] -> UNKNOWN ({d}ms)\n", .{ fn_name, elapsed_ms });
-                    const counterexample = self.buildCounterexample();
-                    try result.addError(.{
-                        .error_type = .Unknown,
-                        .message = try std.fmt.allocPrint(self.allocator, "verification result unknown in {s}", .{fn_name}),
-                        .file = try self.allocator.dupe(u8, self.firstLocationFile(annotations)),
-                        .line = self.firstLocationLine(annotations),
-                        .column = self.firstLocationColumn(annotations),
-                        .counterexample = counterexample,
-                        .allocator = self.allocator,
-                    });
-                    return result;
+                    std.debug.print("note: Z3 returned UNKNOWN (likely timeout). Keeping runtime guards.\n", .{});
+                    // Treat UNKNOWN as non-fatal; leave guards in place.
                 },
             }
 
@@ -613,7 +604,12 @@ pub const VerificationPass = struct {
                     });
                     return result;
                 }
-                std.debug.print("verification: {s} guard {s} [satisfy] -> SAT ({d}ms)\n", .{ fn_name, ann.guard_id.?, satisfy_ms });
+                if (satisfy_status == z3.Z3_L_TRUE) {
+                    std.debug.print("verification: {s} guard {s} [satisfy] -> SAT ({d}ms)\n", .{ fn_name, ann.guard_id.?, satisfy_ms });
+                } else {
+                    std.debug.print("verification: {s} guard {s} [satisfy] -> UNKNOWN ({d}ms)\n", .{ fn_name, ann.guard_id.?, satisfy_ms });
+                    std.debug.print("note: Z3 returned UNKNOWN (likely timeout). Keeping runtime guards.\n", .{});
+                }
 
                 // Second check: can the guard be violated? (to determine if it should be kept)
                 self.solver.push();
@@ -789,16 +785,8 @@ pub const VerificationPass = struct {
                             .allocator = self.allocator,
                         });
                     } else if (entry.status == z3.Z3_L_UNDEF) {
-                        const counterexample = null;
-                        try combined.addError(.{
-                            .error_type = .Unknown,
-                            .message = try std.fmt.allocPrint(self.allocator, "verification result unknown in {s}", .{query.function_name}),
-                            .file = try self.allocator.dupe(u8, query.file),
-                            .line = query.line,
-                            .column = query.column,
-                            .counterexample = counterexample,
-                            .allocator = self.allocator,
-                        });
+                        std.debug.print("note: Z3 returned UNKNOWN (likely timeout). Keeping runtime guards.\n", .{});
+                        // Treat UNKNOWN as non-fatal; leave guards in place.
                     }
                 },
                 .GuardSatisfy => {

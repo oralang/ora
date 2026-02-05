@@ -326,6 +326,17 @@ pub fn storeLValue(
                 }
             }
 
+            if (self.symbol_table) |st| {
+                if (st.lookupSymbol(ident.name)) |symbol| {
+                    if (std.mem.eql(u8, symbol.region, "tstore")) {
+                        const memory_manager = @import("../memory.zig").MemoryManager.init(self.ctx, self.ora_dialect);
+                        const store_op = memory_manager.createTStoreStore(value, ident.name, self.fileLoc(span));
+                        h.appendOp(self.block, store_op);
+                        return;
+                    }
+                }
+            }
+
             log.err("Cannot store to undefined variable: {s}\n", .{ident.name});
         },
         .FieldAccess => |field| {

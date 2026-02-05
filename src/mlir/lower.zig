@@ -133,6 +133,7 @@ pub const TypeSymbol = struct {
     pub const FieldInfo = struct {
         name: []const u8,
         field_type: c.MlirType,
+        ora_type_info: lib.ast.Types.TypeInfo,
         offset: ?usize,
     };
 
@@ -784,6 +785,13 @@ pub fn lowerFunctionsToModuleWithSemanticTable(ctx: c.MlirContext, nodes: []lib.
         }
     }
 
+    // Emit anonymous struct declarations (tuples/anonymous structs) discovered during lowering.
+    var anon_iter = type_mapper.iterAnonymousStructs();
+    while (anon_iter.next()) |entry| {
+        const op = decl_lowerer.lowerAnonymousStruct(entry.key_ptr.*, entry.value_ptr.*);
+        c.oraBlockAppendOwnedOperation(body, op);
+    }
+
     // deep-copy errors and warnings out of the error handler before it is deinitialized.
     const handler_errors = error_handler.getErrors();
     const handler_warnings = error_handler.getWarnings();
@@ -965,6 +973,7 @@ pub fn lowerFunctionsToModuleWithErrors(ctx: c.MlirContext, nodes: []lib.AstNode
                             fields_slice[i] = .{
                                 .name = field.name,
                                 .field_type = field_type,
+                                .ora_type_info = field.type_info,
                                 .offset = current_offset,
                             };
 
@@ -1441,6 +1450,13 @@ pub fn lowerFunctionsToModuleWithErrors(ctx: c.MlirContext, nodes: []lib.AstNode
                 }
             },
         }
+    }
+
+    // Emit anonymous struct declarations (tuples/anonymous structs) discovered during lowering.
+    var anon_iter = type_mapper.iterAnonymousStructs();
+    while (anon_iter.next()) |entry| {
+        const op = decl_lowerer.lowerAnonymousStruct(entry.key_ptr.*, entry.value_ptr.*);
+        c.oraBlockAppendOwnedOperation(body, op);
     }
 
     // deep-copy errors and warnings out of the error handler before it is deinitialized.

@@ -478,6 +478,11 @@ pub const ExpressionLowerer = struct {
         return expr_access.convertIndexToIndexType(self, index, span);
     }
 
+    /// Convert index value to default integer type (u256)
+    pub fn convertIndexToIntegerType(self: *const ExpressionLowerer, index: c.MlirValue, span: lib.ast.SourceSpan) c.MlirValue {
+        return expr_access.convertIndexToIntegerType(self, index, span);
+    }
+
     /// Create array index load with bounds checking
     pub fn createArrayIndexLoad(self: *const ExpressionLowerer, array: c.MlirValue, index: c.MlirValue, span: lib.ast.SourceSpan) c.MlirValue {
         return expr_access.createArrayIndexLoad(self, array, index, span);

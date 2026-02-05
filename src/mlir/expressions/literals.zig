@@ -42,10 +42,19 @@ fn lowerIntegerLiteral(
     locations: LocationTracker,
     int: lib.ast.Expressions.IntegerLiteral,
 ) c.MlirValue {
-    const ty = if (int.type_info.ora_type) |_|
-        type_mapper.toMlirType(int.type_info)
-    else
-        c.oraIntegerTypeCreate(ctx, constants.DEFAULT_INTEGER_BITS);
+    const ty = if (int.type_info.ora_type) |ora_ty| blk: {
+        const base_ora_ty = switch (ora_ty) {
+            .min_value => |mv| mv.base.*,
+            .max_value => |mv| mv.base.*,
+            .in_range => |ir| ir.base.*,
+            .scaled => |s| s.base.*,
+            .exact => |e| e.*,
+            else => ora_ty,
+        };
+        const mapped = type_mapper.toMlirType(.{ .ora_type = base_ora_ty });
+        if (!c.oraTypeIsNull(mapped)) break :blk mapped;
+        break :blk c.oraIntegerTypeCreate(ctx, constants.DEFAULT_INTEGER_BITS);
+    } else c.oraIntegerTypeCreate(ctx, constants.DEFAULT_INTEGER_BITS);
 
     var parsed: u256 = 0;
     var digit_count: u32 = 0;

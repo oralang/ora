@@ -278,10 +278,59 @@ pub const DeclarationParser = struct {
         const region = region_and_kind.region;
         const kind = region_and_kind.kind;
 
-        // tuple unpacking is not supported; use struct destructuring: let .{ a, b } = expr;
+        // tuple destructuring: let (a, b) = expr;
         if (self.base.check(.LeftParen)) {
-            try self.base.errorAtCurrent("Tuple destructuring is not supported; use '.{ ... }' instead");
-            return error.UnexpectedToken;
+            _ = self.base.advance();
+            var names = std.ArrayList([]const u8){};
+            defer names.deinit(self.base.arena.allocator());
+
+            if (!self.base.check(.RightParen)) {
+                repeat: while (true) {
+                    const name_token = try self.base.consume(.Identifier, "Expected variable name in tuple destructuring");
+                    try names.append(self.base.arena.allocator(), name_token.lexeme);
+                    if (!self.base.match(.Comma)) break :repeat;
+                    if (self.base.check(.RightParen)) break :repeat;
+                }
+            }
+
+            _ = try self.base.consume(.RightParen, "Expected ')' after tuple destructuring");
+
+            var var_type: ast.Types.TypeInfo = ast.Types.TypeInfo.unknown();
+            if (self.base.match(.Colon)) {
+                type_parser.base.current = self.base.current;
+                var_type = try type_parser.parseTypeWithContext(.Variable);
+                self.base.current = type_parser.base.current;
+            }
+
+            var initializer: ?*ast.Expressions.ExprNode = null;
+            if (self.base.match(.Equal)) {
+                expr_parser.base.current = self.base.current;
+                const expr = try expr_parser.parseExpression();
+                self.base.current = expr_parser.base.current;
+                const expr_ptr = try self.base.arena.createNode(ast.Expressions.ExprNode);
+                expr_ptr.* = expr;
+                initializer = expr_ptr;
+            } else if (!var_type.isResolved()) {
+                try self.base.errorAtCurrent("Tuple destructuring requires either a type annotation or an initializer");
+                return error.UnexpectedToken;
+            }
+
+            _ = try self.base.consume(.Semicolon, "Expected ';' after tuple destructuring");
+
+            const names_slice = try self.base.arena.createSlice([]const u8, names.items.len);
+            for (names.items, 0..) |n, i| names_slice[i] = n;
+
+            const empty_name = try self.base.arena.createString("");
+            return ast.Statements.VariableDeclNode{
+                .name = empty_name,
+                .region = region,
+                .kind = kind,
+                .locked = is_locked,
+                .type_info = var_type,
+                .value = initializer,
+                .span = ParserCommon.makeSpan(self.base.previous()),
+                .tuple_names = names_slice,
+            };
         }
 
         // regular variable declaration
@@ -301,6 +350,12 @@ pub const DeclarationParser = struct {
         if (self.base.match(.Equal)) {
             // use expression parser
             expr_parser.base.current = self.base.current;
+            const log = @import("log");
+            log.debug("[parseVariableDecl] initializer starts at token {d} type={s} lexeme='{s}'\n", .{
+                expr_parser.base.current,
+                @tagName(expr_parser.base.peek().type),
+                expr_parser.base.peek().lexeme,
+            });
             const expr = try expr_parser.parseExpression();
             self.base.current = expr_parser.base.current;
             const expr_ptr = try self.base.arena.createNode(ast.Expressions.ExprNode);

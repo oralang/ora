@@ -218,7 +218,8 @@ namespace mlir
 
             // Builtin types allowed to pass through.
             addConversion([](mlir::NoneType type) -> Type { return type; });
-            addConversion([](mlir::IndexType type) -> Type { return type; });
+            addConversion([](mlir::IndexType type) -> Type
+                          { return sir::U256Type::get(type.getContext()); });
 
             // Tensor types pass through unless tensor lowering is enabled.
             addConversion([this](mlir::RankedTensorType type) -> Type
@@ -394,12 +395,6 @@ namespace mlir
                                                 }
                                                 return value;
                                             }
-                                        }
-
-                                        // Convert sir.u256 to index when needed.
-                                        if (llvm::isa<mlir::IndexType>(type) && llvm::isa<sir::U256Type>(input.getType()))
-                                        {
-                                            return builder.create<sir::BitcastOp>(loc, type, input);
                                         }
 
                                         // Convert sir.u256 to sir.ptr<1> when required by target types
@@ -632,11 +627,6 @@ namespace mlir
                                                  return builder.create<sir::BitcastOp>(loc, type, input);
                                              }
                                          }
-
-                                        if (llvm::isa<mlir::IndexType>(type) && llvm::isa<sir::U256Type>(input.getType()))
-                                        {
-                                            return builder.create<sir::BitcastOp>(loc, type, input);
-                                        }
 
                                         if (auto errType = dyn_cast<ora::ErrorUnionType>(type))
                                         {

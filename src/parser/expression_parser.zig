@@ -55,7 +55,8 @@ pub const ExpressionParser = struct {
 
     /// Parse expression with precedence climbing (entry point)
     pub fn parseExpression(self: *ExpressionParser) ParserError!ast.Expressions.ExprNode {
-        return precedence.parseComma(self);
+        // Ora doesn't use the comma operator for expressions; treat commas as list separators.
+        return precedence.parseAssignment(self);
     }
 
     /// Parse an expression that must NOT consume top-level commas.
@@ -254,7 +255,14 @@ pub const ExpressionParser = struct {
 
     /// Parse field access (obj.field)
     fn parseFieldAccess(self: *ExpressionParser, target: ast.Expressions.ExprNode) ParserError!ast.Expressions.ExprNode {
-        const name_token = try self.base.consume(.Identifier, "Expected property name after '.'");
+        var name_token: Token = undefined;
+        var is_numeric = false;
+        if (self.base.check(.IntegerLiteral)) {
+            name_token = self.base.advance();
+            is_numeric = true;
+        } else {
+            name_token = try self.base.consume(.Identifier, "Expected property name after '.'");
+        }
 
         // check if this might be an enum literal (EnumType.VariantName)
         // but if followed by '=' (assignment), treat as field access (L-value)
@@ -263,7 +271,7 @@ pub const ExpressionParser = struct {
             self.base.check(.StarEqual) or self.base.check(.SlashEqual) or
             self.base.check(.PercentEqual);
 
-        if (target == .Identifier) {
+        if (!is_numeric and target == .Identifier) {
             const enum_name = target.Identifier.name;
 
             // don't treat standard library and module access as enum literals
@@ -489,7 +497,14 @@ pub const ExpressionParser = struct {
 
             // handle field access (identifier.field) or enum literal (EnumType.VariantName)
             while (self.base.match(.Dot)) {
-                const field_token = try self.base.consume(.Identifier, "Expected field name after '.'");
+                var field_token: Token = undefined;
+                var is_numeric = false;
+                if (self.base.check(.IntegerLiteral)) {
+                    field_token = self.base.advance();
+                    is_numeric = true;
+                } else {
+                    field_token = try self.base.consume(.Identifier, "Expected field name after '.'");
+                }
 
                 // check if this might be an enum literal (EnumType.VariantName)
                 // but if followed by '=' (assignment), treat as field access (L-value)
@@ -498,7 +513,7 @@ pub const ExpressionParser = struct {
                     self.base.check(.StarEqual) or self.base.check(.SlashEqual) or
                     self.base.check(.PercentEqual);
 
-                if (current_expr == .Identifier) {
+                if (!is_numeric and current_expr == .Identifier) {
                     const enum_name = current_expr.Identifier.name;
 
                     // don't treat standard library and module access as enum literals
@@ -587,12 +602,6 @@ pub const ExpressionParser = struct {
             return try complex.parseSwitchExpression(self);
         }
 
-        // parentheses
-        if (self.base.match(.LeftParen)) {
-            const expr = try self.parseExpression();
-            _ = try self.base.consume(.RightParen, "Expected ')' after expression");
-            return expr;
-        }
         // quantified expressions: forall/exists i: T (where predicate)? => body
         if (self.base.match(.Forall) or self.base.match(.Exists)) {
             const quant_token = self.base.previous();

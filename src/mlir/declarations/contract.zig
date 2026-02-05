@@ -35,6 +35,7 @@ fn lowerContractTypes(self: *const DeclarationLowerer, block: c.MlirBlock, contr
                                 fields_slice[i] = .{
                                     .name = field.name,
                                     .field_type = field_type,
+                                    .ora_type_info = field.type_info,
                                     .offset = current_offset,
                                 };
                                 current_offset += 32;

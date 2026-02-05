@@ -87,7 +87,7 @@ contract ErrorHandlingTest {
     }
     
     // Function with custom error handling logic
-    pub fn batch_transfer(recipients: slice[address], amounts: slice[u256]) -> struct { success_count: u256, failed_count: u256 } {
+    pub fn batch_transfer(recipients: slice[address], amounts: slice[u256]) -> u256 {
         var success_count: u256 = 0;
         var failed_count: u256 = 0;
         
@@ -108,10 +108,8 @@ contract ErrorHandlingTest {
             }
         }
         
-        return .{
-            .success_count = success_count,
-            .failed_count = failed_count
-        };
+        // ABI return types are limited; return success_count for now.
+        return success_count;
     }
     
     // Function with inline error creation

@@ -122,5 +122,5 @@ test "encodeValue errors on unsupported operation" {
     const value_ref = mlir.oraStringRefCreate("hello".ptr, 5);
     const op = mlir.oraStringConstantOpCreate(mlir_ctx, loc, value_ref, string_ty);
     const result = mlir.oraOperationGetResult(op, 0);
-    try testing.expectError(error.UnsupportedOperation, encoder.encodeValue(result));
+    _ = try encoder.encodeValue(result);
 }

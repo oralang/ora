@@ -1,5 +1,7 @@
 // AUTO-GENERATED. Do not edit by hand.
-// INPUT: ora-example/comptime/comptime_folds.ora
+// INPUT: ora-example/tuples/tuple_basics.ora
 // CHECK-NOT: builtin.unrealized_conversion_cast
 // CHECK-LABEL: func.func @tuple_access
 // CHECK-LABEL: func.func @tuple_destructure
+// CHECK-LABEL: func.func @tuple_nested_access
+// CHECK-LABEL: func.func @tuple_runtime

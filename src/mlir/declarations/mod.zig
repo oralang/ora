@@ -69,6 +69,7 @@ pub const DeclarationLowerer = struct {
     pub const lowerFunction = @import("function.zig").lowerFunction;
     pub const lowerContract = @import("contract.zig").lowerContract;
     pub const lowerStruct = @import("types.zig").lowerStruct;
+    pub const lowerAnonymousStruct = @import("types.zig").lowerAnonymousStruct;
     pub const lowerEnum = @import("types.zig").lowerEnum;
     pub const createStructType = @import("types.zig").createStructType;
     pub const createEnumType = @import("types.zig").createEnumType;

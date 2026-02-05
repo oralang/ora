@@ -1,0 +1,21 @@
+contract TupleBasics {
+    pub fn tuple_access() -> u256 {
+        let t: (u256, u256) = (10, 20);
+        return t.0 + t.1;
+    }
+
+    pub fn tuple_destructure() -> u256 {
+        let (a, b): (u256, u256) = (3, 4);
+        return a + b;
+    }
+
+    pub fn tuple_nested_access() -> u256 {
+        let t: (u256, (u256, u256)) = (5, (6, 7));
+        return t.1.0 + t.1.1;
+    }
+
+    pub fn tuple_runtime(x: u256, y: u256) -> u256 {
+        let t: (u256, u256) = (x, y);
+        return t.0 + t.1;
+    }
+}

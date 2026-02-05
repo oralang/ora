@@ -24,6 +24,7 @@ const ParserError = @import("parser_core.zig").ParserError;
 const TypeInfo = ast.Types.TypeInfo;
 const OraType = ast.Types.OraType;
 const TypeCategory = ast.TypeCategory;
+const SourceSpan = ast.SourceSpan;
 
 /// Represents the context in which a type is being parsed
 pub const TypeParseContext = enum {
@@ -87,6 +88,11 @@ pub const TypeParser = struct {
                 try self.base.errorAtCurrent("'void' can only be used as a function return type");
                 return error.UnexpectedToken;
             }
+        }
+
+        // tuple type: (T1, T2, ...)
+        if (self.base.match(.LeftParen)) {
+            return try self.parseTupleType(context, span);
         }
 
         // handle complex types
@@ -169,6 +175,57 @@ pub const TypeParser = struct {
 
         try self.base.errorAtCurrent("Expected type");
         return error.UnexpectedToken;
+    }
+
+    /// Parse tuple type: (T1, T2, ...)
+    fn parseTupleType(self: *TypeParser, context: TypeParseContext, span: SourceSpan) ParserError!TypeInfo {
+        // empty tuple: ()
+        if (self.base.check(.RightParen)) {
+            _ = try self.base.consume(.RightParen, "Expected ')' after tuple type");
+            const empty = try self.base.arena.createSlice(OraType, 0);
+            return TypeInfo{
+                .category = .Tuple,
+                .ora_type = OraType{ .tuple = empty },
+                .source = .explicit,
+                .span = span,
+            };
+        }
+
+        const first = try self.parseTypeWithContext(context);
+
+        // single type in parens: (T) -> T
+        if (!self.base.match(.Comma)) {
+            _ = try self.base.consume(.RightParen, "Expected ')' after type");
+            return first;
+        }
+
+        var types = std.ArrayList(TypeInfo){};
+        defer types.deinit(self.base.arena.allocator());
+        try types.append(self.base.arena.allocator(), first);
+
+        if (!self.base.check(.RightParen)) {
+            repeat: while (true) {
+                const next = try self.parseTypeWithContext(context);
+                try types.append(self.base.arena.allocator(), next);
+                if (!self.base.match(.Comma)) break :repeat;
+                if (self.base.check(.RightParen)) break :repeat;
+            }
+        }
+
+        _ = try self.base.consume(.RightParen, "Expected ')' after tuple elements");
+
+        const ora_types = try self.base.arena.createSlice(OraType, types.items.len);
+        for (types.items, 0..) |t, i| {
+            if (t.ora_type == null) return ParserError.UnresolvedType;
+            ora_types[i] = t.ora_type.?;
+        }
+
+        return TypeInfo{
+            .category = .Tuple,
+            .ora_type = OraType{ .tuple = ora_types },
+            .source = .explicit,
+            .span = span,
+        };
     }
 
     /// Parse map type: map[K, V]

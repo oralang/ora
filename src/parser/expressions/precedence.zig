@@ -3,16 +3,15 @@
 // ============================================================================
 //
 // Implements the precedence climbing algorithm for binary operators.
-// Handles all precedence levels from comma (lowest) to unary (highest).
+// Handles all precedence levels from assignment (lowest) to unary (highest).
 //
 // PRECEDENCE LEVELS (low to high):
-//   Comma → Assignment → Logical OR/AND → Bitwise OR/XOR/AND →
+//   Assignment → Logical OR/AND → Bitwise OR/XOR/AND →
 //   Equality → Comparison → Shifts → Add/Sub → Mul/Div/Mod →
 //   Exponentiation → Unary
 //
 // ============================================================================
 
-const std = @import("std");
 const ast = @import("../../ast.zig");
 const common = @import("../common.zig");
 const ParserCommon = common.ParserCommon;
@@ -20,33 +19,6 @@ const ParserError = @import("../parser_core.zig").ParserError;
 
 // Forward declaration - ExpressionParser is defined in expression_parser.zig
 const ExpressionParser = @import("../expression_parser.zig").ExpressionParser;
-
-/// Parse comma expressions (lowest precedence)
-pub fn parseComma(parser: *ExpressionParser) ParserError!ast.Expressions.ExprNode {
-    var expr = try parseAssignment(parser);
-
-    while (parser.base.match(.Comma)) {
-        const comma_token = parser.base.previous();
-        const right = try parseAssignment(parser);
-
-        const left_ptr = try parser.base.arena.createNode(ast.Expressions.ExprNode);
-        left_ptr.* = expr;
-        const right_ptr = try parser.base.arena.createNode(ast.Expressions.ExprNode);
-        right_ptr.* = right;
-
-        expr = ast.Expressions.ExprNode{
-            .Binary = ast.Expressions.BinaryExpr{
-                .lhs = left_ptr,
-                .operator = .Comma,
-                .rhs = right_ptr,
-                .type_info = ast.Types.TypeInfo.unknown(), // Result type will be resolved later
-                .span = parser.base.spanFromToken(comma_token),
-            },
-        };
-    }
-
-    return expr;
-}
 
 /// Parse assignment expressions (precedence 14)
 pub fn parseAssignment(parser: *ExpressionParser) ParserError!ast.Expressions.ExprNode {

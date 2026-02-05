@@ -272,6 +272,95 @@ fn resolveVariableDecl(
         }
     }
 
+    if (var_decl.tuple_names) |names| {
+        if (var_decl.value == null) {
+            return TypeResolutionError.UnresolvedType;
+        }
+        const tuple_ora = var_decl.type_info.ora_type orelse return TypeResolutionError.UnresolvedType;
+        if (tuple_ora != .tuple) {
+            return TypeResolutionError.TypeMismatch;
+        }
+        if (tuple_ora.tuple.len != names.len) {
+            return TypeResolutionError.TypeMismatch;
+        }
+
+        if (var_decl.kind != .Var) {
+            const const_result = self.evaluateConstantExpressionWithLookup(var_decl.value.?) catch .NotConstant;
+            if (const_result == .Array) {
+                if (self.current_scope) |scope| {
+                    const elems = const_result.Array;
+                    if (elems.len == names.len) {
+                        for (names, 0..) |name, idx| {
+                            try self.setComptimeValue(scope, name, elems[idx]);
+                        }
+                    }
+                }
+            }
+        }
+
+        if (self.current_scope) |scope| {
+            for (names, 0..) |name, idx| {
+                const elem_ora = tuple_ora.tuple[idx];
+                var elem_type = TypeInfo.fromOraType(elem_ora);
+                elem_type.region = var_decl.region;
+
+                var stored_type = elem_type;
+                var typ_owned_flag = false;
+                const needs_copy = switch (elem_ora) {
+                    .min_value, .max_value, .in_range, .scaled, .exact, .slice, .error_union, .array, .map, .tuple, .anonymous_struct, ._union, .function => true,
+                    else => false,
+                };
+
+                if (needs_copy) {
+                    if (copyOraTypeOwned(self.type_storage_allocator, elem_ora)) |copied_ora_type| {
+                        const derived_category = copied_ora_type.getCategory();
+                        stored_type = TypeInfo{
+                            .category = derived_category,
+                            .ora_type = copied_ora_type,
+                            .source = elem_type.source,
+                            .span = elem_type.span,
+                            .region = var_decl.region,
+                        };
+                        typ_owned_flag = false;
+                    } else |_| {
+                        return TypeResolutionError.UnresolvedType;
+                    }
+                } else {
+                    stored_type.category = elem_ora.getCategory();
+                    stored_type.region = var_decl.region;
+                }
+
+                if (!stored_type.isResolved()) {
+                    return TypeResolutionError.UnresolvedType;
+                }
+
+                const symbol = semantics.state.Symbol{
+                    .name = name,
+                    .kind = .Var,
+                    .typ = stored_type,
+                    .span = var_decl.span,
+                    .mutable = var_decl.kind == .Var,
+                    .region = var_decl.region,
+                    .typ_owned = typ_owned_flag,
+                };
+
+                if (self.symbol_table.updateSymbolType(scope, name, stored_type, typ_owned_flag)) |_| {
+                    // updated existing symbol
+                } else |err| switch (err) {
+                    error.SymbolNotFound => {
+                        var new_symbol = symbol;
+                        new_symbol.typ_owned = typ_owned_flag and self.symbol_table.isFunctionScope(scope);
+                        if (self.symbol_table.declare(scope, new_symbol)) |_| {} else |_| {
+                            return TypeResolutionError.UnresolvedType;
+                        }
+                    },
+                }
+            }
+        }
+
+        return Typed.init(var_decl.type_info, init_effect, self.allocator);
+    }
+
     // add variable to symbol table AFTER type is resolved
     // ensure type is resolved - if it has ora_type, derive category if needed
     var final_type = var_decl.type_info;
@@ -1658,16 +1747,19 @@ fn validateLiteralAgainstRefinement(
     switch (target_ora_type) {
         .min_value => |mv| {
             if (constant_value < mv.min) {
+                log.debug("[validateLiteralAgainstRefinement] MinValue mismatch: value={d} min={d} at {any}\n", .{ constant_value, mv.min, expr.* });
                 return TypeResolutionError.TypeMismatch;
             }
         },
         .max_value => |mv| {
             if (constant_value > mv.max) {
+                log.debug("[validateLiteralAgainstRefinement] MaxValue mismatch: value={d} max={d} at {any}\n", .{ constant_value, mv.max, expr.* });
                 return TypeResolutionError.TypeMismatch;
             }
         },
         .in_range => |ir| {
             if (constant_value < ir.min or constant_value > ir.max) {
+                log.debug("[validateLiteralAgainstRefinement] InRange mismatch: value={d} min={d} max={d} at {any}\n", .{ constant_value, ir.min, ir.max, expr.* });
                 return TypeResolutionError.TypeMismatch;
             }
         },

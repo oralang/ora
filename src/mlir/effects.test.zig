@@ -35,7 +35,7 @@ test "mlir emits storage read effects on functions" {
     defer allocator.free(sem.diagnostics);
     defer sem.symbols.deinit();
 
-    var type_resolver = TypeResolver.init(allocator, allocator, &sem.symbols);
+    var type_resolver = TypeResolver.init(allocator, arena.allocator(), &sem.symbols);
     defer type_resolver.deinit();
     try type_resolver.resolveTypes(nodes);
 
@@ -90,7 +90,7 @@ test "mlir emits storage readwrite effects on functions" {
     defer allocator.free(sem.diagnostics);
     defer sem.symbols.deinit();
 
-    var type_resolver = TypeResolver.init(allocator, allocator, &sem.symbols);
+    var type_resolver = TypeResolver.init(allocator, arena.allocator(), &sem.symbols);
     defer type_resolver.deinit();
     try type_resolver.resolveTypes(nodes);
 

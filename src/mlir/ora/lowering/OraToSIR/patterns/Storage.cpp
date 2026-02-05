@@ -164,9 +164,7 @@ static uint64_t getElementWordCount(Type elementType)
 
 static Value buildIndexFromU256(ConversionPatternRewriter &rewriter, Location loc, Value value)
 {
-    if (llvm::isa<mlir::IndexType>(value.getType()))
-        return value;
-    return rewriter.create<sir::BitcastOp>(loc, rewriter.getIndexType(), value);
+    return ensureU256Value(rewriter, loc, value);
 }
 
 // -----------------------------------------------------------------------------

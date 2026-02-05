@@ -16,6 +16,87 @@ const log = @import("log");
 pub fn lowerVariableDecl(self: *const StatementLowerer, var_decl: *const lib.ast.Statements.VariableDeclNode) LoweringError!void {
     const loc = self.fileLoc(var_decl.span);
 
+    if (var_decl.tuple_names) |names| {
+        if (var_decl.region != .Stack) {
+            return LoweringError.InvalidMemoryRegion;
+        }
+        const tuple_ora = var_decl.type_info.ora_type orelse return LoweringError.TypeMismatch;
+        if (tuple_ora != .tuple) {
+            return LoweringError.TypeMismatch;
+        }
+        if (var_decl.value == null) {
+            return LoweringError.MalformedExpression;
+        }
+        if (tuple_ora.tuple.len != names.len) {
+            return LoweringError.TypeMismatch;
+        }
+
+        const init_value = helpers.lowerValueWithImplicitTry(@constCast(self), &var_decl.value.?.*, var_decl.type_info);
+
+        for (names, 0..) |name, idx| {
+            const elem_ora = tuple_ora.tuple[idx];
+            var elem_type_info = lib.ast.type_info.TypeInfo.fromOraType(elem_ora);
+            elem_type_info.region = var_decl.region;
+            const elem_mlir_type = self.type_mapper.toMlirType(elem_type_info);
+
+            var field_name_buf: [16]u8 = undefined;
+            const field_name = std.fmt.bufPrint(&field_name_buf, "{d}", .{idx}) catch "0";
+            var element_value = self.expr_lowerer.createStructFieldExtract(init_value, field_name, var_decl.span);
+            element_value = self.expr_lowerer.convertToType(element_value, elem_mlir_type, var_decl.span);
+
+            const is_aggregate = isAggregateType(elem_ora);
+            const is_scalar = isScalarValueType(elem_ora);
+            const prefer_ssa = if (self.local_var_map) |lvm|
+                if (lvm.getLocalVarKind(name)) |kind| kind == .SSA else false
+            else
+                false;
+            const needs_memref = self.force_stack_memref or ((var_decl.kind == .Var) and (is_aggregate or (is_scalar and !prefer_ssa)));
+
+            if (needs_memref) {
+                const rank: u32 = if (elem_ora == .array) 1 else 0;
+                var shape_buf: [1]i64 = .{0};
+                const shape: ?*const i64 = if (elem_ora == .array) blk: {
+                    shape_buf[0] = @intCast(elem_ora.array.len);
+                    break :blk &shape_buf[0];
+                } else null;
+                const memref_type = h.memRefType(self.ctx, elem_mlir_type, rank, shape, h.nullAttr(), h.nullAttr());
+                const alloca_op = self.ora_dialect.createMemrefAlloca(memref_type, loc);
+                h.appendOp(self.block, alloca_op);
+                const memref = h.getResult(alloca_op, 0);
+
+                var store_value = element_value;
+                store_value = try helpers.insertRefinementGuard(self, store_value, elem_ora, var_decl.span, name, false);
+                const element_type = c.oraShapedTypeGetElementType(memref_type);
+                store_value = self.expr_lowerer.convertToType(store_value, element_type, var_decl.span);
+                const store_op = self.ora_dialect.createMemrefStore(store_value, memref, &[_]c.MlirValue{}, loc);
+                h.appendOp(self.block, store_op);
+
+                if (self.local_var_map) |lvm| {
+                    lvm.addLocalVar(name, memref) catch return LoweringError.OutOfMemory;
+                }
+                if (self.symbol_table) |st| {
+                    st.addSymbol(name, memref_type, var_decl.region, null, var_decl.kind) catch {
+                        return LoweringError.OutOfMemory;
+                    };
+                    st.updateSymbolValue(name, memref) catch {};
+                }
+            } else {
+                element_value = try helpers.insertRefinementGuard(self, element_value, elem_ora, var_decl.span, name, false);
+                if (self.local_var_map) |lvm| {
+                    lvm.addLocalVar(name, element_value) catch return LoweringError.OutOfMemory;
+                }
+                if (self.symbol_table) |st| {
+                    st.addSymbol(name, elem_mlir_type, var_decl.region, null, var_decl.kind) catch {
+                        return LoweringError.OutOfMemory;
+                    };
+                    st.updateSymbolValue(name, element_value) catch {};
+                }
+            }
+        }
+
+        return;
+    }
+
     // print variable type info before lowering
     log.debug("[BEFORE MLIR] Variable: {s}\n", .{var_decl.name});
     log.debug("  isResolved: {any}\n", .{var_decl.type_info.isResolved()});
@@ -134,7 +215,8 @@ pub fn lowerStackVariableDecl(self: *const StatementLowerer, var_decl: *const li
         if (lvm.getLocalVarKind(var_decl.name)) |kind| kind == .SSA else false
     else
         false;
-    const needs_memref = self.force_stack_memref or ((var_decl.kind == .Var) and (is_aggregate or (is_scalar and !prefer_ssa)));
+    const force_array_memref = if (var_decl.type_info.ora_type) |ora_type| ora_type == .array else false;
+    const needs_memref = self.force_stack_memref or force_array_memref or ((var_decl.kind == .Var) and (is_aggregate or (is_scalar and !prefer_ssa)));
 
     log.debug(
         "[lowerStackVariableDecl] {s}: kind={any}, is_aggregate={}, is_scalar={}, force_memref={}, needs_memref={}\n",
@@ -149,6 +231,43 @@ pub fn lowerStackVariableDecl(self: *const StatementLowerer, var_decl: *const li
             @panic("lowerStackVariableDecl: ora_type is null for aggregate - this indicates a type system bug");
         };
 
+        // If we already have a memref/shaped initializer for an array, reuse it directly.
+        if (ora_type == .array) {
+            if (var_decl.value) |init_expr| {
+                if (init_expr.* == .ArrayLiteral) {
+                    const init_value = helpers.lowerValueWithImplicitTry(@constCast(self), &init_expr.*, var_decl.type_info);
+                    if (self.local_var_map) |lvm| {
+                        lvm.addLocalVar(var_decl.name, init_value) catch {
+                            log.debug("ERROR: Failed to add local variable memref to map: {s}\n", .{var_decl.name});
+                            return LoweringError.OutOfMemory;
+                        };
+                    }
+                    if (self.symbol_table) |st| {
+                        st.updateSymbolValue(var_decl.name, init_value) catch {
+                            log.debug("WARNING: Failed to update symbol value: {s}\n", .{var_decl.name});
+                        };
+                    }
+                    return;
+                }
+                const init_value = helpers.lowerValueWithImplicitTry(@constCast(self), &init_expr.*, var_decl.type_info);
+                const init_type = c.oraValueGetType(init_value);
+                if (c.oraTypeIsAMemRef(init_type) or c.oraTypeIsAShaped(init_type)) {
+                    if (self.local_var_map) |lvm| {
+                        lvm.addLocalVar(var_decl.name, init_value) catch {
+                            log.debug("ERROR: Failed to add local variable memref to map: {s}\n", .{var_decl.name});
+                            return LoweringError.OutOfMemory;
+                        };
+                    }
+                    if (self.symbol_table) |st| {
+                        st.updateSymbolValue(var_decl.name, init_value) catch {
+                            log.debug("WARNING: Failed to update symbol value: {s}\n", .{var_decl.name});
+                        };
+                    }
+                    return;
+                }
+            }
+        }
+
         // arrays need rank 1 with shape, other aggregates and scalar accumulators use rank 0
         const rank: u32 = if (ora_type == .array) 1 else 0;
         var shape_buf: [1]i64 = .{0};
@@ -157,7 +276,11 @@ pub fn lowerStackVariableDecl(self: *const StatementLowerer, var_decl: *const li
             break :blk &shape_buf[0];
         } else null;
 
-        const memref_type = h.memRefType(self.ctx, mlir_type, rank, shape, h.nullAttr(), h.nullAttr());
+        const memref_elem_type = if (ora_type == .array)
+            self.type_mapper.toMlirType(.{ .ora_type = ora_type.array.elem.* })
+        else
+            mlir_type;
+        const memref_type = h.memRefType(self.ctx, memref_elem_type, rank, shape, h.nullAttr(), h.nullAttr());
 
         // allocate memory on the stack
         const alloca_op = self.ora_dialect.createMemrefAlloca(memref_type, loc);

@@ -1,0 +1,19 @@
+contract LoopBasics {
+    pub fn sum_range(n: u256) -> u256 {
+        var sum: u256 = 0;
+        for (0..n) |value, _| {
+            sum = sum + value;
+        }
+        return sum;
+    }
+
+    pub fn sum_while(n: u256) -> u256 {
+        var i: u256 = 0;
+        var sum: u256 = 0;
+        while (i < n) {
+            sum = sum + i;
+            i += 1;
+        }
+        return sum;
+    }
+}

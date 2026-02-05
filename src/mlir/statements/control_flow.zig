@@ -751,7 +751,6 @@ pub fn lowerWhile(self: *const StatementLowerer, while_stmt: *const lib.ast.Stat
     body_expr_lowerer.current_function_return_type = self.current_function_return_type;
     body_expr_lowerer.current_function_return_type_info = self.current_function_return_type_info;
     body_expr_lowerer.in_try_block = self.in_try_block;
-
     // lower loop invariants if present (in body block, using body expression lowerer)
     for (while_stmt.invariants) |*invariant| {
         const invariant_value = body_expr_lowerer.lowerExpression(invariant);
@@ -798,9 +797,89 @@ pub fn lowerWhile(self: *const StatementLowerer, while_stmt: *const lib.ast.Stat
 /// Lower for loop statements using scf.for with proper iteration variables
 pub fn lowerFor(self: *const StatementLowerer, for_stmt: *const lib.ast.Statements.ForLoopNode) LoweringError!void {
     const loc = self.fileLoc(for_stmt.span);
+    const iterable_expr = blk: {
+        if (for_stmt.iterable == .Tuple) {
+            const tuple_expr = for_stmt.iterable.Tuple;
+            log.debug("[lowerFor] iterable tuple len={d}", .{tuple_expr.elements.len});
+            if (tuple_expr.elements.len >= 1) {
+                if (tuple_expr.elements.len > 1) {
+                    log.warn("[lowerFor] iterable tuple has {d} elements; using first as iterable", .{tuple_expr.elements.len});
+                } else {
+                    log.debug("[lowerFor] unwrapping single-element tuple iterable", .{});
+                }
+                break :blk tuple_expr.elements[0];
+            }
+        }
+        break :blk &for_stmt.iterable;
+    };
+    log.debug("[lowerFor] iterable tag={s}", .{@tagName(iterable_expr.*)});
 
-    // lower the iterable expression
-    const iterable = self.expr_lowerer.lowerExpression(&for_stmt.iterable);
+    // range-based loops are handled specially to avoid treating range values as collections
+    if (iterable_expr.* == .Range) {
+        const range = iterable_expr.Range;
+        const start_val = self.expr_lowerer.lowerExpression(range.start);
+        const end_val = self.expr_lowerer.lowerExpression(range.end);
+
+        switch (for_stmt.pattern) {
+            .Single => |single| {
+                try lowerRangeSimpleForLoop(
+                    self,
+                    single.name,
+                    start_val,
+                    end_val,
+                    range.inclusive,
+                    for_stmt.body,
+                    for_stmt.invariants,
+                    for_stmt.decreases,
+                    for_stmt.increases,
+                    for_stmt.label,
+                    loc,
+                );
+            },
+            .IndexPair => |pair| {
+                try lowerRangeIndexedForLoop(
+                    self,
+                    pair.item,
+                    pair.index,
+                    start_val,
+                    end_val,
+                    range.inclusive,
+                    for_stmt.body,
+                    for_stmt.invariants,
+                    for_stmt.decreases,
+                    for_stmt.increases,
+                    for_stmt.label,
+                    loc,
+                );
+            },
+            .Destructured => {
+                return error.UnsupportedStatement;
+            },
+        }
+        return;
+    }
+
+    // lower the iterable expression (prefer local var if available)
+    const iterable = blk: {
+        if (iterable_expr.* == .Identifier) {
+            const name = iterable_expr.Identifier.name;
+            log.debug("[lowerFor] iterable identifier '{s}'", .{name});
+            if (self.local_var_map) |lvm| {
+                if (lvm.getLocalVar(name)) |local_var| {
+                    log.debug("[lowerFor] using local var for iterable '{s}'\n", .{name});
+                    break :blk local_var;
+                } else {
+                    log.debug("[lowerFor] local var not found for iterable '{s}'\n", .{name});
+                }
+            }
+        }
+        break :blk self.expr_lowerer.lowerExpression(iterable_expr);
+    };
+    log.debug("[lowerFor] iterable type={any} memref={} shaped={}\n", .{
+        c.oraValueGetType(iterable),
+        c.oraTypeIsAMemRef(c.oraValueGetType(iterable)),
+        c.oraTypeIsAShaped(c.oraValueGetType(iterable)),
+    });
 
     // handle different loop patterns
     switch (for_stmt.pattern) {
@@ -813,6 +892,226 @@ pub fn lowerFor(self: *const StatementLowerer, for_stmt: *const lib.ast.Statemen
         .Destructured => |destructured| {
             try lowerDestructuredForLoop(self, destructured.pattern, iterable, for_stmt.body, for_stmt.invariants, for_stmt.decreases, for_stmt.increases, for_stmt.label, loc);
         },
+    }
+}
+
+fn rangeUpperBound(
+    self: *const StatementLowerer,
+    end_val: c.MlirValue,
+    inclusive: bool,
+    span: lib.ast.SourceSpan,
+    loc: c.MlirLocation,
+) c.MlirValue {
+    const index_ty = c.oraIndexTypeCreate(self.ctx);
+    var upper_bound = self.expr_lowerer.convertIndexToIndexType(end_val, span);
+
+    if (inclusive) {
+        const one_op = self.ora_dialect.createArithConstant(1, index_ty, loc);
+        h.appendOp(self.block, one_op);
+        const one = h.getResult(one_op, 0);
+        const add_op = self.ora_dialect.createArithAddi(upper_bound, one, index_ty, loc);
+        h.appendOp(self.block, add_op);
+        upper_bound = h.getResult(add_op, 0);
+    }
+
+    return upper_bound;
+}
+
+fn lowerRangeSimpleForLoop(
+    self: *const StatementLowerer,
+    item_name: []const u8,
+    start_val: c.MlirValue,
+    end_val: c.MlirValue,
+    inclusive: bool,
+    body: lib.ast.Statements.BlockNode,
+    invariants: []lib.ast.Expressions.ExprNode,
+    decreases: ?*lib.ast.Expressions.ExprNode,
+    increases: ?*lib.ast.Expressions.ExprNode,
+    label: ?[]const u8,
+    loc: c.MlirLocation,
+) LoweringError!void {
+    const index_ty = c.oraIndexTypeCreate(self.ctx);
+    const span = body.span;
+
+    const lower_bound = self.expr_lowerer.convertIndexToIndexType(start_val, span);
+    const upper_bound = rangeUpperBound(self, end_val, inclusive, span, loc);
+
+    const step_op = self.ora_dialect.createArithConstant(1, index_ty, loc);
+    h.appendOp(self.block, step_op);
+    const step = h.getResult(step_op, 0);
+
+    const for_op = self.ora_dialect.createScfFor(lower_bound, upper_bound, step, &[_]c.MlirValue{}, &[_]c.MlirType{}, loc);
+    h.appendOp(self.block, for_op);
+
+    const body_block = c.oraScfForOpGetBodyBlock(for_op);
+    if (c.oraBlockIsNull(body_block)) {
+        @panic("scf.for missing body block");
+    }
+    clearBlockTerminator(body_block);
+
+    const induction_var = c.oraBlockGetArgument(body_block, 0);
+
+    var body_expr_lowerer = ExpressionLowerer.init(
+        self.ctx,
+        body_block,
+        self.type_mapper,
+        self.expr_lowerer.param_map,
+        self.expr_lowerer.storage_map,
+        self.expr_lowerer.local_var_map,
+        self.expr_lowerer.symbol_table,
+        self.expr_lowerer.builtin_registry,
+        self.expr_lowerer.error_handler,
+        self.expr_lowerer.locations,
+        self.ora_dialect,
+    );
+    body_expr_lowerer.refinement_base_cache = self.expr_lowerer.refinement_base_cache;
+    body_expr_lowerer.refinement_guard_cache = self.expr_lowerer.refinement_guard_cache;
+    body_expr_lowerer.current_function_return_type = self.current_function_return_type;
+    body_expr_lowerer.current_function_return_type_info = self.current_function_return_type_info;
+    body_expr_lowerer.in_try_block = self.in_try_block;
+
+    const induction_i256 = body_expr_lowerer.convertIndexToIntegerType(induction_var, span);
+
+    if (self.local_var_map) |lvm| {
+        lvm.addLocalVar(item_name, induction_i256) catch {
+            log.warn("Failed to add loop variable to map: {s}\n", .{item_name});
+        };
+    }
+
+    for (invariants) |*invariant| {
+        const invariant_value = self.expr_lowerer.lowerExpression(invariant);
+        const inv_op = self.ora_dialect.createInvariant(invariant_value, loc);
+        verification.addVerificationAttributesToOp(self, inv_op, "invariant", "loop_invariant");
+        h.appendOp(body_block, inv_op);
+    }
+
+    if (decreases) |decreases_expr| {
+        const decreases_value = self.expr_lowerer.lowerExpression(decreases_expr);
+        const dec_op = self.ora_dialect.createDecreases(decreases_value, loc);
+        verification.addVerificationAttributesToOp(self, dec_op, "decreases", "loop_termination_measure");
+        h.appendOp(body_block, dec_op);
+    }
+
+    if (increases) |increases_expr| {
+        const increases_value = self.expr_lowerer.lowerExpression(increases_expr);
+        const inc_op = self.ora_dialect.createIncreases(increases_value, loc);
+        verification.addVerificationAttributesToOp(self, inc_op, "increases", "loop_progress_measure");
+        h.appendOp(body_block, inc_op);
+    }
+
+    const loop_label = label orelse "";
+    const loop_ctx = LabelContext{
+        .label = loop_label,
+        .label_type = .For,
+        .parent = self.label_context,
+    };
+    var body_lowerer = self.*;
+    body_lowerer.label_context = &loop_ctx;
+    const ended_with_terminator = try body_lowerer.lowerBlockBody(body, body_block);
+
+    if (!ended_with_terminator) {
+        const yield_op = self.ora_dialect.createScfYield(loc);
+        h.appendOp(body_block, yield_op);
+    }
+}
+
+fn lowerRangeIndexedForLoop(
+    self: *const StatementLowerer,
+    item_name: []const u8,
+    index_name: []const u8,
+    start_val: c.MlirValue,
+    end_val: c.MlirValue,
+    inclusive: bool,
+    body: lib.ast.Statements.BlockNode,
+    invariants: []lib.ast.Expressions.ExprNode,
+    decreases: ?*lib.ast.Expressions.ExprNode,
+    increases: ?*lib.ast.Expressions.ExprNode,
+    label: ?[]const u8,
+    loc: c.MlirLocation,
+) LoweringError!void {
+    const index_ty = c.oraIndexTypeCreate(self.ctx);
+    const span = body.span;
+
+    const lower_bound = self.expr_lowerer.convertIndexToIndexType(start_val, span);
+    const upper_bound = rangeUpperBound(self, end_val, inclusive, span, loc);
+
+    const step_op = self.ora_dialect.createArithConstant(1, index_ty, loc);
+    h.appendOp(self.block, step_op);
+    const step = h.getResult(step_op, 0);
+
+    const for_op = self.ora_dialect.createScfFor(lower_bound, upper_bound, step, &[_]c.MlirValue{}, &[_]c.MlirType{}, loc);
+    h.appendOp(self.block, for_op);
+
+    const op_body_block = c.oraScfForOpGetBodyBlock(for_op);
+    if (c.oraBlockIsNull(op_body_block)) {
+        @panic("scf.for missing body block");
+    }
+    clearBlockTerminator(op_body_block);
+
+    var body_expr_lowerer = ExpressionLowerer.init(
+        self.ctx,
+        op_body_block,
+        self.type_mapper,
+        self.expr_lowerer.param_map,
+        self.expr_lowerer.storage_map,
+        self.expr_lowerer.local_var_map,
+        self.expr_lowerer.symbol_table,
+        self.expr_lowerer.builtin_registry,
+        self.expr_lowerer.error_handler,
+        self.expr_lowerer.locations,
+        self.ora_dialect,
+    );
+    body_expr_lowerer.refinement_base_cache = self.expr_lowerer.refinement_base_cache;
+    body_expr_lowerer.refinement_guard_cache = self.expr_lowerer.refinement_guard_cache;
+    body_expr_lowerer.current_function_return_type = self.current_function_return_type;
+    body_expr_lowerer.current_function_return_type_info = self.current_function_return_type_info;
+    body_expr_lowerer.in_try_block = self.in_try_block;
+
+    const index_var = c.oraBlockGetArgument(op_body_block, 0);
+    const index_i256 = body_expr_lowerer.convertIndexToIntegerType(index_var, span);
+    if (self.local_var_map) |lvm| {
+        lvm.addLocalVar(index_name, index_i256) catch {
+            log.warn("Failed to add index variable to map: {s}\n", .{index_name});
+        };
+        lvm.addLocalVar(item_name, index_i256) catch {
+            log.warn("Failed to add item variable to map: {s}\n", .{item_name});
+        };
+    }
+
+    for (invariants) |*invariant| {
+        const invariant_value = self.expr_lowerer.lowerExpression(invariant);
+        const inv_op = self.ora_dialect.createInvariant(invariant_value, loc);
+        verification.addVerificationAttributesToOp(self, inv_op, "invariant", "loop_invariant");
+        h.appendOp(op_body_block, inv_op);
+    }
+
+    if (decreases) |decreases_expr| {
+        const decreases_value = self.expr_lowerer.lowerExpression(decreases_expr);
+        const dec_op = self.ora_dialect.createDecreases(decreases_value, loc);
+        verification.addVerificationAttributesToOp(self, dec_op, "decreases", "loop_termination_measure");
+        h.appendOp(op_body_block, dec_op);
+    }
+
+    if (increases) |increases_expr| {
+        const increases_value = self.expr_lowerer.lowerExpression(increases_expr);
+        const inc_op = self.ora_dialect.createIncreases(increases_value, loc);
+        verification.addVerificationAttributesToOp(self, inc_op, "increases", "loop_progress_measure");
+        h.appendOp(op_body_block, inc_op);
+    }
+
+    const loop_label = label orelse "";
+    const loop_ctx = LabelContext{
+        .label = loop_label,
+        .label_type = .For,
+        .parent = self.label_context,
+    };
+    var body_lowerer = self.*;
+    body_lowerer.label_context = &loop_ctx;
+    const ended_with_terminator = try body_lowerer.lowerBlockBody(body, op_body_block);
+
+    if (!ended_with_terminator) {
+        const yield_op = self.ora_dialect.createScfYield(loc);
+        h.appendOp(op_body_block, yield_op);
     }
 }
 
@@ -897,6 +1196,7 @@ fn lowerSimpleForLoop(
     body_expr_lowerer.current_function_return_type = self.current_function_return_type;
     body_expr_lowerer.current_function_return_type_info = self.current_function_return_type_info;
     body_expr_lowerer.in_try_block = self.in_try_block;
+    const induction_i256 = body_expr_lowerer.convertIndexToIntegerType(induction_var, span);
 
     // bind the loop variable:
     // - For range-style loops (integer iterable), item is the index itself.
@@ -904,7 +1204,7 @@ fn lowerSimpleForLoop(
     if (self.local_var_map) |lvm| {
         if (c.oraTypeIsAInteger(iterable_ty)) {
             // range-based: item is the index
-            lvm.addLocalVar(item_name, induction_var) catch {
+            lvm.addLocalVar(item_name, induction_i256) catch {
                 log.warn("Failed to add loop variable to map: {s}\n", .{item_name});
             };
         } else if (c.oraTypeIsAMemRef(iterable_ty) or c.oraTypeIsAShaped(iterable_ty)) {
@@ -914,7 +1214,7 @@ fn lowerSimpleForLoop(
             };
         } else {
             // fallback: expose the index directly
-            lvm.addLocalVar(item_name, induction_var) catch {
+            lvm.addLocalVar(item_name, induction_i256) catch {
                 log.warn("Failed to add loop variable to map: {s}\n", .{item_name});
             };
         }
@@ -991,6 +1291,14 @@ fn lowerIndexedForLoop(
     label: ?[]const u8,
     loc: c.MlirLocation,
 ) LoweringError!void {
+    log.debug("[lowerIndexedForLoop] item={s} index={s}", .{ item_name, index_name });
+    const iterable_ty_dbg = c.oraValueGetType(iterable);
+    log.debug("[lowerIndexedForLoop] iterable type={any} memref={} shaped={} integer={}", .{
+        iterable_ty_dbg,
+        c.oraTypeIsAMemRef(iterable_ty_dbg),
+        c.oraTypeIsAShaped(iterable_ty_dbg),
+        c.oraTypeIsAInteger(iterable_ty_dbg),
+    });
     // use MLIR index type for loop bounds and induction variable
     const index_ty = c.oraIndexTypeCreate(self.ctx);
 
@@ -1051,16 +1359,17 @@ fn lowerIndexedForLoop(
 
     // get the induction variable (index)
     const index_var = c.oraBlockGetArgument(op_body_block, 0);
+    const index_i256 = body_expr_lowerer.convertIndexToIntegerType(index_var, span);
     // for range-based loops, item is the same as index.
     // for collection-based loops, item is the element at iterable[index].
     if (self.local_var_map) |lvm| {
-        lvm.addLocalVar(index_name, index_var) catch {
+        lvm.addLocalVar(index_name, index_i256) catch {
             log.warn("Failed to add index variable to map: {s}\n", .{index_name});
         };
 
         if (c.oraTypeIsAInteger(iterable_ty)) {
             // range-based: item is also the index
-            lvm.addLocalVar(item_name, index_var) catch {
+            lvm.addLocalVar(item_name, index_i256) catch {
                 log.warn("Failed to add item variable to map: {s}\n", .{item_name});
             };
         } else if (c.oraTypeIsAMemRef(iterable_ty) or c.oraTypeIsAShaped(iterable_ty)) {
@@ -1069,7 +1378,7 @@ fn lowerIndexedForLoop(
                 log.warn("Failed to add element variable to map: {s}\n", .{item_name});
             };
         } else {
-            lvm.addLocalVar(item_name, index_var) catch {
+            lvm.addLocalVar(item_name, index_i256) catch {
                 log.warn("Failed to add item variable to map: {s}\n", .{item_name});
             };
         }

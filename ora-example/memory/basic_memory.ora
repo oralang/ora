@@ -4,7 +4,9 @@
 // This file tests memory variable declarations in a contract
 
 contract MemoryDeclarationTest {
-    pub fn memory_declarations() {
+    storage var dummy: u256;
+
+    pub fn memory_declarations() -> u256 {
         // Local memory variables with explicit type
         let x: u256 = 10;
         let y: u256 = 20;
@@ -19,6 +21,9 @@ contract MemoryDeclarationTest {
         
         // Memory arrays
         let numbers: slice[u256] = [1, 2, 3, 4, 5];
+
+        // return a value so we can observe folding vs DCE
+        return sum;
         
         // Memory struct (commented out - anonymous struct types may need compiler support)
         // let user_data: <anonymous> = .{
@@ -26,5 +31,42 @@ contract MemoryDeclarationTest {
         //     .balance = 100,
         //     .active = true
         // };
+    }
+
+    // Side-effecting version to keep memory operations
+    pub fn memory_declarations_side_effects_const_index() {
+        let x: u256 = 10;
+        let y: u256 = 20;
+        let sum: u256 = x + y;
+
+        var product: u256 = x * y;
+
+        const MAX_VALUE: u256 = 1000;
+        const MIN_VALUE: u256 = 0;
+
+        let numbers: slice[u256] = [1, 2, 3, 4, 5];
+
+        // make side effects explicit
+        dummy = sum;
+        dummy = product + MAX_VALUE + MIN_VALUE;
+        dummy = numbers[0];
+    }
+
+    // Side-effecting version that keeps array lowering by using a runtime index
+    pub fn memory_declarations_side_effects_runtime_index(idx: u256) {
+        let x: u256 = 10;
+        let y: u256 = 20;
+        let sum: u256 = x + y;
+
+        var product: u256 = x * y;
+
+        const MAX_VALUE: u256 = 1000;
+        const MIN_VALUE: u256 = 0;
+
+        let numbers: slice[u256] = [1, 2, 3, 4, 5];
+
+        dummy = sum;
+        dummy = product + MAX_VALUE + MIN_VALUE;
+        dummy = numbers[idx];
     }
 }

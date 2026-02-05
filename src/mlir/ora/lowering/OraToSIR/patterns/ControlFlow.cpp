@@ -41,13 +41,6 @@ static Value toCondU256(PatternRewriter &rewriter, Location loc, Value value)
     return rewriter.create<sir::IsZeroOp>(loc, u256Type, isZero);
 }
 
-static Value toIndex(ConversionPatternRewriter &rewriter, Location loc, Value value)
-{
-    if (llvm::isa<mlir::IndexType>(value.getType()))
-        return value;
-    return rewriter.create<sir::BitcastOp>(loc, rewriter.getIndexType(), value);
-}
-
 static FailureOr<uint64_t> getStructFieldCount(Operation *op, StringRef structName)
 {
     ModuleOp module = op->getParentOfType<ModuleOp>();
@@ -4199,7 +4192,8 @@ LogicalResult ConvertScfForOp::matchAndRewrite(
     Region *parentRegion = parentBlock->getParent();
 
     auto afterBlock = rewriter.splitBlock(parentBlock, Block::iterator(op));
-    auto condBlock = rewriter.createBlock(parentRegion, afterBlock->getIterator(), {rewriter.getIndexType()}, {loc});
+    auto u256Type = sir::U256Type::get(rewriter.getContext());
+    auto condBlock = rewriter.createBlock(parentRegion, afterBlock->getIterator(), {u256Type}, {loc});
 
     Region &bodyRegion = op.getRegion();
     SmallVector<mlir::scf::YieldOp, 4> yields;
@@ -4223,24 +4217,26 @@ LogicalResult ConvertScfForOp::matchAndRewrite(
     parentRegion->getBlocks().splice(afterBlock->getIterator(), bodyRegion.getBlocks());
     Block *bodyBlock = movedBlocks.empty() ? nullptr : movedBlocks.front();
     if (!bodyBlock)
-        bodyBlock = rewriter.createBlock(parentRegion, afterBlock->getIterator(), {rewriter.getIndexType()}, {loc});
-
-    Value lb = adaptor.getLowerBound();
-    Value ub = adaptor.getUpperBound();
-    Value step = adaptor.getStep();
-
-    lb = toIndex(rewriter, loc, lb);
-    ub = toIndex(rewriter, loc, ub);
-    step = toIndex(rewriter, loc, step);
+        bodyBlock = rewriter.createBlock(parentRegion, afterBlock->getIterator(), {u256Type}, {loc});
+    // Ensure all moved blocks use SIR-compatible argument types (u256), not index.
+    for (Block *b : movedBlocks)
+    {
+        for (BlockArgument arg : b->getArguments())
+        {
+            if (llvm::isa<mlir::IndexType>(arg.getType()))
+                arg.setType(u256Type);
+        }
+    }
 
     rewriter.setInsertionPointToEnd(parentBlock);
+    Value lb = ensureU256(rewriter, loc, adaptor.getLowerBound());
+    Value ub = ensureU256(rewriter, loc, adaptor.getUpperBound());
+    Value step = ensureU256(rewriter, loc, adaptor.getStep());
     rewriter.create<sir::BrOp>(loc, ValueRange{lb}, condBlock);
 
     rewriter.setInsertionPointToStart(condBlock);
     Value iv = condBlock->getArgument(0);
-    Value ivU256 = ensureU256(rewriter, loc, iv);
-    Value ubU256 = ensureU256(rewriter, loc, ub);
-    Value cond = rewriter.create<sir::LtOp>(loc, sir::U256Type::get(rewriter.getContext()), ivU256, ubU256);
+    Value cond = rewriter.create<sir::LtOp>(loc, u256Type, iv, ub);
     rewriter.create<sir::CondBrOp>(loc, cond, ValueRange{iv}, ValueRange{}, bodyBlock, afterBlock);
 
     if (yields.empty())
@@ -4275,12 +4271,7 @@ LogicalResult ConvertScfForOp::matchAndRewrite(
             return rewriter.notifyMatchFailure(y, "yield has trailing ops");
         rewriter.setInsertionPoint(y);
         Value bodyIv = bodyBlock->getArgument(0);
-        Value nextU256 = rewriter.create<sir::AddOp>(
-            loc,
-            sir::U256Type::get(rewriter.getContext()),
-            ensureU256(rewriter, loc, bodyIv),
-            ensureU256(rewriter, loc, step));
-        Value next = toIndex(rewriter, loc, nextU256);
+        Value next = rewriter.create<sir::AddOp>(loc, u256Type, bodyIv, step);
         rewriter.replaceOpWithNewOp<sir::BrOp>(y, ValueRange{next}, condBlock);
     }
 
@@ -4294,12 +4285,7 @@ LogicalResult ConvertScfForOp::matchAndRewrite(
     {
         rewriter.setInsertionPoint(cont);
         Value bodyIv = bodyBlock->getArgument(0);
-        Value nextU256 = rewriter.create<sir::AddOp>(
-            loc,
-            sir::U256Type::get(rewriter.getContext()),
-            ensureU256(rewriter, loc, bodyIv),
-            ensureU256(rewriter, loc, step));
-        Value next = toIndex(rewriter, loc, nextU256);
+        Value next = rewriter.create<sir::AddOp>(loc, u256Type, bodyIv, step);
         rewriter.create<sir::BrOp>(cont.getLoc(), ValueRange{next}, condBlock);
         rewriter.eraseOp(cont);
     }
@@ -4311,12 +4297,7 @@ LogicalResult ConvertScfForOp::matchAndRewrite(
             if (b->getNumArguments() == 0)
                 continue;
             rewriter.setInsertionPointToEnd(b);
-            Value nextU256 = rewriter.create<sir::AddOp>(
-                loc,
-                sir::U256Type::get(rewriter.getContext()),
-                ensureU256(rewriter, loc, b->getArgument(0)),
-                ensureU256(rewriter, loc, step));
-            Value next = toIndex(rewriter, loc, nextU256);
+            Value next = rewriter.create<sir::AddOp>(loc, u256Type, b->getArgument(0), step);
             rewriter.create<sir::BrOp>(loc, ValueRange{next}, condBlock);
         }
     }

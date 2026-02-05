@@ -51,11 +51,21 @@ fn scanStmt(stmt: lib.ast.Statements.StmtNode, usage: *std.StringHashMap(Usage))
     switch (stmt) {
         .VariableDecl => |decl| {
             if (decl.region != .Stack) return;
-            var entry = usage.get(decl.name) orelse Usage{};
-            entry.kind = decl.kind;
-            entry.region = decl.region;
-            entry.def_count += 1;
-            usage.put(decl.name, entry) catch {};
+            if (decl.tuple_names) |names| {
+                for (names) |name| {
+                    var entry = usage.get(name) orelse Usage{};
+                    entry.kind = decl.kind;
+                    entry.region = decl.region;
+                    entry.def_count += 1;
+                    usage.put(name, entry) catch {};
+                }
+            } else {
+                var entry = usage.get(decl.name) orelse Usage{};
+                entry.kind = decl.kind;
+                entry.region = decl.region;
+                entry.def_count += 1;
+                usage.put(decl.name, entry) catch {};
+            }
         },
         .Expr => |expr| {
             scanExpr(&expr, usage);

@@ -149,6 +149,7 @@ fn evaluateConstantExpressionRecursive(expr: *ast.Expressions.ExprNode, lookup: 
         .Unary => |*unary| evaluateUnaryWithLookup(unary, lookup, allocator),
         .Call => |*call| evaluateCall(call, lookup, allocator),
         .Index => |*idx| evaluateIndex(idx, lookup, allocator),
+        .FieldAccess => |*fa| evaluateFieldAccess(fa, lookup, allocator),
         .Identifier => |*id| {
             if (lookup) |lk| {
                 if (lk.func(lk.ctx, id.name)) |value| {
@@ -450,6 +451,15 @@ fn evaluateIndex(idx: *ast.Expressions.IndexExpr, lookup: ?*const IdentifierLook
     const i: usize = @intCast(index.Integer);
     if (i >= target.Array.len) return ConstantValue.Error;
     return target.Array[i];
+}
+
+fn evaluateFieldAccess(fa: *ast.Expressions.FieldAccessExpr, lookup: ?*const IdentifierLookup, allocator: std.mem.Allocator) ConstantValue {
+    const target = evaluateConstantExpressionRecursive(fa.target, lookup, allocator) catch return ConstantValue.Error;
+    if (target != .Array) return ConstantValue.NotConstant;
+    const field_name = if (fa.field.len > 0 and fa.field[0] == '_') fa.field[1..] else fa.field;
+    const index = std.fmt.parseInt(usize, field_name, 10) catch return ConstantValue.NotConstant;
+    if (index >= target.Array.len) return ConstantValue.Error;
+    return target.Array[index];
 }
 
 // ============================================================================

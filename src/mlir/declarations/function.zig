@@ -20,8 +20,9 @@ const refinements = @import("refinements.zig");
 const expr_helpers = @import("../expressions/helpers.zig");
 const log = @import("log");
 const crypto = std.crypto;
+const SymbolTable = @import("../lower.zig").SymbolTable;
 
-fn canonicalAbiType(allocator: std.mem.Allocator, ora_type: lib.ast.Types.TypeInfo) ![]const u8 {
+fn canonicalAbiType(allocator: std.mem.Allocator, ora_type: lib.ast.Types.TypeInfo, symbol_table: ?*const SymbolTable) ![]const u8 {
     const ot = ora_type.ora_type orelse return error.InvalidType;
     return switch (ot) {
         .u8 => allocator.dupe(u8, "uint8"),
@@ -42,13 +43,13 @@ fn canonicalAbiType(allocator: std.mem.Allocator, ora_type: lib.ast.Types.TypeIn
         .string => allocator.dupe(u8, "string"),
         .array => |arr| {
             const elem_info = lib.ast.Types.TypeInfo.fromOraType(arr.elem.*);
-            const elem = try canonicalAbiType(allocator, elem_info);
+            const elem = try canonicalAbiType(allocator, elem_info, symbol_table);
             defer allocator.free(elem);
             return std.fmt.allocPrint(allocator, "{s}[{d}]", .{ elem, arr.len });
         },
         .slice => |elem| {
             const elem_info = lib.ast.Types.TypeInfo.fromOraType(elem.*);
-            const elem_str = try canonicalAbiType(allocator, elem_info);
+            const elem_str = try canonicalAbiType(allocator, elem_info, symbol_table);
             defer allocator.free(elem_str);
             return std.fmt.allocPrint(allocator, "{s}[]", .{elem_str});
         },
@@ -57,7 +58,7 @@ fn canonicalAbiType(allocator: std.mem.Allocator, ora_type: lib.ast.Types.TypeIn
             defer parts.deinit(allocator);
             for (members) |m| {
                 const mi = lib.ast.Types.TypeInfo.fromOraType(m);
-                const ms = try canonicalAbiType(allocator, mi);
+                const ms = try canonicalAbiType(allocator, mi, symbol_table);
                 try parts.append(allocator, ms);
             }
             defer {
@@ -67,36 +68,88 @@ fn canonicalAbiType(allocator: std.mem.Allocator, ora_type: lib.ast.Types.TypeIn
             defer allocator.free(joined);
             return std.fmt.allocPrint(allocator, "({s})", .{joined});
         },
+        .anonymous_struct => |fields| {
+            var parts = std.ArrayList([]const u8){};
+            defer parts.deinit(allocator);
+            for (fields) |field| {
+                const fi = lib.ast.Types.TypeInfo.fromOraType(field.typ.*);
+                const fs = try canonicalAbiType(allocator, fi, symbol_table);
+                try parts.append(allocator, fs);
+            }
+            defer {
+                for (parts.items) |p| allocator.free(p);
+            }
+            const joined = try std.mem.join(allocator, ",", parts.items);
+            defer allocator.free(joined);
+            return std.fmt.allocPrint(allocator, "({s})", .{joined});
+        },
+        .struct_type => |name| {
+            if (symbol_table) |st| {
+                if (st.lookupType(name)) |type_sym| {
+                    if (type_sym.type_kind == .Struct) {
+                        if (type_sym.fields) |fields| {
+                            var parts = std.ArrayList([]const u8){};
+                            defer parts.deinit(allocator);
+                            for (fields) |field| {
+                                const fs = try canonicalAbiType(allocator, field.ora_type_info, symbol_table);
+                                try parts.append(allocator, fs);
+                            }
+                            defer {
+                                for (parts.items) |p| allocator.free(p);
+                            }
+                            const joined = try std.mem.join(allocator, ",", parts.items);
+                            defer allocator.free(joined);
+                            return std.fmt.allocPrint(allocator, "({s})", .{joined});
+                        }
+                    }
+                }
+            }
+            return error.InvalidType;
+        },
+        .enum_type => |name| {
+            if (symbol_table) |st| {
+                if (st.lookupType(name)) |type_sym| {
+                    if (type_sym.type_kind == .Enum) {
+                        const enum_ty = type_sym.mlir_type;
+                        if (c.oraTypeIsAInteger(enum_ty)) {
+                            const width = c.oraIntegerTypeGetWidth(enum_ty);
+                            return std.fmt.allocPrint(allocator, "uint{d}", .{width});
+                        }
+                    }
+                }
+            }
+            return error.InvalidType;
+        },
         .error_union => |succ| {
             const si = lib.ast.Types.TypeInfo.fromOraType(succ.*);
-            return canonicalAbiType(allocator, si);
+            return canonicalAbiType(allocator, si, symbol_table);
         },
         ._union => |members| {
             if (members.len > 0 and members[0] == .error_union) {
                 const si = lib.ast.Types.TypeInfo.fromOraType(members[0].error_union.*);
-                return canonicalAbiType(allocator, si);
+                return canonicalAbiType(allocator, si, symbol_table);
             }
             return error.InvalidType;
         },
         .min_value => |mv| {
             const base_info = lib.ast.Types.TypeInfo.fromOraType(mv.base.*);
-            return canonicalAbiType(allocator, base_info);
+            return canonicalAbiType(allocator, base_info, symbol_table);
         },
         .max_value => |mv| {
             const base_info = lib.ast.Types.TypeInfo.fromOraType(mv.base.*);
-            return canonicalAbiType(allocator, base_info);
+            return canonicalAbiType(allocator, base_info, symbol_table);
         },
         .in_range => |ir| {
             const base_info = lib.ast.Types.TypeInfo.fromOraType(ir.base.*);
-            return canonicalAbiType(allocator, base_info);
+            return canonicalAbiType(allocator, base_info, symbol_table);
         },
         .scaled => |s| {
             const base_info = lib.ast.Types.TypeInfo.fromOraType(s.base.*);
-            return canonicalAbiType(allocator, base_info);
+            return canonicalAbiType(allocator, base_info, symbol_table);
         },
         .exact => |e| {
             const base_info = lib.ast.Types.TypeInfo.fromOraType(e.*);
-            return canonicalAbiType(allocator, base_info);
+            return canonicalAbiType(allocator, base_info, symbol_table);
         },
         .non_zero_address => allocator.dupe(u8, "address"),
         else => error.InvalidType,
@@ -189,7 +242,7 @@ pub fn lowerFunction(self: *const DeclarationLowerer, func: *const lib.FunctionN
         defer abi_param_attrs.deinit(std.heap.page_allocator);
         const selector_ok = true;
         for (func.parameters) |param| {
-            const s = canonicalAbiType(std.heap.page_allocator, param.type_info) catch |err| {
+            const s = canonicalAbiType(std.heap.page_allocator, param.type_info, self.symbol_table) catch |err| {
                 log.err("ABI type unsupported for selector generation in {s}: {s}\n", .{ func.name, @errorName(err) });
                 if (self.error_handler) |eh| {
                     eh.reportError(.MlirOperationFailed, func.span, "ABI type unsupported for selector generation", @errorName(err)) catch {};
@@ -249,7 +302,7 @@ pub fn lowerFunction(self: *const DeclarationLowerer, func: *const lib.FunctionN
 
         // Attach ABI return type if present.
         if (func.return_type_info) |ret_info| {
-            const ret_str = canonicalAbiType(std.heap.page_allocator, ret_info) catch |err| {
+            const ret_str = canonicalAbiType(std.heap.page_allocator, ret_info, self.symbol_table) catch |err| {
                 log.err("ABI return type unsupported in {s}: {s}\n", .{ func.name, @errorName(err) });
                 if (self.error_handler) |eh| {
                     eh.reportError(.MlirOperationFailed, func.span, "ABI return type unsupported", @errorName(err)) catch {};

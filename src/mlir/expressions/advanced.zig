@@ -183,52 +183,31 @@ pub fn lowerTuple(
     tuple: *const lib.ast.Expressions.TupleExpr,
 ) c.MlirValue {
     if (tuple.elements.len == 0) {
-        return self.createConstant(0, tuple.span);
+        return createEmptyStruct(self, tuple.span);
     }
 
-    var element_values = std.ArrayList(c.MlirValue){};
-    defer element_values.deinit(std.heap.page_allocator);
-
-    for (tuple.elements) |element| {
-        const value = self.lowerExpression(element);
-        element_values.append(std.heap.page_allocator, value) catch {};
+    var fields = std.ArrayList(lib.ast.Expressions.AnonymousStructField){};
+    defer fields.deinit(std.heap.page_allocator);
+    var field_names = std.ArrayList([]const u8){};
+    defer {
+        for (field_names.items) |name| std.heap.page_allocator.free(name);
+        field_names.deinit(std.heap.page_allocator);
     }
 
-    var element_types = std.ArrayList(c.MlirType){};
-    defer element_types.deinit(std.heap.page_allocator);
-
-    for (element_values.items) |value| {
-        const ty = c.oraValueGetType(value);
-        element_types.append(std.heap.page_allocator, ty) catch {};
+    for (tuple.elements, 0..) |element, i| {
+        // Tuple fields use numeric names ("0", "1", ...) to align with t.0 syntax.
+        const field_name = std.fmt.allocPrint(std.heap.page_allocator, "{d}", .{i}) catch {
+            return self.createErrorPlaceholder(tuple.span, "Failed to allocate tuple field name");
+        };
+        field_names.append(std.heap.page_allocator, field_name) catch {};
+        fields.append(std.heap.page_allocator, .{
+            .name = field_name,
+            .value = element,
+            .span = tuple.span,
+        }) catch {};
     }
 
-    const tuple_ty = createTupleType(self, element_types.items);
-    const undef_op = c.oraLlvmUndefOpCreate(self.ctx, self.fileLoc(tuple.span), tuple_ty);
-    if (c.oraOperationIsNull(undef_op)) {
-        @panic("Failed to create llvm.mlir.undef operation");
-    }
-    h.appendOp(self.block, undef_op);
-    var current_tuple = h.getResult(undef_op, 0);
-
-    for (element_values.items, 0..) |element_value, i| {
-        const position = [_]i64{@intCast(i)};
-        const insert_op = c.oraLlvmInsertValueOpCreate(
-            self.ctx,
-            self.fileLoc(tuple.span),
-            tuple_ty,
-            current_tuple,
-            element_value,
-            &position,
-            position.len,
-        );
-        if (c.oraOperationIsNull(insert_op)) {
-            @panic("Failed to create llvm.insertvalue operation");
-        }
-        h.appendOp(self.block, insert_op);
-        current_tuple = h.getResult(insert_op, 0);
-    }
-
-    return current_tuple;
+    return createInitializedStruct(self, fields.items, tuple.span);
 }
 
 /// Lower switch expressions
@@ -1264,11 +1243,23 @@ fn deriveAnonymousStructFields(
         if (type_info.ora_type) |ora_type| {
             types[i] = ora_type;
             anon_fields[i] = .{ .name = field.name, .typ = &types[i] };
-        } else {
-            std.heap.page_allocator.free(types);
-            std.heap.page_allocator.free(anon_fields);
-            return null;
+            continue;
         }
+        if (!type_info.isResolved()) {
+            const fallback: ?lib.ast.type_info.OraType = switch (type_info.category) {
+                .Integer => .{ .u256 = {} },
+                .Bool => .{ .bool = {} },
+                else => null,
+            };
+            if (fallback) |ora_type| {
+                types[i] = ora_type;
+                anon_fields[i] = .{ .name = field.name, .typ = &types[i] };
+                continue;
+            }
+        }
+        std.heap.page_allocator.free(types);
+        std.heap.page_allocator.free(anon_fields);
+        return null;
     }
 
     return .{ .fields = anon_fields, .types = types };

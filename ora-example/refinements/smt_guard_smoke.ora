@@ -44,6 +44,7 @@ contract RefinementGuardSMT {
 
     // SMT can prove Exact division
     pub fn provenExact(dividend: Exact<u256>, divisor: u256)
+        requires(divisor != 0)
         requires(dividend % divisor == 0)
     {
         let q: u256 = dividend / divisor;

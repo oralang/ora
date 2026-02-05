@@ -213,6 +213,7 @@ pub const TypeMapper = struct {
     inference_ctx: TypeInference.InferenceContext,
     symbol_table: ?*@import("lower.zig").SymbolTable,
     error_handler: ?*ErrorHandler,
+    anon_structs: std.StringHashMap([]const lib.ast.type_info.AnonymousStructFieldType),
 
     pub fn init(ctx: c.MlirContext, allocator: std.mem.Allocator) TypeMapper {
         return .{
@@ -220,6 +221,7 @@ pub const TypeMapper = struct {
             .inference_ctx = TypeInference.InferenceContext.init(allocator),
             .symbol_table = null,
             .error_handler = null,
+            .anon_structs = std.StringHashMap([]const lib.ast.type_info.AnonymousStructFieldType).init(allocator),
         };
     }
 
@@ -229,11 +231,13 @@ pub const TypeMapper = struct {
             .inference_ctx = TypeInference.InferenceContext.init(allocator),
             .symbol_table = symbol_table,
             .error_handler = null,
+            .anon_structs = std.StringHashMap([]const lib.ast.type_info.AnonymousStructFieldType).init(allocator),
         };
     }
 
     pub fn deinit(self: *TypeMapper) void {
         self.inference_ctx.deinit();
+        self.anon_structs.deinit();
     }
 
     pub fn setErrorHandler(self: *TypeMapper, error_handler: ?*ErrorHandler) void {
@@ -557,24 +561,31 @@ pub const TypeMapper = struct {
     /// Tuples are anonymous product types: (T1, T2, ..., Tn)
     /// In EVM, tuples are used for multiple return values and temporary groupings
     pub fn mapTupleType(self: *const TypeMapper, tuple_info: anytype) c.MlirType {
-        // tuples in EVM are represented as i256 for simplicity:
-        // - For small tuples (2-3 elements): pack into single i256
-        // - For larger tuples: use memory pointer to tuple data
-        //
-        // tuple packing strategy:
-        // - Tuple of (u8, u8): pack into lower 16 bits
-        // - Tuple of (address, bool): pack into lower 161 bits
-        // - Tuple of (u256, u256): use memory pointer
-        //
-        // the actual packing logic is handled during lowering based on element sizes
-        // type checker ensures element types are tracked for validation
+        if (tuple_info.len == 0) {
+            return c.oraNoneTypeCreate(self.ctx);
+        }
 
-        _ = tuple_info; // Element types tracked in symbol table
+        const fields = self.inference_ctx.allocator.alloc(lib.ast.type_info.AnonymousStructFieldType, tuple_info.len) catch {
+            log.warn("Failed to allocate tuple field types; using i256 fallback\n", .{});
+            return c.oraIntegerTypeCreate(self.ctx, constants.DEFAULT_INTEGER_BITS);
+        };
 
-        // return i256 for EVM-compatible tuple representation
-        // small tuples are packed, large tuples use memory indirection
-        // future: migrate to !llvm.struct<(T1, T2, ...)> for better type safety
-        return c.oraIntegerTypeCreate(self.ctx, constants.DEFAULT_INTEGER_BITS);
+        var i: usize = 0;
+        while (i < tuple_info.len) : (i += 1) {
+            // Tuple fields use numeric names ("0", "1", ...) to align with t.0 syntax.
+            const field_name = std.fmt.allocPrint(self.inference_ctx.allocator, "{d}", .{i}) catch {
+                log.warn("Failed to allocate tuple field name; using i256 fallback\n", .{});
+                return c.oraIntegerTypeCreate(self.ctx, constants.DEFAULT_INTEGER_BITS);
+            };
+            const elem_ptr = self.inference_ctx.allocator.create(lib.ast.type_info.OraType) catch {
+                log.warn("Failed to allocate tuple field type; using i256 fallback\n", .{});
+                return c.oraIntegerTypeCreate(self.ctx, constants.DEFAULT_INTEGER_BITS);
+            };
+            elem_ptr.* = tuple_info[i];
+            fields[i] = .{ .name = field_name, .typ = elem_ptr };
+        }
+
+        return self.mapAnonymousStructType(fields);
     }
 
     /// Convert function type
@@ -636,6 +647,13 @@ pub const TypeMapper = struct {
             log.warn("Failed to allocate anonymous struct name; using i256 fallback\n", .{});
             return c.oraIntegerTypeCreate(self.ctx, constants.DEFAULT_INTEGER_BITS);
         };
+        if (!self.anon_structs.contains(name)) {
+            const owned_fields = self.copyAnonymousStructFields(fields) catch {
+                log.warn("Failed to copy anonymous struct fields; using i256 fallback\n", .{});
+                return c.oraIntegerTypeCreate(self.ctx, constants.DEFAULT_INTEGER_BITS);
+            };
+            _ = @constCast(self).anon_structs.put(name, owned_fields) catch {};
+        }
         const struct_name_ref = h.strRef(name);
         const struct_type = c.oraStructTypeGet(self.ctx, struct_name_ref);
         if (struct_type.ptr != null) {
@@ -643,6 +661,24 @@ pub const TypeMapper = struct {
         }
         log.debug("WARNING: Anonymous struct type '{s}' could not be created. Using i256 fallback.\n", .{name});
         return c.oraIntegerTypeCreate(self.ctx, constants.DEFAULT_INTEGER_BITS);
+    }
+
+    fn copyAnonymousStructFields(
+        self: *const TypeMapper,
+        fields: []const lib.ast.type_info.AnonymousStructFieldType,
+    ) ![]const lib.ast.type_info.AnonymousStructFieldType {
+        const owned = try self.inference_ctx.allocator.alloc(lib.ast.type_info.AnonymousStructFieldType, fields.len);
+        for (fields, 0..) |field, i| {
+            const name_copy = try self.inference_ctx.allocator.dupe(u8, field.name);
+            const typ_ptr = try self.inference_ctx.allocator.create(lib.ast.type_info.OraType);
+            typ_ptr.* = field.typ.*;
+            owned[i] = .{ .name = name_copy, .typ = typ_ptr };
+        }
+        return owned;
+    }
+
+    pub fn iterAnonymousStructs(self: *const TypeMapper) std.StringHashMap([]const lib.ast.type_info.AnonymousStructFieldType).Iterator {
+        return self.anon_structs.iterator();
     }
 
     /// Convert module type
