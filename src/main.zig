@@ -1160,7 +1160,11 @@ fn generateMlirOutput(allocator: std.mem.Allocator, ast_nodes: []lib.AstNode, fi
     const h = mlir.createContext(mlir_allocator);
     defer mlir.destroyContext(h);
 
-    const quiet_mlir_output = mlir_options.emit_mlir_sir and !mlir_options.emit_mlir and !mlir_options.emit_sir_text and !mlir_options.emit_bytecode;
+    const quiet_mlir_output = mlir_options.emit_mlir_sir and
+        !mlir_options.emit_mlir and
+        !mlir_options.emit_sir_text and
+        !mlir_options.emit_bytecode and
+        !mlir_options.debug_enabled;
     const final_module = if (mlir_options.cpp_lowering_stub) blk: {
         const target = getCppStubTarget(ast_nodes);
         const loc = c.oraLocationUnknownGet(h.ctx);
@@ -1336,6 +1340,9 @@ fn generateMlirOutput(allocator: std.mem.Allocator, ast_nodes: []lib.AstNode, fi
 
     // convert Ora to SIR if emitting SIR MLIR
     if (mlir_options.emit_mlir_sir) {
+        try stdout.print("[main] Ora->SIR: begin (debug={any}, quiet_stderr={any})\n", .{
+            mlir_options.debug_enabled, quiet_mlir_output,
+        });
         if (quiet_mlir_output) {
             c.oraSetDebugEnabled(false);
         } else {
@@ -1355,10 +1362,12 @@ fn generateMlirOutput(allocator: std.mem.Allocator, ast_nodes: []lib.AstNode, fi
             if (null_fd) |fd| std.posix.close(fd);
         }
         if (!conversion_success) {
+            try stdout.print("[main] Ora->SIR: failed\n", .{});
             try stdout.print("Error: Ora to SIR conversion failed\n", .{});
             try stdout.flush();
             std.process.exit(1);
         }
+        try stdout.print("[main] Ora->SIR: success\n", .{});
     }
 
     const emit_sir_mlir_output = mlir_options.emit_mlir_sir and !mlir_options.emit_sir_text and !mlir_options.emit_bytecode;

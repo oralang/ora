@@ -36,6 +36,7 @@
 #include "mlir/IR/Verifier.h"
 #include "mlir/IR/IRMapping.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
+#include "mlir/IR/Attributes.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/raw_ostream.h"
@@ -46,6 +47,337 @@
 
 using namespace mlir;
 using namespace ora;
+
+namespace
+{
+    class RefinementErasureTypeConverter final : public TypeConverter
+    {
+    public:
+        RefinementErasureTypeConverter()
+        {
+            addConversion([](Type type) { return type; });
+
+            addConversion([&](ora::MinValueType type) { return convertType(type.getBaseType()); });
+            addConversion([&](ora::MaxValueType type) { return convertType(type.getBaseType()); });
+            addConversion([&](ora::InRangeType type) { return convertType(type.getBaseType()); });
+            addConversion([&](ora::ScaledType type) { return convertType(type.getBaseType()); });
+            addConversion([&](ora::ExactType type) { return convertType(type.getBaseType()); });
+            addConversion([&](ora::NonZeroAddressType type) {
+                return ora::AddressType::get(type.getContext());
+            });
+
+            addConversion([&](ora::ErrorUnionType type) -> Type {
+                auto successType = convertType(type.getSuccessType());
+                return ora::ErrorUnionType::get(type.getContext(), successType);
+            });
+            addConversion([&](ora::UnionType type) -> Type {
+                SmallVector<Type> elems;
+                elems.reserve(type.getElementTypes().size());
+                for (Type elem : type.getElementTypes())
+                    elems.push_back(convertType(elem));
+                return ora::UnionType::get(type.getContext(), elems);
+            });
+            addConversion([&](ora::MapType type) -> Type {
+                auto key = convertType(type.getKeyType());
+                auto value = convertType(type.getValueType());
+                return ora::MapType::get(type.getContext(), key, value);
+            });
+            addConversion([&](ora::TupleType type) -> Type {
+                SmallVector<Type> elems;
+                elems.reserve(type.getElementTypes().size());
+                for (Type elem : type.getElementTypes())
+                    elems.push_back(convertType(elem));
+                return ora::TupleType::get(type.getContext(), elems);
+            });
+
+            addConversion([&](RankedTensorType type) -> Type {
+                auto elem = convertType(type.getElementType());
+                return RankedTensorType::get(type.getShape(), elem, type.getEncoding());
+            });
+            addConversion([&](UnrankedTensorType type) -> Type {
+                auto elem = convertType(type.getElementType());
+                return UnrankedTensorType::get(elem);
+            });
+            addConversion([&](MemRefType type) -> Type {
+                auto elem = convertType(type.getElementType());
+                return MemRefType::get(type.getShape(), elem, type.getLayout(), type.getMemorySpace());
+            });
+            addConversion([&](mlir::FunctionType type) -> Type {
+                SmallVector<Type> inputs;
+                SmallVector<Type> results;
+                inputs.reserve(type.getInputs().size());
+                results.reserve(type.getResults().size());
+                for (Type in : type.getInputs())
+                    inputs.push_back(convertType(in));
+                for (Type out : type.getResults())
+                    results.push_back(convertType(out));
+                return mlir::FunctionType::get(type.getContext(), inputs, results);
+            });
+            addConversion([&](ora::FunctionType type) -> Type {
+                SmallVector<Type> inputs;
+                inputs.reserve(type.getParamTypes().size());
+                for (Type in : type.getParamTypes())
+                    inputs.push_back(convertType(in));
+                Type result = convertType(type.getReturnType());
+                return ora::FunctionType::get(type.getContext(), inputs, result);
+            });
+
+            addSourceMaterialization([&](OpBuilder &builder,
+                                         Type resultType,
+                                         ValueRange inputs,
+                                         Location loc) -> Value {
+                if (inputs.size() != 1)
+                    return Value();
+                return builder
+                    .create<UnrealizedConversionCastOp>(loc, resultType, inputs[0])
+                    .getResult(0);
+            });
+            addTargetMaterialization([&](OpBuilder &builder,
+                                         Type resultType,
+                                         ValueRange inputs,
+                                         Location loc) -> Value {
+                if (inputs.size() != 1)
+                    return Value();
+                return builder
+                    .create<UnrealizedConversionCastOp>(loc, resultType, inputs[0])
+                    .getResult(0);
+            });
+        }
+    };
+
+    class EraseRefinementToBaseOp final
+        : public OpConversionPattern<ora::RefinementToBaseOp>
+    {
+    public:
+        using OpConversionPattern::OpConversionPattern;
+
+        LogicalResult matchAndRewrite(ora::RefinementToBaseOp op,
+                                      OpAdaptor adaptor,
+                                      ConversionPatternRewriter &rewriter) const override
+        {
+            Value value = adaptor.getValue();
+            Type targetType = typeConverter->convertType(op.getType());
+            if (!targetType)
+                return failure();
+            if (value.getType() == targetType)
+            {
+                rewriter.replaceOp(op, value);
+                return success();
+            }
+            rewriter.replaceOpWithNewOp<UnrealizedConversionCastOp>(op, targetType, value);
+            return success();
+        }
+    };
+
+    class EraseBaseToRefinementOp final
+        : public OpConversionPattern<ora::BaseToRefinementOp>
+    {
+    public:
+        using OpConversionPattern::OpConversionPattern;
+
+        LogicalResult matchAndRewrite(ora::BaseToRefinementOp op,
+                                      OpAdaptor adaptor,
+                                      ConversionPatternRewriter &rewriter) const override
+        {
+            Value value = adaptor.getValue();
+            Type targetType = typeConverter->convertType(op.getType());
+            if (!targetType)
+                return failure();
+            if (value.getType() == targetType)
+            {
+                rewriter.replaceOp(op, value);
+                return success();
+            }
+            rewriter.replaceOpWithNewOp<UnrealizedConversionCastOp>(op, targetType, value);
+            return success();
+        }
+    };
+
+    class ConvertRefinementResultTypes final : public ConversionPattern
+    {
+    public:
+        ConvertRefinementResultTypes(MLIRContext *ctx, const TypeConverter &converter)
+            : ConversionPattern(converter, MatchAnyOpTypeTag(), 1, ctx) {}
+
+        LogicalResult matchAndRewrite(Operation *op,
+                                      ArrayRef<Value> operands,
+                                      ConversionPatternRewriter &rewriter) const override
+        {
+            if (isa<ora::RefinementToBaseOp, ora::BaseToRefinementOp, ora::GlobalOp>(op))
+                return failure();
+
+            if (op->getNumResults() == 0)
+                return failure();
+
+            SmallVector<Type> newResultTypes;
+            if (failed(typeConverter->convertTypes(op->getResultTypes(), newResultTypes)))
+                return failure();
+
+            if (llvm::equal(op->getResultTypes(), newResultTypes))
+                return failure();
+
+            auto newOp = convertOpResultTypes(op, operands, *typeConverter, rewriter);
+            if (failed(newOp))
+                return failure();
+            rewriter.replaceOp(op, (*newOp)->getResults());
+            return success();
+        }
+    };
+
+    class ConvertCallTypeOp final : public OpConversionPattern<mlir::func::CallOp>
+    {
+    public:
+        using OpConversionPattern::OpConversionPattern;
+
+        LogicalResult matchAndRewrite(mlir::func::CallOp op,
+                                      OpAdaptor adaptor,
+                                      ConversionPatternRewriter &rewriter) const override
+        {
+            SmallVector<Value> newOperands;
+            newOperands.reserve(op.getNumOperands());
+            for (auto it : llvm::enumerate(adaptor.getOperands()))
+            {
+                Value operand = it.value();
+                Type origType = op.getOperand(it.index()).getType();
+                Type newType = typeConverter->convertType(origType);
+                if (newType && newType != operand.getType())
+                {
+                    operand = rewriter
+                                  .create<UnrealizedConversionCastOp>(op.getLoc(), newType, operand)
+                                  .getResult(0);
+                }
+                newOperands.push_back(operand);
+            }
+
+            SmallVector<Type> newResultTypes;
+            if (failed(typeConverter->convertTypes(op.getResultTypes(), newResultTypes)))
+                return failure();
+
+            if (llvm::equal(op.getResultTypes(), newResultTypes))
+                return failure();
+
+            auto newCall = rewriter.create<mlir::func::CallOp>(
+                op.getLoc(),
+                op.getCalleeAttr(),
+                newResultTypes,
+                newOperands);
+
+            rewriter.replaceOp(op, newCall.getResults());
+            return success();
+        }
+    };
+
+    class ConvertGlobalTypeOp final : public OpConversionPattern<ora::GlobalOp>
+    {
+    public:
+        using OpConversionPattern::OpConversionPattern;
+
+        LogicalResult matchAndRewrite(ora::GlobalOp op,
+                                      OpAdaptor adaptor,
+                                      ConversionPatternRewriter &rewriter) const override
+        {
+            (void)adaptor;
+            Type oldType = op.getType();
+            Type newType = typeConverter->convertType(oldType);
+            if (!newType || newType == oldType)
+                return success();
+            op.setType(newType);
+            return success();
+        }
+    };
+
+    class ConvertFuncTypeAttrsOp final : public OpConversionPattern<mlir::func::FuncOp>
+    {
+    public:
+        using OpConversionPattern::OpConversionPattern;
+
+        LogicalResult matchAndRewrite(mlir::func::FuncOp op,
+                                      OpAdaptor adaptor,
+                                      ConversionPatternRewriter &rewriter) const override
+        {
+            (void)adaptor;
+            bool changed = false;
+
+            auto updateTypeAttr = [&](NamedAttrList &attrs, StringRef name) {
+                if (auto typeAttr = mlir::dyn_cast<TypeAttr>(attrs.get(name)))
+                {
+                    Type newType = typeConverter->convertType(typeAttr.getValue());
+                    if (newType && newType != typeAttr.getValue())
+                    {
+                        attrs.set(name, TypeAttr::get(newType));
+                        changed = true;
+                    }
+                }
+            };
+
+            MLIRContext *ctx = op.getContext();
+
+            rewriter.modifyOpInPlace(op, [&] {
+                // Update argument attributes array.
+                if (op.getNumArguments() > 0)
+                {
+                    SmallVector<Attribute> newArgAttrs;
+                    newArgAttrs.reserve(op.getNumArguments());
+                    ArrayRef<Attribute> argAttrs =
+                        op.getArgAttrsAttr() ? op.getArgAttrsAttr().getValue()
+                                             : ArrayRef<Attribute>();
+                    for (unsigned i = 0; i < op.getNumArguments(); ++i)
+                    {
+                        DictionaryAttr dict = (i < argAttrs.size() && argAttrs[i])
+                                                  ? mlir::dyn_cast<DictionaryAttr>(argAttrs[i])
+                                                  : DictionaryAttr::get(ctx);
+                        NamedAttrList attrs(dict ? dict : DictionaryAttr::get(ctx));
+                        updateTypeAttr(attrs, "ora.type");
+                        newArgAttrs.push_back(attrs.getDictionary(ctx));
+                    }
+                    if (changed)
+                        op.setArgAttrsAttr(ArrayAttr::get(ctx, newArgAttrs));
+                }
+
+                // Update result attributes array.
+                if (op.getNumResults() > 0)
+                {
+                    SmallVector<Attribute> newResAttrs;
+                    newResAttrs.reserve(op.getNumResults());
+                    ArrayRef<Attribute> resAttrs =
+                        op.getResAttrsAttr() ? op.getResAttrsAttr().getValue()
+                                             : ArrayRef<Attribute>();
+                    for (unsigned i = 0; i < op.getNumResults(); ++i)
+                    {
+                        DictionaryAttr dict = (i < resAttrs.size() && resAttrs[i])
+                                                  ? mlir::dyn_cast<DictionaryAttr>(resAttrs[i])
+                                                  : DictionaryAttr::get(ctx);
+                        NamedAttrList attrs(dict ? dict : DictionaryAttr::get(ctx));
+                        updateTypeAttr(attrs, "ora.type");
+                        newResAttrs.push_back(attrs.getDictionary(ctx));
+                    }
+                    if (changed)
+                        op.setResAttrsAttr(ArrayAttr::get(ctx, newResAttrs));
+                }
+            });
+
+            return success();
+        }
+    };
+}
+
+static void logModuleOps(ModuleOp module, StringRef tag)
+{
+    if (!mlir::ora::isDebugEnabled())
+        return;
+    llvm::errs() << "[OraToSIR] " << tag << " (per-op log)\n";
+    module.walk([&](Operation *op) {
+        llvm::errs() << "[OraToSIR]   op=" << op->getName() << " loc=" << op->getLoc() << "\n";
+    });
+    llvm::errs().flush();
+}
+
+static void dumpModuleOnFailure(ModuleOp module, StringRef phase)
+{
+    llvm::errs() << "[OraToSIR] ERROR: " << phase << " failed, dumping module\n";
+    module.dump();
+    llvm::errs().flush();
+}
 
 static void normalizeFuncTerminators(mlir::func::FuncOp funcOp)
 {
@@ -73,6 +405,61 @@ static void normalizeFuncTerminators(mlir::func::FuncOp funcOp)
                          << funcOp.getName() << " at " << terminator->getLoc() << "\n";
         }
     }
+}
+
+static LogicalResult eraseRefinements(ModuleOp module)
+{
+    if (mlir::ora::isDebugEnabled())
+        llvm::errs() << "[OraToSIR] Refinement erasure start\n";
+
+    MLIRContext *ctx = module.getContext();
+    RefinementErasureTypeConverter typeConverter;
+
+    ConversionTarget target(*ctx);
+    target.addLegalDialect<mlir::BuiltinDialect>();
+    target.addLegalDialect<ora::OraDialect>();
+    target.addLegalDialect<mlir::func::FuncDialect>();
+    target.addLegalDialect<mlir::arith::ArithDialect>();
+    target.addLegalDialect<mlir::cf::ControlFlowDialect>();
+    target.addLegalDialect<mlir::scf::SCFDialect>();
+    target.addLegalDialect<mlir::tensor::TensorDialect>();
+    target.addLegalDialect<mlir::memref::MemRefDialect>();
+
+    target.addIllegalOp<ora::RefinementToBaseOp, ora::BaseToRefinementOp>();
+
+    target.addDynamicallyLegalOp<mlir::func::FuncOp>([&](mlir::func::FuncOp op) {
+        return typeConverter.isSignatureLegal(op.getFunctionType());
+    });
+    target.addDynamicallyLegalOp<ora::GlobalOp>([&](ora::GlobalOp op) {
+        return typeConverter.isLegal(op.getType());
+    });
+    target.markUnknownOpDynamicallyLegal([&](Operation *op) {
+        for (Type t : op->getOperandTypes())
+            if (!typeConverter.isLegal(t))
+                return false;
+        for (Type t : op->getResultTypes())
+            if (!typeConverter.isLegal(t))
+                return false;
+        return true;
+    });
+
+    RewritePatternSet patterns(ctx);
+    populateFunctionOpInterfaceTypeConversionPattern<mlir::func::FuncOp>(patterns, typeConverter);
+    patterns.add<ConvertCallTypeOp>(typeConverter, ctx);
+    patterns.add<ConvertFuncTypeAttrsOp>(typeConverter, ctx);
+    patterns.add<EraseRefinementToBaseOp, EraseBaseToRefinementOp>(typeConverter, ctx);
+    patterns.add<ConvertGlobalTypeOp>(typeConverter, ctx);
+    patterns.add<ConvertRefinementResultTypes>(ctx, typeConverter);
+
+    if (failed(applyFullConversion(module, target, std::move(patterns))))
+    {
+        llvm::errs() << "[OraToSIR] Refinement erasure failed\n";
+        return failure();
+    }
+
+    if (mlir::ora::isDebugEnabled())
+        llvm::errs() << "[OraToSIR] Refinement erasure completed\n";
+    return success();
 }
 
 static void assignGlobalSlots(ModuleOp module)
@@ -187,6 +574,7 @@ static void inlineContractsAndEraseDecls(ModuleOp module)
             op->erase();
         } });
 }
+
 class MemRefEliminationPass : public PassWrapper<MemRefEliminationPass, OperationPass<ModuleOp>>
 {
 public:
@@ -338,6 +726,11 @@ public:
 
         assignGlobalSlots(module);
         inlineContractsAndEraseDecls(module);
+        if (failed(eraseRefinements(module)))
+        {
+            module.emitError("[OraToSIR] Refinement erasure failed");
+            return signalPassFailure();
+        }
 
         llvm::errs() << "[OraToSIR] Starting Ora → SIR conversion pass\n";
         llvm::errs() << "[OraToSIR] ========================================\n";
@@ -383,6 +776,7 @@ public:
             patterns.add<ConvertArithSelectOp>(typeConverter, ctx);
             patterns.add<ConvertArithExtUIOp>(typeConverter, ctx);
             patterns.add<ConvertArithIndexCastUIOp>(typeConverter, ctx);
+            patterns.add<ConvertArithIndexCastOp>(typeConverter, ctx);
             patterns.add<ConvertArithTruncIOp>(typeConverter, ctx);
             patterns.add<FoldRedundantBitcastOp>(ctx);
             patterns.add<FoldAndOneOp>(ctx);
@@ -612,8 +1006,10 @@ public:
             } });
 
         // Apply conversion (leave ora.return for second phase)
+        logModuleOps(module, "Before Phase1 conversion");
         if (failed(applyFullConversion(module, target, std::move(patterns))))
         {
+            dumpModuleOnFailure(module, "Phase1 conversion");
             module.walk([&](mlir::UnrealizedConversionCastOp castOp) {
                 llvm::errs() << "[OraToSIR] Remaining cast at " << castOp.getLoc() << " : ";
                 for (auto t : castOp.getOperandTypes())
@@ -674,6 +1070,7 @@ public:
         }
 
         DBG("Conversion completed successfully!");
+        logModuleOps(module, "After Phase1 conversion");
 
         // Continue into Phase 2 (error-union control flow lowering).
 
@@ -699,6 +1096,7 @@ public:
             phase2Patterns.add<ConvertErrorGetErrorOp>(phase2TypeConverter, ctx);
             phase2Patterns.add<ConvertArithExtUIOp>(phase2TypeConverter, ctx);
             phase2Patterns.add<ConvertArithIndexCastUIOp>(phase2TypeConverter, ctx);
+            phase2Patterns.add<ConvertArithIndexCastOp>(phase2TypeConverter, ctx);
 
             ConversionTarget phase2Target(*ctx);
             phase2Target.addLegalDialect<mlir::BuiltinDialect>();
@@ -726,11 +1124,14 @@ public:
             phase2Target.addLegalDialect<ora::OraDialect>();
 
 
+            logModuleOps(module, "Before Phase2 conversion");
             if (failed(applyFullConversion(module, phase2Target, std::move(phase2Patterns))))
             {
+                dumpModuleOnFailure(module, "Phase2 conversion");
                 signalPassFailure();
                 return;
             }
+            logModuleOps(module, "After Phase2 conversion");
         }
 
         // Phase 2b: re-run try_stmt/return lowering to catch any ops introduced
@@ -746,6 +1147,7 @@ public:
             phase2bPatterns.add<ConvertErrorGetErrorOp>(phase2bTypeConverter, ctx);
             phase2bPatterns.add<ConvertArithExtUIOp>(phase2bTypeConverter, ctx);
             phase2bPatterns.add<ConvertArithIndexCastUIOp>(phase2bTypeConverter, ctx);
+            phase2bPatterns.add<ConvertArithIndexCastOp>(phase2bTypeConverter, ctx);
             phase2bPatterns.add<ConvertScfIfOp>(phase2bTypeConverter, ctx, /*lowerReturnsInMergeBlock=*/true, PatternBenefit(10));
             phase2bPatterns.add<ConvertIfOp>(phase2bTypeConverter, ctx);
             phase2bPatterns.add<ConvertIsolatedIfOp>(phase2bTypeConverter, ctx);
@@ -784,11 +1186,14 @@ public:
             phase2bTarget.addLegalOp<ora::SwitchOp>();
             phase2bTarget.addLegalDialect<ora::OraDialect>();
 
+            logModuleOps(module, "Before Phase2b conversion");
             if (failed(applyFullConversion(module, phase2bTarget, std::move(phase2bPatterns))))
             {
+                dumpModuleOnFailure(module, "Phase2b conversion");
                 signalPassFailure();
                 return;
             }
+            logModuleOps(module, "After Phase2b conversion");
 
             // Drop any dead blocks introduced by try_stmt inlining before later phases.
             {
@@ -825,11 +1230,14 @@ public:
             phase3aTarget.addLegalOp<ora::SwitchOp>();
             phase3aTarget.addLegalDialect<ora::OraDialect>();
 
+            logModuleOps(module, "Before Phase3a conversion");
             if (failed(applyFullConversion(module, phase3aTarget, std::move(phase3aPatterns))))
             {
+                dumpModuleOnFailure(module, "Phase3a conversion");
                 signalPassFailure();
                 return;
             }
+            logModuleOps(module, "After Phase3a conversion");
         }
 
         // Phase 3b: lower ora.return after scf.if has been normalized.
@@ -858,11 +1266,14 @@ public:
             phase3bTarget.addLegalOp<ora::SwitchOp>();
             phase3bTarget.addLegalDialect<ora::OraDialect>();
 
+            logModuleOps(module, "Before Phase3b conversion");
             if (failed(applyFullConversion(module, phase3bTarget, std::move(phase3bPatterns))))
             {
+                dumpModuleOnFailure(module, "Phase3b conversion");
                 signalPassFailure();
                 return;
             }
+            logModuleOps(module, "After Phase3b conversion");
         }
 
         // Phase 4: lower scf.for + memref ops (stack temps) to SIR.
@@ -901,11 +1312,14 @@ public:
             ConversionConfig phase4Config;
             // Avoid ptr<->memref materializations; memref ops must be fully rewritten.
             phase4Config.buildMaterializations = false;
+            logModuleOps(module, "Before Phase4 conversion");
             if (failed(applyFullConversion(module, phase4Target, std::move(phase4Patterns), phase4Config)))
             {
+                dumpModuleOnFailure(module, "Phase4 conversion");
                 signalPassFailure();
                 return;
             }
+            logModuleOps(module, "After Phase4 conversion");
         }
 
         // Phase 5: lower remaining Ora control flow + structs.
@@ -949,6 +1363,7 @@ public:
             phase5Patterns.add<ConvertArithSelectOp>(phase5TypeConverter, ctx);
             phase5Patterns.add<ConvertArithExtUIOp>(phase5TypeConverter, ctx);
             phase5Patterns.add<ConvertArithIndexCastUIOp>(phase5TypeConverter, ctx);
+            phase5Patterns.add<ConvertArithIndexCastOp>(phase5TypeConverter, ctx);
             phase5Patterns.add<ConvertArithTruncIOp>(phase5TypeConverter, ctx);
             // Memref lowering happens in Phase 4; do not add memref patterns here.
             phase5Patterns.add<ConvertTensorExtractOp>(phase5TypeConverter, ctx);
@@ -1018,11 +1433,14 @@ public:
                 llvm::errs().flush();
             }
 
+            logModuleOps(module, "Before Phase5 conversion");
             if (failed(applyFullConversion(module, phase5Target, std::move(phase5Patterns))))
             {
+                dumpModuleOnFailure(module, "Phase5 conversion");
                 signalPassFailure();
                 return;
             }
+            logModuleOps(module, "After Phase5 conversion");
 
             // Cleanup: strip any remaining normalized error_union casts that should be packed u256.
             SmallVector<mlir::UnrealizedConversionCastOp, 8> normalizedCasts;

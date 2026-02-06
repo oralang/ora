@@ -1783,6 +1783,8 @@ LogicalResult ConvertCallOp::matchAndRewrite(
 
     SmallVector<Type> newResultTypes;
     auto oldResultTypes = op.getResultTypes();
+    bool isNoneResult = (oldResultTypes.size() == 1 &&
+                         llvm::isa<mlir::NoneType>(oldResultTypes.front()));
 
     auto lowerErrorDeclCall = [&](ora::ErrorDeclOp errDecl) -> LogicalResult {
         auto errIdAttr = errDecl->getAttrOfType<mlir::IntegerAttr>("ora.error_id");
@@ -1879,14 +1881,35 @@ LogicalResult ConvertCallOp::matchAndRewrite(
         newResultTypes.push_back(ptrType);
         newResultTypes.push_back(u256Type);
     }
+    if (usedCalleeSig && newResultTypes.empty() && !oldResultTypes.empty())
+    {
+        auto ptrType = sir::PtrType::get(op.getContext(), /*addrSpace*/ 1);
+        auto u256Type = sir::U256Type::get(op.getContext());
+        newResultTypes.push_back(ptrType);
+        newResultTypes.push_back(u256Type);
+    }
+
+    SmallVector<Value> newOperands;
+    newOperands.reserve(op.getNumOperands());
+    for (auto it : llvm::enumerate(op.getOperands()))
+    {
+        Value operand = it.value();
+        Type origType = operand.getType();
+        if (Type converted = typeConverter->convertType(origType))
+        {
+            if (converted != origType)
+                operand = rewriter.create<UnrealizedConversionCastOp>(op.getLoc(), converted, operand).getResult(0);
+        }
+        newOperands.push_back(operand);
+    }
 
     auto newCall = rewriter.create<sir::ICallOp>(
         op.getLoc(),
         newResultTypes,
         SymbolRefAttr::get(op.getContext(), op.getCallee()),
-        adaptor.getOperands());
+        newOperands);
 
-    if (oldResultTypes.empty())
+    if (oldResultTypes.empty() || isNoneResult)
     {
         op->replaceAllUsesWith(newCall->getResults());
         rewriter.eraseOp(op);
@@ -4269,10 +4292,19 @@ LogicalResult ConvertScfForOp::matchAndRewrite(
         }
         if (hasOpsAfterTerminator(y.getOperation()))
             return rewriter.notifyMatchFailure(y, "yield has trailing ops");
-        rewriter.setInsertionPoint(y);
+        // Avoid trailing ops after a newly inserted terminator by splitting the block.
+        auto *tailBlock = rewriter.splitBlock(yBlock, std::next(Block::iterator(y)));
+        rewriter.setInsertionPointToEnd(yBlock);
         Value bodyIv = bodyBlock->getArgument(0);
         Value next = rewriter.create<sir::AddOp>(loc, u256Type, bodyIv, step);
-        rewriter.replaceOpWithNewOp<sir::BrOp>(y, ValueRange{next}, condBlock);
+        rewriter.create<sir::BrOp>(y.getLoc(), ValueRange{next}, condBlock);
+        rewriter.eraseOp(y);
+        if (!tailBlock->empty())
+        {
+            for (auto &op : llvm::make_early_inc_range(*tailBlock))
+                rewriter.eraseOp(&op);
+        }
+        rewriter.eraseBlock(tailBlock);
     }
 
     for (auto br : breaks)
@@ -4283,11 +4315,20 @@ LogicalResult ConvertScfForOp::matchAndRewrite(
     }
     for (auto cont : continues)
     {
-        rewriter.setInsertionPoint(cont);
+        Block *cBlock = cont->getBlock();
+        // Split to avoid trailing ops after the new terminator.
+        auto *tailBlock = rewriter.splitBlock(cBlock, std::next(Block::iterator(cont)));
+        rewriter.setInsertionPointToEnd(cBlock);
         Value bodyIv = bodyBlock->getArgument(0);
         Value next = rewriter.create<sir::AddOp>(loc, u256Type, bodyIv, step);
         rewriter.create<sir::BrOp>(cont.getLoc(), ValueRange{next}, condBlock);
         rewriter.eraseOp(cont);
+        if (!tailBlock->empty())
+        {
+            for (auto &op : llvm::make_early_inc_range(*tailBlock))
+                rewriter.eraseOp(&op);
+        }
+        rewriter.eraseBlock(tailBlock);
     }
 
     for (Block *b : movedBlocks)

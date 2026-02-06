@@ -282,18 +282,24 @@ namespace mlir
                                              }
                                          }
 
-                                         if (llvm::isa<sir::U256Type>(type))
-                                         {
-                                             if (auto tensorType = llvm::dyn_cast<mlir::RankedTensorType>(input.getType()))
-                                             {
-                                                 (void)tensorType;
-                                                 return builder.create<mlir::UnrealizedConversionCastOp>(loc, type, input).getResult(0);
-                                             }
+                                        if (llvm::isa<sir::U256Type>(type))
+                                        {
+                                            if (llvm::isa<mlir::IndexType>(input.getType()))
+                                            {
+                                                auto i256 = mlir::IntegerType::get(builder.getContext(), 256);
+                                                Value asI256 = builder.create<arith::IndexCastOp>(loc, i256, input);
+                                                return builder.create<sir::BitcastOp>(loc, type, asI256);
+                                            }
+                                            if (auto tensorType = llvm::dyn_cast<mlir::RankedTensorType>(input.getType()))
+                                            {
+                                                (void)tensorType;
+                                                return builder.create<mlir::UnrealizedConversionCastOp>(loc, type, input).getResult(0);
+                                            }
                                             if (llvm::isa<ora::AddressType, ora::NonZeroAddressType>(input.getType()))
                                             {
                                                 return builder.create<mlir::UnrealizedConversionCastOp>(loc, type, input).getResult(0);
                                             }
-                                         }
+                                        }
 
                                          if (llvm::isa<sir::PtrType>(type))
                                          {
@@ -557,6 +563,21 @@ namespace mlir
                                              }
                                          }
 
+                                         // Convert sir.u256 to index types
+                                         if (llvm::isa<mlir::IndexType>(type))
+                                         {
+                                             if (llvm::isa<sir::U256Type>(input.getType()))
+                                             {
+                                                 auto i256 = mlir::IntegerType::get(builder.getContext(), 256);
+                                                 Value asI256 = builder.create<sir::BitcastOp>(loc, i256, input);
+                                                 return builder.create<arith::IndexCastOp>(loc, type, asI256);
+                                             }
+                                             if (auto intTy = dyn_cast<mlir::IntegerType>(input.getType()))
+                                             {
+                                                 return builder.create<arith::IndexCastOp>(loc, type, input);
+                                             }
+                                         }
+
                                          return Value(); // Don't handle other cases
                                      });
 
@@ -627,6 +648,20 @@ namespace mlir
                                                  return builder.create<sir::BitcastOp>(loc, type, input);
                                              }
                                          }
+
+                                        if (llvm::isa<mlir::IndexType>(type))
+                                        {
+                                            if (llvm::isa<sir::U256Type>(input.getType()))
+                                            {
+                                                auto i256 = mlir::IntegerType::get(builder.getContext(), 256);
+                                                Value asI256 = builder.create<sir::BitcastOp>(loc, i256, input);
+                                                return builder.create<arith::IndexCastOp>(loc, type, asI256);
+                                            }
+                                            if (auto intTy = dyn_cast<mlir::IntegerType>(input.getType()))
+                                            {
+                                                return builder.create<arith::IndexCastOp>(loc, type, input);
+                                            }
+                                        }
 
                                         if (auto errType = dyn_cast<ora::ErrorUnionType>(type))
                                         {

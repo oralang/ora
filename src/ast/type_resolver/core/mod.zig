@@ -18,7 +18,7 @@ const MemoryRegion = @import("../../statements.zig").MemoryRegion;
 const validation = @import("../validation/mod.zig");
 const utils = @import("../utils/mod.zig");
 const refinements = @import("../refinements/mod.zig");
-const const_eval = @import("../../../const_eval.zig");
+const comptime_eval = @import("../../../comptime/mod.zig");
 const log = @import("log");
 const TypeResolutionError = @import("../mod.zig").TypeResolutionError;
 
@@ -343,7 +343,10 @@ pub const CoreResolver = struct {
     function_registry: ?*std.StringHashMap(*anyopaque) = null,
     // builtin registry for resolving std.* constants and functions
     builtin_registry: ?*const semantics.builtins.BuiltinRegistry = null,
-    comptime_values: std.AutoHashMap(*Scope, std.StringHashMap(const_eval.ConstantValue)),
+    // Comptime environment (Zig-style comptime system)
+    comptime_env: comptime_eval.CtEnv,
+    // Comptime constant pool (persists across evaluations)
+    comptime_pool: comptime_eval.ConstPool,
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -365,16 +368,14 @@ pub const CoreResolver = struct {
             .utils = utils_sys,
             .refinement_system = refinement_sys,
             .builtin_registry = &symbol_table.builtin_registry,
-            .comptime_values = std.AutoHashMap(*Scope, std.StringHashMap(const_eval.ConstantValue)).init(allocator),
+            .comptime_env = comptime_eval.CtEnv.init(allocator, comptime_eval.EvalConfig.default),
+            .comptime_pool = comptime_eval.ConstPool.init(allocator),
         };
     }
 
     pub fn deinit(self: *CoreResolver) void {
-        var it = self.comptime_values.valueIterator();
-        while (it.next()) |map_ptr| {
-            map_ptr.*.deinit();
-        }
-        self.comptime_values.deinit();
+        self.comptime_env.deinit();
+        self.comptime_pool.deinit();
     }
 
     /// Synthesize (infer) type for an expression
@@ -431,53 +432,85 @@ pub const CoreResolver = struct {
         return @import("identifier.zig").lookupIdentifier(self, name);
     }
 
-    pub fn setComptimeValue(self: *CoreResolver, scope: *Scope, name: []const u8, value: const_eval.ConstantValue) !void {
-        const entry = try self.comptime_values.getOrPut(scope);
-        if (!entry.found_existing) {
-            entry.value_ptr.* = std.StringHashMap(const_eval.ConstantValue).init(self.allocator);
-        }
-        try entry.value_ptr.*.put(name, value);
+    /// Set a compile-time value by name
+    pub fn setComptimeValue(self: *CoreResolver, scope: *Scope, name: []const u8, value: comptime_eval.CtValue) !void {
+        _ = scope; // Scope not used in new system (globals only for now)
+        _ = try self.comptime_env.defineGlobal(name, value);
     }
 
-    pub fn lookupComptimeValue(self: *CoreResolver, name: []const u8) ?const_eval.ConstantValue {
-        var scope = self.current_scope;
-        while (scope) |sc| {
-            if (self.comptime_values.get(sc)) |map| {
-                if (map.get(name)) |value| return value;
-            }
-            scope = sc.parent;
-        }
-        return null;
+    /// Set a compile-time integer constant
+    pub fn setComptimeInteger(self: *CoreResolver, scope: *Scope, name: []const u8, value: u256) !void {
+        try self.setComptimeValue(scope, name, .{ .integer = value });
     }
 
+    /// Set a compile-time boolean constant
+    pub fn setComptimeBool(self: *CoreResolver, scope: *Scope, name: []const u8, value: bool) !void {
+        try self.setComptimeValue(scope, name, .{ .boolean = value });
+    }
+
+    /// Lookup a compile-time value by name
+    pub fn lookupComptimeValue(self: *CoreResolver, name: []const u8) ?comptime_eval.CtValue {
+        return self.comptime_env.lookupValue(name);
+    }
+
+    /// Lookup a compile-time integer by name
     pub fn lookupComptimeInteger(self: *CoreResolver, name: []const u8) ?u256 {
-        if (self.lookupComptimeValue(name)) |value| {
-            if (value == .Integer) return value.Integer;
+        if (self.comptime_env.lookupValue(name)) |ct_value| {
+            if (ct_value == .integer) return ct_value.integer;
         }
         return null;
     }
 
-    pub fn evaluateConstantExpressionWithLookup(self: *CoreResolver, expr: *ast.Expressions.ExprNode) !const_eval.ConstantValue {
-        const lookup = const_eval.IdentifierLookup{
+    /// Get the ConstPool
+    pub fn getConstPool(self: *CoreResolver) *comptime_eval.ConstPool {
+        return &self.comptime_pool;
+    }
+
+    /// Get the CtEnv
+    pub fn getComptimeEnv(self: *CoreResolver) *comptime_eval.CtEnv {
+        return &self.comptime_env;
+    }
+
+    /// Evaluate an AST expression at compile time
+    pub fn evaluateConstantExpression(self: *CoreResolver, expr: *ast.Expressions.ExprNode) comptime_eval.AstEvalResult {
+        const lookup = comptime_eval.IdentifierLookup{
             .ctx = self,
-            .func = lookupComptimeValueThunk,
-            .enum_func = lookupEnumValueThunk,
+            .lookupFn = lookupComptimeValueThunk,
+            .enumLookupFn = lookupEnumValueThunk,
         };
-        return const_eval.evaluateConstantExpressionWithLookup(self.type_storage_allocator, expr, &lookup);
+        var eval = comptime_eval.AstEvaluator.init(&self.comptime_env, .try_eval, .forgiving, lookup);
+        return eval.evalExpr(expr);
+    }
+
+    /// Evaluate an AST expression and intern result into ConstPool
+    /// Returns a ConstId that can be stored in symbol tables
+    pub fn evaluateAndIntern(self: *CoreResolver, expr: *ast.Expressions.ExprNode) comptime_eval.InternResult {
+        const lookup = comptime_eval.IdentifierLookup{
+            .ctx = self,
+            .lookupFn = lookupComptimeValueThunk,
+            .enumLookupFn = lookupEnumValueThunk,
+        };
+        var eval = comptime_eval.AstEvaluator.initWithPool(&self.comptime_env, .try_eval, .forgiving, lookup, &self.comptime_pool);
+        return eval.evalAndIntern(expr);
+    }
+
+    /// Intern a CtValue into the ConstPool
+    pub fn internValue(self: *CoreResolver, value: comptime_eval.CtValue) !comptime_eval.ConstId {
+        return self.comptime_pool.intern(&self.comptime_env, value);
     }
 };
 
-fn lookupComptimeValueThunk(ctx: *anyopaque, name: []const u8) ?const_eval.ConstantValue {
+fn lookupComptimeValueThunk(ctx: *anyopaque, name: []const u8) ?comptime_eval.CtValue {
     const self: *CoreResolver = @ptrCast(@alignCast(ctx));
     return self.lookupComptimeValue(name);
 }
 
-fn lookupEnumValueThunk(ctx: *anyopaque, enum_name: []const u8, variant_name: []const u8) ?const_eval.ConstantValue {
+fn lookupEnumValueThunk(ctx: *anyopaque, enum_name: []const u8, variant_name: []const u8) ?comptime_eval.CtValue {
     const self: *CoreResolver = @ptrCast(@alignCast(ctx));
     if (self.symbol_table.enum_variants.get(enum_name)) |variants| {
         for (variants, 0..) |variant, i| {
             if (!std.mem.eql(u8, variant, variant_name)) continue;
-            return const_eval.ConstantValue{ .Integer = @as(u256, @intCast(i)) };
+            return comptime_eval.CtValue{ .integer = @as(u256, @intCast(i)) };
         }
     }
     return null;

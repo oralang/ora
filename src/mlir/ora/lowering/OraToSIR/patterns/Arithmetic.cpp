@@ -1699,6 +1699,30 @@ LogicalResult ConvertArithIndexCastUIOp::matchAndRewrite(
 }
 
 // -----------------------------------------------------------------------------
+// Convert arith.index_cast → sir.bitcast
+// -----------------------------------------------------------------------------
+LogicalResult ConvertArithIndexCastOp::matchAndRewrite(
+    mlir::arith::IndexCastOp op,
+    typename mlir::arith::IndexCastOp::Adaptor adaptor,
+    ConversionPatternRewriter &rewriter) const
+{
+    auto *typeConverter = getTypeConverter();
+    if (!typeConverter)
+    {
+        return rewriter.notifyMatchFailure(op, "missing type converter");
+    }
+    auto resultType = typeConverter->convertType(op.getResult().getType());
+    if (!resultType)
+    {
+        return rewriter.notifyMatchFailure(op, "unable to convert index_cast result type");
+    }
+
+    auto newOp = rewriter.create<sir::BitcastOp>(op.getLoc(), resultType, adaptor.getIn());
+    rewriter.replaceOp(op, newOp.getResult());
+    return success();
+}
+
+// -----------------------------------------------------------------------------
 // Convert arith.trunci → sir.bitcast (u256)
 // -----------------------------------------------------------------------------
 LogicalResult ConvertArithTruncIOp::matchAndRewrite(

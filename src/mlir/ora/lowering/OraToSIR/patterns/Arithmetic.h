@@ -455,6 +455,17 @@ namespace mlir
                 ConversionPatternRewriter &rewriter) const override;
         };
 
+        class ConvertArithIndexCastOp : public OpConversionPattern<mlir::arith::IndexCastOp>
+        {
+        public:
+            using OpConversionPattern::OpConversionPattern;
+
+            LogicalResult matchAndRewrite(
+                mlir::arith::IndexCastOp op,
+                typename mlir::arith::IndexCastOp::Adaptor adaptor,
+                ConversionPatternRewriter &rewriter) const override;
+        };
+
         class ConvertArithTruncIOp : public OpConversionPattern<mlir::arith::TruncIOp>
         {
         public:

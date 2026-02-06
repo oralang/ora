@@ -1,13 +1,13 @@
 // ============================================================================
 // Constant Evaluation (wrapper)
 // ============================================================================
-// Delegates to shared comptime evaluator in src/const_eval.zig
+// Delegates to the new comptime system in src/comptime/
 // ============================================================================
 
-const const_eval = @import("../../../const_eval.zig");
+const comptime_eval = @import("../../../comptime/mod.zig");
 
-pub const ConstantValue = const_eval.ConstantValue;
-
-pub const evaluateConstantExpression = const_eval.evaluateConstantExpression;
-
-pub const extractIntegerValue = const_eval.extractIntegerValue;
+pub const CtValue = comptime_eval.CtValue;
+pub const AstEvalResult = comptime_eval.AstEvalResult;
+pub const AstEvaluator = comptime_eval.AstEvaluator;
+pub const evaluateExpr = comptime_eval.evaluateExpr;
+pub const evaluateToInteger = comptime_eval.evaluateToInteger;

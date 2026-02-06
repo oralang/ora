@@ -11,7 +11,9 @@ const state = @import("../../semantics/state.zig");
 const core = @import("core/mod.zig");
 const stmt_resolver = @import("core/statement.zig");
 const type_info_mod = @import("../type_info.zig");
-const const_eval = @import("../../const_eval.zig");
+const comptime_eval = @import("../../comptime/mod.zig");
+
+const CtValue = comptime_eval.CtValue;
 
 const TypeInfo = type_info_mod.TypeInfo;
 const CommonTypes = type_info_mod.CommonTypes;
@@ -19,6 +21,68 @@ const SymbolTable = state.SymbolTable;
 const Scope = state.Scope;
 
 const FoldError = error{OutOfMemory};
+
+/// Helper to fold a CtValue into a literal expression
+/// Returns true if folding succeeded, false otherwise
+fn tryFoldValue(
+    ctx: *FoldContext,
+    expr: *ast.Expressions.ExprNode,
+    ct_val: CtValue,
+    span: ast.SourceSpan,
+    type_info: TypeInfo,
+) FoldError!bool {
+    switch (ct_val) {
+        .integer => |int_val| {
+            const value_str = try std.fmt.allocPrint(ctx.type_storage_allocator, "{}", .{int_val});
+            var ty = type_info;
+            if (!ty.isResolved()) {
+                ty = CommonTypes.unknown_integer();
+            } else if (ty.ora_type) |ot| {
+                // Unwrap refinement types to base type for literal
+                switch (ot) {
+                    .min_value => |mv| ty = TypeInfo.fromOraType(mv.base.*),
+                    .max_value => |mv| ty = TypeInfo.fromOraType(mv.base.*),
+                    .in_range => |ir| ty = TypeInfo.fromOraType(ir.base.*),
+                    .scaled => |s| ty = TypeInfo.fromOraType(s.base.*),
+                    .exact => |e| ty = TypeInfo.fromOraType(e.*),
+                    else => {},
+                }
+            }
+            expr.* = .{ .Literal = .{ .Integer = .{
+                .value = value_str,
+                .type_info = ty,
+                .span = span,
+            } } };
+            return true;
+        },
+        .boolean => |bool_val| {
+            var ty = type_info;
+            if (!ty.isResolved()) {
+                ty = CommonTypes.bool_type();
+            }
+            expr.* = .{ .Literal = .{ .Bool = .{
+                .value = bool_val,
+                .type_info = ty,
+                .span = span,
+            } } };
+            return true;
+        },
+        .address => |addr_val| {
+            const value_str = try std.fmt.allocPrint(ctx.type_storage_allocator, "0x{x:0>40}", .{addr_val});
+            var ty = type_info;
+            if (!ty.isResolved()) {
+                ty = CommonTypes.address_type();
+            }
+            expr.* = .{ .Literal = .{ .Address = .{
+                .value = value_str,
+                .type_info = ty,
+                .span = span,
+            } } };
+            return true;
+        },
+        else => return false,
+    }
+}
 
 pub const FoldContext = struct {
     allocator: std.mem.Allocator,
@@ -48,10 +112,10 @@ fn foldNode(ctx: *FoldContext, node: *ast.AstNode) FoldError!void {
                     var_decl.skip_guard = stmt_resolver.shouldSkipGuard(ctx.core_resolver, value, target_ora_type);
                 }
                 if (var_decl.kind != .Var) {
-                    const const_result = ctx.core_resolver.evaluateConstantExpressionWithLookup(value) catch const_eval.ConstantValue.NotConstant;
-                    if (const_result != .NotConstant) {
+                    const const_result = ctx.core_resolver.evaluateConstantExpression(value);
+                    if (const_result.getValue()) |ct_value| {
                         if (ctx.current_scope) |scope| {
-                            ctx.core_resolver.setComptimeValue(scope, var_decl.name, const_result) catch {};
+                            ctx.core_resolver.setComptimeValue(scope, var_decl.name, ct_value) catch {};
                         }
                     }
                 }
@@ -152,10 +216,10 @@ fn foldStmt(ctx: *FoldContext, stmt: *ast.Statements.StmtNode) FoldError!void {
                     var_decl.skip_guard = stmt_resolver.shouldSkipGuard(ctx.core_resolver, value, target_ora_type);
                 }
                 if (var_decl.kind != .Var) {
-                    const const_result = ctx.core_resolver.evaluateConstantExpressionWithLookup(value) catch const_eval.ConstantValue.NotConstant;
-                    if (const_result != .NotConstant) {
+                    const const_result = ctx.core_resolver.evaluateConstantExpression(value);
+                    if (const_result.getValue()) |ct_value| {
                         if (ctx.current_scope) |scope| {
-                            ctx.core_resolver.setComptimeValue(scope, var_decl.name, const_result) catch {};
+                            ctx.core_resolver.setComptimeValue(scope, var_decl.name, ct_value) catch {};
                         }
                     }
                 }
@@ -283,82 +347,7 @@ fn foldExpr(ctx: *FoldContext, expr: *ast.Expressions.ExprNode, allow_fold: bool
         .Identifier => |*id| {
             if (allow_fold) {
                 if (ctx.core_resolver.lookupComptimeValue(id.name)) |val| {
-                    const span = getExpressionSpan(expr);
-                    switch (val) {
-                        .Integer => {
-                            const value_str = try std.fmt.allocPrint(ctx.type_storage_allocator, "{}", .{val.Integer});
-                            var ty = id.type_info;
-                            if (!ty.isResolved()) {
-                                ty = CommonTypes.unknown_integer();
-                            }
-                            expr.* = .{ .Literal = .{ .Integer = .{
-                                .value = value_str,
-                                .type_info = ty,
-                                .span = span,
-                            } } };
-                        },
-                        .Bool => {
-                            var ty = id.type_info;
-                            if (!ty.isResolved()) {
-                                ty = CommonTypes.bool_type();
-                            }
-                            expr.* = .{ .Literal = .{ .Bool = .{
-                                .value = val.Bool,
-                                .type_info = ty,
-                                .span = span,
-                            } } };
-                        },
-                        .Array => {
-                            // Only fold arrays into tuple literals when the identifier is typed as a tuple.
-                            // For arrays/slices, keep the identifier to preserve iterable semantics.
-                            if (id.type_info.ora_type) |ora_ty| {
-                                switch (ora_ty) {
-                                    .tuple => {},
-                                    .array, .slice => return,
-                                    else => {},
-                                }
-                            } else {
-                                return;
-                            }
-
-                            var elements = std.ArrayListUnmanaged(*ast.Expressions.ExprNode){};
-                            defer elements.deinit(ctx.type_storage_allocator);
-
-                            for (val.Array) |elem_val| {
-                                const elem_node = try ctx.type_storage_allocator.create(ast.Expressions.ExprNode);
-                                switch (elem_val) {
-                                    .Integer => {
-                                        const value_str = try std.fmt.allocPrint(ctx.type_storage_allocator, "{}", .{elem_val.Integer});
-                                        elem_node.* = .{ .Literal = .{ .Integer = .{
-                                            .value = value_str,
-                                            .type_info = CommonTypes.unknown_integer(),
-                                            .span = span,
-                                        } } };
-                                    },
-                                    .Bool => {
-                                        elem_node.* = .{ .Literal = .{ .Bool = .{
-                                            .value = elem_val.Bool,
-                                            .type_info = CommonTypes.bool_type(),
-                                            .span = span,
-                                        } } };
-                                    },
-                                    else => {
-                                        // non-scalar element: don't fold identifier into tuple
-                                        ctx.type_storage_allocator.destroy(elem_node);
-                                        return;
-                                    },
-                                }
-                                elements.append(ctx.type_storage_allocator, elem_node) catch return;
-                            }
-
-                            const owned = elements.toOwnedSlice(ctx.type_storage_allocator) catch return;
-                            expr.* = .{ .Tuple = .{
-                                .elements = owned,
-                                .span = span,
-                            } };
-                        },
-                        else => {},
-                    }
+                    _ = try tryFoldValue(ctx, expr, val, getExpressionSpan(expr), id.type_info);
                 }
             }
         },
@@ -366,74 +355,16 @@ fn foldExpr(ctx: *FoldContext, expr: *ast.Expressions.ExprNode, allow_fold: bool
             try foldExpr(ctx, bin.lhs, true);
             try foldExpr(ctx, bin.rhs, true);
             if (allow_fold) {
-                const folded = ctx.core_resolver.evaluateConstantExpressionWithLookup(expr) catch const_eval.ConstantValue.NotConstant;
-                if (folded != .NotConstant) {
-                    const span = getExpressionSpan(expr);
-                    switch (folded) {
-                        .Integer => {
-                            const value_str = try std.fmt.allocPrint(ctx.type_storage_allocator, "{}", .{folded.Integer});
-                            var ty = getExpressionTypeInfo(expr);
-                            if (!ty.isResolved()) {
-                                ty = CommonTypes.unknown_integer();
-                            }
-                            expr.* = .{ .Literal = .{ .Integer = .{
-                                .value = value_str,
-                                .type_info = ty,
-                                .span = span,
-                            } } };
-                            return;
-                        },
-                        .Bool => {
-                            var ty = getExpressionTypeInfo(expr);
-                            if (!ty.isResolved()) {
-                                ty = CommonTypes.bool_type();
-                            }
-                            expr.* = .{ .Literal = .{ .Bool = .{
-                                .value = folded.Bool,
-                                .type_info = ty,
-                                .span = span,
-                            } } };
-                            return;
-                        },
-                        else => {},
-                    }
+                if (ctx.core_resolver.evaluateConstantExpression(expr).getValue()) |ct_val| {
+                    if (try tryFoldValue(ctx, expr, ct_val, getExpressionSpan(expr), getExpressionTypeInfo(expr))) return;
                 }
             }
         },
         .Unary => |*unary| {
             try foldExpr(ctx, unary.operand, true);
             if (allow_fold) {
-                const folded = ctx.core_resolver.evaluateConstantExpressionWithLookup(expr) catch const_eval.ConstantValue.NotConstant;
-                if (folded != .NotConstant) {
-                    const span = getExpressionSpan(expr);
-                    switch (folded) {
-                        .Integer => {
-                            const value_str = try std.fmt.allocPrint(ctx.type_storage_allocator, "{}", .{folded.Integer});
-                            var ty = getExpressionTypeInfo(expr);
-                            if (!ty.isResolved()) {
-                                ty = CommonTypes.unknown_integer();
-                            }
-                            expr.* = .{ .Literal = .{ .Integer = .{
-                                .value = value_str,
-                                .type_info = ty,
-                                .span = span,
-                            } } };
-                            return;
-                        },
-                        .Bool => {
-                            var ty = getExpressionTypeInfo(expr);
-                            if (!ty.isResolved()) {
-                                ty = CommonTypes.bool_type();
-                            }
-                            expr.* = .{ .Literal = .{ .Bool = .{
-                                .value = folded.Bool,
-                                .type_info = ty,
-                                .span = span,
-                            } } };
-                            return;
-                        },
-                        else => {},
-                    }
+                if (ctx.core_resolver.evaluateConstantExpression(expr).getValue()) |ct_val| {
+                    if (try tryFoldValue(ctx, expr, ct_val, getExpressionSpan(expr), getExpressionTypeInfo(expr))) return;
                 }
             }
         },
@@ -458,82 +389,11 @@ fn foldExpr(ctx: *FoldContext, expr: *ast.Expressions.ExprNode, allow_fold: bool
             // fold target first so identifier -> tuple literal can be applied
             try foldExpr(ctx, fa.target, true);
             if (allow_fold) {
-            }
-            if (allow_fold) {
-                const folded = ctx.core_resolver.evaluateConstantExpressionWithLookup(expr) catch const_eval.ConstantValue.NotConstant;
-                if (folded != .NotConstant) {
-                    const span = getExpressionSpan(expr);
-                    switch (folded) {
-                        .Integer => {
-                            const value_str = try std.fmt.allocPrint(ctx.type_storage_allocator, "{}", .{folded.Integer});
-                            var ty = getExpressionTypeInfo(expr);
-                            if (!ty.isResolved()) {
-                                ty = CommonTypes.unknown_integer();
-                            }
-                            expr.* = .{ .Literal = .{ .Integer = .{
-                                .value = value_str,
-                                .type_info = ty,
-                                .span = span,
-                            } } };
-                            return;
-                        },
-                        .Bool => {
-                            var ty = getExpressionTypeInfo(expr);
-                            if (!ty.isResolved()) {
-                                ty = CommonTypes.bool_type();
-                            }
-                            expr.* = .{ .Literal = .{ .Bool = .{
-                                .value = folded.Bool,
-                                .type_info = ty,
-                                .span = span,
-                            } } };
-                            return;
-                        },
-                        else => {},
-                    }
+                if (ctx.core_resolver.evaluateConstantExpression(expr).getValue()) |ct_val| {
+                    if (try tryFoldValue(ctx, expr, ct_val, getExpressionSpan(expr), getExpressionTypeInfo(expr))) return;
                 }
             }
-            if (allow_fold and fa.target.* == .Identifier) {
-                const id = &fa.target.Identifier;
-                if (ctx.core_resolver.lookupComptimeValue(id.name)) |val| {
-                    if (val == .Array) {
-                        const field_str = if (fa.field.len > 0 and fa.field[0] == '_') fa.field[1..] else fa.field;
-                        const idx = std.fmt.parseInt(usize, field_str, 10) catch return;
-                        if (idx < val.Array.len) {
-                            const elem_val = val.Array[idx];
-                            const span = getExpressionSpan(expr);
-                            switch (elem_val) {
-                                .Integer => {
-                                    const value_str = try std.fmt.allocPrint(ctx.type_storage_allocator, "{}", .{elem_val.Integer});
-                                    var ty = getExpressionTypeInfo(expr);
-                                    if (!ty.isResolved()) {
-                                        ty = CommonTypes.unknown_integer();
-                                    }
-                                    expr.* = .{ .Literal = .{ .Integer = .{
-                                        .value = value_str,
-                                        .type_info = ty,
-                                        .span = span,
-                                    } } };
-                                    return;
-                                },
-                                .Bool => {
-                                    var ty = getExpressionTypeInfo(expr);
-                                    if (!ty.isResolved()) {
-                                        ty = CommonTypes.bool_type();
-                                    }
-                                    expr.* = .{ .Literal = .{ .Bool = .{
-                                        .value = elem_val.Bool,
-                                        .type_info = ty,
-                                        .span = span,
-                                    } } };
-                                    return;
-                                },
-                                else => {},
-                            }
-                        }
-                    }
-                }
-            }
+            // TODO: Field access on array_ref once heap-based aggregates are supported
             if (fa.target.* == .AnonymousStruct) {
                 const anon = &fa.target.AnonymousStruct;
                 for (anon.fields) |*field| {
@@ -568,43 +428,8 @@ fn foldExpr(ctx: *FoldContext, expr: *ast.Expressions.ExprNode, allow_fold: bool
                         setLiteralSpan(&expr.Literal, span);
                     }
                 }
-            } else {
-                const target_val = ctx.core_resolver.evaluateConstantExpressionWithLookup(fa.target) catch const_eval.ConstantValue.NotConstant;
-                if (target_val == .Array) {
-                    const field_str = if (fa.field.len > 0 and fa.field[0] == '_') fa.field[1..] else fa.field;
-                    const idx = std.fmt.parseInt(usize, field_str, 10) catch return;
-                    if (idx < target_val.Array.len) {
-                        const elem_val = target_val.Array[idx];
-                        const span = getExpressionSpan(expr);
-                        switch (elem_val) {
-                            .Integer => {
-                                const value_str = try std.fmt.allocPrint(ctx.type_storage_allocator, "{}", .{elem_val.Integer});
-                                var ty = getExpressionTypeInfo(expr);
-                                if (!ty.isResolved()) {
-                                    ty = CommonTypes.unknown_integer();
-                                }
-                                expr.* = .{ .Literal = .{ .Integer = .{
-                                    .value = value_str,
-                                    .type_info = ty,
-                                    .span = span,
-                                } } };
-                            },
-                            .Bool => {
-                                var ty = getExpressionTypeInfo(expr);
-                                if (!ty.isResolved()) {
-                                    ty = CommonTypes.bool_type();
-                                }
-                                expr.* = .{ .Literal = .{ .Bool = .{
-                                    .value = elem_val.Bool,
-                                    .type_info = ty,
-                                    .span = span,
-                                } } };
-                            },
-                            else => {},
-                        }
-                    }
-                }
             }
+            // TODO: Handle array_ref field access once heap-based aggregates are supported
         },
         .Cast => |*cast_expr| {
             try foldExpr(ctx, cast_expr.operand, true);
@@ -684,11 +509,12 @@ fn foldExpr(ctx: *FoldContext, expr: *ast.Expressions.ExprNode, allow_fold: bool
 
     if (!allow_fold) return;
 
-    const result = ctx.core_resolver.evaluateConstantExpressionWithLookup(expr) catch return;
+    const eval_result = ctx.core_resolver.evaluateConstantExpression(expr);
+    const ct_val = eval_result.getValue() orelse return;
     const span = getExpressionSpan(expr);
-    switch (result) {
-        .Integer => {
-            const value_str = try std.fmt.allocPrint(ctx.type_storage_allocator, "{}", .{result.Integer});
+    switch (ct_val) {
+        .integer => |int_val| {
+            const value_str = try std.fmt.allocPrint(ctx.type_storage_allocator, "{}", .{int_val});
             var ty = getExpressionTypeInfo(expr);
             if (!ty.isResolved()) {
                 ty = CommonTypes.unknown_integer();
@@ -708,13 +534,13 @@ fn foldExpr(ctx: *FoldContext, expr: *ast.Expressions.ExprNode, allow_fold: bool
                 .span = span,
             } } };
         },
-        .Bool => {
+        .boolean => |bool_val| {
             var ty = getExpressionTypeInfo(expr);
             if (!ty.isResolved()) {
                 ty = CommonTypes.bool_type();
             }
             expr.* = .{ .Literal = .{ .Bool = .{
-                .value = result.Bool,
+                .value = bool_val,
                 .type_info = ty,
                 .span = span,
             } } };

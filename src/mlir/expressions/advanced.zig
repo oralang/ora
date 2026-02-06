@@ -15,7 +15,7 @@ const expr_helpers = @import("helpers.zig");
 const expr_access = @import("access.zig");
 const expr_literals = @import("literals.zig");
 const log = @import("log");
-const const_eval = lib.const_eval;
+const comptime_eval = lib.comptime_eval;
 
 /// ExpressionLowerer type (forward declaration)
 const ExpressionLowerer = @import("mod.zig").ExpressionLowerer;
@@ -85,53 +85,58 @@ pub fn lowerComptime(
     };
 
     if (result_expr) |expr| {
-        const eval_result = const_eval.evaluateConstantExpression(std.heap.page_allocator, @constCast(expr)) catch |err| {
-            log.err("comptime evaluation failed: {s}\n", .{@errorName(err)});
-            if (self.error_handler) |handler| {
-                handler.reportError(.InternalError, comptime_expr.span, "comptime evaluation failed", null) catch {};
-            }
-            const op = self.ora_dialect.createArithConstantWithAttrs(0, ty, &attrs, loc);
-            h.appendOp(self.block, op);
-            return h.getResult(op, 0);
-        };
+        const eval_result = comptime_eval.evaluateExpr(std.heap.page_allocator, @constCast(expr), null);
 
         switch (eval_result) {
-            .Integer => |value| {
-                if (value > @as(u256, @intCast(std.math.maxInt(i64)))) {
-                    log.err("comptime constant too large for MLIR i64 attribute\n", .{});
-                    if (self.error_handler) |handler| {
-                        handler.reportError(.CompilationLimit, comptime_expr.span, "comptime constant too large for MLIR i64 attribute", null) catch {};
-                    }
-                    const op = self.ora_dialect.createArithConstantWithAttrs(0, ty, &attrs, loc);
-                    h.appendOp(self.block, op);
-                    return h.getResult(op, 0);
+            .value => |ct_val| {
+                switch (ct_val) {
+                    .integer => |value| {
+                        if (value > @as(u256, @intCast(std.math.maxInt(i64)))) {
+                            log.err("comptime constant too large for MLIR i64 attribute\n", .{});
+                            if (self.error_handler) |handler| {
+                                handler.reportError(.CompilationLimit, comptime_expr.span, "comptime constant too large for MLIR i64 attribute", null) catch {};
+                            }
+                            const op = self.ora_dialect.createArithConstantWithAttrs(0, ty, &attrs, loc);
+                            h.appendOp(self.block, op);
+                            return h.getResult(op, 0);
+                        }
+                        const op = self.ora_dialect.createArithConstantWithAttrs(@intCast(value), ty, &attrs, loc);
+                        h.appendOp(self.block, op);
+                        return h.getResult(op, 0);
+                    },
+                    .boolean => |value| {
+                        const op = self.ora_dialect.createArithConstantWithAttrs(if (value) 1 else 0, ty, &attrs, loc);
+                        h.appendOp(self.block, op);
+                        return h.getResult(op, 0);
+                    },
+                    else => {
+                        log.err("comptime expression is not a scalar constant yet\n", .{});
+                        if (self.error_handler) |handler| {
+                            handler.reportError(.InternalError, comptime_expr.span, "comptime expression is not a scalar constant", null) catch {};
+                        }
+                        const op = self.ora_dialect.createArithConstantWithAttrs(0, ty, &attrs, loc);
+                        h.appendOp(self.block, op);
+                        return h.getResult(op, 0);
+                    },
                 }
-                const op = self.ora_dialect.createArithConstantWithAttrs(@intCast(value), ty, &attrs, loc);
+            },
+            .not_constant => {
+                log.err("comptime evaluation produced non-constant\n", .{});
+                if (self.error_handler) |handler| {
+                    handler.reportError(.InternalError, comptime_expr.span, "comptime evaluation produced non-constant", null) catch {};
+                }
+                const op = self.ora_dialect.createArithConstantWithAttrs(0, ty, &attrs, loc);
                 h.appendOp(self.block, op);
                 return h.getResult(op, 0);
             },
-            .Bool => |value| {
-                const op = self.ora_dialect.createArithConstantWithAttrs(if (value) 1 else 0, ty, &attrs, loc);
+            .err => |err| {
+                log.err("comptime evaluation failed: {s}\n", .{@tagName(err.kind)});
+                if (self.error_handler) |handler| {
+                    handler.reportError(.InternalError, comptime_expr.span, "comptime evaluation error", null) catch {};
+                }
+                const op = self.ora_dialect.createArithConstantWithAttrs(0, ty, &attrs, loc);
                 h.appendOp(self.block, op);
                 return h.getResult(op, 0);
-            },
-            .Array, .Range => {
-                log.err("comptime expression is not a scalar constant yet\n", .{});
-                if (self.error_handler) |handler| {
-                    handler.reportError(.UnsupportedFeature, comptime_expr.span, "comptime expression is not a scalar constant", "use a scalar constant expression") catch {};
-                }
-            },
-            .NotConstant => {
-                log.err("comptime expression is not a compile-time constant yet\n", .{});
-                if (self.error_handler) |handler| {
-                    handler.reportError(.UnsupportedFeature, comptime_expr.span, "comptime expression is not a compile-time constant", "remove comptime or make inputs const") catch {};
-                }
-            },
-            .Error => {
-                log.err("comptime expression evaluation error\n", .{});
-                if (self.error_handler) |handler| {
-                    handler.reportError(.InternalError, comptime_expr.span, "comptime expression evaluation error", null) catch {};
-                }
             },
         }
     }
