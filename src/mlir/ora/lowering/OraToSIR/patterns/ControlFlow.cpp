@@ -1754,11 +1754,9 @@ LogicalResult ConvertCallOp::matchAndRewrite(
     bool isNoneResult = (oldResultTypes.size() == 1 &&
                          llvm::isa<mlir::NoneType>(oldResultTypes.front()));
 
-    auto lowerErrorDeclCall = [&](ora::ErrorDeclOp errDecl) -> LogicalResult {
-        auto errIdAttr = errDecl->getAttrOfType<mlir::IntegerAttr>("ora.error_id");
-        if (!errIdAttr)
-            return rewriter.notifyMatchFailure(op, "error.decl missing ora.error_id");
-
+    // Lower a call to an error constructor into a sir.const of the error ID.
+    // Works with both ora::ErrorDeclOp and sir::ErrorDeclOp (post-conversion).
+    auto lowerErrorIdCall = [&](mlir::IntegerAttr errIdAttr) -> LogicalResult {
         auto *ctx = op.getContext();
         auto u256Type = sir::U256Type::get(ctx);
         auto u256IntType = mlir::IntegerType::get(ctx, 256, mlir::IntegerType::Unsigned);
@@ -1791,25 +1789,38 @@ LogicalResult ConvertCallOp::matchAndRewrite(
         return success();
     };
 
+    // Try to find the error ID from an error decl symbol (ora or sir dialect).
+    auto findErrorId = [](Operation *symbol) -> mlir::IntegerAttr {
+        if (auto attr = symbol->getAttrOfType<mlir::IntegerAttr>("ora.error_id"))
+            return attr;
+        if (auto attr = symbol->getAttrOfType<mlir::IntegerAttr>("sir.error_id"))
+            return attr;
+        return {};
+    };
+
     StringRef calleeName = op.getCallee();
     if (!calleeName.empty())
     {
         auto calleeAttr = mlir::StringAttr::get(op.getContext(), calleeName);
         if (Operation *symbol = mlir::SymbolTable::lookupNearestSymbolFrom(op, calleeAttr))
         {
-            if (auto errDecl = dyn_cast<ora::ErrorDeclOp>(symbol))
-                return lowerErrorDeclCall(errDecl);
+            if (auto errId = findErrorId(symbol))
+                return lowerErrorIdCall(errId);
         }
+        // Fallback: walk module for error decls (ora or sir) by sym_name.
         if (auto module = op->getParentOfType<mlir::ModuleOp>())
         {
-            ora::ErrorDeclOp found;
-            module.walk([&](ora::ErrorDeclOp decl) {
-                auto sym = decl->getAttrOfType<mlir::StringAttr>("sym_name");
-                if (sym && sym.getValue() == calleeName)
-                    found = decl;
+            mlir::IntegerAttr foundId;
+            module.walk([&](Operation *decl) {
+                if (!foundId && (isa<ora::ErrorDeclOp>(decl) || isa<sir::ErrorDeclOp>(decl)))
+                {
+                    auto sym = decl->getAttrOfType<mlir::StringAttr>("sym_name");
+                    if (sym && sym.getValue() == calleeName)
+                        foundId = findErrorId(decl);
+                }
             });
-            if (found)
-                return lowerErrorDeclCall(found);
+            if (foundId)
+                return lowerErrorIdCall(foundId);
         }
     }
 

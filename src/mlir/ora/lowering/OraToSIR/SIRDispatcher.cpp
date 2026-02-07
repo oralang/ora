@@ -479,11 +479,30 @@ namespace mlir
                     if (userInit)
                     {
                         auto userInitType = userInit.getFunctionType();
+                        // Strip void/none return types from init (the frontend may emit them).
                         if (userInitType.getNumResults() != 0)
                         {
-                            userInit.emitError("constructor init must not return values");
-                            signalPassFailure();
-                            return;
+                            bool allNone = true;
+                            for (auto rt : userInitType.getResults())
+                            {
+                                if (!llvm::isa<mlir::NoneType>(rt))
+                                {
+                                    allNone = false;
+                                    break;
+                                }
+                            }
+                            if (allNone)
+                            {
+                                auto newType = FunctionType::get(
+                                    userInit.getContext(), userInitType.getInputs(), {});
+                                userInit.setFunctionType(newType);
+                            }
+                            else
+                            {
+                                userInit.emitError("constructor init must not return values");
+                                signalPassFailure();
+                                return;
+                            }
                         }
 
                         SmallVector<AbiType, 8> initAbiParams;

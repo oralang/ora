@@ -974,6 +974,20 @@ public:
                 } });
         DBG("Before conversion: " << totalOps << " total ops, " << oraOps << " Ora ops, " << oraReturnOps << " ora.return ops");
 
+        // Preserve error decl IDs as module attribute before any conversion
+        // erases ora::ErrorDeclOp (sir::ErrorDeclOp lacks SymbolOpInterface).
+        {
+            SmallVector<NamedAttribute> errEntries;
+            module.walk([&](ora::ErrorDeclOp decl) {
+                auto id = decl->getAttrOfType<mlir::IntegerAttr>("ora.error_id");
+                auto sym = decl->getAttrOfType<mlir::StringAttr>("sym_name");
+                if (sym && id)
+                    errEntries.push_back(NamedAttribute(sym, id));
+            });
+            if (!errEntries.empty())
+                module->setAttr("sir.error_ids", DictionaryAttr::get(ctx, errEntries));
+        }
+
         // Phase 0 only: normalize error_union ops into explicit packing/unpacking.
         {
             RewritePatternSet phase0Patterns(ctx);
@@ -1311,21 +1325,7 @@ public:
             phase4Target.addIllegalDialect<mlir::tensor::TensorDialect>();
             phase4Target.addIllegalDialect<mlir::memref::MemRefDialect>();
             phase4Target.addIllegalOp<mlir::UnrealizedConversionCastOp>();
-            phase4Target.addDynamicallyLegalOp<mlir::func::CallOp>(
-                [&](mlir::func::CallOp op)
-                {
-                    for (Type operandType : op.getOperandTypes())
-                    {
-                        if (!typeConverter.isLegal(operandType))
-                            return false;
-                    }
-                    for (Type resultType : op.getResultTypes())
-                    {
-                        if (!typeConverter.isLegal(resultType))
-                            return false;
-                    }
-                    return true;
-                });
+            phase4Target.addIllegalOp<mlir::func::CallOp>();
             phase4Target.addIllegalOp<ora::ReturnOp>();
             phase4Target.addLegalOp<mlir::func::FuncOp>();
             phase4Target.addIllegalOp<ora::IfOp>();
@@ -1354,6 +1354,8 @@ public:
                 llvm::errs().flush();
             }
 
+            // (error IDs already preserved as module attr before Phase 1)
+
             logModuleOps(module, "Before Phase4 conversion");
             if (failed(applyFullConversion(module, phase4Target, std::move(phase4Patterns))))
             {
@@ -1381,11 +1383,40 @@ public:
                 castOp.erase();
             }
 
+            // Cleanup: strip residual refinement ops (materializations may create them).
+            SmallVector<ora::BaseToRefinementOp, 8> residualB2R;
+            SmallVector<ora::RefinementToBaseOp, 8> residualR2B;
+            module.walk([&](ora::BaseToRefinementOp op) { residualB2R.push_back(op); });
+            module.walk([&](ora::RefinementToBaseOp op) { residualR2B.push_back(op); });
+            for (auto op : residualB2R)
+            {
+                op.getResult().replaceAllUsesWith(op.getValue());
+                op.erase();
+            }
+            for (auto op : residualR2B)
+            {
+                op.getResult().replaceAllUsesWith(op.getValue());
+                op.erase();
+            }
+
+            // Cleanup: strip sir.bitcast ops whose result is an Ora refinement type.
+            // These are created by source materializations during conversion.
+            auto isOraRefinement = [](Type t) {
+                return llvm::isa<ora::MinValueType, ora::MaxValueType, ora::InRangeType,
+                                 ora::ScaledType, ora::ExactType, ora::NonZeroAddressType>(t);
+            };
+            SmallVector<sir::BitcastOp, 16> refinementBitcasts;
+            module.walk([&](sir::BitcastOp op) {
+                if (isOraRefinement(op.getResult().getType()))
+                    refinementBitcasts.push_back(op);
+            });
+            for (auto op : refinementBitcasts)
+            {
+                op.getResult().replaceAllUsesWith(op.getOperand());
+                op.erase();
+            }
+
             // Cleanup: strip all remaining 1:1 unrealized_conversion_casts.
-            // After full conversion, any remaining casts are source materializations
-            // where the SIR value was wrapped back to an Ora type for a legal op's
-            // operand. These are safe to forward since the underlying value is already
-            // the correct SIR representation.
             SmallVector<mlir::UnrealizedConversionCastOp, 16> residualCasts;
             module.walk([&](mlir::UnrealizedConversionCastOp op) {
                 if (op.getNumOperands() == 1 && op.getNumResults() == 1)
@@ -1395,6 +1426,52 @@ public:
             {
                 castOp.getResult(0).replaceAllUsesWith(castOp.getOperand(0));
                 castOp.erase();
+            }
+
+            // Cleanup: replace sir.icall to error constructors with sir.const.
+            // Error decl IDs preserved as module attribute before Phase 1.
+            {
+                llvm::StringMap<int64_t> errorIds;
+                if (auto errDict = module->getAttrOfType<DictionaryAttr>("sir.error_ids"))
+                {
+                    for (auto entry : errDict)
+                    {
+                        if (auto id = dyn_cast<IntegerAttr>(entry.getValue()))
+                            errorIds[entry.getName()] = id.getInt();
+                    }
+                }
+
+                SmallVector<sir::ICallOp, 4> errorIcalls;
+                module.walk([&](sir::ICallOp op) {
+                    if (auto callee = op.getCalleeAttr())
+                    {
+                        StringRef name = callee.getValue();
+                        if (errorIds.count(name))
+                            errorIcalls.push_back(op);
+                    }
+                });
+
+                for (auto op : errorIcalls)
+                {
+                    int64_t id = errorIds[op.getCalleeAttr().getValue()];
+                    OpBuilder b(op);
+                    auto u256 = sir::U256Type::get(ctx);
+                    auto ui256 = mlir::IntegerType::get(ctx, 256, mlir::IntegerType::Unsigned);
+                    auto idConst = b.create<sir::ConstOp>(
+                        op.getLoc(), u256, mlir::IntegerAttr::get(ui256, id));
+                    // Replace all results with the error ID constant or zero.
+                    for (unsigned i = 0; i < op.getNumResults(); ++i)
+                    {
+                        Value oldRes = op.getResult(i);
+                        if (oldRes.use_empty())
+                            continue;
+                        Value replacement = idConst;
+                        if (oldRes.getType() != u256)
+                            replacement = b.create<sir::BitcastOp>(op.getLoc(), oldRes.getType(), idConst);
+                        oldRes.replaceAllUsesWith(replacement);
+                    }
+                    op.erase();
+                }
             }
 
             // Verify no unrealized casts remain.

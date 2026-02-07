@@ -94,6 +94,7 @@ namespace mlir
                             s.insert("sir.sgt");
                             s.insert("sir.eq");
                             s.insert("sir.iszero");
+                            s.insert("sir.select");
                             s.insert("sir.and");
                             s.insert("sir.or");
                             s.insert("sir.xor");
@@ -411,12 +412,44 @@ namespace mlir
                         }
                     }
 
+                    // Build error decl map from module attribute (preserved by OraToSIR pass).
+                    llvm::StringMap<int64_t> errorDeclIds;
+                    if (auto errDict = module->getAttrOfType<DictionaryAttr>("sir.error_ids"))
+                    {
+                        for (auto entry : errDict)
+                        {
+                            if (auto id = dyn_cast<IntegerAttr>(entry.getValue()))
+                                errorDeclIds[entry.getName()] = id.getInt();
+                        }
+                    }
+
                     module.walk([&](sir::ICallOp op) {
                         if (auto callee = op.getCalleeAttr())
                         {
                             Operation *sym = SymbolTable::lookupNearestSymbolFrom(op, callee);
                             if (!sym)
                             {
+                                // Check if this is an error constructor call.
+                                auto it = errorDeclIds.find(callee.getValue());
+                                if (it != errorDeclIds.end())
+                                {
+                                    OpBuilder b(op);
+                                    auto u256 = sir::U256Type::get(op.getContext());
+                                    auto ui256 = IntegerType::get(op.getContext(), 256, IntegerType::Unsigned);
+                                    auto idConst = b.create<sir::ConstOp>(
+                                        op.getLoc(), u256, IntegerAttr::get(ui256, it->second));
+                                    for (unsigned i = 0; i < op.getNumResults(); ++i)
+                                    {
+                                        Value oldRes = op.getResult(i);
+                                        if (oldRes.use_empty()) continue;
+                                        Value repl = idConst;
+                                        if (oldRes.getType() != u256)
+                                            repl = b.create<sir::BitcastOp>(op.getLoc(), oldRes.getType(), idConst);
+                                        oldRes.replaceAllUsesWith(repl);
+                                    }
+                                    op.erase();
+                                    return;
+                                }
                                 report(op.getOperation(), "icall callee symbol not found");
                                 return;
                             }

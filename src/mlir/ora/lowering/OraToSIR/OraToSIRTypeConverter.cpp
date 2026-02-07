@@ -740,13 +740,12 @@ namespace mlir
                                             return cast.getResult(0);
                                         }
 
-                                        // Allow materializing into refinement types via ora.base_to_refinement.
+                                        // Refinement types erase to their base representation;
+                                        // materialize via sir.bitcast instead of creating ora ops.
                                         if (llvm::isa<ora::MinValueType, ora::MaxValueType, ora::InRangeType,
                                                      ora::ScaledType, ora::ExactType, ora::NonZeroAddressType>(type))
                                         {
-                                            // The refinement op is type-level; it can wrap an already-converted value.
-                                            auto cast = builder.create<ora::BaseToRefinementOp>(loc, type, input);
-                                            return cast.getResult();
+                                            return builder.create<sir::BitcastOp>(loc, type, input).getResult();
                                         }
 
                                         // If trying to materialize to an Ora type, this is an error
