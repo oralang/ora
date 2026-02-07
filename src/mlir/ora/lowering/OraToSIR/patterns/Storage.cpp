@@ -1,4 +1,5 @@
 #include "patterns/Storage.h"
+#include "patterns/EVMConstants.h"
 #include "OraToSIRTypeConverter.h"
 #include "OraDebug.h"
 
@@ -62,7 +63,11 @@ namespace {
     };
 
     static llvm::DenseMap<MapHashKey, Value, MapHashKeyInfo> mapHashCache;
+} // namespace
 
+void clearMapHashCache() { mapHashCache.clear(); }
+
+namespace {
     static bool getConstU64(Value v, uint64_t &out)
     {
         if (auto cst = v.getDefiningOp<sir::ConstOp>())
@@ -194,8 +199,7 @@ static Value findOrCreateSlotConstant(Operation *op, uint64_t slotIndex,
                 return WalkResult::advance();
             // Found existing slot constant - reuse it
             existingConst = constOp.getResult();
-            return WalkResult::interrupt();
-            return WalkResult::advance(); });
+            return WalkResult::interrupt(); });
     }
 
     // Reuse existing constant if found
@@ -219,11 +223,9 @@ LogicalResult ConvertSLoadOp::matchAndRewrite(
     typename ora::SLoadOp::Adaptor adaptor,
     ConversionPatternRewriter &rewriter) const
 {
-    llvm::errs() << "[OraToSIR] ConvertSLoadOp: " << op.getGlobalName()
-                 << " op=" << op.getOperation()
-                 << " block=" << op.getOperation()->getBlock()
-                 << "\n";
-    llvm::errs().flush();
+    LLVM_DEBUG(llvm::dbgs() << "[OraToSIR] ConvertSLoadOp: " << op.getGlobalName()
+                           << " op=" << op.getOperation()
+                           << " block=" << op.getOperation()->getBlock() << "\n");
 
     auto loc = op.getLoc();
     auto ctx = rewriter.getContext();
@@ -264,18 +266,14 @@ LogicalResult ConvertSLoadOp::matchAndRewrite(
     // Check if result type is dynamic bytes (string, bytes, or enum with string repr)
     Type resultType = op.getResult().getType();
     bool isDynamicBytes = llvm::isa<ora::StringType, ora::BytesType>(resultType);
-    llvm::errs() << "[OraToSIR]   resultType: " << resultType << "\n";
-    llvm::errs() << "[OraToSIR]   dialect: " << resultType.getDialect().getNamespace() << "\n";
-    llvm::errs() << "[OraToSIR]   is StringType: " << llvm::isa<ora::StringType>(resultType) << "\n";
-    llvm::errs() << "[OraToSIR]   is BytesType: " << llvm::isa<ora::BytesType>(resultType) << "\n";
-    llvm::errs() << "[OraToSIR]   is EnumType: " << llvm::isa<ora::EnumType>(resultType) << "\n";
-    llvm::errs() << "[OraToSIR]   isDynamicBytes (initial): " << isDynamicBytes << "\n";
+    LLVM_DEBUG(llvm::dbgs() << "[OraToSIR]   resultType: " << resultType
+                            << ", isDynamicBytes(initial): " << isDynamicBytes << "\n");
 
     // Check if enum type has string/bytes representation
     if (auto enumType = llvm::dyn_cast<ora::EnumType>(resultType))
     {
         Type reprType = enumType.getReprType();
-        llvm::errs() << "[OraToSIR]   enum reprType: " << reprType << "\n";
+        LLVM_DEBUG(llvm::dbgs() << "[OraToSIR]   enum reprType: " << reprType << "\n");
         if (llvm::isa<ora::StringType, ora::BytesType>(reprType))
         {
             isDynamicBytes = true;
@@ -317,7 +315,7 @@ LogicalResult ConvertSLoadOp::matchAndRewrite(
     {
         convertedResultType = ptrType;
     }
-    llvm::errs() << "[OraToSIR]   convertedResultType: " << convertedResultType << "\n";
+    LLVM_DEBUG(llvm::dbgs() << "[OraToSIR]   convertedResultType: " << convertedResultType << "\n");
     if (llvm::isa<sir::PtrType>(convertedResultType))
     {
         isDynamicBytes = true;
@@ -329,7 +327,7 @@ LogicalResult ConvertSLoadOp::matchAndRewrite(
     {
         isDynamicBytes = true;
     }
-    llvm::errs() << "[OraToSIR]   isDynamicBytes (final): " << isDynamicBytes << "\n";
+    LLVM_DEBUG(llvm::dbgs() << "[OraToSIR]   isDynamicBytes(final): " << isDynamicBytes << "\n");
 
     if (isDynamicBytes)
     {
@@ -375,7 +373,7 @@ LogicalResult ConvertSLoadOp::matchAndRewrite(
         rewriter.create<sir::BrOp>(loc, ValueRange{next}, condBlock);
 
         rewriter.replaceOp(op, basePtr);
-        llvm::errs() << "[OraToSIR]   replaced with dynamic bytes load\n";
+        LLVM_DEBUG(llvm::dbgs() << "[OraToSIR]   replaced with dynamic bytes load\n");
         return success();
     }
 
@@ -383,7 +381,7 @@ LogicalResult ConvertSLoadOp::matchAndRewrite(
     // Get the converted result type from type converter (enum -> u256, etc.)
     if (!convertedResultType)
     {
-        llvm::errs() << "[OraToSIR]   failed to convert result type for scalar sload\n";
+        LLVM_DEBUG(llvm::dbgs() << "[OraToSIR]   failed to convert result type for scalar sload\n");
         return rewriter.notifyMatchFailure(op, "failed to convert result type");
     }
 
@@ -396,7 +394,7 @@ LogicalResult ConvertSLoadOp::matchAndRewrite(
     auto sloadOp = rewriter.replaceOpWithNewOp<sir::SLoadOp>(op, convertedResultType, slotConst);
     setResultName(sloadOp, 0, "value");
 
-    llvm::errs() << "[OraToSIR]   replaced with sir.sload\n";
+    LLVM_DEBUG(llvm::dbgs() << "[OraToSIR]   replaced with sir.sload\n");
     return success();
 }
 
@@ -666,12 +664,8 @@ LogicalResult ConvertMapGetOp::matchAndRewrite(
     typename ora::MapGetOp::Adaptor adaptor,
     ConversionPatternRewriter &rewriter) const
 {
-    llvm::errs() << "[OraToSIR] ========================================\n";
-    llvm::errs() << "[OraToSIR] ConvertMapGetOp::matchAndRewrite() CALLED!\n";
-    llvm::errs() << "[OraToSIR]   Operation: " << op->getName() << "\n";
-    llvm::errs() << "[OraToSIR]   Location: " << op.getLoc() << "\n";
-    llvm::errs() << "[OraToSIR] ========================================\n";
-    llvm::errs().flush();
+    LLVM_DEBUG(llvm::dbgs() << "[OraToSIR] ConvertMapGetOp: " << op->getName()
+                           << " at " << op.getLoc() << "\n");
 
     auto loc = op.getLoc();
     auto ctx = rewriter.getContext();
@@ -791,8 +785,7 @@ LogicalResult ConvertMapGetOp::matchAndRewrite(
 
         if (!structDecl)
         {
-            llvm::errs() << "[OraToSIR] ConvertMapGetOp: Could not find struct declaration for: " << structName << "\n";
-            llvm::errs().flush();
+            LLVM_DEBUG(llvm::dbgs() << "[OraToSIR] ConvertMapGetOp: Could not find struct declaration for: " << structName << "\n");
             return rewriter.notifyMatchFailure(op, "could not find struct declaration");
         }
 
@@ -803,8 +796,7 @@ LogicalResult ConvertMapGetOp::matchAndRewrite(
         if (!fieldNamesAttr || !fieldTypesAttr ||
             fieldNamesAttr.size() != fieldTypesAttr.size())
         {
-            llvm::errs() << "[OraToSIR] ConvertMapGetOp: Invalid field attributes for struct: " << structName << "\n";
-            llvm::errs().flush();
+            LLVM_DEBUG(llvm::dbgs() << "[OraToSIR] ConvertMapGetOp: Invalid field attributes for struct: " << structName << "\n");
             return rewriter.notifyMatchFailure(op, "invalid struct field attributes");
         }
 
@@ -866,9 +858,8 @@ LogicalResult ConvertMapGetOp::matchAndRewrite(
     // If type conversion failed, use u256 as fallback
     if (!convertedResultType)
     {
-        llvm::errs() << "[OraToSIR] ConvertMapGetOp: Type conversion failed for result type: " << expectedResultType << "\n";
-        llvm::errs() << "[OraToSIR]   Using u256 as fallback\n";
-        llvm::errs().flush();
+        LLVM_DEBUG(llvm::dbgs() << "[OraToSIR] ConvertMapGetOp: Type conversion failed for: "
+                               << expectedResultType << ", using u256 fallback\n");
         convertedResultType = u256Type;
     }
 
@@ -896,12 +887,8 @@ LogicalResult ConvertMapStoreOp::matchAndRewrite(
     typename ora::MapStoreOp::Adaptor adaptor,
     ConversionPatternRewriter &rewriter) const
 {
-    llvm::errs() << "[OraToSIR] ========================================\n";
-    llvm::errs() << "[OraToSIR] ConvertMapStoreOp::matchAndRewrite() CALLED!\n";
-    llvm::errs() << "[OraToSIR]   Operation: " << op->getName() << "\n";
-    llvm::errs() << "[OraToSIR]   Location: " << op.getLoc() << "\n";
-    llvm::errs() << "[OraToSIR] ========================================\n";
-    llvm::errs().flush();
+    LLVM_DEBUG(llvm::dbgs() << "[OraToSIR] ConvertMapStoreOp: " << op->getName()
+                           << " at " << op.getLoc() << "\n");
 
     auto loc = op.getLoc();
     auto ctx = rewriter.getContext();

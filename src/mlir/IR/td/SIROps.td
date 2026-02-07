@@ -4,6 +4,7 @@
 #define SIR_OPS
 
 include "mlir/IR/OpBase.td"
+include "mlir/IR/CommonAttrConstraints.td"
 include "mlir/Interfaces/SideEffectInterfaces.td"
 include "SIRDialect.td"
 include "SIRTypes.td"
@@ -28,16 +29,28 @@ class SIR_PureOp<string mnemonic, list<Trait> traits = []> :
 // ==========================================================================
 def ConstOp : SIR_PureOp<"const", [DeclareOpInterfaceMethods<OpAsmOpInterface, ["getAsmResultNames"]>]> {
   let summary = "Constant 256-bit value";
-  let arguments = (ins UI64Attr:$value);
+  let arguments = (ins APIntAttr:$value);
   let results   = (outs SIR_U256:$res);
   let hasCustomAssemblyFormat = 1;
   let hasFolder = 1;
 
   let builders = [
+    // Convenience builder for small constants (fits in uint64_t).
     OpBuilder<(ins "uint64_t":$value), [{
-      auto ui64Type = IntegerType::get($_builder.getContext(), 64,
-                                       IntegerType::Unsigned);
-      $_state.addAttribute("value", IntegerAttr::get(ui64Type, value));
+      auto u256Type = ::mlir::IntegerType::get($_builder.getContext(), 256);
+      $_state.addAttribute("value", ::mlir::IntegerAttr::get(u256Type, ::llvm::APInt(256, value)));
+      $_state.addTypes(sir::U256Type::get($_builder.getContext()));
+    }]>,
+    // Full-width builder for arbitrary 256-bit constants.
+    OpBuilder<(ins "const ::llvm::APInt &":$value), [{
+      auto u256Type = ::mlir::IntegerType::get($_builder.getContext(), 256);
+      ::llvm::APInt val = value.getBitWidth() == 256 ? value : value.zext(256);
+      $_state.addAttribute("value", ::mlir::IntegerAttr::get(u256Type, val));
+      $_state.addTypes(sir::U256Type::get($_builder.getContext()));
+    }]>,
+    // Builder accepting an IntegerAttr directly.
+    OpBuilder<(ins "::mlir::IntegerAttr":$value), [{
+      $_state.addAttribute("value", value);
       $_state.addTypes(sir::U256Type::get($_builder.getContext()));
     }]>
   ];
@@ -146,7 +159,7 @@ def ExpOp : SIR_PureOp<"exp"> {
     "$base `:` type($base) `,` $exp `:` type($exp) attr-dict `:` type($res)";
 }
 
-def SignExtendOp : SIR_Op<"signextend"> {
+def SignExtendOp : SIR_PureOp<"signextend"> {
   let summary = "Sign extend";
   let arguments = (ins SIR_U256:$b, SIR_U256:$x);
   let results   = (outs SIR_U256:$res);
@@ -174,7 +187,7 @@ def GtOp : SIR_PureOp<"gt"> {
     "$lhs `:` type($lhs) `,` $rhs `:` type($rhs) attr-dict `:` type($res)";
 }
 
-def SLtOp : SIR_Op<"slt"> {
+def SLtOp : SIR_PureOp<"slt"> {
   let summary = "Signed less-than comparison";
   let arguments = (ins SIR_U256:$lhs, SIR_U256:$rhs);
   let results   = (outs SIR_U256:$res);
@@ -182,7 +195,7 @@ def SLtOp : SIR_Op<"slt"> {
     "$lhs `:` type($lhs) `,` $rhs `:` type($rhs) attr-dict `:` type($res)";
 }
 
-def SGtOp : SIR_Op<"sgt"> {
+def SGtOp : SIR_PureOp<"sgt"> {
   let summary = "Signed greater-than comparison";
   let arguments = (ins SIR_U256:$lhs, SIR_U256:$rhs);
   let results   = (outs SIR_U256:$res);
@@ -243,7 +256,7 @@ def XorOp : SIR_PureOp<"xor"> {
     "$lhs `:` type($lhs) `,` $rhs `:` type($rhs) attr-dict `:` type($res)";
 }
 
-def NotOp : SIR_Op<"not"> {
+def NotOp : SIR_PureOp<"not"> {
   let summary = "Bitwise NOT";
   let arguments = (ins SIR_U256:$x);
   let results   = (outs SIR_U256:$res);
@@ -251,7 +264,7 @@ def NotOp : SIR_Op<"not"> {
     "$x `:` type($x) attr-dict `:` type($res)";
 }
 
-def ByteOp : SIR_Op<"byte"> {
+def ByteOp : SIR_PureOp<"byte"> {
   let summary = "BYTE opcode";
   let arguments = (ins SIR_U256:$i, SIR_U256:$x);
   let results   = (outs SIR_U256:$res);
@@ -275,7 +288,7 @@ def ShrOp : SIR_PureOp<"shr"> {
     "$shift `:` type($shift) `,` $x `:` type($x) attr-dict `:` type($res)";
 }
 
-def SarOp : SIR_Op<"sar"> {
+def SarOp : SIR_PureOp<"sar"> {
   let summary = "Arithmetic shift right";
   let arguments = (ins SIR_U256:$shift, SIR_U256:$x);
   let results   = (outs SIR_U256:$res);

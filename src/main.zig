@@ -1278,13 +1278,26 @@ fn generateMlirOutput(allocator: std.mem.Allocator, ast_nodes: []lib.AstNode, fi
 
         const verification_result = try verifier.runVerificationPass(final_module);
 
+        // Show diagnostics (counterexamples for guards that can be violated)
+        if (verification_result.diagnostics.items.len > 0) {
+            try stdout.print("⚠ Z3 counterexamples ({d} guard(s) can be violated):\n", .{verification_result.diagnostics.items.len});
+            for (verification_result.diagnostics.items) |diag| {
+                try stdout.print("  {s} in {s}:\n", .{ diag.guard_id, diag.function_name });
+                var it = diag.counterexample.variables.iterator();
+                while (it.next()) |entry| {
+                    try stdout.print("    {s} = {s}\n", .{ entry.key_ptr.*, entry.value_ptr.* });
+                }
+            }
+        }
+
         if (!verification_result.success) {
             try stdout.print("❌ Z3 verification failed with {d} error(s):\n", .{verification_result.errors.items.len});
             for (verification_result.errors.items) |err| {
                 try stdout.print("  - {s}\n", .{err.message});
                 if (err.counterexample) |ce| {
-                    if (ce.variables.get("__model")) |model| {
-                        try stdout.print("    Model: {s}\n", .{model});
+                    var it = ce.variables.iterator();
+                    while (it.next()) |entry| {
+                        try stdout.print("    {s} = {s}\n", .{ entry.key_ptr.*, entry.value_ptr.* });
                     }
                 }
             }

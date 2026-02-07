@@ -271,14 +271,14 @@ pub fn lowerIf(self: *const StatementLowerer, if_stmt: *const lib.ast.Statements
         return continue_block;
     }
 
-    // create ora.if for regular if statements (no returns)
-    const if_op = self.ora_dialect.createIf(condition, loc);
+    // create scf.if for regular if statements (no returns, no results)
+    const if_op = self.ora_dialect.createScfIf(condition, &[_]c.MlirType{}, loc);
 
     // get then and else regions
-    const then_block = c.oraIfOpGetThenBlock(if_op);
-    const else_block = c.oraIfOpGetElseBlock(if_op);
+    const then_block = c.oraScfIfOpGetThenBlock(if_op);
+    const else_block = c.oraScfIfOpGetElseBlock(if_op);
     if (c.oraBlockIsNull(then_block) or c.oraBlockIsNull(else_block)) {
-        @panic("ora.if missing then/else blocks");
+        @panic("scf.if missing then/else blocks");
     }
 
     clearBlockTerminator(then_block);
@@ -288,25 +288,24 @@ pub fn lowerIf(self: *const StatementLowerer, if_stmt: *const lib.ast.Statements
     if (if_stmt.else_branch) |else_branch| {
         _ = try self.lowerBlockBody(else_branch, else_block);
     } else {
-        // add scf.yield to empty else region to satisfy MLIR requirements
-        const yield_op = self.ora_dialect.createYield(&[_]c.MlirValue{}, loc);
+        const yield_op = self.ora_dialect.createScfYield(loc);
         h.appendOp(else_block, yield_op);
     }
 
-    // lower then branch FIRST (before creating the ora.if operation)
+    // lower then branch
     _ = try self.lowerBlockBody(if_stmt.then_branch, then_block);
 
     // add scf.yield to then region if it doesn't end with a terminator
-    if (!helpers.blockEndsWithOpName(then_block, "ora.yield")) {
+    if (!helpers.blockEndsWithOpName(then_block, "scf.yield")) {
         clearBlockTerminator(then_block);
-        const yield_op = self.ora_dialect.createYield(&[_]c.MlirValue{}, loc);
+        const yield_op = self.ora_dialect.createScfYield(loc);
         h.appendOp(then_block, yield_op);
     }
 
     // add scf.yield to else region if it doesn't end with a terminator (for non-empty else branches)
-    if (if_stmt.else_branch != null and !helpers.blockEndsWithOpName(else_block, "ora.yield")) {
+    if (if_stmt.else_branch != null and !helpers.blockEndsWithOpName(else_block, "scf.yield")) {
         clearBlockTerminator(else_block);
-        const yield_op = self.ora_dialect.createYield(&[_]c.MlirValue{}, loc);
+        const yield_op = self.ora_dialect.createScfYield(loc);
         h.appendOp(else_block, yield_op);
     }
 
@@ -710,29 +709,82 @@ fn lowerBlockBodyWithYield(
 /// Lower while loop statements using ora.while
 pub fn lowerWhile(self: *const StatementLowerer, while_stmt: *const lib.ast.Statements.WhileNode) LoweringError!void {
     const loc = self.fileLoc(while_stmt.span);
-
-    // lower condition first (before creating the while operation)
-    const condition_raw = self.expr_lowerer.lowerExpression(&while_stmt.condition);
-
-    // ensure condition is boolean (i1) - ora.while requires I1 type
-    const condition_type = c.oraValueGetType(condition_raw);
     const bool_ty = h.boolType(self.ctx);
+
+    // Create break flag memref (initialized to false) so break can exit the loop
+    const empty_attr = c.oraNullAttrCreate();
+    const memref_type = h.memRefType(self.ctx, bool_ty, 0, null, empty_attr, empty_attr);
+    const break_flag_alloca = self.ora_dialect.createMemrefAlloca(memref_type, loc);
+    h.appendOp(self.block, break_flag_alloca);
+    const break_flag_memref = h.getResult(break_flag_alloca, 0);
+    const false_val = helpers.createBoolConstant(self, false, loc);
+    helpers.storeToMemref(self, false_val, break_flag_memref, loc);
+
+    // Create scf.while (no iter args)
+    const while_op = self.ora_dialect.createScfWhile(&[_]c.MlirValue{}, &[_]c.MlirType{}, loc);
+    h.appendOp(self.block, while_op);
+
+    // === Before region: evaluate condition each iteration ===
+    const before_block = c.oraScfWhileOpGetBeforeBlock(while_op);
+    if (c.oraBlockIsNull(before_block)) {
+        @panic("scf.while missing before block");
+    }
+
+    // Load break flag — if set, exit loop
+    const load_break = self.ora_dialect.createMemrefLoad(break_flag_memref, &[_]c.MlirValue{}, bool_ty, loc);
+    h.appendOp(before_block, load_break);
+    const is_broken = h.getResult(load_break, 0);
+
+    // Negate: not_broken = break_flag XOR true
+    const true_const_op = self.ora_dialect.createArithConstantBool(true, loc);
+    h.appendOp(before_block, true_const_op);
+    const true_val = h.getResult(true_const_op, 0);
+    const not_broken_op = c.oraArithXorIOpCreate(self.ctx, loc, is_broken, true_val);
+    h.appendOp(before_block, not_broken_op);
+    const not_broken = h.getResult(not_broken_op, 0);
+
+    // Evaluate loop condition in before region (re-evaluated each iteration)
+    var before_expr_lowerer = ExpressionLowerer.init(
+        self.ctx,
+        before_block,
+        self.type_mapper,
+        self.expr_lowerer.param_map,
+        self.expr_lowerer.storage_map,
+        self.expr_lowerer.local_var_map,
+        self.expr_lowerer.symbol_table,
+        self.expr_lowerer.builtin_registry,
+        self.expr_lowerer.error_handler,
+        self.expr_lowerer.locations,
+        self.ora_dialect,
+    );
+    before_expr_lowerer.refinement_base_cache = self.expr_lowerer.refinement_base_cache;
+    before_expr_lowerer.refinement_guard_cache = self.expr_lowerer.refinement_guard_cache;
+    before_expr_lowerer.current_function_return_type = self.current_function_return_type;
+    before_expr_lowerer.current_function_return_type_info = self.current_function_return_type_info;
+    before_expr_lowerer.in_try_block = self.in_try_block;
+
+    const condition_raw = before_expr_lowerer.lowerExpression(&while_stmt.condition);
+    const condition_type = c.oraValueGetType(condition_raw);
     const condition = if (c.oraTypeEqual(condition_type, bool_ty))
         condition_raw
     else
-        helpers.convertValueToType(self, condition_raw, bool_ty, while_stmt.span, loc);
+        before_expr_lowerer.convertToType(condition_raw, bool_ty, while_stmt.span);
 
-    // create ora.while operation using C++ API (enables custom assembly formats)
-    // note: ora.while has a simpler structure - condition is an operand, body is a region
-    const op = self.ora_dialect.createWhile(condition, loc);
-    h.appendOp(self.block, op);
+    // Combine: should_continue = !break_flag AND condition
+    const and_op = c.oraArithAndIOpCreate(self.ctx, loc, not_broken, condition);
+    h.appendOp(before_block, and_op);
+    const should_continue = h.getResult(and_op, 0);
 
-    const body_block = c.oraWhileOpGetBodyBlock(op);
+    const cond_op = self.ora_dialect.createScfCondition(should_continue, &[_]c.MlirValue{}, loc);
+    h.appendOp(before_block, cond_op);
+
+    // === After region: loop body ===
+    const body_block = c.oraScfWhileOpGetAfterBlock(while_op);
     if (c.oraBlockIsNull(body_block)) {
-        @panic("ora.while missing body block");
+        @panic("scf.while missing after block");
     }
 
-    // create expression lowerer for loop body (uses body_block, shares local_var_map for memref access)
+    // create expression lowerer for loop body
     var body_expr_lowerer = ExpressionLowerer.init(
         self.ctx,
         body_block,
@@ -751,47 +803,46 @@ pub fn lowerWhile(self: *const StatementLowerer, while_stmt: *const lib.ast.Stat
     body_expr_lowerer.current_function_return_type = self.current_function_return_type;
     body_expr_lowerer.current_function_return_type_info = self.current_function_return_type_info;
     body_expr_lowerer.in_try_block = self.in_try_block;
-    // lower loop invariants if present (in body block, using body expression lowerer)
+
+    // lower loop invariants if present
     for (while_stmt.invariants) |*invariant| {
         const invariant_value = body_expr_lowerer.lowerExpression(invariant);
-
         const inv_op = self.ora_dialect.createInvariant(invariant_value, loc);
         verification.addVerificationAttributesToOp(self, inv_op, "invariant", "loop_invariant");
         h.appendOp(body_block, inv_op);
     }
 
-    // lower decreases clause if present (using body expression lowerer)
     if (while_stmt.decreases) |decreases_expr| {
         const decreases_value = body_expr_lowerer.lowerExpression(decreases_expr);
         const dec_op = self.ora_dialect.createDecreases(decreases_value, loc);
-        // add verification attributes using C API (after creation)
         verification.addVerificationAttributesToOp(self, dec_op, "decreases", "loop_termination_measure");
         h.appendOp(body_block, dec_op);
     }
 
-    // lower increases clause if present (using body expression lowerer)
     if (while_stmt.increases) |increases_expr| {
         const increases_value = body_expr_lowerer.lowerExpression(increases_expr);
         const inc_op = self.ora_dialect.createIncreases(increases_value, loc);
-        // add verification attributes using C API (after creation)
         verification.addVerificationAttributesToOp(self, inc_op, "increases", "loop_progress_measure");
         h.appendOp(body_block, inc_op);
     }
 
-    // lower body in body region with loop label context
+    // lower body with loop label context (break_flag_memref for break support)
     const loop_label = while_stmt.label orelse "";
     const loop_ctx = LabelContext{
         .label = loop_label,
         .label_type = .While,
+        .break_flag_memref = break_flag_memref,
         .parent = self.label_context,
     };
     var body_lowerer = self.*;
     body_lowerer.label_context = &loop_ctx;
     _ = try body_lowerer.lowerBlockBody(while_stmt.body, body_block);
 
-    // add ora.yield at end of body to continue loop
-    const yield_op = self.ora_dialect.createYield(&[_]c.MlirValue{}, loc);
-    h.appendOp(body_block, yield_op);
+    // add scf.yield at end of body to continue loop (jumps to before region)
+    if (!helpers.blockEndsWithTerminator(&body_lowerer, body_block)) {
+        const yield_op = self.ora_dialect.createScfYield(loc);
+        h.appendOp(body_block, yield_op);
+    }
 }
 
 /// Lower for loop statements using scf.for with proper iteration variables
@@ -2194,6 +2245,8 @@ pub fn lowerSwitch(self: *const StatementLowerer, switch_stmt: *const lib.ast.St
             h.appendOp(self.block, load_return_flag);
             const should_return = h.getResult(load_return_flag, 0);
 
+            // use ora.if — then-region can legally contain func.return,
+            // and it doesn't split the parent block (avoids empty continuation block)
             const return_if_op = self.ora_dialect.createIf(should_return, loc);
             h.appendOp(self.block, return_if_op);
 
@@ -2248,7 +2301,6 @@ pub fn lowerSwitch(self: *const StatementLowerer, switch_stmt: *const lib.ast.St
             }
         }
     }
-    // the switch just executes and control flow continues to the next statement
 }
 
 /// Recursively lower switch cases as nested if-else-if chain
@@ -2397,14 +2449,7 @@ pub fn lowerSwitchCases(self: *const StatementLowerer, cases: []const lib.ast.Ex
             case_expr_lowerer.current_function_return_type_info = self.current_function_return_type_info;
             case_expr_lowerer.in_try_block = self.in_try_block;
             const case_value = case_expr_lowerer.lowerLiteral(&lit.value);
-            const cmp_op = c.oraCmpOpCreate(
-                self.ctx,
-                loc,
-                h.strRef("eq"),
-                condition,
-                case_value,
-                h.boolType(self.ctx),
-            );
+            const cmp_op = c.oraArithCmpIOpCreate(self.ctx, loc, 0, condition, case_value); // 0 = eq
             h.appendOp(target_block, cmp_op);
             break :blk h.getResult(cmp_op, 0);
         },
@@ -2419,25 +2464,11 @@ pub fn lowerSwitchCases(self: *const StatementLowerer, cases: []const lib.ast.Ex
             const start_val = case_expr_lowerer.lowerExpression(range.start);
             const end_val = case_expr_lowerer.lowerExpression(range.end);
 
-            const lower_cmp_op = c.oraCmpOpCreate(
-                self.ctx,
-                loc,
-                h.strRef("uge"),
-                condition,
-                start_val,
-                h.boolType(self.ctx),
-            );
+            const lower_cmp_op = c.oraArithCmpIOpCreate(self.ctx, loc, 9, condition, start_val); // 9 = uge
             h.appendOp(target_block, lower_cmp_op);
             const lower_bound = h.getResult(lower_cmp_op, 0);
 
-            const upper_cmp_op = c.oraCmpOpCreate(
-                self.ctx,
-                loc,
-                h.strRef("ule"),
-                condition,
-                end_val,
-                h.boolType(self.ctx),
-            );
+            const upper_cmp_op = c.oraArithCmpIOpCreate(self.ctx, loc, 7, condition, end_val); // 7 = ule
             h.appendOp(target_block, upper_cmp_op);
             const upper_bound = h.getResult(upper_cmp_op, 0);
 

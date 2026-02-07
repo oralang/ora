@@ -51,8 +51,16 @@ pub fn lowerBreak(self: *const StatementLowerer, break_stmt: *const lib.ast.Stat
                     }
                 },
                 .While, .For => {
-                    const break_op = self.ora_dialect.createBreak(label, operands.items, loc);
-                    h.appendOp(self.block, break_op);
+                    if (ctx.break_flag_memref) |break_flag| {
+                        // scf.while: set break flag + scf.yield
+                        const true_val = helpers.createBoolConstant(self, true, loc);
+                        helpers.storeToMemref(self, true_val, break_flag, loc);
+                        const yield_op = self.ora_dialect.createScfYield(loc);
+                        h.appendOp(self.block, yield_op);
+                    } else {
+                        const break_op = self.ora_dialect.createBreak(label, operands.items, loc);
+                        h.appendOp(self.block, break_op);
+                    }
                     return;
                 },
             }
@@ -75,8 +83,16 @@ pub fn lowerBreak(self: *const StatementLowerer, break_stmt: *const lib.ast.Stat
                 return;
             },
             .While, .For => {
-                const break_op = self.ora_dialect.createBreak(null, operands.items, loc);
-                h.appendOp(self.block, break_op);
+                if (ctx.break_flag_memref) |break_flag| {
+                    // scf.while: set break flag + scf.yield
+                    const true_val = helpers.createBoolConstant(self, true, loc);
+                    helpers.storeToMemref(self, true_val, break_flag, loc);
+                    const yield_op = self.ora_dialect.createScfYield(loc);
+                    h.appendOp(self.block, yield_op);
+                } else {
+                    const break_op = self.ora_dialect.createBreak(null, operands.items, loc);
+                    h.appendOp(self.block, break_op);
+                }
                 return;
             },
             .Block => {},
@@ -106,8 +122,14 @@ pub fn lowerContinue(self: *const StatementLowerer, continue_stmt: *const lib.as
                     return LoweringError.InvalidControlFlow;
                 },
                 .While, .For => {
-                    const cont_op = self.ora_dialect.createContinue(label, loc);
-                    h.appendOp(self.block, cont_op);
+                    if (ctx.break_flag_memref != null) {
+                        // scf.while: yield back to before region (re-evaluates condition)
+                        const yield_op = self.ora_dialect.createScfYield(loc);
+                        h.appendOp(self.block, yield_op);
+                    } else {
+                        const cont_op = self.ora_dialect.createContinue(label, loc);
+                        h.appendOp(self.block, cont_op);
+                    }
                     return;
                 },
                 .Block => {
@@ -124,11 +146,17 @@ pub fn lowerContinue(self: *const StatementLowerer, continue_stmt: *const lib.as
         }
     }
 
-    var ctx_opt = self.label_context;
-    while (ctx_opt) |ctx| : (ctx_opt = ctx.parent) {
+    var ctx_opt2 = self.label_context;
+    while (ctx_opt2) |ctx| : (ctx_opt2 = ctx.parent) {
         if (ctx.label_type == .While or ctx.label_type == .For) {
-            const cont_op = self.ora_dialect.createContinue(null, loc);
-            h.appendOp(self.block, cont_op);
+            if (ctx.break_flag_memref != null) {
+                // scf.while: yield back to before region
+                const yield_op = self.ora_dialect.createScfYield(loc);
+                h.appendOp(self.block, yield_op);
+            } else {
+                const cont_op = self.ora_dialect.createContinue(null, loc);
+                h.appendOp(self.block, cont_op);
+            }
             return;
         }
     }
@@ -335,25 +363,25 @@ fn lowerLabeledSwitch(self: *const StatementLowerer, labeled_block: *const lib.a
         h.appendOp(self.block, load_return_flag);
         const should_return = h.getResult(load_return_flag, 0);
 
-        // use ora.if so the then-region can legally contain ora.return
+        // use ora.if — then-region can legally contain func.return,
+        // and it doesn't split the parent block (avoids empty continuation block)
         const return_if_op = self.ora_dialect.createIf(should_return, loc);
         h.appendOp(self.block, return_if_op);
 
-        // get the then and else blocks from ora.if
         const return_if_then_block = c.oraIfOpGetThenBlock(return_if_op);
         const return_if_else_block = c.oraIfOpGetElseBlock(return_if_op);
         if (c.oraBlockIsNull(return_if_then_block) or c.oraBlockIsNull(return_if_else_block)) {
             @panic("ora.if missing then/else blocks");
         }
 
-        // then block: load return value and return directly
+        // then block: load return value and return
         const load_return_value = self.ora_dialect.createMemrefLoad(return_value_memref, &[_]c.MlirValue{}, ret_type, loc);
         h.appendOp(return_if_then_block, load_return_value);
         const return_val = h.getResult(load_return_value, 0);
         const return_op = self.ora_dialect.createFuncReturnWithValue(return_val, loc);
         h.appendOp(return_if_then_block, return_op);
 
-        // else block: empty yield (no return, function continues to next statement)
+        // else block: empty yield (continue execution)
         const else_yield_op = self.ora_dialect.createYield(&[_]c.MlirValue{}, loc);
         h.appendOp(return_if_else_block, else_yield_op);
     }

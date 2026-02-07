@@ -1,4 +1,5 @@
 #include "patterns/ControlFlow.h"
+#include "patterns/EVMConstants.h"
 #include "OraToSIRTypeConverter.h"
 #include "OraDebug.h"
 
@@ -342,8 +343,6 @@ LogicalResult ConvertFuncOp::matchAndRewrite(
     typename mlir::func::FuncOp::Adaptor adaptor,
     ConversionPatternRewriter &rewriter) const
 {
-    llvm::errs() << "[OraToSIR] ConvertFuncOp::matchAndRewrite() called for: " << op.getSymName() << "\n";
-    llvm::errs().flush();
 
     // Always convert function signature - ensure all Ora types are converted to SIR types
     // This must happen before converting operations inside
@@ -374,14 +373,12 @@ LogicalResult ConvertFuncOp::matchAndRewrite(
         }
         signatureConversion.addInputs(index, convertedTypes);
         newInputTypes.append(convertedTypes.begin(), convertedTypes.end());
-        llvm::errs() << "[OraToSIR]   Input type: " << inputType << " -> " << convertedTypes.front() << "\n";
     }
 
     // Convert result types - any non-void return uses memory return: (ptr<1>, u256)
     if (oldFuncType.getResults().empty())
     {
         // Void function - no results
-        llvm::errs() << "[OraToSIR]   Result type: void -> void\n";
     }
     else
     {
@@ -389,9 +386,7 @@ LogicalResult ConvertFuncOp::matchAndRewrite(
         auto u256Type = sir::U256Type::get(op.getContext());
         newResultTypes.push_back(ptrType);
         newResultTypes.push_back(u256Type);
-        llvm::errs() << "[OraToSIR]   Result type: (non-void) -> (" << ptrType << ", " << u256Type << ")\n";
     }
-    llvm::errs().flush();
 
     // Check if any types changed
     bool typesChanged = false;
@@ -451,8 +446,6 @@ LogicalResult ConvertFuncOp::matchAndRewrite(
         if (!hasOraTypes)
             return success(); // No Ora types, no conversion needed
         // Force conversion - types should have been converted but weren't
-        llvm::errs() << "[OraToSIR] ConvertFuncOp: Forcing conversion despite typesChanged=false (Ora types detected)\n";
-        llvm::errs().flush();
     }
 
     // Create new function type
@@ -479,8 +472,6 @@ LogicalResult ConvertFuncOp::matchAndRewrite(
         op.removeResultAttr(i, rewriter.getStringAttr("ora.type"));
     }
 
-    llvm::errs() << "[OraToSIR]   Updated function signature and arguments\n";
-    llvm::errs().flush();
     return success();
 }
 
@@ -919,7 +910,6 @@ LogicalResult ConvertTryStmtOp::matchAndRewrite(
     (void)adaptor;
     auto loc = op.getLoc();
     auto *tc = getTypeConverter();
-    llvm::errs() << "[OraToSIR] ConvertTryStmtOp: enter at " << loc << "\n";
 
     SmallVector<Type> resultTypes;
     for (Type t : op.getResultTypes())
@@ -935,10 +925,6 @@ LogicalResult ConvertTryStmtOp::matchAndRewrite(
         if (u->getParentOfType<ora::TryStmtOp>() == op)
             unwraps.push_back(u);
     });
-    op.getTryRegion().walk([&](Operation *opInTry) {
-        llvm::errs() << "[OraToSIR] TryRegion op: " << opInTry->getName() << "\n";
-    });
-
     SmallVector<ora::YieldOp, 4> tryYields;
     SmallVector<ora::YieldOp, 4> catchYields;
     op.getTryRegion().walk([&](ora::YieldOp y) {
@@ -951,10 +937,6 @@ LogicalResult ConvertTryStmtOp::matchAndRewrite(
     });
 
     bool hasYields = !tryYields.empty() || !catchYields.empty();
-    llvm::errs() << "[OraToSIR] ConvertTryStmtOp: results=" << resultTypes.size()
-                 << " tryYields=" << tryYields.size()
-                 << " catchYields=" << catchYields.size()
-                 << " unwraps=" << unwraps.size() << "\n";
 
     Block *parentBlock = op->getBlock();
     Region *parentRegion = parentBlock->getParent();
@@ -1043,9 +1025,6 @@ LogicalResult ConvertTryStmtOp::matchAndRewrite(
                     rewriter.replaceOpWithNewOp<sir::BrOp>(y, defaults, mergeBlock);
                     continue;
                 }
-                llvm::errs() << "[OraToSIR] ConvertTryStmtOp: yield arity mismatch at "
-                             << y.getLoc() << " yield=" << y.getNumOperands()
-                             << " results=" << resultTypes.size() << "\n";
                 return rewriter.notifyMatchFailure(y, "try_stmt yield arity mismatch");
             }
             if (hasOpsAfterTerminator(y.getOperation()))
@@ -1057,8 +1036,6 @@ LogicalResult ConvertTryStmtOp::matchAndRewrite(
                     rewriter.eraseOp(y);
                     continue;
                 }
-                llvm::errs() << "[OraToSIR] ConvertTryStmtOp: yield has trailing ops at "
-                             << y.getLoc() << "\n";
                 return rewriter.notifyMatchFailure(y, "yield has trailing ops");
             }
             rewriter.setInsertionPoint(y);
@@ -1086,17 +1063,14 @@ LogicalResult ConvertTryStmtOp::matchAndRewrite(
 
     if (failed(rewriteErrorUnwrapInTryStmt(unwraps, catchBlock, tc, rewriter)))
     {
-        llvm::errs() << "[OraToSIR] ConvertTryStmtOp: unwrap rewrite failed at " << loc << "\n";
         return rewriter.notifyMatchFailure(op, "failed to rewrite error.unwrap in try_stmt");
     }
     if (failed(replaceYieldWithBr(tryYields)))
     {
-        llvm::errs() << "[OraToSIR] ConvertTryStmtOp: try yields rewrite failed at " << loc << "\n";
         return rewriter.notifyMatchFailure(op, "failed to rewrite try_stmt try yields");
     }
     if (failed(replaceYieldWithBr(catchYields)))
     {
-        llvm::errs() << "[OraToSIR] ConvertTryStmtOp: catch yields rewrite failed at " << loc << "\n";
         return rewriter.notifyMatchFailure(op, "failed to rewrite try_stmt catch yields");
     }
     rewriter.setInsertionPointToEnd(parentBlock);
@@ -1107,7 +1081,6 @@ LogicalResult ConvertTryStmtOp::matchAndRewrite(
         if (!op->use_empty())
             return rewriter.notifyMatchFailure(op, "try_stmt result used but no yields");
         rewriter.eraseOp(op);
-        llvm::errs() << "[OraToSIR] ConvertTryStmtOp: erased statement-only try_stmt\n";
         return success();
     }
 
@@ -1117,9 +1090,6 @@ LogicalResult ConvertTryStmtOp::matchAndRewrite(
     {
         if (static_cast<unsigned>(mergeBlock->getNumArguments()) != op.getNumResults())
         {
-            llvm::errs() << "[OraToSIR] ConvertTryStmtOp: result mismatch op="
-                         << op.getNumResults() << " merge="
-                         << mergeBlock->getNumArguments() << "\n";
             return rewriter.notifyMatchFailure(op, "try_stmt result/merge mismatch");
         }
         rewriter.setInsertionPointToStart(mergeBlock);
@@ -1773,8 +1743,6 @@ LogicalResult ConvertCallOp::matchAndRewrite(
     typename mlir::func::CallOp::Adaptor adaptor,
     ConversionPatternRewriter &rewriter) const
 {
-    llvm::errs() << "[OraToSIR] ConvertCallOp: callee=" << op.getCallee()
-                 << " results=" << op.getNumResults() << " at " << op.getLoc() << "\n";
     auto *typeConverter = getTypeConverter();
     if (!typeConverter)
     {
@@ -1918,7 +1886,6 @@ LogicalResult ConvertCallOp::matchAndRewrite(
 
     if (newCall.getNumResults() < 1)
     {
-        llvm::errs() << "[OraToSIR] ConvertCallOp: newCall has no results\n";
         return rewriter.notifyMatchFailure(op, "expected pointer return for non-void call");
     }
 
@@ -1944,7 +1911,6 @@ LogicalResult ConvertCallOp::matchAndRewrite(
     }
     if (convertedTypes.empty())
     {
-        llvm::errs() << "[OraToSIR] ConvertCallOp: unable to convert result type " << oldResultTypes.front() << "\n";
         return rewriter.notifyMatchFailure(op, "unable to convert call result type");
     }
 
@@ -2090,13 +2056,6 @@ static LogicalResult convertOraReturn(
     PatternRewriter &rewriter)
 {
     DBG("ConvertReturnOp: matching return at " << op.getLoc());
-    llvm::errs() << "[OraToSIR] ConvertReturnOp::matchAndRewrite() called at " << op.getLoc() << "\n";
-    llvm::errs() << "[OraToSIR]   Operands count: " << op.getNumOperands() << "\n";
-    if (op.getNumOperands() > 0)
-    {
-        llvm::errs() << "[OraToSIR]   Operand 0 type: " << op.getOperand(0).getType() << "\n";
-    }
-    llvm::errs().flush();
     auto loc = op.getLoc();
     auto ctx = rewriter.getContext();
 
@@ -2107,17 +2066,9 @@ static LogicalResult convertOraReturn(
 
     ctx->getOrLoadDialect<sir::SIRDialect>();
     rewriter.setInsertionPoint(op);
-    llvm::errs() << "[OraToSIR]   Adaptor operands count: " << operands.size() << "\n";
-    if (operands.size() > 0)
-    {
-        llvm::errs() << "[OraToSIR]   Adaptor operand 0 type: " << operands[0].getType() << "\n";
-    }
-    llvm::errs().flush();
     if (operands.empty())
     {
-        llvm::errs() << "[OraToSIR] ConvertReturnOp: void return path at " << loc << "\n";
         // Void return - use sir.iret with no operands (internal return)
-        // Note: sir.return requires ptr and len operands, so we use sir.iret for void
         rewriter.create<sir::IRetOp>(loc, ValueRange{});
         rewriter.eraseOp(op);
         return success();
@@ -2127,14 +2078,21 @@ static LogicalResult convertOraReturn(
     auto ptrType = sir::PtrType::get(ctx, /*addrSpace*/ 1);
 
     if (!u256Type || !ptrType)
-    {
         return rewriter.notifyMatchFailure(op, "failed to create SIR types");
-    }
 
-    // Non-void return: get already-converted return value from adaptor
     Value retVal = operands[0];
-    auto ui64Type = mlir::IntegerType::get(ctx, 64, mlir::IntegerType::Unsigned);
-    auto origType = op.getOperand(0).getType();
+    if (!retVal)
+        return rewriter.notifyMatchFailure(op, "null return operand");
+    auto ui64Type = mlir::IntegerType::get(ctx, evm::kU64Bits, mlir::IntegerType::Unsigned);
+
+    // Use the operand's type. For returns inside scf.if merge blocks the
+    // operand may have been remapped, so prefer the actual operand value's
+    // type when available, falling back to the original op operand.
+    Type origType;
+    if (op.getNumOperands() > 0)
+        origType = op.getOperand(0).getType();
+    else
+        origType = retVal.getType();
     const bool is_bytes_return = llvm::isa<ora::StringType, ora::BytesType>(origType);
     if (auto errType = llvm::dyn_cast<ora::ErrorUnionType>(origType))
     {
@@ -2159,7 +2117,6 @@ static LogicalResult convertOraReturn(
                 {
                     if (cast.getNumOperands() == 2)
                     {
-                        llvm::errs() << "[OraToSIR] ConvertReturnOp: wide error_union split (cast operands) at " << loc << "\n";
                         Value tag = ensureU256(rewriter, loc, cast.getOperand(0));
                         Value payload = ensureU256(rewriter, loc, cast.getOperand(1));
                         Value one = rewriter.create<sir::ConstOp>(loc, u256Type, mlir::IntegerAttr::get(ui64Type, 1));
@@ -2182,7 +2139,6 @@ static LogicalResult convertOraReturn(
             }
             if (operands.size() == 2)
             {
-                llvm::errs() << "[OraToSIR] ConvertReturnOp: wide error_union split (2 operands) at " << loc << "\n";
                 Value tag = ensureU256(rewriter, loc, operands[0]);
                 Value payload = ensureU256(rewriter, loc, operands[1]);
                 Value one = rewriter.create<sir::ConstOp>(loc, u256Type, mlir::IntegerAttr::get(ui64Type, 1));
@@ -2229,7 +2185,6 @@ static LogicalResult convertOraReturn(
                 return success();
             }
 
-            llvm::errs() << "[OraToSIR] ConvertReturnOp: wide error_union split (materialized) at " << loc << "\n";
             Value tag = ensureU256(rewriter, loc, parts[0]);
             Value payload = ensureU256(rewriter, loc, parts[1]);
             Value one = rewriter.create<sir::ConstOp>(loc, u256Type, mlir::IntegerAttr::get(ui64Type, 1));
@@ -2307,7 +2262,6 @@ static LogicalResult convertOraReturn(
 
     if (operands.size() == 2)
     {
-        llvm::errs() << "[OraToSIR] ConvertReturnOp: split return (2 operands) at " << loc << "\n";
         Value tag = ensureU256(rewriter, loc, operands[0]);
         Value payload = ensureU256(rewriter, loc, operands[1]);
 
@@ -2327,7 +2281,6 @@ static LogicalResult convertOraReturn(
 
     if (is_bytes_return)
     {
-        llvm::errs() << "[OraToSIR] ConvertReturnOp: bytes return path at " << loc << "\n";
         // Return ABI for dynamic bytes: ptr + (len + 32)
         if (!llvm::isa<sir::PtrType>(retVal.getType()))
         {
@@ -2386,7 +2339,6 @@ static LogicalResult convertOraReturn(
     rewriter.create<sir::StoreOp>(loc, mem, retVal);
 
     // Replace func.return with sir.return %ptr, %len (EVM RETURN op)
-    llvm::errs() << "[OraToSIR] ConvertReturnOp: default return path at " << loc << "\n";
     rewriter.create<sir::ReturnOp>(loc, mem, sizeConst);
     rewriter.eraseOp(op);
     return success();
@@ -2402,17 +2354,9 @@ LogicalResult ConvertReturnOp::matchAndRewrite(
     typename ora::ReturnOp::Adaptor adaptor,
     ConversionPatternRewriter &rewriter) const
 {
-    llvm::errs() << "[OraToSIR] ConvertReturnOp::matchAndRewrite() entry at " << op.getLoc() << "\n";
-    llvm::errs() << "[OraToSIR]   Adaptor operand count: " << adaptor.getOperands().size() << "\n";
-    for (auto it : llvm::enumerate(adaptor.getOperands()))
-        llvm::errs() << "[OraToSIR]   Adaptor operand " << it.index() << " type: " << it.value().getType() << "\n";
-    llvm::errs().flush();
     SmallVector<Value> operands;
     operands.append(adaptor.getOperands().begin(), adaptor.getOperands().end());
     auto result = convertOraReturn(op, operands, getTypeConverter(), rewriter);
-    llvm::errs() << "[OraToSIR] ConvertReturnOp::matchAndRewrite() result="
-                 << (succeeded(result) ? "success" : "failure")
-                 << " at " << op.getLoc() << "\n";
     return result;
 }
 
@@ -2421,82 +2365,21 @@ LogicalResult ConvertReturnOp::matchAndRewrite(
     OneToNOpAdaptor adaptor,
     ConversionPatternRewriter &rewriter) const
 {
-    llvm::errs() << "[OraToSIR] ConvertReturnOp::matchAndRewrite(OneToN) entry at " << op.getLoc() << "\n";
-    llvm::errs() << "[OraToSIR]   OneToN operand groups: " << adaptor.getOperands().size() << "\n";
-    for (auto groupIt : llvm::enumerate(adaptor.getOperands()))
-    {
-        llvm::errs() << "[OraToSIR]   Group " << groupIt.index() << " size: " << groupIt.value().size() << "\n";
-        for (auto valIt : llvm::enumerate(groupIt.value()))
-            llvm::errs() << "[OraToSIR]     Group " << groupIt.index() << " operand " << valIt.index() << " type: " << valIt.value().getType() << "\n";
-    }
-    llvm::errs().flush();
     SmallVector<Value> flatOperands;
     for (ValueRange range : adaptor.getOperands())
         flatOperands.append(range.begin(), range.end());
     auto result = convertOraReturn(op, flatOperands, getTypeConverter(), rewriter);
-    llvm::errs() << "[OraToSIR] ConvertReturnOp::matchAndRewrite(OneToN) result="
-                 << (succeeded(result) ? "success" : "failure")
-                 << " at " << op.getLoc() << "\n";
     return result;
-}
-
-LogicalResult ConvertReturnOpRaw::matchAndRewrite(
-    ora::ReturnOp op,
-    typename ora::ReturnOp::Adaptor adaptor,
-    ConversionPatternRewriter &rewriter) const
-{
-    (void)adaptor;
-    llvm::errs() << "[OraToSIR] ConvertReturnOpRaw::matchAndRewrite() entry at " << op.getLoc() << "\n";
-    llvm::errs() << "[OraToSIR]   Raw operand count: " << op.getNumOperands() << "\n";
-    for (auto it : llvm::enumerate(op.getOperands()))
-        llvm::errs() << "[OraToSIR]   Raw operand " << it.index() << " type: " << it.value().getType() << "\n";
-    llvm::errs().flush();
-    if (op.getNumOperands() != 1)
-        return rewriter.notifyMatchFailure(op, "raw return only for single operand");
-    auto errType = llvm::dyn_cast<ora::ErrorUnionType>(op.getOperand(0).getType());
-    if (!errType || isNarrowErrorUnion(errType))
-        return rewriter.notifyMatchFailure(op, "raw return only for wide error_union");
-    SmallVector<Value> operands;
-    operands.append(op.getOperands().begin(), op.getOperands().end());
-    return convertOraReturn(op, operands, getTypeConverter(), rewriter);
-}
-
-LogicalResult ConvertReturnOpFallback::matchAndRewrite(
-    Operation *op,
-    ArrayRef<Value> operands,
-    ConversionPatternRewriter &rewriter) const
-{
-    (void)operands;
-    auto retOp = llvm::dyn_cast<ora::ReturnOp>(op);
-    if (!retOp)
-        return failure();
-    llvm::errs() << "[OraToSIR] ConvertReturnOpFallback::matchAndRewrite() entry at " << retOp.getLoc() << "\n";
-    llvm::errs() << "[OraToSIR]   Fallback operand count: " << retOp.getNumOperands() << "\n";
-    for (auto it : llvm::enumerate(retOp.getOperands()))
-        llvm::errs() << "[OraToSIR]   Fallback operand " << it.index() << " type: " << it.value().getType() << "\n";
-    llvm::errs().flush();
-    SmallVector<Value> rawOperands;
-    rawOperands.append(retOp.getOperands().begin(), retOp.getOperands().end());
-    return convertOraReturn(retOp, rawOperands, typeConverter, rewriter);
 }
 
 LogicalResult ConvertReturnOpPre::matchAndRewrite(
     ora::ReturnOp op,
     PatternRewriter &rewriter) const
 {
-    llvm::errs() << "[OraToSIR] ConvertReturnOpPre::matchAndRewrite() entry at " << op.getLoc() << "\n";
-    llvm::errs() << "[OraToSIR]   Pre operand count: " << op.getNumOperands() << "\n";
-    for (auto it : llvm::enumerate(op.getOperands()))
-        llvm::errs() << "[OraToSIR]   Pre operand " << it.index() << " type: " << it.value().getType() << "\n";
-    llvm::errs().flush();
+    // Skip returns whose operand comes from an scf.if (needs conversion framework).
+    if (op.getNumOperands() == 1 && op.getOperand(0).getDefiningOp<scf::IfOp>())
+        return failure();
 
-    if (op.getNumOperands() != 1)
-        return failure();
-    auto errType = llvm::dyn_cast<ora::ErrorUnionType>(op.getOperand(0).getType());
-    if (!errType || isNarrowErrorUnion(errType))
-        return failure();
-    if (op.getOperand(0).getDefiningOp<scf::IfOp>())
-        return failure();
     SmallVector<Value> operands;
     operands.append(op.getOperands().begin(), op.getOperands().end());
     return convertOraReturn(op, operands, typeConverter, rewriter);
@@ -3291,15 +3174,29 @@ LogicalResult ConvertUnrealizedConversionCastOp::matchAndRewrite(
 
     if (op->hasAttr("ora.normalized_error_union"))
     {
-        llvm::errs() << "[OraToSIR] ConvertUnrealizedConversionCastOp: normalized at "
-                     << loc << " operandType=" << input.getType()
-                     << " resultType=" << resultType << "\n";
-        llvm::errs().flush();
         if (op.getNumOperands() != 1 || op.getNumResults() != 1)
             return failure();
         Value packed = ensureU256(rewriter, loc, input);
         rewriter.replaceOp(op, packed);
         return success();
+    }
+
+    // Address → sir.u256: strip address materialization cast.
+    if (op.getNumOperands() == 1 && op.getNumResults() == 1)
+    {
+        if (llvm::isa<sir::U256Type>(resultType) &&
+            llvm::isa<ora::AddressType, ora::NonZeroAddressType>(input.getType()))
+        {
+            rewriter.replaceOp(op, input);
+            return success();
+        }
+        // sir.u256 → address: same, just forward the value.
+        if (llvm::isa<ora::AddressType, ora::NonZeroAddressType>(resultType) &&
+            llvm::isa<sir::U256Type>(input.getType()))
+        {
+            rewriter.replaceOp(op, input);
+            return success();
+        }
     }
 
     // Memref → ptr materialization during memref lowering.
@@ -3314,45 +3211,13 @@ LogicalResult ConvertUnrealizedConversionCastOp::matchAndRewrite(
         }
     }
 
-    // Cancel ptr -> memref -> ptr chains created by materialization.
+    // Cancel ptr -> memref materialization: memrefs are just ptrs in SIR.
     if (op.getNumOperands() == 1 && op.getNumResults() == 1)
     {
         if (llvm::isa<mlir::MemRefType, mlir::UnrankedMemRefType>(resultType) &&
             llvm::isa<sir::PtrType>(input.getType()))
         {
-            for (Operation *user : op->getUsers())
-            {
-                if (auto userCast = dyn_cast<mlir::UnrealizedConversionCastOp>(user))
-                {
-                    if (userCast.getNumResults() != 1 ||
-                        !llvm::isa<sir::PtrType>(userCast.getResult(0).getType()))
-                        return failure();
-                    continue;
-                }
-                if (auto userBitcast = dyn_cast<sir::BitcastOp>(user))
-                {
-                    if (!llvm::isa<sir::PtrType>(userBitcast.getResult().getType()))
-                        return failure();
-                    continue;
-                }
-                return failure();
-            }
-
-            // All users are ptr casts; replace them and drop the memref cast.
-            for (Operation *user : llvm::make_early_inc_range(op->getUsers()))
-            {
-                if (auto userCast = dyn_cast<mlir::UnrealizedConversionCastOp>(user))
-                {
-                    rewriter.replaceOp(userCast, input);
-                    continue;
-                }
-                if (auto userBitcast = dyn_cast<sir::BitcastOp>(user))
-                {
-                    rewriter.replaceOp(userBitcast, input);
-                    continue;
-                }
-            }
-            rewriter.eraseOp(op);
+            rewriter.replaceOp(op, input);
             return success();
         }
     }
@@ -3652,9 +3517,6 @@ LogicalResult ConvertSwitchOp::matchAndRewrite(
             caseIdxs.push_back(i);
         }
 
-        if (defaultIdx < 0)
-            return failure();
-
         Block *parentBlock = op->getBlock();
         Region *parentRegion = parentBlock->getParent();
         auto mergeBlock = rewriter.splitBlock(parentBlock, Block::iterator(op));
@@ -3715,7 +3577,24 @@ LogicalResult ConvertSwitchOp::matchAndRewrite(
             return rewriter.create<sir::ConstOp>(loc, u256Type, mlir::IntegerAttr::get(ui64Type, v));
         };
 
-        Block *defaultBlock = caseBlocks[defaultIdx];
+        // Synthesize a default block if none was provided.
+        if (defaultIdx < 0)
+            defaultIdx = numCases;
+
+        Block *defaultBlock;
+        if (defaultIdx < numCases)
+        {
+            defaultBlock = caseBlocks[defaultIdx];
+        }
+        else
+        {
+            // Exhaustive switch: default is unreachable, use sir.invalid.
+            defaultBlock = rewriter.createBlock(parentRegion, mergeBlock->getIterator());
+            rewriter.setInsertionPointToStart(defaultBlock);
+            rewriter.create<sir::InvalidOp>(loc);
+            rewriter.setInsertionPointToEnd(parentBlock);
+        }
+
         if (caseIdxs.empty())
         {
             rewriter.setInsertionPointToEnd(parentBlock);
@@ -3802,9 +3681,6 @@ LogicalResult ConvertSwitchOp::matchAndRewrite(
         caseIdxs.push_back(i);
     }
 
-    if (defaultIdx < 0)
-        return failure();
-
     Block *parentBlock = op->getBlock();
     Region *parentRegion = parentBlock->getParent();
     auto afterBlock = rewriter.splitBlock(parentBlock, Block::iterator(op));
@@ -3849,7 +3725,25 @@ LogicalResult ConvertSwitchOp::matchAndRewrite(
         return rewriter.create<sir::ConstOp>(loc, u256Type, mlir::IntegerAttr::get(ui64Type, v));
     };
 
-    Block *defaultBlock = caseBlocks[defaultIdx];
+    // Synthesize a default block if none was provided. For exhaustive switches
+    // (all enum variants covered), the default falls through to the merge block.
+    // For switches with results, we create an unreachable/invalid block.
+    if (defaultIdx < 0)
+        defaultIdx = numCases; // sentinel: will create a synthetic default below
+
+    Block *defaultBlock;
+    if (defaultIdx < numCases)
+    {
+        defaultBlock = caseBlocks[defaultIdx];
+    }
+    else
+    {
+        // Synthesize default: branch to afterBlock (exhaustive switch fallthrough).
+        defaultBlock = rewriter.createBlock(parentRegion, afterBlock->getIterator());
+        rewriter.setInsertionPointToStart(defaultBlock);
+        rewriter.create<sir::BrOp>(loc, ValueRange{}, afterBlock);
+        rewriter.setInsertionPointToEnd(parentBlock);
+    }
     if (caseIdxs.empty())
     {
         rewriter.setInsertionPointToEnd(parentBlock);
@@ -3976,7 +3870,6 @@ LogicalResult ConvertScfIfOp::matchAndRewrite(
     ConversionPatternRewriter &rewriter) const
 {
     auto loc = op.getLoc();
-    llvm::errs() << "[OraToSIR] ConvertScfIfOp::matchAndRewrite() called at " << loc << "\n";
     auto *tc = getTypeConverter();
     if (!tc)
         return rewriter.notifyMatchFailure(op, "missing type converter");
@@ -4004,17 +3897,12 @@ LogicalResult ConvertScfIfOp::matchAndRewrite(
             }
             if (convertedTypes.empty())
             {
-                llvm::errs() << "[OraToSIR] ConvertScfIfOp: failed to convert result type "
-                             << t << " at " << loc << "\n";
                 return rewriter.notifyMatchFailure(op, "failed to convert scf.if result type");
             }
         }
         resultTypeGroups.push_back(convertedTypes);
         resultTypes.append(convertedTypes.begin(), convertedTypes.end());
     }
-    llvm::errs() << "[OraToSIR] ConvertScfIfOp: results=" << op.getNumResults()
-                 << " groups=" << resultTypeGroups.size() << " flat=" << resultTypes.size()
-                 << " at " << loc << "\n";
 
     SmallVector<mlir::scf::YieldOp, 4> thenYields;
     SmallVector<mlir::scf::YieldOp, 4> elseYields;
@@ -4028,8 +3916,6 @@ LogicalResult ConvertScfIfOp::matchAndRewrite(
         if (auto y = dyn_cast<mlir::scf::YieldOp>(b.getTerminator()))
             elseYields.push_back(y);
     }
-    llvm::errs() << "[OraToSIR] ConvertScfIfOp: thenYields=" << thenYields.size()
-                 << " elseYields=" << elseYields.size() << " at " << loc << "\n";
 
     Block *parentBlock = op->getBlock();
     Region *parentRegion = parentBlock->getParent();
@@ -4051,9 +3937,6 @@ LogicalResult ConvertScfIfOp::matchAndRewrite(
         {
             if (y.getNumOperands() != resultTypeGroups.size())
             {
-                llvm::errs() << "[OraToSIR] ConvertScfIfOp: yield/result count mismatch "
-                             << y.getNumOperands() << " vs " << resultTypeGroups.size()
-                             << " at " << y.getLoc() << "\n";
                 return rewriter.notifyMatchFailure(y, "scf.if yield/result count mismatch");
             }
             if (hasOpsAfterTerminator(y.getOperation()))
@@ -4066,14 +3949,10 @@ LogicalResult ConvertScfIfOp::matchAndRewrite(
                 unsigned idx = it.index();
                 Value operand = it.value();
                 auto &group = resultTypeGroups[idx];
-                llvm::errs() << "[OraToSIR] ConvertScfIfOp: yield operand[" << idx
-                             << "] type=" << operand.getType()
-                             << " groupSize=" << group.size() << " at " << y.getLoc() << "\n";
                 if (group.size() == 2 && llvm::isa<ora::ErrorUnionType>(operand.getType()))
                 {
                     if (failed(materializeWideErrorUnion(rewriter, loc, operand, convertedOperands)))
                     {
-                        llvm::errs() << "[OraToSIR] ConvertScfIfOp: failed wide error_union yield at " << y.getLoc() << "\n";
                         return rewriter.notifyMatchFailure(y, "failed to materialize wide error_union yield");
                     }
                     continue;
@@ -4091,7 +3970,6 @@ LogicalResult ConvertScfIfOp::matchAndRewrite(
                 }
                 if (group.size() == 2)
                 {
-                    llvm::errs() << "[OraToSIR] ConvertScfIfOp: unexpected 1->2 conversion at " << y.getLoc() << "\n";
                     return rewriter.notifyMatchFailure(y, "unexpected 1->2 conversion for scf.if yield");
                 }
 
@@ -4107,9 +3985,6 @@ LogicalResult ConvertScfIfOp::matchAndRewrite(
                     Value converted = tc->materializeTargetConversion(rewriter, loc, targetType, operand);
                     if (!converted)
                     {
-                        llvm::errs() << "[OraToSIR] ConvertScfIfOp: materializeTargetConversion failed "
-                                     << operand.getType() << " -> " << targetType
-                                     << " at " << y.getLoc() << "\n";
                         return rewriter.notifyMatchFailure(y, "failed to materialize scf.if yield operand");
                     }
                     convertedOperands.push_back(converted);
@@ -4148,9 +4023,6 @@ LogicalResult ConvertScfIfOp::matchAndRewrite(
     {
         if (static_cast<unsigned>(mergeBlock->getNumArguments()) != resultTypes.size())
         {
-            llvm::errs() << "[OraToSIR] ConvertScfIfOp: merge arg mismatch "
-                         << mergeBlock->getNumArguments() << " vs " << resultTypes.size()
-                         << " at " << loc << "\n";
             return rewriter.notifyMatchFailure(op, "if result/merge mismatch");
         }
         rewriter.setInsertionPointToStart(mergeBlock);
@@ -4340,6 +4212,94 @@ LogicalResult ConvertScfForOp::matchAndRewrite(
             rewriter.setInsertionPointToEnd(b);
             Value next = rewriter.create<sir::AddOp>(loc, u256Type, b->getArgument(0), step);
             rewriter.create<sir::BrOp>(loc, ValueRange{next}, condBlock);
+        }
+    }
+
+    rewriter.eraseOp(op);
+    return success();
+}
+
+// ============================================================================
+// Convert scf.while → SIR CFG
+// ============================================================================
+// scf.while { before: ..., scf.condition(%c) } do { body..., scf.yield }
+//   →  br ^before
+//      ^before: <before ops> cond_br %c ^body ^after
+//      ^body: <body ops> br ^before
+//      ^after: ...
+LogicalResult ConvertScfWhileOp::matchAndRewrite(
+    mlir::scf::WhileOp op,
+    typename mlir::scf::WhileOp::Adaptor adaptor,
+    ConversionPatternRewriter &rewriter) const
+{
+    if (!op.getInits().empty())
+        return rewriter.notifyMatchFailure(op, "scf.while iter_args not supported");
+
+    auto loc = op.getLoc();
+    Block *parentBlock = op->getBlock();
+    Region *parentRegion = parentBlock->getParent();
+
+    // Split parent block: everything after the scf.while goes to afterBlock.
+    auto *afterBlock = rewriter.splitBlock(parentBlock, Block::iterator(op));
+
+    // Move before-region blocks into the parent region (before afterBlock).
+    Region &beforeRegion = op.getBefore();
+    SmallVector<Block *, 4> beforeBlocks;
+    for (Block &b : beforeRegion)
+        beforeBlocks.push_back(&b);
+    parentRegion->getBlocks().splice(afterBlock->getIterator(), beforeRegion.getBlocks());
+    Block *beforeEntry = beforeBlocks.empty() ? nullptr : beforeBlocks.front();
+
+    if (!beforeEntry) {
+        beforeEntry = rewriter.createBlock(parentRegion, afterBlock->getIterator());
+    }
+
+    // Move body-region blocks into the parent region (before afterBlock).
+    Region &afterRegion = op.getAfter();
+    SmallVector<Block *, 4> bodyBlocks;
+    for (Block &b : afterRegion)
+        bodyBlocks.push_back(&b);
+    parentRegion->getBlocks().splice(afterBlock->getIterator(), afterRegion.getBlocks());
+    Block *bodyEntry = bodyBlocks.empty() ? nullptr : bodyBlocks.front();
+
+    if (!bodyEntry)
+        bodyEntry = rewriter.createBlock(parentRegion, afterBlock->getIterator());
+
+    // Branch from parentBlock to beforeEntry (start of condition).
+    rewriter.setInsertionPointToEnd(parentBlock);
+    rewriter.create<sir::BrOp>(loc, ValueRange{}, beforeEntry);
+
+    // Replace scf.condition with sir.cond_br.
+    for (Block *b : beforeBlocks) {
+        for (auto &innerOp : llvm::make_early_inc_range(*b)) {
+            if (auto condOp = dyn_cast<mlir::scf::ConditionOp>(&innerOp)) {
+                rewriter.setInsertionPoint(condOp);
+                Value cond = condOp.getCondition();
+                Value condU256 = toCondU256(rewriter, loc, cond);
+                rewriter.create<sir::CondBrOp>(loc, condU256,
+                    ValueRange{}, ValueRange{},
+                    bodyEntry, afterBlock);
+                rewriter.eraseOp(condOp);
+            }
+        }
+    }
+
+    // Replace scf.yield in body with branch back to beforeEntry.
+    for (Block *b : bodyBlocks) {
+        for (auto &innerOp : llvm::make_early_inc_range(*b)) {
+            if (auto yieldOp = dyn_cast<mlir::scf::YieldOp>(&innerOp)) {
+                rewriter.setInsertionPoint(yieldOp);
+                rewriter.create<sir::BrOp>(yieldOp.getLoc(), ValueRange{}, beforeEntry);
+                rewriter.eraseOp(yieldOp);
+            }
+        }
+    }
+
+    // Ensure all body blocks are properly terminated.
+    for (Block *b : bodyBlocks) {
+        if (b->empty() || !b->back().hasTrait<mlir::OpTrait::IsTerminator>()) {
+            rewriter.setInsertionPointToEnd(b);
+            rewriter.create<sir::BrOp>(loc, ValueRange{}, beforeEntry);
         }
     }
 

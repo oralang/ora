@@ -13,61 +13,9 @@ namespace mlir
         // Forward declarations
         class OraToSIRTypeConverter;
 
-        // Arithmetic operation conversions
-        class ConvertAddOp : public OpConversionPattern<ora::AddOp>
-        {
-        public:
-            using OpConversionPattern::OpConversionPattern;
-
-            LogicalResult matchAndRewrite(
-                ora::AddOp op,
-                typename ora::AddOp::Adaptor adaptor,
-                ConversionPatternRewriter &rewriter) const override;
-        };
-
-        class ConvertMulOp : public OpConversionPattern<ora::MulOp>
-        {
-        public:
-            using OpConversionPattern::OpConversionPattern;
-
-            LogicalResult matchAndRewrite(
-                ora::MulOp op,
-                typename ora::MulOp::Adaptor adaptor,
-                ConversionPatternRewriter &rewriter) const override;
-        };
-
-        class ConvertSubOp : public OpConversionPattern<ora::SubOp>
-        {
-        public:
-            using OpConversionPattern::OpConversionPattern;
-
-            LogicalResult matchAndRewrite(
-                ora::SubOp op,
-                typename ora::SubOp::Adaptor adaptor,
-                ConversionPatternRewriter &rewriter) const override;
-        };
-
-        class ConvertDivOp : public OpConversionPattern<ora::DivOp>
-        {
-        public:
-            using OpConversionPattern::OpConversionPattern;
-
-            LogicalResult matchAndRewrite(
-                ora::DivOp op,
-                typename ora::DivOp::Adaptor adaptor,
-                ConversionPatternRewriter &rewriter) const override;
-        };
-
-        class ConvertRemOp : public OpConversionPattern<ora::RemOp>
-        {
-        public:
-            using OpConversionPattern::OpConversionPattern;
-
-            LogicalResult matchAndRewrite(
-                ora::RemOp op,
-                typename ora::RemOp::Adaptor adaptor,
-                ConversionPatternRewriter &rewriter) const override;
-        };
+        // Note: ora.add/sub/mul/div/rem conversion patterns removed.
+        // The Zig frontend now emits arith.addi/subi/muli/divui/remui directly,
+        // which are converted by ConvertArithAddIOp etc. below.
 
         class ConvertCmpOp : public OpConversionPattern<ora::CmpOp>
         {
@@ -367,6 +315,17 @@ namespace mlir
                 ConversionPatternRewriter &rewriter) const override;
         };
 
+        class ConvertArithRemSIOp : public OpConversionPattern<mlir::arith::RemSIOp>
+        {
+        public:
+            using OpConversionPattern::OpConversionPattern;
+
+            LogicalResult matchAndRewrite(
+                mlir::arith::RemSIOp op,
+                typename mlir::arith::RemSIOp::Adaptor adaptor,
+                ConversionPatternRewriter &rewriter) const override;
+        };
+
         class ConvertArithAndIOp : public OpConversionPattern<mlir::arith::AndIOp>
         {
         public:
@@ -487,16 +446,6 @@ namespace mlir
                 PatternRewriter &rewriter) const override;
         };
 
-        class FoldAndOneOp : public OpRewritePattern<sir::AndOp>
-        {
-        public:
-            using OpRewritePattern::OpRewritePattern;
-
-            LogicalResult matchAndRewrite(
-                sir::AndOp op,
-                PatternRewriter &rewriter) const override;
-        };
-
         class FoldEqSameOp : public OpRewritePattern<sir::EqOp>
         {
         public:
@@ -529,3 +478,7 @@ namespace mlir
 
     } // namespace ora
 } // namespace mlir
+
+/// Clear the static naming helper between pass invocations.
+void clearArithmeticNamingHelper();
+

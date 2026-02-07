@@ -136,12 +136,17 @@ pub const Z3_BOOL_SORT = c.Z3_BOOL_SORT;
 pub const Z3_BV_SORT = c.Z3_BV_SORT;
 pub const Z3_ARRAY_SORT = c.Z3_ARRAY_SORT;
 
-// Model evaluation
+// Model evaluation and iteration
 pub const Z3_model_inc_ref = c.Z3_model_inc_ref;
 pub const Z3_model_dec_ref = c.Z3_model_dec_ref;
 pub const Z3_model_eval = c.Z3_model_eval;
 pub const Z3_model_to_string = c.Z3_model_to_string;
 pub const Z3_get_numeral_string = c.Z3_get_numeral_string;
+pub const Z3_model_get_num_consts = c.Z3_model_get_num_consts;
+pub const Z3_model_get_const_decl = c.Z3_model_get_const_decl;
+pub const Z3_model_get_const_interp = c.Z3_model_get_const_interp;
+pub const Z3_get_decl_name = c.Z3_get_decl_name;
+pub const Z3_get_symbol_string = c.Z3_get_symbol_string;
 
 // Array operations (for storage maps)
 pub const Z3_mk_array_sort = c.Z3_mk_array_sort;

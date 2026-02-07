@@ -106,6 +106,7 @@ add_mlir_dialect_library(MLIROraDialectC
   lowering/OraToSIR/patterns/ControlFlow.cpp
   lowering/OraToSIR/patterns/EVM.cpp
   lowering/OraToSIR/patterns/Logs.cpp
+  lowering/OraToSIR/patterns/MissingOps.cpp
   
   PARTIAL_SOURCES_INTENDED
   

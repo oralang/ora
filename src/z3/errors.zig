@@ -79,10 +79,26 @@ pub const Counterexample = struct {
     }
 };
 
+/// Diagnostic showing how a guard can be violated (not an error, but useful info)
+pub const Diagnostic = struct {
+    guard_id: []const u8,
+    function_name: []const u8,
+    counterexample: Counterexample,
+    allocator: std.mem.Allocator,
+
+    pub fn deinit(self: *Diagnostic) void {
+        self.allocator.free(self.guard_id);
+        self.allocator.free(self.function_name);
+        var ce = self.counterexample;
+        ce.deinit();
+    }
+};
+
 /// Result of verification pass
 pub const VerificationResult = struct {
     success: bool,
     errors: ManagedArrayList(VerificationError),
+    diagnostics: ManagedArrayList(Diagnostic),
     seen_keys: std.StringHashMap(void),
     proven_guard_ids: std.StringHashMap(void),
     allocator: std.mem.Allocator,
@@ -91,6 +107,7 @@ pub const VerificationResult = struct {
         return .{
             .success = true,
             .errors = ManagedArrayList(VerificationError).init(allocator),
+            .diagnostics = ManagedArrayList(Diagnostic).init(allocator),
             .seen_keys = std.StringHashMap(void).init(allocator),
             .proven_guard_ids = std.StringHashMap(void).init(allocator),
             .allocator = allocator,
@@ -102,6 +119,10 @@ pub const VerificationResult = struct {
             err.deinit();
         }
         self.errors.deinit();
+        for (self.diagnostics.items) |*diag| {
+            diag.deinit();
+        }
+        self.diagnostics.deinit();
         var iter = self.seen_keys.iterator();
         while (iter.next()) |entry| {
             self.allocator.free(entry.key_ptr.*);

@@ -15,7 +15,19 @@ namespace mlir
         // Forward declarations
         class OraToSIRTypeConverter;
 
-        // Control flow operation conversions
+        // ---------------------------------------------------------------
+        // ora.return lowering patterns (2 variants)
+        //
+        // All delegate to the shared `convertOraReturn()` helper.
+        //
+        //  Pattern              Base class               Used in        Purpose
+        //  ────────────────     ────────────────────     ──────────     ───────
+        //  ConvertReturnOp      OpConversionPattern      Phases 2+     Standard conversion with type-adapted operands (handles 1:N splits).
+        //  ConvertReturnOpPre   OpRewritePattern         Pre-phase 2   Greedy (non-conversion) pass; lowers "safe" wide error_union returns that aren't produced by scf.if.
+        // ---------------------------------------------------------------
+
+        /// Standard conversion-pattern for ora.return.  Uses the adaptor's
+        /// type-converted operands (including 1-to-N mappings for error unions).
         class ConvertReturnOp : public OpConversionPattern<ora::ReturnOp>
         {
         public:
@@ -32,35 +44,10 @@ namespace mlir
                 ConversionPatternRewriter &rewriter) const override;
         };
 
-        class ConvertReturnOpRaw : public OpConversionPattern<ora::ReturnOp>
-        {
-        public:
-            using OpConversionPattern::OpConversionPattern;
-
-            LogicalResult matchAndRewrite(
-                ora::ReturnOp op,
-                typename ora::ReturnOp::Adaptor adaptor,
-                ConversionPatternRewriter &rewriter) const override;
-        };
-
-        class ConvertReturnOpFallback final : public ConversionPattern
-        {
-        public:
-            ConvertReturnOpFallback(const TypeConverter *typeConverter, MLIRContext *ctx, PatternBenefit benefit = 1)
-                : ConversionPattern(ora::ReturnOp::getOperationName(), benefit, ctx),
-                  typeConverter(typeConverter)
-            {
-            }
-
-            LogicalResult matchAndRewrite(
-                Operation *op,
-                ArrayRef<Value> operands,
-                ConversionPatternRewriter &rewriter) const override;
-
-        private:
-            const TypeConverter *typeConverter;
-        };
-
+        /// Pre-pass pattern (greedy, not conversion-framework).  Lowers
+        /// "safe" wide error_union returns before the main conversion
+        /// phases — specifically those NOT produced by scf.if, which need
+        /// special handling in Phase 2b+.
         class ConvertReturnOpPre : public OpRewritePattern<ora::ReturnOp>
         {
         public:
@@ -380,6 +367,17 @@ namespace mlir
             LogicalResult matchAndRewrite(
                 mlir::scf::ForOp op,
                 typename mlir::scf::ForOp::Adaptor adaptor,
+                ConversionPatternRewriter &rewriter) const override;
+        };
+
+        class ConvertScfWhileOp : public OpConversionPattern<mlir::scf::WhileOp>
+        {
+        public:
+            using OpConversionPattern::OpConversionPattern;
+
+            LogicalResult matchAndRewrite(
+                mlir::scf::WhileOp op,
+                typename mlir::scf::WhileOp::Adaptor adaptor,
                 ConversionPatternRewriter &rewriter) const override;
         };
 

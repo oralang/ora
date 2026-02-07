@@ -346,6 +346,12 @@ fn foldExpr(ctx: *FoldContext, expr: *ast.Expressions.ExprNode, allow_fold: bool
     switch (expr.*) {
         .Identifier => |*id| {
             if (allow_fold) {
+                // Don't fold function parameters — they are runtime values
+                const is_param = if (ctx.current_scope) |scope|
+                    if (SymbolTable.findUp(scope, id.name)) |sym| sym.kind == .Param else false
+                else
+                    false;
+                if (is_param) return; // early return prevents catch-all fold below
                 if (ctx.core_resolver.lookupComptimeValue(id.name)) |val| {
                     _ = try tryFoldValue(ctx, expr, val, getExpressionSpan(expr), id.type_info);
                 }
@@ -508,6 +514,15 @@ fn foldExpr(ctx: *FoldContext, expr: *ast.Expressions.ExprNode, allow_fold: bool
     }
 
     if (!allow_fold) return;
+
+    // Don't fold identifiers that are function parameters (runtime values)
+    if (expr.* == .Identifier) {
+        const is_param = if (ctx.current_scope) |scope|
+            if (SymbolTable.findUp(scope, expr.Identifier.name)) |sym| sym.kind == .Param else false
+        else
+            false;
+        if (is_param) return;
+    }
 
     const eval_result = ctx.core_resolver.evaluateConstantExpression(expr);
     const ct_val = eval_result.getValue() orelse return;

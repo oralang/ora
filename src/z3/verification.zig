@@ -648,6 +648,16 @@ pub const VerificationPass = struct {
                     const guard_id = ann.guard_id.?;
                     const key = try self.allocator.dupe(u8, guard_id);
                     try result.proven_guard_ids.put(key, {});
+                } else if (guard_status == z3.Z3_L_TRUE) {
+                    // Guard CAN be violated — extract counterexample before pop
+                    if (self.buildCounterexample()) |ce| {
+                        try result.diagnostics.append(.{
+                            .guard_id = try self.allocator.dupe(u8, ann.guard_id.?),
+                            .function_name = try self.allocator.dupe(u8, fn_name),
+                            .counterexample = ce,
+                            .allocator = self.allocator,
+                        });
+                    }
                 }
                 self.solver.pop();
 
@@ -687,6 +697,7 @@ pub const VerificationPass = struct {
             status: z3.Z3_lbool = z3.Z3_L_UNDEF,
             elapsed_ms: u64 = 0,
             err: ?anyerror = null,
+            model_str: ?[]const u8 = null, // captured for SAT GuardViolate queries
         };
 
         const results = try worker_allocator.alloc(QueryResult, total_queries);
@@ -754,6 +765,17 @@ pub const VerificationPass = struct {
 
                     ctx.results[idx].status = status;
                     ctx.results[idx].elapsed_ms = elapsed_ms;
+
+                    // Capture model string for SAT GuardViolate queries
+                    if (status == z3.Z3_L_TRUE and query.kind == .GuardViolate) {
+                        if (solver.getModel()) |model| {
+                            const raw = z3.Z3_model_to_string(context.ctx, model);
+                            if (raw != null) {
+                                const dup = ctx.allocator.dupe(u8, std.mem.span(raw)) catch null;
+                                ctx.results[idx].model_str = dup;
+                            }
+                        }
+                    }
                 }
             }
         };
@@ -809,8 +831,26 @@ pub const VerificationPass = struct {
                             const key = try self.allocator.dupe(u8, guard_id);
                             try combined.proven_guard_ids.put(key, {});
                         }
+                    } else if (entry.status == z3.Z3_L_TRUE) {
+                        if (entry.model_str) |model_str| {
+                            if (parseModelString(self.allocator, model_str)) |ce| {
+                                try combined.diagnostics.append(.{
+                                    .guard_id = try self.allocator.dupe(u8, query.guard_id.?),
+                                    .function_name = try self.allocator.dupe(u8, query.function_name),
+                                    .counterexample = ce,
+                                    .allocator = self.allocator,
+                                });
+                            }
+                        }
                     }
                 },
+            }
+        }
+
+        // Free captured model strings
+        for (results) |entry| {
+            if (entry.model_str) |ms| {
+                worker_allocator.free(ms);
             }
         }
 
@@ -986,19 +1026,75 @@ pub const VerificationPass = struct {
 
     fn buildCounterexample(self: *VerificationPass) ?errors.Counterexample {
         const model = self.solver.getModel() orelse return null;
-        const model_str = z3.Z3_model_to_string(self.context.ctx, model);
-        if (model_str == null) return null;
+        const num_consts = z3.Z3_model_get_num_consts(self.context.ctx, model);
+        if (num_consts == 0) return null;
 
         var ce = errors.Counterexample.init(self.allocator);
-        const model_slice = std.mem.span(model_str);
-        const key = "__model";
-        ce.addVariable(key, model_slice) catch {
+
+        var i: c_uint = 0;
+        while (i < num_consts) : (i += 1) {
+            const decl = z3.Z3_model_get_const_decl(self.context.ctx, model, i);
+            const name_sym = z3.Z3_get_decl_name(self.context.ctx, decl);
+            const name_ptr = z3.Z3_get_symbol_string(self.context.ctx, name_sym);
+            if (name_ptr == null) continue;
+            // Copy name immediately — Z3 reuses internal string buffers
+            const name = self.allocator.dupe(u8, std.mem.span(name_ptr)) catch continue;
+            defer self.allocator.free(name);
+
+            // Filter out internal/synthetic variables
+            if (std.mem.startsWith(u8, name, "undef_")) continue;
+            if (std.mem.startsWith(u8, name, "old_")) continue;
+            if (std.mem.startsWith(u8, name, "__")) continue;
+
+            const interp = z3.Z3_model_get_const_interp(self.context.ctx, model, decl);
+            if (interp == null) continue;
+            const val_ptr = z3.Z3_ast_to_string(self.context.ctx, interp);
+            if (val_ptr == null) continue;
+            // Copy value immediately — same reason
+            const val = self.allocator.dupe(u8, std.mem.span(val_ptr)) catch continue;
+            defer self.allocator.free(val);
+
+            ce.addVariable(name, val) catch continue;
+        }
+
+        if (ce.variables.count() == 0) {
             ce.deinit();
             return null;
-        };
+        }
         return ce;
     }
 };
+
+/// Parse a Z3 model string (from parallel worker) into a Counterexample.
+/// Format: "name -> value\n..."
+fn parseModelString(allocator: std.mem.Allocator, model_str: []const u8) ?errors.Counterexample {
+    var ce = errors.Counterexample.init(allocator);
+    const arrow = " -> ";
+
+    var iter = std.mem.splitScalar(u8, model_str, '\n');
+    while (iter.next()) |line| {
+        const trimmed = std.mem.trim(u8, line, " \t\r");
+        if (trimmed.len == 0) continue;
+
+        const arrow_pos = std.mem.indexOf(u8, trimmed, arrow) orelse continue;
+        const name = trimmed[0..arrow_pos];
+        const value = trimmed[arrow_pos + arrow.len ..];
+
+        // Filter internal variables
+        if (std.mem.startsWith(u8, name, "undef_")) continue;
+        if (std.mem.startsWith(u8, name, "old_")) continue;
+        if (std.mem.startsWith(u8, name, "__")) continue;
+
+        if (value.len == 0) continue;
+        ce.addVariable(name, value) catch continue;
+    }
+
+    if (ce.variables.count() == 0) {
+        ce.deinit();
+        return null;
+    }
+    return ce;
+}
 
 const EncodedAnnotation = struct {
     function_name: []const u8,

@@ -1073,23 +1073,9 @@ pub const OraDialect = struct {
         return op;
     }
 
-    /// Create ora.isolated_if operation using C++ API
-    pub fn createIsolatedIf(
-        self: *OraDialect,
-        condition: c.MlirValue,
-        loc: c.MlirLocation,
-    ) c.MlirOperation {
-        if (!self.isRegistered()) {
-            @panic("Ora dialect must be registered before creating operations");
-        }
-        const op = c.oraIsolatedIfOpCreate(self.ctx, loc, condition);
-        if (op.ptr == null) {
-            @panic("Failed to create ora.isolated_if operation");
-        }
-        return op;
-    }
+    // Note: createIsolatedIf removed — unused.
 
-    /// Create scf.if operation (legacy - for compatibility)
+    /// Create scf.if operation
     pub fn createScfIf(
         self: *OraDialect,
         condition: c.MlirValue,
@@ -1121,21 +1107,7 @@ pub const OraDialect = struct {
         return op;
     }
 
-    /// Create ora.test operation (simple test for custom printer)
-    pub fn createTest(
-        self: *OraDialect,
-        loc: c.MlirLocation,
-    ) c.MlirOperation {
-        // always use C++ API (dialect must be registered)
-        if (!self.isRegistered()) {
-            @panic("Ora dialect must be registered before creating operations");
-        }
-        const op = c.oraTestOpCreate(self.ctx, loc);
-        if (op.ptr == null) {
-            @panic("Failed to create ora.test operation");
-        }
-        return op;
-    }
+    // Note: createTest (ora.test) removed — unused test op.
 
     /// Create scf.while operation (legacy - for compatibility)
     pub fn createScfWhile(
@@ -1500,22 +1472,7 @@ pub const OraDialect = struct {
     // loop Operations
     //===----------------------------------------------------------------------===//
 
-    /// Create ora.for operation
-    pub fn createFor(
-        self: *OraDialect,
-        collection: c.MlirValue,
-        loc: c.MlirLocation,
-    ) c.MlirOperation {
-        // always use C++ API (dialect must be registered)
-        if (!self.isRegistered()) {
-            @panic("Ora dialect must be registered before creating operations");
-        }
-        const op = c.oraForOpCreate(self.ctx, loc, collection);
-        if (op.ptr == null) {
-            @panic("Failed to create ora.for operation");
-        }
-        return op;
-    }
+    // Note: ora.for removed — all for-loops use scf.for directly.
 
     /// Create ora.break operation
     pub fn createBreak(

@@ -29,11 +29,13 @@ contract MemoryPrimitive {
         let sum: u256 = counter + balance;
     }
 
-    pub fn testMemoryFromCalldata(x: u256, flag: bool, addr: address) {
+    pub fn testMemoryFromCalldata(x: u256, flag: bool, addr: address) -> address {
         // Calldata -> Memory
         memory var mem_x: u256 = x;
         memory var mem_flag: bool = flag;
         memory var mem_addr: address = addr;
+        return mem_addr;
+        return mem_addr;
     }
 
     pub fn testMemoryToStack() {

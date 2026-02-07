@@ -53,11 +53,11 @@ pub fn lowerBinary(
     }
 
     return switch (bin.operator) {
-        .Plus => self.createArithmeticOp("ora.add", lhs_converted, rhs_converted, result_ty, bin.span),
-        .Minus => self.createArithmeticOp("ora.sub", lhs_converted, rhs_converted, result_ty, bin.span),
-        .Star => self.createArithmeticOp("ora.mul", lhs_converted, rhs_converted, result_ty, bin.span),
-        .Slash => self.createArithmeticOp("ora.div", lhs_converted, rhs_converted, result_ty, bin.span),
-        .Percent => self.createArithmeticOp("ora.rem", lhs_converted, rhs_converted, result_ty, bin.span),
+        .Plus => self.createArithmeticOp("arith.addi", lhs_converted, rhs_converted, result_ty, bin.span),
+        .Minus => self.createArithmeticOp("arith.subi", lhs_converted, rhs_converted, result_ty, bin.span),
+        .Star => self.createArithmeticOp("arith.muli", lhs_converted, rhs_converted, result_ty, bin.span),
+        .Slash => self.createArithmeticOp("arith.divui", lhs_converted, rhs_converted, result_ty, bin.span),
+        .Percent => self.createArithmeticOp("arith.remui", lhs_converted, rhs_converted, result_ty, bin.span),
         .StarStar => lowerPowerOp(self, lhs_converted, rhs_converted, result_ty, bin.span),
         .EqualEqual => self.createComparisonOp("eq", lhs_converted, rhs_converted, bin.span),
         .BangEqual => self.createComparisonOp("ne", lhs_converted, rhs_converted, bin.span),

@@ -58,3 +58,7 @@ namespace mlir
 
     } // namespace ora
 } // namespace mlir
+
+/// Clear the static helper map between pass invocations.
+void clearMemRefHelperMap();
+

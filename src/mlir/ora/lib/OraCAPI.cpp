@@ -6392,76 +6392,15 @@ bool oraConvertToSIR(MlirContext ctx, MlirModule module)
         pm.enableVerifier(false);
 
         LogicalResult result = pm.run(moduleOp);
-        if (mlir::ora::isDebugEnabled())
-        {
-            llvm::errs() << "[OraCAPI] pm.run() completed\n";
-            llvm::errs().flush();
-        }
 
         if (failed(result))
         {
-            llvm::errs() << "[OraCAPI] ERROR: Pass execution failed!\n";
-            llvm::errs().flush();
             // Pass failed - this will be logged by MLIR's error handling
             return false;
         }
-        if (mlir::ora::isDebugEnabled())
-        {
-            llvm::errs() << "[OraCAPI] Pass execution completed successfully\n";
-            llvm::errs().flush();
-        }
-
-        // Verify the module is still valid after conversion
-        if (mlir::ora::isDebugEnabled())
-        {
-            llvm::errs() << "[OraCAPI] Verifying module validity...\n";
-            llvm::errs().flush();
-        }
 
         if (!moduleOp)
-        {
-            llvm::errs() << "[OraCAPI] ERROR: Module is null after conversion!\n";
-            llvm::errs().flush();
             return false;
-        }
-
-        // Check if module has valid operations
-        if (moduleOp->getNumRegions() == 0)
-        {
-            llvm::errs().flush();
-        }
-        else
-        {
-        if (mlir::ora::isDebugEnabled())
-        {
-            llvm::errs() << "[OraCAPI] Module has " << moduleOp->getNumRegions() << " region(s)\n";
-            llvm::errs().flush();
-        }
-
-            // Check first region
-            auto &firstRegion = moduleOp->getRegion(0);
-            if (mlir::ora::isDebugEnabled())
-            {
-                llvm::errs() << "[OraCAPI] First region has " << firstRegion.getBlocks().size() << " block(s)\n";
-                llvm::errs().flush();
-            }
-
-            if (!firstRegion.empty())
-            {
-                auto &firstBlock = firstRegion.front();
-                if (mlir::ora::isDebugEnabled())
-                {
-                    llvm::errs() << "[OraCAPI] First block has " << firstBlock.getOperations().size() << " operation(s)\n";
-                    llvm::errs().flush();
-                }
-            }
-        }
-
-        if (mlir::ora::isDebugEnabled())
-        {
-            llvm::errs() << "[OraCAPI] Module verification complete\n";
-            llvm::errs().flush();
-        }
 
         return true;
     }

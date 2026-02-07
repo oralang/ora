@@ -80,21 +80,9 @@ pub fn unwrapRefinementValue(
     return value;
 }
 
-/// Create arithmetic operation
+/// Create arithmetic operation using standard arith dialect ops.
+/// op_name must be a standard arith op name (e.g., "arith.addi", "arith.divui").
 pub fn createArithmeticOp(ctx: c.MlirContext, block: c.MlirBlock, type_mapper: *const TypeMapper, _: *OraDialect, locations: LocationTracker, refinement_base_cache: ?*std.AutoHashMap(usize, c.MlirValue), op_name: []const u8, lhs: c.MlirValue, rhs: c.MlirValue, span: lib.ast.SourceSpan) c.MlirValue {
-    const arith_op_name = if (std.mem.eql(u8, op_name, "ora.add"))
-        "arith.addi"
-    else if (std.mem.eql(u8, op_name, "ora.sub"))
-        "arith.subi"
-    else if (std.mem.eql(u8, op_name, "ora.mul"))
-        "arith.muli"
-    else if (std.mem.eql(u8, op_name, "ora.div"))
-        "arith.divui"
-    else if (std.mem.eql(u8, op_name, "ora.rem"))
-        "arith.remui"
-    else
-        op_name;
-
     const lhs_unwrapped = unwrapRefinementValue(ctx, block, locations, refinement_base_cache, lhs, span);
     const rhs_unwrapped = unwrapRefinementValue(ctx, block, locations, refinement_base_cache, rhs, span);
 
@@ -107,143 +95,42 @@ pub fn createArithmeticOp(ctx: c.MlirContext, block: c.MlirBlock, type_mapper: *
     }
 
     const loc = locations.createLocation(span);
-    if (std.mem.eql(u8, arith_op_name, "arith.addi")) {
-        const op = c.oraArithAddIOpCreate(ctx, loc, lhs_unwrapped, rhs_converted);
-        h.appendOp(block, op);
-        return h.getResult(op, 0);
-    }
 
-    if (std.mem.eql(u8, arith_op_name, "arith.subi")) {
-        const op = c.oraArithSubIOpCreate(ctx, loc, lhs_unwrapped, rhs_converted);
-        h.appendOp(block, op);
-        return h.getResult(op, 0);
-    }
+    const op = if (std.mem.eql(u8, op_name, "arith.addi"))
+        c.oraArithAddIOpCreate(ctx, loc, lhs_unwrapped, rhs_converted)
+    else if (std.mem.eql(u8, op_name, "arith.subi"))
+        c.oraArithSubIOpCreate(ctx, loc, lhs_unwrapped, rhs_converted)
+    else if (std.mem.eql(u8, op_name, "arith.muli"))
+        c.oraArithMulIOpCreate(ctx, loc, lhs_unwrapped, rhs_converted)
+    else if (std.mem.eql(u8, op_name, "arith.divui"))
+        c.oraArithDivUIOpCreate(ctx, loc, lhs_unwrapped, rhs_converted)
+    else if (std.mem.eql(u8, op_name, "arith.divsi"))
+        c.oraArithDivSIOpCreate(ctx, loc, lhs_unwrapped, rhs_converted)
+    else if (std.mem.eql(u8, op_name, "arith.remui"))
+        c.oraArithRemUIOpCreate(ctx, loc, lhs_unwrapped, rhs_converted)
+    else if (std.mem.eql(u8, op_name, "arith.remsi"))
+        c.oraArithRemSIOpCreate(ctx, loc, lhs_unwrapped, rhs_converted)
+    else if (std.mem.eql(u8, op_name, "arith.andi"))
+        c.oraArithAndIOpCreate(ctx, loc, lhs_unwrapped, rhs_converted)
+    else if (std.mem.eql(u8, op_name, "arith.ori"))
+        c.oraArithOrIOpCreate(ctx, loc, lhs_unwrapped, rhs_converted)
+    else if (std.mem.eql(u8, op_name, "arith.xori"))
+        c.oraArithXorIOpCreate(ctx, loc, lhs_unwrapped, rhs_converted)
+    else if (std.mem.eql(u8, op_name, "arith.shli"))
+        c.oraArithShlIOpCreate(ctx, loc, lhs_unwrapped, rhs_converted)
+    else if (std.mem.eql(u8, op_name, "arith.shrsi"))
+        c.oraArithShrSIOpCreate(ctx, loc, lhs_unwrapped, rhs_converted)
+    else {
+        log.err("Unsupported arithmetic op: {s}\n", .{op_name});
+        @panic("Unsupported arithmetic op");
+    };
 
-    if (std.mem.eql(u8, arith_op_name, "arith.muli")) {
-        const op = c.oraArithMulIOpCreate(ctx, loc, lhs_unwrapped, rhs_converted);
-        h.appendOp(block, op);
-        return h.getResult(op, 0);
-    }
-
-    if (std.mem.eql(u8, arith_op_name, "arith.divui")) {
-        const op = c.oraArithDivUIOpCreate(ctx, loc, lhs_unwrapped, rhs_converted);
-        h.appendOp(block, op);
-        return h.getResult(op, 0);
-    }
-
-    if (std.mem.eql(u8, arith_op_name, "arith.divsi")) {
-        const op = c.oraArithDivSIOpCreate(ctx, loc, lhs_unwrapped, rhs_converted);
-        h.appendOp(block, op);
-        return h.getResult(op, 0);
-    }
-
-    if (std.mem.eql(u8, arith_op_name, "arith.remui")) {
-        const op = c.oraArithRemUIOpCreate(ctx, loc, lhs_unwrapped, rhs_converted);
-        h.appendOp(block, op);
-        return h.getResult(op, 0);
-    }
-
-    if (std.mem.eql(u8, arith_op_name, "arith.remsi")) {
-        const op = c.oraArithRemSIOpCreate(ctx, loc, lhs_unwrapped, rhs_converted);
-        h.appendOp(block, op);
-        return h.getResult(op, 0);
-    }
-
-    if (std.mem.eql(u8, arith_op_name, "arith.andi")) {
-        const op = c.oraArithAndIOpCreate(ctx, loc, lhs_unwrapped, rhs_converted);
-        h.appendOp(block, op);
-        return h.getResult(op, 0);
-    }
-
-    if (std.mem.eql(u8, arith_op_name, "arith.ori")) {
-        const op = c.oraArithOrIOpCreate(ctx, loc, lhs_unwrapped, rhs_converted);
-        h.appendOp(block, op);
-        return h.getResult(op, 0);
-    }
-
-    if (std.mem.eql(u8, arith_op_name, "arith.xori")) {
-        const op = c.oraArithXorIOpCreate(ctx, loc, lhs_unwrapped, rhs_converted);
-        h.appendOp(block, op);
-        return h.getResult(op, 0);
-    }
-
-    if (std.mem.eql(u8, arith_op_name, "arith.shli")) {
-        const op = c.oraArithShlIOpCreate(ctx, loc, lhs_unwrapped, rhs_converted);
-        h.appendOp(block, op);
-        return h.getResult(op, 0);
-    }
-
-    if (std.mem.eql(u8, arith_op_name, "arith.shrsi")) {
-        const op = c.oraArithShrSIOpCreate(ctx, loc, lhs_unwrapped, rhs_converted);
-        h.appendOp(block, op);
-        return h.getResult(op, 0);
-    }
-
-    if (std.mem.eql(u8, arith_op_name, "arith.addi")) {
-        const op = c.oraArithAddIOpCreate(ctx, loc, lhs_unwrapped, rhs_converted);
-        h.appendOp(block, op);
-        return h.getResult(op, 0);
-    }
-
-    if (std.mem.eql(u8, arith_op_name, "arith.subi")) {
-        const op = c.oraArithSubIOpCreate(ctx, loc, lhs_unwrapped, rhs_converted);
-        h.appendOp(block, op);
-        return h.getResult(op, 0);
-    }
-
-    if (std.mem.eql(u8, arith_op_name, "arith.muli")) {
-        const op = c.oraArithMulIOpCreate(ctx, loc, lhs_unwrapped, rhs_converted);
-        h.appendOp(block, op);
-        return h.getResult(op, 0);
-    }
-
-    if (std.mem.eql(u8, arith_op_name, "arith.divui")) {
-        const op = c.oraArithDivUIOpCreate(ctx, loc, lhs_unwrapped, rhs_converted);
-        h.appendOp(block, op);
-        return h.getResult(op, 0);
-    }
-
-    if (std.mem.eql(u8, arith_op_name, "arith.divsi")) {
-        const op = c.oraArithDivSIOpCreate(ctx, loc, lhs_unwrapped, rhs_converted);
-        h.appendOp(block, op);
-        return h.getResult(op, 0);
-    }
-
-    if (std.mem.eql(u8, arith_op_name, "arith.remui")) {
-        const op = c.oraArithRemUIOpCreate(ctx, loc, lhs_unwrapped, rhs_converted);
-        h.appendOp(block, op);
-        return h.getResult(op, 0);
-    }
-
-    if (std.mem.eql(u8, arith_op_name, "arith.remsi")) {
-        const op = c.oraArithRemSIOpCreate(ctx, loc, lhs_unwrapped, rhs_converted);
-        h.appendOp(block, op);
-        return h.getResult(op, 0);
-    }
-
-    if (std.mem.eql(u8, arith_op_name, "arith.andi")) {
-        const op = c.oraArithAndIOpCreate(ctx, loc, lhs_unwrapped, rhs_converted);
-        h.appendOp(block, op);
-        return h.getResult(op, 0);
-    }
-
-    if (std.mem.eql(u8, arith_op_name, "arith.ori")) {
-        const op = c.oraArithOrIOpCreate(ctx, loc, lhs_unwrapped, rhs_converted);
-        h.appendOp(block, op);
-        return h.getResult(op, 0);
-    }
-
-    if (std.mem.eql(u8, arith_op_name, "arith.xori")) {
-        const op = c.oraArithXorIOpCreate(ctx, loc, lhs_unwrapped, rhs_converted);
-        h.appendOp(block, op);
-        return h.getResult(op, 0);
-    }
-
-    log.err("Unsupported arithmetic op: {s}\n", .{arith_op_name});
-    @panic("Unsupported arithmetic op");
+    h.appendOp(block, op);
+    return h.getResult(op, 0);
 }
 
-/// Create comparison operation
+/// Create comparison operation using arith.cmpi for integer types
+/// and ora.cmp for address types (which need special lowering).
 pub fn createComparisonOp(ctx: c.MlirContext, block: c.MlirBlock, locations: LocationTracker, refinement_base_cache: ?*std.AutoHashMap(usize, c.MlirValue), predicate: []const u8, lhs: c.MlirValue, rhs: c.MlirValue, span: lib.ast.SourceSpan) c.MlirValue {
     const lhs_unwrapped = unwrapRefinementValue(ctx, block, locations, refinement_base_cache, lhs, span);
     const rhs_unwrapped = unwrapRefinementValue(ctx, block, locations, refinement_base_cache, rhs, span);
@@ -254,6 +141,7 @@ pub fn createComparisonOp(ctx: c.MlirContext, block: c.MlirBlock, locations: Loc
     const is_rhs_address = c.oraTypeIsAddressType(rhs_ty);
     const loc = locations.createLocation(span);
 
+    // Address comparisons still use ora.cmp (needs address masking in lowering)
     if (is_lhs_address or is_rhs_address) {
         const bool_ty = h.boolType(ctx);
         if (is_lhs_address and is_rhs_address) {
@@ -286,12 +174,13 @@ pub fn createComparisonOp(ctx: c.MlirContext, block: c.MlirBlock, locations: Loc
         const op = c.oraCmpOpCreate(ctx, loc, h.strRef(predicate), lhs_final, rhs_final, bool_ty);
         h.appendOp(block, op);
         return h.getResult(op, 0);
-    } else {
-        const bool_ty = h.boolType(ctx);
-        const op = c.oraCmpOpCreate(ctx, loc, h.strRef(predicate), lhs_unwrapped, rhs_unwrapped, bool_ty);
-        h.appendOp(block, op);
-        return h.getResult(op, 0);
     }
+
+    // Integer comparisons use standard arith.cmpi
+    const pred_int = predicateStringToInt(predicate);
+    const op = c.oraArithCmpIOpCreate(ctx, loc, pred_int, lhs_unwrapped, rhs_unwrapped);
+    h.appendOp(block, op);
+    return h.getResult(op, 0);
 }
 
 /// Convert predicate string to integer

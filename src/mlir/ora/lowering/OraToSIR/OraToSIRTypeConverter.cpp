@@ -9,6 +9,9 @@
 #include "mlir/Transforms/DialectConversion.h"
 #include <optional>
 #include "llvm/Support/Casting.h"
+#include "llvm/Support/Debug.h"
+
+#define DEBUG_TYPE "ora-to-sir-types"
 
 using namespace mlir;
 using namespace ora;
@@ -24,10 +27,6 @@ namespace
         if (auto builtinInt = llvm::dyn_cast<mlir::IntegerType>(type))
             return builtinInt.getWidth();
         if (auto intType = llvm::dyn_cast<ora::IntegerType>(type))
-            return intType.getWidth();
-        if (auto intType = llvm::dyn_cast<mlir::IntegerType>(type))
-            return intType.getWidth();
-        if (auto intType = llvm::dyn_cast<mlir::IntegerType>(type))
             return intType.getWidth();
         if (llvm::isa<ora::BoolType>(type))
             return 1u;
@@ -63,6 +62,26 @@ namespace
     }
 }
 
+static Value makeMaskValue(OpBuilder &builder, Location loc, unsigned width)
+{
+    if (width >= 256)
+        return Value();
+    auto u256 = sir::U256Type::get(builder.getContext());
+    auto ui64Type = mlir::IntegerType::get(builder.getContext(), 64, mlir::IntegerType::Unsigned);
+    if (width == 64)
+    {
+        auto attr = mlir::IntegerAttr::get(ui64Type, std::numeric_limits<uint64_t>::max());
+        return builder.create<sir::ConstOp>(loc, u256, attr);
+    }
+    if (width < 64)
+    {
+        uint64_t mask = (width == 0) ? 0ULL : ((1ULL << width) - 1ULL);
+        auto attr = mlir::IntegerAttr::get(ui64Type, mask);
+        return builder.create<sir::ConstOp>(loc, u256, attr);
+    }
+    return Value();
+}
+
 namespace mlir
 {
     namespace ora
@@ -78,15 +97,11 @@ namespace mlir
             // ora.int<N> → sir.u256  (for now: ABI-level erasure)
             addConversion([](ora::IntegerType type) -> Type
                           {
-                llvm::errs() << "[OraToSIRTypeConverter] Converting ora::IntegerType: " << type << "\n";
+                LLVM_DEBUG(llvm::dbgs() << "[OraToSIRTypeConverter] Converting ora::IntegerType: " << type << "\n");
                 auto *ctx = type.getDialect().getContext();
-                if (!ctx) {
-                    llvm::errs() << "[OraToSIRTypeConverter] ERROR: null context\n";
+                if (!ctx)
                     return Type();
-                }
-                auto result = sir::U256Type::get(ctx);
-                llvm::errs() << "[OraToSIRTypeConverter] Result: " << result << "\n";
-                return result; });
+                return sir::U256Type::get(ctx); });
 
             // ora.bool → sir.u256 (boolean values represented as 0/1 on EVM stack)
             addConversion([&](ora::BoolType type) -> Type
@@ -145,22 +160,11 @@ namespace mlir
             });
 
             // Preserve tensor types until we explicitly enable lowering.
-            addConversion([this](RankedTensorType type) -> Type
-                          {
-                if (enableTensorLowering)
-                    return sir::U256Type::get(type.getContext());
-                return type; });
             addConversion([this](UnrankedTensorType type) -> Type
                           {
                 if (enableTensorLowering)
                     return sir::U256Type::get(type.getContext());
                 return type; });
-            addConversion([this](MemRefType type) -> Type
-                          {
-                if (enableMemRefLowering)
-                    return sir::PtrType::get(type.getContext(), /*addrSpace*/ 1);
-                return type;
-            });
             addConversion([this](UnrankedMemRefType type) -> Type
                           {
                 if (enableMemRefLowering)
@@ -176,14 +180,6 @@ namespace mlir
                     return Type();
                 }
                 return sir::U256Type::get(ctx); });
-
-            // ora.struct passes through until we enable lowering.
-            addConversion([this](ora::StructType type) -> Type
-                          {
-                if (enableStructLowering)
-                    return sir::PtrType::get(type.getContext(), /*addrSpace*/ 1);
-                return type;
-            });
 
             // refinement types → base type (erased to underlying representation)
             addConversion([this](ora::MinValueType type) -> Type
@@ -310,22 +306,7 @@ namespace mlir
                                          }
 
                                          auto makeMask = [&](unsigned width) -> Value {
-                                             if (width >= 256)
-                                                 return Value();
-                                             if (width == 64)
-                                             {
-                                                 auto ui64Type = mlir::IntegerType::get(builder.getContext(), 64, mlir::IntegerType::Unsigned);
-                                                 auto attr = mlir::IntegerAttr::get(ui64Type, std::numeric_limits<uint64_t>::max());
-                                                 return builder.create<sir::ConstOp>(loc, sir::U256Type::get(builder.getContext()), attr);
-                                             }
-                                             if (width < 64)
-                                             {
-                                                 auto ui64Type = mlir::IntegerType::get(builder.getContext(), 64, mlir::IntegerType::Unsigned);
-                                                 uint64_t mask = (width == 0) ? 0ULL : ((1ULL << width) - 1ULL);
-                                                 auto attr = mlir::IntegerAttr::get(ui64Type, mask);
-                                                 return builder.create<sir::ConstOp>(loc, sir::U256Type::get(builder.getContext()), attr);
-                                             }
-                                             return Value();
+                                             return makeMaskValue(builder, loc, width);
                                          };
 
                                         // Convert ora.error_union<T> -> sir.u256 (narrow-only) when defined by ok/err ops.
@@ -581,6 +562,63 @@ namespace mlir
                                          return Value(); // Don't handle other cases
                                      });
 
+            // Wide error union N:1 packing: 2x sir.u256 → ora.error_union via
+            // unrealized_conversion_cast.
+            addSourceMaterialization([](OpBuilder &builder, Type type, ValueRange inputs, Location loc) -> Value
+                                     {
+                                         if (inputs.size() != 2)
+                                             return Value();
+                                         auto errType = dyn_cast<ora::ErrorUnionType>(type);
+                                         if (!errType || isNarrowErrorUnion(errType))
+                                             return Value();
+                                         auto cast = builder.create<mlir::UnrealizedConversionCastOp>(loc, type, inputs);
+                                         cast->setAttr("ora.normalized_error_union", builder.getUnitAttr());
+                                         return cast.getResult(0);
+                                     });
+            addTargetMaterialization([](OpBuilder &builder, Type type, ValueRange inputs, Location loc) -> Value
+                                     {
+                                         if (inputs.size() != 2)
+                                             return Value();
+                                         auto errType = dyn_cast<ora::ErrorUnionType>(type);
+                                         if (!errType || isNarrowErrorUnion(errType))
+                                             return Value();
+                                         auto cast = builder.create<mlir::UnrealizedConversionCastOp>(loc, type, inputs);
+                                         cast->setAttr("ora.normalized_error_union", builder.getUnitAttr());
+                                         return cast.getResult(0);
+                                     });
+
+            // Wide error union 1:N splitting: ora.error_union → 2x sir.u256.
+            // The conversion framework calls this when it needs to adapt a single
+            // error_union value into the two converted values for an op adaptor.
+            addTargetMaterialization([](OpBuilder &builder, TypeRange resultTypes, ValueRange inputs, Location loc) -> SmallVector<Value>
+                                     {
+                                         if (resultTypes.size() != 2 || inputs.size() != 1)
+                                             return {};
+                                         Value input = inputs[0];
+                                         auto errType = dyn_cast<ora::ErrorUnionType>(input.getType());
+                                         if (!errType || isNarrowErrorUnion(errType))
+                                             return {};
+                                         // Look through an existing unrealized_conversion_cast.
+                                         if (auto cast = input.getDefiningOp<mlir::UnrealizedConversionCastOp>())
+                                         {
+                                             if (cast.getNumOperands() == 2 &&
+                                                 cast.getNumResults() == 1)
+                                             {
+                                                 return SmallVector<Value>{cast.getOperand(0), cast.getOperand(1)};
+                                             }
+                                         }
+                                         // Otherwise, decompose via loads from a malloc'd pair.
+                                         auto u256 = sir::U256Type::get(builder.getContext());
+                                         auto ptrType = sir::PtrType::get(builder.getContext(), 1);
+                                         auto ui64 = mlir::IntegerType::get(builder.getContext(), 64, mlir::IntegerType::Unsigned);
+                                         Value bitcast = builder.create<sir::BitcastOp>(loc, ptrType, input);
+                                         Value tag = builder.create<sir::LoadOp>(loc, u256, bitcast);
+                                         Value off = builder.create<sir::ConstOp>(loc, u256, mlir::IntegerAttr::get(ui64, 32));
+                                         Value ptr2 = builder.create<sir::AddPtrOp>(loc, ptrType, bitcast, off);
+                                         Value payload = builder.create<sir::LoadOp>(loc, u256, ptr2);
+                                         return SmallVector<Value>{tag, payload};
+                                     });
+
             // Allow memref -> sir.ptr materialization during memref lowering.
             addSourceMaterialization([this](OpBuilder &builder, Type type, ValueRange inputs, Location loc) -> Value
                                      {
@@ -601,22 +639,7 @@ namespace mlir
             addSourceMaterialization([this](OpBuilder &builder, Type type, ValueRange inputs, Location loc) -> Value
                                      {
                                          auto makeMask = [&](unsigned width) -> Value {
-                                             if (width >= 256)
-                                                 return Value();
-                                             if (width == 64)
-                                             {
-                                                 auto ui64Type = mlir::IntegerType::get(builder.getContext(), 64, mlir::IntegerType::Unsigned);
-                                                 auto attr = mlir::IntegerAttr::get(ui64Type, std::numeric_limits<uint64_t>::max());
-                                                 return builder.create<sir::ConstOp>(loc, sir::U256Type::get(builder.getContext()), attr);
-                                             }
-                                             if (width < 64)
-                                             {
-                                                 auto ui64Type = mlir::IntegerType::get(builder.getContext(), 64, mlir::IntegerType::Unsigned);
-                                                 uint64_t mask = (width == 0) ? 0ULL : ((1ULL << width) - 1ULL);
-                                                 auto attr = mlir::IntegerAttr::get(ui64Type, mask);
-                                                 return builder.create<sir::ConstOp>(loc, sir::U256Type::get(builder.getContext()), attr);
-                                             }
-                                             return Value();
+                                             return makeMaskValue(builder, loc, width);
                                          };
 
                                          if (inputs.size() != 1)
@@ -694,6 +717,14 @@ namespace mlir
                                             }
                                         }
 
+                                        // ptr -> memref: memrefs are ptrs in SIR, forward via bitcast.
+                                        if (enableMemRefLowering &&
+                                            llvm::isa<mlir::MemRefType, mlir::UnrankedMemRefType>(type) &&
+                                            llvm::isa<sir::PtrType>(input.getType()))
+                                        {
+                                            return builder.create<sir::BitcastOp>(loc, type, input);
+                                        }
+
                                         if (enableTensorLowering && llvm::isa<ora::AddressType, ora::NonZeroAddressType>(type))
                                         {
                                             if (llvm::isa<sir::U256Type>(input.getType()))
@@ -721,11 +752,9 @@ namespace mlir
                                         // If trying to materialize to an Ora type, this is an error
                                         if (type.getDialect().getNamespace() == "ora")
                                         {
-                                            llvm::errs() << "[OraToSIRTypeConverter] ERROR: Attempted to materialize from SIR to Ora type: " << type << "\n";
-                                            llvm::errs() << "[OraToSIRTypeConverter] This indicates an unconverted operation still expects Ora types.\n";
-                                            llvm::errs() << "[OraToSIRTypeConverter] Location: " << loc << "\n";
-                                            llvm::errs().flush();
-                                            return Value(); // fail materialization (no fallback)
+                                            LLVM_DEBUG(llvm::dbgs() << "[OraToSIRTypeConverter] ERROR: Attempted to materialize from SIR to Ora type: " << type
+                                                                    << " at " << loc << "\n");
+                                            return Value();
                                         }
                                          return Value(); // Return null - don't handle other cases
                                      });

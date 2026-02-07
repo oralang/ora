@@ -24,7 +24,6 @@ namespace mlir
             ModuleOp module = op->getParentOfType<ModuleOp>();
             if (!module)
             {
-                llvm::errs() << "[OraToSIR] computeGlobalSlot: no module for name=" << name << "\n";
                 return std::nullopt;
             }
 
@@ -63,8 +62,6 @@ namespace mlir
                 auto slotAttr = IntegerAttr::get(ui64Ty, nextSlot);
                 entries.push_back(NamedAttribute(nameAttr, slotAttr));
                 module->setAttr("ora.global_slots", DictionaryAttr::get(ctx, entries));
-                llvm::errs() << "[OraToSIR] computeGlobalSlot: synthesized slot " << nextSlot
-                             << " for name=" << name << "\n";
                 return nextSlot;
             }
 
@@ -181,3 +178,7 @@ namespace mlir
 
     } // namespace ora
 } // namespace mlir
+
+/// Clear the static map hash cache between pass invocations.
+void clearMapHashCache();
+

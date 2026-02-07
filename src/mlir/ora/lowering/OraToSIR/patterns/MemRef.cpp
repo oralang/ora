@@ -22,30 +22,30 @@ using namespace ora;
 // Debug logging macro
 #define DBG(msg) ORA_DEBUG_PREFIX("OraToSIR", msg)
 
-// Helper: Get or create naming helper for current function
+static std::map<Operation *, SIRNamingHelper> memrefHelperMap;
+static SIRNamingHelper memrefFallbackHelper;
+
 static SIRNamingHelper &getNamingHelper(Operation *op)
 {
-    // Get the parent function to use as a key for per-function helpers
     Operation *parentFunc = op->getParentOfType<mlir::func::FuncOp>();
     if (!parentFunc)
-    {
-        // Fallback to static helper if not in a function
-        static SIRNamingHelper helper;
-        return helper;
-    }
+        return memrefFallbackHelper;
 
-    // Use a map to store per-function helpers (reset counters per function)
-    static std::map<Operation *, SIRNamingHelper> helperMap;
-    auto it = helperMap.find(parentFunc);
-    if (it == helperMap.end())
+    auto it = memrefHelperMap.find(parentFunc);
+    if (it == memrefHelperMap.end())
     {
-        // First time seeing this function - create new helper with reset counters
         SIRNamingHelper newHelper;
         newHelper.reset();
-        helperMap[parentFunc] = newHelper;
-        return helperMap[parentFunc];
+        memrefHelperMap[parentFunc] = newHelper;
+        return memrefHelperMap[parentFunc];
     }
     return it->second;
+}
+
+void clearMemRefHelperMap()
+{
+    memrefHelperMap.clear();
+    memrefFallbackHelper.reset();
 }
 
 // -----------------------------------------------------------------------------
@@ -326,9 +326,6 @@ LogicalResult ConvertMemRefStoreOp::matchAndRewrite(
 
     if (!llvm::isa<sir::PtrType>(memref.getType()))
     {
-        llvm::errs() << "[OraToSIR] ConvertMemRefStoreOp: memref type not lowered: "
-                     << memref.getType() << " value type=" << value.getType()
-                     << " at " << loc << "\n";
         auto ptrType = sir::PtrType::get(ctx, /*addrSpace*/ 1);
         memref = rewriter.create<sir::BitcastOp>(loc, ptrType, memref);
     }

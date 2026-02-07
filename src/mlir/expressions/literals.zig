@@ -24,7 +24,7 @@ pub fn lowerLiteral(
     literal: *const lib.ast.Expressions.LiteralExpr,
 ) c.MlirValue {
     return switch (literal.*) {
-        .Integer => |int| lowerIntegerLiteral(ctx, block, type_mapper, locations, int),
+        .Integer => |int| lowerIntegerLiteral(ctx, block, type_mapper, ora_dialect, locations, int),
         .Bool => |bool_lit| lowerBoolLiteral(ctx, block, ora_dialect, locations, bool_lit),
         .String => |string_lit| lowerStringLiteral(ctx, block, ora_dialect, locations, string_lit),
         .Address => |addr_lit| lowerAddressLiteral(ctx, block, type_mapper, locations, addr_lit),
@@ -39,9 +39,22 @@ fn lowerIntegerLiteral(
     ctx: c.MlirContext,
     block: c.MlirBlock,
     type_mapper: *const TypeMapper,
+    ora_dialect: *OraDialect,
     locations: LocationTracker,
     int: lib.ast.Expressions.IntegerLiteral,
 ) c.MlirValue {
+    // If the target type is bytes, emit ora.bytes.constant with the hex representation
+    if (int.type_info.ora_type) |ora_ty| {
+        if (ora_ty == .bytes) {
+            const bytes_ty = c.oraBytesTypeGet(ctx);
+            const loc = locations.createLocation(int.span);
+            // Use the original value string — for hex it's the hex digits
+            const op = ora_dialect.createBytesConstant(int.value, bytes_ty, loc);
+            h.appendOp(block, op);
+            return h.getResult(op, 0);
+        }
+    }
+
     const ty = if (int.type_info.ora_type) |ora_ty| blk: {
         const base_ora_ty = switch (ora_ty) {
             .min_value => |mv| mv.base.*,
@@ -52,8 +65,9 @@ fn lowerIntegerLiteral(
             else => ora_ty,
         };
         const mapped = type_mapper.toMlirType(.{ .ora_type = base_ora_ty });
-        if (!c.oraTypeIsNull(mapped)) break :blk mapped;
-        break :blk c.oraIntegerTypeCreate(ctx, constants.DEFAULT_INTEGER_BITS);
+        if (c.oraTypeIsNull(mapped)) break :blk c.oraIntegerTypeCreate(ctx, constants.DEFAULT_INTEGER_BITS);
+        if (!c.oraTypeIsAInteger(mapped)) @panic("lowerIntegerLiteral: non-integer MLIR type for integer literal (bytes? string? handle before this point)");
+        break :blk mapped;
     } else c.oraIntegerTypeCreate(ctx, constants.DEFAULT_INTEGER_BITS);
 
     var parsed: u256 = 0;

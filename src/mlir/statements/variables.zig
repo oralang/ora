@@ -341,12 +341,12 @@ pub fn lowerStackVariableDecl(self: *const StatementLowerer, var_decl: *const li
             // ensure the initializer value matches the declared type
             // this is critical for structs - if map load returns i256, convert it to struct type
             if (var_decl.type_info.ora_type) |ora_type| {
+                // insert refinement guard BEFORE type conversion to avoid base→refinement→base round-trip
+                init_value = try helpers.insertRefinementGuard(self, init_value, ora_type, var_decl.span, var_decl.name, var_decl.skip_guard);
+
                 // convert to the declared type if needed (e.g., map load might return wrong type)
                 const expected_type = self.expr_lowerer.type_mapper.toMlirType(var_decl.type_info);
                 init_value = self.expr_lowerer.convertToType(init_value, expected_type, var_decl.span);
-
-                // insert refinement guard for variable initialization (skip if optimized)
-                init_value = try helpers.insertRefinementGuard(self, init_value, ora_type, var_decl.span, var_decl.name, var_decl.skip_guard);
             }
         } else {
             // create default value based on variable kind

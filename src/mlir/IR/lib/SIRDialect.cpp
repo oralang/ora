@@ -374,6 +374,17 @@ void SIRDialect::initialize()
 
 namespace
 {
+    // Extract APInt from a sir.const value.
+    static std::optional<llvm::APInt> getConstantAPInt(Value val)
+    {
+        if (auto constOp = val.getDefiningOp<ConstOp>())
+        {
+            if (auto intAttr = llvm::dyn_cast<mlir::IntegerAttr>(constOp.getValueAttr()))
+                return intAttr.getValue();
+        }
+        return std::nullopt;
+    }
+
     // Pattern to fold constant addition: add(const, const) -> const
     struct FoldAddConstants : public OpRewritePattern<AddOp>
     {
@@ -381,32 +392,17 @@ namespace
 
         LogicalResult matchAndRewrite(AddOp op, PatternRewriter &rewriter) const override
         {
-            // Try to get constant values from operands
-            // They might be direct ConstOp results or come from other operations
-            auto getConstantValue = [](Value val) -> std::optional<uint64_t>
-            {
-                if (auto constOp = val.getDefiningOp<ConstOp>())
-                {
-                    auto attr = constOp.getValueAttr();
-                    if (auto intAttr = llvm::dyn_cast<mlir::IntegerAttr>(attr))
-                    {
-                        return intAttr.getValue().getZExtValue();
-                    }
-                }
-                return std::nullopt;
-            };
-
-            auto lhsVal = getConstantValue(op.getLhs());
-            auto rhsVal = getConstantValue(op.getRhs());
-
+            auto lhsVal = getConstantAPInt(op.getLhs());
+            auto rhsVal = getConstantAPInt(op.getRhs());
             if (!lhsVal || !rhsVal)
                 return failure();
 
-            uint64_t result = *lhsVal + *rhsVal;
-            auto u256Type = sir::U256Type::get(op.getContext());
-            auto ui64Type = mlir::IntegerType::get(op.getContext(), 64, mlir::IntegerType::Unsigned);
-            auto valueAttr = mlir::IntegerAttr::get(ui64Type, result);
-            auto newConst = rewriter.create<ConstOp>(op.getLoc(), u256Type, valueAttr);
+            // Normalize to 256 bits before computing.
+            llvm::APInt lhs = lhsVal->getBitWidth() == 256 ? *lhsVal : lhsVal->zextOrTrunc(256);
+            llvm::APInt rhs = rhsVal->getBitWidth() == 256 ? *rhsVal : rhsVal->zextOrTrunc(256);
+            llvm::APInt result = lhs + rhs;
+
+            auto newConst = rewriter.create<ConstOp>(op.getLoc(), result);
             rewriter.replaceOp(op, newConst.getResult());
             return success();
         }
@@ -419,32 +415,16 @@ namespace
 
         LogicalResult matchAndRewrite(MulOp op, PatternRewriter &rewriter) const override
         {
-            // Try to get constant values from operands
-            // They might be direct ConstOp results or come from other operations
-            auto getConstantValue = [](Value val) -> std::optional<uint64_t>
-            {
-                if (auto constOp = val.getDefiningOp<ConstOp>())
-                {
-                    auto attr = constOp.getValueAttr();
-                    if (auto intAttr = llvm::dyn_cast<mlir::IntegerAttr>(attr))
-                    {
-                        return intAttr.getValue().getZExtValue();
-                    }
-                }
-                return std::nullopt;
-            };
-
-            auto lhsVal = getConstantValue(op.getLhs());
-            auto rhsVal = getConstantValue(op.getRhs());
-
+            auto lhsVal = getConstantAPInt(op.getLhs());
+            auto rhsVal = getConstantAPInt(op.getRhs());
             if (!lhsVal || !rhsVal)
                 return failure();
 
-            uint64_t result = *lhsVal * *rhsVal;
-            auto u256Type = sir::U256Type::get(op.getContext());
-            auto ui64Type = mlir::IntegerType::get(op.getContext(), 64, mlir::IntegerType::Unsigned);
-            auto valueAttr = mlir::IntegerAttr::get(ui64Type, result);
-            auto newConst = rewriter.create<ConstOp>(op.getLoc(), u256Type, valueAttr);
+            llvm::APInt lhs = lhsVal->getBitWidth() == 256 ? *lhsVal : lhsVal->zextOrTrunc(256);
+            llvm::APInt rhs = rhsVal->getBitWidth() == 256 ? *rhsVal : rhsVal->zextOrTrunc(256);
+            llvm::APInt result = lhs * rhs;
+
+            auto newConst = rewriter.create<ConstOp>(op.getLoc(), result);
             rewriter.replaceOp(op, newConst.getResult());
             return success();
         }

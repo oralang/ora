@@ -31,3 +31,7 @@ sensei-ir-main/
 
 new-site/
 docs/
+
+tests/mlir/
+tests/mlir_sir/
+tmp/
