@@ -294,6 +294,38 @@ namespace
         if (isa<sir::ErrorDeclOp>(op))
             return;
 
+        // select(cond, a, b) → or(and(sub(0,cond), a), and(not(sub(0,cond)), b))
+        // Expanded inline because sensei has no "select" mnemonic.
+        if (auto sel = dyn_cast<sir::SelectOp>(op))
+        {
+            const char *ind = "        ";
+            std::string result = names.nameFor(sel.getRes());
+            std::string condN = names.nameFor(sel.getCond());
+            std::string trueN = names.nameFor(sel.getTrueValue());
+            std::string falseN = names.nameFor(sel.getFalseValue());
+            std::string mask = names.allocateName("sel_mask");
+            std::string t = names.allocateName("sel_t");
+            std::string inv = names.allocateName("sel_inv");
+            std::string f = names.allocateName("sel_f");
+            // Reuse existing zero const or emit one.
+            std::string zero;
+            auto zIt = names.constNames.find("0");
+            if (zIt != names.constNames.end())
+                zero = names.nameFor(zIt->second);
+            else
+            {
+                zero = names.allocateName("sel_zero");
+                os << zero << " = const 0x0\n" << ind;
+            }
+            // mask = 0 - cond  (0→0, 1→0xFF..FF)
+            os << mask << " = sub " << zero << " " << condN << "\n" << ind;
+            os << t << " = and " << mask << " " << trueN << "\n" << ind;
+            os << inv << " = not " << mask << "\n" << ind;
+            os << f << " = and " << inv << " " << falseN << "\n" << ind;
+            os << result << " = or " << t << " " << f;
+            return;
+        }
+
         // Results
         if (op.getNumResults() > 0)
         {
@@ -312,6 +344,15 @@ namespace
             mnemonic = "mload8";
         else if (isa<sir::Store8Op>(op))
             mnemonic = "mstore8";
+        else if (auto cst = dyn_cast<sir::ConstOp>(op))
+        {
+            // Sensei uses "const" for u32 values, "large_const" for larger.
+            if (auto intAttr = dyn_cast<IntegerAttr>(cst.getValueAttr()))
+            {
+                if (intAttr.getValue().getActiveBits() > 32)
+                    mnemonic = "large_const";
+            }
+        }
 
         os << mnemonic;
 
