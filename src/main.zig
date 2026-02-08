@@ -1023,37 +1023,46 @@ fn emitBytecodeFromSirText(
     switch (term) {
         .Exited => |code| {
             if (code != 0) {
-                var stderr_buffer: [1024]u8 = undefined;
-                var stderr_writer = std.fs.File.stderr().writer(&stderr_buffer);
-                const stderr = &stderr_writer.interface;
+                try stdout.print("\nError: sensei bytecode compilation failed (exit code {d})\n", .{code});
+                // Show sensei's error output (the actual error reason)
                 const trimmed_stderr = std.mem.trim(u8, stderr_bytes, " \n\r\t");
                 if (trimmed_stderr.len > 0) {
-                    try stderr.writeAll(trimmed_stderr);
-                    try stderr.writeAll("\n");
+                    // Extract the meaningful error line (skip Rust backtrace noise)
+                    var line_iter = std.mem.splitScalar(u8, trimmed_stderr, '\n');
+                    while (line_iter.next()) |line| {
+                        const trimmed = std.mem.trim(u8, line, " \r\t");
+                        if (trimmed.len == 0) continue;
+                        // Skip Rust backtrace/thread info noise
+                        if (std.mem.startsWith(u8, trimmed, "note: run with")) continue;
+                        if (std.mem.startsWith(u8, trimmed, "stack backtrace:")) continue;
+                        if (trimmed.len > 3 and trimmed[0] >= '0' and trimmed[0] <= '9' and trimmed[1] == ':') continue;
+                        try stdout.print("  {s}\n", .{trimmed});
+                    }
                 } else {
-                    const trimmed_stdout = std.mem.trim(u8, stdout_bytes, " \n\r\t");
-                    if (trimmed_stdout.len > 0) {
-                        try stderr.writeAll(trimmed_stdout);
-                        try stderr.writeAll("\n");
+                    const trimmed_stdout_err = std.mem.trim(u8, stdout_bytes, " \n\r\t");
+                    if (trimmed_stdout_err.len > 0) {
+                        try stdout.print("  {s}\n", .{trimmed_stdout_err});
                     }
                 }
-                try stdout.print("Error: sensei sir failed ({d})\n", .{code});
-                try stdout.print("SIR input saved to {s}\n", .{sir_file_path});
-                return error.SenseiSirFailed;
+                try stdout.print("SIR input saved to: {s}\n", .{sir_file_path});
+                try stdout.flush();
+                std.process.exit(1);
             }
         },
         else => {
-            try stdout.print("Error: sensei sir terminated unexpectedly\n", .{});
-            try stdout.print("SIR input saved to {s}\n", .{sir_file_path});
-            return error.SenseiSirFailed;
+            try stdout.print("\nError: sensei bytecode compiler terminated unexpectedly\n", .{});
+            try stdout.print("SIR input saved to: {s}\n", .{sir_file_path});
+            try stdout.flush();
+            std.process.exit(1);
         },
     }
 
     const bytecode = std.mem.trim(u8, stdout_bytes, " \n\r\t");
     if (bytecode.len == 0) {
-        try stdout.print("Error: sensei sir produced empty bytecode\n", .{});
-        try stdout.print("SIR input saved to {s}\n", .{sir_file_path});
-        return error.SenseiSirFailed;
+        try stdout.print("\nError: sensei produced empty bytecode\n", .{});
+        try stdout.print("SIR input saved to: {s}\n", .{sir_file_path});
+        try stdout.flush();
+        std.process.exit(1);
     }
 
     if (output_dir) |out_dir| {
