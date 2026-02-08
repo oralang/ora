@@ -527,6 +527,8 @@ namespace mlir
                 }
 
                 // Pre-assign names for all values (block args, op results).
+                // Also perform const dedup and bitcast aliasing so that
+                // block output headers use the final names.
                 for (Block &block : func.getBlocks())
                 {
                     for (BlockArgument arg : block.getArguments())
@@ -535,6 +537,40 @@ namespace mlir
                     }
                     for (Operation &op : block)
                     {
+                        // Const dedup: alias duplicate consts to the first definition.
+                        if (auto cst = dyn_cast<sir::ConstOp>(op))
+                        {
+                            if (auto intAttr = dyn_cast<IntegerAttr>(cst.getValueAttr()))
+                            {
+                                std::string key = formatConstKey(intAttr.getValue());
+                                auto it = names.constNames.find(key);
+                                if (it != names.constNames.end())
+                                {
+                                    Value defVal = it->second;
+                                    if (auto defOp = defVal.getDefiningOp())
+                                    {
+                                        if (defOp->getBlock() == &block && defOp->isBeforeInBlock(&op))
+                                        {
+                                            names.valueNames[cst.getResult()] = names.nameFor(defVal);
+                                            continue;
+                                        }
+                                    }
+                                }
+                                // First occurrence in this block — assign name and register.
+                                names.nameFor(cst.getResult());
+                                names.constNames[key] = cst.getResult();
+                                continue;
+                            }
+                        }
+                        // Bitcast aliasing: alias result to operand.
+                        if (auto bitcast = dyn_cast<sir::BitcastOp>(op))
+                        {
+                            if (bitcast->getNumOperands() == 1 && bitcast->getNumResults() == 1)
+                            {
+                                names.valueNames[bitcast.getResult()] = names.nameFor(bitcast.getOperand());
+                                continue;
+                            }
+                        }
                         for (Value res : op.getResults())
                         {
                             names.nameFor(res);
