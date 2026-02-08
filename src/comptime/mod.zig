@@ -109,7 +109,6 @@ pub const EvalMode = @import("eval.zig").EvalMode;
 pub const EvalResult = @import("eval.zig").EvalResult;
 pub const ControlFlow = @import("eval.zig").ControlFlow;
 
-
 // Run all module tests
 test {
     const std = @import("std");
