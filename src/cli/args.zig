@@ -33,6 +33,7 @@ pub const CliOptions = struct {
     fmt_stdout: bool = false,
     fmt_width: ?u32 = null,
     show_version: bool = false,
+    metrics: bool = false,
 };
 
 pub const ParseError = error{
@@ -138,6 +139,9 @@ pub fn parseArgs(args: []const []const u8) ParseError!CliOptions {
                 return error.UnknownArgument;
             };
             i += 2;
+        } else if (std.mem.eql(u8, arg, "--metrics") or std.mem.eql(u8, arg, "--time-report")) {
+            opts.metrics = true;
+            i += 1;
         } else if (std.mem.eql(u8, arg, "-v") or std.mem.eql(u8, arg, "--version")) {
             opts.show_version = true;
             i += 1;

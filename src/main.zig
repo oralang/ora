@@ -16,6 +16,7 @@ const lib = @import("ora_lib");
 const build_options = @import("build_options");
 const cli_args = @import("cli/args.zig");
 const log = @import("log");
+const Metrics = @import("metrics.zig").Metrics;
 const ManagedArrayList = std.array_list.Managed;
 
 /// MLIR-related command line options
@@ -30,6 +31,7 @@ const MlirOptions = struct {
     canonicalize: bool = true,
     verify_z3: bool = true,
     cpp_lowering_stub: bool = false,
+    metrics: *Metrics = undefined,
 
     fn getOptimizationLevel(self: MlirOptions) OptimizationLevel {
         if (self.opt_level) |level| {
@@ -126,6 +128,9 @@ pub fn main() !void {
     const fmt_diff: bool = parsed.fmt_diff;
     const fmt_stdout: bool = parsed.fmt_stdout;
     const fmt_width: ?u32 = parsed.fmt_width;
+    const metrics_enabled: bool = parsed.metrics;
+
+    var metrics = Metrics.init(metrics_enabled);
 
     log.setDebugEnabled(debug_enabled);
 
@@ -176,6 +181,7 @@ pub fn main() !void {
         .canonicalize = canonicalize_mlir,
         .verify_z3 = verify_z3,
         .cpp_lowering_stub = cpp_lowering_stub,
+        .metrics = &metrics,
     };
 
     // handle CFG generation (uses MLIR's built-in view-op-graph pass)
@@ -195,14 +201,14 @@ pub fn main() !void {
 
     if (emit_tokens) {
         // stop after lexer
-        try runLexer(allocator, file_path);
+        try runLexer(allocator, file_path, &metrics);
     } else if (emit_ast or emit_typed_ast) {
         // stop after parser
         const format = if (emit_typed_ast)
             (emit_typed_ast_format orelse "tree")
         else
             (emit_ast_format orelse "tree");
-        try runParser(allocator, file_path, format, emit_typed_ast);
+        try runParser(allocator, file_path, format, emit_typed_ast, &metrics);
     } else if (emit_mlir) {
         // run full MLIR pipeline (Ora MLIR)
         try runMlirEmitAdvanced(allocator, file_path, mlir_options);
@@ -210,6 +216,13 @@ pub fn main() !void {
         // default: emit MLIR
         try runMlirEmitAdvanced(allocator, file_path, mlir_options);
     }
+
+    // print metrics report (no-op when --metrics is not passed)
+    var stderr_buffer: [1024]u8 = undefined;
+    var stderr_writer = std.fs.File.stderr().writer(&stderr_buffer);
+    const stderr = &stderr_writer.interface;
+    try metrics.report(stderr);
+    try stderr.flush();
 }
 
 // ============================================================================
@@ -259,6 +272,7 @@ fn printUsage() !void {
     try stdout.print("  --verify               - Run Z3 verification on MLIR annotations (default)\n", .{});
     try stdout.print("  --no-verify            - Disable Z3 verification\n", .{});
     try stdout.print("  --debug                - Enable compiler debug output\n", .{});
+    try stdout.print("  --metrics              - Print compilation phase timing report\n", .{});
     try stdout.flush();
 }
 
@@ -423,23 +437,26 @@ fn runFmt(allocator: std.mem.Allocator, file_path: []const u8, check: bool, diff
 }
 
 /// Run lexer on file and display tokens
-fn runLexer(allocator: std.mem.Allocator, file_path: []const u8) !void {
+fn runLexer(allocator: std.mem.Allocator, file_path: []const u8, m: *Metrics) !void {
     var stdout_buffer: [1024]u8 = undefined;
     var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
     const stdout = &stdout_writer.interface;
 
     // read source file
+    m.begin("read source");
     const source = std.fs.cwd().readFileAlloc(allocator, file_path, 1024 * 1024) catch |err| {
         try stdout.print("error: cannot read file '{s}': {s}\n", .{ file_path, @errorName(err) });
         try stdout.flush();
         std.process.exit(1);
     };
+    m.end();
     defer allocator.free(source);
 
     try stdout.print("Lexing {s}\n", .{file_path});
     try stdout.print("==================================================\n", .{});
 
     // run lexer
+    m.begin("lexing");
     var lexer = lib.Lexer.init(allocator, source);
     defer lexer.deinit();
 
@@ -452,6 +469,7 @@ fn runLexer(allocator: std.mem.Allocator, file_path: []const u8) !void {
         }
         return;
     };
+    m.end();
     defer allocator.free(tokens);
 
     try stdout.print("Generated {d} tokens\n\n", .{tokens.len});
@@ -469,7 +487,7 @@ fn runLexer(allocator: std.mem.Allocator, file_path: []const u8) !void {
 // ============================================================================
 
 /// Run parser on file and display AST
-fn runParser(allocator: std.mem.Allocator, file_path: []const u8, format: []const u8, include_types: bool) !void {
+fn runParser(allocator: std.mem.Allocator, file_path: []const u8, format: []const u8, include_types: bool, m: *Metrics) !void {
     var stdout_buffer: [1024]u8 = undefined;
     var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
     const stdout = &stdout_writer.interface;
@@ -481,11 +499,13 @@ fn runParser(allocator: std.mem.Allocator, file_path: []const u8, format: []cons
     }
 
     // read source file
+    m.begin("read source");
     const source = std.fs.cwd().readFileAlloc(allocator, file_path, 1024 * 1024) catch |err| {
         try stdout.print("error: cannot read file '{s}': {s}\n", .{ file_path, @errorName(err) });
         try stdout.flush();
         std.process.exit(1);
     };
+    m.end();
     defer allocator.free(source);
 
     if (std.mem.eql(u8, format, "tree")) {
@@ -494,6 +514,7 @@ fn runParser(allocator: std.mem.Allocator, file_path: []const u8, format: []cons
     }
 
     // run lexer
+    m.begin("lexing");
     var lexer = lib.Lexer.init(allocator, source);
     defer lexer.deinit();
 
@@ -502,6 +523,7 @@ fn runParser(allocator: std.mem.Allocator, file_path: []const u8, format: []cons
         try stdout.flush();
         std.process.exit(1);
     };
+    m.end();
     defer allocator.free(tokens);
 
     if (std.mem.eql(u8, format, "tree")) {
@@ -509,11 +531,13 @@ fn runParser(allocator: std.mem.Allocator, file_path: []const u8, format: []cons
     }
 
     // run parser - use parseWithArena to keep arena alive for AST printing
+    m.begin("parsing + type resolution");
     var parse_result = lib.parser.parseWithArena(allocator, tokens) catch |err| {
         try stdout.print("Parser error: {s}\n", .{@errorName(err)});
         try stdout.flush();
         std.process.exit(1);
     };
+    m.end();
     defer parse_result.arena.deinit(); // Keep arena alive until after printing
     const ast_nodes = parse_result.nodes;
 
@@ -907,16 +931,20 @@ fn runMlirEmitAdvanced(allocator: std.mem.Allocator, file_path: []const u8, mlir
     var stdout_buffer: [1024]u8 = undefined;
     var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
     const stdout = &stdout_writer.interface;
+    const m = mlir_options.metrics;
 
     // read source file
+    m.begin("read source");
     const source = std.fs.cwd().readFileAlloc(allocator, file_path, 1024 * 1024) catch |err| {
         try stdout.print("error: cannot read file '{s}': {s}\n", .{ file_path, @errorName(err) });
         try stdout.flush();
         std.process.exit(1);
     };
+    m.end();
     defer allocator.free(source);
 
     // front half: lex + parse (ensures we have a valid AST before MLIR)
+    m.begin("lexing");
     var lexer = lib.Lexer.init(allocator, source);
     defer lexer.deinit();
 
@@ -925,13 +953,16 @@ fn runMlirEmitAdvanced(allocator: std.mem.Allocator, file_path: []const u8, mlir
         try stdout.flush();
         std.process.exit(1);
     };
+    m.end();
     defer allocator.free(tokens);
 
+    m.begin("parsing + type resolution");
     const parse_result = lib.parser.parseWithArena(allocator, tokens) catch |err| {
         try stdout.print("Parser error: {s}\n", .{@errorName(err)});
         try stdout.flush();
         std.process.exit(1);
     };
+    m.end();
     const ast_nodes = parse_result.nodes;
     var ast_arena = parse_result.arena;
     defer ast_arena.deinit();
@@ -939,7 +970,9 @@ fn runMlirEmitAdvanced(allocator: std.mem.Allocator, file_path: []const u8, mlir
     // run state analysis automatically during compilation
     // skip state analysis output when emitting MLIR to keep output clean
     if (!mlir_options.emit_mlir and !mlir_options.emit_mlir_sir and !mlir_options.emit_sir_text and !mlir_options.emit_bytecode) {
+        m.begin("state analysis");
         try runStateAnalysisForContracts(allocator, ast_nodes);
+        m.end();
     }
 
     // generate MLIR with advanced options
@@ -1172,6 +1205,7 @@ fn generateMlirOutput(allocator: std.mem.Allocator, ast_nodes: []lib.AstNode, fi
     var stdout_buffer: [1024]u8 = undefined;
     var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
     const stdout = &stdout_writer.interface;
+    const m = mlir_options.metrics;
 
     // import MLIR modules directly (NOT through ora_lib to avoid circular dependencies)
     const mlir = @import("mlir/mod.zig");
@@ -1184,7 +1218,9 @@ fn generateMlirOutput(allocator: std.mem.Allocator, ast_nodes: []lib.AstNode, fi
     const mlir_allocator = mlir_arena.allocator();
 
     // create MLIR context
+    m.begin("mlir context init");
     const h = mlir.createContext(mlir_allocator);
+    m.end();
     defer mlir.destroyContext(h);
 
     const quiet_mlir_output = mlir_options.emit_mlir_sir and
@@ -1232,9 +1268,11 @@ fn generateMlirOutput(allocator: std.mem.Allocator, ast_nodes: []lib.AstNode, fi
         break :blk module;
     } else blk: {
         // lower AST to MLIR (type resolution already done in parser.parse())
+        m.begin("mlir lowering");
         const lower = @import("mlir/lower.zig");
         const source_filename = std.fs.path.basename(file_path);
         var lowering_result = try lower.lowerFunctionsToModuleWithErrors(h.ctx, ast_nodes, mlir_allocator, source_filename);
+        m.end();
         defer lowering_result.deinit(mlir_allocator);
 
         // check for errors first
@@ -1275,6 +1313,7 @@ fn generateMlirOutput(allocator: std.mem.Allocator, ast_nodes: []lib.AstNode, fi
 
     // run MLIR verification after generation (when emitting MLIR)
     if (mlir_options.emit_mlir) {
+        m.begin("mlir verification");
         const verification = @import("mlir/verification.zig");
         var verifier = verification.OraVerification.init(h.ctx, mlir_allocator);
         defer verifier.deinit();
@@ -1289,6 +1328,7 @@ fn generateMlirOutput(allocator: std.mem.Allocator, ast_nodes: []lib.AstNode, fi
             try stdout.flush();
             std.process.exit(1);
         }
+        m.end();
     }
 
     var verification_result_opt: ?@import("z3/errors.zig").VerificationResult = null;
@@ -1299,6 +1339,7 @@ fn generateMlirOutput(allocator: std.mem.Allocator, ast_nodes: []lib.AstNode, fi
     }
     // run Z3 verification pass (formal verification)
     if (mlir_options.verify_z3) {
+        m.begin("z3 verification");
         const z3_verification = @import("z3/verification.zig");
         var verifier = try z3_verification.VerificationPass.init(mlir_allocator);
         defer verifier.deinit();
@@ -1333,6 +1374,7 @@ fn generateMlirOutput(allocator: std.mem.Allocator, ast_nodes: []lib.AstNode, fi
         }
 
         verification_result_opt = verification_result;
+        m.end();
     }
 
     // run canonicalization on Ora MLIR before printing or conversion, unless
@@ -1340,10 +1382,12 @@ fn generateMlirOutput(allocator: std.mem.Allocator, ast_nodes: []lib.AstNode, fi
     // "online" for normal usage but lets tests or debugging runs opt out if
     // they hit upstream MLIR issues.
     if (mlir_options.canonicalize and (mlir_options.emit_mlir or mlir_options.emit_mlir_sir)) {
+        m.begin("canonicalization");
         if (!c.oraCanonicalizeOraMLIR(h.ctx, final_module)) {
             try stdout.print("Warning: Ora MLIR canonicalization failed\n", .{});
             try stdout.flush();
         }
+        m.end();
     }
 
     if (mlir_options.emit_mlir_sir) {
@@ -1395,7 +1439,9 @@ fn generateMlirOutput(allocator: std.mem.Allocator, ast_nodes: []lib.AstNode, fi
             null_fd = try std.posix.open("/dev/null", .{ .ACCMODE = .WRONLY }, 0);
             _ = try std.posix.dup2(null_fd.?, std.posix.STDERR_FILENO);
         }
+        m.begin("ora -> sir conversion");
         const conversion_success = c.oraConvertToSIR(h.ctx, final_module);
+        m.end();
         if (quiet_mlir_output) {
             _ = std.posix.dup2(saved_stderr.?, std.posix.STDERR_FILENO) catch {};
             if (saved_stderr) |fd| std.posix.close(fd);
@@ -1462,6 +1508,7 @@ fn generateMlirOutput(allocator: std.mem.Allocator, ast_nodes: []lib.AstNode, fi
 
     // emit SIR text after conversion
     if (mlir_options.emit_sir_text or mlir_options.emit_bytecode) {
+        m.begin("sir dispatcher + legalize");
         if (!c.oraBuildSIRDispatcher(h.ctx, final_module)) {
             try stdout.print("Error: SIR dispatcher build failed\n", .{});
             try stdout.flush();
@@ -1472,7 +1519,9 @@ fn generateMlirOutput(allocator: std.mem.Allocator, ast_nodes: []lib.AstNode, fi
             try stdout.flush();
             std.process.exit(1);
         }
+        m.end();
 
+        m.begin("sir text emission");
         const sir_text_ref = c.oraEmitSIRText(h.ctx, final_module);
         defer if (sir_text_ref.data != null) {
             const mlir_c = @import("mlir_c_api");
@@ -1480,9 +1529,11 @@ fn generateMlirOutput(allocator: std.mem.Allocator, ast_nodes: []lib.AstNode, fi
         };
 
         if (sir_text_ref.data == null or sir_text_ref.length == 0) {
+            m.end();
             try stdout.print("Failed to emit SIR text\n", .{});
             return;
         }
+        m.end();
 
         const sir_text = sir_text_ref.data[0..sir_text_ref.length];
         if (mlir_options.emit_sir_text) {
@@ -1511,7 +1562,9 @@ fn generateMlirOutput(allocator: std.mem.Allocator, ast_nodes: []lib.AstNode, fi
             if (mlir_options.emit_sir_text and mlir_options.output_dir == null) {
                 try stdout.print("\n", .{});
             }
+            m.begin("bytecode generation");
             try emitBytecodeFromSirText(allocator, sir_text, file_path, mlir_options.output_dir, stdout);
+            m.end();
         }
     }
 
