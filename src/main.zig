@@ -107,6 +107,7 @@ pub fn main() !void {
     const emit_cfg: bool = parsed.emit_cfg;
     const emit_abi: bool = parsed.emit_abi;
     const emit_abi_solidity: bool = parsed.emit_abi_solidity;
+    const emit_abi_extras: bool = parsed.emit_abi_extras;
     const canonicalize_mlir: bool = parsed.canonicalize_mlir;
     const analyze_state: bool = parsed.analyze_state;
     const verify_z3: bool = parsed.verify_z3;
@@ -155,7 +156,7 @@ pub fn main() !void {
 
     // determine compilation mode
     // if no --emit-X flag is set, default to MLIR generation
-    if (!emit_tokens and !emit_ast and !emit_typed_ast and !emit_mlir and !emit_mlir_sir and !emit_sir_text and !emit_bytecode and !emit_cfg and !emit_abi and !emit_abi_solidity) {
+    if (!emit_tokens and !emit_ast and !emit_typed_ast and !emit_mlir and !emit_mlir_sir and !emit_sir_text and !emit_bytecode and !emit_cfg and !emit_abi and !emit_abi_solidity and !emit_abi_extras) {
         emit_mlir = true; // Default: emit MLIR
     }
     // Emit SIR MLIR only when explicitly requested or needed for SIR text/bytecode.
@@ -186,9 +187,9 @@ pub fn main() !void {
     // modern compiler-style behavior: process --emit-X flags
     // stop at the earliest stage specified
 
-    if (emit_abi or emit_abi_solidity) {
-        try runAbiEmit(allocator, file_path, output_dir, emit_abi, emit_abi_solidity);
-        const only_abi = !(emit_tokens or emit_ast or emit_typed_ast or emit_mlir or emit_mlir_sir or emit_sir_text or emit_bytecode);
+    if (emit_abi or emit_abi_solidity or emit_abi_extras) {
+        try runAbiEmit(allocator, file_path, output_dir, emit_abi, emit_abi_solidity, emit_abi_extras);
+        const only_abi = !(emit_tokens or emit_ast or emit_typed_ast or emit_mlir or emit_mlir_sir or emit_sir_text or emit_bytecode or emit_cfg);
         if (only_abi) return;
     }
 
@@ -239,6 +240,7 @@ fn printUsage() !void {
     try stdout.print("  --emit-cfg             - Generate control flow graph (Graphviz DOT format)\n", .{});
     try stdout.print("  --emit-abi             - Emit Ora ABI manifest JSON\n", .{});
     try stdout.print("  --emit-abi-solidity    - Emit Solidity-compatible ABI JSON\n", .{});
+    try stdout.print("  --emit-abi-extras      - Emit ABI sidecar extras JSON (frontend metadata)\n", .{});
     try stdout.print("  -v, --version          - Show version and logo\n", .{});
     try stdout.print("\nOutput Options:\n", .{});
     try stdout.print("  -o <file>              - Write output to <file> (e.g., -o out.hex, -o out.mlir)\n", .{});
@@ -805,6 +807,7 @@ fn runAbiEmit(
     output_dir: ?[]const u8,
     emit_abi: bool,
     emit_abi_solidity: bool,
+    emit_abi_extras: bool,
 ) !void {
     var stdout_buffer: [1024]u8 = undefined;
     var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
@@ -841,6 +844,7 @@ fn runAbiEmit(
     defer contract_abi.deinit();
 
     const base_name = std.fs.path.stem(file_path);
+    const emit_sidecar = emit_abi_extras or (emit_abi and output_dir != null);
 
     if (output_dir) |out_dir| {
         std.fs.cwd().makeDir(out_dir) catch |err| switch (err) {
@@ -865,6 +869,15 @@ fn runAbiEmit(
             defer abi_file.close();
             try abi_file.writeAll(abi_json);
         }
+        if (emit_sidecar) {
+            const extras_json = try contract_abi.toExtrasJson(allocator);
+            defer allocator.free(extras_json);
+            const extras_path = try std.fmt.allocPrint(allocator, "{s}/{s}.abi.extras.json", .{ out_dir, base_name });
+            defer allocator.free(extras_path);
+            var extras_file = try std.fs.cwd().createFile(extras_path, .{});
+            defer extras_file.close();
+            try extras_file.writeAll(extras_json);
+        }
     } else {
         if (emit_abi) {
             const abi_json = try contract_abi.toJson(allocator);
@@ -875,6 +888,11 @@ fn runAbiEmit(
             const abi_json = try contract_abi.toSolidityJson(allocator);
             defer allocator.free(abi_json);
             try stdout.print("{s}\n", .{abi_json});
+        }
+        if (emit_abi_extras) {
+            const extras_json = try contract_abi.toExtrasJson(allocator);
+            defer allocator.free(extras_json);
+            try stdout.print("{s}\n", .{extras_json});
         }
         try stdout.flush();
     }

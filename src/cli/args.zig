@@ -19,6 +19,7 @@ pub const CliOptions = struct {
     emit_cfg: bool = false,
     emit_abi: bool = false,
     emit_abi_solidity: bool = false,
+    emit_abi_extras: bool = false,
     cpp_lowering_stub: bool = false,
     canonicalize_mlir: bool = true,
     analyze_state: bool = false,
@@ -86,6 +87,9 @@ pub fn parseArgs(args: []const []const u8) ParseError!CliOptions {
             i += 1;
         } else if (std.mem.eql(u8, arg, "--emit-abi-solidity")) {
             opts.emit_abi_solidity = true;
+            i += 1;
+        } else if (std.mem.eql(u8, arg, "--emit-abi-extras")) {
+            opts.emit_abi_extras = true;
             i += 1;
         } else if (std.mem.eql(u8, arg, "--cpp-lowering-stub")) {
             opts.cpp_lowering_stub = true;
