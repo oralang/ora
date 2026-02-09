@@ -1,0 +1,10 @@
+contract SignedArithmetic {
+    pub fn signedOps(a: i256) -> i256 {
+        var q: i256 = a / 2;
+        var r: i256 = a % 3;
+        if (q > r) {
+            return q >> 1;
+        }
+        return r >> 1;
+    }
+}
