@@ -1,6 +1,6 @@
 #include "OraToSIRTypeConverter.h"
 
-#include "Ora/OraDialect.h" // Includes OraTypes.h.inc
+#include "OraDialect.h"
 #include "SIR/SIRDialect.h"
 
 #include "mlir/IR/BuiltinTypes.h"
