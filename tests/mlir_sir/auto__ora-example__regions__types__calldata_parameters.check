@@ -1,0 +1,1 @@
+// AUTO-GENERATED. Do not edit by hand.\n// INPUT: ora-example/regions/types/calldata_parameters.ora\n// CHECK-NOT: builtin.unrealized_conversion_cast\n// CHECK: module\n

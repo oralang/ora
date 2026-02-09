@@ -1,0 +1,5 @@
+// INPUT: ora-example/verification/quantified_bound_variable.ora
+// CHECK-NOT: ora.error_placeholder
+// CHECK-LABEL: func.func @check
+// CHECK: ora.bound_variable = "i"
+// CHECK: ora.quantified "forall", "i", "u256"

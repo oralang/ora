@@ -1,0 +1,1 @@
+// AUTO-GENERATED. Do not edit by hand.\n// INPUT: ora-example/regions/transitions/valid/stack_to_tstore.ora\n// CHECK-NOT: builtin.unrealized_conversion_cast\n// CHECK: module\n

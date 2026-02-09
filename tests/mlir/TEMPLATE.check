@@ -1,0 +1,15 @@
+// INPUT: path/to/contract.ora
+//
+// Guidelines:
+// - Use CHECK-LABEL to anchor per function.
+// - Use CHECK for required patterns.
+// - Use CHECK-NOT sparingly and scoped between labels.
+// - Prefer regex {{.*}} over exact values when possible.
+//
+// CHECK-LABEL: func.func @function_name
+// CHECK: ora.op
+// CHECK-NOT: builtin.unrealized_conversion_cast
+//
+// CHECK-LABEL: func.func @another_function
+// CHECK: ora.op
+// CHECK-NOT: ora.

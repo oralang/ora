@@ -1,0 +1,24 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/apps/defi_lending_pool.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @get_total_deposits
+// CHECK-LABEL: func.func @get_available_liquidity
+// CHECK-LABEL: func.func @is_valid_amount
+// CHECK-LABEL: func.func @only_owner
+// CHECK-LABEL: func.func @when_not_paused
+// CHECK-LABEL: func.func @get_tier_discount
+// CHECK-LABEL: func.func @get_tier_max_ltv
+// CHECK-LABEL: func.func @get_risk_level
+// CHECK-LABEL: func.func @process_operation_with_tier
+// CHECK-LABEL: func.func @update_loan_status
+// CHECK-LABEL: func.func @calculate_utilization_rate
+// CHECK-LABEL: func.func @calculate_interest_rate
+// CHECK-LABEL: func.func @accrue_interest
+// CHECK-LABEL: func.func @deposit
+// CHECK-LABEL: func.func @calculate_health_factor
+// CHECK-LABEL: func.func @borrow
+// CHECK-LABEL: func.func @repay
+// CHECK-LABEL: func.func @withdraw
+// CHECK-LABEL: func.func @liquidate
+// CHECK-LABEL: func.func @rebalance_user_portfolio
+// CHECK-LABEL: func.func @complex_risk_assessment

@@ -1,0 +1,7 @@
+// INPUT: ora-example/expressions/signed_arithmetic.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @signedOps
+// CHECK: arith.divsi
+// CHECK: arith.remsi
+// CHECK: arith.cmpi sgt
+// CHECK: arith.shrsi

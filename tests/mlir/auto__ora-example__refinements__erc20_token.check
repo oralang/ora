@@ -1,0 +1,21 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/refinements/erc20_token.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @init
+// CHECK-LABEL: func.func @transfer
+// CHECK-LABEL: func.func @transferFrom
+// CHECK-LABEL: func.func @mint
+// CHECK-LABEL: func.func @burn
+// CHECK-LABEL: func.func @calculateTotalRequired
+// CHECK-LABEL: func.func @calculateBurnAmount
+// CHECK-LABEL: func.func @setTransferFeeRate
+// CHECK-LABEL: func.func @setBurnRate
+// CHECK-LABEL: func.func @setMinTransfer
+// CHECK-LABEL: func.func @getTotalSupply
+// CHECK-LABEL: func.func @getDecimals
+// CHECK-LABEL: func.func @getTransferFeeRate
+// CHECK-LABEL: func.func @getBurnRate
+// CHECK-LABEL: func.func @getMinTransfer
+// CHECK-LABEL: func.func @getBalance
+// CHECK-LABEL: func.func @setBalance
+// CHECK-LABEL: func.func @executeTransfer

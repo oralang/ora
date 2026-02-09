@@ -1,0 +1,11 @@
+// INPUT: ora-example/smt/verification/assertions.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @checkBalance
+// CHECK: ora.requires_count = 1 : i32
+// CHECK: ora.verification = true
+// CHECK-LABEL: func.func @checkSum
+// CHECK: ora.requires_count = 2 : i32
+// CHECK: ora.verification = true
+// CHECK-LABEL: func.func @multipleChecks
+// CHECK: ora.requires_count = 3 : i32
+// CHECK: ora.verification = true

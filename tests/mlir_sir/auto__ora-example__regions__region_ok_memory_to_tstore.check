@@ -1,0 +1,1 @@
+// AUTO-GENERATED. Do not edit by hand.\n// INPUT: ora-example/regions/region_ok_memory_to_tstore.ora\n// CHECK-NOT: builtin.unrealized_conversion_cast\n// CHECK: module\n

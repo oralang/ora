@@ -1,0 +1,1 @@
+// AUTO-GENERATED. Do not edit by hand.\n// INPUT: ora-example/refinements/patterns/fee_calculation.ora\n// CHECK-NOT: builtin.unrealized_conversion_cast\n// CHECK: module\n

@@ -1,0 +1,10 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/errors/basic_errors.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @init
+// CHECK-LABEL: func.func @transfer
+// CHECK-LABEL: func.func @admin_operation
+// CHECK-LABEL: func.func @safe_transfer
+// CHECK-LABEL: func.func @proxy_transfer
+// CHECK-LABEL: func.func @batch_transfer
+// CHECK-LABEL: func.func @verify_operation
