@@ -289,6 +289,8 @@ jobs:
                 libc++-dev \
                 libc++abi-dev \
                 pkg-config \
+                z3 \
+                libz3-dev \
                 git
               echo "✅ Linux dependencies installed"
               echo "CC=clang" >> $GITHUB_ENV
@@ -296,7 +298,7 @@ jobs:
               ;;
             macOS)
               brew update
-              brew install boost openssl cmake ninja
+              brew install boost openssl cmake ninja z3
               echo "✅ macOS dependencies installed"
               echo "CC=clang" >> $GITHUB_ENV
               echo "CXX=clang++" >> $GITHUB_ENV

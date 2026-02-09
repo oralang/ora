@@ -53,11 +53,13 @@ jobs:
                 libboost-all-dev \
                 libssl-dev \
                 pkg-config \
+                z3 \
+                libz3-dev \
                 git
               echo "✅ Linux dependencies installed"
               ;;
             macOS)
-              brew install boost openssl cmake
+              brew install boost openssl cmake z3
               echo "✅ macOS dependencies installed"
               ;;
           esac
@@ -144,11 +146,13 @@ jobs:
                 libboost-all-dev \
                 libssl-dev \
                 pkg-config \
+                z3 \
+                libz3-dev \
                 git
               echo "✅ Linux dependencies installed"
               ;;
             macOS)
-              brew install boost openssl cmake
+              brew install boost openssl cmake z3
               echo "✅ macOS dependencies installed"
               ;;
             # Windows)
@@ -226,11 +230,13 @@ jobs:
                 libboost-all-dev \
                 libssl-dev \
                 pkg-config \
+                z3 \
+                libz3-dev \
                 git
               echo "✅ Linux dependencies installed"
               ;;
             macOS)
-              brew install boost openssl cmake
+              brew install boost openssl cmake z3
               echo "✅ macOS dependencies installed"
               ;;
             # Windows)
@@ -312,11 +318,13 @@ jobs:
                 libboost-all-dev \
                 libssl-dev \
                 pkg-config \
+                z3 \
+                libz3-dev \
                 git
               echo "✅ Linux dependencies installed"
               ;;
             macOS)
-              brew install boost openssl cmake
+              brew install boost openssl cmake z3
               echo "✅ macOS dependencies installed"
               ;;
             # Windows)
@@ -471,11 +479,13 @@ jobs:
                 libboost-all-dev \
                 libssl-dev \
                 pkg-config \
+                z3 \
+                libz3-dev \
                 git
               echo "✅ Linux dependencies installed"
               ;;
             macOS)
-              brew install boost openssl cmake
+              brew install boost openssl cmake z3
               echo "✅ macOS dependencies installed"
               ;;
             Windows)
@@ -560,11 +570,13 @@ jobs:
                 libboost-all-dev \
                 libssl-dev \
                 pkg-config \
+                z3 \
+                libz3-dev \
                 git
               echo "✅ Linux dependencies installed"
               ;;
             macOS)
-              brew install boost openssl cmake
+              brew install boost openssl cmake z3
               echo "✅ macOS dependencies installed"
               ;;
             Windows)

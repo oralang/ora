@@ -1154,6 +1154,73 @@ fn buildZ3Libraries(b: *std.Build, target: std.Build.ResolvedTarget, optimize: s
     return step;
 }
 
+fn pathExists(path: []const u8) bool {
+    std.fs.cwd().access(path, .{}) catch return false;
+    return true;
+}
+
+fn anyPathExists(paths: []const []const u8) bool {
+    for (paths) |path| {
+        if (pathExists(path)) return true;
+    }
+    return false;
+}
+
+fn hostHasSystemZ3() bool {
+    const builtin = @import("builtin");
+
+    const header_paths = switch (builtin.os.tag) {
+        .macos => [_][]const u8{
+            "/opt/homebrew/include/z3.h",
+            "/usr/local/include/z3.h",
+            "/usr/include/z3.h",
+        },
+        .linux => [_][]const u8{
+            "/usr/include/z3.h",
+            "/usr/local/include/z3.h",
+        },
+        .windows => [_][]const u8{
+            "C:/Program Files/Z3/include/z3.h",
+            "C:/tools/z3/include/z3.h",
+        },
+        else => [_][]const u8{
+            "/usr/include/z3.h",
+        },
+    };
+
+    const lib_paths = switch (builtin.os.tag) {
+        .macos => [_][]const u8{
+            "/opt/homebrew/lib/libz3.dylib",
+            "/opt/homebrew/lib/libz3.a",
+            "/usr/local/lib/libz3.dylib",
+            "/usr/local/lib/libz3.a",
+        },
+        .linux => [_][]const u8{
+            "/usr/lib/libz3.so",
+            "/usr/lib/libz3.a",
+            "/usr/lib64/libz3.so",
+            "/usr/local/lib/libz3.so",
+            "/usr/local/lib/libz3.a",
+            "/usr/lib/x86_64-linux-gnu/libz3.so",
+            "/usr/lib/x86_64-linux-gnu/libz3.a",
+            "/usr/lib/aarch64-linux-gnu/libz3.so",
+            "/usr/lib/aarch64-linux-gnu/libz3.a",
+        },
+        .windows => [_][]const u8{
+            "C:/Program Files/Z3/bin/libz3.dll",
+            "C:/Program Files/Z3/lib/libz3.lib",
+            "C:/tools/z3/bin/libz3.dll",
+            "C:/tools/z3/lib/libz3.lib",
+        },
+        else => [_][]const u8{
+            "/usr/lib/libz3.so",
+            "/usr/lib/libz3.a",
+        },
+    };
+
+    return anyPathExists(&header_paths) and anyPathExists(&lib_paths);
+}
+
 /// Implementation of CMake build for Z3 libraries
 fn buildZ3LibrariesImpl(step: *std.Build.Step, options: std.Build.Step.MakeOptions) anyerror!void {
     _ = options;
@@ -1161,28 +1228,13 @@ fn buildZ3LibrariesImpl(step: *std.Build.Step, options: std.Build.Step.MakeOptio
     const b = step.owner;
     const allocator = b.allocator;
 
-    // check if Z3 is installed on the system
-    const z3_check = std.process.Child.run(.{
-        .allocator = allocator,
-        .argv = &[_][]const u8{ "z3", "--version" },
-        .cwd = ".",
-    }) catch null;
-
-    if (z3_check) |res| {
-        switch (res.term) {
-            .Exited => |code| {
-                if (code == 0) {
-                    std.log.info("Z3 found on system: {s}", .{res.stdout});
-                    // z3 is installed, we'll link to it
-                    return;
-                }
-            },
-            else => {},
-        }
+    if (hostHasSystemZ3()) {
+        std.log.info("System Z3 headers and library detected; skipping vendored Z3 build", .{});
+        return;
     }
 
-    // z3 not found on system, try to build from vendor
-    std.log.info("Z3 not found on system, checking vendor/z3...", .{});
+    // system Z3 headers/libraries not found, try to build from vendor
+    std.log.info("System Z3 not fully available, checking vendor/z3...", .{});
 
     const cwd = std.fs.cwd();
     _ = cwd.openDir("vendor/z3", .{ .iterate = false }) catch {
@@ -1343,25 +1395,17 @@ fn buildZ3LibrariesImpl(step: *std.Build.Step, options: std.Build.Step.MakeOptio
 fn linkZ3Libraries(b: *std.Build, exe: *std.Build.Step.Compile, z3_step: *std.Build.Step, target: std.Build.ResolvedTarget) void {
     // depend on Z3 build
     exe.step.dependOn(z3_step);
+    const using_system_z3 = hostHasSystemZ3();
 
-    // try system-installed Z3 first
-    const z3_check = std.process.Child.run(.{
-        .allocator = b.allocator,
-        .argv = &[_][]const u8{ "z3", "--version" },
-        .cwd = ".",
-    }) catch null;
+    // Ensure vendored search paths exist to avoid hard failures when Zig checks
+    // linker search directories before the z3 custom step populates them.
+    std.fs.cwd().makePath("vendor/z3-install/include") catch {};
+    std.fs.cwd().makePath("vendor/z3-install/lib") catch {};
 
-    var using_system_z3 = false;
-    if (z3_check) |res| {
-        switch (res.term) {
-            .Exited => |code| {
-                if (code == 0) {
-                    using_system_z3 = true;
-                }
-            },
-            else => {},
-        }
-    }
+    // Always expose vendored include/lib paths. The custom z3_step may populate
+    // these directories later in the build graph.
+    exe.addIncludePath(b.path("vendor/z3-install/include"));
+    exe.addLibraryPath(b.path("vendor/z3-install/lib"));
 
     if (using_system_z3) {
         std.log.info("Linking against system Z3", .{});
@@ -1391,18 +1435,7 @@ fn linkZ3Libraries(b: *std.Build, exe: *std.Build.Step.Compile, z3_step: *std.Bu
             },
         }
     } else {
-        // use vendored Z3 if available
-        const cwd = std.fs.cwd();
-        _ = cwd.openDir("vendor/z3-install", .{ .iterate = false }) catch {
-            std.log.warn("Z3 not available - formal verification features will be disabled", .{});
-            return;
-        };
-
-        std.log.info("Linking against vendored Z3", .{});
-        const include_path = b.path("vendor/z3-install/include");
-        const lib_path = b.path("vendor/z3-install/lib");
-        exe.addIncludePath(include_path);
-        exe.addLibraryPath(lib_path);
+        std.log.info("Linking against vendored Z3 (or vendor build output)", .{});
     }
 
     // link Z3 library
