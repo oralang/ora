@@ -406,6 +406,19 @@ pub fn build(b: *std.Build) void {
     linkZ3Libraries(b, z3_encoder_tests, z3_step, target);
     test_step.dependOn(&b.addRunArtifact(z3_encoder_tests).step);
 
+    // z3 verification tests (requires MLIR + Z3)
+    const z3_verification_test_mod = b.createModule(.{
+        .root_source_file = b.path("src/z3/verification.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    z3_verification_test_mod.addImport("mlir_c_api", mlir_c_mod);
+    z3_verification_test_mod.addImport("ora_lib", lib_mod);
+    const z3_verification_tests = b.addTest(.{ .root_module = z3_verification_test_mod });
+    linkMlirLibraries(b, z3_verification_tests, mlir_step, ora_dialect_step, sir_dialect_step, target);
+    linkZ3Libraries(b, z3_verification_tests, z3_step, target);
+    test_step.dependOn(&b.addRunArtifact(z3_verification_tests).step);
+
     // mlir type mapper tests
     const mlir_types_test_mod = b.createModule(.{
         .root_source_file = b.path("src/mlir/types.test.zig"),
