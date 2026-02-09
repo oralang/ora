@@ -45,8 +45,8 @@ We document research work in-progress as first-class artifacts:
 - [Getting Started](./getting-started) to build the compiler and run your first file.
 - [Language Basics](./language-basics) for core syntax and types.
 - [Examples](./examples) for working patterns and caveats.
-- [Compiler Field Guide](./compiler/field-guide/index) for contributors and new compiler engineers.
-- [Research](./research/index) for the academic lens: formal verification, type system
+- [Compiler Field Guide](./compiler/field-guide) for contributors and new compiler engineers.
+- [Research](./research) for the academic lens: formal verification, type system
   strategy, and compiler architecture.
 
 ## Contributing

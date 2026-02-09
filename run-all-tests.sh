@@ -1,48 +1,154 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
-echo "🧪 Running all tests..."
-echo "================================"
+set -euo pipefail
 
-echo "1️⃣ Running comprehensive test suite..."
-zig build test
-COMPREHENSIVE_EXIT=$?
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT_DIR="$SCRIPT_DIR"
 
-echo "2️⃣ Running AST visitor tests..."
-zig build test-ast
-AST_EXIT=$?
+MODE="fast"       # fast | full
+RUN_EXAMPLES=1
+RUN_MLIR=0
 
-echo "3️⃣ Running lexer tests..."
-zig build test-lexer
-LEXER_EXIT=$?
+usage() {
+  cat <<USAGE
+Run Ora test suites.
 
-echo "4️⃣ Running expression parser tests..."
-zig build test-expression-parser
-PARSER_EXIT=$?
+Usage:
+  ./run-all-tests.sh [options]
 
-echo "5️⃣ Running test framework tests..."
-zig build test-framework
-FRAMEWORK_EXIT=$?
+Options:
+  --fast            Run fast suite (default)
+  --full            Run full suite
+  --mlir            Also run MLIR-specific tests (zig build test-mlir)
+  --no-examples     Skip example validation script
+  -h, --help        Show this help
+USAGE
+}
 
-echo "6️⃣ Running example tests..."
-zig build test-examples
-EXAMPLES_EXIT=$?
+parse_args() {
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --fast)
+        MODE="fast"
+        shift
+        ;;
+      --full)
+        MODE="full"
+        shift
+        ;;
+      --mlir)
+        RUN_MLIR=1
+        shift
+        ;;
+      --no-examples)
+        RUN_EXAMPLES=0
+        shift
+        ;;
+      -h|--help)
+        usage
+        exit 0
+        ;;
+      *)
+        echo "error: unknown argument: $1" >&2
+        exit 1
+        ;;
+    esac
+  done
+}
 
-echo "================================"
-echo "📊 Test Results Summary:"
-echo "  Comprehensive tests: $([ $COMPREHENSIVE_EXIT -eq 0 ] && echo "✅ PASSED" || echo "❌ FAILED")"
-echo "  AST tests: $([ $AST_EXIT -eq 0 ] && echo "✅ PASSED" || echo "❌ FAILED")"
-echo "  Lexer tests: $([ $LEXER_EXIT -eq 0 ] && echo "✅ PASSED" || echo "❌ FAILED")"
-echo "  Expression parser tests: $([ $PARSER_EXIT -eq 0 ] && echo "✅ PASSED" || echo "❌ FAILED")"
-echo "  Test framework tests: $([ $FRAMEWORK_EXIT -eq 0 ] && echo "✅ PASSED" || echo "❌ FAILED")"
-echo "  Example tests: $([ $EXAMPLES_EXIT -eq 0 ] && echo "✅ PASSED" || echo "⚠️  FAILED (some expected)")"
+has_mlir_artifacts() {
+  local lib_dir="$ROOT_DIR/vendor/mlir/lib"
+  [[ -d "$lib_dir" ]] || return 1
+  compgen -G "$lib_dir/libMLIR-C.*" >/dev/null || return 1
+  compgen -G "$lib_dir/libMLIROraDialectC.*" >/dev/null || return 1
+  compgen -G "$lib_dir/libMLIRSIRDialect.*" >/dev/null || return 1
+  return 0
+}
 
-# Calculate total failures (excluding examples which may have expected failures)
-TOTAL_FAILURES=$((COMPREHENSIVE_EXIT + AST_EXIT + LEXER_EXIT + PARSER_EXIT + FRAMEWORK_EXIT))
+declare -a STEP_NAMES=()
+declare -a STEP_CODES=()
 
-if [ $TOTAL_FAILURES -eq 0 ]; then
-    echo "🎉 All core tests passed!"
-    exit 0
-else
-    echo "❌ Some tests failed. Check the output above for details."
+run_step() {
+  local name="$1"
+  shift
+
+  printf "\n[step] %s\n" "$name"
+  if "$@"; then
+    STEP_NAMES+=("$name")
+    STEP_CODES+=(0)
+    printf "[ok]   %s\n" "$name"
+  else
+    local code=$?
+    STEP_NAMES+=("$name")
+    STEP_CODES+=("$code")
+    printf "[fail] %s (exit %s)\n" "$name" "$code"
+  fi
+}
+
+skip_step() {
+  local name="$1"
+  local reason="$2"
+  STEP_NAMES+=("$name")
+  STEP_CODES+=(125)
+  printf "\n[skip] %s (%s)\n" "$name" "$reason"
+}
+
+print_summary_and_exit() {
+  local failures=0
+  local i code status
+
+  printf "\nTest Summary\n"
+  printf "%s\n" "------------"
+
+  for ((i=0; i<${#STEP_NAMES[@]}; i++)); do
+    code="${STEP_CODES[$i]}"
+    if [[ "$code" -eq 0 ]]; then
+      status="PASS"
+    elif [[ "$code" -eq 125 ]]; then
+      status="SKIP"
+    else
+      status="FAIL"
+      failures=$((failures + 1))
+    fi
+    printf "%-32s %s\n" "${STEP_NAMES[$i]}" "$status"
+  done
+
+  if [[ "$failures" -gt 0 ]]; then
+    printf "\nResult: FAIL (%s failing step(s))\n" "$failures"
     exit 1
-fi
+  fi
+
+  printf "\nResult: PASS\n"
+}
+
+main() {
+  parse_args "$@"
+  cd "$ROOT_DIR"
+
+  if [[ "$MODE" == "fast" ]] && has_mlir_artifacts; then
+    run_step "Build (fast)" zig build -Dskip-mlir=true
+    run_step "Unit tests (fast)" zig build test -Dskip-mlir=true
+  else
+    if [[ "$MODE" == "fast" ]]; then
+      echo "[info] MLIR artifacts not found; falling back to full build/test"
+    fi
+    run_step "Build" zig build
+    run_step "Unit tests" zig build test
+  fi
+
+  if [[ "$RUN_MLIR" -eq 1 ]]; then
+    if has_mlir_artifacts; then
+      run_step "MLIR tests" zig build test-mlir
+    else
+      skip_step "MLIR tests" "missing MLIR artifacts"
+    fi
+  fi
+
+  if [[ "$RUN_EXAMPLES" -eq 1 ]]; then
+    run_step "Example validation" "$ROOT_DIR/scripts/validate-examples.sh"
+  fi
+
+  print_summary_and_exit
+}
+
+main "$@"

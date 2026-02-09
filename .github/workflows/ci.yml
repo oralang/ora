@@ -12,6 +12,9 @@ on:
 env:
   # Use the latest stable Zig version
   ZIG_VERSION: 0.15.2
+  # Pin LLVM/MLIR revision to keep CI deterministic and API-compatible.
+  LLVM_REPO_URL: https://github.com/llvm/llvm-project.git
+  LLVM_COMMIT: ee8c14be14deabace692ab51f5d5d432b0a83d58
   HOMEBREW_NO_AUTO_UPDATE: 1
   HOMEBREW_NO_INSTALL_CLEANUP: 1
 
@@ -69,24 +72,23 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-zig-${{ env.ZIG_VERSION }}-
 
-      - name: Clone LLVM/MLIR for build
+      - name: Fetch pinned LLVM/MLIR source
         shell: bash
         run: |
-          echo "📦 Cloning LLVM/MLIR (shallow clone for faster CI)..."
-          if [ ! -d "vendor/llvm-project" ]; then
-            git clone --depth=1 --branch=release/19.x https://github.com/llvm/llvm-project.git vendor/llvm-project
-            echo "✅ LLVM/MLIR cloned"
-          else
-            echo "✅ LLVM/MLIR already present"
-          fi
+          set -euo pipefail
+          echo "📦 Fetching pinned LLVM/MLIR commit: ${{ env.LLVM_COMMIT }}"
+          rm -rf vendor/llvm-project
+          git init vendor/llvm-project
+          git -C vendor/llvm-project remote add origin "${{ env.LLVM_REPO_URL }}"
+          git -C vendor/llvm-project fetch --depth=1 origin "${{ env.LLVM_COMMIT }}"
+          git -C vendor/llvm-project checkout --detach FETCH_HEAD
+          echo "✅ LLVM/MLIR at $(git -C vendor/llvm-project rev-parse HEAD)"
 
       - name: Cache MLIR build
         uses: actions/cache@v4
         with:
           path: vendor/mlir/
-          key: ${{ runner.os }}-mlir-build-${{ hashFiles('vendor/llvm-project/.git/HEAD', 'build.zig', 'src/mlir/ora/**', 'src/mlir/IR/**') }}
-          restore-keys: |
-            ${{ runner.os }}-mlir-build-
+          key: ${{ runner.os }}-${{ runner.arch }}-mlir-build-${{ env.LLVM_COMMIT }}-${{ hashFiles('build.zig', 'src/mlir/ora/**', 'src/mlir/IR/**') }}
 
       - name: Build MLIR libraries if needed
         shell: bash
@@ -104,7 +106,7 @@ jobs:
       - name: Upload MLIR artifact
         uses: actions/upload-artifact@v4
         with:
-          name: mlir-${{ runner.os }}
+          name: mlir-${{ runner.os }}-${{ runner.arch }}
           path: vendor/mlir/
           retention-days: 7
 
@@ -119,7 +121,7 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
         with:
-          submodules: true  # Only fetch configured submodules (vendor/solidity)
+          submodules: true
 
       - name: Setup Zig
         uses: goto-bus-stop/setup-zig@v2
@@ -200,7 +202,7 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
         with:
-          submodules: true  # Only fetch configured submodules (vendor/solidity)
+          submodules: true
 
       - name: Setup Zig
         uses: goto-bus-stop/setup-zig@v2
@@ -253,7 +255,7 @@ jobs:
       - name: Download MLIR artifact
         uses: actions/download-artifact@v4
         with:
-          name: mlir-${{ runner.os }}
+          name: mlir-${{ runner.os }}-${{ runner.arch }}
           path: vendor/mlir
 
       - name: Build project (cached MLIR)
@@ -287,7 +289,7 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
         with:
-          submodules: true  # Only fetch configured submodules (vendor/solidity)
+          submodules: true
 
       - name: Setup Zig
         uses: goto-bus-stop/setup-zig@v2
@@ -339,7 +341,7 @@ jobs:
       - name: Download MLIR artifact
         uses: actions/download-artifact@v4
         with:
-          name: mlir-${{ runner.os }}
+          name: mlir-${{ runner.os }}-${{ runner.arch }}
           path: vendor/mlir
 
       - name: Build compiler (cached MLIR)
@@ -401,7 +403,7 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
         with:
-          submodules: true  # Only fetch configured submodules (vendor/solidity)
+          submodules: true
 
       - name: Run security scan
         shell: bash
@@ -446,7 +448,7 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
         with:
-          submodules: true  # Only fetch configured submodules (vendor/solidity)
+          submodules: true
 
       - name: Setup Zig
         uses: goto-bus-stop/setup-zig@v2
@@ -495,7 +497,7 @@ jobs:
       - name: Download MLIR artifact
         uses: actions/download-artifact@v4
         with:
-          name: mlir-${{ runner.os }}
+          name: mlir-${{ runner.os }}-${{ runner.arch }}
           path: vendor/mlir
 
       - name: Build with optimizations
@@ -535,7 +537,7 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
         with:
-          submodules: true  # Only fetch configured submodules (vendor/solidity)
+          submodules: true
 
       - name: Setup Zig
         uses: goto-bus-stop/setup-zig@v2
@@ -571,24 +573,23 @@ jobs:
               ;;
           esac
 
-      - name: Clone LLVM/MLIR for build
+      - name: Fetch pinned LLVM/MLIR source
         shell: bash
         run: |
-          echo "📦 Cloning LLVM/MLIR (shallow clone for faster CI)..."
-          if [ ! -d "vendor/llvm-project" ]; then
-            git clone --depth=1 --branch=release/19.x https://github.com/llvm/llvm-project.git vendor/llvm-project
-            echo "✅ LLVM/MLIR cloned"
-          else
-            echo "✅ LLVM/MLIR already present"
-          fi
+          set -euo pipefail
+          echo "📦 Fetching pinned LLVM/MLIR commit: ${{ env.LLVM_COMMIT }}"
+          rm -rf vendor/llvm-project
+          git init vendor/llvm-project
+          git -C vendor/llvm-project remote add origin "${{ env.LLVM_REPO_URL }}"
+          git -C vendor/llvm-project fetch --depth=1 origin "${{ env.LLVM_COMMIT }}"
+          git -C vendor/llvm-project checkout --detach FETCH_HEAD
+          echo "✅ LLVM/MLIR at $(git -C vendor/llvm-project rev-parse HEAD)"
 
       - name: Cache MLIR build
         uses: actions/cache@v4
         with:
           path: vendor/mlir/
-          key: ${{ runner.os }}-mlir-build-${{ hashFiles('vendor/llvm-project/.git/HEAD', 'build.zig') }}
-          restore-keys: |
-            ${{ runner.os }}-mlir-build-
+          key: ${{ runner.os }}-${{ runner.arch }}-mlir-build-${{ env.LLVM_COMMIT }}-${{ hashFiles('build.zig', 'src/mlir/ora/**', 'src/mlir/IR/**') }}
 
       - name: Build release version
         shell: bash

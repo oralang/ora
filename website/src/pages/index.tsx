@@ -96,7 +96,7 @@ function FocusAreas() {
         'Sensei-IR backend integration',
         'Z3-based SMT verification pass',
       ],
-      link: '/docs/compiler/field-guide/index',
+      link: '/docs/compiler/field-guide',
       linkLabel: 'Field Guide',
     },
     {

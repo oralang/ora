@@ -1,6 +1,3 @@
-[submodule "vendor/solidity"]
-	path = vendor/solidity
-	url = https://github.com/ethereum/solidity.git
 [submodule "vendor/z3"]
 	path = vendor/z3
 	url = https://github.com/Z3Prover/z3.git

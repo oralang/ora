@@ -29,6 +29,8 @@ on:
 
 env:
   ZIG_VERSION: 0.15.2
+  LLVM_REPO_URL: https://github.com/llvm/llvm-project.git
+  LLVM_COMMIT: ee8c14be14deabace692ab51f5d5d432b0a83d58
 
 permissions:
   contents: write
@@ -307,23 +309,20 @@ jobs:
           path: |
             ~/.cache/zig
             .zig-cache
-            vendor/solidity/build
             vendor/mlir/
-          key: ${{ runner.os }}-${{ matrix.target }}-deps-${{ hashFiles('build.zig', 'build.zig.zon') }}
-          restore-keys: |
-            ${{ runner.os }}-${{ matrix.target }}-deps-
-            ${{ runner.os }}-deps-
+          key: ${{ runner.os }}-${{ runner.arch }}-${{ matrix.target }}-deps-${{ env.LLVM_COMMIT }}-${{ hashFiles('build.zig', 'src/mlir/ora/**', 'src/mlir/IR/**') }}
 
-      - name: Clone LLVM/MLIR for build
+      - name: Fetch pinned LLVM/MLIR source
         shell: bash
         run: |
-          echo "📦 Cloning LLVM/MLIR (shallow clone for faster CI)..."
-          if [ ! -d "vendor/llvm-project" ]; then
-            git clone --depth=1 --branch=release/19.x https://github.com/llvm/llvm-project.git vendor/llvm-project
-            echo "✅ LLVM/MLIR cloned"
-          else
-            echo "✅ LLVM/MLIR already present"
-          fi
+          set -euo pipefail
+          echo "📦 Fetching pinned LLVM/MLIR commit: ${{ env.LLVM_COMMIT }}"
+          rm -rf vendor/llvm-project
+          git init vendor/llvm-project
+          git -C vendor/llvm-project remote add origin "${{ env.LLVM_REPO_URL }}"
+          git -C vendor/llvm-project fetch --depth=1 origin "${{ env.LLVM_COMMIT }}"
+          git -C vendor/llvm-project checkout --detach FETCH_HEAD
+          echo "✅ LLVM/MLIR at $(git -C vendor/llvm-project rev-parse HEAD)"
 
       - name: Build MLIR libraries if needed
         shell: bash
@@ -335,9 +334,6 @@ jobs:
             zig build
             echo "✅ MLIR libraries built"
           fi
-
-      # Rely on zig's build.zig to configure and build Solidity via CMake
-      # Ensures flags and C++ stdlib are consistent across CI and release
 
       - name: Build release binary
         run: |
