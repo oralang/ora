@@ -638,7 +638,14 @@ LogicalResult ConvertQuantifiedOp::matchAndRewrite(
     typename ora::QuantifiedOp::Adaptor adaptor,
     ConversionPatternRewriter &rewriter) const
 {
-    rewriter.replaceOp(op, adaptor.getBody());
+    (void)adaptor;
+    if (!op.getResult().use_empty())
+    {
+        return rewriter.notifyMatchFailure(
+            op,
+            "ora.quantified is verification-only and cannot be lowered to runtime SIR");
+    }
+    rewriter.eraseOp(op);
     return success();
 }
 
@@ -727,6 +734,14 @@ LogicalResult ConvertArithCmpIOp::matchAndRewrite(
         lhs = rewriter.create<sir::BitcastOp>(loc, u256Type, lhs);
     if (!llvm::isa<sir::U256Type>(rhs.getType()))
         rhs = rewriter.create<sir::BitcastOp>(loc, u256Type, rhs);
+
+    // Address values must be masked to 160 bits before comparison to avoid
+    // high-bit garbage affecting equality/ordering checks.
+    if (llvm::isa<ora::AddressType>(op.getLhs().getType()))
+        lhs = maskAddressTo160(rewriter, loc, lhs);
+    if (llvm::isa<ora::AddressType>(op.getRhs().getType()))
+        rhs = maskAddressTo160(rewriter, loc, rhs);
+
     const auto pred = op.getPredicate();
 
     auto mkEq = [&]() { return rewriter.create<sir::EqOp>(loc, resultType, lhs, rhs).getResult(); };
@@ -1094,6 +1109,42 @@ LogicalResult ConvertArithShrUIOp::matchAndRewrite(
     if (!resultType)
     {
         return rewriter.notifyMatchFailure(op, "unable to convert shrui result type");
+    }
+    if (resultType == u256Type)
+    {
+        rewriter.replaceOp(op, shifted);
+    }
+    else
+    {
+        auto casted = rewriter.create<sir::BitcastOp>(loc, resultType, shifted);
+        rewriter.replaceOp(op, casted.getResult());
+    }
+    return success();
+}
+
+// -----------------------------------------------------------------------------
+// Convert arith.shrsi → sir.sar
+// -----------------------------------------------------------------------------
+LogicalResult ConvertArithShrSIOp::matchAndRewrite(
+    mlir::arith::ShRSIOp op,
+    typename mlir::arith::ShRSIOp::Adaptor adaptor,
+    ConversionPatternRewriter &rewriter) const
+{
+    auto loc = op.getLoc();
+    Value shift = ensureU256(rewriter, loc, adaptor.getRhs());
+    Value value = ensureU256(rewriter, loc, adaptor.getLhs());
+    auto u256Type = sir::U256Type::get(op.getContext());
+    auto shifted = rewriter.create<sir::SarOp>(loc, u256Type, shift, value).getResult();
+
+    auto *typeConverter = getTypeConverter();
+    if (!typeConverter)
+    {
+        return rewriter.notifyMatchFailure(op, "missing type converter");
+    }
+    auto resultType = typeConverter->convertType(op.getResult().getType());
+    if (!resultType)
+    {
+        return rewriter.notifyMatchFailure(op, "unable to convert shrsi result type");
     }
     if (resultType == u256Type)
     {

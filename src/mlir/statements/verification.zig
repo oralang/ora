@@ -97,7 +97,19 @@ pub fn lowerAssume(self: *const StatementLowerer, assume: *const lib.ast.Stateme
     };
 
     const op = self.ora_dialect.createAssume(condition, loc);
-    addVerificationAttributesToOp(self, op, "assume", "verification_assumption");
+    const origin_name = h.strRef("ora.assume_origin");
+    const origin_str = switch (assume.origin) {
+        .User => "user",
+        .CompilerPath => "path",
+    };
+    const origin_attr = h.stringAttr(self.ctx, origin_str);
+    c.oraOperationSetAttributeByName(op, origin_name, origin_attr);
+
+    const assume_context = switch (assume.origin) {
+        .User => "verification_assumption",
+        .CompilerPath => "path_assumption",
+    };
+    addVerificationAttributesToOp(self, op, "assume", assume_context);
     h.appendOp(self.block, op);
 }
 

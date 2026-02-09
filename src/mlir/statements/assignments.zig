@@ -13,6 +13,7 @@ const LoweringError = StatementLowerer.LoweringError;
 const MemoryManager = @import("../memory.zig").MemoryManager;
 const helpers = @import("helpers.zig");
 const error_handling = @import("../error_handling.zig");
+const expr_operators = @import("../expressions/operators.zig");
 const log = @import("log");
 
 fn reportAssignmentError(
@@ -700,8 +701,15 @@ pub fn lowerCompoundAssignment(self: *const StatementLowerer, assignment: *const
         if (self.storage_map) |sm| {
             _ = sm; // Use the variable to avoid warning
 
-            // define result type for arithmetic operations
-            const result_ty = c.oraIntegerTypeCreate(self.ctx, constants.DEFAULT_INTEGER_BITS);
+            // Preserve declared integer signedness/width for storage compound ops.
+            const declared_ty = if (ident.type_info.ora_type != null)
+                self.type_mapper.toMlirType(ident.type_info)
+            else
+                c.oraIntegerTypeCreate(self.ctx, constants.DEFAULT_INTEGER_BITS);
+            const result_ty = if (c.oraTypeIsIntegerType(declared_ty) or c.oraTypeIsAInteger(declared_ty))
+                declared_ty
+            else
+                c.oraIntegerTypeCreate(self.ctx, constants.DEFAULT_INTEGER_BITS);
 
             // load current value from storage using ora.sload
             const memory_manager = MemoryManager.init(self.ctx, self.ora_dialect);
@@ -711,37 +719,45 @@ pub fn lowerCompoundAssignment(self: *const StatementLowerer, assignment: *const
 
             // lower the right-hand side expression
             const rhs_value = self.expr_lowerer.lowerExpression(assignment.value);
+            const rhs_converted = self.expr_lowerer.convertToType(rhs_value, result_ty, ident.span);
+            const uses_signed_integer_semantics = expr_operators.isSignedIntegerTypeInfo(ident.type_info);
 
             // perform the compound operation
             var new_value: c.MlirValue = undefined;
             switch (assignment.operator) {
                 .PlusEqual => {
                     // current_value + rhs_value
-                    const add_op = self.ora_dialect.createArithAddi(current_value, rhs_value, result_ty, self.fileLoc(ident.span));
+                    const add_op = self.ora_dialect.createArithAddi(current_value, rhs_converted, result_ty, self.fileLoc(ident.span));
                     h.appendOp(self.block, add_op);
                     new_value = h.getResult(add_op, 0);
                 },
                 .MinusEqual => {
                     // current_value - rhs_value
-                    const sub_op = self.ora_dialect.createArithSubi(current_value, rhs_value, result_ty, self.fileLoc(ident.span));
+                    const sub_op = self.ora_dialect.createArithSubi(current_value, rhs_converted, result_ty, self.fileLoc(ident.span));
                     h.appendOp(self.block, sub_op);
                     new_value = h.getResult(sub_op, 0);
                 },
                 .StarEqual => {
                     // current_value * rhs_value
-                    const mul_op = self.ora_dialect.createArithMuli(current_value, rhs_value, result_ty, self.fileLoc(ident.span));
+                    const mul_op = self.ora_dialect.createArithMuli(current_value, rhs_converted, result_ty, self.fileLoc(ident.span));
                     h.appendOp(self.block, mul_op);
                     new_value = h.getResult(mul_op, 0);
                 },
                 .SlashEqual => {
                     // current_value / rhs_value
-                    const div_op = self.ora_dialect.createArithDivsi(current_value, rhs_value, result_ty, self.fileLoc(ident.span));
+                    const div_op = if (uses_signed_integer_semantics)
+                        c.oraArithDivSIOpCreate(self.ctx, self.fileLoc(ident.span), current_value, rhs_converted)
+                    else
+                        c.oraArithDivUIOpCreate(self.ctx, self.fileLoc(ident.span), current_value, rhs_converted);
                     h.appendOp(self.block, div_op);
                     new_value = h.getResult(div_op, 0);
                 },
                 .PercentEqual => {
                     // current_value % rhs_value
-                    const rem_op = self.ora_dialect.createArithRemsi(current_value, rhs_value, result_ty, self.fileLoc(ident.span));
+                    const rem_op = if (uses_signed_integer_semantics)
+                        c.oraArithRemSIOpCreate(self.ctx, self.fileLoc(ident.span), current_value, rhs_converted)
+                    else
+                        c.oraArithRemUIOpCreate(self.ctx, self.fileLoc(ident.span), current_value, rhs_converted);
                     h.appendOp(self.block, rem_op);
                     new_value = h.getResult(rem_op, 0);
                 },

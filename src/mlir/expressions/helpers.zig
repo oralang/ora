@@ -118,6 +118,12 @@ pub fn createArithmeticOp(ctx: c.MlirContext, block: c.MlirBlock, type_mapper: *
         c.oraArithXorIOpCreate(ctx, loc, lhs_unwrapped, rhs_converted)
     else if (std.mem.eql(u8, op_name, "arith.shli"))
         c.oraArithShlIOpCreate(ctx, loc, lhs_unwrapped, rhs_converted)
+    else if (std.mem.eql(u8, op_name, "arith.shrui"))
+        if (@hasDecl(c, "oraArithShrUIOpCreate"))
+            c.oraArithShrUIOpCreate(ctx, loc, lhs_unwrapped, rhs_converted)
+        else
+            // Compatibility fallback for environments using older Ora C API headers.
+            c.oraArithShrSIOpCreate(ctx, loc, lhs_unwrapped, rhs_converted)
     else if (std.mem.eql(u8, op_name, "arith.shrsi"))
         c.oraArithShrSIOpCreate(ctx, loc, lhs_unwrapped, rhs_converted)
     else {

@@ -24,6 +24,10 @@ pub const CliOptions = struct {
     canonicalize_mlir: bool = true,
     analyze_state: bool = false,
     verify_z3: bool = true,
+    verify_mode: ?[]const u8 = null,
+    verify_calls: ?bool = null,
+    verify_state: ?bool = null,
+    verify_stats: bool = false,
     debug: bool = false,
     mlir_opt_level: ?[]const u8 = null,
     // fmt options
@@ -98,8 +102,31 @@ pub fn parseArgs(args: []const []const u8) ParseError!CliOptions {
         } else if (std.mem.eql(u8, arg, "--verify")) {
             opts.verify_z3 = true;
             i += 1;
+        } else if (std.mem.startsWith(u8, arg, "--verify=")) {
+            const mode = arg["--verify=".len..];
+            if (!std.ascii.eqlIgnoreCase(mode, "basic") and !std.ascii.eqlIgnoreCase(mode, "full")) {
+                return error.UnknownArgument;
+            }
+            opts.verify_z3 = true;
+            opts.verify_mode = mode;
+            i += 1;
         } else if (std.mem.eql(u8, arg, "--no-verify")) {
             opts.verify_z3 = false;
+            i += 1;
+        } else if (std.mem.eql(u8, arg, "--verify-calls")) {
+            opts.verify_calls = true;
+            i += 1;
+        } else if (std.mem.eql(u8, arg, "--no-verify-calls")) {
+            opts.verify_calls = false;
+            i += 1;
+        } else if (std.mem.eql(u8, arg, "--verify-state")) {
+            opts.verify_state = true;
+            i += 1;
+        } else if (std.mem.eql(u8, arg, "--no-verify-state")) {
+            opts.verify_state = false;
+            i += 1;
+        } else if (std.mem.eql(u8, arg, "--verify-stats")) {
+            opts.verify_stats = true;
             i += 1;
         } else if (std.mem.eql(u8, arg, "--debug")) {
             opts.debug = true;
@@ -154,4 +181,26 @@ pub fn parseArgs(args: []const []const u8) ParseError!CliOptions {
     }
 
     return opts;
+}
+
+test "parse verify mode and toggles" {
+    const args = [_][]const u8{
+        "--verify=full",
+        "--verify-calls",
+        "--no-verify-state",
+        "--verify-stats",
+        "input.ora",
+    };
+    const parsed = try parseArgs(args[0..]);
+    try std.testing.expect(parsed.verify_z3);
+    try std.testing.expect(parsed.verify_mode != null);
+    try std.testing.expect(std.mem.eql(u8, parsed.verify_mode.?, "full"));
+    try std.testing.expect(parsed.verify_calls != null and parsed.verify_calls.?);
+    try std.testing.expect(parsed.verify_state != null and !parsed.verify_state.?);
+    try std.testing.expect(parsed.verify_stats);
+}
+
+test "parse invalid verify mode fails" {
+    const args = [_][]const u8{"--verify=turbo"};
+    try std.testing.expectError(error.UnknownArgument, parseArgs(args[0..]));
 }

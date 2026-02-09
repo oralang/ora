@@ -3,6 +3,6 @@
 // CHECK-LABEL: func.func @testIf
 // CHECK: ora.assume
 // CHECK-LABEL: func.func @testWhile
-// CHECK: ora.while
+// CHECK: scf.while
 // CHECK-LABEL: func.func @testSwitch
 // CHECK: ora.switch

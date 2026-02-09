@@ -31,12 +31,19 @@ pub fn lowerBinary(
 
     const lhs_converted = self.convertToType(lhs, result_ty, bin.span);
     const rhs_converted = self.convertToType(rhs, result_ty, bin.span);
+    const lhs_type_info = extractTypeInfo(bin.lhs);
+    const rhs_type_info = extractTypeInfo(bin.rhs);
+    const uses_signed_integer_semantics = usesSignedIntegerSemantics(lhs_type_info, rhs_type_info);
+    const div_op_name = if (uses_signed_integer_semantics) "arith.divsi" else "arith.divui";
+    const rem_op_name = if (uses_signed_integer_semantics) "arith.remsi" else "arith.remui";
+    const lt_predicate = if (uses_signed_integer_semantics) "slt" else "ult";
+    const le_predicate = if (uses_signed_integer_semantics) "sle" else "ule";
+    const gt_predicate = if (uses_signed_integer_semantics) "sgt" else "ugt";
+    const ge_predicate = if (uses_signed_integer_semantics) "sge" else "uge";
+    const shr_op_name = if (uses_signed_integer_semantics) "arith.shrsi" else "arith.shrui";
 
     // check for Exact<T> division/modulo guard
     if (bin.operator == .Slash or bin.operator == .Percent) {
-        const lhs_type_info = extractTypeInfo(bin.lhs);
-        const rhs_type_info = extractTypeInfo(bin.rhs);
-
         const needs_exact_guard = if (lhs_type_info.ora_type) |lhs_ora_type|
             lhs_ora_type == .exact
         else
@@ -56,22 +63,22 @@ pub fn lowerBinary(
         .Plus => self.createArithmeticOp("arith.addi", lhs_converted, rhs_converted, result_ty, bin.span),
         .Minus => self.createArithmeticOp("arith.subi", lhs_converted, rhs_converted, result_ty, bin.span),
         .Star => self.createArithmeticOp("arith.muli", lhs_converted, rhs_converted, result_ty, bin.span),
-        .Slash => self.createArithmeticOp("arith.divui", lhs_converted, rhs_converted, result_ty, bin.span),
-        .Percent => self.createArithmeticOp("arith.remui", lhs_converted, rhs_converted, result_ty, bin.span),
+        .Slash => self.createArithmeticOp(div_op_name, lhs_converted, rhs_converted, result_ty, bin.span),
+        .Percent => self.createArithmeticOp(rem_op_name, lhs_converted, rhs_converted, result_ty, bin.span),
         .StarStar => lowerPowerOp(self, lhs_converted, rhs_converted, result_ty, bin.span),
         .EqualEqual => self.createComparisonOp("eq", lhs_converted, rhs_converted, bin.span),
         .BangEqual => self.createComparisonOp("ne", lhs_converted, rhs_converted, bin.span),
-        .Less => self.createComparisonOp("ult", lhs_converted, rhs_converted, bin.span),
-        .LessEqual => self.createComparisonOp("ule", lhs_converted, rhs_converted, bin.span),
-        .Greater => self.createComparisonOp("ugt", lhs_converted, rhs_converted, bin.span),
-        .GreaterEqual => self.createComparisonOp("uge", lhs_converted, rhs_converted, bin.span),
+        .Less => self.createComparisonOp(lt_predicate, lhs_converted, rhs_converted, bin.span),
+        .LessEqual => self.createComparisonOp(le_predicate, lhs_converted, rhs_converted, bin.span),
+        .Greater => self.createComparisonOp(gt_predicate, lhs_converted, rhs_converted, bin.span),
+        .GreaterEqual => self.createComparisonOp(ge_predicate, lhs_converted, rhs_converted, bin.span),
         .And => lowerLogicalAnd(self, bin),
         .Or => lowerLogicalOr(self, bin),
         .BitwiseAnd => self.createArithmeticOp("arith.andi", lhs_converted, rhs_converted, result_ty, bin.span),
         .BitwiseOr => self.createArithmeticOp("arith.ori", lhs_converted, rhs_converted, result_ty, bin.span),
         .BitwiseXor => self.createArithmeticOp("arith.xori", lhs_converted, rhs_converted, result_ty, bin.span),
         .LeftShift => self.createArithmeticOp("arith.shli", lhs_converted, rhs_converted, result_ty, bin.span),
-        .RightShift => self.createArithmeticOp("arith.shrsi", lhs_converted, rhs_converted, result_ty, bin.span),
+        .RightShift => self.createArithmeticOp(shr_op_name, lhs_converted, rhs_converted, result_ty, bin.span),
         .Comma => lowerCommaOp(self, lhs_converted, rhs_converted, result_ty, bin.span),
     };
 }
@@ -300,6 +307,29 @@ pub fn extractTypeInfo(expr: *const lib.ast.Expressions.ExprNode) lib.ast.Types.
         .CompoundAssignment => lib.ast.Types.TypeInfo.unknown(),
         else => lib.ast.Types.TypeInfo.unknown(),
     };
+}
+
+fn isTopLevelSignedIntegerOraType(ora_type: lib.ast.Types.OraType) bool {
+    return switch (ora_type) {
+        .i8, .i16, .i32, .i64, .i128, .i256 => true,
+        else => false,
+    };
+}
+
+pub fn isSignedIntegerTypeInfo(type_info: lib.ast.Types.TypeInfo) bool {
+    if (type_info.ora_type) |ora_type| {
+        // Avoid dereferencing refinement base pointers here; some paths can
+        // carry transient refinement wrappers that are not stable to recurse.
+        return isTopLevelSignedIntegerOraType(ora_type);
+    }
+    return false;
+}
+
+pub fn usesSignedIntegerSemantics(
+    lhs_type_info: lib.ast.Types.TypeInfo,
+    rhs_type_info: lib.ast.Types.TypeInfo,
+) bool {
+    return isSignedIntegerTypeInfo(lhs_type_info) or isSignedIntegerTypeInfo(rhs_type_info);
 }
 
 /// Insert exactness guard for Exact<T> division

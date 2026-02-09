@@ -50,6 +50,7 @@ fn prependAssumeToBlock(
     new_statements[0] = ast.Statements.StmtNode{
         .Assume = .{
             .condition = condition,
+            .origin = .CompilerPath,
             .span = span,
         },
     };

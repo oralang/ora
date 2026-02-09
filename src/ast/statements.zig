@@ -169,8 +169,14 @@ pub const EnsuresNode = struct {
 
 /// Assume statement: assume a condition for verification
 /// Example: assume(amount > 0);
+pub const AssumeOrigin = enum {
+    User,
+    CompilerPath,
+};
+
 pub const AssumeNode = struct {
     condition: ExprNode,
+    origin: AssumeOrigin = .User,
     span: SourceSpan,
 
     /// Metadata: Always specification-only

@@ -227,12 +227,18 @@ pub fn lowerCompoundAssignment(
         }
     }
 
+    const lhs_type_info = expr_operators.extractTypeInfo(comp_assign.target);
+    const rhs_type_info = expr_operators.extractTypeInfo(comp_assign.value);
+    const uses_signed_integer_semantics = expr_operators.usesSignedIntegerSemantics(lhs_type_info, rhs_type_info);
+    const div_op_name = if (uses_signed_integer_semantics) "arith.divsi" else "arith.divui";
+    const rem_op_name = if (uses_signed_integer_semantics) "arith.remsi" else "arith.remui";
+
     const result_value = switch (comp_assign.operator) {
         .PlusEqual => self.createArithmeticOp("arith.addi", current_converted, rhs_converted, common_ty, comp_assign.span),
         .MinusEqual => self.createArithmeticOp("arith.subi", current_converted, rhs_converted, common_ty, comp_assign.span),
         .StarEqual => self.createArithmeticOp("arith.muli", current_converted, rhs_converted, common_ty, comp_assign.span),
-        .SlashEqual => self.createArithmeticOp("arith.divsi", current_converted, rhs_converted, common_ty, comp_assign.span),
-        .PercentEqual => self.createArithmeticOp("arith.remsi", current_converted, rhs_converted, common_ty, comp_assign.span),
+        .SlashEqual => self.createArithmeticOp(div_op_name, current_converted, rhs_converted, common_ty, comp_assign.span),
+        .PercentEqual => self.createArithmeticOp(rem_op_name, current_converted, rhs_converted, common_ty, comp_assign.span),
     };
 
     storeLValue(self, comp_assign.target, result_value, comp_assign.span);

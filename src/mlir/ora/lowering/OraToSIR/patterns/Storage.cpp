@@ -596,6 +596,37 @@ LogicalResult ConvertGlobalOp::matchAndRewrite(
     ConversionPatternRewriter &rewriter) const
 {
     (void)adaptor;
+    auto slotAttr = op->getAttrOfType<IntegerAttr>("ora.slot_index");
+    if (!slotAttr)
+    {
+        return rewriter.notifyMatchFailure(op, "missing ora.slot_index for global");
+    }
+
+    auto nameAttr = op->getAttrOfType<StringAttr>("sym_name");
+    if (!nameAttr)
+    {
+        return rewriter.notifyMatchFailure(op, "missing sym_name on global");
+    }
+
+    auto module = op->getParentOfType<ModuleOp>();
+    if (!module)
+    {
+        return rewriter.notifyMatchFailure(op, "global op not contained in module");
+    }
+
+    auto slotsAttr = module->getAttrOfType<DictionaryAttr>("ora.global_slots");
+    if (!slotsAttr)
+    {
+        return rewriter.notifyMatchFailure(op, "missing ora.global_slots module attribute");
+    }
+
+    auto entry = slotsAttr.get(nameAttr.getValue());
+    auto entryInt = llvm::dyn_cast_or_null<IntegerAttr>(entry);
+    if (!entryInt || entryInt.getUInt() != slotAttr.getUInt())
+    {
+        return rewriter.notifyMatchFailure(op, "global slot index mismatch with ora.global_slots map");
+    }
+
     rewriter.eraseOp(op);
     return success();
 }

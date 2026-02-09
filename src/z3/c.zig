@@ -35,6 +35,7 @@ pub const c = @cImport({
 pub const Z3_context = c.Z3_context;
 pub const Z3_solver = c.Z3_solver;
 pub const Z3_ast = c.Z3_ast;
+pub const Z3_app = c.Z3_app;
 pub const Z3_sort = c.Z3_sort;
 pub const Z3_symbol = c.Z3_symbol;
 pub const Z3_func_decl = c.Z3_func_decl;
@@ -78,6 +79,8 @@ pub const Z3_mk_bv_sub = c.Z3_mk_bvsub;
 pub const Z3_mk_bv_mul = c.Z3_mk_bvmul;
 pub const Z3_mk_bv_udiv = c.Z3_mk_bvudiv;
 pub const Z3_mk_bv_urem = c.Z3_mk_bvurem;
+pub const Z3_mk_bvsdiv = c.Z3_mk_bvsdiv;
+pub const Z3_mk_bvsrem = c.Z3_mk_bvsrem;
 pub const Z3_mk_bvult = c.Z3_mk_bvult;
 pub const Z3_mk_bvugt = c.Z3_mk_bvugt;
 pub const Z3_mk_bvule = c.Z3_mk_bvule;
@@ -86,6 +89,8 @@ pub const Z3_mk_bvslt = c.Z3_mk_bvslt;
 pub const Z3_mk_bvsle = c.Z3_mk_bvsle;
 pub const Z3_mk_bvsgt = c.Z3_mk_bvsgt;
 pub const Z3_mk_bvsge = c.Z3_mk_bvsge;
+pub const Z3_mk_forall_const = c.Z3_mk_forall_const;
+pub const Z3_mk_exists_const = c.Z3_mk_exists_const;
 
 pub const Z3_mk_tuple_sort = c.Z3_mk_tuple_sort;
 pub const Z3_mk_bvand = c.Z3_mk_bvand;
@@ -103,6 +108,7 @@ pub const Z3_mk_unsigned_int64 = c.Z3_mk_unsigned_int64;
 pub const Z3_mk_numeral = c.Z3_mk_numeral;
 pub const Z3_mk_func_decl = c.Z3_mk_func_decl;
 pub const Z3_mk_app = c.Z3_mk_app;
+pub const Z3_to_app = c.Z3_to_app;
 
 // Boolean operations
 pub const Z3_mk_and = c.Z3_mk_and;
@@ -130,6 +136,8 @@ pub const Z3_mk_seq_length = c.Z3_mk_seq_length;
 pub const Z3_get_sort = c.Z3_get_sort;
 pub const Z3_get_sort_kind = c.Z3_get_sort_kind;
 pub const Z3_get_bv_sort_size = c.Z3_get_bv_sort_size;
+pub const Z3_get_array_sort_domain = c.Z3_get_array_sort_domain;
+pub const Z3_get_array_sort_range = c.Z3_get_array_sort_range;
 
 // Sort kind constants
 pub const Z3_BOOL_SORT = c.Z3_BOOL_SORT;

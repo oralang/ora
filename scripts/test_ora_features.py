@@ -78,20 +78,43 @@ def test_file(file_path, compiler_path="./zig-out/bin/ora", timeout_s=30):
     except OSError:
         source_text = ""
     has_contract_decl = re.search(r"^\s*contract\b", source_text, re.MULTILINE) is not None
-    result = subprocess.run(
-        [compiler_path, "--verify", "--emit-mlir", str(file_path)],
-        capture_output=True,
-        timeout=timeout_s
-    )
-    
+    timed_out = False
+    return_code = None
+    timeout_note = None
+    stdout_raw = b""
+    stderr_raw = b""
+
+    try:
+        result = subprocess.run(
+            [compiler_path, "--verify", "--emit-mlir", str(file_path)],
+            capture_output=True,
+            timeout=timeout_s
+        )
+        return_code = result.returncode
+        stdout_raw = result.stdout or b""
+        stderr_raw = result.stderr or b""
+    except subprocess.TimeoutExpired as exc:
+        timed_out = True
+        timeout_note = f"timed out after {timeout_s} seconds"
+        if exc.stdout:
+            stdout_raw = exc.stdout
+        if exc.stderr:
+            stderr_raw = exc.stderr
+
     # Decode with error handling for non-UTF-8 characters
     try:
-        stdout = result.stdout.decode('utf-8', errors='replace')
-        stderr = result.stderr.decode('utf-8', errors='replace')
+        stdout = stdout_raw.decode('utf-8', errors='replace')
+        stderr = stderr_raw.decode('utf-8', errors='replace')
     except (UnicodeDecodeError, AttributeError):
-        stdout = result.stdout.decode('utf-8', errors='ignore') if result.stdout else ""
-        stderr = result.stderr.decode('utf-8', errors='ignore') if result.stderr else ""
-    
+        stdout = stdout_raw.decode('utf-8', errors='ignore') if stdout_raw else ""
+        stderr = stderr_raw.decode('utf-8', errors='ignore') if stderr_raw else ""
+
+    if timeout_note:
+        if stderr:
+            stderr = f"{stderr.rstrip()}\n{timeout_note}"
+        else:
+            stderr = timeout_note
+
     # Check for actual errors - look for error patterns that indicate compilation failure
     # Exclude false positives like "ErrorCode" in enum names or "error" in MLIR attributes
     error_patterns = [
@@ -114,7 +137,7 @@ def test_file(file_path, compiler_path="./zig-out/bin/ora", timeout_s=30):
         if "[parser_core] type resolution error:" not in line
         and "[type_resolver]" not in line
     )
-    has_error = any(pattern.lower() in filtered_stderr for pattern in error_patterns)
+    has_error = timed_out or any(pattern.lower() in filtered_stderr for pattern in error_patterns)
 
     # Allow empty-module outputs (no contracts/functions) as success.
     # This covers files that only contain declarations (e.g., error-only files).
@@ -126,10 +149,12 @@ def test_file(file_path, compiler_path="./zig-out/bin/ora", timeout_s=30):
             has_error = False
     
     # Also check exit code
-    if result.returncode != 0 and has_contract_decl:
+    if return_code is not None and return_code != 0 and has_contract_decl:
         has_error = True
 
-    if expected_failure:
+    if timed_out:
+        status = "✅ EXPECTED FAIL (TIMEOUT)" if expected_failure else "❌ TIMEOUT"
+    elif expected_failure:
         status = "✅ EXPECTED FAIL" if has_error else "❌ UNEXPECTED PASS"
     else:
         status = "❌ FAILED" if has_error else "✅ SUCCESS"

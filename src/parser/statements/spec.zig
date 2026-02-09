@@ -86,6 +86,7 @@ pub fn parseAssumeStatement(parser: *StatementParser) common.ParserError!ast.Sta
 
     return ast.Statements.StmtNode{ .Assume = ast.Statements.AssumeNode{
         .condition = condition,
+        .origin = .User,
         .span = ParserCommon.makeSpan(assume_token),
     } };
 }

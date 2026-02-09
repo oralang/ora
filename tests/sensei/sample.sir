@@ -1,0 +1,10 @@
+fn init:
+    entry {
+        stop
+    }
+fn main:
+    entry {
+        c0 = const 0
+        c32 = const 32
+        return c0 c32
+    }

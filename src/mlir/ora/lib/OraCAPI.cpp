@@ -39,6 +39,7 @@
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
 #include "llvm/ADT/APInt.h"
+#include "llvm/ADT/SmallString.h"
 #include "llvm/Support/Casting.h"
 #include <sstream>
 #include "mlir/Transforms/ViewOpGraph.h"
@@ -251,6 +252,16 @@ void oraBlockAppendOwnedOperation(MlirBlock block, MlirOperation op)
         return wrap(blk->getTerminator());
     }
 
+    size_t oraBlockGetNumArguments(MlirBlock block)
+    {
+        mlir::Block *blk = unwrap(block);
+        if (blk == nullptr)
+        {
+            return 0;
+        }
+        return blk->getNumArguments();
+    }
+
     MlirValue oraBlockGetArgument(MlirBlock block, size_t index)
     {
         return wrap(unwrap(block)->getArgument(index));
@@ -413,6 +424,48 @@ void oraBlockAppendOwnedOperation(MlirBlock block, MlirOperation op)
             return 0;
         }
         return int_attr.getValue().getSExtValue();
+    }
+
+    size_t oraArrayAttrGetNumElements(MlirAttribute attr)
+    {
+        auto array_attr = llvm::dyn_cast<mlir::ArrayAttr>(unwrap(attr));
+        if (!array_attr)
+        {
+            return 0;
+        }
+        return array_attr.size();
+    }
+
+    MlirAttribute oraArrayAttrGetElement(MlirAttribute attr, size_t index)
+    {
+        auto array_attr = llvm::dyn_cast<mlir::ArrayAttr>(unwrap(attr));
+        if (!array_attr || index >= array_attr.size())
+        {
+            return MlirAttribute{nullptr};
+        }
+        return wrap(array_attr[index]);
+    }
+
+    MlirStringRef oraIntegerAttrGetValueString(MlirAttribute attr)
+    {
+        auto int_attr = llvm::dyn_cast<mlir::IntegerAttr>(unwrap(attr));
+        if (!int_attr)
+        {
+            return oraStringRefCreate(nullptr, 0);
+        }
+
+        llvm::SmallString<128> value;
+        int_attr.getValue().toString(value, 10, /*Signed=*/false, /*formatAsCLiteral=*/false);
+
+        char *value_copy = static_cast<char *>(std::malloc(value.size() + 1));
+        if (!value_copy)
+        {
+            return oraStringRefCreate(nullptr, 0);
+        }
+
+        std::memcpy(value_copy, value.data(), value.size());
+        value_copy[value.size()] = '\0';
+        return oraStringRefCreate(value_copy, value.size());
     }
 
     MlirType oraFunctionTypeGet(
@@ -2857,6 +2910,25 @@ MlirOperation oraArithShlIOpCreate(MlirContext ctx, MlirLocation loc, MlirValue 
     }
 }
 
+MlirOperation oraArithShrUIOpCreate(MlirContext ctx, MlirLocation loc, MlirValue lhs, MlirValue rhs)
+{
+    try
+    {
+        MLIRContext *context = unwrap(ctx);
+        Location location = unwrap(loc);
+        Value lhsVal = unwrap(lhs);
+        Value rhsVal = unwrap(rhs);
+
+        OpBuilder builder(context);
+        auto op = builder.create<arith::ShRUIOp>(location, lhsVal, rhsVal);
+        return wrap(op.getOperation());
+    }
+    catch (...)
+    {
+        return {nullptr};
+    }
+}
+
 MlirOperation oraArithShrSIOpCreate(MlirContext ctx, MlirLocation loc, MlirValue lhs, MlirValue rhs)
 {
     try
@@ -4884,12 +4956,14 @@ MlirAttribute oraIntegerAttrCreateI64(MlirContext ctx, MlirType type, int64_t va
         Type ty = unwrap(type);
         if (auto intTy = llvm::dyn_cast<mlir::IntegerType>(ty))
         {
-            return wrap(IntegerAttr::get(intTy, value));
+            llvm::APInt ap(intTy.getWidth(), static_cast<uint64_t>(value), /*isSigned=*/true);
+            return wrap(IntegerAttr::get(intTy, ap));
         }
         if (auto oraIntTy = llvm::dyn_cast<mlir::ora::IntegerType>(ty))
         {
             auto builtinTy = mlir::IntegerType::get(context, oraIntTy.getWidth(), oraIntTy.getIsSigned() ? mlir::IntegerType::Signed : mlir::IntegerType::Unsigned);
-            return wrap(IntegerAttr::get(builtinTy, value));
+            llvm::APInt ap(builtinTy.getWidth(), static_cast<uint64_t>(value), /*isSigned=*/true);
+            return wrap(IntegerAttr::get(builtinTy, ap));
         }
         return {nullptr};
     }
@@ -4907,12 +4981,14 @@ MlirAttribute oraIntegerAttrCreateI64FromType(MlirType type, int64_t value)
         MLIRContext *context = ty.getContext();
         if (auto intTy = llvm::dyn_cast<mlir::IntegerType>(ty))
         {
-            return wrap(IntegerAttr::get(intTy, value));
+            llvm::APInt ap(intTy.getWidth(), static_cast<uint64_t>(value), /*isSigned=*/true);
+            return wrap(IntegerAttr::get(intTy, ap));
         }
         if (auto oraIntTy = llvm::dyn_cast<mlir::ora::IntegerType>(ty))
         {
             auto builtinTy = mlir::IntegerType::get(context, oraIntTy.getWidth(), oraIntTy.getIsSigned() ? mlir::IntegerType::Signed : mlir::IntegerType::Unsigned);
-            return wrap(IntegerAttr::get(builtinTy, value));
+            llvm::APInt ap(builtinTy.getWidth(), static_cast<uint64_t>(value), /*isSigned=*/true);
+            return wrap(IntegerAttr::get(builtinTy, ap));
         }
         if (auto indexTy = llvm::dyn_cast<mlir::IndexType>(ty))
         {

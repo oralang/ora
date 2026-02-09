@@ -11,6 +11,7 @@ const h = @import("../helpers.zig");
 const TypeMapper = @import("../types.zig").TypeMapper;
 const LocationTracker = @import("../locations.zig").LocationTracker;
 const OraDialect = @import("../dialect.zig").OraDialect;
+const LocalVarMap = @import("../symbols.zig").LocalVarMap;
 const expr_helpers = @import("helpers.zig");
 const expr_access = @import("access.zig");
 const expr_literals = @import("literals.zig");
@@ -556,16 +557,6 @@ pub fn lowerQuantified(
     quantified: *const lib.ast.Expressions.QuantifiedExpr,
 ) c.MlirValue {
     const result_ty = h.boolType(self.ctx);
-    const body_value = self.lowerExpression(quantified.body);
-
-    var condition_value: ?c.MlirValue = null;
-    if (quantified.condition) |condition| {
-        condition_value = self.lowerExpression(condition);
-    }
-
-    var attributes = std.ArrayList(c.MlirNamedAttribute){};
-    defer attributes.deinit(std.heap.page_allocator);
-
     const quantifier_type_str = if (quantified.verification_metadata) |metadata|
         switch (metadata.quantifier_type) {
             .Forall => "forall",
@@ -579,10 +570,57 @@ pub fn lowerQuantified(
         metadata.variable_name
     else
         quantified.variable;
+    const variable_type_info = if (quantified.verification_metadata) |metadata|
+        metadata.variable_type
+    else
+        quantified.variable_type;
     const var_type_str = if (quantified.verification_metadata) |metadata|
         getTypeString(self, metadata.variable_type)
     else
         getTypeString(self, quantified.variable_type);
+
+    // Bind the quantified variable as a scoped symbolic constant so references
+    // in the condition/body resolve to the quantified value.
+    const variable_mlir_type = self.type_mapper.toMlirType(variable_type_info);
+    const bound_var_name_id = h.identifier(self.ctx, "ora.bound_variable");
+    const bound_var_name_attr = h.stringAttr(self.ctx, variable_name);
+    const placeholder_attrs = [_]c.MlirNamedAttribute{
+        c.oraNamedAttributeGet(bound_var_name_id, bound_var_name_attr),
+    };
+    const placeholder_op = self.ora_dialect.createArithConstantWithAttrs(
+        0,
+        variable_mlir_type,
+        &placeholder_attrs,
+        self.fileLoc(quantified.span),
+    );
+    h.appendOp(self.block, placeholder_op);
+    const placeholder_value = h.getResult(placeholder_op, 0);
+
+    var scoped_local_vars = LocalVarMap.init(std.heap.page_allocator);
+    defer scoped_local_vars.deinit();
+    if (self.local_var_map) |existing_locals| {
+        var vars_it = existing_locals.variables.iterator();
+        while (vars_it.next()) |entry| {
+            scoped_local_vars.addLocalVar(entry.key_ptr.*, entry.value_ptr.*) catch {};
+        }
+        var kinds_it = existing_locals.kinds.iterator();
+        while (kinds_it.next()) |entry| {
+            scoped_local_vars.setLocalVarKind(entry.key_ptr.*, entry.value_ptr.*) catch {};
+        }
+    }
+    scoped_local_vars.addLocalVar(variable_name, placeholder_value) catch {};
+
+    var quantified_lowerer = self.*;
+    quantified_lowerer.local_var_map = &scoped_local_vars;
+
+    const body_value = quantified_lowerer.lowerExpression(quantified.body);
+    var condition_value: ?c.MlirValue = null;
+    if (quantified.condition) |condition| {
+        condition_value = quantified_lowerer.lowerExpression(condition);
+    }
+
+    var attributes = std.ArrayList(c.MlirNamedAttribute){};
+    defer attributes.deinit(std.heap.page_allocator);
 
     if (quantified.verification_metadata) |metadata| {
         const quantifier_id = h.identifier(self.ctx, "quantifier");

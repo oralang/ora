@@ -16,36 +16,108 @@ const Context = @import("context.zig").Context;
 
 /// MLIR to SMT encoder
 pub const Encoder = struct {
+    const CallSlotState = struct {
+        name: []const u8,
+        pre: z3.Z3_ast,
+        sort: z3.Z3_sort,
+        is_write: bool,
+        post: ?z3.Z3_ast = null,
+    };
+
+    const QuantifiedBinding = struct {
+        name: []u8,
+        ast: z3.Z3_ast,
+    };
+
     context: *Context,
     allocator: std.mem.Allocator,
+    verify_calls: bool,
+    verify_state: bool,
+    max_summary_inline_depth: u32,
 
     /// Map from MLIR value to Z3 AST (for caching encoded values)
     value_map: std.HashMap(u64, z3.Z3_ast, std.hash_map.AutoContext(u64), std.hash_map.default_max_load_percentage),
     /// Cache for old() encodings of MLIR values (separate from current-state encodings).
     value_map_old: std.HashMap(u64, z3.Z3_ast, std.hash_map.AutoContext(u64), std.hash_map.default_max_load_percentage),
+    /// Explicit MLIR value bindings (used for call summary argument substitution).
+    value_bindings: std.HashMap(u64, z3.Z3_ast, std.hash_map.AutoContext(u64), std.hash_map.default_max_load_percentage),
     /// Map from global storage name to Z3 AST (for consistent storage symbols)
     global_map: std.StringHashMap(z3.Z3_ast),
     /// Map from global storage name to Z3 AST (for old() storage symbols)
     global_old_map: std.StringHashMap(z3.Z3_ast),
+    /// Map from function symbol name to MLIR function operation.
+    function_ops: std.StringHashMap(mlir.MlirOperation),
+    /// Calls already materialized for current-state summary (avoid double state transitions).
+    materialized_calls: std.AutoHashMap(u64, void),
+    /// Active summary inlining stack for recursion guard.
+    inline_function_stack: std.ArrayList([]u8),
     /// Keep Z3 symbol names alive for the life of the encoder.
     string_storage: std.ArrayList([]u8),
     /// Pending constraints emitted during encoding (e.g., error.unwrap validity).
     pending_constraints: std.ArrayList(z3.Z3_ast),
+    /// Pending safety obligations emitted during encoding (e.g., div-by-zero, overflow).
+    pending_obligations: std.ArrayList(z3.Z3_ast),
     /// Cache of error_union tuple sorts by MLIR type pointer.
     error_union_sorts: std.HashMap(u64, ErrorUnionSort, std.hash_map.AutoContext(u64), std.hash_map.default_max_load_percentage),
+    /// Stack of active quantified variable bindings (innermost binding last).
+    quantified_bindings: std.ArrayList(QuantifiedBinding),
 
     pub fn init(context: *Context, allocator: std.mem.Allocator) Encoder {
         return .{
             .context = context,
             .allocator = allocator,
+            .verify_calls = true,
+            .verify_state = true,
+            .max_summary_inline_depth = 8,
             .value_map = std.HashMap(u64, z3.Z3_ast, std.hash_map.AutoContext(u64), std.hash_map.default_max_load_percentage).init(allocator),
             .value_map_old = std.HashMap(u64, z3.Z3_ast, std.hash_map.AutoContext(u64), std.hash_map.default_max_load_percentage).init(allocator),
+            .value_bindings = std.HashMap(u64, z3.Z3_ast, std.hash_map.AutoContext(u64), std.hash_map.default_max_load_percentage).init(allocator),
             .global_map = std.StringHashMap(z3.Z3_ast).init(allocator),
             .global_old_map = std.StringHashMap(z3.Z3_ast).init(allocator),
+            .function_ops = std.StringHashMap(mlir.MlirOperation).init(allocator),
+            .materialized_calls = std.AutoHashMap(u64, void).init(allocator),
+            .inline_function_stack = std.ArrayList([]u8){},
             .string_storage = std.ArrayList([]u8){},
             .pending_constraints = std.ArrayList(z3.Z3_ast){},
+            .pending_obligations = std.ArrayList(z3.Z3_ast){},
             .error_union_sorts = std.HashMap(u64, ErrorUnionSort, std.hash_map.AutoContext(u64), std.hash_map.default_max_load_percentage).init(allocator),
+            .quantified_bindings = std.ArrayList(QuantifiedBinding){},
         };
+    }
+
+    pub fn setVerifyCalls(self: *Encoder, enabled: bool) void {
+        self.verify_calls = enabled;
+    }
+
+    pub fn setVerifyState(self: *Encoder, enabled: bool) void {
+        self.verify_state = enabled;
+    }
+
+    pub fn resetFunctionState(self: *Encoder) void {
+        var g_it = self.global_map.iterator();
+        while (g_it.next()) |entry| {
+            self.allocator.free(entry.key_ptr.*);
+        }
+        self.global_map.clearRetainingCapacity();
+
+        var old_it = self.global_old_map.iterator();
+        while (old_it.next()) |entry| {
+            self.allocator.free(entry.key_ptr.*);
+        }
+        self.global_old_map.clearRetainingCapacity();
+
+        self.value_map.clearRetainingCapacity();
+        self.value_map_old.clearRetainingCapacity();
+        self.value_bindings.clearRetainingCapacity();
+        self.materialized_calls.clearRetainingCapacity();
+        for (self.inline_function_stack.items) |fn_name| {
+            self.allocator.free(fn_name);
+        }
+        self.inline_function_stack.clearRetainingCapacity();
+        for (self.quantified_bindings.items) |binding| {
+            self.allocator.free(binding.name);
+        }
+        self.quantified_bindings.clearRetainingCapacity();
     }
 
     pub fn deinit(self: *Encoder) void {
@@ -59,14 +131,96 @@ pub const Encoder = struct {
             self.allocator.free(entry.key_ptr.*);
         }
         self.global_old_map.deinit();
+        var fn_it = self.function_ops.iterator();
+        while (fn_it.next()) |entry| {
+            self.allocator.free(entry.key_ptr.*);
+        }
+        self.function_ops.deinit();
+        self.materialized_calls.deinit();
+        for (self.inline_function_stack.items) |fn_name| {
+            self.allocator.free(fn_name);
+        }
+        self.inline_function_stack.deinit(self.allocator);
         for (self.string_storage.items) |buf| {
             self.allocator.free(buf);
         }
         self.string_storage.deinit(self.allocator);
         self.pending_constraints.deinit(self.allocator);
+        self.pending_obligations.deinit(self.allocator);
         self.error_union_sorts.deinit();
+        for (self.quantified_bindings.items) |binding| {
+            self.allocator.free(binding.name);
+        }
+        self.quantified_bindings.deinit(self.allocator);
         self.value_map.deinit();
         self.value_map_old.deinit();
+        self.value_bindings.deinit();
+    }
+
+    pub fn registerFunctionOperation(self: *Encoder, func_op: mlir.MlirOperation) !void {
+        const name = self.getStringAttr(func_op, "sym_name") orelse return;
+        if (self.function_ops.contains(name)) return;
+        const key = try self.allocator.dupe(u8, name);
+        try self.function_ops.put(key, func_op);
+    }
+
+    fn copyFunctionRegistryFrom(self: *Encoder, other: *const Encoder) !void {
+        var it = other.function_ops.iterator();
+        while (it.next()) |entry| {
+            const name = entry.key_ptr.*;
+            if (self.function_ops.contains(name)) continue;
+            const key = try self.allocator.dupe(u8, name);
+            try self.function_ops.put(key, entry.value_ptr.*);
+        }
+    }
+
+    fn copyInlineStackFrom(self: *Encoder, other: *const Encoder) !void {
+        for (other.inline_function_stack.items) |fn_name| {
+            try self.inline_function_stack.append(self.allocator, try self.allocator.dupe(u8, fn_name));
+        }
+    }
+
+    fn inlineStackContains(self: *const Encoder, name: []const u8) bool {
+        for (self.inline_function_stack.items) |fn_name| {
+            if (std.mem.eql(u8, fn_name, name)) return true;
+        }
+        return false;
+    }
+
+    fn pushInlineFunction(self: *Encoder, name: []const u8) !void {
+        try self.inline_function_stack.append(self.allocator, try self.allocator.dupe(u8, name));
+    }
+
+    fn pushQuantifiedBinding(self: *Encoder, name: []const u8, ast: z3.Z3_ast) !void {
+        try self.quantified_bindings.append(self.allocator, .{
+            .name = try self.allocator.dupe(u8, name),
+            .ast = ast,
+        });
+    }
+
+    fn popQuantifiedBinding(self: *Encoder) void {
+        const popped = self.quantified_bindings.pop() orelse return;
+        self.allocator.free(popped.name);
+    }
+
+    fn lookupQuantifiedBinding(self: *const Encoder, name: []const u8, expected_sort: z3.Z3_sort) ?z3.Z3_ast {
+        var idx = self.quantified_bindings.items.len;
+        while (idx > 0) : (idx -= 1) {
+            const binding = self.quantified_bindings.items[idx - 1];
+            if (!std.mem.eql(u8, binding.name, name)) continue;
+            const binding_sort = z3.Z3_get_sort(self.context.ctx, binding.ast);
+            if (binding_sort == expected_sort) return binding.ast;
+        }
+        return null;
+    }
+
+    pub fn bindValue(self: *Encoder, value: mlir.MlirValue, ast: z3.Z3_ast) !void {
+        const value_id = @intFromPtr(value.ptr);
+        try self.value_bindings.put(value_id, ast);
+    }
+
+    pub fn encodeValueOld(self: *Encoder, mlir_value: mlir.MlirValue) EncodeError!z3.Z3_ast {
+        return self.encodeValueWithMode(mlir_value, .Old);
     }
 
     //===----------------------------------------------------------------------===//
@@ -158,10 +312,21 @@ pub const Encoder = struct {
         self.pending_constraints.append(self.allocator, constraint) catch {};
     }
 
+    fn addObligation(self: *Encoder, obligation: z3.Z3_ast) void {
+        self.pending_obligations.append(self.allocator, obligation) catch {};
+    }
+
     pub fn takeConstraints(self: *Encoder, allocator: std.mem.Allocator) ![]z3.Z3_ast {
         if (self.pending_constraints.items.len == 0) return &[_]z3.Z3_ast{};
         const slice = try allocator.dupe(z3.Z3_ast, self.pending_constraints.items);
         self.pending_constraints.clearRetainingCapacity();
+        return slice;
+    }
+
+    pub fn takeObligations(self: *Encoder, allocator: std.mem.Allocator) ![]z3.Z3_ast {
+        if (self.pending_obligations.items.len == 0) return &[_]z3.Z3_ast{};
+        const slice = try allocator.dupe(z3.Z3_ast, self.pending_obligations.items);
+        self.pending_obligations.clearRetainingCapacity();
         return slice;
     }
 
@@ -194,8 +359,10 @@ pub const Encoder = struct {
             .Add => z3.Z3_mk_bv_add(self.context.ctx, lhs, rhs),
             .Sub => z3.Z3_mk_bv_sub(self.context.ctx, lhs, rhs),
             .Mul => z3.Z3_mk_bv_mul(self.context.ctx, lhs, rhs),
-            .Div => z3.Z3_mk_bv_udiv(self.context.ctx, lhs, rhs), // Unsigned division
-            .Rem => z3.Z3_mk_bv_urem(self.context.ctx, lhs, rhs), // Unsigned remainder
+            .DivUnsigned => z3.Z3_mk_bv_udiv(self.context.ctx, lhs, rhs),
+            .RemUnsigned => z3.Z3_mk_bv_urem(self.context.ctx, lhs, rhs),
+            .DivSigned => z3.Z3_mk_bvsdiv(self.context.ctx, lhs, rhs),
+            .RemSigned => z3.Z3_mk_bvsrem(self.context.ctx, lhs, rhs),
         };
     }
 
@@ -204,9 +371,25 @@ pub const Encoder = struct {
         Add,
         Sub,
         Mul,
-        Div,
-        Rem,
+        DivUnsigned,
+        RemUnsigned,
+        DivSigned,
+        RemSigned,
     };
+
+    fn emitArithmeticSafetyObligations(self: *Encoder, op: ArithmeticOp, lhs: z3.Z3_ast, rhs: z3.Z3_ast) void {
+        switch (op) {
+            .Mul => {
+                const no_overflow = z3.Z3_mk_not(self.context.ctx, self.checkMulOverflow(lhs, rhs));
+                self.addObligation(no_overflow);
+            },
+            .DivUnsigned, .DivSigned, .RemUnsigned, .RemSigned => {
+                const non_zero_divisor = z3.Z3_mk_not(self.context.ctx, self.checkDivByZero(rhs));
+                self.addObligation(non_zero_divisor);
+            },
+            else => {},
+        }
+    }
 
     pub const BitwiseOp = enum {
         And,
@@ -282,14 +465,16 @@ pub const Encoder = struct {
 
     /// Check for overflow in multiplication
     pub fn checkMulOverflow(self: *Encoder, lhs: z3.Z3_ast, rhs: z3.Z3_ast) z3.Z3_ast {
-        // for multiplication, we need to check if the high bits are non-zero
-        // this is more complex - for now, we'll use a conservative check
-        // todo: Implement proper multiplication overflow detection
-        // for u256, multiplication overflow occurs when the result doesn't fit in 256 bits
-        // we can check this by computing the full-width result and checking high bits
-        _ = lhs;
-        _ = rhs;
-        return z3.Z3_mk_false(self.context.ctx); // Placeholder - needs proper implementation
+        // Unsigned overflow check:
+        // overflow iff lhs != 0 and ((lhs * rhs) / lhs) != rhs (in modular arithmetic).
+        const sort = z3.Z3_get_sort(self.context.ctx, lhs);
+        const zero = z3.Z3_mk_unsigned_int64(self.context.ctx, 0, sort);
+        const lhs_non_zero = z3.Z3_mk_not(self.context.ctx, z3.Z3_mk_eq(self.context.ctx, lhs, zero));
+        const product = z3.Z3_mk_bv_mul(self.context.ctx, lhs, rhs);
+        const recovered_rhs = z3.Z3_mk_bv_udiv(self.context.ctx, product, lhs);
+        const matches_rhs = z3.Z3_mk_eq(self.context.ctx, recovered_rhs, rhs);
+        const overflow_if_non_zero = z3.Z3_mk_not(self.context.ctx, matches_rhs);
+        return z3.Z3_mk_and(self.context.ctx, 2, &[_]z3.Z3_ast{ lhs_non_zero, overflow_if_non_zero });
     }
 
     /// Check for division by zero
@@ -419,6 +604,48 @@ pub const Encoder = struct {
         return z3.Z3_mk_store(self.context.ctx, array, index, value);
     }
 
+    /// Emit quantified frame condition for a single array store:
+    /// forall k. k != index -> select(post, k) == select(pre, k)
+    fn addArrayStoreFrameConstraint(self: *Encoder, pre: z3.Z3_ast, index: z3.Z3_ast, post: z3.Z3_ast, op_id: u64) EncodeError!void {
+        const key_sort = z3.Z3_get_sort(self.context.ctx, index);
+        const key_name = try std.fmt.allocPrint(self.allocator, "frame_k_{d}", .{op_id});
+        defer self.allocator.free(key_name);
+        const key = try self.mkVariable(key_name, key_sort);
+
+        const neq_key = z3.Z3_mk_not(self.context.ctx, z3.Z3_mk_eq(self.context.ctx, key, index));
+        const pre_val = z3.Z3_mk_select(self.context.ctx, pre, key);
+        const post_val = z3.Z3_mk_select(self.context.ctx, post, key);
+        const eq_val = z3.Z3_mk_eq(self.context.ctx, post_val, pre_val);
+        const body = z3.Z3_mk_implies(self.context.ctx, neq_key, eq_val);
+
+        var bounds = [_]z3.Z3_app{z3.Z3_to_app(self.context.ctx, key)};
+        const frame = z3.Z3_mk_forall_const(self.context.ctx, 0, 1, &bounds, 0, null, body);
+        self.addConstraint(frame);
+    }
+
+    fn isArraySort(self: *Encoder, sort: z3.Z3_sort) bool {
+        return z3.Z3_get_sort_kind(self.context.ctx, sort) == z3.Z3_ARRAY_SORT;
+    }
+
+    /// Emit quantified frame equality for array-typed state:
+    /// forall k. select(post, k) == select(pre, k)
+    fn addArrayEqualityFrameConstraint(self: *Encoder, pre: z3.Z3_ast, post: z3.Z3_ast, frame_id: u64) EncodeError!void {
+        const pre_sort = z3.Z3_get_sort(self.context.ctx, pre);
+        if (!self.isArraySort(pre_sort)) return;
+        const key_sort = z3.Z3_get_array_sort_domain(self.context.ctx, pre_sort);
+        const key_name = try std.fmt.allocPrint(self.allocator, "frame_eq_k_{d}", .{frame_id});
+        defer self.allocator.free(key_name);
+        const key = try self.mkVariable(key_name, key_sort);
+
+        const pre_val = z3.Z3_mk_select(self.context.ctx, pre, key);
+        const post_val = z3.Z3_mk_select(self.context.ctx, post, key);
+        const eq_val = z3.Z3_mk_eq(self.context.ctx, post_val, pre_val);
+
+        var bounds = [_]z3.Z3_app{z3.Z3_to_app(self.context.ctx, key)};
+        const frame = z3.Z3_mk_forall_const(self.context.ctx, 0, 1, &bounds, 0, null, eq_val);
+        self.addConstraint(frame);
+    }
+
     //===----------------------------------------------------------------------===//
     // mlir Operation Encoding
     //===----------------------------------------------------------------------===//
@@ -439,6 +666,11 @@ pub const Encoder = struct {
             ""
         else
             op_name_ref.data[0..op_name_ref.length];
+
+        // Quantified ops must establish bindings before encoding operands.
+        if (std.mem.eql(u8, op_name, "ora.quantified")) {
+            return try self.encodeQuantifiedOp(mlir_op, mode);
+        }
 
         // get number of operands
         const num_operands = mlir.oraOperationGetNumOperands(mlir_op);
@@ -464,8 +696,12 @@ pub const Encoder = struct {
 
     /// Encode an MLIR value to Z3 AST (with caching), using the provided mode.
     fn encodeValueWithMode(self: *Encoder, mlir_value: mlir.MlirValue, mode: EncodeMode) EncodeError!z3.Z3_ast {
-        // check cache first
         const value_id = @intFromPtr(mlir_value.ptr);
+        if (self.value_bindings.get(value_id)) |bound| {
+            return bound;
+        }
+
+        // check cache first
         if (mode == .Current) {
             if (self.value_map.get(value_id)) |cached| {
                 return cached;
@@ -479,16 +715,14 @@ pub const Encoder = struct {
         if (mlir.oraValueIsAOpResult(mlir_value)) {
             const defining_op = mlir.oraOpResultGetOwner(mlir_value);
             if (!mlir.oraOperationIsNull(defining_op)) {
-                if (self.encodeOperationWithMode(defining_op, mode)) |encoded| {
-                    if (mode == .Current) {
-                        try self.value_map.put(value_id, encoded);
-                    } else {
-                        try self.value_map_old.put(value_id, encoded);
-                    }
-                    return encoded;
-                } else |err| {
-                    return err;
+                const result_index = self.getResultIndex(defining_op, mlir_value) orelse 0;
+                const encoded = try self.encodeOperationResultWithMode(defining_op, result_index, mode);
+                if (mode == .Current) {
+                    try self.value_map.put(value_id, encoded);
+                } else {
+                    try self.value_map_old.put(value_id, encoded);
                 }
+                return encoded;
             }
         }
 
@@ -503,6 +737,118 @@ pub const Encoder = struct {
         // For block arguments, keep a single symbol shared across modes.
         try self.value_map.put(value_id, encoded);
         return encoded;
+    }
+
+    fn getResultIndex(_: *Encoder, op: mlir.MlirOperation, value: mlir.MlirValue) ?u32 {
+        const num_results: u32 = @intCast(mlir.oraOperationGetNumResults(op));
+        var i: u32 = 0;
+        while (i < num_results) : (i += 1) {
+            const candidate = mlir.oraOperationGetResult(op, @intCast(i));
+            if (candidate.ptr == value.ptr) return i;
+        }
+        return null;
+    }
+
+    fn encodeOperationResultWithMode(
+        self: *Encoder,
+        mlir_op: mlir.MlirOperation,
+        result_index: u32,
+        mode: EncodeMode,
+    ) EncodeError!z3.Z3_ast {
+        const op_name_ref = mlir.oraOperationGetName(mlir_op);
+        defer @import("mlir_c_api").freeStringRef(op_name_ref);
+        const op_name = if (op_name_ref.data == null or op_name_ref.length == 0)
+            ""
+        else
+            op_name_ref.data[0..op_name_ref.length];
+
+        if (std.mem.eql(u8, op_name, "scf.if")) {
+            return try self.encodeScfIfResult(mlir_op, result_index, mode);
+        }
+
+        if (std.mem.eql(u8, op_name, "scf.while") or
+            std.mem.eql(u8, op_name, "scf.for") or
+            std.mem.eql(u8, op_name, "scf.execute_region"))
+        {
+            const operands = try self.encodeOperationOperandsWithMode(mlir_op, mode);
+            defer self.allocator.free(operands);
+            return try self.encodeStructuredControlResult(mlir_op, op_name, operands, result_index);
+        }
+
+        if (std.mem.eql(u8, op_name, "func.call") or std.mem.eql(u8, op_name, "call")) {
+            const operands = try self.encodeOperationOperandsWithMode(mlir_op, mode);
+            defer self.allocator.free(operands);
+            return try self.encodeFuncCallResult(mlir_op, operands, result_index, mode);
+        }
+
+        if (result_index == 0) {
+            return self.encodeOperationWithMode(mlir_op, mode);
+        }
+
+        const num_results: u32 = @intCast(mlir.oraOperationGetNumResults(mlir_op));
+        if (result_index >= num_results) return error.UnsupportedOperation;
+        const result_value = mlir.oraOperationGetResult(mlir_op, @intCast(result_index));
+        const result_type = mlir.oraValueGetType(result_value);
+        const result_sort = try self.encodeMLIRType(result_type);
+        const op_id = @intFromPtr(mlir_op.ptr);
+        const label = try std.fmt.allocPrint(self.allocator, "op_result_{d}", .{result_index});
+        defer self.allocator.free(label);
+        return try self.mkUndefValue(result_sort, label, op_id);
+    }
+
+    fn encodeScfIfResult(self: *Encoder, mlir_op: mlir.MlirOperation, result_index: u32, mode: EncodeMode) EncodeError!z3.Z3_ast {
+        const num_operands = mlir.oraOperationGetNumOperands(mlir_op);
+        if (num_operands < 1) return error.InvalidOperandCount;
+        const condition_value = mlir.oraOperationGetOperand(mlir_op, 0);
+        const condition = try self.encodeValueWithMode(condition_value, mode);
+        const then_expr = try self.extractIfYield(mlir_op, 0, result_index, mode);
+        const else_expr = try self.extractIfYield(mlir_op, 1, result_index, mode);
+        return try self.encodeControlFlow("scf.if", condition, then_expr, else_expr);
+    }
+
+    fn encodeOperationOperandsWithMode(
+        self: *Encoder,
+        mlir_op: mlir.MlirOperation,
+        mode: EncodeMode,
+    ) EncodeError![]z3.Z3_ast {
+        const num_operands = mlir.oraOperationGetNumOperands(mlir_op);
+        const operand_count: usize = @intCast(num_operands);
+        var operands = try self.allocator.alloc(z3.Z3_ast, operand_count);
+        for (0..operand_count) |i| {
+            const operand_value = mlir.oraOperationGetOperand(mlir_op, @intCast(i));
+            operands[i] = try self.encodeValueWithMode(operand_value, mode);
+        }
+        return operands;
+    }
+
+    fn encodeStructuredControlResult(
+        self: *Encoder,
+        mlir_op: mlir.MlirOperation,
+        op_name: []const u8,
+        operands: []const z3.Z3_ast,
+        result_index: u32,
+    ) EncodeError!z3.Z3_ast {
+        const num_results: u32 = @intCast(mlir.oraOperationGetNumResults(mlir_op));
+        if (num_results == 0) {
+            return self.encodeBoolConstant(true);
+        }
+        if (result_index >= num_results) return error.InvalidOperandCount;
+        const result_value = mlir.oraOperationGetResult(mlir_op, @intCast(result_index));
+        const result_type = mlir.oraValueGetType(result_value);
+        const result_sort = try self.encodeMLIRType(result_type);
+
+        const op_id = @intFromPtr(mlir_op.ptr);
+        const fn_name = try std.fmt.allocPrint(self.allocator, "{s}_summary_{d}_{d}", .{ op_name, op_id, result_index });
+        defer self.allocator.free(fn_name);
+        const symbol = try self.mkSymbol(fn_name);
+
+        var domain = try self.allocator.alloc(z3.Z3_sort, operands.len);
+        defer self.allocator.free(domain);
+        for (operands, 0..) |opnd, i| {
+            domain[i] = z3.Z3_get_sort(self.context.ctx, opnd);
+        }
+        const func_decl = z3.Z3_mk_func_decl(self.context.ctx, symbol, @intCast(operands.len), domain.ptr, result_sort);
+        return z3.Z3_mk_app(self.context.ctx, func_decl, @intCast(operands.len), operands.ptr);
     }
 
     /// Encode MLIR type to Z3 sort
@@ -589,23 +935,33 @@ pub const Encoder = struct {
 
         // constant operations
         if (std.mem.eql(u8, op_name, "arith.constant")) {
+            if (self.getStringAttr(mlir_op, "ora.bound_variable")) |bound_var_name| {
+                const num_results = mlir.oraOperationGetNumResults(mlir_op);
+                if (num_results < 1) return error.UnsupportedOperation;
+                const result_value = mlir.oraOperationGetResult(mlir_op, 0);
+                const result_type = mlir.oraValueGetType(result_value);
+                const sort = try self.encodeMLIRType(result_type);
+                if (self.lookupQuantifiedBinding(bound_var_name, sort)) |bound| {
+                    return bound;
+                }
+                return try self.mkVariable(bound_var_name, sort);
+            }
             const value_attr = mlir.oraOperationGetAttributeByName(mlir_op, mlir.oraStringRefCreate("value", 5));
             const value_type = mlir.oraOperationGetResult(mlir_op, 0);
             const mlir_type = mlir.oraValueGetType(value_type);
             const is_addr = mlir.oraTypeIsAddressType(mlir_type);
-            const value = self.parseConstAttrValue(value_attr) orelse if (is_addr) 0 else self.getConstantValue(mlir_op);
             const width: u32 = if (is_addr)
                 160
             else if (mlir.oraTypeIsAInteger(mlir_type))
                 @intCast(mlir.oraIntegerTypeGetWidth(mlir_type))
             else
                 256;
+            const value = self.parseConstAttrValue(value_attr, width) orelse if (is_addr) 0 else self.getConstantValue(mlir_op, width);
             return try self.encodeConstantOp(value, width);
         }
 
         if (std.mem.eql(u8, op_name, "ora.const")) {
             const value_attr = mlir.oraOperationGetAttributeByName(mlir_op, mlir.oraStringRefCreate("value", 5));
-            const value = self.parseConstAttrValue(value_attr) orelse return error.UnsupportedOperation;
             const value_type = mlir.oraOperationGetResult(mlir_op, 0);
             const mlir_type = mlir.oraValueGetType(value_type);
             const width: u32 = if (mlir.oraTypeIsAInteger(mlir_type))
@@ -614,6 +970,7 @@ pub const Encoder = struct {
                 160
             else
                 256;
+            const value = self.parseConstAttrValue(value_attr, width) orelse return error.UnsupportedOperation;
             return try self.encodeConstantOp(value, width);
         }
 
@@ -629,6 +986,23 @@ pub const Encoder = struct {
             if (num_operands < 1) return error.InvalidOperandCount;
             const operand_value = mlir.oraOperationGetOperand(mlir_op, 0);
             return self.encodeValueWithMode(operand_value, .Old);
+        }
+
+        if (std.mem.eql(u8, op_name, "ora.quantified")) {
+            return try self.encodeQuantifiedOp(mlir_op, mode);
+        }
+
+        if (std.mem.eql(u8, op_name, "ora.variable_placeholder")) {
+            const num_results = mlir.oraOperationGetNumResults(mlir_op);
+            if (num_results < 1) return error.UnsupportedOperation;
+            const result_value = mlir.oraOperationGetResult(mlir_op, 0);
+            const result_type = mlir.oraValueGetType(result_value);
+            const sort = try self.encodeMLIRType(result_type);
+            const name = self.getStringAttr(mlir_op, "name") orelse "placeholder";
+            if (self.lookupQuantifiedBinding(name, sort)) |bound| {
+                return bound;
+            }
+            return try self.mkVariable(name, sort);
         }
 
         if (std.mem.eql(u8, op_name, "arith.andi") or std.mem.eql(u8, op_name, "arith.ori") or std.mem.eql(u8, op_name, "arith.xori")) {
@@ -687,9 +1061,10 @@ pub const Encoder = struct {
             else if (std.mem.eql(u8, op_name, "ora.mul"))
                 ArithmeticOp.Mul
             else if (std.mem.eql(u8, op_name, "ora.div"))
-                ArithmeticOp.Div
+                ArithmeticOp.DivUnsigned
             else
-                ArithmeticOp.Rem;
+                ArithmeticOp.RemUnsigned;
+            self.emitArithmeticSafetyObligations(arith_op, operands[0], operands[1]);
             return self.encodeArithmeticOp(arith_op, operands[0], operands[1]);
         }
 
@@ -701,6 +1076,10 @@ pub const Encoder = struct {
             const result_value = mlir.oraOperationGetResult(mlir_op, 0);
             const result_type = mlir.oraValueGetType(result_value);
             const result_sort = try self.encodeMLIRType(result_type);
+            if (!self.verify_state) {
+                const op_id = @intFromPtr(mlir_op.ptr);
+                return try self.mkUndefValue(result_sort, "sload", op_id);
+            }
             if (mode == .Old) {
                 return try self.getOrCreateOldGlobal(global_name, result_sort);
             }
@@ -709,25 +1088,63 @@ pub const Encoder = struct {
 
         if (std.mem.eql(u8, op_name, "ora.sstore")) {
             if (operands.len < 1) return error.InvalidOperandCount;
+            if (!self.verify_state) {
+                return operands[0];
+            }
             const global_name = self.getStringAttr(mlir_op, "global") orelse return error.UnsupportedOperation;
             const operand_value = mlir.oraOperationGetOperand(mlir_op, 0);
             const operand_type = mlir.oraValueGetType(operand_value);
             const operand_sort = try self.encodeMLIRType(operand_type);
-            _ = try self.getOrCreateGlobal(global_name, operand_sort);
+            if (mode == .Old) {
+                _ = try self.getOrCreateOldGlobal(global_name, operand_sort);
+            } else if (self.global_map.getPtr(global_name)) |existing| {
+                existing.* = operands[0];
+            } else {
+                const key = try self.allocator.dupe(u8, global_name);
+                try self.global_map.put(key, operands[0]);
+            }
             return operands[0];
         }
 
         if (std.mem.eql(u8, op_name, "ora.map_get")) {
             if (operands.len >= 2) {
+                if (!self.verify_state) {
+                    const num_results = mlir.oraOperationGetNumResults(mlir_op);
+                    if (num_results < 1) return error.UnsupportedOperation;
+                    const result_value = mlir.oraOperationGetResult(mlir_op, 0);
+                    const result_type = mlir.oraValueGetType(result_value);
+                    const result_sort = try self.encodeMLIRType(result_type);
+                    const op_id = @intFromPtr(mlir_op.ptr);
+                    return try self.mkUndefValue(result_sort, "map_get", op_id);
+                }
                 return self.encodeSelect(operands[0], operands[1]);
             }
         }
 
         if (std.mem.eql(u8, op_name, "ora.map_store")) {
             if (operands.len >= 3) {
+                if (!self.verify_state) {
+                    const num_results = mlir.oraOperationGetNumResults(mlir_op);
+                    if (num_results > 0) return operands[2];
+                    return self.encodeBoolConstant(true);
+                }
                 const stored = self.encodeStore(operands[0], operands[1], operands[2]);
+                const op_id = @intFromPtr(mlir_op.ptr);
+                self.addArrayStoreFrameConstraint(operands[0], operands[1], stored, op_id) catch {};
+                if (mode == .Current) {
+                    const map_operand = mlir.oraOperationGetOperand(mlir_op, 0);
+                    if (self.resolveGlobalNameFromMapOperand(map_operand)) |global_name| {
+                        if (self.global_map.getPtr(global_name)) |existing| {
+                            existing.* = stored;
+                        } else {
+                            const key = try self.allocator.dupe(u8, global_name);
+                            try self.global_map.put(key, stored);
+                        }
+                    }
+                }
                 const num_results = mlir.oraOperationGetNumResults(mlir_op);
                 if (num_results > 0) return stored;
+                return self.encodeBoolConstant(true);
             }
         }
 
@@ -743,8 +1160,8 @@ pub const Encoder = struct {
             }
         }
 
-        if (std.mem.eql(u8, op_name, "func.call")) {
-            return try self.encodeFuncCall(mlir_op, operands);
+        if (std.mem.eql(u8, op_name, "func.call") or std.mem.eql(u8, op_name, "call")) {
+            return try self.encodeFuncCall(mlir_op, operands, mode);
         }
 
         if (std.mem.eql(u8, op_name, "ora.error.unwrap") or
@@ -783,10 +1200,17 @@ pub const Encoder = struct {
         if (std.mem.eql(u8, op_name, "scf.if")) {
             if (operands.len >= 1) {
                 const condition = operands[0];
-                const then_expr = try self.extractIfYield(mlir_op, 0);
-                const else_expr = try self.extractIfYield(mlir_op, 1);
+                const then_expr = try self.extractIfYield(mlir_op, 0, 0, mode);
+                const else_expr = try self.extractIfYield(mlir_op, 1, 0, mode);
                 return try self.encodeControlFlow(op_name, condition, then_expr, else_expr);
             }
+        }
+
+        if (std.mem.eql(u8, op_name, "scf.while") or
+            std.mem.eql(u8, op_name, "scf.for") or
+            std.mem.eql(u8, op_name, "scf.execute_region"))
+        {
+            return try self.encodeStructuredControlResult(mlir_op, op_name, operands, 0);
         }
 
         if (std.mem.eql(u8, op_name, "memref.alloca")) {
@@ -990,30 +1414,715 @@ pub const Encoder = struct {
         return error.UnsupportedOperation;
     }
 
-    fn encodeFuncCall(self: *Encoder, mlir_op: mlir.MlirOperation, operands: []const z3.Z3_ast) EncodeError!z3.Z3_ast {
-        const num_results = mlir.oraOperationGetNumResults(mlir_op);
-        if (num_results < 1) return error.UnsupportedOperation;
-        const result_value = mlir.oraOperationGetResult(mlir_op, 0);
-        const result_type = mlir.oraValueGetType(result_value);
-        const result_sort = try self.encodeMLIRType(result_type);
-
-        const callee = self.getStringAttr(mlir_op, "callee") orelse "call";
-        const op_id = @intFromPtr(mlir_op.ptr);
-        const name = try std.fmt.allocPrint(self.allocator, "{s}_{d}", .{ callee, op_id });
-        defer self.allocator.free(name);
-        const symbol = try self.mkSymbol(name);
-
-        var domain = try self.allocator.alloc(z3.Z3_sort, operands.len);
-        defer self.allocator.free(domain);
-        for (operands, 0..) |opnd, i| {
-            domain[i] = z3.Z3_get_sort(self.context.ctx, opnd);
+    fn encodeFuncCall(self: *Encoder, mlir_op: mlir.MlirOperation, operands: []const z3.Z3_ast, mode: EncodeMode) EncodeError!z3.Z3_ast {
+        const num_results: u32 = @intCast(mlir.oraOperationGetNumResults(mlir_op));
+        if (num_results == 0) {
+            if (mode == .Current and self.verify_calls) {
+                try self.materializeCallSummaryCurrent(mlir_op, operands);
+            }
+            return self.encodeBoolConstant(true);
         }
-
-        const func_decl = z3.Z3_mk_func_decl(self.context.ctx, symbol, @intCast(operands.len), domain.ptr, result_sort);
-        return z3.Z3_mk_app(self.context.ctx, func_decl, @intCast(operands.len), operands.ptr);
+        return self.encodeFuncCallResult(mlir_op, operands, 0, mode);
     }
 
-    fn extractIfYield(self: *Encoder, mlir_op: mlir.MlirOperation, region_index: u32) EncodeError!?z3.Z3_ast {
+    fn encodeFuncCallResult(
+        self: *Encoder,
+        mlir_op: mlir.MlirOperation,
+        operands: []const z3.Z3_ast,
+        result_index: u32,
+        mode: EncodeMode,
+    ) EncodeError!z3.Z3_ast {
+        const num_results: u32 = @intCast(mlir.oraOperationGetNumResults(mlir_op));
+        if (num_results < 1 or result_index >= num_results) return error.UnsupportedOperation;
+
+        const result_value = mlir.oraOperationGetResult(mlir_op, @intCast(result_index));
+        const result_id = @intFromPtr(result_value.ptr);
+
+        if (mode == .Current) {
+            if (self.value_map.get(result_id)) |cached| {
+                return cached;
+            }
+            if (self.verify_calls) {
+                try self.materializeCallSummaryCurrent(mlir_op, operands);
+                if (self.value_map.get(result_id)) |cached_after| {
+                    return cached_after;
+                }
+            }
+        }
+
+        const result_type = mlir.oraValueGetType(result_value);
+        const result_sort = try self.encodeMLIRType(result_type);
+        if (!self.verify_calls) {
+            const op_id = @intFromPtr(mlir_op.ptr);
+            const label = try std.fmt.allocPrint(self.allocator, "call_r{d}", .{result_index});
+            defer self.allocator.free(label);
+            return try self.mkUndefValue(result_sort, label, op_id);
+        }
+
+        const owned_callee = try self.resolveCalleeName(mlir_op);
+        defer if (owned_callee) |name| self.allocator.free(name);
+        const callee = owned_callee orelse "call";
+        return try self.encodeCallResultUFSymbol(callee, operands, &[_]CallSlotState{}, result_index, result_sort);
+    }
+
+    fn encodeCallResultUFSymbol(
+        self: *Encoder,
+        callee: []const u8,
+        operands: []const z3.Z3_ast,
+        slots: []const CallSlotState,
+        result_index: u32,
+        result_sort: z3.Z3_sort,
+    ) EncodeError!z3.Z3_ast {
+        var hasher = std.hash.Wyhash.init(0);
+        hasher.update(callee);
+        var idx_copy = result_index;
+        hasher.update(std.mem.asBytes(&idx_copy));
+        const result_sort_id = @intFromPtr(result_sort);
+        hasher.update(std.mem.asBytes(&result_sort_id));
+
+        for (operands) |opnd| {
+            const sort_ptr = @intFromPtr(z3.Z3_get_sort(self.context.ctx, opnd));
+            hasher.update(std.mem.asBytes(&sort_ptr));
+        }
+        for (slots) |slot| {
+            hasher.update(slot.name);
+            const slot_sort_ptr = @intFromPtr(slot.sort);
+            hasher.update(std.mem.asBytes(&slot_sort_ptr));
+        }
+        const signature_hash = hasher.final();
+
+        const fn_name = try std.fmt.allocPrint(self.allocator, "{s}_{x}_r{d}", .{ callee, signature_hash, result_index });
+        defer self.allocator.free(fn_name);
+        const symbol = try self.mkSymbol(fn_name);
+
+        const domain_len = operands.len + slots.len;
+        var domain = try self.allocator.alloc(z3.Z3_sort, domain_len);
+        defer self.allocator.free(domain);
+        var args = try self.allocator.alloc(z3.Z3_ast, domain_len);
+        defer self.allocator.free(args);
+
+        var cursor: usize = 0;
+        for (operands) |opnd| {
+            domain[cursor] = z3.Z3_get_sort(self.context.ctx, opnd);
+            args[cursor] = opnd;
+            cursor += 1;
+        }
+        for (slots) |slot| {
+            domain[cursor] = slot.sort;
+            args[cursor] = slot.pre;
+            cursor += 1;
+        }
+
+        const func_decl = z3.Z3_mk_func_decl(self.context.ctx, symbol, @intCast(domain_len), domain.ptr, result_sort);
+        return z3.Z3_mk_app(self.context.ctx, func_decl, @intCast(domain_len), args.ptr);
+    }
+
+    fn encodeCallStateTransitionUFSymbol(
+        self: *Encoder,
+        callee: []const u8,
+        slot: CallSlotState,
+        operands: []const z3.Z3_ast,
+        slots: []const CallSlotState,
+    ) EncodeError!z3.Z3_ast {
+        var hasher = std.hash.Wyhash.init(0);
+        hasher.update(callee);
+        hasher.update(slot.name);
+        const range_sort_ptr = @intFromPtr(slot.sort);
+        hasher.update(std.mem.asBytes(&range_sort_ptr));
+        for (operands) |opnd| {
+            const sort_ptr = @intFromPtr(z3.Z3_get_sort(self.context.ctx, opnd));
+            hasher.update(std.mem.asBytes(&sort_ptr));
+        }
+        for (slots) |state_slot| {
+            hasher.update(state_slot.name);
+            const slot_sort_ptr = @intFromPtr(state_slot.sort);
+            hasher.update(std.mem.asBytes(&slot_sort_ptr));
+        }
+        const signature_hash = hasher.final();
+
+        const fn_name = try std.fmt.allocPrint(self.allocator, "{s}_state_{s}_{x}", .{ callee, slot.name, signature_hash });
+        defer self.allocator.free(fn_name);
+        const symbol = try self.mkSymbol(fn_name);
+
+        const domain_len = operands.len + slots.len;
+        var domain = try self.allocator.alloc(z3.Z3_sort, domain_len);
+        defer self.allocator.free(domain);
+        var args = try self.allocator.alloc(z3.Z3_ast, domain_len);
+        defer self.allocator.free(args);
+
+        var cursor: usize = 0;
+        for (operands) |opnd| {
+            domain[cursor] = z3.Z3_get_sort(self.context.ctx, opnd);
+            args[cursor] = opnd;
+            cursor += 1;
+        }
+        for (slots) |state_slot| {
+            domain[cursor] = state_slot.sort;
+            args[cursor] = state_slot.pre;
+            cursor += 1;
+        }
+
+        const decl = z3.Z3_mk_func_decl(self.context.ctx, symbol, @intCast(domain_len), domain.ptr, slot.sort);
+        return z3.Z3_mk_app(self.context.ctx, decl, @intCast(domain_len), args.ptr);
+    }
+
+    fn collectFunctionWriteInfo(
+        self: *Encoder,
+        func_op: mlir.MlirOperation,
+        write_slots: *std.ArrayList([]u8),
+        writes_unknown: *bool,
+    ) EncodeError!void {
+        writes_unknown.* = false;
+        var visited_funcs = std.AutoHashMap(u64, void).init(self.allocator);
+        defer visited_funcs.deinit();
+        try self.collectFunctionWriteInfoRecursive(func_op, write_slots, writes_unknown, &visited_funcs);
+    }
+
+    fn appendWriteSlotUnique(self: *Encoder, write_slots: *std.ArrayList([]u8), slot_name: []const u8) EncodeError!void {
+        for (write_slots.items) |existing| {
+            if (std.mem.eql(u8, existing, slot_name)) return;
+        }
+        try write_slots.append(self.allocator, try self.allocator.dupe(u8, slot_name));
+    }
+
+    fn functionHasWriteEffect(self: *Encoder, func_op: mlir.MlirOperation) bool {
+        _ = self;
+        const effect_attr = mlir.oraOperationGetAttributeByName(func_op, mlir.oraStringRefCreate("ora.effect", 10));
+        if (mlir.oraAttributeIsNull(effect_attr)) return false;
+        const effect_ref = mlir.oraStringAttrGetValue(effect_attr);
+        if (effect_ref.data == null or effect_ref.length == 0) return false;
+        const effect = effect_ref.data[0..effect_ref.length];
+        return std.mem.eql(u8, effect, "writes") or std.mem.eql(u8, effect, "readwrites");
+    }
+
+    fn collectFunctionWriteInfoRecursive(
+        self: *Encoder,
+        func_op: mlir.MlirOperation,
+        write_slots: *std.ArrayList([]u8),
+        writes_unknown: *bool,
+        visited_funcs: *std.AutoHashMap(u64, void),
+    ) EncodeError!void {
+        const func_id = @intFromPtr(func_op.ptr);
+        if (visited_funcs.contains(func_id)) return;
+        try visited_funcs.put(func_id, {});
+
+        const slots_before = write_slots.items.len;
+        const has_write_effect = self.functionHasWriteEffect(func_op);
+
+        // Prefer explicit metadata when available.
+        const slots_attr = mlir.oraOperationGetAttributeByName(func_op, mlir.oraStringRefCreate("ora.write_slots", 15));
+        if (!mlir.oraAttributeIsNull(slots_attr)) {
+            const count: usize = @intCast(mlir.oraArrayAttrGetNumElements(slots_attr));
+            for (0..count) |i| {
+                const elem = mlir.oraArrayAttrGetElement(slots_attr, i);
+                if (mlir.oraAttributeIsNull(elem)) continue;
+                const slot_ref = mlir.oraStringAttrGetValue(elem);
+                if (slot_ref.data == null or slot_ref.length == 0) continue;
+                const slot_name = slot_ref.data[0..slot_ref.length];
+                try self.appendWriteSlotUnique(write_slots, slot_name);
+            }
+        }
+
+        // Also scan function body and transitive callees to recover missing metadata.
+        try self.collectWriteInfoFromOperation(func_op, write_slots, writes_unknown, visited_funcs);
+
+        // If function is marked as writing but we still couldn't recover any slots,
+        // conservatively model as unknown write set.
+        if (has_write_effect and write_slots.items.len == slots_before) {
+            writes_unknown.* = true;
+        }
+    }
+
+    fn collectWriteInfoFromOperation(
+        self: *Encoder,
+        op: mlir.MlirOperation,
+        write_slots: *std.ArrayList([]u8),
+        writes_unknown: *bool,
+        visited_funcs: *std.AutoHashMap(u64, void),
+    ) EncodeError!void {
+        const name_ref = mlir.oraOperationGetName(op);
+        defer @import("mlir_c_api").freeStringRef(name_ref);
+        const op_name = if (name_ref.data == null or name_ref.length == 0)
+            ""
+        else
+            name_ref.data[0..name_ref.length];
+
+        if (std.mem.eql(u8, op_name, "ora.sstore")) {
+            const global_name = self.getStringAttr(op, "global") orelse {
+                writes_unknown.* = true;
+                return;
+            };
+            try self.appendWriteSlotUnique(write_slots, global_name);
+        } else if (std.mem.eql(u8, op_name, "ora.map_store")) {
+            const num_operands = mlir.oraOperationGetNumOperands(op);
+            if (num_operands < 1) {
+                writes_unknown.* = true;
+            } else {
+                const map_operand = mlir.oraOperationGetOperand(op, 0);
+                if (self.resolveGlobalNameFromMapOperand(map_operand)) |global_name| {
+                    try self.appendWriteSlotUnique(write_slots, global_name);
+                } else {
+                    // Could be a non-global map or unresolved storage origin.
+                    writes_unknown.* = true;
+                }
+            }
+        } else if (self.verify_calls and
+            (std.mem.eql(u8, op_name, "func.call") or std.mem.eql(u8, op_name, "call")))
+        {
+            const owned_callee = try self.resolveCalleeName(op);
+            defer if (owned_callee) |name| self.allocator.free(name);
+            if (owned_callee) |callee| {
+                if (self.function_ops.get(callee)) |callee_op| {
+                    try self.collectFunctionWriteInfoRecursive(callee_op, write_slots, writes_unknown, visited_funcs);
+                } else {
+                    // Unknown callee target: conservatively treat as unknown state write.
+                    writes_unknown.* = true;
+                }
+            } else {
+                writes_unknown.* = true;
+            }
+        }
+
+        const num_regions: usize = @intCast(mlir.oraOperationGetNumRegions(op));
+        for (0..num_regions) |region_idx| {
+            const region = mlir.oraOperationGetRegion(op, region_idx);
+            if (mlir.oraRegionIsNull(region)) continue;
+            var block = mlir.oraRegionGetFirstBlock(region);
+            while (!mlir.oraBlockIsNull(block)) {
+                var nested = mlir.oraBlockGetFirstOperation(block);
+                while (!mlir.oraOperationIsNull(nested)) {
+                    try self.collectWriteInfoFromOperation(nested, write_slots, writes_unknown, visited_funcs);
+                    nested = mlir.oraOperationGetNextInBlock(nested);
+                }
+                block = mlir.oraBlockGetNextInRegion(block);
+            }
+        }
+    }
+
+    fn inferGlobalSortFromFunction(self: *Encoder, func_op: mlir.MlirOperation, slot_name: []const u8) ?z3.Z3_sort {
+        var found: ?z3.Z3_sort = null;
+        self.findGlobalSortInOperation(func_op, slot_name, &found);
+        return found;
+    }
+
+    fn findGlobalSortInOperation(
+        self: *Encoder,
+        op: mlir.MlirOperation,
+        slot_name: []const u8,
+        out: *?z3.Z3_sort,
+    ) void {
+        if (out.* != null) return;
+
+        const name_ref = mlir.oraOperationGetName(op);
+        defer @import("mlir_c_api").freeStringRef(name_ref);
+        if (name_ref.data != null and name_ref.length > 0) {
+            const op_name = name_ref.data[0..name_ref.length];
+            if (std.mem.eql(u8, op_name, "ora.sload") or std.mem.eql(u8, op_name, "ora.sstore")) {
+                const global_attr = mlir.oraOperationGetAttributeByName(op, mlir.oraStringRefCreate("global", 6));
+                if (!mlir.oraAttributeIsNull(global_attr)) {
+                    const global_ref = mlir.oraStringAttrGetValue(global_attr);
+                    if (global_ref.data != null and global_ref.length > 0) {
+                        const global_name = global_ref.data[0..global_ref.length];
+                        if (std.mem.eql(u8, global_name, slot_name)) {
+                            if (std.mem.eql(u8, op_name, "ora.sload")) {
+                                const num_results = mlir.oraOperationGetNumResults(op);
+                                if (num_results >= 1) {
+                                    const result_value = mlir.oraOperationGetResult(op, 0);
+                                    out.* = self.encodeMLIRType(mlir.oraValueGetType(result_value)) catch null;
+                                    if (out.* != null) return;
+                                }
+                            } else {
+                                const num_operands = mlir.oraOperationGetNumOperands(op);
+                                if (num_operands >= 1) {
+                                    const value = mlir.oraOperationGetOperand(op, 0);
+                                    out.* = self.encodeMLIRType(mlir.oraValueGetType(value)) catch null;
+                                    if (out.* != null) return;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        const num_regions: usize = @intCast(mlir.oraOperationGetNumRegions(op));
+        for (0..num_regions) |region_idx| {
+            const region = mlir.oraOperationGetRegion(op, region_idx);
+            if (mlir.oraRegionIsNull(region)) continue;
+            var block = mlir.oraRegionGetFirstBlock(region);
+            while (!mlir.oraBlockIsNull(block)) {
+                var nested = mlir.oraBlockGetFirstOperation(block);
+                while (!mlir.oraOperationIsNull(nested)) {
+                    self.findGlobalSortInOperation(nested, slot_name, out);
+                    if (out.* != null) return;
+                    nested = mlir.oraOperationGetNextInBlock(nested);
+                }
+                block = mlir.oraBlockGetNextInRegion(block);
+            }
+        }
+    }
+
+    fn findFunctionReturnOp(self: *Encoder, func_op: mlir.MlirOperation) ?mlir.MlirOperation {
+        var out = mlir.MlirOperation{ .ptr = null };
+        self.findReturnInOperation(func_op, &out);
+        if (mlir.oraOperationIsNull(out)) return null;
+        return out;
+    }
+
+    fn findReturnInOperation(self: *Encoder, op: mlir.MlirOperation, out: *mlir.MlirOperation) void {
+        if (!mlir.oraOperationIsNull(out.*)) return;
+
+        const name_ref = mlir.oraOperationGetName(op);
+        defer @import("mlir_c_api").freeStringRef(name_ref);
+        if (name_ref.data != null and name_ref.length > 0) {
+            const op_name = name_ref.data[0..name_ref.length];
+            if (std.mem.eql(u8, op_name, "ora.return") or std.mem.eql(u8, op_name, "func.return")) {
+                out.* = op;
+                return;
+            }
+        }
+
+        const num_regions: usize = @intCast(mlir.oraOperationGetNumRegions(op));
+        for (0..num_regions) |region_idx| {
+            const region = mlir.oraOperationGetRegion(op, region_idx);
+            if (mlir.oraRegionIsNull(region)) continue;
+            var block = mlir.oraRegionGetFirstBlock(region);
+            while (!mlir.oraBlockIsNull(block)) {
+                var nested = mlir.oraBlockGetFirstOperation(block);
+                while (!mlir.oraOperationIsNull(nested)) {
+                    self.findReturnInOperation(nested, out);
+                    if (!mlir.oraOperationIsNull(out.*)) return;
+                    nested = mlir.oraOperationGetNextInBlock(nested);
+                }
+                block = mlir.oraBlockGetNextInRegion(block);
+            }
+        }
+    }
+
+    fn appendSlotState(
+        self: *Encoder,
+        slots: *std.ArrayList(CallSlotState),
+        name: []const u8,
+        is_write: bool,
+        func_op: ?mlir.MlirOperation,
+    ) EncodeError!void {
+        for (slots.items) |*existing| {
+            if (std.mem.eql(u8, existing.name, name)) {
+                existing.is_write = existing.is_write or is_write;
+                return;
+            }
+        }
+
+        const slot_name = try self.allocator.dupe(u8, name);
+        var pre: z3.Z3_ast = undefined;
+        var sort: z3.Z3_sort = undefined;
+        if (self.global_map.get(slot_name)) |existing| {
+            pre = existing;
+            sort = z3.Z3_get_sort(self.context.ctx, existing);
+        } else {
+            const inferred_sort = if (func_op) |fop|
+                self.inferGlobalSortFromFunction(fop, slot_name)
+            else
+                null;
+            sort = inferred_sort orelse self.mkBitVectorSort(256);
+            pre = try self.getOrCreateGlobal(slot_name, sort);
+        }
+
+        try slots.append(self.allocator, .{
+            .name = slot_name,
+            .pre = pre,
+            .sort = sort,
+            .is_write = is_write,
+            .post = null,
+        });
+    }
+
+    fn sortSlotStates(_: *Encoder, slots: []CallSlotState) void {
+        const Ctx = struct {};
+        std.mem.sort(CallSlotState, slots, Ctx{}, struct {
+            fn lessThan(_: Ctx, lhs: CallSlotState, rhs: CallSlotState) bool {
+                return std.mem.lessThan(u8, lhs.name, rhs.name);
+            }
+        }.lessThan);
+    }
+
+    fn freeSlotStates(self: *Encoder, slots: []CallSlotState) void {
+        for (slots) |slot| {
+            self.allocator.free(slot.name);
+        }
+    }
+
+    fn tryInlineFunctionCallSummary(
+        self: *Encoder,
+        callee: []const u8,
+        func_op: mlir.MlirOperation,
+        operands: []const z3.Z3_ast,
+        slots: []CallSlotState,
+        result_exprs: []?z3.Z3_ast,
+    ) EncodeError!bool {
+        // Stop recursive/non-terminating expansion; fall back to UF summaries.
+        if (self.inlineStackContains(callee)) return false;
+        if (self.inline_function_stack.items.len >= self.max_summary_inline_depth) return false;
+
+        var summary_encoder = Encoder.init(self.context, self.allocator);
+        defer summary_encoder.deinit();
+        summary_encoder.setVerifyCalls(self.verify_calls);
+        summary_encoder.setVerifyState(self.verify_state);
+        summary_encoder.max_summary_inline_depth = self.max_summary_inline_depth;
+        try summary_encoder.copyFunctionRegistryFrom(self);
+        try summary_encoder.copyInlineStackFrom(self);
+        try summary_encoder.pushInlineFunction(callee);
+
+        for (slots) |slot| {
+            const g_key = try summary_encoder.allocator.dupe(u8, slot.name);
+            try summary_encoder.global_map.put(g_key, slot.pre);
+            const old_key = try summary_encoder.allocator.dupe(u8, slot.name);
+            try summary_encoder.global_old_map.put(old_key, slot.pre);
+        }
+
+        const body_region = mlir.oraOperationGetRegion(func_op, 0);
+        if (mlir.oraRegionIsNull(body_region)) return false;
+        const entry_block = mlir.oraRegionGetFirstBlock(body_region);
+        if (mlir.oraBlockIsNull(entry_block)) return false;
+
+        const arg_count = mlir.oraBlockGetNumArguments(entry_block);
+        const bind_count = @min(arg_count, operands.len);
+        for (0..bind_count) |i| {
+            const arg_value = mlir.oraBlockGetArgument(entry_block, i);
+            try summary_encoder.bindValue(arg_value, operands[i]);
+        }
+
+        // Materialize stateful effects from the callee body so summary state
+        // reflects sstore/map_store updates before we snapshot post-state.
+        summary_encoder.encodeStateEffectsInOperation(func_op);
+
+        const return_op = self.findFunctionReturnOp(func_op) orelse return false;
+        const ret_operands = mlir.oraOperationGetNumOperands(return_op);
+        const result_count = @min(ret_operands, result_exprs.len);
+        if (result_count == 0 and result_exprs.len > 0) return false;
+
+        var any_result = false;
+        for (0..result_count) |i| {
+            const ret_value = mlir.oraOperationGetOperand(return_op, i);
+            const encoded = summary_encoder.encodeValue(ret_value) catch return false;
+            result_exprs[i] = encoded;
+            any_result = true;
+        }
+
+        const extra_constraints = try summary_encoder.takeConstraints(self.allocator);
+        defer if (extra_constraints.len > 0) self.allocator.free(extra_constraints);
+        for (extra_constraints) |cst| self.addConstraint(cst);
+
+        const extra_obligations = try summary_encoder.takeObligations(self.allocator);
+        defer if (extra_obligations.len > 0) self.allocator.free(extra_obligations);
+        for (extra_obligations) |obl| self.addObligation(obl);
+
+        for (slots) |*slot| {
+            if (summary_encoder.global_map.get(slot.name)) |post| {
+                slot.post = post;
+            }
+        }
+
+        return any_result or slots.len > 0;
+    }
+
+    fn encodeStateEffectsInOperation(self: *Encoder, op: mlir.MlirOperation) void {
+        const name_ref = mlir.oraOperationGetName(op);
+        defer @import("mlir_c_api").freeStringRef(name_ref);
+        if (name_ref.data != null and name_ref.length > 0) {
+            const op_name = name_ref.data[0..name_ref.length];
+            if (std.mem.eql(u8, op_name, "ora.sstore") or
+                std.mem.eql(u8, op_name, "ora.map_store") or
+                std.mem.eql(u8, op_name, "func.call") or
+                std.mem.eql(u8, op_name, "call"))
+            {
+                _ = self.encodeOperation(op) catch {};
+            }
+        }
+
+        const num_regions: usize = @intCast(mlir.oraOperationGetNumRegions(op));
+        for (0..num_regions) |region_idx| {
+            const region = mlir.oraOperationGetRegion(op, region_idx);
+            if (mlir.oraRegionIsNull(region)) continue;
+            var block = mlir.oraRegionGetFirstBlock(region);
+            while (!mlir.oraBlockIsNull(block)) {
+                var nested = mlir.oraBlockGetFirstOperation(block);
+                while (!mlir.oraOperationIsNull(nested)) {
+                    self.encodeStateEffectsInOperation(nested);
+                    nested = mlir.oraOperationGetNextInBlock(nested);
+                }
+                block = mlir.oraBlockGetNextInRegion(block);
+            }
+        }
+    }
+
+    fn materializeCallSummaryCurrent(
+        self: *Encoder,
+        mlir_op: mlir.MlirOperation,
+        operands: []const z3.Z3_ast,
+    ) EncodeError!void {
+        const call_id = @intFromPtr(mlir_op.ptr);
+        if (self.materialized_calls.contains(call_id)) return;
+
+        const owned_callee = try self.resolveCalleeName(mlir_op);
+        defer if (owned_callee) |name| self.allocator.free(name);
+        const callee = owned_callee orelse "call";
+        const func_op = self.function_ops.get(callee);
+
+        var write_slots = std.ArrayList([]u8){};
+        defer {
+            for (write_slots.items) |slot_name| self.allocator.free(slot_name);
+            write_slots.deinit(self.allocator);
+        }
+        var writes_unknown = false;
+        if (self.verify_state) {
+            if (func_op) |fop| {
+                try self.collectFunctionWriteInfo(fop, &write_slots, &writes_unknown);
+            }
+        }
+
+        var slots = std.ArrayList(CallSlotState){};
+        defer {
+            self.freeSlotStates(slots.items);
+            slots.deinit(self.allocator);
+        }
+
+        if (self.verify_state) {
+            var g_it = self.global_map.iterator();
+            while (g_it.next()) |entry| {
+                try self.appendSlotState(&slots, entry.key_ptr.*, false, func_op);
+            }
+
+            for (write_slots.items) |slot_name| {
+                try self.appendSlotState(&slots, slot_name, true, func_op);
+            }
+
+            if (writes_unknown) {
+                for (slots.items) |*slot| {
+                    slot.is_write = true;
+                }
+            }
+        }
+
+        self.sortSlotStates(slots.items);
+
+        const num_results: usize = @intCast(mlir.oraOperationGetNumResults(mlir_op));
+        var result_exprs = try self.allocator.alloc(?z3.Z3_ast, num_results);
+        defer self.allocator.free(result_exprs);
+        for (0..num_results) |i| result_exprs[i] = null;
+
+        if (func_op) |fop| {
+            _ = try self.tryInlineFunctionCallSummary(callee, fop, operands, slots.items, result_exprs);
+        }
+
+        for (0..num_results) |i| {
+            const result_value = mlir.oraOperationGetResult(mlir_op, i);
+            const result_type = mlir.oraValueGetType(result_value);
+            const result_sort = try self.encodeMLIRType(result_type);
+            const encoded = if (result_exprs[i]) |expr|
+                expr
+            else
+                try self.encodeCallResultUFSymbol(callee, operands, slots.items, @intCast(i), result_sort);
+            const result_id = @intFromPtr(result_value.ptr);
+            try self.value_map.put(result_id, encoded);
+        }
+
+        if (self.verify_state) {
+            for (slots.items, 0..) |slot, slot_idx| {
+                var post = slot.post orelse slot.pre;
+                if (slot.is_write and slot.post == null) {
+                    post = try self.encodeCallStateTransitionUFSymbol(callee, slot, operands, slots.items);
+                } else if (!slot.is_write) {
+                    self.addConstraint(z3.Z3_mk_eq(self.context.ctx, post, slot.pre));
+                    const slot_sort = z3.Z3_get_sort(self.context.ctx, post);
+                    if (self.isArraySort(slot_sort)) {
+                        const call_id_u64: u64 = @intCast(@intFromPtr(mlir_op.ptr));
+                        const frame_id = @as(u64, @intCast(slot_idx)) ^ (call_id_u64 << 8);
+                        self.addArrayEqualityFrameConstraint(slot.pre, post, frame_id) catch {};
+                    }
+                }
+
+                if (self.global_map.getPtr(slot.name)) |existing| {
+                    existing.* = post;
+                } else {
+                    const key = try self.allocator.dupe(u8, slot.name);
+                    try self.global_map.put(key, post);
+                }
+            }
+        }
+
+        try self.materialized_calls.put(call_id, {});
+    }
+
+    fn resolveCalleeName(self: *Encoder, mlir_op: mlir.MlirOperation) EncodeError!?[]u8 {
+        if (self.getStringAttr(mlir_op, "callee")) |callee| {
+            return try self.allocator.dupe(u8, callee);
+        }
+
+        const printed = mlir.oraOperationPrintToString(mlir_op);
+        defer if (printed.data != null) {
+            const mlir_c = @import("mlir_c_api");
+            mlir_c.freeStringRef(printed);
+        };
+        if (printed.data == null or printed.length == 0) return null;
+
+        const text = printed.data[0..printed.length];
+        const at_pos = std.mem.indexOfScalar(u8, text, '@') orelse return null;
+        var end = at_pos + 1;
+        while (end < text.len) : (end += 1) {
+            const ch = text[end];
+            if (!(std.ascii.isAlphanumeric(ch) or ch == '_' or ch == '.' or ch == '$')) {
+                break;
+            }
+        }
+        if (end <= at_pos + 1) return null;
+        return try self.allocator.dupe(u8, text[at_pos + 1 .. end]);
+    }
+
+    fn resolveGlobalNameFromMapOperand(self: *Encoder, value: mlir.MlirValue) ?[]const u8 {
+        if (!mlir.oraValueIsAOpResult(value)) return null;
+        const owner = mlir.oraOpResultGetOwner(value);
+        if (mlir.oraOperationIsNull(owner)) return null;
+
+        const name_ref = mlir.oraOperationGetName(owner);
+        defer @import("mlir_c_api").freeStringRef(name_ref);
+        const op_name = if (name_ref.data == null or name_ref.length == 0)
+            ""
+        else
+            name_ref.data[0..name_ref.length];
+
+        if (std.mem.eql(u8, op_name, "ora.sload")) {
+            return self.getStringAttr(owner, "global");
+        }
+
+        if (std.mem.eql(u8, op_name, "ora.refinement_to_base") or
+            std.mem.eql(u8, op_name, "ora.base_to_refinement") or
+            std.mem.eql(u8, op_name, "arith.bitcast") or
+            std.mem.eql(u8, op_name, "arith.extui") or
+            std.mem.eql(u8, op_name, "arith.extsi") or
+            std.mem.eql(u8, op_name, "arith.trunci") or
+            std.mem.eql(u8, op_name, "arith.index_cast") or
+            std.mem.eql(u8, op_name, "arith.index_castui") or
+            std.mem.eql(u8, op_name, "arith.index_castsi") or
+            std.mem.eql(u8, op_name, "builtin.unrealized_conversion_cast") or
+            std.mem.eql(u8, op_name, "tensor.cast"))
+        {
+            const num_operands = mlir.oraOperationGetNumOperands(owner);
+            if (num_operands < 1) return null;
+            const inner = mlir.oraOperationGetOperand(owner, 0);
+            return self.resolveGlobalNameFromMapOperand(inner);
+        }
+
+        return null;
+    }
+
+    fn extractIfYield(
+        self: *Encoder,
+        mlir_op: mlir.MlirOperation,
+        region_index: u32,
+        result_index: u32,
+        mode: EncodeMode,
+    ) EncodeError!?z3.Z3_ast {
         const region = mlir.oraOperationGetRegion(mlir_op, region_index);
         if (mlir.oraRegionIsNull(region)) return null;
         const block = mlir.oraRegionGetFirstBlock(region);
@@ -1028,10 +2137,10 @@ pub const Encoder = struct {
             else
                 name_ref.data[0..name_ref.length];
             if (std.mem.eql(u8, name, "scf.yield")) {
-                const num_operands = mlir.oraOperationGetNumOperands(current);
-                if (num_operands >= 1) {
-                    const value = mlir.oraOperationGetOperand(current, 0);
-                    return try self.encodeValue(value);
+                const num_operands: u32 = @intCast(mlir.oraOperationGetNumOperands(current));
+                if (num_operands > result_index) {
+                    const value = mlir.oraOperationGetOperand(current, result_index);
+                    return try self.encodeValueWithMode(value, mode);
                 }
                 return null;
             }
@@ -1053,23 +2162,139 @@ pub const Encoder = struct {
         return value.data[0..value.length];
     }
 
-    fn parseConstAttrValue(_: *Encoder, attr: mlir.MlirAttribute) ?u256 {
+    fn coerceToBool(self: *Encoder, ast: z3.Z3_ast) z3.Z3_ast {
+        const sort = z3.Z3_get_sort(self.context.ctx, ast);
+        const kind = z3.Z3_get_sort_kind(self.context.ctx, sort);
+        if (kind == z3.Z3_BOOL_SORT) return ast;
+        if (kind == z3.Z3_BV_SORT) {
+            const zero = z3.Z3_mk_unsigned_int64(self.context.ctx, 0, sort);
+            return z3.Z3_mk_not(self.context.ctx, z3.Z3_mk_eq(self.context.ctx, ast, zero));
+        }
+        return ast;
+    }
+
+    fn quantifiedVarSortFromTypeString(self: *Encoder, type_name: []const u8) z3.Z3_sort {
+        if (std.mem.eql(u8, type_name, "bool")) {
+            return z3.Z3_mk_bool_sort(self.context.ctx);
+        }
+        if (std.mem.eql(u8, type_name, "address")) {
+            return self.mkBitVectorSort(160);
+        }
+        if (std.mem.eql(u8, type_name, "string")) {
+            return z3.Z3_mk_string_sort(self.context.ctx);
+        }
+
+        if (type_name.len >= 2 and (type_name[0] == 'u' or type_name[0] == 'i')) {
+            const width = std.fmt.parseInt(u32, type_name[1..], 10) catch 256;
+            return self.mkBitVectorSort(width);
+        }
+
+        // Default to EVM word width for unknown/refinement type spellings.
+        return self.mkBitVectorSort(256);
+    }
+
+    fn encodeQuantifiedOp(self: *Encoder, mlir_op: mlir.MlirOperation, mode: EncodeMode) EncodeError!z3.Z3_ast {
+        const num_operands = mlir.oraOperationGetNumOperands(mlir_op);
+        if (num_operands < 1) return error.InvalidOperandCount;
+        const quantifier = self.getStringAttr(mlir_op, "quantifier") orelse
+            self.getStringAttr(mlir_op, "ora.quantifier") orelse
+            "forall";
+        const variable = self.getStringAttr(mlir_op, "variable") orelse
+            self.getStringAttr(mlir_op, "ora.bound_variable") orelse
+            "q";
+        const variable_type = self.getStringAttr(mlir_op, "variable_type") orelse
+            self.getStringAttr(mlir_op, "ora.variable_type") orelse
+            "u256";
+
+        const var_sort = self.quantifiedVarSortFromTypeString(variable_type);
+        const bound_var = try self.mkVariable(variable, var_sort);
+        try self.pushQuantifiedBinding(variable, bound_var);
+        defer self.popQuantifiedBinding();
+
+        const body_value = mlir.oraOperationGetOperand(mlir_op, num_operands - 1);
+        var quantified_body = self.coerceToBool(try self.encodeValueWithMode(body_value, mode));
+
+        if (num_operands > 1) {
+            const condition_value = mlir.oraOperationGetOperand(mlir_op, 0);
+            const condition = self.coerceToBool(try self.encodeValueWithMode(condition_value, mode));
+            if (std.ascii.eqlIgnoreCase(quantifier, "exists")) {
+                quantified_body = z3.Z3_mk_and(self.context.ctx, 2, &[_]z3.Z3_ast{ condition, quantified_body });
+            } else {
+                quantified_body = z3.Z3_mk_implies(self.context.ctx, condition, quantified_body);
+            }
+        }
+
+        var bounds = [_]z3.Z3_app{z3.Z3_to_app(self.context.ctx, bound_var)};
+        if (std.ascii.eqlIgnoreCase(quantifier, "exists")) {
+            return z3.Z3_mk_exists_const(self.context.ctx, 0, 1, &bounds, 0, null, quantified_body);
+        }
+        return z3.Z3_mk_forall_const(self.context.ctx, 0, 1, &bounds, 0, null, quantified_body);
+    }
+
+    fn bitMaskForWidth(_: *Encoder, width: u32) u256 {
+        if (width == 0) return 0;
+        if (width >= 256) return std.math.maxInt(u256);
+        return (@as(u256, 1) << @intCast(width)) - 1;
+    }
+
+    fn normalizeUnsignedToWidth(self: *Encoder, value: u256, width: u32) u256 {
+        return value & self.bitMaskForWidth(width);
+    }
+
+    fn negateModuloWidth(self: *Encoder, abs_value: u256, width: u32) u256 {
+        const mask = self.bitMaskForWidth(width);
+        const narrowed = abs_value & mask;
+        if (narrowed == 0) return 0;
+        return ((~narrowed) +% 1) & mask;
+    }
+
+    fn normalizeSignedIntToWidth(self: *Encoder, value: i64, width: u32) u256 {
+        if (value >= 0) {
+            return self.normalizeUnsignedToWidth(@intCast(value), width);
+        }
+        const signed_wide: i128 = value;
+        const abs_wide: i128 = -signed_wide;
+        const abs_u128: u128 = @intCast(abs_wide);
+        return self.negateModuloWidth(@intCast(abs_u128), width);
+    }
+
+    fn parseLiteralToWidth(self: *Encoder, literal: []const u8, width: u32) ?u256 {
+        if (literal.len == 0) return null;
+        var negative = false;
+        var body = literal;
+
+        if (body[0] == '-') {
+            negative = true;
+            body = body[1..];
+        }
+        if (body.len == 0) return null;
+
+        var base: u8 = 10;
+        if (body.len >= 2 and body[0] == '0' and (body[1] == 'x' or body[1] == 'X')) {
+            base = 16;
+            body = body[2..];
+            if (body.len == 0) return null;
+        }
+
+        const parsed = std.fmt.parseUnsigned(u256, body, base) catch return null;
+        if (negative) return self.negateModuloWidth(parsed, width);
+        return self.normalizeUnsignedToWidth(parsed, width);
+    }
+
+    fn parseConstAttrValue(self: *Encoder, attr: mlir.MlirAttribute, width: u32) ?u256 {
         if (mlir.oraAttributeIsNull(attr)) return null;
         const str = mlir.oraStringAttrGetValue(attr);
         if (str.data != null and str.length > 0) {
             const slice = str.data[0..str.length];
-            if (slice.len >= 2 and slice[0] == '0' and (slice[1] == 'x' or slice[1] == 'X')) {
-                return std.fmt.parseUnsigned(u256, slice[2..], 16) catch null;
-            }
-            return std.fmt.parseUnsigned(u256, slice, 10) catch null;
+            return self.parseLiteralToWidth(slice, width);
         }
-        const int_value = mlir.oraIntegerAttrGetValueSInt(attr);
-        if (int_value < 0) {
-            if (int_value == -1) return 1;
-            const u64_value: u64 = @bitCast(@as(i64, int_value));
-            return @intCast(u64_value);
+        const int_str = mlir.oraIntegerAttrGetValueString(attr);
+        defer if (int_str.data != null) @import("mlir_c_api").freeStringRef(int_str);
+        if (int_str.data != null and int_str.length > 0) {
+            const slice = int_str.data[0..int_str.length];
+            return self.parseLiteralToWidth(slice, width);
         }
-        return @intCast(@as(i64, int_value));
+        return self.normalizeSignedIntToWidth(mlir.oraIntegerAttrGetValueSInt(attr), width);
     }
 
     fn applyFieldFunction(
@@ -1109,34 +2334,12 @@ pub const Encoder = struct {
     }
 
     /// Get constant value from MLIR constant operation
-    fn getConstantValue(_: *Encoder, mlir_op: mlir.MlirOperation) u256 {
+    fn getConstantValue(self: *Encoder, mlir_op: mlir.MlirOperation, width: u32) u256 {
         // extract constant value from arith.constant attributes
         // the value attribute contains the integer constant
         const attr_name_ref = mlir.oraStringRefCreate("value".ptr, "value".len);
         const attr = mlir.oraOperationGetAttributeByName(mlir_op, attr_name_ref);
-        if (mlir.oraAttributeIsNull(attr)) {
-            // return 0 if value attribute is missing
-            return 0;
-        }
-
-        // get the integer value (signed, but we'll interpret as unsigned for u256)
-        const int_value = mlir.oraIntegerAttrGetValueSInt(attr);
-
-        // handle negative values (for boolean true = -1 in MLIR, but we want 1)
-        if (int_value < 0) {
-            // for boolean values, -1 means true, convert to 1
-            if (int_value == -1) {
-                return 1;
-            }
-            // for other negative values, this represents a large unsigned value
-            // convert i64 to u64 first (two's complement), then to u256
-            const u64_value: u64 = @bitCast(@as(i64, int_value));
-            return @intCast(u64_value);
-        }
-
-        // convert signed to unsigned (non-negative values)
-        // for values that fit in i64, cast directly
-        return @intCast(@as(i64, int_value));
+        return self.parseConstAttrValue(attr, width) orelse 0;
     }
 
     /// Encode MLIR arithmetic operation (arith.addi, arith.subi, etc.)
@@ -1155,13 +2358,18 @@ pub const Encoder = struct {
         else if (std.mem.eql(u8, op_name, "arith.muli"))
             ArithmeticOp.Mul
         else if (std.mem.eql(u8, op_name, "arith.divui"))
-            ArithmeticOp.Div
+            ArithmeticOp.DivUnsigned
+        else if (std.mem.eql(u8, op_name, "arith.divsi"))
+            ArithmeticOp.DivSigned
         else if (std.mem.eql(u8, op_name, "arith.remui"))
-            ArithmeticOp.Rem
+            ArithmeticOp.RemUnsigned
+        else if (std.mem.eql(u8, op_name, "arith.remsi"))
+            ArithmeticOp.RemSigned
         else {
             return error.UnsupportedOperation;
         };
 
+        self.emitArithmeticSafetyObligations(arith_op, lhs, rhs);
         return self.encodeArithmeticOp(arith_op, lhs, rhs);
     }
 

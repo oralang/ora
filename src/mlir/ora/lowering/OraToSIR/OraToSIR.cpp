@@ -755,6 +755,7 @@ public:
             patterns.add<ConvertArithDivUIOp>(typeConverter, ctx);
             patterns.add<ConvertArithRemUIOp>(typeConverter, ctx);
             patterns.add<ConvertArithDivSIOp>(typeConverter, ctx);
+            patterns.add<ConvertArithRemSIOp>(typeConverter, ctx);
             patterns.add<ConvertArithAndIOp>(typeConverter, ctx);
             patterns.add<ConvertArithOrIOp>(typeConverter, ctx);
             patterns.add<ConvertArithXOrIOp>(typeConverter, ctx);
@@ -1292,11 +1293,13 @@ public:
             phase4Patterns.add<ConvertArithDivUIOp>(typeConverter, ctx);
             phase4Patterns.add<ConvertArithRemUIOp>(typeConverter, ctx);
             phase4Patterns.add<ConvertArithDivSIOp>(typeConverter, ctx);
+            phase4Patterns.add<ConvertArithRemSIOp>(typeConverter, ctx);
             phase4Patterns.add<ConvertArithAndIOp>(typeConverter, ctx);
             phase4Patterns.add<ConvertArithOrIOp>(typeConverter, ctx);
             phase4Patterns.add<ConvertArithXOrIOp>(typeConverter, ctx);
             phase4Patterns.add<ConvertArithShlIOp>(typeConverter, ctx);
             phase4Patterns.add<ConvertArithShrUIOp>(typeConverter, ctx);
+            phase4Patterns.add<ConvertArithShrSIOp>(typeConverter, ctx);
             phase4Patterns.add<ConvertArithSelectOp>(typeConverter, ctx);
             phase4Patterns.add<ConvertArithExtUIOp>(typeConverter, ctx);
             phase4Patterns.add<ConvertArithIndexCastUIOp>(typeConverter, ctx);

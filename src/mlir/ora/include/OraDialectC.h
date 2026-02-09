@@ -59,6 +59,7 @@ extern "C"
     MLIR_CAPI_EXPORTED void oraBlockInsertOwnedOperationBefore(MlirBlock block, MlirOperation op, MlirOperation before);
     MLIR_CAPI_EXPORTED MlirOperation oraBlockGetFirstOperation(MlirBlock block);
     MLIR_CAPI_EXPORTED MlirOperation oraBlockGetTerminator(MlirBlock block);
+    MLIR_CAPI_EXPORTED size_t oraBlockGetNumArguments(MlirBlock block);
     MLIR_CAPI_EXPORTED MlirValue oraBlockGetArgument(MlirBlock block, size_t index);
     MLIR_CAPI_EXPORTED bool oraBlockIsNull(MlirBlock block);
 
@@ -91,6 +92,11 @@ extern "C"
     MLIR_CAPI_EXPORTED bool oraAttributeIsNull(MlirAttribute attr);
     MLIR_CAPI_EXPORTED MlirStringRef oraStringAttrGetValue(MlirAttribute attr);
     MLIR_CAPI_EXPORTED int64_t oraIntegerAttrGetValueSInt(MlirAttribute attr);
+    MLIR_CAPI_EXPORTED size_t oraArrayAttrGetNumElements(MlirAttribute attr);
+    MLIR_CAPI_EXPORTED MlirAttribute oraArrayAttrGetElement(MlirAttribute attr, size_t index);
+    /// Returns the integer value as an unsigned decimal string preserving full APInt width.
+    /// Returns a newly allocated string; caller must free with oraStringRefFree.
+    MLIR_CAPI_EXPORTED MlirStringRef oraIntegerAttrGetValueString(MlirAttribute attr);
 
     MLIR_CAPI_EXPORTED MlirType oraFunctionTypeGet(
         MlirContext ctx,
@@ -607,6 +613,13 @@ extern "C"
 
     /// Create an arith.shli operation
     MLIR_CAPI_EXPORTED MlirOperation oraArithShlIOpCreate(
+        MlirContext ctx,
+        MlirLocation loc,
+        MlirValue lhs,
+        MlirValue rhs);
+
+    /// Create an arith.shrui operation
+    MLIR_CAPI_EXPORTED MlirOperation oraArithShrUIOpCreate(
         MlirContext ctx,
         MlirLocation loc,
         MlirValue lhs,

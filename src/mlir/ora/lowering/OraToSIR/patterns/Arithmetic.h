@@ -381,6 +381,17 @@ namespace mlir
                 ConversionPatternRewriter &rewriter) const override;
         };
 
+        class ConvertArithShrSIOp : public OpConversionPattern<mlir::arith::ShRSIOp>
+        {
+        public:
+            using OpConversionPattern::OpConversionPattern;
+
+            LogicalResult matchAndRewrite(
+                mlir::arith::ShRSIOp op,
+                typename mlir::arith::ShRSIOp::Adaptor adaptor,
+                ConversionPatternRewriter &rewriter) const override;
+        };
+
         class ConvertArithSelectOp : public OpConversionPattern<mlir::arith::SelectOp>
         {
         public:
@@ -481,4 +492,3 @@ namespace mlir
 
 /// Clear the static naming helper between pass invocations.
 void clearArithmeticNamingHelper();
-

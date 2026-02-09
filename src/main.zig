@@ -30,6 +30,10 @@ const MlirOptions = struct {
     debug_enabled: bool = false,
     canonicalize: bool = true,
     verify_z3: bool = true,
+    verify_mode: ?[]const u8 = null,
+    verify_calls: ?bool = null,
+    verify_state: ?bool = null,
+    verify_stats: bool = false,
     cpp_lowering_stub: bool = false,
     metrics: *Metrics = undefined,
 
@@ -113,6 +117,10 @@ pub fn main() !void {
     const canonicalize_mlir: bool = parsed.canonicalize_mlir;
     const analyze_state: bool = parsed.analyze_state;
     const verify_z3: bool = parsed.verify_z3;
+    const verify_mode: ?[]const u8 = parsed.verify_mode;
+    const verify_calls: ?bool = parsed.verify_calls;
+    const verify_state: ?bool = parsed.verify_state;
+    const verify_stats: bool = parsed.verify_stats;
     const cpp_lowering_stub: bool = parsed.cpp_lowering_stub;
     var debug_enabled: bool = parsed.debug;
     if (!debug_enabled) {
@@ -180,6 +188,10 @@ pub fn main() !void {
         .debug_enabled = debug_enabled,
         .canonicalize = canonicalize_mlir,
         .verify_z3 = verify_z3,
+        .verify_mode = verify_mode,
+        .verify_calls = verify_calls,
+        .verify_state = verify_state,
+        .verify_stats = verify_stats,
         .cpp_lowering_stub = cpp_lowering_stub,
         .metrics = &metrics,
     };
@@ -270,7 +282,13 @@ fn printUsage() !void {
     try stdout.print("\nAnalysis Options:\n", .{});
     try stdout.print("  --analyze-state        - Analyze storage reads/writes per function\n", .{});
     try stdout.print("  --verify               - Run Z3 verification on MLIR annotations (default)\n", .{});
+    try stdout.print("  --verify=basic|full    - Verification mode (basic annotations, or full assertions)\n", .{});
     try stdout.print("  --no-verify            - Disable Z3 verification\n", .{});
+    try stdout.print("  --verify-calls         - Enable call reasoning in Z3 encoder (default)\n", .{});
+    try stdout.print("  --no-verify-calls      - Disable call reasoning (treat calls as unknown)\n", .{});
+    try stdout.print("  --verify-state         - Enable storage/map state threading (default)\n", .{});
+    try stdout.print("  --no-verify-state      - Disable state threading (treat loads as unknown)\n", .{});
+    try stdout.print("  --verify-stats         - Print Z3 query stats summary\n", .{});
     try stdout.print("  --debug                - Enable compiler debug output\n", .{});
     try stdout.print("  --metrics              - Print compilation phase timing report\n", .{});
     try stdout.flush();
@@ -1343,6 +1361,21 @@ fn generateMlirOutput(allocator: std.mem.Allocator, ast_nodes: []lib.AstNode, fi
         const z3_verification = @import("z3/verification.zig");
         var verifier = try z3_verification.VerificationPass.init(mlir_allocator);
         defer verifier.deinit();
+
+        if (mlir_options.verify_mode) |mode| {
+            if (std.ascii.eqlIgnoreCase(mode, "full")) {
+                verifier.setVerifyMode(.Full);
+            } else {
+                verifier.setVerifyMode(.Basic);
+            }
+        }
+        if (mlir_options.verify_calls) |enabled| {
+            verifier.setVerifyCalls(enabled);
+        }
+        if (mlir_options.verify_state) |enabled| {
+            verifier.setVerifyState(enabled);
+        }
+        verifier.setVerifyStats(mlir_options.verify_stats);
 
         const verification_result = try verifier.runVerificationPass(final_module);
 
