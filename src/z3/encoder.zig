@@ -45,8 +45,14 @@ pub const Encoder = struct {
     global_map: std.StringHashMap(z3.Z3_ast),
     /// Map from global storage name to Z3 AST (for old() storage symbols)
     global_old_map: std.StringHashMap(z3.Z3_ast),
+    /// Snapshot of global storage symbols at function entry.
+    global_entry_map: std.StringHashMap(z3.Z3_ast),
     /// Map from environment symbol name (e.g. msg.sender) to Z3 AST.
     env_map: std.StringHashMap(z3.Z3_ast),
+    /// Scalar memref local state threaded during verification extraction.
+    memref_map: std.AutoHashMap(u64, z3.Z3_ast),
+    /// Scalar memref local state for old() mode.
+    memref_old_map: std.AutoHashMap(u64, z3.Z3_ast),
     /// Map from function symbol name to MLIR function operation.
     function_ops: std.StringHashMap(mlir.MlirOperation),
     /// Calls already materialized for current-state summary (avoid double state transitions).
@@ -76,7 +82,10 @@ pub const Encoder = struct {
             .value_bindings = std.HashMap(u64, z3.Z3_ast, std.hash_map.AutoContext(u64), std.hash_map.default_max_load_percentage).init(allocator),
             .global_map = std.StringHashMap(z3.Z3_ast).init(allocator),
             .global_old_map = std.StringHashMap(z3.Z3_ast).init(allocator),
+            .global_entry_map = std.StringHashMap(z3.Z3_ast).init(allocator),
             .env_map = std.StringHashMap(z3.Z3_ast).init(allocator),
+            .memref_map = std.AutoHashMap(u64, z3.Z3_ast).init(allocator),
+            .memref_old_map = std.AutoHashMap(u64, z3.Z3_ast).init(allocator),
             .function_ops = std.StringHashMap(mlir.MlirOperation).init(allocator),
             .materialized_calls = std.AutoHashMap(u64, void).init(allocator),
             .inline_function_stack = std.ArrayList([]u8){},
@@ -109,11 +118,20 @@ pub const Encoder = struct {
         }
         self.global_old_map.clearRetainingCapacity();
 
+        var entry_it = self.global_entry_map.iterator();
+        while (entry_it.next()) |entry| {
+            self.allocator.free(entry.key_ptr.*);
+        }
+        self.global_entry_map.clearRetainingCapacity();
+
         var env_it = self.env_map.iterator();
         while (env_it.next()) |entry| {
             self.allocator.free(entry.key_ptr.*);
         }
         self.env_map.clearRetainingCapacity();
+
+        self.memref_map.clearRetainingCapacity();
+        self.memref_old_map.clearRetainingCapacity();
 
         self.value_map.clearRetainingCapacity();
         self.value_map_old.clearRetainingCapacity();
@@ -140,11 +158,18 @@ pub const Encoder = struct {
             self.allocator.free(entry.key_ptr.*);
         }
         self.global_old_map.deinit();
+        var entry_it = self.global_entry_map.iterator();
+        while (entry_it.next()) |entry| {
+            self.allocator.free(entry.key_ptr.*);
+        }
+        self.global_entry_map.deinit();
         var env_it = self.env_map.iterator();
         while (env_it.next()) |entry| {
             self.allocator.free(entry.key_ptr.*);
         }
         self.env_map.deinit();
+        self.memref_map.deinit();
+        self.memref_old_map.deinit();
         var fn_it = self.function_ops.iterator();
         while (fn_it.next()) |entry| {
             self.allocator.free(entry.key_ptr.*);
@@ -316,7 +341,27 @@ pub const Encoder = struct {
         const symbol = try self.mkVariable(prefixed, sort);
         const key = try self.allocator.dupe(u8, name);
         try self.global_old_map.put(key, symbol);
+
+        // old(x) is the entry-state value of x; tie it to the entry snapshot.
+        const entry_symbol = try self.getOrCreateGlobalEntry(name, sort);
+        const eq = z3.Z3_mk_eq(self.context.ctx, symbol, entry_symbol);
+        self.addConstraint(eq);
         return symbol;
+    }
+
+    fn getOrCreateGlobalEntry(self: *Encoder, name: []const u8, sort: z3.Z3_sort) EncodeError!z3.Z3_ast {
+        if (self.global_entry_map.get(name)) |existing| {
+            return existing;
+        }
+
+        // If current state doesn't exist yet, create a dedicated entry symbol.
+        // getOrCreateGlobal() will reuse this symbol as the initial current state.
+        const entry_name = try std.fmt.allocPrint(self.allocator, "g_entry_{s}", .{name});
+        defer self.allocator.free(entry_name);
+        const entry_symbol = try self.mkVariable(entry_name, sort);
+        const key = try self.allocator.dupe(u8, name);
+        try self.global_entry_map.put(key, entry_symbol);
+        return entry_symbol;
     }
 
     fn mkSymbol(self: *Encoder, name: []const u8) EncodeError!z3.Z3_symbol {
@@ -358,6 +403,16 @@ pub const Encoder = struct {
         if (self.global_map.get(name)) |existing| {
             return existing;
         }
+
+        // If old(name) was encoded first, reuse the entry snapshot as the
+        // initial current-state value.
+        if (self.global_entry_map.get(name)) |entry_symbol| {
+            const key = try self.allocator.dupe(u8, name);
+            errdefer self.allocator.free(key);
+            try self.global_map.put(key, entry_symbol);
+            return entry_symbol;
+        }
+
         const key = try self.allocator.dupe(u8, name);
         errdefer self.allocator.free(key);
 
@@ -365,6 +420,10 @@ pub const Encoder = struct {
         defer self.allocator.free(global_name);
         const ast = try self.mkVariable(global_name, sort);
         try self.global_map.put(key, ast);
+
+        const entry_key = try self.allocator.dupe(u8, name);
+        errdefer self.allocator.free(entry_key);
+        try self.global_entry_map.put(entry_key, ast);
         return ast;
     }
 
@@ -787,6 +846,7 @@ pub const Encoder = struct {
         const var_name = try std.fmt.allocPrint(self.allocator, "v_{d}", .{value_id});
         defer self.allocator.free(var_name);
         const encoded = try self.mkVariable(var_name, sort);
+        try self.addBlockArgumentConstraints(mlir_value, encoded, mode);
 
         // cache the result
         // For block arguments, keep a single symbol shared across modes.
@@ -802,6 +862,70 @@ pub const Encoder = struct {
             if (candidate.ptr == value.ptr) return i;
         }
         return null;
+    }
+
+    fn addBlockArgumentConstraints(self: *Encoder, value: mlir.MlirValue, ast: z3.Z3_ast, mode: EncodeMode) EncodeError!void {
+        if (!mlir.mlirValueIsABlockArgument(value)) return;
+
+        const owner_block = mlir.mlirBlockArgumentGetOwner(value);
+        if (mlir.oraBlockIsNull(owner_block)) return;
+        const parent_op = mlir.mlirBlockGetParentOperation(owner_block);
+        if (mlir.oraOperationIsNull(parent_op)) return;
+
+        const op_name_ref = mlir.oraOperationGetName(parent_op);
+        defer @import("mlir_c_api").freeStringRef(op_name_ref);
+        const op_name = if (op_name_ref.data == null or op_name_ref.length == 0)
+            ""
+        else
+            op_name_ref.data[0..op_name_ref.length];
+
+        // scf.for body arg0 is induction variable. Constrain it by loop bounds.
+        if (std.mem.eql(u8, op_name, "scf.for")) {
+            const arg_no = mlir.mlirBlockArgumentGetArgNumber(value);
+            if (arg_no != 0) return;
+
+            const num_operands = mlir.oraOperationGetNumOperands(parent_op);
+            if (num_operands < 2) return;
+            const lower_bound = mlir.oraOperationGetOperand(parent_op, 0);
+            const upper_bound = mlir.oraOperationGetOperand(parent_op, 1);
+
+            const lb_ast = try self.encodeValueWithMode(lower_bound, mode);
+            const ub_ast = try self.encodeValueWithMode(upper_bound, mode);
+            const unsigned_cmp = self.getScfForUnsignedCmp(parent_op);
+            const lower_ok = if (unsigned_cmp)
+                z3.Z3_mk_bvuge(self.context.ctx, ast, lb_ast)
+            else
+                z3.Z3_mk_bvsge(self.context.ctx, ast, lb_ast);
+            const upper_ok = if (unsigned_cmp)
+                z3.Z3_mk_bvult(self.context.ctx, ast, ub_ast)
+            else
+                z3.Z3_mk_bvslt(self.context.ctx, ast, ub_ast);
+            self.addConstraint(lower_ok);
+            self.addConstraint(upper_ok);
+        }
+    }
+
+    fn getScfForUnsignedCmp(self: *Encoder, loop_op: mlir.MlirOperation) bool {
+        const printed = mlir.oraOperationPrintToString(loop_op);
+        defer if (printed.data != null) {
+            const mlir_c = @import("mlir_c_api");
+            mlir_c.freeStringRef(printed);
+        };
+
+        if (printed.data != null and printed.length > 0) {
+            const text = printed.data[0..printed.length];
+            if (std.mem.indexOf(u8, text, "unsignedCmp = true") != null) return true;
+            if (std.mem.indexOf(u8, text, "unsignedCmp = false") != null) return false;
+        }
+
+        const unsigned_attr = mlir.oraOperationGetAttributeByName(
+            loop_op,
+            mlir.oraStringRefCreate("unsignedCmp".ptr, "unsignedCmp".len),
+        );
+        if (mlir.oraAttributeIsNull(unsigned_attr)) return false;
+
+        _ = self;
+        return mlir.oraIntegerAttrGetValueSInt(unsigned_attr) != 0;
     }
 
     fn encodeOperationResultWithMode(
@@ -1279,12 +1403,45 @@ pub const Encoder = struct {
             }
         }
 
+        if (std.mem.eql(u8, op_name, "memref.store")) {
+            // Track scalar local memref state (rank-0 alloca pattern used by lowered locals).
+            if (operands.len < 2) return error.InvalidOperandCount;
+            const num_operands = mlir.oraOperationGetNumOperands(mlir_op);
+            if (num_operands == 2) {
+                const memref_value = mlir.oraOperationGetOperand(mlir_op, 1);
+                const memref_id = @intFromPtr(memref_value.ptr);
+                if (mode == .Old) {
+                    try self.memref_old_map.put(memref_id, operands[0]);
+                } else {
+                    try self.memref_map.put(memref_id, operands[0]);
+                }
+            }
+            return operands[0];
+        }
+
         if (std.mem.eql(u8, op_name, "memref.load")) {
             const num_results = mlir.oraOperationGetNumResults(mlir_op);
             if (num_results >= 1) {
                 const result_value = mlir.oraOperationGetResult(mlir_op, 0);
                 const result_type = mlir.oraValueGetType(result_value);
                 const result_sort = try self.encodeMLIRType(result_type);
+
+                // Scalar memref load: read from tracked local state if present.
+                const num_operands = mlir.oraOperationGetNumOperands(mlir_op);
+                if (num_operands == 1) {
+                    const memref_value = mlir.oraOperationGetOperand(mlir_op, 0);
+                    const memref_id = @intFromPtr(memref_value.ptr);
+                    const map = if (mode == .Old) &self.memref_old_map else &self.memref_map;
+                    if (map.get(memref_id)) |stored| {
+                        return stored;
+                    }
+
+                    const op_id_unknown = @intFromPtr(mlir_op.ptr);
+                    const fresh = try self.mkUndefValue(result_sort, "memref_load", op_id_unknown);
+                    try map.put(memref_id, fresh);
+                    return fresh;
+                }
+
                 const op_id = @intFromPtr(mlir_op.ptr);
                 return try self.mkUndefValue(result_sort, "memref_load", op_id);
             }

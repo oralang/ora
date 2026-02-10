@@ -33,3 +33,7 @@ new-site/
 docs/
 
 tmp/
+
+.zig-cache/
+zig-out/
+.zig-global-cache

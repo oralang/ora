@@ -125,6 +125,78 @@ test "encodeSLoad for map returns array sort" {
     try testing.expectEqual(@as(u32, z3.Z3_ARRAY_SORT), @as(u32, @intCast(sort_kind)));
 }
 
+test "memref store threads into later scalar load" {
+    var z3_ctx = try Context.init(testing.allocator);
+    defer z3_ctx.deinit();
+
+    var encoder = Encoder.init(&z3_ctx, testing.allocator);
+    defer encoder.deinit();
+
+    const mlir_ctx = mlir.oraContextCreate();
+    defer mlir.oraContextDestroy(mlir_ctx);
+
+    loadAllDialects(mlir_ctx);
+    _ = mlir.oraDialectRegister(mlir_ctx);
+
+    const loc = mlir.oraLocationUnknownGet(mlir_ctx);
+    const i256_ty = mlir.oraIntegerTypeCreate(mlir_ctx, 256);
+    const null_attr = mlir.MlirAttribute{ .ptr = null };
+    const memref_ty = mlir.oraMemRefTypeCreate(mlir_ctx, i256_ty, 0, null, null_attr, null_attr);
+
+    const alloca = mlir.oraMemrefAllocaOpCreate(mlir_ctx, loc, memref_ty);
+    const slot = mlir.oraOperationGetResult(alloca, 0);
+    _ = try encoder.encodeOperation(alloca);
+
+    const value_attr = mlir.oraIntegerAttrCreateI64FromType(i256_ty, 42);
+    const value_op = mlir.oraArithConstantOpCreate(mlir_ctx, loc, i256_ty, value_attr);
+    const value = mlir.oraOperationGetResult(value_op, 0);
+
+    const store = mlir.oraMemrefStoreOpCreate(mlir_ctx, loc, value, slot, null, 0);
+    _ = try encoder.encodeOperation(store);
+
+    const load = mlir.oraMemrefLoadOpCreate(mlir_ctx, loc, slot, null, 0, i256_ty);
+    const loaded = try encoder.encodeOperation(load);
+    const expected = try encoder.encodeValue(value);
+
+    var solver = try Solver.init(&z3_ctx, testing.allocator);
+    defer solver.deinit();
+    solver.assert(z3.Z3_mk_not(z3_ctx.ctx, z3.Z3_mk_eq(z3_ctx.ctx, loaded, expected)));
+    try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_FALSE), solver.check());
+}
+
+test "old global is linked to entry current state" {
+    var z3_ctx = try Context.init(testing.allocator);
+    defer z3_ctx.deinit();
+
+    var encoder = Encoder.init(&z3_ctx, testing.allocator);
+    defer encoder.deinit();
+
+    const mlir_ctx = mlir.oraContextCreate();
+    defer mlir.oraContextDestroy(mlir_ctx);
+    loadAllDialects(mlir_ctx);
+    _ = mlir.oraDialectRegister(mlir_ctx);
+
+    const loc = mlir.oraLocationUnknownGet(mlir_ctx);
+    const i256_ty = mlir.oraIntegerTypeCreate(mlir_ctx, 256);
+
+    const sload = mlir.oraSLoadOpCreate(mlir_ctx, loc, stringRef("total"), i256_ty);
+    const old_op = mlir.oraOldOpCreate(mlir_ctx, loc, mlir.oraOperationGetResult(sload, 0), i256_ty);
+
+    // Encode old(...) first to exercise old-before-current flow.
+    const old_value = try encoder.encodeOperation(old_op);
+    const current_value = try encoder.encodeOperation(sload);
+
+    const constraints = try encoder.takeConstraints(testing.allocator);
+    defer if (constraints.len > 0) testing.allocator.free(constraints);
+    try testing.expect(constraints.len > 0);
+
+    var solver = try Solver.init(&z3_ctx, testing.allocator);
+    defer solver.deinit();
+    for (constraints) |cst| solver.assert(cst);
+    solver.assert(z3.Z3_mk_not(z3_ctx.ctx, z3.Z3_mk_eq(z3_ctx.ctx, old_value, current_value)));
+    try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_FALSE), solver.check());
+}
+
 test "encodeValue errors on unsupported operation" {
     var z3_ctx = try Context.init(testing.allocator);
     defer z3_ctx.deinit();
@@ -185,6 +257,55 @@ test "ora.evm.caller shares symbol and is constrained non-zero" {
     const zero = z3.Z3_mk_unsigned_int64(z3_ctx.ctx, 0, caller_sort);
     solver_non_zero.assert(z3.Z3_mk_eq(z3_ctx.ctx, caller_a, zero));
     try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_FALSE), solver_non_zero.check());
+}
+
+test "scf.for induction variable is constrained by loop bounds" {
+    var z3_ctx = try Context.init(testing.allocator);
+    defer z3_ctx.deinit();
+
+    var encoder = Encoder.init(&z3_ctx, testing.allocator);
+    defer encoder.deinit();
+
+    const mlir_ctx = mlir.oraContextCreate();
+    defer mlir.oraContextDestroy(mlir_ctx);
+    loadAllDialects(mlir_ctx);
+    _ = mlir.oraDialectRegister(mlir_ctx);
+
+    const loc = mlir.oraLocationUnknownGet(mlir_ctx);
+    const index_ty = mlir.oraIndexTypeCreate(mlir_ctx);
+
+    const c0_attr = mlir.oraIntegerAttrCreateI64FromType(index_ty, 0);
+    const c5_attr = mlir.oraIntegerAttrCreateI64FromType(index_ty, 5);
+    const c1_attr = mlir.oraIntegerAttrCreateI64FromType(index_ty, 1);
+    const c0_op = mlir.oraArithConstantOpCreate(mlir_ctx, loc, index_ty, c0_attr);
+    const c5_op = mlir.oraArithConstantOpCreate(mlir_ctx, loc, index_ty, c5_attr);
+    const c1_op = mlir.oraArithConstantOpCreate(mlir_ctx, loc, index_ty, c1_attr);
+
+    const lb = mlir.oraOperationGetResult(c0_op, 0);
+    const ub = mlir.oraOperationGetResult(c5_op, 0);
+    const step = mlir.oraOperationGetResult(c1_op, 0);
+    const empty_init_args = [_]mlir.MlirValue{};
+    const for_op = mlir.oraScfForOpCreate(mlir_ctx, loc, lb, ub, step, &empty_init_args, empty_init_args.len, false);
+    const body = mlir.oraScfForOpGetBodyBlock(for_op);
+    const induction_var = mlir.oraBlockGetArgument(body, 0);
+
+    const iv_ast = try encoder.encodeValue(induction_var);
+    const lb_ast = try encoder.encodeValue(lb);
+    const ub_ast = try encoder.encodeValue(ub);
+
+    const constraints = try encoder.takeConstraints(testing.allocator);
+    defer if (constraints.len > 0) testing.allocator.free(constraints);
+    try testing.expect(constraints.len > 0);
+
+    var solver = try Solver.init(&z3_ctx, testing.allocator);
+    defer solver.deinit();
+    for (constraints) |cst| solver.assert(cst);
+
+    const below_lb = z3.Z3_mk_bvslt(z3_ctx.ctx, iv_ast, lb_ast);
+    const at_or_above_ub = z3.Z3_mk_bvsge(z3_ctx.ctx, iv_ast, ub_ast);
+    var range_violation = [_]z3.Z3_ast{ below_lb, at_or_above_ub };
+    solver.assert(z3.Z3_mk_or(z3_ctx.ctx, range_violation.len, &range_violation));
+    try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_FALSE), solver.check());
 }
 
 test "arith div emits safety obligation" {
