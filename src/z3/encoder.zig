@@ -45,6 +45,8 @@ pub const Encoder = struct {
     global_map: std.StringHashMap(z3.Z3_ast),
     /// Map from global storage name to Z3 AST (for old() storage symbols)
     global_old_map: std.StringHashMap(z3.Z3_ast),
+    /// Map from environment symbol name (e.g. msg.sender) to Z3 AST.
+    env_map: std.StringHashMap(z3.Z3_ast),
     /// Map from function symbol name to MLIR function operation.
     function_ops: std.StringHashMap(mlir.MlirOperation),
     /// Calls already materialized for current-state summary (avoid double state transitions).
@@ -74,6 +76,7 @@ pub const Encoder = struct {
             .value_bindings = std.HashMap(u64, z3.Z3_ast, std.hash_map.AutoContext(u64), std.hash_map.default_max_load_percentage).init(allocator),
             .global_map = std.StringHashMap(z3.Z3_ast).init(allocator),
             .global_old_map = std.StringHashMap(z3.Z3_ast).init(allocator),
+            .env_map = std.StringHashMap(z3.Z3_ast).init(allocator),
             .function_ops = std.StringHashMap(mlir.MlirOperation).init(allocator),
             .materialized_calls = std.AutoHashMap(u64, void).init(allocator),
             .inline_function_stack = std.ArrayList([]u8){},
@@ -106,6 +109,12 @@ pub const Encoder = struct {
         }
         self.global_old_map.clearRetainingCapacity();
 
+        var env_it = self.env_map.iterator();
+        while (env_it.next()) |entry| {
+            self.allocator.free(entry.key_ptr.*);
+        }
+        self.env_map.clearRetainingCapacity();
+
         self.value_map.clearRetainingCapacity();
         self.value_map_old.clearRetainingCapacity();
         self.value_bindings.clearRetainingCapacity();
@@ -131,6 +140,11 @@ pub const Encoder = struct {
             self.allocator.free(entry.key_ptr.*);
         }
         self.global_old_map.deinit();
+        var env_it = self.env_map.iterator();
+        while (env_it.next()) |entry| {
+            self.allocator.free(entry.key_ptr.*);
+        }
+        self.env_map.deinit();
         var fn_it = self.function_ops.iterator();
         while (fn_it.next()) |entry| {
             self.allocator.free(entry.key_ptr.*);
@@ -177,6 +191,16 @@ pub const Encoder = struct {
     fn copyInlineStackFrom(self: *Encoder, other: *const Encoder) !void {
         for (other.inline_function_stack.items) |fn_name| {
             try self.inline_function_stack.append(self.allocator, try self.allocator.dupe(u8, fn_name));
+        }
+    }
+
+    fn copyEnvMapFrom(self: *Encoder, other: *const Encoder) !void {
+        var it = other.env_map.iterator();
+        while (it.next()) |entry| {
+            const name = entry.key_ptr.*;
+            if (self.env_map.contains(name)) continue;
+            const key = try self.allocator.dupe(u8, name);
+            try self.env_map.put(key, entry.value_ptr.*);
         }
     }
 
@@ -342,6 +366,37 @@ pub const Encoder = struct {
         const ast = try self.mkVariable(global_name, sort);
         try self.global_map.put(key, ast);
         return ast;
+    }
+
+    fn getOrCreateEnv(self: *Encoder, name: []const u8, sort: z3.Z3_sort) EncodeError!z3.Z3_ast {
+        if (self.env_map.get(name)) |existing| {
+            const existing_sort = z3.Z3_get_sort(self.context.ctx, existing);
+            self.addEnvironmentConstraints(name, existing, existing_sort);
+            return existing;
+        }
+        const key = try self.allocator.dupe(u8, name);
+        errdefer self.allocator.free(key);
+
+        const env_name = try std.fmt.allocPrint(self.allocator, "env_{s}", .{name});
+        defer self.allocator.free(env_name);
+        const ast = try self.mkVariable(env_name, sort);
+        self.addEnvironmentConstraints(name, ast, sort);
+        try self.env_map.put(key, ast);
+        return ast;
+    }
+
+    fn addEnvironmentConstraints(self: *Encoder, name: []const u8, ast: z3.Z3_ast, sort: z3.Z3_sort) void {
+        // EVM caller is always a non-zero address in runtime semantics.
+        if (std.mem.eql(u8, name, "evm_caller")) {
+            self.addNonZeroBitVectorConstraint(ast, sort);
+        }
+    }
+
+    fn addNonZeroBitVectorConstraint(self: *Encoder, ast: z3.Z3_ast, sort: z3.Z3_sort) void {
+        if (z3.Z3_get_sort_kind(self.context.ctx, sort) != z3.Z3_BV_SORT) return;
+        const zero = z3.Z3_mk_unsigned_int64(self.context.ctx, 0, sort);
+        const non_zero = z3.Z3_mk_not(self.context.ctx, z3.Z3_mk_eq(self.context.ctx, ast, zero));
+        self.addConstraint(non_zero);
     }
 
     //===----------------------------------------------------------------------===//
@@ -1263,8 +1318,7 @@ pub const Encoder = struct {
                 const result_value = mlir.oraOperationGetResult(mlir_op, 0);
                 const result_type = mlir.oraValueGetType(result_value);
                 const result_sort = try self.encodeMLIRType(result_type);
-                const op_id = @intFromPtr(mlir_op.ptr);
-                return try self.mkUndefValue(result_sort, "evm_caller", op_id);
+                return try self.getOrCreateEnv("evm_caller", result_sort);
             }
         }
 
@@ -1871,6 +1925,7 @@ pub const Encoder = struct {
         summary_encoder.max_summary_inline_depth = self.max_summary_inline_depth;
         try summary_encoder.copyFunctionRegistryFrom(self);
         try summary_encoder.copyInlineStackFrom(self);
+        try summary_encoder.copyEnvMapFrom(self);
         try summary_encoder.pushInlineFunction(callee);
 
         for (slots) |slot| {

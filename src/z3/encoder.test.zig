@@ -146,6 +146,47 @@ test "encodeValue errors on unsupported operation" {
     _ = try encoder.encodeValue(result);
 }
 
+test "ora.evm.caller shares symbol and is constrained non-zero" {
+    var z3_ctx = try Context.init(testing.allocator);
+    defer z3_ctx.deinit();
+
+    var encoder = Encoder.init(&z3_ctx, testing.allocator);
+    defer encoder.deinit();
+
+    const mlir_ctx = mlir.oraContextCreate();
+    defer mlir.oraContextDestroy(mlir_ctx);
+    loadAllDialects(mlir_ctx);
+    _ = mlir.oraDialectRegister(mlir_ctx);
+
+    const loc = mlir.oraLocationUnknownGet(mlir_ctx);
+    const addr_ty = mlir.oraAddressTypeGet(mlir_ctx);
+    const caller_a_op = mlir.oraEvmOpCreate(mlir_ctx, loc, stringRef("ora.evm.caller"), null, 0, addr_ty);
+    const caller_b_op = mlir.oraEvmOpCreate(mlir_ctx, loc, stringRef("ora.evm.caller"), null, 0, addr_ty);
+
+    const caller_a = try encoder.encodeOperation(caller_a_op);
+    const caller_b = try encoder.encodeOperation(caller_b_op);
+    const constraints = try encoder.takeConstraints(testing.allocator);
+    defer if (constraints.len > 0) testing.allocator.free(constraints);
+    try testing.expect(constraints.len > 0);
+
+    // Repeated caller reads within one function should resolve to the same symbol.
+    var solver_same = try Solver.init(&z3_ctx, testing.allocator);
+    defer solver_same.deinit();
+    for (constraints) |cst| solver_same.assert(cst);
+    const neq = z3.Z3_mk_not(z3_ctx.ctx, z3.Z3_mk_eq(z3_ctx.ctx, caller_a, caller_b));
+    solver_same.assert(neq);
+    try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_FALSE), solver_same.check());
+
+    // Runtime semantics guarantee msg.sender/caller is non-zero.
+    var solver_non_zero = try Solver.init(&z3_ctx, testing.allocator);
+    defer solver_non_zero.deinit();
+    for (constraints) |cst| solver_non_zero.assert(cst);
+    const caller_sort = z3.Z3_get_sort(z3_ctx.ctx, caller_a);
+    const zero = z3.Z3_mk_unsigned_int64(z3_ctx.ctx, 0, caller_sort);
+    solver_non_zero.assert(z3.Z3_mk_eq(z3_ctx.ctx, caller_a, zero));
+    try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_FALSE), solver_non_zero.check());
+}
+
 test "arith div emits safety obligation" {
     var z3_ctx = try Context.init(testing.allocator);
     defer z3_ctx.deinit();
