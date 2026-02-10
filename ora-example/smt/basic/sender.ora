@@ -1,0 +1,31 @@
+contract C {
+    pub fn f() -> bool
+        ensures(std.msg.sender() == std.msg.sender())
+    {
+        let s1: NonZeroAddress = std.msg.sender();
+        let s2: NonZeroAddress = std.msg.sender();
+
+        if (s1 == s2) {
+            return true;
+        }
+
+        return false;
+    }
+
+    pub fn g(a: NonZeroAddress) -> bool
+        requires(a == std.msg.sender())
+        ensures(a == std.msg.sender())
+    {
+        let s: NonZeroAddress = std.msg.sender();
+
+        if (s == a) {
+            return true;
+        }
+
+        // This branch is intentionally unsafe if reachable.
+        // The requires-clause should make it unreachable.
+        let z: u256 = 0;
+        let q: u256 = 1 / z;
+        return q == 1;
+    }
+}
