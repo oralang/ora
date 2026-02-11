@@ -89,6 +89,7 @@ const sidebars: SidebarsConfig = {
       items: [
         'specs/type-system',
         'specs/abi',
+        'specs/bitfield',
       ],
     },
     'roadmap-to-asuka',

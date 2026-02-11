@@ -178,6 +178,10 @@ const config: Config = {
               label: 'ABI v0.1',
               to: '/docs/specs/abi',
             },
+            {
+              label: 'Bitfield Type',
+              to: '/docs/specs/bitfield',
+            },
           ],
         },
         {
