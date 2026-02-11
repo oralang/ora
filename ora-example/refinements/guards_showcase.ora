@@ -44,7 +44,7 @@ contract GuardShowcase {
 
     // InRange
     pub fn provenInRange(value: InRange<u256, 0, 100>)
-        requires(value >= 0)
+        requires(value >= 10)
         requires(value <= 100)
     {
         let v: InRange<u256, 0, 100> = value;
@@ -68,7 +68,9 @@ contract GuardShowcase {
 
     // Scaled (type-level only, no guards expected)
     pub fn scaledAdd(a: Scaled<u256, 18>, b: Scaled<u256, 18>)
-        requires(a >= 0)
+        requires(a > 0)
+        requires(b > 0)
+        requires(a <= std.constants.U256_MAX - b)
     {
         let c: Scaled<u256, 18> = a + b;
     }

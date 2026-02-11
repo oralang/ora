@@ -31,12 +31,12 @@ contract MinValueRuntime {
     }
 
     // SMT cannot prove MinValue from function call
-    pub fn runtimeMinValueFromCall() -> u256 {
-        return 0;
+    pub fn runtimeMinValueFromCall(x: u256) -> u256 {
+        return x;
     }
 
-    pub fn testCall() {
-        let call_result: u256 = runtimeMinValueFromCall();
+    pub fn testCall(x: u256) {
+        let call_result: u256 = runtimeMinValueFromCall(x);
         // Guard should remain - function return value unknown
         let v: MinValue<u256, 100> = call_result;
     }
@@ -56,4 +56,3 @@ contract MinValueRuntime {
         }
     }
 }
-

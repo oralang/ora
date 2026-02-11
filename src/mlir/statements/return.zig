@@ -18,14 +18,7 @@ pub fn lowerReturn(self: *const StatementLowerer, ret: *const lib.ast.Statements
     if (self.in_try_block and self.try_return_flag_memref != null) {
         const loc = self.fileLoc(ret.span);
         const return_flag_memref = self.try_return_flag_memref.?;
-
-        // insert ensures clause checks before recording the try-return
-        if (self.ensures_clauses.len > 0) {
-            try lowerEnsuresBeforeReturn(self, self.block, ret.span);
-        }
-
-        const true_val = helpers.createBoolConstant(self, true, loc);
-        helpers.storeToMemref(self, true_val, return_flag_memref, loc);
+        var final_value: ?c.MlirValue = null;
 
         if (ret.value) |value_expr| {
             if (self.try_return_value_memref) |return_value_memref| {
@@ -50,7 +43,20 @@ pub fn lowerReturn(self: *const StatementLowerer, ret: *const lib.ast.Statements
                     }
                     v = helpers.convertValueToType(self, v, element_type, ret.span, loc);
                 }
+                final_value = v;
+            }
+        }
 
+        // insert ensures clause checks before recording the try-return
+        if (self.ensures_clauses.len > 0) {
+            try lowerEnsuresBeforeReturn(self, self.block, ret.span, final_value);
+        }
+
+        const true_val = helpers.createBoolConstant(self, true, loc);
+        helpers.storeToMemref(self, true_val, return_flag_memref, loc);
+
+        if (self.try_return_value_memref) |return_value_memref| {
+            if (final_value) |v| {
                 helpers.storeToMemref(self, v, return_value_memref, loc);
             }
         }
@@ -61,16 +67,13 @@ pub fn lowerReturn(self: *const StatementLowerer, ret: *const lib.ast.Statements
     const loc = self.fileLoc(ret.span);
     log.debug("[lowerReturn] self.block ptr = {*}, self.expr_lowerer.block ptr = {*}\n", .{ self.block.ptr, self.expr_lowerer.block.ptr });
 
-    // insert ensures clause checks before return (postconditions must hold at every return point)
-    if (self.ensures_clauses.len > 0) {
-        try lowerEnsuresBeforeReturn(self, self.block, ret.span);
-    }
+    var final_value: ?c.MlirValue = null;
 
     if (ret.value) |e| {
         var v = self.expr_lowerer.lowerExpression(&e);
 
         // convert/wrap return value to match function return type if available
-        const final_value = if (self.current_function_return_type) |ret_type| blk: {
+        const converted_value = if (self.current_function_return_type) |ret_type| blk: {
             const is_error_union = if (self.current_function_return_type_info) |ti|
                 helpers.isErrorUnionTypeInfo(ti)
             else
@@ -92,8 +95,16 @@ pub fn lowerReturn(self: *const StatementLowerer, ret: *const lib.ast.Statements
             }
             break :blk v;
         } else v;
+        final_value = converted_value;
+    }
 
-        const op = self.ora_dialect.createFuncReturnWithValue(final_value, loc);
+    // insert ensures clause checks before return (postconditions must hold at every return point)
+    if (self.ensures_clauses.len > 0) {
+        try lowerEnsuresBeforeReturn(self, self.block, ret.span, final_value);
+    }
+
+    if (final_value) |v| {
+        const op = self.ora_dialect.createFuncReturnWithValue(v, loc);
         h.appendOp(self.block, op);
     } else {
         const op = self.ora_dialect.createFuncReturn(loc);
@@ -143,12 +154,16 @@ fn getExpressionSpan(expr: *const lib.ast.Expressions.ExprNode) lib.ast.SourceSp
 }
 
 /// Lower ensures clauses before a return statement
-pub fn lowerEnsuresBeforeReturn(self: *const StatementLowerer, block: c.MlirBlock, span: lib.ast.SourceSpan) LoweringError!void {
+pub fn lowerEnsuresBeforeReturn(self: *const StatementLowerer, block: c.MlirBlock, span: lib.ast.SourceSpan, return_value: ?c.MlirValue) LoweringError!void {
     _ = span; // Unused parameter
 
     for (self.ensures_clauses, 0..) |clause, i| {
+        var ensures_expr_lowerer = self.expr_lowerer.*;
+        ensures_expr_lowerer.block = block;
+        ensures_expr_lowerer.postcondition_return_value = return_value;
+
         // lower the ensures expression
-        const condition_value = self.expr_lowerer.lowerExpression(clause);
+        const condition_value = ensures_expr_lowerer.lowerExpression(clause);
 
         // create an assertion operation with comprehensive verification attributes
         // get the clause's span by switching on the expression type

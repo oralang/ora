@@ -132,6 +132,7 @@ contract FeatureMaximizer {
 
     fn helper_require_ensure(x: u256) -> u256
         requires (x > 0)
+        requires (x < std.constants.U256_MAX)
         ensures (x + 1 > x)
     {
         return x + 1;
@@ -150,5 +151,4 @@ contract FeatureMaximizer {
         return 0;
     }
 }
-
 
