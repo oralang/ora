@@ -343,8 +343,19 @@ pub fn insertExactDivisionGuard(
     const dividend_unwrapped = expr_helpers.unwrapRefinementValue(self.ctx, self.block, self.locations, self.refinement_base_cache, dividend, span);
     const divisor_unwrapped = expr_helpers.unwrapRefinementValue(self.ctx, self.block, self.locations, self.refinement_base_cache, divisor, span);
     const dividend_type = c.oraValueGetType(dividend_unwrapped);
+    const divisor_type = c.oraValueGetType(divisor_unwrapped);
+
+    const zero_divisor_op = self.ora_dialect.createArithConstant(0, divisor_type, loc);
+    h.appendOp(self.block, zero_divisor_op);
+    const zero_divisor = h.getResult(zero_divisor_op, 0);
+
+    // divisor != 0
+    const non_zero_op = c.oraArithCmpIOpCreate(self.ctx, loc, 1, divisor_unwrapped, zero_divisor);
+    h.appendOp(self.block, non_zero_op);
+    const non_zero = h.getResult(non_zero_op, 0);
 
     const mod_op = c.oraArithRemUIOpCreate(self.ctx, loc, dividend_unwrapped, divisor_unwrapped);
+    c.oraOperationSetAttributeByName(mod_op, h.strRef("ora.guard_internal"), h.stringAttr(self.ctx, "true"));
     h.appendOp(self.block, mod_op);
     const remainder = h.getResult(mod_op, 0);
 
@@ -354,7 +365,12 @@ pub fn insertExactDivisionGuard(
 
     const cmp_op = c.oraArithCmpIOpCreate(self.ctx, loc, 0, remainder, zero_const);
     h.appendOp(self.block, cmp_op);
-    const condition = h.getResult(cmp_op, 0);
+    const exact = h.getResult(cmp_op, 0);
+
+    // divisor != 0 && dividend % divisor == 0
+    const and_op = c.oraArithAndIOpCreate(self.ctx, loc, non_zero, exact);
+    h.appendOp(self.block, and_op);
+    const condition = h.getResult(and_op, 0);
 
     const msg = "Refinement violation: Exact<T> division must have no remainder";
     guard_helpers.emitRefinementGuard(

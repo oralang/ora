@@ -59,6 +59,10 @@ pub const ExpressionLowerer = struct {
     in_try_block: bool = false,
     current_function_return_type: ?c.MlirType = null,
     current_function_return_type_info: ?lib.ast.Types.TypeInfo = null,
+    current_function_name: ?[]const u8 = null,
+    // When lowering ensures just before return, identity self-calls should
+    // resolve to the current return SSA value rather than recursive func.call.
+    postcondition_return_value: ?c.MlirValue = null,
     refinement_base_cache: ?*std.AutoHashMap(usize, c.MlirValue) = null,
     refinement_guard_cache: ?*std.AutoHashMap(u128, void) = null,
     prefer_refinement_base_cache: bool = false,
@@ -78,6 +82,8 @@ pub const ExpressionLowerer = struct {
             .in_try_block = false,
             .current_function_return_type = null,
             .current_function_return_type_info = null,
+            .current_function_name = null,
+            .postcondition_return_value = null,
             .refinement_base_cache = null,
             .refinement_guard_cache = null,
             .prefer_refinement_base_cache = false,

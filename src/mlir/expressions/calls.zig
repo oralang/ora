@@ -68,6 +68,12 @@ pub fn processNormalCall(
         else => {},
     }
 
+    if (function_name) |name| {
+        if (rewriteIdentitySelfCall(self, name, call)) |ret_value| {
+            return ret_value;
+        }
+    }
+
     // lower arguments and convert to match parameter types if needed
     for (call.arguments, 0..) |arg, i| {
         var arg_value = self.lowerExpression(arg);
@@ -105,6 +111,53 @@ pub fn processNormalCall(
             return self.createErrorPlaceholder(call.span, "Unsupported callee type");
         },
     }
+}
+
+fn rewriteIdentitySelfCall(
+    self: *const ExpressionLowerer,
+    function_name: []const u8,
+    call: *const lib.ast.Expressions.CallExpr,
+) ?c.MlirValue {
+    const return_value = self.postcondition_return_value orelse return null;
+    const current_name = self.current_function_name orelse resolveCurrentFunctionName(self) orelse return null;
+    if (!std.mem.eql(u8, function_name, current_name)) return null;
+
+    const param_map = self.param_map orelse return null;
+    if (call.arguments.len != param_map.names.count()) return null;
+
+    // Only rewrite identity self-calls: f(p0, p1, ..., pn) where each
+    // argument is the corresponding parameter in order.
+    for (call.arguments, 0..) |arg, i| {
+        switch (arg.*) {
+            .Identifier => |ident| {
+                const param_index = param_map.getParamIndex(ident.name) orelse return null;
+                if (param_index != i) return null;
+            },
+            else => return null,
+        }
+    }
+
+    return return_value;
+}
+
+fn resolveCurrentFunctionName(self: *const ExpressionLowerer) ?[]const u8 {
+    var current_block = self.block;
+    while (!c.mlirBlockIsNull(current_block)) {
+        const parent_op = c.mlirBlockGetParentOperation(current_block);
+        if (c.oraOperationIsNull(parent_op)) return null;
+
+        const parent_name_ref = c.oraOperationGetName(parent_op);
+        if (parent_name_ref.data != null and std.mem.eql(u8, parent_name_ref.data[0..parent_name_ref.length], "func.func")) {
+            const sym_name_attr = c.oraOperationGetAttributeByName(parent_op, h.strRef("sym_name"));
+            if (c.oraAttributeIsNull(sym_name_attr)) return null;
+            const sym_name_ref = c.oraStringAttrGetValue(sym_name_attr);
+            if (sym_name_ref.data == null or sym_name_ref.length == 0) return null;
+            return sym_name_ref.data[0..sym_name_ref.length];
+        }
+
+        current_block = c.mlirOperationGetBlock(parent_op);
+    }
+    return null;
 }
 
 /// Lower builtin function call

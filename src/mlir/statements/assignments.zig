@@ -517,6 +517,48 @@ pub fn lowerIndexAssignment(self: *const StatementLowerer, index_expr: *const li
             1,
         );
         h.appendOp(self.block, store_op);
+    } else if (c.oraTypeIsAShaped(target_type)) {
+        // Tensor-shaped index assignment (e.g., storage arrays lowered as tensors):
+        //   %updated = tensor.insert %value into %target[%idx]
+        //   ora.sstore %updated, "name"  (when target is a storage identifier)
+        const index_index = self.expr_lowerer.convertIndexToIndexType(index_val, index_expr.span);
+        const element_type = c.oraShapedTypeGetElementType(target_type);
+        const inserted_value = self.expr_lowerer.convertToType(value, element_type, index_expr.span);
+
+        const insert_operands = [_]c.MlirValue{ inserted_value, target, index_index };
+        const insert_results = [_]c.MlirType{target_type};
+        const tensor_insert = h.createOp(
+            self.ctx,
+            loc,
+            "tensor.insert",
+            &insert_operands,
+            &insert_results,
+            &[_]c.MlirNamedAttribute{},
+            0,
+            false,
+        );
+        h.appendOp(self.block, tensor_insert);
+        const updated_tensor = h.getResult(tensor_insert, 0);
+
+        // If assigning into a storage variable (e.g., numbers[i] = v), persist update.
+        if (index_expr.target.* == .Identifier) {
+            const ident = index_expr.target.Identifier;
+            if (self.storage_map) |sm| {
+                if (sm.hasStorageVariable(ident.name)) {
+                    const sstore_op = self.memory_manager.createStorageStore(updated_tensor, ident.name, loc);
+                    h.appendOp(self.block, sstore_op);
+                    return;
+                }
+            }
+
+            // Fallback for non-storage tensor locals represented as SSA values.
+            if (self.local_var_map) |lvm| {
+                lvm.addLocalVar(ident.name, updated_tensor) catch return LoweringError.OutOfMemory;
+            }
+            if (self.symbol_table) |st| {
+                st.updateSymbolValue(ident.name, updated_tensor) catch {};
+            }
+        }
     } else {
         // map indexing or other complex indexing operations
         // use ora.map_store directly (registered operation)
