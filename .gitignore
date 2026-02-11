@@ -31,5 +31,6 @@ sensei-ir-main/
 
 new-site/
 docs/
+!website/docs/
 
 tmp/
