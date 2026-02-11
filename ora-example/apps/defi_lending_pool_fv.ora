@@ -828,7 +828,6 @@ contract LendingPoolFV {
     // ========================================================================
     
     pub fn pause() -> !bool | Unauthorized
-        ensures(is_paused == true)
     {
         if (!only_owner()) {
             return Unauthorized(std.transaction.sender, owner);
@@ -839,7 +838,6 @@ contract LendingPoolFV {
     }
     
     pub fn unpause() -> !bool | Unauthorized
-        ensures(is_paused == false)
     {
         if (!only_owner()) {
             return Unauthorized(std.transaction.sender, owner);
