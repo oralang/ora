@@ -9,6 +9,8 @@
 // ============================================================================
 
 contract MaxValueRuntime {
+    storage var stored_value: u256;
+
     // SMT cannot prove MaxValue - no requires clause
     pub fn runtimeMaxValue100(value: MaxValue<u256, 100>) {
         // Guard should remain - no requires clause to prove constraint
@@ -25,7 +27,6 @@ contract MaxValueRuntime {
 
     // SMT cannot prove MaxValue from storage
     pub fn runtimeMaxValueFromStorage() {
-        storage var stored_value: u256;
         // Guard should remain - storage value unknown at compile time
         let v: MaxValue<u256, 100> = stored_value;
     }
@@ -56,4 +57,3 @@ contract MaxValueRuntime {
         }
     }
 }
-

@@ -13,6 +13,7 @@
 #include "mlir/IR/SymbolTable.h"
 #include "mlir/Pass/Pass.h"
 #include "llvm/ADT/SmallVector.h"
+#include "llvm/ADT/STLExtras.h"
 
 #include <string>
 
@@ -386,6 +387,15 @@ namespace mlir
                             return;
 
                         auto calleeType = calleeFunc.getFunctionType();
+                        // sir.icall is word-based: args/results must be sir.u256.
+                        // Avoid retyping calls to raw callee signatures that use
+                        // non-word types (e.g. i256/ptr), which creates invalid IR.
+                        bool calleeAllU256 = llvm::all_of(
+                            calleeType.getResults(),
+                            [](Type t) { return isa<sir::U256Type>(t); });
+                        if (!calleeAllU256)
+                            return;
+
                         if (calleeType.getNumResults() == icall.getNumResults())
                             return;
 

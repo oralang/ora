@@ -639,14 +639,38 @@ LogicalResult ConvertQuantifiedOp::matchAndRewrite(
     ConversionPatternRewriter &rewriter) const
 {
     (void)adaptor;
-    if (!op.getResult().use_empty())
+    auto *typeConverter = getTypeConverter();
+    if (!typeConverter)
+        return rewriter.notifyMatchFailure(op, "missing type converter");
+
+    Type resultType = op.getResult().getType();
+    if (auto converted = typeConverter->convertType(resultType))
+        resultType = converted;
+
+    // Quantifiers are specification-only constructs. Runtime SIR has no SMT
+    // domain, so erase the operator by replacing it with a trivially true value.
+    if (llvm::isa<sir::U256Type>(resultType))
     {
-        return rewriter.notifyMatchFailure(
-            op,
-            "ora.quantified is verification-only and cannot be lowered to runtime SIR");
+        auto i256Type = mlir::IntegerType::get(rewriter.getContext(), 256, mlir::IntegerType::Unsigned);
+        auto oneAttr = mlir::IntegerAttr::get(i256Type, 1);
+        Value one = rewriter.create<sir::ConstOp>(op.getLoc(), sir::U256Type::get(rewriter.getContext()), oneAttr);
+        rewriter.replaceOp(op, ValueRange{one});
+        return success();
     }
-    rewriter.eraseOp(op);
-    return success();
+
+    if (auto intTy = llvm::dyn_cast<mlir::IntegerType>(resultType))
+    {
+        if (intTy.getWidth() == 1)
+        {
+            rewriter.replaceOpWithNewOp<mlir::arith::ConstantOp>(op, resultType, rewriter.getBoolAttr(true));
+            return success();
+        }
+        auto oneAttr = rewriter.getIntegerAttr(resultType, 1);
+        rewriter.replaceOpWithNewOp<mlir::arith::ConstantOp>(op, resultType, oneAttr);
+        return success();
+    }
+
+    return rewriter.notifyMatchFailure(op, "unsupported converted result type for ora.quantified");
 }
 
 // -----------------------------------------------------------------------------
@@ -822,6 +846,9 @@ LogicalResult ConvertArithAddIOp::matchAndRewrite(
     typename mlir::arith::AddIOp::Adaptor adaptor,
     ConversionPatternRewriter &rewriter) const
 {
+    auto loc = op.getLoc();
+    auto u256Type = sir::U256Type::get(op.getContext());
+
     auto *typeConverter = getTypeConverter();
     if (!typeConverter)
     {
@@ -833,8 +860,13 @@ LogicalResult ConvertArithAddIOp::matchAndRewrite(
         return rewriter.notifyMatchFailure(op, "unable to convert addi result type");
     }
 
-    auto newOp = rewriter.create<sir::AddOp>(op.getLoc(), resultType, adaptor.getLhs(), adaptor.getRhs());
-    rewriter.replaceOp(op, newOp.getResult());
+    Value lhs = ensureU256(rewriter, loc, adaptor.getLhs());
+    Value rhs = ensureU256(rewriter, loc, adaptor.getRhs());
+    Value result = rewriter.create<sir::AddOp>(loc, u256Type, lhs, rhs).getResult();
+    if (resultType != u256Type)
+        result = rewriter.create<sir::BitcastOp>(loc, resultType, result).getResult();
+
+    rewriter.replaceOp(op, result);
     return success();
 }
 
@@ -846,6 +878,9 @@ LogicalResult ConvertArithSubIOp::matchAndRewrite(
     typename mlir::arith::SubIOp::Adaptor adaptor,
     ConversionPatternRewriter &rewriter) const
 {
+    auto loc = op.getLoc();
+    auto u256Type = sir::U256Type::get(op.getContext());
+
     auto *typeConverter = getTypeConverter();
     if (!typeConverter)
     {
@@ -857,8 +892,13 @@ LogicalResult ConvertArithSubIOp::matchAndRewrite(
         return rewriter.notifyMatchFailure(op, "unable to convert subi result type");
     }
 
-    auto newOp = rewriter.create<sir::SubOp>(op.getLoc(), resultType, adaptor.getLhs(), adaptor.getRhs());
-    rewriter.replaceOp(op, newOp.getResult());
+    Value lhs = ensureU256(rewriter, loc, adaptor.getLhs());
+    Value rhs = ensureU256(rewriter, loc, adaptor.getRhs());
+    Value result = rewriter.create<sir::SubOp>(loc, u256Type, lhs, rhs).getResult();
+    if (resultType != u256Type)
+        result = rewriter.create<sir::BitcastOp>(loc, resultType, result).getResult();
+
+    rewriter.replaceOp(op, result);
     return success();
 }
 
@@ -870,6 +910,9 @@ LogicalResult ConvertArithMulIOp::matchAndRewrite(
     typename mlir::arith::MulIOp::Adaptor adaptor,
     ConversionPatternRewriter &rewriter) const
 {
+    auto loc = op.getLoc();
+    auto u256Type = sir::U256Type::get(op.getContext());
+
     auto *typeConverter = getTypeConverter();
     if (!typeConverter)
     {
@@ -881,8 +924,13 @@ LogicalResult ConvertArithMulIOp::matchAndRewrite(
         return rewriter.notifyMatchFailure(op, "unable to convert muli result type");
     }
 
-    auto newOp = rewriter.create<sir::MulOp>(op.getLoc(), resultType, adaptor.getLhs(), adaptor.getRhs());
-    rewriter.replaceOp(op, newOp.getResult());
+    Value lhs = ensureU256(rewriter, loc, adaptor.getLhs());
+    Value rhs = ensureU256(rewriter, loc, adaptor.getRhs());
+    Value result = rewriter.create<sir::MulOp>(loc, u256Type, lhs, rhs).getResult();
+    if (resultType != u256Type)
+        result = rewriter.create<sir::BitcastOp>(loc, resultType, result).getResult();
+
+    rewriter.replaceOp(op, result);
     return success();
 }
 
@@ -894,6 +942,9 @@ LogicalResult ConvertArithDivUIOp::matchAndRewrite(
     typename mlir::arith::DivUIOp::Adaptor adaptor,
     ConversionPatternRewriter &rewriter) const
 {
+    auto loc = op.getLoc();
+    auto u256Type = sir::U256Type::get(op.getContext());
+
     auto *typeConverter = getTypeConverter();
     if (!typeConverter)
     {
@@ -905,8 +956,13 @@ LogicalResult ConvertArithDivUIOp::matchAndRewrite(
         return rewriter.notifyMatchFailure(op, "unable to convert divui result type");
     }
 
-    auto newOp = rewriter.create<sir::DivOp>(op.getLoc(), resultType, adaptor.getLhs(), adaptor.getRhs());
-    rewriter.replaceOp(op, newOp.getResult());
+    Value lhs = ensureU256(rewriter, loc, adaptor.getLhs());
+    Value rhs = ensureU256(rewriter, loc, adaptor.getRhs());
+    Value result = rewriter.create<sir::DivOp>(loc, u256Type, lhs, rhs).getResult();
+    if (resultType != u256Type)
+        result = rewriter.create<sir::BitcastOp>(loc, resultType, result).getResult();
+
+    rewriter.replaceOp(op, result);
     return success();
 }
 
@@ -918,6 +974,9 @@ LogicalResult ConvertArithRemUIOp::matchAndRewrite(
     typename mlir::arith::RemUIOp::Adaptor adaptor,
     ConversionPatternRewriter &rewriter) const
 {
+    auto loc = op.getLoc();
+    auto u256Type = sir::U256Type::get(op.getContext());
+
     auto *typeConverter = getTypeConverter();
     if (!typeConverter)
     {
@@ -929,8 +988,13 @@ LogicalResult ConvertArithRemUIOp::matchAndRewrite(
         return rewriter.notifyMatchFailure(op, "unable to convert remui result type");
     }
 
-    auto newOp = rewriter.create<sir::ModOp>(op.getLoc(), resultType, adaptor.getLhs(), adaptor.getRhs());
-    rewriter.replaceOp(op, newOp.getResult());
+    Value lhs = ensureU256(rewriter, loc, adaptor.getLhs());
+    Value rhs = ensureU256(rewriter, loc, adaptor.getRhs());
+    Value result = rewriter.create<sir::ModOp>(loc, u256Type, lhs, rhs).getResult();
+    if (resultType != u256Type)
+        result = rewriter.create<sir::BitcastOp>(loc, resultType, result).getResult();
+
+    rewriter.replaceOp(op, result);
     return success();
 }
 
@@ -942,6 +1006,9 @@ LogicalResult ConvertArithDivSIOp::matchAndRewrite(
     typename mlir::arith::DivSIOp::Adaptor adaptor,
     ConversionPatternRewriter &rewriter) const
 {
+    auto loc = op.getLoc();
+    auto u256Type = sir::U256Type::get(op.getContext());
+
     auto *typeConverter = getTypeConverter();
     if (!typeConverter)
     {
@@ -953,8 +1020,13 @@ LogicalResult ConvertArithDivSIOp::matchAndRewrite(
         return rewriter.notifyMatchFailure(op, "unable to convert divsi result type");
     }
 
-    auto newOp = rewriter.create<sir::SDivOp>(op.getLoc(), resultType, adaptor.getLhs(), adaptor.getRhs());
-    rewriter.replaceOp(op, newOp.getResult());
+    Value lhs = ensureU256(rewriter, loc, adaptor.getLhs());
+    Value rhs = ensureU256(rewriter, loc, adaptor.getRhs());
+    Value result = rewriter.create<sir::SDivOp>(loc, u256Type, lhs, rhs).getResult();
+    if (resultType != u256Type)
+        result = rewriter.create<sir::BitcastOp>(loc, resultType, result).getResult();
+
+    rewriter.replaceOp(op, result);
     return success();
 }
 
@@ -966,6 +1038,9 @@ LogicalResult ConvertArithRemSIOp::matchAndRewrite(
     typename mlir::arith::RemSIOp::Adaptor adaptor,
     ConversionPatternRewriter &rewriter) const
 {
+    auto loc = op.getLoc();
+    auto u256Type = sir::U256Type::get(op.getContext());
+
     auto *typeConverter = getTypeConverter();
     if (!typeConverter)
         return rewriter.notifyMatchFailure(op, "missing type converter");
@@ -973,8 +1048,13 @@ LogicalResult ConvertArithRemSIOp::matchAndRewrite(
     if (!resultType)
         return rewriter.notifyMatchFailure(op, "unable to convert remsi result type");
 
-    auto newOp = rewriter.create<sir::SModOp>(op.getLoc(), resultType, adaptor.getLhs(), adaptor.getRhs());
-    rewriter.replaceOp(op, newOp.getResult());
+    Value lhs = ensureU256(rewriter, loc, adaptor.getLhs());
+    Value rhs = ensureU256(rewriter, loc, adaptor.getRhs());
+    Value result = rewriter.create<sir::SModOp>(loc, u256Type, lhs, rhs).getResult();
+    if (resultType != u256Type)
+        result = rewriter.create<sir::BitcastOp>(loc, resultType, result).getResult();
+
+    rewriter.replaceOp(op, result);
     return success();
 }
 
@@ -986,6 +1066,9 @@ LogicalResult ConvertArithAndIOp::matchAndRewrite(
     typename mlir::arith::AndIOp::Adaptor adaptor,
     ConversionPatternRewriter &rewriter) const
 {
+    auto loc = op.getLoc();
+    auto u256Type = sir::U256Type::get(op.getContext());
+
     auto *typeConverter = getTypeConverter();
     if (!typeConverter)
     {
@@ -997,8 +1080,13 @@ LogicalResult ConvertArithAndIOp::matchAndRewrite(
         return rewriter.notifyMatchFailure(op, "unable to convert andi result type");
     }
 
-    auto newOp = rewriter.create<sir::AndOp>(op.getLoc(), resultType, adaptor.getLhs(), adaptor.getRhs());
-    rewriter.replaceOp(op, newOp.getResult());
+    Value lhs = ensureU256(rewriter, loc, adaptor.getLhs());
+    Value rhs = ensureU256(rewriter, loc, adaptor.getRhs());
+    Value result = rewriter.create<sir::AndOp>(loc, u256Type, lhs, rhs).getResult();
+    if (resultType != u256Type)
+        result = rewriter.create<sir::BitcastOp>(loc, resultType, result).getResult();
+
+    rewriter.replaceOp(op, result);
     return success();
 }
 
@@ -1010,6 +1098,9 @@ LogicalResult ConvertArithOrIOp::matchAndRewrite(
     typename mlir::arith::OrIOp::Adaptor adaptor,
     ConversionPatternRewriter &rewriter) const
 {
+    auto loc = op.getLoc();
+    auto u256Type = sir::U256Type::get(op.getContext());
+
     auto *typeConverter = getTypeConverter();
     if (!typeConverter)
     {
@@ -1021,8 +1112,13 @@ LogicalResult ConvertArithOrIOp::matchAndRewrite(
         return rewriter.notifyMatchFailure(op, "unable to convert ori result type");
     }
 
-    auto newOp = rewriter.create<sir::OrOp>(op.getLoc(), resultType, adaptor.getLhs(), adaptor.getRhs());
-    rewriter.replaceOp(op, newOp.getResult());
+    Value lhs = ensureU256(rewriter, loc, adaptor.getLhs());
+    Value rhs = ensureU256(rewriter, loc, adaptor.getRhs());
+    Value result = rewriter.create<sir::OrOp>(loc, u256Type, lhs, rhs).getResult();
+    if (resultType != u256Type)
+        result = rewriter.create<sir::BitcastOp>(loc, resultType, result).getResult();
+
+    rewriter.replaceOp(op, result);
     return success();
 }
 
@@ -1034,6 +1130,9 @@ LogicalResult ConvertArithXOrIOp::matchAndRewrite(
     typename mlir::arith::XOrIOp::Adaptor adaptor,
     ConversionPatternRewriter &rewriter) const
 {
+    auto loc = op.getLoc();
+    auto u256Type = sir::U256Type::get(op.getContext());
+
     auto *typeConverter = getTypeConverter();
     if (!typeConverter)
     {
@@ -1045,8 +1144,13 @@ LogicalResult ConvertArithXOrIOp::matchAndRewrite(
         return rewriter.notifyMatchFailure(op, "unable to convert xori result type");
     }
 
-    auto newOp = rewriter.create<sir::XorOp>(op.getLoc(), resultType, adaptor.getLhs(), adaptor.getRhs());
-    rewriter.replaceOp(op, newOp.getResult());
+    Value lhs = ensureU256(rewriter, loc, adaptor.getLhs());
+    Value rhs = ensureU256(rewriter, loc, adaptor.getRhs());
+    Value result = rewriter.create<sir::XorOp>(loc, u256Type, lhs, rhs).getResult();
+    if (resultType != u256Type)
+        result = rewriter.create<sir::BitcastOp>(loc, resultType, result).getResult();
+
+    rewriter.replaceOp(op, result);
     return success();
 }
 
@@ -1179,12 +1283,19 @@ LogicalResult ConvertArithSelectOp::matchAndRewrite(
     }
 
     auto loc = op.getLoc();
+    auto u256Type = sir::U256Type::get(op.getContext());
     Value cond = ensureU256(rewriter, loc, adaptor.getCondition());
     Value trueVal = ensureU256(rewriter, loc, adaptor.getTrueValue());
     Value falseVal = ensureU256(rewriter, loc, adaptor.getFalseValue());
 
-    auto newOp = rewriter.create<sir::SelectOp>(loc, resultType, cond, trueVal, falseVal);
-    rewriter.replaceOp(op, newOp.getResult());
+    // SIR select is strictly u256-typed. Cast the selected word back when the
+    // converted target type is narrower/non-u256.
+    Value selected = rewriter.create<sir::SelectOp>(loc, u256Type, cond, trueVal, falseVal).getResult();
+    if (resultType != u256Type)
+    {
+        selected = rewriter.create<sir::BitcastOp>(loc, resultType, selected).getResult();
+    }
+    rewriter.replaceOp(op, selected);
     return success();
 }
 

@@ -5,6 +5,8 @@
 // ============================================================================
 
 contract CalldataParameters {
+    storage var storage_x: u256;
+
     // Function parameters are calldata region
     pub fn testCalldataParams(x: u256, flag: bool, addr: address, name: string, data: bytes) {
         // All parameters are calldata region (read-only)
@@ -16,7 +18,6 @@ contract CalldataParameters {
         
         // Can copy calldata to other regions
         memory var mem_x: u256 = x; // Calldata -> Memory
-        storage var storage_x: u256;
         storage_x = x; // Calldata -> Storage (via stack)
     }
 
@@ -43,4 +44,3 @@ contract CalldataParameters {
         return x; // Calldata -> Stack -> Return
     }
 }
-
