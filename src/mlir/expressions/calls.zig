@@ -83,9 +83,14 @@ pub fn processNormalCall(
             if (i < params.len) {
                 const expected_param_type = params[i];
                 const arg_type = c.oraValueGetType(arg_value);
+                const arg_ref_base = c.oraRefinementTypeGetBaseType(arg_type);
+                const expected_ref_base = c.oraRefinementTypeGetBaseType(expected_param_type);
 
                 // convert if types don't match (handles subtyping conversions like u8 -> u256)
-                if (!c.oraTypeEqual(arg_type, expected_param_type)) {
+                const needs_refinement_bridge =
+                    (arg_ref_base.ptr != null and c.oraTypeEqual(arg_ref_base, expected_param_type)) or
+                    (expected_ref_base.ptr != null and c.oraTypeEqual(expected_ref_base, arg_type));
+                if (!c.oraTypeEqual(arg_type, expected_param_type) or needs_refinement_bridge) {
                     const error_handling = @import("../error_handling.zig");
                     const arg_span = error_handling.getSpanFromExpression(arg);
                     arg_value = self.convertToType(arg_value, expected_param_type, arg_span);
@@ -99,9 +104,20 @@ pub fn processNormalCall(
         };
     }
 
+    // If type resolution already classified this as an error constructor call,
+    // do not lower it as func.call (there is no func.func symbol for errors).
+    if (call.type_info.category == .Error) {
+        if (getCalleeName(call.callee)) |error_name| {
+            return lowerErrorConstructorCall(self, error_name, call.span);
+        }
+    }
+
     switch (call.callee.*) {
         .Identifier => |ident| {
-            return createDirectFunctionCall(self, ident.name, args.items, call.span);
+            if (isErrorConstructorCallee(self, ident.name)) {
+                return lowerErrorConstructorCall(self, ident.name, call.span);
+            }
+            return createDirectFunctionCall(self, ident.name, args.items, call.span, call.type_info);
         },
         .FieldAccess => |field_access| {
             return createMethodCall(self, field_access, args.items, call.span);
@@ -111,6 +127,52 @@ pub fn processNormalCall(
             return self.createErrorPlaceholder(call.span, "Unsupported callee type");
         },
     }
+}
+
+fn getCalleeName(callee: *const lib.ast.Expressions.ExprNode) ?[]const u8 {
+    return switch (callee.*) {
+        .Identifier => |ident| ident.name,
+        .FieldAccess => |field_access| field_access.field,
+        else => null,
+    };
+}
+
+fn isErrorConstructorCallee(
+    self: *const ExpressionLowerer,
+    function_name: []const u8,
+) bool {
+    const sym_table = self.symbol_table orelse return false;
+
+    // Prefer real functions when names collide.
+    if (sym_table.lookupFunction(function_name) != null) return false;
+
+    if (sym_table.lookupSymbol(function_name)) |symbol| {
+        return symbol.symbol_kind == .Error;
+    }
+
+    return sym_table.getErrorId(function_name) != null;
+}
+
+fn lowerErrorConstructorCall(
+    self: *const ExpressionLowerer,
+    error_name: []const u8,
+    span: lib.ast.SourceSpan,
+) c.MlirValue {
+    const result_type = c.oraIntegerTypeCreate(self.ctx, constants.DEFAULT_INTEGER_BITS);
+    const error_code: i64 = if (self.symbol_table) |sym_table|
+        @intCast(sym_table.getErrorId(error_name) orelse 1)
+    else
+        1;
+    const error_id = h.identifier(self.ctx, "ora.error");
+    const error_name_attr = h.stringAttr(self.ctx, error_name);
+
+    const attrs = [_]c.MlirNamedAttribute{
+        c.oraNamedAttributeGet(error_id, error_name_attr),
+    };
+
+    const op = self.ora_dialect.createArithConstantWithAttrs(error_code, result_type, &attrs, self.fileLoc(span));
+    h.appendOp(self.block, op);
+    return h.getResult(op, 0);
 }
 
 fn rewriteIdentitySelfCall(
@@ -196,20 +258,40 @@ pub fn createDirectFunctionCall(
     function_name: []const u8,
     args: []c.MlirValue,
     span: lib.ast.SourceSpan,
+    call_type_info: ?lib.ast.Types.TypeInfo,
 ) c.MlirValue {
     var result_types_buf: [1]c.MlirType = undefined;
     var result_types: []const c.MlirType = &[_]c.MlirType{};
+    var callee_returns_void = false;
 
     if (self.symbol_table) |sym_table| {
         if (sym_table.lookupFunction(function_name)) |func_symbol| {
-            if (!c.oraTypeIsNull(func_symbol.return_type)) {
+            if (!c.oraTypeIsNull(func_symbol.return_type) and !c.oraTypeIsANone(func_symbol.return_type)) {
                 result_types_buf[0] = func_symbol.return_type;
                 result_types = result_types_buf[0..1];
+            } else {
+                callee_returns_void = true;
             }
         }
     }
 
-    if (result_types.len == 0) {
+    if (result_types.len == 0 and !callee_returns_void) {
+        if (call_type_info) |ti| {
+            if (ti.category == .Void) {
+                callee_returns_void = true;
+            } else {
+                const inferred_ty = self.type_mapper.toMlirType(ti);
+                if (!c.oraTypeIsNull(inferred_ty) and !c.oraTypeIsANone(inferred_ty)) {
+                    result_types_buf[0] = inferred_ty;
+                    result_types = result_types_buf[0..1];
+                } else {
+                    callee_returns_void = true;
+                }
+            }
+        }
+    }
+
+    if (result_types.len == 0 and !callee_returns_void) {
         const result_ty = c.oraIntegerTypeCreate(self.ctx, constants.DEFAULT_INTEGER_BITS);
         result_types_buf[0] = result_ty;
         result_types = result_types_buf[0..1];
@@ -217,6 +299,13 @@ pub fn createDirectFunctionCall(
 
     const op = self.ora_dialect.createFuncCall(function_name, args, result_types, self.fileLoc(span));
     h.appendOp(self.block, op);
+
+    if (result_types.len == 0) {
+        // Void calls have no SSA result; return a placeholder if an expression value
+        // is requested. This keeps lowering robust for invalid value contexts.
+        return self.createErrorPlaceholder(span, "void function call has no value");
+    }
+
     return h.getResult(op, 0);
 }
 

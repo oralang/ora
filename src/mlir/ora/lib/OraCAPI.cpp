@@ -46,6 +46,7 @@
 #include "mlir/Transforms/Passes.h"
 #include "llvm/Support/FileSystem.h"
 #include "llvm/Support/Path.h"
+#include "llvm/Support/raw_ostream.h"
 #include <cstdlib>
 #include <cstring>
 
@@ -4341,12 +4342,8 @@ MlirOperation oraEnumDeclOpCreate(MlirContext ctx, MlirLocation loc, MlirStringR
         auto nameAttr = StringAttr::get(context, nameRef);
         auto op = builder.create<ora::EnumDeclOp>(location, nameAttr, TypeAttr::get(reprTy));
 
-        // Ensure the variants region has at least one block
-        if (op.getVariants().empty())
-        {
-            OpBuilder::InsertionGuard guard(builder);
-            builder.createBlock(&op.getVariants());
-        }
+        // Keep declaration region empty unless explicitly populated.
+        // Creating an empty block without terminator violates MLIR verifier.
 
         // Add gas cost attribute (declaration has no runtime cost)
         auto gasCostAttr = builder.getI64IntegerAttr(0);
@@ -4400,11 +4397,8 @@ MlirOperation oraStructDeclOpCreate(MlirContext ctx, MlirLocation loc, MlirStrin
         auto nameAttr = StringAttr::get(context, nameRef);
         auto op = builder.create<ora::StructDeclOp>(location, nameAttr);
 
-        if (op.getFields().empty())
-        {
-            OpBuilder::InsertionGuard guard(builder);
-            builder.createBlock(&op.getFields());
-        }
+        // Keep declaration region empty unless explicitly populated.
+        // Creating an empty block without terminator violates MLIR verifier.
 
         auto gasCostAttr = builder.getI64IntegerAttr(0);
         op->setAttr("gas_cost", gasCostAttr);
@@ -4579,12 +4573,17 @@ MlirOperation oraErrorDeclOpCreate(MlirContext ctx, MlirLocation loc, const Mlir
 {
     try
     {
+        (void)ctx;
+        (void)resultTypes;
         Location location = unwrap(loc);
 
         OperationState state(location, "ora.error.decl");
-        for (size_t i = 0; i < numResults; ++i)
+        if (numResults > 0)
         {
-            state.addTypes(unwrap(resultTypes[i]));
+            // Keep API backward-compatible while enforcing current op schema:
+            // ora.error.decl is a symbol declaration and has zero results.
+            llvm::errs() << "warning: ignoring " << numResults
+                         << " result type(s) for ora.error.decl; op requires zero results\n";
         }
         for (size_t i = 0; i < numAttrs; ++i)
         {
@@ -6341,6 +6340,33 @@ MlirStringRef oraGenerateCFG(MlirContext ctx, MlirModule module, bool includeCon
     }
 }
 
+static bool oraMlirVerifierOptOutEnabled()
+{
+    const char *value = std::getenv("ORA_DISABLE_MLIR_VERIFIER");
+    if (!value)
+        return false;
+
+    return std::strcmp(value, "1") == 0 ||
+           std::strcmp(value, "true") == 0 ||
+           std::strcmp(value, "TRUE") == 0 ||
+           std::strcmp(value, "on") == 0 ||
+           std::strcmp(value, "ON") == 0 ||
+           std::strcmp(value, "yes") == 0 ||
+           std::strcmp(value, "YES") == 0;
+}
+
+static void oraConfigureVerifierForPassManager(PassManager &pm, const char *pipelineName)
+{
+    const bool disableVerifier = oraMlirVerifierOptOutEnabled();
+    pm.enableVerifier(!disableVerifier);
+
+    if (disableVerifier)
+    {
+        llvm::errs() << "warning: ORA_DISABLE_MLIR_VERIFIER is set; disabling MLIR verifier for "
+                     << pipelineName << "\n";
+    }
+}
+
 //===----------------------------------------------------------------------===//
 // Ora Canonicalization (before conversion)
 //===----------------------------------------------------------------------===//
@@ -6360,7 +6386,7 @@ bool oraCanonicalizeOraMLIR(MlirContext ctx, MlirModule module)
 
         // Create pass manager for builtin.module operations
         PassManager pm(context, "builtin.module");
-        pm.enableVerifier(false);
+        oraConfigureVerifierForPassManager(pm, "ora-canonicalize");
 
         // Run Ora optimizations in order:
         // 1. Constant deduplication and constant folding (fallback)
@@ -6414,7 +6440,7 @@ bool oraConvertToSIR(MlirContext ctx, MlirModule module)
         // Create pass manager for builtin.module operations
         // This ensures nested passes can be added and executed
         PassManager pm(context, "builtin.module");
-        pm.enableVerifier(false);
+        oraConfigureVerifierForPassManager(pm, "ora-to-sir");
 
         ORA_DEBUG_PREFIX("OraCAPI", "Created PassManager for builtin.module");
 
@@ -6463,10 +6489,6 @@ bool oraConvertToSIR(MlirContext ctx, MlirModule module)
         // Run the pass
         ORA_DEBUG_PREFIX("OraCAPI", "Running OraToSIR pass...");
 
-        // Disable verifier to avoid segfault during verification
-        // The IR should be valid after conversion, but verification might be triggering the crash
-        pm.enableVerifier(false);
-
         LogicalResult result = pm.run(moduleOp);
 
         if (failed(result))
@@ -6505,7 +6527,7 @@ bool oraLegalizeSIRText(MlirContext ctx, MlirModule module)
         context->getOrLoadDialect<sir::SIRDialect>();
 
         PassManager pm(context, "builtin.module");
-        pm.enableVerifier(false);
+        oraConfigureVerifierForPassManager(pm, "sir-text-legalize");
         pm.addPass(createSIRTextLegalizerPass());
 
         return mlir::succeeded(pm.run(moduleOp));
@@ -6531,7 +6553,7 @@ bool oraBuildSIRDispatcher(MlirContext ctx, MlirModule module)
         context->getOrLoadDialect<sir::SIRDialect>();
 
         PassManager pm(context, "builtin.module");
-        pm.enableVerifier(false);
+        oraConfigureVerifierForPassManager(pm, "sir-dispatcher");
         pm.addPass(createSIRDispatcherPass());
 
         return mlir::succeeded(pm.run(moduleOp));

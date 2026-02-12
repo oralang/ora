@@ -232,6 +232,44 @@ def Ora_SStoreOp : Ora_Op<"sstore",
   }];
 }
 
+def Ora_MemoryGlobalOp : Ora_Op<"memory.global"> {
+  let summary = "Memory global variable declaration";
+  let description = [{
+    Declares a contract-level memory variable used by Ora lowering.
+
+    Example:
+    ```mlir
+    "ora.memory.global"() {sym_name = "tmp", type = i256}
+    ```
+  }];
+
+  let arguments = (ins
+    StrAttr:$sym_name,
+    TypeAttr:$type
+  );
+
+  let traits = [Symbol, MemoryEffects<[MemWrite]>];
+}
+
+def Ora_TStoreGlobalOp : Ora_Op<"tstore.global"> {
+  let summary = "Transient storage global variable declaration";
+  let description = [{
+    Declares a contract-level transient storage variable used by Ora lowering.
+
+    Example:
+    ```mlir
+    "ora.tstore.global"() {sym_name = "tmp", type = i256}
+    ```
+  }];
+
+  let arguments = (ins
+    StrAttr:$sym_name,
+    TypeAttr:$type
+  );
+
+  let traits = [Symbol, MemoryEffects<[MemWrite]>];
+}
+
 //===----------------------------------------------------------------------===//
 // Test Operation (Simple Custom Printer Test)
 //===----------------------------------------------------------------------===//
