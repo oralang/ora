@@ -506,6 +506,8 @@ namespace mlir
                                 auto newType = FunctionType::get(
                                     userInit.getContext(), userInitType.getInputs(), {});
                                 userInit.setFunctionType(newType);
+                                // Also strip result attributes to match the new 0-result type.
+                                userInit.setAllResultAttrs(ArrayRef<DictionaryAttr>{});
                             }
                             else
                             {
@@ -883,6 +885,9 @@ namespace mlir
                                     argVal = builder.create<sir::BitcastOp>(loc, u256Type, argVal);
                                 }
                             }
+                            // sir.icall requires all args to be !sir.u256.
+                            if (isa<sir::PtrType>(argVal.getType()))
+                                argVal = builder.create<sir::BitcastOp>(loc, u256Type, argVal);
                             args.push_back(argVal);
                         }
 

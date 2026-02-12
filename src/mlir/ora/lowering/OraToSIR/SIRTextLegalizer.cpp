@@ -28,9 +28,71 @@ namespace mlir
         {
             struct SIRTextLegalizerPass : public PassWrapper<SIRTextLegalizerPass, OperationPass<ModuleOp>>
             {
-                void runOnOperation() override
+                // Insert trampoline blocks for cond_br with non-uniform operands.
+            // SIR text requires a single set of block outputs for all edges.
+            void normalizeBranches(ModuleOp module)
+            {
+                SmallVector<sir::CondBrOp, 16> toFix;
+                module.walk([&](sir::CondBrOp br) {
+                    auto trueOps = br.getTrueOperands();
+                    auto falseOps = br.getFalseOperands();
+                    bool same = trueOps.size() == falseOps.size();
+                    if (same)
+                    {
+                        for (size_t i = 0; i < trueOps.size(); ++i)
+                        {
+                            if (trueOps[i] != falseOps[i])
+                            {
+                                same = false;
+                                break;
+                            }
+                        }
+                    }
+                    if (!same)
+                        toFix.push_back(br);
+                });
+
+                for (auto br : toFix)
+                {
+                    OpBuilder b(br);
+                    Block *parentBlock = br.getOperation()->getBlock();
+                    Region *region = parentBlock->getParent();
+                    // Create trampoline blocks after the parent block.
+                    Block *trampTrue = new Block();
+                    Block *trampFalse = new Block();
+                    region->getBlocks().insertAfter(Region::iterator(parentBlock), trampTrue);
+                    region->getBlocks().insertAfter(Region::iterator(trampTrue), trampFalse);
+
+                    // trampoline_true: br ^true_dest(true_operands)
+                    {
+                        OpBuilder tb(br.getContext());
+                        tb.setInsertionPointToEnd(trampTrue);
+                        tb.create<sir::BrOp>(br.getLoc(), br.getTrueOperands(), br.getTrueDest());
+                    }
+                    // trampoline_false: br ^false_dest(false_operands)
+                    {
+                        OpBuilder fb(br.getContext());
+                        fb.setInsertionPointToEnd(trampFalse);
+                        fb.create<sir::BrOp>(br.getLoc(), br.getFalseOperands(), br.getFalseDest());
+                    }
+
+                    // Replace cond_br with: cond_br %c, ^trampTrue, ^trampFalse (no operands)
+                    // build signature: (cond, trueOperands, falseOperands, trueDest, falseDest)
+                    b.setInsertionPoint(br);
+                    b.create<sir::CondBrOp>(br.getLoc(), br.getCond(),
+                                            ValueRange{}, ValueRange{},
+                                            trampTrue, trampFalse);
+                    br.erase();
+                }
+            }
+
+            void runOnOperation() override
                 {
                     ModuleOp module = getOperation();
+
+                    // Phase 0: normalize asymmetric cond_br operands.
+                    normalizeBranches(module);
+
                     bool failed_any = false;
 
                     auto report = [&](Operation *op, const Twine &msg) {
