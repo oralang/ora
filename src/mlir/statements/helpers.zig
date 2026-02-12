@@ -120,6 +120,21 @@ pub fn getErrorUnionPayload(
                 err_name = ident.name;
             }
         },
+        .Call => |call| {
+            const call_error_name = extractErrorNameFromCallee(call.callee);
+            if (self.symbol_table) |st| {
+                if (call_error_name) |name| {
+                    if (st.getErrorId(name) != null) {
+                        is_error = true;
+                        err_name = name;
+                    }
+                }
+            }
+            if (!is_error and call.type_info.category == .Error) {
+                is_error = true;
+                err_name = call_error_name;
+            }
+        },
         else => {},
     }
 
@@ -134,6 +149,14 @@ pub fn getErrorUnionPayload(
     }
 
     return .{ .payload = payload, .is_error = is_error };
+}
+
+fn extractErrorNameFromCallee(callee: *const lib.ast.Expressions.ExprNode) ?[]const u8 {
+    return switch (callee.*) {
+        .Identifier => |ident| ident.name,
+        .FieldAccess => |field_access| field_access.field,
+        else => null,
+    };
 }
 
 fn createArithConstantInFunction(

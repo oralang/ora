@@ -168,6 +168,8 @@ pub fn lowerEnsuresBeforeReturn(self: *const StatementLowerer, block: c.MlirBloc
         // create an assertion operation with comprehensive verification attributes
         // get the clause's span by switching on the expression type
         const clause_span = getExpressionSpan(clause);
+        const clause_loc = self.fileLoc(clause_span);
+        const final_condition = gateEnsuresForErrorUnion(self, block, condition_value, return_value, clause_loc);
         // collect verification attributes
         var attributes = std.ArrayList(c.MlirNamedAttribute){};
         defer attributes.deinit(self.allocator);
@@ -199,9 +201,33 @@ pub fn lowerEnsuresBeforeReturn(self: *const StatementLowerer, block: c.MlirBloc
         const index_id = h.identifier(self.ctx, "ora.postcondition_index");
         attributes.append(self.allocator, c.oraNamedAttributeGet(index_id, index_attr)) catch {};
 
-        const assert_op = self.ora_dialect.createCfAssertWithAttrs(condition_value, attributes.items, self.fileLoc(clause_span));
+        const assert_op = self.ora_dialect.createCfAssertWithAttrs(final_condition, attributes.items, clause_loc);
         h.appendOp(block, assert_op);
     }
+}
+
+/// For error-union returns, enforce ensures only on the success path:
+///   (!is_error(return_value)) => ensures_condition
+/// encoded as:
+///   is_error(return_value) || ensures_condition
+fn gateEnsuresForErrorUnion(
+    self: *const StatementLowerer,
+    block: c.MlirBlock,
+    condition_value: c.MlirValue,
+    return_value: ?c.MlirValue,
+    loc: c.MlirLocation,
+) c.MlirValue {
+    const rv = return_value orelse return condition_value;
+    const ret_ti = self.current_function_return_type_info orelse return condition_value;
+    if (!helpers.isErrorUnionTypeInfo(ret_ti)) return condition_value;
+
+    const is_error_op = self.ora_dialect.createErrorIsError(rv, loc);
+    h.appendOp(block, is_error_op);
+    const is_error_val = h.getResult(is_error_op, 0);
+
+    const gated_op = c.oraArithOrIOpCreate(self.ctx, loc, is_error_val, condition_value);
+    h.appendOp(block, gated_op);
+    return h.getResult(gated_op, 0);
 }
 
 /// Lower return statements in control flow context using scf.yield

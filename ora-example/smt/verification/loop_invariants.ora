@@ -45,6 +45,7 @@ contract LoopInvariants {
 
     pub fn accumulateToStorage(n: u256)
         requires(n <= 100)
+        ensures(total == old(total) + n * (n + 1) / 2)
     {
         let start_total: u256 = total;
         var i: u256 = 1;

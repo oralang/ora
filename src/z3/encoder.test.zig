@@ -1150,6 +1150,58 @@ test "map_store updates global map for later map_get" {
     try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_FALSE), solver.check());
 }
 
+test "nested map_store rethreads inner update through outer map" {
+    var z3_ctx = try Context.init(testing.allocator);
+    defer z3_ctx.deinit();
+
+    var encoder = Encoder.init(&z3_ctx, testing.allocator);
+    defer encoder.deinit();
+
+    const mlir_ctx = mlir.oraContextCreate();
+    defer mlir.oraContextDestroy(mlir_ctx);
+    loadAllDialects(mlir_ctx);
+    _ = mlir.oraDialectRegister(mlir_ctx);
+
+    const loc = mlir.oraLocationUnknownGet(mlir_ctx);
+    const i256_ty = mlir.oraIntegerTypeCreate(mlir_ctx, 256);
+    const inner_map_ty = mlir.oraMapTypeGet(mlir_ctx, i256_ty, i256_ty);
+    const outer_map_ty = mlir.oraMapTypeGet(mlir_ctx, i256_ty, inner_map_ty);
+
+    const owner_attr = mlir.oraIntegerAttrCreateI64FromType(i256_ty, 11);
+    const spender_attr = mlir.oraIntegerAttrCreateI64FromType(i256_ty, 22);
+    const value_attr = mlir.oraIntegerAttrCreateI64FromType(i256_ty, 99);
+
+    const owner_op = mlir.oraArithConstantOpCreate(mlir_ctx, loc, i256_ty, owner_attr);
+    const spender_op = mlir.oraArithConstantOpCreate(mlir_ctx, loc, i256_ty, spender_attr);
+    const value_op = mlir.oraArithConstantOpCreate(mlir_ctx, loc, i256_ty, value_attr);
+
+    const owner = mlir.oraOperationGetResult(owner_op, 0);
+    const spender = mlir.oraOperationGetResult(spender_op, 0);
+    const value = mlir.oraOperationGetResult(value_op, 0);
+
+    const outer_before = mlir.oraSLoadOpCreate(mlir_ctx, loc, stringRef("allowances"), outer_map_ty);
+    const outer_before_value = mlir.oraOperationGetResult(outer_before, 0);
+    const inner_before = mlir.oraMapGetOpCreate(mlir_ctx, loc, outer_before_value, owner, inner_map_ty);
+    const inner_before_value = mlir.oraOperationGetResult(inner_before, 0);
+
+    _ = try encoder.encodeOperation(mlir.oraMapStoreOpCreate(mlir_ctx, loc, inner_before_value, spender, value));
+    _ = try encoder.encodeOperation(mlir.oraMapStoreOpCreate(mlir_ctx, loc, outer_before_value, owner, inner_before_value));
+
+    const outer_after = mlir.oraSLoadOpCreate(mlir_ctx, loc, stringRef("allowances"), outer_map_ty);
+    const outer_after_value = mlir.oraOperationGetResult(outer_after, 0);
+    const inner_after = mlir.oraMapGetOpCreate(mlir_ctx, loc, outer_after_value, owner, inner_map_ty);
+    const inner_after_value = try encoder.encodeOperation(inner_after);
+    const final_get = mlir.oraMapGetOpCreate(mlir_ctx, loc, mlir.oraOperationGetResult(inner_after, 0), spender, i256_ty);
+    const loaded = try encoder.encodeOperation(final_get);
+    const expected = try encoder.encodeValue(value);
+
+    var solver = try Solver.init(&z3_ctx, testing.allocator);
+    defer solver.deinit();
+    solver.assert(z3.Z3_mk_not(z3_ctx.ctx, z3.Z3_mk_eq(z3_ctx.ctx, loaded, expected)));
+    try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_FALSE), solver.check());
+    _ = inner_after_value;
+}
+
 test "map key operands are coerced to map domain width" {
     var z3_ctx = try Context.init(testing.allocator);
     defer z3_ctx.deinit();

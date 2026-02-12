@@ -121,7 +121,7 @@ pub fn lowerIdentifierAssignment(
         if (st.lookupSymbol(ident.name)) |symbol| {
             // store variable_kind early to avoid shadowing issues in nested scopes
             const var_kind = symbol.variable_kind;
-            log.debug("[lowerIdentifierAssignment] Symbol found: {s}, variable_kind: {any}, symbol_kind: {any}\n", .{ ident.name, var_kind, symbol.symbol_kind });
+            log.debug("[lowerIdentifierAssignment] Symbol found: {s}, region: {s}, variable_kind: {any}, symbol_kind: {any}\n", .{ ident.name, symbol.region, var_kind, symbol.symbol_kind });
 
             // only variables have variable_kind - parameters and constants don't
             if (symbol.symbol_kind != .Variable) {
@@ -137,7 +137,13 @@ pub fn lowerIdentifierAssignment(
                 if (self.storage_map) |sm| {
                     if (sm.hasStorageVariable(ident.name)) {
                         // this is a storage variable - handle it directly
-                        const store_op = self.memory_manager.createStorageStore(value, ident.name, loc);
+                        const converted_value = if (target_ora_type) |ora_type| convert_storage_value: {
+                            const target_mlir_type = self.type_mapper.toMlirType(.{ .ora_type = ora_type });
+                            break :convert_storage_value self.expr_lowerer.convertToType(value, target_mlir_type, ident.span);
+                        } else passthrough_storage_value: {
+                            break :passthrough_storage_value value;
+                        };
+                        const store_op = self.memory_manager.createStorageStore(converted_value, ident.name, loc);
                         h.appendOp(self.block, store_op);
                         return;
                     }
@@ -148,20 +154,9 @@ pub fn lowerIdentifierAssignment(
 
             switch (region) {
                 .Storage => {
-                    // storage always holds i256 values in EVM
-                    // if value is i1 (boolean), extend it to i256
-                    const value_type = c.oraValueGetType(value);
-                    const actual_value = if (c.oraTypeIsAInteger(value_type) and c.oraIntegerTypeGetWidth(value_type) == 1) blk: {
-                        // this is i1, need to extend to i256
-                        const i256_type = c.oraIntegerTypeCreate(self.ctx, constants.DEFAULT_INTEGER_BITS);
-                        const ext_op = c.oraArithExtUIOpCreate(self.ctx, loc, value, i256_type);
-                        h.appendOp(self.block, ext_op);
-                        break :blk h.getResult(ext_op, 0);
-                    } else blk: {
-                        break :blk value;
-                    };
-
-                    const store_op = self.memory_manager.createStorageStore(actual_value, ident.name, loc);
+                    // Preserve the declared storage type (e.g. bool storage remains i1).
+                    const storage_value = self.expr_lowerer.convertToType(value, symbol.type, ident.span);
+                    const store_op = self.memory_manager.createStorageStore(storage_value, ident.name, loc);
                     h.appendOp(self.block, store_op);
                     return;
                 },
@@ -293,7 +288,23 @@ pub fn lowerIdentifierAssignment(
     // fallback: check storage map
     if (self.storage_map) |sm| {
         if (sm.hasStorageVariable(ident.name)) {
-            const store_op = self.memory_manager.createStorageStore(value, ident.name, loc);
+            const converted_value = convert_storage_fallback: {
+                if (self.symbol_table) |st| {
+                    if (st.lookupSymbol(ident.name)) |sym| {
+                        break :convert_storage_fallback self.expr_lowerer.convertToType(value, sym.type, ident.span);
+                    }
+                }
+                if (target_ora_type) |ora_type| {
+                    const target_mlir_type = self.type_mapper.toMlirType(.{ .ora_type = ora_type });
+                    break :convert_storage_fallback self.expr_lowerer.convertToType(value, target_mlir_type, ident.span);
+                }
+                if (ident.type_info.ora_type) |ora_type| {
+                    const target_mlir_type = self.type_mapper.toMlirType(.{ .ora_type = ora_type });
+                    break :convert_storage_fallback self.expr_lowerer.convertToType(value, target_mlir_type, ident.span);
+                }
+                break :convert_storage_fallback value;
+            };
+            const store_op = self.memory_manager.createStorageStore(converted_value, ident.name, loc);
             h.appendOp(self.block, store_op);
             return;
         }
@@ -564,6 +575,32 @@ pub fn lowerIndexAssignment(self: *const StatementLowerer, index_expr: *const li
         // use ora.map_store directly (registered operation)
         const map_store_op = self.ora_dialect.createMapStore(target, index_val, value, loc);
         h.appendOp(self.block, map_store_op);
+
+        // Nested map update re-threading:
+        // For assignments like outer[k1][k2] = v, we first store into the inner map
+        // (target = outer[k1]) and then write that updated inner map back into outer[k1].
+        var parent_expr = index_expr.target;
+        var current_value_to_store = target;
+        while (parent_expr.* == .Index) {
+            const parent_index = parent_expr.Index;
+            const outer_map = self.expr_lowerer.lowerExpression(parent_index.target);
+            const outer_key = self.expr_lowerer.lowerExpression(parent_index.index);
+            const outer_map_type = c.oraValueGetType(outer_map);
+            const outer_value_type = c.oraMapTypeGetValueType(outer_map_type);
+            if (c.oraTypeIsNull(outer_value_type)) break;
+
+            const current_value_type = c.oraValueGetType(current_value_to_store);
+            const store_value = if (!c.oraTypeEqual(current_value_type, outer_value_type))
+                self.expr_lowerer.convertToType(current_value_to_store, outer_value_type, index_expr.span)
+            else
+                current_value_to_store;
+
+            const outer_store = self.ora_dialect.createMapStore(outer_map, outer_key, store_value, loc);
+            h.appendOp(self.block, outer_store);
+
+            current_value_to_store = outer_map;
+            parent_expr = parent_index.target;
+        }
     }
 }
 

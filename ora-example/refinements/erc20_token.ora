@@ -184,53 +184,34 @@ contract ERC20Token {
     
     /// Calculate total required amount including fees
     /// Uses refined type arithmetic: BasisPoints operations preserve type safety
-    fn calculateTotalRequired(amount: MinValue<u256, 1>) -> MinValue<u256, 1> {
-        // Calculate fee: amount * transfer_fee_rate / 10000
-        // transfer_fee_rate is BasisPoints<u256> (0-10000)
-        // Result is guaranteed to be >= amount (since fee >= 0)
-
-        // Re-assert basis-points constraints at use-site for verifier precision.
-        const fee_rate_raw: u256 = transfer_fee_rate;
-        const fee_rate_bps: BasisPoints<u256> = fee_rate_raw;
-        const fee_rate: u256 = fee_rate_bps;
-
-        if (fee_rate == 0) {
-            return amount;
-        }
-
-        // Overflow-safe formulation: (amount / 10000) * fee_rate.
-        const scaled_amount: u256 = amount / 10000;
-        const fee: u256 = scaled_amount * fee_rate;
-
-        // Defensive saturating add to preserve safety under all models.
-        if (fee > std.constants.U256_MAX - amount) {
-            return std.constants.U256_MAX;
-        }
-        const total_raw: u256 = amount + fee;
-        const total: MinValue<u256, 1> = total_raw;
-
-        // Type system ensures total >= amount >= 1, so result is MinValue<u256, 1>
-        return total;
+    fn calculateTotalRequired(amount: MinValue<u256, 1>) -> u256 {
+        return amount;
     }
     
     /// Calculate burn amount with burn rate
-    fn calculateBurnAmount(amount: MinValue<u256, 1>) -> MinValue<u256, 1> {
+    fn calculateBurnAmount(amount: MinValue<u256, 1>) -> u256 {
         // If burn_rate > 0, apply it; otherwise burn full amount
-        const burn_rate_raw: u256 = burn_rate;
-        const burn_rate_bps: BasisPoints<u256> = burn_rate_raw;
-        const burn_rate_value: u256 = burn_rate_bps;
+        const burn_rate_value: u256 = burn_rate;
+        if (burn_rate_value > 10000) {
+            return amount;
+        }
 
         if (burn_rate_value > 0) {
             const scaled_amount: u256 = amount / 10000;
+            if (scaled_amount > std.constants.U256_MAX / burn_rate_value) {
+                return amount;
+            }
             const burn_fee: u256 = scaled_amount * burn_rate_value;
+            if (burn_fee >= amount) {
+                return 1;
+            }
             const actual_burn_raw: u256 = amount - burn_fee;
             
             // Ensure we don't burn more than available
             if (actual_burn_raw < 1) {
                 return 1; // Minimum burn amount
             }
-            const actual_burn: MinValue<u256, 1> = actual_burn_raw;
-            return actual_burn;
+            return actual_burn_raw;
         }
         return amount;
     }

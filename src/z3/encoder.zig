@@ -252,6 +252,16 @@ pub const Encoder = struct {
         }
     }
 
+    fn copyGlobalEntryMapFrom(self: *Encoder, other: *const Encoder) !void {
+        var it = other.global_entry_map.iterator();
+        while (it.next()) |entry| {
+            const name = entry.key_ptr.*;
+            if (self.global_entry_map.contains(name)) continue;
+            const key = try self.allocator.dupe(u8, name);
+            try self.global_entry_map.put(key, entry.value_ptr.*);
+        }
+    }
+
     fn inlineStackContains(self: *const Encoder, name: []const u8) bool {
         for (self.inline_function_stack.items) |fn_name| {
             if (std.mem.eql(u8, fn_name, name)) return true;
@@ -1550,6 +1560,9 @@ pub const Encoder = struct {
                 self.addArrayStoreFrameConstraint(operands[0], key, stored, op_id) catch {};
                 if (mode == .Current) {
                     const map_operand = mlir.oraOperationGetOperand(mlir_op, 0);
+                    const map_operand_id = @intFromPtr(map_operand.ptr);
+                    try self.value_bindings.put(map_operand_id, stored);
+                    try self.value_map.put(map_operand_id, stored);
                     if (self.resolveGlobalNameFromMapOperand(map_operand)) |global_name| {
                         if (self.global_map.getPtr(global_name)) |existing| {
                             existing.* = stored;
@@ -2337,6 +2350,7 @@ pub const Encoder = struct {
         try summary_encoder.copyInlineStackFrom(self);
         try summary_encoder.copyEnvMapFrom(self);
         try summary_encoder.copyGlobalStateMapFrom(self, mode == .Old);
+        try summary_encoder.copyGlobalEntryMapFrom(self);
         try summary_encoder.pushInlineFunction(callee);
 
         const body_region = mlir.oraOperationGetRegion(func_op, 0);
@@ -2396,6 +2410,8 @@ pub const Encoder = struct {
             try summary_encoder.global_map.put(g_key, slot.pre);
             const old_key = try summary_encoder.allocator.dupe(u8, slot.name);
             try summary_encoder.global_old_map.put(old_key, slot.pre);
+            const entry_key = try summary_encoder.allocator.dupe(u8, slot.name);
+            try summary_encoder.global_entry_map.put(entry_key, slot.pre);
         }
 
         const body_region = mlir.oraOperationGetRegion(func_op, 0);

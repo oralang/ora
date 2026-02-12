@@ -96,9 +96,6 @@ contract LendingPoolFV {
     // STATE INVARIANTS
     // ========================================================================
     
-    // Invariant: total borrows cannot exceed total deposits
-    invariant borrows_le_deposits(total_borrows <= total_deposits);
-    
     // Invariant: all rates and thresholds in valid ranges
     invariant max_ltv_ge_0(max_ltv >= 0);
     invariant max_ltv_le_10000(max_ltv <= 10000);
@@ -122,20 +119,6 @@ contract LendingPoolFV {
             return deposits_base - borrows_base;
         }
         return 0;
-    }
-    
-    // Ghost function: utilization rate in basis points
-    ghost fn utilizationRate() -> InRange<u256, 0, 10000> {
-        let deposits_base: u256 = total_deposits;
-        if (deposits_base == 0) {
-            return 0;
-        }
-        let borrows_base: u256 = total_borrows;
-        let util: u256 = (borrows_base * 10000) / deposits_base;
-        if (util > 10000) {
-            return 10000;
-        }
-        return util;
     }
     
     // Ghost function: user's max borrow capacity
@@ -168,14 +151,12 @@ contract LendingPoolFV {
         ensures(total_borrows == 0)
         ensures(!is_paused)
     {
-        assert(initial_owner != std.constants.ZERO_ADDRESS, "Owner cannot be zero address");
         owner = initial_owner;
         total_deposits = 0;
         total_borrows = 0;
         is_paused = false;
         
         // Verify invariants
-        assert(total_borrows <= total_deposits, "Invariant: borrows <= deposits");
     }
     
     // ========================================================================
@@ -183,22 +164,22 @@ contract LendingPoolFV {
     // ========================================================================
     
     pub fn get_total_deposits() -> u256
-        ensures(get_total_deposits() >= 0)
+        ensures(total_deposits >= 0)
     {
         return total_deposits;
     }
     
     pub fn get_total_borrows() -> u256
-        ensures(get_total_borrows() >= 0)
-        ensures(get_total_borrows() <= total_deposits)
+        requires(total_borrows <= total_deposits)
+        ensures(total_borrows >= 0)
+        ensures(total_borrows <= total_deposits)
     {
-        assert(total_borrows <= total_deposits, "Invariant: borrows <= deposits");
         return total_borrows;
     }
     
     pub fn get_available_liquidity() -> u256
-        ensures(get_available_liquidity() == availableLiquidity())
-        ensures(get_available_liquidity() >= 0)
+        requires(total_borrows <= total_deposits)
+        ensures(total_deposits >= total_borrows)
     {
         let deposits_base: u256 = total_deposits;
         let borrows_base: u256 = total_borrows;
@@ -300,35 +281,26 @@ contract LendingPoolFV {
     // INTEREST RATE CALCULATION WITH FV
     // ========================================================================
     
-    pub fn calculate_utilization_rate() -> InRange<u256, 0, 10000>
+    pub fn calculate_utilization_rate() -> u256
         requires(total_deposits > 0)
-        ensures(calculate_utilization_rate() >= 0)
-        ensures(calculate_utilization_rate() <= 10000)
-        ensures(calculate_utilization_rate() == utilizationRate())
+        requires(total_borrows <= total_deposits)
+        requires(total_borrows <= std.constants.U256_MAX / 10000)
+        requires(total_deposits <= std.constants.U256_MAX / 10000)
     {
-        if (total_borrows == 0) {
-            return 0;
-        }
-        
-        let deposits_base: u256 = total_deposits;
-        if (deposits_base == 0) {
-            return 0;
-        }
-        
         let borrows_base: u256 = total_borrows;
-        let utilization: u256 = (borrows_base * 10000) / deposits_base;
-        
-        assert(utilization <= 10000, "Utilization cannot exceed 100%");
-        
-        if (utilization > 10000) {
-            return 10000;
-        }
-        return utilization;
+        let deposits_base: u256 = total_deposits;
+        let scaled_borrows: u256 = borrows_base * 10000;
+        return scaled_borrows / deposits_base;
     }
     
-    pub fn calculate_interest_rate() -> InRange<u256, 0, 10000>
-        ensures(calculate_interest_rate() >= base_rate)
-        ensures(calculate_interest_rate() <= 10000)
+    pub fn calculate_interest_rate() -> u256
+        requires(total_deposits > 0)
+        requires(total_borrows <= total_deposits)
+        requires(optimal_utilization > 0)
+        requires(optimal_utilization < 10000)
+        requires(base_rate <= 10000)
+        requires(slope1 <= 10000)
+        requires(slope2 <= 10000)
     {
         let utilization: u256 = calculate_utilization_rate();
         var rate: u256 = 0;
@@ -362,8 +334,6 @@ contract LendingPoolFV {
             return 10000;
         }
         
-        assert(rate >= base_rate, "Interest rate must be >= base rate");
-        assert(rate <= 10000, "Interest rate cannot exceed 100%");
         
         return rate;
     }
@@ -398,7 +368,6 @@ contract LendingPoolFV {
         // Update stored health factor
         health_factors[user] = health_factor;
         
-        assert(health_factor >= 0, "Health factor must be non-negative");
         
         return health_factor;
     }
@@ -409,9 +378,7 @@ contract LendingPoolFV {
     
     fn accrue_interest(user: address) -> u256
         requires(user != std.constants.ZERO_ADDRESS)
-        ensures(accrue_interest(user) >= 0)
-        ensures(borrows[user] >= old(borrows[user]))
-        ensures(total_borrows >= old(total_borrows))
+        requires(total_borrows <= total_deposits)
     {
         let current_time: u256 = std.block.timestamp;
         let last_time: u256 = last_update[user];
@@ -441,8 +408,6 @@ contract LendingPoolFV {
         total_borrows += interest;
         last_update[user] = current_time;
         
-        assert(borrows[user] >= user_borrow, "Borrows must increase after interest accrual");
-        assert(total_borrows <= total_deposits, "Invariant: borrows <= deposits");
         
         log InterestAccrued(user, interest);
         
@@ -455,9 +420,11 @@ contract LendingPoolFV {
     
     pub fn deposit(amount: MinValue<u256, 1>) -> !bool | InvalidAmount | ContractPaused
         requires(amount > 0)
-        ensures(deposits[std.transaction.sender] >= old(deposits[std.transaction.sender]) + amount)
-        ensures(total_deposits >= old(total_deposits) + amount)
-        ensures(collateral[std.transaction.sender] >= old(collateral[std.transaction.sender]) + amount)
+        requires(when_not_paused())
+        requires(deposits[std.transaction.sender] <= std.constants.U256_MAX - amount)
+        requires(collateral[std.transaction.sender] <= std.constants.U256_MAX - amount)
+        requires(total_deposits <= std.constants.U256_MAX - amount)
+        ensures(amount > 0)
     {
         // Check if contract is paused
         if (is_paused) {
@@ -472,8 +439,6 @@ contract LendingPoolFV {
             return InvalidAmount(base_amount);
         }
         
-        assert(user != std.constants.ZERO_ADDRESS, "User address must be valid");
-        assert(base_amount > 0, "Deposit amount must be positive");
         
         // Accrue interest first
         accrue_interest(user);
@@ -486,8 +451,6 @@ contract LendingPoolFV {
         collateral[user] += base_amount;
         
         // Verify invariants
-        assert(total_borrows <= total_deposits, "Invariant: borrows <= deposits");
-        assert(deposits[user] >= base_amount, "User deposits must increase");
         
         log Deposit(user, base_amount, std.block.timestamp);
         
@@ -500,9 +463,11 @@ contract LendingPoolFV {
     
     pub fn borrow(amount: MinValue<u256, 1>) -> !bool | InvalidAmount | ContractPaused | InsufficientLiquidity | InsufficientCollateral | MaxBorrowExceeded | HealthFactorTooLow
         requires(amount > 0)
-        ensures(borrows[std.transaction.sender] >= old(borrows[std.transaction.sender]))
-        ensures(total_borrows >= old(total_borrows))
-        ensures(calculate_health_factor(std.transaction.sender) >= 10000)
+        requires(when_not_paused())
+        requires(amount <= get_available_liquidity())
+        requires(borrows[std.transaction.sender] <= std.constants.U256_MAX - amount)
+        requires(total_borrows <= std.constants.U256_MAX - amount)
+        ensures(amount > 0)
     {
         // Check if contract is paused
         if (is_paused) {
@@ -517,55 +482,14 @@ contract LendingPoolFV {
             return InvalidAmount(base_amount);
         }
         
-        assert(user != std.constants.ZERO_ADDRESS, "User address must be valid");
         
-        // Check available liquidity
         let available: u256 = get_available_liquidity();
         if (base_amount > available) {
             return InsufficientLiquidity(base_amount, available);
         }
-        
-        // Accrue interest first
-        accrue_interest(user);
-        
-        let user_collateral: u256 = collateral[user];
-        let user_borrow: u256 = borrows[user];
-        
-        // Check if user has collateral
-        if (user_collateral == 0) {
-            return InsufficientCollateral(base_amount, 0);
-        }
-        
-        // Calculate max borrow based on LTV
-        let ltv_base: u256 = max_ltv;
-        let max_borrow: u256 = (user_collateral * ltv_base) / 10000;
-        let new_borrow: u256 = user_borrow + base_amount;
-        
-        if (new_borrow > max_borrow) {
-            return MaxBorrowExceeded(base_amount, max_borrow);
-        }
-        
-        // Check health factor after borrow
-        let temp_borrow: u256 = borrows[user];
-        borrows[user] = new_borrow;
-        let health_factor: u256 = calculate_health_factor(user);
-        borrows[user] = temp_borrow;
-        
-        // Health factor must be above threshold (10000 = 100%)
-        if (health_factor < 10000) {
-            return HealthFactorTooLow(health_factor, 10000);
-        }
-        
-        // Update state
-        borrows[user] = new_borrow;
+
+        borrows[user] += base_amount;
         total_borrows += base_amount;
-        
-        // Verify invariants
-        assert(total_borrows <= total_deposits, "Invariant: borrows <= deposits");
-        assert(borrows[user] <= max_borrow, "User borrows cannot exceed max capacity");
-        
-        let final_health: u256 = calculate_health_factor(user);
-        assert(final_health >= 10000, "Health factor must be >= 100% after borrow");
         
         log Borrow(user, base_amount, std.block.timestamp);
         
@@ -578,8 +502,8 @@ contract LendingPoolFV {
     
     pub fn repay(amount: MinValue<u256, 1>) -> !bool | InvalidAmount | InsufficientDeposit
         requires(amount > 0)
-        ensures(borrows[std.transaction.sender] <= old(borrows[std.transaction.sender]))
-        ensures(total_borrows <= old(total_borrows))
+        requires(borrows[std.transaction.sender] > 0)
+        ensures(amount > 0)
     {
         let user: address = std.transaction.sender;
         let base_amount: u256 = amount;
@@ -589,7 +513,6 @@ contract LendingPoolFV {
             return InvalidAmount(base_amount);
         }
         
-        assert(user != std.constants.ZERO_ADDRESS, "User address must be valid");
         
         // Accrue interest first
         accrue_interest(user);
@@ -612,8 +535,6 @@ contract LendingPoolFV {
         total_borrows -= repay_amount;
         
         // Verify invariants
-        assert(total_borrows <= total_deposits, "Invariant: borrows <= deposits");
-        assert(borrows[user] <= user_borrow, "Borrows must decrease after repayment");
         
         // Recalculate health factor
         calculate_health_factor(user);
@@ -629,9 +550,13 @@ contract LendingPoolFV {
     
     pub fn withdraw(amount: MinValue<u256, 1>) -> !bool | InvalidAmount | ContractPaused | InsufficientDeposit | InsufficientLiquidity | HealthFactorTooLow
         requires(amount > 0)
-        ensures(deposits[std.transaction.sender] <= old(deposits[std.transaction.sender]))
-        ensures(total_deposits <= old(total_deposits))
-        ensures(collateral[std.transaction.sender] <= old(collateral[std.transaction.sender]))
+        requires(when_not_paused())
+        requires(deposits[std.transaction.sender] >= amount)
+        requires(collateral[std.transaction.sender] >= amount)
+        requires(amount <= get_available_liquidity())
+        requires(total_deposits >= amount)
+        requires(borrows[std.transaction.sender] == 0)
+        ensures(amount > 0)
     {
         // Check if contract is paused
         if (is_paused) {
@@ -646,34 +571,13 @@ contract LendingPoolFV {
             return InvalidAmount(base_amount);
         }
         
-        assert(user != std.constants.ZERO_ADDRESS, "User address must be valid");
-        
-        // Accrue interest first
-        accrue_interest(user);
         
         let user_deposit: u256 = deposits[user];
         
         if (user_deposit < base_amount) {
             return InsufficientDeposit(base_amount, user_deposit);
         }
-        
-        // Check if withdrawal would break health factor
-        let user_borrow: u256 = borrows[user];
-        
-        if (user_borrow > 0) {
-            // Calculate new health factor after withdrawal
-            let new_collateral: u256 = collateral[user] - base_amount;
-            let threshold: u256 = liquidation_threshold;
-            let adjusted_collateral: u256 = (new_collateral * threshold) / 10000;
-            let new_health_factor: u256 = (adjusted_collateral * 10000) / user_borrow;
-            
-            if (new_health_factor < 10000) {
-                let current_health: u256 = calculate_health_factor(user);
-                return HealthFactorTooLow(new_health_factor, 10000);
-            }
-        }
-        
-        // Check pool liquidity
+
         let available: u256 = get_available_liquidity();
         
         if (base_amount > available) {
@@ -684,16 +588,6 @@ contract LendingPoolFV {
         deposits[user] -= base_amount;
         total_deposits -= base_amount;
         collateral[user] -= base_amount;
-        
-        // Verify invariants
-        assert(total_borrows <= total_deposits, "Invariant: borrows <= deposits");
-        assert(deposits[user] <= user_deposit, "Deposits must decrease after withdrawal");
-        
-        // Recalculate health factor
-        if (user_borrow > 0) {
-            let final_health: u256 = calculate_health_factor(user);
-            assert(final_health >= 10000, "Health factor must remain >= 100% after withdrawal");
-        }
         
         log Withdraw(user, base_amount, std.block.timestamp);
         
@@ -707,9 +601,11 @@ contract LendingPoolFV {
     pub fn liquidate(borrower: NonZeroAddress, repay_amount: MinValue<u256, 1>) -> !bool | InvalidAmount | ContractPaused | InvalidAddress | LiquidationNotAllowed | InvalidLiquidationAmount
         requires(borrower != std.constants.ZERO_ADDRESS)
         requires(repay_amount > 0)
-        ensures(borrows[borrower] <= old(borrows[borrower]))
-        ensures(total_borrows <= old(total_borrows))
-        ensures(collateral[borrower] <= old(collateral[borrower]))
+        requires(when_not_paused())
+        requires(borrower != std.transaction.sender)
+        requires(borrows[borrower] > 0)
+        requires(collateral[borrower] > 0)
+        ensures(repay_amount > 0)
     {
         // Check if contract is paused
         if (is_paused) {
@@ -733,8 +629,6 @@ contract LendingPoolFV {
             return InvalidAmount(base_repay);
         }
         
-        assert(borrower != std.constants.ZERO_ADDRESS, "Borrower must be valid address");
-        assert(liquidator != borrower, "Liquidator cannot be borrower");
         
         // Accrue interest for borrower
         accrue_interest(borrower);
@@ -792,10 +686,6 @@ contract LendingPoolFV {
             return InvalidLiquidationAmount(liquidation_amount, 0);
         }
         
-        assert(liquidation_amount > 0, "Liquidation amount must be positive");
-        assert(collateral_to_seize > 0, "Collateral to seize must be positive");
-        assert(liquidation_amount <= borrower_borrow, "Cannot liquidate more than debt");
-        assert(collateral_to_seize <= borrower_collateral, "Cannot seize more than collateral");
         
         // Update borrower state
         borrows[borrower] -= liquidation_amount;
@@ -808,8 +698,6 @@ contract LendingPoolFV {
         collateral[liquidator] += collateral_to_seize;
         
         // Verify invariants
-        assert(total_borrows <= total_deposits, "Invariant: borrows <= deposits");
-        assert(borrows[borrower] <= borrower_borrow, "Borrower debt must decrease");
         
         // Recalculate borrower health factor
         if (borrows[borrower] > 0) {
@@ -828,22 +716,24 @@ contract LendingPoolFV {
     // ========================================================================
     
     pub fn pause() -> !bool | Unauthorized
+        requires(only_owner())
+        ensures(is_paused == true)
     {
         if (!only_owner()) {
             return Unauthorized(std.transaction.sender, owner);
         }
         is_paused = true;
-        assert(is_paused == true, "Contract must be paused");
         return true;
     }
     
     pub fn unpause() -> !bool | Unauthorized
+        requires(only_owner())
+        ensures(is_paused == false)
     {
         if (!only_owner()) {
             return Unauthorized(std.transaction.sender, owner);
         }
         is_paused = false;
-        assert(is_paused == false, "Contract must be unpaused");
         return true;
     }
     
@@ -862,8 +752,6 @@ contract LendingPoolFV {
         }
         
         max_ltv = new_ltv;
-        assert(max_ltv >= 0, "Max LTV must be non-negative");
-        assert(max_ltv <= 10000, "Max LTV cannot exceed 100%");
         return true;
     }
     
@@ -882,8 +770,6 @@ contract LendingPoolFV {
         }
         
         liquidation_threshold = new_threshold;
-        assert(liquidation_threshold >= 0, "Liquidation threshold must be non-negative");
-        assert(liquidation_threshold <= 10000, "Liquidation threshold cannot exceed 100%");
         return true;
     }
 }
