@@ -371,18 +371,18 @@ jobs:
           fi
           echo "✅ Python3 available: $(python3 --version)"
 
-      - name: Run Python feature tests
+      - name: Run Python feature tests (Ora + SIR)
         shell: bash
         run: |
-          echo "🐍 Running Python feature test script..."
-          if [ -f "scripts/test_ora_features.py" ]; then
-            python3 scripts/test_ora_features.py --compiler ./zig-out/bin/ora --timeout 120 || {
+          echo "🐍 Running Python feature test script (Ora + SIR)..."
+          if [ -f "scripts/test_ora_features_sir.py" ]; then
+            python3 scripts/test_ora_features_sir.py --compiler ./zig-out/bin/ora --timeout 120 || {
               echo "❌ Python feature tests failed"
               exit 1
             }
             echo "✅ Python feature tests completed"
           else
-            echo "⚠️  test_ora_features.py not found, skipping"
+            echo "⚠️  test_ora_features_sir.py not found, skipping"
           fi
 
       - name: Upload test results
