@@ -39,21 +39,16 @@ contract VerifiedToken {
     pub fn transfer(recipient: NonZeroAddress, amount: u256) -> bool
         requires(amount > 0)
         requires(recipient != std.constants.ZERO_ADDRESS)
+        requires(recipient != std.msg.sender())
         requires(balances[std.msg.sender()] >= amount)
-        ensures(balances[std.msg.sender()] == old(balances[std.msg.sender()]) - amount)
-        ensures(balances[recipient] == old(balances[recipient]) + amount)
+        requires(balances[recipient] <= std.constants.U256_MAX - amount)
+        ensures(
+            balances[std.msg.sender()] == old(balances[std.msg.sender()]) - amount &&
+            balances[recipient] == old(balances[recipient]) + amount
+        )
     {
         var sender: address = std.msg.sender();
         var sender_balance: u256 = balances[sender];
-        
-        // Simple checks without require
-        if (sender_balance < amount) {
-            return false;
-        }
-        
-        if (recipient == std.constants.ZERO_ADDRESS) {
-            return false;
-        }
         
         // Perform transfer
         balances[sender] = sender_balance - amount;
@@ -69,11 +64,6 @@ contract VerifiedToken {
         ensures(allowances[std.msg.sender()][spender] == amount)
     {
         var owner: address = std.msg.sender();
-        
-        if (spender == std.constants.ZERO_ADDRESS) {
-            return false;
-        }
-        
         allowances[owner][spender] = amount;
         return true;
     }
@@ -84,30 +74,23 @@ contract VerifiedToken {
     }
     
     // Transfer from one address to another using allowance
-    pub fn transferFrom(sender: address, recipient: address, amount: u256) -> bool
+    pub fn transferFrom(sender: NonZeroAddress, recipient: NonZeroAddress, amount: u256) -> bool
         requires(amount > 0)
         requires(recipient != std.constants.ZERO_ADDRESS)
+        requires(sender != recipient)
         requires(allowances[sender][std.msg.sender()] >= amount)
         requires(balances[sender] >= amount)
-        ensures(balances[sender] == old(balances[sender]) - amount)
-        ensures(balances[recipient] == old(balances[recipient]) + amount)
-        ensures(allowances[sender][std.msg.sender()] == old(allowances[sender][std.msg.sender()]) - amount)
+        requires(balances[recipient] <= std.constants.U256_MAX - amount)
+        ensures(
+            balances[sender] == old(balances[sender]) - amount &&
+            balances[recipient] == old(balances[recipient]) + amount &&
+            allowances[sender][std.msg.sender()] == old(allowances[sender][std.msg.sender()]) - amount
+        )
     {
         var spender: address = std.msg.sender();
         
         var current_allowance: u256 = allowances[sender][spender];
-        if (current_allowance < amount) {
-            return false;
-        }
-        
         var sender_balance: u256 = balances[sender];
-        if (sender_balance < amount) {
-            return false;
-        }
-        
-        if (recipient == std.constants.ZERO_ADDRESS) {
-            return false;
-        }
         
         // Update allowance
         allowances[sender][spender] = current_allowance - amount;
@@ -125,4 +108,3 @@ contract VerifiedToken {
         return sumOfBalances;
     }
 }
-

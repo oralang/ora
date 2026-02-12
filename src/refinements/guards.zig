@@ -260,6 +260,26 @@ pub fn generateExactDivisionGuard(
     span: lib.SourceSpan,
 ) !void {
     const loc = self.fileLoc(span);
+    const divisor_type = c.mlirValueGetType(divisor);
+    const zero_divisor_attr = c.mlirIntegerAttrGet(divisor_type, 0);
+    const zero_divisor = self.createConstant(zero_divisor_attr, loc);
+
+    // check: divisor != 0
+    const ne_pred_id = h.identifier(self.ctx, "predicate");
+    const ne_pred_attr = c.mlirIntegerAttrGet(c.mlirIntegerTypeGet(self.ctx, 64), 1); // ne
+    var ne_attrs = [_]c.MlirNamedAttribute{c.mlirNamedAttributeGet(ne_pred_id, ne_pred_attr)};
+    const non_zero_cmp = h.createOp(
+        self.ctx,
+        loc,
+        "arith.cmpi",
+        &[_]c.MlirValue{ divisor, zero_divisor },
+        &[_]c.MlirType{h.boolType(self.ctx)},
+        &ne_attrs,
+        0,
+        false,
+    );
+    h.appendOp(self.block, non_zero_cmp);
+    const non_zero = h.getResult(non_zero_cmp, 0);
 
     // compute: dividend % divisor
     const mod_op = h.createOp(
@@ -295,7 +315,20 @@ pub fn generateExactDivisionGuard(
         false,
     );
     h.appendOp(self.block, cmp_op);
-    const condition = h.getResult(cmp_op, 0);
+    const exact = h.getResult(cmp_op, 0);
+
+    const and_op = h.createOp(
+        self.ctx,
+        loc,
+        "arith.andi",
+        &[_]c.MlirValue{ non_zero, exact },
+        &[_]c.MlirType{h.boolType(self.ctx)},
+        &[_]c.MlirNamedAttribute{},
+        0,
+        false,
+    );
+    h.appendOp(self.block, and_op);
+    const condition = h.getResult(and_op, 0);
 
     // create assertion
     const msg = "Refinement violation: Exact<T> division must have no remainder";

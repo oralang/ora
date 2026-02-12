@@ -24,6 +24,12 @@ pub const Encoder = struct {
         post: ?z3.Z3_ast = null,
     };
 
+    const TensorDimKey = struct {
+        source_value_id: u64,
+        dim_value_id: u64,
+        is_old: bool,
+    };
+
     const QuantifiedBinding = struct {
         name: []u8,
         ast: z3.Z3_ast,
@@ -45,8 +51,16 @@ pub const Encoder = struct {
     global_map: std.StringHashMap(z3.Z3_ast),
     /// Map from global storage name to Z3 AST (for old() storage symbols)
     global_old_map: std.StringHashMap(z3.Z3_ast),
+    /// Snapshot of global storage symbols at function entry.
+    global_entry_map: std.StringHashMap(z3.Z3_ast),
     /// Map from environment symbol name (e.g. msg.sender) to Z3 AST.
     env_map: std.StringHashMap(z3.Z3_ast),
+    /// Scalar memref local state threaded during verification extraction.
+    memref_map: std.AutoHashMap(u64, z3.Z3_ast),
+    /// Scalar memref local state for old() mode.
+    memref_old_map: std.AutoHashMap(u64, z3.Z3_ast),
+    /// Stable symbolic dimensions for tensor.dim/memref.dim on dynamic shapes.
+    tensor_dim_map: std.AutoHashMap(TensorDimKey, z3.Z3_ast),
     /// Map from function symbol name to MLIR function operation.
     function_ops: std.StringHashMap(mlir.MlirOperation),
     /// Calls already materialized for current-state summary (avoid double state transitions).
@@ -76,7 +90,11 @@ pub const Encoder = struct {
             .value_bindings = std.HashMap(u64, z3.Z3_ast, std.hash_map.AutoContext(u64), std.hash_map.default_max_load_percentage).init(allocator),
             .global_map = std.StringHashMap(z3.Z3_ast).init(allocator),
             .global_old_map = std.StringHashMap(z3.Z3_ast).init(allocator),
+            .global_entry_map = std.StringHashMap(z3.Z3_ast).init(allocator),
             .env_map = std.StringHashMap(z3.Z3_ast).init(allocator),
+            .memref_map = std.AutoHashMap(u64, z3.Z3_ast).init(allocator),
+            .memref_old_map = std.AutoHashMap(u64, z3.Z3_ast).init(allocator),
+            .tensor_dim_map = std.AutoHashMap(TensorDimKey, z3.Z3_ast).init(allocator),
             .function_ops = std.StringHashMap(mlir.MlirOperation).init(allocator),
             .materialized_calls = std.AutoHashMap(u64, void).init(allocator),
             .inline_function_stack = std.ArrayList([]u8){},
@@ -109,11 +127,21 @@ pub const Encoder = struct {
         }
         self.global_old_map.clearRetainingCapacity();
 
+        var entry_it = self.global_entry_map.iterator();
+        while (entry_it.next()) |entry| {
+            self.allocator.free(entry.key_ptr.*);
+        }
+        self.global_entry_map.clearRetainingCapacity();
+
         var env_it = self.env_map.iterator();
         while (env_it.next()) |entry| {
             self.allocator.free(entry.key_ptr.*);
         }
         self.env_map.clearRetainingCapacity();
+
+        self.memref_map.clearRetainingCapacity();
+        self.memref_old_map.clearRetainingCapacity();
+        self.tensor_dim_map.clearRetainingCapacity();
 
         self.value_map.clearRetainingCapacity();
         self.value_map_old.clearRetainingCapacity();
@@ -140,11 +168,19 @@ pub const Encoder = struct {
             self.allocator.free(entry.key_ptr.*);
         }
         self.global_old_map.deinit();
+        var entry_it = self.global_entry_map.iterator();
+        while (entry_it.next()) |entry| {
+            self.allocator.free(entry.key_ptr.*);
+        }
+        self.global_entry_map.deinit();
         var env_it = self.env_map.iterator();
         while (env_it.next()) |entry| {
             self.allocator.free(entry.key_ptr.*);
         }
         self.env_map.deinit();
+        self.memref_map.deinit();
+        self.memref_old_map.deinit();
+        self.tensor_dim_map.deinit();
         var fn_it = self.function_ops.iterator();
         while (fn_it.next()) |entry| {
             self.allocator.free(entry.key_ptr.*);
@@ -201,6 +237,28 @@ pub const Encoder = struct {
             if (self.env_map.contains(name)) continue;
             const key = try self.allocator.dupe(u8, name);
             try self.env_map.put(key, entry.value_ptr.*);
+        }
+    }
+
+    fn copyGlobalStateMapFrom(self: *Encoder, other: *const Encoder, use_old: bool) !void {
+        const source = if (use_old) &other.global_old_map else &other.global_map;
+        const destination = if (use_old) &self.global_old_map else &self.global_map;
+        var it = source.iterator();
+        while (it.next()) |entry| {
+            const name = entry.key_ptr.*;
+            if (destination.contains(name)) continue;
+            const key = try self.allocator.dupe(u8, name);
+            try destination.put(key, entry.value_ptr.*);
+        }
+    }
+
+    fn copyGlobalEntryMapFrom(self: *Encoder, other: *const Encoder) !void {
+        var it = other.global_entry_map.iterator();
+        while (it.next()) |entry| {
+            const name = entry.key_ptr.*;
+            if (self.global_entry_map.contains(name)) continue;
+            const key = try self.allocator.dupe(u8, name);
+            try self.global_entry_map.put(key, entry.value_ptr.*);
         }
     }
 
@@ -316,7 +374,27 @@ pub const Encoder = struct {
         const symbol = try self.mkVariable(prefixed, sort);
         const key = try self.allocator.dupe(u8, name);
         try self.global_old_map.put(key, symbol);
+
+        // old(x) is the entry-state value of x; tie it to the entry snapshot.
+        const entry_symbol = try self.getOrCreateGlobalEntry(name, sort);
+        const eq = z3.Z3_mk_eq(self.context.ctx, symbol, entry_symbol);
+        self.addConstraint(eq);
         return symbol;
+    }
+
+    fn getOrCreateGlobalEntry(self: *Encoder, name: []const u8, sort: z3.Z3_sort) EncodeError!z3.Z3_ast {
+        if (self.global_entry_map.get(name)) |existing| {
+            return existing;
+        }
+
+        // If current state doesn't exist yet, create a dedicated entry symbol.
+        // getOrCreateGlobal() will reuse this symbol as the initial current state.
+        const entry_name = try std.fmt.allocPrint(self.allocator, "g_entry_{s}", .{name});
+        defer self.allocator.free(entry_name);
+        const entry_symbol = try self.mkVariable(entry_name, sort);
+        const key = try self.allocator.dupe(u8, name);
+        try self.global_entry_map.put(key, entry_symbol);
+        return entry_symbol;
     }
 
     fn mkSymbol(self: *Encoder, name: []const u8) EncodeError!z3.Z3_symbol {
@@ -330,6 +408,96 @@ pub const Encoder = struct {
         const name = try std.fmt.allocPrint(self.allocator, "undef_{s}_{d}", .{ label, id });
         defer self.allocator.free(name);
         return try self.mkVariable(name, sort);
+    }
+
+    fn getValueConstUnsigned(self: *Encoder, value: mlir.MlirValue, width: u32) ?u256 {
+        if (!mlir.oraValueIsAOpResult(value)) return null;
+        const owner = mlir.oraOpResultGetOwner(value);
+        if (mlir.oraOperationIsNull(owner)) return null;
+
+        const name_ref = mlir.oraOperationGetName(owner);
+        defer @import("mlir_c_api").freeStringRef(name_ref);
+        const op_name = if (name_ref.data == null or name_ref.length == 0)
+            ""
+        else
+            name_ref.data[0..name_ref.length];
+
+        if (!std.mem.eql(u8, op_name, "arith.constant") and !std.mem.eql(u8, op_name, "ora.const")) {
+            return null;
+        }
+
+        const value_attr = mlir.oraOperationGetAttributeByName(
+            owner,
+            mlir.oraStringRefCreate("value".ptr, "value".len),
+        );
+        return self.parseConstAttrValue(value_attr, width);
+    }
+
+    fn encodeUnsignedToSort(self: *Encoder, value: u64, sort: z3.Z3_sort) EncodeError!z3.Z3_ast {
+        const value_str = try std.fmt.allocPrint(self.allocator, "{d}", .{value});
+        defer self.allocator.free(value_str);
+        const value_z = try self.allocator.dupeZ(u8, value_str);
+        defer self.allocator.free(value_z);
+        return z3.Z3_mk_numeral(self.context.ctx, value_z.ptr, sort);
+    }
+
+    fn getOrCreateShapedDimSymbol(self: *Encoder, key: TensorDimKey, result_sort: z3.Z3_sort) EncodeError!z3.Z3_ast {
+        if (self.tensor_dim_map.get(key)) |existing| {
+            return existing;
+        }
+
+        const mode_tag = if (key.is_old) "old" else "cur";
+        const name = try std.fmt.allocPrint(
+            self.allocator,
+            "shape_dim_{d}_{d}_{s}",
+            .{ key.source_value_id, key.dim_value_id, mode_tag },
+        );
+        defer self.allocator.free(name);
+        const dim_ast = try self.mkVariable(name, result_sort);
+        try self.tensor_dim_map.put(key, dim_ast);
+        return dim_ast;
+    }
+
+    fn encodeShapedDimOp(self: *Encoder, mlir_op: mlir.MlirOperation, mode: EncodeMode) EncodeError!z3.Z3_ast {
+        const num_results = mlir.oraOperationGetNumResults(mlir_op);
+        if (num_results < 1) return error.UnsupportedOperation;
+        const result_value = mlir.oraOperationGetResult(mlir_op, 0);
+        const result_type = mlir.oraValueGetType(result_value);
+        const result_sort = try self.encodeMLIRType(result_type);
+
+        const num_operands = mlir.oraOperationGetNumOperands(mlir_op);
+        if (num_operands < 1) return error.InvalidOperandCount;
+
+        const source_value = mlir.oraOperationGetOperand(mlir_op, 0);
+        var dim_value_id: u64 = 0;
+        var dim_index: ?u256 = null;
+        if (num_operands >= 2) {
+            const dim_value = mlir.oraOperationGetOperand(mlir_op, 1);
+            dim_value_id = @intFromPtr(dim_value.ptr);
+            dim_index = self.getValueConstUnsigned(dim_value, 64);
+        }
+
+        const source_type = mlir.oraValueGetType(source_value);
+        if (!mlir.oraTypeIsNull(source_type) and mlir.oraTypeIsAShaped(source_type)) {
+            if (dim_index) |idx| {
+                const rank_i64 = mlir.oraShapedTypeGetRank(source_type);
+                const rank_u64: u64 = if (rank_i64 > 0) @intCast(rank_i64) else 0;
+                if (idx < rank_u64) {
+                    const dim_axis: i64 = @intCast(idx);
+                    const dim_size = mlir.oraShapedTypeGetDimSize(source_type, dim_axis);
+                    if (dim_size >= 0) {
+                        return try self.encodeUnsignedToSort(@intCast(dim_size), result_sort);
+                    }
+                }
+            }
+        }
+
+        const key = TensorDimKey{
+            .source_value_id = @intFromPtr(source_value.ptr),
+            .dim_value_id = dim_value_id,
+            .is_old = mode == .Old,
+        };
+        return try self.getOrCreateShapedDimSymbol(key, result_sort);
     }
 
     fn addConstraint(self: *Encoder, constraint: z3.Z3_ast) void {
@@ -358,6 +526,16 @@ pub const Encoder = struct {
         if (self.global_map.get(name)) |existing| {
             return existing;
         }
+
+        // If old(name) was encoded first, reuse the entry snapshot as the
+        // initial current-state value.
+        if (self.global_entry_map.get(name)) |entry_symbol| {
+            const key = try self.allocator.dupe(u8, name);
+            errdefer self.allocator.free(key);
+            try self.global_map.put(key, entry_symbol);
+            return entry_symbol;
+        }
+
         const key = try self.allocator.dupe(u8, name);
         errdefer self.allocator.free(key);
 
@@ -365,6 +543,10 @@ pub const Encoder = struct {
         defer self.allocator.free(global_name);
         const ast = try self.mkVariable(global_name, sort);
         try self.global_map.put(key, ast);
+
+        const entry_key = try self.allocator.dupe(u8, name);
+        errdefer self.allocator.free(entry_key);
+        try self.global_entry_map.put(entry_key, ast);
         return ast;
     }
 
@@ -659,6 +841,105 @@ pub const Encoder = struct {
         return z3.Z3_mk_store(self.context.ctx, array, index, value);
     }
 
+    fn coerceAstToSort(self: *Encoder, ast: z3.Z3_ast, target_sort: z3.Z3_sort) z3.Z3_ast {
+        const src_sort = z3.Z3_get_sort(self.context.ctx, ast);
+        if (src_sort == target_sort) return ast;
+
+        const src_kind = z3.Z3_get_sort_kind(self.context.ctx, src_sort);
+        const dst_kind = z3.Z3_get_sort_kind(self.context.ctx, target_sort);
+
+        if (src_kind == z3.Z3_BOOL_SORT and dst_kind == z3.Z3_BV_SORT) {
+            const one = z3.Z3_mk_unsigned_int64(self.context.ctx, 1, target_sort);
+            const zero = z3.Z3_mk_unsigned_int64(self.context.ctx, 0, target_sort);
+            return z3.Z3_mk_ite(self.context.ctx, ast, one, zero);
+        }
+
+        if (src_kind == z3.Z3_BV_SORT and dst_kind == z3.Z3_BOOL_SORT) {
+            const zero = z3.Z3_mk_unsigned_int64(self.context.ctx, 0, src_sort);
+            return z3.Z3_mk_not(self.context.ctx, z3.Z3_mk_eq(self.context.ctx, ast, zero));
+        }
+
+        if (src_kind == z3.Z3_BV_SORT and dst_kind == z3.Z3_BV_SORT) {
+            const src_width = z3.Z3_get_bv_sort_size(self.context.ctx, src_sort);
+            const dst_width = z3.Z3_get_bv_sort_size(self.context.ctx, target_sort);
+            if (src_width == dst_width) return ast;
+            if (src_width < dst_width) {
+                return z3.Z3_mk_zero_ext(self.context.ctx, dst_width - src_width, ast);
+            }
+            return z3.Z3_mk_extract(self.context.ctx, dst_width - 1, 0, ast);
+        }
+
+        return ast;
+    }
+
+    fn encodeTensorExtractOp(self: *Encoder, operands: []const z3.Z3_ast, mlir_op: mlir.MlirOperation) EncodeError!z3.Z3_ast {
+        if (operands.len < 2) return error.InvalidOperandCount;
+
+        var current = operands[0];
+        for (operands[1..]) |raw_index| {
+            const current_sort = z3.Z3_get_sort(self.context.ctx, current);
+            if (!self.isArraySort(current_sort)) return error.UnsupportedOperation;
+            const index_sort = z3.Z3_get_array_sort_domain(self.context.ctx, current_sort);
+            const index = self.coerceAstToSort(raw_index, index_sort);
+            current = self.encodeSelect(current, index);
+        }
+
+        const num_results = mlir.oraOperationGetNumResults(mlir_op);
+        if (num_results < 1) return current;
+        const result_value = mlir.oraOperationGetResult(mlir_op, 0);
+        const result_sort = try self.encodeMLIRType(mlir.oraValueGetType(result_value));
+        return self.coerceAstToSort(current, result_sort);
+    }
+
+    fn encodeTensorInsertOp(self: *Encoder, operands: []const z3.Z3_ast) EncodeError!z3.Z3_ast {
+        // tensor.insert %value into %tensor[%i, ...]
+        // operands: value, tensor, idx0, idx1, ...
+        if (operands.len < 3) return error.InvalidOperandCount;
+
+        const value = operands[0];
+        const tensor = operands[1];
+        const indices = operands[2..];
+
+        var containers = try self.allocator.alloc(z3.Z3_ast, indices.len);
+        defer self.allocator.free(containers);
+        var cast_indices = try self.allocator.alloc(z3.Z3_ast, indices.len);
+        defer self.allocator.free(cast_indices);
+
+        var cursor = tensor;
+        for (indices, 0..) |raw_index, i| {
+            const container_sort = z3.Z3_get_sort(self.context.ctx, cursor);
+            if (!self.isArraySort(container_sort)) return error.UnsupportedOperation;
+
+            containers[i] = cursor;
+            const index_sort = z3.Z3_get_array_sort_domain(self.context.ctx, container_sort);
+            cast_indices[i] = self.coerceAstToSort(raw_index, index_sort);
+
+            if (i + 1 < indices.len) {
+                cursor = self.encodeSelect(cursor, cast_indices[i]);
+            }
+        }
+
+        const leaf_container = containers[indices.len - 1];
+        const leaf_sort = z3.Z3_get_sort(self.context.ctx, leaf_container);
+        const leaf_range = z3.Z3_get_array_sort_range(self.context.ctx, leaf_sort);
+        var updated = self.encodeStore(
+            leaf_container,
+            cast_indices[indices.len - 1],
+            self.coerceAstToSort(value, leaf_range),
+        );
+
+        var depth = indices.len - 1;
+        while (depth > 0) {
+            depth -= 1;
+            const parent = containers[depth];
+            const parent_sort = z3.Z3_get_sort(self.context.ctx, parent);
+            const parent_range = z3.Z3_get_array_sort_range(self.context.ctx, parent_sort);
+            updated = self.encodeStore(parent, cast_indices[depth], self.coerceAstToSort(updated, parent_range));
+        }
+
+        return updated;
+    }
+
     /// Emit quantified frame condition for a single array store:
     /// forall k. k != index -> select(post, k) == select(pre, k)
     fn addArrayStoreFrameConstraint(self: *Encoder, pre: z3.Z3_ast, index: z3.Z3_ast, post: z3.Z3_ast, op_id: u64) EncodeError!void {
@@ -787,6 +1068,7 @@ pub const Encoder = struct {
         const var_name = try std.fmt.allocPrint(self.allocator, "v_{d}", .{value_id});
         defer self.allocator.free(var_name);
         const encoded = try self.mkVariable(var_name, sort);
+        try self.addBlockArgumentConstraints(mlir_value, encoded, mode);
 
         // cache the result
         // For block arguments, keep a single symbol shared across modes.
@@ -802,6 +1084,70 @@ pub const Encoder = struct {
             if (candidate.ptr == value.ptr) return i;
         }
         return null;
+    }
+
+    fn addBlockArgumentConstraints(self: *Encoder, value: mlir.MlirValue, ast: z3.Z3_ast, mode: EncodeMode) EncodeError!void {
+        if (!mlir.mlirValueIsABlockArgument(value)) return;
+
+        const owner_block = mlir.mlirBlockArgumentGetOwner(value);
+        if (mlir.oraBlockIsNull(owner_block)) return;
+        const parent_op = mlir.mlirBlockGetParentOperation(owner_block);
+        if (mlir.oraOperationIsNull(parent_op)) return;
+
+        const op_name_ref = mlir.oraOperationGetName(parent_op);
+        defer @import("mlir_c_api").freeStringRef(op_name_ref);
+        const op_name = if (op_name_ref.data == null or op_name_ref.length == 0)
+            ""
+        else
+            op_name_ref.data[0..op_name_ref.length];
+
+        // scf.for body arg0 is induction variable. Constrain it by loop bounds.
+        if (std.mem.eql(u8, op_name, "scf.for")) {
+            const arg_no = mlir.mlirBlockArgumentGetArgNumber(value);
+            if (arg_no != 0) return;
+
+            const num_operands = mlir.oraOperationGetNumOperands(parent_op);
+            if (num_operands < 2) return;
+            const lower_bound = mlir.oraOperationGetOperand(parent_op, 0);
+            const upper_bound = mlir.oraOperationGetOperand(parent_op, 1);
+
+            const lb_ast = try self.encodeValueWithMode(lower_bound, mode);
+            const ub_ast = try self.encodeValueWithMode(upper_bound, mode);
+            const unsigned_cmp = self.getScfForUnsignedCmp(parent_op);
+            const lower_ok = if (unsigned_cmp)
+                z3.Z3_mk_bvuge(self.context.ctx, ast, lb_ast)
+            else
+                z3.Z3_mk_bvsge(self.context.ctx, ast, lb_ast);
+            const upper_ok = if (unsigned_cmp)
+                z3.Z3_mk_bvult(self.context.ctx, ast, ub_ast)
+            else
+                z3.Z3_mk_bvslt(self.context.ctx, ast, ub_ast);
+            self.addConstraint(lower_ok);
+            self.addConstraint(upper_ok);
+        }
+    }
+
+    fn getScfForUnsignedCmp(self: *Encoder, loop_op: mlir.MlirOperation) bool {
+        const printed = mlir.oraOperationPrintToString(loop_op);
+        defer if (printed.data != null) {
+            const mlir_c = @import("mlir_c_api");
+            mlir_c.freeStringRef(printed);
+        };
+
+        if (printed.data != null and printed.length > 0) {
+            const text = printed.data[0..printed.length];
+            if (std.mem.indexOf(u8, text, "unsignedCmp = true") != null) return true;
+            if (std.mem.indexOf(u8, text, "unsignedCmp = false") != null) return false;
+        }
+
+        const unsigned_attr = mlir.oraOperationGetAttributeByName(
+            loop_op,
+            mlir.oraStringRefCreate("unsignedCmp".ptr, "unsignedCmp".len),
+        );
+        if (mlir.oraAttributeIsNull(unsigned_attr)) return false;
+
+        _ = self;
+        return mlir.oraIntegerAttrGetValueSInt(unsigned_attr) != 0;
     }
 
     fn encodeOperationResultWithMode(
@@ -959,6 +1305,22 @@ pub const Encoder = struct {
             return self.mkArraySort(key_sort, value_sort);
         }
 
+        if (mlir.oraTypeIsAShaped(mlir_type)) {
+            const elem_type = mlir.oraShapedTypeGetElementType(mlir_type);
+            if (mlir.oraTypeIsNull(elem_type)) return self.mkBitVectorSort(256);
+
+            var sort = try self.encodeMLIRType(elem_type);
+            const rank_i = mlir.oraShapedTypeGetRank(mlir_type);
+            if (rank_i <= 0) return sort;
+
+            const rank: usize = @intCast(rank_i);
+            const index_sort = self.mkBitVectorSort(256);
+            for (0..rank) |_| {
+                sort = self.mkArraySort(index_sort, sort);
+            }
+            return sort;
+        }
+
         // default to 256-bit bitvector for EVM
         return self.mkBitVectorSort(256);
     }
@@ -1099,7 +1461,7 @@ pub const Encoder = struct {
 
         // arithmetic operations
         if (std.mem.startsWith(u8, op_name, "arith.")) {
-            return try self.encodeArithOp(op_name, operands);
+            return try self.encodeArithOp(op_name, operands, mlir_op);
         }
 
         if (std.mem.eql(u8, op_name, "ora.add") or
@@ -1172,7 +1534,11 @@ pub const Encoder = struct {
                     const op_id = @intFromPtr(mlir_op.ptr);
                     return try self.mkUndefValue(result_sort, "map_get", op_id);
                 }
-                return self.encodeSelect(operands[0], operands[1]);
+                const map_sort = z3.Z3_get_sort(self.context.ctx, operands[0]);
+                if (!self.isArraySort(map_sort)) return error.UnsupportedOperation;
+                const key_sort = z3.Z3_get_array_sort_domain(self.context.ctx, map_sort);
+                const key = self.coerceAstToSort(operands[1], key_sort);
+                return self.encodeSelect(operands[0], key);
             }
         }
 
@@ -1183,17 +1549,26 @@ pub const Encoder = struct {
                     if (num_results > 0) return operands[2];
                     return self.encodeBoolConstant(true);
                 }
-                const stored = self.encodeStore(operands[0], operands[1], operands[2]);
+                const map_sort = z3.Z3_get_sort(self.context.ctx, operands[0]);
+                if (!self.isArraySort(map_sort)) return error.UnsupportedOperation;
+                const key_sort = z3.Z3_get_array_sort_domain(self.context.ctx, map_sort);
+                const value_sort = z3.Z3_get_array_sort_range(self.context.ctx, map_sort);
+                const key = self.coerceAstToSort(operands[1], key_sort);
+                const value = self.coerceAstToSort(operands[2], value_sort);
+                const stored = self.encodeStore(operands[0], key, value);
                 const op_id = @intFromPtr(mlir_op.ptr);
-                self.addArrayStoreFrameConstraint(operands[0], operands[1], stored, op_id) catch {};
+                self.addArrayStoreFrameConstraint(operands[0], key, stored, op_id) catch {};
                 if (mode == .Current) {
                     const map_operand = mlir.oraOperationGetOperand(mlir_op, 0);
+                    const map_operand_id = @intFromPtr(map_operand.ptr);
+                    try self.value_bindings.put(map_operand_id, stored);
+                    try self.value_map.put(map_operand_id, stored);
                     if (self.resolveGlobalNameFromMapOperand(map_operand)) |global_name| {
                         if (self.global_map.getPtr(global_name)) |existing| {
                             existing.* = stored;
                         } else {
-                            const key = try self.allocator.dupe(u8, global_name);
-                            try self.global_map.put(key, stored);
+                            const global_key = try self.allocator.dupe(u8, global_name);
+                            try self.global_map.put(global_key, stored);
                         }
                     }
                 }
@@ -1268,6 +1643,12 @@ pub const Encoder = struct {
             return try self.encodeStructuredControlResult(mlir_op, op_name, operands, 0);
         }
 
+        if (std.mem.eql(u8, op_name, "ora.try_stmt")) {
+            // Conservative summary for try/catch-style control flow.
+            // Result values are modeled as structured-control summaries.
+            return try self.encodeStructuredControlResult(mlir_op, op_name, operands, 0);
+        }
+
         if (std.mem.eql(u8, op_name, "memref.alloca")) {
             const num_results = mlir.oraOperationGetNumResults(mlir_op);
             if (num_results >= 1) {
@@ -1279,26 +1660,60 @@ pub const Encoder = struct {
             }
         }
 
+        if (std.mem.eql(u8, op_name, "memref.store")) {
+            // Track scalar local memref state (rank-0 alloca pattern used by lowered locals).
+            if (operands.len < 2) return error.InvalidOperandCount;
+            const num_operands = mlir.oraOperationGetNumOperands(mlir_op);
+            if (num_operands == 2) {
+                const memref_value = mlir.oraOperationGetOperand(mlir_op, 1);
+                const memref_id = @intFromPtr(memref_value.ptr);
+                if (mode == .Old) {
+                    try self.memref_old_map.put(memref_id, operands[0]);
+                } else {
+                    try self.memref_map.put(memref_id, operands[0]);
+                }
+            }
+            return operands[0];
+        }
+
         if (std.mem.eql(u8, op_name, "memref.load")) {
             const num_results = mlir.oraOperationGetNumResults(mlir_op);
             if (num_results >= 1) {
                 const result_value = mlir.oraOperationGetResult(mlir_op, 0);
                 const result_type = mlir.oraValueGetType(result_value);
                 const result_sort = try self.encodeMLIRType(result_type);
+
+                // Scalar memref load: read from tracked local state if present.
+                const num_operands = mlir.oraOperationGetNumOperands(mlir_op);
+                if (num_operands == 1) {
+                    const memref_value = mlir.oraOperationGetOperand(mlir_op, 0);
+                    const memref_id = @intFromPtr(memref_value.ptr);
+                    const map = if (mode == .Old) &self.memref_old_map else &self.memref_map;
+                    if (map.get(memref_id)) |stored| {
+                        return stored;
+                    }
+
+                    const op_id_unknown = @intFromPtr(mlir_op.ptr);
+                    const fresh = try self.mkUndefValue(result_sort, "memref_load", op_id_unknown);
+                    try map.put(memref_id, fresh);
+                    return fresh;
+                }
+
                 const op_id = @intFromPtr(mlir_op.ptr);
                 return try self.mkUndefValue(result_sort, "memref_load", op_id);
             }
         }
 
+        if (std.mem.eql(u8, op_name, "tensor.dim") or std.mem.eql(u8, op_name, "memref.dim")) {
+            return try self.encodeShapedDimOp(mlir_op, mode);
+        }
+
+        if (std.mem.eql(u8, op_name, "tensor.insert")) {
+            return try self.encodeTensorInsertOp(operands);
+        }
+
         if (std.mem.eql(u8, op_name, "tensor.extract")) {
-            const num_results = mlir.oraOperationGetNumResults(mlir_op);
-            if (num_results >= 1) {
-                const result_value = mlir.oraOperationGetResult(mlir_op, 0);
-                const result_type = mlir.oraValueGetType(result_value);
-                const result_sort = try self.encodeMLIRType(result_type);
-                const op_id = @intFromPtr(mlir_op.ptr);
-                return try self.mkUndefValue(result_sort, "tensor_extract", op_id);
-            }
+            return try self.encodeTensorExtractOp(operands, mlir_op);
         }
 
         if (std.mem.eql(u8, op_name, "ora.evm.origin")) {
@@ -1516,6 +1931,13 @@ pub const Encoder = struct {
         const owned_callee = try self.resolveCalleeName(mlir_op);
         defer if (owned_callee) |name| self.allocator.free(name);
         const callee = owned_callee orelse "call";
+        if (mode == .Old) {
+            if (self.function_ops.get(callee)) |func_op| {
+                if (try self.tryInlinePureCallResult(callee, func_op, operands, result_index, mode)) |inlined| {
+                    return inlined;
+                }
+            }
+        }
         return try self.encodeCallResultUFSymbol(callee, operands, &[_]CallSlotState{}, result_index, result_sort);
     }
 
@@ -1906,6 +2328,61 @@ pub const Encoder = struct {
         }
     }
 
+    fn tryInlinePureCallResult(
+        self: *Encoder,
+        callee: []const u8,
+        func_op: mlir.MlirOperation,
+        operands: []const z3.Z3_ast,
+        result_index: u32,
+        mode: EncodeMode,
+    ) EncodeError!?z3.Z3_ast {
+        // Old-mode fallbacks should not mutate caller state. Inline only pure callees.
+        if (self.functionHasWriteEffect(func_op)) return null;
+        if (self.inlineStackContains(callee)) return null;
+        if (self.inline_function_stack.items.len >= self.max_summary_inline_depth) return null;
+
+        var summary_encoder = Encoder.init(self.context, self.allocator);
+        defer summary_encoder.deinit();
+        summary_encoder.setVerifyCalls(self.verify_calls);
+        summary_encoder.setVerifyState(self.verify_state);
+        summary_encoder.max_summary_inline_depth = self.max_summary_inline_depth;
+        try summary_encoder.copyFunctionRegistryFrom(self);
+        try summary_encoder.copyInlineStackFrom(self);
+        try summary_encoder.copyEnvMapFrom(self);
+        try summary_encoder.copyGlobalStateMapFrom(self, mode == .Old);
+        try summary_encoder.copyGlobalEntryMapFrom(self);
+        try summary_encoder.pushInlineFunction(callee);
+
+        const body_region = mlir.oraOperationGetRegion(func_op, 0);
+        if (mlir.oraRegionIsNull(body_region)) return null;
+        const entry_block = mlir.oraRegionGetFirstBlock(body_region);
+        if (mlir.oraBlockIsNull(entry_block)) return null;
+
+        const arg_count = mlir.oraBlockGetNumArguments(entry_block);
+        const bind_count = @min(arg_count, operands.len);
+        for (0..bind_count) |i| {
+            const arg_value = mlir.oraBlockGetArgument(entry_block, i);
+            try summary_encoder.bindValue(arg_value, operands[i]);
+        }
+
+        const return_op = self.findFunctionReturnOp(func_op) orelse return null;
+        const ret_operands = mlir.oraOperationGetNumOperands(return_op);
+        if (result_index >= ret_operands) return null;
+        const ret_value = mlir.oraOperationGetOperand(return_op, result_index);
+
+        const encoded = summary_encoder.encodeValueWithMode(ret_value, mode) catch return null;
+
+        const extra_constraints = try summary_encoder.takeConstraints(self.allocator);
+        defer if (extra_constraints.len > 0) self.allocator.free(extra_constraints);
+        for (extra_constraints) |cst| self.addConstraint(cst);
+
+        const extra_obligations = try summary_encoder.takeObligations(self.allocator);
+        defer if (extra_obligations.len > 0) self.allocator.free(extra_obligations);
+        for (extra_obligations) |obl| self.addObligation(obl);
+
+        return encoded;
+    }
+
     fn tryInlineFunctionCallSummary(
         self: *Encoder,
         callee: []const u8,
@@ -1933,6 +2410,8 @@ pub const Encoder = struct {
             try summary_encoder.global_map.put(g_key, slot.pre);
             const old_key = try summary_encoder.allocator.dupe(u8, slot.name);
             try summary_encoder.global_old_map.put(old_key, slot.pre);
+            const entry_key = try summary_encoder.allocator.dupe(u8, slot.name);
+            try summary_encoder.global_entry_map.put(entry_key, slot.pre);
         }
 
         const body_region = mlir.oraOperationGetRegion(func_op, 0);
@@ -2398,7 +2877,7 @@ pub const Encoder = struct {
     }
 
     /// Encode MLIR arithmetic operation (arith.addi, arith.subi, etc.)
-    pub fn encodeArithOp(self: *Encoder, op_name: []const u8, operands: []const z3.Z3_ast) !z3.Z3_ast {
+    pub fn encodeArithOp(self: *Encoder, op_name: []const u8, operands: []const z3.Z3_ast, mlir_op: mlir.MlirOperation) !z3.Z3_ast {
         if (operands.len < 2) {
             return error.UnsupportedOperation;
         }
@@ -2424,7 +2903,13 @@ pub const Encoder = struct {
             return error.UnsupportedOperation;
         };
 
-        self.emitArithmeticSafetyObligations(arith_op, lhs, rhs);
+        const guard_internal = if (self.getStringAttr(mlir_op, "ora.guard_internal")) |value|
+            std.mem.eql(u8, value, "true")
+        else
+            false;
+        if (!guard_internal) {
+            self.emitArithmeticSafetyObligations(arith_op, lhs, rhs);
+        }
         return self.encodeArithmeticOp(arith_op, lhs, rhs);
     }
 

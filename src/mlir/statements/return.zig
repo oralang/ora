@@ -18,14 +18,7 @@ pub fn lowerReturn(self: *const StatementLowerer, ret: *const lib.ast.Statements
     if (self.in_try_block and self.try_return_flag_memref != null) {
         const loc = self.fileLoc(ret.span);
         const return_flag_memref = self.try_return_flag_memref.?;
-
-        // insert ensures clause checks before recording the try-return
-        if (self.ensures_clauses.len > 0) {
-            try lowerEnsuresBeforeReturn(self, self.block, ret.span);
-        }
-
-        const true_val = helpers.createBoolConstant(self, true, loc);
-        helpers.storeToMemref(self, true_val, return_flag_memref, loc);
+        var final_value: ?c.MlirValue = null;
 
         if (ret.value) |value_expr| {
             if (self.try_return_value_memref) |return_value_memref| {
@@ -50,7 +43,20 @@ pub fn lowerReturn(self: *const StatementLowerer, ret: *const lib.ast.Statements
                     }
                     v = helpers.convertValueToType(self, v, element_type, ret.span, loc);
                 }
+                final_value = v;
+            }
+        }
 
+        // insert ensures clause checks before recording the try-return
+        if (self.ensures_clauses.len > 0) {
+            try lowerEnsuresBeforeReturn(self, self.block, ret.span, final_value);
+        }
+
+        const true_val = helpers.createBoolConstant(self, true, loc);
+        helpers.storeToMemref(self, true_val, return_flag_memref, loc);
+
+        if (self.try_return_value_memref) |return_value_memref| {
+            if (final_value) |v| {
                 helpers.storeToMemref(self, v, return_value_memref, loc);
             }
         }
@@ -61,16 +67,13 @@ pub fn lowerReturn(self: *const StatementLowerer, ret: *const lib.ast.Statements
     const loc = self.fileLoc(ret.span);
     log.debug("[lowerReturn] self.block ptr = {*}, self.expr_lowerer.block ptr = {*}\n", .{ self.block.ptr, self.expr_lowerer.block.ptr });
 
-    // insert ensures clause checks before return (postconditions must hold at every return point)
-    if (self.ensures_clauses.len > 0) {
-        try lowerEnsuresBeforeReturn(self, self.block, ret.span);
-    }
+    var final_value: ?c.MlirValue = null;
 
     if (ret.value) |e| {
         var v = self.expr_lowerer.lowerExpression(&e);
 
         // convert/wrap return value to match function return type if available
-        const final_value = if (self.current_function_return_type) |ret_type| blk: {
+        const converted_value = if (self.current_function_return_type) |ret_type| blk: {
             const is_error_union = if (self.current_function_return_type_info) |ti|
                 helpers.isErrorUnionTypeInfo(ti)
             else
@@ -92,8 +95,16 @@ pub fn lowerReturn(self: *const StatementLowerer, ret: *const lib.ast.Statements
             }
             break :blk v;
         } else v;
+        final_value = converted_value;
+    }
 
-        const op = self.ora_dialect.createFuncReturnWithValue(final_value, loc);
+    // insert ensures clause checks before return (postconditions must hold at every return point)
+    if (self.ensures_clauses.len > 0) {
+        try lowerEnsuresBeforeReturn(self, self.block, ret.span, final_value);
+    }
+
+    if (final_value) |v| {
+        const op = self.ora_dialect.createFuncReturnWithValue(v, loc);
         h.appendOp(self.block, op);
     } else {
         const op = self.ora_dialect.createFuncReturn(loc);
@@ -143,16 +154,22 @@ fn getExpressionSpan(expr: *const lib.ast.Expressions.ExprNode) lib.ast.SourceSp
 }
 
 /// Lower ensures clauses before a return statement
-pub fn lowerEnsuresBeforeReturn(self: *const StatementLowerer, block: c.MlirBlock, span: lib.ast.SourceSpan) LoweringError!void {
+pub fn lowerEnsuresBeforeReturn(self: *const StatementLowerer, block: c.MlirBlock, span: lib.ast.SourceSpan, return_value: ?c.MlirValue) LoweringError!void {
     _ = span; // Unused parameter
 
     for (self.ensures_clauses, 0..) |clause, i| {
+        var ensures_expr_lowerer = self.expr_lowerer.*;
+        ensures_expr_lowerer.block = block;
+        ensures_expr_lowerer.postcondition_return_value = return_value;
+
         // lower the ensures expression
-        const condition_value = self.expr_lowerer.lowerExpression(clause);
+        const condition_value = ensures_expr_lowerer.lowerExpression(clause);
 
         // create an assertion operation with comprehensive verification attributes
         // get the clause's span by switching on the expression type
         const clause_span = getExpressionSpan(clause);
+        const clause_loc = self.fileLoc(clause_span);
+        const final_condition = gateEnsuresForErrorUnion(self, block, condition_value, return_value, clause_loc);
         // collect verification attributes
         var attributes = std.ArrayList(c.MlirNamedAttribute){};
         defer attributes.deinit(self.allocator);
@@ -184,9 +201,33 @@ pub fn lowerEnsuresBeforeReturn(self: *const StatementLowerer, block: c.MlirBloc
         const index_id = h.identifier(self.ctx, "ora.postcondition_index");
         attributes.append(self.allocator, c.oraNamedAttributeGet(index_id, index_attr)) catch {};
 
-        const assert_op = self.ora_dialect.createCfAssertWithAttrs(condition_value, attributes.items, self.fileLoc(clause_span));
+        const assert_op = self.ora_dialect.createCfAssertWithAttrs(final_condition, attributes.items, clause_loc);
         h.appendOp(block, assert_op);
     }
+}
+
+/// For error-union returns, enforce ensures only on the success path:
+///   (!is_error(return_value)) => ensures_condition
+/// encoded as:
+///   is_error(return_value) || ensures_condition
+fn gateEnsuresForErrorUnion(
+    self: *const StatementLowerer,
+    block: c.MlirBlock,
+    condition_value: c.MlirValue,
+    return_value: ?c.MlirValue,
+    loc: c.MlirLocation,
+) c.MlirValue {
+    const rv = return_value orelse return condition_value;
+    const ret_ti = self.current_function_return_type_info orelse return condition_value;
+    if (!helpers.isErrorUnionTypeInfo(ret_ti)) return condition_value;
+
+    const is_error_op = self.ora_dialect.createErrorIsError(rv, loc);
+    h.appendOp(block, is_error_op);
+    const is_error_val = h.getResult(is_error_op, 0);
+
+    const gated_op = c.oraArithOrIOpCreate(self.ctx, loc, is_error_val, condition_value);
+    h.appendOp(block, gated_op);
+    return h.getResult(gated_op, 0);
 }
 
 /// Lower return statements in control flow context using scf.yield

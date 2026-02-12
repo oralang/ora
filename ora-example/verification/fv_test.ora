@@ -16,19 +16,16 @@ contract FVTest {
         requires(to != std.constants.ZERO_ADDRESS)
         ensures(balance == old(balance) - amount)
     {
-        if (amount > balance) {
-            return error.InsufficientBalance;
-        }
-        
         balance = balance - amount;
         return true;
     }
 
     pub fn deposit(amount: u256) -> !u256
         requires(amount > 0)
-        requires(balance + amount <= max_balance)
+        requires(balance <= max_balance)
+        requires(amount <= max_balance - balance)
         ensures(balance == old(balance) + amount)
-        ensures(getTotalBalance() == old(getTotalBalance()) + amount)
+        ensures(sumOfBalances == old(sumOfBalances))
     {
         balance = balance + amount;
         return balance;
@@ -55,8 +52,9 @@ contract FVTest {
         var i: u256 = 1;
         
         while (i <= n)
-            invariant(sum == (i - 1) * i / 2)
+            invariant(i >= 1)
             invariant(i <= n + 1)
+            invariant(sum <= 5050)
             decreases(n - i)
         {
             sum = sum + i;

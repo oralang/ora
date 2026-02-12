@@ -614,8 +614,8 @@ fn lowerFunctionBody(self: *const DeclarationLowerer, func: *const lib.FunctionN
     var expr_lowerer = ExpressionLowerer.init(self.ctx, block, self.type_mapper, param_map, storage_map, const_local_var_map, self.symbol_table, self.builtin_registry, self.error_handler, self.locations, self.ora_dialect);
     expr_lowerer.refinement_base_cache = refinement_base_cache;
     expr_lowerer.prefer_refinement_base_cache = true;
-    expr_lowerer.prefer_refinement_base_cache = true;
     expr_lowerer.refinement_guard_cache = refinement_guard_cache;
+    expr_lowerer.current_function_name = func.name;
 
     // get the function's return type
     const function_return_type = if (func.return_type_info) |ret_info|

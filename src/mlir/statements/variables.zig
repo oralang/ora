@@ -376,11 +376,12 @@ pub fn lowerStackVariableDecl(self: *const StatementLowerer, var_decl: *const li
 }
 
 /// Lower storage variable declarations
-pub fn lowerStorageVariableDecl(self: *const StatementLowerer, var_decl: *const lib.ast.Statements.VariableDeclNode, _: c.MlirType, loc: c.MlirLocation) LoweringError!void {
+pub fn lowerStorageVariableDecl(self: *const StatementLowerer, var_decl: *const lib.ast.Statements.VariableDeclNode, mlir_type: c.MlirType, loc: c.MlirLocation) LoweringError!void {
     // storage variables are typically handled at the contract level
     // if there's an initializer, we need to generate a store operation
     if (var_decl.value) |init_expr| {
-        const init_value = helpers.lowerValueWithImplicitTry(@constCast(self), &init_expr.*, var_decl.type_info);
+        const init_raw = helpers.lowerValueWithImplicitTry(@constCast(self), &init_expr.*, var_decl.type_info);
+        const init_value = self.expr_lowerer.convertToType(init_raw, mlir_type, var_decl.span);
 
         // generate storage store operation
         const store_op = self.memory_manager.createStorageStore(init_value, var_decl.name, loc);
