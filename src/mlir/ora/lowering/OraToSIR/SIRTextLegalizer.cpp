@@ -326,8 +326,9 @@ namespace mlir
 
                             if (auto br = dyn_cast<sir::BrOp>(terminator))
                             {
-                                SmallVector<Value, 8> expected(br.getDestOperands().begin(), br.getDestOperands().end());
-                                verifyBranchOperands(&terminator, &block, br.getDest(), br.getDestOperands(), expected);
+                                // Only check dest arg count matches (self-comparison would be tautological).
+                                if (br.getDest() && br.getDest()->getNumArguments() != br.getDestOperands().size())
+                                    report(&terminator, "successor block argument count does not match branch operand count");
                             }
                             else if (auto br = dyn_cast<sir::CondBrOp>(terminator))
                             {
@@ -485,103 +486,88 @@ namespace mlir
                         }
                     }
 
-                    module.walk([&](sir::ICallOp op) {
-                        if (auto callee = op.getCalleeAttr())
+                    // Collect-then-mutate to avoid walk invalidation.
+                    SmallVector<sir::ICallOp, 8> icalls;
+                    module.walk([&](sir::ICallOp op) { icalls.push_back(op); });
+
+                    for (auto op : icalls) {
+                        auto callee = op.getCalleeAttr();
+                        if (!callee) continue;
+                        Operation *sym = SymbolTable::lookupNearestSymbolFrom(op, callee);
+                        if (!sym)
                         {
-                            Operation *sym = SymbolTable::lookupNearestSymbolFrom(op, callee);
-                            if (!sym)
+                            auto it = errorDeclIds.find(callee.getValue());
+                            if (it != errorDeclIds.end())
                             {
-                                // Check if this is an error constructor call.
-                                auto it = errorDeclIds.find(callee.getValue());
-                                if (it != errorDeclIds.end())
+                                OpBuilder b(op);
+                                auto u256 = sir::U256Type::get(op.getContext());
+                                auto ui256 = IntegerType::get(op.getContext(), 256, IntegerType::Unsigned);
+                                auto idConst = b.create<sir::ConstOp>(
+                                    op.getLoc(), u256, IntegerAttr::get(ui256, it->second));
+                                for (unsigned i = 0; i < op.getNumResults(); ++i)
                                 {
-                                    OpBuilder b(op);
-                                    auto u256 = sir::U256Type::get(op.getContext());
-                                    auto ui256 = IntegerType::get(op.getContext(), 256, IntegerType::Unsigned);
-                                    auto idConst = b.create<sir::ConstOp>(
-                                        op.getLoc(), u256, IntegerAttr::get(ui256, it->second));
-                                    for (unsigned i = 0; i < op.getNumResults(); ++i)
-                                    {
-                                        Value oldRes = op.getResult(i);
-                                        if (oldRes.use_empty()) continue;
-                                        Value repl = idConst;
-                                        if (oldRes.getType() != u256)
-                                            repl = b.create<sir::BitcastOp>(op.getLoc(), oldRes.getType(), idConst);
-                                        oldRes.replaceAllUsesWith(repl);
-                                    }
-                                    op.erase();
-                                    return;
+                                    Value oldRes = op.getResult(i);
+                                    if (oldRes.use_empty()) continue;
+                                    Value repl = idConst;
+                                    if (oldRes.getType() != u256)
+                                        repl = b.create<sir::BitcastOp>(op.getLoc(), oldRes.getType(), idConst);
+                                    oldRes.replaceAllUsesWith(repl);
                                 }
-                                report(op.getOperation(), "icall callee symbol not found");
-                                return;
+                                op.erase();
+                                continue;
                             }
-                            if (auto func = dyn_cast<func::FuncOp>(sym))
-                            {
-                                auto funcType = func.getFunctionType();
-                                if (funcType.getNumInputs() != op.getArgs().size())
-                                {
-                                    report(op.getOperation(), "icall argument count does not match callee function inputs");
-                                }
-                                if (funcType.getNumResults() != op.getResults().size())
-                                {
-                                    // Repair mismatched icall result counts by rebuilding the call.
-                                    OpBuilder b(op);
-                                    auto u256 = sir::U256Type::get(op.getContext());
-                                    SmallVector<Type, 4> newResults;
-                                    for (unsigned i = 0; i < funcType.getNumResults(); ++i)
-                                        newResults.push_back(u256);
-                                    auto newCall = b.create<sir::ICallOp>(op.getLoc(), newResults, op.getCalleeAttr(), op.getArgs());
-                                    unsigned common = std::min(op.getNumResults(), newCall.getNumResults());
-                                    for (unsigned i = 0; i < common; ++i)
-                                    {
-                                        Value oldRes = op.getResult(i);
-                                        Value newRes = newCall.getResult(i);
-                                        if (oldRes.getType() == newRes.getType())
-                                        {
-                                            oldRes.replaceAllUsesWith(newRes);
-                                        }
-                                        else if (isa<sir::PtrType>(oldRes.getType()) && isa<sir::U256Type>(newRes.getType()))
-                                        {
-                                            auto bc = b.create<sir::BitcastOp>(op.getLoc(), oldRes.getType(), newRes);
-                                            oldRes.replaceAllUsesWith(bc.getResult());
-                                        }
-                                        else if (isa<sir::U256Type>(oldRes.getType()) && isa<sir::PtrType>(newRes.getType()))
-                                        {
-                                            auto bc = b.create<sir::BitcastOp>(op.getLoc(), oldRes.getType(), newRes);
-                                            oldRes.replaceAllUsesWith(bc.getResult());
-                                        }
-                                        else
-                                        {
-                                            oldRes.replaceAllUsesWith(newRes);
-                                        }
-                                    }
-                                    if (op.getNumResults() > newCall.getNumResults())
-                                    {
-                                        auto zero = b.create<sir::ConstOp>(op.getLoc(), u256,
-                                                                           IntegerAttr::get(b.getI64Type(), 0));
-                                        for (unsigned i = common; i < op.getNumResults(); ++i)
-                                        {
-                                            Value oldRes = op.getResult(i);
-                                            if (isa<sir::PtrType>(oldRes.getType()))
-                                            {
-                                                auto bc = b.create<sir::BitcastOp>(op.getLoc(), oldRes.getType(), zero);
-                                                oldRes.replaceAllUsesWith(bc.getResult());
-                                            }
-                                            else
-                                            {
-                                                oldRes.replaceAllUsesWith(zero);
-                                            }
-                                        }
-                                    }
-                                    op.erase();
-                                }
-                            }
-                            else
-                            {
-                                report(op.getOperation(), "icall callee is not a func.func");
-                            }
+                            report(op.getOperation(), "icall callee symbol not found");
+                            continue;
                         }
-                    });
+                        auto func = dyn_cast<func::FuncOp>(sym);
+                        if (!func)
+                        {
+                            report(op.getOperation(), "icall callee is not a func.func");
+                            continue;
+                        }
+                        auto funcType = func.getFunctionType();
+                        if (funcType.getNumInputs() != op.getArgs().size())
+                            report(op.getOperation(), "icall argument count does not match callee function inputs");
+                        if (funcType.getNumResults() != op.getResults().size())
+                        {
+                            OpBuilder b(op);
+                            auto u256 = sir::U256Type::get(op.getContext());
+                            SmallVector<Type, 4> newResults;
+                            for (unsigned i = 0; i < funcType.getNumResults(); ++i)
+                                newResults.push_back(u256);
+                            auto newCall = b.create<sir::ICallOp>(op.getLoc(), newResults, op.getCalleeAttr(), op.getArgs());
+                            unsigned common = std::min(op.getNumResults(), newCall.getNumResults());
+                            for (unsigned i = 0; i < common; ++i)
+                            {
+                                Value oldRes = op.getResult(i);
+                                Value newRes = newCall.getResult(i);
+                                if (oldRes.getType() != newRes.getType())
+                                {
+                                    auto bc = b.create<sir::BitcastOp>(op.getLoc(), oldRes.getType(), newRes);
+                                    oldRes.replaceAllUsesWith(bc.getResult());
+                                }
+                                else
+                                    oldRes.replaceAllUsesWith(newRes);
+                            }
+                            if (op.getNumResults() > newCall.getNumResults())
+                            {
+                                auto zero = b.create<sir::ConstOp>(op.getLoc(), u256,
+                                                                   IntegerAttr::get(b.getI64Type(), 0));
+                                for (unsigned i = common; i < op.getNumResults(); ++i)
+                                {
+                                    Value oldRes = op.getResult(i);
+                                    if (isa<sir::PtrType>(oldRes.getType()))
+                                    {
+                                        auto bc = b.create<sir::BitcastOp>(op.getLoc(), oldRes.getType(), zero);
+                                        oldRes.replaceAllUsesWith(bc.getResult());
+                                    }
+                                    else
+                                        oldRes.replaceAllUsesWith(zero);
+                                }
+                            }
+                            op.erase();
+                        }
+                    }
 
                     if (failed_any)
                         signalPassFailure();

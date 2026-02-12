@@ -18,26 +18,23 @@
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/BuiltinDialect.h"
 #include "mlir/IR/BuiltinTypes.h"
+#include "mlir/IR/Attributes.h"
+#include "mlir/IR/IRMapping.h"
+#include "mlir/IR/PatternMatch.h"
+#include "mlir/IR/Verifier.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
-#include "mlir/Interfaces/SideEffectInterfaces.h"
 #include "mlir/Dialect/ControlFlow/IR/ControlFlow.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
+#include "mlir/Interfaces/SideEffectInterfaces.h"
+#include "mlir/Analysis/DataFlow/LivenessAnalysis.h"
+#include "mlir/Pass/PassManager.h"
 #include "mlir/Transforms/DialectConversion.h"
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
-#include "llvm/ADT/DenseMap.h"
-#include "mlir/IR/PatternMatch.h"
-#include "mlir/Analysis/DataFlow/LivenessAnalysis.h"
-#include "mlir/Interfaces/SideEffectInterfaces.h"
-#include "mlir/Pass/PassManager.h"
 #include "mlir/Transforms/Passes.h"
 #include "mlir/Transforms/RegionUtils.h"
-#include "mlir/IR/Verifier.h"
-#include "mlir/IR/IRMapping.h"
-#include "mlir/Dialect/Func/IR/FuncOps.h"
-#include "mlir/IR/Attributes.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/raw_ostream.h"
@@ -281,7 +278,7 @@ namespace
             Type oldType = op.getType();
             Type newType = typeConverter->convertType(oldType);
             if (!newType || newType == oldType)
-                return success();
+                return failure(); // no conversion needed
             op.setType(newType);
             return success();
         }
@@ -536,9 +533,8 @@ static void assignGlobalSlots(ModuleOp module)
     module.walk([&](ora::ContractOp contractOp)
                 { assignInBlock(contractOp.getBody().front()); });
 
-    if (module.getBody()->empty())
-        // Phase 1: proceed with Ora -> SIR conversion after normalization.
-    assignInBlock(module.getBodyRegion().front());
+    if (!module.getBody()->empty())
+        assignInBlock(module.getBodyRegion().front());
 
     if (!slotAttrs.empty())
     {
@@ -584,18 +580,16 @@ static void inlineContractsAndEraseDecls(ModuleOp module)
         } });
 }
 
+// Verification pass: marks memref dialect illegal with zero conversion patterns.
+// Will fail if any memref ops survive to this point, acting as a gatekeeper.
 class MemRefEliminationPass : public PassWrapper<MemRefEliminationPass, OperationPass<ModuleOp>>
 {
 public:
     void runOnOperation() override
     {
         ModuleOp module = getOperation();
-        ora::OraToSIRTypeConverter typeConverter;
 
         RewritePatternSet patterns(module.getContext());
-
-        // Memref lowering happens in Phase 4; keep this pass free of memref patterns.
-
         ConversionTarget target(*module.getContext());
         target.addLegalDialect<mlir::BuiltinDialect>();
         target.addLegalOp<mlir::UnrealizedConversionCastOp>();
@@ -614,6 +608,75 @@ public:
     }
 };
 
+// Shared helper: deduplicate sir.ConstOp per block using Attribute key (u256-safe).
+static bool deduplicateConstantsPerBlock(ModuleOp module)
+{
+    bool changed = false;
+    module.walk([&](Block *block) {
+        DenseMap<Attribute, Value> consts;
+        for (Operation &op : llvm::make_early_inc_range(*block))
+        {
+            auto constOp = dyn_cast<sir::ConstOp>(&op);
+            if (!constOp) continue;
+            Attribute key = constOp.getValueAttr();
+            auto it = consts.find(key);
+            if (it != consts.end())
+            {
+                constOp.replaceAllUsesWith(it->second);
+                constOp.erase();
+                changed = true;
+                continue;
+            }
+            consts.insert({key, constOp.getResult()});
+        }
+    });
+    return changed;
+}
+
+// Shared helper: fold constant add/mul using APInt (u256-safe).
+static bool foldConstantArithmeticSIR(ModuleOp module)
+{
+    bool changed = false;
+
+    module.walk([&](sir::AddOp addOp) {
+        auto lhsInt = llvm::dyn_cast_or_null<IntegerAttr>(
+            addOp.getLhs().getDefiningOp<sir::ConstOp>() ?
+            addOp.getLhs().getDefiningOp<sir::ConstOp>().getValueAttr() : Attribute{});
+        auto rhsInt = llvm::dyn_cast_or_null<IntegerAttr>(
+            addOp.getRhs().getDefiningOp<sir::ConstOp>() ?
+            addOp.getRhs().getDefiningOp<sir::ConstOp>().getValueAttr() : Attribute{});
+        if (!lhsInt || !rhsInt) return;
+        APInt result = lhsInt.getValue().zextOrTrunc(256) + rhsInt.getValue().zextOrTrunc(256);
+        OpBuilder builder(addOp);
+        auto u256Type = sir::U256Type::get(addOp.getContext());
+        auto ui256 = mlir::IntegerType::get(addOp.getContext(), 256, mlir::IntegerType::Unsigned);
+        auto newConst = builder.create<sir::ConstOp>(addOp.getLoc(), u256Type, IntegerAttr::get(ui256, result));
+        addOp.getResult().replaceAllUsesWith(newConst.getResult());
+        addOp.erase();
+        changed = true;
+    });
+
+    module.walk([&](sir::MulOp mulOp) {
+        auto lhsInt = llvm::dyn_cast_or_null<IntegerAttr>(
+            mulOp.getLhs().getDefiningOp<sir::ConstOp>() ?
+            mulOp.getLhs().getDefiningOp<sir::ConstOp>().getValueAttr() : Attribute{});
+        auto rhsInt = llvm::dyn_cast_or_null<IntegerAttr>(
+            mulOp.getRhs().getDefiningOp<sir::ConstOp>() ?
+            mulOp.getRhs().getDefiningOp<sir::ConstOp>().getValueAttr() : Attribute{});
+        if (!lhsInt || !rhsInt) return;
+        APInt result = lhsInt.getValue().zextOrTrunc(256) * rhsInt.getValue().zextOrTrunc(256);
+        OpBuilder builder(mulOp);
+        auto u256Type = sir::U256Type::get(mulOp.getContext());
+        auto ui256 = mlir::IntegerType::get(mulOp.getContext(), 256, mlir::IntegerType::Unsigned);
+        auto newConst = builder.create<sir::ConstOp>(mulOp.getLoc(), u256Type, IntegerAttr::get(ui256, result));
+        mulOp.getResult().replaceAllUsesWith(newConst.getResult());
+        mulOp.erase();
+        changed = true;
+    });
+
+    return changed;
+}
+
 class SIRCleanupPass : public PassWrapper<SIRCleanupPass, OperationPass<ModuleOp>>
 {
 public:
@@ -626,14 +689,7 @@ public:
         {
             changed = false;
 
-            module.walk([&](mlir::memref::StoreOp storeOp)
-                        {
-                if (storeOp->use_empty())
-                {
-                    DBG("SIRCleanupPass: removing unused store");
-                    storeOp->erase();
-                    changed = true;
-                } });
+            // NOTE: memref::StoreOp is side-effecting — do NOT erase based on use_empty().
 
             module.walk([&](mlir::memref::AllocaOp allocaOp)
                         {
@@ -653,26 +709,7 @@ public:
                     changed = true;
                 } });
 
-            module.walk([&](Block *block)
-                        {
-                llvm::DenseMap<Attribute, Value> consts;
-                for (Operation &op : llvm::make_early_inc_range(*block))
-                {
-                    auto constOp = dyn_cast<sir::ConstOp>(&op);
-                    if (!constOp)
-                        continue;
-
-                    Attribute key = constOp.getValueAttr();
-                    auto it = consts.find(key);
-                    if (it != consts.end())
-                    {
-                        constOp.replaceAllUsesWith(it->second);
-                        constOp.erase();
-                        changed = true;
-                        continue;
-                    }
-                    consts.insert({key, constOp.getResult()});
-                } });
+            changed |= deduplicateConstantsPerBlock(module);
 
             module.walk([&](Operation *op)
                         {
@@ -1659,31 +1696,9 @@ public:
             llvm::errs().flush();
         }
 
-        {
-            if (mlir::ora::isDebugEnabled())
-            {
-                llvm::errs() << "[OraToSIR] Post-Phase4: greedy cleanup start\n";
-                llvm::errs().flush();
-            }
-            // Temporarily disabled: greedy cleanup has been causing crashes in
-            // some converted loop CFGs. Keep conversion robust first.
-            // RewritePatternSet cleanupPatterns(ctx);
-            // cleanupPatterns.add<FoldRedundantBitcastOp>(ctx);
-            // cleanupPatterns.add<FoldEqSameOp>(ctx);
-            // cleanupPatterns.add<FoldEqConstOp>(ctx);
-            // cleanupPatterns.add<FoldIsZeroConstOp>(ctx);
-            // cleanupPatterns.add<FoldCondBrSameDestOp>(ctx);
-            // cleanupPatterns.add<NormalizeCondBrOperandsOp>(ctx);
-            // cleanupPatterns.add<FoldCondBrDoubleIsZeroOp>(ctx);
-            // cleanupPatterns.add<FoldCondBrConstOp>(ctx);
-            // cleanupPatterns.add<FoldBrToBrOp>(ctx);
-            // (void)applyPatternsGreedily(module, std::move(cleanupPatterns));
-            if (mlir::ora::isDebugEnabled())
-            {
-                llvm::errs() << "[OraToSIR] Post-Phase4: greedy cleanup done\n";
-                llvm::errs().flush();
-            }
-        }
+        // NOTE: greedy peephole patterns (FoldRedundantBitcast, FoldEqSame, etc.)
+        // are intentionally disabled here — they caused crashes in converted loop
+        // CFGs. Re-enable when SIR CFG normalization is more robust.
 
         // Remove gas_cost attributes from all operations (Ora MLIR specific, not SIR)
         if (mlir::ora::isDebugEnabled())
@@ -1753,125 +1768,11 @@ namespace mlir
                 {
                     changed = false;
 
-                    // Run optimizations in order
-                    changed |= deduplicateConstants(module);
-                    changed |= foldConstantArithmetic(module);
+                    changed |= deduplicateConstantsPerBlock(module);
+                    changed |= foldConstantArithmeticSIR(module);
                 }
 
                 DBG("SIROptimizationPass: optimizations completed");
-            }
-
-        private:
-            // Deduplicate constants within each function (SSA values cannot be shared across functions)
-            bool deduplicateConstants(ModuleOp module)
-            {
-                bool changed = false;
-
-                // Deduplicate constants per function, not across the entire module
-                module.walk([&](mlir::func::FuncOp funcOp)
-                            {
-                    DenseMap<std::pair<uint64_t, Type>, sir::ConstOp> constantMap;
-
-                    funcOp.walk([&](sir::ConstOp constOp)
-                                {
-                        // Get value from attribute
-                        auto attr = constOp.getValueAttr();
-                        if (!attr)
-                            return;
-                        uint64_t value = 0;
-                        if (auto intAttr = llvm::dyn_cast<mlir::IntegerAttr>(attr))
-                        {
-                            // getInt() returns APInt, getZExtValue() extracts uint64_t
-                            value = intAttr.getValue().getZExtValue();
-                        }
-                        else
-                        {
-                            return;
-                        }
-
-                        Type type = constOp.getResult().getType();
-                        auto key = std::make_pair(value, type);
-
-                        auto it = constantMap.find(key);
-                        if (it != constantMap.end())
-                        {
-                            // Replace all uses of this constant with the first one
-                            constOp.getResult().replaceAllUsesWith(it->second.getResult());
-                            constOp.erase();
-                            changed = true;
-                        }
-                        else
-                        {
-                            constantMap[key] = constOp;
-                        } }); });
-
-                return changed;
-            }
-
-            // Fold constant arithmetic: evaluate constant expressions at compile time
-            bool foldConstantArithmetic(ModuleOp module)
-            {
-                bool changed = false;
-
-                module.walk([&](sir::AddOp addOp)
-                            {
-                    auto lhsConst = addOp.getLhs().getDefiningOp<sir::ConstOp>();
-                    auto rhsConst = addOp.getRhs().getDefiningOp<sir::ConstOp>();
-
-                    if (lhsConst && rhsConst)
-                    {
-                        auto lhsAttr = lhsConst.getValueAttr();
-                        auto rhsAttr = rhsConst.getValueAttr();
-                        if (lhsAttr && rhsAttr)
-                        {
-                            auto lhsInt = llvm::dyn_cast<mlir::IntegerAttr>(lhsAttr);
-                            auto rhsInt = llvm::dyn_cast<mlir::IntegerAttr>(rhsAttr);
-                            if (lhsInt && rhsInt)
-                            {
-                                uint64_t result = lhsInt.getValue().getZExtValue() + rhsInt.getValue().getZExtValue();
-                                OpBuilder builder(addOp);
-                                auto u256Type = sir::U256Type::get(addOp.getContext());
-                                auto ui64Type = mlir::IntegerType::get(addOp.getContext(), 64, mlir::IntegerType::Unsigned);
-                                auto valueAttr = mlir::IntegerAttr::get(ui64Type, result);
-                                auto newConst = builder.create<sir::ConstOp>(
-                                    addOp.getLoc(), u256Type, valueAttr);
-                                addOp.getResult().replaceAllUsesWith(newConst.getResult());
-                                addOp.erase();
-                                changed = true;
-                            }
-                        }
-                    } });
-
-                module.walk([&](sir::MulOp mulOp)
-                            {
-                    auto lhsConst = mulOp.getLhs().getDefiningOp<sir::ConstOp>();
-                    auto rhsConst = mulOp.getRhs().getDefiningOp<sir::ConstOp>();
-
-                    if (lhsConst && rhsConst)
-                    {
-                        auto lhsAttr = lhsConst.getValueAttr();
-                        auto rhsAttr = rhsConst.getValueAttr();
-                        if (lhsAttr && rhsAttr)
-                        {
-                            auto lhsInt = llvm::dyn_cast<mlir::IntegerAttr>(lhsAttr);
-                            auto rhsInt = llvm::dyn_cast<mlir::IntegerAttr>(rhsAttr);
-                            if (lhsInt && rhsInt)
-                            {
-                                uint64_t result = lhsInt.getValue().getZExtValue() * rhsInt.getValue().getZExtValue();
-                                OpBuilder builder(mulOp);
-                                auto u256Type = sir::U256Type::get(mulOp.getContext());
-                                auto ui64Type = mlir::IntegerType::get(mulOp.getContext(), 64, mlir::IntegerType::Unsigned);
-                                auto valueAttr = mlir::IntegerAttr::get(ui64Type, result);
-                                auto newConst = builder.create<sir::ConstOp>(
-                                    mulOp.getLoc(), u256Type, valueAttr);
-                                mulOp.getResult().replaceAllUsesWith(newConst.getResult());
-                                mulOp.erase();
-                                changed = true;
-                            }
-                        }
-                    } });
-
-                return changed;
             }
 
             StringRef getArgument() const override { return "sir-optimize"; }
@@ -1986,76 +1887,41 @@ namespace mlir
 
         private:
             // Inline a function call by cloning the function body
+            // NOTE: only handles single-block functions. Multi-block inlining
+            // requires MLIR's InlinerInterface (not yet wired up).
             bool inlineCall(mlir::func::CallOp callOp, mlir::func::FuncOp funcOp)
             {
-                try
-                {
-                    // Get the function body
-                    auto &funcBody = funcOp.getBody();
-                    if (funcBody.empty())
-                        return false;
-
-                    // Get the entry block
-                    Block *entryBlock = &funcBody.front();
-                    if (entryBlock->empty())
-                        return false;
-
-                    // Create IR mapping for value substitution
-                    IRMapping mapping;
-
-                    // Map function arguments to call operands
-                    for (unsigned i = 0; i < callOp.getNumOperands(); ++i)
-                    {
-                        if (i < entryBlock->getNumArguments())
-                        {
-                            mapping.map(entryBlock->getArgument(i), callOp.getOperand(i));
-                        }
-                    }
-
-                    // Get the insertion point (before the call operation)
-                    OpBuilder builder(callOp);
-
-                    // Clone all operations from the function body (except the return)
-                    for (auto &op : entryBlock->getOperations())
-                    {
-                        // Skip the return operation - we'll handle it separately
-                        if (isa<mlir::func::ReturnOp>(op))
-                        {
-                            auto returnOp = cast<mlir::func::ReturnOp>(op);
-                            // Map return values to call results
-                            if (returnOp.getNumOperands() > 0)
-                            {
-                                // Clone the return operands and replace call results
-                                SmallVector<Value> returnValues;
-                                for (auto operand : returnOp.getOperands())
-                                {
-                                    returnValues.push_back(mapping.lookupOrDefault(operand));
-                                }
-                                // Replace call results with return values
-                                if (returnValues.size() == callOp.getNumResults())
-                                {
-                                    for (unsigned i = 0; i < returnValues.size(); ++i)
-                                    {
-                                        callOp.getResult(i).replaceAllUsesWith(returnValues[i]);
-                                    }
-                                }
-                            }
-                            break; // Stop after processing return
-                        }
-
-                        // Clone the operation
-                        builder.clone(op, mapping);
-                    }
-
-                    // Erase the call operation
-                    callOp.erase();
-
-                    return true;
-                }
-                catch (...)
-                {
+                auto &funcBody = funcOp.getBody();
+                if (funcBody.empty())
                     return false;
+                Block *entryBlock = &funcBody.front();
+                if (entryBlock->empty() || funcBody.getBlocks().size() > 1)
+                    return false;
+
+                IRMapping mapping;
+                for (unsigned i = 0; i < callOp.getNumOperands(); ++i)
+                {
+                    if (i < entryBlock->getNumArguments())
+                        mapping.map(entryBlock->getArgument(i), callOp.getOperand(i));
                 }
+
+                OpBuilder builder(callOp);
+                for (auto &op : entryBlock->getOperations())
+                {
+                    if (auto returnOp = dyn_cast<mlir::func::ReturnOp>(op))
+                    {
+                        SmallVector<Value> returnValues;
+                        for (auto operand : returnOp.getOperands())
+                            returnValues.push_back(mapping.lookupOrDefault(operand));
+                        if (returnValues.size() == callOp.getNumResults())
+                            for (unsigned i = 0; i < returnValues.size(); ++i)
+                                callOp.getResult(i).replaceAllUsesWith(returnValues[i]);
+                        break;
+                    }
+                    builder.clone(op, mapping);
+                }
+                callOp.erase();
+                return true;
             }
         };
 
@@ -2084,107 +1950,38 @@ namespace mlir
                 {
                     changed = false;
 
-                    // Run optimizations in order
-                    changed |= deduplicateConstants(module);
-                    changed |= foldConstantArithmetic(module);
+                    changed |= deduplicateConstantsPerBlock(module);
+                    changed |= foldOraConstantArithmetic(module);
                 }
 
                 DBG("Ora optimizations completed");
             }
 
         private:
-            // Deduplicate constants: find all arith.constant with same value/type, replace uses
-            // IMPORTANT: Only deduplicate constants in the SAME BLOCK to avoid dominance issues
-            // Constants inside nested regions (ora.if, scf.if, etc.) cannot be deduplicated
-            // with constants outside those regions.
-            bool deduplicateConstants(ModuleOp module)
+            // Fold ora::AddOp/MulOp with constant operands (fallback — uses APInt for u256 safety).
+            bool foldOraConstantArithmetic(ModuleOp module)
             {
                 bool changed = false;
 
-                module.walk([&](mlir::func::FuncOp funcOp)
-                            {
-                    // Process each block separately to avoid cross-region deduplication
-                    for (Block &block : funcOp.getBlocks())
-                    {
-                        llvm::DenseMap<std::pair<uint64_t, Type>, sir::ConstOp> constantMap;
-                        llvm::SmallVector<sir::ConstOp, 8> toErase;
-                        
-                        // Only process constants directly in this block, not in nested regions
-                        for (Operation &op : block.getOperations())
-                        {
-                            auto constOp = dyn_cast<sir::ConstOp>(&op);
-                            if (!constOp)
-                                continue;
-                                
-                            // Get value from attribute
-                            auto attr = constOp.getValueAttr();
-                            if (!attr)
-                                continue;
-                            uint64_t value = 0;
-                            if (auto intAttr = llvm::dyn_cast<mlir::IntegerAttr>(attr))
-                            {
-                                value = intAttr.getValue().getZExtValue();
-                            }
-                            else
-                            {
-                                continue;
-                            }
+                // Fold constant addition (fallback — uses APInt for u256 safety).
+                auto getConstAPInt = [](Value val) -> std::optional<APInt> {
+                    if (auto constOp = val.getDefiningOp<sir::ConstOp>())
+                        if (auto intAttr = llvm::dyn_cast<mlir::IntegerAttr>(constOp.getValueAttr()))
+                            return intAttr.getValue().zextOrTrunc(256);
+                    return std::nullopt;
+                };
 
-                            Type type = constOp.getResult().getType();
-                            auto key = std::make_pair(value, type);
-
-                            auto it = constantMap.find(key);
-                            if (it != constantMap.end())
-                            {
-                                // Replace all uses of this constant with the first one
-                                constOp.getResult().replaceAllUsesWith(it->second.getResult());
-                                toErase.push_back(constOp);
-                                changed = true;
-                            }
-                            else
-                            {
-                                constantMap[key] = constOp;
-                            }
-                        }
-                        
-                        // Erase duplicates after iteration is complete
-                        for (auto constOp : toErase)
-                        {
-                            constOp.erase();
-                        }
-                    } });
-
-                return changed;
-            }
-
-            // Fold constant arithmetic: evaluate constant expressions at compile time (fallback)
-            bool foldConstantArithmetic(ModuleOp module)
-            {
-                bool changed = false;
-
-                // Fold constant addition (fallback if canonicalization didn't catch it)
                 module.walk([&](ora::AddOp addOp)
                             {
-                    auto getConstantValue = [](Value val) -> std::optional<uint64_t> {
-                        if (auto constOp = val.getDefiningOp<sir::ConstOp>()) {
-                            if (auto intAttr = llvm::dyn_cast<mlir::IntegerAttr>(constOp.getValueAttr())) {
-                                return intAttr.getValue().getZExtValue();
-                            }
-                        }
-                        return std::nullopt;
-                    };
-
-                    auto lhsVal = getConstantValue(addOp.getLhs());
-                    auto rhsVal = getConstantValue(addOp.getRhs());
-
-                    if (lhsVal && rhsVal) {
-                        uint64_t result = *lhsVal + *rhsVal;
+                    auto lhs = getConstAPInt(addOp.getLhs());
+                    auto rhs = getConstAPInt(addOp.getRhs());
+                    if (lhs && rhs) {
+                        APInt result = *lhs + *rhs;
                         OpBuilder builder(addOp);
                         auto resultType = addOp.getResult().getType();
                         auto u256Type = sir::U256Type::get(addOp.getContext());
-                        auto ui64Type = mlir::IntegerType::get(addOp.getContext(), 64, mlir::IntegerType::Unsigned);
-                        auto valueAttr = mlir::IntegerAttr::get(ui64Type, result);
-                        auto newConst = builder.create<sir::ConstOp>(addOp.getLoc(), u256Type, valueAttr);
+                        auto ui256 = mlir::IntegerType::get(addOp.getContext(), 256, mlir::IntegerType::Unsigned);
+                        auto newConst = builder.create<sir::ConstOp>(addOp.getLoc(), u256Type, mlir::IntegerAttr::get(ui256, result));
                         Value resultVal = newConst.getResult();
                         if (resultType != u256Type)
                             resultVal = builder.create<sir::BitcastOp>(addOp.getLoc(), resultType, resultVal);
@@ -2193,29 +1990,18 @@ namespace mlir
                         changed = true;
                     } });
 
-                // Fold constant multiplication (fallback)
+                // Fold constant multiplication (fallback — uses APInt for u256 safety).
                 module.walk([&](ora::MulOp mulOp)
                             {
-                    auto getConstantValue = [](Value val) -> std::optional<uint64_t> {
-                        if (auto constOp = val.getDefiningOp<sir::ConstOp>()) {
-                            if (auto intAttr = llvm::dyn_cast<mlir::IntegerAttr>(constOp.getValueAttr())) {
-                                return intAttr.getValue().getZExtValue();
-                            }
-                        }
-                        return std::nullopt;
-                    };
-
-                    auto lhsVal = getConstantValue(mulOp.getLhs());
-                    auto rhsVal = getConstantValue(mulOp.getRhs());
-
-                    if (lhsVal && rhsVal) {
-                        uint64_t result = *lhsVal * *rhsVal;
+                    auto lhs = getConstAPInt(mulOp.getLhs());
+                    auto rhs = getConstAPInt(mulOp.getRhs());
+                    if (lhs && rhs) {
+                        APInt result = *lhs * *rhs;
                         OpBuilder builder(mulOp);
                         auto resultType = mulOp.getResult().getType();
                         auto u256Type = sir::U256Type::get(mulOp.getContext());
-                        auto ui64Type = mlir::IntegerType::get(mulOp.getContext(), 64, mlir::IntegerType::Unsigned);
-                        auto valueAttr = mlir::IntegerAttr::get(ui64Type, result);
-                        auto newConst = builder.create<sir::ConstOp>(mulOp.getLoc(), u256Type, valueAttr);
+                        auto ui256 = mlir::IntegerType::get(mulOp.getContext(), 256, mlir::IntegerType::Unsigned);
+                        auto newConst = builder.create<sir::ConstOp>(mulOp.getLoc(), u256Type, mlir::IntegerAttr::get(ui256, result));
                         Value resultVal = newConst.getResult();
                         if (resultType != u256Type)
                             resultVal = builder.create<sir::BitcastOp>(mulOp.getLoc(), resultType, resultVal);
@@ -2240,31 +2026,14 @@ namespace mlir
         // Ora Cleanup Pass
         //===----------------------------------------------------------------------===//
 
-        // Pass that removes unused Ora operations
+        // Intentional no-op: kept for pipeline compatibility. All cleanup
+        // is handled by SIRCleanupPass and DCE.
         class OraCleanupPass : public PassWrapper<OraCleanupPass, OperationPass<ModuleOp>>
         {
         public:
-            void runOnOperation() override
-            {
-                (void)getOperation();
-                bool changed = true;
-
-                DBG("Running Ora cleanup...");
-
-                // Iterate until no more changes
-                while (changed)
-                {
-                    changed = false;
-
-                    // Do not remove stores: they are side-effecting even if their
-                    // input value has no other uses.
-                }
-
-                DBG("Ora cleanup completed");
-            }
-
+            void runOnOperation() override { /* no-op */ }
             StringRef getArgument() const override { return "ora-cleanup"; }
-            StringRef getDescription() const override { return "Clean up unused Ora operations"; }
+            StringRef getDescription() const override { return "Clean up unused Ora operations (no-op)"; }
         };
 
         std::unique_ptr<Pass> createOraCleanupPass()

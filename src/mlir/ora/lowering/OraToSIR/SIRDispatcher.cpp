@@ -439,12 +439,7 @@ namespace mlir
                             oldRes.replaceAllUsesWith(newRes);
                         }
 
-                        if (icall.getNumResults() < newCall.getNumResults())
-                        {
-                            // Old call had fewer results; map to the prefix and ignore the rest.
-                            // This keeps existing uses intact while matching callee signature.
-                        }
-
+                        // If old call had fewer results, the prefix mapping above is sufficient.
                         if (icall.getNumResults() > newCall.getNumResults())
                         {
                             auto u256 = sir::U256Type::get(module.getContext());
@@ -684,6 +679,9 @@ namespace mlir
                                     argVal = builder.create<sir::BitcastOp>(loc, u256Type, argVal);
                                 }
                             }
+                            // sir.icall requires all args to be !sir.u256.
+                            if (isa<sir::PtrType>(argVal.getType()))
+                                argVal = builder.create<sir::BitcastOp>(loc, u256Type, argVal);
 
                             args.push_back(argVal);
                         }
@@ -857,7 +855,9 @@ namespace mlir
 
                                     Value cdsize_case = builder.create<sir::CallDataSizeOp>(loc, u256Type);
                                     Value end = builder.create<sir::AddOp>(loc, u256Type, absOff, total);
-                                    Value valid_dyn = builder.create<sir::LtOp>(loc, u256Type, end, cdsize_case);
+                                    // Check cdsize >= end (i.e., !(cdsize < end))
+                                    Value tooShort = builder.create<sir::LtOp>(loc, u256Type, cdsize_case, end);
+                                    Value valid_dyn = builder.create<sir::IsZeroOp>(loc, u256Type, tooShort);
                                     Block *dynBody = mainFunc.addBlock();
                                     builder.create<sir::CondBrOp>(loc, valid_dyn, ValueRange{}, ValueRange{}, dynBody, revertError);
                                     builder.setInsertionPointToEnd(dynBody);

@@ -69,12 +69,28 @@ namespace
                         std::string n = nameAttr.getValue().str();
                         if (!n.empty())
                         {
-                            // Allow consts to reuse explicit names across blocks.
-                            if (isa<sir::ConstOp>(def))
+                            // Allow consts to reuse explicit names across blocks
+                            // only if they share the same value attribute.
+                            if (auto cOp = dyn_cast<sir::ConstOp>(def))
                             {
-                                valueNames[v] = n;
-                                usedNames.insert(n);
-                                return n;
+                                auto existing = constNames.find(n);
+                                if (existing == constNames.end())
+                                {
+                                    constNames[n] = v;
+                                    valueNames[v] = n;
+                                    usedNames.insert(n);
+                                    return n;
+                                }
+                                // Same name already registered — reuse only if same value.
+                                if (auto prevConst = existing->second.getDefiningOp<sir::ConstOp>())
+                                {
+                                    if (prevConst.getValueAttr() == cOp.getValueAttr())
+                                    {
+                                        valueNames[v] = n;
+                                        return n;
+                                    }
+                                }
+                                // Different value — fall through to allocateName() below.
                             }
                             std::string unique = allocateName(n);
                             if (!unique.empty())
@@ -309,7 +325,8 @@ namespace
             std::string f = names.allocateName("sel_f");
             // Reuse existing zero const or emit one.
             std::string zero;
-            auto zIt = names.constNames.find("0");
+            std::string zeroKey = formatConstKey(APInt(256, 0));
+            auto zIt = names.constNames.find(zeroKey);
             if (zIt != names.constNames.end())
                 zero = names.nameFor(zIt->second);
             else
@@ -383,11 +400,7 @@ namespace
             os << " " << formatStringAsHex(sc.getValue());
             return;
         }
-        if (auto ed = dyn_cast<sir::ErrorDeclOp>(op))
-        {
-            os << " " << ed.getSymName();
-            return;
-        }
+        // NOTE: ErrorDeclOp is handled by early-return above (line ~310).
         if (auto ic = dyn_cast<sir::ICallOp>(op))
         {
             os << " @" << ic.getCalleeAttr().getValue();
@@ -537,6 +550,8 @@ namespace mlir
                             blockName = "bb" + std::to_string(bbId++);
                         }
                     }
+                    // Route through allocateName for collision detection.
+                    blockName = names.allocateName(blockName);
                     names.blockNames[&block] = blockName;
                     blocks.push_back(&block);
                 }
