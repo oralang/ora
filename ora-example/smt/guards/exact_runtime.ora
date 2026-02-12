@@ -9,6 +9,9 @@
 // ============================================================================
 
 contract ExactRuntime {
+    storage var stored_dividend: Exact<u256>;
+    storage var stored_divisor: u256;
+
     // SMT cannot prove Exact division - no requires clause
     pub fn runtimeExactDivision(dividend: Exact<u256>, divisor: u256) {
         // Guard should remain - no requires clause to prove exact division
@@ -25,16 +28,13 @@ contract ExactRuntime {
 
     // SMT cannot prove Exact division from storage
     pub fn runtimeExactDivisionFromStorage() {
-        storage var dividend: Exact<u256>;
-        storage var divisor: u256;
         // Guard should remain - storage values unknown at compile time
-        let q: u256 = dividend / divisor;
+        let q: u256 = stored_dividend / stored_divisor;
     }
 
     // SMT cannot prove Exact division from function call
     pub fn getDividend() -> Exact<u256> {
-        storage var value: Exact<u256>;
-        return value;
+        return stored_dividend;
     }
 
     pub fn testCall() {
@@ -52,4 +52,3 @@ contract ExactRuntime {
         // This test needs refinement
     }
 }
-

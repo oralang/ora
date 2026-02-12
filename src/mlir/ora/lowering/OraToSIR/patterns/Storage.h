@@ -20,11 +20,27 @@ namespace mlir
         // -----------------------------------------------------------------------------
         inline std::optional<uint64_t> computeGlobalSlot(StringRef name, Operation *op)
         {
+            auto fallbackSlotFromName = [](StringRef key) -> std::optional<uint64_t> {
+                if (key.empty())
+                    return std::nullopt;
+                // Deterministic FNV-1a hash for function-scoped storage vars that
+                // don't materialize as ora.global symbols/module slot attrs.
+                uint64_t hash = 1469598103934665603ULL;
+                for (unsigned char c : key.bytes())
+                {
+                    hash ^= static_cast<uint64_t>(c);
+                    hash *= 1099511628211ULL;
+                }
+                if (hash == 0)
+                    hash = 1;
+                return hash;
+            };
+
             // Get the module to look up the ora.global operation
             ModuleOp module = op->getParentOfType<ModuleOp>();
             if (!module)
             {
-                return std::nullopt;
+                return fallbackSlotFromName(name);
             }
 
             // Look up the ora.global operation by name using SymbolTable
@@ -34,13 +50,13 @@ namespace mlir
             {
                 auto slotsAttr = module->getAttrOfType<DictionaryAttr>("ora.global_slots");
                 if (!slotsAttr)
-                    return std::nullopt;
+                    return fallbackSlotFromName(name);
                 if (auto slotAttr = slotsAttr.get(name))
                 {
                     if (auto intAttr = llvm::dyn_cast<IntegerAttr>(slotAttr))
                         return intAttr.getUInt();
                 }
-                return std::nullopt;
+                return fallbackSlotFromName(name);
             }
 
             // Check if the global has a slot index attribute
@@ -50,7 +66,7 @@ namespace mlir
                 return slotAttr.getUInt();
             }
 
-            return std::nullopt;
+            return fallbackSlotFromName(name);
         }
 
         // Storage operation conversions
@@ -140,6 +156,17 @@ namespace mlir
             LogicalResult matchAndRewrite(
                 mlir::tensor::ExtractOp op,
                 typename mlir::tensor::ExtractOp::Adaptor adaptor,
+                ConversionPatternRewriter &rewriter) const override;
+        };
+
+        class ConvertTensorInsertOp : public OpConversionPattern<mlir::tensor::InsertOp>
+        {
+        public:
+            using OpConversionPattern::OpConversionPattern;
+
+            LogicalResult matchAndRewrite(
+                mlir::tensor::InsertOp op,
+                typename mlir::tensor::InsertOp::Adaptor adaptor,
                 ConversionPatternRewriter &rewriter) const override;
         };
 

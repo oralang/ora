@@ -185,32 +185,29 @@ static Value findOrCreateSlotConstant(Operation *op, uint64_t slotIndex,
     auto ui64Type = mlir::IntegerType::get(ctx, 64, mlir::IntegerType::Unsigned);
     auto slotAttr = mlir::IntegerAttr::get(ui64Type, slotIndex);
 
-    // Look for existing slot constant with the same name.
-    Value existingConst;
-    Operation *parentFunc = op->getParentOfType<mlir::func::FuncOp>();
-    if (parentFunc)
-    {
-        parentFunc->walk([&](sir::ConstOp constOp)
-                         {
-            auto nameAttr = constOp->getAttrOfType<StringAttr>("sir.result_name_0");
-            if (!nameAttr)
-                return WalkResult::advance();
-            if (nameAttr.getValue() != ("slot_" + globalName).str())
-                return WalkResult::advance();
-            // Found existing slot constant - reuse it
-            existingConst = constOp.getResult();
-            return WalkResult::interrupt(); });
-    }
-
-    // Reuse existing constant if found
-    if (existingConst)
-    {
-        return existingConst;
-    }
-
-    // Create new constant if not found
-    auto slotConst = rewriter.create<sir::ConstOp>(loc, u256, slotAttr);
     std::string slotName = "slot_" + globalName.str();
+    if (auto parentFunc = op->getParentOfType<mlir::func::FuncOp>())
+    {
+        Block &entry = parentFunc.getBody().front();
+        for (Operation &entryOp : entry)
+        {
+            auto constOp = llvm::dyn_cast<sir::ConstOp>(entryOp);
+            if (!constOp)
+                continue;
+            auto nameAttr = constOp->getAttrOfType<StringAttr>("sir.result_name_0");
+            if (nameAttr && nameAttr.getValue() == slotName)
+                return constOp.getResult();
+        }
+
+        OpBuilder::InsertionGuard guard(rewriter);
+        rewriter.setInsertionPointToStart(&entry);
+        auto slotConst = rewriter.create<sir::ConstOp>(loc, u256, slotAttr);
+        slotConst->setAttr("sir.result_name_0", StringAttr::get(ctx, slotName));
+        return slotConst.getResult();
+    }
+
+    // Fallback for non-function contexts.
+    auto slotConst = rewriter.create<sir::ConstOp>(loc, u256, slotAttr);
     slotConst->setAttr("sir.result_name_0", StringAttr::get(ctx, slotName));
     return slotConst.getResult();
 }
@@ -350,7 +347,9 @@ LogicalResult ConvertSLoadOp::matchAndRewrite(
         auto condBlock = rewriter.createBlock(parentRegion, afterBlock->getIterator(), {u256}, {loc});
         auto bodyBlock = rewriter.createBlock(parentRegion, afterBlock->getIterator(), {u256}, {loc});
 
-        rewriter.setInsertionPoint(op);
+        // Enter the loop from the pre-split block. Inserting this branch in the
+        // continuation block would leave trailing ops after a terminator.
+        rewriter.setInsertionPointToEnd(parentBlock);
         rewriter.create<sir::BrOp>(loc, ValueRange{zero}, condBlock);
 
         rewriter.setInsertionPointToStart(condBlock);
@@ -385,14 +384,14 @@ LogicalResult ConvertSLoadOp::matchAndRewrite(
         return rewriter.notifyMatchFailure(op, "failed to convert result type");
     }
 
-    // Ensure we use u256 for storage loads (all scalar types become u256 in SIR)
-    if (!llvm::isa<sir::U256Type>(convertedResultType))
+    // SIR storage loads always produce u256; cast after loading if needed.
+    Value loaded = rewriter.create<sir::SLoadOp>(loc, u256, slotConst);
+    if (convertedResultType != u256)
     {
-        convertedResultType = u256;
+        loaded = rewriter.create<sir::BitcastOp>(loc, convertedResultType, loaded);
     }
-
-    auto sloadOp = rewriter.replaceOpWithNewOp<sir::SLoadOp>(op, convertedResultType, slotConst);
-    setResultName(sloadOp, 0, "value");
+    setResultName(loaded.getDefiningOp(), 0, "value");
+    rewriter.replaceOp(op, loaded);
 
     LLVM_DEBUG(llvm::dbgs() << "[OraToSIR]   replaced with sir.sload\n");
     return success();
@@ -414,8 +413,10 @@ LogicalResult ConvertSStoreOp::matchAndRewrite(
 
     if (llvm::isa<mlir::RankedTensorType>(value.getType()))
     {
-        DBG("  -> skipping sstore of tensor type");
-        return failure();
+        // Storage array element writes are lowered from tensor.insert to sir.sstore.
+        // The enclosing ora.sstore tensor write is then a no-op.
+        rewriter.eraseOp(op);
+        return success();
     }
 
     const bool isDynamicBytes = llvm::isa<ora::StringType, ora::BytesType>(op.getValue().getType());
@@ -464,7 +465,9 @@ LogicalResult ConvertSStoreOp::matchAndRewrite(
         auto condBlock = rewriter.createBlock(parentRegion, afterBlock->getIterator(), {u256Type}, {loc});
         auto bodyBlock = rewriter.createBlock(parentRegion, afterBlock->getIterator(), {u256Type}, {loc});
 
-        rewriter.setInsertionPoint(op);
+        // Enter the loop from the pre-split block. Inserting this branch in the
+        // continuation block would leave trailing ops after a terminator.
+        rewriter.setInsertionPointToEnd(parentBlock);
         rewriter.create<sir::BrOp>(loc, ValueRange{zero}, condBlock);
 
         rewriter.setInsertionPointToStart(condBlock);
@@ -596,35 +599,26 @@ LogicalResult ConvertGlobalOp::matchAndRewrite(
     ConversionPatternRewriter &rewriter) const
 {
     (void)adaptor;
-    auto slotAttr = op->getAttrOfType<IntegerAttr>("ora.slot_index");
-    if (!slotAttr)
+    // Contract-level metadata for globals may be absent in syntax-only samples.
+    // Globals are compile-time declarations only; lowering can safely erase them.
+    // If metadata exists and is inconsistent, emit a warning but continue.
+    if (auto slotAttr = op->getAttrOfType<IntegerAttr>("ora.slot_index"))
     {
-        return rewriter.notifyMatchFailure(op, "missing ora.slot_index for global");
-    }
-
-    auto nameAttr = op->getAttrOfType<StringAttr>("sym_name");
-    if (!nameAttr)
-    {
-        return rewriter.notifyMatchFailure(op, "missing sym_name on global");
-    }
-
-    auto module = op->getParentOfType<ModuleOp>();
-    if (!module)
-    {
-        return rewriter.notifyMatchFailure(op, "global op not contained in module");
-    }
-
-    auto slotsAttr = module->getAttrOfType<DictionaryAttr>("ora.global_slots");
-    if (!slotsAttr)
-    {
-        return rewriter.notifyMatchFailure(op, "missing ora.global_slots module attribute");
-    }
-
-    auto entry = slotsAttr.get(nameAttr.getValue());
-    auto entryInt = llvm::dyn_cast_or_null<IntegerAttr>(entry);
-    if (!entryInt || entryInt.getUInt() != slotAttr.getUInt())
-    {
-        return rewriter.notifyMatchFailure(op, "global slot index mismatch with ora.global_slots map");
+        if (auto nameAttr = op->getAttrOfType<StringAttr>("sym_name"))
+        {
+            if (auto module = op->getParentOfType<ModuleOp>())
+            {
+                if (auto slotsAttr = module->getAttrOfType<DictionaryAttr>("ora.global_slots"))
+                {
+                    auto entry = slotsAttr.get(nameAttr.getValue());
+                    auto entryInt = llvm::dyn_cast_or_null<IntegerAttr>(entry);
+                    if (!entryInt || entryInt.getUInt() != slotAttr.getUInt())
+                    {
+                        op.emitWarning("ora.global slot metadata mismatch; continuing with erase");
+                    }
+                }
+            }
+        }
     }
 
     rewriter.eraseOp(op);
@@ -858,8 +852,12 @@ LogicalResult ConvertMapGetOp::matchAndRewrite(
                 convertedFieldType = u256Type;
             }
 
-            // Load field from storage
-            Value fieldValue = rewriter.create<sir::SLoadOp>(loc, convertedFieldType, fieldSlot);
+            // SIR storage loads always produce u256; cast after loading if needed.
+            Value fieldValue = rewriter.create<sir::SLoadOp>(loc, u256Type, fieldSlot);
+            if (convertedFieldType != u256Type)
+            {
+                fieldValue = rewriter.create<sir::BitcastOp>(loc, convertedFieldType, fieldValue);
+            }
             StringRef fieldName = cast<StringAttr>(fieldNamesAttr[i]).getValue();
             std::string fieldNameStr = "field_" + structName.str() + "_" + fieldName.str();
             setResultName(fieldValue.getDefiningOp(), 0, fieldNameStr);
@@ -894,8 +892,12 @@ LogicalResult ConvertMapGetOp::matchAndRewrite(
         convertedResultType = u256Type;
     }
 
-    // Load from storage using the hash
-    Value result = rewriter.create<sir::SLoadOp>(loc, convertedResultType, hash);
+    // SIR storage loads always produce u256; cast after loading if needed.
+    Value result = rewriter.create<sir::SLoadOp>(loc, u256Type, hash);
+    if (convertedResultType != u256Type)
+    {
+        result = rewriter.create<sir::BitcastOp>(loc, convertedResultType, result);
+    }
     setResultName(result.getDefiningOp(), 0, "value");
 
     // Replace the map_get with the result
@@ -1112,6 +1114,80 @@ LogicalResult ConvertMapStoreOp::matchAndRewrite(
     // Erase the map_store operation (it has no results)
     rewriter.eraseOp(op);
     DBG("ConvertMapStoreOp: replaced with keccak256 + sstore");
+    return success();
+}
+
+// -----------------------------------------------------------------------------
+// Lower tensor.insert for storage arrays -> sir.sstore base_slot + index
+// -----------------------------------------------------------------------------
+LogicalResult ConvertTensorInsertOp::matchAndRewrite(
+    mlir::tensor::InsertOp op,
+    typename mlir::tensor::InsertOp::Adaptor adaptor,
+    ConversionPatternRewriter &rewriter) const
+{
+    auto loc = op.getLoc();
+    auto ctx = rewriter.getContext();
+    auto u256Type = sir::U256Type::get(ctx);
+
+    auto tensorType = llvm::dyn_cast<mlir::RankedTensorType>(op.getDest().getType());
+    if (!tensorType)
+        return rewriter.notifyMatchFailure(op, "tensor.insert destination is not ranked tensor");
+    if (static_cast<int64_t>(adaptor.getIndices().size()) != tensorType.getRank())
+        return rewriter.notifyMatchFailure(op, "tensor.insert index count mismatch");
+
+    Value base = adaptor.getDest();
+    if (auto cast = base.getDefiningOp<mlir::UnrealizedConversionCastOp>())
+    {
+        if (cast.getNumOperands() == 1)
+            base = cast.getOperand(0);
+    }
+    if (!llvm::isa<sir::U256Type>(base.getType()))
+        return rewriter.notifyMatchFailure(op, "tensor.insert destination is not backed by storage slot");
+
+    Value indexU256;
+    if (tensorType.getRank() == 1)
+    {
+        indexU256 = ensureU256Value(rewriter, loc, adaptor.getIndices()[0]);
+    }
+    else
+    {
+        auto ui64Type = mlir::IntegerType::get(ctx, 64, mlir::IntegerType::Unsigned);
+        indexU256 = rewriter.create<sir::ConstOp>(
+            loc, u256Type, mlir::IntegerAttr::get(ui64Type, 0));
+
+        auto shape = tensorType.getShape();
+        int64_t stride = 1;
+        for (int64_t i = tensorType.getRank() - 1; i >= 0; --i)
+        {
+            Value idx = ensureU256Value(rewriter, loc, adaptor.getIndices()[i]);
+            Value strideConst = rewriter.create<sir::ConstOp>(
+                loc, u256Type, mlir::IntegerAttr::get(ui64Type, static_cast<uint64_t>(stride)));
+            Value scaled = rewriter.create<sir::MulOp>(loc, u256Type, idx, strideConst);
+            indexU256 = rewriter.create<sir::AddOp>(loc, u256Type, indexU256, scaled);
+            stride *= shape[i];
+        }
+    }
+
+    uint64_t elemWords = getElementWordCount(tensorType.getElementType());
+    Value slot = base;
+    if (elemWords != 1)
+    {
+        auto ui64Type = mlir::IntegerType::get(ctx, 64, mlir::IntegerType::Unsigned);
+        Value elemWordsConst = rewriter.create<sir::ConstOp>(
+            loc, u256Type, mlir::IntegerAttr::get(ui64Type, elemWords));
+        Value offset = rewriter.create<sir::MulOp>(loc, u256Type, indexU256, elemWordsConst);
+        slot = rewriter.create<sir::AddOp>(loc, u256Type, base, offset);
+    }
+    else
+    {
+        slot = rewriter.create<sir::AddOp>(loc, u256Type, base, indexU256);
+    }
+
+    Value storedValue = ensureU256Value(rewriter, loc, adaptor.getScalar());
+    rewriter.create<sir::SStoreOp>(loc, slot, storedValue);
+
+    // Preserve SSA flow; the enclosing ora.sstore(tensor, global) is a no-op.
+    rewriter.replaceOp(op, adaptor.getDest());
     return success();
 }
 

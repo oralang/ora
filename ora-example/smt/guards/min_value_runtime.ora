@@ -9,6 +9,8 @@
 // ============================================================================
 
 contract MinValueRuntime {
+    storage var stored_value: u256;
+
     // SMT cannot prove MinValue - no requires clause
     pub fn runtimeMinValue10(value: MinValue<u256, 10>) {
         // Guard should remain - no requires clause to prove constraint
@@ -25,7 +27,6 @@ contract MinValueRuntime {
 
     // SMT cannot prove MinValue from storage
     pub fn runtimeMinValueFromStorage() {
-        storage var stored_value: u256;
         // Guard should remain - storage value unknown at compile time
         let v: MinValue<u256, 100> = stored_value;
     }

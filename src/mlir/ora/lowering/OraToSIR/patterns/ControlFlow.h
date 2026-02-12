@@ -445,6 +445,11 @@ namespace mlir
                 ora::ErrorIsErrorOp op,
                 typename ora::ErrorIsErrorOp::Adaptor adaptor,
                 ConversionPatternRewriter &rewriter) const override;
+
+            LogicalResult matchAndRewrite(
+                ora::ErrorIsErrorOp op,
+                OneToNOpAdaptor adaptor,
+                ConversionPatternRewriter &rewriter) const override;
         };
 
         class ConvertErrorUnwrapOp : public OpConversionPattern<ora::ErrorUnwrapOp>

@@ -9,6 +9,8 @@
 // ============================================================================
 
 contract InRangeRuntime {
+    storage var stored_value: u256;
+
     // SMT cannot prove InRange - no requires clause
     pub fn runtimeInRange0to100(value: InRange<u256, 0, 100>) {
         // Guard should remain - no requires clause to prove constraint
@@ -33,7 +35,6 @@ contract InRangeRuntime {
 
     // SMT cannot prove InRange from storage
     pub fn runtimeInRangeFromStorage() {
-        storage var stored_value: u256;
         // Guard should remain - storage value unknown at compile time
         let v: InRange<u256, 0, 100> = stored_value;
     }
@@ -62,4 +63,3 @@ contract InRangeRuntime {
         let v: BasisPoints<u256> = fee;
     }
 }
-

@@ -381,9 +381,10 @@ static void dumpModuleOnFailure(ModuleOp module, StringRef phase)
     // inconsistent, so we skip it.
 }
 
-static void normalizeFuncTerminators(mlir::func::FuncOp funcOp)
+static bool normalizeFuncTerminators(mlir::func::FuncOp funcOp)
 {
     mlir::IRRewriter rewriter(funcOp.getContext());
+    bool hadMalformedBlock = false;
     for (Block &block : funcOp.getBody())
     {
         Operation *terminator = nullptr;
@@ -397,16 +398,30 @@ static void normalizeFuncTerminators(mlir::func::FuncOp funcOp)
         }
         if (!terminator)
         {
+            hadMalformedBlock = true;
+            llvm::errs() << "[OraToSIR] ERROR: Missing terminator in function "
+                         << funcOp.getName() << " at " << block.getParent()->getLoc() << "\n";
             rewriter.setInsertionPointToEnd(&block);
             rewriter.create<sir::InvalidOp>(funcOp.getLoc());
             continue;
         }
         if (terminator->getNextNode())
         {
+            hadMalformedBlock = true;
             llvm::errs() << "[OraToSIR] ERROR: Terminator has trailing ops in function "
                          << funcOp.getName() << " at " << terminator->getLoc() << "\n";
+            // Keep IR valid for downstream passes by dropping unreachable ops
+            // that were left after a terminator.
+            Operation *extra = terminator->getNextNode();
+            while (extra)
+            {
+                Operation *next = extra->getNextNode();
+                extra->erase();
+                extra = next;
+            }
         }
     }
+    return hadMalformedBlock;
 }
 
 static LogicalResult eraseRefinements(ModuleOp module)
@@ -813,6 +828,7 @@ public:
             patterns.add<ConvertTStoreOp>(typeConverter, ctx);
             patterns.add<ConvertMapGetOp>(typeConverter, ctx, PatternBenefit(5));
             patterns.add<ConvertMapStoreOp>(typeConverter, ctx, PatternBenefit(5));
+            patterns.add<ConvertTensorInsertOp>(typeConverter, ctx);
             patterns.add<ConvertTensorExtractOp>(typeConverter, ctx);
             patterns.add<ConvertTensorDimOp>(typeConverter, ctx);
         }
@@ -872,7 +888,7 @@ public:
         if (enable_storage)
         {
             // Force storage-related tensor ops to lower when arrays/maps are enabled.
-            target.addIllegalOp<mlir::tensor::ExtractOp, mlir::tensor::DimOp>();
+            target.addIllegalOp<mlir::tensor::InsertOp, mlir::tensor::ExtractOp, mlir::tensor::DimOp>();
         }
         target.addIllegalOp<ora::ContractOp>();
         target.addLegalOp<ora::ReturnOp>();
@@ -1077,9 +1093,12 @@ public:
             phase2Target.addLegalDialect<mlir::scf::SCFDialect>();
             phase2Target.addLegalDialect<mlir::arith::ArithDialect>();
             phase2Target.addLegalOp<ora::ReturnOp>();
-            phase2Target.addIllegalOp<ora::ErrorIsErrorOp>();
-            phase2Target.addIllegalOp<ora::ErrorUnwrapOp>();
-            phase2Target.addIllegalOp<ora::ErrorGetErrorOp>();
+            // Defer ora.error.is_error lowering to phase 2b. Some wide error-union
+            // forms are normalized there after additional rewrites.
+            phase2Target.addLegalOp<ora::ErrorIsErrorOp>();
+            // Defer scalar error accessors to phase 2b together with CFG lowering.
+            phase2Target.addLegalOp<ora::ErrorUnwrapOp>();
+            phase2Target.addLegalOp<ora::ErrorGetErrorOp>();
             phase2Target.addLegalOp<ora::ErrorOkOp>();
             phase2Target.addLegalOp<ora::ErrorErrOp>();
             phase2Target.addLegalOp<ora::IfOp>();
@@ -1305,6 +1324,7 @@ public:
             phase4Patterns.add<ConvertArithIndexCastUIOp>(typeConverter, ctx);
             phase4Patterns.add<ConvertArithIndexCastOp>(typeConverter, ctx);
             phase4Patterns.add<ConvertArithTruncIOp>(typeConverter, ctx);
+            phase4Patterns.add<ConvertTensorInsertOp>(typeConverter, ctx);
             phase4Patterns.add<ConvertTensorExtractOp>(typeConverter, ctx);
             phase4Patterns.add<ConvertTensorDimOp>(typeConverter, ctx);
             phase4Patterns.add<ConvertBaseToRefinementOp>(typeConverter, ctx);
@@ -1506,18 +1526,34 @@ public:
                 return;
             }
 
-            // Debug: dump final module.
+            // Normalize malformed blocks before any final printing/validation so we
+            // fail cleanly instead of reaching MLIR internals with invalid CFG.
+            bool hadMalformedTerminatorBlocks = false;
+            module.walk([&](mlir::func::FuncOp funcOp) {
+                hadMalformedTerminatorBlocks = normalizeFuncTerminators(funcOp) || hadMalformedTerminatorBlocks;
+            });
+            if (hadMalformedTerminatorBlocks)
+            {
+                module.emitError("[OraToSIR] malformed CFG: missing terminator or trailing ops after terminator");
+                signalPassFailure();
+                return;
+            }
+
+            // Avoid in-pass full module dump here: if IR is structurally damaged,
+            // pretty-print traversal itself can crash before we report a clean
+            // diagnostic. The CLI still prints SIR MLIR after successful conversion.
             if (mlir::ora::isDebugEnabled())
             {
-                llvm::errs() << "\n//===----------------------------------------------------------------------===//\n";
-                llvm::errs() << "// SIR MLIR (after Phase4)\n";
-                llvm::errs() << "//===----------------------------------------------------------------------===//\n\n";
-                module.print(llvm::errs());
-                llvm::errs() << "\n";
+                llvm::errs() << "[OraToSIR] Post-Phase4: internal module dump skipped\n";
                 llvm::errs().flush();
             }
 
             // Extra guard: detect any remaining unrealized casts by name.
+            if (mlir::ora::isDebugEnabled())
+            {
+                llvm::errs() << "[OraToSIR] Post-Phase4: name-scan start\n";
+                llvm::errs().flush();
+            }
             int64_t unrealizedByName = 0;
             module.walk([&](Operation *op) {
                 if (op->getName().getStringRef() == "builtin.unrealized_conversion_cast")
@@ -1538,6 +1574,7 @@ public:
             });
             if (mlir::ora::isDebugEnabled())
             {
+                llvm::errs() << "[OraToSIR] Post-Phase4: name-scan done (count=" << unrealizedByName << ")\n";
                 llvm::errs().flush();
             }
             if (unrealizedByName > 0)
@@ -1550,6 +1587,11 @@ public:
         }
 
         // Guard: fail if any ops remain that should have been lowered by this stage.
+        if (mlir::ora::isDebugEnabled())
+        {
+            llvm::errs() << "[OraToSIR] Post-Phase4: illegal-op scan start\n";
+            llvm::errs().flush();
+        }
         bool illegalFound = false;
         module.walk([&](Operation *op)
                     {
@@ -1582,11 +1624,17 @@ public:
             signalPassFailure();
             return;
         }
+        if (mlir::ora::isDebugEnabled())
+        {
+            llvm::errs() << "[OraToSIR] Post-Phase4: illegal-op scan done\n";
+            llvm::errs().flush();
+        }
 
-        // Guard: ensure every block in every function has a terminator.
-        module.walk([&](mlir::func::FuncOp funcOp)
-                    { normalizeFuncTerminators(funcOp); });
-
+        if (mlir::ora::isDebugEnabled())
+        {
+            llvm::errs() << "[OraToSIR] Post-Phase4: terminator scan start\n";
+            llvm::errs().flush();
+        }
         bool missingTerminator = false;
         module.walk([&](mlir::func::FuncOp funcOp)
                     {
@@ -1596,8 +1644,6 @@ public:
                 {
                     llvm::errs() << "[OraToSIR] ERROR: Missing terminator in function "
                                  << funcOp.getName() << " at " << funcOp.getLoc() << "\n";
-                    llvm::errs() << "[OraToSIR]   Block contents:\n";
-                    block.dump();
                     missingTerminator = true;
                 }
             } });
@@ -1607,28 +1653,55 @@ public:
             signalPassFailure();
             return;
         }
+        if (mlir::ora::isDebugEnabled())
+        {
+            llvm::errs() << "[OraToSIR] Post-Phase4: terminator scan done\n";
+            llvm::errs().flush();
+        }
 
         {
-            RewritePatternSet cleanupPatterns(ctx);
-            cleanupPatterns.add<FoldRedundantBitcastOp>(ctx);
-            cleanupPatterns.add<FoldEqSameOp>(ctx);
-            cleanupPatterns.add<FoldEqConstOp>(ctx);
-            cleanupPatterns.add<FoldIsZeroConstOp>(ctx);
-            cleanupPatterns.add<FoldCondBrSameDestOp>(ctx);
-            cleanupPatterns.add<NormalizeCondBrOperandsOp>(ctx);
-            cleanupPatterns.add<FoldCondBrDoubleIsZeroOp>(ctx);
-            cleanupPatterns.add<FoldCondBrConstOp>(ctx);
-            cleanupPatterns.add<FoldBrToBrOp>(ctx);
-            (void)applyPatternsGreedily(module, std::move(cleanupPatterns));
+            if (mlir::ora::isDebugEnabled())
+            {
+                llvm::errs() << "[OraToSIR] Post-Phase4: greedy cleanup start\n";
+                llvm::errs().flush();
+            }
+            // Temporarily disabled: greedy cleanup has been causing crashes in
+            // some converted loop CFGs. Keep conversion robust first.
+            // RewritePatternSet cleanupPatterns(ctx);
+            // cleanupPatterns.add<FoldRedundantBitcastOp>(ctx);
+            // cleanupPatterns.add<FoldEqSameOp>(ctx);
+            // cleanupPatterns.add<FoldEqConstOp>(ctx);
+            // cleanupPatterns.add<FoldIsZeroConstOp>(ctx);
+            // cleanupPatterns.add<FoldCondBrSameDestOp>(ctx);
+            // cleanupPatterns.add<NormalizeCondBrOperandsOp>(ctx);
+            // cleanupPatterns.add<FoldCondBrDoubleIsZeroOp>(ctx);
+            // cleanupPatterns.add<FoldCondBrConstOp>(ctx);
+            // cleanupPatterns.add<FoldBrToBrOp>(ctx);
+            // (void)applyPatternsGreedily(module, std::move(cleanupPatterns));
+            if (mlir::ora::isDebugEnabled())
+            {
+                llvm::errs() << "[OraToSIR] Post-Phase4: greedy cleanup done\n";
+                llvm::errs().flush();
+            }
         }
 
         // Remove gas_cost attributes from all operations (Ora MLIR specific, not SIR)
+        if (mlir::ora::isDebugEnabled())
+        {
+            llvm::errs() << "[OraToSIR] Post-Phase4: gas attribute cleanup start\n";
+            llvm::errs().flush();
+        }
         module.walk([&](Operation *op)
                     {
                 if (op->hasAttr("gas_cost"))
                 {
                     op->removeAttr("gas_cost");
                 } });
+        if (mlir::ora::isDebugEnabled())
+        {
+            llvm::errs() << "[OraToSIR] Post-Phase4: gas attribute cleanup done\n";
+            llvm::errs().flush();
+        }
 
         // Check what Ora ops remain (should be none)
         module.walk([&](Operation *op)

@@ -717,6 +717,10 @@ test "mlir infers forward callee param types and inserts arg conversion" {
         "";
 
     try testing.expect(std.mem.containsAtLeast(u8, mlir_text, 1, "call @sink("));
-    try testing.expect(std.mem.containsAtLeast(u8, mlir_text, 1, ") : (!ora.address) -> i256"));
-    try testing.expect(!std.mem.containsAtLeast(u8, mlir_text, 1, ") : (!ora.non_zero_address) -> i256"));
+    // Assert semantic intent rather than brittle call-print formatting:
+    // forward callee param must resolve to address, and caller arg must be
+    // adapted from non-zero-address via refinement_to_base.
+    try testing.expect(std.mem.containsAtLeast(u8, mlir_text, 1, "func.func @sink(%arg0: !ora.address"));
+    try testing.expect(std.mem.containsAtLeast(u8, mlir_text, 1, "ora.refinement_to_base"));
+    try testing.expect(!std.mem.containsAtLeast(u8, mlir_text, 1, "func.func @sink(%arg0: !ora.non_zero_address"));
 }

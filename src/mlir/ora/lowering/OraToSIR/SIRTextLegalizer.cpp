@@ -464,8 +464,10 @@ namespace mlir
                                 {
                                     // Repair mismatched icall result counts by rebuilding the call.
                                     OpBuilder b(op);
+                                    auto u256 = sir::U256Type::get(op.getContext());
                                     SmallVector<Type, 4> newResults;
-                                    newResults.append(funcType.getResults().begin(), funcType.getResults().end());
+                                    for (unsigned i = 0; i < funcType.getNumResults(); ++i)
+                                        newResults.push_back(u256);
                                     auto newCall = b.create<sir::ICallOp>(op.getLoc(), newResults, op.getCalleeAttr(), op.getArgs());
                                     unsigned common = std::min(op.getNumResults(), newCall.getNumResults());
                                     for (unsigned i = 0; i < common; ++i)
@@ -493,7 +495,6 @@ namespace mlir
                                     }
                                     if (op.getNumResults() > newCall.getNumResults())
                                     {
-                                        auto u256 = sir::U256Type::get(op.getContext());
                                         auto zero = b.create<sir::ConstOp>(op.getLoc(), u256,
                                                                            IntegerAttr::get(b.getI64Type(), 0));
                                         for (unsigned i = common; i < op.getNumResults(); ++i)
