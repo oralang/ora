@@ -1417,8 +1417,9 @@ fn generateMlirOutput(allocator: std.mem.Allocator, ast_nodes: []lib.AstNode, fi
     if (mlir_options.canonicalize and (mlir_options.emit_mlir or mlir_options.emit_mlir_sir)) {
         m.begin("canonicalization");
         if (!c.oraCanonicalizeOraMLIR(h.ctx, final_module)) {
-            try stdout.print("Warning: Ora MLIR canonicalization failed\n", .{});
+            try stdout.print("❌ Ora MLIR canonicalization failed\n", .{});
             try stdout.flush();
+            std.process.exit(1);
         }
         m.end();
     }

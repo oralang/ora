@@ -109,7 +109,8 @@ pub const FunctionSymbol = struct {
         };
     }
 
-    pub fn deinit(self: *FunctionSymbol) void {
+    pub fn deinit(self: *FunctionSymbol, allocator: std.mem.Allocator) void {
+        allocator.free(self.param_types);
         self.attributes.deinit();
     }
 };
@@ -218,7 +219,7 @@ pub const SymbolTable = struct {
         // clean up function symbols
         var func_iter = self.functions.iterator();
         while (func_iter.next()) |entry| {
-            entry.value_ptr.deinit();
+            entry.value_ptr.deinit(self.allocator);
         }
         self.functions.deinit();
 
@@ -353,6 +354,11 @@ pub const SymbolTable = struct {
     /// Add a function symbol to the global function table
     pub fn addFunction(self: *SymbolTable, name: []const u8, operation: c.MlirOperation, param_types: []c.MlirType, return_type: c.MlirType) !void {
         const func_symbol = FunctionSymbol.init(self.allocator, name, operation, param_types, return_type);
+        if (self.functions.getPtr(name)) |existing| {
+            existing.deinit(self.allocator);
+            existing.* = func_symbol;
+            return;
+        }
         try self.functions.put(name, func_symbol);
     }
 
@@ -498,11 +504,10 @@ pub const LoweringResult = struct {
 /// Convert semantic analysis symbol table to MLIR symbol table
 /// Note: Type registration (enums, structs) is now handled in the MLIR lowering phase
 /// This function only handles variable and function symbols from semantic analysis
-pub fn convertSemanticSymbolTable(semantic_table: *const lib.semantics.state.SymbolTable, mlir_table: *SymbolTable, ctx: c.MlirContext, allocator: std.mem.Allocator) !void {
+pub fn convertSemanticSymbolTable(semantic_table: *const lib.semantics.state.SymbolTable, mlir_table: *SymbolTable, allocator: std.mem.Allocator) !void {
     // note: Type registration (enums, structs) is now handled directly in the MLIR lowering phase
     // where we have access to the MLIR context and can create proper MLIR types.
     // this function is kept for future use if we need to convert other semantic symbols.
-    _ = ctx;
     var it = semantic_table.function_effects.iterator();
     while (it.next()) |entry| {
         const name = entry.key_ptr.*;
@@ -544,6 +549,57 @@ pub fn convertSemanticSymbolTable(semantic_table: *const lib.semantics.state.Sym
     }
 
     // Log signatures are registered per-contract during lowering.
+}
+
+fn preRegisterFunctionSignatureFromAst(
+    symbol_table: *SymbolTable,
+    type_mapper: *const TypeMapper,
+    ctx: c.MlirContext,
+    func: lib.FunctionNode,
+) !void {
+    const owned_params = try symbol_table.allocator.alloc(c.MlirType, func.parameters.len);
+    for (func.parameters, 0..) |param, i| {
+        owned_params[i] = type_mapper.toMlirType(param.type_info);
+    }
+
+    const return_ty = if (func.return_type_info) |ret_info|
+        type_mapper.toMlirType(ret_info)
+    else
+        c.oraNoneTypeCreate(ctx);
+
+    try symbol_table.addFunction(func.name, c.MlirOperation{ .ptr = null }, owned_params, return_ty);
+}
+
+fn preRegisterFunctionSignaturesFromAst(
+    nodes: []const lib.AstNode,
+    symbol_table: *SymbolTable,
+    type_mapper: *const TypeMapper,
+    ctx: c.MlirContext,
+) !void {
+    for (nodes) |node| {
+        switch (node) {
+            .Function => |func| {
+                try preRegisterFunctionSignatureFromAst(symbol_table, type_mapper, ctx, func);
+            },
+            .Contract => |contract| {
+                for (contract.body) |member| {
+                    switch (member) {
+                        .Function => |func| {
+                            try preRegisterFunctionSignatureFromAst(symbol_table, type_mapper, ctx, func);
+                        },
+                        .Module => |nested_module| {
+                            try preRegisterFunctionSignaturesFromAst(nested_module.declarations, symbol_table, type_mapper, ctx);
+                        },
+                        else => {},
+                    }
+                }
+            },
+            .Module => |module_node| {
+                try preRegisterFunctionSignaturesFromAst(module_node.declarations, symbol_table, type_mapper, ctx);
+            },
+            else => {},
+        }
+    }
 }
 
 /// Helper to get span from AstNode
@@ -599,9 +655,6 @@ pub fn lowerFunctionsToModuleWithSemanticTable(ctx: c.MlirContext, nodes: []lib.
     var symbol_table = SymbolTable.init(allocator);
     defer symbol_table.deinit();
 
-    // convert semantic analysis symbol table to MLIR symbol table
-    try convertSemanticSymbolTable(semantic_table, &symbol_table, ctx, allocator);
-
     // create builtin registry for standard library functions
     var builtin_registry = lib.semantics.builtins.BuiltinRegistry.init(allocator) catch {
         log.debug("FATAL: Failed to initialize builtin registry\n", .{});
@@ -613,6 +666,13 @@ pub fn lowerFunctionsToModuleWithSemanticTable(ctx: c.MlirContext, nodes: []lib.
     var type_mapper = TypeMapper.initWithSymbolTable(ctx, allocator, &symbol_table);
     type_mapper.setErrorHandler(&error_handler);
     defer type_mapper.deinit();
+
+    // convert semantic analysis symbol table to MLIR symbol table
+    try convertSemanticSymbolTable(semantic_table, &symbol_table, allocator);
+
+    // pre-register function signatures directly from AST so forward calls
+    // use source-of-truth parameter types during argument conversion.
+    try preRegisterFunctionSignaturesFromAst(nodes, &symbol_table, &type_mapper, ctx);
 
     const decl_lowerer = DeclarationLowerer.withErrorHandlerAndDialectAndSymbolTable(ctx, &type_mapper, locations, &error_handler, &ora_dialect, &symbol_table, &builtin_registry);
 
@@ -875,6 +935,10 @@ pub fn lowerFunctionsToModuleWithErrors(ctx: c.MlirContext, nodes: []lib.AstNode
     var type_mapper = TypeMapper.initWithSymbolTable(ctx, allocator, &symbol_table);
     type_mapper.setErrorHandler(&error_handler);
     defer type_mapper.deinit();
+
+    // Pre-register function signatures directly from AST so forward calls can
+    // convert arguments against callee parameter types.
+    try preRegisterFunctionSignaturesFromAst(nodes, &symbol_table, &type_mapper, ctx);
 
     const decl_lowerer = DeclarationLowerer.withErrorHandlerAndDialectAndSymbolTable(ctx, &type_mapper, locations, &error_handler, &ora_dialect, &symbol_table, &builtin_registry);
 

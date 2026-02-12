@@ -354,7 +354,69 @@ test "mlir encodes error-constructor call return as ora.error.err" {
     else
         "";
 
-    try testing.expect(std.mem.containsAtLeast(u8, mlir_text, 1, "call @E("));
+    try testing.expect(!std.mem.containsAtLeast(u8, mlir_text, 1, "call @E("));
+    try testing.expect(std.mem.containsAtLeast(u8, mlir_text, 1, "ora.error.err"));
+}
+
+test "mlir does not emit func.call for payload error constructors in mixed unions" {
+    const allocator = testing.allocator;
+    const source =
+        \\contract Test {
+        \\    error E1;
+        \\    error E2(code: u256);
+        \\
+        \\    pub fn mayFailMixed(x: u256) -> !bool | E1 | E2 {
+        \\        if (x == 0) {
+        \\            return E1;
+        \\        }
+        \\        if (x == 1) {
+        \\            return E2(7);
+        \\        }
+        \\        return true;
+        \\    }
+        \\}
+    ;
+
+    var lex = lib.lexer.Lexer.init(allocator, source);
+    defer lex.deinit();
+    const tokens = try lex.scanTokens();
+    defer allocator.free(tokens);
+
+    var arena = lib.ast_arena.AstArena.init(allocator);
+    defer arena.deinit();
+    var parser_instance = lib.parser.Parser.init(tokens, &arena);
+    const nodes = try parser_instance.parse();
+    defer arena.allocator().free(nodes);
+
+    var sem = try lib.semantics.analyze(allocator, nodes);
+    defer allocator.free(sem.diagnostics);
+    defer sem.symbols.deinit();
+
+    var type_resolver = TypeResolver.init(allocator, arena.allocator(), &sem.symbols);
+    defer type_resolver.deinit();
+    try type_resolver.resolveTypes(nodes);
+
+    var mlir_arena = std.heap.ArenaAllocator.init(allocator);
+    defer mlir_arena.deinit();
+    const mlir_allocator = mlir_arena.allocator();
+
+    const h = mlir.createContext(mlir_allocator);
+    defer mlir.destroyContext(h);
+
+    var lowering = try mlir.lower.lowerFunctionsToModuleWithSemanticTable(h.ctx, nodes, mlir_allocator, &sem.symbols, "error_constructor_mixed.ora");
+    defer lowering.deinit(mlir_allocator);
+    defer c.oraModuleDestroy(lowering.module);
+    try testing.expect(lowering.success);
+
+    const module_op = c.oraModuleGetOperation(lowering.module);
+    const mlir_text_ref = c.oraOperationPrintToString(module_op);
+    defer @import("mlir_c_api").freeStringRef(mlir_text_ref);
+    const mlir_text = if (mlir_text_ref.data != null and mlir_text_ref.length > 0)
+        mlir_text_ref.data[0..mlir_text_ref.length]
+    else
+        "";
+
+    try testing.expect(!std.mem.containsAtLeast(u8, mlir_text, 1, "call @E2("));
     try testing.expect(std.mem.containsAtLeast(u8, mlir_text, 1, "ora.error.err"));
 }
 
@@ -480,4 +542,181 @@ test "mlir lowers arithmetic old() ensures expression" {
     try testing.expect(std.mem.containsAtLeast(u8, mlir_text, 1, "arith.muli"));
     try testing.expect(std.mem.containsAtLeast(u8, mlir_text, 1, "arith.divui"));
     try testing.expect(std.mem.containsAtLeast(u8, mlir_text, 1, "Postcondition 0 failed"));
+}
+
+test "mlir emits zero-result call for void callee" {
+    const allocator = testing.allocator;
+    const source =
+        \\contract Test {
+        \\    fn helper(x: u256) {
+        \\    }
+        \\
+        \\    pub fn caller(a: u256) -> u256 {
+        \\        helper(a);
+        \\        return a;
+        \\    }
+        \\}
+    ;
+
+    var lex = lib.lexer.Lexer.init(allocator, source);
+    defer lex.deinit();
+    const tokens = try lex.scanTokens();
+    defer allocator.free(tokens);
+
+    var arena = lib.ast_arena.AstArena.init(allocator);
+    defer arena.deinit();
+    var parser_instance = lib.parser.Parser.init(tokens, &arena);
+    const nodes = try parser_instance.parse();
+    defer arena.allocator().free(nodes);
+
+    var sem = try lib.semantics.analyze(allocator, nodes);
+    defer allocator.free(sem.diagnostics);
+    defer sem.symbols.deinit();
+
+    var type_resolver = TypeResolver.init(allocator, arena.allocator(), &sem.symbols);
+    defer type_resolver.deinit();
+    try type_resolver.resolveTypes(nodes);
+
+    var mlir_arena = std.heap.ArenaAllocator.init(allocator);
+    defer mlir_arena.deinit();
+    const mlir_allocator = mlir_arena.allocator();
+
+    const h = mlir.createContext(mlir_allocator);
+    defer mlir.destroyContext(h);
+
+    var lowering = try mlir.lower.lowerFunctionsToModuleWithSemanticTable(h.ctx, nodes, mlir_allocator, &sem.symbols, "void_call.ora");
+    defer lowering.deinit(mlir_allocator);
+    defer c.oraModuleDestroy(lowering.module);
+    try testing.expect(lowering.success);
+
+    const module_op = c.oraModuleGetOperation(lowering.module);
+    const mlir_text_ref = c.oraOperationPrintToString(module_op);
+    defer @import("mlir_c_api").freeStringRef(mlir_text_ref);
+    const mlir_text = if (mlir_text_ref.data != null and mlir_text_ref.length > 0)
+        mlir_text_ref.data[0..mlir_text_ref.length]
+    else
+        "";
+
+    try testing.expect(std.mem.containsAtLeast(u8, mlir_text, 1, "call @helper("));
+    try testing.expect(!std.mem.containsAtLeast(u8, mlir_text, 1, "= call @helper("));
+    try testing.expect(!std.mem.containsAtLeast(u8, mlir_text, 1, "-> none"));
+}
+
+test "mlir infers forward callee error-union result type from typed call" {
+    const allocator = testing.allocator;
+    const source =
+        \\contract Test {
+        \\    error E();
+        \\
+        \\    pub fn caller() -> !u256 | E {
+        \\        let v: u256 = try callee();
+        \\        return v;
+        \\    }
+        \\
+        \\    fn callee() -> !u256 | E {
+        \\        return 1;
+        \\    }
+        \\}
+    ;
+
+    var lex = lib.lexer.Lexer.init(allocator, source);
+    defer lex.deinit();
+    const tokens = try lex.scanTokens();
+    defer allocator.free(tokens);
+
+    var arena = lib.ast_arena.AstArena.init(allocator);
+    defer arena.deinit();
+    var parser_instance = lib.parser.Parser.init(tokens, &arena);
+    const nodes = try parser_instance.parse();
+    defer arena.allocator().free(nodes);
+
+    var sem = try lib.semantics.analyze(allocator, nodes);
+    defer allocator.free(sem.diagnostics);
+    defer sem.symbols.deinit();
+
+    var type_resolver = TypeResolver.init(allocator, arena.allocator(), &sem.symbols);
+    defer type_resolver.deinit();
+    try type_resolver.resolveTypes(nodes);
+
+    var mlir_arena = std.heap.ArenaAllocator.init(allocator);
+    defer mlir_arena.deinit();
+    const mlir_allocator = mlir_arena.allocator();
+
+    const h = mlir.createContext(mlir_allocator);
+    defer mlir.destroyContext(h);
+
+    var lowering = try mlir.lower.lowerFunctionsToModuleWithSemanticTable(h.ctx, nodes, mlir_allocator, &sem.symbols, "forward_error_union_call.ora");
+    defer lowering.deinit(mlir_allocator);
+    defer c.oraModuleDestroy(lowering.module);
+    try testing.expect(lowering.success);
+
+    const module_op = c.oraModuleGetOperation(lowering.module);
+    const mlir_text_ref = c.oraOperationPrintToString(module_op);
+    defer @import("mlir_c_api").freeStringRef(mlir_text_ref);
+    const mlir_text = if (mlir_text_ref.data != null and mlir_text_ref.length > 0)
+        mlir_text_ref.data[0..mlir_text_ref.length]
+    else
+        "";
+
+    try testing.expect(std.mem.containsAtLeast(u8, mlir_text, 1, "call @callee()"));
+    try testing.expect(std.mem.containsAtLeast(u8, mlir_text, 1, "-> !ora.error_union<i256>"));
+    try testing.expect(!std.mem.containsAtLeast(u8, mlir_text, 1, "call @callee() {gas_cost = 10 : i64} : () -> i256"));
+}
+
+test "mlir infers forward callee param types and inserts arg conversion" {
+    const allocator = testing.allocator;
+    const source =
+        \\contract Test {
+        \\    pub fn caller() -> u256 {
+        \\        return sink(std.msg.sender());
+        \\    }
+        \\
+        \\    fn sink(a: address) -> u256 {
+        \\        return 1;
+        \\    }
+        \\}
+    ;
+
+    var lex = lib.lexer.Lexer.init(allocator, source);
+    defer lex.deinit();
+    const tokens = try lex.scanTokens();
+    defer allocator.free(tokens);
+
+    var arena = lib.ast_arena.AstArena.init(allocator);
+    defer arena.deinit();
+    var parser_instance = lib.parser.Parser.init(tokens, &arena);
+    const nodes = try parser_instance.parse();
+    defer arena.allocator().free(nodes);
+
+    var sem = try lib.semantics.analyze(allocator, nodes);
+    defer allocator.free(sem.diagnostics);
+    defer sem.symbols.deinit();
+
+    var type_resolver = TypeResolver.init(allocator, arena.allocator(), &sem.symbols);
+    defer type_resolver.deinit();
+    try type_resolver.resolveTypes(nodes);
+
+    var mlir_arena = std.heap.ArenaAllocator.init(allocator);
+    defer mlir_arena.deinit();
+    const mlir_allocator = mlir_arena.allocator();
+
+    const h = mlir.createContext(mlir_allocator);
+    defer mlir.destroyContext(h);
+
+    var lowering = try mlir.lower.lowerFunctionsToModuleWithSemanticTable(h.ctx, nodes, mlir_allocator, &sem.symbols, "forward_param_conversion.ora");
+    defer lowering.deinit(mlir_allocator);
+    defer c.oraModuleDestroy(lowering.module);
+    try testing.expect(lowering.success);
+
+    const module_op = c.oraModuleGetOperation(lowering.module);
+    const mlir_text_ref = c.oraOperationPrintToString(module_op);
+    defer @import("mlir_c_api").freeStringRef(mlir_text_ref);
+    const mlir_text = if (mlir_text_ref.data != null and mlir_text_ref.length > 0)
+        mlir_text_ref.data[0..mlir_text_ref.length]
+    else
+        "";
+
+    try testing.expect(std.mem.containsAtLeast(u8, mlir_text, 1, "call @sink("));
+    try testing.expect(std.mem.containsAtLeast(u8, mlir_text, 1, ") : (!ora.address) -> i256"));
+    try testing.expect(!std.mem.containsAtLeast(u8, mlir_text, 1, ") : (!ora.non_zero_address) -> i256"));
 }

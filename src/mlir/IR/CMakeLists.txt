@@ -111,6 +111,16 @@ add_mlir_dialect_library(MLIRSIRDialect
     MLIRSymbolInterfaces
 )
 
+# Ensure generated TableGen includes exist before compiling sources that
+# transitively include SIRDialect.h -> *.inc.
+set_source_files_properties(
+  lib/SIRDialect.cpp
+  lib/SIRTypes.cpp
+  PROPERTIES
+    OBJECT_DEPENDS
+      "${PROJECT_BINARY_DIR}/SIRDialect.h.inc;${PROJECT_BINARY_DIR}/SIRDialect.cpp.inc;${PROJECT_BINARY_DIR}/SIRTypes.h.inc;${PROJECT_BINARY_DIR}/SIRTypes.cpp.inc;${PROJECT_BINARY_DIR}/SIROps.h.inc;${PROJECT_BINARY_DIR}/SIROps.cpp.inc"
+)
+
 # -------------------------------
 # Install targets
 # -------------------------------

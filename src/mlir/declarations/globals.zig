@@ -5,7 +5,6 @@
 const std = @import("std");
 const c = @import("mlir_c_api").c;
 const lib = @import("ora_lib");
-const constants = @import("../lower.zig");
 const h = @import("../helpers.zig");
 const DeclarationLowerer = @import("mod.zig").DeclarationLowerer;
 const helpers = @import("helpers.zig");
@@ -248,13 +247,13 @@ pub fn createGlobalDeclaration(self: *const DeclarationLowerer, var_decl: *const
 /// Create memory global variable declaration
 pub fn createMemoryGlobalDeclaration(self: *const DeclarationLowerer, var_decl: *const lib.ast.Statements.VariableDeclNode) c.MlirOperation {
     const loc = helpers.createFileLocation(self, var_decl.span);
-    const var_type = c.oraIntegerTypeCreate(self.ctx, constants.DEFAULT_INTEGER_BITS); // default to i256
+    const var_type = self.type_mapper.toMlirType(var_decl.type_info);
     return c.oraMemoryGlobalOpCreate(self.ctx, loc, h.strRef(var_decl.name), var_type);
 }
 
 /// Create transient storage global variable declaration
 pub fn createTStoreGlobalDeclaration(self: *const DeclarationLowerer, var_decl: *const lib.ast.Statements.VariableDeclNode) c.MlirOperation {
     const loc = helpers.createFileLocation(self, var_decl.span);
-    const var_type = c.oraIntegerTypeCreate(self.ctx, constants.DEFAULT_INTEGER_BITS); // default to i256
+    const var_type = self.type_mapper.toMlirType(var_decl.type_info);
     return c.oraTStoreGlobalOpCreate(self.ctx, loc, h.strRef(var_decl.name), var_type);
 }

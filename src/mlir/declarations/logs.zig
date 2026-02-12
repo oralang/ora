@@ -140,13 +140,12 @@ pub fn lowerErrorDecl(self: *const DeclarationLowerer, error_decl: *const lib.as
         attributes.append(std.heap.page_allocator, c.oraNamedAttributeGet(id_name, id_attr)) catch {};
     }
 
-    // create the error type and add it as a result
-    const error_type = self.createErrorType(error_decl);
+    // Error declarations are symbol ops with attributes only (no SSA results).
     return c.oraErrorDeclOpCreate(
         self.ctx,
         loc,
-        &[_]c.MlirType{error_type},
-        1,
+        null,
+        0,
         if (attributes.items.len == 0) null else attributes.items.ptr,
         attributes.items.len,
     );

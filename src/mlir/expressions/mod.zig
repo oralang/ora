@@ -180,8 +180,8 @@ pub const ExpressionLowerer = struct {
     }
 
     /// Create direct function call
-    pub fn createDirectFunctionCall(self: *const ExpressionLowerer, function_name: []const u8, args: []c.MlirValue, span: lib.ast.SourceSpan) c.MlirValue {
-        return expr_calls.createDirectFunctionCall(self, function_name, args, span);
+    pub fn createDirectFunctionCall(self: *const ExpressionLowerer, function_name: []const u8, args: []c.MlirValue, span: lib.ast.SourceSpan, call_type_info: ?lib.ast.Types.TypeInfo) c.MlirValue {
+        return expr_calls.createDirectFunctionCall(self, function_name, args, span, call_type_info);
     }
 
     /// Create method call
