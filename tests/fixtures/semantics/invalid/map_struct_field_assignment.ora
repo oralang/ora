@@ -4,7 +4,7 @@ contract Test {
         right: u256;
     }
 
-    storage var pairs: map[address, Pair];
+    storage var pairs: map<address, Pair>;
 
     fn setLeft(addr: address, value: u256) {
         let frozen: u256 = value;

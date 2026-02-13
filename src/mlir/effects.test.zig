@@ -249,7 +249,7 @@ test "mlir rethreads nested map assignment to outer map" {
     const allocator = testing.allocator;
     const source =
         \\contract Test {
-        \\    storage var allowances: map[address, map[address, u256]];
+        \\    storage var allowances: map<address, map<address, u256>>;
         \\
         \\    pub fn setAllowance(owner: address, spender: address, amount: u256) {
         \\        allowances[owner][spender] = amount;
