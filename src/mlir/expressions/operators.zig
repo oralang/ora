@@ -536,6 +536,7 @@ fn insertMulOverflowCheck(
     if (!is_signed) {
         // Unsigned: overflow iff b != 0 && result / b != a
         const quot_op = c.oraArithDivUIOpCreate(self.ctx, loc, result_uw, rhs_uw);
+        c.oraOperationSetAttributeByName(quot_op, h.strRef("ora.guard_internal"), h.stringAttr(self.ctx, "true"));
         h.appendOp(self.block, quot_op);
         const mismatch_cmp = c.oraArithCmpIOpCreate(self.ctx, loc, pred_ne, h.getResult(quot_op, 0), lhs_uw);
         h.appendOp(self.block, mismatch_cmp);
@@ -567,6 +568,7 @@ fn insertMulOverflowCheck(
 
         // general = b != 0 && sdiv(result, b) != a
         const quot_op = c.oraArithDivSIOpCreate(self.ctx, loc, result_uw, rhs_uw);
+        c.oraOperationSetAttributeByName(quot_op, h.strRef("ora.guard_internal"), h.stringAttr(self.ctx, "true"));
         h.appendOp(self.block, quot_op);
         const mismatch_cmp = c.oraArithCmpIOpCreate(self.ctx, loc, pred_ne, h.getResult(quot_op, 0), lhs_uw);
         h.appendOp(self.block, mismatch_cmp);

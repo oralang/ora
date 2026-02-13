@@ -497,6 +497,7 @@ pub fn createStructFieldExtract(
     var result_ty = c.oraIntegerTypeCreate(self.ctx, constants.DEFAULT_INTEGER_BITS);
 
     if (self.symbol_table) |st| {
+        // Check named struct types
         var type_iter = st.types.iterator();
         while (type_iter.next()) |entry| {
             const type_symbols = entry.value_ptr.*;
@@ -511,6 +512,30 @@ pub fn createStructFieldExtract(
                         }
                     }
                 }
+            }
+        }
+        // Check anonymous structs from type mapper (e.g. overflow builtins, tuples)
+        // Match by struct type to avoid ambiguity when multiple anon structs share field names.
+        const default_ty = c.oraIntegerTypeCreate(self.ctx, constants.DEFAULT_INTEGER_BITS);
+        if (c.oraTypeEqual(result_ty, default_ty)) {
+            const struct_val_type = c.oraValueGetType(struct_val);
+            var anon_iter = self.type_mapper.iterAnonymousStructs();
+            while (anon_iter.next()) |anon_entry| {
+                const anon_ty = c.oraStructTypeGet(self.ctx, h.strRef(anon_entry.key_ptr.*));
+                if (!c.oraTypeEqual(struct_val_type, anon_ty)) continue;
+                for (anon_entry.value_ptr.*) |field| {
+                    if (std.mem.eql(u8, field.name, field_name)) {
+                        const field_type_info = lib.ast.Types.TypeInfo{
+                            .category = field.typ.*.getCategory(),
+                            .ora_type = field.typ.*,
+                            .source = .inferred,
+                            .span = null,
+                        };
+                        result_ty = self.type_mapper.toMlirType(field_type_info);
+                        break;
+                    }
+                }
+                break; // found matching struct, stop
             }
         }
     }

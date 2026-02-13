@@ -39,6 +39,7 @@ pub const Encoder = encoder.Encoder;
 pub const VerificationPass = verification.VerificationPass;
 pub const VerificationResult = errors.VerificationResult;
 pub const VerificationError = errors.VerificationError;
+pub const SmtReportArtifacts = verification.SmtReportArtifacts;
 
 //===----------------------------------------------------------------------===//
 // Version and Feature Detection

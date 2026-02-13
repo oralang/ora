@@ -1680,8 +1680,19 @@ pub const Encoder = struct {
                 // Build a struct-like value; bind each operand as a named field
                 // so ora.struct_field_extract can recover them.
                 const struct_val = try self.mkVariable("struct_init", result_sort);
+                // Use field names from attribute if available, otherwise fall back to field_N
+                const field_names_str = self.getStringAttr(mlir_op, "ora.field_names");
                 for (operands, 0..) |operand, i| {
-                    const field_attr_name = try std.fmt.allocPrint(self.allocator, "field_{d}", .{i});
+                    const field_attr_name = if (field_names_str) |names| blk: {
+                        // Parse comma-separated field names
+                        var it = std.mem.splitSequence(u8, names, ",");
+                        var idx: usize = 0;
+                        while (it.next()) |part| {
+                            if (idx == i) break :blk try self.allocator.dupe(u8, part);
+                            idx += 1;
+                        }
+                        break :blk try std.fmt.allocPrint(self.allocator, "field_{d}", .{i});
+                    } else try std.fmt.allocPrint(self.allocator, "field_{d}", .{i});
                     defer self.allocator.free(field_attr_name);
                     const field_sort = z3.Z3_get_sort(self.context.ctx, operand);
                     const accessor = try self.applyFieldFunction(field_attr_name, result_sort, field_sort, struct_val);

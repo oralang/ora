@@ -1,0 +1,30 @@
+// ==========================================
+// SIGNED TOKEN BALANCE (REALISTIC)
+// ==========================================
+// A lending pool that tracks signed PnL per user.
+contract SignedTokenBalance {
+    storage var total_pnl: i256 = 0;
+
+    // Deposit adds positive value — checked overflow protects invariant
+    pub fn record_profit(delta: i256) {
+        total_pnl = total_pnl + delta;
+    }
+
+    // Loss subtracts — checked overflow prevents underflow
+    pub fn record_loss(delta: i256) {
+        total_pnl = total_pnl - delta;
+    }
+
+    // Wrapping add for gas-efficient accumulator (caller handles overflow)
+    pub fn accumulate_unchecked(delta: i256) {
+        total_pnl = total_pnl +% delta;
+    }
+
+    pub fn get_pnl() -> i256 {
+        return total_pnl;
+    }
+
+    pub fn is_profitable() -> bool {
+        return total_pnl > 0;
+    }
+}

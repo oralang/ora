@@ -74,6 +74,16 @@ pub const LoopInvariants = struct {
     }
 };
 
+pub const SmtReportArtifacts = struct {
+    markdown: []u8,
+    json: []u8,
+
+    pub fn deinit(self: *SmtReportArtifacts, allocator: std.mem.Allocator) void {
+        allocator.free(self.markdown);
+        allocator.free(self.json);
+    }
+};
+
 /// Verification pass for MLIR modules
 pub const VerificationPass = struct {
     pub const VerifyMode = enum {
@@ -1672,6 +1682,462 @@ pub const VerificationPass = struct {
         return combined;
     }
 
+    pub fn buildSmtReport(
+        self: *VerificationPass,
+        mlir_module: mlir.MlirModule,
+        source_file: []const u8,
+        verification_result: ?*const errors.VerificationResult,
+    ) !SmtReportArtifacts {
+        if (self.encoded_annotations.items.len == 0) {
+            try self.extractAnnotationsFromMLIR(mlir_module);
+        }
+
+        var queries = try self.buildPreparedQueries();
+        defer {
+            for (queries.items) |*query| {
+                query.deinit(self.allocator);
+            }
+            queries.deinit();
+        }
+
+        const report_runs = try self.allocator.alloc(ReportQueryRun, queries.items.len);
+        defer {
+            for (report_runs) |entry| {
+                if (entry.model) |model| {
+                    self.allocator.free(model);
+                }
+            }
+            self.allocator.free(report_runs);
+        }
+
+        for (queries.items, 0..) |query, idx| {
+            self.solver.reset();
+            self.solver.loadFromSmtlib(query.smtlib_z);
+
+            var timer = try std.time.Timer.start();
+            const status = self.solver.check();
+            const elapsed_ms = timer.read() / std.time.ns_per_ms;
+
+            var model_copy: ?[]u8 = null;
+            if (status == z3.Z3_L_TRUE and (query.kind == .Obligation or
+                query.kind == .LoopInvariantStep or
+                query.kind == .LoopInvariantPost or
+                query.kind == .GuardViolate))
+            {
+                if (self.solver.getModel()) |model| {
+                    const raw = z3.Z3_model_to_string(self.context.ctx, model);
+                    if (raw != null) {
+                        model_copy = try self.allocator.dupe(u8, std.mem.span(raw));
+                    }
+                }
+            }
+
+            report_runs[idx] = .{
+                .status = status,
+                .elapsed_ms = elapsed_ms,
+                .model = model_copy,
+            };
+        }
+
+        var summary = ReportSummary{
+            .total_queries = @intCast(queries.items.len),
+        };
+        var kind_counts = ReportKindCounts{};
+
+        var proven_guard_ids = std.StringHashMap(void).init(self.allocator);
+        defer {
+            var it = proven_guard_ids.iterator();
+            while (it.next()) |entry| {
+                self.allocator.free(entry.key_ptr.*);
+            }
+            proven_guard_ids.deinit();
+        }
+
+        var violatable_guard_ids = std.StringHashMap(void).init(self.allocator);
+        defer {
+            var it = violatable_guard_ids.iterator();
+            while (it.next()) |entry| {
+                self.allocator.free(entry.key_ptr.*);
+            }
+            violatable_guard_ids.deinit();
+        }
+
+        for (queries.items, report_runs) |query, run| {
+            switch (run.status) {
+                z3.Z3_L_TRUE => summary.sat += 1,
+                z3.Z3_L_FALSE => summary.unsat += 1,
+                else => summary.unknown += 1,
+            }
+
+            switch (query.kind) {
+                .Base => {
+                    kind_counts.base += 1;
+                    if (run.status == z3.Z3_L_FALSE) {
+                        summary.inconsistent_bases += 1;
+                    }
+                },
+                .Obligation => {
+                    kind_counts.obligation += 1;
+                    if (run.status == z3.Z3_L_TRUE) {
+                        summary.failed_obligations += 1;
+                    }
+                },
+                .LoopInvariantStep => {
+                    kind_counts.loop_invariant_step += 1;
+                    if (run.status == z3.Z3_L_TRUE) {
+                        summary.failed_obligations += 1;
+                    }
+                },
+                .LoopInvariantPost => {
+                    kind_counts.loop_invariant_post += 1;
+                    if (run.status == z3.Z3_L_TRUE) {
+                        summary.failed_obligations += 1;
+                    }
+                },
+                .GuardSatisfy => {
+                    kind_counts.guard_satisfy += 1;
+                },
+                .GuardViolate => {
+                    kind_counts.guard_violate += 1;
+                    if (query.guard_id) |guard_id| {
+                        if (run.status == z3.Z3_L_FALSE and !proven_guard_ids.contains(guard_id)) {
+                            try proven_guard_ids.put(try self.allocator.dupe(u8, guard_id), {});
+                        } else if (run.status == z3.Z3_L_TRUE and !violatable_guard_ids.contains(guard_id)) {
+                            try violatable_guard_ids.put(try self.allocator.dupe(u8, guard_id), {});
+                        }
+                    }
+                },
+            }
+        }
+
+        if (verification_result) |vr| {
+            summary.verification_success = vr.success;
+            summary.verification_errors = @intCast(vr.errors.items.len);
+            summary.verification_diagnostics = @intCast(vr.diagnostics.items.len);
+            summary.proven_guards = @intCast(vr.proven_guard_ids.count());
+
+            var uniq_diag_guards = std.StringHashMap(void).init(self.allocator);
+            defer {
+                var it = uniq_diag_guards.iterator();
+                while (it.next()) |entry| {
+                    self.allocator.free(entry.key_ptr.*);
+                }
+                uniq_diag_guards.deinit();
+            }
+            for (vr.diagnostics.items) |diag| {
+                if (!uniq_diag_guards.contains(diag.guard_id)) {
+                    try uniq_diag_guards.put(try self.allocator.dupe(u8, diag.guard_id), {});
+                }
+            }
+            summary.violatable_guards = @intCast(uniq_diag_guards.count());
+        } else {
+            summary.verification_success = summary.failed_obligations == 0 and summary.inconsistent_bases == 0;
+            summary.verification_errors = 0;
+            summary.verification_diagnostics = 0;
+            summary.proven_guards = @intCast(proven_guard_ids.count());
+            summary.violatable_guards = @intCast(violatable_guard_ids.count());
+        }
+
+        const generated_at_unix = std.time.timestamp();
+        const markdown = try self.renderSmtReportMarkdown(
+            source_file,
+            generated_at_unix,
+            queries.items,
+            report_runs,
+            summary,
+            kind_counts,
+            verification_result,
+        );
+        errdefer self.allocator.free(markdown);
+
+        const json = try self.renderSmtReportJson(
+            source_file,
+            generated_at_unix,
+            queries.items,
+            report_runs,
+            summary,
+            kind_counts,
+            verification_result,
+        );
+        return .{
+            .markdown = markdown,
+            .json = json,
+        };
+    }
+
+    fn renderSmtReportMarkdown(
+        self: *VerificationPass,
+        source_file: []const u8,
+        generated_at_unix: i64,
+        queries: []const PreparedQuery,
+        runs: []const ReportQueryRun,
+        summary: ReportSummary,
+        kind_counts: ReportKindCounts,
+        verification_result: ?*const errors.VerificationResult,
+    ) ![]u8 {
+        var buffer = std.ArrayList(u8){};
+        defer buffer.deinit(self.allocator);
+        const writer = buffer.writer(self.allocator);
+
+        try writer.writeAll("# SMT Encoding Report\n\n");
+
+        try writer.writeAll("## 1. Run Metadata\n");
+        try writer.print("- Source file: `{s}`\n", .{source_file});
+        try writer.print("- Generated at (unix): `{d}`\n", .{generated_at_unix});
+        try writer.print("- Verification mode: `{s}`\n", .{verifyModeLabel(self.verify_mode)});
+        try writer.print("- verify_calls: `{any}`\n", .{self.verify_calls});
+        try writer.print("- verify_state: `{any}`\n", .{self.verify_state});
+        try writer.print("- parallel: `{any}`\n", .{self.parallel});
+        if (self.timeout_ms) |timeout| {
+            try writer.print("- timeout_ms: `{d}`\n", .{timeout});
+        } else {
+            try writer.writeAll("- timeout_ms: `none`\n");
+        }
+        try writer.writeAll("\n");
+
+        try writer.writeAll("## 2. Summary\n");
+        try writer.print("- Total queries: `{d}`\n", .{summary.total_queries});
+        try writer.print("- SAT: `{d}`\n", .{summary.sat});
+        try writer.print("- UNSAT: `{d}`\n", .{summary.unsat});
+        try writer.print("- UNKNOWN: `{d}`\n", .{summary.unknown});
+        try writer.print("- Failed obligations: `{d}`\n", .{summary.failed_obligations});
+        try writer.print("- Inconsistent assumption bases: `{d}`\n", .{summary.inconsistent_bases});
+        try writer.print("- Proven guards: `{d}`\n", .{summary.proven_guards});
+        try writer.print("- Violatable guards: `{d}`\n", .{summary.violatable_guards});
+        try writer.print("- Verification success: `{any}`\n", .{summary.verification_success});
+        try writer.print("- Verification errors: `{d}`\n", .{summary.verification_errors});
+        try writer.print("- Verification diagnostics: `{d}`\n", .{summary.verification_diagnostics});
+        try writer.writeAll("\n");
+
+        try writer.writeAll("## 3. Query Kind Counts\n");
+        try writer.print("- base: `{d}`\n", .{kind_counts.base});
+        try writer.print("- obligation: `{d}`\n", .{kind_counts.obligation});
+        try writer.print("- loop_invariant_step: `{d}`\n", .{kind_counts.loop_invariant_step});
+        try writer.print("- loop_invariant_post: `{d}`\n", .{kind_counts.loop_invariant_post});
+        try writer.print("- guard_satisfy: `{d}`\n", .{kind_counts.guard_satisfy});
+        try writer.print("- guard_violate: `{d}`\n", .{kind_counts.guard_violate});
+        try writer.writeAll("\n");
+
+        try writer.writeAll("## 4. Findings\n");
+        if (verification_result) |vr| {
+            if (vr.errors.items.len == 0 and vr.diagnostics.items.len == 0) {
+                try writer.writeAll("- No verification findings.\n");
+            } else {
+                for (vr.errors.items, 0..) |err, idx| {
+                    try writer.print("### Error {d}\n", .{idx + 1});
+                    try writer.print("- Type: `{s}`\n", .{@tagName(err.error_type)});
+                    try writer.print("- Message: {s}\n", .{err.message});
+                    try writer.print("- Location: `{s}:{d}:{d}`\n", .{ err.file, err.line, err.column });
+                    if (err.counterexample) |ce| {
+                        try writer.writeAll("- Counterexample:\n");
+                        var it = ce.variables.iterator();
+                        while (it.next()) |entry| {
+                            try writer.print("  - `{s} = {s}`\n", .{ entry.key_ptr.*, entry.value_ptr.* });
+                        }
+                    }
+                    try writer.writeAll("\n");
+                }
+
+                for (vr.diagnostics.items, 0..) |diag, idx| {
+                    try writer.print("### Diagnostic {d}\n", .{idx + 1});
+                    try writer.print("- Guard ID: `{s}`\n", .{diag.guard_id});
+                    try writer.print("- Function: `{s}`\n", .{diag.function_name});
+                    var it = diag.counterexample.variables.iterator();
+                    if (diag.counterexample.variables.count() > 0) {
+                        try writer.writeAll("- Counterexample:\n");
+                    }
+                    while (it.next()) |entry| {
+                        try writer.print("  - `{s} = {s}`\n", .{ entry.key_ptr.*, entry.value_ptr.* });
+                    }
+                    try writer.writeAll("\n");
+                }
+            }
+        } else {
+            try writer.writeAll("- Verification findings unavailable (`--no-verify` was used).\n\n");
+        }
+
+        try writer.writeAll("## 5. Query Catalog\n");
+        for (queries, runs, 0..) |query, run, idx| {
+            try writer.print("### Q{d} - {s}\n", .{ idx + 1, queryKindLabel(query.kind) });
+            try writer.print("- Function: `{s}`\n", .{query.function_name});
+            try writer.print("- Location: `{s}:{d}:{d}`\n", .{ query.file, query.line, query.column });
+            try writer.print("- Status: `{s}`\n", .{queryStatusLabel(run.status)});
+            try writer.print("- Elapsed ms: `{d}`\n", .{run.elapsed_ms});
+            if (query.guard_id) |guard_id| {
+                try writer.print("- Guard ID: `{s}`\n", .{guard_id});
+            }
+            if (query.obligation_kind) |kind| {
+                try writer.print("- Obligation kind: `{s}`\n", .{obligationKindLabel(kind)});
+            }
+            if (run.model) |model| {
+                try writer.writeAll("- Model:\n```smt2\n");
+                try writer.writeAll(model);
+                try writer.writeAll("\n```\n");
+            }
+            try writer.writeAll("- SMT-LIB:\n```smt2\n");
+            try writer.writeAll(query.smtlib_z);
+            try writer.writeAll("\n```\n\n");
+        }
+
+        return buffer.toOwnedSlice(self.allocator);
+    }
+
+    fn renderSmtReportJson(
+        self: *VerificationPass,
+        source_file: []const u8,
+        generated_at_unix: i64,
+        queries: []const PreparedQuery,
+        runs: []const ReportQueryRun,
+        summary: ReportSummary,
+        kind_counts: ReportKindCounts,
+        verification_result: ?*const errors.VerificationResult,
+    ) ![]u8 {
+        var buffer = std.ArrayList(u8){};
+        defer buffer.deinit(self.allocator);
+        const writer = buffer.writer(self.allocator);
+
+        try writer.writeByte('{');
+        try writer.writeAll("\"schema\":\"ora.smt.report.v1\",");
+        try writer.writeAll("\"source_file\":");
+        try writeJsonStringEscaped(writer, source_file);
+        try writer.writeByte(',');
+        try writer.print("\"generated_at_unix\":{d},", .{generated_at_unix});
+
+        try writer.writeAll("\"settings\":{");
+        try writer.writeAll("\"verify_mode\":");
+        try writeJsonStringEscaped(writer, verifyModeLabel(self.verify_mode));
+        try writer.writeAll(if (self.verify_calls) ",\"verify_calls\":true" else ",\"verify_calls\":false");
+        try writer.writeAll(if (self.verify_state) ",\"verify_state\":true" else ",\"verify_state\":false");
+        try writer.writeAll(if (self.parallel) ",\"parallel\":true" else ",\"parallel\":false");
+        if (self.timeout_ms) |timeout| {
+            try writer.print(",\"timeout_ms\":{d}", .{timeout});
+        } else {
+            try writer.writeAll(",\"timeout_ms\":null");
+        }
+        try writer.writeByte('}');
+        try writer.writeByte(',');
+
+        try writer.writeAll("\"summary\":{");
+        try writer.print("\"total_queries\":{d}", .{summary.total_queries});
+        try writer.print(",\"sat\":{d}", .{summary.sat});
+        try writer.print(",\"unsat\":{d}", .{summary.unsat});
+        try writer.print(",\"unknown\":{d}", .{summary.unknown});
+        try writer.print(",\"failed_obligations\":{d}", .{summary.failed_obligations});
+        try writer.print(",\"inconsistent_bases\":{d}", .{summary.inconsistent_bases});
+        try writer.print(",\"proven_guards\":{d}", .{summary.proven_guards});
+        try writer.print(",\"violatable_guards\":{d}", .{summary.violatable_guards});
+        try writer.writeByte('}');
+        try writer.writeByte(',');
+
+        try writer.writeAll("\"query_kind_counts\":{");
+        try writer.print("\"base\":{d}", .{kind_counts.base});
+        try writer.print(",\"obligation\":{d}", .{kind_counts.obligation});
+        try writer.print(",\"loop_invariant_step\":{d}", .{kind_counts.loop_invariant_step});
+        try writer.print(",\"loop_invariant_post\":{d}", .{kind_counts.loop_invariant_post});
+        try writer.print(",\"guard_satisfy\":{d}", .{kind_counts.guard_satisfy});
+        try writer.print(",\"guard_violate\":{d}", .{kind_counts.guard_violate});
+        try writer.writeByte('}');
+        try writer.writeByte(',');
+
+        try writer.writeAll("\"verification\":{");
+        try writer.writeAll(if (summary.verification_success) "\"success\":true" else "\"success\":false");
+        try writer.print(",\"errors\":{d}", .{summary.verification_errors});
+        try writer.print(",\"diagnostics\":{d}", .{summary.verification_diagnostics});
+        try writer.writeByte('}');
+        try writer.writeByte(',');
+
+        try writer.writeAll("\"errors\":[");
+        if (verification_result) |vr| {
+            var first_error = true;
+            for (vr.errors.items) |err| {
+                if (!first_error) try writer.writeByte(',');
+                first_error = false;
+                try writer.writeByte('{');
+                try writer.writeAll("\"type\":");
+                try writeJsonStringEscaped(writer, @tagName(err.error_type));
+                try writer.writeAll(",\"message\":");
+                try writeJsonStringEscaped(writer, err.message);
+                try writer.writeAll(",\"file\":");
+                try writeJsonStringEscaped(writer, err.file);
+                try writer.print(",\"line\":{d}", .{err.line});
+                try writer.print(",\"column\":{d}", .{err.column});
+                try writer.writeAll(",\"counterexample\":");
+                if (err.counterexample) |ce| {
+                    try writeCounterexampleJson(writer, ce);
+                } else {
+                    try writer.writeAll("null");
+                }
+                try writer.writeByte('}');
+            }
+        }
+        try writer.writeByte(']');
+        try writer.writeByte(',');
+
+        try writer.writeAll("\"diagnostics\":[");
+        if (verification_result) |vr| {
+            var first_diag = true;
+            for (vr.diagnostics.items) |diag| {
+                if (!first_diag) try writer.writeByte(',');
+                first_diag = false;
+                try writer.writeByte('{');
+                try writer.writeAll("\"guard_id\":");
+                try writeJsonStringEscaped(writer, diag.guard_id);
+                try writer.writeAll(",\"function_name\":");
+                try writeJsonStringEscaped(writer, diag.function_name);
+                try writer.writeAll(",\"counterexample\":");
+                try writeCounterexampleJson(writer, diag.counterexample);
+                try writer.writeByte('}');
+            }
+        }
+        try writer.writeByte(']');
+        try writer.writeByte(',');
+
+        try writer.writeAll("\"queries\":[");
+        var first_query = true;
+        for (queries, runs, 0..) |query, run, idx| {
+            if (!first_query) try writer.writeByte(',');
+            first_query = false;
+            try writer.writeByte('{');
+            try writer.print("\"id\":{d}", .{idx + 1});
+            try writer.writeAll(",\"kind\":");
+            try writeJsonStringEscaped(writer, queryKindLabel(query.kind));
+            try writer.writeAll(",\"function_name\":");
+            try writeJsonStringEscaped(writer, query.function_name);
+            try writer.writeAll(",\"file\":");
+            try writeJsonStringEscaped(writer, query.file);
+            try writer.print(",\"line\":{d}", .{query.line});
+            try writer.print(",\"column\":{d}", .{query.column});
+            try writer.writeAll(",\"status\":");
+            try writeJsonStringEscaped(writer, queryStatusLabel(run.status));
+            try writer.print(",\"elapsed_ms\":{d}", .{run.elapsed_ms});
+            try writer.writeAll(",\"guard_id\":");
+            if (query.guard_id) |guard_id| {
+                try writeJsonStringEscaped(writer, guard_id);
+            } else {
+                try writer.writeAll("null");
+            }
+            try writer.writeAll(",\"obligation_kind\":");
+            if (query.obligation_kind) |kind| {
+                try writeJsonStringEscaped(writer, obligationKindLabel(kind));
+            } else {
+                try writer.writeAll("null");
+            }
+            try writer.writeAll(",\"model\":");
+            if (run.model) |model| {
+                try writeJsonStringEscaped(writer, model);
+            } else {
+                try writer.writeAll("null");
+            }
+            try writer.writeAll(",\"smtlib\":");
+            try writeJsonStringEscaped(writer, query.smtlib_z);
+            try writer.writeByte('}');
+        }
+        try writer.writeByte(']');
+
+        try writer.writeByte('}');
+        return buffer.toOwnedSlice(self.allocator);
+    }
+
     fn buildPreparedQueries(self: *VerificationPass) !ManagedArrayList(PreparedQuery) {
         var queries = ManagedArrayList(PreparedQuery).init(self.allocator);
 
@@ -2130,6 +2596,97 @@ const QueryKind = enum {
     GuardSatisfy,
     GuardViolate,
 };
+
+const ReportQueryRun = struct {
+    status: z3.Z3_lbool = z3.Z3_L_UNDEF,
+    elapsed_ms: u64 = 0,
+    model: ?[]u8 = null,
+};
+
+const ReportSummary = struct {
+    total_queries: u64 = 0,
+    sat: u64 = 0,
+    unsat: u64 = 0,
+    unknown: u64 = 0,
+    failed_obligations: u64 = 0,
+    inconsistent_bases: u64 = 0,
+    proven_guards: u64 = 0,
+    violatable_guards: u64 = 0,
+    verification_success: bool = true,
+    verification_errors: u64 = 0,
+    verification_diagnostics: u64 = 0,
+};
+
+const ReportKindCounts = struct {
+    base: u64 = 0,
+    obligation: u64 = 0,
+    loop_invariant_step: u64 = 0,
+    loop_invariant_post: u64 = 0,
+    guard_satisfy: u64 = 0,
+    guard_violate: u64 = 0,
+};
+
+fn verifyModeLabel(mode: VerificationPass.VerifyMode) []const u8 {
+    return switch (mode) {
+        .Basic => "basic",
+        .Full => "full",
+    };
+}
+
+fn queryKindLabel(kind: QueryKind) []const u8 {
+    return switch (kind) {
+        .Base => "base",
+        .Obligation => "obligation",
+        .LoopInvariantStep => "loop_invariant_step",
+        .LoopInvariantPost => "loop_invariant_post",
+        .GuardSatisfy => "guard_satisfy",
+        .GuardViolate => "guard_violate",
+    };
+}
+
+fn queryStatusLabel(status: z3.Z3_lbool) []const u8 {
+    return switch (status) {
+        z3.Z3_L_TRUE => "SAT",
+        z3.Z3_L_FALSE => "UNSAT",
+        else => "UNKNOWN",
+    };
+}
+
+fn writeJsonStringEscaped(writer: anytype, value: []const u8) !void {
+    try writer.writeByte('"');
+    for (value) |ch| {
+        switch (ch) {
+            '"' => try writer.writeAll("\\\""),
+            '\\' => try writer.writeAll("\\\\"),
+            '\n' => try writer.writeAll("\\n"),
+            '\r' => try writer.writeAll("\\r"),
+            '\t' => try writer.writeAll("\\t"),
+            else => {
+                if (ch < 0x20) {
+                    try writer.print("\\u{X:0>4}", .{@as(u32, ch)});
+                } else {
+                    try writer.writeByte(ch);
+                }
+            },
+        }
+    }
+    try writer.writeByte('"');
+}
+
+fn writeCounterexampleJson(writer: anytype, ce: errors.Counterexample) !void {
+    var ce_copy = ce;
+    try writer.writeByte('{');
+    var first = true;
+    var it = ce_copy.variables.iterator();
+    while (it.next()) |entry| {
+        if (!first) try writer.writeByte(',');
+        first = false;
+        try writeJsonStringEscaped(writer, entry.key_ptr.*);
+        try writer.writeByte(':');
+        try writeJsonStringEscaped(writer, entry.value_ptr.*);
+    }
+    try writer.writeByte('}');
+}
 
 const PreparedQuery = struct {
     kind: QueryKind,

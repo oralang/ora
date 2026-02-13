@@ -28,6 +28,7 @@ pub const CliOptions = struct {
     verify_calls: ?bool = null,
     verify_state: ?bool = null,
     verify_stats: bool = false,
+    emit_smt_report: bool = false,
     debug: bool = false,
     mlir_opt_level: ?[]const u8 = null,
     // fmt options
@@ -127,6 +128,9 @@ pub fn parseArgs(args: []const []const u8) ParseError!CliOptions {
             i += 1;
         } else if (std.mem.eql(u8, arg, "--verify-stats")) {
             opts.verify_stats = true;
+            i += 1;
+        } else if (std.mem.eql(u8, arg, "--emit-smt-report")) {
+            opts.emit_smt_report = true;
             i += 1;
         } else if (std.mem.eql(u8, arg, "--debug")) {
             opts.debug = true;

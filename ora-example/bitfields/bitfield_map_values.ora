@@ -13,12 +13,13 @@ bitfield AccountFlags : u256 {
 contract BitfieldMapValues {
     storage var user_flags: map<address, AccountFlags>;
 
-    fn set_user_flags(user: address, next: AccountFlags) {
+    pub fn set_user_flags(user: address, next: AccountFlags) {
         user_flags[user] = next;
     }
 
-    fn copy_user_flags(from: address, to: address) {
+    pub fn copy_user_flags(from: address, to: address) -> AccountFlags {
         let current: AccountFlags = user_flags[from];
         user_flags[to] = current;
+        return current;
     }
 }

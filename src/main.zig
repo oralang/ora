@@ -34,6 +34,7 @@ const MlirOptions = struct {
     verify_calls: ?bool = null,
     verify_state: ?bool = null,
     verify_stats: bool = false,
+    emit_smt_report: bool = false,
     cpp_lowering_stub: bool = false,
     metrics: *Metrics = undefined,
 
@@ -121,6 +122,7 @@ pub fn main() !void {
     const verify_calls: ?bool = parsed.verify_calls;
     const verify_state: ?bool = parsed.verify_state;
     const verify_stats: bool = parsed.verify_stats;
+    const emit_smt_report: bool = parsed.emit_smt_report;
     const cpp_lowering_stub: bool = parsed.cpp_lowering_stub;
     var debug_enabled: bool = parsed.debug;
     if (!debug_enabled) {
@@ -192,6 +194,7 @@ pub fn main() !void {
         .verify_calls = verify_calls,
         .verify_state = verify_state,
         .verify_stats = verify_stats,
+        .emit_smt_report = emit_smt_report,
         .cpp_lowering_stub = cpp_lowering_stub,
         .metrics = &metrics,
     };
@@ -289,6 +292,7 @@ fn printUsage() !void {
     try stdout.print("  --verify-state         - Enable storage/map state threading (default)\n", .{});
     try stdout.print("  --no-verify-state      - Disable state threading (treat loads as unknown)\n", .{});
     try stdout.print("  --verify-stats         - Print Z3 query stats summary\n", .{});
+    try stdout.print("  --emit-smt-report      - Emit SMT encoding audit report (.md + .json)\n", .{});
     try stdout.print("  --debug                - Enable compiler debug output\n", .{});
     try stdout.print("  --metrics              - Print compilation phase timing report\n", .{});
     try stdout.flush();
@@ -940,6 +944,50 @@ fn runAbiEmit(
     }
 }
 
+fn writeSmtReportArtifacts(
+    allocator: std.mem.Allocator,
+    file_path: []const u8,
+    output_dir: ?[]const u8,
+    report: @import("z3/mod.zig").SmtReportArtifacts,
+    stdout: anytype,
+) !void {
+    const base_name = std.fs.path.stem(file_path);
+    const md_name = try std.fmt.allocPrint(allocator, "{s}.smt.report.md", .{base_name});
+    defer allocator.free(md_name);
+    const json_name = try std.fmt.allocPrint(allocator, "{s}.smt.report.json", .{base_name});
+    defer allocator.free(json_name);
+
+    var md_path_buf: ?[]u8 = null;
+    defer if (md_path_buf) |buf| allocator.free(buf);
+    var json_path_buf: ?[]u8 = null;
+    defer if (json_path_buf) |buf| allocator.free(buf);
+
+    const md_path = if (output_dir) |dir| blk: {
+        std.fs.cwd().makeDir(dir) catch |err| switch (err) {
+            error.PathAlreadyExists => {},
+            else => return err,
+        };
+        md_path_buf = try std.fs.path.join(allocator, &[_][]const u8{ dir, md_name });
+        break :blk md_path_buf.?;
+    } else md_name;
+
+    const json_path = if (output_dir) |dir| blk: {
+        json_path_buf = try std.fs.path.join(allocator, &[_][]const u8{ dir, json_name });
+        break :blk json_path_buf.?;
+    } else json_name;
+
+    var md_file = try std.fs.cwd().createFile(md_path, .{});
+    defer md_file.close();
+    try md_file.writeAll(report.markdown);
+
+    var json_file = try std.fs.cwd().createFile(json_path, .{});
+    defer json_file.close();
+    try json_file.writeAll(report.json);
+
+    try stdout.print("SMT report saved to {s}\n", .{md_path});
+    try stdout.print("SMT report JSON saved to {s}\n", .{json_path});
+}
+
 // ============================================================================
 // SECTION 6: MLIR Integration & Code Generation
 // ============================================================================
@@ -1391,6 +1439,12 @@ fn generateMlirOutput(allocator: std.mem.Allocator, ast_nodes: []lib.AstNode, fi
             }
         }
 
+        if (mlir_options.emit_smt_report) {
+            var smt_report = try verifier.buildSmtReport(final_module, file_path, &verification_result);
+            defer smt_report.deinit(mlir_allocator);
+            try writeSmtReportArtifacts(allocator, file_path, mlir_options.output_dir, smt_report, stdout);
+        }
+
         if (!verification_result.success) {
             try stdout.print("❌ Z3 verification failed with {d} error(s):\n", .{verification_result.errors.items.len});
             for (verification_result.errors.items) |err| {
@@ -1407,6 +1461,32 @@ fn generateMlirOutput(allocator: std.mem.Allocator, ast_nodes: []lib.AstNode, fi
         }
 
         verification_result_opt = verification_result;
+        m.end();
+    }
+
+    if (mlir_options.emit_smt_report and !mlir_options.verify_z3) {
+        m.begin("smt report");
+        const z3_verification = @import("z3/verification.zig");
+        var verifier = try z3_verification.VerificationPass.init(mlir_allocator);
+        defer verifier.deinit();
+
+        if (mlir_options.verify_mode) |mode| {
+            if (std.ascii.eqlIgnoreCase(mode, "full")) {
+                verifier.setVerifyMode(.Full);
+            } else {
+                verifier.setVerifyMode(.Basic);
+            }
+        }
+        if (mlir_options.verify_calls) |enabled| {
+            verifier.setVerifyCalls(enabled);
+        }
+        if (mlir_options.verify_state) |enabled| {
+            verifier.setVerifyState(enabled);
+        }
+
+        var smt_report = try verifier.buildSmtReport(final_module, file_path, null);
+        defer smt_report.deinit(mlir_allocator);
+        try writeSmtReportArtifacts(allocator, file_path, mlir_options.output_dir, smt_report, stdout);
         m.end();
     }
 

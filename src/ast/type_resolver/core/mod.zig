@@ -422,6 +422,23 @@ pub const CoreResolver = struct {
         }
     }
 
+    /// Fix a struct_type OraType that is actually an enum or bitfield.
+    /// The parser initially assumes all named types are struct_type;
+    /// this corrects based on the symbol table.
+    pub fn resolveNamedOraType(self: *CoreResolver, ot: *OraType) void {
+        if (ot.* == .struct_type) {
+            const name = ot.struct_type;
+            const root_scope: ?*const Scope = @as(?*const Scope, @ptrCast(self.symbol_table.root));
+            if (SymbolTable.findUp(root_scope, name)) |sym| {
+                if (sym.kind == .Enum) {
+                    ot.* = OraType{ .enum_type = name };
+                } else if (sym.kind == .Bitfield) {
+                    ot.* = OraType{ .bitfield_type = name };
+                }
+            }
+        }
+    }
+
     /// Resolve types for a statement
     pub fn resolveStatement(self: *CoreResolver, stmt: *ast.Statements.StmtNode, context: TypeContext) !Typed {
         return @import("statement.zig").resolveStatement(self, stmt, context);

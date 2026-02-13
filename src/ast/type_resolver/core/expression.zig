@@ -806,6 +806,11 @@ fn synthIdentifier(
     self: *CoreResolver,
     id: *ast.Expressions.IdentifierExpr,
 ) TypeResolutionError!Typed {
+    // @-prefixed builtins are resolved in synthCall, not here
+    if (id.name.len > 1 and id.name[0] == '@') {
+        id.type_info = TypeInfo.unknown();
+        return Typed.init(TypeInfo.unknown(), Effect.pure(), self.allocator);
+    }
     // use identifier resolution module
     try @import("identifier.zig").resolveIdentifierType(self, id);
     var eff = Effect.pure();
@@ -1007,7 +1012,7 @@ fn synthCall(
             // handle @-prefixed builtins (overflow reporters, divTrunc, etc.)
             if (func_name.len > 1 and func_name[0] == '@') {
                 const builtin_suffix = func_name[1..];
-                if (resolveOverflowBuiltinType(builtin_suffix, call, self.allocator)) |ret_info| {
+                if (resolveOverflowBuiltinType(builtin_suffix, call, self.type_storage_allocator)) |ret_info| {
                     call.type_info = ret_info;
                     return Typed.init(ret_info, combined_eff, self.allocator);
                 }
@@ -1242,6 +1247,22 @@ fn synthFieldAccess(
         }
     }
 
+    // handle anonymous struct type field access (e.g., res.value, res.overflow)
+    if (target_type.ora_type) |ora_ty| {
+        if (ora_ty == .anonymous_struct) {
+            for (ora_ty.anonymous_struct) |field| {
+                if (std.mem.eql(u8, field.name, fa.field)) {
+                    const field_type = TypeInfo.fromOraType(field.typ.*);
+                    fa.type_info = field_type;
+                    fa.type_info.region = base_typed.ty.region;
+                    const eff = takeEffect(&base_typed);
+                    return Typed.init(field_type, eff, self.allocator);
+                }
+            }
+            return TypeResolutionError.TypeMismatch;
+        }
+    }
+
     // check if the type is a struct
     if (target_type.category == .Struct) {
         if (target_type.ora_type) |ora_ty| {
@@ -1326,6 +1347,8 @@ fn synthIndex(
         // extract value type from ora_type
         if (target_type.ora_type) |ora_ty| {
             if (ora_ty == .map) {
+                // resolve struct_type -> bitfield_type/enum_type if needed
+                self.resolveNamedOraType(@constCast(ora_ty.map.value));
                 const value_ora_type = ora_ty.map.value.*;
                 const value_type_info = TypeInfo.inferred(value_ora_type.getCategory(), value_ora_type, null);
                 var updated = value_type_info;
@@ -1635,8 +1658,8 @@ fn resolveOverflowBuiltinType(
     const bool_type_ptr = allocator.create(OraType) catch return null;
     bool_type_ptr.* = .bool;
     const fields = allocator.alloc(ast.type_info.AnonymousStructFieldType, 2) catch return null;
-    fields[0] = .{ .name = "0", .typ = value_type_ptr };
-    fields[1] = .{ .name = "1", .typ = bool_type_ptr };
+    fields[0] = .{ .name = "value", .typ = value_type_ptr };
+    fields[1] = .{ .name = "overflow", .typ = bool_type_ptr };
     return TypeInfo{
         .category = .Tuple,
         .ora_type = .{ .anonymous_struct = fields },
