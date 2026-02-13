@@ -23,7 +23,7 @@ contract Payments {
     error InvalidAmount;
     error InsufficientBalance(required: u256, available: u256);
 
-    storage var balances: map[NonZeroAddress, u256];
+    storage var balances: map<NonZeroAddress, u256>;
 
     fn withdraw(to: NonZeroAddress, amount: u256) -> !u256 | InvalidAmount | InsufficientBalance {
         if (amount == 0) return error.InvalidAmount;

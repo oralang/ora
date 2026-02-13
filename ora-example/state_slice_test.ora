@@ -6,7 +6,7 @@
 
 contract StateSliceTest {
     // Storage map from address to balance
-    storage balances: map[address, u256];
+    storage balances: map<address, u256>;
 
     pub fn sumBalances(accounts: slice[address]) -> u256 {
         var total: u256 = 0;

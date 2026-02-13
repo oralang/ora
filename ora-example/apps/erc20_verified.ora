@@ -4,8 +4,8 @@
 contract VerifiedToken {
     // Storage
     storage totalSupply: u256;
-    storage balances: map[address, u256];
-    storage allowances: map[address, map[address, u256]];
+    storage balances: map<address, u256>;
+    storage allowances: map<address, map<address, u256>>;
     
     // Contract invariants (specification-only)
     invariant totalSupplyPositive(totalSupply >= 0);

@@ -6,7 +6,7 @@
 
 contract FunctionEffectSummary {
     storage var counter: u256;
-    storage balances: map[address, u256];
+    storage balances: map<address, u256>;
     tstore var temp_flag: bool;
 
     // Function with only storage reads

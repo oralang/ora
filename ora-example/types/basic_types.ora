@@ -28,8 +28,8 @@ contract TypesTest {
     storage var bytes_value: bytes;
     
     // Testing complex types
-    storage var map_value: map[address, u256];
-    storage var doublemap_value: map[address, map[u8, u256]];
+    storage var map_value: map<address, u256>;
+    storage var doublemap_value: map<address, map<u8, u256>>;
     storage var struct_value: CustomType;
     storage var enum_value: StatusType;
     

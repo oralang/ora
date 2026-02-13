@@ -43,14 +43,14 @@ contract LendingPool {
     storage var owner: address;
     
     // User data
-    storage var deposits: map[address, u256];
-    storage var borrows: map[address, u256];
-    storage var collateral: map[address, u256];
-    storage var last_update: map[address, u256];
-    storage var health_factors: map[address, u256];
-    // Note: Using u8 for enum storage due to compiler limitation with map[address, EnumType]
-    storage var user_tiers: map[address, u8];
-    storage var loan_status: map[address, u8];
+    storage var deposits: map<address, u256>;
+    storage var borrows: map<address, u256>;
+    storage var collateral: map<address, u256>;
+    storage var last_update: map<address, u256>;
+    storage var health_factors: map<address, u256>;
+    // Note: Using u8 for enum storage due to compiler limitation with map<address, EnumType>
+    storage var user_tiers: map<address, u8>;
+    storage var loan_status: map<address, u8>;
     
     // Interest rate model
     storage var base_rate: u256 = 100;

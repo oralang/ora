@@ -11,8 +11,8 @@ error TransferToZeroAddress;
 contract ERC20Token {
     // Storage variables (explicit @storage region)
     storage var totalSupply: u256;  // @storage: persistent contract storage
-    storage balances: map[address, u256];  // @storage: persistent storage map
-    storage allowances: map[address, map[address, u256]];  // @storage: nested storage map
+    storage balances: map<address, u256>;  // @storage: persistent storage map
+    storage allowances: map<address, map<address, u256>>;  // @storage: nested storage map
     
     // Events (logs)
     log Transfer(from: address, to: address, amount: u256);

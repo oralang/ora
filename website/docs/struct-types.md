@@ -116,7 +116,7 @@ struct Employee {
 }
 
 contract Company {
-    storage employees: map[u256, Employee];
+    storage employees: map<u256, Employee>;
     
     pub fn add_employee(id: u256, name: string) {
         employees[id] = Employee {

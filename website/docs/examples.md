@@ -79,7 +79,7 @@ struct User {
     active: bool;
 }
 
-storage var users: map[address, User];
+storage var users: map<address, User>;
 
 fn credit(who: address, amount: u256) {
     var user: User = users[who];

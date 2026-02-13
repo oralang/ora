@@ -4,7 +4,7 @@
 contract StateTest {
     // Storage variables
     storage counter: u256;
-    storage balances: map[address, u256];
+    storage balances: map<address, u256>;
     storage owner: address;
     storage config: u256;
     storage unusedData: u256;

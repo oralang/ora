@@ -7,7 +7,7 @@
 contract RefinementDispatcherE2E {
     storage owner: NonZeroAddress;
     storage limit: MaxValue<u256, 1_000_000>;
-    storage balances: map[address, u256];
+    storage balances: map<address, u256>;
     storage fee_bps: BasisPoints<u256>;
 
     // constructor-like initializer (pub to test dispatcher)

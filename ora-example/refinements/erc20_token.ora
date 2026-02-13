@@ -279,7 +279,7 @@ contract ERC20Token {
     // Storage Mappings
     // ============================================================================
     
-    storage balances: map[address, u256];
+    storage balances: map<address, u256>;
     
     // ============================================================================
     // Helper Functions

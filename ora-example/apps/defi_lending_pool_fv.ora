@@ -78,13 +78,13 @@ contract LendingPoolFV {
     storage var owner: NonZeroAddress;
     
     // User data maps
-    storage var deposits: map[address, u256];
-    storage var borrows: map[address, u256];
-    storage var collateral: map[address, u256];
-    storage var last_update: map[address, u256];
-    storage var health_factors: map[address, u256];
-    storage var user_tiers: map[address, u8];
-    storage var loan_status: map[address, u8];
+    storage var deposits: map<address, u256>;
+    storage var borrows: map<address, u256>;
+    storage var collateral: map<address, u256>;
+    storage var last_update: map<address, u256>;
+    storage var health_factors: map<address, u256>;
+    storage var user_tiers: map<address, u8>;
+    storage var loan_status: map<address, u8>;
     
     // Interest rate model - rates in basis points (0-10000)
     storage var base_rate: InRange<u256, 0, 10000> = 100;  // 1% base rate

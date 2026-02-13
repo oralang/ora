@@ -41,11 +41,29 @@ pub const TypeParseContext = enum {
 /// Specialized parser for type expressions
 pub const TypeParser = struct {
     base: BaseParser,
+    /// Tracks pending '>' from a '>>' token split (for nested map<K, map<K, V>>).
+    split_right_angle: u32 = 0,
 
     pub fn init(tokens: []const Token, arena: *@import("../ast/ast_arena.zig").AstArena) TypeParser {
         return TypeParser{
             .base = BaseParser.init(tokens, arena),
         };
+    }
+
+    /// Consume a closing '>' for angle-bracket types, handling '>>' token splitting.
+    fn consumeRightAngle(self: *TypeParser) !Token {
+        if (self.split_right_angle > 0) {
+            self.split_right_angle -= 1;
+            return self.base.previous(); // synthetic — position unchanged
+        }
+        if (self.base.check(.Greater)) {
+            return self.base.advance();
+        }
+        if (self.base.check(.GreaterGreater)) {
+            self.split_right_angle += 1;
+            return self.base.advance();
+        }
+        return self.base.consume(.Greater, "Expected '>' after map value type");
     }
 
     /// Parse type information with default context
@@ -228,15 +246,15 @@ pub const TypeParser = struct {
         };
     }
 
-    /// Parse map type: map[K, V]
+    /// Parse map type: map<K, V>
     fn parseMapType(self: *TypeParser, context: TypeParseContext) ParserError!TypeInfo {
         const span = self.base.currentSpan();
-        _ = try self.base.consume(.LeftBracket, "Expected '[' after 'map'");
+        _ = try self.base.consume(.Less, "Expected '<' after 'map'");
 
         const key_type_info = try self.parseTypeWithContext(context);
         _ = try self.base.consume(.Comma, "Expected ',' after map key type");
         const value_type_info = try self.parseTypeWithContext(context);
-        _ = try self.base.consume(.RightBracket, "Expected ']' after map value type");
+        _ = try self.consumeRightAngle();
 
         // create OraType for mapping
         const key_ora_type = try self.base.arena.createNode(OraType);
@@ -427,7 +445,7 @@ pub const TypeParser = struct {
 
         // parse minimum value (compile-time constant)
         const min_value = try self.parseCompileTimeInt();
-        _ = try self.base.consume(.Greater, "Expected '>' after MinValue parameters");
+        _ = try self.consumeRightAngle();
 
         // create base type pointer
         const base_type_ptr = try self.base.arena.createNode(OraType);
@@ -453,7 +471,7 @@ pub const TypeParser = struct {
 
         // parse maximum value (compile-time constant)
         const max_value = try self.parseCompileTimeInt();
-        _ = try self.base.consume(.Greater, "Expected '>' after MaxValue parameters");
+        _ = try self.consumeRightAngle();
 
         // create base type pointer
         const base_type_ptr = try self.base.arena.createNode(OraType);
@@ -483,7 +501,7 @@ pub const TypeParser = struct {
 
         // parse maximum value
         const max_value = try self.parseCompileTimeInt();
-        _ = try self.base.consume(.Greater, "Expected '>' after InRange parameters");
+        _ = try self.consumeRightAngle();
 
         // validate: MIN <= MAX (will be checked in type resolution, but catch obvious errors here)
         if (min_value > max_value) {
@@ -519,7 +537,7 @@ pub const TypeParser = struct {
             try self.base.errorAtCurrent("Decimal places must be a valid u32");
             return error.UnexpectedToken;
         };
-        _ = try self.base.consume(.Greater, "Expected '>' after Scaled parameters");
+        _ = try self.consumeRightAngle();
 
         // create base type pointer
         const base_type_ptr = try self.base.arena.createNode(OraType);
@@ -541,7 +559,7 @@ pub const TypeParser = struct {
         // parse base type
         const base_type_info = try self.parseTypeWithContext(context);
         const base_ora_type = base_type_info.ora_type orelse return error.UnresolvedType;
-        _ = try self.base.consume(.Greater, "Expected '>' after Exact base type");
+        _ = try self.consumeRightAngle();
 
         // create base type pointer
         const base_type_ptr = try self.base.arena.createNode(OraType);
@@ -563,7 +581,7 @@ pub const TypeParser = struct {
         // parse base type
         const base_type_info = try self.parseTypeWithContext(context);
         const base_ora_type = base_type_info.ora_type orelse return error.UnresolvedType;
-        _ = try self.base.consume(.Greater, "Expected '>' after NonZero base type");
+        _ = try self.consumeRightAngle();
 
         // create base type pointer
         const base_type_ptr = try self.base.arena.createNode(OraType);
@@ -586,7 +604,7 @@ pub const TypeParser = struct {
         // parse base type
         const base_type_info = try self.parseTypeWithContext(context);
         const base_ora_type = base_type_info.ora_type orelse return error.UnresolvedType;
-        _ = try self.base.consume(.Greater, "Expected '>' after BasisPoints base type");
+        _ = try self.consumeRightAngle();
 
         // create base type pointer
         const base_type_ptr = try self.base.arena.createNode(OraType);

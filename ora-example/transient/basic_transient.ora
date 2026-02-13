@@ -11,5 +11,5 @@ contract TransientStorageTest {
     // Transient storage variables
     tstore var temp_counter: u256;
     tstore var operation_state: bool;
-    tstore var temp_map: map[address, u256];
+    tstore var temp_map: map<address, u256>;
 }

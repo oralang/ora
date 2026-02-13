@@ -67,7 +67,7 @@ struct User {
 
 enum Status : u8 { Pending, Active, Closed }
 
-var balances: map[address, u256];
+var balances: map<address, u256>;
 ```
 
 ## Functions

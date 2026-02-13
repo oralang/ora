@@ -134,17 +134,17 @@ test "types: slice with different element types" {
 // Map Type Tests
 // ============================================================================
 
-test "types: map type" {
+test "types: map type angle brackets" {
     const allocator = testing.allocator;
-    const type_info = try parseTypeFromSource(allocator, "map[address, u256]");
+    const type_info = try parseTypeFromSource(allocator, "map<address, u256>");
 
     try testing.expectEqual(TypeCategory.Map, type_info.category);
     try testing.expect(type_info.ora_type != null);
 }
 
-test "types: nested map type" {
+test "types: nested map type angle brackets" {
     const allocator = testing.allocator;
-    const type_info = try parseTypeFromSource(allocator, "map[address, map[address, u256]]");
+    const type_info = try parseTypeFromSource(allocator, "map<address, map<address, u256>>");
 
     try testing.expectEqual(TypeCategory.Map, type_info.category);
 }
