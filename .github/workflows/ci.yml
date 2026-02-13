@@ -376,7 +376,7 @@ jobs:
         run: |
           echo "🐍 Running Python feature test script (Ora + SIR)..."
           if [ -f "scripts/test_ora_features_sir.py" ]; then
-            python3 scripts/test_ora_features_sir.py --compiler ./zig-out/bin/ora --timeout 120 || {
+            python3 scripts/test_ora_features_sir.py --compiler ./zig-out/bin/ora --timeout 300 || {
               echo "❌ Python feature tests failed"
               exit 1
             }

@@ -156,7 +156,7 @@ pub fn getOrigin() -> address {
 **Example Use Case**:
 ```ora
 // Track which EOAs have interacted
-storage visitedAddresses: map[address, bool];
+storage visitedAddresses: map<address, bool>;
 
 pub fn recordVisit() {
     let origin = std.transaction.sender();
@@ -409,8 +409,8 @@ Here's a token contract using the standard library:
 ```ora
 contract SimpleToken {
     storage totalSupply: u256;
-    storage balances: map[address, u256];
-    storage allowances: doublemap[address, address, u256];
+    storage balances: map<address, u256>;
+    storage allowances: doublemap<address, address, u256>;
     
     pub fn initialize(initialSupply: u256) -> bool {
         let deployer = std.msg.sender();

@@ -149,7 +149,7 @@ function CodeExample() {
         <div className={styles.codeContainer}>
           <pre className={styles.codeBlock}>
             <code className="language-ora">{`contract Vault {
-    storage var balances: map[NonZeroAddress, u256];
+    storage var balances: map<NonZeroAddress, u256>;
 
     log Transfer(sender: address, recipient: address, amount: u256);
 

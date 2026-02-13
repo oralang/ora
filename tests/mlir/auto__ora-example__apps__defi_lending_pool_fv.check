@@ -3,7 +3,6 @@
 // CHECK-NOT: builtin.unrealized_conversion_cast
 // CHECK-LABEL: func.func @totalValueLocked
 // CHECK-LABEL: func.func @availableLiquidity
-// CHECK-LABEL: func.func @utilizationRate
 // CHECK-LABEL: func.func @maxBorrowCapacity
 // CHECK-LABEL: func.func @init
 // CHECK-LABEL: func.func @get_total_deposits

@@ -8,7 +8,7 @@ contract StorageTest3 {
     }
     
     // Storage variables using structs
-    storage var users: map[address, User];
+    storage var users: map<address, User>;
     storage var total_users: u256;
     storage var owner: address;
     

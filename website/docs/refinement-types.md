@@ -22,7 +22,7 @@ let scaled: Scaled<u256, 18> = 1_000_000_000_000_000_000;
 
 ```ora
 contract Vault {
-    storage var balances: map[NonZeroAddress, u256];
+    storage var balances: map<NonZeroAddress, u256>;
 
     pub fn deposit(from: NonZeroAddress, amount: MinValue<u256, 1>) {
         balances[from] = balances[from] + amount;

@@ -370,11 +370,11 @@ pub const Formatter = struct {
             .void => try self.writer.write("void"),
             .non_zero_address => try self.writer.write("NonZeroAddress"),
             .map => |map| {
-                try self.writer.write("map[");
+                try self.writer.write("map<");
                 try self.formatOraType(map.key.*);
                 try self.writer.write(", ");
                 try self.formatOraType(map.value.*);
-                try self.writer.write("]");
+                try self.writer.write(">");
             },
             .array => |arr| {
                 try self.writer.write("[");

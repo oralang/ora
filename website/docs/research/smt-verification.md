@@ -66,7 +66,7 @@ havoc balance;
 ### Quantifiers
 
 ```ora
-pub fn check_all(balances: map[address, u256]) -> bool
+pub fn check_all(balances: map<address, u256>) -> bool
     requires forall addr: address where addr != std.constants.ZERO_ADDRESS
         => balances[addr] >= 0
 {

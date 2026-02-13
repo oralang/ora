@@ -7,7 +7,7 @@
 contract FeeCalculation {
     storage var transfer_fee_rate: BasisPoints<u256>;
     storage var min_transfer: MinValue<u256, 1>;
-    storage var balances: map[address, u256];
+    storage var balances: map<address, u256>;
     
     error InsufficientBalance;
     

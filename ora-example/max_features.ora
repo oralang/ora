@@ -31,8 +31,8 @@ contract FeatureMaximizer {
     immutable OWNER: address = 0x0123456789abcdef0123456789abcdef01234567;
     // Contract storage variables (all regions/kinds)
     storage let total_supply: u256 = 0;
-    storage var balances: map[address, u256];
-    storage var approvals: map[address, map[address, u256]];
+    storage var balances: map<address, u256>;
+    storage var approvals: map<address, map<address, u256>>;
     memory var temp_points: [Point; 4];
     // TODO: we need to test slice
     tstore var scratch: [u256; 4];

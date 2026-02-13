@@ -618,11 +618,11 @@ pub const OraType = union(enum) {
                 try writer.writeByte(']');
             },
             .map => |m| {
-                try writer.writeAll("map[");
+                try writer.writeAll("map<");
                 try (@constCast(m.key).*).render(writer);
                 try writer.writeAll(", ");
                 try (@constCast(m.value).*).render(writer);
-                try writer.writeByte(']');
+                try writer.writeByte('>');
             },
             .tuple => |elems| {
                 try writer.writeByte('(');

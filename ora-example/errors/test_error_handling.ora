@@ -1,6 +1,6 @@
 // Minimal test contract to reproduce error handling issues
 contract ErrorHandlingTest {
-    storage balances: map[address, u256];
+    storage balances: map<address, u256>;
     
     error InsufficientBalance;
     error InvalidAddress;

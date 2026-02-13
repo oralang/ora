@@ -6,7 +6,7 @@
 
 contract SupplyCap {
     storage var total_supply: MaxValue<u256, 1_000_000_000>; // Max 1 billion
-    storage var balances: map[address, u256];
+    storage var balances: map<address, u256>;
     
     // ============================================================================
     // Minting with Supply Cap

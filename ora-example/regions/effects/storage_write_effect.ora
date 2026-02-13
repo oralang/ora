@@ -7,7 +7,7 @@
 contract StorageWriteEffect {
     storage var counter: u256;
     storage var balance: u256;
-    storage balances: map[address, u256];
+    storage balances: map<address, u256>;
 
     // Writing to storage variable records write effect
     pub fn testStorageWrite() {
@@ -49,7 +49,7 @@ contract StorageWriteEffect {
 
     // Storage write from nested map records write effect
     pub fn testNestedMapWrite(owner: address, spender: address, amount: u256) {
-        storage allowances: map[address, map[address, u256]];
+        storage allowances: map<address, map<address, u256>>;
         allowances[owner][spender] = amount; // Nested write effect
     }
 }

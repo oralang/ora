@@ -51,8 +51,8 @@ Ora primitive types are mapped to MLIR as follows:
 |----------|-----------|-------------|
 | `[T; N]` | `memref<NxT, space>` | Fixed-size arrays with memory space |
 | `slice[T]` | `!ora.slice<T>` | Dynamic slices |
-| `map[K, V]` | `!ora.map<K, V>` | Key-value mappings |
-| `doublemap[K1, K2, V]` | `!ora.doublemap<K1, K2, V>` | Nested mappings |
+| `map<K, V>` | `!ora.map<K, V>` | Key-value mappings |
+| `doublemap<K1, K2, V>` | `!ora.doublemap<K1, K2, V>` | Nested mappings |
 | `struct { ... }` | `!llvm.struct<...>` | Struct types |
 | `enum` | `!ora.enum<name, repr>` | Enumeration types |
 | `!T` | `!ora.error<T>` | Error types |
@@ -654,8 +654,8 @@ The MLIR lowering system targets:
 ```ora
 contract SimpleToken {
     storage totalSupply: u256;
-    storage balances: map[address, u256];
-    storage allowances: doublemap[address, address, u256];
+    storage balances: map<address, u256>;
+    storage allowances: doublemap<address, address, u256>;
     
     pub fn initialize(initialSupply: u256) -> bool {
         var deployer: address = std.msg.sender();

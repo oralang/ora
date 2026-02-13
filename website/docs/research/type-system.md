@@ -35,7 +35,7 @@ The implemented baseline is captured in `TYPE_SYSTEM_STATE.md` and includes:
 
 ```ora
 contract Vault {
-    storage var balances: map[NonZeroAddress, u256];
+    storage var balances: map<NonZeroAddress, u256>;
 
     pub fn credit(user: NonZeroAddress, amount: MinValue<u256, 1>) {
         balances[user] = balances[user] + amount;

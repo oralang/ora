@@ -7,7 +7,7 @@
 contract ImplicitStorageToStack {
     storage var counter: u256;
     storage var balance: u256;
-    storage balances: map[address, u256];
+    storage balances: map<address, u256>;
 
     // Implicit storage -> stack in assignment
     pub fn testImplicitStorageToStack() {

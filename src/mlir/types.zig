@@ -542,7 +542,7 @@ pub const TypeMapper = struct {
         return h.rankedTensorType(self.ctx, 1, &shape[0], elem_mlir_type, h.nullAttr());
     }
 
-    /// Convert mapping type `map[K, V]` to !ora.map<K, V>
+    /// Convert mapping type `map<K, V>` to !ora.map<K, V>
     /// Maps in Ora/EVM are storage-based and use keccak256 for key hashing
     /// The type represents a base storage slot; actual access is via ora.map_get/ora.map_set
     pub fn mapMapType(self: *const TypeMapper, mapping_info: lib.ast.type_info.MapType) c.MlirType {

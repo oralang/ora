@@ -452,7 +452,7 @@ From highest to lowest precedence:
 ```ora
 contract SimpleToken {
     storage var totalSupply: u256;
-    storage var balances: map[address, u256];
+    storage var balances: map<address, u256>;
     
     log Transfer(from: address, to: address, amount: u256);
     

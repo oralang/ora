@@ -105,7 +105,7 @@ Example:
 fn complex(
     a: u256,
     b: address,
-    c: map[address, u256],
+    c: map<address, u256>,
 ) -> bool {
 }
 ```
@@ -121,7 +121,7 @@ fn complex(
 ```ora
 contract Token{
 storage var totalSupply:u256;
-storage var balances:map[address,u256];
+storage var balances:map<address,u256>;
 pub fn init(initialSupply:u256){
 totalSupply=initialSupply;
 }
@@ -142,7 +142,7 @@ return true;
 ```ora
 contract Token {
     storage var totalSupply: u256;
-    storage var balances: map[address, u256];
+    storage var balances: map<address, u256>;
 
     pub fn init(initialSupply: u256) {
         totalSupply = initialSupply;
