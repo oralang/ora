@@ -180,6 +180,8 @@ pub const TypeResolver = struct {
                 var stmt_node = Statements.StmtNode{ .VariableDecl = var_decl.* };
                 var typed = try self.core_resolver.resolveStatement(&stmt_node, context);
                 defer typed.deinit(self.allocator);
+                // write back resolved type_info to the original AST node
+                var_decl.type_info = stmt_node.VariableDecl.type_info;
             },
             .Constant => |*constant| {
                 try self.resolveConstant(constant, context);
@@ -413,6 +415,9 @@ pub const TypeResolver = struct {
                         if (tsym.kind == .Enum) {
                             param.type_info.ora_type = OraType{ .enum_type = type_name };
                             param.type_info.category = .Enum;
+                        } else if (tsym.kind == .Bitfield) {
+                            param.type_info.ora_type = OraType{ .bitfield_type = type_name };
+                            param.type_info.category = .Bitfield;
                         } else {
                             var derived_category = ot.getCategory();
                             if (ot == ._union and ot._union.len > 0 and ot._union[0] == .error_union) {
@@ -452,11 +457,12 @@ pub const TypeResolver = struct {
                     const type_symbol = SymbolTable.findUp(root_scope, type_name);
                     if (type_symbol) |tsym| {
                         if (tsym.kind == .Enum) {
-                            // fix: change struct_type to enum_type
                             ret_type.ora_type = OraType{ .enum_type = type_name };
                             ret_type.category = .Enum;
+                        } else if (tsym.kind == .Bitfield) {
+                            ret_type.ora_type = OraType{ .bitfield_type = type_name };
+                            ret_type.category = .Bitfield;
                         } else {
-                            // use the category from the ora_type
                             var derived_category = ot.getCategory();
                             if (ot == ._union and ot._union.len > 0 and ot._union[0] == .error_union) {
                                 derived_category = .ErrorUnion;
@@ -464,7 +470,6 @@ pub const TypeResolver = struct {
                             ret_type.category = derived_category;
                         }
                     } else {
-                        // type not found, use category from ora_type
                         var derived_category = ot.getCategory();
                         if (ot == ._union and ot._union.len > 0 and ot._union[0] == .error_union) {
                             derived_category = .ErrorUnion;

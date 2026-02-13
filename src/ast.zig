@@ -135,6 +135,22 @@ pub const StructField = struct {
     span: SourceSpan,
 };
 
+pub const BitfieldDeclNode = struct {
+    name: []const u8,
+    base_type_info: Types.TypeInfo, // The base integer type (e.g. u256)
+    fields: []BitfieldField,
+    auto_packed: bool, // true if no @at() annotations
+    span: SourceSpan,
+};
+
+pub const BitfieldField = struct {
+    name: []const u8,
+    type_info: Types.TypeInfo, // Field type (bool, uN, iN)
+    offset: ?u32, // Bit offset (null if auto-packed)
+    width: ?u32, // Bit width (null to derive from type)
+    span: SourceSpan,
+};
+
 pub const EnumDeclNode = struct {
     name: []const u8,
     variants: []EnumVariant,
@@ -202,6 +218,7 @@ pub const AstNode = union(enum) {
     Constant: ConstantNode,
     VariableDecl: Statements.VariableDeclNode,
     StructDecl: StructDeclNode,
+    BitfieldDecl: BitfieldDeclNode,
     EnumDecl: EnumDeclNode,
     LogDecl: LogDeclNode,
     Import: ImportNode,
@@ -281,6 +298,9 @@ pub fn deinitAstNode(allocator: std.mem.Allocator, node: *AstNode) void {
         },
         .StructDecl => |*struct_decl| {
             allocator.free(struct_decl.fields);
+        },
+        .BitfieldDecl => |*bf_decl| {
+            allocator.free(bf_decl.fields);
         },
         .EnumDecl => |*enum_decl| {
             for (enum_decl.variants) |*variant| {

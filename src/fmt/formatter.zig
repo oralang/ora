@@ -100,6 +100,7 @@ pub const Formatter = struct {
             .Function => |*function| try self.formatFunction(function),
             .VariableDecl => |*var_decl| try self.formatVariableDecl(var_decl),
             .StructDecl => |*struct_decl| try self.formatStructDecl(struct_decl),
+            .BitfieldDecl => |*bf_decl| try self.formatBitfieldDecl(bf_decl),
             .EnumDecl => |*enum_decl| try self.formatEnumDecl(enum_decl),
             .LogDecl => |*log_decl| try self.formatLogDecl(log_decl),
             .Import => |*import| try self.formatImport(import),
@@ -194,7 +195,7 @@ pub const Formatter = struct {
     fn contractMemberGroup(node: lib.AstNode) ContractMemberGroup {
         return switch (node) {
             .Function => .Functions,
-            .VariableDecl, .StructDecl, .EnumDecl, .LogDecl, .Import, .ErrorDecl => .Decls,
+            .VariableDecl, .StructDecl, .BitfieldDecl, .EnumDecl, .LogDecl, .Import, .ErrorDecl => .Decls,
             else => .Other,
         };
     }
@@ -205,6 +206,7 @@ pub const Formatter = struct {
             .Function => |func| func.span,
             .VariableDecl => |var_decl| var_decl.span,
             .StructDecl => |struct_decl| struct_decl.span,
+            .BitfieldDecl => |bf_decl| bf_decl.span,
             .EnumDecl => |enum_decl| enum_decl.span,
             .LogDecl => |log_decl| log_decl.span,
             .Import => |import| import.span,
@@ -429,6 +431,7 @@ pub const Formatter = struct {
                 try self.writer.write(" }");
             },
             .struct_type => |name| try self.writer.write(name),
+            .bitfield_type => |name| try self.writer.write(name),
             .enum_type => |name| try self.writer.write(name),
             .contract_type => |name| try self.writer.write(name),
             .module => |name| {
@@ -1111,6 +1114,11 @@ pub const Formatter = struct {
             .Slash => "/",
             .Percent => "%",
             .StarStar => "**",
+            .WrappingAdd => "+%",
+            .WrappingSub => "-%",
+            .WrappingMul => "*%",
+            .WrappingShl => "<<%",
+            .WrappingShr => ">>%",
             .EqualEqual => "==",
             .BangEqual => "!=",
             .Less => "<",
@@ -1181,6 +1189,37 @@ pub const Formatter = struct {
             try self.writer.write(field.name);
             try self.writer.write(": ");
             try self.formatTypeInfo(field.type_info);
+            try self.writer.write(";");
+            try self.writer.newline();
+        }
+        self.writer.dedent();
+
+        try self.writer.write("}");
+    }
+
+    fn formatBitfieldDecl(self: *Formatter, bf_decl: *const lib.ast.BitfieldDeclNode) FormatError!void {
+        try self.writer.write("bitfield ");
+        try self.writer.write(bf_decl.name);
+        try self.writer.write(" : ");
+        try self.formatTypeInfo(bf_decl.base_type_info);
+        try self.writer.write(" {");
+        try self.writer.newline();
+
+        self.writer.indent();
+        for (bf_decl.fields) |field| {
+            try self.writer.write(field.name);
+            try self.writer.write(": ");
+            try self.formatTypeInfo(field.type_info);
+            if (field.offset != null and field.width != null) {
+                try self.writer.write(" @at(");
+                var buf: [32]u8 = undefined;
+                const off_str = std.fmt.bufPrint(&buf, "{d}", .{field.offset.?}) catch "?";
+                try self.writer.write(off_str);
+                try self.writer.write(", ");
+                const w_str = std.fmt.bufPrint(&buf, "{d}", .{field.width.?}) catch "?";
+                try self.writer.write(w_str);
+                try self.writer.write(")");
+            }
             try self.writer.write(";");
             try self.writer.newline();
         }

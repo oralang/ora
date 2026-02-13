@@ -1,0 +1,25 @@
+// ==========================================
+// WRAPPING SIGNED OPERATORS
+// ==========================================
+// Uses +%, -%, *%, <<%, >>% to bypass checked-overflow assertions.
+contract SignedWrappingOps {
+    pub fn add_wrap(a: i8, b: i8) -> i8 {
+        return a +% b;
+    }
+
+    pub fn sub_wrap(a: i8, b: i8) -> i8 {
+        return a -% b;
+    }
+
+    pub fn mul_wrap(a: i8, b: i8) -> i8 {
+        return a *% b;
+    }
+
+    pub fn shl_wrap(a: i8, bits: u8) -> i8 {
+        return a <<% bits;
+    }
+
+    pub fn shr_wrap(a: i8, bits: u8) -> i8 {
+        return a >>% bits;
+    }
+}

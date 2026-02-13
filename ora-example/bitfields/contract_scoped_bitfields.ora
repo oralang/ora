@@ -1,0 +1,31 @@
+// ==========================================
+// CONTRACT-SCOPED BITFIELDS
+// ==========================================
+// Demonstrates declaring bitfields inside a contract and using multiple types.
+
+contract BitfieldScoped {
+    bitfield PermissionFlags : u256 {
+        can_mint: bool;
+        can_pause: bool;
+        role: u8;
+    }
+
+    bitfield RiskFlags : u256 {
+        flagged: bool;
+        score: u16;
+        review_count: u8;
+    }
+
+    storage var permissions: PermissionFlags;
+    storage var risk: RiskFlags;
+
+    fn update_permissions(next: PermissionFlags) {
+        permissions = next;
+    }
+
+    fn sync_risk(next: RiskFlags) {
+        let previous: RiskFlags = risk;
+        risk = next;
+        risk = previous;
+    }
+}

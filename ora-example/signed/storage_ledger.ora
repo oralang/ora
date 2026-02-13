@@ -1,0 +1,19 @@
+// ==========================================
+// SIGNED STORAGE LEDGER
+// ==========================================
+// Signed deltas persisted in storage and read back.
+contract SignedStorageLedger {
+    storage var net: i256 = 0;
+
+    pub fn apply(delta: i256) {
+        net = net + delta;
+    }
+
+    pub fn rollback(delta: i256) {
+        net = net - delta;
+    }
+
+    pub fn current() -> i256 {
+        return net;
+    }
+}

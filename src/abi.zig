@@ -754,6 +754,9 @@ pub const AbiGenerator = struct {
                         self.global_structs.put(struct_decl.name, struct_decl) catch {};
                     }
                 },
+                .BitfieldDecl => {
+                    // Bitfields are skipped for ABI generation (similar to structs)
+                },
                 .EnumDecl => |*enum_decl| {
                     if (!self.global_enums.contains(enum_decl.name)) {
                         self.global_enums.put(enum_decl.name, enum_decl) catch {};

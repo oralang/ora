@@ -16,6 +16,8 @@ const sidebars: SidebarsConfig = {
       items: [
         'switch',
         'struct-types',
+        'signed-integers',
+        'bitfield-types',
         'memory-regions',
         'error-unions',
         'refinement-types',

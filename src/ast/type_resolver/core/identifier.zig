@@ -63,9 +63,11 @@ pub fn resolveIdentifierType(
                     const type_symbol = SymbolTable.findUp(root_scope, type_name);
                     if (type_symbol) |tsym| {
                         if (tsym.kind == .Enum) {
-                            // fix: change struct_type to enum_type
                             resolved_typ.ora_type = OraType{ .enum_type = type_name };
                             resolved_typ.category = .Enum;
+                        } else if (tsym.kind == .Bitfield) {
+                            resolved_typ.ora_type = OraType{ .bitfield_type = type_name };
+                            resolved_typ.category = .Bitfield;
                         } else {
                             // use the category from the ora_type
                             var derived_category = ot.getCategory();

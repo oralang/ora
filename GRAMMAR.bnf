@@ -8,6 +8,7 @@ top_level_declaration ::= contract_declaration
                         | function_declaration
                         | variable_declaration
                         | struct_declaration
+                        | bitfield_declaration
                         | enum_declaration
                         | log_declaration
                         | import_declaration
@@ -23,6 +24,7 @@ contract_member ::= variable_declaration
                   | function_declaration
                   | log_declaration
                   | struct_declaration
+                  | bitfield_declaration
                   | enum_declaration
                   | error_declaration
                   | ghost_declaration
@@ -54,6 +56,14 @@ variable_kind ::= "var" | "let" | "const" | "immutable"
 struct_declaration ::= "struct" identifier "{" struct_member* "}"
 
 struct_member ::= identifier ":" type ";"
+
+bitfield_declaration ::= "bitfield" identifier ":" type "{" bitfield_field* "}"
+
+bitfield_field ::= identifier ":" type bitfield_layout? ";"
+
+bitfield_layout ::= "@at" "(" integer_literal "," integer_literal ")"
+                   | "@bits" "(" integer_literal ".." integer_literal ")"
+                   | "(" integer_literal ")"
 
 enum_declaration ::= "enum" identifier (":" type)? "{" enum_member_list? "}"
 
@@ -204,11 +214,11 @@ equality_expression ::= relational_expression (("==" | "!=") relational_expressi
 
 relational_expression ::= shift_expression (("<" | "<=" | ">" | ">=") shift_expression)*
 
-shift_expression ::= additive_expression (("<<" | ">>") additive_expression)*
+shift_expression ::= additive_expression (("<<" | ">>" | "<<%" | ">>%") additive_expression)*
 
-additive_expression ::= multiplicative_expression (("+" | "-") multiplicative_expression)*
+additive_expression ::= multiplicative_expression (("+" | "-" | "+%" | "-%") multiplicative_expression)*
 
-multiplicative_expression ::= unary_expression (("*" | "/" | "%") unary_expression)*
+multiplicative_expression ::= unary_expression (("*" | "/" | "%" | "*%") unary_expression)*
 
 unary_expression ::= ("!" | "-" | "+")* postfix_expression
 

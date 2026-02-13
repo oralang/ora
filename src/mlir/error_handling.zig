@@ -421,6 +421,7 @@ pub fn getSpanFromAstNode(node: *const lib.ast.AstNode) lib.ast.SourceSpan {
         .Constant => |constant| constant.span,
         .VariableDecl => |var_decl| var_decl.span,
         .StructDecl => |struct_decl| struct_decl.span,
+        .BitfieldDecl => |bf_decl| bf_decl.span,
         .EnumDecl => |enum_decl| enum_decl.span,
         .LogDecl => |log_decl| log_decl.span,
         .Import => |import| import.span,

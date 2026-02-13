@@ -1,0 +1,56 @@
+// ==========================================
+// BITFIELD BASICS
+// ==========================================
+// Demonstrates field-level access: read, write, construct, and mixed ops.
+
+bitfield ConfigFlags : u256 {
+    initialized: bool;
+    mode: u8;
+    retries: u8;
+    epoch: u16;
+}
+
+contract BitfieldBasic {
+    storage var flags: ConfigFlags;
+
+    // Write the whole bitfield into storage.
+    fn set_flags(next: ConfigFlags) {
+        flags = next;
+    }
+
+    // Read a single field from the stored bitfield.
+    fn get_mode() -> u8 {
+        let f: ConfigFlags = flags;
+        return f.mode;
+    }
+
+    // Read the epoch field.
+    fn get_epoch() -> u16 {
+        let f: ConfigFlags = flags;
+        return f.epoch;
+    }
+
+    // Write a single field back into storage.
+    fn set_retries(val: u8) {
+        let f: ConfigFlags = flags;
+        f.retries = val;
+        flags = f;
+    }
+
+    // Multiple field writes in sequence (tests storage batching path).
+    fn configure(m: u8, r: u8, e: u16) {
+        let f: ConfigFlags = flags;
+        f.mode = m;
+        f.retries = r;
+        f.epoch = e;
+        f.initialized = true;
+        flags = f;
+    }
+
+    // Round-trip: load, read a field, store unchanged.
+    fn roundtrip() {
+        let snapshot: ConfigFlags = flags;
+        let _m: u8 = snapshot.mode;
+        flags = snapshot;
+    }
+}

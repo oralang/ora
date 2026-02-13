@@ -176,6 +176,7 @@ pub const TokenType = enum {
     As, // reserved keyword (not currently used)
     Import,
     Struct,
+    Bitfield,
     Enum,
     True,
     False,
@@ -259,6 +260,11 @@ pub const TokenType = enum {
     Pipe, // |
     PipePipe, // ||
     Caret, // ^
+    PlusPercent, // +% (wrapping add)
+    MinusPercent, // -% (wrapping sub)
+    StarPercent, // *% (wrapping mul)
+    LessLessPercent, // <<% (wrapping shl)
+    GreaterGreaterPercent, // >>% (wrapping shr)
     PlusEqual, // +=
     MinusEqual, // -=
     StarEqual, // *=
@@ -559,6 +565,7 @@ pub const keywords = std.StaticStringMap(TokenType).initComptime(.{
     .{ "as", .As },
     .{ "import", .Import },
     .{ "struct", .Struct },
+    .{ "bitfield", .Bitfield },
     .{ "enum", .Enum },
     .{ "true", .True },
     .{ "false", .False },
@@ -1137,14 +1144,18 @@ pub const Lexer = struct {
 
             // operators that might have compound forms
             '+' => {
-                if (self.match('=')) {
+                if (self.match('%')) {
+                    try self.addToken(.PlusPercent);
+                } else if (self.match('=')) {
                     try self.addToken(.PlusEqual);
                 } else {
                     try self.addToken(.Plus);
                 }
             },
             '-' => {
-                if (self.match('=')) {
+                if (self.match('%')) {
+                    try self.addToken(.MinusPercent);
+                } else if (self.match('=')) {
                     try self.addToken(.MinusEqual);
                 } else if (self.match('>')) {
                     try self.addToken(.Arrow);
@@ -1153,7 +1164,9 @@ pub const Lexer = struct {
                 }
             },
             '*' => {
-                if (self.match('=')) {
+                if (self.match('%')) {
+                    try self.addToken(.StarPercent);
+                } else if (self.match('=')) {
                     try self.addToken(.StarEqual);
                 } else if (self.match('*')) {
                     try self.addToken(.StarStar);
@@ -1206,7 +1219,11 @@ pub const Lexer = struct {
                 if (self.match('=')) {
                     try self.addToken(.LessEqual);
                 } else if (self.match('<')) {
-                    try self.addToken(.LessLess);
+                    if (self.match('%')) {
+                        try self.addToken(.LessLessPercent);
+                    } else {
+                        try self.addToken(.LessLess);
+                    }
                 } else {
                     try self.addToken(.Less);
                 }
@@ -1215,7 +1232,11 @@ pub const Lexer = struct {
                 if (self.match('=')) {
                     try self.addToken(.GreaterEqual);
                 } else if (self.match('>')) {
-                    try self.addToken(.GreaterGreater);
+                    if (self.match('%')) {
+                        try self.addToken(.GreaterGreaterPercent);
+                    } else {
+                        try self.addToken(.GreaterGreater);
+                    }
                 } else {
                     try self.addToken(.Greater);
                 }
@@ -1558,7 +1579,7 @@ pub inline fn isWhitespace(c: u8) bool {
 // Token utility functions for parser use
 pub fn isKeyword(token_type: TokenType) bool {
     return switch (token_type) {
-        .Contract, .Pub, .Fn, .Let, .Var, .Const, .Immutable, .Storage, .Memory, .Tstore, .Init, .Log, .If, .Else, .While, .For, .Break, .Continue, .Return, .Requires, .Ensures, .Invariant, .Old, .Result, .Modifies, .Decreases, .Increases, .Assume, .Havoc, .Switch, .Ghost, .Assert, .Void, .Comptime, .As, .Import, .Struct, .Enum, .True, .False, .Error, .Try, .Catch, .From, .To, .Forall, .Exists, .Where, .U8, .U16, .U32, .U64, .U128, .U256, .I8, .I16, .I32, .I64, .I128, .I256, .Bool, .Address, .String, .Map, .Slice, .Bytes => true,
+        .Contract, .Pub, .Fn, .Let, .Var, .Const, .Immutable, .Storage, .Memory, .Tstore, .Init, .Log, .If, .Else, .While, .For, .Break, .Continue, .Return, .Requires, .Ensures, .Invariant, .Old, .Result, .Modifies, .Decreases, .Increases, .Assume, .Havoc, .Switch, .Ghost, .Assert, .Void, .Comptime, .As, .Import, .Struct, .Bitfield, .Enum, .True, .False, .Error, .Try, .Catch, .From, .To, .Forall, .Exists, .Where, .U8, .U16, .U32, .U64, .U128, .U256, .I8, .I16, .I32, .I64, .I128, .I256, .Bool, .Address, .String, .Map, .Slice, .Bytes => true,
         else => false,
     };
 }

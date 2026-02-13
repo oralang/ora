@@ -1,0 +1,6 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/signed/storage_ledger.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @apply
+// CHECK-LABEL: func.func @rollback
+// CHECK-LABEL: func.func @current

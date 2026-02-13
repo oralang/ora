@@ -309,6 +309,39 @@ pub fn lowerFieldAccess(
         return createPseudoFieldAccess(self, target, field.field, field.span);
     }
 
+    // Check if target is a bitfield type → emit shift+mask extraction
+    if (self.symbol_table) |st| {
+        const target_type_info = @import("operators.zig").extractTypeInfo(field.target);
+        if (target_type_info.ora_type) |ora_type| {
+            if (ora_type == .bitfield_type) {
+                if (st.lookupType(ora_type.bitfield_type)) |type_sym| {
+                    if (type_sym.type_kind == .Bitfield) {
+                        return createBitfieldFieldExtract(self, target, field.field, type_sym, field.span);
+                    }
+                }
+            }
+        }
+        // Fallback: if the MLIR type is an integer (bitfields lower to i256), scan all
+        // bitfield types for a matching field. Handles cases where the AST type_info is
+        // unknown (e.g., enum-literal fallback path).
+        if (c.oraTypeIsAInteger(target_type) or c.oraTypeIsAOraInteger(target_type)) {
+            var type_iter = st.types.iterator();
+            while (type_iter.next()) |entry| {
+                for (entry.value_ptr.*) |type_sym| {
+                    if (type_sym.type_kind == .Bitfield) {
+                        if (type_sym.fields) |fields| {
+                            for (fields) |f| {
+                                if (std.mem.eql(u8, f.name, field.field)) {
+                                    return createBitfieldFieldExtract(self, target, field.field, &type_sym, field.span);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     return createStructFieldExtract(self, target, field.field, field.span);
 }
 
@@ -375,6 +408,83 @@ fn lowerBuiltinFieldCall(
     );
     h.appendOp(self.block, op);
     return h.getResult(op, 0);
+}
+
+/// Extract a bitfield field via shift+mask: (word >> offset) & mask
+/// For signed fields: sign-extend via SHL + SAR
+fn createBitfieldFieldExtract(
+    self: *const ExpressionLowerer,
+    word: c.MlirValue,
+    field_name: []const u8,
+    type_sym: *const constants.TypeSymbol,
+    span: lib.ast.SourceSpan,
+) c.MlirValue {
+    const loc = self.fileLoc(span);
+    const int_ty = c.oraIntegerTypeCreate(self.ctx, constants.DEFAULT_INTEGER_BITS);
+
+    // Find the field in the type symbol
+    if (type_sym.fields) |fields| {
+        for (fields) |field| {
+            if (!std.mem.eql(u8, field.name, field_name)) continue;
+
+            const offset: i64 = if (field.offset) |o| @intCast(o) else 0;
+            const width: u32 = field.bit_width orelse 256;
+
+            // Step 1: SHR by offset → shifted = word >> offset
+            const offset_const_op = self.ora_dialect.createArithConstant(offset, int_ty, loc);
+            h.appendOp(self.block, offset_const_op);
+            const offset_val = h.getResult(offset_const_op, 0);
+
+            const shr_op = c.oraArithShrUIOpCreate(self.ctx, loc, word, offset_val);
+            h.appendOp(self.block, shr_op);
+            const shifted = h.getResult(shr_op, 0);
+
+            // Step 2: AND with mask → raw = shifted & ((1 << width) - 1)
+            const mask: i64 = if (width >= 64) -1 else (@as(i64, 1) << @intCast(width)) - 1;
+            const mask_const_op = self.ora_dialect.createArithConstant(mask, int_ty, loc);
+            h.appendOp(self.block, mask_const_op);
+            const mask_val = h.getResult(mask_const_op, 0);
+
+            const and_op = c.oraArithAndIOpCreate(self.ctx, loc, shifted, mask_val);
+            h.appendOp(self.block, and_op);
+            const raw = h.getResult(and_op, 0);
+
+            // Step 3: For signed fields, sign-extend via SHL+SAR
+            const is_signed = if (field.ora_type_info.ora_type) |ot| switch (ot) {
+                .i8, .i16, .i32, .i64, .i128, .i256 => true,
+                else => false,
+            } else false;
+
+            if (is_signed and width < 256) {
+                const shift_amt: i64 = 256 - @as(i64, width);
+                const shift_const_op = self.ora_dialect.createArithConstant(shift_amt, int_ty, loc);
+                h.appendOp(self.block, shift_const_op);
+                const shift_val = h.getResult(shift_const_op, 0);
+
+                // SHL to put sign bit at bit 255
+                const shl_op = c.oraArithShlIOpCreate(self.ctx, loc, raw, shift_val);
+                h.appendOp(self.block, shl_op);
+                const shl_result = h.getResult(shl_op, 0);
+
+                // SAR to sign-extend back
+                const sar_op = c.oraArithShrSIOpCreate(self.ctx, loc, shl_result, shift_val);
+                h.appendOp(self.block, sar_op);
+                const result = h.getResult(sar_op, 0);
+
+                // Emit signed bound assumption: -(2^(width-1)) <= result < 2^(width-1)
+                emitBitfieldBoundAssume(self, result, width, true, int_ty, loc);
+                return result;
+            }
+
+            // Emit unsigned bound assumption: 0 <= result <= mask
+            emitBitfieldBoundAssume(self, raw, width, false, int_ty, loc);
+            return raw;
+        }
+    }
+
+    // Field not found in bitfield, fall back to error placeholder
+    log.debug("ERROR: Bitfield field '{s}' not found in type '{s}'\n", .{ field_name, type_sym.name });
+    return self.createErrorPlaceholder(span, "bitfield field not found");
 }
 
 /// Create struct field extract operation
@@ -672,4 +782,47 @@ pub fn createMapIndexLoad(
     }
 
     return result;
+}
+
+/// Emit an `ora.assume` with bitfield field bounds for SMT verification.
+/// Unsigned: result <= (1 << width) - 1
+/// Signed: -(1 << (width-1)) <= result <= (1 << (width-1)) - 1
+fn emitBitfieldBoundAssume(
+    self: *const ExpressionLowerer,
+    result: c.MlirValue,
+    width: u32,
+    is_signed: bool,
+    int_ty: c.MlirType,
+    loc: c.MlirLocation,
+) void {
+    if (width >= 256) return; // full-width, no useful bound
+
+    if (!is_signed) {
+        // result <= mask (unsigned upper bound)
+        const mask: i64 = (@as(i64, 1) << @intCast(width)) - 1;
+        const mask_op = self.ora_dialect.createArithConstant(mask, int_ty, loc);
+        h.appendOp(self.block, mask_op);
+        const cmp = c.oraArithCmpIOpCreate(self.ctx, loc, 7, result, h.getResult(mask_op, 0)); // 7 = ule
+        h.appendOp(self.block, cmp);
+        const assume_op = self.ora_dialect.createAssume(h.getResult(cmp, 0), loc);
+        h.appendOp(self.block, assume_op);
+    } else {
+        // result >= -(1 << (width-1))  AND  result <= (1 << (width-1)) - 1
+        const half: i64 = @as(i64, 1) << @intCast(width - 1);
+        // lower bound: result >= -half (signed)
+        const lo_op = self.ora_dialect.createArithConstant(-half, int_ty, loc);
+        h.appendOp(self.block, lo_op);
+        const cmp_lo = c.oraArithCmpIOpCreate(self.ctx, loc, 5, result, h.getResult(lo_op, 0)); // 5 = sge
+        h.appendOp(self.block, cmp_lo);
+        const assume_lo = self.ora_dialect.createAssume(h.getResult(cmp_lo, 0), loc);
+        h.appendOp(self.block, assume_lo);
+
+        // upper bound: result <= half - 1 (signed)
+        const hi_op = self.ora_dialect.createArithConstant(half - 1, int_ty, loc);
+        h.appendOp(self.block, hi_op);
+        const cmp_hi = c.oraArithCmpIOpCreate(self.ctx, loc, 3, result, h.getResult(hi_op, 0)); // 3 = sle
+        h.appendOp(self.block, cmp_hi);
+        const assume_hi = self.ora_dialect.createAssume(h.getResult(cmp_hi, 0), loc);
+        h.appendOp(self.block, assume_hi);
+    }
 }

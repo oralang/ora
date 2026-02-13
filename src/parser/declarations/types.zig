@@ -69,6 +69,129 @@ pub fn parseStruct(parser: *DeclarationParser, type_parser: *TypeParser) !ast.As
     } };
 }
 
+/// Parse bitfield declaration: bitfield Name : BaseInt { fields }
+pub fn parseBitfield(parser: *DeclarationParser, type_parser: *TypeParser) !ast.AstNode {
+    const name_token = try parser.base.consume(.Identifier, "Expected bitfield name");
+
+    // Parse optional base type (: BaseInt)
+    var base_type_info = ast.Types.TypeInfo.fromOraType(.u256); // default u256
+    if (parser.base.match(.Colon)) {
+        type_parser.base.current = parser.base.current;
+        base_type_info = try type_parser.parseType();
+        parser.base.current = type_parser.base.current;
+    }
+
+    _ = try parser.base.consume(.LeftBrace, "Expected '{' after bitfield declaration");
+
+    var fields = std.ArrayList(ast.BitfieldField){};
+    defer fields.deinit(parser.base.arena.allocator());
+    var auto_packed = true;
+    var any_at = false;
+    var any_no_at = false;
+
+    while (!parser.base.check(.RightBrace) and !parser.base.isAtEnd()) {
+        const field_name = try parser.base.consumeIdentifierOrKeyword("Expected field name");
+        _ = try parser.base.consume(.Colon, "Expected ':' after field name");
+
+        // Parse field type
+        type_parser.base.current = parser.base.current;
+        const field_type = try type_parser.parseType();
+        parser.base.current = type_parser.base.current;
+
+        // Parse optional width annotation: (width)
+        var explicit_width: ?u32 = null;
+        if (parser.base.match(.LeftParen)) {
+            const w_tok = try parser.base.consume(.IntegerLiteral, "Expected width in field width annotation");
+            explicit_width = std.fmt.parseInt(u32, w_tok.lexeme, 10) catch null;
+            _ = try parser.base.consume(.RightParen, "Expected ')' after width");
+        }
+
+        // Parse optional @at(offset, width) or @bits(start..end)
+        var offset: ?u32 = null;
+        var width: ?u32 = explicit_width;
+        if (parser.base.match(.At)) {
+            const at_name = try parser.base.consume(.Identifier, "Expected 'at' or 'bits' after '@'");
+            if (std.mem.eql(u8, at_name.lexeme, "at")) {
+                _ = try parser.base.consume(.LeftParen, "Expected '(' after '@at'");
+                const off_tok = try parser.base.consume(.IntegerLiteral, "Expected offset in @at");
+                offset = std.fmt.parseInt(u32, off_tok.lexeme, 10) catch null;
+                _ = try parser.base.consume(.Comma, "Expected ',' between offset and width in @at");
+                const w_tok = try parser.base.consume(.IntegerLiteral, "Expected width in @at");
+                width = std.fmt.parseInt(u32, w_tok.lexeme, 10) catch null;
+                _ = try parser.base.consume(.RightParen, "Expected ')' after @at arguments");
+            } else if (std.mem.eql(u8, at_name.lexeme, "bits")) {
+                // @bits(start..end) desugars to @at(start, end - start)
+                _ = try parser.base.consume(.LeftParen, "Expected '(' after '@bits'");
+                const start_tok = try parser.base.consume(.IntegerLiteral, "Expected start bit in @bits");
+                const start = std.fmt.parseInt(u32, start_tok.lexeme, 10) catch null;
+                _ = try parser.base.consume(.DotDot, "Expected '..' in @bits range");
+                const end_tok = try parser.base.consume(.IntegerLiteral, "Expected end bit in @bits");
+                const end = std.fmt.parseInt(u32, end_tok.lexeme, 10) catch null;
+                _ = try parser.base.consume(.RightParen, "Expected ')' after @bits arguments");
+                if (start != null and end != null) {
+                    offset = start;
+                    width = end.? - start.?;
+                }
+            } else {
+                try parser.base.errorAtCurrent("Expected '@at' or '@bits' annotation for bitfield field");
+                return error.UnexpectedToken;
+            }
+            any_at = true;
+        } else {
+            any_no_at = true;
+        }
+
+        _ = try parser.base.consume(.Semicolon, "Expected ';' after field");
+
+        try fields.append(parser.base.arena.allocator(), ast.BitfieldField{
+            .name = field_name.lexeme,
+            .type_info = field_type,
+            .offset = offset,
+            .width = width,
+            .span = parser.base.spanFromToken(field_name),
+        });
+    }
+
+    _ = try parser.base.consume(.RightBrace, "Expected '}' after bitfield fields");
+
+    // Mixing @at and auto-packed is an error
+    if (any_at and any_no_at) {
+        try parser.base.errorAtCurrent("Cannot mix @at() and auto-packed fields in a bitfield");
+        return error.UnexpectedToken;
+    }
+    auto_packed = !any_at;
+
+    // Resolve auto-packed fields: derive widths from types and compute cumulative offsets
+    if (auto_packed) {
+        var cursor: u32 = 0;
+        const items = fields.items;
+        for (items) |*field| {
+            // Derive width from the field type if not explicitly given
+            if (field.width == null) {
+                field.width = if (field.type_info.ora_type) |ot| ot.bitWidth() else null;
+            }
+            field.offset = cursor;
+            cursor += field.width orelse 0;
+        }
+    } else {
+        // Explicit @at: derive width from type if only offset was given via @bits or inline (width)
+        const items = fields.items;
+        for (items) |*field| {
+            if (field.width == null) {
+                field.width = if (field.type_info.ora_type) |ot| ot.bitWidth() else null;
+            }
+        }
+    }
+
+    return ast.AstNode{ .BitfieldDecl = ast.BitfieldDeclNode{
+        .name = name_token.lexeme,
+        .base_type_info = base_type_info,
+        .fields = try fields.toOwnedSlice(parser.base.arena.allocator()),
+        .auto_packed = auto_packed,
+        .span = parser.base.spanFromToken(name_token),
+    } };
+}
+
 /// Parse a single enum variant value with proper precedence handling
 /// This avoids using the general expression parser which would interpret commas as operators
 /// The enum's underlying type is used for integer literals instead of generic integers

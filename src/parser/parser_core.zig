@@ -159,6 +159,13 @@ pub const Parser = struct {
             return result;
         }
 
+        // handle bitfield declarations
+        if (self.match(.Bitfield)) {
+            const result = try self.getDeclParser().parseBitfield(&self.type_parser);
+            self.updateFromSubParser(self.decl_parser.base.current);
+            return result;
+        }
+
         // handle enum declarations
         if (self.match(.Enum)) {
             const result = try self.getDeclParser().parseEnum(&self.type_parser, &self.expr_parser);

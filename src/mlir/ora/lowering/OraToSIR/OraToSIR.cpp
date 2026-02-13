@@ -811,6 +811,9 @@ public:
             patterns.add<ConvertArithAndIOp>(typeConverter, ctx);
             patterns.add<ConvertArithOrIOp>(typeConverter, ctx);
             patterns.add<ConvertArithXOrIOp>(typeConverter, ctx);
+            patterns.add<ConvertArithShlIOp>(typeConverter, ctx);
+            patterns.add<ConvertArithShrUIOp>(typeConverter, ctx);
+            patterns.add<ConvertArithShrSIOp>(typeConverter, ctx);
             patterns.add<ConvertArithSelectOp>(typeConverter, ctx);
             patterns.add<ConvertArithExtUIOp>(typeConverter, ctx);
             patterns.add<ConvertArithIndexCastUIOp>(typeConverter, ctx);

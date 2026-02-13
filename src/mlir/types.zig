@@ -32,6 +32,7 @@ fn hashOraType(hasher: *std.hash.Wyhash, ora_type: lib.ast.type_info.OraType) vo
     switch (ora_type) {
         .u8, .u16, .u32, .u64, .u128, .u256, .i8, .i16, .i32, .i64, .i128, .i256, .bool, .string, .address, .bytes, .void, .non_zero_address => {},
         .struct_type => |name| hasher.update(name),
+        .bitfield_type => |name| hasher.update(name),
         .enum_type => |name| hasher.update(name),
         .contract_type => |name| hasher.update(name),
         .array => |arr| {
@@ -315,6 +316,8 @@ pub const TypeMapper = struct {
 
             // complex types - comprehensive mapping
             .struct_type => self.mapStructType(ora_ty.struct_type),
+            // bitfield maps to its base integer type (u256 by default)
+            .bitfield_type => c.oraIntegerTypeCreate(self.ctx, constants.DEFAULT_INTEGER_BITS),
             .enum_type => self.mapEnumType(ora_ty.enum_type),
             .contract_type => self.mapContractType(ora_ty.contract_type),
             .array => self.mapArrayType(ora_ty.array),
@@ -764,7 +767,7 @@ pub const TypeMapper = struct {
     pub fn isComplex(self: *const TypeMapper, ora_type: lib.ast.type_info.OraType) bool {
         _ = self;
         return switch (ora_type) {
-            .struct_type, .enum_type, .contract_type, .array, .slice, .Map, .tuple, .function, .error_union, ._union, .anonymous_struct, .module => true,
+            .struct_type, .bitfield_type, .enum_type, .contract_type, .array, .slice, .Map, .tuple, .function, .error_union, ._union, .anonymous_struct, .module => true,
             else => false,
         };
     }
