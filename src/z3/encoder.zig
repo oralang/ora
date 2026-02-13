@@ -616,15 +616,25 @@ pub const Encoder = struct {
 
     fn emitArithmeticSafetyObligations(self: *Encoder, op: ArithmeticOp, lhs: z3.Z3_ast, rhs: z3.Z3_ast) void {
         switch (op) {
-            .Mul => {
-                const no_overflow = z3.Z3_mk_not(self.context.ctx, self.checkMulOverflow(lhs, rhs));
-                self.addObligation(no_overflow);
-            },
+            // Division/remainder: always check divisor != 0
             .DivUnsigned, .DivSigned, .RemUnsigned, .RemSigned => {
                 const non_zero_divisor = z3.Z3_mk_not(self.context.ctx, self.checkDivByZero(rhs));
                 self.addObligation(non_zero_divisor);
             },
-            else => {},
+            // For ora.add/sub/mul (old-style ops without ora.assert), add overflow obligations.
+            // For arith.addi/subi/muli, overflow obligations come from ora.assert ops instead.
+            .Add => {
+                const no_overflow = z3.Z3_mk_not(self.context.ctx, self.checkAddOverflow(lhs, rhs));
+                self.addObligation(no_overflow);
+            },
+            .Sub => {
+                const no_underflow = z3.Z3_mk_not(self.context.ctx, self.checkSubUnderflow(lhs, rhs));
+                self.addObligation(no_underflow);
+            },
+            .Mul => {
+                const no_overflow = z3.Z3_mk_not(self.context.ctx, self.checkMulOverflow(lhs, rhs));
+                self.addObligation(no_overflow);
+            },
         }
     }
 
@@ -680,6 +690,15 @@ pub const Encoder = struct {
     }
 
     pub fn encodeShiftOp(self: *Encoder, op: ShiftOp, lhs: z3.Z3_ast, rhs: z3.Z3_ast) z3.Z3_ast {
+        // Obligation: shift amount must be < bit_width (undefined behavior otherwise)
+        const sort = z3.Z3_get_sort(self.context.ctx, lhs);
+        const sort_kind = z3.Z3_get_sort_kind(self.context.ctx, sort);
+        if (sort_kind == z3.Z3_BV_SORT) {
+            const width = z3.Z3_get_bv_sort_size(self.context.ctx, sort);
+            const max_shift = z3.Z3_mk_unsigned_int64(self.context.ctx, width, sort);
+            const in_range = z3.Z3_mk_bvult(self.context.ctx, rhs, max_shift);
+            self.addObligation(in_range);
+        }
         return switch (op) {
             .Shl => z3.Z3_mk_bvshl(self.context.ctx, lhs, rhs),
             .ShrSigned => z3.Z3_mk_bvashr(self.context.ctx, lhs, rhs),
@@ -712,6 +731,47 @@ pub const Encoder = struct {
         const matches_rhs = z3.Z3_mk_eq(self.context.ctx, recovered_rhs, rhs);
         const overflow_if_non_zero = z3.Z3_mk_not(self.context.ctx, matches_rhs);
         return z3.Z3_mk_and(self.context.ctx, 2, &[_]z3.Z3_ast{ lhs_non_zero, overflow_if_non_zero });
+    }
+
+    /// Check for signed overflow in addition.
+    /// Overflow iff operands have same sign and result has different sign:
+    ///   ((result ^ a) & (result ^ b))[MSB] == 1
+    pub fn checkSignedAddOverflow(self: *Encoder, lhs: z3.Z3_ast, rhs: z3.Z3_ast) z3.Z3_ast {
+        const ctx = self.context.ctx;
+        const result = z3.Z3_mk_bv_add(ctx, lhs, rhs);
+        const xor_ra = z3.Z3_mk_bvxor(ctx, result, lhs);
+        const xor_rb = z3.Z3_mk_bvxor(ctx, result, rhs);
+        const both = z3.Z3_mk_bvand(ctx, xor_ra, xor_rb);
+        const sort = z3.Z3_get_sort(ctx, lhs);
+        const zero = z3.Z3_mk_unsigned_int64(ctx, 0, sort);
+        return z3.Z3_mk_bvslt(ctx, both, zero); // MSB set → overflow
+    }
+
+    /// Check for signed overflow in subtraction.
+    /// Overflow iff operands have different sign and result has different sign from lhs:
+    ///   ((a ^ b) & (result ^ a))[MSB] == 1
+    pub fn checkSignedSubOverflow(self: *Encoder, lhs: z3.Z3_ast, rhs: z3.Z3_ast) z3.Z3_ast {
+        const ctx = self.context.ctx;
+        const result = z3.Z3_mk_bv_sub(ctx, lhs, rhs);
+        const xor_ab = z3.Z3_mk_bvxor(ctx, lhs, rhs);
+        const xor_ra = z3.Z3_mk_bvxor(ctx, result, lhs);
+        const both = z3.Z3_mk_bvand(ctx, xor_ab, xor_ra);
+        const sort = z3.Z3_get_sort(ctx, lhs);
+        const zero = z3.Z3_mk_unsigned_int64(ctx, 0, sort);
+        return z3.Z3_mk_bvslt(ctx, both, zero);
+    }
+
+    /// Check for signed overflow in multiplication.
+    /// Overflow iff b != 0 && sdiv(a*b, b) != a, with special case for MIN_INT * -1.
+    pub fn checkSignedMulOverflow(self: *Encoder, lhs: z3.Z3_ast, rhs: z3.Z3_ast) z3.Z3_ast {
+        const ctx = self.context.ctx;
+        const sort = z3.Z3_get_sort(ctx, lhs);
+        const zero = z3.Z3_mk_unsigned_int64(ctx, 0, sort);
+        const rhs_nz = z3.Z3_mk_not(ctx, z3.Z3_mk_eq(ctx, rhs, zero));
+        const product = z3.Z3_mk_bv_mul(ctx, lhs, rhs);
+        const recovered = z3.Z3_mk_bvsdiv(ctx, product, rhs);
+        const mismatch = z3.Z3_mk_not(ctx, z3.Z3_mk_eq(ctx, recovered, lhs));
+        return z3.Z3_mk_and(ctx, 2, &[_]z3.Z3_ast{ rhs_nz, mismatch });
     }
 
     /// Check for division by zero
@@ -1587,6 +1647,48 @@ pub const Encoder = struct {
         if (std.mem.eql(u8, op_name, "ora.base_to_refinement")) {
             if (operands.len >= 1) {
                 return operands[0];
+            }
+        }
+
+        // ---- ora.assert: encode condition as a verification obligation ----
+        // Handles checked-arithmetic overflow assertions, runtime guards, etc.
+        if (std.mem.eql(u8, op_name, "ora.assert")) {
+            if (operands.len >= 1) {
+                const condition = self.coerceToBool(operands[0]);
+                self.addObligation(condition);
+                return condition;
+            }
+        }
+
+        // ---- ora.assume: encode condition as a known-true assumption ----
+        // Handles bitfield read bounds, control-flow-derived facts, etc.
+        if (std.mem.eql(u8, op_name, "ora.assume")) {
+            if (operands.len >= 1) {
+                const condition = self.coerceToBool(operands[0]);
+                self.addConstraint(condition);
+                return condition;
+            }
+        }
+
+        // ---- ora.struct_init: model as an uninterpreted constructor ----
+        // Used by @addWithOverflow etc. to return (value, overflow) tuples.
+        if (std.mem.eql(u8, op_name, "ora.struct_init")) {
+            if (mlir.oraOperationGetNumResults(mlir_op) >= 1) {
+                const result_value = mlir.oraOperationGetResult(mlir_op, 0);
+                const result_type = mlir.oraValueGetType(result_value);
+                const result_sort = try self.encodeMLIRType(result_type);
+                // Build a struct-like value; bind each operand as a named field
+                // so ora.struct_field_extract can recover them.
+                const struct_val = try self.mkVariable("struct_init", result_sort);
+                for (operands, 0..) |operand, i| {
+                    const field_attr_name = try std.fmt.allocPrint(self.allocator, "field_{d}", .{i});
+                    defer self.allocator.free(field_attr_name);
+                    const field_sort = z3.Z3_get_sort(self.context.ctx, operand);
+                    const accessor = try self.applyFieldFunction(field_attr_name, result_sort, field_sort, struct_val);
+                    const eq = z3.Z3_mk_eq(self.context.ctx, accessor, operand);
+                    self.addConstraint(eq);
+                }
+                return struct_val;
             }
         }
 
@@ -2908,7 +3010,18 @@ pub const Encoder = struct {
         else
             false;
         if (!guard_internal) {
-            self.emitArithmeticSafetyObligations(arith_op, lhs, rhs);
+            // For arith.* ops, only emit div-by-zero obligations here.
+            // Overflow obligations for add/sub/mul are emitted by ora.assert ops
+            // that the MLIR lowering places alongside checked arithmetic.
+            // Wrapping operators (+%, -%, *%) don't have ora.assert, so they
+            // correctly get no overflow obligation.
+            switch (arith_op) {
+                .DivUnsigned, .DivSigned, .RemUnsigned, .RemSigned => {
+                    const non_zero = z3.Z3_mk_not(self.context.ctx, self.checkDivByZero(rhs));
+                    self.addObligation(non_zero);
+                },
+                else => {},
+            }
         }
         return self.encodeArithmeticOp(arith_op, lhs, rhs);
     }

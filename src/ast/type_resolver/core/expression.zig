@@ -921,6 +921,15 @@ fn synthUnary(
     // unary operators preserve operand type (except ! which returns bool)
     const result_type = switch (unary.operator) {
         .Bang => CommonTypes.bool_type(),
+        .Minus => blk: {
+            // Unary negation is only valid on signed integer types.
+            if (operand_typed.ty.ora_type) |ot| {
+                if (ot.isUnsignedInteger()) {
+                    return TypeResolutionError.IncompatibleTypes;
+                }
+            }
+            break :blk operand_typed.ty;
+        },
         else => operand_typed.ty,
     };
 
@@ -993,6 +1002,33 @@ fn synthCall(
                         call.type_info = TypeInfo.unknown();
                         return Typed.init(TypeInfo.unknown(), combined_eff, self.allocator);
                     }
+                }
+            }
+            // handle @-prefixed builtins (overflow reporters, divTrunc, etc.)
+            if (func_name.len > 1 and func_name[0] == '@') {
+                const builtin_suffix = func_name[1..];
+                if (resolveOverflowBuiltinType(builtin_suffix, call, self.allocator)) |ret_info| {
+                    call.type_info = ret_info;
+                    return Typed.init(ret_info, combined_eff, self.allocator);
+                }
+                // @divTrunc etc. return same type as arguments
+                if (std.mem.eql(u8, builtin_suffix, "divTrunc") or
+                    std.mem.eql(u8, builtin_suffix, "divFloor") or
+                    std.mem.eql(u8, builtin_suffix, "divCeil") or
+                    std.mem.eql(u8, builtin_suffix, "divExact") or
+                    std.mem.eql(u8, builtin_suffix, "truncate"))
+                {
+                    if (call.arguments.len > 0) {
+                        const first_arg_info = extractExprTypeInfo(call.arguments[0]);
+                        call.type_info = first_arg_info;
+                        return Typed.init(first_arg_info, combined_eff, self.allocator);
+                    }
+                    call.type_info = TypeInfo.unknown();
+                    return Typed.init(TypeInfo.unknown(), combined_eff, self.allocator);
+                }
+                if (std.mem.eql(u8, builtin_suffix, "divmod")) {
+                    call.type_info = TypeInfo.unknown();
+                    return Typed.init(TypeInfo.unknown(), combined_eff, self.allocator);
                 }
             }
             return TypeResolutionError.UndefinedIdentifier;
@@ -1208,25 +1244,42 @@ fn synthFieldAccess(
 
     // check if the type is a struct
     if (target_type.category == .Struct) {
-        // extract struct name from ora_type
         if (target_type.ora_type) |ora_ty| {
             if (ora_ty == .struct_type) {
                 const struct_name = ora_ty.struct_type;
-                // look up struct fields from symbol table
                 if (self.symbol_table.struct_fields.get(struct_name)) |fields| {
-                    // find the field by name
                     for (fields) |field| {
                         if (std.mem.eql(u8, field.name, fa.field)) {
-                            // found the field! Use its type
                             fa.type_info = field.type_info;
                             fa.type_info.region = base_typed.ty.region;
                             const eff = takeEffect(&base_typed);
                             return Typed.init(field.type_info, eff, self.allocator);
                         }
                     }
-                    // field not found in struct
                     return TypeResolutionError.TypeMismatch;
                 }
+            }
+        }
+    }
+
+    // check if the type is a bitfield
+    if (target_type.category == .Bitfield) {
+        if (target_type.ora_type) |ora_ty| {
+            switch (ora_ty) {
+                .bitfield_type => |bf_name| {
+                    if (self.symbol_table.bitfield_fields.get(bf_name)) |fields| {
+                        for (fields) |field| {
+                            if (std.mem.eql(u8, field.name, fa.field)) {
+                                fa.type_info = field.type_info;
+                                fa.type_info.region = base_typed.ty.region;
+                                const eff = takeEffect(&base_typed);
+                                return Typed.init(field.type_info, eff, self.allocator);
+                            }
+                        }
+                        return TypeResolutionError.TypeMismatch;
+                    }
+                },
+                else => {},
             }
         }
     }
@@ -1523,6 +1576,75 @@ fn validateBinaryOperator(
 // Function argument validation moved to mod.zig to avoid circular dependency
 
 /// Format TypeInfo for error messages, including refinement details
+/// Extract type_info from any expression node (for builtin type resolution).
+fn extractExprTypeInfo(expr: *const ast.Expressions.ExprNode) TypeInfo {
+    return switch (expr.*) {
+        .Binary => |b| b.type_info,
+        .Unary => |u| u.type_info,
+        .Identifier => |i| i.type_info,
+        .Literal => |l| switch (l) {
+            .Integer => |int_lit| int_lit.type_info,
+            .String => |str_lit| str_lit.type_info,
+            .Bool => |bool_lit| bool_lit.type_info,
+            .Address => |addr_lit| addr_lit.type_info,
+            .Hex => |hex_lit| hex_lit.type_info,
+            .Binary => |bin_lit| bin_lit.type_info,
+            .Character => |char_lit| char_lit.type_info,
+            .Bytes => |bytes_lit| bytes_lit.type_info,
+        },
+        .Call => |call_expr| call_expr.type_info,
+        .FieldAccess => |f| f.type_info,
+        .Cast => |cast_expr| cast_expr.target_type,
+        else => TypeInfo.unknown(),
+    };
+}
+
+/// Resolve the return type for @opWithOverflow builtins.
+/// Returns a tuple type (value: T, overflow: bool) represented as anonymous_struct.
+fn resolveOverflowBuiltinType(
+    builtin_suffix: []const u8,
+    call: *ast.Expressions.CallExpr,
+    allocator: std.mem.Allocator,
+) ?TypeInfo {
+    const overflow_builtins = [_][]const u8{
+        "addWithOverflow", "subWithOverflow", "mulWithOverflow",
+        "divWithOverflow", "modWithOverflow", "negWithOverflow",
+        "shlWithOverflow", "shrWithOverflow",
+    };
+    var is_overflow = false;
+    for (overflow_builtins) |name| {
+        if (std.mem.eql(u8, builtin_suffix, name)) {
+            is_overflow = true;
+            break;
+        }
+    }
+    if (!is_overflow) return null;
+
+    // Determine the value type from the first argument
+    var value_type: OraType = .u256; // default
+    if (call.arguments.len > 0) {
+        const arg_info = extractExprTypeInfo(call.arguments[0]);
+        if (arg_info.ora_type) |ot| {
+            if (ot.isInteger()) value_type = ot;
+        }
+    }
+
+    // Build tuple type: (value: T, overflow: bool)
+    const value_type_ptr = allocator.create(OraType) catch return null;
+    value_type_ptr.* = value_type;
+    const bool_type_ptr = allocator.create(OraType) catch return null;
+    bool_type_ptr.* = .bool;
+    const fields = allocator.alloc(ast.type_info.AnonymousStructFieldType, 2) catch return null;
+    fields[0] = .{ .name = "0", .typ = value_type_ptr };
+    fields[1] = .{ .name = "1", .typ = bool_type_ptr };
+    return TypeInfo{
+        .category = .Tuple,
+        .ora_type = .{ .anonymous_struct = fields },
+        .source = .inferred,
+        .span = null,
+    };
+}
+
 fn formatTypeInfo(type_info: TypeInfo, allocator: std.mem.Allocator) ![]const u8 {
     if (type_info.ora_type) |ora_type| {
         return formatOraType(ora_type, allocator);

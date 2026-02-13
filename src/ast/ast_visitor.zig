@@ -37,6 +37,7 @@ pub fn Visitor(comptime Context: type, comptime ReturnType: type) type {
         visitConstant: ?*const fn (*Self, *ast.ConstantNode) ReturnType = null,
         visitVariableDecl: ?*const fn (*Self, *ast.Statements.VariableDeclNode) ReturnType = null,
         visitStructDecl: ?*const fn (*Self, *ast.StructDeclNode) ReturnType = null,
+        visitBitfieldDecl: ?*const fn (*Self, *ast.BitfieldDeclNode) ReturnType = null,
         visitEnumDecl: ?*const fn (*Self, *ast.EnumDeclNode) ReturnType = null,
         visitLogDecl: ?*const fn (*Self, *ast.LogDeclNode) ReturnType = null,
         visitImport: ?*const fn (*Self, *ast.ImportNode) ReturnType = null,
@@ -143,6 +144,11 @@ pub fn Visitor(comptime Context: type, comptime ReturnType: type) type {
                 .StructDecl => |*struct_decl| {
                     if (self.visitStructDecl) |visitFn| {
                         return visitFn(self, struct_decl);
+                    }
+                },
+                .BitfieldDecl => |*bitfield_decl| {
+                    if (self.visitBitfieldDecl) |visitFn| {
+                        return visitFn(self, bitfield_decl);
                     }
                 },
                 .EnumDecl => |*enum_decl| {
@@ -849,6 +855,7 @@ pub const MutableVisitor = struct {
     modifyFunction: ?*const fn (*Self, *ast.FunctionNode) anyerror!void = null,
     modifyVariableDecl: ?*const fn (*Self, *ast.Statements.VariableDeclNode) anyerror!void = null,
     modifyStructDecl: ?*const fn (*Self, *ast.StructDeclNode) anyerror!void = null,
+    modifyBitfieldDecl: ?*const fn (*Self, *ast.BitfieldDeclNode) anyerror!void = null,
     modifyEnumDecl: ?*const fn (*Self, *ast.EnumDeclNode) anyerror!void = null,
     modifyLogDecl: ?*const fn (*Self, *ast.LogDeclNode) anyerror!void = null,
     modifyImport: ?*const fn (*Self, *ast.ImportNode) anyerror!void = null,
@@ -943,6 +950,18 @@ pub const MutableVisitor = struct {
                         self.error_count += 1;
                         if (self.onError) |errorFn| {
                             errorFn(self, "Error modifying struct declaration", struct_decl.span);
+                        }
+                        return err;
+                    };
+                    self.modification_count += 1;
+                }
+            },
+            .BitfieldDecl => |*bitfield_decl| {
+                if (self.modifyBitfieldDecl) |modifyFn| {
+                    modifyFn(self, bitfield_decl) catch |err| {
+                        self.error_count += 1;
+                        if (self.onError) |errorFn| {
+                            errorFn(self, "Error modifying bitfield declaration", bitfield_decl.span);
                         }
                         return err;
                     };

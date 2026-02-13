@@ -13,6 +13,7 @@ const DeclarationLowerer = @import("mod.zig").DeclarationLowerer;
 const helpers = @import("helpers.zig");
 const error_handling = @import("../error_handling.zig");
 const log = @import("log");
+const lower = @import("../lower.zig");
 
 fn lowerContractTypes(self: *const DeclarationLowerer, block: c.MlirBlock, contract: *const lib.ContractNode) void {
     for (contract.body) |child| {
@@ -57,6 +58,40 @@ fn lowerContractTypes(self: *const DeclarationLowerer, block: c.MlirBlock, contr
                         } else |_| {
                             log.err("Failed to allocate fields slice for struct: {s}\n", .{struct_decl.name});
                         }
+                    }
+                }
+            },
+            .BitfieldDecl => |bf_decl| {
+                // Register bitfield with field layout (offset + width)
+                if (self.symbol_table) |st| {
+                    if (st.lookupType(bf_decl.name) == null) {
+                        const alloc = std.heap.page_allocator;
+                        const bf_type = c.oraIntegerTypeCreate(self.ctx, lower.DEFAULT_INTEGER_BITS);
+                        const fields_slice = alloc.alloc(lower.TypeSymbol.FieldInfo, bf_decl.fields.len) catch {
+                            log.err("Failed to allocate fields for bitfield: {s}\n", .{bf_decl.name});
+                            continue;
+                        };
+                        for (bf_decl.fields, 0..) |field, i| {
+                            fields_slice[i] = .{
+                                .name = field.name,
+                                .field_type = self.type_mapper.toMlirType(field.type_info),
+                                .ora_type_info = field.type_info,
+                                .offset = if (field.offset) |o| @as(usize, o) else null,
+                                .bit_width = field.width,
+                            };
+                        }
+                        const type_symbol = lower.TypeSymbol{
+                            .name = bf_decl.name,
+                            .type_kind = .Bitfield,
+                            .mlir_type = bf_type,
+                            .fields = fields_slice,
+                            .variants = null,
+                            .allocator = alloc,
+                        };
+                        st.addType(bf_decl.name, type_symbol) catch {
+                            alloc.free(fields_slice);
+                            log.err("Failed to register bitfield type: {s}\n", .{bf_decl.name});
+                        };
                     }
                 }
             },
@@ -229,8 +264,8 @@ pub fn lowerContract(self: *const DeclarationLowerer, contract: *const lib.Contr
                     },
                 }
             },
-            .StructDecl, .EnumDecl => {
-                // structs/enums are lowered and registered in the second pass.
+            .StructDecl, .BitfieldDecl, .EnumDecl => {
+                // structs/bitfields/enums are lowered and registered in the second pass.
             },
             .LogDecl => |log_decl| {
                 // lower log declarations within contract

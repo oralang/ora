@@ -156,7 +156,16 @@ pub fn parseBuiltinFunction(parser: *ExpressionParser) ParserError!ast.Expressio
         std.mem.eql(u8, builtin_name, "divFloor") or
         std.mem.eql(u8, builtin_name, "divCeil") or
         std.mem.eql(u8, builtin_name, "divExact") or
-        std.mem.eql(u8, builtin_name, "divmod"))
+        std.mem.eql(u8, builtin_name, "divmod") or
+        std.mem.eql(u8, builtin_name, "addWithOverflow") or
+        std.mem.eql(u8, builtin_name, "subWithOverflow") or
+        std.mem.eql(u8, builtin_name, "mulWithOverflow") or
+        std.mem.eql(u8, builtin_name, "divWithOverflow") or
+        std.mem.eql(u8, builtin_name, "modWithOverflow") or
+        std.mem.eql(u8, builtin_name, "negWithOverflow") or
+        std.mem.eql(u8, builtin_name, "shlWithOverflow") or
+        std.mem.eql(u8, builtin_name, "shrWithOverflow") or
+        std.mem.eql(u8, builtin_name, "truncate"))
     {
         _ = try parser.base.consume(.LeftParen, "Expected '(' after builtin function name");
 

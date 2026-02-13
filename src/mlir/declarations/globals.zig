@@ -241,7 +241,39 @@ pub fn createGlobalDeclaration(self: *const DeclarationLowerer, var_decl: *const
     };
 
     // use the dialect helper function to create the global operation
-    return self.ora_dialect.createGlobal(var_decl.name, var_type, init_attr, helpers.createFileLocation(self, var_decl.span));
+    const global_op = self.ora_dialect.createGlobal(var_decl.name, var_type, init_attr, helpers.createFileLocation(self, var_decl.span));
+
+    // Attach bitfield layout metadata so later passes can reconstruct the field structure.
+    // The MLIR type is i256 (base word), but this attribute preserves the semantic layout.
+    if (var_decl.type_info.ora_type) |ora_type| {
+        switch (ora_type) {
+            .bitfield_type => |bf_name| {
+                c.oraOperationSetAttributeByName(global_op, h.strRef("ora.bitfield"), h.stringAttr(self.ctx, bf_name));
+                if (self.symbol_table) |st| {
+                    if (st.lookupType(bf_name)) |type_sym| {
+                        if (type_sym.fields) |fields| {
+                            // Encode layout as "field:offset:width:s/u;..." string
+                            var buf: [2048]u8 = undefined;
+                            var pos: usize = 0;
+                            for (fields) |field| {
+                                const off = field.offset orelse 0;
+                                const w = field.bit_width orelse 0;
+                                const sign: u8 = if (field.ora_type_info.ora_type) |ft| (if (ft.isSignedInteger()) @as(u8, 's') else 'u') else 'u';
+                                const written = std.fmt.bufPrint(buf[pos..], "{s}:{d}:{d}:{c};", .{ field.name, off, w, sign }) catch break;
+                                pos += written.len;
+                            }
+                            if (pos > 0) {
+                                c.oraOperationSetAttributeByName(global_op, h.strRef("ora.bitfield_layout"), h.stringAttr(self.ctx, buf[0..pos]));
+                            }
+                        }
+                    }
+                }
+            },
+            else => {},
+        }
+    }
+
+    return global_op;
 }
 
 /// Create memory global variable declaration

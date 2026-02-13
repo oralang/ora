@@ -218,6 +218,7 @@ pub const AstSerializer = struct {
             .Constant => |*constant| try declarations.serializeConstant(self, constant, writer, indent, depth),
             .VariableDecl => |*var_decl| try declarations.serializeVariableDecl(self, var_decl, writer, indent, depth),
             .StructDecl => |*struct_decl| try declarations.serializeStructDecl(self, struct_decl, writer, indent, depth),
+            .BitfieldDecl => |*bitfield_decl| try declarations.serializeBitfieldDecl(self, bitfield_decl, writer, indent, depth),
             .EnumDecl => |*enum_decl| try declarations.serializeEnumDecl(self, enum_decl, writer, indent, depth),
             .LogDecl => |*log_decl| try declarations.serializeLogDecl(self, log_decl, writer, indent, depth),
             .Import => |*import| try declarations.serializeImport(self, import, writer, indent, depth),

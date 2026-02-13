@@ -451,6 +451,39 @@ pub fn lowerFieldAccessAssignment(self: *const StatementLowerer, field_access: *
         }
     }
 
+    // Check if target is a bitfield → emit shift/mask bit manipulation instead of struct_field_update
+    if (self.symbol_table) |st| {
+        const target_type_info = expr_operators.extractTypeInfo(field_access.target);
+        if (target_type_info.ora_type) |ora_type| {
+            if (ora_type == .bitfield_type) {
+                if (st.lookupType(ora_type.bitfield_type)) |type_sym| {
+                    if (type_sym.type_kind == .Bitfield) {
+                        const expr_assign = @import("../expressions/assignments.zig");
+                        const updated = expr_assign.createBitfieldFieldUpdateImpl(self.expr_lowerer, target, field_access.field, value, type_sym, field_access.span);
+                        // store updated value back into the local variable
+                        if (field_access.target.* == .Identifier) {
+                            const ident = field_access.target.Identifier;
+                            if (self.local_var_map) |var_map| {
+                                if (var_map.getLocalVar(ident.name)) |var_value| {
+                                    const var_type = c.oraValueGetType(var_value);
+                                    if (c.oraTypeIsAMemRef(var_type)) {
+                                        const store_op = self.ora_dialect.createMemrefStore(updated, var_value, &[_]c.MlirValue{}, loc);
+                                        h.appendOp(self.block, store_op);
+                                    } else {
+                                        var_map.addLocalVar(ident.name, updated) catch {};
+                                    }
+                                } else {
+                                    var_map.addLocalVar(ident.name, updated) catch {};
+                                }
+                            }
+                        }
+                        return;
+                    }
+                }
+            }
+        }
+    }
+
     // use ora.struct_field_update (pure operation, works with !ora.struct types)
     // result type is automatically inferred from input struct type (SameOperandsAndResultType trait)
     const update_op = self.ora_dialect.createStructFieldUpdate(target, field_access.field, value, loc);

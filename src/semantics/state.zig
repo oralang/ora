@@ -25,6 +25,7 @@ pub const SymbolKind = enum {
     Contract,
     Function,
     Struct,
+    Bitfield,
     Enum,
     Log,
     Error,
@@ -121,6 +122,7 @@ pub const SymbolTable = struct {
     block_scopes: std.AutoHashMap(usize, *Scope),
     enum_variants: std.StringHashMap([][]const u8),
     struct_fields: std.StringHashMap([]const ast.StructField), // struct name → fields
+    bitfield_fields: std.StringHashMap([]const ast.BitfieldField), // bitfield name → fields
     builtin_registry: builtins.BuiltinRegistry, // Built-in stdlib functions/constants
 
     pub fn init(allocator: std.mem.Allocator) SymbolTable {
@@ -146,6 +148,7 @@ pub const SymbolTable = struct {
             .block_scopes = std.AutoHashMap(usize, *Scope).init(allocator),
             .enum_variants = std.StringHashMap([][]const u8).init(allocator),
             .struct_fields = std.StringHashMap([]const ast.StructField).init(allocator),
+            .bitfield_fields = std.StringHashMap([]const ast.BitfieldField).init(allocator),
             .builtin_registry = builtin_reg,
         };
     }
@@ -208,8 +211,9 @@ pub const SymbolTable = struct {
             self.allocator.free(slice_ptr.*);
         }
         self.enum_variants.deinit();
-        // note: struct_fields values are direct references to AST nodes, not owned copies
+        // note: struct_fields/bitfield_fields values are direct references to AST nodes, not owned copies
         self.struct_fields.deinit();
+        self.bitfield_fields.deinit();
         self.builtin_registry.deinit();
     }
 

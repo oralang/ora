@@ -138,6 +138,11 @@ pub const DeclarationParser = struct {
         return types.parseStruct(self, type_parser);
     }
 
+    /// Parse bitfield declaration
+    pub fn parseBitfield(self: *DeclarationParser, type_parser: *TypeParser) !ast.AstNode {
+        return types.parseBitfield(self, type_parser);
+    }
+
     /// Parse enum declaration with value assignments and base types
     pub fn parseEnum(
         self: *DeclarationParser,

@@ -1,0 +1,15 @@
+// ==========================================
+// SIGNED WIDTH WIDENING
+// ==========================================
+// Demonstrates widening conversions within signed integer families.
+contract SignedWidths {
+    pub fn widen_i8_to_i16(x: i8) -> i16 {
+        let y: i16 = x;
+        return y;
+    }
+
+    pub fn widen_i16_to_i32(x: i16) -> i32 {
+        let y: i32 = x;
+        return y;
+    }
+}

@@ -1,0 +1,5 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/signed/width_widening.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @widen_i8_to_i16
+// CHECK-LABEL: func.func @widen_i16_to_i32

@@ -25,6 +25,17 @@ pub const LValueMode = enum {
     Store,
 };
 
+fn createBitfieldFieldUpdate(
+    self: *const ExpressionLowerer,
+    word: c.MlirValue,
+    field_name: []const u8,
+    new_val: c.MlirValue,
+    type_sym: *const constants.TypeSymbol,
+    span: lib.ast.SourceSpan,
+) c.MlirValue {
+    return createBitfieldFieldUpdateImpl(self, word, field_name, new_val, type_sym, span);
+}
+
 /// Lower assignment expressions
 pub fn lowerAssignment(
     self: *const ExpressionLowerer,
@@ -155,6 +166,23 @@ pub fn lowerAssignment(
                         "cannot update field on address type - map load returned wrong type",
                         "check map value type and struct layout for field access",
                     );
+                }
+            }
+
+            // Check if target is a bitfield → emit clear+set bit manipulation
+            if (self.symbol_table) |st| {
+                const target_type_info = expr_operators.extractTypeInfo(field_access.target);
+                if (target_type_info.ora_type) |ora_type| {
+                    if (ora_type == .bitfield_type) {
+                        if (st.lookupType(ora_type.bitfield_type)) |type_sym| {
+                            if (type_sym.type_kind == .Bitfield) {
+                                const updated = createBitfieldFieldUpdate(self, target_value, field_name, value, type_sym, assign.span);
+                                // Store back to storage if target is a storage variable
+                                storeBitfieldBackToStorage(self, field_access.target, updated, assign.span);
+                                return updated;
+                            }
+                        }
+                    }
                 }
             }
 
@@ -411,6 +439,22 @@ pub fn storeLValue(
                 }
             }
 
+            // Check if target is a bitfield → emit clear+set bit manipulation
+            if (self.symbol_table) |st| {
+                const target_type_info = expr_operators.extractTypeInfo(field.target);
+                if (target_type_info.ora_type) |ora_type| {
+                    if (ora_type == .bitfield_type) {
+                        if (st.lookupType(ora_type.bitfield_type)) |type_sym| {
+                            if (type_sym.type_kind == .Bitfield) {
+                                const updated = createBitfieldFieldUpdate(self, target_val, field.field, value, type_sym, span);
+                                storeBitfieldBackToStorage(self, field.target, updated, span);
+                                return;
+                            }
+                        }
+                    }
+                }
+            }
+
             const update_op = self.ora_dialect.createStructFieldUpdate(target_val, field.field, value, self.fileLoc(span));
             h.appendOp(self.block, update_op);
             _ = h.getResult(update_op, 0);
@@ -439,5 +483,102 @@ pub fn storeLValue(
         else => {
             log.err("Invalid lvalue for assignment\n", .{});
         },
+    }
+}
+
+/// Bitfield field write: cleared = word & ~(mask << offset), updated = cleared | ((val & mask) << offset)
+pub fn createBitfieldFieldUpdateImpl(
+    self: *const ExpressionLowerer,
+    word: c.MlirValue,
+    field_name: []const u8,
+    new_val: c.MlirValue,
+    type_sym: *const constants.TypeSymbol,
+    span: lib.ast.SourceSpan,
+) c.MlirValue {
+    const loc = self.fileLoc(span);
+    const int_ty = c.oraIntegerTypeCreate(self.ctx, constants.DEFAULT_INTEGER_BITS);
+
+    if (type_sym.fields) |fields| {
+        for (fields) |field| {
+            if (!std.mem.eql(u8, field.name, field_name)) continue;
+
+            const offset: i64 = if (field.offset) |o| @intCast(o) else 0;
+            const width: u32 = field.bit_width orelse 256;
+            const mask: i64 = if (width >= 64) -1 else (@as(i64, 1) << @intCast(width)) - 1;
+
+            // mask_val = (1 << width) - 1
+            const mask_op = self.ora_dialect.createArithConstant(mask, int_ty, loc);
+            h.appendOp(self.block, mask_op);
+            const mask_val = h.getResult(mask_op, 0);
+
+            // offset_val = offset
+            const offset_op = self.ora_dialect.createArithConstant(offset, int_ty, loc);
+            h.appendOp(self.block, offset_op);
+            const offset_val = h.getResult(offset_op, 0);
+
+            // shifted_mask = mask << offset
+            const shl_mask_op = c.oraArithShlIOpCreate(self.ctx, loc, mask_val, offset_val);
+            h.appendOp(self.block, shl_mask_op);
+            const shifted_mask = h.getResult(shl_mask_op, 0);
+
+            // inv_mask = ~(mask << offset) = shifted_mask XOR -1
+            const all_ones_op = self.ora_dialect.createArithConstant(-1, int_ty, loc);
+            h.appendOp(self.block, all_ones_op);
+            const all_ones = h.getResult(all_ones_op, 0);
+
+            const inv_mask_op = c.oraArithXorIOpCreate(self.ctx, loc, shifted_mask, all_ones);
+            h.appendOp(self.block, inv_mask_op);
+            const inv_mask = h.getResult(inv_mask_op, 0);
+
+            // cleared = word & inv_mask
+            const cleared_op = c.oraArithAndIOpCreate(self.ctx, loc, word, inv_mask);
+            h.appendOp(self.block, cleared_op);
+            const cleared = h.getResult(cleared_op, 0);
+
+            // Widen new_val to i256 if it's a narrower integer (e.g. u8 field value)
+            var widened_val = new_val;
+            const val_type = c.oraValueGetType(new_val);
+            if (!c.oraTypeEqual(val_type, int_ty)) {
+                const ext_op = c.oraArithExtUIOpCreate(self.ctx, loc, new_val, int_ty);
+                h.appendOp(self.block, ext_op);
+                widened_val = h.getResult(ext_op, 0);
+            }
+
+            // masked_val = new_val & mask
+            const masked_val_op = c.oraArithAndIOpCreate(self.ctx, loc, widened_val, mask_val);
+            h.appendOp(self.block, masked_val_op);
+            const masked_val = h.getResult(masked_val_op, 0);
+
+            // shifted_val = masked_val << offset
+            const shl_val_op = c.oraArithShlIOpCreate(self.ctx, loc, masked_val, offset_val);
+            h.appendOp(self.block, shl_val_op);
+            const shifted_val = h.getResult(shl_val_op, 0);
+
+            // updated = cleared | shifted_val
+            const or_op = c.oraArithOrIOpCreate(self.ctx, loc, cleared, shifted_val);
+            h.appendOp(self.block, or_op);
+            return h.getResult(or_op, 0);
+        }
+    }
+
+    log.debug("ERROR: Bitfield field '{s}' not found in type '{s}'\n", .{ field_name, type_sym.name });
+    return self.createErrorPlaceholder(span, "bitfield field not found");
+}
+
+/// If the field access target is a storage-backed variable, emit SSTORE with the updated value.
+fn storeBitfieldBackToStorage(
+    self: *const ExpressionLowerer,
+    target_expr: *const lib.ast.Expressions.ExprNode,
+    updated_value: c.MlirValue,
+    span: lib.ast.SourceSpan,
+) void {
+    if (target_expr.* != .Identifier) return;
+    const ident = target_expr.Identifier;
+    if (self.storage_map) |sm| {
+        if (sm.hasStorageVariable(ident.name)) {
+            const memory_manager = @import("../memory.zig").MemoryManager.init(self.ctx, self.ora_dialect);
+            const store_op = memory_manager.createStorageStore(updated_value, ident.name, self.fileLoc(span));
+            h.appendOp(self.block, store_op);
+        }
     }
 }

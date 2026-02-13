@@ -137,7 +137,8 @@ pub fn areTypesCompatible(
     return true;
 }
 
-/// Check if base types are compatible (handles width subtyping)
+/// Check if base types are compatible (handles width subtyping).
+/// Signed and unsigned integers are NOT compatible with each other.
 pub fn isBaseTypeCompatible(source: OraType, target: OraType) bool {
     // direct match
     if (OraType.equals(source, target)) return true;
@@ -146,18 +147,19 @@ pub fn isBaseTypeCompatible(source: OraType, target: OraType) bool {
     const width_order = [_]OraType{ .u8, .u16, .u32, .u64, .u128, .u256 };
     const signed_width_order = [_]OraType{ .i8, .i16, .i32, .i64, .i128, .i256 };
 
-    const source_idx = getTypeIndex(source, &width_order) orelse
-        getTypeIndex(source, &signed_width_order);
-    const target_idx = getTypeIndex(target, &width_order) orelse
-        getTypeIndex(target, &signed_width_order);
+    // Check unsigned hierarchy
+    const source_u = getTypeIndex(source, &width_order);
+    const target_u = getTypeIndex(target, &width_order);
+    if (source_u != null and target_u != null)
+        return source_u.? <= target_u.?;
 
-    if (source_idx) |s_idx| {
-        if (target_idx) |t_idx| {
-            // same sign category, check if source is narrower than target
-            return s_idx <= t_idx;
-        }
-    }
+    // Check signed hierarchy
+    const source_s = getTypeIndex(source, &signed_width_order);
+    const target_s = getTypeIndex(target, &signed_width_order);
+    if (source_s != null and target_s != null)
+        return source_s.? <= target_s.?;
 
+    // Mixed signed/unsigned is incompatible
     return false;
 }
 
