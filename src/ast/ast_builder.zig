@@ -768,6 +768,10 @@ pub const ContractBuilder = struct {
         return self;
     }
 
+    // NOTE: Bitfield builder support may be needed in the future.
+    // If bitfield declarations need to be added to contracts programmatically,
+    // an addBitfield method similar to addStruct should be implemented here.
+
     /// Add an enum declaration to the contract with validation
     pub fn addEnum(self: *ContractBuilder, enum_decl: *ast.EnumDeclNode) !*ContractBuilder {
         // validate enum name uniqueness

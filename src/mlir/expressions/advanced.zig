@@ -895,6 +895,15 @@ pub fn lowerStructInstantiation(
         },
     };
 
+    // Check if this is a bitfield construction → emit shift/OR chain
+    if (self.symbol_table) |st| {
+        if (st.lookupType(struct_name_str)) |type_sym| {
+            if (type_sym.type_kind == .Bitfield) {
+                return lowerBitfieldConstruction(self, struct_inst, type_sym);
+            }
+        }
+    }
+
     const result_ty = self.type_mapper.mapStructType(struct_name_str);
 
     if (struct_inst.fields.len == 0) {
@@ -914,6 +923,58 @@ pub fn lowerStructInstantiation(
     const op = self.ora_dialect.createStructInstantiate(struct_name_str, field_values.items, result_ty, self.fileLoc(struct_inst.span));
     h.appendOp(self.block, op);
     return h.getResult(op, 0);
+}
+
+/// Lower bitfield construction: fold field values into a packed integer via OR/SHL.
+/// Result starts at 0 and each specified field is masked, shifted, and OR'd in.
+fn lowerBitfieldConstruction(
+    self: *const ExpressionLowerer,
+    struct_inst: *const lib.ast.Expressions.StructInstantiationExpr,
+    type_sym: *const constants.TypeSymbol,
+) c.MlirValue {
+    const loc = self.fileLoc(struct_inst.span);
+    const int_ty = c.oraIntegerTypeCreate(self.ctx, constants.DEFAULT_INTEGER_BITS);
+
+    // Start with zero
+    const zero_op = self.ora_dialect.createArithConstant(0, int_ty, loc);
+    h.appendOp(self.block, zero_op);
+    var word = h.getResult(zero_op, 0);
+
+    const fields_info = type_sym.fields orelse return word;
+
+    for (struct_inst.fields) |init_field| {
+        const field_val = self.lowerExpression(init_field.value);
+        const field_uw = expr_helpers.unwrapRefinementValue(self.ctx, self.block, self.locations, self.refinement_base_cache, field_val, init_field.span);
+
+        // Find matching field layout
+        for (fields_info) |info| {
+            if (!std.mem.eql(u8, info.name, init_field.name)) continue;
+
+            const offset: i64 = if (info.offset) |o| @intCast(o) else 0;
+            const width: u32 = info.bit_width orelse 256;
+            const mask: i64 = if (width >= 64) -1 else (@as(i64, 1) << @intCast(width)) - 1;
+
+            // masked = field_val & mask
+            const mask_op = self.ora_dialect.createArithConstant(mask, int_ty, loc);
+            h.appendOp(self.block, mask_op);
+            const masked = c.oraArithAndIOpCreate(self.ctx, loc, field_uw, h.getResult(mask_op, 0));
+            h.appendOp(self.block, masked);
+
+            // shifted = masked << offset
+            const off_op = self.ora_dialect.createArithConstant(offset, int_ty, loc);
+            h.appendOp(self.block, off_op);
+            const shifted = c.oraArithShlIOpCreate(self.ctx, loc, h.getResult(masked, 0), h.getResult(off_op, 0));
+            h.appendOp(self.block, shifted);
+
+            // word = word | shifted
+            const or_op = c.oraArithOrIOpCreate(self.ctx, loc, word, h.getResult(shifted, 0));
+            h.appendOp(self.block, or_op);
+            word = h.getResult(or_op, 0);
+            break;
+        }
+    }
+
+    return word;
 }
 
 /// Lower anonymous struct expressions
@@ -1093,10 +1154,21 @@ pub fn lowerEnumLiteral(
         }
     }
 
-    // Fallback: create default integer constant if enum not found
-    const op = self.ora_dialect.createArithConstant(enum_value, enum_ty, self.fileLoc(enum_lit.span));
-    h.appendOp(self.block, op);
-    return h.getResult(op, 0);
+    // Fallback: reinterpret as field access (e.g., f.mode on a bitfield/struct variable)
+    {
+        var ident_expr = lib.ast.Expressions.ExprNode{ .Identifier = lib.ast.Expressions.IdentifierExpr{
+            .name = enum_lit.enum_name,
+            .type_info = lib.ast.Types.TypeInfo.unknown(),
+            .span = enum_lit.span,
+        } };
+        var field_expr = lib.ast.Expressions.FieldAccessExpr{
+            .target = &ident_expr,
+            .field = enum_lit.variant_name,
+            .type_info = lib.ast.Types.TypeInfo.unknown(),
+            .span = enum_lit.span,
+        };
+        return @import("access.zig").lowerFieldAccess(self, &field_expr);
+    }
 }
 
 /// Lower array literal expressions
@@ -1373,6 +1445,7 @@ pub fn getTypeString(
             .slice => "slice",
             .map => "map",
             .struct_type => "struct",
+            .bitfield_type => "bitfield",
             .enum_type => "enum",
             .error_union => "error_union",
             .function => "function",

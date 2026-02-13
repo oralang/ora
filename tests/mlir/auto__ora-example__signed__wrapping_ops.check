@@ -1,0 +1,8 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/signed/wrapping_ops.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @add_wrap
+// CHECK-LABEL: func.func @sub_wrap
+// CHECK-LABEL: func.func @mul_wrap
+// CHECK-LABEL: func.func @shl_wrap
+// CHECK-LABEL: func.func @shr_wrap

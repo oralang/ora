@@ -126,6 +126,7 @@ pub const TypeSymbol = struct {
 
     pub const TypeKind = enum {
         Struct,
+        Bitfield,
         Enum,
         Contract,
         Alias,
@@ -135,7 +136,8 @@ pub const TypeSymbol = struct {
         name: []const u8,
         field_type: c.MlirType,
         ora_type_info: lib.ast.Types.TypeInfo,
-        offset: ?usize,
+        offset: ?usize, // byte offset for structs, bit offset for bitfields
+        bit_width: ?u32 = null, // bit width (bitfields only)
     };
 
     pub const VariantInfo = struct {
@@ -609,6 +611,7 @@ fn getNodeSpan(node: *const lib.AstNode) ?lib.ast.SourceSpan {
         .Function => |func| func.span,
         .VariableDecl => |var_decl| var_decl.span,
         .StructDecl => |struct_decl| struct_decl.span,
+        .BitfieldDecl => |bf_decl| bf_decl.span,
         .EnumDecl => |enum_decl| enum_decl.span,
         .LogDecl => |log_decl| log_decl.span,
         .Import => |import| import.span,
@@ -812,8 +815,8 @@ pub fn lowerFunctionsToModuleWithSemanticTable(ctx: c.MlirContext, nodes: []lib.
                         .Expression, .Statement => {
                             // expressions/statements are not lowered in this path
                         },
-                        .EnumDecl, .StructDecl => {
-                            // skip enum and struct declarations - already processed in semantic analysis
+                        .EnumDecl, .StructDecl, .BitfieldDecl => {
+                            // skip enum/struct/bitfield declarations - already processed
                         },
                         .ContractInvariant => {
                             // skip contract invariants - specification-only, don't generate code
@@ -836,8 +839,8 @@ pub fn lowerFunctionsToModuleWithSemanticTable(ctx: c.MlirContext, nodes: []lib.
             .Expression, .Statement => {
                 // top-level expressions/statements are not lowered in this path
             },
-            .EnumDecl, .StructDecl => {
-                // skip enum and struct declarations - already processed in semantic analysis
+            .EnumDecl, .StructDecl, .BitfieldDecl => {
+                // skip enum/struct/bitfield declarations - already processed
             },
             .ContractInvariant => {
                 // skip contract invariants - specification-only, don't generate code
@@ -1068,6 +1071,37 @@ pub fn lowerFunctionsToModuleWithErrors(ctx: c.MlirContext, nodes: []lib.AstNode
                             log.debug("ERROR: Failed to register struct type: {s}\n", .{struct_decl.name});
                         };
                     }
+                }
+            },
+            .BitfieldDecl => |bf_decl| {
+                // Register bitfield with field layout (offset + width)
+                if (symbol_table.lookupType(bf_decl.name) == null) {
+                    const bf_type = c.oraIntegerTypeCreate(ctx, DEFAULT_INTEGER_BITS);
+                    const fields_slice = allocator.alloc(TypeSymbol.FieldInfo, bf_decl.fields.len) catch {
+                        log.debug("ERROR: Failed to allocate fields for bitfield: {s}\n", .{bf_decl.name});
+                        continue;
+                    };
+                    for (bf_decl.fields, 0..) |field, i| {
+                        fields_slice[i] = .{
+                            .name = field.name,
+                            .field_type = decl_lowerer.type_mapper.toMlirType(field.type_info),
+                            .ora_type_info = field.type_info,
+                            .offset = if (field.offset) |o| @as(usize, o) else null,
+                            .bit_width = field.width,
+                        };
+                    }
+                    const type_symbol = TypeSymbol{
+                        .name = bf_decl.name,
+                        .type_kind = .Bitfield,
+                        .mlir_type = bf_type,
+                        .fields = fields_slice,
+                        .variants = null,
+                        .allocator = allocator,
+                    };
+                    symbol_table.addType(bf_decl.name, type_symbol) catch {
+                        allocator.free(fields_slice);
+                        log.debug("ERROR: Failed to register bitfield type: {s}\n", .{bf_decl.name});
+                    };
                 }
             },
             else => {
@@ -1325,6 +1359,9 @@ pub fn lowerFunctionsToModuleWithErrors(ctx: c.MlirContext, nodes: []lib.AstNode
                                 c.oraBlockAppendOwnedOperation(body, struct_op);
                             }
                         },
+                        .BitfieldDecl => {
+                            // bitfield is registered as type only, no MLIR op needed
+                        },
                         .EnumDecl => |enum_decl| {
                             const enum_op = decl_lowerer.lowerEnum(&enum_decl);
                             if (error_handler.validateMlirOperation(enum_op, enum_decl.span) catch false) {
@@ -1512,6 +1549,10 @@ pub fn lowerFunctionsToModuleWithErrors(ctx: c.MlirContext, nodes: []lib.AstNode
                     _ = struct_type;
                     _ = type_symbol;
                 }
+            },
+            .BitfieldDecl => |bf_decl| {
+                // already handled in the first pass; bitfield lowers to an integer type alias
+                _ = bf_decl;
             },
         }
     }

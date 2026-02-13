@@ -1,0 +1,22 @@
+// ==========================================
+// SIGNED COMPARISONS AND SHIFTS
+// ==========================================
+// Exercises signed comparisons plus arithmetic shifting.
+
+contract SignedCompareShift {
+    pub fn is_positive(x: i256) -> bool {
+        return x > 0;
+    }
+
+    pub fn is_non_positive(x: i256) -> bool {
+        return x <= 0;
+    }
+
+    pub fn arithmetic_shr(x: i256, bits: u8) -> i256 {
+        return x >> bits;
+    }
+
+    pub fn left_shift(x: i256, bits: u8) -> i256 {
+        return x << bits;
+    }
+}

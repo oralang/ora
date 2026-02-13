@@ -592,6 +592,15 @@ pub fn lowerFunction(self: *const DeclarationLowerer, func: *const lib.FunctionN
         if (!success) {
             log.warn("Failed to set ora.type attribute on parameter {s}\n", .{param.name});
         }
+        // Attach bitfield name so later passes know this i256 is a bitfield
+        if (param.type_info.ora_type) |ot| {
+            switch (ot) {
+                .bitfield_type => |bf_name| {
+                    _ = c.oraFuncSetArgAttr(func_op, @intCast(i), h.strRef("ora.bitfield"), h.stringAttr(self.ctx, bf_name));
+                },
+                else => {},
+            }
+        }
     }
 
     // set attribute on function return value (if present)

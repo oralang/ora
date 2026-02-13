@@ -309,6 +309,34 @@ pub const StatementLowerer = struct {
                 else => false,
             };
 
+            // Bitfield storage batching: detect consecutive field writes to the same
+            // storage-backed bitfield and emit a single SLOAD → N mutations → SSTORE.
+            if (self.storage_map != null and self.symbol_table != null) {
+                if (getBitfieldStorageTarget(s, self.storage_map.?, self.symbol_table.?)) |var_name| {
+                    var batch_end = stmt_idx + 1;
+                    while (batch_end < b.statements.len) {
+                        if (getBitfieldStorageTarget(&b.statements[batch_end], self.storage_map.?, self.symbol_table.?)) |next_var| {
+                            if (std.mem.eql(u8, var_name, next_var)) {
+                                // Break batch if RHS reads the same variable (would see stale storage)
+                                const next_assign = b.statements[batch_end].Expr.Assignment;
+                                if (!exprReferencesVar(next_assign.value, var_name)) {
+                                    batch_end += 1;
+                                    continue;
+                                }
+                            }
+                        }
+                        break;
+                    }
+                    if (batch_end > stmt_idx + 1) {
+                        // Batch: SLOAD once, apply all modifications, SSTORE once
+                        expr_lowerer.block = current_block;
+                        emitBatchedBitfieldWrites(&expr_lowerer, b.statements[stmt_idx..batch_end], var_name, self.storage_map.?, self.symbol_table.?);
+                        stmt_idx = batch_end - 1; // loop will increment
+                        continue;
+                    }
+                }
+            }
+
             // Check for pattern: if (with one branch returning) followed by return
             // Transform: if (c) { return x; } return y; -> if (c) { return x; } else { return y; }
             if (s.* == .If and stmt_idx + 1 < b.statements.len) {
@@ -460,3 +488,153 @@ pub const StatementLowerer = struct {
         return self.locations.createLocation(span);
     }
 };
+
+// ============================================================================
+// Bitfield Storage Batching Helpers
+// ============================================================================
+
+const expr_operators = @import("../expressions/operators.zig");
+
+/// Check if a statement is a bitfield field write to a storage variable.
+/// Returns the storage variable name if so, null otherwise.
+fn getBitfieldStorageTarget(
+    stmt: *const lib.ast.Statements.StmtNode,
+    sm: *const StorageMap,
+    st: *const SymbolTable,
+) ?[]const u8 {
+    if (stmt.* != .Expr) return null;
+    const expr = stmt.Expr;
+    if (expr != .Assignment) return null;
+    const assign = expr.Assignment;
+    if (assign.target.* != .FieldAccess) return null;
+    const fa = assign.target.FieldAccess;
+    if (fa.target.* != .Identifier) return null;
+    const ident = fa.target.Identifier;
+
+    if (!sm.hasStorageVariable(ident.name)) return null;
+
+    if (ident.type_info.ora_type) |ora_type| {
+        if (ora_type == .bitfield_type) {
+            if (st.lookupType(ora_type.bitfield_type)) |type_sym| {
+                if (type_sym.type_kind == .Bitfield) return ident.name;
+            }
+        }
+    }
+    return null;
+}
+
+/// Emit a batched sequence: SLOAD → N bitfield field updates → SSTORE.
+/// This avoids redundant SLOAD/SSTORE pairs for consecutive field writes.
+fn emitBatchedBitfieldWrites(
+    el: *const ExpressionLowerer,
+    stmts: []const lib.ast.Statements.StmtNode,
+    var_name: []const u8,
+    _: *const StorageMap,
+    st: *const SymbolTable,
+) void {
+    if (stmts.len == 0) return;
+
+    const first_span = getStmtSpan(stmts[0]);
+    const loc = el.locations.createLocation(first_span);
+    const int_ty = c.oraIntegerTypeCreate(el.ctx, @import("../lower.zig").DEFAULT_INTEGER_BITS);
+
+    // Single SLOAD
+    const mem_mgr = MemoryManager.init(el.ctx, el.ora_dialect);
+    const load_op = mem_mgr.createStorageLoadWithName(var_name, int_ty, loc, var_name);
+    h.appendOp(el.block, load_op);
+    var word = h.getResult(load_op, 0);
+
+    // Chain all field modifications on the same SSA word
+    for (stmts) |stmt| {
+        const assign = stmt.Expr.Assignment;
+        const fa = assign.target.FieldAccess;
+        word = applyBitfieldFieldPatch(el, word, fa.field, el.lowerExpression(assign.value), fa.target, int_ty, assign.span, st);
+    }
+
+    // Single SSTORE
+    const last_span = getStmtSpan(stmts[stmts.len - 1]);
+    const store_op = mem_mgr.createStorageStore(word, var_name, el.locations.createLocation(last_span));
+    h.appendOp(el.block, store_op);
+}
+
+/// Apply a single bitfield field clear+set patch to `word`, returning the updated word.
+fn applyBitfieldFieldPatch(
+    el: *const ExpressionLowerer,
+    word: c.MlirValue,
+    field_name: []const u8,
+    rhs: c.MlirValue,
+    target_expr: *const lib.ast.Expressions.ExprNode,
+    int_ty: c.MlirType,
+    span: lib.ast.SourceSpan,
+    st: *const SymbolTable,
+) c.MlirValue {
+    const target_type_info = expr_operators.extractTypeInfo(target_expr);
+    const ora_type = target_type_info.ora_type orelse return word;
+    if (ora_type != .bitfield_type) return word;
+    const type_sym = st.lookupType(ora_type.bitfield_type) orelse return word;
+    const fields = type_sym.fields orelse return word;
+
+    for (fields) |field| {
+        if (!std.mem.eql(u8, field.name, field_name)) continue;
+        const offset: i64 = if (field.offset) |o| @intCast(o) else 0;
+        const width: u32 = field.bit_width orelse 256;
+        const mask_i: i64 = if (width >= 64) -1 else (@as(i64, 1) << @intCast(width)) - 1;
+        const floc = el.locations.createLocation(span);
+
+        const mask_op = el.ora_dialect.createArithConstant(mask_i, int_ty, floc);
+        h.appendOp(el.block, mask_op);
+        const mask_val = h.getResult(mask_op, 0);
+        const off_op = el.ora_dialect.createArithConstant(offset, int_ty, floc);
+        h.appendOp(el.block, off_op);
+        const off_val = h.getResult(off_op, 0);
+
+        // cleared = word & ~(mask << offset)
+        const shl_m = c.oraArithShlIOpCreate(el.ctx, floc, mask_val, off_val);
+        h.appendOp(el.block, shl_m);
+        const all1 = el.ora_dialect.createArithConstant(-1, int_ty, floc);
+        h.appendOp(el.block, all1);
+        const inv = c.oraArithXorIOpCreate(el.ctx, floc, h.getResult(shl_m, 0), h.getResult(all1, 0));
+        h.appendOp(el.block, inv);
+        const cleared = c.oraArithAndIOpCreate(el.ctx, floc, word, h.getResult(inv, 0));
+        h.appendOp(el.block, cleared);
+
+        // shifted = (rhs & mask) << offset
+        const masked = c.oraArithAndIOpCreate(el.ctx, floc, rhs, mask_val);
+        h.appendOp(el.block, masked);
+        const shifted = c.oraArithShlIOpCreate(el.ctx, floc, h.getResult(masked, 0), off_val);
+        h.appendOp(el.block, shifted);
+
+        // word = cleared | shifted
+        const or_op = c.oraArithOrIOpCreate(el.ctx, floc, h.getResult(cleared, 0), h.getResult(shifted, 0));
+        h.appendOp(el.block, or_op);
+        return h.getResult(or_op, 0);
+    }
+    return word;
+}
+
+/// Conservatively check whether an expression tree references a given variable name.
+/// Used to break batches when the RHS reads from the same bitfield being written.
+fn exprReferencesVar(expr: *const lib.ast.Expressions.ExprNode, var_name: []const u8) bool {
+    return switch (expr.*) {
+        .Identifier => |id| std.mem.eql(u8, id.name, var_name),
+        .FieldAccess => |fa| exprReferencesVar(fa.target, var_name),
+        .Binary => |b| exprReferencesVar(b.lhs, var_name) or exprReferencesVar(b.rhs, var_name),
+        .Unary => |u| exprReferencesVar(u.operand, var_name),
+        .Call => |call| {
+            if (exprReferencesVar(call.callee, var_name)) return true;
+            for (call.arguments) |arg| {
+                if (exprReferencesVar(arg, var_name)) return true;
+            }
+            return false;
+        },
+        .Index => |idx| exprReferencesVar(idx.target, var_name) or exprReferencesVar(idx.index, var_name),
+        else => false,
+    };
+}
+
+fn getStmtSpan(stmt: lib.ast.Statements.StmtNode) lib.ast.SourceSpan {
+    if (stmt == .Expr) {
+        if (stmt.Expr == .Assignment) return stmt.Expr.Assignment.span;
+    }
+    return .{ .line = 0, .column = 0, .length = 0 };
+}

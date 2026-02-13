@@ -13,6 +13,7 @@ TopLevelDeclaration =
   | FunctionDeclaration
   | VariableDeclaration
   | StructDeclaration
+  | BitfieldDeclaration
   | EnumDeclaration
   | LogDeclaration
   | ImportDeclaration
@@ -38,6 +39,7 @@ ContractMember =
   | FunctionDeclaration
   | LogDeclaration
   | StructDeclaration
+  | BitfieldDeclaration
   | EnumDeclaration
   | ErrorDeclaration
   | GhostDeclaration
@@ -80,6 +82,18 @@ VariableKind = "var" | "let" | "const" | "immutable" ;
 StructDeclaration = "struct" Identifier "{" { StructMember } "}" ;
 
 StructMember = Identifier ":" Type ";" ;
+
+# ==========================================
+# BITFIELD DECLARATIONS
+# ==========================================
+
+BitfieldDeclaration = "bitfield" Identifier ":" Type "{" { BitfieldField } "}" ;
+
+BitfieldField = Identifier ":" Type [ BitfieldLayout ] ";" ;
+
+BitfieldLayout = "@at" "(" IntegerLiteral "," IntegerLiteral ")"
+               | "@bits" "(" IntegerLiteral ".." IntegerLiteral ")"
+               | "(" IntegerLiteral ")" ;
 
 # ==========================================
 # ENUM DECLARATIONS
@@ -244,9 +258,9 @@ BitwiseAndExpression = EqualityExpression   { "&"  EqualityExpression } ;
 
 EqualityExpression   = RelationalExpression { ( "==" | "!=" ) RelationalExpression } ;
 RelationalExpression = ShiftExpression      { ( "<" | "<=" | ">" | ">=" ) ShiftExpression } ;
-ShiftExpression      = AdditiveExpression   { ( "<<" | ">>" ) AdditiveExpression } ;
-AdditiveExpression   = MultiplicativeExpression { ( "+" | "-" ) MultiplicativeExpression } ;
-MultiplicativeExpression = UnaryExpression { ( "*" | "/" | "%" ) UnaryExpression } ;
+ShiftExpression      = AdditiveExpression   { ( "<<" | ">>" | "<<%" | ">>%" ) AdditiveExpression } ;
+AdditiveExpression   = MultiplicativeExpression { ( "+" | "-" | "+%" | "-%" ) MultiplicativeExpression } ;
+MultiplicativeExpression = UnaryExpression { ( "*" | "/" | "%" | "*%" ) UnaryExpression } ;
 
 UnaryExpression   = { ( "!" | "-" | "+" ) } PostfixExpression ;
 PostfixExpression = PrimaryExpression { PostfixOperator } ;

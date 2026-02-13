@@ -38,6 +38,11 @@ pub fn collectContractSymbols(table: *state.SymbolTable, root: *state.Scope, c: 
             // store struct fields for type resolution
             try table.struct_fields.put(s.name, s.fields);
         },
+        .BitfieldDecl => |bf| {
+            const sym = state.Symbol{ .name = bf.name, .kind = .Bitfield, .span = bf.span };
+            _ = try table.declare(contract_scope, sym);
+            try table.bitfield_fields.put(bf.name, bf.fields);
+        },
         .EnumDecl => |e| {
             const sym = state.Symbol{ .name = e.name, .kind = .Enum, .span = e.span };
             _ = try table.declare(contract_scope, sym);
