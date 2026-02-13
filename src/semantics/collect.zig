@@ -62,6 +62,11 @@ pub fn collectSymbols(allocator: std.mem.Allocator, nodes: []const ast.AstNode) 
             // store struct fields for type resolution
             try table.struct_fields.put(s.name, s.fields);
         },
+        .BitfieldDecl => |bf| {
+            const sym = state.Symbol{ .name = bf.name, .kind = .Bitfield, .span = bf.span };
+            if (try table.declare(table.root, sym)) |_| try diags.append(allocator, bf.span);
+            try table.bitfield_fields.put(bf.name, bf.fields);
+        },
         .EnumDecl => |e| {
             const sym = state.Symbol{ .name = e.name, .kind = .Enum, .span = e.span };
             if (try table.declare(table.root, sym)) |_| try diags.append(allocator, e.span);

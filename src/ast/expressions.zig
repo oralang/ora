@@ -24,6 +24,13 @@ pub const BinaryOp = enum {
     Percent,
     StarStar, // **
 
+    // wrapping arithmetic (modular, no overflow check)
+    WrappingAdd, // +%
+    WrappingSub, // -%
+    WrappingMul, // *%
+    WrappingShl, // <<%
+    WrappingShr, // >>%
+
     // comparison
     EqualEqual,
     BangEqual,

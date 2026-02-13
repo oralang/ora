@@ -1,0 +1,5 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/bitfields/contract_scoped_bitfields.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @update_permissions
+// CHECK-LABEL: func.func @sync_risk

@@ -60,12 +60,39 @@ pub fn lowerBinary(
     }
 
     return switch (bin.operator) {
-        .Plus => self.createArithmeticOp("arith.addi", lhs_converted, rhs_converted, result_ty, bin.span),
-        .Minus => self.createArithmeticOp("arith.subi", lhs_converted, rhs_converted, result_ty, bin.span),
-        .Star => self.createArithmeticOp("arith.muli", lhs_converted, rhs_converted, result_ty, bin.span),
-        .Slash => self.createArithmeticOp(div_op_name, lhs_converted, rhs_converted, result_ty, bin.span),
-        .Percent => self.createArithmeticOp(rem_op_name, lhs_converted, rhs_converted, result_ty, bin.span),
+        // Checked arithmetic: compute result then assert no overflow
+        .Plus => blk: {
+            const result = self.createArithmeticOp("arith.addi", lhs_converted, rhs_converted, result_ty, bin.span);
+            insertAddOverflowCheck(self, result, lhs_converted, rhs_converted, uses_signed_integer_semantics, bin.span);
+            break :blk result;
+        },
+        .Minus => blk: {
+            const result = self.createArithmeticOp("arith.subi", lhs_converted, rhs_converted, result_ty, bin.span);
+            insertSubOverflowCheck(self, result, lhs_converted, rhs_converted, uses_signed_integer_semantics, bin.span);
+            break :blk result;
+        },
+        .Star => blk: {
+            const result = self.createArithmeticOp("arith.muli", lhs_converted, rhs_converted, result_ty, bin.span);
+            insertMulOverflowCheck(self, result, lhs_converted, rhs_converted, uses_signed_integer_semantics, bin.span);
+            break :blk result;
+        },
+        .Slash => blk: {
+            const result = self.createArithmeticOp(div_op_name, lhs_converted, rhs_converted, result_ty, bin.span);
+            insertDivChecks(self, lhs_converted, rhs_converted, uses_signed_integer_semantics, bin.span);
+            break :blk result;
+        },
+        .Percent => blk: {
+            const result = self.createArithmeticOp(rem_op_name, lhs_converted, rhs_converted, result_ty, bin.span);
+            insertDivChecks(self, lhs_converted, rhs_converted, uses_signed_integer_semantics, bin.span);
+            break :blk result;
+        },
         .StarStar => lowerPowerOp(self, lhs_converted, rhs_converted, result_ty, bin.span),
+        // Wrapping operators lower to raw modular arithmetic (no overflow trap)
+        .WrappingAdd => self.createArithmeticOp("arith.addi", lhs_converted, rhs_converted, result_ty, bin.span),
+        .WrappingSub => self.createArithmeticOp("arith.subi", lhs_converted, rhs_converted, result_ty, bin.span),
+        .WrappingMul => self.createArithmeticOp("arith.muli", lhs_converted, rhs_converted, result_ty, bin.span),
+        .WrappingShl => self.createArithmeticOp("arith.shli", lhs_converted, rhs_converted, result_ty, bin.span),
+        .WrappingShr => self.createArithmeticOp(shr_op_name, lhs_converted, rhs_converted, result_ty, bin.span),
         .EqualEqual => self.createComparisonOp("eq", lhs_converted, rhs_converted, bin.span),
         .BangEqual => self.createComparisonOp("ne", lhs_converted, rhs_converted, bin.span),
         .Less => self.createComparisonOp(lt_predicate, lhs_converted, rhs_converted, bin.span),
@@ -77,8 +104,16 @@ pub fn lowerBinary(
         .BitwiseAnd => self.createArithmeticOp("arith.andi", lhs_converted, rhs_converted, result_ty, bin.span),
         .BitwiseOr => self.createArithmeticOp("arith.ori", lhs_converted, rhs_converted, result_ty, bin.span),
         .BitwiseXor => self.createArithmeticOp("arith.xori", lhs_converted, rhs_converted, result_ty, bin.span),
-        .LeftShift => self.createArithmeticOp("arith.shli", lhs_converted, rhs_converted, result_ty, bin.span),
-        .RightShift => self.createArithmeticOp(shr_op_name, lhs_converted, rhs_converted, result_ty, bin.span),
+        .LeftShift => blk: {
+            const result = self.createArithmeticOp("arith.shli", lhs_converted, rhs_converted, result_ty, bin.span);
+            insertShiftBoundsCheck(self, rhs_converted, bin.span);
+            break :blk result;
+        },
+        .RightShift => blk: {
+            const result = self.createArithmeticOp(shr_op_name, lhs_converted, rhs_converted, result_ty, bin.span);
+            insertShiftBoundsCheck(self, rhs_converted, bin.span);
+            break :blk result;
+        },
         .Comma => lowerCommaOp(self, lhs_converted, rhs_converted, result_ty, bin.span),
     };
 }
@@ -257,7 +292,10 @@ fn lowerUnaryMinus(
     span: lib.ast.SourceSpan,
 ) c.MlirValue {
     const zero_val = self.createTypedConstant(0, operand_ty, span);
-    return self.createArithmeticOp("arith.subi", zero_val, operand, operand_ty, span);
+    const result = self.createArithmeticOp("arith.subi", zero_val, operand, operand_ty, span);
+    // Guard: -INT_MIN overflows for signed types (MIN_INT = 1 << 255)
+    insertNegateOverflowCheck(self, operand, span);
+    return result;
 }
 
 fn lowerBitwiseNot(
@@ -386,4 +424,265 @@ pub fn insertExactDivisionGuard(
         null,
         std.heap.page_allocator,
     );
+}
+
+// ============================================================================
+// Checked Arithmetic Overflow Guards
+// ============================================================================
+// For checked (default) operators, emit overflow detection + assert.
+// Unsigned addition overflow:  result < a
+// Unsigned subtraction overflow: a < b
+// Unsigned mul overflow: b != 0 && result / b != a
+// Signed variants use signed comparison predicates.
+
+/// Emit assert(!overflow) for checked addition.
+/// Unsigned: overflow iff result < a.
+/// Signed: overflow iff (b > 0 && result < a) || (b < 0 && result > a).
+fn insertAddOverflowCheck(
+    self: *const ExpressionLowerer,
+    result: c.MlirValue,
+    lhs: c.MlirValue,
+    rhs: c.MlirValue,
+    is_signed: bool,
+    span: lib.ast.SourceSpan,
+) void {
+    const loc = self.fileLoc(span);
+    const result_uw = expr_helpers.unwrapRefinementValue(self.ctx, self.block, self.locations, self.refinement_base_cache, result, span);
+    const lhs_uw = expr_helpers.unwrapRefinementValue(self.ctx, self.block, self.locations, self.refinement_base_cache, lhs, span);
+    if (!is_signed) {
+        // Unsigned: overflow iff result < a (ult)
+        const cmp = c.oraArithCmpIOpCreate(self.ctx, loc, expr_helpers.predicateStringToInt("ult"), result_uw, lhs_uw);
+        h.appendOp(self.block, cmp);
+        emitOverflowAssert(self, h.getResult(cmp, 0), "checked addition overflow", span);
+    } else {
+        // Signed: overflow iff ((result ^ a) & (result ^ b)) < 0 (sign bit set)
+        const rhs_uw = expr_helpers.unwrapRefinementValue(self.ctx, self.block, self.locations, self.refinement_base_cache, rhs, span);
+        const xor_ra = c.oraArithXorIOpCreate(self.ctx, loc, result_uw, lhs_uw);
+        h.appendOp(self.block, xor_ra);
+        const xor_rb = c.oraArithXorIOpCreate(self.ctx, loc, result_uw, rhs_uw);
+        h.appendOp(self.block, xor_rb);
+        const and_op = c.oraArithAndIOpCreate(self.ctx, loc, h.getResult(xor_ra, 0), h.getResult(xor_rb, 0));
+        h.appendOp(self.block, and_op);
+        const zero_op = self.ora_dialect.createArithConstant(0, c.oraValueGetType(result_uw), loc);
+        h.appendOp(self.block, zero_op);
+        const cmp = c.oraArithCmpIOpCreate(self.ctx, loc, expr_helpers.predicateStringToInt("slt"), h.getResult(and_op, 0), h.getResult(zero_op, 0));
+        h.appendOp(self.block, cmp);
+        emitOverflowAssert(self, h.getResult(cmp, 0), "checked signed addition overflow", span);
+    }
+}
+
+/// Emit assert(!overflow) for checked subtraction.
+/// Unsigned: overflow iff a < b.
+fn insertSubOverflowCheck(
+    self: *const ExpressionLowerer,
+    result: c.MlirValue,
+    lhs: c.MlirValue,
+    rhs: c.MlirValue,
+    is_signed: bool,
+    span: lib.ast.SourceSpan,
+) void {
+    const loc = self.fileLoc(span);
+    const lhs_uw = expr_helpers.unwrapRefinementValue(self.ctx, self.block, self.locations, self.refinement_base_cache, lhs, span);
+    const rhs_uw = expr_helpers.unwrapRefinementValue(self.ctx, self.block, self.locations, self.refinement_base_cache, rhs, span);
+    if (!is_signed) {
+        // Unsigned: overflow iff a < b (ult)
+        const cmp = c.oraArithCmpIOpCreate(self.ctx, loc, expr_helpers.predicateStringToInt("ult"), lhs_uw, rhs_uw);
+        h.appendOp(self.block, cmp);
+        emitOverflowAssert(self, h.getResult(cmp, 0), "checked subtraction overflow", span);
+    } else {
+        // Signed: overflow iff ((a ^ b) & (result ^ a)) < 0 (sign bit set)
+        const result_uw = expr_helpers.unwrapRefinementValue(self.ctx, self.block, self.locations, self.refinement_base_cache, result, span);
+        const xor_ab = c.oraArithXorIOpCreate(self.ctx, loc, lhs_uw, rhs_uw);
+        h.appendOp(self.block, xor_ab);
+        const xor_ra = c.oraArithXorIOpCreate(self.ctx, loc, result_uw, lhs_uw);
+        h.appendOp(self.block, xor_ra);
+        const and_op = c.oraArithAndIOpCreate(self.ctx, loc, h.getResult(xor_ab, 0), h.getResult(xor_ra, 0));
+        h.appendOp(self.block, and_op);
+        const zero_op = self.ora_dialect.createArithConstant(0, c.oraValueGetType(result_uw), loc);
+        h.appendOp(self.block, zero_op);
+        const cmp = c.oraArithCmpIOpCreate(self.ctx, loc, expr_helpers.predicateStringToInt("slt"), h.getResult(and_op, 0), h.getResult(zero_op, 0));
+        h.appendOp(self.block, cmp);
+        emitOverflowAssert(self, h.getResult(cmp, 0), "checked signed subtraction overflow", span);
+    }
+}
+
+/// Emit assert(!overflow) for checked multiplication.
+/// Unsigned: overflow iff (b != 0 && result / b != a).
+fn insertMulOverflowCheck(
+    self: *const ExpressionLowerer,
+    result: c.MlirValue,
+    lhs: c.MlirValue,
+    rhs: c.MlirValue,
+    is_signed: bool,
+    span: lib.ast.SourceSpan,
+) void {
+    const loc = self.fileLoc(span);
+    const result_uw = expr_helpers.unwrapRefinementValue(self.ctx, self.block, self.locations, self.refinement_base_cache, result, span);
+    const lhs_uw = expr_helpers.unwrapRefinementValue(self.ctx, self.block, self.locations, self.refinement_base_cache, lhs, span);
+    const rhs_uw = expr_helpers.unwrapRefinementValue(self.ctx, self.block, self.locations, self.refinement_base_cache, rhs, span);
+    const val_ty = c.oraValueGetType(rhs_uw);
+    const pred_eq = expr_helpers.predicateStringToInt("eq");
+    const pred_ne = expr_helpers.predicateStringToInt("ne");
+
+    const zero_op = self.ora_dialect.createArithConstant(0, val_ty, loc);
+    h.appendOp(self.block, zero_op);
+    const zero = h.getResult(zero_op, 0);
+
+    // b_nonzero = b != 0
+    const b_nz_cmp = c.oraArithCmpIOpCreate(self.ctx, loc, pred_ne, rhs_uw, zero);
+    h.appendOp(self.block, b_nz_cmp);
+    const b_nonzero = h.getResult(b_nz_cmp, 0);
+
+    if (!is_signed) {
+        // Unsigned: overflow iff b != 0 && result / b != a
+        const quot_op = c.oraArithDivUIOpCreate(self.ctx, loc, result_uw, rhs_uw);
+        h.appendOp(self.block, quot_op);
+        const mismatch_cmp = c.oraArithCmpIOpCreate(self.ctx, loc, pred_ne, h.getResult(quot_op, 0), lhs_uw);
+        h.appendOp(self.block, mismatch_cmp);
+        const and_op = c.oraArithAndIOpCreate(self.ctx, loc, h.getResult(mismatch_cmp, 0), b_nonzero);
+        h.appendOp(self.block, and_op);
+        emitOverflowAssert(self, h.getResult(and_op, 0), "checked multiplication overflow", span);
+    } else {
+        // Signed: special case a == MIN_INT && b == -1 (sdiv(MIN,-1) = MIN, masking the bug)
+        // MIN_INT = 1 << 255
+        const one_op = self.ora_dialect.createArithConstant(1, val_ty, loc);
+        h.appendOp(self.block, one_op);
+        const shift_op = self.ora_dialect.createArithConstant(255, val_ty, loc);
+        h.appendOp(self.block, shift_op);
+        const min_int_op = c.oraArithShlIOpCreate(self.ctx, loc, h.getResult(one_op, 0), h.getResult(shift_op, 0));
+        h.appendOp(self.block, min_int_op);
+        const min_int = h.getResult(min_int_op, 0);
+
+        const neg1_op = self.ora_dialect.createArithConstant(-1, val_ty, loc);
+        h.appendOp(self.block, neg1_op);
+        const neg1 = h.getResult(neg1_op, 0);
+
+        // special = (a == MIN_INT) && (b == -1)
+        const a_min_cmp = c.oraArithCmpIOpCreate(self.ctx, loc, pred_eq, lhs_uw, min_int);
+        h.appendOp(self.block, a_min_cmp);
+        const b_neg1_cmp = c.oraArithCmpIOpCreate(self.ctx, loc, pred_eq, rhs_uw, neg1);
+        h.appendOp(self.block, b_neg1_cmp);
+        const special = c.oraArithAndIOpCreate(self.ctx, loc, h.getResult(a_min_cmp, 0), h.getResult(b_neg1_cmp, 0));
+        h.appendOp(self.block, special);
+
+        // general = b != 0 && sdiv(result, b) != a
+        const quot_op = c.oraArithDivSIOpCreate(self.ctx, loc, result_uw, rhs_uw);
+        h.appendOp(self.block, quot_op);
+        const mismatch_cmp = c.oraArithCmpIOpCreate(self.ctx, loc, pred_ne, h.getResult(quot_op, 0), lhs_uw);
+        h.appendOp(self.block, mismatch_cmp);
+        const general = c.oraArithAndIOpCreate(self.ctx, loc, h.getResult(mismatch_cmp, 0), b_nonzero);
+        h.appendOp(self.block, general);
+
+        // overflow = special || general
+        const or_op = c.oraArithOrIOpCreate(self.ctx, loc, h.getResult(special, 0), h.getResult(general, 0));
+        h.appendOp(self.block, or_op);
+        emitOverflowAssert(self, h.getResult(or_op, 0), "checked signed multiplication overflow", span);
+    }
+}
+
+/// Emit div-by-zero and signed-division-overflow guards for / and %.
+/// - Always: assert(divisor != 0)
+/// - Signed: assert(!(dividend == MIN_INT && divisor == -1))
+fn insertDivChecks(
+    self: *const ExpressionLowerer,
+    lhs: c.MlirValue,
+    rhs: c.MlirValue,
+    is_signed: bool,
+    span: lib.ast.SourceSpan,
+) void {
+    const loc = self.fileLoc(span);
+    const rhs_uw = expr_helpers.unwrapRefinementValue(self.ctx, self.block, self.locations, self.refinement_base_cache, rhs, span);
+    const val_ty = c.oraValueGetType(rhs_uw);
+
+    // assert(divisor != 0)
+    const zero_op = self.ora_dialect.createArithConstant(0, val_ty, loc);
+    h.appendOp(self.block, zero_op);
+    const ne_cmp = c.oraArithCmpIOpCreate(self.ctx, loc, expr_helpers.predicateStringToInt("ne"), rhs_uw, h.getResult(zero_op, 0));
+    h.appendOp(self.block, ne_cmp);
+    const assert_nz = self.ora_dialect.createAssert(h.getResult(ne_cmp, 0), loc, "division by zero");
+    h.appendOp(self.block, assert_nz);
+
+    if (is_signed) {
+        // assert(!(a == MIN_INT && b == -1))
+        const lhs_uw = expr_helpers.unwrapRefinementValue(self.ctx, self.block, self.locations, self.refinement_base_cache, lhs, span);
+        const one_op = self.ora_dialect.createArithConstant(1, val_ty, loc);
+        h.appendOp(self.block, one_op);
+        const shift_op = self.ora_dialect.createArithConstant(255, val_ty, loc);
+        h.appendOp(self.block, shift_op);
+        const min_int_op = c.oraArithShlIOpCreate(self.ctx, loc, h.getResult(one_op, 0), h.getResult(shift_op, 0));
+        h.appendOp(self.block, min_int_op);
+        const neg1_op = self.ora_dialect.createArithConstant(-1, val_ty, loc);
+        h.appendOp(self.block, neg1_op);
+
+        const a_min = c.oraArithCmpIOpCreate(self.ctx, loc, expr_helpers.predicateStringToInt("eq"), lhs_uw, h.getResult(min_int_op, 0));
+        h.appendOp(self.block, a_min);
+        const b_neg1 = c.oraArithCmpIOpCreate(self.ctx, loc, expr_helpers.predicateStringToInt("eq"), rhs_uw, h.getResult(neg1_op, 0));
+        h.appendOp(self.block, b_neg1);
+        const both = c.oraArithAndIOpCreate(self.ctx, loc, h.getResult(a_min, 0), h.getResult(b_neg1, 0));
+        h.appendOp(self.block, both);
+        emitOverflowAssert(self, h.getResult(both, 0), "signed division overflow (MIN_INT / -1)", span);
+    }
+}
+
+/// Emit overflow guard for unary negation: -MIN_INT overflows.
+fn insertNegateOverflowCheck(
+    self: *const ExpressionLowerer,
+    operand: c.MlirValue,
+    span: lib.ast.SourceSpan,
+) void {
+    const loc = self.fileLoc(span);
+    const operand_uw = expr_helpers.unwrapRefinementValue(self.ctx, self.block, self.locations, self.refinement_base_cache, operand, span);
+    const val_ty = c.oraValueGetType(operand_uw);
+
+    // MIN_INT = 1 << 255
+    const one_op = self.ora_dialect.createArithConstant(1, val_ty, loc);
+    h.appendOp(self.block, one_op);
+    const shift_op = self.ora_dialect.createArithConstant(255, val_ty, loc);
+    h.appendOp(self.block, shift_op);
+    const min_int_op = c.oraArithShlIOpCreate(self.ctx, loc, h.getResult(one_op, 0), h.getResult(shift_op, 0));
+    h.appendOp(self.block, min_int_op);
+
+    // assert(operand != MIN_INT)
+    const ne_cmp = c.oraArithCmpIOpCreate(self.ctx, loc, expr_helpers.predicateStringToInt("ne"), operand_uw, h.getResult(min_int_op, 0));
+    h.appendOp(self.block, ne_cmp);
+    const assert_op = self.ora_dialect.createAssert(h.getResult(ne_cmp, 0), loc, "signed negation overflow (negating MIN_INT)");
+    h.appendOp(self.block, assert_op);
+}
+
+/// Emit assert(shift_amount < 256) for checked shifts.
+fn insertShiftBoundsCheck(
+    self: *const ExpressionLowerer,
+    shift_amt: c.MlirValue,
+    span: lib.ast.SourceSpan,
+) void {
+    const loc = self.fileLoc(span);
+    const amt_uw = expr_helpers.unwrapRefinementValue(self.ctx, self.block, self.locations, self.refinement_base_cache, shift_amt, span);
+    const val_ty = c.oraValueGetType(amt_uw);
+    const limit_op = self.ora_dialect.createArithConstant(256, val_ty, loc);
+    h.appendOp(self.block, limit_op);
+    const cmp = c.oraArithCmpIOpCreate(self.ctx, loc, expr_helpers.predicateStringToInt("ult"), amt_uw, h.getResult(limit_op, 0));
+    h.appendOp(self.block, cmp);
+    const assert_op = self.ora_dialect.createAssert(h.getResult(cmp, 0), loc, "shift amount exceeds bit width");
+    h.appendOp(self.block, assert_op);
+}
+
+/// Emit an ora.assert(!flag) for overflow. The flag is true when overflow occurred.
+fn emitOverflowAssert(
+    self: *const ExpressionLowerer,
+    overflow_flag: c.MlirValue,
+    message: []const u8,
+    span: lib.ast.SourceSpan,
+) void {
+    const loc = self.fileLoc(span);
+    // Invert: condition for assert is "no overflow"
+    const true_op = self.ora_dialect.createArithConstantBool(true, loc);
+    h.appendOp(self.block, true_op);
+    const true_val = h.getResult(true_op, 0);
+
+    const not_op = c.oraArithXorIOpCreate(self.ctx, loc, overflow_flag, true_val);
+    h.appendOp(self.block, not_op);
+    const no_overflow = h.getResult(not_op, 0);
+
+    const assert_op = self.ora_dialect.createAssert(no_overflow, loc, message);
+    h.appendOp(self.block, assert_op);
 }

@@ -7,7 +7,7 @@ description: "Spec for Ora's bitfield type: packed word layout with sub-byte fie
 # Spec: `bitfield` Type (Packed Word Layout)
 
 **Author:** Axe
-**Status:** Proposal
+**Status:** Implemented
 **Target:** Ora Language (EVM)
 **Goal:** Provide a safe, explicit, zero/low-overhead way to pack flags and small integers into a single word with predictable lowering and strong static checks.
 

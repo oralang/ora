@@ -143,18 +143,18 @@ fn resolveVariableDecl(
     var_decl: *ast.Statements.VariableDeclNode,
     _: TypeContext,
 ) TypeResolutionError!Typed {
-    // fix custom type names: if parser assumed struct_type but it's actually enum_type
+    // fix custom type names: if parser assumed struct_type but it's actually enum_type or bitfield_type
     if (var_decl.type_info.ora_type) |ot| {
         if (ot == .struct_type) {
             const type_name = ot.struct_type;
-            // look up symbol to see if it's actually an enum
-            // search from root scope to find type declarations
             const symbol = SymbolTable.findUp(@as(?*const Scope, @ptrCast(self.symbol_table.root)), type_name);
             if (symbol) |sym| {
                 if (sym.kind == .Enum) {
-                    // fix: change struct_type to enum_type
                     var_decl.type_info.ora_type = OraType{ .enum_type = type_name };
                     var_decl.type_info.category = .Enum;
+                } else if (sym.kind == .Bitfield) {
+                    var_decl.type_info.ora_type = OraType{ .bitfield_type = type_name };
+                    var_decl.type_info.category = .Bitfield;
                 }
             }
         }

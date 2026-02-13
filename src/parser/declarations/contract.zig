@@ -225,6 +225,11 @@ pub fn parseContractMember(
         return parser.parseStruct(type_parser);
     }
 
+    // bitfield declarations (contract-scoped bitfields)
+    if (parser.base.match(.Bitfield)) {
+        return parser.parseBitfield(type_parser);
+    }
+
     // enum declarations (contract-scoped enums)
     if (parser.base.match(.Enum)) {
         return parser.parseEnum(type_parser, expr_parser);

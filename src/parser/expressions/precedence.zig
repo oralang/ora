@@ -304,13 +304,17 @@ pub fn parseComparison(parser: *ExpressionParser) ParserError!ast.Expressions.Ex
 pub fn parseBitwiseShift(parser: *ExpressionParser) ParserError!ast.Expressions.ExprNode {
     var expr = try parseTerm(parser);
 
-    while (parser.base.match(.LessLess) or parser.base.match(.GreaterGreater)) {
+    while (parser.base.match(.LessLess) or parser.base.match(.GreaterGreater) or
+        parser.base.match(.LessLessPercent) or parser.base.match(.GreaterGreaterPercent))
+    {
         const op_token = parser.base.previous();
         const right = try parseTerm(parser);
 
         const operator: ast.Operators.Binary = switch (op_token.type) {
             .LessLess => .LeftShift,
             .GreaterGreater => .RightShift,
+            .LessLessPercent => .WrappingShl,
+            .GreaterGreaterPercent => .WrappingShr,
             else => unreachable,
         };
 
@@ -337,13 +341,17 @@ pub fn parseBitwiseShift(parser: *ExpressionParser) ParserError!ast.Expressions.
 pub fn parseTerm(parser: *ExpressionParser) ParserError!ast.Expressions.ExprNode {
     var expr = try parseFactor(parser);
 
-    while (parser.base.match(.Plus) or parser.base.match(.Minus)) {
+    while (parser.base.match(.Plus) or parser.base.match(.Minus) or
+        parser.base.match(.PlusPercent) or parser.base.match(.MinusPercent))
+    {
         const op_token = parser.base.previous();
         const right = try parseFactor(parser);
 
         const operator: ast.Operators.Binary = switch (op_token.type) {
             .Plus => .Plus,
             .Minus => .Minus,
+            .PlusPercent => .WrappingAdd,
+            .MinusPercent => .WrappingSub,
             else => unreachable,
         };
 
@@ -370,7 +378,9 @@ pub fn parseTerm(parser: *ExpressionParser) ParserError!ast.Expressions.ExprNode
 pub fn parseFactor(parser: *ExpressionParser) ParserError!ast.Expressions.ExprNode {
     var expr = try parseExponent(parser);
 
-    while (parser.base.match(.Star) or parser.base.match(.Slash) or parser.base.match(.Percent)) {
+    while (parser.base.match(.Star) or parser.base.match(.Slash) or parser.base.match(.Percent) or
+        parser.base.match(.StarPercent))
+    {
         const op_token = parser.base.previous();
         const right = try parseExponent(parser);
 
@@ -378,6 +388,7 @@ pub fn parseFactor(parser: *ExpressionParser) ParserError!ast.Expressions.ExprNo
             .Star => .Star,
             .Slash => .Slash,
             .Percent => .Percent,
+            .StarPercent => .WrappingMul,
             else => unreachable,
         };
 

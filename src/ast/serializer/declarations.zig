@@ -284,6 +284,90 @@ pub fn serializeStructDecl(serializer: *AstSerializer, struct_decl: *const ast.S
     }
 }
 
+/// Serialize bitfield declaration
+pub fn serializeBitfieldDecl(serializer: *AstSerializer, bitfield_decl: *const ast.BitfieldDeclNode, writer: anytype, indent: u32, depth: u32) SerializationError!void {
+    _ = depth; // unused
+    try helpers.writeField(serializer, writer, "type", "BitfieldDecl", indent + 1, true);
+    try helpers.writeField(serializer, writer, "name", bitfield_decl.name, indent + 1, false);
+
+    if (serializer.options.include_spans) {
+        try helpers.writeSpanField(serializer, writer, &bitfield_decl.span, indent + 1);
+    }
+
+    // base_type
+    if (serializer.options.pretty_print and !serializer.options.compact_mode) {
+        try writer.writeAll(",\n");
+        try helpers.writeIndent(serializer, writer, indent + 1);
+        try writer.writeAll("\"base_type\": ");
+    } else {
+        try writer.writeAll(",\"base_type\":");
+    }
+    try serializer.serializeTypeInfo(bitfield_decl.base_type_info, writer);
+
+    // auto_packed
+    try helpers.writeBoolField(serializer, writer, "auto_packed", bitfield_decl.auto_packed, indent + 1);
+
+    // fields
+    if (serializer.options.pretty_print and !serializer.options.compact_mode) {
+        try writer.writeAll(",\n");
+        try helpers.writeIndent(serializer, writer, indent + 1);
+        try writer.writeAll("\"fields\": [\n");
+    } else {
+        try writer.writeAll(",\"fields\":[");
+    }
+
+    for (bitfield_decl.fields, 0..) |*field, i| {
+        if (i > 0) try writer.writeAll(",");
+        if (serializer.options.pretty_print and !serializer.options.compact_mode) {
+            try writer.writeAll("\n");
+            try helpers.writeIndent(serializer, writer, indent + 2);
+            try writer.writeAll("{\n");
+            try helpers.writeField(serializer, writer, "name", field.name, indent + 3, true);
+            try writer.writeAll(",\n");
+            try helpers.writeIndent(serializer, writer, indent + 3);
+            try writer.writeAll("\"field_type\": ");
+            try serializer.serializeTypeInfo(field.type_info, writer);
+            if (field.offset) |offset| {
+                try writer.writeAll(",\n");
+                try helpers.writeIndent(serializer, writer, indent + 3);
+                try writer.print("\"offset\": {d}", .{offset});
+            }
+            if (field.width) |width| {
+                try writer.writeAll(",\n");
+                try helpers.writeIndent(serializer, writer, indent + 3);
+                try writer.print("\"width\": {d}", .{width});
+            }
+            if (serializer.options.include_spans) {
+                try writer.writeAll(",\n");
+                try helpers.writeSpanFieldNoComma(serializer, writer, &field.span, indent + 3);
+            }
+            try writer.writeAll("\n");
+            try helpers.writeIndent(serializer, writer, indent + 2);
+            try writer.writeAll("}");
+        } else {
+            try writer.writeAll("{\"name\":\"");
+            try writer.writeAll(field.name);
+            try writer.writeAll("\",\"field_type\":");
+            try serializer.serializeTypeInfo(field.type_info, writer);
+            if (field.offset) |offset| {
+                try writer.print(",\"offset\":{d}", .{offset});
+            }
+            if (field.width) |width| {
+                try writer.print(",\"width\":{d}", .{width});
+            }
+            try writer.writeAll("}");
+        }
+    }
+
+    if (serializer.options.pretty_print and !serializer.options.compact_mode) {
+        try writer.writeAll("\n");
+        try helpers.writeIndent(serializer, writer, indent + 1);
+        try writer.writeAll("]");
+    } else {
+        try writer.writeAll("]");
+    }
+}
+
 /// Serialize enum declaration
 pub fn serializeEnumDecl(serializer: *AstSerializer, enum_decl: *const ast.EnumDeclNode, writer: anytype, indent: u32, depth: u32) SerializationError!void {
     try helpers.writeField(serializer, writer, "type", "EnumDecl", indent + 1, true);

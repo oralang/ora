@@ -156,6 +156,7 @@ pub const TypeSymbol = struct {
 
     pub const TypeKind = enum {
         Struct,
+        Bitfield,
         Enum,
         Contract,
         Alias,
@@ -165,6 +166,7 @@ pub const TypeSymbol = struct {
         name: []const u8,
         field_type: c.MlirType,
         offset: ?usize,
+        bit_width: ?u32 = null,
     };
 
     pub const VariantInfo = struct {

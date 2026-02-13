@@ -1,0 +1,25 @@
+// ==========================================
+// BASIC SIGNED OPERATIONS
+// ==========================================
+// End-to-end-safe signed arithmetic using i256 values.
+contract SignedBasicOps {
+    pub fn add(a: i256, b: i256) -> i256 {
+        return a + b;
+    }
+
+    pub fn sub(a: i256, b: i256) -> i256 {
+        return a - b;
+    }
+
+    pub fn div(a: i256, b: i256) -> i256 {
+        return a / b;
+    }
+
+    pub fn rem(a: i256, b: i256) -> i256 {
+        return a % b;
+    }
+
+    pub fn negate(a: i256) -> i256 {
+        return -a;
+    }
+}

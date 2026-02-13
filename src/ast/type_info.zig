@@ -179,6 +179,7 @@ pub const TypeCategory = enum {
 
     // complex type categories
     Struct,
+    Bitfield,
     Enum,
     Contract, // Contract type category
     Function,
@@ -230,6 +231,7 @@ pub const OraType = union(enum) {
 
     // complex types with additional data
     struct_type: []const u8, // Struct name
+    bitfield_type: []const u8, // Bitfield name
     enum_type: []const u8, // Enum name
     contract_type: []const u8, // Contract name
     array: struct { elem: *const OraType, len: u64 }, // Fixed-size array [T; N]
@@ -273,6 +275,7 @@ pub const OraType = union(enum) {
             .bytes => .Bytes,
             .void => .Void,
             .struct_type => .Struct,
+            .bitfield_type => .Bitfield,
             .enum_type => .Enum,
             .contract_type => .Contract,
             .array => .Array,
@@ -319,6 +322,21 @@ pub const OraType = union(enum) {
             .scaled => |s| s.base.isUnsignedInteger(),
             .exact => |e| e.isUnsignedInteger(),
             else => false,
+        };
+    }
+
+    /// Return the bit width of a primitive/integer type, or null for complex types.
+    pub fn bitWidth(self: OraType) ?u32 {
+        return switch (self) {
+            .bool => 1,
+            .u8, .i8 => 8,
+            .u16, .i16 => 16,
+            .u32, .i32 => 32,
+            .u64, .i64 => 64,
+            .u128, .i128 => 128,
+            .u256, .i256 => 256,
+            .address => 160,
+            else => null,
         };
     }
 
@@ -385,6 +403,10 @@ pub const OraType = union(enum) {
             .u8, .u16, .u32, .u64, .u128, .u256, .i8, .i16, .i32, .i64, .i128, .i256, .bool, .string, .address, .bytes, .void => true,
             .struct_type => |an| switch (b) {
                 .struct_type => |bn| std.mem.eql(u8, an, bn),
+                else => unreachable,
+            },
+            .bitfield_type => |an| switch (b) {
+                .bitfield_type => |bn| std.mem.eql(u8, an, bn),
                 else => unreachable,
             },
             .enum_type => |an| switch (b) {
@@ -601,6 +623,7 @@ pub const OraType = union(enum) {
             .bytes => try writer.writeAll("bytes"),
             .void => try writer.writeAll("void"),
             .struct_type => |name| try writer.writeAll(name),
+            .bitfield_type => |name| try writer.writeAll(name),
             .enum_type => |name| try writer.writeAll(name),
             .contract_type => |name| try writer.writeAll(name),
             .array => |arr| {
