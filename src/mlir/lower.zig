@@ -581,12 +581,14 @@ fn preRegisterFunctionSignaturesFromAst(
     for (nodes) |node| {
         switch (node) {
             .Function => |func| {
+                if (func.is_generic or func.is_comptime_only) continue;
                 try preRegisterFunctionSignatureFromAst(symbol_table, type_mapper, ctx, func);
             },
             .Contract => |contract| {
                 for (contract.body) |member| {
                     switch (member) {
                         .Function => |func| {
+                            if (func.is_generic or func.is_comptime_only) continue;
                             try preRegisterFunctionSignatureFromAst(symbol_table, type_mapper, ctx, func);
                         },
                         .Module => |nested_module| {
@@ -733,12 +735,14 @@ pub fn lowerFunctionsToModuleWithSemanticTable(ctx: c.MlirContext, nodes: []lib.
     for (nodes) |node| {
         switch (node) {
             .Function => |func| {
+                if (func.is_generic or func.is_comptime_only) continue;
                 var local_var_map = LocalVarMap.init(allocator);
                 defer local_var_map.deinit();
                 const func_op = decl_lowerer.lowerFunction(&func, &global_storage_map, &local_var_map);
                 c.oraBlockAppendOwnedOperation(body, func_op);
             },
             .Contract => |contract| {
+                if (contract.is_generic) continue; // skip generic contract templates
                 const contract_op = decl_lowerer.lowerContract(&contract);
                 c.oraBlockAppendOwnedOperation(body, contract_op);
             },
@@ -774,12 +778,14 @@ pub fn lowerFunctionsToModuleWithSemanticTable(ctx: c.MlirContext, nodes: []lib.
                 for (module_node.declarations) |decl| {
                     switch (decl) {
                         .Function => |func| {
+                            if (func.is_generic or func.is_comptime_only) continue;
                             var local_var_map = LocalVarMap.init(allocator);
                             defer local_var_map.deinit();
                             const func_op = decl_lowerer.lowerFunction(&func, &global_storage_map, &local_var_map);
                             c.oraBlockAppendOwnedOperation(body, func_op);
                         },
                         .Contract => |contract| {
+                            if (contract.is_generic) continue;
                             const contract_op = decl_lowerer.lowerContract(&contract);
                             c.oraBlockAppendOwnedOperation(body, contract_op);
                         },
@@ -1011,6 +1017,7 @@ pub fn lowerFunctionsToModuleWithErrors(ctx: c.MlirContext, nodes: []lib.AstNode
                 }
             },
             .StructDecl => |struct_decl| {
+                if (struct_decl.is_generic) continue;
                 const struct_valid = error_handler.validateAstNode(struct_decl, struct_decl.span) catch {
                     try error_handler.reportError(.MalformedAst, struct_decl.span, "struct declaration validation failed", "check struct structure");
                     continue;
@@ -1114,6 +1121,7 @@ pub fn lowerFunctionsToModuleWithErrors(ctx: c.MlirContext, nodes: []lib.AstNode
     for (nodes) |node| {
         switch (node) {
             .Function => |func| {
+                if (func.is_generic or func.is_comptime_only) continue;
                 // set error context for function lowering
                 try error_handler.pushContext(ErrorContext.function(func.name));
                 defer error_handler.popContext();
@@ -1151,6 +1159,7 @@ pub fn lowerFunctionsToModuleWithErrors(ctx: c.MlirContext, nodes: []lib.AstNode
                 if (!contract_valid) {
                     continue; // Skip malformed contract
                 }
+                if (contract.is_generic) continue; // skip generic contract templates
 
                 // lower contract declaration using the modular declaration lowerer
                 const contract_op = decl_lowerer.lowerContract(&contract);
@@ -1329,6 +1338,7 @@ pub fn lowerFunctionsToModuleWithErrors(ctx: c.MlirContext, nodes: []lib.AstNode
                     // instead, we need to handle them based on their type
                     switch (decl) {
                         .Function => |func| {
+                            if (func.is_generic or func.is_comptime_only) continue;
                             // create a local variable map for this function
                             var local_var_map = LocalVarMap.init(allocator);
                             defer local_var_map.deinit();
@@ -1339,6 +1349,7 @@ pub fn lowerFunctionsToModuleWithErrors(ctx: c.MlirContext, nodes: []lib.AstNode
                             }
                         },
                         .Contract => |contract| {
+                            if (contract.is_generic) continue;
                             const contract_op = decl_lowerer.lowerContract(&contract);
                             if (error_handler.validateMlirOperation(contract_op, contract.span) catch false) {
                                 c.oraBlockAppendOwnedOperation(body, contract_op);
@@ -1354,6 +1365,7 @@ pub fn lowerFunctionsToModuleWithErrors(ctx: c.MlirContext, nodes: []lib.AstNode
                             }
                         },
                         .StructDecl => |struct_decl| {
+                            if (struct_decl.is_generic) continue;
                             const struct_op = decl_lowerer.lowerStruct(&struct_decl);
                             if (error_handler.validateMlirOperation(struct_op, struct_decl.span) catch false) {
                                 c.oraBlockAppendOwnedOperation(body, struct_op);
@@ -1541,6 +1553,7 @@ pub fn lowerFunctionsToModuleWithErrors(ctx: c.MlirContext, nodes: []lib.AstNode
                 }
             },
             .StructDecl => |struct_decl| {
+                if (struct_decl.is_generic) continue;
                 // already handled in the first pass, but ensure MLIR type is created
                 const struct_type = decl_lowerer.createStructType(&struct_decl);
                 if (symbol_table.lookupType(struct_decl.name)) |type_symbol| {

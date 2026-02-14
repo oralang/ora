@@ -35,6 +35,10 @@ pub fn resolveIdentifierType(
     self: *CoreResolver,
     id: *ast.Expressions.IdentifierExpr,
 ) TypeResolutionError!void {
+    // If the parser already resolved this identifier (e.g., type keywords like u256
+    // parsed as type expressions for generic calls), accept it as-is.
+    if (id.type_info.isResolved()) return;
+
     // first try to find in symbol table (for variables, functions, etc.)
     const scope = if (self.current_scope) |s| s else self.symbol_table.root;
     var symbol = self.symbol_table.safeFindUpOpt(scope, id.name);

@@ -1,0 +1,10 @@
+contract FailGenericPlusStringNumeric {
+    fn add_bad(comptime A: type, comptime B: type, a: A, b: B) -> A {
+        // INVALID: instantiated as string + u256.
+        return a + b;
+    }
+
+    pub fn bad() -> string {
+        return add_bad(string, u256, "ora", 1);
+    }
+}

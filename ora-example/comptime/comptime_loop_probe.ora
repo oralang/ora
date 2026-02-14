@@ -1,0 +1,9 @@
+contract ComptimeLoopProbe {
+    pub fn test_comptime_while() -> u256 {
+        var total: u256 = 0;
+        comptime while (total < 5) {
+            total = total + 1;
+        }
+        return total;  // should be 5
+    }
+}

@@ -1,0 +1,6 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/comptime/generics/generic_struct_cache_reuse.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @make_pair_one
+// CHECK-LABEL: func.func @make_pair_two
+// CHECK-LABEL: func.func @make_pair_u8

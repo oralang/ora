@@ -130,10 +130,47 @@ fn synthStructInstantiation(
     self: *CoreResolver,
     si: *ast.Expressions.StructInstantiationExpr,
 ) TypeResolutionError!Typed {
-    const struct_name = switch (si.struct_name.*) {
-        .Identifier => |id| id.name,
+    var struct_name: []const u8 = undefined;
+    switch (si.struct_name.*) {
+        .Identifier => |id| {
+            struct_name = id.name;
+        },
+        .Call => |call| {
+            // Generic struct instantiation: Pair(u256) { ... }
+            // The callee is the struct name, arguments are type args.
+            // Try to monomorphize and resolve the mangled name.
+            if (call.callee.* == .Identifier) {
+                const base_name = call.callee.Identifier.name;
+                const mono_mod = @import("../monomorphize.zig");
+                // Extract type args from call arguments
+                var type_args_list = std.ArrayList(OraType){};
+                defer type_args_list.deinit(self.allocator);
+                for (call.arguments) |arg| {
+                    if (mono_mod.resolveTypeFromExpr(arg)) |ot| {
+                        type_args_list.append(self.allocator, ot) catch {};
+                    }
+                }
+                // Build mangled name
+                // Use type_storage_allocator (arena) since the mangled name persists in the AST
+                var buf = std.ArrayList(u8){};
+                buf.appendSlice(self.type_storage_allocator, base_name) catch return TypeResolutionError.OutOfMemory;
+                for (type_args_list.items) |ta| {
+                    buf.appendSlice(self.type_storage_allocator, "__") catch return TypeResolutionError.OutOfMemory;
+                    buf.appendSlice(self.type_storage_allocator, ta.toString()) catch return TypeResolutionError.OutOfMemory;
+                }
+                struct_name = buf.toOwnedSlice(self.type_storage_allocator) catch return TypeResolutionError.OutOfMemory;
+                // Rewrite struct_name to Identifier with mangled name for downstream
+                si.struct_name.* = ast.Expressions.ExprNode{ .Identifier = ast.Expressions.IdentifierExpr{
+                    .name = struct_name,
+                    .type_info = TypeInfo.explicit(.Struct, OraType{ .struct_type = struct_name }, call.span),
+                    .span = call.span,
+                } };
+            } else {
+                return TypeResolutionError.TypeMismatch;
+            }
+        },
         else => return TypeResolutionError.TypeMismatch,
-    };
+    }
 
     const fields = self.symbol_table.struct_fields.get(struct_name) orelse {
         return TypeResolutionError.TypeMismatch;
@@ -806,6 +843,11 @@ fn synthIdentifier(
     self: *CoreResolver,
     id: *ast.Expressions.IdentifierExpr,
 ) TypeResolutionError!Typed {
+    // @-prefixed builtins are resolved in synthCall, not here
+    if (id.name.len > 1 and id.name[0] == '@') {
+        id.type_info = TypeInfo.unknown();
+        return Typed.init(TypeInfo.unknown(), Effect.pure(), self.allocator);
+    }
     // use identifier resolution module
     try @import("identifier.zig").resolveIdentifierType(self, id);
     var eff = Effect.pure();
@@ -993,6 +1035,17 @@ fn synthCall(
             if (self.function_registry) |registry| {
                 const registry_map = @as(*std.StringHashMap(*FunctionNode), @ptrCast(@alignCast(registry)));
                 if (registry_map.get(func_name)) |function| {
+                    // Enforce comptime params: arguments to comptime-annotated parameters
+                    // must be compile-time known
+                    try checkComptimeParams(self, function, call);
+
+                    // Generic function call: substitute type parameters in return type
+                    if (function.is_generic) {
+                        const ret_info = resolveGenericReturnType(function, call);
+                        call.type_info = ret_info;
+                        return Typed.init(ret_info, combined_eff, self.allocator);
+                    }
+
                     // found in function registry - use return type
                     if (function.return_type_info) |ret_info| {
                         call.type_info = ret_info;
@@ -1007,7 +1060,7 @@ fn synthCall(
             // handle @-prefixed builtins (overflow reporters, divTrunc, etc.)
             if (func_name.len > 1 and func_name[0] == '@') {
                 const builtin_suffix = func_name[1..];
-                if (resolveOverflowBuiltinType(builtin_suffix, call, self.allocator)) |ret_info| {
+                if (resolveOverflowBuiltinType(builtin_suffix, call, self.type_storage_allocator)) |ret_info| {
                     call.type_info = ret_info;
                     return Typed.init(ret_info, combined_eff, self.allocator);
                 }
@@ -1038,6 +1091,19 @@ fn synthCall(
         const found_symbol = symbol.?;
 
         if (found_symbol.kind == .Function) {
+            // Enforce comptime params via function registry
+            if (self.function_registry) |registry| {
+                const registry_map = @as(*std.StringHashMap(*FunctionNode), @ptrCast(@alignCast(registry)));
+                if (registry_map.get(func_name)) |function| {
+                    try checkComptimeParams(self, function, call);
+                    // Generic function call: substitute type parameters in return type
+                    if (function.is_generic) {
+                        const ret_info = resolveGenericReturnType(function, call);
+                        call.type_info = ret_info;
+                        return Typed.init(ret_info, combined_eff, self.allocator);
+                    }
+                }
+            }
             // function's type_info is a function type, extract return type
             if (found_symbol.typ) |typ| {
                 if (typ.isResolved()) {
@@ -1242,6 +1308,22 @@ fn synthFieldAccess(
         }
     }
 
+    // handle anonymous struct type field access (e.g., res.value, res.overflow)
+    if (target_type.ora_type) |ora_ty| {
+        if (ora_ty == .anonymous_struct) {
+            for (ora_ty.anonymous_struct) |field| {
+                if (std.mem.eql(u8, field.name, fa.field)) {
+                    const field_type = TypeInfo.fromOraType(field.typ.*);
+                    fa.type_info = field_type;
+                    fa.type_info.region = base_typed.ty.region;
+                    const eff = takeEffect(&base_typed);
+                    return Typed.init(field_type, eff, self.allocator);
+                }
+            }
+            return TypeResolutionError.TypeMismatch;
+        }
+    }
+
     // check if the type is a struct
     if (target_type.category == .Struct) {
         if (target_type.ora_type) |ora_ty| {
@@ -1326,6 +1408,8 @@ fn synthIndex(
         // extract value type from ora_type
         if (target_type.ora_type) |ora_ty| {
             if (ora_ty == .map) {
+                // resolve struct_type -> bitfield_type/enum_type if needed
+                self.resolveNamedOraType(@constCast(ora_ty.map.value));
                 const value_ora_type = ora_ty.map.value.*;
                 const value_type_info = TypeInfo.inferred(value_ora_type.getCategory(), value_ora_type, null);
                 var updated = value_type_info;
@@ -1599,6 +1683,54 @@ fn extractExprTypeInfo(expr: *const ast.Expressions.ExprNode) TypeInfo {
     };
 }
 
+/// Check that arguments to comptime-annotated parameters are compile-time known.
+/// Returns TypeMismatch if a non-constant argument is passed to a comptime param.
+fn checkComptimeParams(
+    self: *CoreResolver,
+    function: *const FunctionNode,
+    call: *const ast.Expressions.CallExpr,
+) TypeResolutionError!void {
+    const arg_count = @min(function.parameters.len, call.arguments.len);
+    for (function.parameters[0..arg_count], 0..) |param, i| {
+        if (!param.is_comptime) continue;
+        const arg = call.arguments[i];
+
+        // `comptime T: type` must receive a concrete type expression.
+        if (param.type_info.ora_type) |ot| {
+            if (ot == .type) {
+                switch (arg.*) {
+                    .Identifier => |id| {
+                        if (idNameToOraType(id.name) == null) {
+                            log.err(
+                                "[type_resolver] comptime type parameter '{s}' in '{s}' requires a concrete type argument\n",
+                                .{ param.name, function.name },
+                            );
+                            return TypeResolutionError.TypeMismatch;
+                        }
+                    },
+                    else => {
+                        log.err(
+                            "[type_resolver] comptime type parameter '{s}' in '{s}' requires a type identifier\n",
+                            .{ param.name, function.name },
+                        );
+                        return TypeResolutionError.TypeMismatch;
+                    },
+                }
+                continue;
+            }
+        }
+
+        const arg_result = self.evaluateConstantExpression(arg);
+        if (arg_result.getValue() == null) {
+            log.err(
+                "[type_resolver] comptime parameter '{s}' in '{s}' requires a compile-time known argument\n",
+                .{ param.name, function.name },
+            );
+            return TypeResolutionError.TypeMismatch;
+        }
+    }
+}
+
 /// Resolve the return type for @opWithOverflow builtins.
 /// Returns a tuple type (value: T, overflow: bool) represented as anonymous_struct.
 fn resolveOverflowBuiltinType(
@@ -1635,8 +1767,8 @@ fn resolveOverflowBuiltinType(
     const bool_type_ptr = allocator.create(OraType) catch return null;
     bool_type_ptr.* = .bool;
     const fields = allocator.alloc(ast.type_info.AnonymousStructFieldType, 2) catch return null;
-    fields[0] = .{ .name = "0", .typ = value_type_ptr };
-    fields[1] = .{ .name = "1", .typ = bool_type_ptr };
+    fields[0] = .{ .name = "value", .typ = value_type_ptr };
+    fields[1] = .{ .name = "overflow", .typ = bool_type_ptr };
     return TypeInfo{
         .category = .Tuple,
         .ora_type = .{ .anonymous_struct = fields },
@@ -1704,4 +1836,73 @@ fn formatOraType(ora_type: OraType, allocator: std.mem.Allocator) ![]const u8 {
         .contract_type => |name| try std.fmt.allocPrint(allocator, "contract {s}", .{name}),
         else => try std.fmt.allocPrint(allocator, "{s}", .{@tagName(ora_type)}),
     };
+}
+
+/// For a generic function call, resolve the concrete return type by mapping
+/// comptime type arguments to the function's type parameters.
+/// e.g., `max(u256, 10, 20)` with `fn max(comptime T: type, a: T, b: T) -> T`
+///       → return type is u256.
+fn resolveGenericReturnType(
+    function: *const FunctionNode,
+    call: *const ast.Expressions.CallExpr,
+) TypeInfo {
+    const ret = function.return_type_info orelse return TypeInfo.unknown();
+    const ret_ot = ret.ora_type orelse return ret;
+
+    // If return type is a type_parameter, substitute with the concrete type from the call
+    if (ret_ot == .type_parameter) {
+        const param_name = ret_ot.type_parameter;
+        // Find which parameter index this type param corresponds to
+        for (function.parameters, 0..) |param, i| {
+            if (param.is_comptime and std.mem.eql(u8, param.name, param_name)) {
+                // The i-th argument should be a type expression
+                if (i < call.arguments.len) {
+                    return typeInfoFromTypeExpr(call.arguments[i]);
+                }
+            }
+        }
+    }
+    return ret;
+}
+
+/// Extract a concrete TypeInfo from an expression that represents a type
+/// (e.g., an Identifier "u256" with category .Type).
+fn typeInfoFromTypeExpr(expr: *const ast.Expressions.ExprNode) TypeInfo {
+    switch (expr.*) {
+        .Identifier => |id| {
+            // The parser sets .Type category for type keyword identifiers.
+            // Map the name back to a concrete OraType.
+            const comptime_mod = @import("../../../comptime/mod.zig");
+            if (comptime_mod.type_ids.toOraType(
+                comptime_mod.type_ids.fromOraType(idNameToOraType(id.name) orelse return TypeInfo.unknown()) orelse return TypeInfo.unknown(),
+            )) |concrete_ot| {
+                return TypeInfo.inferred(concrete_ot.getCategory(), concrete_ot, id.span);
+            }
+            return TypeInfo.unknown();
+        },
+        else => return TypeInfo.unknown(),
+    }
+}
+
+/// Map a type name string to an OraType.
+fn idNameToOraType(name: []const u8) ?OraType {
+    const map = std.StaticStringMap(OraType).initComptime(.{
+        .{ "u8", OraType{ .u8 = {} } },
+        .{ "u16", OraType{ .u16 = {} } },
+        .{ "u32", OraType{ .u32 = {} } },
+        .{ "u64", OraType{ .u64 = {} } },
+        .{ "u128", OraType{ .u128 = {} } },
+        .{ "u256", OraType{ .u256 = {} } },
+        .{ "i8", OraType{ .i8 = {} } },
+        .{ "i16", OraType{ .i16 = {} } },
+        .{ "i32", OraType{ .i32 = {} } },
+        .{ "i64", OraType{ .i64 = {} } },
+        .{ "i128", OraType{ .i128 = {} } },
+        .{ "i256", OraType{ .i256 = {} } },
+        .{ "bool", OraType{ .bool = {} } },
+        .{ "address", OraType{ .address = {} } },
+        .{ "string", OraType{ .string = {} } },
+        .{ "bytes", OraType{ .bytes = {} } },
+    });
+    return map.get(name);
 }

@@ -30,7 +30,8 @@ fn hashOraType(hasher: *std.hash.Wyhash, ora_type: lib.ast.type_info.OraType) vo
     const tag_val: u32 = @intFromEnum(std.meta.activeTag(ora_type));
     hasher.update(std.mem.asBytes(&tag_val));
     switch (ora_type) {
-        .u8, .u16, .u32, .u64, .u128, .u256, .i8, .i16, .i32, .i64, .i128, .i256, .bool, .string, .address, .bytes, .void, .non_zero_address => {},
+        .u8, .u16, .u32, .u64, .u128, .u256, .i8, .i16, .i32, .i64, .i128, .i256, .bool, .string, .address, .bytes, .void, .non_zero_address, .type => {},
+        .type_parameter => |name| hasher.update(name),
         .struct_type => |name| hasher.update(name),
         .bitfield_type => |name| hasher.update(name),
         .enum_type => |name| hasher.update(name),
@@ -363,6 +364,15 @@ pub const TypeMapper = struct {
                 return c.oraExactTypeGet(self.ctx, base_type);
             },
             .non_zero_address => c.oraNonZeroAddressTypeGet(self.ctx),
+
+            // Generics: type and type_parameter should never reach MLIR lowering
+            // (monomorphization replaces them with concrete types before MLIR emission)
+            .type, .type_parameter => {
+                std.debug.panic(
+                    "internal compiler error: generic type reached MLIR lowering: {s}",
+                    .{ora_ty.toString()},
+                );
+            },
         };
 
         // log result type info

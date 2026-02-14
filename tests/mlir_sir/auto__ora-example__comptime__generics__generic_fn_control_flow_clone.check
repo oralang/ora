@@ -1,0 +1,6 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/comptime/generics/generic_fn_control_flow_clone.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @rem_u256
+// CHECK-LABEL: func.func @rem_u256_alt
+// CHECK-LABEL: func.func @bounded_remainder__u256

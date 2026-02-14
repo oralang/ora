@@ -1,0 +1,95 @@
+contract ComptimeOverflowProbe {
+
+    // ================================================================
+    // Unsigned overflow: max + 1
+    // ================================================================
+    pub fn test_u8_overflow() -> u8 {
+        const max: u8 = 255;
+        return max + 1;
+    }
+
+    pub fn test_u16_overflow() -> u16 {
+        const max: u16 = 65535;
+        return max + 1;
+    }
+
+    pub fn test_u32_overflow() -> u32 {
+        const max: u32 = 4294967295;
+        return max + 1;
+    }
+
+    pub fn test_u64_overflow() -> u64 {
+        const max: u64 = 18446744073709551615;
+        return max + 1;
+    }
+
+    pub fn test_u128_overflow() -> u128 {
+        const max: u128 = 340282366920938463463374607431768211455;
+        return max + 1;
+    }
+
+    pub fn test_u256_overflow() -> u256 {
+        const max: u256 = 115792089237316195423570985008687907853269984665640564039457584007913129639935;
+        return max + 1;
+    }
+
+    // ================================================================
+    // Signed overflow: max + 1
+    // ================================================================
+    pub fn test_i8_overflow() -> i8 {
+        const max: i8 = 127;
+        return max + 1;
+    }
+
+    pub fn test_i16_overflow() -> i16 {
+        const max: i16 = 32767;
+        return max + 1;
+    }
+
+    pub fn test_i32_overflow() -> i32 {
+        const max: i32 = 2147483647;
+        return max + 1;
+    }
+
+    pub fn test_i64_overflow() -> i64 {
+        const max: i64 = 9223372036854775807;
+        return max + 1;
+    }
+
+    pub fn test_i128_overflow() -> i128 {
+        const max: i128 = 170141183460469231731687303715884105727;
+        return max + 1;
+    }
+
+    // ================================================================
+    // Unsigned underflow: 0 - 1
+    // ================================================================
+    pub fn test_u8_underflow() -> u8 {
+        return 0 - 1;
+    }
+
+    pub fn test_u32_underflow() -> u32 {
+        return 0 - 1;
+    }
+
+    // ================================================================
+    // Safe operations per type (should fold correctly)
+    // ================================================================
+    pub fn test_u8_safe() -> u8 {
+        const a: u8 = 100;
+        const b: u8 = 50;
+        return a + b;
+    }
+
+    pub fn test_u32_safe() -> u32 {
+        const a: u32 = 1000000;
+        const b: u32 = 2000000;
+        return a + b;
+    }
+
+    pub fn test_u256_safe() -> u256 {
+        const a: u256 = 100;
+        const b: u256 = 200;
+        return a + b;
+    }
+}

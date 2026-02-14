@@ -1,0 +1,10 @@
+contract FailGenericRuntimeTypeArg {
+    fn id(comptime T: type, x: T) -> T {
+        return x;
+    }
+
+    pub fn bad(x: u256) -> u256 {
+        // INVALID: first argument to `comptime T: type` must be a type identifier.
+        return id(x, x);
+    }
+}

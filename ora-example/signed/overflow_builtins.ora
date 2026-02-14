@@ -1,0 +1,37 @@
+// ==========================================
+// OVERFLOW-REPORTING BUILTINS
+// ==========================================
+// Returns (value, overflow_flag) instead of reverting.
+contract OverflowBuiltins {
+    pub fn safe_add(a: i256, b: i256) -> i256 {
+        let res = @addWithOverflow(a, b);
+        if (res.overflow) {
+            return 0;
+        }
+        return res.value;
+    }
+
+    pub fn safe_sub(a: i256, b: i256) -> i256 {
+        let res = @subWithOverflow(a, b);
+        if (res.overflow) {
+            return 0;
+        }
+        return res.value;
+    }
+
+    pub fn safe_mul(a: i256, b: i256) -> i256 {
+        let res = @mulWithOverflow(a, b);
+        if (res.overflow) {
+            return 0;
+        }
+        return res.value;
+    }
+
+    pub fn safe_negate(a: i256) -> i256 {
+        let res = @negWithOverflow(a);
+        if (res.overflow) {
+            return 0;
+        }
+        return res.value;
+    }
+}

@@ -1,0 +1,23 @@
+contract GenericFnControlFlowClone {
+    fn bounded_remainder(comptime T: type, value: T, modulus: T) -> T {
+        var x = value;
+
+        if (x < modulus) {
+            return x;
+        }
+
+        while (x >= modulus) {
+            x = x - modulus;
+        }
+
+        return x;
+    }
+
+    pub fn rem_u256(value: u256, modulus: u256) -> u256 {
+        return bounded_remainder(u256, value, modulus);
+    }
+
+    pub fn rem_u256_alt(value: u256) -> u256 {
+        return bounded_remainder(u256, value, 7);
+    }
+}

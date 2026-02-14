@@ -1,0 +1,25 @@
+// ==========================================
+// CHECKED vs WRAPPING SHIFTS
+// ==========================================
+// Checked shifts assert(amount < 256); wrapping shifts skip the guard.
+contract ShiftGuards {
+    // Checked left shift — reverts if bits >= 256
+    pub fn checked_shl(x: u256, bits: u256) -> u256 {
+        return x << bits;
+    }
+
+    // Checked right shift — reverts if bits >= 256
+    pub fn checked_shr(x: u256, bits: u256) -> u256 {
+        return x >> bits;
+    }
+
+    // Wrapping left shift — no guard, silently zero on large shift
+    pub fn wrapping_shl(x: u256, bits: u256) -> u256 {
+        return x <<% bits;
+    }
+
+    // Signed arithmetic shift preserves sign bit
+    pub fn signed_shr(x: i256, bits: u8) -> i256 {
+        return x >> bits;
+    }
+}

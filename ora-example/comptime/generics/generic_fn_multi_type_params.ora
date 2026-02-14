@@ -1,0 +1,17 @@
+contract GenericFnMultiTypeParams {
+    fn first(comptime A: type, comptime B: type, a: A, b: B) -> A {
+        return a;
+    }
+
+    fn second(comptime A: type, comptime B: type, a: A, b: B) -> B {
+        return b;
+    }
+
+    pub fn pick_first(a: u256, b: u8) -> u256 {
+        return first(u256, u8, a, b);
+    }
+
+    pub fn pick_second(a: u256, b: u8) -> u8 {
+        return second(u256, u8, a, b);
+    }
+}

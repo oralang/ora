@@ -476,6 +476,8 @@ pub const Formatter = struct {
                 try self.formatOraType(base.*);
                 try self.writer.write(">");
             },
+            .@"type" => try self.writer.write("type"),
+            .type_parameter => |name| try self.writer.write(name),
         }
     }
 

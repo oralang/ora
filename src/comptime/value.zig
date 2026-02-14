@@ -138,6 +138,82 @@ pub const ConstEnum = struct {
 };
 
 // ============================================================================
+// TypeId ↔ OraType mapping (well-known IDs for primitives)
+// ============================================================================
+
+const OraType = @import("../ast/type_info.zig").OraType;
+
+/// Well-known TypeId values for primitive Ora types.
+/// These are stable constants used by the comptime system.
+pub const type_ids = struct {
+    pub const u8_id: TypeId = 1;
+    pub const u16_id: TypeId = 2;
+    pub const u32_id: TypeId = 3;
+    pub const u64_id: TypeId = 4;
+    pub const u128_id: TypeId = 5;
+    pub const u256_id: TypeId = 6;
+    pub const i8_id: TypeId = 7;
+    pub const i16_id: TypeId = 8;
+    pub const i32_id: TypeId = 9;
+    pub const i64_id: TypeId = 10;
+    pub const i128_id: TypeId = 11;
+    pub const i256_id: TypeId = 12;
+    pub const bool_id: TypeId = 13;
+    pub const address_id: TypeId = 14;
+    pub const string_id: TypeId = 15;
+    pub const bytes_id: TypeId = 16;
+    pub const void_id: TypeId = 17;
+
+    /// Convert an OraType to a well-known TypeId (primitives only).
+    pub fn fromOraType(ot: OraType) ?TypeId {
+        return switch (ot) {
+            .u8 => u8_id,
+            .u16 => u16_id,
+            .u32 => u32_id,
+            .u64 => u64_id,
+            .u128 => u128_id,
+            .u256 => u256_id,
+            .i8 => i8_id,
+            .i16 => i16_id,
+            .i32 => i32_id,
+            .i64 => i64_id,
+            .i128 => i128_id,
+            .i256 => i256_id,
+            .bool => bool_id,
+            .address => address_id,
+            .string => string_id,
+            .bytes => bytes_id,
+            .void => void_id,
+            else => null,
+        };
+    }
+
+    /// Convert a well-known TypeId back to an OraType.
+    pub fn toOraType(tid: TypeId) ?OraType {
+        return switch (tid) {
+            u8_id => OraType{ .u8 = {} },
+            u16_id => OraType{ .u16 = {} },
+            u32_id => OraType{ .u32 = {} },
+            u64_id => OraType{ .u64 = {} },
+            u128_id => OraType{ .u128 = {} },
+            u256_id => OraType{ .u256 = {} },
+            i8_id => OraType{ .i8 = {} },
+            i16_id => OraType{ .i16 = {} },
+            i32_id => OraType{ .i32 = {} },
+            i64_id => OraType{ .i64 = {} },
+            i128_id => OraType{ .i128 = {} },
+            i256_id => OraType{ .i256 = {} },
+            bool_id => OraType{ .bool = {} },
+            address_id => OraType{ .address = {} },
+            string_id => OraType{ .string = {} },
+            bytes_id => OraType{ .bytes = {} },
+            void_id => OraType{ .void = {} },
+            else => null,
+        };
+    }
+};
+
+// ============================================================================
 // Tests
 // ============================================================================
 

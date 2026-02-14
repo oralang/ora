@@ -448,6 +448,7 @@ fn lowerOverflowBuiltin(
             const b_nz = c.oraArithCmpIOpCreate(self.ctx, loc, expr_helpers.predicateStringToInt("ne"), rhs_uw, zero);
             h.appendOp(self.block, b_nz);
             const quot = c.oraArithDivUIOpCreate(self.ctx, loc, value, rhs_uw);
+            c.oraOperationSetAttributeByName(quot, h.strRef("ora.guard_internal"), h.stringAttr(self.ctx, "true"));
             h.appendOp(self.block, quot);
             const ne = c.oraArithCmpIOpCreate(self.ctx, loc, expr_helpers.predicateStringToInt("ne"), h.getResult(quot, 0), lhs_uw);
             h.appendOp(self.block, ne);
@@ -464,29 +465,64 @@ fn lowerOverflowBuiltin(
         const sub_op = c.oraArithSubIOpCreate(self.ctx, loc, zero, lhs_uw);
         h.appendOp(self.block, sub_op);
         value = h.getResult(sub_op, 0);
-        // unsigned: overflows unless a == 0
-        const cmp = c.oraArithCmpIOpCreate(self.ctx, loc, expr_helpers.predicateStringToInt("ne"), lhs_uw, zero);
+        if (is_signed) {
+            // signed: overflows only when a == MIN_INT (-MIN_INT is unrepresentable)
+            const one_op = self.ora_dialect.createArithConstant(1, value_ty, loc);
+            h.appendOp(self.block, one_op);
+            const s255_op = self.ora_dialect.createArithConstant(255, value_ty, loc);
+            h.appendOp(self.block, s255_op);
+            const min_op = c.oraArithShlIOpCreate(self.ctx, loc, h.getResult(one_op, 0), h.getResult(s255_op, 0));
+            h.appendOp(self.block, min_op);
+            const cmp = c.oraArithCmpIOpCreate(self.ctx, loc, expr_helpers.predicateStringToInt("eq"), lhs_uw, h.getResult(min_op, 0));
+            h.appendOp(self.block, cmp);
+            overflow_flag = h.getResult(cmp, 0);
+        } else {
+            // unsigned: overflows unless a == 0
+            const cmp = c.oraArithCmpIOpCreate(self.ctx, loc, expr_helpers.predicateStringToInt("ne"), lhs_uw, zero);
+            h.appendOp(self.block, cmp);
+            overflow_flag = h.getResult(cmp, 0);
+        }
+    } else if (std.mem.eql(u8, builtin_name, "shlWithOverflow")) {
+        if (call.arguments.len < 2) return null;
+        const rhs = self.lowerExpression(call.arguments[1]);
+        const rhs_uw = expr_helpers.unwrapRefinementValue(self.ctx, self.block, self.locations, self.refinement_base_cache, rhs, call.span);
+        const shl_op = c.oraArithShlIOpCreate(self.ctx, loc, lhs_uw, rhs_uw);
+        h.appendOp(self.block, shl_op);
+        value = h.getResult(shl_op, 0);
+        // overflow iff (value >> b) != a  (bits were shifted out)
+        const shr_op = if (is_signed)
+            c.oraArithShrSIOpCreate(self.ctx, loc, value, rhs_uw)
+        else
+            c.oraArithShrUIOpCreate(self.ctx, loc, value, rhs_uw);
+        h.appendOp(self.block, shr_op);
+        const cmp = c.oraArithCmpIOpCreate(self.ctx, loc, expr_helpers.predicateStringToInt("ne"), h.getResult(shr_op, 0), lhs_uw);
         h.appendOp(self.block, cmp);
         overflow_flag = h.getResult(cmp, 0);
+    } else if (std.mem.eql(u8, builtin_name, "shrWithOverflow")) {
+        if (call.arguments.len < 2) return null;
+        const rhs = self.lowerExpression(call.arguments[1]);
+        const rhs_uw = expr_helpers.unwrapRefinementValue(self.ctx, self.block, self.locations, self.refinement_base_cache, rhs, call.span);
+        const shr_op = if (is_signed)
+            c.oraArithShrSIOpCreate(self.ctx, loc, lhs_uw, rhs_uw)
+        else
+            c.oraArithShrUIOpCreate(self.ctx, loc, lhs_uw, rhs_uw);
+        h.appendOp(self.block, shr_op);
+        value = h.getResult(shr_op, 0);
+        // shr never overflows (bits shifted out are lost, not an error)
+        overflow_flag = makeFalse(self, loc);
     } else if (std.mem.eql(u8, builtin_name, "divWithOverflow") or
-        std.mem.eql(u8, builtin_name, "modWithOverflow") or
-        std.mem.eql(u8, builtin_name, "shlWithOverflow") or
-        std.mem.eql(u8, builtin_name, "shrWithOverflow"))
+        std.mem.eql(u8, builtin_name, "modWithOverflow"))
     {
         if (call.arguments.len < 2) return null;
         const rhs = self.lowerExpression(call.arguments[1]);
         const rhs_uw = expr_helpers.unwrapRefinementValue(self.ctx, self.block, self.locations, self.refinement_base_cache, rhs, call.span);
         const arith_op = if (std.mem.eql(u8, builtin_name, "divWithOverflow"))
             (if (is_signed) c.oraArithDivSIOpCreate(self.ctx, loc, lhs_uw, rhs_uw) else c.oraArithDivUIOpCreate(self.ctx, loc, lhs_uw, rhs_uw))
-        else if (std.mem.eql(u8, builtin_name, "modWithOverflow"))
-            (if (is_signed) c.oraArithRemSIOpCreate(self.ctx, loc, lhs_uw, rhs_uw) else c.oraArithRemUIOpCreate(self.ctx, loc, lhs_uw, rhs_uw))
-        else if (std.mem.eql(u8, builtin_name, "shlWithOverflow"))
-            c.oraArithShlIOpCreate(self.ctx, loc, lhs_uw, rhs_uw)
         else
-            c.oraArithShrSIOpCreate(self.ctx, loc, lhs_uw, rhs_uw);
+            (if (is_signed) c.oraArithRemSIOpCreate(self.ctx, loc, lhs_uw, rhs_uw) else c.oraArithRemUIOpCreate(self.ctx, loc, lhs_uw, rhs_uw));
         h.appendOp(self.block, arith_op);
         value = h.getResult(arith_op, 0);
-        overflow_flag = makeFalse(self, loc); // TODO: proper overflow detection
+        overflow_flag = makeFalse(self, loc);
     } else {
         return null;
     }
@@ -500,13 +536,15 @@ fn lowerOverflowBuiltin(
     const bool_ptr = std.heap.page_allocator.create(lib.ast.type_info.OraType) catch return value;
     bool_ptr.* = bool_ora;
     const fields = [_]lib.ast.type_info.AnonymousStructFieldType{
-        .{ .name = "0", .typ = val_ptr },
-        .{ .name = "1", .typ = bool_ptr },
+        .{ .name = "value", .typ = val_ptr },
+        .{ .name = "overflow", .typ = bool_ptr },
     };
     const struct_type = self.type_mapper.mapAnonymousStructType(&fields);
     if (struct_type.ptr != null) {
         const vals = [_]c.MlirValue{ value, overflow_flag };
         const init_op = self.ora_dialect.createStructInit(&vals, struct_type, loc);
+        // Attach field names so the Z3 encoder can bind them correctly
+        c.oraOperationSetAttributeByName(init_op, h.strRef("ora.field_names"), h.stringAttr(self.ctx, "value,overflow"));
         h.appendOp(self.block, init_op);
         return h.getResult(init_op, 0);
     }
@@ -627,6 +665,7 @@ fn computeSignedMulOverflow(self: *const ExpressionLowerer, result: c.MlirValue,
     const b_nz = c.oraArithCmpIOpCreate(self.ctx, loc, pred_ne, b, h.getResult(zero_op, 0));
     h.appendOp(self.block, b_nz);
     const quot = c.oraArithDivSIOpCreate(self.ctx, loc, result, b);
+    c.oraOperationSetAttributeByName(quot, h.strRef("ora.guard_internal"), h.stringAttr(self.ctx, "true"));
     h.appendOp(self.block, quot);
     const mismatch = c.oraArithCmpIOpCreate(self.ctx, loc, pred_ne, h.getResult(quot, 0), a);
     h.appendOp(self.block, mismatch);

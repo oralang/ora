@@ -85,6 +85,12 @@ pub const ExpressionParser = struct {
         while (true) {
             if (self.base.match(.LeftParen)) {
                 expr = try self.finishCall(expr);
+                // Generic struct instantiation: Pair(u256) { ... }
+                if (self.base.check(.LeftBrace)) {
+                    if (expr == .Call and expr.Call.callee.* == .Identifier) {
+                        return try complex.parseGenericStructInstantiation(self, &expr.Call);
+                    }
+                }
             } else if (self.base.check(.DotDot) or self.base.check(.DotDotDot)) {
                 // this is a range expression - parse it
                 const start_expr = expr;
@@ -463,6 +469,16 @@ pub const ExpressionParser = struct {
                     },
                 },
             };
+        }
+
+        // type keywords as expressions (for `comptime T: type` arguments)
+        if (self.matchTypeKeyword()) |type_token| {
+            const name_copy = try self.base.arena.createString(type_token.lexeme);
+            return ast.Expressions.ExprNode{ .Identifier = ast.Expressions.IdentifierExpr{
+                .name = name_copy,
+                .type_info = ast.Types.TypeInfo.explicit(.Type, .{ .@"type" = {} }, self.base.spanFromToken(type_token)),
+                .span = self.base.spanFromToken(type_token),
+            } };
         }
 
         // identifiers (including keywords that can be used as identifiers)
@@ -897,5 +913,19 @@ pub const ExpressionParser = struct {
         const block = try stmt_parser.parseBlock();
         self.base.current = stmt_parser.base.current;
         return block;
+    }
+
+    /// Match a type keyword token (u8, u256, bool, etc.) in expression position.
+    /// Returns the token if matched, null otherwise.
+    fn matchTypeKeyword(self: *ExpressionParser) ?Token {
+        const tt = self.base.peek().type;
+        const is_type_kw = switch (tt) {
+            .U8, .U16, .U32, .U64, .U128, .U256, .I8, .I16, .I32, .I64, .I128, .I256, .Bool, .Address, .String, .Bytes => true,
+            else => false,
+        };
+        if (is_type_kw) {
+            return self.base.advance();
+        }
+        return null;
     }
 };

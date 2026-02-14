@@ -1,0 +1,30 @@
+contract ComptimeFunctions {
+    // Pure function — eligible for comptime evaluation
+    fn square(x: u256) -> u256 {
+        return x * x;
+    }
+
+    fn double(x: u256) -> u256 {
+        return x + x;
+    }
+
+    // Comptime parameter — caller must pass a compile-time known value
+    fn make_mask(comptime width: u256) -> u256 {
+        return (1 << width) - 1;
+    }
+
+    pub fn test_comptime_fn() -> u256 {
+        // square(16) should fold to 256 at comptime
+        const size: u256 = square(16);
+        // double(5) should fold to 10 at comptime
+        const ten: u256 = double(5);
+        return size + ten;
+    }
+
+    pub fn test_comptime_params() -> u256 {
+        // make_mask(8) should fold to 255 at comptime
+        const mask8: u256 = make_mask(8);
+        const mask16: u256 = make_mask(16);
+        return mask8 + mask16;
+    }
+}

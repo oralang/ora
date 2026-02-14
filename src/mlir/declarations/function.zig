@@ -152,6 +152,7 @@ fn canonicalAbiType(allocator: std.mem.Allocator, ora_type: lib.ast.Types.TypeIn
             return canonicalAbiType(allocator, base_info, symbol_table);
         },
         .non_zero_address => allocator.dupe(u8, "address"),
+        .bitfield_type => allocator.dupe(u8, "uint256"), // bitfields are u256 on the wire
         else => error.InvalidType,
     };
 }

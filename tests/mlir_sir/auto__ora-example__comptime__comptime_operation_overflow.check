@@ -1,0 +1,4 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/comptime/comptime_operation_overflow.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK: module

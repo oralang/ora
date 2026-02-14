@@ -1,0 +1,21 @@
+contract GenericMaxTest {
+    // Basic generic function: comptime T: type
+    fn max(comptime T: type, a: T, b: T) -> T {
+        if (a > b) { return a; } else { return b; }
+    }
+
+    // Test 1: All args comptime-known → fully folded
+    pub fn test_comptime_max() -> u256 {
+        return max(u256, 10, 20);
+    }
+
+    // Test 2: Runtime args → monomorphizes to max__u256
+    pub fn test_runtime_max(x: u256, y: u256) -> u256 {
+        return max(u256, x, y);
+    }
+
+    // Test 3: Different type → monomorphizes to max__u8
+    pub fn test_runtime_max_u8(x: u8, y: u8) -> u8 {
+        return max(u8, x, y);
+    }
+}

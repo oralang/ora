@@ -1,0 +1,16 @@
+contract FailGenericRuntimeComptimeValue {
+    fn add_n_times(comptime T: type, comptime n: u256, base: T, delta: T) -> T {
+        var i: u256 = 0;
+        var acc: T = base;
+        while (i < n) {
+            acc = acc + delta;
+            i = i + 1;
+        }
+        return acc;
+    }
+
+    pub fn bad(n: u256, x: u256) -> u256 {
+        // INVALID: `n` is runtime, but parameter is `comptime n: u256`.
+        return add_n_times(u256, n, x, 1);
+    }
+}

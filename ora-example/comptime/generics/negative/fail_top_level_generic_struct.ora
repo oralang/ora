@@ -1,0 +1,9 @@
+struct Pair(comptime T: type) {
+    first: T;
+    second: T;
+}
+
+fn make_pair(a: u256, b: u256) -> Pair(u256) {
+    // INVALID (current limitation): top-level generic instantiation is not supported.
+    return Pair(u256) { first: a, second: b };
+}

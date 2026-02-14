@@ -422,6 +422,23 @@ pub const CoreResolver = struct {
         }
     }
 
+    /// Fix a struct_type OraType that is actually an enum or bitfield.
+    /// The parser initially assumes all named types are struct_type;
+    /// this corrects based on the symbol table.
+    pub fn resolveNamedOraType(self: *CoreResolver, ot: *OraType) void {
+        if (ot.* == .struct_type) {
+            const name = ot.struct_type;
+            const root_scope: ?*const Scope = @as(?*const Scope, @ptrCast(self.symbol_table.root));
+            if (SymbolTable.findUp(root_scope, name)) |sym| {
+                if (sym.kind == .Enum) {
+                    ot.* = OraType{ .enum_type = name };
+                } else if (sym.kind == .Bitfield) {
+                    ot.* = OraType{ .bitfield_type = name };
+                }
+            }
+        }
+    }
+
     /// Resolve types for a statement
     pub fn resolveStatement(self: *CoreResolver, stmt: *ast.Statements.StmtNode, context: TypeContext) !Typed {
         return @import("statement.zig").resolveStatement(self, stmt, context);
@@ -432,10 +449,12 @@ pub const CoreResolver = struct {
         return @import("identifier.zig").lookupIdentifier(self, name);
     }
 
-    /// Set a compile-time value by name
+    /// Set a compile-time value by name (scoped to current comptime env scope)
     pub fn setComptimeValue(self: *CoreResolver, scope: *Scope, name: []const u8, value: comptime_eval.CtValue) !void {
-        _ = scope; // Scope not used in new system (globals only for now)
-        _ = try self.comptime_env.defineGlobal(name, value);
+        _ = scope;
+        // Use scoped bind so function-local consts don't leak across functions.
+        // Top-level consts (outside functions) use the root scope and remain visible.
+        _ = try self.comptime_env.bind(name, value);
     }
 
     /// Set a compile-time integer constant
@@ -478,7 +497,11 @@ pub const CoreResolver = struct {
             .lookupFn = lookupComptimeValueThunk,
             .enumLookupFn = lookupEnumValueThunk,
         };
-        var eval = comptime_eval.AstEvaluator.init(&self.comptime_env, .try_eval, .forgiving, lookup);
+        const fn_lookup = comptime_eval.FunctionLookup{
+            .ctx = self,
+            .lookupFn = lookupComptimeFnThunk,
+        };
+        var eval = comptime_eval.AstEvaluator.initWithFnLookup(&self.comptime_env, .try_eval, .forgiving, lookup, fn_lookup);
         return eval.evalExpr(expr);
     }
 
@@ -500,12 +523,12 @@ pub const CoreResolver = struct {
     }
 };
 
-fn lookupComptimeValueThunk(ctx: *anyopaque, name: []const u8) ?comptime_eval.CtValue {
+pub fn lookupComptimeValueThunk(ctx: *anyopaque, name: []const u8) ?comptime_eval.CtValue {
     const self: *CoreResolver = @ptrCast(@alignCast(ctx));
     return self.lookupComptimeValue(name);
 }
 
-fn lookupEnumValueThunk(ctx: *anyopaque, enum_name: []const u8, variant_name: []const u8) ?comptime_eval.CtValue {
+pub fn lookupEnumValueThunk(ctx: *anyopaque, enum_name: []const u8, variant_name: []const u8) ?comptime_eval.CtValue {
     const self: *CoreResolver = @ptrCast(@alignCast(ctx));
     if (self.symbol_table.enum_variants.get(enum_name)) |variants| {
         for (variants, 0..) |variant, i| {
@@ -514,4 +537,162 @@ fn lookupEnumValueThunk(ctx: *anyopaque, enum_name: []const u8, variant_name: []
         }
     }
     return null;
+}
+
+fn lookupComptimeFnThunk(ctx: *anyopaque, name: []const u8) ?comptime_eval.ComptimeFnInfo {
+    const self: *CoreResolver = @ptrCast(@alignCast(ctx));
+    // Check function purity — only pure functions can be evaluated at comptime
+    if (self.symbol_table.function_effects.get(name)) |effect| {
+        if (effect != .Pure) return null; // has side effects
+    }
+    // else: effect not yet computed (first pass) — optimistically allow
+
+    // Look up the function body in the registry
+    const registry = self.function_registry orelse return null;
+    const fn_node_ptr = registry.get(name) orelse return null;
+    const fn_node: *const ast.FunctionNode = @ptrCast(@alignCast(fn_node_ptr));
+
+    // Transitive purity check: walk the body for calls to non-pure functions
+    // and runtime-only builtins
+    if (!isBodyComptimeSafe(&fn_node.body, self.symbol_table, registry)) return null;
+
+    // Build param names slice (use type_storage_allocator — arena, freed at end of compilation)
+    const param_names = self.type_storage_allocator.alloc([]const u8, fn_node.parameters.len) catch return null;
+    const is_comptime_param = self.type_storage_allocator.alloc(bool, fn_node.parameters.len) catch return null;
+    for (fn_node.parameters, 0..) |param, i| {
+        param_names[i] = param.name;
+        is_comptime_param[i] = param.is_comptime;
+    }
+
+    return comptime_eval.ComptimeFnInfo{
+        .body = &fn_node.body,
+        .param_names = param_names,
+        .is_comptime_param = is_comptime_param,
+    };
+}
+
+/// Runtime-only builtins that cannot be used in comptime context
+const runtime_only_builtins = [_][]const u8{
+    "msg.sender",   "msg.value",  "msg.data",
+    "block.number", "block.timestamp", "block.coinbase",
+    "tx.origin",    "tx.gasprice",
+    "address(this)",
+};
+
+/// Check if a function body is safe for comptime evaluation.
+/// Returns false if it calls non-pure functions or uses runtime-only builtins.
+fn isBodyComptimeSafe(
+    body: *const ast.Statements.BlockNode,
+    symbol_table: *const SymbolTable,
+    registry: *const std.StringHashMap(*anyopaque),
+) bool {
+    for (body.statements) |*stmt| {
+        if (!isStmtComptimeSafe(stmt, symbol_table, registry)) return false;
+    }
+    return true;
+}
+
+fn isStmtComptimeSafe(
+    stmt: *const ast.Statements.StmtNode,
+    symbol_table: *const SymbolTable,
+    registry: *const std.StringHashMap(*anyopaque),
+) bool {
+    return switch (stmt.*) {
+        .Expr => |expr| isExprComptimeSafe(&expr, symbol_table, registry),
+        .VariableDecl => |vd| if (vd.value) |v| isExprComptimeSafe(v, symbol_table, registry) else true,
+        .Return => |ret| if (ret.value) |v| isExprComptimeSafe(&v, symbol_table, registry) else true,
+        .If => |if_stmt| blk: {
+            if (!isExprComptimeSafe(&if_stmt.condition, symbol_table, registry)) break :blk false;
+            if (!isBodyComptimeSafe(&if_stmt.then_branch, symbol_table, registry)) break :blk false;
+            if (if_stmt.else_branch) |*else_b| {
+                if (!isBodyComptimeSafe(else_b, symbol_table, registry)) break :blk false;
+            }
+            break :blk true;
+        },
+        .While => |while_stmt| blk: {
+            if (!isExprComptimeSafe(&while_stmt.condition, symbol_table, registry)) break :blk false;
+            if (!isBodyComptimeSafe(&while_stmt.body, symbol_table, registry)) break :blk false;
+            break :blk true;
+        },
+        .ForLoop => |for_stmt| blk: {
+            if (!isExprComptimeSafe(&for_stmt.iterable, symbol_table, registry)) break :blk false;
+            if (!isBodyComptimeSafe(&for_stmt.body, symbol_table, registry)) break :blk false;
+            break :blk true;
+        },
+        .CompoundAssignment => |ca| isExprComptimeSafe(ca.value, symbol_table, registry),
+        .Break, .Continue => true,
+        .Assert, .Invariant, .Requires, .Ensures, .Assume, .Havoc => true,
+        // Log, Lock, Unlock, TryBlock are runtime-only
+        .Log, .Lock, .Unlock, .TryBlock => false,
+        else => true,
+    };
+}
+
+fn isExprComptimeSafe(
+    expr: *const ast.Expressions.ExprNode,
+    symbol_table: *const SymbolTable,
+    registry: *const std.StringHashMap(*anyopaque),
+) bool {
+    return switch (expr.*) {
+        .Call => |call| blk: {
+            // Check callee name
+            if (call.callee.* == .Identifier) {
+                const callee_name = call.callee.Identifier.name;
+                // Block runtime-only builtins
+                for (&runtime_only_builtins) |builtin| {
+                    if (std.mem.eql(u8, callee_name, builtin)) break :blk false;
+                }
+                // Check if called function is pure (transitively)
+                if (callee_name.len > 0 and callee_name[0] != '@') {
+                    if (symbol_table.function_effects.get(callee_name)) |effect| {
+                        if (effect != .Pure) break :blk false;
+                    }
+                }
+            } else if (call.callee.* == .FieldAccess) {
+                // Check for runtime-only member access (msg.sender, block.number, etc.)
+                const fa = &call.callee.FieldAccess;
+                if (fa.target.* == .Identifier) {
+                    const base = fa.target.Identifier.name;
+                    if (std.mem.eql(u8, base, "msg") or
+                        std.mem.eql(u8, base, "block") or
+                        std.mem.eql(u8, base, "tx"))
+                    {
+                        break :blk false;
+                    }
+                }
+            }
+            // Check arguments recursively
+            for (call.arguments) |arg| {
+                if (!isExprComptimeSafe(arg, symbol_table, registry)) break :blk false;
+            }
+            break :blk true;
+        },
+        .Binary => |bin| isExprComptimeSafe(bin.lhs, symbol_table, registry) and
+            isExprComptimeSafe(bin.rhs, symbol_table, registry),
+        .Unary => |un| isExprComptimeSafe(un.operand, symbol_table, registry),
+        .FieldAccess => |fa| blk: {
+            // Block runtime-only field access patterns
+            if (fa.target.* == .Identifier) {
+                const base = fa.target.Identifier.name;
+                if (std.mem.eql(u8, base, "msg") or
+                    std.mem.eql(u8, base, "block") or
+                    std.mem.eql(u8, base, "tx"))
+                {
+                    break :blk false;
+                }
+            }
+            break :blk isExprComptimeSafe(fa.target, symbol_table, registry);
+        },
+        .Index => |idx| isExprComptimeSafe(idx.target, symbol_table, registry) and
+            isExprComptimeSafe(idx.index, symbol_table, registry),
+        .Cast => |cast| isExprComptimeSafe(cast.operand, symbol_table, registry),
+        .Literal, .Identifier, .EnumLiteral => true,
+        .Tuple => |tup| blk: {
+            for (tup.elements) |el| {
+                if (!isExprComptimeSafe(el, symbol_table, registry)) break :blk false;
+            }
+            break :blk true;
+        },
+        else => true, // Conservatively allow others
+    };
 }

@@ -98,6 +98,7 @@ pub const WhileNode = struct {
     decreases: ?*ExprNode = null, // Termination measure (decreases)
     increases: ?*ExprNode = null, // Progress measure (increases)
     label: ?[]const u8 = null, // Optional label for labeled break/continue
+    is_comptime: bool = false, // comptime while — unrolled at compile time
     span: SourceSpan,
 };
 
@@ -129,6 +130,7 @@ pub const ForLoopNode = struct {
     decreases: ?*ExprNode = null, // Termination measure (decreases)
     increases: ?*ExprNode = null, // Progress measure (increases)
     label: ?[]const u8 = null, // Optional label for labeled break/continue
+    is_comptime: bool = false, // comptime for — unrolled at compile time
     span: SourceSpan,
 };
 

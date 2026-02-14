@@ -1,0 +1,5 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/comptime/generics/generic_struct_multi_type_params.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @make_entry
+// CHECK-LABEL: func.func @value_plus_one

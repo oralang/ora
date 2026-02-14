@@ -204,6 +204,9 @@ pub fn parseParameterWithDefaults(
     type_parser: *TypeParser,
     expr_parser: *ExpressionParser,
 ) !ast.ParameterNode {
+    // check for comptime parameter modifier (comptime param_name)
+    const is_comptime = parser.base.match(.Comptime);
+
     // check for mutable parameter modifier (mut param_name)
     const is_mutable = if (parser.base.check(.Identifier) and std.mem.eql(u8, parser.base.peek().lexeme, "mut")) blk: {
         _ = parser.base.advance(); // consume "mut"
@@ -236,6 +239,7 @@ pub fn parseParameterWithDefaults(
         .name = name_token.lexeme,
         .type_info = param_type,
         .is_mutable = is_mutable,
+        .is_comptime = is_comptime,
         .default_value = default_value,
         .span = ParserCommon.makeSpan(name_token),
     };

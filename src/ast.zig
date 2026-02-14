@@ -73,6 +73,8 @@ pub const ContractNode = struct {
     name: []const u8,
     attributes: []u8, // Placeholder for future contract attributes
     body: []AstNode, // Contract body contains declarations
+    is_generic: bool = false,
+    type_param_names: []const []const u8 = &.{},
     span: SourceSpan,
 };
 
@@ -102,6 +104,9 @@ pub const FunctionNode = struct {
     ensures_clauses: []*Expressions.ExprNode, // Postconditions (formal verification)
     modifies_clause: ?[]*Expressions.ExprNode = null, // Frame conditions - what storage can be modified
     is_ghost: bool = false, // Is this a ghost function? (specification-only)
+    is_comptime_only: bool = false, // Private fn with all call sites folded — skip MLIR lowering
+    is_generic: bool = false, // Has comptime type parameters — needs monomorphization
+    type_param_names: []const []const u8 = &.{}, // Names of comptime type parameters (e.g., ["T", "U"])
     span: SourceSpan,
 
     /// Check if this function is specification-only (not compiled to bytecode)
@@ -114,6 +119,7 @@ pub const ParameterNode = struct {
     name: []const u8,
     type_info: Types.TypeInfo, // Unified type information
     is_mutable: bool, // mut parameter
+    is_comptime: bool = false, // comptime parameter (must be known at compile time)
     default_value: ?*Expressions.ExprNode, // Default parameter value
     span: SourceSpan,
 };
@@ -126,6 +132,8 @@ pub const Visibility = enum { Public, Private };
 pub const StructDeclNode = struct {
     name: []const u8,
     fields: []StructField,
+    is_generic: bool = false,
+    type_param_names: []const []const u8 = &.{},
     span: SourceSpan,
 };
 

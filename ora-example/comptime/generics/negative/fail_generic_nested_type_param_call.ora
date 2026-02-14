@@ -1,0 +1,15 @@
+contract FailGenericNestedTypeParamCall {
+    fn id(comptime T: type, x: T) -> T {
+        return x;
+    }
+
+    fn passthrough(comptime T: type, x: T) -> T {
+        // INVALID (current limitation): using type parameter `T` as a type argument
+        // to another generic call is not accepted yet.
+        return id(T, x);
+    }
+
+    pub fn use_it(x: u256) -> u256 {
+        return passthrough(u256, x);
+    }
+}

@@ -1460,6 +1460,8 @@ pub fn getTypeString(
             .scaled => "Scaled",
             .exact => "Exact",
             .non_zero_address => "NonZeroAddress",
+            .@"type" => "type",
+            .type_parameter => "type_parameter",
         };
     }
 

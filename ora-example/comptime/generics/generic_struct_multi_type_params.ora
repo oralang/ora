@@ -1,0 +1,15 @@
+contract GenericStructMultiTypeParams {
+    struct Entry(comptime K: type, comptime V: type) {
+        key: K;
+        value: V;
+    }
+
+    pub fn make_entry(addr: address, amount: u256) -> Entry(address, u256) {
+        return Entry(address, u256) { key: addr, value: amount };
+    }
+
+    pub fn value_plus_one(addr: address, amount: u256) -> u256 {
+        let e = Entry(address, u256) { key: addr, value: amount };
+        return e.value + 1;
+    }
+}

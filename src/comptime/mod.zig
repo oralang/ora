@@ -54,6 +54,7 @@ pub const HeapId = @import("value.zig").HeapId;
 pub const TypeId = @import("value.zig").TypeId;
 pub const FieldId = @import("value.zig").FieldId;
 pub const VariantId = @import("value.zig").VariantId;
+pub const type_ids = @import("value.zig").type_ids;
 
 // Re-export pool
 pub const ConstPool = @import("pool.zig").ConstPool;
@@ -94,6 +95,8 @@ pub const AstEvaluator = ast_eval.AstEvaluator;
 pub const AstEvalResult = ast_eval.AstEvalResult;
 pub const InternResult = ast_eval.AstEvaluator.InternResult;
 pub const IdentifierLookup = ast_eval.IdentifierLookup;
+pub const FunctionLookup = ast_eval.FunctionLookup;
+pub const ComptimeFnInfo = ast_eval.ComptimeFnInfo;
 pub const evaluateExpr = ast_eval.evaluateExpr;
 pub const evaluateToInteger = ast_eval.evaluateToInteger;
 pub const evaluateAndIntern = ast_eval.evaluateAndIntern;

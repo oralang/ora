@@ -1,0 +1,10 @@
+contract FailGenericPlusBoolNumeric {
+    fn add_bad(comptime A: type, comptime B: type, a: A, b: B) -> A {
+        // INVALID: instantiated as bool + u8.
+        return a + b;
+    }
+
+    pub fn bad() -> bool {
+        return add_bad(bool, u8, true, 1);
+    }
+}

@@ -144,23 +144,15 @@ fn resolveVariableDecl(
     _: TypeContext,
 ) TypeResolutionError!Typed {
     // fix custom type names: if parser assumed struct_type but it's actually enum_type or bitfield_type
-    if (var_decl.type_info.ora_type) |ot| {
-        if (ot == .struct_type) {
-            const type_name = ot.struct_type;
-            const symbol = SymbolTable.findUp(@as(?*const Scope, @ptrCast(self.symbol_table.root)), type_name);
-            if (symbol) |sym| {
-                if (sym.kind == .Enum) {
-                    var_decl.type_info.ora_type = OraType{ .enum_type = type_name };
-                    var_decl.type_info.category = .Enum;
-                } else if (sym.kind == .Bitfield) {
-                    var_decl.type_info.ora_type = OraType{ .bitfield_type = type_name };
-                    var_decl.type_info.category = .Bitfield;
-                }
-            }
+    if (var_decl.type_info.ora_type) |*ot| {
+        self.resolveNamedOraType(ot);
+        // also fix nested named types (e.g. map<address, MyBitfield>)
+        if (ot.* == .map) {
+            self.resolveNamedOraType(@constCast(ot.map.value));
         }
         // ensure category matches ora_type if present (fixes refinement types)
         var derived_category = ot.getCategory();
-        if (ot == ._union and ot._union.len > 0 and ot._union[0] == .error_union) {
+        if (ot.* == ._union and ot._union.len > 0 and ot._union[0] == .error_union) {
             derived_category = .ErrorUnion;
         }
         var_decl.type_info.category = derived_category;

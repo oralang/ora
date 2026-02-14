@@ -1,0 +1,16 @@
+contract GenericPairTest {
+    struct Pair(comptime T: type) {
+        first: T;
+        second: T;
+    }
+
+    // Test: Use Pair(u256) as a function return type
+    pub fn make_pair(a: u256, b: u256) -> Pair(u256) {
+        return Pair(u256) { first: a, second: b };
+    }
+
+    // Test: Use Pair(u8) — different instantiation
+    pub fn make_pair_u8(a: u8, b: u8) -> Pair(u8) {
+        return Pair(u8) { first: a, second: b };
+    }
+}

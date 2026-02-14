@@ -1,0 +1,29 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/test_std_constants_bounds.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @getU8Min
+// CHECK-LABEL: func.func @getU8Max
+// CHECK-LABEL: func.func @getU16Min
+// CHECK-LABEL: func.func @getU16Max
+// CHECK-LABEL: func.func @getU32Min
+// CHECK-LABEL: func.func @getU32Max
+// CHECK-LABEL: func.func @getU64Min
+// CHECK-LABEL: func.func @getU64Max
+// CHECK-LABEL: func.func @getU128Min
+// CHECK-LABEL: func.func @getU128Max
+// CHECK-LABEL: func.func @getU256Min
+// CHECK-LABEL: func.func @getU256Max
+// CHECK-LABEL: func.func @getI8Min
+// CHECK-LABEL: func.func @getI8Max
+// CHECK-LABEL: func.func @getI16Min
+// CHECK-LABEL: func.func @getI16Max
+// CHECK-LABEL: func.func @getI32Min
+// CHECK-LABEL: func.func @getI32Max
+// CHECK-LABEL: func.func @getI64Min
+// CHECK-LABEL: func.func @getI64Max
+// CHECK-LABEL: func.func @getI128Min
+// CHECK-LABEL: func.func @getI128Max
+// CHECK-LABEL: func.func @getI256Min
+// CHECK-LABEL: func.func @getI256Max
+// CHECK-LABEL: func.func @unsignedBoundsOrdered
+// CHECK-LABEL: func.func @signedBoundsOrdered

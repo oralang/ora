@@ -157,10 +157,14 @@ pub const StatementLowerer = struct {
                 return try control_flow.lowerIf(self, &if_stmt);
             },
             .While => |while_stmt| {
+                // comptime while: already evaluated during fold pass, skip MLIR emission
+                if (while_stmt.is_comptime) return null;
                 try control_flow.lowerWhile(self, &while_stmt);
                 return null;
             },
             .ForLoop => |for_stmt| {
+                // comptime for: already evaluated during fold pass, skip MLIR emission
+                if (for_stmt.is_comptime) return null;
                 try control_flow.lowerFor(self, &for_stmt);
                 return null;
             },

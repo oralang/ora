@@ -175,6 +175,9 @@ pub const Evaluator = struct {
             .mul => self.checkedMul(l, r, span),
             .div => self.checkedDiv(l, r, span),
             .mod => self.checkedMod(l, r, span),
+            .wadd => EvalResult.ok(.{ .integer = l +% r }),
+            .wsub => EvalResult.ok(.{ .integer = l -% r }),
+            .wmul => EvalResult.ok(.{ .integer = l *% r }),
             .eq => EvalResult.ok(.{ .boolean = l == r }),
             .neq => EvalResult.ok(.{ .boolean = l != r }),
             .lt => EvalResult.ok(.{ .boolean = l < r }),
@@ -185,7 +188,9 @@ pub const Evaluator = struct {
             .bor => EvalResult.ok(.{ .integer = l | r }),
             .bxor => EvalResult.ok(.{ .integer = l ^ r }),
             .shl => self.checkedShl(l, r, span),
-            .shr => EvalResult.ok(.{ .integer = l >> @intCast(r) }),
+            .shr => if (r >= 256) EvalResult.ok(.{ .integer = 0 }) else EvalResult.ok(.{ .integer = l >> @intCast(r) }),
+            .wshl => if (r >= 256) EvalResult.ok(.{ .integer = 0 }) else EvalResult.ok(.{ .integer = l << @intCast(r) }),
+            .wshr => if (r >= 256) EvalResult.ok(.{ .integer = 0 }) else EvalResult.ok(.{ .integer = l >> @intCast(r) }),
             .land, .lor => unreachable, // handled above
         };
     }
@@ -329,7 +334,7 @@ pub const Evaluator = struct {
     // ========================================================================
 
     /// Consume one step of fuel, returns error if limit exceeded
-    fn step(self: *Evaluator, span: SourceSpan) ?EvalResult {
+    pub fn step(self: *Evaluator, span: SourceSpan) ?EvalResult {
         self.current_span = span;
         self.env.stats.recordStep();
 
@@ -425,6 +430,9 @@ pub const BinaryOp = enum {
     mul,
     div,
     mod,
+    wadd,
+    wsub,
+    wmul,
 
     // Comparison
     eq,
@@ -440,6 +448,8 @@ pub const BinaryOp = enum {
     bxor,
     shl,
     shr,
+    wshl,
+    wshr,
 
     // Logical
     land,
@@ -602,4 +612,28 @@ test "Evaluator stage checking" {
         const result = eval.checkStage(.comptime_ok, span);
         try std.testing.expect(result == null);
     }
+}
+
+test "Evaluator wrapping arithmetic and shift ops" {
+    var env = CtEnv.init(std.testing.allocator, .{});
+    defer env.deinit();
+
+    var eval = Evaluator.init(&env, .must_eval, .strict);
+    const span = SourceSpan{ .line = 1, .column = 1, .length = 1 };
+    const max_u256: u256 = std.math.maxInt(u256);
+
+    const add_wrap = eval.evalBinaryOp(.wadd, .{ .integer = max_u256 }, .{ .integer = 1 }, span);
+    try std.testing.expectEqual(@as(u256, 0), add_wrap.getValue().?.integer);
+
+    const sub_wrap = eval.evalBinaryOp(.wsub, .{ .integer = 0 }, .{ .integer = 1 }, span);
+    try std.testing.expectEqual(max_u256, sub_wrap.getValue().?.integer);
+
+    const mul_wrap = eval.evalBinaryOp(.wmul, .{ .integer = max_u256 }, .{ .integer = 2 }, span);
+    try std.testing.expectEqual(max_u256 - 1, mul_wrap.getValue().?.integer);
+
+    const shl_wrap = eval.evalBinaryOp(.wshl, .{ .integer = 1 }, .{ .integer = 255 }, span);
+    try std.testing.expectEqual((@as(u256, 1) << 255), shl_wrap.getValue().?.integer);
+
+    const shr_wrap = eval.evalBinaryOp(.wshr, .{ .integer = 1 }, .{ .integer = 300 }, span);
+    try std.testing.expectEqual(@as(u256, 0), shr_wrap.getValue().?.integer);
 }

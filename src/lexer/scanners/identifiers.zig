@@ -161,7 +161,20 @@ pub fn scanAtDirective(lexer: *Lexer) LexerError!void {
         std.mem.eql(u8, directive_name, "divFloor") or
         std.mem.eql(u8, directive_name, "divCeil") or
         std.mem.eql(u8, directive_name, "divExact") or
-        std.mem.eql(u8, directive_name, "divMod");
+        std.mem.eql(u8, directive_name, "divMod") or
+        std.mem.eql(u8, directive_name, "divmod") or
+        std.mem.eql(u8, directive_name, "cast") or
+        std.mem.eql(u8, directive_name, "truncate") or
+        std.mem.eql(u8, directive_name, "addWithOverflow") or
+        std.mem.eql(u8, directive_name, "subWithOverflow") or
+        std.mem.eql(u8, directive_name, "mulWithOverflow") or
+        std.mem.eql(u8, directive_name, "divWithOverflow") or
+        std.mem.eql(u8, directive_name, "modWithOverflow") or
+        std.mem.eql(u8, directive_name, "negWithOverflow") or
+        std.mem.eql(u8, directive_name, "shlWithOverflow") or
+        std.mem.eql(u8, directive_name, "shrWithOverflow") or
+        std.mem.eql(u8, directive_name, "bitCast") or
+        std.mem.eql(u8, directive_name, "bits");
 
     if (!is_valid_builtin) {
         // invalid directive/function - record error and continue
@@ -189,6 +202,39 @@ pub fn scanAtDirective(lexer: *Lexer) LexerError!void {
         }
     }
 
-    // for built-in functions, add the @ token (same as before)
-    try lexer.addToken(.At);
+    // for built-in functions, split into .At + .Identifier (parser expects this)
+    const at_text = lexer.source[lexer.start .. lexer.start + 1];
+    const at_range = SourceRange{
+        .start_line = lexer.line,
+        .start_column = lexer.start_column,
+        .end_line = lexer.line,
+        .end_column = lexer.start_column + 1,
+        .start_offset = lexer.start,
+        .end_offset = lexer.start + 1,
+    };
+    try lexer.tokens.append(lexer.allocator, Token{
+        .type = .At,
+        .lexeme = at_text,
+        .range = at_range,
+        .value = null,
+        .line = lexer.line,
+        .column = lexer.start_column,
+    });
+    const id_text = lexer.source[lexer.start + 1 .. lexer.current];
+    const id_range = SourceRange{
+        .start_line = lexer.line,
+        .start_column = lexer.start_column + 1,
+        .end_line = lexer.line,
+        .end_column = lexer.column,
+        .start_offset = lexer.start + 1,
+        .end_offset = lexer.current,
+    };
+    try lexer.tokens.append(lexer.allocator, Token{
+        .type = .Identifier,
+        .lexeme = id_text,
+        .range = id_range,
+        .value = null,
+        .line = lexer.line,
+        .column = lexer.start_column + 1,
+    });
 }

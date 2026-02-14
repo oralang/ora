@@ -608,13 +608,13 @@ test "mlir infers forward callee error-union result type from typed call" {
         \\contract Test {
         \\    error E();
         \\
-        \\    pub fn caller() -> !u256 | E {
-        \\        let v: u256 = try callee();
+        \\    pub fn caller(x: u256) -> !u256 | E {
+        \\        let v: u256 = try callee(x);
         \\        return v;
         \\    }
         \\
-        \\    fn callee() -> !u256 | E {
-        \\        return 1;
+        \\    fn callee(a: u256) -> !u256 | E {
+        \\        return a;
         \\    }
         \\}
     ;
@@ -658,9 +658,9 @@ test "mlir infers forward callee error-union result type from typed call" {
     else
         "";
 
-    try testing.expect(std.mem.containsAtLeast(u8, mlir_text, 1, "call @callee()"));
+    try testing.expect(std.mem.containsAtLeast(u8, mlir_text, 1, "call @callee("));
     try testing.expect(std.mem.containsAtLeast(u8, mlir_text, 1, "-> !ora.error_union<i256>"));
-    try testing.expect(!std.mem.containsAtLeast(u8, mlir_text, 1, "call @callee() {gas_cost = 10 : i64} : () -> i256"));
+    try testing.expect(!std.mem.containsAtLeast(u8, mlir_text, 1, "call @callee(%arg0) {gas_cost = 10 : i64} : (i256) -> i256"));
 }
 
 test "mlir infers forward callee param types and inserts arg conversion" {

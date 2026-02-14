@@ -19,6 +19,8 @@ const error_mod = @import("error.zig");
 const limits = @import("limits.zig");
 const pool_mod = @import("pool.zig");
 const heap_mod = @import("heap.zig");
+const ast_type_info = @import("../ast/type_info.zig");
+const AstSourceSpan = @import("../ast/source_span.zig").SourceSpan;
 
 const CtValue = value.CtValue;
 const ConstId = value.ConstId;
@@ -93,18 +95,51 @@ pub const IdentifierLookup = struct {
     }
 };
 
+/// Opaque function info returned by FunctionLookup
+pub const ComptimeFnInfo = struct {
+    body: *const @import("../ast/statements.zig").BlockNode,
+    param_names: []const []const u8,
+    is_comptime_param: []const bool, // per-parameter comptime flag
+};
+
+/// Callback for looking up function bodies and checking purity
+pub const FunctionLookup = struct {
+    ctx: *anyopaque,
+    /// Returns function body + param names if the function exists and is comptime-eligible (pure)
+    lookupFn: *const fn (ctx: *anyopaque, name: []const u8) ?ComptimeFnInfo,
+
+    pub fn lookup(self: FunctionLookup, name: []const u8) ?ComptimeFnInfo {
+        return self.lookupFn(self.ctx, name);
+    }
+};
+
 /// AST expression evaluator
 pub const AstEvaluator = struct {
     env: *CtEnv,
     evaluator: Evaluator,
     lookup: ?IdentifierLookup,
+    fn_lookup: ?FunctionLookup,
     pool: ?*ConstPool,
+    call_depth: u32 = 0,
+    max_call_depth: u32 = 64,
 
     pub fn init(env: *CtEnv, mode: EvalMode, policy: TryEvalPolicy, lookup: ?IdentifierLookup) AstEvaluator {
         return .{
             .env = env,
             .evaluator = Evaluator.init(env, mode, policy),
             .lookup = lookup,
+            .fn_lookup = null,
+            .pool = null,
+        };
+    }
+
+    /// Initialize with function lookup for comptime fn evaluation
+    pub fn initWithFnLookup(env: *CtEnv, mode: EvalMode, policy: TryEvalPolicy, lookup: ?IdentifierLookup, fn_lookup: ?FunctionLookup) AstEvaluator {
+        return .{
+            .env = env,
+            .evaluator = Evaluator.init(env, mode, policy),
+            .lookup = lookup,
+            .fn_lookup = fn_lookup,
             .pool = null,
         };
     }
@@ -115,6 +150,7 @@ pub const AstEvaluator = struct {
             .env = env,
             .evaluator = Evaluator.init(env, mode, policy),
             .lookup = lookup,
+            .fn_lookup = null,
             .pool = pool,
         };
     }
@@ -185,8 +221,158 @@ pub const AstEvaluator = struct {
             .StructInstantiation => |*si| self.evalStructInstantiation(si),
             .Try => |*try_expr| self.evalTry(try_expr),
             .Range => |*range| self.evalRange(range),
+            .Call => |*call| self.evalCall(call),
             else => .not_constant,
         };
+    }
+
+    /// Evaluate a function call at compile time.
+    /// Only succeeds if: all args are comptime-known AND the function is pure.
+    fn evalCall(self: *AstEvaluator, call: anytype) AstEvalResult {
+        // Extract function name from callee
+        const fn_name = switch (call.callee.*) {
+            .Identifier => |id| id.name,
+            else => return .not_constant, // only direct calls supported
+        };
+
+        // Handle supported @-builtins directly in the AST evaluator.
+        if (fn_name.len > 0 and fn_name[0] == '@') {
+            return self.evalBuiltinCall(call, fn_name);
+        }
+
+        const fn_lookup = self.fn_lookup orelse return .not_constant;
+
+        // Evaluate all arguments — all must be comptime-known
+        var arg_values: [32]CtValue = undefined; // stack buffer for common case
+        if (call.arguments.len > 32) return .not_constant;
+
+        for (call.arguments, 0..) |arg, i| {
+            const arg_result = self.evalExprNode(arg);
+            switch (arg_result) {
+                .value => |v| arg_values[i] = v,
+                .not_constant => return .not_constant,
+                .err => |e| return .{ .err = e },
+            }
+        }
+
+        // Look up function body — returns null if fn doesn't exist or isn't pure
+        const fn_info = fn_lookup.lookup(fn_name) orelse return .not_constant;
+
+        // Check param count matches
+        if (fn_info.param_names.len != call.arguments.len) return .not_constant;
+
+        // Check recursion depth
+        if (self.call_depth >= self.max_call_depth) {
+            return .{ .err = error_mod.CtError.init(.recursion_limit, .{ .line = 0, .column = 0, .length = 0 }, "comptime recursion depth exceeded") };
+        }
+
+        // Push scope, bind params, evaluate body
+        self.env.pushScope(false) catch return .not_constant;
+        defer self.env.popScope();
+
+        for (fn_info.param_names, 0..) |param_name, i| {
+            _ = self.env.bind(param_name, arg_values[i]) catch return .not_constant;
+        }
+
+        self.call_depth += 1;
+        defer self.call_depth -= 1;
+
+        // Evaluate function body using StmtEvaluator
+        var stmt_eval = StmtEvaluator{
+            .base = self.*,
+            .allocator = self.env.allocator,
+        };
+        const result = stmt_eval.evalBlock(fn_info.body);
+        return switch (result) {
+            .return_val => |v| if (v) |val| .{ .value = val } else .{ .value = .void_val },
+            .ok => |v| if (v) |val| .{ .value = val } else .{ .value = .void_val },
+            .not_comptime => .not_constant,
+            .err => |e| .{ .err = e },
+            .break_val, .continue_val => .not_constant,
+        };
+    }
+
+    fn evalBuiltinCall(self: *AstEvaluator, call: anytype, fn_name: []const u8) AstEvalResult {
+        if (call.arguments.len != 2) return .not_constant;
+
+        const lhs_result = self.evalExprNode(call.arguments[0]);
+        const rhs_result = self.evalExprNode(call.arguments[1]);
+
+        const lhs: u256 = switch (lhs_result) {
+            .value => |v| switch (v) {
+                .integer => |n| n,
+                else => return .not_constant,
+            },
+            .not_constant => return .not_constant,
+            .err => |e| return .{ .err = e },
+        };
+        const rhs: u256 = switch (rhs_result) {
+            .value => |v| switch (v) {
+                .integer => |n| n,
+                else => return .not_constant,
+            },
+            .not_constant => return .not_constant,
+            .err => |e| return .{ .err = e },
+        };
+
+        if (std.mem.eql(u8, fn_name, "@addWithOverflow")) {
+            const result, const overflow = @addWithOverflow(lhs, rhs);
+            return self.makeOverflowResult(result, overflow != 0);
+        }
+        if (std.mem.eql(u8, fn_name, "@subWithOverflow")) {
+            const result, const overflow = @subWithOverflow(lhs, rhs);
+            return self.makeOverflowResult(result, overflow != 0);
+        }
+        if (std.mem.eql(u8, fn_name, "@mulWithOverflow")) {
+            const result, const overflow = @mulWithOverflow(lhs, rhs);
+            return self.makeOverflowResult(result, overflow != 0);
+        }
+        if (std.mem.eql(u8, fn_name, "@shlWithOverflow")) {
+            const shift = shiftLeftWithOverflow(lhs, rhs);
+            return self.makeOverflowResult(shift.value, shift.overflow);
+        }
+        if (std.mem.eql(u8, fn_name, "@shrWithOverflow")) {
+            const shift = shiftRightWithOverflow(lhs, rhs);
+            return self.makeOverflowResult(shift.value, shift.overflow);
+        }
+
+        return .not_constant;
+    }
+
+    fn makeOverflowResult(self: *AstEvaluator, value_result: u256, overflow: bool) AstEvalResult {
+        const fields = [_]heap_mod.CtAggregate.StructField{
+            .{ .field_id = 0, .value = .{ .integer = value_result } },
+            .{ .field_id = 1, .value = .{ .boolean = overflow } },
+        };
+        const heap_id = self.env.heap.allocStruct(0, &fields) catch return .not_constant;
+        return .{ .value = .{ .struct_ref = heap_id } };
+    }
+
+    const ShiftWithOverflowResult = struct {
+        value: u256,
+        overflow: bool,
+    };
+
+    fn shiftLeftWithOverflow(lhs: u256, rhs: u256) ShiftWithOverflowResult {
+        if (rhs == 0) return .{ .value = lhs, .overflow = false };
+        if (rhs >= 256) return .{ .value = 0, .overflow = lhs != 0 };
+
+        const shift_u16: u16 = @intCast(rhs);
+        const shift_amt: u8 = @intCast(shift_u16);
+        const upper_bits_shift: u8 = @intCast(256 - shift_u16);
+        const overflow = (lhs >> upper_bits_shift) != 0;
+        return .{ .value = lhs << shift_amt, .overflow = overflow };
+    }
+
+    fn shiftRightWithOverflow(lhs: u256, rhs: u256) ShiftWithOverflowResult {
+        if (rhs == 0) return .{ .value = lhs, .overflow = false };
+        if (rhs >= 256) return .{ .value = 0, .overflow = lhs != 0 };
+
+        const shift_u16: u16 = @intCast(rhs);
+        const shift_amt: u8 = @intCast(shift_u16);
+        const mask = (@as(u256, 1) << shift_amt) - 1;
+        const overflow = (lhs & mask) != 0;
+        return .{ .value = lhs >> shift_amt, .overflow = overflow };
     }
 
     fn evalLiteral(self: *AstEvaluator, lit: anytype) AstEvalResult {
@@ -286,7 +472,36 @@ pub const AstEvaluator = struct {
         if (self.env.lookupValue(id.name)) |val| {
             return .{ .value = val };
         }
+        // Check if the identifier is a type name → return type_val
+        if (resolveTypeName(id.name)) |tid| {
+            return .{ .value = CtValue{ .type_val = tid } };
+        }
         return .not_constant;
+    }
+
+    /// Resolve a type name string (e.g. "u256", "bool") to a TypeId.
+    fn resolveTypeName(name: []const u8) ?value.TypeId {
+        const ids = value.type_ids;
+        const map = std.StaticStringMap(value.TypeId).initComptime(.{
+            .{ "u8", ids.u8_id },
+            .{ "u16", ids.u16_id },
+            .{ "u32", ids.u32_id },
+            .{ "u64", ids.u64_id },
+            .{ "u128", ids.u128_id },
+            .{ "u256", ids.u256_id },
+            .{ "i8", ids.i8_id },
+            .{ "i16", ids.i16_id },
+            .{ "i32", ids.i32_id },
+            .{ "i64", ids.i64_id },
+            .{ "i128", ids.i128_id },
+            .{ "i256", ids.i256_id },
+            .{ "bool", ids.bool_id },
+            .{ "address", ids.address_id },
+            .{ "string", ids.string_id },
+            .{ "bytes", ids.bytes_id },
+            .{ "void", ids.void_id },
+        });
+        return map.get(name);
     }
 
     fn evalEnumLiteral(self: *AstEvaluator, el: anytype) AstEvalResult {
@@ -345,21 +560,22 @@ pub const AstEvaluator = struct {
             .struct_ref => |heap_id| {
                 // Struct field access by index (field_id)
                 const struct_data = self.env.heap.getStruct(heap_id);
+                // Known anonymous-struct field names used by overflow builtins.
+                if (std.mem.eql(u8, field_name, "value")) {
+                    if (struct_data.fields.len > 0) return .{ .value = struct_data.fields[0].value };
+                    return .not_constant;
+                }
+                if (std.mem.eql(u8, field_name, "overflow")) {
+                    if (struct_data.fields.len > 1) return .{ .value = struct_data.fields[1].value };
+                    return .not_constant;
+                }
                 // Try to match by index (for anonymous structs created in order)
                 const field_str = if (field_name.len > 0 and field_name[0] == '_') field_name[1..] else field_name;
                 if (std.fmt.parseInt(usize, field_str, 10)) |idx| {
                     if (idx < struct_data.fields.len) {
                         return .{ .value = struct_data.fields[idx].value };
                     }
-                } else |_| {
-                    // Field access by name requires type system for proper field_id lookup
-                    // For anonymous structs created in order, field_id matches index
-                    for (struct_data.fields, 0..) |field, i| {
-                        if (field.field_id == i) {
-                            // Can't match by name without type info, return indexed value
-                        }
-                    }
-                }
+                } else |_| {}
                 return .not_constant;
             },
             .string_ref => |heap_id| {
@@ -637,6 +853,11 @@ fn mapBinaryOp(op: anytype) ?BinaryOp {
         .Star => .mul,
         .Slash => .div,
         .Percent => .mod,
+        .WrappingAdd => .wadd,
+        .WrappingSub => .wsub,
+        .WrappingMul => .wmul,
+        .WrappingShl => .wshl,
+        .WrappingShr => .wshr,
         .EqualEqual => .eq,
         .BangEqual => .neq,
         .Less => .lt,
@@ -730,7 +951,8 @@ pub const StmtEvaluator = struct {
     /// Evaluate a single statement
     pub fn evalStatement(self: *StmtEvaluator, stmt: *const StmtNode) AstStmtResult {
         // Check step limit
-        if (!self.base.evaluator.step(.{ .line = 0, .column = 0, .length = 0 })) {
+        if (self.base.evaluator.step(.{ .line = 0, .column = 0, .length = 0 })) |err_result| {
+            if (err_result == .err) return .{ .err = err_result.err };
             return .{ .err = error_mod.CtError.init(.step_limit, .{ .line = 0, .column = 0, .length = 0 }, "comptime step limit exceeded") };
         }
 
@@ -792,7 +1014,7 @@ pub const StmtEvaluator = struct {
             }
         } else .void_val;
 
-        self.base.env.bind(vd.name, val) catch {
+        _ = self.base.env.bind(vd.name, val) catch {
             return .{ .err = error_mod.CtError.init(.internal_error, .{ .line = 0, .column = 0, .length = 0 }, "failed to bind variable") };
         };
         return .{ .ok = null };
@@ -924,11 +1146,11 @@ pub const StmtEvaluator = struct {
                 .IndexPair => |ip| ip.item,
                 .Destructured => return .not_comptime, // TODO: support destructuring
             };
-            self.base.env.bind(var_name, .{ .integer = i }) catch return .{ .err = error_mod.CtError.init(.internal_error, .{ .line = 0, .column = 0, .length = 0 }, "failed to bind loop var") };
+            _ = self.base.env.bind(var_name, .{ .integer = i }) catch return .{ .err = error_mod.CtError.init(.internal_error, .{ .line = 0, .column = 0, .length = 0 }, "failed to bind loop var") };
 
             // Bind index if IndexPair
             if (for_stmt.pattern == .IndexPair) {
-                self.base.env.bind(for_stmt.pattern.IndexPair.index, .{ .integer = iterations - 1 }) catch {};
+                _ = self.base.env.bind(for_stmt.pattern.IndexPair.index, .{ .integer = iterations - 1 }) catch {};
             }
 
             const body_result = self.evalBlock(&for_stmt.body);
@@ -971,11 +1193,11 @@ pub const StmtEvaluator = struct {
                 .IndexPair => |ip| ip.item,
                 .Destructured => return .not_comptime,
             };
-            self.base.env.bind(var_name, item) catch return .{ .err = error_mod.CtError.init(.internal_error, .{ .line = 0, .column = 0, .length = 0 }, "failed to bind loop var") };
+            _ = self.base.env.bind(var_name, item) catch return .{ .err = error_mod.CtError.init(.internal_error, .{ .line = 0, .column = 0, .length = 0 }, "failed to bind loop var") };
 
             // Bind index if IndexPair
             if (for_stmt.pattern == .IndexPair) {
-                self.base.env.bind(for_stmt.pattern.IndexPair.index, .{ .integer = idx }) catch {};
+                _ = self.base.env.bind(for_stmt.pattern.IndexPair.index, .{ .integer = idx }) catch {};
             }
 
             const body_result = self.evalBlock(&for_stmt.body);
@@ -1042,18 +1264,12 @@ pub const StmtEvaluator = struct {
             .err => |e| return .{ .err = e },
         };
 
-        const op: BinaryOp = switch (ca.op) {
+        const op: BinaryOp = switch (ca.operator) {
             .PlusEqual => .add,
             .MinusEqual => .sub,
             .StarEqual => .mul,
             .SlashEqual => .div,
             .PercentEqual => .mod,
-            .BitwiseAndEqual => .band,
-            .BitwiseOrEqual => .bor,
-            .BitwiseXorEqual => .bxor,
-            .LeftShiftEqual => .shl,
-            .RightShiftEqual => .shr,
-            else => return .not_comptime,
         };
 
         const eval_result = self.base.evaluator.evalBinaryOp(op, current, rhs, .{ .line = 0, .column = 0, .length = 0 });
@@ -1184,7 +1400,7 @@ pub const StmtEvaluator = struct {
                 for (fields, 0..) |field, i| {
                     // For anonymous structs, use index-based access
                     if (i < struct_data.fields.len) {
-                        self.base.env.bind(field.variable, struct_data.fields[i].value) catch return .{ .err = error_mod.CtError.init(.internal_error, .{ .line = 0, .column = 0, .length = 0 }, "failed to bind destructured field") };
+                        _ = self.base.env.bind(field.variable, struct_data.fields[i].value) catch return .{ .err = error_mod.CtError.init(.internal_error, .{ .line = 0, .column = 0, .length = 0 }, "failed to bind destructured field") };
                     } else {
                         return .{ .err = error_mod.CtError.init(.index_out_of_bounds, .{ .line = 0, .column = 0, .length = 0 }, "destructuring field out of bounds") };
                     }
@@ -1197,7 +1413,7 @@ pub const StmtEvaluator = struct {
 
                 for (names, 0..) |name, i| {
                     if (i < tuple_data.elems.len) {
-                        self.base.env.bind(name, tuple_data.elems[i]) catch return .{ .err = error_mod.CtError.init(.internal_error, .{ .line = 0, .column = 0, .length = 0 }, "failed to bind destructured tuple element") };
+                        _ = self.base.env.bind(name, tuple_data.elems[i]) catch return .{ .err = error_mod.CtError.init(.internal_error, .{ .line = 0, .column = 0, .length = 0 }, "failed to bind destructured tuple element") };
                     } else {
                         return .{ .err = error_mod.CtError.init(.index_out_of_bounds, .{ .line = 0, .column = 0, .length = 0 }, "destructuring tuple index out of bounds") };
                     }
@@ -1210,7 +1426,7 @@ pub const StmtEvaluator = struct {
 
                 for (names, 0..) |name, i| {
                     if (i < arr_data.elems.len) {
-                        self.base.env.bind(name, arr_data.elems[i]) catch return .{ .err = error_mod.CtError.init(.internal_error, .{ .line = 0, .column = 0, .length = 0 }, "failed to bind destructured array element") };
+                        _ = self.base.env.bind(name, arr_data.elems[i]) catch return .{ .err = error_mod.CtError.init(.internal_error, .{ .line = 0, .column = 0, .length = 0 }, "failed to bind destructured array element") };
                     } else {
                         return .{ .err = error_mod.CtError.init(.index_out_of_bounds, .{ .line = 0, .column = 0, .length = 0 }, "destructuring array index out of bounds") };
                     }
@@ -1541,4 +1757,104 @@ test "AstEvaluator valuesEqual" {
 
     // Test type mismatch
     try std.testing.expect(!eval.valuesEqual(.{ .integer = 1 }, .{ .boolean = true }));
+}
+
+test "mapBinaryOp supports wrapping operators" {
+    try std.testing.expectEqual(BinaryOp.wadd, mapBinaryOp(ast_expressions.BinaryOp.WrappingAdd).?);
+    try std.testing.expectEqual(BinaryOp.wsub, mapBinaryOp(ast_expressions.BinaryOp.WrappingSub).?);
+    try std.testing.expectEqual(BinaryOp.wmul, mapBinaryOp(ast_expressions.BinaryOp.WrappingMul).?);
+    try std.testing.expectEqual(BinaryOp.wshl, mapBinaryOp(ast_expressions.BinaryOp.WrappingShl).?);
+    try std.testing.expectEqual(BinaryOp.wshr, mapBinaryOp(ast_expressions.BinaryOp.WrappingShr).?);
+}
+
+test "AstEvaluator evaluates wrapping operators via AST" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var env = CtEnv.init(std.testing.allocator, EvalConfig.default);
+    defer env.deinit();
+    var eval = AstEvaluator.init(&env, .must_eval, .strict, null);
+
+    const span = AstSourceSpan{ .line = 1, .column = 1, .length = 1 };
+    const max_lit = try ast_expressions.createUntypedIntegerLiteral(a, "0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff", span);
+    const one_lit = try ast_expressions.createUntypedIntegerLiteral(a, "1", span);
+    const zero_lit = try ast_expressions.createUntypedIntegerLiteral(a, "0", span);
+
+    const add_wrap_expr = try ast_expressions.createBinaryExpr(a, max_lit, .WrappingAdd, one_lit, span);
+    const add_wrap = eval.evalExpr(add_wrap_expr);
+    try std.testing.expectEqual(@as(u256, 0), add_wrap.getInteger().?);
+
+    const sub_wrap_expr = try ast_expressions.createBinaryExpr(a, zero_lit, .WrappingSub, one_lit, span);
+    const sub_wrap = eval.evalExpr(sub_wrap_expr);
+    try std.testing.expectEqual(std.math.maxInt(u256), sub_wrap.getInteger().?);
+}
+
+test "AstEvaluator evaluates overflow builtins with field access" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var env = CtEnv.init(std.testing.allocator, EvalConfig.default);
+    defer env.deinit();
+    var eval = AstEvaluator.init(&env, .must_eval, .strict, null);
+
+    const span = AstSourceSpan{ .line = 1, .column = 1, .length = 1 };
+    const max_lit = try ast_expressions.createUntypedIntegerLiteral(a, "0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff", span);
+    const one_lit = try ast_expressions.createUntypedIntegerLiteral(a, "1", span);
+
+    const add_callee = try ast_expressions.createIdentifier(a, "@addWithOverflow", span);
+    const add_args = try a.alloc(*ast_expressions.ExprNode, 2);
+    add_args[0] = max_lit;
+    add_args[1] = one_lit;
+    const add_call = try a.create(ast_expressions.ExprNode);
+    add_call.* = .{ .Call = .{
+        .callee = add_callee,
+        .arguments = add_args,
+        .type_info = ast_type_info.TypeInfo.unknown(),
+        .span = span,
+    } };
+
+    const overflow_field = try a.create(ast_expressions.ExprNode);
+    overflow_field.* = .{ .FieldAccess = .{
+        .target = add_call,
+        .field = "overflow",
+        .type_info = ast_type_info.TypeInfo.unknown(),
+        .span = span,
+    } };
+    const overflow_result = eval.evalExpr(overflow_field);
+    try std.testing.expectEqual(true, overflow_result.getBoolean().?);
+
+    const value_field = try a.create(ast_expressions.ExprNode);
+    value_field.* = .{ .FieldAccess = .{
+        .target = add_call,
+        .field = "value",
+        .type_info = ast_type_info.TypeInfo.unknown(),
+        .span = span,
+    } };
+    const value_result = eval.evalExpr(value_field);
+    try std.testing.expectEqual(@as(u256, 0), value_result.getInteger().?);
+
+    const high_bit_lit = try ast_expressions.createUntypedIntegerLiteral(a, "0x8000000000000000000000000000000000000000000000000000000000000000", span);
+    const shl_callee = try ast_expressions.createIdentifier(a, "@shlWithOverflow", span);
+    const shl_args = try a.alloc(*ast_expressions.ExprNode, 2);
+    shl_args[0] = high_bit_lit;
+    shl_args[1] = one_lit;
+    const shl_call = try a.create(ast_expressions.ExprNode);
+    shl_call.* = .{ .Call = .{
+        .callee = shl_callee,
+        .arguments = shl_args,
+        .type_info = ast_type_info.TypeInfo.unknown(),
+        .span = span,
+    } };
+
+    const shl_overflow_field = try a.create(ast_expressions.ExprNode);
+    shl_overflow_field.* = .{ .FieldAccess = .{
+        .target = shl_call,
+        .field = "overflow",
+        .type_info = ast_type_info.TypeInfo.unknown(),
+        .span = span,
+    } };
+    const shl_overflow_result = eval.evalExpr(shl_overflow_field);
+    try std.testing.expectEqual(true, shl_overflow_result.getBoolean().?);
 }
