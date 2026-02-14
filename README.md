@@ -8,11 +8,20 @@ Ora is a smart-contract language and compiler for EVM with explicit semantics, v
 
 ## Overview
 
-Ora is designed for teams that want compiler visibility and formal reasoning without hiding execution details. The toolchain is structured around:
-- Explicit region/effect semantics (`storage`, `memory`, `transient`, `stack`).
-- Strongly typed frontend with refinements and specification constructs.
-- Deterministic lowering through Ora MLIR and SIR before EVM bytecode emission.
-- Integrated Z3-backed verification for contract annotations and safety obligations.
+Ora is designed for teams that want compiler visibility and formal reasoning without hiding execution details. The toolchain is structured around explicit region/effect semantics, a strongly typed frontend, deterministic Ora MLIR → SIR → EVM lowering, and Z3-backed verification.
+
+### Language features at a glance
+
+| Area | Features |
+|------|----------|
+| **Types** | Unsigned/signed ints (u8–u256, i8–i256), bool, address, string, bytes; structs, enums, tuples, anonymous structs (`.{ ... }`). |
+| **Refinement types** | Subtypes with constraints: `NonZero`, `InRange`, `MinValue`, `MaxValue`, `Scaled`, `Exact`, `BasisPoints`, `NonZeroAddress`; compile-time and optional runtime guards. |
+| **Abstraction** | **Generics** (`comptime T: type`), generic functions and structs; **comptime** evaluation and constant folding. |
+| **Control flow** | **Switch** (expressions and statements; cases, ranges, `default`); loops with **termination** (e.g. `decreases`, invariants); **labels**, `break`/`continue` to labels. |
+| **Bit-level** | **Bitfields** with packed fields, optional `@at`/`@bits` layout. |
+| **Errors** | **Error unions** and errors-as-values (`!T`), `try`/`catch`-style handling. |
+| **Verification** | **SMT** (Z3); `requires`/`ensures`/`invariant`/`assume`; path-sensitive reasoning; refinement guards. |
+| **Memory** | Explicit regions: `storage`, `memory`, `transient`, `stack`. |
 
 ## Release Track: Asuka (Pre-Release)
 
@@ -20,12 +29,10 @@ Asuka is the current hardening milestone. The goal is production-grade correctne
 
 ## Current Capabilities
 
-- Frontend pipeline: lexer, parser, typed AST, and Ora MLIR emission.
-- Core language features: structs, enums, mappings, switch expressions/statements, error unions, and refinement types.
-- Backend pipeline: Ora MLIR -> SIR MLIR / SIR text -> EVM bytecode.
-- Verification inputs: `requires`, `ensures`, `invariant`, `assume`, and refinement guards.
-- Verification execution controls for mode/call/state reasoning and timeout tuning.
-- Path-sensitive assumption handling (compiler path assumptions are scoped; user assumptions remain function-level).
+- **Frontend:** Lexer, parser, typed AST, Ora MLIR emission.
+- **Backend:** Ora MLIR → SIR MLIR / SIR text → EVM bytecode.
+- **Verification:** SMT (Z3) with `requires`/`ensures`/`invariant`/`assume`, refinement guards, path-sensitive assumptions.
+- See the **Language features** table above for types, generics, comptime, switch, loops, bitfields, error unions, and verification.
 
 ## Current Focus
 
@@ -54,6 +61,12 @@ Run tests:
 zig build test
 ```
 
+## Documentation
+
+- **Language & specs:** [website/docs](website/docs) — structs, refinement types, generics, comptime, ABI, formal verification.
+- **Generics (style guide):** [website/docs/generics.md](website/docs/generics.md) — `comptime T: type`, generic functions/structs, monomorphization.
+- **Examples:** [ora-example](ora-example) — apps, comptime, and [ora-example/comptime/generics](ora-example/comptime/generics) for generic examples.
+
 ## Using the compiler
 
 Run the compiler directly:
@@ -73,45 +86,11 @@ See available commands and flags:
 
 ## Common workflows
 
-```bash
-# Format Ora source code
-./zig-out/bin/ora fmt ora-example/apps/counter.ora
-
-# Check if code is formatted (useful for CI)
-./zig-out/bin/ora fmt --check ora-example/apps/counter.ora
-
-# Emit MLIR (Ora dialect)
-./zig-out/bin/ora --emit-mlir ora-example/apps/counter.ora
-
-# Emit SIR MLIR (where supported)
-./zig-out/bin/ora --emit-mlir-sir ora-example/apps/counter.ora
-
-# Emit Sensei SIR text
-./zig-out/bin/ora --emit-sir-text ora-example/apps/counter.ora
-
-# Emit bytecode
-./zig-out/bin/ora --emit-bytecode ora-example/apps/counter.ora
-
-# Emit ABI (Ora-native)
-./zig-out/bin/ora --emit-abi ora-example/apps/counter.ora
-
-# Emit ABI (Solidity-compatible JSON)
-./zig-out/bin/ora --emit-abi-solidity ora-example/apps/counter.ora
-
-# Run verifier explicitly (default is enabled)
-./zig-out/bin/ora --verify --emit-mlir ora-example/apps/counter.ora
-
-# Full verification mode (includes untagged asserts)
-./zig-out/bin/ora --verify=full --emit-mlir ora-example/apps/counter.ora
-
-# Run the standard test suite
-zig build test
-```
-
-Validate fixtures:
-```bash
-./scripts/validate-examples.sh
-```
+- **Format:** `./zig-out/bin/ora fmt <file.ora>` — format source; use `--check` for CI.
+- **Emit IR / bytecode / ABI:** `--emit-mlir`, `--emit-mlir-sir`, `--emit-sir-text`, `--emit-bytecode`, `--emit-abi`, `--emit-abi-solidity`.
+- **Verify:** `--verify` (default); `--verify=full` for untagged asserts.
+- **SMT report:** `--emit-smt-report` — writes an SMT encoding audit to `<basename>.smt.report.md` and `<basename>.smt.report.json` (per-file encoding, obligations, and SMT-LIB snippets). Example: `./zig-out/bin/ora --emit-smt-report ora-example/apps/counter.ora` produces `counter.ora.smt.report.md` and `.json`.
+- **Tests:** `zig build test` — run the test suite. `./scripts/validate-examples.sh` — validate example fixtures.
 
 ## Verification timeout and tuning
 
@@ -148,3 +127,4 @@ python3 scripts/generate_ora_to_sir_coverage.py
 
 - Asuka is pre-release; breaking changes are expected.
 - Ora → SIR parity is the primary milestone for Asuka.
+- Generic style (syntax and semantics) is defined in [website/docs/generics.md](website/docs/generics.md).
