@@ -102,6 +102,7 @@ pub const FunctionNode = struct {
     ensures_clauses: []*Expressions.ExprNode, // Postconditions (formal verification)
     modifies_clause: ?[]*Expressions.ExprNode = null, // Frame conditions - what storage can be modified
     is_ghost: bool = false, // Is this a ghost function? (specification-only)
+    is_comptime_only: bool = false, // Private fn with all call sites folded — skip MLIR lowering
     span: SourceSpan,
 
     /// Check if this function is specification-only (not compiled to bytecode)
@@ -114,6 +115,7 @@ pub const ParameterNode = struct {
     name: []const u8,
     type_info: Types.TypeInfo, // Unified type information
     is_mutable: bool, // mut parameter
+    is_comptime: bool = false, // comptime parameter (must be known at compile time)
     default_value: ?*Expressions.ExprNode, // Default parameter value
     span: SourceSpan,
 };

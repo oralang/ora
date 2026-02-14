@@ -189,6 +189,41 @@ pub const StatementParser = struct {
             return try control_flow.parseIfStatement(self);
         }
 
+        // comptime while / comptime for — compile-time unrolled loops
+        if (self.base.check(.Comptime)) {
+            // Peek ahead: if next token is 'while' or 'for', parse as comptime loop
+            const next_idx = self.base.current + 1;
+            if (next_idx < self.base.tokens.len) {
+                const next_type = self.base.tokens[next_idx].type;
+                if (next_type == .While or next_type == .For) {
+                    _ = self.base.advance(); // consume 'comptime'
+                    if (self.base.match(.While)) {
+                        const while_stmt = try control_flow.parseWhileStatement(self);
+                        switch (while_stmt) {
+                            .While => |w| {
+                                var w_copy = w;
+                                w_copy.is_comptime = true;
+                                w_copy.label = label;
+                                return ast.Statements.StmtNode{ .While = w_copy };
+                            },
+                            else => return while_stmt,
+                        }
+                    } else if (self.base.match(.For)) {
+                        const for_stmt = try control_flow.parseForStatement(self);
+                        switch (for_stmt) {
+                            .ForLoop => |fl| {
+                                var fl_copy = fl;
+                                fl_copy.is_comptime = true;
+                                fl_copy.label = label;
+                                return ast.Statements.StmtNode{ .ForLoop = fl_copy };
+                            },
+                            else => return for_stmt,
+                        }
+                    }
+                }
+            }
+        }
+
         // while statements
         if (self.base.match(.While)) {
             const while_stmt = try control_flow.parseWhileStatement(self);

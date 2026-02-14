@@ -157,6 +157,9 @@ fn foldContract(ctx: *FoldContext, contract: *ast.ContractNode) FoldError!void {
     for (contract.body) |*child| {
         try foldNode(ctx, child);
     }
+
+    // DCE: mark private functions whose call sites were all folded away
+    markDeadPrivateFunctions(contract);
 }
 
 fn foldFunction(ctx: *FoldContext, function: *ast.FunctionNode) FoldError!void {
@@ -167,7 +170,11 @@ fn foldFunction(ctx: *FoldContext, function: *ast.FunctionNode) FoldError!void {
         ctx.core_resolver.current_scope = scope;
     }
     ctx.core_resolver.current_function_return_type = function.return_type_info;
+
+    // Push a comptime env scope so function-local consts don't leak to other functions
+    ctx.core_resolver.comptime_env.pushScope(false) catch {};
     defer {
+        ctx.core_resolver.comptime_env.popScope();
         ctx.current_scope = prev_scope;
         ctx.core_resolver.current_scope = prev_scope;
         ctx.core_resolver.current_function_return_type = prev_return_type;
@@ -248,6 +255,10 @@ fn foldStmt(ctx: *FoldContext, stmt: *ast.Statements.StmtNode) FoldError!void {
             }
         },
         .While => |*while_stmt| {
+            if (while_stmt.is_comptime) {
+                // Comptime while: evaluate entirely at compile time
+                tryEvalComptimeWhile(ctx, while_stmt);
+            }
             try foldExpr(ctx, &while_stmt.condition, true);
             for (while_stmt.invariants) |*inv| {
                 try foldExpr(ctx, inv, true);
@@ -258,6 +269,10 @@ fn foldStmt(ctx: *FoldContext, stmt: *ast.Statements.StmtNode) FoldError!void {
             try foldBlock(ctx, &while_stmt.body, body_key);
         },
         .ForLoop => |*for_stmt| {
+            if (for_stmt.is_comptime) {
+                // Comptime for: evaluate entirely at compile time
+                tryEvalComptimeFor(ctx, for_stmt);
+            }
             try foldExpr(ctx, &for_stmt.iterable, true);
             for (for_stmt.invariants) |*inv| {
                 try foldExpr(ctx, inv, true);
@@ -386,6 +401,12 @@ fn foldExpr(ctx: *FoldContext, expr: *ast.Expressions.ExprNode, allow_fold: bool
         },
         .Call => |*call| {
             for (call.arguments) |arg| try foldExpr(ctx, arg, true);
+            // Try to evaluate the entire call at comptime (pure fn + all args known)
+            if (allow_fold) {
+                if (ctx.core_resolver.evaluateConstantExpression(expr).getValue()) |ct_val| {
+                    if (try tryFoldValue(ctx, expr, ct_val, getExpressionSpan(expr), getExpressionTypeInfo(expr))) return;
+                }
+            }
         },
         .Index => |*idx| {
             try foldExpr(ctx, idx.target, true);
@@ -640,7 +661,249 @@ fn setLiteralSpan(lit: *ast.Expressions.LiteralExpr, span: ast.SourceSpan) void 
     }
 }
 
+/// Evaluate a comptime while loop at compile time.
+/// Side effect: any `comptime var` bindings are updated in the fold context.
+fn tryEvalComptimeWhile(ctx: *FoldContext, while_stmt: *ast.Statements.WhileNode) void {
+    const lookup = comptime_eval.IdentifierLookup{
+        .ctx = ctx.core_resolver,
+        .lookupFn = @import("core/mod.zig").lookupComptimeValueThunk,
+        .enumLookupFn = @import("core/mod.zig").lookupEnumValueThunk,
+    };
+    var stmt_eval = comptime_eval.StmtEvaluator.init(
+        ctx.allocator,
+        &ctx.core_resolver.comptime_env,
+        .try_eval,
+        .forgiving,
+        lookup,
+    );
+    const while_as_stmt = ast.Statements.StmtNode{ .While = while_stmt.* };
+    const result = stmt_eval.evalStatement(&while_as_stmt);
+    // If evaluation succeeded, any bindings are updated in comptime_env
+    // If it failed (not_comptime), the loop will still be emitted as runtime code
+    switch (result) {
+        .ok => |maybe_val| {
+            if (maybe_val) |val| {
+                if (val == .integer) {
+                    // Store the result if we can identify a variable to update
+                }
+            }
+        },
+        else => {},
+    }
+}
+
+/// Evaluate a comptime for loop at compile time.
+fn tryEvalComptimeFor(ctx: *FoldContext, for_stmt: *ast.Statements.ForLoopNode) void {
+    const lookup = comptime_eval.IdentifierLookup{
+        .ctx = ctx.core_resolver,
+        .lookupFn = @import("core/mod.zig").lookupComptimeValueThunk,
+        .enumLookupFn = @import("core/mod.zig").lookupEnumValueThunk,
+    };
+    var stmt_eval = comptime_eval.StmtEvaluator.init(
+        ctx.allocator,
+        &ctx.core_resolver.comptime_env,
+        .try_eval,
+        .forgiving,
+        lookup,
+    );
+    const for_as_stmt = ast.Statements.StmtNode{ .ForLoop = for_stmt.* };
+    const result = stmt_eval.evalStatement(&for_as_stmt);
+    switch (result) {
+        .ok => {},
+        else => {},
+    }
+}
+
 /// Must match locals_binder.getBlockScopeKey for consistency.
 fn getBlockScopeKey(stmt: *const ast.Statements.StmtNode, block_id: usize) usize {
     return @intFromPtr(stmt) * 4 + block_id;
+}
+
+// ============================================================================
+// Dead Code Elimination for comptime-only private functions
+// ============================================================================
+
+/// After folding, scan the contract AST for remaining call targets.
+/// Private functions with zero live callers are marked `is_comptime_only = true`
+/// so the MLIR emitter can skip them.
+/// Uses iterative fixpoint: dead functions are excluded from subsequent scans
+/// so their callees can also be collected as dead.
+fn markDeadPrivateFunctions(contract: *ast.ContractNode) void {
+    var changed = true;
+    while (changed) {
+        changed = false;
+        var live_calls = std.StringHashMap(void).init(std.heap.page_allocator);
+        defer live_calls.deinit();
+
+        // Only collect call targets from live (non-dead) functions.
+        // Self-calls are excluded: a recursive fn calling itself doesn't keep it live.
+        for (contract.body) |child| {
+            switch (child) {
+                .Function => |func| {
+                    if (func.is_comptime_only) continue;
+                    collectCallTargetsBlock(&func.body, &live_calls, func.name);
+                    // Also scan requires/ensures — they contain runtime calls too
+                    for (func.requires_clauses) |clause| {
+                        collectCallTargetsExprVal(clause.*, &live_calls, func.name);
+                    }
+                    for (func.ensures_clauses) |clause| {
+                        collectCallTargetsExprVal(clause.*, &live_calls, func.name);
+                    }
+                },
+                else => {},
+            }
+        }
+
+        for (contract.body) |*child| {
+            switch (child.*) {
+                .Function => |*func| {
+                    if (func.is_comptime_only) continue;
+                    if (func.visibility != .Private) continue;
+                    if (func.is_ghost) continue;
+                    if (!live_calls.contains(func.name)) {
+                        func.is_comptime_only = true;
+                        changed = true;
+                    }
+                },
+                else => {},
+            }
+        }
+    }
+}
+
+fn collectCallTargetsBlock(block: *const ast.Statements.BlockNode, live: *std.StringHashMap(void), exclude: ?[]const u8) void {
+    for (block.statements) |stmt| {
+        collectCallTargetsStmt(&stmt, live, exclude);
+    }
+}
+
+fn collectCallTargetsStmt(stmt: *const ast.Statements.StmtNode, live: *std.StringHashMap(void), exclude: ?[]const u8) void {
+    switch (stmt.*) {
+        .Expr => |expr| collectCallTargetsExprVal(expr, live, exclude),
+        .Return => |ret| {
+            if (ret.value) |v| collectCallTargetsExprVal(v, live, exclude);
+        },
+        .VariableDecl => |vd| {
+            if (vd.value) |v| collectCallTargetsExprVal(v.*, live, exclude);
+        },
+        .If => |if_s| {
+            collectCallTargetsExprVal(if_s.condition, live, exclude);
+            collectCallTargetsBlock(&if_s.then_branch, live, exclude);
+            if (if_s.else_branch) |eb| collectCallTargetsBlock(&eb, live, exclude);
+        },
+        .While => |w| {
+            collectCallTargetsExprVal(w.condition, live, exclude);
+            collectCallTargetsBlock(&w.body, live, exclude);
+        },
+        .ForLoop => |f| {
+            collectCallTargetsExprVal(f.iterable, live, exclude);
+            collectCallTargetsBlock(&f.body, live, exclude);
+        },
+        .Switch => |sw| {
+            collectCallTargetsExprVal(sw.condition, live, exclude);
+            for (sw.cases) |case| {
+                switch (case.body) {
+                    .Expression => |e| collectCallTargetsExprVal(e.*, live, exclude),
+                    .Block => |*b| collectCallTargetsBlock(b, live, exclude),
+                    .LabeledBlock => |*lb| collectCallTargetsBlock(&lb.block, live, exclude),
+                }
+            }
+            if (sw.default_case) |*dc| collectCallTargetsBlock(dc, live, exclude);
+        },
+        .Assert => |a| collectCallTargetsExprVal(a.condition, live, exclude),
+        .Log => |lg| {
+            for (lg.args) |arg| collectCallTargetsExprVal(arg, live, exclude);
+        },
+        .CompoundAssignment => |ca| collectCallTargetsExprVal(ca.value.*, live, exclude),
+        .TryBlock => |*tb| {
+            collectCallTargetsBlock(&tb.try_block, live, exclude);
+            if (tb.catch_block) |*cb| collectCallTargetsBlock(&cb.block, live, exclude);
+        },
+        .LabeledBlock => |*lb| collectCallTargetsBlock(&lb.block, live, exclude),
+        .Break => |br| {
+            if (br.value) |v| collectCallTargetsExprVal(v.*, live, exclude);
+        },
+        .Continue => |cont| {
+            if (cont.value) |v| collectCallTargetsExprVal(v.*, live, exclude);
+        },
+        .DestructuringAssignment => |da| collectCallTargetsExprVal(da.value.*, live, exclude),
+        else => {},
+    }
+}
+
+fn collectCallTargetsExprVal(expr: ast.Expressions.ExprNode, live: *std.StringHashMap(void), exclude: ?[]const u8) void {
+    switch (expr) {
+        .Call => |call| {
+            if (call.callee.* == .Identifier) {
+                const name = call.callee.Identifier.name;
+                // Skip self-calls — a recursive fn calling itself doesn't keep it live
+                const is_self = if (exclude) |ex| std.mem.eql(u8, name, ex) else false;
+                if (!is_self) live.put(name, {}) catch {};
+            }
+            for (call.arguments) |arg| collectCallTargetsExprVal(arg.*, live, exclude);
+        },
+        .Binary => |bin| {
+            collectCallTargetsExprVal(bin.lhs.*, live, exclude);
+            collectCallTargetsExprVal(bin.rhs.*, live, exclude);
+        },
+        .Unary => |un| collectCallTargetsExprVal(un.operand.*, live, exclude),
+        .Assignment => |asgn| {
+            collectCallTargetsExprVal(asgn.target.*, live, exclude);
+            collectCallTargetsExprVal(asgn.value.*, live, exclude);
+        },
+        .CompoundAssignment => |ca| {
+            collectCallTargetsExprVal(ca.target.*, live, exclude);
+            collectCallTargetsExprVal(ca.value.*, live, exclude);
+        },
+        .Index => |idx| {
+            collectCallTargetsExprVal(idx.target.*, live, exclude);
+            collectCallTargetsExprVal(idx.index.*, live, exclude);
+        },
+        .FieldAccess => |fa| collectCallTargetsExprVal(fa.target.*, live, exclude),
+        .Cast => |c_expr| collectCallTargetsExprVal(c_expr.operand.*, live, exclude),
+        .Tuple => |t| {
+            for (t.elements) |el| collectCallTargetsExprVal(el.*, live, exclude);
+        },
+        .SwitchExpression => |sw| {
+            collectCallTargetsExprVal(sw.condition.*, live, exclude);
+            for (sw.cases) |case| {
+                switch (case.body) {
+                    .Expression => |e| collectCallTargetsExprVal(e.*, live, exclude),
+                    .Block => |*b| collectCallTargetsBlock(b, live, exclude),
+                    .LabeledBlock => |*lb| collectCallTargetsBlock(&lb.block, live, exclude),
+                }
+            }
+            if (sw.default_case) |*dc| collectCallTargetsBlock(dc, live, exclude);
+        },
+        .Try => |tr| collectCallTargetsExprVal(tr.expr.*, live, exclude),
+        .ErrorCast => |ec| collectCallTargetsExprVal(ec.operand.*, live, exclude),
+        .Comptime => |ct| collectCallTargetsBlock(&ct.block, live, exclude),
+        .Old => |old| collectCallTargetsExprVal(old.expr.*, live, exclude),
+        .Quantified => |q| {
+            if (q.condition) |cond| collectCallTargetsExprVal(cond.*, live, exclude);
+            collectCallTargetsExprVal(q.body.*, live, exclude);
+        },
+        .StructInstantiation => |si| {
+            for (si.fields) |f| collectCallTargetsExprVal(f.value.*, live, exclude);
+        },
+        .AnonymousStruct => |anon| {
+            for (anon.fields) |f| collectCallTargetsExprVal(f.value.*, live, exclude);
+        },
+        .ArrayLiteral => |arr| {
+            for (arr.elements) |el| collectCallTargetsExprVal(el.*, live, exclude);
+        },
+        .Destructuring => |d| collectCallTargetsExprVal(d.value.*, live, exclude),
+        .Range => |r| {
+            collectCallTargetsExprVal(r.start.*, live, exclude);
+            collectCallTargetsExprVal(r.end.*, live, exclude);
+        },
+        .LabeledBlock => |lb| collectCallTargetsBlock(&lb.block, live, exclude),
+        .Shift => |sh| {
+            collectCallTargetsExprVal(sh.mapping.*, live, exclude);
+            collectCallTargetsExprVal(sh.source.*, live, exclude);
+            collectCallTargetsExprVal(sh.dest.*, live, exclude);
+            collectCallTargetsExprVal(sh.amount.*, live, exclude);
+        },
+        else => {},
+    }
 }

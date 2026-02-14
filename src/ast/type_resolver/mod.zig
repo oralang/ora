@@ -539,6 +539,10 @@ pub const TypeResolver = struct {
             self.core_resolver.current_scope = prev_scope;
         }
 
+        // Push a comptime env scope so function-local consts don't leak to other functions
+        self.core_resolver.comptime_env.pushScope(false) catch {};
+        defer self.core_resolver.comptime_env.popScope();
+
         // create context for function body with return type
         var func_context = context;
         func_context.function_return_type = function.return_type_info;

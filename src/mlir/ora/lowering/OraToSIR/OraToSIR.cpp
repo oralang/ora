@@ -1390,7 +1390,32 @@ public:
             phase4Target.addIllegalOp<mlir::UnrealizedConversionCastOp>();
             phase4Target.addIllegalOp<mlir::func::CallOp>();
             phase4Target.addIllegalOp<ora::ReturnOp>();
-            phase4Target.addLegalOp<mlir::func::FuncOp>();
+            phase4Target.addDynamicallyLegalOp<mlir::func::FuncOp>(
+                [&](mlir::func::FuncOp funcOp) {
+                    auto fnType = funcOp.getFunctionType();
+                    for (Type inputType : fnType.getInputs())
+                    {
+                        if (!typeConverter.isLegal(inputType))
+                            return false;
+                    }
+                    for (Type resultType : fnType.getResults())
+                    {
+                        if (!typeConverter.isLegal(resultType))
+                            return false;
+                    }
+
+                    // Also require all block arguments to be legal, otherwise
+                    // SIR text legalizer will reject the function body.
+                    for (Block &block : funcOp.getBody())
+                    {
+                        for (BlockArgument arg : block.getArguments())
+                        {
+                            if (!typeConverter.isLegal(arg.getType()))
+                                return false;
+                        }
+                    }
+                    return true;
+                });
             phase4Target.addIllegalOp<ora::IfOp>();
             phase4Target.addIllegalOp<ora::YieldOp>();
             phase4Target.addIllegalOp<ora::ContinueOp>();

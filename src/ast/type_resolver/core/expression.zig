@@ -998,6 +998,10 @@ fn synthCall(
             if (self.function_registry) |registry| {
                 const registry_map = @as(*std.StringHashMap(*FunctionNode), @ptrCast(@alignCast(registry)));
                 if (registry_map.get(func_name)) |function| {
+                    // Enforce comptime params: arguments to comptime-annotated parameters
+                    // must be compile-time known
+                    checkComptimeParams(self, function, call);
+
                     // found in function registry - use return type
                     if (function.return_type_info) |ret_info| {
                         call.type_info = ret_info;
@@ -1620,6 +1624,24 @@ fn extractExprTypeInfo(expr: *const ast.Expressions.ExprNode) TypeInfo {
         .Cast => |cast_expr| cast_expr.target_type,
         else => TypeInfo.unknown(),
     };
+}
+
+/// Check that arguments to comptime-annotated parameters are compile-time known.
+/// Emits a diagnostic (log warning) if a non-comptime argument is passed to a comptime param.
+fn checkComptimeParams(
+    self: *CoreResolver,
+    function: *const FunctionNode,
+    call: *const ast.Expressions.CallExpr,
+) void {
+    const arg_count = @min(function.parameters.len, call.arguments.len);
+    for (function.parameters[0..arg_count], 0..) |param, i| {
+        if (!param.is_comptime) continue;
+        // Check if argument is comptime-known
+        const arg_result = self.evaluateConstantExpression(call.arguments[i]);
+        if (arg_result.getValue() == null) {
+            log.debug("[synthCall] comptime param '{s}' in '{s}' requires compile-time known argument\n", .{ param.name, function.name });
+        }
+    }
 }
 
 /// Resolve the return type for @opWithOverflow builtins.

@@ -222,6 +222,8 @@ pub fn lowerContract(self: *const DeclarationLowerer, contract: *const lib.Contr
     for (contract.body) |child| {
         switch (child) {
             .Function => |f| {
+                // Skip private functions whose only callers were comptime-folded (DCE)
+                if (f.is_comptime_only) continue;
                 // include ghost functions in MLIR for verification
                 // they will be filtered out during target code generation (not in bytecode)
                 var local_var_map = LocalVarMap.init(std.heap.page_allocator);

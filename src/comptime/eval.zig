@@ -329,7 +329,7 @@ pub const Evaluator = struct {
     // ========================================================================
 
     /// Consume one step of fuel, returns error if limit exceeded
-    fn step(self: *Evaluator, span: SourceSpan) ?EvalResult {
+    pub fn step(self: *Evaluator, span: SourceSpan) ?EvalResult {
         self.current_span = span;
         self.env.stats.recordStep();
 

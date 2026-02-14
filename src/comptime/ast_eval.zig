@@ -93,18 +93,51 @@ pub const IdentifierLookup = struct {
     }
 };
 
+/// Opaque function info returned by FunctionLookup
+pub const ComptimeFnInfo = struct {
+    body: *const @import("../ast/statements.zig").BlockNode,
+    param_names: []const []const u8,
+    is_comptime_param: []const bool, // per-parameter comptime flag
+};
+
+/// Callback for looking up function bodies and checking purity
+pub const FunctionLookup = struct {
+    ctx: *anyopaque,
+    /// Returns function body + param names if the function exists and is comptime-eligible (pure)
+    lookupFn: *const fn (ctx: *anyopaque, name: []const u8) ?ComptimeFnInfo,
+
+    pub fn lookup(self: FunctionLookup, name: []const u8) ?ComptimeFnInfo {
+        return self.lookupFn(self.ctx, name);
+    }
+};
+
 /// AST expression evaluator
 pub const AstEvaluator = struct {
     env: *CtEnv,
     evaluator: Evaluator,
     lookup: ?IdentifierLookup,
+    fn_lookup: ?FunctionLookup,
     pool: ?*ConstPool,
+    call_depth: u32 = 0,
+    max_call_depth: u32 = 64,
 
     pub fn init(env: *CtEnv, mode: EvalMode, policy: TryEvalPolicy, lookup: ?IdentifierLookup) AstEvaluator {
         return .{
             .env = env,
             .evaluator = Evaluator.init(env, mode, policy),
             .lookup = lookup,
+            .fn_lookup = null,
+            .pool = null,
+        };
+    }
+
+    /// Initialize with function lookup for comptime fn evaluation
+    pub fn initWithFnLookup(env: *CtEnv, mode: EvalMode, policy: TryEvalPolicy, lookup: ?IdentifierLookup, fn_lookup: ?FunctionLookup) AstEvaluator {
+        return .{
+            .env = env,
+            .evaluator = Evaluator.init(env, mode, policy),
+            .lookup = lookup,
+            .fn_lookup = fn_lookup,
             .pool = null,
         };
     }
@@ -115,6 +148,7 @@ pub const AstEvaluator = struct {
             .env = env,
             .evaluator = Evaluator.init(env, mode, policy),
             .lookup = lookup,
+            .fn_lookup = null,
             .pool = pool,
         };
     }
@@ -185,7 +219,72 @@ pub const AstEvaluator = struct {
             .StructInstantiation => |*si| self.evalStructInstantiation(si),
             .Try => |*try_expr| self.evalTry(try_expr),
             .Range => |*range| self.evalRange(range),
+            .Call => |*call| self.evalCall(call),
             else => .not_constant,
+        };
+    }
+
+    /// Evaluate a function call at compile time.
+    /// Only succeeds if: all args are comptime-known AND the function is pure.
+    fn evalCall(self: *AstEvaluator, call: anytype) AstEvalResult {
+        const fn_lookup = self.fn_lookup orelse return .not_constant;
+
+        // Extract function name from callee
+        const fn_name = switch (call.callee.*) {
+            .Identifier => |id| id.name,
+            else => return .not_constant, // only direct calls supported
+        };
+
+        // Skip builtins (handled elsewhere)
+        if (fn_name.len > 0 and fn_name[0] == '@') return .not_constant;
+
+        // Evaluate all arguments — all must be comptime-known
+        var arg_values: [32]CtValue = undefined; // stack buffer for common case
+        if (call.arguments.len > 32) return .not_constant;
+
+        for (call.arguments, 0..) |arg, i| {
+            const arg_result = self.evalExprNode(arg);
+            switch (arg_result) {
+                .value => |v| arg_values[i] = v,
+                .not_constant => return .not_constant,
+                .err => |e| return .{ .err = e },
+            }
+        }
+
+        // Look up function body — returns null if fn doesn't exist or isn't pure
+        const fn_info = fn_lookup.lookup(fn_name) orelse return .not_constant;
+
+        // Check param count matches
+        if (fn_info.param_names.len != call.arguments.len) return .not_constant;
+
+        // Check recursion depth
+        if (self.call_depth >= self.max_call_depth) {
+            return .{ .err = error_mod.CtError.init(.recursion_limit, .{ .line = 0, .column = 0, .length = 0 }, "comptime recursion depth exceeded") };
+        }
+
+        // Push scope, bind params, evaluate body
+        self.env.pushScope(false) catch return .not_constant;
+        defer self.env.popScope();
+
+        for (fn_info.param_names, 0..) |param_name, i| {
+            _ = self.env.bind(param_name, arg_values[i]) catch return .not_constant;
+        }
+
+        self.call_depth += 1;
+        defer self.call_depth -= 1;
+
+        // Evaluate function body using StmtEvaluator
+        var stmt_eval = StmtEvaluator{
+            .base = self.*,
+            .allocator = self.env.allocator,
+        };
+        const result = stmt_eval.evalBlock(fn_info.body);
+        return switch (result) {
+            .return_val => |v| if (v) |val| .{ .value = val } else .{ .value = .void_val },
+            .ok => |v| if (v) |val| .{ .value = val } else .{ .value = .void_val },
+            .not_comptime => .not_constant,
+            .err => |e| .{ .err = e },
+            .break_val, .continue_val => .not_constant,
         };
     }
 
@@ -730,7 +829,8 @@ pub const StmtEvaluator = struct {
     /// Evaluate a single statement
     pub fn evalStatement(self: *StmtEvaluator, stmt: *const StmtNode) AstStmtResult {
         // Check step limit
-        if (!self.base.evaluator.step(.{ .line = 0, .column = 0, .length = 0 })) {
+        if (self.base.evaluator.step(.{ .line = 0, .column = 0, .length = 0 })) |err_result| {
+            if (err_result == .err) return .{ .err = err_result.err };
             return .{ .err = error_mod.CtError.init(.step_limit, .{ .line = 0, .column = 0, .length = 0 }, "comptime step limit exceeded") };
         }
 
@@ -792,7 +892,7 @@ pub const StmtEvaluator = struct {
             }
         } else .void_val;
 
-        self.base.env.bind(vd.name, val) catch {
+        _ = self.base.env.bind(vd.name, val) catch {
             return .{ .err = error_mod.CtError.init(.internal_error, .{ .line = 0, .column = 0, .length = 0 }, "failed to bind variable") };
         };
         return .{ .ok = null };
@@ -924,11 +1024,11 @@ pub const StmtEvaluator = struct {
                 .IndexPair => |ip| ip.item,
                 .Destructured => return .not_comptime, // TODO: support destructuring
             };
-            self.base.env.bind(var_name, .{ .integer = i }) catch return .{ .err = error_mod.CtError.init(.internal_error, .{ .line = 0, .column = 0, .length = 0 }, "failed to bind loop var") };
+            _ = self.base.env.bind(var_name, .{ .integer = i }) catch return .{ .err = error_mod.CtError.init(.internal_error, .{ .line = 0, .column = 0, .length = 0 }, "failed to bind loop var") };
 
             // Bind index if IndexPair
             if (for_stmt.pattern == .IndexPair) {
-                self.base.env.bind(for_stmt.pattern.IndexPair.index, .{ .integer = iterations - 1 }) catch {};
+                _ = self.base.env.bind(for_stmt.pattern.IndexPair.index, .{ .integer = iterations - 1 }) catch {};
             }
 
             const body_result = self.evalBlock(&for_stmt.body);
@@ -971,11 +1071,11 @@ pub const StmtEvaluator = struct {
                 .IndexPair => |ip| ip.item,
                 .Destructured => return .not_comptime,
             };
-            self.base.env.bind(var_name, item) catch return .{ .err = error_mod.CtError.init(.internal_error, .{ .line = 0, .column = 0, .length = 0 }, "failed to bind loop var") };
+            _ = self.base.env.bind(var_name, item) catch return .{ .err = error_mod.CtError.init(.internal_error, .{ .line = 0, .column = 0, .length = 0 }, "failed to bind loop var") };
 
             // Bind index if IndexPair
             if (for_stmt.pattern == .IndexPair) {
-                self.base.env.bind(for_stmt.pattern.IndexPair.index, .{ .integer = idx }) catch {};
+                _ = self.base.env.bind(for_stmt.pattern.IndexPair.index, .{ .integer = idx }) catch {};
             }
 
             const body_result = self.evalBlock(&for_stmt.body);
@@ -1042,18 +1142,12 @@ pub const StmtEvaluator = struct {
             .err => |e| return .{ .err = e },
         };
 
-        const op: BinaryOp = switch (ca.op) {
+        const op: BinaryOp = switch (ca.operator) {
             .PlusEqual => .add,
             .MinusEqual => .sub,
             .StarEqual => .mul,
             .SlashEqual => .div,
             .PercentEqual => .mod,
-            .BitwiseAndEqual => .band,
-            .BitwiseOrEqual => .bor,
-            .BitwiseXorEqual => .bxor,
-            .LeftShiftEqual => .shl,
-            .RightShiftEqual => .shr,
-            else => return .not_comptime,
         };
 
         const eval_result = self.base.evaluator.evalBinaryOp(op, current, rhs, .{ .line = 0, .column = 0, .length = 0 });
@@ -1184,7 +1278,7 @@ pub const StmtEvaluator = struct {
                 for (fields, 0..) |field, i| {
                     // For anonymous structs, use index-based access
                     if (i < struct_data.fields.len) {
-                        self.base.env.bind(field.variable, struct_data.fields[i].value) catch return .{ .err = error_mod.CtError.init(.internal_error, .{ .line = 0, .column = 0, .length = 0 }, "failed to bind destructured field") };
+                        _ = self.base.env.bind(field.variable, struct_data.fields[i].value) catch return .{ .err = error_mod.CtError.init(.internal_error, .{ .line = 0, .column = 0, .length = 0 }, "failed to bind destructured field") };
                     } else {
                         return .{ .err = error_mod.CtError.init(.index_out_of_bounds, .{ .line = 0, .column = 0, .length = 0 }, "destructuring field out of bounds") };
                     }
@@ -1197,7 +1291,7 @@ pub const StmtEvaluator = struct {
 
                 for (names, 0..) |name, i| {
                     if (i < tuple_data.elems.len) {
-                        self.base.env.bind(name, tuple_data.elems[i]) catch return .{ .err = error_mod.CtError.init(.internal_error, .{ .line = 0, .column = 0, .length = 0 }, "failed to bind destructured tuple element") };
+                        _ = self.base.env.bind(name, tuple_data.elems[i]) catch return .{ .err = error_mod.CtError.init(.internal_error, .{ .line = 0, .column = 0, .length = 0 }, "failed to bind destructured tuple element") };
                     } else {
                         return .{ .err = error_mod.CtError.init(.index_out_of_bounds, .{ .line = 0, .column = 0, .length = 0 }, "destructuring tuple index out of bounds") };
                     }
@@ -1210,7 +1304,7 @@ pub const StmtEvaluator = struct {
 
                 for (names, 0..) |name, i| {
                     if (i < arr_data.elems.len) {
-                        self.base.env.bind(name, arr_data.elems[i]) catch return .{ .err = error_mod.CtError.init(.internal_error, .{ .line = 0, .column = 0, .length = 0 }, "failed to bind destructured array element") };
+                        _ = self.base.env.bind(name, arr_data.elems[i]) catch return .{ .err = error_mod.CtError.init(.internal_error, .{ .line = 0, .column = 0, .length = 0 }, "failed to bind destructured array element") };
                     } else {
                         return .{ .err = error_mod.CtError.init(.index_out_of_bounds, .{ .line = 0, .column = 0, .length = 0 }, "destructuring array index out of bounds") };
                     }

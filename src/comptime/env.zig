@@ -214,6 +214,20 @@ pub const CtEnv = struct {
         return null;
     }
 
+    /// Get a value by name (alias for lookupValue)
+    pub fn get(self: *const CtEnv, name: []const u8) ?CtValue {
+        return self.lookupValue(name);
+    }
+
+    /// Set a value by name (update existing binding or bind in current scope)
+    pub fn set(self: *CtEnv, name: []const u8, val: CtValue) void {
+        if (self.lookup(name)) |slot| {
+            self.write(slot, val);
+        } else {
+            _ = self.bind(name, val) catch {};
+        }
+    }
+
     /// Get slot count
     pub fn slotCount(self: *const CtEnv) usize {
         return self.slots.items.len;
