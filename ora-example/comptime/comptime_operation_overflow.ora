@@ -1,0 +1,43 @@
+contract ComptimeOperationOverflow {
+    pub fn add_overflow_flag() -> bool {
+        const a: u8 = 255;
+        const b: u8 = 1;
+        let res = @addWithOverflow(a, b);
+        return res.overflow;
+    }
+
+    pub fn add_overflow_value() -> u8 {
+        const a: u8 = 255;
+        const b: u8 = 1;
+        let res = @addWithOverflow(a, b);
+        return res.value;
+    }
+
+    pub fn sub_overflow_flag() -> bool {
+        const a: u8 = 0;
+        const b: u8 = 1;
+        let res = @subWithOverflow(a, b);
+        return res.overflow;
+    }
+
+    pub fn mul_overflow_flag() -> bool {
+        const a: u8 = 200;
+        const b: u8 = 2;
+        let res = @mulWithOverflow(a, b);
+        return res.overflow;
+    }
+
+    pub fn shl_overflow_flag() -> bool {
+        const a: u8 = 1;
+        const bits: u8 = 8;
+        let res = @shlWithOverflow(a, bits);
+        return res.overflow;
+    }
+
+    pub fn add_no_overflow_flag() -> bool {
+        const a: u8 = 2;
+        const b: u8 = 3;
+        let res = @addWithOverflow(a, b);
+        return res.overflow;
+    }
+}

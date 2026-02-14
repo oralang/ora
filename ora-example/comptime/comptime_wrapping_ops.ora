@@ -1,0 +1,31 @@
+contract ComptimeWrappingOps {
+    pub fn add_wrap_u8() -> u8 {
+        const x: u8 = 255 +% 1;
+        return x;
+    }
+
+    pub fn sub_wrap_u8() -> u8 {
+        const x: u8 = 0 -% 1;
+        return x;
+    }
+
+    pub fn mul_wrap_u8() -> u8 {
+        const x: u8 = 200 *% 2;
+        return x;
+    }
+
+    pub fn shl_wrap_u8() -> u8 {
+        const x: u8 = 1 <<% 4;
+        return x;
+    }
+
+    pub fn shr_wrap_u8() -> u8 {
+        const x: u8 = 240 >>% 4;
+        return x;
+    }
+
+    pub fn chained_wrap_u8() -> u8 {
+        const x: u8 = (250 +% 10) *% 2;
+        return x;
+    }
+}

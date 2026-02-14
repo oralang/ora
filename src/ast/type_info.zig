@@ -376,6 +376,7 @@ pub const OraType = union(enum) {
             .void => "void",
             .struct_type => |name| name,
             .enum_type => |name| name,
+            .bitfield_type => |name| name,
             .contract_type => |name| name,
             .array => "array",
             .slice => "slice",

@@ -64,16 +64,19 @@ pub fn lowerBinary(
         .Plus => blk: {
             const result = self.createArithmeticOp("arith.addi", lhs_converted, rhs_converted, result_ty, bin.span);
             insertAddOverflowCheck(self, result, lhs_converted, rhs_converted, uses_signed_integer_semantics, bin.span);
+            insertNarrowingOverflowCheck(self, result, bin.type_info, uses_signed_integer_semantics, bin.span);
             break :blk result;
         },
         .Minus => blk: {
             const result = self.createArithmeticOp("arith.subi", lhs_converted, rhs_converted, result_ty, bin.span);
             insertSubOverflowCheck(self, result, lhs_converted, rhs_converted, uses_signed_integer_semantics, bin.span);
+            insertNarrowingOverflowCheck(self, result, bin.type_info, uses_signed_integer_semantics, bin.span);
             break :blk result;
         },
         .Star => blk: {
             const result = self.createArithmeticOp("arith.muli", lhs_converted, rhs_converted, result_ty, bin.span);
             insertMulOverflowCheck(self, result, lhs_converted, rhs_converted, uses_signed_integer_semantics, bin.span);
+            insertNarrowingOverflowCheck(self, result, bin.type_info, uses_signed_integer_semantics, bin.span);
             break :blk result;
         },
         .Slash => blk: {
@@ -666,6 +669,72 @@ fn insertShiftBoundsCheck(
     h.appendOp(self.block, cmp);
     const assert_op = self.ora_dialect.createAssert(h.getResult(cmp, 0), loc, "shift amount exceeds bit width");
     h.appendOp(self.block, assert_op);
+}
+
+/// Emit narrowing overflow check when the Ora-level type is narrower than the
+/// MLIR computation type (i256). Without this, u8: 255+1 passes the i256
+/// overflow check but silently wraps to 0 after truncation.
+fn insertNarrowingOverflowCheck(
+    self: *const ExpressionLowerer,
+    result: c.MlirValue,
+    type_info: lib.ast.Types.TypeInfo,
+    is_signed: bool,
+    span: lib.ast.SourceSpan,
+) void {
+    const ora_type = type_info.ora_type orelse return;
+    const bit_width = ora_type.bitWidth() orelse return;
+    if (bit_width >= 256) return; // native width — already covered
+
+    const result_uw = expr_helpers.unwrapRefinementValue(
+        self.ctx, self.block, self.locations, self.refinement_base_cache, result, span,
+    );
+    const loc = self.fileLoc(span);
+
+    if (!is_signed) {
+        // Unsigned: truncate to iN then zero-extend back — if different, overflow.
+        const narrow_ty = c.oraIntegerTypeCreate(self.ctx, bit_width);
+        const wide_ty = c.oraValueGetType(result_uw);
+        const trunc_op = c.oraArithTruncIOpCreate(self.ctx, loc, result_uw, narrow_ty);
+        h.appendOp(self.block, trunc_op);
+        const ext_op = c.oraArithExtUIOpCreate(self.ctx, loc, h.getResult(trunc_op, 0), wide_ty);
+        h.appendOp(self.block, ext_op);
+        const cmp = c.oraArithCmpIOpCreate(
+            self.ctx, loc, expr_helpers.predicateStringToInt("ne"),
+            result_uw, h.getResult(ext_op, 0),
+        );
+        h.appendOp(self.block, cmp);
+        emitOverflowAssert(self, h.getResult(cmp, 0), "checked narrowing overflow", span);
+    } else {
+        // Signed: result must be in [min_signed, max_signed].
+        // Use string-based constants to avoid Zig integer overflow for large widths.
+        const wide_ty = c.oraValueGetType(result_uw);
+        const max_u256 = (@as(u256, 1) << @intCast(bit_width - 1)) - 1;
+        const min_u256_abs = @as(u256, 1) << @intCast(bit_width - 1);
+        var max_buf: [80]u8 = undefined;
+        var min_buf: [80]u8 = undefined;
+        const max_str = std.fmt.bufPrint(&max_buf, "{}", .{max_u256}) catch unreachable;
+        const min_str = std.fmt.bufPrint(&min_buf, "-{}", .{min_u256_abs}) catch unreachable;
+        const max_attr = c.oraIntegerAttrGetFromString(wide_ty, h.strRef(max_str));
+        const max_op = c.oraArithConstantOpCreate(self.ctx, loc, wide_ty, max_attr);
+        h.appendOp(self.block, max_op);
+        const min_attr = c.oraIntegerAttrGetFromString(wide_ty, h.strRef(min_str));
+        const min_op = c.oraArithConstantOpCreate(self.ctx, loc, wide_ty, min_attr);
+        h.appendOp(self.block, min_op);
+        // overflow if result > max OR result < min
+        const cmp_gt = c.oraArithCmpIOpCreate(
+            self.ctx, loc, expr_helpers.predicateStringToInt("sgt"),
+            result_uw, h.getResult(max_op, 0),
+        );
+        h.appendOp(self.block, cmp_gt);
+        const cmp_lt = c.oraArithCmpIOpCreate(
+            self.ctx, loc, expr_helpers.predicateStringToInt("slt"),
+            result_uw, h.getResult(min_op, 0),
+        );
+        h.appendOp(self.block, cmp_lt);
+        const or_op = c.oraArithOrIOpCreate(self.ctx, loc, h.getResult(cmp_gt, 0), h.getResult(cmp_lt, 0));
+        h.appendOp(self.block, or_op);
+        emitOverflowAssert(self, h.getResult(or_op, 0), "checked signed narrowing overflow", span);
+    }
 }
 
 /// Emit an ora.assert(!flag) for overflow. The flag is true when overflow occurred.

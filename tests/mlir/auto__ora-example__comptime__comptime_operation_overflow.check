@@ -1,0 +1,9 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/comptime/comptime_operation_overflow.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @add_overflow_flag
+// CHECK-LABEL: func.func @add_overflow_value
+// CHECK-LABEL: func.func @sub_overflow_flag
+// CHECK-LABEL: func.func @mul_overflow_flag
+// CHECK-LABEL: func.func @shl_overflow_flag
+// CHECK-LABEL: func.func @add_no_overflow_flag

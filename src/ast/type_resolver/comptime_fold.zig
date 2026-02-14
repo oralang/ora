@@ -34,7 +34,6 @@ fn tryFoldValue(
 ) FoldError!bool {
     switch (ct_val) {
         .integer => |int_val| {
-            const value_str = try std.fmt.allocPrint(ctx.type_storage_allocator, "{}", .{int_val});
             var ty = type_info;
             if (!ty.isResolved()) {
                 ty = CommonTypes.unknown_integer();
@@ -49,6 +48,16 @@ fn tryFoldValue(
                     else => {},
                 }
             }
+            // Check that the value fits within the declared type width
+            if (ty.ora_type) |ot| {
+                if (!fitsInType(int_val, ot)) {
+                    log.warn("comptime value {d} overflows type '{s}' at line {d}\n", .{
+                        int_val, @tagName(ot), span.line,
+                    });
+                    return false; // don't fold — leave as runtime expression
+                }
+            }
+            const value_str = try std.fmt.allocPrint(ctx.type_storage_allocator, "{}", .{int_val});
             expr.* = .{ .Literal = .{ .Integer = .{
                 .value = value_str,
                 .type_info = ty,
@@ -556,7 +565,6 @@ fn foldExpr(ctx: *FoldContext, expr: *ast.Expressions.ExprNode, allow_fold: bool
     const span = getExpressionSpan(expr);
     switch (ct_val) {
         .integer => |int_val| {
-            const value_str = try std.fmt.allocPrint(ctx.type_storage_allocator, "{}", .{int_val});
             var ty = getExpressionTypeInfo(expr);
             if (!ty.isResolved()) {
                 ty = CommonTypes.unknown_integer();
@@ -570,6 +578,11 @@ fn foldExpr(ctx: *FoldContext, expr: *ast.Expressions.ExprNode, allow_fold: bool
                     else => {},
                 }
             }
+            // Don't fold if value overflows the target type
+            if (ty.ora_type) |ot| {
+                if (!fitsInType(int_val, ot)) return;
+            }
+            const value_str = try std.fmt.allocPrint(ctx.type_storage_allocator, "{}", .{int_val});
             expr.* = .{ .Literal = .{ .Integer = .{
                 .value = value_str,
                 .type_info = ty,
@@ -657,6 +670,25 @@ fn getExpressionSpan(expr: *ast.Expressions.ExprNode) ast.SourceSpan {
 /// When both operands of a binary expression are compile-time known but the
 /// evaluator fails (overflow, underflow, division by zero), re-evaluate in
 /// strict mode to extract the error and emit a compile-time diagnostic.
+/// Check if a u256 value fits within the range of the given OraType.
+fn fitsInType(val: u256, ot: type_info_mod.OraType) bool {
+    return switch (ot) {
+        .u8 => val <= std.math.maxInt(u8),
+        .u16 => val <= std.math.maxInt(u16),
+        .u32 => val <= std.math.maxInt(u32),
+        .u64 => val <= std.math.maxInt(u64),
+        .u128 => val <= std.math.maxInt(u128),
+        .u256 => true,
+        .i8 => val <= @as(u256, @intCast(std.math.maxInt(i8))),
+        .i16 => val <= @as(u256, @intCast(std.math.maxInt(i16))),
+        .i32 => val <= @as(u256, @intCast(std.math.maxInt(i32))),
+        .i64 => val <= @as(u256, @intCast(std.math.maxInt(i64))),
+        .i128 => val <= @as(u256, @intCast(std.math.maxInt(i128))),
+        .i256 => val <= @as(u256, @intCast(std.math.maxInt(i256))),
+        else => true, // non-integer types: don't constrain
+    };
+}
+
 /// Both operands are compile-time known but the result failed — re-evaluate
 /// in strict mode to extract the precise error and emit a compile-time warning.
 /// The MLIR is still emitted (with the runtime overflow guard), so pub functions
