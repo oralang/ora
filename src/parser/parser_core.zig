@@ -301,6 +301,10 @@ pub fn parseWithArena(allocator: Allocator, tokens: []const Token) ParserError!s
             log.err("Type resolution failed: {s}\n", .{@errorName(err)});
             if (err == @import("../ast/type_resolver/mod.zig").TypeResolutionError.ErrorUnionOutsideTry) {
                 log.help("use `try` to unwrap error unions or wrap the code in a try/catch block\n", .{});
+            } else if (err == @import("../ast/type_resolver/mod.zig").TypeResolutionError.GenericContractNotSupported) {
+                log.help("generic contracts are parsed but not implemented yet; remove type parameters for now\n", .{});
+            } else if (err == @import("../ast/type_resolver/mod.zig").TypeResolutionError.TopLevelGenericInstantiationNotSupported) {
+                log.help("generic functions/structs currently require a contract scope; move the generic usage inside a contract\n", .{});
             }
             // best-effort stack trace in debug builds
             const trace = @errorReturnTrace();
@@ -346,6 +350,10 @@ pub fn parse(allocator: Allocator, tokens: []const Token) ParserError![]AstNode 
             log.err("Type resolution failed: {s}\n", .{@errorName(err)});
             if (err == @import("../ast/type_resolver/mod.zig").TypeResolutionError.ErrorUnionOutsideTry) {
                 log.help("use `try` to unwrap error unions or wrap the code in a try/catch block\n", .{});
+            } else if (err == @import("../ast/type_resolver/mod.zig").TypeResolutionError.GenericContractNotSupported) {
+                log.help("generic contracts are parsed but not implemented yet; remove type parameters for now\n", .{});
+            } else if (err == @import("../ast/type_resolver/mod.zig").TypeResolutionError.TopLevelGenericInstantiationNotSupported) {
+                log.help("generic functions/structs currently require a contract scope; move the generic usage inside a contract\n", .{});
             }
             // best-effort stack trace in debug builds
             const trace = @errorReturnTrace();

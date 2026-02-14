@@ -345,6 +345,42 @@ pub const TypeParser = struct {
 
         // note: 'Result[T,E]' is not supported; use error unions '!T | E' instead.
 
+        // `type` as a comptime metatype (used in `comptime T: type`)
+        if (std.mem.eql(u8, type_name, "type")) {
+            return TypeInfo{
+                .category = .Type,
+                .ora_type = OraType{ .@"type" = {} },
+                .source = .explicit,
+                .span = span,
+            };
+        }
+
+        // Check for generic struct instantiation: Pair(u256, ...)
+        if (self.base.check(.LeftParen)) {
+            // Peek ahead to see if this looks like a generic type instantiation
+            // (as opposed to a function call — but in type position, parens mean type args)
+            _ = self.base.advance(); // consume '('
+            var type_args_list = std.ArrayList(OraType){};
+            const alloc = self.base.arena.allocator();
+            while (!self.base.check(.RightParen) and !self.base.isAtEnd()) {
+                // Parse each type argument as a type
+                const arg_type = try self.parseType();
+                if (arg_type.ora_type) |ot| {
+                    type_args_list.append(alloc, ot) catch {};
+                }
+                if (!self.base.match(.Comma)) break;
+            }
+            _ = try self.base.consume(.RightParen, "Expected ')' after generic type arguments");
+            const type_args = type_args_list.toOwnedSlice(alloc) catch &.{};
+            return TypeInfo{
+                .category = .Struct,
+                .ora_type = OraType{ .struct_type = type_name },
+                .source = .explicit,
+                .span = span,
+                .generic_type_args = if (type_args.len > 0) type_args else null,
+            };
+        }
+
         // custom type (struct or enum - will be resolved during semantic analysis)
         return TypeInfo{
             .category = .Struct, // Assume struct for now, will be resolved later

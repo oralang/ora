@@ -53,54 +53,60 @@ namespace
     public:
         RefinementErasureTypeConverter()
         {
-            addConversion([](Type type) { return type; });
+            addConversion([](Type type)
+                          { return type; });
 
-            addConversion([&](ora::MinValueType type) { return convertType(type.getBaseType()); });
-            addConversion([&](ora::MaxValueType type) { return convertType(type.getBaseType()); });
-            addConversion([&](ora::InRangeType type) { return convertType(type.getBaseType()); });
-            addConversion([&](ora::ScaledType type) { return convertType(type.getBaseType()); });
-            addConversion([&](ora::ExactType type) { return convertType(type.getBaseType()); });
-            addConversion([&](ora::NonZeroAddressType type) {
-                return ora::AddressType::get(type.getContext());
-            });
+            addConversion([&](ora::MinValueType type)
+                          { return convertType(type.getBaseType()); });
+            addConversion([&](ora::MaxValueType type)
+                          { return convertType(type.getBaseType()); });
+            addConversion([&](ora::InRangeType type)
+                          { return convertType(type.getBaseType()); });
+            addConversion([&](ora::ScaledType type)
+                          { return convertType(type.getBaseType()); });
+            addConversion([&](ora::ExactType type)
+                          { return convertType(type.getBaseType()); });
+            addConversion([&](ora::NonZeroAddressType type)
+                          { return ora::AddressType::get(type.getContext()); });
 
-            addConversion([&](ora::ErrorUnionType type) -> Type {
+            addConversion([&](ora::ErrorUnionType type) -> Type
+                          {
                 auto successType = convertType(type.getSuccessType());
-                return ora::ErrorUnionType::get(type.getContext(), successType);
-            });
-            addConversion([&](ora::UnionType type) -> Type {
+                return ora::ErrorUnionType::get(type.getContext(), successType); });
+            addConversion([&](ora::UnionType type) -> Type
+                          {
                 SmallVector<Type> elems;
                 elems.reserve(type.getElementTypes().size());
                 for (Type elem : type.getElementTypes())
                     elems.push_back(convertType(elem));
-                return ora::UnionType::get(type.getContext(), elems);
-            });
-            addConversion([&](ora::MapType type) -> Type {
+                return ora::UnionType::get(type.getContext(), elems); });
+            addConversion([&](ora::MapType type) -> Type
+                          {
                 auto key = convertType(type.getKeyType());
                 auto value = convertType(type.getValueType());
-                return ora::MapType::get(type.getContext(), key, value);
-            });
-            addConversion([&](ora::TupleType type) -> Type {
+                return ora::MapType::get(type.getContext(), key, value); });
+            addConversion([&](ora::TupleType type) -> Type
+                          {
                 SmallVector<Type> elems;
                 elems.reserve(type.getElementTypes().size());
                 for (Type elem : type.getElementTypes())
                     elems.push_back(convertType(elem));
-                return ora::TupleType::get(type.getContext(), elems);
-            });
+                return ora::TupleType::get(type.getContext(), elems); });
 
-            addConversion([&](RankedTensorType type) -> Type {
+            addConversion([&](RankedTensorType type) -> Type
+                          {
                 auto elem = convertType(type.getElementType());
-                return RankedTensorType::get(type.getShape(), elem, type.getEncoding());
-            });
-            addConversion([&](UnrankedTensorType type) -> Type {
+                return RankedTensorType::get(type.getShape(), elem, type.getEncoding()); });
+            addConversion([&](UnrankedTensorType type) -> Type
+                          {
                 auto elem = convertType(type.getElementType());
-                return UnrankedTensorType::get(elem);
-            });
-            addConversion([&](MemRefType type) -> Type {
+                return UnrankedTensorType::get(elem); });
+            addConversion([&](MemRefType type) -> Type
+                          {
                 auto elem = convertType(type.getElementType());
-                return MemRefType::get(type.getShape(), elem, type.getLayout(), type.getMemorySpace());
-            });
-            addConversion([&](mlir::FunctionType type) -> Type {
+                return MemRefType::get(type.getShape(), elem, type.getLayout(), type.getMemorySpace()); });
+            addConversion([&](mlir::FunctionType type) -> Type
+                          {
                 SmallVector<Type> inputs;
                 SmallVector<Type> results;
                 inputs.reserve(type.getInputs().size());
@@ -109,37 +115,36 @@ namespace
                     inputs.push_back(convertType(in));
                 for (Type out : type.getResults())
                     results.push_back(convertType(out));
-                return mlir::FunctionType::get(type.getContext(), inputs, results);
-            });
-            addConversion([&](ora::FunctionType type) -> Type {
+                return mlir::FunctionType::get(type.getContext(), inputs, results); });
+            addConversion([&](ora::FunctionType type) -> Type
+                          {
                 SmallVector<Type> inputs;
                 inputs.reserve(type.getParamTypes().size());
                 for (Type in : type.getParamTypes())
                     inputs.push_back(convertType(in));
                 Type result = convertType(type.getReturnType());
-                return ora::FunctionType::get(type.getContext(), inputs, result);
-            });
+                return ora::FunctionType::get(type.getContext(), inputs, result); });
 
             addSourceMaterialization([&](OpBuilder &builder,
                                          Type resultType,
                                          ValueRange inputs,
-                                         Location loc) -> Value {
+                                         Location loc) -> Value
+                                     {
                 if (inputs.size() != 1)
                     return Value();
                 return builder
                     .create<UnrealizedConversionCastOp>(loc, resultType, inputs[0])
-                    .getResult(0);
-            });
+                    .getResult(0); });
             addTargetMaterialization([&](OpBuilder &builder,
                                          Type resultType,
                                          ValueRange inputs,
-                                         Location loc) -> Value {
+                                         Location loc) -> Value
+                                     {
                 if (inputs.size() != 1)
                     return Value();
                 return builder
                     .create<UnrealizedConversionCastOp>(loc, resultType, inputs[0])
-                    .getResult(0);
-            });
+                    .getResult(0); });
         }
     };
 
@@ -296,7 +301,8 @@ namespace
             (void)adaptor;
             bool changed = false;
 
-            auto updateTypeAttr = [&](NamedAttrList &attrs, StringRef name) {
+            auto updateTypeAttr = [&](NamedAttrList &attrs, StringRef name)
+            {
                 if (auto typeAttr = mlir::dyn_cast<TypeAttr>(attrs.get(name)))
                 {
                     Type newType = typeConverter->convertType(typeAttr.getValue());
@@ -310,7 +316,8 @@ namespace
 
             MLIRContext *ctx = op.getContext();
 
-            rewriter.modifyOpInPlace(op, [&] {
+            rewriter.modifyOpInPlace(op, [&]
+                                     {
                 // Update argument attributes array.
                 if (op.getNumArguments() > 0)
                 {
@@ -351,8 +358,7 @@ namespace
                     }
                     if (changed)
                         op.setResAttrsAttr(ArrayAttr::get(ctx, newResAttrs));
-                }
-            });
+                } });
 
             return success();
         }
@@ -364,9 +370,8 @@ static void logModuleOps(ModuleOp module, StringRef tag)
     if (!mlir::ora::isDebugEnabled())
         return;
     llvm::errs() << "[OraToSIR] " << tag << " (per-op log)\n";
-    module.walk([&](Operation *op) {
-        llvm::errs() << "[OraToSIR]   op=" << op->getName() << " loc=" << op->getLoc() << "\n";
-    });
+    module.walk([&](Operation *op)
+                { llvm::errs() << "[OraToSIR]   op=" << op->getName() << " loc=" << op->getLoc() << "\n"; });
     llvm::errs().flush();
 }
 
@@ -438,21 +443,19 @@ static LogicalResult eraseRefinements(ModuleOp module)
 
     target.addIllegalOp<ora::RefinementToBaseOp, ora::BaseToRefinementOp>();
 
-    target.addDynamicallyLegalOp<mlir::func::FuncOp>([&](mlir::func::FuncOp op) {
-        return typeConverter.isSignatureLegal(op.getFunctionType());
-    });
-    target.addDynamicallyLegalOp<ora::GlobalOp>([&](ora::GlobalOp op) {
-        return typeConverter.isLegal(op.getType());
-    });
-    target.markUnknownOpDynamicallyLegal([&](Operation *op) {
+    target.addDynamicallyLegalOp<mlir::func::FuncOp>([&](mlir::func::FuncOp op)
+                                                     { return typeConverter.isSignatureLegal(op.getFunctionType()); });
+    target.addDynamicallyLegalOp<ora::GlobalOp>([&](ora::GlobalOp op)
+                                                { return typeConverter.isLegal(op.getType()); });
+    target.markUnknownOpDynamicallyLegal([&](Operation *op)
+                                         {
         for (Type t : op->getOperandTypes())
             if (!typeConverter.isLegal(t))
                 return false;
         for (Type t : op->getResultTypes())
             if (!typeConverter.isLegal(t))
                 return false;
-        return true;
-    });
+        return true; });
 
     RewritePatternSet patterns(ctx);
     populateFunctionOpInterfaceTypeConversionPattern<mlir::func::FuncOp>(patterns, typeConverter);
@@ -546,7 +549,8 @@ static void inlineContractsAndEraseDecls(ModuleOp module)
 {
     // Inline contract bodies into the module block and erase contract wrappers.
     SmallVector<ora::ContractOp, 4> contracts;
-    module.walk([&](ora::ContractOp contractOp) { contracts.push_back(contractOp); });
+    module.walk([&](ora::ContractOp contractOp)
+                { contracts.push_back(contractOp); });
 
     if (!contracts.empty())
     {
@@ -612,7 +616,8 @@ public:
 static bool deduplicateConstantsPerBlock(ModuleOp module)
 {
     bool changed = false;
-    module.walk([&](Block *block) {
+    module.walk([&](Block *block)
+                {
         DenseMap<Attribute, Value> consts;
         for (Operation &op : llvm::make_early_inc_range(*block))
         {
@@ -628,8 +633,7 @@ static bool deduplicateConstantsPerBlock(ModuleOp module)
                 continue;
             }
             consts.insert({key, constOp.getResult()});
-        }
-    });
+        } });
     return changed;
 }
 
@@ -638,7 +642,8 @@ static bool foldConstantArithmeticSIR(ModuleOp module)
 {
     bool changed = false;
 
-    module.walk([&](sir::AddOp addOp) {
+    module.walk([&](sir::AddOp addOp)
+                {
         auto lhsInt = llvm::dyn_cast_or_null<IntegerAttr>(
             addOp.getLhs().getDefiningOp<sir::ConstOp>() ?
             addOp.getLhs().getDefiningOp<sir::ConstOp>().getValueAttr() : Attribute{});
@@ -653,10 +658,10 @@ static bool foldConstantArithmeticSIR(ModuleOp module)
         auto newConst = builder.create<sir::ConstOp>(addOp.getLoc(), u256Type, IntegerAttr::get(ui256, result));
         addOp.getResult().replaceAllUsesWith(newConst.getResult());
         addOp.erase();
-        changed = true;
-    });
+        changed = true; });
 
-    module.walk([&](sir::MulOp mulOp) {
+    module.walk([&](sir::MulOp mulOp)
+                {
         auto lhsInt = llvm::dyn_cast_or_null<IntegerAttr>(
             mulOp.getLhs().getDefiningOp<sir::ConstOp>() ?
             mulOp.getLhs().getDefiningOp<sir::ConstOp>().getValueAttr() : Attribute{});
@@ -671,8 +676,7 @@ static bool foldConstantArithmeticSIR(ModuleOp module)
         auto newConst = builder.create<sir::ConstOp>(mulOp.getLoc(), u256Type, IntegerAttr::get(ui256, result));
         mulOp.getResult().replaceAllUsesWith(newConst.getResult());
         mulOp.erase();
-        changed = true;
-    });
+        changed = true; });
 
     return changed;
 }
@@ -731,8 +735,7 @@ public:
                 }
 
                 op->erase();
-                changed = true;
-            });
+                changed = true; });
         }
 
         DBG("SIRCleanupPass: cleanup completed");
@@ -784,10 +787,10 @@ public:
         const bool enable_contract = true;
         const bool enable_func = true;
         const bool enable_arith = true;
-        const bool enable_memref_alloc = false;   // Phase 4
-        const bool enable_memref_load = false;    // Phase 4
-        const bool enable_memref_store = false;   // Phase 4
-        const bool enable_struct = false;          // Phase 4
+        const bool enable_memref_alloc = false; // Phase 4
+        const bool enable_memref_load = false;  // Phase 4
+        const bool enable_memref_store = false; // Phase 4
+        const bool enable_struct = false;       // Phase 4
         const bool enable_storage = true;
         const bool enable_control_flow = true;
 
@@ -1035,12 +1038,12 @@ public:
         // erases ora::ErrorDeclOp (sir::ErrorDeclOp lacks SymbolOpInterface).
         {
             SmallVector<NamedAttribute> errEntries;
-            module.walk([&](ora::ErrorDeclOp decl) {
+            module.walk([&](ora::ErrorDeclOp decl)
+                        {
                 auto id = decl->getAttrOfType<mlir::IntegerAttr>("ora.error_id");
                 auto sym = decl->getAttrOfType<mlir::StringAttr>("sym_name");
                 if (sym && id)
-                    errEntries.push_back(NamedAttribute(sym, id));
-            });
+                    errEntries.push_back(NamedAttribute(sym, id)); });
             if (!errEntries.empty())
                 module->setAttr("sir.error_ids", DictionaryAttr::get(ctx, errEntries));
         }
@@ -1172,7 +1175,7 @@ public:
             phase2bPatterns.add<ConvertArithIndexCastUIOp>(typeConverter, ctx);
             phase2bPatterns.add<ConvertArithIndexCastOp>(typeConverter, ctx);
             phase2bPatterns.add<ConvertScfIfOp>(typeConverter, ctx,
-                /*lowerReturnsInMergeBlock=*/false, PatternBenefit(10));
+                                                /*lowerReturnsInMergeBlock=*/false, PatternBenefit(10));
             phase2bPatterns.add<ConvertIfOp>(typeConverter, ctx);
             phase2bPatterns.add<ConvertIsolatedIfOp>(typeConverter, ctx);
 
@@ -1237,13 +1240,14 @@ public:
             // Check for any remaining ora.return ops — these need the conversion
             // framework with a full ConversionTarget.
             bool hasRemainingReturns = false;
-            module.walk([&](ora::ReturnOp) { hasRemainingReturns = true; });
+            module.walk([&](ora::ReturnOp)
+                        { hasRemainingReturns = true; });
             if (hasRemainingReturns)
             {
                 RewritePatternSet phase3bPatterns(ctx);
                 phase3bPatterns.add<ConvertReturnOp>(typeConverter, ctx);
                 phase3bPatterns.add<ConvertScfIfOp>(typeConverter, ctx,
-                    /*lowerReturnsInMergeBlock=*/false, PatternBenefit(10));
+                                                    /*lowerReturnsInMergeBlock=*/false, PatternBenefit(10));
 
                 ConversionTarget phase3bTarget(*ctx);
                 phase3bTarget.addLegalDialect<mlir::BuiltinDialect>();
@@ -1391,7 +1395,8 @@ public:
             phase4Target.addIllegalOp<mlir::func::CallOp>();
             phase4Target.addIllegalOp<ora::ReturnOp>();
             phase4Target.addDynamicallyLegalOp<mlir::func::FuncOp>(
-                [&](mlir::func::FuncOp funcOp) {
+                [&](mlir::func::FuncOp funcOp)
+                {
                     auto fnType = funcOp.getFunctionType();
                     for (Type inputType : fnType.getInputs())
                     {
@@ -1456,15 +1461,15 @@ public:
 
             // Cleanup: strip any remaining normalized error_union casts.
             SmallVector<mlir::UnrealizedConversionCastOp, 8> normalizedCasts;
-            module.walk([&](mlir::UnrealizedConversionCastOp op) {
+            module.walk([&](mlir::UnrealizedConversionCastOp op)
+                        {
                 if (!op->hasAttr("ora.normalized_error_union"))
                     return;
                 if (op.getNumOperands() != 1 || op.getNumResults() != 1)
                     return;
                 if (!llvm::isa<sir::U256Type>(op.getOperand(0).getType()))
                     return;
-                normalizedCasts.push_back(op);
-            });
+                normalizedCasts.push_back(op); });
             for (auto castOp : normalizedCasts)
             {
                 castOp.getResult(0).replaceAllUsesWith(castOp.getOperand(0));
@@ -1474,8 +1479,10 @@ public:
             // Cleanup: strip residual refinement ops (materializations may create them).
             SmallVector<ora::BaseToRefinementOp, 8> residualB2R;
             SmallVector<ora::RefinementToBaseOp, 8> residualR2B;
-            module.walk([&](ora::BaseToRefinementOp op) { residualB2R.push_back(op); });
-            module.walk([&](ora::RefinementToBaseOp op) { residualR2B.push_back(op); });
+            module.walk([&](ora::BaseToRefinementOp op)
+                        { residualB2R.push_back(op); });
+            module.walk([&](ora::RefinementToBaseOp op)
+                        { residualR2B.push_back(op); });
             for (auto op : residualB2R)
             {
                 op.getResult().replaceAllUsesWith(op.getValue());
@@ -1489,15 +1496,16 @@ public:
 
             // Cleanup: strip sir.bitcast ops whose result is an Ora refinement type.
             // These are created by source materializations during conversion.
-            auto isOraRefinement = [](Type t) {
+            auto isOraRefinement = [](Type t)
+            {
                 return llvm::isa<ora::MinValueType, ora::MaxValueType, ora::InRangeType,
                                  ora::ScaledType, ora::ExactType, ora::NonZeroAddressType>(t);
             };
             SmallVector<sir::BitcastOp, 16> refinementBitcasts;
-            module.walk([&](sir::BitcastOp op) {
+            module.walk([&](sir::BitcastOp op)
+                        {
                 if (isOraRefinement(op.getResult().getType()))
-                    refinementBitcasts.push_back(op);
-            });
+                    refinementBitcasts.push_back(op); });
             for (auto op : refinementBitcasts)
             {
                 op.getResult().replaceAllUsesWith(op.getOperand());
@@ -1506,10 +1514,10 @@ public:
 
             // Cleanup: strip all remaining 1:1 unrealized_conversion_casts.
             SmallVector<mlir::UnrealizedConversionCastOp, 16> residualCasts;
-            module.walk([&](mlir::UnrealizedConversionCastOp op) {
+            module.walk([&](mlir::UnrealizedConversionCastOp op)
+                        {
                 if (op.getNumOperands() == 1 && op.getNumResults() == 1)
-                    residualCasts.push_back(op);
-            });
+                    residualCasts.push_back(op); });
             for (auto castOp : residualCasts)
             {
                 castOp.getResult(0).replaceAllUsesWith(castOp.getOperand(0));
@@ -1530,14 +1538,14 @@ public:
                 }
 
                 SmallVector<sir::ICallOp, 4> errorIcalls;
-                module.walk([&](sir::ICallOp op) {
+                module.walk([&](sir::ICallOp op)
+                            {
                     if (auto callee = op.getCalleeAttr())
                     {
                         StringRef name = callee.getValue();
                         if (errorIds.count(name))
                             errorIcalls.push_back(op);
-                    }
-                });
+                    } });
 
                 for (auto op : errorIcalls)
                 {
@@ -1594,9 +1602,8 @@ public:
             // Normalize malformed blocks before any final printing/validation so we
             // fail cleanly instead of reaching MLIR internals with invalid CFG.
             bool hadMalformedTerminatorBlocks = false;
-            module.walk([&](mlir::func::FuncOp funcOp) {
-                hadMalformedTerminatorBlocks = normalizeFuncTerminators(funcOp) || hadMalformedTerminatorBlocks;
-            });
+            module.walk([&](mlir::func::FuncOp funcOp)
+                        { hadMalformedTerminatorBlocks = normalizeFuncTerminators(funcOp) || hadMalformedTerminatorBlocks; });
             if (hadMalformedTerminatorBlocks)
             {
                 module.emitError("[OraToSIR] malformed CFG: missing terminator or trailing ops after terminator");
@@ -1620,7 +1627,8 @@ public:
                 llvm::errs().flush();
             }
             int64_t unrealizedByName = 0;
-            module.walk([&](Operation *op) {
+            module.walk([&](Operation *op)
+                        {
                 if (op->getName().getStringRef() == "builtin.unrealized_conversion_cast")
                 {
                     ++unrealizedByName;
@@ -1635,8 +1643,7 @@ public:
                             llvm::errs() << " out=" << op->getResult(0).getType();
                         llvm::errs() << "\n";
                     }
-                }
-            });
+                } });
             if (mlir::ora::isDebugEnabled())
             {
                 llvm::errs() << "[OraToSIR] Post-Phase4: name-scan done (count=" << unrealizedByName << ")\n";
@@ -1648,7 +1655,6 @@ public:
                 signalPassFailure();
                 return;
             }
-
         }
 
         // Guard: fail if any ops remain that should have been lowered by this stage.
@@ -1992,7 +1998,8 @@ namespace mlir
                 bool changed = false;
 
                 // Fold constant addition (fallback — uses APInt for u256 safety).
-                auto getConstAPInt = [](Value val) -> std::optional<APInt> {
+                auto getConstAPInt = [](Value val) -> std::optional<APInt>
+                {
                     if (auto constOp = val.getDefiningOp<sir::ConstOp>())
                         if (auto intAttr = llvm::dyn_cast<mlir::IntegerAttr>(constOp.getValueAttr()))
                             return intAttr.getValue().zextOrTrunc(256);

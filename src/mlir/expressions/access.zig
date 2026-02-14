@@ -366,19 +366,63 @@ fn lowerBuiltinConstant(
         return h.getResult(addr_op, 0);
     }
 
-    if (std.mem.eql(u8, builtin_info.full_path, "std.constants.U256_MAX") or
-        std.mem.eql(u8, builtin_info.full_path, "std.constants.U128_MAX") or
-        std.mem.eql(u8, builtin_info.full_path, "std.constants.U64_MAX") or
-        std.mem.eql(u8, builtin_info.full_path, "std.constants.U32_MAX"))
-    {
-        const op = self.ora_dialect.createArithConstant(-1, ty, self.fileLoc(span));
-        h.appendOp(self.block, op);
-        return h.getResult(op, 0);
+    if (builtin_info.return_type.isInteger()) {
+        if (std.mem.endsWith(u8, builtin_info.full_path, "_MIN")) {
+            return lowerIntegerBoundaryConstant(self, builtin_info.return_type, .min, span);
+        }
+        if (std.mem.endsWith(u8, builtin_info.full_path, "_MAX")) {
+            return lowerIntegerBoundaryConstant(self, builtin_info.return_type, .max, span);
+        }
     }
 
     const op = self.ora_dialect.createArithConstant(0, ty, self.fileLoc(span));
     h.appendOp(self.block, op);
     return h.getResult(op, 0);
+}
+
+const IntegerBoundary = enum { min, max };
+
+/// Lower integer boundary constants (e.g., U256_MAX, I128_MIN).
+fn lowerIntegerBoundaryConstant(
+    self: *const ExpressionLowerer,
+    ora_type: lib.OraType,
+    boundary: IntegerBoundary,
+    span: lib.ast.SourceSpan,
+) c.MlirValue {
+    const loc = self.fileLoc(span);
+    const ty = self.type_mapper.toMlirType(.{ .ora_type = ora_type });
+
+    // Unsigned boundaries are cheap: MIN = 0, MAX = all ones.
+    if (!ora_type.isSignedInteger()) {
+        const value: i64 = switch (boundary) {
+            .min => 0,
+            .max => -1,
+        };
+        const op = self.ora_dialect.createArithConstant(value, ty, loc);
+        h.appendOp(self.block, op);
+        return h.getResult(op, 0);
+    }
+
+    const one_op = self.ora_dialect.createArithConstant(1, ty, loc);
+    h.appendOp(self.block, one_op);
+    const one = h.getResult(one_op, 0);
+
+    // Signed MIN bit pattern: 1 << (bits - 1)
+    if (boundary == .min) {
+        const width = ora_type.bitWidth() orelse constants.DEFAULT_INTEGER_BITS;
+        const shift = self.ora_dialect.createArithConstant(@intCast(width - 1), ty, loc);
+        h.appendOp(self.block, shift);
+        const min_op = c.oraArithShlIOpCreate(self.ctx, loc, one, h.getResult(shift, 0));
+        h.appendOp(self.block, min_op);
+        return h.getResult(min_op, 0);
+    }
+
+    // Signed MAX bit pattern: logical_shift_right(all_ones, 1)
+    const all_ones_op = self.ora_dialect.createArithConstant(-1, ty, loc);
+    h.appendOp(self.block, all_ones_op);
+    const max_op = c.oraArithShrUIOpCreate(self.ctx, loc, h.getResult(all_ones_op, 0), one);
+    h.appendOp(self.block, max_op);
+    return h.getResult(max_op, 0);
 }
 
 /// Lower builtin "field access" that represents a call (e.g., std.transaction.sender).

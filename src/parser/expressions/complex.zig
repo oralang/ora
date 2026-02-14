@@ -319,6 +319,51 @@ pub fn parseStructInstantiation(parser: *ExpressionParser, name_token: Token) Pa
     } };
 }
 
+/// Parse generic struct instantiation: Pair(u256) { first: value, ... }
+/// Called after Pair(u256) has been parsed as a Call expression.
+/// Stores the Call expression as the struct_name — the type resolver will
+/// detect the Call pattern and trigger monomorphization.
+pub fn parseGenericStructInstantiation(
+    parser: *ExpressionParser,
+    call: *const ast.Expressions.CallExpr,
+) ParserError!ast.Expressions.ExprNode {
+    const alloc = parser.base.arena.allocator();
+    _ = try parser.base.consume(.LeftBrace, "Expected '{' after generic struct type arguments");
+
+    var fields = std.ArrayList(ast.Expressions.StructInstantiationField){};
+    defer fields.deinit(alloc);
+
+    while (!parser.base.check(.RightBrace) and !parser.base.isAtEnd()) {
+        const field_name = try parser.base.consumeIdentifierOrKeyword("Expected field name in struct instantiation");
+        _ = try parser.base.consume(.Colon, "Expected ':' after field name in struct instantiation");
+        const field_value = try precedence.parseAssignment(parser);
+        const field_value_ptr = try parser.base.arena.createNode(ast.Expressions.ExprNode);
+        field_value_ptr.* = field_value;
+        try fields.append(alloc, ast.Expressions.StructInstantiationField{
+            .name = field_name.lexeme,
+            .value = field_value_ptr,
+            .span = parser.base.spanFromToken(field_name),
+        });
+        if (!parser.base.check(.RightBrace)) {
+            if (!parser.base.match(.Comma)) return error.ExpectedToken;
+        } else {
+            _ = parser.base.match(.Comma);
+        }
+    }
+    _ = try parser.base.consume(.RightBrace, "Expected '}' after struct instantiation fields");
+
+    // Store the original Call expression as struct_name — preserves the
+    // callee (struct name) and arguments (type args) for the type resolver.
+    const call_expr_ptr = try parser.base.arena.createNode(ast.Expressions.ExprNode);
+    call_expr_ptr.* = ast.Expressions.ExprNode{ .Call = call.* };
+
+    return ast.Expressions.ExprNode{ .StructInstantiation = ast.Expressions.StructInstantiationExpr{
+        .struct_name = call_expr_ptr,
+        .fields = try fields.toOwnedSlice(alloc),
+        .span = call.span,
+    } };
+}
+
 /// Parse anonymous struct literal (.{field = value, ...})
 pub fn parseAnonymousStructLiteral(parser: *ExpressionParser) ParserError!ast.Expressions.ExprNode {
     const dot_token = parser.base.previous();

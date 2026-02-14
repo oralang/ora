@@ -1,0 +1,8 @@
+fn id(comptime T: type, x: T) -> T {
+    return x;
+}
+
+fn use_id(x: u256) -> u256 {
+    // INVALID (current limitation): top-level generic instantiation is not supported.
+    return id(u256, x);
+}

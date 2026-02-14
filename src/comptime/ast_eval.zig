@@ -472,7 +472,36 @@ pub const AstEvaluator = struct {
         if (self.env.lookupValue(id.name)) |val| {
             return .{ .value = val };
         }
+        // Check if the identifier is a type name → return type_val
+        if (resolveTypeName(id.name)) |tid| {
+            return .{ .value = CtValue{ .type_val = tid } };
+        }
         return .not_constant;
+    }
+
+    /// Resolve a type name string (e.g. "u256", "bool") to a TypeId.
+    fn resolveTypeName(name: []const u8) ?value.TypeId {
+        const ids = value.type_ids;
+        const map = std.StaticStringMap(value.TypeId).initComptime(.{
+            .{ "u8", ids.u8_id },
+            .{ "u16", ids.u16_id },
+            .{ "u32", ids.u32_id },
+            .{ "u64", ids.u64_id },
+            .{ "u128", ids.u128_id },
+            .{ "u256", ids.u256_id },
+            .{ "i8", ids.i8_id },
+            .{ "i16", ids.i16_id },
+            .{ "i32", ids.i32_id },
+            .{ "i64", ids.i64_id },
+            .{ "i128", ids.i128_id },
+            .{ "i256", ids.i256_id },
+            .{ "bool", ids.bool_id },
+            .{ "address", ids.address_id },
+            .{ "string", ids.string_id },
+            .{ "bytes", ids.bytes_id },
+            .{ "void", ids.void_id },
+        });
+        return map.get(name);
     }
 
     fn evalEnumLiteral(self: *AstEvaluator, el: anytype) AstEvalResult {

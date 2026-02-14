@@ -1,0 +1,12 @@
+contract FailGenericStructNonTypeArg {
+    struct Pair(comptime T: type) {
+        first: T;
+        second: T;
+    }
+
+    pub fn bad(a: u256, b: u256) -> u256 {
+        // INVALID: `1` is not a type argument.
+        let p = Pair(1) { first: a, second: b };
+        return p.first;
+    }
+}

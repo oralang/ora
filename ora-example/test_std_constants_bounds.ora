@@ -1,0 +1,119 @@
+// Test contract for std.constants integer min/max bounds.
+contract StdConstantsBoundsTest {
+    // Unsigned bounds
+    pub fn getU8Min() -> u8 {
+        return std.constants.U8_MIN;
+    }
+
+    pub fn getU8Max() -> u8 {
+        return std.constants.U8_MAX;
+    }
+
+    pub fn getU16Min() -> u16 {
+        return std.constants.U16_MIN;
+    }
+
+    pub fn getU16Max() -> u16 {
+        return std.constants.U16_MAX;
+    }
+
+    pub fn getU32Min() -> u32 {
+        return std.constants.U32_MIN;
+    }
+
+    pub fn getU32Max() -> u32 {
+        return std.constants.U32_MAX;
+    }
+
+    pub fn getU64Min() -> u64 {
+        return std.constants.U64_MIN;
+    }
+
+    pub fn getU64Max() -> u64 {
+        return std.constants.U64_MAX;
+    }
+
+    pub fn getU128Min() -> u128 {
+        return std.constants.U128_MIN;
+    }
+
+    pub fn getU128Max() -> u128 {
+        return std.constants.U128_MAX;
+    }
+
+    pub fn getU256Min() -> u256 {
+        return std.constants.U256_MIN;
+    }
+
+    pub fn getU256Max() -> u256 {
+        return std.constants.U256_MAX;
+    }
+
+    // Signed bounds
+    pub fn getI8Min() -> i8 {
+        return std.constants.I8_MIN;
+    }
+
+    pub fn getI8Max() -> i8 {
+        return std.constants.I8_MAX;
+    }
+
+    pub fn getI16Min() -> i16 {
+        return std.constants.I16_MIN;
+    }
+
+    pub fn getI16Max() -> i16 {
+        return std.constants.I16_MAX;
+    }
+
+    pub fn getI32Min() -> i32 {
+        return std.constants.I32_MIN;
+    }
+
+    pub fn getI32Max() -> i32 {
+        return std.constants.I32_MAX;
+    }
+
+    pub fn getI64Min() -> i64 {
+        return std.constants.I64_MIN;
+    }
+
+    pub fn getI64Max() -> i64 {
+        return std.constants.I64_MAX;
+    }
+
+    pub fn getI128Min() -> i128 {
+        return std.constants.I128_MIN;
+    }
+
+    pub fn getI128Max() -> i128 {
+        return std.constants.I128_MAX;
+    }
+
+    pub fn getI256Min() -> i256 {
+        return std.constants.I256_MIN;
+    }
+
+    pub fn getI256Max() -> i256 {
+        return std.constants.I256_MAX;
+    }
+
+    // Sanity checks
+    pub fn unsignedBoundsOrdered() -> bool {
+        return std.constants.U8_MIN < std.constants.U8_MAX &&
+            std.constants.U16_MIN < std.constants.U16_MAX &&
+            std.constants.U32_MIN < std.constants.U32_MAX &&
+            std.constants.U64_MIN < std.constants.U64_MAX &&
+            std.constants.U128_MIN < std.constants.U128_MAX &&
+            std.constants.U256_MIN < std.constants.U256_MAX;
+    }
+
+    pub fn signedBoundsOrdered() -> bool {
+        return std.constants.I8_MIN < std.constants.I8_MAX &&
+            std.constants.I16_MIN < std.constants.I16_MAX &&
+            std.constants.I32_MIN < std.constants.I32_MAX &&
+            std.constants.I64_MIN < std.constants.I64_MAX &&
+            std.constants.I128_MIN < std.constants.I128_MAX &&
+            std.constants.I256_MIN < std.constants.I256_MAX;
+    }
+}

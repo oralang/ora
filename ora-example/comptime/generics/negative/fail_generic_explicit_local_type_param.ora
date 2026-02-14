@@ -1,0 +1,12 @@
+contract FailGenericExplicitLocalTypeParam {
+    fn add_one(comptime T: type, x: T) -> T {
+        // INVALID (current limitation): explicit local type `T` is not
+        // fully substituted in all paths yet.
+        var y: T = x;
+        return y + 1;
+    }
+
+    pub fn bad(x: u256) -> u256 {
+        return add_one(u256, x);
+    }
+}

@@ -1,0 +1,19 @@
+contract GenericNestedCalls {
+    fn min(comptime T: type, a: T, b: T) -> T {
+        if (a < b) { return a; }
+        return b;
+    }
+
+    fn max(comptime T: type, a: T, b: T) -> T {
+        if (a > b) { return a; }
+        return b;
+    }
+
+    pub fn clamp_u256(x: u256) -> u256 {
+        return min(u256, max(u256, x, 10), 100);
+    }
+
+    pub fn clamp_u8(x: u8) -> u8 {
+        return min(u8, max(u8, x, 2), 10);
+    }
+}

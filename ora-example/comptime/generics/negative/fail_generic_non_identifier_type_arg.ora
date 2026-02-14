@@ -1,0 +1,10 @@
+contract FailGenericNonIdentifierTypeArg {
+    fn id(comptime T: type, x: T) -> T {
+        return x;
+    }
+
+    pub fn bad(x: u256) -> u256 {
+        // INVALID: `1` is not a type identifier.
+        return id(1, x);
+    }
+}

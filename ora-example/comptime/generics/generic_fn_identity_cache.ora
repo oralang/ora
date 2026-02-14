@@ -1,0 +1,15 @@
+contract GenericFnIdentityCache {
+    fn id(comptime T: type, value: T) -> T {
+        return value;
+    }
+
+    pub fn roundtrip_u256(x: u256) -> u256 {
+        let a: u256 = id(u256, x);
+        let b: u256 = id(u256, a + 1);
+        return id(u256, b);
+    }
+
+    pub fn roundtrip_u8(x: u8) -> u8 {
+        return id(u8, id(u8, x));
+    }
+}

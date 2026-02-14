@@ -28,21 +28,43 @@ pub fn parseContract(
 ) !ast.AstNode {
     const name_token = try parser.base.consume(.Identifier, "Expected contract name");
     const name = try parser.base.arena.createString(name_token.lexeme);
+    const alloc = parser.base.arena.allocator();
+
+    // Parse optional comptime type parameters: (comptime T: type, ...)
+    var type_param_names = std.ArrayList([]const u8){};
+    defer type_param_names.deinit(alloc);
+    var is_generic = false;
+
+    if (parser.base.match(.LeftParen)) {
+        while (!parser.base.check(.RightParen) and !parser.base.isAtEnd()) {
+            _ = try parser.base.consume(.Comptime, "Expected 'comptime' in contract type parameter");
+            const param_name = try parser.base.consume(.Identifier, "Expected type parameter name");
+            _ = try parser.base.consume(.Colon, "Expected ':' after type parameter name");
+            const type_tok = try parser.base.consume(.Identifier, "Expected 'type' after ':'");
+            if (!std.mem.eql(u8, type_tok.lexeme, "type")) {
+                try parser.base.errorAtCurrent("Expected 'type' keyword for contract type parameter");
+                return error.UnexpectedToken;
+            }
+            try type_param_names.append(alloc, param_name.lexeme);
+            if (!parser.base.match(.Comma)) break;
+        }
+        _ = try parser.base.consume(.RightParen, "Expected ')' after contract type parameters");
+        is_generic = type_param_names.items.len > 0;
+    }
 
     _ = try parser.base.consume(.LeftBrace, "Expected '{' after contract declaration");
 
     var body = std.ArrayList(ast.AstNode){};
-    defer body.deinit(parser.base.arena.allocator());
+    defer body.deinit(alloc);
     errdefer {
-        // clean up any partially parsed members on error
         for (body.items) |*member| {
-            ast.deinitAstNode(parser.base.arena.allocator(), member);
+            ast.deinitAstNode(alloc, member);
         }
     }
 
     while (!parser.base.check(.RightBrace) and !parser.base.isAtEnd()) {
         const member = try parseContractMember(parser, type_parser, expr_parser);
-        try body.append(parser.base.arena.allocator(), member);
+        try body.append(alloc, member);
     }
 
     _ = try parser.base.consume(.RightBrace, "Expected '}' after contract body");
@@ -50,7 +72,9 @@ pub fn parseContract(
     return ast.AstNode{ .Contract = ast.ContractNode{
         .name = name,
         .attributes = &[_]u8{},
-        .body = try body.toOwnedSlice(parser.base.arena.allocator()),
+        .body = try body.toOwnedSlice(alloc),
+        .is_generic = is_generic,
+        .type_param_names = if (is_generic) try type_param_names.toOwnedSlice(alloc) else &.{},
         .span = parser.base.spanFromToken(name_token),
     } };
 }

@@ -30,6 +30,7 @@ pub const TypeInfo = struct {
     source: TypeSource,
     span: ?SourceSpan, // Where the type was determined/declared
     region: ?MemoryRegion = null, // Located type region (if known)
+    generic_type_args: ?[]const OraType = null, // For generic instantiations like Pair(u256)
 
     /// Create unknown type info (used during parsing)
     pub fn unknown() TypeInfo {
@@ -66,8 +67,10 @@ pub const TypeInfo = struct {
 
     /// Check if type is fully resolved
     pub fn isResolved(self: TypeInfo) bool {
-        if (self.category == .Error) {
-            return true;
+        if (self.category == .Error) return true;
+        if (self.ora_type) |ot| {
+            // type_parameter is a valid placeholder in generic signatures
+            if (ot == .type_parameter) return true;
         }
         return self.ora_type != null and self.category != .Unknown;
     }
@@ -195,6 +198,7 @@ pub const TypeCategory = enum {
     Void,
     Error,
     Module,
+    Type, // comptime type — the metatype
     Unknown,
 
     pub fn format(self: TypeCategory, comptime fmt: []const u8, options: std.fmt.FormatOptions, writer: anytype) !void {
@@ -244,6 +248,10 @@ pub const OraType = union(enum) {
     anonymous_struct: []const AnonymousStructFieldType, // struct { field: T, ... }
     module: ?[]const u8, // Optional module name
 
+    // generics / comptime type system
+    @"type": void, // the metatype — `comptime T: type`
+    type_parameter: []const u8, // placeholder for a generic type param, e.g. "T"
+
     // refinement types
     min_value: struct {
         base: *const OraType, // Base integer type
@@ -287,6 +295,8 @@ pub const OraType = union(enum) {
             ._union => .Union,
             .anonymous_struct => .Struct,
             .module => .Module,
+            .@"type" => .Type,
+            .type_parameter => .Unknown, // resolved during monomorphization
             // refinement types inherit the category of their base type
             .min_value => |mv| mv.base.*.getCategory(),
             .max_value => |mv| mv.base.*.getCategory(),
@@ -387,6 +397,8 @@ pub const OraType = union(enum) {
             ._union => "union",
             .anonymous_struct => "struct",
             .module => "module",
+            .@"type" => "type",
+            .type_parameter => |name| name,
             // refinement types - use render() for proper formatting
             .min_value, .max_value, .in_range, .scaled, .exact, .non_zero_address => "refinement",
         };
@@ -401,7 +413,7 @@ pub const OraType = union(enum) {
     pub fn equals(a: OraType, b: OraType) bool {
         if (std.meta.activeTag(a) != std.meta.activeTag(b)) return false;
         return switch (a) {
-            .u8, .u16, .u32, .u64, .u128, .u256, .i8, .i16, .i32, .i64, .i128, .i256, .bool, .string, .address, .bytes, .void => true,
+            .u8, .u16, .u32, .u64, .u128, .u256, .i8, .i16, .i32, .i64, .i128, .i256, .bool, .string, .address, .bytes, .void, .@"type" => true,
             .struct_type => |an| switch (b) {
                 .struct_type => |bn| std.mem.eql(u8, an, bn),
                 else => unreachable,
@@ -505,6 +517,10 @@ pub const OraType = union(enum) {
                 .non_zero_address => true,
                 else => false,
             },
+            .type_parameter => |an| switch (b) {
+                .type_parameter => |bn| std.mem.eql(u8, an, bn),
+                else => unreachable,
+            },
             .module => |am| switch (b) {
                 .module => |bm| blk: {
                     if ((am == null) != (bm == null)) break :blk false;
@@ -521,7 +537,8 @@ pub const OraType = union(enum) {
         const tag_val: u64 = @intCast(@intFromEnum(std.meta.activeTag(self)));
         h.update(std.mem.asBytes(&tag_val));
         switch (self) {
-            .u8, .u16, .u32, .u64, .u128, .u256, .i8, .i16, .i32, .i64, .i128, .i256, .bool, .string, .address, .bytes, .void => {},
+            .u8, .u16, .u32, .u64, .u128, .u256, .i8, .i16, .i32, .i64, .i128, .i256, .bool, .string, .address, .bytes, .void, .@"type" => {},
+            .type_parameter => |name| h.update(name),
             .struct_type => |name| h.update(name),
             .enum_type => |name| h.update(name),
             .contract_type => |name| h.update(name),
@@ -699,6 +716,8 @@ pub const OraType = union(enum) {
                 try writer.writeByte('}');
             },
             .module => |_| try writer.writeAll("module"),
+            .@"type" => try writer.writeAll("type"),
+            .type_parameter => |name| try writer.writeAll(name),
             .min_value => |mv| {
                 try writer.writeAll("MinValue<");
                 try (@constCast(mv.base).*).render(writer);

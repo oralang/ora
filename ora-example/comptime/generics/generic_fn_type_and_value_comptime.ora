@@ -1,0 +1,13 @@
+contract GenericFnTypeAndValueComptime {
+    fn add_with_bias(comptime T: type, comptime bias: T, x: T) -> T {
+        return x + bias;
+    }
+
+    pub fn add_three(x: u256) -> u256 {
+        return add_with_bias(u256, 3, x);
+    }
+
+    pub fn add_ten(x: u256) -> u256 {
+        return add_with_bias(u256, 10, x);
+    }
+}

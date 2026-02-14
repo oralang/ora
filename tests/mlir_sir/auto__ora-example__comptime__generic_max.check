@@ -1,0 +1,8 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/comptime/generic_max.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @test_comptime_max
+// CHECK-LABEL: func.func @test_runtime_max
+// CHECK-LABEL: func.func @test_runtime_max_u8
+// CHECK-LABEL: func.func @max__u256
+// CHECK-LABEL: func.func @max__u8

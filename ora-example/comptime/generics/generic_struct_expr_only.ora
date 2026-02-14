@@ -1,0 +1,16 @@
+contract GenericStructExprOnly {
+    struct Pair(comptime T: type) {
+        first: T;
+        second: T;
+    }
+
+    pub fn make_pair_u256(a: u256, b: u256) -> Pair(u256) {
+        let p = Pair(u256) { first: a, second: b };
+        return p;
+    }
+
+    pub fn make_pair_u8(a: u8, b: u8) -> Pair(u8) {
+        let p = Pair(u8) { first: a, second: b };
+        return p;
+    }
+}

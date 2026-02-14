@@ -12,6 +12,7 @@ const core = @import("core/mod.zig");
 const stmt_resolver = @import("core/statement.zig");
 const type_info_mod = @import("../type_info.zig");
 const comptime_eval = @import("../../comptime/mod.zig");
+const mono = @import("monomorphize.zig");
 const log = @import("log");
 
 const CtValue = comptime_eval.CtValue;
@@ -100,6 +101,9 @@ pub const FoldContext = struct {
     symbol_table: *SymbolTable,
     core_resolver: *core.CoreResolver,
     current_scope: ?*Scope = null,
+    monomorphizer: ?*mono.Monomorphizer = null,
+    /// Function registry for looking up generic function templates
+    function_registry: ?*std.StringHashMap(*ast.FunctionNode) = null,
 };
 
 pub fn foldConstants(ctx: *FoldContext, nodes: []ast.AstNode) FoldError!void {
@@ -422,6 +426,8 @@ fn foldExpr(ctx: *FoldContext, expr: *ast.Expressions.ExprNode, allow_fold: bool
                     if (try tryFoldValue(ctx, expr, ct_val, getExpressionSpan(expr), getExpressionTypeInfo(expr))) return;
                 }
             }
+            // If call targets a generic function, monomorphize and rewrite the call
+            try tryMonomorphizeCall(ctx, call);
         },
         .Index => |*idx| {
             try foldExpr(ctx, idx.target, true);
@@ -601,6 +607,78 @@ fn foldExpr(ctx: *FoldContext, expr: *ast.Expressions.ExprNode, allow_fold: bool
             } } };
         },
         else => return,
+    }
+}
+
+/// If the call targets a generic function, monomorphize it and rewrite the
+/// call site to target the mangled concrete name, stripping type args.
+fn tryMonomorphizeCall(ctx: *FoldContext, call: *ast.Expressions.CallExpr) FoldError!void {
+    const monomorphizer = ctx.monomorphizer orelse return;
+    const registry = ctx.function_registry orelse return;
+
+    // Only handle direct calls (Identifier callee)
+    const fn_name = switch (call.callee.*) {
+        .Identifier => |id| id.name,
+        else => return,
+    };
+
+    const generic_fn = registry.get(fn_name) orelse return;
+    if (!generic_fn.is_generic) return;
+
+    // Extract concrete type args from the call (heap-allocated, temporary)
+    const type_args = mono.extractTypeArgs(generic_fn, call, ctx.allocator) orelse return;
+    defer ctx.allocator.free(type_args);
+
+    // Monomorphize
+    const owner_contract = ctx.symbol_table.findEnclosingContractName(ctx.current_scope);
+    const mangled_name = try monomorphizer.monomorphize(generic_fn, type_args, owner_contract);
+
+    // Rewrite call: change callee name and strip type arguments
+    call.callee.Identifier.name = mangled_name;
+
+    // Strip the comptime type arguments from the argument list
+    // Use type_storage_allocator (arena) since the result persists in the AST
+    var new_args = std.ArrayList(*ast.Expressions.ExprNode){};
+    var arg_idx: usize = 0;
+    for (generic_fn.parameters) |param| {
+        if (arg_idx >= call.arguments.len) break;
+        if (param.is_comptime) {
+            if (param.type_info.ora_type) |ot| {
+                if (ot == .type) {
+                    arg_idx += 1;
+                    continue; // skip type argument
+                }
+            }
+        }
+        try new_args.append(ctx.type_storage_allocator, call.arguments[arg_idx]);
+        arg_idx += 1;
+    }
+    call.arguments = try new_args.toOwnedSlice(ctx.type_storage_allocator);
+
+    // Update call type_info to reflect the concrete return type
+    if (generic_fn.return_type_info) |ret_ti| {
+        if (ret_ti.ora_type) |ot| {
+            if (ot == .type_parameter) {
+                // Find the matching type arg
+                var ti: usize = 0;
+                for (generic_fn.parameters) |param| {
+                    if (param.is_comptime) {
+                        if (param.type_info.ora_type) |pot| {
+                            if (pot == .type) {
+                                if (std.mem.eql(u8, param.name, ot.type_parameter)) {
+                                    if (ti < type_args.len) {
+                                        const concrete = type_args[ti];
+                                        call.type_info = TypeInfo.inferred(concrete.getCategory(), concrete, call.span);
+                                    }
+                                    break;
+                                }
+                                ti += 1;
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 

@@ -54,6 +54,7 @@ pub const HeapId = @import("value.zig").HeapId;
 pub const TypeId = @import("value.zig").TypeId;
 pub const FieldId = @import("value.zig").FieldId;
 pub const VariantId = @import("value.zig").VariantId;
+pub const type_ids = @import("value.zig").type_ids;
 
 // Re-export pool
 pub const ConstPool = @import("pool.zig").ConstPool;

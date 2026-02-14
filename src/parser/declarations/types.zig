@@ -18,12 +18,38 @@ const ExpressionParser = @import("../expression_parser.zig").ExpressionParser;
 const DeclarationParser = @import("../declaration_parser.zig").DeclarationParser;
 
 /// Parse struct declaration with complete field definitions
+/// Supports generic structs: struct Pair(comptime T: type) { first: T, second: T }
 pub fn parseStruct(parser: *DeclarationParser, type_parser: *TypeParser) !ast.AstNode {
     const name_token = try parser.base.consume(.Identifier, "Expected struct name");
+    const alloc = parser.base.arena.allocator();
+
+    // Parse optional comptime type parameters: (comptime T: type, ...)
+    var type_param_names = std.ArrayList([]const u8){};
+    defer type_param_names.deinit(alloc);
+    var is_generic = false;
+
+    if (parser.base.match(.LeftParen)) {
+        while (!parser.base.check(.RightParen) and !parser.base.isAtEnd()) {
+            _ = try parser.base.consume(.Comptime, "Expected 'comptime' in struct type parameter");
+            const param_name = try parser.base.consume(.Identifier, "Expected type parameter name");
+            _ = try parser.base.consume(.Colon, "Expected ':' after type parameter name");
+            // Expect 'type' keyword (parsed as Identifier since it's not a keyword)
+            const type_tok = try parser.base.consume(.Identifier, "Expected 'type' after ':'");
+            if (!std.mem.eql(u8, type_tok.lexeme, "type")) {
+                try parser.base.errorAtCurrent("Expected 'type' keyword for struct type parameter");
+                return error.UnexpectedToken;
+            }
+            try type_param_names.append(alloc, param_name.lexeme);
+            if (!parser.base.match(.Comma)) break;
+        }
+        _ = try parser.base.consume(.RightParen, "Expected ')' after struct type parameters");
+        is_generic = type_param_names.items.len > 0;
+    }
+
     _ = try parser.base.consume(.LeftBrace, "Expected '{' after struct name");
 
     var fields = std.ArrayList(ast.StructField){};
-    defer fields.deinit(parser.base.arena.allocator());
+    defer fields.deinit(alloc);
 
     while (!parser.base.check(.RightBrace) and !parser.base.isAtEnd()) {
         // skip any field attributes/annotations for now
@@ -53,7 +79,7 @@ pub fn parseStruct(parser: *DeclarationParser, type_parser: *TypeParser) !ast.As
 
         _ = try parser.base.consume(.Semicolon, "Expected ';' after field");
 
-        try fields.append(parser.base.arena.allocator(), ast.StructField{
+        try fields.append(alloc, ast.StructField{
             .name = field_name.lexeme,
             .type_info = field_type,
             .span = parser.base.spanFromToken(field_name),
@@ -64,7 +90,9 @@ pub fn parseStruct(parser: *DeclarationParser, type_parser: *TypeParser) !ast.As
 
     return ast.AstNode{ .StructDecl = ast.StructDeclNode{
         .name = name_token.lexeme,
-        .fields = try fields.toOwnedSlice(parser.base.arena.allocator()),
+        .fields = try fields.toOwnedSlice(alloc),
+        .is_generic = is_generic,
+        .type_param_names = if (is_generic) try type_param_names.toOwnedSlice(alloc) else &.{},
         .span = parser.base.spanFromToken(name_token),
     } };
 }

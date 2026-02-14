@@ -19,6 +19,8 @@ fn lowerContractTypes(self: *const DeclarationLowerer, block: c.MlirBlock, contr
     for (contract.body) |child| {
         switch (child) {
             .StructDecl => |struct_decl| {
+                // Skip generic struct templates (only lower monomorphized instances)
+                if (struct_decl.is_generic) continue;
                 const struct_op = self.lowerStruct(&struct_decl);
                 h.appendOp(block, struct_op);
 
@@ -224,6 +226,8 @@ pub fn lowerContract(self: *const DeclarationLowerer, contract: *const lib.Contr
             .Function => |f| {
                 // Skip private functions whose only callers were comptime-folded (DCE)
                 if (f.is_comptime_only) continue;
+                // Skip generic function templates — only monomorphized instances are lowered
+                if (f.is_generic) continue;
                 // include ghost functions in MLIR for verification
                 // they will be filtered out during target code generation (not in bytecode)
                 var local_var_map = LocalVarMap.init(std.heap.page_allocator);
