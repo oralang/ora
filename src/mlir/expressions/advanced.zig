@@ -945,6 +945,7 @@ fn lowerBitfieldConstruction(
     for (struct_inst.fields) |init_field| {
         const field_val = self.lowerExpression(init_field.value);
         const field_uw = expr_helpers.unwrapRefinementValue(self.ctx, self.block, self.locations, self.refinement_base_cache, field_val, init_field.span);
+        const field_i256 = coerceBitfieldFieldToWord(self, field_uw, int_ty, init_field.span);
 
         // Find matching field layout
         for (fields_info) |info| {
@@ -957,7 +958,7 @@ fn lowerBitfieldConstruction(
             // masked = field_val & mask
             const mask_op = self.ora_dialect.createArithConstant(mask, int_ty, loc);
             h.appendOp(self.block, mask_op);
-            const masked = c.oraArithAndIOpCreate(self.ctx, loc, field_uw, h.getResult(mask_op, 0));
+            const masked = c.oraArithAndIOpCreate(self.ctx, loc, field_i256, h.getResult(mask_op, 0));
             h.appendOp(self.block, masked);
 
             // shifted = masked << offset
@@ -977,11 +978,171 @@ fn lowerBitfieldConstruction(
     return word;
 }
 
+fn lowerAnonymousBitfieldConstruction(
+    self: *const ExpressionLowerer,
+    fields: []const lib.ast.Expressions.AnonymousStructField,
+    span: lib.ast.SourceSpan,
+    type_sym: *const constants.TypeSymbol,
+) c.MlirValue {
+    const loc = self.fileLoc(span);
+    const int_ty = c.oraIntegerTypeCreate(self.ctx, constants.DEFAULT_INTEGER_BITS);
+
+    const zero_op = self.ora_dialect.createArithConstant(0, int_ty, loc);
+    h.appendOp(self.block, zero_op);
+    var word = h.getResult(zero_op, 0);
+
+    const fields_info = type_sym.fields orelse return word;
+
+    for (fields) |init_field| {
+        const field_val = self.lowerExpression(init_field.value);
+        const field_uw = expr_helpers.unwrapRefinementValue(self.ctx, self.block, self.locations, self.refinement_base_cache, field_val, init_field.span);
+        const field_i256 = coerceBitfieldFieldToWord(self, field_uw, int_ty, init_field.span);
+
+        for (fields_info) |info| {
+            if (!std.mem.eql(u8, info.name, init_field.name)) continue;
+
+            const offset: i64 = if (info.offset) |o| @intCast(o) else 0;
+            const width: u32 = info.bit_width orelse 256;
+            const mask: i64 = if (width >= 64) -1 else (@as(i64, 1) << @intCast(width)) - 1;
+
+            const mask_op = self.ora_dialect.createArithConstant(mask, int_ty, loc);
+            h.appendOp(self.block, mask_op);
+            const masked = c.oraArithAndIOpCreate(self.ctx, loc, field_i256, h.getResult(mask_op, 0));
+            h.appendOp(self.block, masked);
+
+            const off_op = self.ora_dialect.createArithConstant(offset, int_ty, loc);
+            h.appendOp(self.block, off_op);
+            const shifted = c.oraArithShlIOpCreate(self.ctx, loc, h.getResult(masked, 0), h.getResult(off_op, 0));
+            h.appendOp(self.block, shifted);
+
+            const or_op = c.oraArithOrIOpCreate(self.ctx, loc, word, h.getResult(shifted, 0));
+            h.appendOp(self.block, or_op);
+            word = h.getResult(or_op, 0);
+            break;
+        }
+    }
+
+    return word;
+}
+
+fn coerceBitfieldFieldToWord(
+    self: *const ExpressionLowerer,
+    value: c.MlirValue,
+    word_ty: c.MlirType,
+    span: lib.ast.SourceSpan,
+) c.MlirValue {
+    const value_ty = c.oraValueGetType(value);
+    if (c.oraTypeEqual(value_ty, word_ty)) return value;
+
+    const loc = self.fileLoc(span);
+
+    // Bool fields lower as i1 and must be widened before mask/shift in i256 domain.
+    if (c.oraTypeEqual(value_ty, h.boolType(self.ctx))) {
+        const ext_bool = c.oraArithExtUIOpCreate(self.ctx, loc, value, word_ty);
+        h.appendOp(self.block, ext_bool);
+        return h.getResult(ext_bool, 0);
+    }
+
+    if (c.oraTypeIsAInteger(value_ty)) {
+        const value_width = c.oraIntegerTypeGetWidth(value_ty);
+        const word_width = c.oraIntegerTypeGetWidth(word_ty);
+
+        if (value_width < word_width) {
+            const ext_op = c.oraArithExtUIOpCreate(self.ctx, loc, value, word_ty);
+            h.appendOp(self.block, ext_op);
+            return h.getResult(ext_op, 0);
+        }
+        if (value_width > word_width) {
+            const trunc_op = c.oraArithTruncIOpCreate(self.ctx, loc, value, word_ty);
+            h.appendOp(self.block, trunc_op);
+            return h.getResult(trunc_op, 0);
+        }
+
+        const cast_op = c.oraArithBitcastOpCreate(self.ctx, loc, value, word_ty);
+        h.appendOp(self.block, cast_op);
+        return h.getResult(cast_op, 0);
+    }
+
+    return self.convertToType(value, word_ty, span);
+}
+
+fn matchesBitfieldFields(
+    init_fields: []const lib.ast.Expressions.AnonymousStructField,
+    bitfield_fields: []const constants.TypeSymbol.FieldInfo,
+) bool {
+    if (init_fields.len != bitfield_fields.len) return false;
+
+    for (init_fields) |init_field| {
+        var found = false;
+        for (bitfield_fields) |bf_field| {
+            if (std.mem.eql(u8, init_field.name, bf_field.name)) {
+                found = true;
+                break;
+            }
+        }
+        if (!found) return false;
+    }
+
+    return true;
+}
+
+fn inferBitfieldFromAnonymousFields(
+    self: *const ExpressionLowerer,
+    fields: []const lib.ast.Expressions.AnonymousStructField,
+) ?*const constants.TypeSymbol {
+    if (self.symbol_table == null or fields.len == 0) return null;
+
+    var match: ?*const constants.TypeSymbol = null;
+    var type_iter = self.symbol_table.?.types.iterator();
+    while (type_iter.next()) |entry| {
+        const type_symbols = entry.value_ptr.*;
+        for (type_symbols) |*type_sym| {
+            if (type_sym.type_kind != .Bitfield) continue;
+            const bitfield_fields = type_sym.fields orelse continue;
+            if (!matchesBitfieldFields(fields, bitfield_fields)) continue;
+
+            // Ambiguous shape: fall back to regular anonymous struct lowering.
+            if (match != null) return null;
+            match = type_sym;
+        }
+    }
+
+    return match;
+}
+
 /// Lower anonymous struct expressions
 pub fn lowerAnonymousStruct(
     self: *const ExpressionLowerer,
     anon_struct: *const lib.ast.Expressions.AnonymousStructExpr,
 ) c.MlirValue {
+    if (self.expected_type_info) |expected| {
+        if (expected.ora_type) |ora_type| {
+            if (self.symbol_table) |st| switch (ora_type) {
+                .bitfield_type => |bf_name| {
+                    if (st.lookupType(bf_name)) |type_sym| {
+                        if (type_sym.type_kind == .Bitfield) {
+                            return lowerAnonymousBitfieldConstruction(self, anon_struct.fields, anon_struct.span, type_sym);
+                        }
+                    }
+                },
+                .struct_type => |type_name| {
+                    if (st.lookupType(type_name)) |type_sym| {
+                        if (type_sym.type_kind == .Bitfield) {
+                            return lowerAnonymousBitfieldConstruction(self, anon_struct.fields, anon_struct.span, type_sym);
+                        }
+                    }
+                },
+                else => {},
+            };
+        }
+    }
+
+    if (inferBitfieldFromAnonymousFields(self, anon_struct.fields)) |type_sym| {
+        if (type_sym.type_kind == .Bitfield) {
+            return lowerAnonymousBitfieldConstruction(self, anon_struct.fields, anon_struct.span, type_sym);
+        }
+    }
+
     if (anon_struct.fields.len == 0) {
         return createEmptyStruct(self, anon_struct.span);
     }
@@ -1460,7 +1621,7 @@ pub fn getTypeString(
             .scaled => "Scaled",
             .exact => "Exact",
             .non_zero_address => "NonZeroAddress",
-            .@"type" => "type",
+            .type => "type",
             .type_parameter => "type_parameter",
         };
     }

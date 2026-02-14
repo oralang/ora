@@ -1,0 +1,171 @@
+// ERC20-style token that combines:
+// 1) bitfields for compact configuration/account metadata,
+// 2) comptime values,
+// 3) generic helpers + generic struct instantiation.
+
+bitfield TokenFlags : u256 {
+    initialized: bool;
+    paused: bool;
+    mint_enabled: bool;
+    burn_enabled: bool;
+    decimals: u8;
+    version: u8;
+}
+
+bitfield AccountFlags : u256 {
+    frozen: bool;
+    has_kyc: bool;
+    privileged: bool;
+    nonce: u16;
+}
+
+contract ERC20BitfieldComptimeGenerics {
+    struct TransferBook(comptime T: type) {
+        amount: T;
+        sender_before: T;
+        recipient_before: T;
+    }
+
+    storage var token_flags: TokenFlags;
+    storage var total_supply: u256;
+    storage balances: map<address, u256>;
+    storage allowances: map<address, map<address, u256>>;
+    storage account_flags: map<address, AccountFlags>;
+
+    log Transfer(from: address, to: address, amount: u256);
+    log Approval(owner: address, spender: address, amount: u256);
+
+    fn add(comptime T: type, a: T, b: T) -> T {
+        return a + b;
+    }
+
+    fn sub(comptime T: type, a: T, b: T) -> T {
+        return a - b;
+    }
+
+    fn ct(comptime T: type, comptime value: T) -> T {
+        return value;
+    }
+
+    pub fn init(initial_supply: u256) {
+        let deployer: NonZeroAddress = std.msg.sender();
+
+        total_supply = initial_supply;
+        balances[deployer] = initial_supply;
+
+        let f: TokenFlags = .{
+            .initialized = true,
+            .paused = false,
+            .mint_enabled = true,
+            .burn_enabled = true,
+            .decimals = ct(u8, 18),
+            .version = ct(u8, 1),
+        };
+        token_flags = f;
+
+        let a: AccountFlags = .{
+            .frozen = false,
+            .has_kyc = true,
+            .privileged = true,
+            .nonce = ct(u16, 1),
+        };
+        account_flags[deployer] = a;
+
+        log Transfer(std.constants.ZERO_ADDRESS, deployer, initial_supply);
+    }
+
+    pub fn decimals() -> u8 {
+        let f: TokenFlags = token_flags;
+        return f.decimals;
+    }
+
+    pub fn isPaused() -> bool {
+        let f: TokenFlags = token_flags;
+        return f.paused;
+    }
+
+    pub fn setPaused(next: bool) {
+        let f: TokenFlags = token_flags;
+        f.paused = next;
+        token_flags = f;
+    }
+
+    pub fn balanceOf(owner: address) -> u256 {
+        return balances[owner];
+    }
+
+    pub fn allowance(owner: address, spender: address) -> u256 {
+        return allowances[owner][spender];
+    }
+
+    pub fn approve(spender: NonZeroAddress, amount: u256) -> bool {
+        let owner: address = std.msg.sender();
+        allowances[owner][spender] = amount;
+        log Approval(owner, spender, amount);
+        return true;
+    }
+
+    pub fn transfer(to: NonZeroAddress, amount: MinValue<u256, 1>) -> bool {
+        let sender: NonZeroAddress = std.msg.sender();
+        let sender_before: u256 = balances[sender];
+
+        if (sender_before < amount) {
+            return false;
+        }
+
+        let recipient_before: u256 = balances[to];
+        let book = TransferBook(u256) {
+            amount: amount,
+            sender_before: sender_before,
+            recipient_before: recipient_before,
+        };
+
+        balances[sender] = sub(u256, book.sender_before, book.amount);
+        balances[to] = add(u256, book.recipient_before, book.amount);
+
+        let meta: AccountFlags = account_flags[sender];
+        meta.nonce = meta.nonce + 1;
+        account_flags[sender] = meta;
+
+        log Transfer(sender, to, amount);
+        return true;
+    }
+
+    pub fn transferFrom(from: NonZeroAddress, to: NonZeroAddress, amount: MinValue<u256, 1>) -> bool {
+        let spender: NonZeroAddress = std.msg.sender();
+        let current_allowance: u256 = allowances[from][spender];
+
+        if (current_allowance < amount) {
+            return false;
+        }
+
+        let sender_balance: u256 = balances[from];
+        if (sender_balance < amount) {
+            return false;
+        }
+
+        allowances[from][spender] = sub(u256, current_allowance, amount);
+        balances[from] = sub(u256, sender_balance, amount);
+
+        let recipient_balance: u256 = balances[to];
+        balances[to] = add(u256, recipient_balance, amount);
+
+        log Transfer(from, to, amount);
+        return true;
+    }
+
+    pub fn mint(to: NonZeroAddress, amount: MinValue<u256, 1>) -> bool {
+        let f: TokenFlags = token_flags;
+        if (f.mint_enabled == false) {
+            return false;
+        }
+
+        total_supply = add(u256, total_supply, amount);
+
+        let balance: u256 = balances[to];
+        balances[to] = add(u256, balance, amount);
+
+        log Transfer(std.constants.ZERO_ADDRESS, to, amount);
+        return true;
+    }
+}

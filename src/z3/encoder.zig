@@ -63,6 +63,8 @@ pub const Encoder = struct {
     tensor_dim_map: std.AutoHashMap(TensorDimKey, z3.Z3_ast),
     /// Map from function symbol name to MLIR function operation.
     function_ops: std.StringHashMap(mlir.MlirOperation),
+    /// Map from struct symbol name to comma-separated field names in declaration order.
+    struct_field_names_csv: std.StringHashMap([]u8),
     /// Calls already materialized for current-state summary (avoid double state transitions).
     materialized_calls: std.AutoHashMap(u64, void),
     /// Active summary inlining stack for recursion guard.
@@ -96,6 +98,7 @@ pub const Encoder = struct {
             .memref_old_map = std.AutoHashMap(u64, z3.Z3_ast).init(allocator),
             .tensor_dim_map = std.AutoHashMap(TensorDimKey, z3.Z3_ast).init(allocator),
             .function_ops = std.StringHashMap(mlir.MlirOperation).init(allocator),
+            .struct_field_names_csv = std.StringHashMap([]u8).init(allocator),
             .materialized_calls = std.AutoHashMap(u64, void).init(allocator),
             .inline_function_stack = std.ArrayList([]u8){},
             .string_storage = std.ArrayList([]u8){},
@@ -186,6 +189,12 @@ pub const Encoder = struct {
             self.allocator.free(entry.key_ptr.*);
         }
         self.function_ops.deinit();
+        var struct_it = self.struct_field_names_csv.iterator();
+        while (struct_it.next()) |entry| {
+            self.allocator.free(entry.key_ptr.*);
+            self.allocator.free(entry.value_ptr.*);
+        }
+        self.struct_field_names_csv.deinit();
         self.materialized_calls.deinit();
         for (self.inline_function_stack.items) |fn_name| {
             self.allocator.free(fn_name);
@@ -214,6 +223,33 @@ pub const Encoder = struct {
         try self.function_ops.put(key, func_op);
     }
 
+    pub fn registerStructDeclOperation(self: *Encoder, struct_op: mlir.MlirOperation) !void {
+        const name = self.getStringAttr(struct_op, "sym_name") orelse
+            self.getStringAttr(struct_op, "name") orelse return;
+        if (self.struct_field_names_csv.contains(name)) return;
+
+        const fields_attr = mlir.oraOperationGetAttributeByName(struct_op, mlir.oraStringRefCreate("ora.field_names", 15));
+        var csv_builder = std.ArrayList(u8){};
+        defer csv_builder.deinit(self.allocator);
+        if (!mlir.oraAttributeIsNull(fields_attr)) {
+            const count: usize = @intCast(mlir.oraArrayAttrGetNumElements(fields_attr));
+            for (0..count) |i| {
+                const field_attr = mlir.oraArrayAttrGetElement(fields_attr, i);
+                if (mlir.oraAttributeIsNull(field_attr)) continue;
+                const field_ref = mlir.oraStringAttrGetValue(field_attr);
+                if (field_ref.data == null or field_ref.length == 0) continue;
+                if (csv_builder.items.len > 0) try csv_builder.append(self.allocator, ',');
+                try csv_builder.appendSlice(self.allocator, field_ref.data[0..field_ref.length]);
+            }
+        }
+
+        const key = try self.allocator.dupe(u8, name);
+        errdefer self.allocator.free(key);
+        const value = try self.allocator.dupe(u8, csv_builder.items);
+        errdefer self.allocator.free(value);
+        try self.struct_field_names_csv.put(key, value);
+    }
+
     fn copyFunctionRegistryFrom(self: *Encoder, other: *const Encoder) !void {
         var it = other.function_ops.iterator();
         while (it.next()) |entry| {
@@ -221,6 +257,17 @@ pub const Encoder = struct {
             if (self.function_ops.contains(name)) continue;
             const key = try self.allocator.dupe(u8, name);
             try self.function_ops.put(key, entry.value_ptr.*);
+        }
+    }
+
+    fn copyStructRegistryFrom(self: *Encoder, other: *const Encoder) !void {
+        var it = other.struct_field_names_csv.iterator();
+        while (it.next()) |entry| {
+            const name = entry.key_ptr.*;
+            if (self.struct_field_names_csv.contains(name)) continue;
+            const key = try self.allocator.dupe(u8, name);
+            const value = try self.allocator.dupe(u8, entry.value_ptr.*);
+            try self.struct_field_names_csv.put(key, value);
         }
     }
 
@@ -1670,6 +1717,37 @@ pub const Encoder = struct {
             }
         }
 
+        // ---- ora.struct_instantiate: model as a constrained constructor ----
+        // Uses struct declaration field order to tie field extracts to operands.
+        if (std.mem.eql(u8, op_name, "ora.struct_instantiate")) {
+            if (mlir.oraOperationGetNumResults(mlir_op) >= 1) {
+                const result_value = mlir.oraOperationGetResult(mlir_op, 0);
+                const result_type = mlir.oraValueGetType(result_value);
+                const result_sort = try self.encodeMLIRType(result_type);
+                const op_id = @intFromPtr(mlir_op.ptr);
+                const struct_var_name = try std.fmt.allocPrint(self.allocator, "struct_instantiate_{d}", .{op_id});
+                defer self.allocator.free(struct_var_name);
+                const struct_val = try self.mkVariable(struct_var_name, result_sort);
+
+                var field_names_str = self.getStringAttr(mlir_op, "ora.field_names");
+                if (field_names_str == null) {
+                    if (self.getStringAttr(mlir_op, "struct_name")) |struct_name| {
+                        field_names_str = self.struct_field_names_csv.get(struct_name);
+                    }
+                }
+
+                for (operands, 0..) |operand, i| {
+                    const field_attr_name = try self.resolveFieldNameForIndex(field_names_str, i);
+                    defer self.allocator.free(field_attr_name);
+                    const field_sort = z3.Z3_get_sort(self.context.ctx, operand);
+                    const accessor = try self.applyFieldFunction(field_attr_name, result_sort, field_sort, struct_val);
+                    const eq = z3.Z3_mk_eq(self.context.ctx, accessor, operand);
+                    self.addConstraint(eq);
+                }
+                return struct_val;
+            }
+        }
+
         // ---- ora.struct_init: model as an uninterpreted constructor ----
         // Used by @addWithOverflow etc. to return (value, overflow) tuples.
         if (std.mem.eql(u8, op_name, "ora.struct_init")) {
@@ -1677,22 +1755,16 @@ pub const Encoder = struct {
                 const result_value = mlir.oraOperationGetResult(mlir_op, 0);
                 const result_type = mlir.oraValueGetType(result_value);
                 const result_sort = try self.encodeMLIRType(result_type);
+                const op_id = @intFromPtr(mlir_op.ptr);
                 // Build a struct-like value; bind each operand as a named field
                 // so ora.struct_field_extract can recover them.
-                const struct_val = try self.mkVariable("struct_init", result_sort);
+                const struct_var_name = try std.fmt.allocPrint(self.allocator, "struct_init_{d}", .{op_id});
+                defer self.allocator.free(struct_var_name);
+                const struct_val = try self.mkVariable(struct_var_name, result_sort);
                 // Use field names from attribute if available, otherwise fall back to field_N
                 const field_names_str = self.getStringAttr(mlir_op, "ora.field_names");
                 for (operands, 0..) |operand, i| {
-                    const field_attr_name = if (field_names_str) |names| blk: {
-                        // Parse comma-separated field names
-                        var it = std.mem.splitSequence(u8, names, ",");
-                        var idx: usize = 0;
-                        while (it.next()) |part| {
-                            if (idx == i) break :blk try self.allocator.dupe(u8, part);
-                            idx += 1;
-                        }
-                        break :blk try std.fmt.allocPrint(self.allocator, "field_{d}", .{i});
-                    } else try std.fmt.allocPrint(self.allocator, "field_{d}", .{i});
+                    const field_attr_name = try self.resolveFieldNameForIndex(field_names_str, i);
                     defer self.allocator.free(field_attr_name);
                     const field_sort = z3.Z3_get_sort(self.context.ctx, operand);
                     const accessor = try self.applyFieldFunction(field_attr_name, result_sort, field_sort, struct_val);
@@ -1879,7 +1951,7 @@ pub const Encoder = struct {
             }
         }
 
-        // unsupported operation - caller may treat as unknown symbol.
+        // unsupported operation - fail verification/compilation immediately.
         std.debug.print("z3 encoder unsupported op: {s}\n", .{op_name});
         return error.UnsupportedOperation;
     }
@@ -2460,6 +2532,7 @@ pub const Encoder = struct {
         summary_encoder.setVerifyState(self.verify_state);
         summary_encoder.max_summary_inline_depth = self.max_summary_inline_depth;
         try summary_encoder.copyFunctionRegistryFrom(self);
+        try summary_encoder.copyStructRegistryFrom(self);
         try summary_encoder.copyInlineStackFrom(self);
         try summary_encoder.copyEnvMapFrom(self);
         try summary_encoder.copyGlobalStateMapFrom(self, mode == .Old);
@@ -2514,6 +2587,7 @@ pub const Encoder = struct {
         summary_encoder.setVerifyState(self.verify_state);
         summary_encoder.max_summary_inline_depth = self.max_summary_inline_depth;
         try summary_encoder.copyFunctionRegistryFrom(self);
+        try summary_encoder.copyStructRegistryFrom(self);
         try summary_encoder.copyInlineStackFrom(self);
         try summary_encoder.copyEnvMapFrom(self);
         try summary_encoder.pushInlineFunction(callee);
@@ -2807,6 +2881,24 @@ pub const Encoder = struct {
         const value = mlir.oraStringAttrGetValue(attr);
         if (value.data == null or value.length == 0) return null;
         return value.data[0..value.length];
+    }
+
+    fn resolveFieldNameForIndex(self: *Encoder, field_names_csv: ?[]const u8, index: usize) ![]u8 {
+        if (field_names_csv) |csv| {
+            var it = std.mem.splitScalar(u8, csv, ',');
+            var idx: usize = 0;
+            while (it.next()) |part| {
+                if (idx == index) {
+                    const trimmed = std.mem.trim(u8, part, " \t\n\r");
+                    if (trimmed.len > 0) {
+                        return self.allocator.dupe(u8, trimmed);
+                    }
+                    break;
+                }
+                idx += 1;
+            }
+        }
+        return std.fmt.allocPrint(self.allocator, "field_{d}", .{index});
     }
 
     fn coerceToBool(self: *Encoder, ast: z3.Z3_ast) z3.Z3_ast {

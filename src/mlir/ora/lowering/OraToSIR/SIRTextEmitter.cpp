@@ -111,13 +111,9 @@ namespace
 
     std::string formatInt(const APInt &v)
     {
-        if (v.isNegative())
-        {
-            llvm::SmallString<32> s;
-            v.toStringSigned(s, 10);
-            return s.str().str();
-        }
         llvm::SmallString<32> s;
+        // Sensei SIR text parser only accepts unsigned decimal/hex literals.
+        // Emit all APInt values as unsigned hex (two's-complement for negatives).
         v.toString(s, 16, false, false);
         return ("0x" + s.str()).str();
     }

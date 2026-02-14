@@ -396,6 +396,8 @@ pub const VerificationPass = struct {
             op_name_ref.data[0..op_name_ref.length];
         if (std.mem.eql(u8, op_name, "func.func")) {
             try self.encoder.registerFunctionOperation(root);
+        } else if (std.mem.eql(u8, op_name, "ora.struct.decl")) {
+            try self.encoder.registerStructDeclOperation(root);
         }
 
         const num_regions = mlir.oraOperationGetNumRegions(root);
@@ -564,10 +566,7 @@ pub const VerificationPass = struct {
             std.mem.eql(u8, op_name, "call");
         if (!should_observe) return;
 
-        _ = self.encoder.encodeOperation(op) catch |err| switch (err) {
-            error.UnsupportedOperation, error.InvalidOperandCount, error.UnsupportedPredicate, error.InvalidControlFlow => return,
-            else => return err,
-        };
+        _ = try self.encoder.encodeOperation(op);
 
         // State observation should not leak ad-hoc constraints/obligations into
         // subsequent annotation queries.

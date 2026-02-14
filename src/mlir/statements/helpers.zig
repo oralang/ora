@@ -213,7 +213,7 @@ pub fn lowerValueWithImplicitTry(
         };
         if (needs_unwrap) {
             if (expected_type == null or !isErrorUnionTypeInfo(expected_type.?)) {
-                const expr_value = self.expr_lowerer.lowerExpression(expr);
+                const expr_value = self.expr_lowerer.lowerExpressionWithExpectedType(expr, expected_type);
                 if (c.oraValueIsNull(expr_value)) return expr_value;
 
                 const expr_ty = c.oraValueGetType(expr_value);
@@ -234,7 +234,7 @@ pub fn lowerValueWithImplicitTry(
             return self.expr_lowerer.lowerTry(&try_expr);
         }
     }
-    return self.expr_lowerer.lowerExpression(expr);
+    return self.expr_lowerer.lowerExpressionWithExpectedType(expr, expected_type);
 }
 
 fn reportRefinementGuardError(self: *const StatementLowerer, span: lib.ast.SourceSpan, message: []const u8, suggestion: ?[]const u8) void {

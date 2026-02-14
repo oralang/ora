@@ -66,6 +66,7 @@ pub const ExpressionLowerer = struct {
     refinement_base_cache: ?*std.AutoHashMap(usize, c.MlirValue) = null,
     refinement_guard_cache: ?*std.AutoHashMap(u128, void) = null,
     prefer_refinement_base_cache: bool = false,
+    expected_type_info: ?lib.ast.Types.TypeInfo = null,
     pub fn init(ctx: c.MlirContext, block: c.MlirBlock, type_mapper: *const TypeMapper, param_map: ?*const ParamMap, storage_map: ?*const StorageMap, local_var_map: ?*const LocalVarMap, symbol_table: ?*const SymbolTable, builtin_registry: ?*const builtins.BuiltinRegistry, error_handler: ?*ErrorHandler, locations: LocationTracker, ora_dialect: *OraDialect) ExpressionLowerer {
         return .{
             .ctx = ctx,
@@ -87,7 +88,20 @@ pub const ExpressionLowerer = struct {
             .refinement_base_cache = null,
             .refinement_guard_cache = null,
             .prefer_refinement_base_cache = false,
+            .expected_type_info = null,
         };
+    }
+
+    /// Lower an expression with an optional contextual expected type.
+    pub fn lowerExpressionWithExpectedType(
+        self: *const ExpressionLowerer,
+        expr: *const lib.ast.Expressions.ExprNode,
+        expected_type: ?lib.ast.Types.TypeInfo,
+    ) c.MlirValue {
+        if (expected_type == null) return self.lowerExpression(expr);
+        var contextual = self.*;
+        contextual.expected_type_info = expected_type;
+        return contextual.lowerExpression(expr);
     }
 
     /// Main dispatch function for lowering expressions

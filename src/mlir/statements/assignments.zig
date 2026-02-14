@@ -606,7 +606,12 @@ pub fn lowerIndexAssignment(self: *const StatementLowerer, index_expr: *const li
     } else {
         // map indexing or other complex indexing operations
         // use ora.map_store directly (registered operation)
-        const map_store_op = self.ora_dialect.createMapStore(target, index_val, value, loc);
+        const map_value_type = c.oraMapTypeGetValueType(target_type);
+        const store_value = if (!c.oraTypeIsNull(map_value_type))
+            self.expr_lowerer.convertToType(value, map_value_type, index_expr.span)
+        else
+            value;
+        const map_store_op = self.ora_dialect.createMapStore(target, index_val, store_value, loc);
         h.appendOp(self.block, map_store_op);
 
         // Nested map update re-threading:
@@ -623,12 +628,12 @@ pub fn lowerIndexAssignment(self: *const StatementLowerer, index_expr: *const li
             if (c.oraTypeIsNull(outer_value_type)) break;
 
             const current_value_type = c.oraValueGetType(current_value_to_store);
-            const store_value = if (!c.oraTypeEqual(current_value_type, outer_value_type))
+            const outer_store_value = if (!c.oraTypeEqual(current_value_type, outer_value_type))
                 self.expr_lowerer.convertToType(current_value_to_store, outer_value_type, index_expr.span)
             else
                 current_value_to_store;
 
-            const outer_store = self.ora_dialect.createMapStore(outer_map, outer_key, store_value, loc);
+            const outer_store = self.ora_dialect.createMapStore(outer_map, outer_key, outer_store_value, loc);
             h.appendOp(self.block, outer_store);
 
             current_value_to_store = outer_map;

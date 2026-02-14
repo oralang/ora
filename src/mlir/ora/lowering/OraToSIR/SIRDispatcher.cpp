@@ -719,13 +719,19 @@ namespace mlir
                     builder.setInsertionPointToEnd(entry);
                     static_cast<void>(getConst(builder, loc, u256Type, i64Type, 0, constCache, entry, "zero"));
                     static_cast<void>(getConst(builder, loc, u256Type, i64Type, 4, constCache, entry, "selector_offset"));
-                    static_cast<void>(getConst(builder, loc, u256Type, i64Type, 32, constCache, entry, "word_size"));
+                    Value c32_entry = getConst(builder, loc, u256Type, i64Type, 32, constCache, entry, "word_size");
                     static_cast<void>(getConst(builder, loc, u256Type, i64Type, 35, constCache, entry, "min_cdsize_1arg"));
                     static_cast<void>(getConst(builder, loc, u256Type, i64Type, 36, constCache, entry, "arg1_offset"));
                     static_cast<void>(getConst(builder, loc, u256Type, i64Type, 67, constCache, entry, "min_cdsize_2args"));
                     static_cast<void>(getConst(builder, loc, u256Type, i64Type, 68, constCache, entry, "arg2_offset"));
                     static_cast<void>(getConst(builder, loc, u256Type, i64Type, 99, constCache, entry, "min_cdsize_3args"));
                     static_cast<void>(getConst(builder, loc, u256Type, i64Type, 224, constCache, entry, "selector_shift"));
+
+                    // Initialize runtime malloc free-pointer slot (memory[0x20]).
+                    // Without this, malloc may start at address 0 and clobber scratch state.
+                    Value freePtrSlot = builder.create<sir::BitcastOp>(loc, ptrType, c32_entry);
+                    Value heapBase = builder.create<sir::CodeSizeOp>(loc, u256Type);
+                    builder.create<sir::StoreOp>(loc, freePtrSlot, heapBase);
 
                     Value cv = builder.create<sir::CallValueOp>(loc, u256Type);
                     setResultName(cv.getDefiningOp(), "cv");
