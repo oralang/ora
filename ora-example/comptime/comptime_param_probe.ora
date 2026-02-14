@@ -1,0 +1,15 @@
+contract ComptimeParamProbe {
+    fn align_up(comptime alignment: u256, value: u256) -> u256 {
+        const mask: u256 = alignment - 1;
+        return (value + mask) - ((value + mask) % alignment);
+    }
+
+    pub fn test_ok(x: u256) -> u256 {
+        return align_up(32, x);  // 32 is comptime-known: OK
+    }
+
+    // Uncomment to see compile error:
+    // pub fn test_bad(x: u256, y: u256) -> u256 {
+    //     return align_up(y, x);  // y is runtime: type error
+    // }
+}

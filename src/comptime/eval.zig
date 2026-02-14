@@ -185,7 +185,7 @@ pub const Evaluator = struct {
             .bor => EvalResult.ok(.{ .integer = l | r }),
             .bxor => EvalResult.ok(.{ .integer = l ^ r }),
             .shl => self.checkedShl(l, r, span),
-            .shr => EvalResult.ok(.{ .integer = l >> @intCast(r) }),
+            .shr => if (r >= 256) EvalResult.ok(.{ .integer = 0 }) else EvalResult.ok(.{ .integer = l >> @intCast(r) }),
             .land, .lor => unreachable, // handled above
         };
     }

@@ -1000,7 +1000,7 @@ fn synthCall(
                 if (registry_map.get(func_name)) |function| {
                     // Enforce comptime params: arguments to comptime-annotated parameters
                     // must be compile-time known
-                    checkComptimeParams(self, function, call);
+                    try checkComptimeParams(self, function, call);
 
                     // found in function registry - use return type
                     if (function.return_type_info) |ret_info| {
@@ -1047,6 +1047,13 @@ fn synthCall(
         const found_symbol = symbol.?;
 
         if (found_symbol.kind == .Function) {
+            // Enforce comptime params via function registry
+            if (self.function_registry) |registry| {
+                const registry_map = @as(*std.StringHashMap(*FunctionNode), @ptrCast(@alignCast(registry)));
+                if (registry_map.get(func_name)) |function| {
+                    try checkComptimeParams(self, function, call);
+                }
+            }
             // function's type_info is a function type, extract return type
             if (found_symbol.typ) |typ| {
                 if (typ.isResolved()) {
@@ -1627,19 +1634,22 @@ fn extractExprTypeInfo(expr: *const ast.Expressions.ExprNode) TypeInfo {
 }
 
 /// Check that arguments to comptime-annotated parameters are compile-time known.
-/// Emits a diagnostic (log warning) if a non-comptime argument is passed to a comptime param.
+/// Returns TypeMismatch if a non-constant argument is passed to a comptime param.
 fn checkComptimeParams(
     self: *CoreResolver,
     function: *const FunctionNode,
     call: *const ast.Expressions.CallExpr,
-) void {
+) TypeResolutionError!void {
     const arg_count = @min(function.parameters.len, call.arguments.len);
     for (function.parameters[0..arg_count], 0..) |param, i| {
         if (!param.is_comptime) continue;
-        // Check if argument is comptime-known
         const arg_result = self.evaluateConstantExpression(call.arguments[i]);
         if (arg_result.getValue() == null) {
-            log.debug("[synthCall] comptime param '{s}' in '{s}' requires compile-time known argument\n", .{ param.name, function.name });
+            log.err(
+                "[type_resolver] comptime parameter '{s}' in '{s}' requires a compile-time known argument\n",
+                .{ param.name, function.name },
+            );
+            return TypeResolutionError.TypeMismatch;
         }
     }
 }

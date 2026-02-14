@@ -12,6 +12,7 @@ const core = @import("core/mod.zig");
 const stmt_resolver = @import("core/statement.zig");
 const type_info_mod = @import("../type_info.zig");
 const comptime_eval = @import("../../comptime/mod.zig");
+const log = @import("log");
 
 const CtValue = comptime_eval.CtValue;
 
@@ -222,12 +223,12 @@ fn foldStmt(ctx: *FoldContext, stmt: *ast.Statements.StmtNode) FoldError!void {
                 if (var_decl.type_info.ora_type) |target_ora_type| {
                     var_decl.skip_guard = stmt_resolver.shouldSkipGuard(ctx.core_resolver, value, target_ora_type);
                 }
-                if (var_decl.kind != .Var) {
-                    const const_result = ctx.core_resolver.evaluateConstantExpression(value);
-                    if (const_result.getValue()) |ct_value| {
-                        if (ctx.current_scope) |scope| {
-                            ctx.core_resolver.setComptimeValue(scope, var_decl.name, ct_value) catch {};
-                        }
+                // Track both const and var in comptime_env. Var values may be
+                // updated by comptime while/for and folded into later expressions.
+                const const_result = ctx.core_resolver.evaluateConstantExpression(value);
+                if (const_result.getValue()) |ct_value| {
+                    if (ctx.current_scope) |scope| {
+                        ctx.core_resolver.setComptimeValue(scope, var_decl.name, ct_value) catch {};
                     }
                 }
             }
@@ -376,8 +377,13 @@ fn foldExpr(ctx: *FoldContext, expr: *ast.Expressions.ExprNode, allow_fold: bool
             try foldExpr(ctx, bin.lhs, true);
             try foldExpr(ctx, bin.rhs, true);
             if (allow_fold) {
-                if (ctx.core_resolver.evaluateConstantExpression(expr).getValue()) |ct_val| {
+                const eval_result = ctx.core_resolver.evaluateConstantExpression(expr);
+                if (eval_result.getValue()) |ct_val| {
                     if (try tryFoldValue(ctx, expr, ct_val, getExpressionSpan(expr), getExpressionTypeInfo(expr))) return;
+                } else if (bin.lhs.* == .Literal and bin.rhs.* == .Literal) {
+                    // Both operands are compile-time known but the result failed —
+                    // overflow/underflow/div-by-zero. Warn but keep emitting MLIR.
+                    emitComptimeArithError(ctx, expr);
                 }
             }
         },
@@ -648,6 +654,35 @@ fn getExpressionSpan(expr: *ast.Expressions.ExprNode) ast.SourceSpan {
     };
 }
 
+/// When both operands of a binary expression are compile-time known but the
+/// evaluator fails (overflow, underflow, division by zero), re-evaluate in
+/// strict mode to extract the error and emit a compile-time diagnostic.
+/// Both operands are compile-time known but the result failed — re-evaluate
+/// in strict mode to extract the precise error and emit a compile-time warning.
+/// The MLIR is still emitted (with the runtime overflow guard), so pub functions
+/// remain in the ABI.
+fn emitComptimeArithError(ctx: *FoldContext, expr: *ast.Expressions.ExprNode) void {
+    const lookup = comptime_eval.IdentifierLookup{
+        .ctx = ctx.core_resolver,
+        .lookupFn = core.lookupComptimeValueThunk,
+        .enumLookupFn = core.lookupEnumValueThunk,
+    };
+    var eval = comptime_eval.AstEvaluator.init(
+        &ctx.core_resolver.comptime_env,
+        .must_eval,
+        .strict,
+        lookup,
+    );
+    const strict_result = eval.evalExpr(expr);
+    switch (strict_result) {
+        .err => |ct_err| {
+            const span = getExpressionSpan(expr);
+            log.warn("comptime arithmetic error at line {d}: {s}\n", .{ span.line, ct_err.message });
+        },
+        else => {},
+    }
+}
+
 fn setLiteralSpan(lit: *ast.Expressions.LiteralExpr, span: ast.SourceSpan) void {
     switch (lit.*) {
         .Integer => |*int_lit| int_lit.span = span,
@@ -662,7 +697,8 @@ fn setLiteralSpan(lit: *ast.Expressions.LiteralExpr, span: ast.SourceSpan) void 
 }
 
 /// Evaluate a comptime while loop at compile time.
-/// Side effect: any `comptime var` bindings are updated in the fold context.
+/// On success: bindings are updated in comptime_env, is_comptime stays true (loop skipped in MLIR).
+/// On failure: is_comptime is cleared so the loop falls back to runtime emission.
 fn tryEvalComptimeWhile(ctx: *FoldContext, while_stmt: *ast.Statements.WhileNode) void {
     const lookup = comptime_eval.IdentifierLookup{
         .ctx = ctx.core_resolver,
@@ -678,21 +714,15 @@ fn tryEvalComptimeWhile(ctx: *FoldContext, while_stmt: *ast.Statements.WhileNode
     );
     const while_as_stmt = ast.Statements.StmtNode{ .While = while_stmt.* };
     const result = stmt_eval.evalStatement(&while_as_stmt);
-    // If evaluation succeeded, any bindings are updated in comptime_env
-    // If it failed (not_comptime), the loop will still be emitted as runtime code
     switch (result) {
-        .ok => |maybe_val| {
-            if (maybe_val) |val| {
-                if (val == .integer) {
-                    // Store the result if we can identify a variable to update
-                }
-            }
-        },
-        else => {},
+        .ok => {}, // success — env is updated, loop will be skipped in MLIR
+        else => while_stmt.is_comptime = false, // failed — fall back to runtime loop
     }
 }
 
 /// Evaluate a comptime for loop at compile time.
+/// On success: bindings are updated in comptime_env, is_comptime stays true (loop skipped in MLIR).
+/// On failure: is_comptime is cleared so the loop falls back to runtime emission.
 fn tryEvalComptimeFor(ctx: *FoldContext, for_stmt: *ast.Statements.ForLoopNode) void {
     const lookup = comptime_eval.IdentifierLookup{
         .ctx = ctx.core_resolver,
@@ -709,8 +739,8 @@ fn tryEvalComptimeFor(ctx: *FoldContext, for_stmt: *ast.Statements.ForLoopNode) 
     const for_as_stmt = ast.Statements.StmtNode{ .ForLoop = for_stmt.* };
     const result = stmt_eval.evalStatement(&for_as_stmt);
     switch (result) {
-        .ok => {},
-        else => {},
+        .ok => {}, // success — loop will be skipped in MLIR
+        else => for_stmt.is_comptime = false, // failed — fall back to runtime loop
     }
 }
 

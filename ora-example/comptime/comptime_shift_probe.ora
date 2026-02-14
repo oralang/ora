@@ -1,0 +1,9 @@
+contract ComptimeShiftProbe {
+    pub fn test_large_shr() -> u256 {
+        const x: u256 = 1 >> 300;    // should fold to 0, not panic
+        const y: u256 = 255 >> 256;  // also 0
+        const z: u256 = 1 >> 8;      // normal: 0
+        const w: u256 = 256 >> 4;    // normal: 16
+        return x + y + z + w;        // 0 + 0 + 0 + 16 = 16
+    }
+}
