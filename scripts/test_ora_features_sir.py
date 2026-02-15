@@ -86,7 +86,7 @@ def test_file(file_path, compiler_path="./zig-out/bin/ora", timeout_s=30):
 
     try:
         result = subprocess.run(
-            [compiler_path, "--verify", "--emit-sir", str(file_path)],
+            [compiler_path, "--verify", "--emit-mlir=sir", str(file_path)],
             capture_output=True,
             timeout=timeout_s
         )

@@ -71,26 +71,66 @@ zig build test
 
 Run the compiler directly:
 ```bash
-./zig-out/bin/ora [options] <file.ora>
+./zig-out/bin/ora <file.ora>
 ```
 
-Compile to Sensei SIR text:
+Explicit build command:
 ```bash
-./zig-out/bin/ora compile [options] <file.ora>
+./zig-out/bin/ora build [options] <file.ora>
+```
+
+Emit/debug command (IR-focused):
+```bash
+./zig-out/bin/ora emit [emit-options] <file.ora>
 ```
 
 See available commands and flags:
 ```bash
-./zig-out/bin/ora --help
+./zig-out/bin/ora
 ```
 
 ## Common workflows
 
 - **Format:** `./zig-out/bin/ora fmt <file.ora>` — format source; use `--check` for CI.
-- **Emit IR / bytecode / ABI:** `--emit-mlir`, `--emit-mlir-sir`, `--emit-sir-text`, `--emit-bytecode`, `--emit-abi`, `--emit-abi-solidity`.
-- **Verify:** `--verify` (default); `--verify=full` for untagged asserts.
-- **SMT report:** `--emit-smt-report` — writes an SMT encoding audit to `<basename>.smt.report.md` and `<basename>.smt.report.json` (per-file encoding, obligations, and SMT-LIB snippets). Example: `./zig-out/bin/ora --emit-smt-report ora-example/apps/counter.ora` produces `counter.ora.smt.report.md` and `.json`.
+- **Build artifacts (default):** `./zig-out/bin/ora <file.ora>` (same as `build`) writes:
+  - `artifacts/<name>/abi/<name>.abi.json`
+  - `artifacts/<name>/abi/<name>.abi.sol.json`
+  - `artifacts/<name>/abi/<name>.abi.extras.json`
+  - `artifacts/<name>/bin/<name>.hex`
+  - `artifacts/<name>/sir/<name>.sir`
+  - `artifacts/<name>/verify/<name>.smt.report.md`
+  - `artifacts/<name>/verify/<name>.smt.report.json`
+- **Emit MLIR/SIR for debugging:** `./zig-out/bin/ora emit --emit-mlir[=ora|sir|both] <file.ora>`, `./zig-out/bin/ora emit --emit-sir-text <file.ora>`.
+- **MLIR output modes:**
+  - Ora MLIR: `./zig-out/bin/ora emit --emit-mlir=ora <file.ora>`
+  - SIR MLIR (after Ora->SIR): `./zig-out/bin/ora emit --emit-mlir=sir <file.ora>`
+  - Both Ora + SIR MLIR: `./zig-out/bin/ora emit --emit-mlir=both <file.ora>`
+  - SIR text (Sensei text IR): `./zig-out/bin/ora emit --emit-sir-text <file.ora>`
+- **Emit specific outputs:** `./zig-out/bin/ora emit --emit-bytecode`, `--emit-abi`, `--emit-abi-solidity`, `--emit-abi-extras`.
+- **CFG generation:** `./zig-out/bin/ora emit --emit-cfg <file.ora>` (defaults to Ora MLIR), or explicitly `--emit-cfg=ora` / `--emit-cfg=sir`.
+- **Verify:** `--verify` (default), `--verify=full` for untagged asserts.
+- **SMT report in emit mode:** `./zig-out/bin/ora emit --emit-smt-report <file.ora>`.
 - **Tests:** `zig build test` — run the test suite. `./scripts/validate-examples.sh` — validate example fixtures.
+- **CLI command matrix:** `./scripts/run-cli-command-checks.sh` — run end-to-end checks for build/emit/fmt/verification/advanced MLIR flags. Useful options: `--quiet`, `--out /tmp/ora-cli-cmd-tests`, `--file <path.ora>`, `--compiler <path-to-ora>`.
+
+## Advanced MLIR controls
+
+- Run a custom MLIR pipeline:
+  - `./zig-out/bin/ora emit --mlir-pass-pipeline "builtin.module(canonicalize,cse)" --emit-mlir=ora <file.ora>`
+- Verify each pass in that pipeline:
+  - `--mlir-verify-each-pass` (requires `--mlir-pass-pipeline`)
+- Enable pass timing for that pipeline:
+  - `--mlir-pass-timing` (requires `--mlir-pass-pipeline`)
+- Print stage snapshots:
+  - `--mlir-print-ir=before|after|before-after|all`
+  - Optional stage filter: `--mlir-print-ir-pass <filter>`
+  - Current stage names: `lowering`, `custom-pipeline`, `canonicalize`, `ora-to-sir`, `sir-legalize`
+- Save MLIR when a stage fails:
+  - `--mlir-crash-reproducer <path>`
+- Print module snapshot on MLIR diagnostics:
+  - `--mlir-print-op-on-diagnostic`
+- Print operation-count stats across stages:
+  - `--mlir-pass-statistics`
 
 ## Verification timeout and tuning
 
@@ -98,7 +138,7 @@ Z3 verification timeout is controlled via `ORA_Z3_TIMEOUT_MS` (milliseconds):
 
 ```bash
 # 5 minutes
-ORA_Z3_TIMEOUT_MS=300000 ./zig-out/bin/ora --verify --emit-mlir ora-example/apps/defi_lending_pool.ora
+ORA_Z3_TIMEOUT_MS=300000 ./zig-out/bin/ora emit --verify --emit-mlir ora-example/apps/defi_lending_pool.ora
 ```
 
 Optional verifier env toggles:

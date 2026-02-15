@@ -27,6 +27,7 @@
 #include "mlir/IR/DialectRegistry.h"
 #include "mlir/IR/AsmState.h"
 #include "mlir/InitAllDialects.h"
+#include "mlir/InitAllPasses.h"
 #include "mlir/Pass/Pass.h"
 #include "mlir/Pass/PassManager.h"
 #include "mlir/Pass/PassRegistry.h"
@@ -641,6 +642,12 @@ void oraBlockAppendOwnedOperation(MlirBlock block, MlirOperation op)
 
     MlirPassManager oraPassManagerCreate(MlirContext ctx)
     {
+        static bool passesRegistered = false;
+        if (!passesRegistered)
+        {
+            mlir::registerAllPasses();
+            passesRegistered = true;
+        }
         return wrap(new mlir::PassManager(unwrap(ctx)));
     }
 

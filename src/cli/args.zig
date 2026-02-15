@@ -17,6 +17,7 @@ pub const CliOptions = struct {
     emit_sir_text: bool = false,
     emit_bytecode: bool = false,
     emit_cfg: bool = false,
+    emit_cfg_mode: ?[]const u8 = null,
     emit_abi: bool = false,
     emit_abi_solidity: bool = false,
     emit_abi_extras: bool = false,
@@ -29,6 +30,14 @@ pub const CliOptions = struct {
     verify_state: ?bool = null,
     verify_stats: bool = false,
     emit_smt_report: bool = false,
+    mlir_pass_pipeline: ?[]const u8 = null,
+    mlir_verify_each_pass: bool = false,
+    mlir_pass_timing: bool = false,
+    mlir_pass_statistics: bool = false,
+    mlir_print_ir: ?[]const u8 = null,
+    mlir_print_ir_pass: ?[]const u8 = null,
+    mlir_crash_reproducer: ?[]const u8 = null,
+    mlir_print_op_on_diagnostic: bool = false,
     debug: bool = false,
     mlir_opt_level: ?[]const u8 = null,
     // fmt options
@@ -76,8 +85,18 @@ pub fn parseArgs(args: []const []const u8) ParseError!CliOptions {
         } else if (std.mem.eql(u8, arg, "--emit-mlir")) {
             opts.emit_mlir = true;
             i += 1;
-        } else if (std.mem.eql(u8, arg, "--emit-mlir-sir") or std.mem.eql(u8, arg, "--emit-sir")) {
-            opts.emit_mlir_sir = true;
+        } else if (std.mem.startsWith(u8, arg, "--emit-mlir=")) {
+            const mode = arg["--emit-mlir=".len..];
+            if (std.ascii.eqlIgnoreCase(mode, "ora")) {
+                opts.emit_mlir = true;
+            } else if (std.ascii.eqlIgnoreCase(mode, "sir")) {
+                opts.emit_mlir_sir = true;
+            } else if (std.ascii.eqlIgnoreCase(mode, "both")) {
+                opts.emit_mlir = true;
+                opts.emit_mlir_sir = true;
+            } else {
+                return error.UnknownArgument;
+            }
             i += 1;
         } else if (std.mem.eql(u8, arg, "--emit-sir-text")) {
             opts.emit_sir_text = true;
@@ -87,6 +106,14 @@ pub fn parseArgs(args: []const []const u8) ParseError!CliOptions {
             i += 1;
         } else if (std.mem.eql(u8, arg, "--emit-cfg")) {
             opts.emit_cfg = true;
+            i += 1;
+        } else if (std.mem.startsWith(u8, arg, "--emit-cfg=")) {
+            const mode = arg["--emit-cfg=".len..];
+            if (!std.ascii.eqlIgnoreCase(mode, "ora") and !std.ascii.eqlIgnoreCase(mode, "sir")) {
+                return error.UnknownArgument;
+            }
+            opts.emit_cfg = true;
+            opts.emit_cfg_mode = mode;
             i += 1;
         } else if (std.mem.eql(u8, arg, "--emit-abi")) {
             opts.emit_abi = true;
@@ -131,6 +158,62 @@ pub fn parseArgs(args: []const []const u8) ParseError!CliOptions {
             i += 1;
         } else if (std.mem.eql(u8, arg, "--emit-smt-report")) {
             opts.emit_smt_report = true;
+            i += 1;
+        } else if (std.mem.eql(u8, arg, "--mlir-pass-pipeline")) {
+            if (i + 1 >= args.len) return error.MissingArgument;
+            opts.mlir_pass_pipeline = args[i + 1];
+            i += 2;
+        } else if (std.mem.startsWith(u8, arg, "--mlir-pass-pipeline=")) {
+            opts.mlir_pass_pipeline = arg["--mlir-pass-pipeline=".len..];
+            i += 1;
+        } else if (std.mem.eql(u8, arg, "--mlir-verify-each-pass")) {
+            opts.mlir_verify_each_pass = true;
+            i += 1;
+        } else if (std.mem.eql(u8, arg, "--mlir-pass-timing")) {
+            opts.mlir_pass_timing = true;
+            i += 1;
+        } else if (std.mem.eql(u8, arg, "--mlir-pass-statistics")) {
+            opts.mlir_pass_statistics = true;
+            i += 1;
+        } else if (std.mem.eql(u8, arg, "--mlir-print-ir")) {
+            if (i + 1 >= args.len) return error.MissingArgument;
+            const mode = args[i + 1];
+            if (!std.ascii.eqlIgnoreCase(mode, "before") and
+                !std.ascii.eqlIgnoreCase(mode, "after") and
+                !std.ascii.eqlIgnoreCase(mode, "before-after") and
+                !std.ascii.eqlIgnoreCase(mode, "all"))
+            {
+                return error.UnknownArgument;
+            }
+            opts.mlir_print_ir = mode;
+            i += 2;
+        } else if (std.mem.startsWith(u8, arg, "--mlir-print-ir=")) {
+            const mode = arg["--mlir-print-ir=".len..];
+            if (!std.ascii.eqlIgnoreCase(mode, "before") and
+                !std.ascii.eqlIgnoreCase(mode, "after") and
+                !std.ascii.eqlIgnoreCase(mode, "before-after") and
+                !std.ascii.eqlIgnoreCase(mode, "all"))
+            {
+                return error.UnknownArgument;
+            }
+            opts.mlir_print_ir = mode;
+            i += 1;
+        } else if (std.mem.eql(u8, arg, "--mlir-print-ir-pass")) {
+            if (i + 1 >= args.len) return error.MissingArgument;
+            opts.mlir_print_ir_pass = args[i + 1];
+            i += 2;
+        } else if (std.mem.startsWith(u8, arg, "--mlir-print-ir-pass=")) {
+            opts.mlir_print_ir_pass = arg["--mlir-print-ir-pass=".len..];
+            i += 1;
+        } else if (std.mem.eql(u8, arg, "--mlir-crash-reproducer")) {
+            if (i + 1 >= args.len) return error.MissingArgument;
+            opts.mlir_crash_reproducer = args[i + 1];
+            i += 2;
+        } else if (std.mem.startsWith(u8, arg, "--mlir-crash-reproducer=")) {
+            opts.mlir_crash_reproducer = arg["--mlir-crash-reproducer=".len..];
+            i += 1;
+        } else if (std.mem.eql(u8, arg, "--mlir-print-op-on-diagnostic")) {
+            opts.mlir_print_op_on_diagnostic = true;
             i += 1;
         } else if (std.mem.eql(u8, arg, "--debug")) {
             opts.debug = true;

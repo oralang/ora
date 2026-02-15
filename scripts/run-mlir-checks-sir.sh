@@ -51,7 +51,7 @@ while IFS= read -r -d '' check; do
   tmp_stdout=$(mktemp)
   tmp_stderr=$(mktemp)
   tmp_filtered=$(mktemp)
-  if ! "$ORA_BIN" "$ORA_VERIFY_FLAG" --emit-sir "$input" >"$tmp_stdout" 2>"$tmp_stderr"; then
+  if ! "$ORA_BIN" "$ORA_VERIFY_FLAG" --emit-mlir=sir "$input" >"$tmp_stdout" 2>"$tmp_stderr"; then
     echo "error: ora failed for $input (check: $check)" >&2
     sed -n '1,80p' "$tmp_stderr" >&2 || true
     rm -f "$tmp_stdout" "$tmp_stderr" "$tmp_filtered"

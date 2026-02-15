@@ -34,7 +34,7 @@ USAGE
 emit_mode_to_flag() {
   case "$1" in
     mlir) echo "--emit-mlir" ;;
-    sir) echo "--emit-sir" ;;
+    sir) echo "--emit-mlir=sir" ;;
     sir-text) echo "--emit-sir-text" ;;
     bytecode) echo "--emit-bytecode" ;;
     abi) echo "--emit-abi" ;;
