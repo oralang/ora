@@ -14,6 +14,7 @@ const log = @import("log");
 const constants = @import("../lower.zig");
 const expr_helpers = @import("../expressions/helpers.zig");
 const guard_helpers = @import("../refinement_guard_helpers.zig");
+const slot_key = lib.ast.slot_key;
 
 pub fn isErrorUnionTypeInfo(ti: lib.ast.Types.TypeInfo) bool {
     if (ti.category == .ErrorUnion) return true;
@@ -23,6 +24,75 @@ pub fn isErrorUnionTypeInfo(ti: lib.ast.Types.TypeInfo) bool {
         else => {},
     };
     return false;
+}
+
+fn pathBaseIdentifier(expr: *const lib.ast.Expressions.ExprNode) ?[]const u8 {
+    return switch (expr.*) {
+        .Identifier => |id| id.name,
+        .FieldAccess => |fa| pathBaseIdentifier(fa.target),
+        .Index => |ix| pathBaseIdentifier(ix.target),
+        else => null,
+    };
+}
+
+fn isStoragePath(self: *const StatementLowerer, path: *const lib.ast.Expressions.ExprNode) bool {
+    const base = pathBaseIdentifier(path) orelse return false;
+    if (self.symbol_table) |st| {
+        if (st.lookupSymbol(base)) |sym| {
+            if (std.mem.eql(u8, sym.region, "storage")) return true;
+        }
+    }
+    if (self.storage_map) |sm| {
+        if (sm.hasStorageVariable(base)) return true;
+    }
+    return false;
+}
+
+pub fn buildStoragePathKey(
+    allocator: std.mem.Allocator,
+    path: *const lib.ast.Expressions.ExprNode,
+) StatementLowerer.LoweringError!?[]const u8 {
+    return slot_key.buildPathSlotKey(allocator, path) catch return StatementLowerer.LoweringError.OutOfMemory;
+}
+
+pub fn buildRuntimeLockKeyForPath(
+    self: *const StatementLowerer,
+    path: *const lib.ast.Expressions.ExprNode,
+) StatementLowerer.LoweringError!?[]const u8 {
+    // Locking applies only to storage slots. Runtime lock state itself is tx-scoped in TSTORE.
+    if (!isStoragePath(self, path)) return null;
+    if (!slot_key.runtimeLockPathSupported(path)) return null;
+    return buildStoragePathKey(self.allocator, path);
+}
+
+pub fn lockRuntimeResourceExpr(path: *const lib.ast.Expressions.ExprNode) *const lib.ast.Expressions.ExprNode {
+    if (path.* == .Index and path.Index.target.* == .Identifier) return path.Index.index;
+    return path;
+}
+
+pub fn maybeEmitStorageGuardForPath(
+    self: *const StatementLowerer,
+    path: *const lib.ast.Expressions.ExprNode,
+    loc: c.MlirLocation,
+) StatementLowerer.LoweringError!void {
+    if (!isStoragePath(self, path)) return;
+    const root = pathBaseIdentifier(path) orelse return;
+
+    const guarded = blk: {
+        if (self.guarded_storage_bases) |set| break :blk set;
+        if (self.symbol_table) |st| break :blk &st.contract_locked_storage_roots;
+        break :blk null;
+    } orelse return;
+
+    if (!guarded.contains(root)) return;
+
+    const key = (try buildRuntimeLockKeyForPath(self, path)) orelse return;
+    defer self.allocator.free(key);
+
+    const resource_expr = lockRuntimeResourceExpr(path);
+    const resource = self.expr_lowerer.lowerExpression(resource_expr);
+    const guard_op = self.ora_dialect.createTStoreGuard(resource, key, loc);
+    h.appendOp(self.block, guard_op);
 }
 
 fn unwrapRefinementValueWithCache(self: *const StatementLowerer, value: c.MlirValue, span: lib.ast.SourceSpan) c.MlirValue {

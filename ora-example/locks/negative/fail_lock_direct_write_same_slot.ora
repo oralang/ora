@@ -1,0 +1,10 @@
+// Expected failure: direct write to a locked storage slot in the same scope.
+
+contract FailLockDirectWriteSameSlot {
+    storage var balances: map<address, u256>;
+
+    pub fn bad(user: address, amount: u256) {
+        @lock(balances[user]);
+        balances[user] = amount;
+    }
+}

@@ -707,6 +707,19 @@ pub const OraDialect = struct {
         return op;
     }
 
+    /// Create ora.tstore.guard (revert at runtime if TStore slot key is locked)
+    pub fn createTStoreGuard(self: *OraDialect, resource: c.MlirValue, key: []const u8, loc: c.MlirLocation) c.MlirOperation {
+        if (!self.isRegistered()) {
+            @panic("Ora dialect must be registered before creating operations");
+        }
+        const key_ref = h.strRef(key);
+        const op = c.oraTStoreGuardOpCreateWithResource(self.ctx, loc, resource, key_ref);
+        if (op.ptr == null) {
+            @panic("Failed to create ora.tstore.guard operation");
+        }
+        return op;
+    }
+
     /// Create ora.continue operation
     pub fn createContinue(
         self: *OraDialect,
@@ -782,38 +795,48 @@ pub const OraDialect = struct {
         return op;
     }
 
-    /// Create ora.lock operation
-    pub fn createLock(
+    /// Create ora.lock operation (optionally with key for OraToSIR slot lookup)
+    pub fn createLockWithKey(
         self: *OraDialect,
         resource: c.MlirValue,
+        key: []const u8,
         loc: c.MlirLocation,
     ) c.MlirOperation {
-        // always use C++ API (dialect must be registered)
         if (!self.isRegistered()) {
             @panic("Ora dialect must be registered before creating operations");
         }
-        const op = c.oraLockOpCreate(self.ctx, loc, resource);
+        const key_ref = if (key.len > 0) h.strRef(key) else c.MlirStringRef{ .data = null, .length = 0 };
+        const op = c.oraLockOpCreateWithKey(self.ctx, loc, resource, key_ref);
         if (op.ptr == null) {
             @panic("Failed to create ora.lock operation");
         }
         return op;
     }
 
-    /// Create ora.unlock operation
-    pub fn createUnlock(
+    pub fn createLock(self: *OraDialect, resource: c.MlirValue, loc: c.MlirLocation) c.MlirOperation {
+        return self.createLockWithKey(resource, "", loc);
+    }
+
+    /// Create ora.unlock operation (optionally with key for OraToSIR slot lookup)
+    pub fn createUnlockWithKey(
         self: *OraDialect,
         resource: c.MlirValue,
+        key: []const u8,
         loc: c.MlirLocation,
     ) c.MlirOperation {
-        // always use C++ API (dialect must be registered)
         if (!self.isRegistered()) {
             @panic("Ora dialect must be registered before creating operations");
         }
-        const op = c.oraUnlockOpCreate(self.ctx, loc, resource);
+        const key_ref = if (key.len > 0) h.strRef(key) else c.MlirStringRef{ .data = null, .length = 0 };
+        const op = c.oraUnlockOpCreateWithKey(self.ctx, loc, resource, key_ref);
         if (op.ptr == null) {
             @panic("Failed to create ora.unlock operation");
         }
         return op;
+    }
+
+    pub fn createUnlock(self: *OraDialect, resource: c.MlirValue, loc: c.MlirLocation) c.MlirOperation {
+        return self.createUnlockWithKey(resource, "", loc);
     }
 
     // ============================================================================

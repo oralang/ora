@@ -804,6 +804,17 @@ def Ora_TStoreOp : Ora_Op<"tstore",
   let assemblyFormat = "$value `,` $key attr-dict `:` type($value)";
 }
 
+def Ora_TStoreGuardOp : Ora_Op<"tstore.guard"> {
+  let summary = "Runtime guard: revert if TStore slot key is locked";
+  let description = [{
+    Emitted before a TStore write when the slot key is in the function's
+    locked set. For indexed paths, `resource` carries the runtime index key.
+    Lowers to a runtime check; reverts if the slot is locked.
+  }];
+  let arguments = (ins AnyType:$resource, StrAttr:$key);
+  let assemblyFormat = "$resource `,` $key attr-dict `:` type($resource)";
+}
+
 //===----------------------------------------------------------------------===//
 // Destructuring Operations
 //===----------------------------------------------------------------------===//
@@ -1291,32 +1302,18 @@ def Ora_LogDeclOp : Ora_Op<"log.decl"> {
 def Ora_LockOp : Ora_Op<"lock"> {
   let summary = "Lock operation";
   let description = [{
-    Acquires a lock on the specified resource.
-    
-    Example:
-    ```mlir
-    ora.lock %resource : i256 -> ()
-    ```
+    Acquires a lock on the specified TStore slot (key used for OraToSIR slot lookup).
   }];
-  
-  let arguments = (ins AnyType:$resource);
-  
+  let arguments = (ins AnyType:$resource, OptionalAttr<StrAttr>:$key);
   let assemblyFormat = "$resource attr-dict `:` type($resource)";
 }
 
 def Ora_UnlockOp : Ora_Op<"unlock"> {
   let summary = "Unlock operation";
   let description = [{
-    Releases a lock on the specified resource.
-    
-    Example:
-    ```mlir
-    ora.unlock %resource : i256 -> ()
-    ```
+    Releases a lock on the specified TStore slot (key used for OraToSIR slot lookup).
   }];
-  
-  let arguments = (ins AnyType:$resource);
-  
+  let arguments = (ins AnyType:$resource, OptionalAttr<StrAttr>:$key);
   let assemblyFormat = "$resource attr-dict `:` type($resource)";
 }
 

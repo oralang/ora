@@ -137,6 +137,8 @@ pub fn lowerIdentifierAssignment(
                 if (self.storage_map) |sm| {
                     if (sm.hasStorageVariable(ident.name)) {
                         // this is a storage variable - handle it directly
+                        var guard_expr = lib.ast.Expressions.ExprNode{ .Identifier = ident.* };
+                        try helpers.maybeEmitStorageGuardForPath(self, &guard_expr, loc);
                         const converted_value = if (target_ora_type) |ora_type| convert_storage_value: {
                             const target_mlir_type = self.type_mapper.toMlirType(.{ .ora_type = ora_type });
                             break :convert_storage_value self.expr_lowerer.convertToType(value, target_mlir_type, ident.span);
@@ -154,6 +156,8 @@ pub fn lowerIdentifierAssignment(
 
             switch (region) {
                 .Storage => {
+                    var guard_expr = lib.ast.Expressions.ExprNode{ .Identifier = ident.* };
+                    try helpers.maybeEmitStorageGuardForPath(self, &guard_expr, loc);
                     // Preserve the declared storage type (e.g. bool storage remains i1).
                     const storage_value = self.expr_lowerer.convertToType(value, symbol.type, ident.span);
                     const store_op = self.memory_manager.createStorageStore(storage_value, ident.name, loc);
@@ -343,6 +347,9 @@ pub fn lowerIdentifierAssignment(
 
 /// Lower field access assignments (struct.field = value)
 pub fn lowerFieldAccessAssignment(self: *const StatementLowerer, field_access: *const lib.ast.Expressions.FieldAccessExpr, value: c.MlirValue, loc: c.MlirLocation) LoweringError!void {
+    var guard_expr = lib.ast.Expressions.ExprNode{ .FieldAccess = field_access.* };
+    try helpers.maybeEmitStorageGuardForPath(self, &guard_expr, loc);
+
     // lower the target expression to get the struct
     var target = self.expr_lowerer.lowerExpression(field_access.target);
     var target_type = c.oraValueGetType(target);
@@ -539,6 +546,9 @@ pub fn lowerFieldAccessAssignment(self: *const StatementLowerer, field_access: *
 
 /// Lower array/map index assignments (arr[index] = value)
 pub fn lowerIndexAssignment(self: *const StatementLowerer, index_expr: *const lib.ast.Expressions.IndexExpr, value: c.MlirValue, loc: c.MlirLocation) LoweringError!void {
+    var guard_expr = lib.ast.Expressions.ExprNode{ .Index = index_expr.* };
+    try helpers.maybeEmitStorageGuardForPath(self, &guard_expr, loc);
+
     // lower the target expression to get the array/map
     const target = self.expr_lowerer.lowerExpression(index_expr.target);
     const index_val = self.expr_lowerer.lowerExpression(index_expr.index);

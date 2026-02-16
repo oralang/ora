@@ -28,6 +28,7 @@ const validation = @import("../validation/mod.zig");
 const refinements = @import("../refinements/mod.zig");
 const utils = @import("../utils/mod.zig");
 const log = @import("log");
+const slot_key = ast.slot_key;
 
 const CoreResolver = @import("mod.zig").CoreResolver;
 const expression = @import("expression.zig");
@@ -127,6 +128,8 @@ pub fn resolveStatement(
         .Continue => |*continue_stmt| resolveContinue(self, continue_stmt, context),
         .Switch => |*switch_stmt| resolveSwitch(self, switch_stmt, context),
         .Log => |*log_stmt| resolveLog(self, log_stmt, context),
+        .Lock => |*lock_node| resolveLock(self, lock_node, context),
+        .Unlock => |*unlock_node| resolveUnlock(self, unlock_node, context),
         else => {
             // unhandled statement types - return unknown
             return Typed.init(TypeInfo.unknown(), Effect.pure(), self.allocator);
@@ -1541,6 +1544,56 @@ fn formatOraType(ora_type: OraType, allocator: std.mem.Allocator) ![]const u8 {
         .string => return std.fmt.allocPrint(allocator, "string", .{}),
         else => return std.fmt.allocPrint(allocator, "{s}", .{@tagName(ora_type)}),
     };
+}
+
+fn resolveLock(
+    self: *CoreResolver,
+    lock_node: *ast.Statements.LockNode,
+    context: TypeContext,
+) TypeResolutionError!Typed {
+    _ = context;
+    if (!slot_key.runtimeLockPathSupported(&lock_node.path)) {
+        return TypeResolutionError.TypeMismatch;
+    }
+    var path_typed = try expression.synthExpr(self, &lock_node.path);
+    defer path_typed.deinit(self.allocator);
+    const key = (try expression.getStorageSlot(self, &lock_node.path)) orelse return TypeResolutionError.LockUnlockOnlyStorage;
+    var key_owned_by_set = false;
+    if (!self.locked_slots.contains(key)) {
+        errdefer self.allocator.free(key);
+        try self.locked_slots.add(self.allocator, key);
+        key_owned_by_set = true;
+    }
+    const base = expression.slotKeyBase(key);
+    const key_copy = self.allocator.dupe(u8, base) catch return TypeResolutionError.OutOfMemory;
+    errdefer self.allocator.free(key_copy);
+    const gop = self.locked_bases_this_function.getOrPut(key_copy) catch return TypeResolutionError.OutOfMemory;
+    if (!gop.found_existing) {
+        gop.value_ptr.* = {};
+    } else {
+        self.allocator.free(key_copy);
+    }
+    if (!key_owned_by_set) {
+        self.allocator.free(key);
+    }
+    return Typed.init(TypeInfo.unknown(), Effect.pure(), self.allocator);
+}
+
+fn resolveUnlock(
+    self: *CoreResolver,
+    unlock_node: *ast.Statements.UnlockNode,
+    context: TypeContext,
+) TypeResolutionError!Typed {
+    _ = context;
+    if (!slot_key.runtimeLockPathSupported(&unlock_node.path)) {
+        return TypeResolutionError.TypeMismatch;
+    }
+    var path_typed = try expression.synthExpr(self, &unlock_node.path);
+    defer path_typed.deinit(self.allocator);
+    const key = (try expression.getStorageSlot(self, &unlock_node.path)) orelse return TypeResolutionError.LockUnlockOnlyStorage;
+    defer self.allocator.free(key);
+    self.locked_slots.removeAndFree(self.allocator, key);
+    return Typed.init(TypeInfo.unknown(), Effect.pure(), self.allocator);
 }
 
 fn resolveLog(

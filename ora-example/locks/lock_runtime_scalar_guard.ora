@@ -1,0 +1,26 @@
+// Runtime lock/unlock behavior for scalar storage slots (identifier path).
+
+contract LockRuntimeScalarGuard {
+    storage var gate: u256 = 0;
+    storage var success_counter: u256 = 0;
+
+    pub fn safe_roundtrip(value: u256) -> bool {
+        @lock(gate);
+        @unlock(gate);
+        gate = value;
+        success_counter += 1;
+        return true;
+    }
+
+    // Direct write to the same locked slot should fail during type resolution.
+    // Kept commented so this file remains a positive runtime fixture.
+    //
+    // pub fn direct_conflict(value: u256) {
+    //     @lock(gate);
+    //     gate = value;
+    // }
+
+    pub fn successCount() -> u256 {
+        return success_counter;
+    }
+}

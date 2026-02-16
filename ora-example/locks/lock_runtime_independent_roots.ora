@@ -1,0 +1,17 @@
+// Tests selective guard behavior by root:
+// only roots that ever appear in @lock/@unlock should receive runtime guards.
+
+contract LockRuntimeIndependentRoots {
+    storage var guarded_slot: u256 = 0;
+    storage var plain_slot: u256 = 0;
+
+    pub fn touch_guarded(value: u256) {
+        @lock(guarded_slot);
+        @unlock(guarded_slot);
+        guarded_slot = value;
+    }
+
+    pub fn touch_plain(value: u256) {
+        plain_slot = value;
+    }
+}

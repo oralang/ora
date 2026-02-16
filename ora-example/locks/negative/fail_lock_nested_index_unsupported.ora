@@ -1,0 +1,11 @@
+// Expected failure: runtime lock-key lowering currently supports only
+// identifier and identifier[index] path forms.
+
+contract FailLockNestedIndexUnsupported {
+    storage nested: map<address, map<address, u256>>;
+
+    pub fn bad(a: address, b: address) {
+        @lock(nested[a][b]);
+        @unlock(nested[a][b]);
+    }
+}

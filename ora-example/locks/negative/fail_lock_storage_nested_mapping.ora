@@ -1,0 +1,12 @@
+// Expected failure: runtime lock-path lowering supports only identifier/index
+// (single index); nested index lock paths are currently unsupported.
+
+contract FailLockStorageNestedMapping {
+    storage allowances: map<address, map<address, u256>>;
+
+    pub fn bad(owner: address, spender: address, amount: u256) {
+        @lock(allowances[owner][spender]);
+        allowances[owner][spender] = amount;
+        @unlock(allowances[owner][spender]);
+    }
+}

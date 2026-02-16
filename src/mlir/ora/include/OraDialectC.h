@@ -470,6 +470,19 @@ extern "C"
         MlirValue value,
         MlirStringRef key);
 
+    /// Create an ora.tstore.guard operation (revert at runtime if TStore slot key is locked)
+    MLIR_CAPI_EXPORTED MlirOperation oraTStoreGuardOpCreateWithResource(
+        MlirContext ctx,
+        MlirLocation loc,
+        MlirValue resource,
+        MlirStringRef key);
+
+    /// Legacy helper that creates a guard with a dummy resource.
+    MLIR_CAPI_EXPORTED MlirOperation oraTStoreGuardOpCreate(
+        MlirContext ctx,
+        MlirLocation loc,
+        MlirStringRef key);
+
     /// Create an ora.map_get operation using the registered dialect
     MLIR_CAPI_EXPORTED MlirOperation oraMapGetOpCreate(
         MlirContext ctx,
@@ -872,12 +885,24 @@ extern "C"
         size_t numPositions);
 
     /// Create an ora.lock operation using the registered dialect
+    MLIR_CAPI_EXPORTED MlirOperation oraLockOpCreateWithKey(
+        MlirContext ctx,
+        MlirLocation loc,
+        MlirValue resource,
+        MlirStringRef key);
+
     MLIR_CAPI_EXPORTED MlirOperation oraLockOpCreate(
         MlirContext ctx,
         MlirLocation loc,
         MlirValue resource);
 
     /// Create an ora.unlock operation using the registered dialect
+    MLIR_CAPI_EXPORTED MlirOperation oraUnlockOpCreateWithKey(
+        MlirContext ctx,
+        MlirLocation loc,
+        MlirValue resource,
+        MlirStringRef key);
+
     MLIR_CAPI_EXPORTED MlirOperation oraUnlockOpCreate(
         MlirContext ctx,
         MlirLocation loc,

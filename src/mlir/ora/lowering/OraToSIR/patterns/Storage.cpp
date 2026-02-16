@@ -12,6 +12,7 @@
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Transforms/DialectConversion.h"
 #include "mlir/IR/Dominance.h"
+#include "llvm/ADT/APInt.h"
 #include "llvm/ADT/Hashing.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/raw_ostream.h"
@@ -586,6 +587,179 @@ LogicalResult ConvertTStoreOp::matchAndRewrite(
     }
 
     rewriter.replaceOpWithNewOp<sir::TStoreOp>(op, slotConst, value);
+    return success();
+}
+
+// Lock/unlock/guard use a tx-scoped "locked set" stored in TSTORE at key = LOCK_PREFIX + slot.
+// Sensei text has no tstore.lock/unlock/guard; we expand to const/add/tstore/tload/cond_br/revert.
+constexpr unsigned kLockPrefixBit = 255;
+static llvm::APInt getLockPrefixAPInt()
+{
+    return llvm::APInt(256, 1).shl(kLockPrefixBit);
+}
+
+static llvm::StringRef rootFromPathKey(llvm::StringRef key)
+{
+    size_t dot = key.find('.');
+    size_t bracket = key.find('[');
+    size_t end = llvm::StringRef::npos;
+    if (dot != llvm::StringRef::npos)
+        end = dot;
+    if (bracket != llvm::StringRef::npos && (end == llvm::StringRef::npos || bracket < end))
+        end = bracket;
+    return end == llvm::StringRef::npos ? key : key.take_front(end);
+}
+
+static bool keyIsIndexed(llvm::StringRef key)
+{
+    return key.find('[') != llvm::StringRef::npos;
+}
+
+static Value deriveMapElementSlot(
+    Location loc,
+    ConversionPatternRewriter &rewriter,
+    Value key,
+    Value mapSlot,
+    Type u256Type,
+    Type ptrType,
+    Type ui64Type)
+{
+    Value keyU256 = key;
+    if (!llvm::isa<sir::U256Type>(keyU256.getType()))
+        keyU256 = rewriter.create<sir::BitcastOp>(loc, u256Type, keyU256);
+
+    Value size64 = rewriter.create<sir::ConstOp>(loc, u256Type, IntegerAttr::get(ui64Type, 64ULL));
+    Value slotKey = rewriter.create<sir::MallocOp>(loc, ptrType, size64);
+    rewriter.create<sir::StoreOp>(loc, slotKey, keyU256);
+
+    Value offset32 = rewriter.create<sir::ConstOp>(loc, u256Type, IntegerAttr::get(ui64Type, 32ULL));
+    Value slotKeyPlus32 = rewriter.create<sir::AddPtrOp>(loc, ptrType, slotKey, offset32);
+    rewriter.create<sir::StoreOp>(loc, slotKeyPlus32, mapSlot);
+
+    return rewriter.create<sir::KeccakOp>(loc, u256Type, slotKey, size64);
+}
+
+// -----------------------------------------------------------------------------
+// Lower ora.tstore.guard -> key = LOCK_PREFIX+slot; if TLOAD(key) != 0 then REVERT(0,0)
+// -----------------------------------------------------------------------------
+LogicalResult ConvertTStoreGuardOp::matchAndRewrite(
+    ora::TStoreGuardOp op,
+    typename ora::TStoreGuardOp::Adaptor adaptor,
+    ConversionPatternRewriter &rewriter) const
+{
+    auto loc = op.getLoc();
+    auto ctx = rewriter.getContext();
+    auto u256 = sir::U256Type::get(ctx);
+    auto ui64Type = mlir::IntegerType::get(ctx, 64, mlir::IntegerType::Unsigned);
+
+    auto keyAttr = op->getAttrOfType<StringAttr>("key");
+    if (!keyAttr)
+        return rewriter.notifyMatchFailure(op, "tstore.guard missing key");
+    llvm::StringRef key = keyAttr.getValue();
+    llvm::StringRef root = rootFromPathKey(key);
+    auto slotIndexOpt = computeGlobalSlot(root, op.getOperation());
+    if (!slotIndexOpt)
+        return rewriter.notifyMatchFailure(op, "missing slot for tstore.guard key");
+    Value slotBase = rewriter.create<sir::ConstOp>(loc, u256, mlir::IntegerAttr::get(ui64Type, *slotIndexOpt));
+    auto ptrType = sir::PtrType::get(ctx, 1);
+    Value slot = slotBase;
+    if (keyIsIndexed(key))
+    {
+        slot = deriveMapElementSlot(loc, rewriter, adaptor.getResource(), slotBase, u256, ptrType, ui64Type);
+    }
+
+    Block *parentBlock = op->getBlock();
+    Region *parentRegion = parentBlock->getParent();
+    Block *afterBlock = rewriter.splitBlock(parentBlock, std::next(Block::iterator(op)));
+
+    Block *revertBlock = rewriter.createBlock(parentRegion, afterBlock->getIterator());
+    rewriter.setInsertionPointToStart(revertBlock);
+    Value zeroPtr = rewriter.create<sir::ConstOp>(loc, ptrType, mlir::IntegerAttr::get(ui64Type, 0));
+    Value zeroLen = rewriter.create<sir::ConstOp>(loc, u256, mlir::IntegerAttr::get(ui64Type, 0));
+    rewriter.create<sir::RevertOp>(loc, zeroPtr, zeroLen);
+
+    rewriter.setInsertionPoint(op);
+    Value lockPrefix = rewriter.create<sir::ConstOp>(loc, u256, mlir::IntegerAttr::get(mlir::IntegerType::get(ctx, 256), getLockPrefixAPInt()));
+    Value lockKey = rewriter.create<sir::AddOp>(loc, u256, lockPrefix, slot);
+    Value val = rewriter.create<sir::TLoadOp>(loc, u256, lockKey);
+    rewriter.create<sir::CondBrOp>(loc, val, ValueRange{}, ValueRange{}, revertBlock, afterBlock);
+    rewriter.eraseOp(op);
+    return success();
+}
+
+// -----------------------------------------------------------------------------
+// Lower ora.lock -> TSTORE(LOCK_PREFIX+slot, 1)
+// -----------------------------------------------------------------------------
+LogicalResult ConvertLockOp::matchAndRewrite(
+    ora::LockOp op,
+    typename ora::LockOp::Adaptor adaptor,
+    ConversionPatternRewriter &rewriter) const
+{
+    auto loc = op.getLoc();
+    auto ctx = rewriter.getContext();
+    auto u256 = sir::U256Type::get(ctx);
+    auto ui64Type = mlir::IntegerType::get(ctx, 64, mlir::IntegerType::Unsigned);
+
+    auto keyAttr = op->getAttrOfType<StringAttr>("key");
+    if (!keyAttr)
+        return rewriter.notifyMatchFailure(op, "ora.lock missing key attribute");
+    llvm::StringRef key = keyAttr.getValue();
+    llvm::StringRef root = rootFromPathKey(key);
+    auto slotIndexOpt = computeGlobalSlot(root, op.getOperation());
+    if (!slotIndexOpt)
+        return rewriter.notifyMatchFailure(op, "missing slot for lock key");
+    Value slotBase = rewriter.create<sir::ConstOp>(loc, u256, mlir::IntegerAttr::get(ui64Type, *slotIndexOpt));
+    auto ptrType = sir::PtrType::get(ctx, 1);
+    Value slot = slotBase;
+    if (keyIsIndexed(key))
+    {
+        slot = deriveMapElementSlot(loc, rewriter, adaptor.getResource(), slotBase, u256, ptrType, ui64Type);
+    }
+
+    rewriter.setInsertionPoint(op);
+    Value lockPrefix = rewriter.create<sir::ConstOp>(loc, u256, mlir::IntegerAttr::get(mlir::IntegerType::get(ctx, 256), getLockPrefixAPInt()));
+    Value lockKey = rewriter.create<sir::AddOp>(loc, u256, lockPrefix, slot);
+    Value one = rewriter.create<sir::ConstOp>(loc, u256, mlir::IntegerAttr::get(ui64Type, 1));
+    rewriter.create<sir::TStoreOp>(loc, lockKey, one);
+    rewriter.eraseOp(op);
+    return success();
+}
+
+// -----------------------------------------------------------------------------
+// Lower ora.unlock -> TSTORE(LOCK_PREFIX+slot, 0)
+// -----------------------------------------------------------------------------
+LogicalResult ConvertUnlockOp::matchAndRewrite(
+    ora::UnlockOp op,
+    typename ora::UnlockOp::Adaptor adaptor,
+    ConversionPatternRewriter &rewriter) const
+{
+    auto loc = op.getLoc();
+    auto ctx = rewriter.getContext();
+    auto u256 = sir::U256Type::get(ctx);
+    auto ui64Type = mlir::IntegerType::get(ctx, 64, mlir::IntegerType::Unsigned);
+
+    auto keyAttr = op->getAttrOfType<StringAttr>("key");
+    if (!keyAttr)
+        return rewriter.notifyMatchFailure(op, "ora.unlock missing key attribute");
+    llvm::StringRef key = keyAttr.getValue();
+    llvm::StringRef root = rootFromPathKey(key);
+    auto slotIndexOpt = computeGlobalSlot(root, op.getOperation());
+    if (!slotIndexOpt)
+        return rewriter.notifyMatchFailure(op, "missing slot for unlock key");
+    Value slotBase = rewriter.create<sir::ConstOp>(loc, u256, mlir::IntegerAttr::get(ui64Type, *slotIndexOpt));
+    auto ptrType = sir::PtrType::get(ctx, 1);
+    Value slot = slotBase;
+    if (keyIsIndexed(key))
+    {
+        slot = deriveMapElementSlot(loc, rewriter, adaptor.getResource(), slotBase, u256, ptrType, ui64Type);
+    }
+
+    rewriter.setInsertionPoint(op);
+    Value lockPrefix = rewriter.create<sir::ConstOp>(loc, u256, mlir::IntegerAttr::get(mlir::IntegerType::get(ctx, 256), getLockPrefixAPInt()));
+    Value lockKey = rewriter.create<sir::AddOp>(loc, u256, lockPrefix, slot);
+    Value zero = rewriter.create<sir::ConstOp>(loc, u256, mlir::IntegerAttr::get(ui64Type, 0));
+    rewriter.create<sir::TStoreOp>(loc, lockKey, zero);
+    rewriter.eraseOp(op);
     return success();
 }
 

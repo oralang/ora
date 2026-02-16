@@ -142,15 +142,41 @@ pub fn lowerLog(self: *const StatementLowerer, log_stmt: *const lib.ast.Statemen
 /// Lower lock statements
 pub fn lowerLock(self: *const StatementLowerer, lock_stmt: *const lib.ast.Statements.LockNode) LoweringError!void {
     const loc = self.fileLoc(lock_stmt.span);
-    const path_value = self.expr_lowerer.lowerExpression(&lock_stmt.path);
-    const op = self.ora_dialect.createLock(path_value, loc);
+    const key = (try helpers.buildRuntimeLockKeyForPath(self, &lock_stmt.path)) orelse {
+        if (self.expr_lowerer.error_handler) |handler| {
+            handler.reportError(
+                .UnsupportedFeature,
+                lock_stmt.span,
+                "@lock supports only storage identifier or storage identifier[index] paths",
+                null,
+            ) catch {};
+        }
+        return LoweringError.InvalidLValue;
+    };
+    defer self.allocator.free(key);
+    const resource_expr = helpers.lockRuntimeResourceExpr(&lock_stmt.path);
+    const resource = self.expr_lowerer.lowerExpression(resource_expr);
+    const op = self.ora_dialect.createLockWithKey(resource, key, loc);
     h.appendOp(self.block, op);
 }
 
 /// Lower unlock statements
 pub fn lowerUnlock(self: *const StatementLowerer, unlock_stmt: *const lib.ast.Statements.UnlockNode) LoweringError!void {
     const loc = self.fileLoc(unlock_stmt.span);
-    const path_value = self.expr_lowerer.lowerExpression(&unlock_stmt.path);
-    const op = self.ora_dialect.createUnlock(path_value, loc);
+    const key = (try helpers.buildRuntimeLockKeyForPath(self, &unlock_stmt.path)) orelse {
+        if (self.expr_lowerer.error_handler) |handler| {
+            handler.reportError(
+                .UnsupportedFeature,
+                unlock_stmt.span,
+                "@unlock supports only storage identifier or storage identifier[index] paths",
+                null,
+            ) catch {};
+        }
+        return LoweringError.InvalidLValue;
+    };
+    defer self.allocator.free(key);
+    const resource_expr = helpers.lockRuntimeResourceExpr(&unlock_stmt.path);
+    const resource = self.expr_lowerer.lowerExpression(resource_expr);
+    const op = self.ora_dialect.createUnlockWithKey(resource, key, loc);
     h.appendOp(self.block, op);
 }

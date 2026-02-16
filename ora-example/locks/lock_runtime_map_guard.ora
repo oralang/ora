@@ -1,0 +1,51 @@
+// Runtime lock/unlock behavior over storage map slots.
+// This contract validates:
+// 1) @lock/@unlock lowering for identifier[index]
+// 2) runtime guard insertion on lock-participating roots
+// 3) same-slot writes under lock revert at runtime
+
+contract LockRuntimeStorageMapGuard {
+
+    storage var balances: map<address, u256>;
+    storage var success_counter: u256 = 0;
+    storage var newMap: map<address, u256>;
+
+    fn write_balance(user: address, amount: u256) {
+        balances[user] = amount;
+    }
+
+    // Locks one slot and writes a different slot.
+    pub fn safe_different_slot(locked_user: address, target: address, amount: u256) -> bool {
+
+        newMap[target] = amount;
+        balances[locked_user] = 1;
+
+        @lock(balances[locked_user]);
+        write_balance(target, amount);
+        @unlock(balances[locked_user]);
+        balances[locked_user] = 1;
+        success_counter += 1;
+        newMap[target] = amount + 1;
+        return true;
+    }
+
+    // Locks a slot and writes that same slot through a helper call.
+    // This should compile, but must revert at runtime.
+    pub fn unsafe_same_slot(user: address, amount: u256) -> bool {
+        @lock(balances[user]);
+        write_balance(user, amount);
+        @unlock(balances[user]);
+        success_counter += 1;
+        return true;
+    }
+
+    pub fn lock_slot(user: address) {
+        write_balance(user, 1)
+        @lock(balances[user]);
+        write_balance(user, 1)
+    }
+
+    pub fn successCount() -> u256 {
+        return success_counter;
+    }
+}

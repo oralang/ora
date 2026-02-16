@@ -90,6 +90,10 @@ pub const TypeResolutionError = error{
     ErrorUnionOutsideTry,
     GenericContractNotSupported,
     TopLevelGenericInstantiationNotSupported,
+    /// Write to a slot that is currently locked (between @lock and @unlock)
+    WriteToLockedSlot,
+    /// @lock/@unlock only apply to storage slots
+    LockUnlockOnlyStorage,
 };
 
 /// Main type resolver orchestrator
@@ -851,6 +855,8 @@ pub const TypeResolver = struct {
 
         // resolve all statements in function body
         self.core_resolver.current_function_return_type = function.return_type_info;
+        self.core_resolver.clearLockedSlots(); // @lock/@unlock are tx-scoped at runtime.
+        self.core_resolver.clearLockedBasesForFunction();
         // note: We don't set block scopes here to avoid double-frees during deinit
         // variables declared in blocks will be found via findUp from the function scope
         var func_effect = Effect.pure();
@@ -862,6 +868,19 @@ pub const TypeResolver = struct {
         }
         // note: Function call argument validation happens in synthCall
         // via function_registry which is set on core_resolver
+
+        // Persist locked storage roots for this function (for selective runtime guard emission).
+        var bases_copy = std.StringHashMap(void).init(self.allocator);
+        var bit = self.core_resolver.locked_bases_this_function.keyIterator();
+        while (bit.next()) |k| {
+            bases_copy.put(self.allocator.dupe(u8, k.*) catch return TypeResolutionError.OutOfMemory, {}) catch {};
+        }
+        if (self.symbol_table.function_locked_storage_roots.getPtr(function.name)) |existing| {
+            var kit = existing.keyIterator();
+            while (kit.next()) |kk| self.allocator.free(kk.*);
+            existing.deinit();
+        }
+        self.symbol_table.function_locked_storage_roots.put(function.name, bases_copy) catch {};
 
         const stored_effect = functionEffectFromCore(self.allocator, &func_effect);
         if (self.symbol_table.function_effects.getPtr(function.name)) |existing| {

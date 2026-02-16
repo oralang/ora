@@ -91,6 +91,8 @@ pub const StatementLowerer = struct {
     force_stack_memref: bool = false, // Force stack locals to lower as memrefs (e.g. labeled blocks)
     current_func_op: ?c.MlirOperation = null, // Current function operation (for creating new blocks)
     last_block: ?c.MlirBlock = null, // Last block used by lowerBlockBody
+    /// Storage root names that are @lock'd in this contract; matching writes emit ora.tstore.guard before store.
+    guarded_storage_bases: ?*const std.StringHashMap(void) = null,
 
     pub fn init(ctx: c.MlirContext, block: c.MlirBlock, type_mapper: *const TypeMapper, expr_lowerer: *const ExpressionLowerer, param_map: ?*const ParamMap, storage_map: ?*const StorageMap, local_var_map: ?*LocalVarMap, locations: LocationTracker, symbol_table: ?*SymbolTable, builtin_registry: ?*const lib.semantics.builtins.BuiltinRegistry, allocator: std.mem.Allocator, refinement_guard_cache: ?*std.AutoHashMap(u128, void), function_return_type: ?c.MlirType, function_return_type_info: ?lib.ast.Types.TypeInfo, ora_dialect: *@import("../dialect.zig").OraDialect, ensures_clauses: []*lib.ast.Expressions.ExprNode) StatementLowerer {
         return .{

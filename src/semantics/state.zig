@@ -119,6 +119,8 @@ pub const SymbolTable = struct {
     function_allowed_errors: std.StringHashMap([][]const u8),
     function_success_types: std.StringHashMap(ast.Types.OraType),
     function_effects: std.StringHashMap(FunctionEffect),
+    /// Storage root names that are ever @lock'd in each function (for selective runtime guard emission).
+    function_locked_storage_roots: std.StringHashMap(std.StringHashMap(void)),
     block_scopes: std.AutoHashMap(usize, *Scope),
     enum_variants: std.StringHashMap([][]const u8),
     struct_fields: std.StringHashMap([]const ast.StructField), // struct name → fields
@@ -145,6 +147,7 @@ pub const SymbolTable = struct {
             .function_allowed_errors = std.StringHashMap([][]const u8).init(allocator),
             .function_success_types = std.StringHashMap(ast.Types.OraType).init(allocator),
             .function_effects = std.StringHashMap(FunctionEffect).init(allocator),
+            .function_locked_storage_roots = std.StringHashMap(std.StringHashMap(void)).init(allocator),
             .block_scopes = std.AutoHashMap(usize, *Scope).init(allocator),
             .enum_variants = std.StringHashMap([][]const u8).init(allocator),
             .struct_fields = std.StringHashMap([]const ast.StructField).init(allocator),
@@ -200,6 +203,13 @@ pub const SymbolTable = struct {
             eff.deinit(self.allocator);
         }
         self.function_effects.deinit();
+        var fltb_it = self.function_locked_storage_roots.valueIterator();
+        while (fltb_it.next()) |inner| {
+            var kit = inner.keyIterator();
+            while (kit.next()) |k| self.allocator.free(k.*);
+            inner.deinit();
+        }
+        self.function_locked_storage_roots.deinit();
         var bs_it = self.block_scopes.valueIterator();
         while (bs_it.next()) |_| {
             // scopes themselves are owned by self.scopes; nothing to free per entry

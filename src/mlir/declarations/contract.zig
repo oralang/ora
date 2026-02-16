@@ -15,6 +15,89 @@ const error_handling = @import("../error_handling.zig");
 const log = @import("log");
 const lower = @import("../lower.zig");
 
+fn lockPathBase(path: *const lib.ast.Expressions.ExprNode) ?[]const u8 {
+    return switch (path.*) {
+        .Identifier => |id| id.name,
+        .Index => |ix| lockPathBase(ix.target),
+        .FieldAccess => |fa| lockPathBase(fa.target),
+        else => null,
+    };
+}
+
+fn addLockedRootForContract(st: *lower.SymbolTable, root: []const u8) !void {
+    if (st.contract_locked_storage_roots.contains(root)) return;
+    const duped = try st.allocator.dupe(u8, root);
+    errdefer st.allocator.free(duped);
+    try st.contract_locked_storage_roots.put(duped, {});
+}
+
+fn collectLockedRootsFromBlock(st: *lower.SymbolTable, block: lib.ast.Statements.BlockNode) !void {
+    for (block.statements) |stmt| {
+        switch (stmt) {
+            .Lock => |lock_stmt| {
+                if (lockPathBase(&lock_stmt.path)) |root| {
+                    try addLockedRootForContract(st, root);
+                }
+            },
+            .If => |if_stmt| {
+                try collectLockedRootsFromBlock(st, if_stmt.then_branch);
+                if (if_stmt.else_branch) |else_block| {
+                    try collectLockedRootsFromBlock(st, else_block);
+                }
+            },
+            .While => |while_stmt| {
+                try collectLockedRootsFromBlock(st, while_stmt.body);
+            },
+            .ForLoop => |for_stmt| {
+                try collectLockedRootsFromBlock(st, for_stmt.body);
+            },
+            .LabeledBlock => |labeled| {
+                try collectLockedRootsFromBlock(st, labeled.block);
+            },
+            .TryBlock => |try_stmt| {
+                try collectLockedRootsFromBlock(st, try_stmt.try_block);
+                if (try_stmt.catch_block) |catch_block| {
+                    try collectLockedRootsFromBlock(st, catch_block.block);
+                }
+            },
+            .Switch => |switch_stmt| {
+                for (switch_stmt.cases) |case| {
+                    switch (case.body) {
+                        .Block => |case_block| {
+                            try collectLockedRootsFromBlock(st, case_block);
+                        },
+                        .LabeledBlock => |labeled_case| {
+                            try collectLockedRootsFromBlock(st, labeled_case.block);
+                        },
+                        else => {},
+                    }
+                }
+                if (switch_stmt.default_case) |default_block| {
+                    try collectLockedRootsFromBlock(st, default_block);
+                }
+            },
+            else => {},
+        }
+    }
+}
+
+fn refreshContractLockedRoots(st: *lower.SymbolTable, contract: *const lib.ContractNode) !void {
+    var existing_it = st.contract_locked_storage_roots.keyIterator();
+    while (existing_it.next()) |k| {
+        st.allocator.free(k.*);
+    }
+    st.contract_locked_storage_roots.clearRetainingCapacity();
+
+    for (contract.body) |child| {
+        switch (child) {
+            .Function => |func| {
+                try collectLockedRootsFromBlock(st, func.body);
+            },
+            else => {},
+        }
+    }
+}
+
 fn lowerContractTypes(self: *const DeclarationLowerer, block: c.MlirBlock, contract: *const lib.ContractNode) void {
     for (contract.body) |child| {
         switch (child) {
@@ -140,6 +223,9 @@ pub fn lowerContract(self: *const DeclarationLowerer, contract: *const lib.Contr
         st.log_signatures.clearRetainingCapacity();
         st.error_ids.clearRetainingCapacity();
         st.constants.clearRetainingCapacity();
+        refreshContractLockedRoots(st, contract) catch {
+            log.err("Failed to collect @lock roots for contract {s}\n", .{contract.name});
+        };
         defer st.popScope();
     }
 

@@ -466,6 +466,24 @@ def TLoadOp : SIR_Op<"tload"> {
     "$slot `:` type($slot) attr-dict `:` type($res)";
 }
 
+def TStoreLockOp : SIR_Op<"tstore.lock"> {
+  let summary = "Add TStore slot to locked set (tx-scoped)";
+  let arguments = (ins SIR_U256:$slot);
+  let assemblyFormat = "$slot `:` type($slot) attr-dict";
+}
+
+def TStoreUnlockOp : SIR_Op<"tstore.unlock"> {
+  let summary = "Remove TStore slot from locked set";
+  let arguments = (ins SIR_U256:$slot);
+  let assemblyFormat = "$slot `:` type($slot) attr-dict";
+}
+
+def TStoreGuardOp : SIR_Op<"tstore.guard"> {
+  let summary = "Revert if TStore slot is in locked set";
+  let arguments = (ins SIR_U256:$slot);
+  let assemblyFormat = "$slot `:` type($slot) attr-dict";
+}
+
 def GasOp : SIR_Op<"gas"> {
   let summary = "Remaining gas";
   let arguments = (ins);

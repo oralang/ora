@@ -7,7 +7,7 @@
 // ============================================================================
 
 pub const c = @cImport({
-    @cInclude("ora/OraDialectC.h");
+    @cInclude("OraDialectC.h");
 });
 
 // Helper to free string returned from C API

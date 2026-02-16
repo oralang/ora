@@ -13,6 +13,7 @@ const testing = std.testing;
 pub const expressions = @import("ast/expressions.zig");
 pub const statements = @import("ast/statements.zig");
 pub const type_info = @import("ast/type_info.zig");
+pub const slot_key = @import("ast/slot_key.zig");
 pub const ast_visitor = @import("ast/ast_visitor.zig");
 pub const verification = @import("ast/verification.zig");
 

@@ -1,0 +1,16 @@
+// INPUT: ora-example/locks/lock_runtime_array_guard.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-NOT: ora.lock
+// CHECK-NOT: ora.unlock
+// CHECK-NOT: ora.tstore.guard
+//
+// CHECK-LABEL: func.func @write_history
+// CHECK: sir.tload
+// CHECK: sir.cond_br
+// CHECK: sir.revert
+// CHECK: sir.sstore
+//
+// CHECK-LABEL: func.func @safe_different_slot
+// CHECK: sir.tstore
+// CHECK: call @write_history
+// CHECK: sir.tstore

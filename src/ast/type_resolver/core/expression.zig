@@ -35,6 +35,7 @@ const FunctionNode = ast.FunctionNode;
 const log = @import("log");
 
 const CoreResolver = @import("mod.zig").CoreResolver;
+const slot_key = ast.slot_key;
 
 fn isRefinementOraType(ora_type: OraType) bool {
     return switch (ora_type) {
@@ -1492,6 +1493,28 @@ fn resolveRegionSlot(
     return null;
 }
 
+/// Path-scoped slot key for lock/write: "balances", "balances[to]", "state.x". Caller owns result; null if not in region.
+fn buildSlotKey(
+    self: *CoreResolver,
+    expr: *ast.Expressions.ExprNode,
+    region: MemoryRegion,
+) TypeResolutionError!?[]const u8 {
+    _ = resolveRegionSlot(self, expr, region) orelse return null;
+    return slot_key.buildPathSlotKey(self.allocator, expr) catch return TypeResolutionError.OutOfMemory;
+}
+
+/// Returns allocated path-scoped Storage slot key for @lock/@unlock. Caller owns result.
+pub fn getStorageSlot(self: *CoreResolver, path: *ast.Expressions.ExprNode) TypeResolutionError!?[]const u8 {
+    return buildSlotKey(self, path, .Storage);
+}
+
+/// Base name of a slot key for "guarded bases" set: "balances[to]" -> "balances", "state.x" -> "state".
+pub fn slotKeyBase(key: []const u8) []const u8 {
+    if (std.mem.indexOfScalar(u8, key, '[')) |i| return key[0..i];
+    if (std.mem.indexOfScalar(u8, key, '.')) |i| return key[0..i];
+    return key;
+}
+
 fn findBaseIdentifier(expr: *const ast.Expressions.ExprNode) ?[]const u8 {
     return switch (expr.*) {
         .Identifier => |id| id.name,
@@ -1515,6 +1538,13 @@ fn regionReadEffect(self: *CoreResolver, expr: *ast.Expressions.ExprNode, region
 fn regionWriteEffect(self: *CoreResolver, expr: *ast.Expressions.ExprNode, region: MemoryRegion) TypeResolutionError!Effect {
     if (region == .Storage or region == .TStore) {
         if (resolveRegionSlot(self, expr, region)) |slot_name| {
+            if (region == .Storage) {
+                const write_key = try buildSlotKey(self, expr, .Storage);
+                if (write_key) |key| {
+                    defer self.allocator.free(key);
+                    if (self.locked_slots.contains(key)) return TypeResolutionError.WriteToLockedSlot;
+                }
+            }
             var slots = SlotSet.init(self.allocator);
             try slots.addWithSrc(self.allocator, slot_name, @src());
             return Effect.writes(slots);

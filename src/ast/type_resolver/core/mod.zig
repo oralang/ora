@@ -234,6 +234,7 @@ pub const SlotSet = struct {
         slot: []const u8,
         src: std.builtin.SourceLocation,
     ) !void {
+        if (self.contains(slot)) return;
         try self.slots.append(allocator, slot);
         _ = src;
     }
@@ -243,6 +244,38 @@ pub const SlotSet = struct {
             if (std.mem.eql(u8, s, slot)) return true;
         }
         return false;
+    }
+
+    /// Remove slot (by name). Used for @unlock.
+    pub fn remove(self: *SlotSet, _: std.mem.Allocator, slot: []const u8) void {
+        for (self.slots.items, 0..) |s, i| {
+            if (std.mem.eql(u8, s, slot)) {
+                _ = self.slots.orderedRemove(i);
+                return;
+            }
+        }
+    }
+
+    /// Remove slot by value and free the stored slice (for owned locked_slots keys).
+    pub fn removeAndFree(self: *SlotSet, allocator: std.mem.Allocator, slot: []const u8) void {
+        for (self.slots.items, 0..) |s, i| {
+            if (std.mem.eql(u8, s, slot)) {
+                const removed = self.slots.orderedRemove(i);
+                allocator.free(removed);
+                return;
+            }
+        }
+    }
+
+    /// Clear and free each stored slice (for owned locked_slots keys).
+    pub fn clearAndFree(self: *SlotSet, allocator: std.mem.Allocator) void {
+        for (self.slots.items) |s| allocator.free(s);
+        self.slots.clearRetainingCapacity();
+    }
+
+    /// Clear all slots (e.g. at function entry for lock tracking).
+    pub fn clearRetainingCapacity(self: *SlotSet) void {
+        self.slots.clearRetainingCapacity();
     }
 };
 
@@ -347,6 +380,10 @@ pub const CoreResolver = struct {
     comptime_env: comptime_eval.CtEnv,
     // Comptime constant pool (persists across evaluations)
     comptime_pool: comptime_eval.ConstPool,
+    /// Storage slot paths currently locked by @lock. Cleared at function entry; add/remove on @lock/@unlock.
+    locked_slots: SlotSet,
+    /// Storage root names that are ever locked in the current function (for runtime guard emission).
+    locked_bases_this_function: std.StringHashMap(void),
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -370,12 +407,31 @@ pub const CoreResolver = struct {
             .builtin_registry = &symbol_table.builtin_registry,
             .comptime_env = comptime_eval.CtEnv.init(allocator, comptime_eval.EvalConfig.default),
             .comptime_pool = comptime_eval.ConstPool.init(allocator),
+            .locked_slots = SlotSet.init(allocator),
+            .locked_bases_this_function = std.StringHashMap(void).init(allocator),
         };
     }
 
     pub fn deinit(self: *CoreResolver) void {
         self.comptime_env.deinit();
         self.comptime_pool.deinit();
+        self.locked_slots.clearAndFree(self.allocator);
+        self.locked_slots.deinit(self.allocator);
+        var it = self.locked_bases_this_function.keyIterator();
+        while (it.next()) |k| self.allocator.free(k.*);
+        self.locked_bases_this_function.deinit();
+    }
+
+    /// Clear locked slots and free keys (call at function body entry).
+    pub fn clearLockedSlots(self: *CoreResolver) void {
+        self.locked_slots.clearAndFree(self.allocator);
+    }
+
+    /// Clear locked-key set (call at function body entry so we only record keys for current function).
+    pub fn clearLockedBasesForFunction(self: *CoreResolver) void {
+        var it = self.locked_bases_this_function.keyIterator();
+        while (it.next()) |k| self.allocator.free(k.*);
+        self.locked_bases_this_function.clearRetainingCapacity();
     }
 
     /// Synthesize (infer) type for an expression

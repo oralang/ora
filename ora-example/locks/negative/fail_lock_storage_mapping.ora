@@ -1,0 +1,11 @@
+// Expected failure: direct write to the same locked storage mapping slot.
+
+contract FailLockStorageMapping {
+    storage balances: map<address, u256>;
+
+    pub fn bad(user: address, amount: u256) {
+        @lock(balances[user]);
+        balances[user] = amount;
+        @unlock(balances[user]);
+    }
+}

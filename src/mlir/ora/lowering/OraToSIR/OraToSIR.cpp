@@ -915,8 +915,9 @@ public:
         // Ops that pass through or erase.
         patterns.add<ConvertImmutableOp>(typeConverter, ctx);
         patterns.add<EraseOpByName>("ora.test", ctx);
-        patterns.add<EraseOpByName>("ora.lock", ctx);
-        patterns.add<EraseOpByName>("ora.unlock", ctx);
+        patterns.add<ora::ConvertLockOp>(typeConverter, ctx);
+        patterns.add<ora::ConvertUnlockOp>(typeConverter, ctx);
+        patterns.add<ora::ConvertTStoreGuardOp>(typeConverter, ctx);
         patterns.add<EraseOpByName>("ora.move", ctx);
         patterns.add<EraseOpByName>("ora.for", ctx);
 

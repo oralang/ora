@@ -1,0 +1,34 @@
+// Runtime lock/unlock behavior over storage array slots.
+// This contract validates lock keys for identifier[index] over arrays.
+
+contract LockRuntimeStorageArrayGuard {
+    storage var history: [u256; 8];
+    storage var success_counter: u256 = 0;
+
+    fn write_history(index: u256, value: u256) {
+        history[index] = value;
+    }
+
+    // Locks one array element and writes a different element.
+    pub fn safe_different_slot(locked_index: u256, target_index: u256, value: u256) -> bool {
+        @lock(history[locked_index]);
+        write_history(target_index, value);
+        @unlock(history[locked_index]);
+        success_counter += 1;
+        return true;
+    }
+
+    // Locks and writes the exact same element through helper call.
+    // This should compile, but must revert at runtime.
+    pub fn unsafe_same_slot(index: u256, value: u256) -> bool {
+        @lock(history[index]);
+        write_history(index, value);
+        @unlock(history[index]);
+        success_counter += 1;
+        return true;
+    }
+
+    pub fn successCount() -> u256 {
+        return success_counter;
+    }
+}

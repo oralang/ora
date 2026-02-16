@@ -638,6 +638,10 @@ fn lowerFunctionBody(self: *const DeclarationLowerer, func: *const lib.FunctionN
     expr_lowerer.current_function_return_type_info = function_return_type_info;
     var stmt_lowerer = StatementLowerer.init(self.ctx, block, self.type_mapper, &expr_lowerer, param_map, storage_map, local_var_map, self.locations, self.symbol_table, self.builtin_registry, std.heap.page_allocator, refinement_guard_cache, function_return_type, function_return_type_info, self.ora_dialect, func.ensures_clauses);
     stmt_lowerer.current_func_op = func_op;
+    if (self.symbol_table) |st| {
+        // Guard any write to a lock-participating storage root in this contract.
+        stmt_lowerer.guarded_storage_bases = &st.contract_locked_storage_roots;
+    }
 
     // lower the function body
     _ = try stmt_lowerer.lowerBlockBody(func.body, block);

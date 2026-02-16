@@ -2385,6 +2385,55 @@ MlirOperation oraTStoreOpCreate(MlirContext ctx, MlirLocation loc, MlirValue val
     }
 }
 
+MlirOperation oraTStoreGuardOpCreateWithResource(MlirContext ctx, MlirLocation loc, MlirValue resource, MlirStringRef key)
+{
+    try
+    {
+        MLIRContext *context = unwrap(ctx);
+        Location location = unwrap(loc);
+        Value resourceRef = unwrap(resource);
+        StringRef keyRef = unwrap(key);
+
+        if (!oraDialectIsRegistered(ctx))
+        {
+            return {nullptr};
+        }
+
+        OpBuilder builder(context);
+        auto keyAttr = StringAttr::get(context, keyRef);
+        auto guardOp = builder.create<TStoreGuardOp>(location, resourceRef, keyAttr);
+        return wrap(guardOp.getOperation());
+    }
+    catch (...)
+    {
+        return {nullptr};
+    }
+}
+
+MlirOperation oraTStoreGuardOpCreate(MlirContext ctx, MlirLocation loc, MlirStringRef key)
+{
+    try
+    {
+        MLIRContext *context = unwrap(ctx);
+        Location location = unwrap(loc);
+
+        if (!oraDialectIsRegistered(ctx))
+        {
+            return {nullptr};
+        }
+
+        OpBuilder builder(context);
+        auto i256 = ::mlir::IntegerType::get(context, 256);
+        auto zeroAttr = IntegerAttr::get(i256, 0);
+        Value zero = builder.create<arith::ConstantOp>(location, i256, zeroAttr);
+        return oraTStoreGuardOpCreateWithResource(ctx, loc, wrap(zero), key);
+    }
+    catch (...)
+    {
+        return {nullptr};
+    }
+}
+
 MlirOperation oraMapGetOpCreate(MlirContext ctx, MlirLocation loc, MlirValue map, MlirValue key, MlirType resultType)
 {
     try
@@ -3833,7 +3882,7 @@ MlirOperation oraLlvmExtractValueOpCreate(MlirContext ctx, MlirLocation loc, Mli
     }
 }
 
-MlirOperation oraLockOpCreate(MlirContext ctx, MlirLocation loc, MlirValue resource)
+MlirOperation oraLockOpCreateWithKey(MlirContext ctx, MlirLocation loc, MlirValue resource, MlirStringRef key)
 {
     try
     {
@@ -3847,7 +3896,10 @@ MlirOperation oraLockOpCreate(MlirContext ctx, MlirLocation loc, MlirValue resou
         }
 
         OpBuilder builder(context);
-        auto lockOp = builder.create<LockOp>(location, resourceRef);
+        StringAttr keyAttr = (key.data != nullptr && key.length > 0)
+            ? StringAttr::get(context, StringRef(key.data, key.length))
+            : StringAttr();
+        auto lockOp = builder.create<LockOp>(location, resourceRef, keyAttr);
 
         // Add gas_cost attribute (locking operation has no runtime cost = 0)
         auto gasCostAttr = IntegerAttr::get(::mlir::IntegerType::get(context, 64), 0);
@@ -3861,7 +3913,13 @@ MlirOperation oraLockOpCreate(MlirContext ctx, MlirLocation loc, MlirValue resou
     }
 }
 
-MlirOperation oraUnlockOpCreate(MlirContext ctx, MlirLocation loc, MlirValue resource)
+MlirOperation oraLockOpCreate(MlirContext ctx, MlirLocation loc, MlirValue resource)
+{
+    MlirStringRef empty = {nullptr, 0};
+    return oraLockOpCreateWithKey(ctx, loc, resource, empty);
+}
+
+MlirOperation oraUnlockOpCreateWithKey(MlirContext ctx, MlirLocation loc, MlirValue resource, MlirStringRef key)
 {
     try
     {
@@ -3875,7 +3933,10 @@ MlirOperation oraUnlockOpCreate(MlirContext ctx, MlirLocation loc, MlirValue res
         }
 
         OpBuilder builder(context);
-        auto unlockOp = builder.create<UnlockOp>(location, resourceRef);
+        StringAttr keyAttr = (key.data != nullptr && key.length > 0)
+            ? StringAttr::get(context, StringRef(key.data, key.length))
+            : StringAttr();
+        auto unlockOp = builder.create<UnlockOp>(location, resourceRef, keyAttr);
 
         // Add gas_cost attribute (unlocking operation has no runtime cost = 0)
         auto gasCostAttr = IntegerAttr::get(::mlir::IntegerType::get(context, 64), 0);
@@ -3887,6 +3948,12 @@ MlirOperation oraUnlockOpCreate(MlirContext ctx, MlirLocation loc, MlirValue res
     {
         return {nullptr};
     }
+}
+
+MlirOperation oraUnlockOpCreate(MlirContext ctx, MlirLocation loc, MlirValue resource)
+{
+    MlirStringRef empty = {nullptr, 0};
+    return oraUnlockOpCreateWithKey(ctx, loc, resource, empty);
 }
 
 MlirOperation oraStringConstantOpCreate(MlirContext ctx, MlirLocation loc, MlirStringRef value, MlirType resultType)

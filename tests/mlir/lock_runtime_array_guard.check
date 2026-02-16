@@ -1,0 +1,21 @@
+// INPUT: ora-example/locks/lock_runtime_array_guard.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+//
+// CHECK-LABEL: func.func @write_history
+// CHECK: ora.tstore.guard
+// CHECK: history[index]
+// CHECK: tensor.insert
+// CHECK: ora.sstore
+// CHECK: "history"
+//
+// CHECK-LABEL: func.func @safe_different_slot
+// CHECK: ora.lock
+// CHECK: history[locked_index]
+// CHECK: call @write_history
+// CHECK: ora.unlock
+//
+// CHECK-LABEL: func.func @unsafe_same_slot
+// CHECK: ora.lock
+// CHECK: history[index]
+// CHECK: call @write_history
+// CHECK: ora.unlock

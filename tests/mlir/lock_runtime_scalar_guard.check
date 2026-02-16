@@ -1,0 +1,12 @@
+// INPUT: ora-example/locks/lock_runtime_scalar_guard.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+//
+// CHECK-LABEL: func.func @safe_roundtrip
+// CHECK: ora.lock
+// CHECK: key = "gate"
+// CHECK: ora.unlock
+// CHECK: key = "gate"
+// CHECK: ora.tstore.guard
+// CHECK: key = "gate"
+// CHECK: ora.sstore
+// CHECK: "gate"

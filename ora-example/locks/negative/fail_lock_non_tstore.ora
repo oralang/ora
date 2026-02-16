@@ -1,0 +1,11 @@
+// Expected failure: @lock/@unlock are only valid for storage-slot paths.
+
+contract FailLockNonStorage {
+    tstore var counter: u256;
+
+    pub fn bad() {
+        @lock(counter);
+        counter = 1;
+        @unlock(counter);
+    }
+}

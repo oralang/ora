@@ -114,6 +114,36 @@ namespace mlir
                 ConversionPatternRewriter &rewriter) const override;
         };
 
+        class ConvertTStoreGuardOp : public OpConversionPattern<ora::TStoreGuardOp>
+        {
+        public:
+            using OpConversionPattern::OpConversionPattern;
+            LogicalResult matchAndRewrite(
+                ora::TStoreGuardOp op,
+                typename ora::TStoreGuardOp::Adaptor adaptor,
+                ConversionPatternRewriter &rewriter) const override;
+        };
+
+        class ConvertLockOp : public OpConversionPattern<ora::LockOp>
+        {
+        public:
+            using OpConversionPattern::OpConversionPattern;
+            LogicalResult matchAndRewrite(
+                ora::LockOp op,
+                typename ora::LockOp::Adaptor adaptor,
+                ConversionPatternRewriter &rewriter) const override;
+        };
+
+        class ConvertUnlockOp : public OpConversionPattern<ora::UnlockOp>
+        {
+        public:
+            using OpConversionPattern::OpConversionPattern;
+            LogicalResult matchAndRewrite(
+                ora::UnlockOp op,
+                typename ora::UnlockOp::Adaptor adaptor,
+                ConversionPatternRewriter &rewriter) const override;
+        };
+
         class ConvertGlobalOp : public OpConversionPattern<ora::GlobalOp>
         {
         public:

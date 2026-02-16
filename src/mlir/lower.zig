@@ -189,6 +189,10 @@ pub const SymbolTable = struct {
     constants: std.StringHashMap(*const lib.ast.ConstantNode),
     // function effect summaries from semantic analysis
     function_effects: std.StringHashMap(FunctionEffect),
+    // Storage roots that are ever @lock'd per function (for runtime guard emission)
+    function_locked_storage_roots: std.StringHashMap(std.StringHashMap(void)),
+    // Union of all locked keys across functions: matching writes get runtime guards
+    contract_locked_storage_roots: std.StringHashMap(void),
     // log event signatures from semantic analysis (borrowed AST slices)
     log_signatures: std.StringHashMap([]const lib.ast.LogField),
     // error ids for declared errors
@@ -207,6 +211,8 @@ pub const SymbolTable = struct {
             .types = std.StringHashMap([]TypeSymbol).init(allocator),
             .constants = std.StringHashMap(*const lib.ast.ConstantNode).init(allocator),
             .function_effects = std.StringHashMap(FunctionEffect).init(allocator),
+            .function_locked_storage_roots = std.StringHashMap(std.StringHashMap(void)).init(allocator),
+            .contract_locked_storage_roots = std.StringHashMap(void).init(allocator),
             .log_signatures = std.StringHashMap([]const lib.ast.LogField).init(allocator),
             .error_ids = std.StringHashMap(u32).init(allocator),
         };
@@ -235,6 +241,16 @@ pub const SymbolTable = struct {
             eff.deinit(self.allocator);
         }
         self.function_effects.deinit();
+        var fltb_it = self.function_locked_storage_roots.valueIterator();
+        while (fltb_it.next()) |inner| {
+            var kit = inner.keyIterator();
+            while (kit.next()) |k| self.allocator.free(k.*);
+            inner.deinit();
+        }
+        self.function_locked_storage_roots.deinit();
+        var cltb_it = self.contract_locked_storage_roots.keyIterator();
+        while (cltb_it.next()) |k| self.allocator.free(k.*);
+        self.contract_locked_storage_roots.deinit();
         self.log_signatures.deinit();
         self.error_ids.deinit();
         while (type_iter.next()) |entry| {
@@ -550,7 +566,127 @@ pub fn convertSemanticSymbolTable(semantic_table: *const lib.semantics.state.Sym
         }
     }
 
+    var fltb_it = semantic_table.function_locked_storage_roots.iterator();
+    while (fltb_it.next()) |entry| {
+        const fname = entry.key_ptr.*;
+        const inner = entry.value_ptr.*;
+        var copy = std.StringHashMap(void).init(allocator);
+        var kit = inner.keyIterator();
+        while (kit.next()) |k| {
+            const duped = allocator.dupe(u8, k.*) catch return error.OutOfMemory;
+            copy.put(duped, {}) catch {};
+            // Merge into contract-level set so every function guards writes to any ever-locked root.
+            if (!mlir_table.contract_locked_storage_roots.contains(k.*))
+                try mlir_table.contract_locked_storage_roots.put(allocator.dupe(u8, k.*) catch return error.OutOfMemory, {});
+        }
+        if (mlir_table.function_locked_storage_roots.getPtr(fname)) |existing| {
+            var ex_it = existing.keyIterator();
+            while (ex_it.next()) |kk| allocator.free(kk.*);
+            existing.deinit();
+        }
+        try mlir_table.function_locked_storage_roots.put(fname, copy);
+    }
+
     // Log signatures are registered per-contract during lowering.
+}
+
+fn lockPathBase(path: *const lib.ast.Expressions.ExprNode) ?[]const u8 {
+    return switch (path.*) {
+        .Identifier => |id| id.name,
+        .Index => |ix| lockPathBase(ix.target),
+        .FieldAccess => |fa| lockPathBase(fa.target),
+        else => null,
+    };
+}
+
+fn addContractLockedStorageRoot(
+    symbol_table: *SymbolTable,
+    allocator: std.mem.Allocator,
+    root: []const u8,
+) !void {
+    if (symbol_table.contract_locked_storage_roots.contains(root)) return;
+    const duped = try allocator.dupe(u8, root);
+    errdefer allocator.free(duped);
+    try symbol_table.contract_locked_storage_roots.put(duped, {});
+}
+
+fn collectLockedRootsFromBlock(
+    symbol_table: *SymbolTable,
+    allocator: std.mem.Allocator,
+    block: lib.ast.Statements.BlockNode,
+) !void {
+    for (block.statements) |stmt| {
+        switch (stmt) {
+            .Lock => |lock_stmt| {
+                if (lockPathBase(&lock_stmt.path)) |root| {
+                    try addContractLockedStorageRoot(symbol_table, allocator, root);
+                }
+            },
+            .If => |if_stmt| {
+                try collectLockedRootsFromBlock(symbol_table, allocator, if_stmt.then_branch);
+                if (if_stmt.else_branch) |else_block| {
+                    try collectLockedRootsFromBlock(symbol_table, allocator, else_block);
+                }
+            },
+            .While => |while_stmt| {
+                try collectLockedRootsFromBlock(symbol_table, allocator, while_stmt.body);
+            },
+            .ForLoop => |for_stmt| {
+                try collectLockedRootsFromBlock(symbol_table, allocator, for_stmt.body);
+            },
+            .LabeledBlock => |labeled| {
+                try collectLockedRootsFromBlock(symbol_table, allocator, labeled.block);
+            },
+            .TryBlock => |try_stmt| {
+                try collectLockedRootsFromBlock(symbol_table, allocator, try_stmt.try_block);
+                if (try_stmt.catch_block) |catch_block| {
+                    try collectLockedRootsFromBlock(symbol_table, allocator, catch_block.block);
+                }
+            },
+            .Switch => |switch_stmt| {
+                for (switch_stmt.cases) |case| {
+                    switch (case.body) {
+                        .Block => |case_block| {
+                            try collectLockedRootsFromBlock(symbol_table, allocator, case_block);
+                        },
+                        .LabeledBlock => |labeled_case| {
+                            try collectLockedRootsFromBlock(symbol_table, allocator, labeled_case.block);
+                        },
+                        else => {},
+                    }
+                }
+                if (switch_stmt.default_case) |default_block| {
+                    try collectLockedRootsFromBlock(symbol_table, allocator, default_block);
+                }
+            },
+            else => {},
+        }
+    }
+}
+
+fn collectContractLockedRootsFromNodes(
+    symbol_table: *SymbolTable,
+    allocator: std.mem.Allocator,
+    nodes: []lib.AstNode,
+) !void {
+    for (nodes) |node| {
+        switch (node) {
+            .Function => |func| {
+                try collectLockedRootsFromBlock(symbol_table, allocator, func.body);
+            },
+            .Contract => |contract| {
+                for (contract.body) |child| {
+                    switch (child) {
+                        .Function => |func| {
+                            try collectLockedRootsFromBlock(symbol_table, allocator, func.body);
+                        },
+                        else => {},
+                    }
+                }
+            },
+            else => {},
+        }
+    }
 }
 
 fn preRegisterFunctionSignatureFromAst(
@@ -944,6 +1080,12 @@ pub fn lowerFunctionsToModuleWithErrors(ctx: c.MlirContext, nodes: []lib.AstNode
     var type_mapper = TypeMapper.initWithSymbolTable(ctx, allocator, &symbol_table);
     type_mapper.setErrorHandler(&error_handler);
     defer type_mapper.deinit();
+
+    // Fallback path: collect contract-wide locked storage roots directly from AST
+    // so runtime guards are emitted even when lowering without semantic-table transfer.
+    collectContractLockedRootsFromNodes(&symbol_table, allocator, nodes) catch |err| switch (err) {
+        error.OutOfMemory => return err,
+    };
 
     // Pre-register function signatures directly from AST so forward calls can
     // convert arguments against callee parameter types.
