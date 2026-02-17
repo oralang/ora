@@ -124,6 +124,11 @@ pub fn parseBuiltinFunction(parser: *ExpressionParser) ParserError!ast.Expressio
     // check if it's a valid builtin function
     const builtin_name = name_token.lexeme;
 
+    if (std.mem.eql(u8, builtin_name, "lock") or std.mem.eql(u8, builtin_name, "unlock")) {
+        try parser.base.errorAtCurrent("@lock/@unlock are statement-only; use @lock(path); or @unlock(path);");
+        return error.UnexpectedToken;
+    }
+
     // handle @cast(Type, expr)
     if (std.mem.eql(u8, builtin_name, "cast")) {
         _ = try parser.base.consume(.LeftParen, "Expected '(' after builtin function name");
