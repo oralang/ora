@@ -1,0 +1,16 @@
+// Expected failure: runtime lock-path lowering supports only identifier/index
+// (single index); storage field lock paths are currently unsupported.
+
+struct AccountState {
+    balance: u256;
+}
+
+contract FailLockStorageStructFieldUnsupported {
+    storage var state: AccountState;
+
+    pub fn bad(amount: u256) {
+        @lock(state.balance);
+        state.balance = amount;
+        @unlock(state.balance);
+    }
+}

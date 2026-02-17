@@ -1,0 +1,10 @@
+// Expected failure: @unlock is statement-only and cannot be used in expression position.
+
+contract FailUnlockInExpression {
+    storage var balances: map<address, u256>;
+
+    pub fn bad(user: address) -> bool {
+        @lock(balances[user]);
+        return @unlock(balances[user]);
+    }
+}
