@@ -458,6 +458,12 @@ fn lowerOverflowBuiltin(
         } else {
             overflow_flag = computeSignedMulOverflow(self, value, lhs_uw, rhs_uw, value_ty, loc);
         }
+    } else if (std.mem.eql(u8, builtin_name, "powerWithOverflow")) {
+        const rhs = self.lowerExpression(call.arguments[1]);
+        const rhs_uw = expr_helpers.unwrapRefinementValue(self.ctx, self.block, self.locations, self.refinement_base_cache, rhs, call.span);
+        const pow = operators.lowerPowerWithOverflow(self, lhs_uw, rhs_uw, value_ty, is_signed, call.span);
+        value = pow.value;
+        overflow_flag = pow.overflow;
     } else if (std.mem.eql(u8, builtin_name, "negWithOverflow")) {
         const zero_op = self.ora_dialect.createArithConstant(0, value_ty, loc);
         h.appendOp(self.block, zero_op);

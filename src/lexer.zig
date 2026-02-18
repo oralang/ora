@@ -245,6 +245,7 @@ pub const TokenType = enum {
     Slash, // /
     Percent, // %
     StarStar, // **
+    StarStarPercent, // **%
     Equal, // =
     EqualEqual, // ==
     BangEqual, // !=
@@ -1164,12 +1165,16 @@ pub const Lexer = struct {
                 }
             },
             '*' => {
-                if (self.match('%')) {
+                if (self.match('*')) {
+                    if (self.match('%')) {
+                        try self.addToken(.StarStarPercent);
+                    } else {
+                        try self.addToken(.StarStar);
+                    }
+                } else if (self.match('%')) {
                     try self.addToken(.StarPercent);
                 } else if (self.match('=')) {
                     try self.addToken(.StarEqual);
-                } else if (self.match('*')) {
-                    try self.addToken(.StarStar);
                 } else {
                     try self.addToken(.Star);
                 }
@@ -1593,7 +1598,7 @@ pub fn isLiteral(token_type: TokenType) bool {
 
 pub fn isOperator(token_type: TokenType) bool {
     return switch (token_type) {
-        .Plus, .Minus, .Star, .Slash, .Percent, .StarStar, .Equal, .EqualEqual, .BangEqual, .Less, .LessEqual, .Greater, .GreaterEqual, .Bang, .Ampersand, .Pipe, .Caret, .LessLess, .GreaterGreater, .PlusEqual, .MinusEqual, .StarEqual, .SlashEqual, .PercentEqual, .AmpersandAmpersand, .PipePipe, .Arrow, .DotDot, .DotDotDot => true,
+        .Plus, .Minus, .Star, .Slash, .Percent, .StarStar, .StarStarPercent, .Equal, .EqualEqual, .BangEqual, .Less, .LessEqual, .Greater, .GreaterEqual, .Bang, .Ampersand, .Pipe, .Caret, .LessLess, .GreaterGreater, .PlusEqual, .MinusEqual, .StarEqual, .SlashEqual, .PercentEqual, .AmpersandAmpersand, .PipePipe, .Arrow, .DotDot, .DotDotDot => true,
         else => false,
     };
 }

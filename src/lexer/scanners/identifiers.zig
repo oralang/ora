@@ -170,6 +170,7 @@ pub fn scanAtDirective(lexer: *Lexer) LexerError!void {
         std.mem.eql(u8, directive_name, "mulWithOverflow") or
         std.mem.eql(u8, directive_name, "divWithOverflow") or
         std.mem.eql(u8, directive_name, "modWithOverflow") or
+        std.mem.eql(u8, directive_name, "powerWithOverflow") or
         std.mem.eql(u8, directive_name, "negWithOverflow") or
         std.mem.eql(u8, directive_name, "shlWithOverflow") or
         std.mem.eql(u8, directive_name, "shrWithOverflow") or

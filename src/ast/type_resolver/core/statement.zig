@@ -40,6 +40,12 @@ fn getBlockScopeKey(stmt: *const ast.Statements.StmtNode, block_id: usize) usize
     return @intFromPtr(stmt) * 4 + block_id;
 }
 
+fn updateLoopSymbolType(self: *CoreResolver, scope: *Scope, name: []const u8, typ: TypeInfo) TypeResolutionError!void {
+    self.symbol_table.updateSymbolType(scope, name, typ, false) catch |err| switch (err) {
+        error.SymbolNotFound => return TypeResolutionError.UndefinedIdentifier,
+    };
+}
+
 fn prependAssumeToBlock(
     self: *CoreResolver,
     block: *ast.Statements.BlockNode,
@@ -715,20 +721,18 @@ fn resolveFor(
                 // update the symbol type for the loop variable
                 // loop variables are typically simple types, not owned
                 if (element_type.ora_type != null) {
-                    _ = self.symbol_table.updateSymbolType(scope, s.name, element_type, false) catch {
-                        // symbol might not exist yet, that's okay - it will be created during lowering
-                    };
+                    try updateLoopSymbolType(self, scope, s.name, element_type);
                 }
             },
             .IndexPair => |p| {
                 // update item variable type
                 // loop variables are typically simple types, not owned
                 if (element_type.ora_type != null) {
-                    _ = self.symbol_table.updateSymbolType(scope, p.item, element_type, false) catch {};
+                    try updateLoopSymbolType(self, scope, p.item, element_type);
                 }
                 // index variable is always u256 (or mlir index type) - simple type, not owned
                 const index_type = CommonTypes.u256_type();
-                _ = self.symbol_table.updateSymbolType(scope, p.index, index_type, false) catch {};
+                try updateLoopSymbolType(self, scope, p.index, index_type);
             },
             .Destructured => |d| {
                 // for destructuring, we need to extract field types from the element type
@@ -739,17 +743,17 @@ fn resolveFor(
                     switch (d.pattern) {
                         .Struct => |fields| {
                             for (fields) |field| {
-                                _ = self.symbol_table.updateSymbolType(scope, field.variable, element_type, false) catch {};
+                                try updateLoopSymbolType(self, scope, field.variable, element_type);
                             }
                         },
                         .Tuple => |names| {
                             for (names) |name| {
-                                _ = self.symbol_table.updateSymbolType(scope, name, element_type, false) catch {};
+                                try updateLoopSymbolType(self, scope, name, element_type);
                             }
                         },
                         .Array => |names| {
                             for (names) |name| {
-                                _ = self.symbol_table.updateSymbolType(scope, name, element_type, false) catch {};
+                                try updateLoopSymbolType(self, scope, name, element_type);
                             }
                         },
                     }

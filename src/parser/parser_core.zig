@@ -298,6 +298,11 @@ pub fn parseWithArena(allocator: Allocator, tokens: []const Token) ParserError!s
         // type resolution errors (especially TypeMismatch) should stop compilation
         // these indicate invalid type assignments that cannot be safely compiled
         if (!builtin.is_test) {
+            const is_user_facing_type_error = err == @import("../ast/type_resolver/mod.zig").TypeResolutionError.ErrorUnionOutsideTry or
+                err == @import("../ast/type_resolver/mod.zig").TypeResolutionError.GenericContractNotSupported or
+                err == @import("../ast/type_resolver/mod.zig").TypeResolutionError.TopLevelGenericInstantiationNotSupported or
+                err == @import("../ast/type_resolver/mod.zig").TypeResolutionError.ComptimeArithmeticError or
+                err == @import("../ast/type_resolver/mod.zig").TypeResolutionError.ComptimeEvaluationError;
             log.err("Type resolution failed: {s}\n", .{@errorName(err)});
             if (err == @import("../ast/type_resolver/mod.zig").TypeResolutionError.ErrorUnionOutsideTry) {
                 log.help("use `try` to unwrap error unions or wrap the code in a try/catch block\n", .{});
@@ -305,10 +310,16 @@ pub fn parseWithArena(allocator: Allocator, tokens: []const Token) ParserError!s
                 log.help("generic contracts are parsed but not implemented yet; remove type parameters for now\n", .{});
             } else if (err == @import("../ast/type_resolver/mod.zig").TypeResolutionError.TopLevelGenericInstantiationNotSupported) {
                 log.help("generic functions/structs currently require a contract scope; move the generic usage inside a contract\n", .{});
+            } else if (err == @import("../ast/type_resolver/mod.zig").TypeResolutionError.ComptimeArithmeticError) {
+                log.help("checked arithmetic in a compile-time-known expression failed; use wrapping operators (e.g. **%) or smaller values\n", .{});
+            } else if (err == @import("../ast/type_resolver/mod.zig").TypeResolutionError.ComptimeEvaluationError) {
+                log.help("explicit/known comptime evaluation failed and cannot fall back to runtime\n", .{});
             }
             // best-effort stack trace in debug builds
-            const trace = @errorReturnTrace();
-            if (trace) |t| std.debug.dumpStackTrace(t.*);
+            if (!is_user_facing_type_error) {
+                const trace = @errorReturnTrace();
+                if (trace) |t| std.debug.dumpStackTrace(t.*);
+            }
         }
         return ParserError.TypeResolutionFailed;
     };
@@ -347,6 +358,11 @@ pub fn parse(allocator: Allocator, tokens: []const Token) ParserError![]AstNode 
         // type resolution errors (especially TypeMismatch) should stop compilation
         // these indicate invalid type assignments that cannot be safely compiled
         if (!builtin.is_test) {
+            const is_user_facing_type_error = err == @import("../ast/type_resolver/mod.zig").TypeResolutionError.ErrorUnionOutsideTry or
+                err == @import("../ast/type_resolver/mod.zig").TypeResolutionError.GenericContractNotSupported or
+                err == @import("../ast/type_resolver/mod.zig").TypeResolutionError.TopLevelGenericInstantiationNotSupported or
+                err == @import("../ast/type_resolver/mod.zig").TypeResolutionError.ComptimeArithmeticError or
+                err == @import("../ast/type_resolver/mod.zig").TypeResolutionError.ComptimeEvaluationError;
             log.err("Type resolution failed: {s}\n", .{@errorName(err)});
             if (err == @import("../ast/type_resolver/mod.zig").TypeResolutionError.ErrorUnionOutsideTry) {
                 log.help("use `try` to unwrap error unions or wrap the code in a try/catch block\n", .{});
@@ -354,10 +370,16 @@ pub fn parse(allocator: Allocator, tokens: []const Token) ParserError![]AstNode 
                 log.help("generic contracts are parsed but not implemented yet; remove type parameters for now\n", .{});
             } else if (err == @import("../ast/type_resolver/mod.zig").TypeResolutionError.TopLevelGenericInstantiationNotSupported) {
                 log.help("generic functions/structs currently require a contract scope; move the generic usage inside a contract\n", .{});
+            } else if (err == @import("../ast/type_resolver/mod.zig").TypeResolutionError.ComptimeArithmeticError) {
+                log.help("checked arithmetic in a compile-time-known expression failed; use wrapping operators (e.g. **%) or smaller values\n", .{});
+            } else if (err == @import("../ast/type_resolver/mod.zig").TypeResolutionError.ComptimeEvaluationError) {
+                log.help("explicit/known comptime evaluation failed and cannot fall back to runtime\n", .{});
             }
             // best-effort stack trace in debug builds
-            const trace = @errorReturnTrace();
-            if (trace) |t| std.debug.dumpStackTrace(t.*);
+            if (!is_user_facing_type_error) {
+                const trace = @errorReturnTrace();
+                if (trace) |t| std.debug.dumpStackTrace(t.*);
+            }
         }
         return ParserError.TypeResolutionFailed;
     };

@@ -118,7 +118,7 @@ pub fn combineEffects(
         fn copy(alloc: std.mem.Allocator, set: SlotSet) SlotSet {
             var out = SlotSet.init(alloc);
             for (set.slots.items) |slot| {
-                out.addWithSrc(alloc, slot, @src()) catch {};
+                out.addWithSrc(alloc, slot, @src()) catch @panic("failed to copy effect slot");
             }
             return out;
         }
@@ -127,7 +127,7 @@ pub fn combineEffects(
             var out = @This().copy(alloc, a);
             for (b.slots.items) |slot| {
                 if (!out.contains(slot)) {
-                    out.addWithSrc(alloc, slot, @src()) catch {};
+                    out.addWithSrc(alloc, slot, @src()) catch @panic("failed to merge effect slots");
                 }
             }
             return out;
@@ -595,7 +595,7 @@ pub fn lookupEnumValueThunk(ctx: *anyopaque, enum_name: []const u8, variant_name
     return null;
 }
 
-fn lookupComptimeFnThunk(ctx: *anyopaque, name: []const u8) ?comptime_eval.ComptimeFnInfo {
+pub fn lookupComptimeFnThunk(ctx: *anyopaque, name: []const u8) ?comptime_eval.ComptimeFnInfo {
     const self: *CoreResolver = @ptrCast(@alignCast(ctx));
     // Check function purity — only pure functions can be evaluated at comptime
     if (self.symbol_table.function_effects.get(name)) |effect| {
@@ -629,10 +629,9 @@ fn lookupComptimeFnThunk(ctx: *anyopaque, name: []const u8) ?comptime_eval.Compt
 
 /// Runtime-only builtins that cannot be used in comptime context
 const runtime_only_builtins = [_][]const u8{
-    "msg.sender",   "msg.value",  "msg.data",
+    "msg.sender",   "msg.value",       "msg.data",
     "block.number", "block.timestamp", "block.coinbase",
-    "tx.origin",    "tx.gasprice",
-    "address(this)",
+    "tx.origin",    "tx.gasprice",     "address(this)",
 };
 
 /// Check if a function body is safe for comptime evaluation.

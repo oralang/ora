@@ -89,11 +89,17 @@ pub fn lowerBinary(
             insertDivChecks(self, lhs_converted, rhs_converted, uses_signed_integer_semantics, bin.span);
             break :blk result;
         },
-        .StarStar => lowerPowerOp(self, lhs_converted, rhs_converted, result_ty, bin.span),
+        .StarStar => blk: {
+            const pow = lowerPowerWithOverflow(self, lhs_converted, rhs_converted, result_ty, uses_signed_integer_semantics, bin.span);
+            emitOverflowAssert(self, pow.overflow, "checked power overflow", bin.span);
+            insertNarrowingOverflowCheck(self, pow.value, bin.type_info, uses_signed_integer_semantics, bin.span);
+            break :blk pow.value;
+        },
         // Wrapping operators lower to raw modular arithmetic (no overflow trap)
         .WrappingAdd => self.createArithmeticOp("arith.addi", lhs_converted, rhs_converted, result_ty, bin.span),
         .WrappingSub => self.createArithmeticOp("arith.subi", lhs_converted, rhs_converted, result_ty, bin.span),
         .WrappingMul => self.createArithmeticOp("arith.muli", lhs_converted, rhs_converted, result_ty, bin.span),
+        .WrappingPow => lowerPowerWrappingOp(self, lhs_converted, rhs_converted, result_ty, bin.span),
         .WrappingShl => self.createArithmeticOp("arith.shli", lhs_converted, rhs_converted, result_ty, bin.span),
         .WrappingShr => self.createArithmeticOp(shr_op_name, lhs_converted, rhs_converted, result_ty, bin.span),
         .EqualEqual => self.createComparisonOp("eq", lhs_converted, rhs_converted, bin.span),
@@ -136,7 +142,7 @@ pub fn lowerUnary(
     };
 }
 
-fn lowerPowerOp(
+fn lowerPowerWrappingOp(
     self: *const ExpressionLowerer,
     lhs: c.MlirValue,
     rhs: c.MlirValue,
@@ -146,6 +152,242 @@ fn lowerPowerOp(
     const power_op = self.ora_dialect.createPower(lhs, rhs, result_ty, self.fileLoc(span));
     h.appendOp(self.block, power_op);
     return h.getResult(power_op, 0);
+}
+
+pub const PowerWithOverflowResult = struct {
+    value: c.MlirValue,
+    overflow: c.MlirValue,
+};
+
+pub fn lowerPowerWithOverflow(
+    self: *const ExpressionLowerer,
+    base_in: c.MlirValue,
+    exponent_in: c.MlirValue,
+    result_ty: c.MlirType,
+    is_signed: bool,
+    span: lib.ast.SourceSpan,
+) PowerWithOverflowResult {
+    const loc = self.fileLoc(span);
+    const bool_ty = h.boolType(self.ctx);
+
+    const result_base_ty = blk: {
+        const base_ty = c.oraRefinementTypeGetBaseType(result_ty);
+        if (base_ty.ptr != null) break :blk base_ty;
+        break :blk result_ty;
+    };
+
+    const base_unwrapped = expr_helpers.unwrapRefinementValue(self.ctx, self.block, self.locations, self.refinement_base_cache, base_in, span);
+    const exponent_unwrapped = expr_helpers.unwrapRefinementValue(self.ctx, self.block, self.locations, self.refinement_base_cache, exponent_in, span);
+    const base = if (c.oraTypeEqual(c.oraValueGetType(base_unwrapped), result_base_ty))
+        base_unwrapped
+    else
+        self.convertToType(base_unwrapped, result_base_ty, span);
+    const exponent = if (c.oraTypeEqual(c.oraValueGetType(exponent_unwrapped), result_base_ty))
+        exponent_unwrapped
+    else
+        self.convertToType(exponent_unwrapped, result_base_ty, span);
+
+    const one = self.createTypedConstant(1, result_base_ty, span);
+    const zero = self.createTypedConstant(0, result_base_ty, span);
+    var result = one;
+    var factor = base;
+    var overflow = self.createBoolConstant(false, span);
+
+    const bit_width: u32 = if (c.oraTypeIsAInteger(result_base_ty))
+        @intCast(c.oraIntegerTypeGetWidth(result_base_ty))
+    else
+        constants.DEFAULT_INTEGER_BITS;
+
+    var bit_index: u32 = 0;
+    while (bit_index < bit_width) : (bit_index += 1) {
+        const shift_amount = self.createTypedConstant(@intCast(bit_index), result_base_ty, span);
+        const shifted = createArithShiftRightUnsigned(self, exponent, shift_amount, loc);
+        const current_bit = createArithAnd(self, shifted, one, loc);
+        const bit_is_set = createArithCmp(self, "ne", current_bit, zero, loc);
+
+        const multiplied = createArithMul(self, result, factor, loc);
+        const mul_overflow = computeMulOverflowFlag(self, multiplied, result, factor, result_base_ty, is_signed, span);
+        const overflow_with_mul = createBoolOr(self, overflow, mul_overflow, loc);
+        const after_mul = selectPowerState(self, bit_is_set, multiplied, overflow_with_mul, result, overflow, result_base_ty, bool_ty, loc);
+        result = after_mul.value;
+        overflow = after_mul.overflow;
+
+        if (bit_index + 1 < bit_width) {
+            const next_shift_amount = self.createTypedConstant(@intCast(bit_index + 1), result_base_ty, span);
+            const remaining = createArithShiftRightUnsigned(self, exponent, next_shift_amount, loc);
+            const has_more_bits = createArithCmp(self, "ne", remaining, zero, loc);
+
+            const squared = createArithMul(self, factor, factor, loc);
+            const sq_overflow = computeMulOverflowFlag(self, squared, factor, factor, result_base_ty, is_signed, span);
+            const overflow_with_square = createBoolOr(self, overflow, sq_overflow, loc);
+            const after_square = selectPowerState(self, has_more_bits, squared, overflow_with_square, factor, overflow, result_base_ty, bool_ty, loc);
+            factor = after_square.value;
+            overflow = after_square.overflow;
+        }
+    }
+
+    return .{ .value = result, .overflow = overflow };
+}
+
+fn createArithCmp(
+    self: *const ExpressionLowerer,
+    predicate: []const u8,
+    lhs: c.MlirValue,
+    rhs: c.MlirValue,
+    loc: c.MlirLocation,
+) c.MlirValue {
+    const op = c.oraArithCmpIOpCreate(self.ctx, loc, expr_helpers.predicateStringToInt(predicate), lhs, rhs);
+    h.appendOp(self.block, op);
+    return h.getResult(op, 0);
+}
+
+fn createArithMul(
+    self: *const ExpressionLowerer,
+    lhs: c.MlirValue,
+    rhs: c.MlirValue,
+    loc: c.MlirLocation,
+) c.MlirValue {
+    const op = c.oraArithMulIOpCreate(self.ctx, loc, lhs, rhs);
+    h.appendOp(self.block, op);
+    return h.getResult(op, 0);
+}
+
+fn createArithAnd(
+    self: *const ExpressionLowerer,
+    lhs: c.MlirValue,
+    rhs: c.MlirValue,
+    loc: c.MlirLocation,
+) c.MlirValue {
+    const op = c.oraArithAndIOpCreate(self.ctx, loc, lhs, rhs);
+    h.appendOp(self.block, op);
+    return h.getResult(op, 0);
+}
+
+fn createArithShiftRightUnsigned(
+    self: *const ExpressionLowerer,
+    lhs: c.MlirValue,
+    rhs: c.MlirValue,
+    loc: c.MlirLocation,
+) c.MlirValue {
+    const op = if (@hasDecl(c, "oraArithShrUIOpCreate"))
+        c.oraArithShrUIOpCreate(self.ctx, loc, lhs, rhs)
+    else
+        c.oraArithShrSIOpCreate(self.ctx, loc, lhs, rhs);
+    h.appendOp(self.block, op);
+    return h.getResult(op, 0);
+}
+
+fn createBoolOr(
+    self: *const ExpressionLowerer,
+    lhs: c.MlirValue,
+    rhs: c.MlirValue,
+    loc: c.MlirLocation,
+) c.MlirValue {
+    const op = c.oraArithOrIOpCreate(self.ctx, loc, lhs, rhs);
+    h.appendOp(self.block, op);
+    return h.getResult(op, 0);
+}
+
+fn selectPowerState(
+    self: *const ExpressionLowerer,
+    condition: c.MlirValue,
+    then_value: c.MlirValue,
+    then_overflow: c.MlirValue,
+    else_value: c.MlirValue,
+    else_overflow: c.MlirValue,
+    value_ty: c.MlirType,
+    bool_ty: c.MlirType,
+    loc: c.MlirLocation,
+) PowerWithOverflowResult {
+    const result_types = [_]c.MlirType{ value_ty, bool_ty };
+    const if_op = self.ora_dialect.createScfIf(condition, result_types[0..], loc);
+    h.appendOp(self.block, if_op);
+
+    const then_block = c.oraScfIfOpGetThenBlock(if_op);
+    const else_block = c.oraScfIfOpGetElseBlock(if_op);
+    if (c.oraBlockIsNull(then_block) or c.oraBlockIsNull(else_block)) {
+        @panic("scf.if missing then/else blocks for power state");
+    }
+
+    const then_yield = self.ora_dialect.createScfYieldWithValues(&[_]c.MlirValue{ then_value, then_overflow }, loc);
+    h.appendOp(then_block, then_yield);
+
+    const else_yield = self.ora_dialect.createScfYieldWithValues(&[_]c.MlirValue{ else_value, else_overflow }, loc);
+    h.appendOp(else_block, else_yield);
+
+    return .{
+        .value = h.getResult(if_op, 0),
+        .overflow = h.getResult(if_op, 1),
+    };
+}
+
+fn computeMulOverflowFlag(
+    self: *const ExpressionLowerer,
+    product: c.MlirValue,
+    lhs: c.MlirValue,
+    rhs: c.MlirValue,
+    value_ty: c.MlirType,
+    is_signed: bool,
+    span: lib.ast.SourceSpan,
+) c.MlirValue {
+    const loc = self.fileLoc(span);
+    const pred_eq = expr_helpers.predicateStringToInt("eq");
+    const pred_ne = expr_helpers.predicateStringToInt("ne");
+
+    const zero_op = self.ora_dialect.createArithConstant(0, value_ty, loc);
+    h.appendOp(self.block, zero_op);
+    const zero = h.getResult(zero_op, 0);
+
+    const rhs_nz_cmp = c.oraArithCmpIOpCreate(self.ctx, loc, pred_ne, rhs, zero);
+    h.appendOp(self.block, rhs_nz_cmp);
+    const rhs_non_zero = h.getResult(rhs_nz_cmp, 0);
+
+    if (!is_signed) {
+        const quot_op = c.oraArithDivUIOpCreate(self.ctx, loc, product, rhs);
+        c.oraOperationSetAttributeByName(quot_op, h.strRef("ora.guard_internal"), h.stringAttr(self.ctx, "true"));
+        h.appendOp(self.block, quot_op);
+        const mismatch_cmp = c.oraArithCmpIOpCreate(self.ctx, loc, pred_ne, h.getResult(quot_op, 0), lhs);
+        h.appendOp(self.block, mismatch_cmp);
+        const and_op = c.oraArithAndIOpCreate(self.ctx, loc, h.getResult(mismatch_cmp, 0), rhs_non_zero);
+        h.appendOp(self.block, and_op);
+        return h.getResult(and_op, 0);
+    }
+
+    const bit_width: u32 = if (c.oraTypeIsAInteger(value_ty))
+        @intCast(c.oraIntegerTypeGetWidth(value_ty))
+    else
+        constants.DEFAULT_INTEGER_BITS;
+
+    const one_op = self.ora_dialect.createArithConstant(1, value_ty, loc);
+    h.appendOp(self.block, one_op);
+    const shift_amt_op = self.ora_dialect.createArithConstant(@intCast(@as(i64, @intCast(bit_width - 1))), value_ty, loc);
+    h.appendOp(self.block, shift_amt_op);
+    const min_int_op = c.oraArithShlIOpCreate(self.ctx, loc, h.getResult(one_op, 0), h.getResult(shift_amt_op, 0));
+    h.appendOp(self.block, min_int_op);
+    const min_int = h.getResult(min_int_op, 0);
+
+    const neg1_op = self.ora_dialect.createArithConstant(-1, value_ty, loc);
+    h.appendOp(self.block, neg1_op);
+    const neg1 = h.getResult(neg1_op, 0);
+
+    const lhs_is_min = c.oraArithCmpIOpCreate(self.ctx, loc, pred_eq, lhs, min_int);
+    h.appendOp(self.block, lhs_is_min);
+    const rhs_is_neg1 = c.oraArithCmpIOpCreate(self.ctx, loc, pred_eq, rhs, neg1);
+    h.appendOp(self.block, rhs_is_neg1);
+    const special_case = c.oraArithAndIOpCreate(self.ctx, loc, h.getResult(lhs_is_min, 0), h.getResult(rhs_is_neg1, 0));
+    h.appendOp(self.block, special_case);
+
+    const quot_op = c.oraArithDivSIOpCreate(self.ctx, loc, product, rhs);
+    c.oraOperationSetAttributeByName(quot_op, h.strRef("ora.guard_internal"), h.stringAttr(self.ctx, "true"));
+    h.appendOp(self.block, quot_op);
+    const mismatch_cmp = c.oraArithCmpIOpCreate(self.ctx, loc, pred_ne, h.getResult(quot_op, 0), lhs);
+    h.appendOp(self.block, mismatch_cmp);
+    const general_case = c.oraArithAndIOpCreate(self.ctx, loc, h.getResult(mismatch_cmp, 0), rhs_non_zero);
+    h.appendOp(self.block, general_case);
+
+    const overflow = c.oraArithOrIOpCreate(self.ctx, loc, h.getResult(special_case, 0), h.getResult(general_case, 0));
+    h.appendOp(self.block, overflow);
+    return h.getResult(overflow, 0);
 }
 
 fn lowerLogicalAnd(
@@ -686,7 +928,12 @@ fn insertNarrowingOverflowCheck(
     if (bit_width >= 256) return; // native width — already covered
 
     const result_uw = expr_helpers.unwrapRefinementValue(
-        self.ctx, self.block, self.locations, self.refinement_base_cache, result, span,
+        self.ctx,
+        self.block,
+        self.locations,
+        self.refinement_base_cache,
+        result,
+        span,
     );
     const loc = self.fileLoc(span);
 
@@ -699,8 +946,11 @@ fn insertNarrowingOverflowCheck(
         const ext_op = c.oraArithExtUIOpCreate(self.ctx, loc, h.getResult(trunc_op, 0), wide_ty);
         h.appendOp(self.block, ext_op);
         const cmp = c.oraArithCmpIOpCreate(
-            self.ctx, loc, expr_helpers.predicateStringToInt("ne"),
-            result_uw, h.getResult(ext_op, 0),
+            self.ctx,
+            loc,
+            expr_helpers.predicateStringToInt("ne"),
+            result_uw,
+            h.getResult(ext_op, 0),
         );
         h.appendOp(self.block, cmp);
         emitOverflowAssert(self, h.getResult(cmp, 0), "checked narrowing overflow", span);
@@ -722,13 +972,19 @@ fn insertNarrowingOverflowCheck(
         h.appendOp(self.block, min_op);
         // overflow if result > max OR result < min
         const cmp_gt = c.oraArithCmpIOpCreate(
-            self.ctx, loc, expr_helpers.predicateStringToInt("sgt"),
-            result_uw, h.getResult(max_op, 0),
+            self.ctx,
+            loc,
+            expr_helpers.predicateStringToInt("sgt"),
+            result_uw,
+            h.getResult(max_op, 0),
         );
         h.appendOp(self.block, cmp_gt);
         const cmp_lt = c.oraArithCmpIOpCreate(
-            self.ctx, loc, expr_helpers.predicateStringToInt("slt"),
-            result_uw, h.getResult(min_op, 0),
+            self.ctx,
+            loc,
+            expr_helpers.predicateStringToInt("slt"),
+            result_uw,
+            h.getResult(min_op, 0),
         );
         h.appendOp(self.block, cmp_lt);
         const or_op = c.oraArithOrIOpCreate(self.ctx, loc, h.getResult(cmp_gt, 0), h.getResult(cmp_lt, 0));

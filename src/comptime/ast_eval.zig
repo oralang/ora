@@ -167,7 +167,11 @@ pub const AstEvaluator = struct {
             }
         }
 
-        return .not_constant;
+        return .{ .err = error_mod.CtError.init(
+            .internal_error,
+            .{ .line = 0, .column = 0, .length = 0 },
+            "invalid expression node handle for comptime evaluator",
+        ) };
     }
 
     /// Evaluate and intern result into ConstPool (returns ConstId if successful)
@@ -179,7 +183,7 @@ pub const AstEvaluator = struct {
                     const const_id = pool.intern(self.env, v) catch return .{ .err = error_mod.CtError.init(.internal_error, .{ .line = 0, .column = 0, .length = 0 }, "failed to intern constant") };
                     return .{ .const_id = const_id };
                 }
-                return .not_constant; // No pool provided
+                return .{ .err = error_mod.CtError.init(.internal_error, .{ .line = 0, .column = 0, .length = 0 }, "no const pool provided for interning") };
             },
             .not_constant => .not_constant,
             .err => |e| .{ .err = e },
@@ -229,6 +233,12 @@ pub const AstEvaluator = struct {
     /// Evaluate a function call at compile time.
     /// Only succeeds if: all args are comptime-known AND the function is pure.
     fn evalCall(self: *AstEvaluator, call: anytype) AstEvalResult {
+        const call_span = SourceSpan{
+            .line = call.span.line,
+            .column = call.span.column,
+            .length = call.span.length,
+        };
+
         // Extract function name from callee
         const fn_name = switch (call.callee.*) {
             .Identifier => |id| id.name,
@@ -267,11 +277,23 @@ pub const AstEvaluator = struct {
         }
 
         // Push scope, bind params, evaluate body
-        self.env.pushScope(false) catch return .not_constant;
+        self.env.pushScope(false) catch {
+            return .{ .err = error_mod.CtError.init(
+                .internal_error,
+                call_span,
+                "internal error: failed to create comptime call scope",
+            ) };
+        };
         defer self.env.popScope();
 
         for (fn_info.param_names, 0..) |param_name, i| {
-            _ = self.env.bind(param_name, arg_values[i]) catch return .not_constant;
+            _ = self.env.bind(param_name, arg_values[i]) catch {
+                return .{ .err = error_mod.CtError.init(
+                    .internal_error,
+                    call_span,
+                    "internal error: failed to bind comptime call parameter",
+                ) };
+            };
         }
 
         self.call_depth += 1;
@@ -335,6 +357,10 @@ pub const AstEvaluator = struct {
             const shift = shiftRightWithOverflow(lhs, rhs);
             return self.makeOverflowResult(shift.value, shift.overflow);
         }
+        if (std.mem.eql(u8, fn_name, "@powerWithOverflow")) {
+            const power = powerWithOverflow(lhs, rhs);
+            return self.makeOverflowResult(power.value, power.overflow);
+        }
 
         return .not_constant;
     }
@@ -344,11 +370,22 @@ pub const AstEvaluator = struct {
             .{ .field_id = 0, .value = .{ .integer = value_result } },
             .{ .field_id = 1, .value = .{ .boolean = overflow } },
         };
-        const heap_id = self.env.heap.allocStruct(0, &fields) catch return .not_constant;
+        const heap_id = self.env.heap.allocStruct(0, &fields) catch {
+            return .{ .err = error_mod.CtError.init(
+                .internal_error,
+                .{ .line = 0, .column = 0, .length = 0 },
+                "failed to allocate overflow result struct",
+            ) };
+        };
         return .{ .value = .{ .struct_ref = heap_id } };
     }
 
     const ShiftWithOverflowResult = struct {
+        value: u256,
+        overflow: bool,
+    };
+
+    const PowerWithOverflowResult = struct {
         value: u256,
         overflow: bool,
     };
@@ -375,10 +412,40 @@ pub const AstEvaluator = struct {
         return .{ .value = lhs >> shift_amt, .overflow = overflow };
     }
 
+    fn powerWithOverflow(base: u256, exponent: u256) PowerWithOverflowResult {
+        var result: u256 = 1;
+        var factor = base;
+        var exp = exponent;
+        var overflow = false;
+
+        while (exp != 0) {
+            if ((exp & 1) == 1) {
+                const mul_result, const mul_overflow = @mulWithOverflow(result, factor);
+                result = mul_result;
+                overflow = overflow or (mul_overflow != 0);
+            }
+
+            exp >>= 1;
+            if (exp != 0) {
+                const sq_result, const sq_overflow = @mulWithOverflow(factor, factor);
+                factor = sq_result;
+                overflow = overflow or (sq_overflow != 0);
+            }
+        }
+
+        return .{ .value = result, .overflow = overflow };
+    }
+
     fn evalLiteral(self: *AstEvaluator, lit: anytype) AstEvalResult {
         return switch (lit.*) {
             .Integer => |int_lit| {
-                const val = std.fmt.parseInt(u256, int_lit.value, 0) catch return .not_constant;
+                const val = std.fmt.parseInt(u256, int_lit.value, 0) catch {
+                    return .{ .err = error_mod.CtError.init(
+                        .internal_error,
+                        .{ .line = int_lit.span.line, .column = int_lit.span.column, .length = int_lit.span.length },
+                        "invalid integer literal during comptime evaluation",
+                    ) };
+                };
                 return .{ .value = .{ .integer = val } };
             },
             .Bool => |bool_lit| .{ .value = .{ .boolean = bool_lit.value } },
@@ -390,7 +457,13 @@ pub const AstEvaluator = struct {
                     addr_str[2..]
                 else
                     addr_str;
-                const val = std.fmt.parseInt(u160, hex_str, 16) catch return .not_constant;
+                const val = std.fmt.parseInt(u160, hex_str, 16) catch {
+                    return .{ .err = error_mod.CtError.init(
+                        .internal_error,
+                        .{ .line = addr_lit.span.line, .column = addr_lit.span.column, .length = addr_lit.span.length },
+                        "invalid address literal during comptime evaluation",
+                    ) };
+                };
                 return .{ .value = .{ .address = val } };
             },
             .Hex => |hex_lit| {
@@ -400,7 +473,13 @@ pub const AstEvaluator = struct {
                     hex_str[2..]
                 else
                     hex_str;
-                const val = std.fmt.parseInt(u256, stripped, 16) catch return .not_constant;
+                const val = std.fmt.parseInt(u256, stripped, 16) catch {
+                    return .{ .err = error_mod.CtError.init(
+                        .internal_error,
+                        .{ .line = hex_lit.span.line, .column = hex_lit.span.column, .length = hex_lit.span.length },
+                        "invalid hex literal during comptime evaluation",
+                    ) };
+                };
                 return .{ .value = .{ .integer = val } };
             },
             .Binary => |bin_lit| {
@@ -410,17 +489,35 @@ pub const AstEvaluator = struct {
                     bin_str[2..]
                 else
                     bin_str;
-                const val = std.fmt.parseInt(u256, stripped, 2) catch return .not_constant;
+                const val = std.fmt.parseInt(u256, stripped, 2) catch {
+                    return .{ .err = error_mod.CtError.init(
+                        .internal_error,
+                        .{ .line = bin_lit.span.line, .column = bin_lit.span.column, .length = bin_lit.span.length },
+                        "invalid binary literal during comptime evaluation",
+                    ) };
+                };
                 return .{ .value = .{ .integer = val } };
             },
             .String => |str_lit| {
                 // Allocate string on heap
-                const heap_id = self.env.heap.allocString(str_lit.value) catch return .not_constant;
+                const heap_id = self.env.heap.allocString(str_lit.value) catch {
+                    return .{ .err = error_mod.CtError.init(
+                        .internal_error,
+                        .{ .line = str_lit.span.line, .column = str_lit.span.column, .length = str_lit.span.length },
+                        "failed to allocate string literal during comptime evaluation",
+                    ) };
+                };
                 return .{ .value = .{ .string_ref = heap_id } };
             },
             .Bytes => |bytes_lit| {
                 // Allocate bytes on heap
-                const heap_id = self.env.heap.allocBytes(bytes_lit.value) catch return .not_constant;
+                const heap_id = self.env.heap.allocBytes(bytes_lit.value) catch {
+                    return .{ .err = error_mod.CtError.init(
+                        .internal_error,
+                        .{ .line = bytes_lit.span.line, .column = bytes_lit.span.column, .length = bytes_lit.span.length },
+                        "failed to allocate bytes literal during comptime evaluation",
+                    ) };
+                };
                 return .{ .value = .{ .bytes_ref = heap_id } };
             },
             else => .not_constant, // Character - not commonly used
@@ -642,11 +739,23 @@ pub const AstEvaluator = struct {
         for (tup.elements) |elem| {
             const elem_result = self.evalExprNode(elem);
             if (elem_result != .value) return elem_result;
-            elements.append(self.env.allocator, elem_result.value) catch return .not_constant;
+            elements.append(self.env.allocator, elem_result.value) catch {
+                return .{ .err = error_mod.CtError.init(
+                    .internal_error,
+                    .{ .line = 0, .column = 0, .length = 0 },
+                    "failed to append tuple element during comptime evaluation",
+                ) };
+            };
         }
 
         // Allocate tuple on heap
-        const heap_id = self.env.heap.allocTuple(elements.items) catch return .not_constant;
+        const heap_id = self.env.heap.allocTuple(elements.items) catch {
+            return .{ .err = error_mod.CtError.init(
+                .internal_error,
+                .{ .line = 0, .column = 0, .length = 0 },
+                "failed to allocate tuple during comptime evaluation",
+            ) };
+        };
         return .{ .value = .{ .tuple_ref = heap_id } };
     }
 
@@ -658,11 +767,23 @@ pub const AstEvaluator = struct {
         for (arr.elements) |elem| {
             const elem_result = self.evalExprNode(elem);
             if (elem_result != .value) return elem_result;
-            elements.append(self.env.allocator, elem_result.value) catch return .not_constant;
+            elements.append(self.env.allocator, elem_result.value) catch {
+                return .{ .err = error_mod.CtError.init(
+                    .internal_error,
+                    .{ .line = 0, .column = 0, .length = 0 },
+                    "failed to append array element during comptime evaluation",
+                ) };
+            };
         }
 
         // Allocate array on heap
-        const heap_id = self.env.heap.allocArray(elements.items) catch return .not_constant;
+        const heap_id = self.env.heap.allocArray(elements.items) catch {
+            return .{ .err = error_mod.CtError.init(
+                .internal_error,
+                .{ .line = 0, .column = 0, .length = 0 },
+                "failed to allocate array during comptime evaluation",
+            ) };
+        };
         return .{ .value = .{ .array_ref = heap_id } };
     }
 
@@ -693,8 +814,14 @@ pub const AstEvaluator = struct {
             return .{ .value = .void_val };
         }
 
-        // No match and no default - error in must_eval, not_constant in try_eval
-        return .not_constant;
+        // No match and no default - strict evaluation must fail explicitly.
+        if (self.evaluator.mode.convertsErrorsToRuntime(self.evaluator.policy)) {
+            return .not_constant;
+        }
+        return .{ .err = error_mod.CtError.notComptime(
+            .{ .line = sw.span.line, .column = sw.span.column, .length = sw.span.length },
+            "switch expression has no matching case and no default",
+        ) };
     }
 
     fn matchPattern(self: *AstEvaluator, pattern: anytype, cond_val: CtValue) bool {
@@ -771,11 +898,23 @@ pub const AstEvaluator = struct {
             fields.append(self.env.allocator, .{
                 .field_id = @intCast(i),
                 .value = val_result.value,
-            }) catch return .not_constant;
+            }) catch {
+                return .{ .err = error_mod.CtError.init(
+                    .internal_error,
+                    .{ .line = 0, .column = 0, .length = 0 },
+                    "failed to append anonymous struct field during comptime evaluation",
+                ) };
+            };
         }
 
         // Allocate struct on heap with type_id = 0 (anonymous)
-        const heap_id = self.env.heap.allocStruct(0, fields.items) catch return .not_constant;
+        const heap_id = self.env.heap.allocStruct(0, fields.items) catch {
+            return .{ .err = error_mod.CtError.init(
+                .internal_error,
+                .{ .line = 0, .column = 0, .length = 0 },
+                "failed to allocate anonymous struct during comptime evaluation",
+            ) };
+        };
         return .{ .value = .{ .struct_ref = heap_id } };
     }
 
@@ -790,12 +929,24 @@ pub const AstEvaluator = struct {
             fields.append(self.env.allocator, .{
                 .field_id = @intCast(i),
                 .value = val_result.value,
-            }) catch return .not_constant;
+            }) catch {
+                return .{ .err = error_mod.CtError.init(
+                    .internal_error,
+                    .{ .line = 0, .column = 0, .length = 0 },
+                    "failed to append struct field during comptime evaluation",
+                ) };
+            };
         }
 
         // TODO: Look up type_id from struct_name via type system
         // For now, use type_id = 0 as placeholder
-        const heap_id = self.env.heap.allocStruct(0, fields.items) catch return .not_constant;
+        const heap_id = self.env.heap.allocStruct(0, fields.items) catch {
+            return .{ .err = error_mod.CtError.init(
+                .internal_error,
+                .{ .line = 0, .column = 0, .length = 0 },
+                "failed to allocate struct during comptime evaluation",
+            ) };
+        };
         return .{ .value = .{ .struct_ref = heap_id } };
     }
 
@@ -831,13 +982,23 @@ pub const AstEvaluator = struct {
 
         // Ranges are typically used in for loops - return as a tuple (start, end)
         // which the for loop handler can interpret
-        const elems = self.env.allocator.alloc(CtValue, 2) catch return .not_constant;
+        const elems = self.env.allocator.alloc(CtValue, 2) catch {
+            return .{ .err = error_mod.CtError.init(
+                .internal_error,
+                .{ .line = 0, .column = 0, .length = 0 },
+                "failed to allocate range tuple elements during comptime evaluation",
+            ) };
+        };
         elems[0] = start;
         elems[1] = end;
 
         const heap_id = self.env.heap.allocTuple(elems) catch {
             self.env.allocator.free(elems);
-            return .not_constant;
+            return .{ .err = error_mod.CtError.init(
+                .internal_error,
+                .{ .line = 0, .column = 0, .length = 0 },
+                "failed to allocate range tuple during comptime evaluation",
+            ) };
         };
         self.env.allocator.free(elems);
 
@@ -851,11 +1012,13 @@ fn mapBinaryOp(op: anytype) ?BinaryOp {
         .Plus => .add,
         .Minus => .sub,
         .Star => .mul,
+        .StarStar => .pow,
         .Slash => .div,
         .Percent => .mod,
         .WrappingAdd => .wadd,
         .WrappingSub => .wsub,
         .WrappingMul => .wmul,
+        .WrappingPow => .wpow,
         .WrappingShl => .wshl,
         .WrappingShr => .wshr,
         .EqualEqual => .eq,
@@ -986,7 +1149,9 @@ pub const StmtEvaluator = struct {
                 const val_result = self.base.evalExpr(assign.value);
                 switch (val_result) {
                     .value => |v| {
-                        self.base.env.set(name, v);
+                        self.base.env.set(name, v) catch {
+                            return .{ .err = error_mod.CtError.init(.internal_error, .{ .line = 0, .column = 0, .length = 0 }, "failed to assign comptime variable") };
+                        };
                         return .{ .ok = v };
                     },
                     .not_constant => return .not_comptime,
@@ -1150,7 +1315,9 @@ pub const StmtEvaluator = struct {
 
             // Bind index if IndexPair
             if (for_stmt.pattern == .IndexPair) {
-                _ = self.base.env.bind(for_stmt.pattern.IndexPair.index, .{ .integer = iterations - 1 }) catch {};
+                _ = self.base.env.bind(for_stmt.pattern.IndexPair.index, .{ .integer = iterations - 1 }) catch {
+                    return .{ .err = error_mod.CtError.init(.internal_error, .{ .line = 0, .column = 0, .length = 0 }, "failed to bind loop index var") };
+                };
             }
 
             const body_result = self.evalBlock(&for_stmt.body);
@@ -1197,7 +1364,9 @@ pub const StmtEvaluator = struct {
 
             // Bind index if IndexPair
             if (for_stmt.pattern == .IndexPair) {
-                _ = self.base.env.bind(for_stmt.pattern.IndexPair.index, .{ .integer = idx }) catch {};
+                _ = self.base.env.bind(for_stmt.pattern.IndexPair.index, .{ .integer = idx }) catch {
+                    return .{ .err = error_mod.CtError.init(.internal_error, .{ .line = 0, .column = 0, .length = 0 }, "failed to bind loop index var") };
+                };
             }
 
             const body_result = self.evalBlock(&for_stmt.body);
@@ -1275,7 +1444,9 @@ pub const StmtEvaluator = struct {
         const eval_result = self.base.evaluator.evalBinaryOp(op, current, rhs, .{ .line = 0, .column = 0, .length = 0 });
         return switch (eval_result) {
             .value => |v| {
-                self.base.env.set(name, v);
+                self.base.env.set(name, v) catch {
+                    return .{ .err = error_mod.CtError.init(.internal_error, .{ .line = 0, .column = 0, .length = 0 }, "failed to apply compound assignment") };
+                };
                 return .{ .ok = v };
             },
             .runtime => .not_comptime,
@@ -1611,8 +1782,8 @@ test "StmtEvaluator while loop" {
     while (iterations < 5) : (iterations += 1) {
         const i_val = env.get("i").?.integer;
         const sum_val = env.get("sum").?.integer;
-        env.set("sum", .{ .integer = sum_val + i_val });
-        env.set("i", .{ .integer = i_val + 1 });
+        try env.set("sum", .{ .integer = sum_val + i_val });
+        try env.set("i", .{ .integer = i_val + 1 });
     }
 
     try std.testing.expectEqual(@as(u256, 10), env.get("sum").?.integer); // 0+1+2+3+4 = 10
@@ -1763,8 +1934,10 @@ test "mapBinaryOp supports wrapping operators" {
     try std.testing.expectEqual(BinaryOp.wadd, mapBinaryOp(ast_expressions.BinaryOp.WrappingAdd).?);
     try std.testing.expectEqual(BinaryOp.wsub, mapBinaryOp(ast_expressions.BinaryOp.WrappingSub).?);
     try std.testing.expectEqual(BinaryOp.wmul, mapBinaryOp(ast_expressions.BinaryOp.WrappingMul).?);
+    try std.testing.expectEqual(BinaryOp.wpow, mapBinaryOp(ast_expressions.BinaryOp.WrappingPow).?);
     try std.testing.expectEqual(BinaryOp.wshl, mapBinaryOp(ast_expressions.BinaryOp.WrappingShl).?);
     try std.testing.expectEqual(BinaryOp.wshr, mapBinaryOp(ast_expressions.BinaryOp.WrappingShr).?);
+    try std.testing.expectEqual(BinaryOp.pow, mapBinaryOp(ast_expressions.BinaryOp.StarStar).?);
 }
 
 test "AstEvaluator evaluates wrapping operators via AST" {
@@ -1788,6 +1961,23 @@ test "AstEvaluator evaluates wrapping operators via AST" {
     const sub_wrap_expr = try ast_expressions.createBinaryExpr(a, zero_lit, .WrappingSub, one_lit, span);
     const sub_wrap = eval.evalExpr(sub_wrap_expr);
     try std.testing.expectEqual(std.math.maxInt(u256), sub_wrap.getInteger().?);
+
+    const two_lit = try ast_expressions.createUntypedIntegerLiteral(a, "2", span);
+    const ten_lit = try ast_expressions.createUntypedIntegerLiteral(a, "10", span);
+    const two_hundred_fifty_six_lit = try ast_expressions.createUntypedIntegerLiteral(a, "256", span);
+
+    const pow_expr = try ast_expressions.createBinaryExpr(a, two_lit, .StarStar, ten_lit, span);
+    const pow = eval.evalExpr(pow_expr);
+    try std.testing.expectEqual(@as(u256, 1024), pow.getInteger().?);
+
+    const pow_wrap_expr_ok = try ast_expressions.createBinaryExpr(a, two_lit, .WrappingPow, two_hundred_fifty_six_lit, span);
+    const pow_wrap_ok = eval.evalExpr(pow_wrap_expr_ok);
+    try std.testing.expectEqual(@as(u256, 0), pow_wrap_ok.getInteger().?);
+
+    const pow_wrap_expr = try ast_expressions.createBinaryExpr(a, two_lit, .StarStar, two_hundred_fifty_six_lit, span);
+    const pow_overflow = eval.evalExpr(pow_wrap_expr);
+    try std.testing.expect(pow_overflow == .err);
+    try std.testing.expectEqual(error_mod.CtErrorKind.overflow, pow_overflow.err.kind);
 }
 
 test "AstEvaluator evaluates overflow builtins with field access" {
@@ -1857,4 +2047,202 @@ test "AstEvaluator evaluates overflow builtins with field access" {
     } };
     const shl_overflow_result = eval.evalExpr(shl_overflow_field);
     try std.testing.expectEqual(true, shl_overflow_result.getBoolean().?);
+
+    const two_lit = try ast_expressions.createUntypedIntegerLiteral(a, "2", span);
+    const exp_lit = try ast_expressions.createUntypedIntegerLiteral(a, "256", span);
+    const pow_callee = try ast_expressions.createIdentifier(a, "@powerWithOverflow", span);
+    const pow_args = try a.alloc(*ast_expressions.ExprNode, 2);
+    pow_args[0] = two_lit;
+    pow_args[1] = exp_lit;
+    const pow_call = try a.create(ast_expressions.ExprNode);
+    pow_call.* = .{ .Call = .{
+        .callee = pow_callee,
+        .arguments = pow_args,
+        .type_info = ast_type_info.TypeInfo.unknown(),
+        .span = span,
+    } };
+
+    const pow_overflow_field = try a.create(ast_expressions.ExprNode);
+    pow_overflow_field.* = .{ .FieldAccess = .{
+        .target = pow_call,
+        .field = "overflow",
+        .type_info = ast_type_info.TypeInfo.unknown(),
+        .span = span,
+    } };
+    const pow_overflow_result = eval.evalExpr(pow_overflow_field);
+    try std.testing.expectEqual(true, pow_overflow_result.getBoolean().?);
+
+    const pow_value_field = try a.create(ast_expressions.ExprNode);
+    pow_value_field.* = .{ .FieldAccess = .{
+        .target = pow_call,
+        .field = "value",
+        .type_info = ast_type_info.TypeInfo.unknown(),
+        .span = span,
+    } };
+    const pow_value_result = eval.evalExpr(pow_value_field);
+    try std.testing.expectEqual(@as(u256, 0), pow_value_result.getInteger().?);
+}
+
+test "AstEvaluator switch no match strict reports not_comptime" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var env = CtEnv.init(std.testing.allocator, EvalConfig.default);
+    defer env.deinit();
+    var eval = AstEvaluator.init(&env, .try_eval, .strict, null);
+
+    const span = AstSourceSpan{ .line = 1, .column = 1, .length = 1 };
+    const cond = try ast_expressions.createUntypedIntegerLiteral(a, "7", span);
+    const body = try ast_expressions.createUntypedIntegerLiteral(a, "42", span);
+
+    const cases = try a.alloc(ast_expressions.SwitchCase, 1);
+    cases[0] = .{
+        .pattern = .{ .Literal = .{
+            .value = .{ .Integer = .{
+                .value = "1",
+                .type_info = ast_type_info.CommonTypes.unknown_integer(),
+                .span = span,
+            } },
+            .span = span,
+        } },
+        .body = .{ .Expression = body },
+        .span = span,
+    };
+
+    const switch_expr = try ast_expressions.createSwitchExprNode(a, cond, cases, null, span);
+    const result = eval.evalExpr(switch_expr);
+    try std.testing.expect(result == .err);
+    try std.testing.expectEqual(CtErrorKind.not_comptime, result.err.kind);
+}
+
+test "AstEvaluator switch no match forgiving remains not_constant" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var env = CtEnv.init(std.testing.allocator, EvalConfig.default);
+    defer env.deinit();
+    var eval = AstEvaluator.init(&env, .try_eval, .forgiving, null);
+
+    const span = AstSourceSpan{ .line = 1, .column = 1, .length = 1 };
+    const cond = try ast_expressions.createUntypedIntegerLiteral(a, "7", span);
+    const body = try ast_expressions.createUntypedIntegerLiteral(a, "42", span);
+
+    const cases = try a.alloc(ast_expressions.SwitchCase, 1);
+    cases[0] = .{
+        .pattern = .{ .Literal = .{
+            .value = .{ .Integer = .{
+                .value = "1",
+                .type_info = ast_type_info.CommonTypes.unknown_integer(),
+                .span = span,
+            } },
+            .span = span,
+        } },
+        .body = .{ .Expression = body },
+        .span = span,
+    };
+
+    const switch_expr = try ast_expressions.createSwitchExprNode(a, cond, cases, null, span);
+    const result = eval.evalExpr(switch_expr);
+    try std.testing.expect(result == .not_constant);
+}
+
+test "AstEvaluator switch no match strict uses default case when present" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var env = CtEnv.init(std.testing.allocator, EvalConfig.default);
+    defer env.deinit();
+    var eval = AstEvaluator.init(&env, .try_eval, .strict, null);
+
+    const span = AstSourceSpan{ .line = 1, .column = 1, .length = 1 };
+    const cond = try ast_expressions.createUntypedIntegerLiteral(a, "7", span);
+    const body = try ast_expressions.createUntypedIntegerLiteral(a, "42", span);
+
+    const cases = try a.alloc(ast_expressions.SwitchCase, 1);
+    cases[0] = .{
+        .pattern = .{ .Literal = .{
+            .value = .{ .Integer = .{
+                .value = "1",
+                .type_info = ast_type_info.CommonTypes.unknown_integer(),
+                .span = span,
+            } },
+            .span = span,
+        } },
+        .body = .{ .Expression = body },
+        .span = span,
+    };
+
+    const default_expr = try ast_expressions.createUntypedIntegerLiteral(a, "99", span);
+    const default_statements = try a.alloc(ast_statements.StmtNode, 1);
+    default_statements[0] = .{ .Expr = default_expr.* };
+    const default_block = ast_statements.BlockNode{
+        .statements = default_statements,
+        .span = span,
+    };
+
+    const switch_expr = try ast_expressions.createSwitchExprNode(a, cond, cases, default_block, span);
+    const result = eval.evalExpr(switch_expr);
+    try std.testing.expectEqual(@as(u256, 99), result.getInteger().?);
+}
+
+test "AstEvaluator evalExpr invalid handle reports internal_error" {
+    var env = CtEnv.init(std.testing.allocator, EvalConfig.default);
+    defer env.deinit();
+    var eval = AstEvaluator.init(&env, .must_eval, .strict, null);
+
+    const result = eval.evalExpr(@as(u8, 1));
+    try std.testing.expect(result == .err);
+    try std.testing.expectEqual(CtErrorKind.internal_error, result.err.kind);
+}
+
+test "AstEvaluator evalAndIntern pool precondition and success path" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const span = AstSourceSpan{ .line = 1, .column = 1, .length = 1 };
+    const lit = try ast_expressions.createUntypedIntegerLiteral(a, "5", span);
+
+    var env = CtEnv.init(std.testing.allocator, EvalConfig.default);
+    defer env.deinit();
+
+    {
+        var eval = AstEvaluator.init(&env, .must_eval, .strict, null);
+        const result = eval.evalAndIntern(lit);
+        try std.testing.expect(result == .err);
+        try std.testing.expectEqual(CtErrorKind.internal_error, result.err.kind);
+    }
+
+    var pool = ConstPool.init(std.testing.allocator);
+    defer pool.deinit();
+    {
+        var eval = AstEvaluator.initWithPool(&env, .must_eval, .strict, null, &pool);
+        const result = eval.evalAndIntern(lit);
+        try std.testing.expect(result == .const_id);
+        switch (pool.get(result.const_id)) {
+            .integer => |n| try std.testing.expectEqual(@as(u256, 5), n),
+            else => try std.testing.expect(false),
+        }
+    }
+}
+
+test "AstEvaluator evalAndIntern preserves not_constant" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var env = CtEnv.init(std.testing.allocator, EvalConfig.default);
+    defer env.deinit();
+    var pool = ConstPool.init(std.testing.allocator);
+    defer pool.deinit();
+
+    const span = AstSourceSpan{ .line = 1, .column = 1, .length = 1 };
+    const id = try ast_expressions.createIdentifier(a, "unknown_symbol", span);
+
+    var eval = AstEvaluator.initWithPool(&env, .must_eval, .strict, null, &pool);
+    const result = eval.evalAndIntern(id);
+    try std.testing.expect(result == .not_constant);
 }

@@ -170,6 +170,7 @@ pub fn parseBuiltinFunction(parser: *ExpressionParser) ParserError!ast.Expressio
         std.mem.eql(u8, builtin_name, "negWithOverflow") or
         std.mem.eql(u8, builtin_name, "shlWithOverflow") or
         std.mem.eql(u8, builtin_name, "shrWithOverflow") or
+        std.mem.eql(u8, builtin_name, "powerWithOverflow") or
         std.mem.eql(u8, builtin_name, "truncate"))
     {
         _ = try parser.base.consume(.LeftParen, "Expected '(' after builtin function name");

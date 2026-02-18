@@ -173,11 +173,13 @@ pub const Evaluator = struct {
             .add => self.checkedAdd(l, r, span),
             .sub => self.checkedSub(l, r, span),
             .mul => self.checkedMul(l, r, span),
+            .pow => self.checkedPow(l, r, span),
             .div => self.checkedDiv(l, r, span),
             .mod => self.checkedMod(l, r, span),
             .wadd => EvalResult.ok(.{ .integer = l +% r }),
             .wsub => EvalResult.ok(.{ .integer = l -% r }),
             .wmul => EvalResult.ok(.{ .integer = l *% r }),
+            .wpow => EvalResult.ok(.{ .integer = wrappingPow(l, r) }),
             .eq => EvalResult.ok(.{ .boolean = l == r }),
             .neq => EvalResult.ok(.{ .boolean = l != r }),
             .lt => EvalResult.ok(.{ .boolean = l < r }),
@@ -312,10 +314,10 @@ pub const Evaluator = struct {
     pub fn checkStage(self: *Evaluator, op_stage: Stage, span: SourceSpan) ?EvalResult {
         return switch (op_stage) {
             .comptime_only, .comptime_ok => null, // OK in both modes
-            .runtime_only => switch (self.mode) {
-                .must_eval => EvalResult.fail(CtError.stageViolation(span, "runtime-only operation")),
-                .try_eval => EvalResult.asRuntime(),
-            },
+            .runtime_only => if (self.mode.convertsErrorsToRuntime(self.policy))
+                EvalResult.asRuntime()
+            else
+                EvalResult.fail(CtError.stageViolation(span, "runtime-only operation")),
         };
     }
 
@@ -323,10 +325,10 @@ pub const Evaluator = struct {
     pub fn requireKnown(self: *Evaluator, known: bool, span: SourceSpan, reason: []const u8) ?EvalResult {
         if (known) return null;
 
-        return switch (self.mode) {
-            .must_eval => EvalResult.fail(CtError.notComptime(span, reason)),
-            .try_eval => EvalResult.asRuntime(),
-        };
+        return if (self.mode.convertsErrorsToRuntime(self.policy))
+            EvalResult.asRuntime()
+        else
+            EvalResult.fail(CtError.notComptime(span, reason));
     }
 
     // ========================================================================
@@ -371,6 +373,50 @@ pub const Evaluator = struct {
             return self.arithmeticError(span, .overflow);
         }
         return EvalResult.ok(.{ .integer = result });
+    }
+
+    fn checkedPow(self: *Evaluator, base: u256, exponent: u256, span: SourceSpan) EvalResult {
+        var result: u256 = 1;
+        var factor = base;
+        var exp = exponent;
+
+        while (exp != 0) {
+            if ((exp & 1) == 1) {
+                const mul_result, const mul_overflow = @mulWithOverflow(result, factor);
+                if (mul_overflow != 0) {
+                    return self.arithmeticError(span, .overflow);
+                }
+                result = mul_result;
+            }
+
+            exp >>= 1;
+
+            // Only square if another exponent bit will be consumed.
+            if (exp != 0) {
+                const sq_result, const sq_overflow = @mulWithOverflow(factor, factor);
+                if (sq_overflow != 0) {
+                    return self.arithmeticError(span, .overflow);
+                }
+                factor = sq_result;
+            }
+        }
+
+        return EvalResult.ok(.{ .integer = result });
+    }
+
+    fn wrappingPow(base: u256, exponent: u256) u256 {
+        var result: u256 = 1;
+        var factor = base;
+        var exp = exponent;
+
+        while (exp != 0) : (exp >>= 1) {
+            if ((exp & 1) == 1) {
+                result = result *% factor;
+            }
+            factor = factor *% factor;
+        }
+
+        return result;
     }
 
     fn checkedDiv(self: *Evaluator, a: u256, b: u256, span: SourceSpan) EvalResult {
@@ -428,11 +474,13 @@ pub const BinaryOp = enum {
     add,
     sub,
     mul,
+    pow,
     div,
     mod,
     wadd,
     wsub,
     wmul,
+    wpow,
 
     // Comparison
     eq,
@@ -485,6 +533,10 @@ test "Evaluator basic arithmetic" {
     // Multiplication
     const mul_result = eval.evalBinaryOp(.mul, .{ .integer = 10 }, .{ .integer = 5 }, span);
     try std.testing.expectEqual(@as(u256, 50), mul_result.getValue().?.integer);
+
+    // Power
+    const pow_result = eval.evalBinaryOp(.pow, .{ .integer = 2 }, .{ .integer = 10 }, span);
+    try std.testing.expectEqual(@as(u256, 1024), pow_result.getValue().?.integer);
 
     // Division
     const div_result = eval.evalBinaryOp(.div, .{ .integer = 10 }, .{ .integer = 5 }, span);
@@ -546,6 +598,34 @@ test "Evaluator try_eval forgiving mode" {
     try std.testing.expect(result.isRuntime());
 }
 
+test "Evaluator try_eval policy for overflow and power overflow" {
+    var env = CtEnv.init(std.testing.allocator, .{});
+    defer env.deinit();
+
+    const span = SourceSpan{ .line = 1, .column = 1, .length = 1 };
+    const max_u256: u256 = std.math.maxInt(u256);
+
+    {
+        var eval = Evaluator.init(&env, .try_eval, .strict);
+        const add_overflow = eval.evalBinaryOp(.add, .{ .integer = max_u256 }, .{ .integer = 1 }, span);
+        try std.testing.expect(add_overflow.isError());
+        try std.testing.expectEqual(CtErrorKind.overflow, add_overflow.getError().?.kind);
+
+        const pow_overflow = eval.evalBinaryOp(.pow, .{ .integer = 2 }, .{ .integer = 256 }, span);
+        try std.testing.expect(pow_overflow.isError());
+        try std.testing.expectEqual(CtErrorKind.overflow, pow_overflow.getError().?.kind);
+    }
+
+    {
+        var eval = Evaluator.init(&env, .try_eval, .forgiving);
+        const add_overflow = eval.evalBinaryOp(.add, .{ .integer = max_u256 }, .{ .integer = 1 }, span);
+        try std.testing.expect(add_overflow.isRuntime());
+
+        const pow_overflow = eval.evalBinaryOp(.pow, .{ .integer = 2 }, .{ .integer = 256 }, span);
+        try std.testing.expect(pow_overflow.isRuntime());
+    }
+}
+
 test "Evaluator unary operations" {
     var env = CtEnv.init(std.testing.allocator, .{});
     defer env.deinit();
@@ -598,9 +678,18 @@ test "Evaluator stage checking" {
         try std.testing.expect(result.?.isError());
     }
 
-    // try_eval returns runtime for runtime_only
+    // try_eval + strict must report an error (no silent runtime fallback)
     {
         var eval = Evaluator.init(&env, .try_eval, .strict);
+        const result = eval.checkStage(.runtime_only, span);
+        try std.testing.expect(result != null);
+        try std.testing.expect(result.?.isError());
+        try std.testing.expectEqual(CtErrorKind.stage_violation, result.?.getError().?.kind);
+    }
+
+    // try_eval + forgiving can degrade to runtime
+    {
+        var eval = Evaluator.init(&env, .try_eval, .forgiving);
         const result = eval.checkStage(.runtime_only, span);
         try std.testing.expect(result != null);
         try std.testing.expect(result.?.isRuntime());
@@ -610,6 +699,34 @@ test "Evaluator stage checking" {
     {
         var eval = Evaluator.init(&env, .must_eval, .strict);
         const result = eval.checkStage(.comptime_ok, span);
+        try std.testing.expect(result == null);
+    }
+}
+
+test "Evaluator knownness checking policy" {
+    var env = CtEnv.init(std.testing.allocator, .{});
+    defer env.deinit();
+
+    const span = SourceSpan{ .line = 1, .column = 1, .length = 1 };
+
+    {
+        var eval = Evaluator.init(&env, .try_eval, .strict);
+        const result = eval.requireKnown(false, span, "runtime dependency");
+        try std.testing.expect(result != null);
+        try std.testing.expect(result.?.isError());
+        try std.testing.expectEqual(CtErrorKind.not_comptime, result.?.getError().?.kind);
+    }
+
+    {
+        var eval = Evaluator.init(&env, .try_eval, .forgiving);
+        const result = eval.requireKnown(false, span, "runtime dependency");
+        try std.testing.expect(result != null);
+        try std.testing.expect(result.?.isRuntime());
+    }
+
+    {
+        var eval = Evaluator.init(&env, .try_eval, .strict);
+        const result = eval.requireKnown(true, span, "runtime dependency");
         try std.testing.expect(result == null);
     }
 }
@@ -636,4 +753,11 @@ test "Evaluator wrapping arithmetic and shift ops" {
 
     const shr_wrap = eval.evalBinaryOp(.wshr, .{ .integer = 1 }, .{ .integer = 300 }, span);
     try std.testing.expectEqual(@as(u256, 0), shr_wrap.getValue().?.integer);
+
+    const pow_wrap = eval.evalBinaryOp(.wpow, .{ .integer = 2 }, .{ .integer = 256 }, span);
+    try std.testing.expectEqual(@as(u256, 0), pow_wrap.getValue().?.integer);
+
+    const pow_overflow = eval.evalBinaryOp(.pow, .{ .integer = 2 }, .{ .integer = 256 }, span);
+    try std.testing.expect(pow_overflow.isError());
+    try std.testing.expectEqual(CtErrorKind.overflow, pow_overflow.getError().?.kind);
 }

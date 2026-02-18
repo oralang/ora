@@ -71,7 +71,7 @@ pub const CtEnv = struct {
         };
 
         // Start with a root scope
-        env.pushScope(false) catch {};
+        env.pushScope(false) catch @panic("failed to initialize comptime root scope");
 
         return env;
     }
@@ -220,11 +220,11 @@ pub const CtEnv = struct {
     }
 
     /// Set a value by name (update existing binding or bind in current scope)
-    pub fn set(self: *CtEnv, name: []const u8, val: CtValue) void {
+    pub fn set(self: *CtEnv, name: []const u8, val: CtValue) !void {
         if (self.lookup(name)) |slot| {
             self.write(slot, val);
         } else {
-            _ = self.bind(name, val) catch {};
+            _ = try self.bind(name, val);
         }
     }
 

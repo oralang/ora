@@ -411,13 +411,19 @@ pub fn parseFactor(parser: *ExpressionParser) ParserError!ast.Expressions.ExprNo
     return expr;
 }
 
-/// Parse exponentiation expressions (precedence 3: **)
+/// Parse exponentiation expressions (precedence 3: **, **%)
 pub fn parseExponent(parser: *ExpressionParser) ParserError!ast.Expressions.ExprNode {
     var expr = try parseUnary(parser);
 
-    while (parser.base.match(.StarStar)) {
+    while (parser.base.match(.StarStar) or parser.base.match(.StarStarPercent)) {
         const op_token = parser.base.previous();
         const right = try parseExponent(parser); // Right-associative
+
+        const operator: ast.Operators.Binary = switch (op_token.type) {
+            .StarStar => .StarStar,
+            .StarStarPercent => .WrappingPow,
+            else => unreachable,
+        };
 
         const left_ptr = try parser.base.arena.createNode(ast.Expressions.ExprNode);
         left_ptr.* = expr;
@@ -427,7 +433,7 @@ pub fn parseExponent(parser: *ExpressionParser) ParserError!ast.Expressions.Expr
         expr = ast.Expressions.ExprNode{
             .Binary = ast.Expressions.BinaryExpr{
                 .lhs = left_ptr,
-                .operator = .StarStar,
+                .operator = operator,
                 .rhs = right_ptr,
                 .type_info = ast.Types.TypeInfo.unknown(), // Type will be inferred from operands
                 .span = ParserCommon.makeSpan(op_token),

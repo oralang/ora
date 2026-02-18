@@ -56,9 +56,9 @@ pub const ConstPool = struct {
         };
 
         // Pre-populate common constants
-        pool.values.append(allocator, .void_val) catch {};
-        pool.values.append(allocator, .{ .boolean = true }) catch {};
-        pool.values.append(allocator, .{ .boolean = false }) catch {};
+        pool.values.append(allocator, .void_val) catch @panic("failed to initialize const pool (void)");
+        pool.values.append(allocator, .{ .boolean = true }) catch @panic("failed to initialize const pool (true)");
+        pool.values.append(allocator, .{ .boolean = false }) catch @panic("failed to initialize const pool (false)");
 
         return pool;
     }

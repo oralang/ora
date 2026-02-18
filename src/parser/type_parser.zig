@@ -349,7 +349,7 @@ pub const TypeParser = struct {
         if (std.mem.eql(u8, type_name, "type")) {
             return TypeInfo{
                 .category = .Type,
-                .ora_type = OraType{ .@"type" = {} },
+                .ora_type = OraType{ .type = {} },
                 .source = .explicit,
                 .span = span,
             };

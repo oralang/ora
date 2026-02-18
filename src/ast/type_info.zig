@@ -249,7 +249,7 @@ pub const OraType = union(enum) {
     module: ?[]const u8, // Optional module name
 
     // generics / comptime type system
-    @"type": void, // the metatype — `comptime T: type`
+    type: void, // the metatype — `comptime T: type`
     type_parameter: []const u8, // placeholder for a generic type param, e.g. "T"
 
     // refinement types
@@ -295,7 +295,7 @@ pub const OraType = union(enum) {
             ._union => .Union,
             .anonymous_struct => .Struct,
             .module => .Module,
-            .@"type" => .Type,
+            .type => .Type,
             .type_parameter => .Unknown, // resolved during monomorphization
             // refinement types inherit the category of their base type
             .min_value => |mv| mv.base.*.getCategory(),
@@ -397,7 +397,7 @@ pub const OraType = union(enum) {
             ._union => "union",
             .anonymous_struct => "struct",
             .module => "module",
-            .@"type" => "type",
+            .type => "type",
             .type_parameter => |name| name,
             // refinement types - use render() for proper formatting
             .min_value, .max_value, .in_range, .scaled, .exact, .non_zero_address => "refinement",
@@ -413,7 +413,7 @@ pub const OraType = union(enum) {
     pub fn equals(a: OraType, b: OraType) bool {
         if (std.meta.activeTag(a) != std.meta.activeTag(b)) return false;
         return switch (a) {
-            .u8, .u16, .u32, .u64, .u128, .u256, .i8, .i16, .i32, .i64, .i128, .i256, .bool, .string, .address, .bytes, .void, .@"type" => true,
+            .u8, .u16, .u32, .u64, .u128, .u256, .i8, .i16, .i32, .i64, .i128, .i256, .bool, .string, .address, .bytes, .void, .type => true,
             .struct_type => |an| switch (b) {
                 .struct_type => |bn| std.mem.eql(u8, an, bn),
                 else => unreachable,
@@ -537,7 +537,7 @@ pub const OraType = union(enum) {
         const tag_val: u64 = @intCast(@intFromEnum(std.meta.activeTag(self)));
         h.update(std.mem.asBytes(&tag_val));
         switch (self) {
-            .u8, .u16, .u32, .u64, .u128, .u256, .i8, .i16, .i32, .i64, .i128, .i256, .bool, .string, .address, .bytes, .void, .@"type" => {},
+            .u8, .u16, .u32, .u64, .u128, .u256, .i8, .i16, .i32, .i64, .i128, .i256, .bool, .string, .address, .bytes, .void, .type => {},
             .type_parameter => |name| h.update(name),
             .struct_type => |name| h.update(name),
             .enum_type => |name| h.update(name),
@@ -716,7 +716,7 @@ pub const OraType = union(enum) {
                 try writer.writeByte('}');
             },
             .module => |_| try writer.writeAll("module"),
-            .@"type" => try writer.writeAll("type"),
+            .type => try writer.writeAll("type"),
             .type_parameter => |name| try writer.writeAll(name),
             .min_value => |mv| {
                 try writer.writeAll("MinValue<");

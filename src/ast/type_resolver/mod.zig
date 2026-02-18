@@ -94,6 +94,10 @@ pub const TypeResolutionError = error{
     WriteToLockedSlot,
     /// @lock/@unlock only apply to storage slots
     LockUnlockOnlyStorage,
+    /// Checked arithmetic failed during compile-time folding (proven overflow/underflow/div-by-zero)
+    ComptimeArithmeticError,
+    /// Explicit/known compile-time evaluation failed and cannot fall back to runtime
+    ComptimeEvaluationError,
 };
 
 /// Main type resolver orchestrator
@@ -499,7 +503,9 @@ pub const TypeResolver = struct {
 
         // update symbol table with resolved type
         const scope = if (self.current_scope) |s| s else self.symbol_table.root;
-        _ = self.symbol_table.updateSymbolType(scope, constant.name, constant.typ, false) catch {};
+        self.symbol_table.updateSymbolType(scope, constant.name, constant.typ, false) catch |err| switch (err) {
+            error.SymbolNotFound => return TypeResolutionError.UndefinedIdentifier,
+        };
     }
 
     fn resolveErrorDecl(
@@ -830,7 +836,7 @@ pub const TypeResolver = struct {
         }
 
         // Push a comptime env scope so function-local consts don't leak to other functions
-        self.core_resolver.comptime_env.pushScope(false) catch {};
+        try self.core_resolver.comptime_env.pushScope(false);
         defer self.core_resolver.comptime_env.popScope();
 
         // Rewrite generic struct instantiations (e.g., Pair(u256) { ... }) before
@@ -871,18 +877,25 @@ pub const TypeResolver = struct {
 
         // Persist locked storage roots for this function (for selective runtime guard emission).
         var bases_copy = std.StringHashMap(void).init(self.allocator);
+        errdefer {
+            var cleanup_it = bases_copy.keyIterator();
+            while (cleanup_it.next()) |k| self.allocator.free(k.*);
+            bases_copy.deinit();
+        }
         var bit = self.core_resolver.locked_bases_this_function.keyIterator();
         while (bit.next()) |k| {
-            bases_copy.put(self.allocator.dupe(u8, k.*) catch return TypeResolutionError.OutOfMemory, {}) catch {};
+            const duped = try self.allocator.dupe(u8, k.*);
+            errdefer self.allocator.free(duped);
+            try bases_copy.put(duped, {});
         }
         if (self.symbol_table.function_locked_storage_roots.getPtr(function.name)) |existing| {
             var kit = existing.keyIterator();
             while (kit.next()) |kk| self.allocator.free(kk.*);
             existing.deinit();
         }
-        self.symbol_table.function_locked_storage_roots.put(function.name, bases_copy) catch {};
+        try self.symbol_table.function_locked_storage_roots.put(function.name, bases_copy);
 
-        const stored_effect = functionEffectFromCore(self.allocator, &func_effect);
+        const stored_effect = try functionEffectFromCore(self.allocator, &func_effect);
         if (self.symbol_table.function_effects.getPtr(function.name)) |existing| {
             existing.deinit(self.allocator);
             existing.* = stored_effect;
@@ -1061,31 +1074,35 @@ pub const TypeResolver = struct {
     fn functionEffectFromCore(
         allocator: std.mem.Allocator,
         eff: *Effect,
-    ) FunctionEffect {
+    ) TypeResolutionError!FunctionEffect {
         const result = switch (eff.*) {
             .Pure => FunctionEffect.pure(),
             .Reads => |slots| blk: {
                 var list = std.ArrayList([]const u8){};
+                errdefer list.deinit(allocator);
                 for (slots.slots.items) |slot| {
-                    list.append(allocator, slot) catch {};
+                    try list.append(allocator, slot);
                 }
                 break :blk FunctionEffect.reads(list);
             },
             .Writes => |slots| blk: {
                 var list = std.ArrayList([]const u8){};
+                errdefer list.deinit(allocator);
                 for (slots.slots.items) |slot| {
-                    list.append(allocator, slot) catch {};
+                    try list.append(allocator, slot);
                 }
                 break :blk FunctionEffect.writes(list);
             },
             .ReadsWrites => |rw| blk: {
                 var reads = std.ArrayList([]const u8){};
+                errdefer reads.deinit(allocator);
                 for (rw.reads.slots.items) |slot| {
-                    reads.append(allocator, slot) catch {};
+                    try reads.append(allocator, slot);
                 }
                 var writes = std.ArrayList([]const u8){};
+                errdefer writes.deinit(allocator);
                 for (rw.writes.slots.items) |slot| {
-                    writes.append(allocator, slot) catch {};
+                    try writes.append(allocator, slot);
                 }
                 break :blk FunctionEffect.readsWrites(reads, writes);
             },
@@ -1200,7 +1217,7 @@ pub const TypeResolver = struct {
                 .typ = TypeInfo.explicit(.Struct, OraType{ .struct_type = mangled }, generic_span),
                 .span = generic_span,
             };
-            _ = self.symbol_table.declare(root, sym) catch {};
+            _ = try self.symbol_table.declare(root, sym);
         }
     }
 

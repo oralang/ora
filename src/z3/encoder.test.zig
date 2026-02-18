@@ -40,6 +40,8 @@ test "encodeMLIRType maps bool and i32" {
 
     const mlir_ctx = mlir.oraContextCreate();
     defer mlir.oraContextDestroy(mlir_ctx);
+    loadAllDialects(mlir_ctx);
+    _ = mlir.oraDialectRegister(mlir_ctx);
 
     const ty_i1 = mlir.oraIntegerTypeCreate(mlir_ctx, 1);
     const bool_sort = try encoder.encodeMLIRType(ty_i1);
@@ -49,6 +51,56 @@ test "encodeMLIRType maps bool and i32" {
     const i32_sort = try encoder.encodeMLIRType(ty_i32);
     try testing.expectEqual(@as(u32, z3.Z3_BV_SORT), @as(u32, @intCast(z3.Z3_get_sort_kind(z3_ctx.ctx, i32_sort))));
     try testing.expectEqual(@as(u32, 32), @as(u32, @intCast(z3.Z3_get_bv_sort_size(z3_ctx.ctx, i32_sort))));
+
+    const ty_bytes = mlir.oraBytesTypeGet(mlir_ctx);
+    const bytes_sort = try encoder.encodeMLIRType(ty_bytes);
+    try testing.expect(z3.Z3_is_string_sort(z3_ctx.ctx, bytes_sort));
+}
+
+test "ora.bytes.constant encodes canonical hex string" {
+    var z3_ctx = try Context.init(testing.allocator);
+    defer z3_ctx.deinit();
+
+    var encoder = Encoder.init(&z3_ctx, testing.allocator);
+    defer encoder.deinit();
+
+    const mlir_ctx = mlir.oraContextCreate();
+    defer mlir.oraContextDestroy(mlir_ctx);
+    loadAllDialects(mlir_ctx);
+    _ = mlir.oraDialectRegister(mlir_ctx);
+
+    const loc = mlir.oraLocationUnknownGet(mlir_ctx);
+    const bytes_ty = mlir.oraBytesTypeGet(mlir_ctx);
+
+    const with_prefix = mlir.oraBytesConstantOpCreate(mlir_ctx, loc, stringRef("0xDEADbeef"), bytes_ty);
+    const without_prefix = mlir.oraBytesConstantOpCreate(mlir_ctx, loc, stringRef("deadBEEF"), bytes_ty);
+
+    const lhs = try encoder.encodeOperation(with_prefix);
+    const rhs = try encoder.encodeOperation(without_prefix);
+
+    var solver = try Solver.init(&z3_ctx, testing.allocator);
+    defer solver.deinit();
+    solver.assert(z3.Z3_mk_not(z3_ctx.ctx, z3.Z3_mk_eq(z3_ctx.ctx, lhs, rhs)));
+    try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_FALSE), solver.check());
+}
+
+test "ora.bytes.constant rejects invalid hex" {
+    var z3_ctx = try Context.init(testing.allocator);
+    defer z3_ctx.deinit();
+
+    var encoder = Encoder.init(&z3_ctx, testing.allocator);
+    defer encoder.deinit();
+
+    const mlir_ctx = mlir.oraContextCreate();
+    defer mlir.oraContextDestroy(mlir_ctx);
+    loadAllDialects(mlir_ctx);
+    _ = mlir.oraDialectRegister(mlir_ctx);
+
+    const loc = mlir.oraLocationUnknownGet(mlir_ctx);
+    const bytes_ty = mlir.oraBytesTypeGet(mlir_ctx);
+    const invalid = mlir.oraBytesConstantOpCreate(mlir_ctx, loc, stringRef("0xabc"), bytes_ty);
+
+    try testing.expectError(error.UnsupportedOperation, encoder.encodeOperation(invalid));
 }
 
 test "encodeIntegerConstant encodes large numerals" {
@@ -485,6 +537,52 @@ test "arith divsi encodes signed division" {
     const ast = try encoder.encodeOperation(div_op);
     const ast_str = std.mem.span(z3.Z3_ast_to_string(z3_ctx.ctx, ast));
     try testing.expect(std.mem.indexOf(u8, ast_str, "bvsdiv") != null);
+}
+
+test "ora.power encodes modular exponentiation" {
+    var z3_ctx = try Context.init(testing.allocator);
+    defer z3_ctx.deinit();
+
+    var encoder = Encoder.init(&z3_ctx, testing.allocator);
+    defer encoder.deinit();
+
+    const mlir_ctx = mlir.oraContextCreate();
+    defer mlir.oraContextDestroy(mlir_ctx);
+    loadAllDialects(mlir_ctx);
+    _ = mlir.oraDialectRegister(mlir_ctx);
+
+    const loc = mlir.oraLocationUnknownGet(mlir_ctx);
+    const i256_ty = mlir.oraIntegerTypeCreate(mlir_ctx, 256);
+
+    const base_attr = mlir.oraIntegerAttrCreateI64FromType(i256_ty, 2);
+    const exp10_attr = mlir.oraIntegerAttrCreateI64FromType(i256_ty, 10);
+    const exp256_attr = mlir.oraIntegerAttrCreateI64FromType(i256_ty, 256);
+
+    const base_op = mlir.oraArithConstantOpCreate(mlir_ctx, loc, i256_ty, base_attr);
+    const exp10_op = mlir.oraArithConstantOpCreate(mlir_ctx, loc, i256_ty, exp10_attr);
+    const exp256_op = mlir.oraArithConstantOpCreate(mlir_ctx, loc, i256_ty, exp256_attr);
+
+    const base = mlir.oraOperationGetResult(base_op, 0);
+    const exp10 = mlir.oraOperationGetResult(exp10_op, 0);
+    const exp256 = mlir.oraOperationGetResult(exp256_op, 0);
+
+    const pow10_op = mlir.oraPowerOpCreate(mlir_ctx, loc, base, exp10, i256_ty);
+    const pow10 = try encoder.encodeOperation(pow10_op);
+    const expected_1024 = try encoder.encodeIntegerConstant(1024, 256);
+
+    var solver_pow10 = try Solver.init(&z3_ctx, testing.allocator);
+    defer solver_pow10.deinit();
+    solver_pow10.assert(z3.Z3_mk_not(z3_ctx.ctx, z3.Z3_mk_eq(z3_ctx.ctx, pow10, expected_1024)));
+    try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_FALSE), solver_pow10.check());
+
+    const pow256_op = mlir.oraPowerOpCreate(mlir_ctx, loc, base, exp256, i256_ty);
+    const pow256 = try encoder.encodeOperation(pow256_op);
+    const expected_zero = try encoder.encodeIntegerConstant(0, 256);
+
+    var solver_pow256 = try Solver.init(&z3_ctx, testing.allocator);
+    defer solver_pow256.deinit();
+    solver_pow256.assert(z3.Z3_mk_not(z3_ctx.ctx, z3.Z3_mk_eq(z3_ctx.ctx, pow256, expected_zero)));
+    try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_FALSE), solver_pow256.check());
 }
 
 test "arith.constant -1 is encoded as all-ones at target bit width" {

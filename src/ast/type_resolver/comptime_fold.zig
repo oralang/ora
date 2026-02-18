@@ -6,6 +6,7 @@
 // ============================================================================
 
 const std = @import("std");
+const builtin = @import("builtin");
 const ast = @import("../../ast.zig");
 const state = @import("../../semantics/state.zig");
 const core = @import("core/mod.zig");
@@ -22,7 +23,11 @@ const CommonTypes = type_info_mod.CommonTypes;
 const SymbolTable = state.SymbolTable;
 const Scope = state.Scope;
 
-const FoldError = error{OutOfMemory};
+const FoldError = error{
+    OutOfMemory,
+    ComptimeArithmeticError,
+    ComptimeEvaluationError,
+};
 
 /// Helper to fold a CtValue into a literal expression
 /// Returns true if folding succeeded, false otherwise
@@ -52,10 +57,12 @@ fn tryFoldValue(
             // Check that the value fits within the declared type width
             if (ty.ora_type) |ot| {
                 if (!fitsInType(int_val, ot)) {
-                    log.warn("comptime value {d} overflows type '{s}' at line {d}\n", .{
-                        int_val, @tagName(ot), span.line,
-                    });
-                    return false; // don't fold — leave as runtime expression
+                    if (!builtin.is_test) {
+                        log.err("comptime value {d} overflows type '{s}' at line {d}\n", .{
+                            int_val, @tagName(ot), span.line,
+                        });
+                    }
+                    return error.ComptimeArithmeticError;
                 }
             }
             const value_str = try std.fmt.allocPrint(ctx.type_storage_allocator, "{}", .{int_val});
@@ -129,7 +136,7 @@ fn foldNode(ctx: *FoldContext, node: *ast.AstNode) FoldError!void {
                     const const_result = ctx.core_resolver.evaluateConstantExpression(value);
                     if (const_result.getValue()) |ct_value| {
                         if (ctx.current_scope) |scope| {
-                            ctx.core_resolver.setComptimeValue(scope, var_decl.name, ct_value) catch {};
+                            try ctx.core_resolver.setComptimeValue(scope, var_decl.name, ct_value);
                         }
                     }
                 }
@@ -186,7 +193,7 @@ fn foldFunction(ctx: *FoldContext, function: *ast.FunctionNode) FoldError!void {
     ctx.core_resolver.current_function_return_type = function.return_type_info;
 
     // Push a comptime env scope so function-local consts don't leak to other functions
-    ctx.core_resolver.comptime_env.pushScope(false) catch {};
+    try ctx.core_resolver.comptime_env.pushScope(false);
     defer {
         ctx.core_resolver.comptime_env.popScope();
         ctx.current_scope = prev_scope;
@@ -241,7 +248,7 @@ fn foldStmt(ctx: *FoldContext, stmt: *ast.Statements.StmtNode) FoldError!void {
                 const const_result = ctx.core_resolver.evaluateConstantExpression(value);
                 if (const_result.getValue()) |ct_value| {
                     if (ctx.current_scope) |scope| {
-                        ctx.core_resolver.setComptimeValue(scope, var_decl.name, ct_value) catch {};
+                        try ctx.core_resolver.setComptimeValue(scope, var_decl.name, ct_value);
                     }
                 }
             }
@@ -271,7 +278,7 @@ fn foldStmt(ctx: *FoldContext, stmt: *ast.Statements.StmtNode) FoldError!void {
         .While => |*while_stmt| {
             if (while_stmt.is_comptime) {
                 // Comptime while: evaluate entirely at compile time
-                tryEvalComptimeWhile(ctx, while_stmt);
+                try tryEvalComptimeWhile(ctx, while_stmt);
             }
             try foldExpr(ctx, &while_stmt.condition, true);
             for (while_stmt.invariants) |*inv| {
@@ -285,7 +292,7 @@ fn foldStmt(ctx: *FoldContext, stmt: *ast.Statements.StmtNode) FoldError!void {
         .ForLoop => |*for_stmt| {
             if (for_stmt.is_comptime) {
                 // Comptime for: evaluate entirely at compile time
-                tryEvalComptimeFor(ctx, for_stmt);
+                try tryEvalComptimeFor(ctx, for_stmt);
             }
             try foldExpr(ctx, &for_stmt.iterable, true);
             for (for_stmt.invariants) |*inv| {
@@ -394,9 +401,9 @@ fn foldExpr(ctx: *FoldContext, expr: *ast.Expressions.ExprNode, allow_fold: bool
                 if (eval_result.getValue()) |ct_val| {
                     if (try tryFoldValue(ctx, expr, ct_val, getExpressionSpan(expr), getExpressionTypeInfo(expr))) return;
                 } else if (bin.lhs.* == .Literal and bin.rhs.* == .Literal) {
-                    // Both operands are compile-time known but the result failed —
-                    // overflow/underflow/div-by-zero. Warn but keep emitting MLIR.
-                    emitComptimeArithError(ctx, expr);
+                    // Both operands are compile-time known but checked arithmetic failed.
+                    // This is a hard compile-time error: do not lower guaranteed-invalid code.
+                    try emitComptimeArithError(ctx, expr);
                 }
             }
         },
@@ -566,9 +573,21 @@ fn foldExpr(ctx: *FoldContext, expr: *ast.Expressions.ExprNode, allow_fold: bool
         if (is_param) return;
     }
 
-    const eval_result = ctx.core_resolver.evaluateConstantExpression(expr);
-    const ct_val = eval_result.getValue() orelse return;
     const span = getExpressionSpan(expr);
+    const eval_result = ctx.core_resolver.evaluateConstantExpression(expr);
+    const ct_val = switch (eval_result) {
+        .value => |v| v,
+        .err => |ct_err| {
+            logComptimeStrictFailure(span, ct_err.message);
+            return foldErrorFromCtError(ct_err.kind);
+        },
+        .not_constant => {
+            if (isDefinitelyComptimeKnown(ctx, expr)) {
+                try emitComptimeArithError(ctx, expr);
+            }
+            return;
+        },
+    };
     switch (ct_val) {
         .integer => |int_val| {
             var ty = getExpressionTypeInfo(expr);
@@ -705,6 +724,193 @@ fn getExpressionTypeInfo(expr: *ast.Expressions.ExprNode) TypeInfo {
     };
 }
 
+fn isDefinitelyComptimeKnown(ctx: *FoldContext, expr: *const ast.Expressions.ExprNode) bool {
+    return switch (expr.*) {
+        .Literal, .EnumLiteral => true,
+        .Identifier => |id| blk: {
+            // Function parameters are runtime values by definition.
+            const is_param = if (ctx.current_scope) |scope|
+                if (SymbolTable.findUp(scope, id.name)) |sym| sym.kind == .Param else false
+            else
+                false;
+            if (is_param) break :blk false;
+            break :blk ctx.core_resolver.lookupComptimeValue(id.name) != null;
+        },
+        .Unary => |unary| isDefinitelyComptimeKnown(ctx, unary.operand),
+        .Binary => |bin| isDefinitelyComptimeKnown(ctx, bin.lhs) and
+            isDefinitelyComptimeKnown(ctx, bin.rhs),
+        .Cast => |cast_expr| isDefinitelyComptimeKnown(ctx, cast_expr.operand),
+        .Index => |idx| isDefinitelyComptimeKnown(ctx, idx.target) and
+            isDefinitelyComptimeKnown(ctx, idx.index),
+        .FieldAccess => |fa| isDefinitelyComptimeKnown(ctx, fa.target),
+        .Tuple => |t| blk: {
+            for (t.elements) |el| {
+                if (!isDefinitelyComptimeKnown(ctx, el)) break :blk false;
+            }
+            break :blk true;
+        },
+        .ArrayLiteral => |arr| blk: {
+            for (arr.elements) |el| {
+                if (!isDefinitelyComptimeKnown(ctx, el)) break :blk false;
+            }
+            break :blk true;
+        },
+        .StructInstantiation => |si| blk: {
+            for (si.fields) |field| {
+                if (!isDefinitelyComptimeKnown(ctx, field.value)) break :blk false;
+            }
+            break :blk true;
+        },
+        .AnonymousStruct => |anon| blk: {
+            for (anon.fields) |field| {
+                if (!isDefinitelyComptimeKnown(ctx, field.value)) break :blk false;
+            }
+            break :blk true;
+        },
+        .Range => |range| isDefinitelyComptimeKnown(ctx, range.start) and
+            isDefinitelyComptimeKnown(ctx, range.end),
+        .Comptime => |*ct| isBlockDefinitelyComptimeKnown(ctx, &ct.block),
+        .Old => |old_expr| isDefinitelyComptimeKnown(ctx, old_expr.expr),
+        .Quantified => |q| (if (q.condition) |cond| isDefinitelyComptimeKnown(ctx, cond) else true) and
+            isDefinitelyComptimeKnown(ctx, q.body),
+        .SwitchExpression => |sw| blk: {
+            if (!isDefinitelyComptimeKnown(ctx, sw.condition)) break :blk false;
+            for (sw.cases) |*case| {
+                if (!isSwitchPatternDefinitelyComptimeKnown(ctx, &case.pattern)) break :blk false;
+                if (!isSwitchBodyDefinitelyComptimeKnown(ctx, &case.body)) break :blk false;
+            }
+            if (sw.default_case) |*default_case| {
+                if (!isBlockDefinitelyComptimeKnown(ctx, default_case)) break :blk false;
+            }
+            break :blk true;
+        },
+        .Try => |try_expr| isDefinitelyComptimeKnown(ctx, try_expr.expr),
+        .ErrorCast => |err_cast| isDefinitelyComptimeKnown(ctx, err_cast.operand),
+        .Shift => |shift| isDefinitelyComptimeKnown(ctx, shift.mapping) and
+            isDefinitelyComptimeKnown(ctx, shift.source) and
+            isDefinitelyComptimeKnown(ctx, shift.dest) and
+            isDefinitelyComptimeKnown(ctx, shift.amount),
+        .LabeledBlock => |*lb| isBlockDefinitelyComptimeKnown(ctx, &lb.block),
+        .Destructuring => |destr| isDefinitelyComptimeKnown(ctx, destr.value),
+        .Call => |call| blk: {
+            // Error-propagating calls are semantically runtime-flow values (`try`/`catch`),
+            // not guaranteed foldable constants.
+            if (isErrorPropagatingType(call.type_info)) break :blk false;
+
+            // Only direct calls can be judged here; member/runtime calls are not forced.
+            if (call.callee.* != .Identifier) break :blk false;
+            const fn_name = call.callee.Identifier.name;
+            if (fn_name.len == 0) break :blk false;
+
+            // Non-builtin function calls are only "definitely known" when purity is known.
+            if (fn_name[0] != '@') {
+                const effect = ctx.symbol_table.function_effects.get(fn_name) orelse break :blk false;
+                if (effect != .Pure) break :blk false;
+            }
+
+            for (call.arguments) |arg| {
+                if (!isDefinitelyComptimeKnown(ctx, arg)) break :blk false;
+            }
+            break :blk true;
+        },
+        else => false,
+    };
+}
+
+fn isSwitchPatternDefinitelyComptimeKnown(ctx: *FoldContext, pattern: *const ast.Expressions.SwitchPattern) bool {
+    return switch (pattern.*) {
+        .Literal => true,
+        .Range => |range| isDefinitelyComptimeKnown(ctx, range.start) and
+            isDefinitelyComptimeKnown(ctx, range.end),
+        .EnumValue, .Else => true,
+    };
+}
+
+fn isSwitchBodyDefinitelyComptimeKnown(ctx: *FoldContext, body: *const ast.Expressions.SwitchBody) bool {
+    return switch (body.*) {
+        .Expression => |expr| isDefinitelyComptimeKnown(ctx, expr),
+        .Block => |*block| isBlockDefinitelyComptimeKnown(ctx, block),
+        .LabeledBlock => |*labeled| isBlockDefinitelyComptimeKnown(ctx, &labeled.block),
+    };
+}
+
+fn isBlockDefinitelyComptimeKnown(ctx: *FoldContext, block: *const ast.Statements.BlockNode) bool {
+    for (block.statements) |*stmt| {
+        if (!isStmtDefinitelyComptimeKnown(ctx, stmt)) return false;
+    }
+    return true;
+}
+
+fn isStmtDefinitelyComptimeKnown(ctx: *FoldContext, stmt: *const ast.Statements.StmtNode) bool {
+    return switch (stmt.*) {
+        .Expr => |*expr| isDefinitelyComptimeKnown(ctx, expr),
+        .VariableDecl => |*var_decl| if (var_decl.value) |value|
+            isDefinitelyComptimeKnown(ctx, value)
+        else
+            false,
+        .DestructuringAssignment => |*dest| isDefinitelyComptimeKnown(ctx, dest.value),
+        .Return => |*ret| if (ret.value) |*value|
+            isDefinitelyComptimeKnown(ctx, value)
+        else
+            true,
+        .If => |*if_stmt| isDefinitelyComptimeKnown(ctx, &if_stmt.condition) and
+            isBlockDefinitelyComptimeKnown(ctx, &if_stmt.then_branch) and
+            (if (if_stmt.else_branch) |*else_block| isBlockDefinitelyComptimeKnown(ctx, else_block) else true),
+        .Switch => |*sw| blk: {
+            if (!isDefinitelyComptimeKnown(ctx, &sw.condition)) break :blk false;
+            for (sw.cases) |*case| {
+                if (!isSwitchPatternDefinitelyComptimeKnown(ctx, &case.pattern)) break :blk false;
+                if (!isSwitchBodyDefinitelyComptimeKnown(ctx, &case.body)) break :blk false;
+            }
+            if (sw.default_case) |*default_case| {
+                if (!isBlockDefinitelyComptimeKnown(ctx, default_case)) break :blk false;
+            }
+            break :blk true;
+        },
+        .Break => |*brk| if (brk.value) |value|
+            isDefinitelyComptimeKnown(ctx, value)
+        else
+            true,
+        .Continue => |*cont| if (cont.value) |value|
+            isDefinitelyComptimeKnown(ctx, value)
+        else
+            true,
+        .CompoundAssignment => |*compound| blk: {
+            if (compound.target.* != .Identifier) break :blk false;
+            if (!isDefinitelyComptimeKnown(ctx, compound.value)) break :blk false;
+
+            const target_name = compound.target.Identifier.name;
+            const is_param = if (ctx.current_scope) |scope|
+                if (SymbolTable.findUp(scope, target_name)) |sym| sym.kind == .Param else false
+            else
+                false;
+            if (is_param) break :blk false;
+
+            break :blk ctx.core_resolver.lookupComptimeValue(target_name) != null;
+        },
+        .LabeledBlock => |*labeled| isBlockDefinitelyComptimeKnown(ctx, &labeled.block),
+        .Assert => |*assert_stmt| isDefinitelyComptimeKnown(ctx, &assert_stmt.condition),
+        .Invariant => |*inv| isDefinitelyComptimeKnown(ctx, &inv.condition),
+        .Requires => |*req| isDefinitelyComptimeKnown(ctx, &req.condition),
+        .Ensures => |*ens| isDefinitelyComptimeKnown(ctx, &ens.condition),
+        .Assume => |*assume| isDefinitelyComptimeKnown(ctx, &assume.condition),
+        // Conservative false for statements that are runtime-only or require
+        // richer control-flow/data-flow analysis to guarantee comptime knownness.
+        .While, .ForLoop, .Log, .Lock, .Unlock, .ErrorDecl, .TryBlock, .Havoc => false,
+    };
+}
+
+fn isErrorPropagatingType(ty: TypeInfo) bool {
+    if (ty.category == .ErrorUnion or ty.category == .Result or ty.category == .Error) return true;
+
+    const ora_ty = ty.ora_type orelse return false;
+    return switch (ora_ty) {
+        .error_union => true,
+        ._union => |members| members.len > 0 and members[0] == .error_union,
+        else => false,
+    };
+}
+
 fn getExpressionSpan(expr: *ast.Expressions.ExprNode) ast.SourceSpan {
     return switch (expr.*) {
         .Identifier => |id| id.span,
@@ -767,29 +973,49 @@ fn fitsInType(val: u256, ot: type_info_mod.OraType) bool {
     };
 }
 
-/// Both operands are compile-time known but the result failed — re-evaluate
-/// in strict mode to extract the precise error and emit a compile-time warning.
-/// The MLIR is still emitted (with the runtime overflow guard), so pub functions
-/// remain in the ABI.
-fn emitComptimeArithError(ctx: *FoldContext, expr: *ast.Expressions.ExprNode) void {
+fn foldErrorFromCtError(kind: comptime_eval.CtErrorKind) FoldError {
+    return if (kind.isArithmeticError())
+        error.ComptimeArithmeticError
+    else
+        error.ComptimeEvaluationError;
+}
+
+fn logComptimeStrictFailure(span: ast.SourceSpan, message: []const u8) void {
+    if (!builtin.is_test) {
+        log.err("comptime evaluation error at line {d}: {s}\n", .{ span.line, message });
+    }
+}
+
+/// Expression is definitely compile-time-known but failed to evaluate.
+/// Re-evaluate in strict mode and convert the error into a hard compiler error.
+fn emitComptimeArithError(ctx: *FoldContext, expr: *ast.Expressions.ExprNode) FoldError!void {
     const lookup = comptime_eval.IdentifierLookup{
         .ctx = ctx.core_resolver,
         .lookupFn = core.lookupComptimeValueThunk,
         .enumLookupFn = core.lookupEnumValueThunk,
     };
-    var eval = comptime_eval.AstEvaluator.init(
+    const fn_lookup = comptime_eval.FunctionLookup{
+        .ctx = ctx.core_resolver,
+        .lookupFn = core.lookupComptimeFnThunk,
+    };
+    var eval = comptime_eval.AstEvaluator.initWithFnLookup(
         &ctx.core_resolver.comptime_env,
         .must_eval,
         .strict,
         lookup,
+        fn_lookup,
     );
     const strict_result = eval.evalExpr(expr);
     switch (strict_result) {
         .err => |ct_err| {
-            const span = getExpressionSpan(expr);
-            log.warn("comptime arithmetic error at line {d}: {s}\n", .{ span.line, ct_err.message });
+            logComptimeStrictFailure(getExpressionSpan(expr), ct_err.message);
+            return foldErrorFromCtError(ct_err.kind);
         },
-        else => {},
+        .not_constant => {
+            logComptimeStrictFailure(getExpressionSpan(expr), "expression could not be evaluated at compile time");
+            return error.ComptimeEvaluationError;
+        },
+        else => return,
     }
 }
 
@@ -807,9 +1033,8 @@ fn setLiteralSpan(lit: *ast.Expressions.LiteralExpr, span: ast.SourceSpan) void 
 }
 
 /// Evaluate a comptime while loop at compile time.
-/// On success: bindings are updated in comptime_env, is_comptime stays true (loop skipped in MLIR).
-/// On failure: is_comptime is cleared so the loop falls back to runtime emission.
-fn tryEvalComptimeWhile(ctx: *FoldContext, while_stmt: *ast.Statements.WhileNode) void {
+/// Explicit `comptime` loops are strict: failure is a hard compile-time error.
+fn tryEvalComptimeWhile(ctx: *FoldContext, while_stmt: *ast.Statements.WhileNode) FoldError!void {
     const lookup = comptime_eval.IdentifierLookup{
         .ctx = ctx.core_resolver,
         .lookupFn = @import("core/mod.zig").lookupComptimeValueThunk,
@@ -818,22 +1043,28 @@ fn tryEvalComptimeWhile(ctx: *FoldContext, while_stmt: *ast.Statements.WhileNode
     var stmt_eval = comptime_eval.StmtEvaluator.init(
         ctx.allocator,
         &ctx.core_resolver.comptime_env,
-        .try_eval,
-        .forgiving,
+        .must_eval,
+        .strict,
         lookup,
     );
     const while_as_stmt = ast.Statements.StmtNode{ .While = while_stmt.* };
     const result = stmt_eval.evalStatement(&while_as_stmt);
     switch (result) {
         .ok => {}, // success — env is updated, loop will be skipped in MLIR
-        else => while_stmt.is_comptime = false, // failed — fall back to runtime loop
+        .err => |ct_err| {
+            logComptimeStrictFailure(while_stmt.span, ct_err.message);
+            return foldErrorFromCtError(ct_err.kind);
+        },
+        else => {
+            logComptimeStrictFailure(while_stmt.span, "explicit comptime while could not be fully evaluated");
+            return error.ComptimeEvaluationError;
+        },
     }
 }
 
 /// Evaluate a comptime for loop at compile time.
-/// On success: bindings are updated in comptime_env, is_comptime stays true (loop skipped in MLIR).
-/// On failure: is_comptime is cleared so the loop falls back to runtime emission.
-fn tryEvalComptimeFor(ctx: *FoldContext, for_stmt: *ast.Statements.ForLoopNode) void {
+/// Explicit `comptime` loops are strict: failure is a hard compile-time error.
+fn tryEvalComptimeFor(ctx: *FoldContext, for_stmt: *ast.Statements.ForLoopNode) FoldError!void {
     const lookup = comptime_eval.IdentifierLookup{
         .ctx = ctx.core_resolver,
         .lookupFn = @import("core/mod.zig").lookupComptimeValueThunk,
@@ -842,15 +1073,22 @@ fn tryEvalComptimeFor(ctx: *FoldContext, for_stmt: *ast.Statements.ForLoopNode) 
     var stmt_eval = comptime_eval.StmtEvaluator.init(
         ctx.allocator,
         &ctx.core_resolver.comptime_env,
-        .try_eval,
-        .forgiving,
+        .must_eval,
+        .strict,
         lookup,
     );
     const for_as_stmt = ast.Statements.StmtNode{ .ForLoop = for_stmt.* };
     const result = stmt_eval.evalStatement(&for_as_stmt);
     switch (result) {
         .ok => {}, // success — loop will be skipped in MLIR
-        else => for_stmt.is_comptime = false, // failed — fall back to runtime loop
+        .err => |ct_err| {
+            logComptimeStrictFailure(for_stmt.span, ct_err.message);
+            return foldErrorFromCtError(ct_err.kind);
+        },
+        else => {
+            logComptimeStrictFailure(for_stmt.span, "explicit comptime for could not be fully evaluated");
+            return error.ComptimeEvaluationError;
+        },
     }
 }
 
@@ -978,7 +1216,7 @@ fn collectCallTargetsExprVal(expr: ast.Expressions.ExprNode, live: *std.StringHa
                 const name = call.callee.Identifier.name;
                 // Skip self-calls — a recursive fn calling itself doesn't keep it live
                 const is_self = if (exclude) |ex| std.mem.eql(u8, name, ex) else false;
-                if (!is_self) live.put(name, {}) catch {};
+                if (!is_self) live.put(name, {}) catch @panic("failed to record live call target");
             }
             for (call.arguments) |arg| collectCallTargetsExprVal(arg.*, live, exclude);
         },

@@ -476,7 +476,7 @@ pub const ExpressionParser = struct {
             const name_copy = try self.base.arena.createString(type_token.lexeme);
             return ast.Expressions.ExprNode{ .Identifier = ast.Expressions.IdentifierExpr{
                 .name = name_copy,
-                .type_info = ast.Types.TypeInfo.explicit(.Type, .{ .@"type" = {} }, self.base.spanFromToken(type_token)),
+                .type_info = ast.Types.TypeInfo.explicit(.Type, .{ .type = {} }, self.base.spanFromToken(type_token)),
                 .span = self.base.spanFromToken(type_token),
             } };
         }

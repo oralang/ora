@@ -363,6 +363,52 @@ test "expressions: precedence - multiplication before addition" {
     }
 }
 
+test "expressions: precedence - exponentiation is right associative" {
+    const allocator = testing.allocator;
+    const source = "a ** b ** c";
+
+    var lex = lexer.Lexer.init(allocator, source);
+    defer lex.deinit();
+    const tokens = try lex.scanTokens();
+    defer allocator.free(tokens);
+
+    var arena = ast_arena.AstArena.init(allocator);
+    defer arena.deinit();
+    var expr_parser = ExpressionParser.init(tokens, &arena);
+
+    const expr = try expr_parser.parseExpression();
+
+    // should parse as: a ** (b ** c)
+    try testing.expect(expr == .Binary);
+    if (expr == .Binary) {
+        try testing.expectEqual(ast.Expressions.BinaryOp.StarStar, expr.Binary.operator);
+        try testing.expect(expr.Binary.rhs.* == .Binary);
+        if (expr.Binary.rhs.* == .Binary) {
+            try testing.expectEqual(ast.Expressions.BinaryOp.StarStar, expr.Binary.rhs.Binary.operator);
+        }
+    }
+}
+
+test "expressions: wrapping exponent operator" {
+    const allocator = testing.allocator;
+    const source = "a **% b";
+
+    var lex = lexer.Lexer.init(allocator, source);
+    defer lex.deinit();
+    const tokens = try lex.scanTokens();
+    defer allocator.free(tokens);
+
+    var arena = ast_arena.AstArena.init(allocator);
+    defer arena.deinit();
+    var expr_parser = ExpressionParser.init(tokens, &arena);
+
+    const expr = try expr_parser.parseExpression();
+    try testing.expect(expr == .Binary);
+    if (expr == .Binary) {
+        try testing.expectEqual(ast.Expressions.BinaryOp.WrappingPow, expr.Binary.operator);
+    }
+}
+
 test "expressions: precedence - addition before comparison" {
     const allocator = testing.allocator;
     const source = "a + b < c";

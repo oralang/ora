@@ -28,6 +28,7 @@ pub const BinaryOp = enum {
     WrappingAdd, // +%
     WrappingSub, // -%
     WrappingMul, // *%
+    WrappingPow, // **%
     WrappingShl, // <<%
     WrappingShr, // >>%
 

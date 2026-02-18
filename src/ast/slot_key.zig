@@ -170,6 +170,7 @@ fn binaryToken(op: ast.Expressions.BinaryOp) []const u8 {
         .WrappingAdd => "+%",
         .WrappingSub => "-%",
         .WrappingMul => "*%",
+        .WrappingPow => "**%",
         .WrappingShl => "<<%",
         .WrappingShr => ">>%",
         .EqualEqual => "==",

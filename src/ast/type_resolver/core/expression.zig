@@ -148,7 +148,7 @@ fn synthStructInstantiation(
                 defer type_args_list.deinit(self.allocator);
                 for (call.arguments) |arg| {
                     if (mono_mod.resolveTypeFromExpr(arg)) |ot| {
-                        type_args_list.append(self.allocator, ot) catch {};
+                        try type_args_list.append(self.allocator, ot);
                     }
                 }
                 // Build mangled name
@@ -1061,6 +1061,17 @@ fn synthCall(
             // handle @-prefixed builtins (overflow reporters, divTrunc, etc.)
             if (func_name.len > 1 and func_name[0] == '@') {
                 const builtin_suffix = func_name[1..];
+                if (std.mem.eql(u8, builtin_suffix, "powerWithOverflow")) {
+                    if (call.arguments.len < 2) {
+                        return TypeResolutionError.TypeMismatch;
+                    }
+                    const exponent_info = extractExprTypeInfo(call.arguments[1]);
+                    if (exponent_info.ora_type) |ot| {
+                        if (!ot.isUnsignedInteger()) {
+                            return TypeResolutionError.IncompatibleTypes;
+                        }
+                    }
+                }
                 if (resolveOverflowBuiltinType(builtin_suffix, call, self.type_storage_allocator)) |ret_info| {
                     call.type_info = ret_info;
                     return Typed.init(ret_info, combined_eff, self.allocator);
@@ -1681,6 +1692,19 @@ fn validateBinaryOperator(
         return; // Comma operator allows any types
     }
 
+    // Exponent is always unsigned in Ora.
+    if (op == .StarStar or op == .WrappingPow) {
+        if (lhs_check.category != .Integer or rhs_check.category != .Integer) {
+            return TypeResolutionError.IncompatibleTypes;
+        }
+        if (rhs_check.ora_type) |rhs_ora| {
+            if (!rhs_ora.isUnsignedInteger()) {
+                return TypeResolutionError.IncompatibleTypes;
+            }
+        }
+        return;
+    }
+
     // check types are compatible for the operator
     if (!self.validation.areCompatible(lhs_check, rhs_check)) {
         return TypeResolutionError.IncompatibleTypes;
@@ -1771,7 +1795,7 @@ fn resolveOverflowBuiltinType(
     const overflow_builtins = [_][]const u8{
         "addWithOverflow", "subWithOverflow", "mulWithOverflow",
         "divWithOverflow", "modWithOverflow", "negWithOverflow",
-        "shlWithOverflow", "shrWithOverflow",
+        "shlWithOverflow", "shrWithOverflow", "powerWithOverflow",
     };
     var is_overflow = false;
     for (overflow_builtins) |name| {
