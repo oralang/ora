@@ -20,12 +20,12 @@ contract C {
 
         if (s == a) {
             return true;
+        } else {
+            // This branch is intentionally unsafe if reachable.
+            // The requires-clause should make it unreachable.
+            let z: u256 = 0;
+            let q: u256 = 1 / z;
+            return q == 1;
         }
-
-        // This branch is intentionally unsafe if reachable.
-        // The requires-clause should make it unreachable.
-        let z: u256 = 0;
-        let q: u256 = 1 / z;
-        return q == 1;
     }
 }

@@ -1,0 +1,23 @@
+contract IfPathSensitiveCheckedArith {
+    pub fn unknown(flag: bool) -> bool {
+        if (flag) {
+            return true;
+        } else {
+            // Branch is runtime-dependent; fold should not hard-fail both branches.
+            let z: u256 = 0;
+            let q: u256 = 1 / z;
+            return q == 1;
+        }
+    }
+
+    pub fn known_true() -> u256 {
+        if (true) {
+            return 1;
+        } else {
+            // Dead branch under constant condition.
+            let z: u256 = 0;
+            let q: u256 = 1 / z;
+            return q;
+        }
+    }
+}

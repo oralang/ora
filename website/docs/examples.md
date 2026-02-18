@@ -49,7 +49,7 @@ Ora’s examples live in the **`ora-example/`** directory in the repo. They show
 - `comptime/generics/generic_struct_expr_only.ora`, `generic_struct_multi_type_params.ora` — Generic structs and multiple type params.
 - `comptime/generics/generic_nested_calls.ora` — Nested generic calls.
 - `comptime/comptime_folds.ora`, `comptime_basics.ora` — Constant folding and comptime evaluation.
-- `comptime/comptime_overflow_probe.ora`, `comptime_wrapping_ops.ora` — Comptime overflow and wrapping behavior.
+- `comptime/fail_comptime_overflow_probe.ora`, `comptime_wrapping_ops.ora` — Comptime overflow and wrapping behavior.
 
 ### Refinements (`ora-example/refinements/`)
 

@@ -139,18 +139,18 @@ def test_file(file_path, compiler_path="./zig-out/bin/ora", timeout_s=30):
     )
     has_error = timed_out or any(pattern.lower() in filtered_stderr for pattern in error_patterns)
 
-    # Allow empty-module outputs (no contracts/functions) as success.
-    # This covers files that only contain declarations (e.g., error-only files).
-    if has_error:
+    # Non-zero exit code is always a failure signal.
+    if return_code is not None and return_code != 0:
+        has_error = True
+
+    # Allow empty-module outputs (no contracts/functions) as success only when
+    # compilation succeeded and the file is not an expected-fail fixture.
+    if has_error and return_code == 0 and not expected_failure:
         empty_module = "module {" in stdout and "ora.contract" not in stdout and "func.func" not in stdout
         critical_patterns = ["segmentation fault", "panic:", "error: ora to sir conversion failed"]
         has_critical = any(p in filtered_stderr for p in critical_patterns)
-        if (empty_module or not has_contract_decl) and not has_critical:
+        if empty_module and not has_critical:
             has_error = False
-    
-    # Also check exit code
-    if return_code is not None and return_code != 0 and has_contract_decl:
-        has_error = True
 
     if timed_out:
         status = "✅ EXPECTED FAIL (TIMEOUT)" if expected_failure else "❌ TIMEOUT"

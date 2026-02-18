@@ -1,0 +1,18 @@
+contract RequiresAssumptionUnreachableBranch {
+    pub fn g(a: NonZeroAddress) -> bool
+        requires(a == std.msg.sender())
+        ensures(a == std.msg.sender())
+    {
+        let s: NonZeroAddress = std.msg.sender();
+
+        if (s == a) {
+            return true;
+        } else {
+            // Intentionally unsafe if reachable; the requires-clause models
+            // this branch as unreachable for the SMT proof.
+            let z: u256 = 0;
+            let q: u256 = 1 / z;
+            return q == 1;
+        }
+    }
+}

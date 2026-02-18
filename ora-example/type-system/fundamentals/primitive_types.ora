@@ -9,7 +9,7 @@ contract PrimitiveTypes {
     pub fn testU256() {
         var value: u256 = 0;
         value = 1000;
-        value = 2**256 - 1; // Max u256
+        value = (2 **% 256) -% 1; // Max u256
     }
 
     // bool - Boolean type

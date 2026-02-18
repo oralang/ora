@@ -548,6 +548,15 @@ pub const CoreResolver = struct {
 
     /// Evaluate an AST expression at compile time
     pub fn evaluateConstantExpression(self: *CoreResolver, expr: *ast.Expressions.ExprNode) comptime_eval.AstEvalResult {
+        const start_steps = self.comptime_env.stats.total_steps;
+        const max_steps = self.comptime_env.config.max_steps;
+        const expr_kind = @tagName(expr.*);
+        const line = evalExprDebugLine(expr);
+        log.debug(
+            "[comptime][eval] start line={d} expr={s} steps={d}/{d}\n",
+            .{ line, expr_kind, start_steps, max_steps },
+        );
+
         const lookup = comptime_eval.IdentifierLookup{
             .ctx = self,
             .lookupFn = lookupComptimeValueThunk,
@@ -558,7 +567,22 @@ pub const CoreResolver = struct {
             .lookupFn = lookupComptimeFnThunk,
         };
         var eval = comptime_eval.AstEvaluator.initWithFnLookup(&self.comptime_env, .try_eval, .forgiving, lookup, fn_lookup);
-        return eval.evalExpr(expr);
+        const result = eval.evalExpr(expr);
+
+        const end_steps = self.comptime_env.stats.total_steps;
+        const delta_steps: u64 = if (end_steps >= start_steps) end_steps - start_steps else 0;
+        log.debug(
+            "[comptime][eval] done  line={d} expr={s} result={s}/{s} steps={d}/{d} (+{d})\n",
+            .{ line, expr_kind, evalResultKind(result), evalResultValueKind(result), end_steps, max_steps, delta_steps },
+        );
+        if (result == .err) {
+            const ct_err = result.err;
+            log.debug(
+                "[comptime][eval] error line={d} kind={s} message={s}\n",
+                .{ ct_err.span.line, @tagName(ct_err.kind), ct_err.message },
+            );
+        }
+        return result;
     }
 
     /// Evaluate an AST expression and intern result into ConstPool
@@ -624,6 +648,59 @@ pub fn lookupComptimeFnThunk(ctx: *anyopaque, name: []const u8) ?comptime_eval.C
         .body = &fn_node.body,
         .param_names = param_names,
         .is_comptime_param = is_comptime_param,
+    };
+}
+
+fn evalResultKind(result: comptime_eval.AstEvalResult) []const u8 {
+    return switch (result) {
+        .value => "value",
+        .not_constant => "not_constant",
+        .err => "err",
+    };
+}
+
+fn evalResultValueKind(result: comptime_eval.AstEvalResult) []const u8 {
+    return switch (result) {
+        .value => |v| @tagName(v),
+        else => "-",
+    };
+}
+
+fn evalExprDebugLine(expr: *ast.Expressions.ExprNode) u32 {
+    return switch (expr.*) {
+        .Identifier => |id| id.span.line,
+        .Literal => |lit| switch (lit) {
+            .Integer => |int_lit| int_lit.span.line,
+            .String => |str_lit| str_lit.span.line,
+            .Bool => |bool_lit| bool_lit.span.line,
+            .Address => |addr_lit| addr_lit.span.line,
+            .Hex => |hex_lit| hex_lit.span.line,
+            .Binary => |bin_lit| bin_lit.span.line,
+            .Character => |char_lit| char_lit.span.line,
+            .Bytes => |bytes_lit| bytes_lit.span.line,
+        },
+        .Binary => |bin| bin.span.line,
+        .Unary => |unary| unary.span.line,
+        .Assignment => |assign| assign.span.line,
+        .CompoundAssignment => |compound| compound.span.line,
+        .Call => |call| call.span.line,
+        .Index => |idx| idx.span.line,
+        .FieldAccess => |fa| fa.span.line,
+        .Cast => |cast_expr| cast_expr.span.line,
+        .Comptime => |ct| ct.span.line,
+        .Old => |old_expr| old_expr.span.line,
+        .Tuple => |t| t.span.line,
+        .ArrayLiteral => |arr| arr.span.line,
+        .StructInstantiation => |si| si.span.line,
+        .AnonymousStruct => |anon| anon.span.line,
+        .Range => |range| range.span.line,
+        .SwitchExpression => |sw| sw.span.line,
+        .Try => |try_expr| try_expr.span.line,
+        .ErrorCast => |err_cast| err_cast.span.line,
+        .Shift => |shift| shift.span.line,
+        .LabeledBlock => |labeled| labeled.span.line,
+        .Destructuring => |destr| destr.span.line,
+        else => 0,
     };
 }
 

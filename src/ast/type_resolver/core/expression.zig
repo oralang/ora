@@ -1042,6 +1042,9 @@ fn synthCall(
 
                     // Generic function call: substitute type parameters in return type
                     if (function.is_generic) {
+                        if (self.symbol_table.findEnclosingContractName(self.current_scope) == null) {
+                            return TypeResolutionError.TopLevelGenericInstantiationNotSupported;
+                        }
                         const ret_info = resolveGenericReturnType(function, call);
                         call.type_info = ret_info;
                         return Typed.init(ret_info, combined_eff, self.allocator);
@@ -1110,6 +1113,9 @@ fn synthCall(
                     try checkComptimeParams(self, function, call);
                     // Generic function call: substitute type parameters in return type
                     if (function.is_generic) {
+                        if (self.symbol_table.findEnclosingContractName(self.current_scope) == null) {
+                            return TypeResolutionError.TopLevelGenericInstantiationNotSupported;
+                        }
                         const ret_info = resolveGenericReturnType(function, call);
                         call.type_info = ret_info;
                         return Typed.init(ret_info, combined_eff, self.allocator);

@@ -1195,6 +1195,9 @@ pub const TypeResolver = struct {
         const mono_ptr = self.monomorphizer orelse return null;
 
         const owner_contract = self.symbol_table.findEnclosingContractName(self.current_scope);
+        if (owner_contract == null) {
+            return TypeResolutionError.TopLevelGenericInstantiationNotSupported;
+        }
         const mangled = try mono_ptr.monomorphizeStruct(generic_struct, type_args, owner_contract);
         try self.registerMonomorphizedStructSymbol(mangled, generic_struct.span, mono_ptr);
         return mangled;

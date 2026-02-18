@@ -21,6 +21,7 @@ const pool_mod = @import("pool.zig");
 const heap_mod = @import("heap.zig");
 const ast_type_info = @import("../ast/type_info.zig");
 const AstSourceSpan = @import("../ast/source_span.zig").SourceSpan;
+const log = @import("log");
 
 const CtValue = value.CtValue;
 const ConstId = value.ConstId;
@@ -74,6 +75,14 @@ pub const AstEvalResult = union(enum) {
             if (self.value == .address) return self.value.address;
         }
         return null;
+    }
+
+    pub fn kindName(self: AstEvalResult) []const u8 {
+        return switch (self) {
+            .value => "value",
+            .not_constant => "not_constant",
+            .err => "err",
+        };
     }
 };
 
@@ -245,6 +254,12 @@ pub const AstEvaluator = struct {
             else => return .not_constant, // only direct calls supported
         };
 
+        const start_steps = self.env.stats.total_steps;
+        log.debug(
+            "[comptime][call] start fn={s} line={d} depth={d} steps={d}/{d}\n",
+            .{ fn_name, call_span.line, self.call_depth, start_steps, self.env.config.max_steps },
+        );
+
         // Handle supported @-builtins directly in the AST evaluator.
         if (fn_name.len > 0 and fn_name[0] == '@') {
             return self.evalBuiltinCall(call, fn_name);
@@ -305,13 +320,28 @@ pub const AstEvaluator = struct {
             .allocator = self.env.allocator,
         };
         const result = stmt_eval.evalBlock(fn_info.body);
-        return switch (result) {
+        const eval_result: AstEvalResult = switch (result) {
             .return_val => |v| if (v) |val| .{ .value = val } else .{ .value = .void_val },
             .ok => |v| if (v) |val| .{ .value = val } else .{ .value = .void_val },
             .not_comptime => .not_constant,
             .err => |e| .{ .err = e },
             .break_val, .continue_val => .not_constant,
         };
+
+        const end_steps = self.env.stats.total_steps;
+        const delta_steps: u64 = if (end_steps >= start_steps) end_steps - start_steps else 0;
+        log.debug(
+            "[comptime][call] done  fn={s} line={d} result={s} steps={d}/{d} (+{d})\n",
+            .{ fn_name, call_span.line, eval_result.kindName(), end_steps, self.env.config.max_steps, delta_steps },
+        );
+        if (eval_result == .err) {
+            const ct_err = eval_result.err;
+            log.debug(
+                "[comptime][call] error fn={s} kind={s} message={s}\n",
+                .{ fn_name, @tagName(ct_err.kind), ct_err.message },
+            );
+        }
+        return eval_result;
     }
 
     fn evalBuiltinCall(self: *AstEvaluator, call: anytype, fn_name: []const u8) AstEvalResult {
@@ -535,7 +565,8 @@ pub const AstEvaluator = struct {
         const span = SourceSpan{ .line = bin.span.line, .column = bin.span.column, .length = bin.span.length };
 
         const result = self.evaluator.evalBinaryOp(op, lhs_result.value, rhs_result.value, span);
-        return switch (result) {
+        const normalized_result = normalizeWrappingBinaryResult(bin.operator, bin.type_info, result);
+        return switch (normalized_result) {
             .value => |v| .{ .value = v },
             .runtime => .not_constant,
             .err => |e| .{ .err = e },
@@ -1006,6 +1037,59 @@ pub const AstEvaluator = struct {
     }
 };
 
+fn normalizeWrappingBinaryResult(
+    operator: anytype,
+    expr_type: ast_type_info.TypeInfo,
+    result: EvalResult,
+) EvalResult {
+    if (!isWrappingBinaryOp(operator)) return result;
+    return switch (result) {
+        .value => |v| switch (v) {
+            .integer => |n| .{ .value = .{ .integer = wrapIntegerToResolvedTypeWidth(n, expr_type) } },
+            else => result,
+        },
+        else => result,
+    };
+}
+
+fn isWrappingBinaryOp(operator: anytype) bool {
+    return switch (operator) {
+        .WrappingAdd, .WrappingSub, .WrappingMul, .WrappingPow, .WrappingShl, .WrappingShr => true,
+        else => false,
+    };
+}
+
+fn wrapIntegerToResolvedTypeWidth(value_int: u256, expr_type: ast_type_info.TypeInfo) u256 {
+    const width = resolvedIntegerBitWidth(expr_type) orelse return value_int;
+    if (width >= 256) return value_int;
+    const shift_amt: u8 = @intCast(width);
+    const mask: u256 = (@as(u256, 1) << shift_amt) - 1;
+    return value_int & mask;
+}
+
+fn resolvedIntegerBitWidth(expr_type: ast_type_info.TypeInfo) ?u32 {
+    if (expr_type.category != .Integer) return null;
+    const ot = expr_type.ora_type orelse return null;
+    const base = unwrapIntegerBaseType(ot);
+    if (!base.isInteger()) return null;
+    return base.bitWidth();
+}
+
+fn unwrapIntegerBaseType(ot: ast_type_info.OraType) ast_type_info.OraType {
+    var current = ot;
+    while (true) {
+        switch (current) {
+            .min_value => |mv| current = mv.base.*,
+            .max_value => |mv| current = mv.base.*,
+            .in_range => |ir| current = ir.base.*,
+            .scaled => |s| current = s.base.*,
+            .exact => |e| current = e.*,
+            else => break,
+        }
+    }
+    return current;
+}
+
 /// Map AST binary operator to comptime binary operator
 fn mapBinaryOp(op: anytype) ?BinaryOp {
     return switch (op) {
@@ -1115,6 +1199,10 @@ pub const StmtEvaluator = struct {
     pub fn evalStatement(self: *StmtEvaluator, stmt: *const StmtNode) AstStmtResult {
         // Check step limit
         if (self.base.evaluator.step(.{ .line = 0, .column = 0, .length = 0 })) |err_result| {
+            log.debug(
+                "[comptime][step-limit] stmt={s} steps={d}/{d}\n",
+                .{ @tagName(stmt.*), self.base.env.stats.total_steps, self.base.env.config.max_steps },
+            );
             if (err_result == .err) return .{ .err = err_result.err };
             return .{ .err = error_mod.CtError.init(.step_limit, .{ .line = 0, .column = 0, .length = 0 }, "comptime step limit exceeded") };
         }
@@ -1214,11 +1302,21 @@ pub const StmtEvaluator = struct {
     fn evalWhile(self: *StmtEvaluator, while_stmt: *const ast_statements.WhileNode) AstStmtResult {
         const max_iterations = self.base.env.config.max_loop_iterations;
         var iterations: u64 = 0;
+        log.debug(
+            "[comptime][while] enter line={d} steps={d}/{d} max_iter={d}\n",
+            .{ while_stmt.span.line, self.base.env.stats.total_steps, self.base.env.config.max_steps, max_iterations },
+        );
 
         while (true) {
             // Check iteration limit
             iterations += 1;
             self.iteration_count += 1;
+            if (iterations <= 10 or (iterations % 1000) == 0) {
+                log.debug(
+                    "[comptime][while] tick  line={d} iter={d} steps={d}/{d}\n",
+                    .{ while_stmt.span.line, iterations, self.base.env.stats.total_steps, self.base.env.config.max_steps },
+                );
+            }
             if (iterations > max_iterations) {
                 return .{ .err = error_mod.CtError.init(.iteration_limit, .{ .line = 0, .column = 0, .length = 0 }, "comptime loop iteration limit exceeded") };
             }
@@ -1236,8 +1334,79 @@ pub const StmtEvaluator = struct {
                 .integer => |i| i != 0,
                 else => return .{ .err = error_mod.CtError.init(.type_mismatch, .{ .line = 0, .column = 0, .length = 0 }, "while condition must be boolean") },
             };
+            if (iterations <= 10 or (iterations % 1000) == 0) {
+                log.debug(
+                    "[comptime][while] cond  line={d} iter={d} continue={any}\n",
+                    .{ while_stmt.span.line, iterations, should_continue },
+                );
+                if (while_stmt.condition == .Binary) {
+                    const cond_bin = while_stmt.condition.Binary;
+                    switch (cond_bin.lhs.*) {
+                        .Identifier => |id| {
+                            const lhs_name = id.name;
+                            const lhs_val = self.base.env.lookupValue(lhs_name);
+                            if (lhs_val) |lv| {
+                                switch (lv) {
+                                    .integer => |n| log.debug(
+                                        "[comptime][while] lhs   {s}={d}\n",
+                                        .{ lhs_name, n },
+                                    ),
+                                    else => log.debug(
+                                        "[comptime][while] lhs   {s}=<{s}>\n",
+                                        .{ lhs_name, @tagName(lv) },
+                                    ),
+                                }
+                            } else {
+                                log.debug("[comptime][while] lhs   {s}=<missing>\n", .{lhs_name});
+                            }
+                        },
+                        .Literal => |lit| switch (lit) {
+                            .Integer => |int_lit| log.debug(
+                                "[comptime][while] lhs   <lit>={s}\n",
+                                .{int_lit.value},
+                            ),
+                            else => {},
+                        },
+                        else => {},
+                    }
+                    switch (cond_bin.rhs.*) {
+                        .Identifier => |id| {
+                            const rhs_name = id.name;
+                            const rhs_val = self.base.env.lookupValue(rhs_name);
+                            if (rhs_val) |rv| {
+                                switch (rv) {
+                                    .integer => |n| log.debug(
+                                        "[comptime][while] rhs   {s}={d}\n",
+                                        .{ rhs_name, n },
+                                    ),
+                                    else => log.debug(
+                                        "[comptime][while] rhs   {s}=<{s}>\n",
+                                        .{ rhs_name, @tagName(rv) },
+                                    ),
+                                }
+                            } else {
+                                log.debug("[comptime][while] rhs   {s}=<missing>\n", .{rhs_name});
+                            }
+                        },
+                        .Literal => |lit| switch (lit) {
+                            .Integer => |int_lit| log.debug(
+                                "[comptime][while] rhs   <lit>={s}\n",
+                                .{int_lit.value},
+                            ),
+                            else => {},
+                        },
+                        else => {},
+                    }
+                }
+            }
 
-            if (!should_continue) break;
+            if (!should_continue) {
+                log.debug(
+                    "[comptime][while] exit  line={d} iter={d} steps={d}/{d}\n",
+                    .{ while_stmt.span.line, iterations, self.base.env.stats.total_steps, self.base.env.config.max_steps },
+                );
+                break;
+            }
 
             // Execute body
             self.base.env.pushScope(true) catch return .{ .err = error_mod.CtError.init(.internal_error, .{ .line = 0, .column = 0, .length = 0 }, "failed to push loop scope") };
