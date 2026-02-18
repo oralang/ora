@@ -1541,6 +1541,39 @@ fn deriveAnonymousStructFields(
     return .{ .fields = anon_fields, .types = types };
 }
 
+fn inferTupleTypeInfo(tuple_expr: *const lib.ast.Expressions.TupleExpr) ?lib.ast.Types.TypeInfo {
+    const tuple_elems = std.heap.page_allocator.alloc(lib.ast.type_info.OraType, tuple_expr.elements.len) catch return null;
+
+    for (tuple_expr.elements, 0..) |elem, i| {
+        const elem_ti = getExprTypeInfo(elem) orelse {
+            std.heap.page_allocator.free(tuple_elems);
+            return null;
+        };
+
+        if (elem_ti.ora_type) |elem_ora| {
+            tuple_elems[i] = elem_ora;
+            continue;
+        }
+
+        if (!elem_ti.isResolved()) {
+            const fallback: ?lib.ast.type_info.OraType = switch (elem_ti.category) {
+                .Integer => .{ .u256 = {} },
+                .Bool => .{ .bool = {} },
+                else => null,
+            };
+            if (fallback) |elem_ora| {
+                tuple_elems[i] = elem_ora;
+                continue;
+            }
+        }
+
+        std.heap.page_allocator.free(tuple_elems);
+        return null;
+    }
+
+    return lib.ast.Types.TypeInfo.fromOraType(.{ .tuple = tuple_elems });
+}
+
 fn getExprTypeInfo(expr: *const lib.ast.Expressions.ExprNode) ?lib.ast.Types.TypeInfo {
     return switch (expr.*) {
         .Identifier => |id| id.type_info,
@@ -1559,6 +1592,7 @@ fn getExprTypeInfo(expr: *const lib.ast.Expressions.ExprNode) ?lib.ast.Types.Typ
         .Call => |call| call.type_info,
         .FieldAccess => |fa| fa.type_info,
         .Range => |range| range.type_info,
+        .Tuple => |tuple_expr| inferTupleTypeInfo(&tuple_expr),
         else => null,
     };
 }

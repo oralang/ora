@@ -61,8 +61,9 @@ LogicalResult ConvertRefinementGuardOp::matchAndRewrite(
     auto ptrType = sir::PtrType::get(rewriter.getContext(), /*addrSpace=*/1);
     auto ui64Type = mlir::IntegerType::get(rewriter.getContext(), evm::kU64Bits, mlir::IntegerType::Unsigned);
     // revert(0, 0) — zero-length revert data.
-    Value zeroPtr = rewriter.create<sir::ConstOp>(loc, ptrType,
+    Value zeroU256 = rewriter.create<sir::ConstOp>(loc, u256Type,
         mlir::IntegerAttr::get(ui64Type, 0));
+    Value zeroPtr = rewriter.create<sir::BitcastOp>(loc, ptrType, zeroU256);
     Value zeroLen = rewriter.create<sir::ConstOp>(loc, u256Type,
         mlir::IntegerAttr::get(ui64Type, 0));
     rewriter.create<sir::RevertOp>(loc, zeroPtr, zeroLen);

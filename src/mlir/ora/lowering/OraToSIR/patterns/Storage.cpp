@@ -674,7 +674,8 @@ LogicalResult ConvertTStoreGuardOp::matchAndRewrite(
 
     Block *revertBlock = rewriter.createBlock(parentRegion, afterBlock->getIterator());
     rewriter.setInsertionPointToStart(revertBlock);
-    Value zeroPtr = rewriter.create<sir::ConstOp>(loc, ptrType, mlir::IntegerAttr::get(ui64Type, 0));
+    Value zeroU256 = rewriter.create<sir::ConstOp>(loc, u256, mlir::IntegerAttr::get(ui64Type, 0));
+    Value zeroPtr = rewriter.create<sir::BitcastOp>(loc, ptrType, zeroU256);
     Value zeroLen = rewriter.create<sir::ConstOp>(loc, u256, mlir::IntegerAttr::get(ui64Type, 0));
     rewriter.create<sir::RevertOp>(loc, zeroPtr, zeroLen);
 
