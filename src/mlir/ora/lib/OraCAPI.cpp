@@ -6466,7 +6466,7 @@ bool oraCanonicalizeOraMLIR(MlirContext ctx, MlirModule module)
         // 1. Constant deduplication and constant folding (fallback)
         pm.addPass(mlir::ora::createOraOptimizationPass());
 
-        // 2. Canonicalization and DCE on Ora MLIR functions
+        // 2. Canonicalization on Ora MLIR functions
         pm.addPass(mlir::ora::createSimpleOraOptimizationPass());
 
         // 3. Cleanup unused Ora operations
@@ -6525,9 +6525,9 @@ bool oraConvertToSIR(MlirContext ctx, MlirModule module)
             pm.addPass(mlir::ora::createOraOptimizationPass());
             ORA_DEBUG_PREFIX("OraCAPI", "Added Ora optimization pass");
 
-            // 2. Canonicalization and DCE on Ora MLIR functions
+            // 2. Canonicalization on Ora MLIR functions
             pm.addPass(mlir::ora::createSimpleOraOptimizationPass());
-            ORA_DEBUG_PREFIX("OraCAPI", "Added Simple Ora optimization pass (canonicalize + DCE)");
+            ORA_DEBUG_PREFIX("OraCAPI", "Added Simple Ora optimization pass (canonicalize)");
 
             // 3. Cleanup unused Ora operations
             pm.addPass(mlir::ora::createOraCleanupPass());
@@ -6545,7 +6545,7 @@ bool oraConvertToSIR(MlirContext ctx, MlirModule module)
         {
             pm.addPass(createOraToSIRPass());
         }
-        const bool enable_post_sir_passes = false;
+        const bool enable_post_sir_passes = true;
         if (enable_post_sir_passes)
         {
             // Add optimization pass (for SIR-specific optimizations like constant folding)

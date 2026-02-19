@@ -2078,10 +2078,12 @@ namespace mlir
         }
 
         //===----------------------------------------------------------------------===//
-        // Simple Ora Optimization Pass (canonicalize + DCE)
+        // Simple Ora Optimization Pass (canonicalize)
         //===----------------------------------------------------------------------===//
 
-        // Pass that runs canonicalization and DCE on each function in Ora MLIR (before conversion)
+        // Pass that runs canonicalization on each function in Ora MLIR (before conversion).
+        // Dead-value elimination is intentionally deferred to the post-SIR pipeline where
+        // operands are normalized and DCE is stable.
         class SimpleOraOptimizationPass : public PassWrapper<SimpleOraOptimizationPass, OperationPass<ModuleOp>>
         {
         public:
@@ -2089,7 +2091,7 @@ namespace mlir
             {
                 ModuleOp module = getOperation();
 
-                DBG("Running canonicalization and DCE on Ora MLIR...");
+                DBG("Running canonicalization on Ora MLIR...");
 
                 // Walk through all func.func operations and run passes on each
                 module.walk([&](mlir::func::FuncOp funcOp)
@@ -2109,21 +2111,21 @@ namespace mlir
                         } });
                     if (hasNullOperand || failed(mlir::verify(funcOp)))
                     {
-                        DBG("Skipping canonicalization for function: " << funcOp.getName());
-                        module->setAttr("ora.dce_invalid", mlir::UnitAttr::get(module.getContext()));
+                        funcOp.emitError("[SimpleOraOptimization] input IR is invalid before canonicalization");
+                        signalPassFailure();
                         return;
                     }
                     
-                    // Print IR BEFORE DCE to see what we start with
+                    // Print IR before canonicalization to see what we start with
                     if (mlir::ora::isDebugEnabled())
                     {
-                        llvm::errs() << "[SimpleOraOptimization] === IR BEFORE DCE ===\n";
+                        llvm::errs() << "[SimpleOraOptimization] === IR BEFORE CANONICALIZE ===\n";
                         funcOp.print(llvm::errs());
-                        llvm::errs() << "\n[SimpleOraOptimization] === END IR BEFORE DCE ===\n";
+                        llvm::errs() << "\n[SimpleOraOptimization] === END IR BEFORE CANONICALIZE ===\n";
                         llvm::errs().flush();
                         
-                        // Track all operations before DCE
-                        llvm::errs() << "[SimpleOraOptimization] Operations before DCE:\n";
+                        // Track all operations before canonicalization
+                        llvm::errs() << "[SimpleOraOptimization] Operations before canonicalize:\n";
                         funcOp.walk([&](Operation *op)
                                     {
                             llvm::errs() << "  - " << op->getName() << " at " << op->getLoc() << "\n";
@@ -2150,9 +2152,6 @@ namespace mlir
                     funcPM.addPass(mlir::createCanonicalizerPass());
                     DBG("  Added canonicalize pass");
                     
-                    // DCE is temporarily disabled because it can invalidate
-                    // func.call operands in Ora IR, producing null operands.
-                    
                     // Run the pass manager on this function
                     if (failed(runPipeline(funcPM, funcOp)))
                     {
@@ -2161,12 +2160,12 @@ namespace mlir
                         return;
                     }
                     
-                    // Print IR AFTER DCE to see what was removed
+                    // Print IR after canonicalization
                     if (mlir::ora::isDebugEnabled())
                     {
-                        llvm::errs() << "[SimpleOraOptimization] === IR AFTER DCE ===\n";
+                        llvm::errs() << "[SimpleOraOptimization] === IR AFTER CANONICALIZE ===\n";
                         funcOp.print(llvm::errs());
-                        llvm::errs() << "\n[SimpleOraOptimization] === END IR AFTER DCE ===\n";
+                        llvm::errs() << "\n[SimpleOraOptimization] === END IR AFTER CANONICALIZE ===\n";
                         llvm::errs().flush();
                         
                         // Check for null operands explicitly and show what func.return expects
@@ -2214,20 +2213,12 @@ namespace mlir
                         llvm::errs().flush();
                     }
                     
-                    // Verify the function after DCE to catch any issues before printing
-                    // If verification fails, the IR is invalid and printing will segfault
-                    // CRITICAL: Mark the module as invalid so we can skip printing later
+                    // Verify the function after canonicalization to catch any issues before printing
                     if (failed(mlir::verify(funcOp)))
                     {
-                        DBG("ERROR: Function verification failed after DCE for: " << funcOp.getName());
-                        DBG("  DCE left the IR in an invalid state");
-                        
-                        // Mark the module as invalid by setting an attribute
-                        // This allows us to skip printing later
-                        module->setAttr("ora.dce_invalid", mlir::UnitAttr::get(module.getContext()));
-                        
-                        // Don't fail the pass - we want to continue to see other errors
-                        // But we'll skip printing to avoid segfault
+                        funcOp.emitError("[SimpleOraOptimization] IR invalid after canonicalization");
+                        signalPassFailure();
+                        return;
                     }
                     
                     DBG("Completed passes on function: " << funcOp.getName()); });
@@ -2236,7 +2227,7 @@ namespace mlir
             }
 
             StringRef getArgument() const override { return "ora-simple-optimize"; }
-            StringRef getDescription() const override { return "Run canonicalization and DCE on Ora MLIR functions"; }
+            StringRef getDescription() const override { return "Run canonicalization on Ora MLIR functions"; }
         };
 
         std::unique_ptr<Pass> createSimpleOraOptimizationPass()

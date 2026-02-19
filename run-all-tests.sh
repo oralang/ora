@@ -146,6 +146,7 @@ main() {
 
   if [[ "$RUN_EXAMPLES" -eq 1 ]]; then
     run_step "Example validation" "$ROOT_DIR/scripts/validate-examples.sh"
+    run_step "Storage/TStore separation checks" "$ROOT_DIR/scripts/check-storage-tstore-separation.sh"
   fi
 
   print_summary_and_exit

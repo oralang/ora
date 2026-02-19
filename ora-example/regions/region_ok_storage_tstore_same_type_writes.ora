@@ -1,0 +1,12 @@
+contract RegionOkStorageTstoreSameTypeWrites {
+    storage var persistent_counter: u256;
+    tstore var transient_counter: u256;
+
+    pub fn writeAndClear(value: u256) {
+        persistent_counter = value;
+        transient_counter = value;
+
+        persistent_counter = 0;
+        transient_counter = 0;
+    }
+}

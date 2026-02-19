@@ -1,0 +1,9 @@
+// INPUT: ora-example/regions/region_ok_storage_tstore_same_type_writes.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-NOT: ora.sstore
+// CHECK-NOT: ora.tstore
+// CHECK-LABEL: func.func @writeAndClear
+// CHECK: sir.sstore
+// CHECK: sir.tstore
+// CHECK: sir.sstore
+// CHECK: sir.tstore

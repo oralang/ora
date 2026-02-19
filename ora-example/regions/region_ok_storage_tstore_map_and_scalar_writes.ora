@@ -1,0 +1,12 @@
+contract RegionOkStorageTstoreMapAndScalarWrites {
+    storage var approvals: map<address, u256>;
+    tstore var pending_approval: u256;
+
+    pub fn setAndClear(spender: address, amount: u256) {
+        approvals[spender] = amount;
+        pending_approval = amount;
+
+        approvals[spender] = 0;
+        pending_approval = 0;
+    }
+}

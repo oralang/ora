@@ -25,7 +25,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-latest]
+        os: [ubuntu-latest, macos-latest]
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -118,7 +118,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-latest]
+        os: [ubuntu-latest, macos-latest]
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -199,7 +199,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-latest]
+        os: [ubuntu-latest, macos-latest]
         zig-version: [0.15.2]
     
     steps:
@@ -289,7 +289,7 @@ jobs:
     
     strategy:
       matrix:
-        os: [macos-latest]
+        os: [ubuntu-latest, macos-latest]
         
     steps:
       - name: Checkout code
@@ -450,7 +450,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-latest]
+        os: [ubuntu-latest, macos-latest]
     
     steps:
       - name: Checkout code
@@ -541,7 +541,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-latest]
+        os: [ubuntu-latest, macos-latest]
     
     steps:
       - name: Checkout code
@@ -607,9 +607,8 @@ jobs:
         shell: bash
         run: |
           echo "🎯 Building release version..."
-          # Linux and Windows builds disabled temporarily, focusing on macOS
           zig build -Doptimize=ReleaseFast
-          echo "✅ Release builds completed (macOS only)"
+          echo "✅ Release build completed for ${{ runner.os }}"
 
       - name: Create release summary
         shell: bash
@@ -627,7 +626,7 @@ jobs:
       - name: Upload release artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: ora-release-${{ github.sha }}
+          name: ora-release-${{ runner.os }}-${{ github.sha }}
           path: |
             zig-out/
             release-summary.md

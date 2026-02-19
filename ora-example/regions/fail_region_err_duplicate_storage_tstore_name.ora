@@ -1,0 +1,8 @@
+contract RegionErrDuplicateStorageTstoreName {
+    storage var scratch: u256;
+    tstore var scratch: u256;
+
+    pub fn set(x: u256) {
+        scratch = x;
+    }
+}
