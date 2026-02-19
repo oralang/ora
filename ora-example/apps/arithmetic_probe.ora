@@ -1,0 +1,15 @@
+contract ArithmeticProbe {
+    pub fn add_case(a: u256, b: u256)
+        requires(a <= std.constants.U256_MAX - b)
+    {
+        let c: u256 = a + b;
+        assert(c >= a, "add_monotonic");
+    }
+
+    pub fn sub_case(a: u256, b: u256)
+        requires(a >= b)
+    {
+        let c: u256 = a - b;
+        assert(c <= a, "sub_monotonic");
+    }
+}

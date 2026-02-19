@@ -96,11 +96,13 @@ pub const VerificationPass = struct {
     encoder: Encoder,
     allocator: std.mem.Allocator,
     debug_z3: bool,
+    trace_smt: bool,
+    trace_smtlib: bool,
     timeout_ms: ?u32,
     parallel: bool,
     max_workers: usize,
     filter_function_name: ?[]const u8 = null,
-    verify_mode: VerifyMode = .Basic,
+    verify_mode: VerifyMode = .Full,
     verify_calls: bool = true,
     verify_state: bool = true,
     verify_stats: bool = false,
@@ -140,6 +142,18 @@ pub const VerificationPass = struct {
         const debug_z3 = debug_env != null;
         if (debug_env) |val| allocator.free(val);
 
+        const trace_env = std.process.getEnvVarOwned(allocator, "ORA_Z3_TRACE") catch null;
+        const trace_smt = if (trace_env) |val| blk: {
+            defer allocator.free(val);
+            break :blk parseBoolEnv(val);
+        } else false;
+
+        const trace_smtlib_env = std.process.getEnvVarOwned(allocator, "ORA_Z3_TRACE_SMTLIB") catch null;
+        const trace_smtlib = if (trace_smtlib_env) |val| blk: {
+            defer allocator.free(val);
+            break :blk parseBoolEnv(val);
+        } else false;
+
         const timeout_env = std.process.getEnvVarOwned(allocator, "ORA_Z3_TIMEOUT_MS") catch null;
         var timeout_ms: ?u32 = 60_000;
         if (timeout_env) |val| {
@@ -164,7 +178,7 @@ pub const VerificationPass = struct {
         const verify_mode = if (verify_mode_env) |val| blk: {
             defer allocator.free(val);
             break :blk parseVerifyMode(val);
-        } else .Basic;
+        } else .Full;
 
         const verify_calls_env = std.process.getEnvVarOwned(allocator, "ORA_VERIFY_CALLS") catch null;
         const verify_calls = if (verify_calls_env) |val| blk: {
@@ -197,6 +211,8 @@ pub const VerificationPass = struct {
             .encoder = encoder,
             .allocator = allocator,
             .debug_z3 = debug_z3,
+            .trace_smt = trace_smt,
+            .trace_smtlib = trace_smtlib,
             .timeout_ms = timeout_ms,
             .parallel = parallel,
             .max_workers = max_workers,
@@ -418,12 +434,33 @@ pub const VerificationPass = struct {
 
     /// Walk an MLIR region to find verification operations
     fn walkMLIRRegion(self: *VerificationPass, region: mlir.MlirRegion) !void {
+        const region_path_assumption_len = self.active_path_assumptions.items.len;
+        defer self.active_path_assumptions.shrinkRetainingCapacity(region_path_assumption_len);
+
+        var predecessor_counts = std.AutoHashMap(usize, usize).init(self.allocator);
+        defer predecessor_counts.deinit();
+        try self.collectRegionPredecessorCounts(region, &predecessor_counts);
+
+        var inherited_assumptions = std.AutoHashMap(usize, []ActivePathAssume).init(self.allocator);
+        defer {
+            var it = inherited_assumptions.iterator();
+            while (it.next()) |entry| {
+                self.allocator.free(entry.value_ptr.*);
+            }
+            inherited_assumptions.deinit();
+        }
+
         // get first block in region
         var current_block = mlir.oraRegionGetFirstBlock(region);
 
         while (!mlir.oraBlockIsNull(current_block)) {
-            const block_path_assumption_len = self.active_path_assumptions.items.len;
-            defer self.active_path_assumptions.shrinkRetainingCapacity(block_path_assumption_len);
+            self.active_path_assumptions.shrinkRetainingCapacity(region_path_assumption_len);
+            const block_key = @intFromPtr(current_block.ptr);
+            if (inherited_assumptions.get(block_key)) |assumes| {
+                for (assumes) |assume| {
+                    try self.active_path_assumptions.append(assume);
+                }
+            }
 
             // walk operations in this block
             var current_op = mlir.oraBlockGetFirstOperation(current_block);
@@ -445,11 +482,15 @@ pub const VerificationPass = struct {
 
                 try self.processMLIROperation(current_op);
 
-                // walk nested regions (for functions, if statements, etc.)
-                const num_regions = mlir.oraOperationGetNumRegions(current_op);
-                for (0..@intCast(num_regions)) |region_idx| {
-                    const nested_region = mlir.oraOperationGetRegion(current_op, @intCast(region_idx));
-                    try self.walkMLIRRegion(nested_region);
+                if (std.mem.eql(u8, op_name, "scf.if")) {
+                    try self.walkScfIfRegions(current_op);
+                } else {
+                    // walk nested regions (for functions, loops, etc.)
+                    const num_regions = mlir.oraOperationGetNumRegions(current_op);
+                    for (0..@intCast(num_regions)) |region_idx| {
+                        const nested_region = mlir.oraOperationGetRegion(current_op, @intCast(region_idx));
+                        try self.walkMLIRRegion(nested_region);
+                    }
                 }
 
                 if (std.mem.eql(u8, op_name, "func.func")) {
@@ -459,7 +500,267 @@ pub const VerificationPass = struct {
                 current_op = mlir.oraOperationGetNextInBlock(current_op);
             }
 
+            // Propagate accumulated path assumptions to CFG successors with a
+            // single predecessor. This keeps linear guard chains precise while
+            // staying conservative on merge blocks.
+            const term = mlir.oraBlockGetTerminator(current_block);
+            if (!mlir.oraOperationIsNull(term)) {
+                const num_succ = mlir.mlirOperationGetNumSuccessors(term);
+                if (num_succ > 0) {
+                    const block_assumptions = self.active_path_assumptions.items[region_path_assumption_len..];
+                    for (0..@intCast(num_succ)) |succ_idx| {
+                        const succ_block = mlir.mlirOperationGetSuccessor(term, @intCast(succ_idx));
+                        if (mlir.oraBlockIsNull(succ_block)) continue;
+                        const succ_key = @intFromPtr(succ_block.ptr);
+                        const pred_count = predecessor_counts.get(succ_key) orelse 0;
+                        if (pred_count != 1) continue;
+
+                        if (inherited_assumptions.fetchRemove(succ_key)) |removed| {
+                            self.allocator.free(removed.value);
+                        }
+                        const dup = try self.allocator.dupe(ActivePathAssume, block_assumptions);
+                        try inherited_assumptions.put(succ_key, dup);
+                    }
+                }
+            }
+
             current_block = mlir.oraBlockGetNextInRegion(current_block);
+        }
+    }
+
+    const EncoderBranchState = struct {
+        global_map: std.StringHashMap(z3.Z3_ast),
+        memref_map: std.AutoHashMap(u64, z3.Z3_ast),
+
+        fn init(allocator: std.mem.Allocator) EncoderBranchState {
+            return .{
+                .global_map = std.StringHashMap(z3.Z3_ast).init(allocator),
+                .memref_map = std.AutoHashMap(u64, z3.Z3_ast).init(allocator),
+            };
+        }
+
+        fn deinit(self: *EncoderBranchState, allocator: std.mem.Allocator) void {
+            var g_it = self.global_map.iterator();
+            while (g_it.next()) |entry| {
+                allocator.free(entry.key_ptr.*);
+            }
+            self.global_map.deinit();
+            self.memref_map.deinit();
+        }
+    };
+
+    fn captureEncoderBranchState(self: *VerificationPass) !EncoderBranchState {
+        var snap = EncoderBranchState.init(self.allocator);
+        errdefer snap.deinit(self.allocator);
+
+        var g_it = self.encoder.global_map.iterator();
+        while (g_it.next()) |entry| {
+            const key_dup = try self.allocator.dupe(u8, entry.key_ptr.*);
+            try snap.global_map.put(key_dup, entry.value_ptr.*);
+        }
+
+        var m_it = self.encoder.memref_map.iterator();
+        while (m_it.next()) |entry| {
+            try snap.memref_map.put(entry.key_ptr.*, entry.value_ptr.*);
+        }
+
+        return snap;
+    }
+
+    fn clearEncoderGlobalMap(self: *VerificationPass) void {
+        var g_it = self.encoder.global_map.iterator();
+        while (g_it.next()) |entry| {
+            self.allocator.free(entry.key_ptr.*);
+        }
+        self.encoder.global_map.clearRetainingCapacity();
+    }
+
+    fn restoreEncoderBranchState(self: *VerificationPass, snap: *const EncoderBranchState) !void {
+        self.clearEncoderGlobalMap();
+        self.encoder.memref_map.clearRetainingCapacity();
+
+        var g_it = snap.global_map.iterator();
+        while (g_it.next()) |entry| {
+            const key_dup = try self.allocator.dupe(u8, entry.key_ptr.*);
+            try self.encoder.global_map.put(key_dup, entry.value_ptr.*);
+        }
+
+        var m_it = snap.memref_map.iterator();
+        while (m_it.next()) |entry| {
+            try self.encoder.memref_map.put(entry.key_ptr.*, entry.value_ptr.*);
+        }
+    }
+
+    fn appendUniqueName(self: *VerificationPass, list: *std.ArrayList([]const u8), name: []const u8) !void {
+        for (list.items) |existing| {
+            if (std.mem.eql(u8, existing, name)) return;
+        }
+        try list.append(self.allocator, name);
+    }
+
+    fn mergeEncoderBranchState(
+        self: *VerificationPass,
+        condition: z3.Z3_ast,
+        base: *const EncoderBranchState,
+        then_state: *const EncoderBranchState,
+        else_state: *const EncoderBranchState,
+    ) !void {
+        // Globals: merge per-slot as ite(condition, then, else), defaulting to base.
+        self.clearEncoderGlobalMap();
+        var global_names = std.ArrayList([]const u8){};
+        defer global_names.deinit(self.allocator);
+
+        var base_g_it = base.global_map.iterator();
+        while (base_g_it.next()) |entry| {
+            try appendUniqueName(self, &global_names, entry.key_ptr.*);
+        }
+        var then_g_it = then_state.global_map.iterator();
+        while (then_g_it.next()) |entry| {
+            try appendUniqueName(self, &global_names, entry.key_ptr.*);
+        }
+        var else_g_it = else_state.global_map.iterator();
+        while (else_g_it.next()) |entry| {
+            try appendUniqueName(self, &global_names, entry.key_ptr.*);
+        }
+
+        for (global_names.items) |name| {
+            const base_opt = base.global_map.get(name);
+            const then_opt = then_state.global_map.get(name);
+            const else_opt = else_state.global_map.get(name);
+            const fallback = base_opt orelse then_opt orelse else_opt orelse continue;
+            const then_val = then_opt orelse fallback;
+            const else_val = else_opt orelse fallback;
+            const merged = if (then_val == else_val)
+                then_val
+            else
+                self.encoder.encodeIte(condition, then_val, else_val);
+
+            const key_dup = try self.allocator.dupe(u8, name);
+            try self.encoder.global_map.put(key_dup, merged);
+        }
+
+        // Scalar memrefs: same merge logic.
+        self.encoder.memref_map.clearRetainingCapacity();
+        var mem_keys = std.AutoHashMap(u64, void).init(self.allocator);
+        defer mem_keys.deinit();
+
+        var base_m_it = base.memref_map.iterator();
+        while (base_m_it.next()) |entry| {
+            try mem_keys.put(entry.key_ptr.*, {});
+        }
+        var then_m_it = then_state.memref_map.iterator();
+        while (then_m_it.next()) |entry| {
+            try mem_keys.put(entry.key_ptr.*, {});
+        }
+        var else_m_it = else_state.memref_map.iterator();
+        while (else_m_it.next()) |entry| {
+            try mem_keys.put(entry.key_ptr.*, {});
+        }
+
+        var key_it = mem_keys.iterator();
+        while (key_it.next()) |entry| {
+            const key = entry.key_ptr.*;
+            const base_opt = base.memref_map.get(key);
+            const then_opt = then_state.memref_map.get(key);
+            const else_opt = else_state.memref_map.get(key);
+            const fallback = base_opt orelse then_opt orelse else_opt orelse continue;
+            const then_val = then_opt orelse fallback;
+            const else_val = else_opt orelse fallback;
+            const merged = if (then_val == else_val)
+                then_val
+            else
+                self.encoder.encodeIte(condition, then_val, else_val);
+            try self.encoder.memref_map.put(key, merged);
+        }
+    }
+
+    fn walkScfIfRegions(self: *VerificationPass, if_op: mlir.MlirOperation) anyerror!void {
+        const num_regions = mlir.oraOperationGetNumRegions(if_op);
+        if (num_regions == 0) return;
+
+        const num_operands = mlir.oraOperationGetNumOperands(if_op);
+        if (num_operands < 1) {
+            for (0..@intCast(num_regions)) |region_idx| {
+                const nested_region = mlir.oraOperationGetRegion(if_op, @intCast(region_idx));
+                try self.walkMLIRRegion(nested_region);
+            }
+            return;
+        }
+
+        const condition_value = mlir.oraOperationGetOperand(if_op, 0);
+        const condition = try self.encoder.encodeValue(condition_value);
+        const leaked_constraints = try self.encoder.takeConstraints(self.allocator);
+        defer if (leaked_constraints.len > 0) self.allocator.free(leaked_constraints);
+        const leaked_obligations = try self.encoder.takeObligations(self.allocator);
+        defer if (leaked_obligations.len > 0) self.allocator.free(leaked_obligations);
+
+        var base_state = try self.captureEncoderBranchState();
+        defer base_state.deinit(self.allocator);
+
+        var then_state = EncoderBranchState.init(self.allocator);
+        defer then_state.deinit(self.allocator);
+        var else_state = EncoderBranchState.init(self.allocator);
+        defer else_state.deinit(self.allocator);
+
+        // Then branch under condition.
+        if (num_regions >= 1) {
+            try self.restoreEncoderBranchState(&base_state);
+            const saved_len = self.active_path_assumptions.items.len;
+            defer self.active_path_assumptions.shrinkRetainingCapacity(saved_len);
+            try self.active_path_assumptions.append(.{
+                .condition = condition,
+                .extra_constraints = &[_]z3.Z3_ast{},
+            });
+            const then_region = mlir.oraOperationGetRegion(if_op, 0);
+            try self.walkMLIRRegion(then_region);
+            then_state.deinit(self.allocator);
+            then_state = try self.captureEncoderBranchState();
+        } else {
+            then_state.deinit(self.allocator);
+            then_state = try self.captureEncoderBranchState();
+        }
+
+        // Else branch under !condition.
+        if (num_regions >= 2) {
+            try self.restoreEncoderBranchState(&base_state);
+            const saved_len = self.active_path_assumptions.items.len;
+            defer self.active_path_assumptions.shrinkRetainingCapacity(saved_len);
+            const not_condition = z3.Z3_mk_not(self.context.ctx, condition);
+            try self.active_path_assumptions.append(.{
+                .condition = not_condition,
+                .extra_constraints = &[_]z3.Z3_ast{},
+            });
+            const else_region = mlir.oraOperationGetRegion(if_op, 1);
+            try self.walkMLIRRegion(else_region);
+            else_state.deinit(self.allocator);
+            else_state = try self.captureEncoderBranchState();
+        } else {
+            else_state.deinit(self.allocator);
+            else_state = try self.captureEncoderBranchState();
+        }
+
+        try self.mergeEncoderBranchState(condition, &base_state, &then_state, &else_state);
+    }
+
+    fn collectRegionPredecessorCounts(
+        _: *VerificationPass,
+        region: mlir.MlirRegion,
+        counts: *std.AutoHashMap(usize, usize),
+    ) !void {
+        var block = mlir.oraRegionGetFirstBlock(region);
+        while (!mlir.oraBlockIsNull(block)) {
+            const term = mlir.oraBlockGetTerminator(block);
+            if (!mlir.oraOperationIsNull(term)) {
+                const num_succ = mlir.mlirOperationGetNumSuccessors(term);
+                for (0..@intCast(num_succ)) |succ_idx| {
+                    const succ_block = mlir.mlirOperationGetSuccessor(term, @intCast(succ_idx));
+                    if (mlir.oraBlockIsNull(succ_block)) continue;
+                    const succ_key = @intFromPtr(succ_block.ptr);
+                    const prev = counts.get(succ_key) orelse 0;
+                    try counts.put(succ_key, prev + 1);
+                }
+            }
+            block = mlir.oraBlockGetNextInRegion(block);
         }
     }
 
@@ -533,7 +834,7 @@ pub const VerificationPass = struct {
                     });
                 }
             }
-        } else if (std.mem.eql(u8, op_name, "cf.assert")) {
+        } else if (std.mem.eql(u8, op_name, "cf.assert") or std.mem.eql(u8, op_name, "ora.assert")) {
             const num_operands = mlir.oraOperationGetNumOperands(op);
             if (num_operands >= 1) {
                 const condition_value = mlir.oraOperationGetOperand(op, 0);
@@ -549,7 +850,7 @@ pub const VerificationPass = struct {
                     tagged_assert = true;
                 }
                 if (!tagged_assert and self.verify_mode == .Full) {
-                    // In full mode, treat untagged cf.assert as proof obligations.
+                    // In full mode, treat untagged assert ops as proof obligations.
                     _ = try self.recordEncodedAnnotation(op, .ContractInvariant, condition_value, null);
                 }
             }
@@ -574,6 +875,14 @@ pub const VerificationPass = struct {
         defer if (leaked_constraints.len > 0) self.allocator.free(leaked_constraints);
         const leaked_obligations = try self.encoder.takeObligations(self.allocator);
         defer if (leaked_obligations.len > 0) self.allocator.free(leaked_obligations);
+
+        // Encoding state ops can cache intermediate value encodings (e.g.,
+        // ora.struct_init) whose defining constraints were just discarded.
+        // Clear expression caches so later annotation encoding re-materializes
+        // those constraints instead of reusing under-constrained ASTs.
+        self.encoder.value_map.clearRetainingCapacity();
+        self.encoder.value_map_old.clearRetainingCapacity();
+        self.encoder.value_bindings.clearRetainingCapacity();
     }
 
     /// Get MLIR operation name as string
@@ -910,6 +1219,49 @@ pub const VerificationPass = struct {
         std.debug.print("[Z3] {s}: {s}\n", .{ label, std.mem.span(c_str) });
     }
 
+    fn traceSmt(self: *const VerificationPass, comptime format: []const u8, args: anytype) void {
+        if (!self.trace_smt) return;
+        std.debug.print("smt-trace: " ++ format ++ "\n", args);
+    }
+
+    fn tracePreparedQuery(self: *const VerificationPass, query_index: usize, query: PreparedQuery) void {
+        if (!self.trace_smt) return;
+        self.traceSmt(
+            "Q{d} kind={s} fn={s} loc={s}:{d}:{d} constraints={d} smt_bytes={d} smt_hash=0x{x}",
+            .{
+                query_index + 1,
+                queryKindLabel(query.kind),
+                query.function_name,
+                query.file,
+                query.line,
+                query.column,
+                query.constraint_count,
+                query.smtlib_bytes,
+                query.smtlib_hash,
+            },
+        );
+    }
+
+    fn traceCurrentSolverState(self: *const VerificationPass, phase_label: []const u8) void {
+        if (!self.trace_smt) return;
+        const raw = z3.Z3_solver_to_string(self.context.ctx, self.solver.solver);
+        if (raw == null) {
+            self.traceSmt("{s} smt unavailable", .{phase_label});
+            return;
+        }
+        const c_str: [*:0]const u8 = @ptrCast(raw);
+        const smt_text = std.mem.span(c_str);
+        const smt_hash = std.hash.Wyhash.hash(0, smt_text);
+        self.traceSmt(
+            "{s} smt_bytes={d} smt_hash=0x{x}",
+            .{ phase_label, smt_text.len, smt_hash },
+        );
+        if (self.trace_smtlib) {
+            std.debug.print("smt-trace: {s} smtlib-begin\n{s}\n", .{ phase_label, smt_text });
+            std.debug.print("smt-trace: {s} smtlib-end\n", .{phase_label});
+        }
+    }
+
     pub fn runVerificationPass(self: *VerificationPass, mlir_module: mlir.MlirModule) !errors.VerificationResult {
         if (self.parallel) {
             return try self.runVerificationPassParallel(mlir_module);
@@ -995,6 +1347,8 @@ pub const VerificationPass = struct {
                 self.logSolverState("base");
             }
 
+            self.traceSmt("{s} [base] check-start", .{fn_name});
+            self.traceCurrentSolverState("query");
             std.debug.print("verification: {s} [base] start\n", .{fn_name});
             timer.reset();
             const assumption_status = self.solver.check();
@@ -1043,6 +1397,8 @@ pub const VerificationPass = struct {
                 self.solver.assert(negated);
 
                 const obligation_label = obligationKindLabel(ann.kind);
+                self.traceSmt("{s} [{s}] check-start", .{ fn_name, obligation_label });
+                self.traceCurrentSolverState("query");
                 std.debug.print("verification: {s} [{s}] start\n", .{ fn_name, obligation_label });
                 timer.reset();
                 const obligation_status = self.solver.check();
@@ -1106,6 +1462,8 @@ pub const VerificationPass = struct {
                         }
                         self.solver.assert(z3.Z3_mk_not(self.context.ctx, ann.condition));
 
+                        self.traceSmt("{s} [invariant-step] check-start", .{fn_name});
+                        self.traceCurrentSolverState("query");
                         std.debug.print("verification: {s} [invariant-step] start\n", .{fn_name});
                         timer.reset();
                         const step_status = self.solver.check();
@@ -1183,6 +1541,8 @@ pub const VerificationPass = struct {
                     self.solver.assert(exit_condition);
                     self.solver.assert(z3.Z3_mk_not(self.context.ctx, ensure_ann.condition));
 
+                    self.traceSmt("{s} [invariant-post] check-start", .{fn_name});
+                    self.traceCurrentSolverState("query");
                     std.debug.print("verification: {s} [invariant-post] start\n", .{fn_name});
                     timer.reset();
                     const post_status = self.solver.check();
@@ -1261,6 +1621,8 @@ pub const VerificationPass = struct {
                     self.solver.assert(cst);
                 }
                 self.solver.assert(ann.condition);
+                self.traceSmt("{s} guard {s} [satisfy] check-start", .{ fn_name, ann.guard_id.? });
+                self.traceCurrentSolverState("query");
                 std.debug.print("verification: {s} guard {s} [satisfy] start\n", .{ fn_name, ann.guard_id.? });
                 timer.reset();
                 const satisfy_status = self.solver.check();
@@ -1326,6 +1688,8 @@ pub const VerificationPass = struct {
                     self.logAst("guard", ann.condition);
                     self.logSolverState("guard");
                 }
+                self.traceSmt("{s} guard {s} [violate] check-start", .{ fn_name, ann.guard_id.? });
+                self.traceCurrentSolverState("query");
                 std.debug.print("verification: {s} guard {s} [violate] start\n", .{ fn_name, ann.guard_id.? });
                 timer.reset();
                 const guard_status = self.solver.check();
@@ -1399,6 +1763,12 @@ pub const VerificationPass = struct {
             return errors.VerificationResult.init(self.allocator);
         }
 
+        if (self.trace_smt) {
+            for (queries.items, 0..) |query, idx| {
+                self.tracePreparedQuery(idx, query);
+            }
+        }
+
         var thread_safe_allocator = std.heap.ThreadSafeAllocator{ .child_allocator = std.heap.page_allocator };
         const worker_allocator = thread_safe_allocator.allocator();
 
@@ -1424,6 +1794,8 @@ pub const VerificationPass = struct {
             results: []QueryResult,
             allocator: std.mem.Allocator,
             timeout_ms: ?u32,
+            trace_smt: bool,
+            trace_smtlib: bool,
         };
 
         var state = WorkState{
@@ -1432,6 +1804,8 @@ pub const VerificationPass = struct {
             .results = results,
             .allocator = worker_allocator,
             .timeout_ms = self.timeout_ms,
+            .trace_smt = self.trace_smt,
+            .trace_smtlib = self.trace_smtlib,
         };
 
         const Worker = struct {
@@ -1451,8 +1825,32 @@ pub const VerificationPass = struct {
                     if (idx >= ctx.queries.len) break;
 
                     const query = ctx.queries[idx];
+                    if (ctx.trace_smt) {
+                        std.debug.print(
+                            "smt-trace: Q{d} reset kind={s} fn={s} constraints={d} smt_bytes={d} smt_hash=0x{x}\n",
+                            .{
+                                idx + 1,
+                                queryKindLabel(query.kind),
+                                query.function_name,
+                                query.constraint_count,
+                                query.smtlib_bytes,
+                                query.smtlib_hash,
+                            },
+                        );
+                    }
                     solver.reset();
+                    if (ctx.trace_smt) {
+                        std.debug.print("smt-trace: Q{d} load-smt begin\n", .{idx + 1});
+                        if (ctx.trace_smtlib) {
+                            std.debug.print("smt-trace: Q{d} smtlib-begin\n{s}\n", .{ idx + 1, query.smtlib_z });
+                            std.debug.print("smt-trace: Q{d} smtlib-end\n", .{idx + 1});
+                        }
+                    }
                     solver.loadFromSmtlib(query.smtlib_z);
+                    if (ctx.trace_smt) {
+                        std.debug.print("smt-trace: Q{d} load-smt done\n", .{idx + 1});
+                        std.debug.print("smt-trace: Q{d} check start\n", .{idx + 1});
+                    }
 
                     std.debug.print("{s} start\n", .{query.log_prefix});
                     var timer = std.time.Timer.start() catch |err| {
@@ -1461,6 +1859,20 @@ pub const VerificationPass = struct {
                     };
                     const status = solver.check();
                     const elapsed_ms = timer.read() / std.time.ns_per_ms;
+                    if (ctx.trace_smt) {
+                        std.debug.print(
+                            "smt-trace: Q{d} check done status={s} elapsed_ms={d}\n",
+                            .{
+                                idx + 1,
+                                switch (status) {
+                                    z3.Z3_L_FALSE => "UNSAT",
+                                    z3.Z3_L_TRUE => "SAT",
+                                    else => "UNKNOWN",
+                                },
+                                elapsed_ms,
+                            },
+                        );
+                    }
 
                     std.debug.print("{s} -> {s} ({d}ms)\n", .{
                         query.log_prefix,
@@ -1485,6 +1897,9 @@ pub const VerificationPass = struct {
                             if (raw != null) {
                                 const dup = ctx.allocator.dupe(u8, std.mem.span(raw)) catch null;
                                 ctx.results[idx].model_str = dup;
+                                if (ctx.trace_smt and dup != null) {
+                                    std.debug.print("smt-trace: Q{d} model captured bytes={d}\n", .{ idx + 1, dup.?.len });
+                                }
                             }
                         }
                     }
@@ -1710,12 +2125,32 @@ pub const VerificationPass = struct {
         }
 
         for (queries.items, 0..) |query, idx| {
+            if (self.trace_smt) {
+                self.tracePreparedQuery(idx, query);
+                self.traceSmt("Q{d} report reset", .{idx + 1});
+            }
             self.solver.reset();
+            if (self.trace_smt) {
+                self.traceSmt("Q{d} report load-smt begin", .{idx + 1});
+                if (self.trace_smtlib) {
+                    std.debug.print("smt-trace: Q{d} smtlib-begin\n{s}\n", .{ idx + 1, query.smtlib_z });
+                    std.debug.print("smt-trace: Q{d} smtlib-end\n", .{idx + 1});
+                }
+            }
             self.solver.loadFromSmtlib(query.smtlib_z);
+            if (self.trace_smt) {
+                self.traceSmt("Q{d} report check-start", .{idx + 1});
+            }
 
             var timer = try std.time.Timer.start();
             const status = self.solver.check();
             const elapsed_ms = timer.read() / std.time.ns_per_ms;
+            if (self.trace_smt) {
+                self.traceSmt(
+                    "Q{d} report check-done status={s} elapsed_ms={d}",
+                    .{ idx + 1, queryStatusLabel(status), elapsed_ms },
+                );
+            }
 
             var model_copy: ?[]u8 = null;
             if (status == z3.Z3_L_TRUE and (query.kind == .Obligation or
@@ -1962,6 +2397,9 @@ pub const VerificationPass = struct {
             try writer.print("- Location: `{s}:{d}:{d}`\n", .{ query.file, query.line, query.column });
             try writer.print("- Status: `{s}`\n", .{queryStatusLabel(run.status)});
             try writer.print("- Elapsed ms: `{d}`\n", .{run.elapsed_ms});
+            try writer.print("- Constraint count: `{d}`\n", .{query.constraint_count});
+            try writer.print("- SMT bytes: `{d}`\n", .{query.smtlib_bytes});
+            try writer.print("- SMT hash: `0x{x}`\n", .{query.smtlib_hash});
             if (query.guard_id) |guard_id| {
                 try writer.print("- Guard ID: `{s}`\n", .{guard_id});
             }
@@ -2109,6 +2547,10 @@ pub const VerificationPass = struct {
             try writer.writeAll(",\"status\":");
             try writeJsonStringEscaped(writer, queryStatusLabel(run.status));
             try writer.print(",\"elapsed_ms\":{d}", .{run.elapsed_ms});
+            try writer.print(",\"constraint_count\":{d}", .{query.constraint_count});
+            try writer.print(",\"smtlib_bytes\":{d}", .{query.smtlib_bytes});
+            try writer.writeAll(",\"smtlib_hash\":");
+            try writer.print("\"0x{x}\"", .{query.smtlib_hash});
             try writer.writeAll(",\"guard_id\":");
             if (query.guard_id) |guard_id| {
                 try writeJsonStringEscaped(writer, guard_id);
@@ -2210,6 +2652,9 @@ pub const VerificationPass = struct {
                 .line = self.firstLocationLine(annotations),
                 .column = self.firstLocationColumn(annotations),
                 .smtlib_z = base_smtlib,
+                .constraint_count = assumption_constraints.items.len,
+                .smtlib_bytes = base_smtlib.len,
+                .smtlib_hash = std.hash.Wyhash.hash(0, base_smtlib),
                 .log_prefix = base_log_prefix,
             });
 
@@ -2236,6 +2681,9 @@ pub const VerificationPass = struct {
                     .line = ann.line,
                     .column = ann.column,
                     .smtlib_z = obligation_smtlib,
+                    .constraint_count = obligation_constraints.items.len,
+                    .smtlib_bytes = obligation_smtlib.len,
+                    .smtlib_hash = std.hash.Wyhash.hash(0, obligation_smtlib),
                     .log_prefix = obligation_log_prefix,
                 });
 
@@ -2268,6 +2716,9 @@ pub const VerificationPass = struct {
                             .line = ann.line,
                             .column = ann.column,
                             .smtlib_z = step_smtlib,
+                            .constraint_count = step_constraints.items.len,
+                            .smtlib_bytes = step_smtlib.len,
+                            .smtlib_hash = std.hash.Wyhash.hash(0, step_smtlib),
                             .log_prefix = step_log_prefix,
                         });
                     }
@@ -2309,6 +2760,9 @@ pub const VerificationPass = struct {
                         .line = ensure_ann.line,
                         .column = ensure_ann.column,
                         .smtlib_z = post_smtlib,
+                        .constraint_count = post_constraints.items.len,
+                        .smtlib_bytes = post_smtlib.len,
+                        .smtlib_hash = std.hash.Wyhash.hash(0, post_smtlib),
                         .log_prefix = post_log_prefix,
                     });
                 }
@@ -2353,6 +2807,9 @@ pub const VerificationPass = struct {
                     .line = ann.line,
                     .column = ann.column,
                     .smtlib_z = satisfy_smtlib,
+                    .constraint_count = satisfy_constraints.items.len,
+                    .smtlib_bytes = satisfy_smtlib.len,
+                    .smtlib_hash = std.hash.Wyhash.hash(0, satisfy_smtlib),
                     .log_prefix = satisfy_log_prefix,
                 });
 
@@ -2378,6 +2835,9 @@ pub const VerificationPass = struct {
                     .line = ann.line,
                     .column = ann.column,
                     .smtlib_z = violate_smtlib,
+                    .constraint_count = violate_constraints.items.len,
+                    .smtlib_bytes = violate_smtlib.len,
+                    .smtlib_hash = std.hash.Wyhash.hash(0, violate_smtlib),
                     .log_prefix = violate_log_prefix,
                 });
 
@@ -2696,6 +3156,9 @@ const PreparedQuery = struct {
     line: u32,
     column: u32,
     smtlib_z: [:0]const u8,
+    constraint_count: usize = 0,
+    smtlib_bytes: usize = 0,
+    smtlib_hash: u64 = 0,
     log_prefix: []const u8,
 
     fn deinit(self: *PreparedQuery, allocator: std.mem.Allocator) void {
@@ -3110,6 +3573,36 @@ fn buildUntaggedCfAssertModule(mlir_ctx: mlir.MlirContext) mlir.MlirModule {
     return module;
 }
 
+fn buildUntaggedOraAssertModule(mlir_ctx: mlir.MlirContext) mlir.MlirModule {
+    const loc = mlir.oraLocationUnknownGet(mlir_ctx);
+    const module = mlir.oraModuleCreateEmpty(loc);
+    const module_body = mlir.oraModuleGetBody(module);
+
+    const sym_name_attr = mlir.oraStringAttrCreate(mlir_ctx, testStringRef("ora_assert_test"));
+    const func_attrs = [_]mlir.MlirNamedAttribute{
+        testNamedAttr(mlir_ctx, "sym_name", sym_name_attr),
+    };
+    const empty_types = [_]mlir.MlirType{};
+    const empty_locs = [_]mlir.MlirLocation{};
+    const func_op = mlir.oraFuncFuncOpCreate(mlir_ctx, loc, &func_attrs, func_attrs.len, &empty_types, &empty_locs, 0);
+    const func_body = mlir.oraFuncOpGetBodyBlock(func_op);
+
+    const i1_ty = mlir.oraIntegerTypeCreate(mlir_ctx, 1);
+    const cond_attr = mlir.oraIntegerAttrCreateI64FromType(i1_ty, 1);
+    const cond_op = mlir.oraArithConstantOpCreate(mlir_ctx, loc, i1_ty, cond_attr);
+    const cond = mlir.oraOperationGetResult(cond_op, 0);
+    const assert_op = mlir.oraAssertOpCreate(mlir_ctx, loc, cond, testStringRef("assert"));
+    const empty_return_vals = [_]mlir.MlirValue{};
+    const ret_op = mlir.oraReturnOpCreate(mlir_ctx, loc, &empty_return_vals, empty_return_vals.len);
+
+    mlir.oraBlockAppendOwnedOperation(func_body, cond_op);
+    mlir.oraBlockAppendOwnedOperation(func_body, assert_op);
+    mlir.oraBlockAppendOwnedOperation(func_body, ret_op);
+
+    mlir.oraBlockAppendOwnedOperation(module_body, func_op);
+    return module;
+}
+
 fn buildPathAssumeEnsuresModule(mlir_ctx: mlir.MlirContext, path_assume_value: i64, ensures_value: i64) mlir.MlirModule {
     const loc = mlir.oraLocationUnknownGet(mlir_ctx);
     const module = mlir.oraModuleCreateEmpty(loc);
@@ -3377,6 +3870,67 @@ test "basic verify mode ignores untagged cf.assert as obligation" {
     _ = mlir.oraDialectRegister(mlir_ctx);
 
     const module = buildUntaggedCfAssertModule(mlir_ctx);
+    defer mlir.oraModuleDestroy(module);
+
+    try pass.extractAnnotationsFromMLIR(module);
+    var queries = try pass.buildPreparedQueries();
+    defer {
+        for (queries.items) |*q| {
+            q.deinit(testing.allocator);
+        }
+        queries.deinit();
+    }
+
+    for (queries.items) |q| {
+        if (q.kind == .Obligation and q.obligation_kind == .ContractInvariant) {
+            try testing.expect(false);
+        }
+    }
+}
+
+test "full verify mode treats untagged ora.assert as obligation" {
+    var pass = try VerificationPass.init(testing.allocator);
+    defer pass.deinit();
+    pass.setVerifyMode(.Full);
+
+    const mlir_ctx = mlir.oraContextCreate();
+    defer mlir.oraContextDestroy(mlir_ctx);
+    testLoadAllDialects(mlir_ctx);
+    _ = mlir.oraDialectRegister(mlir_ctx);
+
+    const module = buildUntaggedOraAssertModule(mlir_ctx);
+    defer mlir.oraModuleDestroy(module);
+
+    try pass.extractAnnotationsFromMLIR(module);
+    var queries = try pass.buildPreparedQueries();
+    defer {
+        for (queries.items) |*q| {
+            q.deinit(testing.allocator);
+        }
+        queries.deinit();
+    }
+
+    var saw_contract_obligation = false;
+    for (queries.items) |q| {
+        if (q.kind == .Obligation and q.obligation_kind == .ContractInvariant) {
+            saw_contract_obligation = true;
+            break;
+        }
+    }
+    try testing.expect(saw_contract_obligation);
+}
+
+test "basic verify mode ignores untagged ora.assert as obligation" {
+    var pass = try VerificationPass.init(testing.allocator);
+    defer pass.deinit();
+    pass.setVerifyMode(.Basic);
+
+    const mlir_ctx = mlir.oraContextCreate();
+    defer mlir.oraContextDestroy(mlir_ctx);
+    testLoadAllDialects(mlir_ctx);
+    _ = mlir.oraDialectRegister(mlir_ctx);
+
+    const module = buildUntaggedOraAssertModule(mlir_ctx);
     defer mlir.oraModuleDestroy(module);
 
     try pass.extractAnnotationsFromMLIR(module);

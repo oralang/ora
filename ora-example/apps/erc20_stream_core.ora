@@ -1,0 +1,385 @@
+// ============================================================================
+// ERC20 Stream Core
+// ============================================================================
+// Design goals:
+// - Minimal stream lifecycle: open -> close -> claim/reclaim
+// - Integration-ready with an existing deployed ERC20 via settlement adapter
+// - Verification-friendly arithmetic and explicit state transitions
+//
+// Integration model:
+// - `token_address` points to an already deployed ERC20 token contract.
+// - A trusted `settlement_adapter` (typically Solidity) performs ERC20 transfers
+//   and calls this contract to mutate verified stream accounting.
+// ============================================================================
+error Unauthorized;
+error InvalidSchedule;
+error InvalidRate;
+error InvalidAmount;
+error InvalidAddress;
+error StreamNotFound;
+error StreamNotOpen;
+error StreamStillOpen;
+error NotStreamRecipient;
+error NotStreamSender;
+error NothingToClaim;
+error NothingToReclaim;
+error EscrowOverflow;
+error EscrowUnderflow;
+error SpecOverflow;
+error StreamIdExhausted;
+contract ERC20StreamCore {
+    // External integration anchors
+    storage var token_address: address;
+    storage var settlement_adapter: address; // Global accounting
+
+    storage var next_stream_id: u256 = 1;
+    storage var total_escrowed: u256 = 0; // Per-stream state
+
+    storage var stream_exists: map<u256, bool>;
+    storage var stream_open: map<u256, bool>;
+    storage var stream_sender: map<u256, address>;
+    storage var stream_recipient: map<u256, address>;
+    storage var stream_rate: map<u256, u256>;
+    storage var stream_start: map<u256, u256>;
+    storage var stream_end: map<u256, u256>;
+    storage var stream_closed_at: map<u256, u256>;
+    storage var stream_deposit: map<u256, u256>;
+    storage var stream_claimed: map<u256, u256>;
+    storage var stream_reclaimed: map<u256, u256>;
+
+    // Ghost ledger for formal accounting
+    ghost storage spec_total_opened: u256 = 0;
+    ghost storage spec_total_claimed: u256 = 0;
+    ghost storage spec_total_reclaimed: u256 = 0;
+
+    // Global conservation invariants: never distribute or hold more than opened.
+    invariant claimedNotAboveOpened(spec_total_claimed <= spec_total_opened);
+    invariant reclaimedNotAboveOpened(spec_total_reclaimed <= spec_total_opened);
+    invariant escrowNotAboveOpened(total_escrowed <= spec_total_opened);
+
+    log StreamOpened(stream_id: u256, sender: address, recipient: address, total_amount: u256, rate_per_second: u256, starts_at: u256, ends_at: u256);
+    log StreamClosed(stream_id: u256, closed_at: u256, final_accrued: u256);
+    log StreamClaimed(stream_id: u256, recipient: address, amount: u256, total_claimed: u256);
+    log StreamReclaimed(stream_id: u256, sender: address, amount: u256, total_reclaimed: u256);
+
+    pub fn init(token: NonZeroAddress, adapter: NonZeroAddress)
+        requires(token != std.constants.ZERO_ADDRESS)
+        requires(adapter != std.constants.ZERO_ADDRESS)
+        ensures(token_address == token)
+        ensures(settlement_adapter == adapter)
+        ensures(next_stream_id == 1)
+        ensures(total_escrowed == 0)
+        ensures(spec_total_opened == 0)
+        ensures(spec_total_claimed == 0)
+        ensures(spec_total_reclaimed == 0)
+    {
+        token_address = token;
+        settlement_adapter = adapter;
+        next_stream_id = 1;
+        total_escrowed = 0;
+        spec_total_opened = 0;
+        spec_total_claimed = 0;
+        spec_total_reclaimed = 0;
+    }
+
+    pub fn getTokenAddress() -> address {
+        return token_address;
+    }
+
+    pub fn getSettlementAdapter() -> address {
+        return settlement_adapter;
+    }
+
+    fn onlyAdapter() -> bool {
+        return std.msg.sender() == settlement_adapter;
+    }
+
+    fn assertLedgerInvariant()
+        requires(spec_total_opened >= spec_total_claimed)
+        requires(spec_total_opened - spec_total_claimed >= spec_total_reclaimed)
+        requires(total_escrowed == spec_total_opened - spec_total_claimed - spec_total_reclaimed)
+    {
+        let remaining_after_claims: u256 = spec_total_opened - spec_total_claimed;
+        let expected_escrow: u256 = remaining_after_claims - spec_total_reclaimed;
+        assert(total_escrowed == expected_escrow, "escrow ledger mismatch");
+    }
+
+    fn streamCutoff(stream_id: u256, now_ts: u256) -> u256 {
+        var cutoff: u256 = now_ts;
+        let close_ts: u256 = stream_closed_at[stream_id];
+        let end_ts: u256 = stream_end[stream_id];
+        if (close_ts > 0 && close_ts < cutoff) {
+            cutoff = close_ts;
+        }
+        if (end_ts < cutoff) {
+            cutoff = end_ts;
+        }
+        return cutoff;
+    }
+
+    fn accruedAt(stream_id: u256, now_ts: u256) -> u256 {
+        let start_ts: u256 = stream_start[stream_id];
+        if (now_ts <= start_ts) {
+            return 0;
+        }
+        let cutoff: u256 = streamCutoff(stream_id, now_ts);
+        var elapsed: u256 = 0;
+        if (cutoff > start_ts) {
+            elapsed = cutoff - start_ts;
+        } else {
+            return 0;
+        }
+        let rate: u256 = stream_rate[stream_id];
+        let mul_res: struct { value: u256, overflow: bool } = @mulWithOverflow(elapsed, rate);
+        if (mul_res.overflow) {
+            return stream_deposit[stream_id];
+        }
+        let raw_accrued: u256 = mul_res.value;
+        let cap: u256 = stream_deposit[stream_id];
+        if (raw_accrued > cap) {
+            return cap;
+        }
+        return raw_accrued;
+    }
+
+    pub fn openStream(sender: address, recipient: address, starts_at: u256, ends_at: u256, rate_per_second: u256, total_amount: u256)
+        -> !u256 | Unauthorized | InvalidAddress | InvalidSchedule | InvalidRate | InvalidAmount | EscrowOverflow | StreamIdExhausted | SpecOverflow
+    {
+        if (!onlyAdapter()) {
+            return error.Unauthorized;
+        }
+        if (sender == std.constants.ZERO_ADDRESS) {
+            return error.InvalidAddress;
+        }
+        if (recipient == std.constants.ZERO_ADDRESS) {
+            return error.InvalidAddress;
+        }
+        if (sender == recipient) {
+            return error.InvalidAddress;
+        }
+        if (rate_per_second == 0) {
+            return error.InvalidRate;
+        }
+        if (total_amount == 0) {
+            return error.InvalidAmount;
+        }
+        var duration: u256 = 0;
+        if (ends_at > starts_at) {
+            duration = ends_at - starts_at;
+        } else {
+            return error.InvalidSchedule;
+        }
+        let expected_total: struct { value: u256, overflow: bool } = @mulWithOverflow(rate_per_second, duration);
+        if (expected_total.overflow) {
+            return error.InvalidRate;
+        }
+        if (expected_total.value != total_amount) {
+            return error.InvalidAmount;
+        }
+        if (next_stream_id == std.constants.U256_MAX) {
+            return error.StreamIdExhausted;
+        }
+        if (total_escrowed > std.constants.U256_MAX - total_amount) {
+            return error.EscrowOverflow;
+        }
+        if (spec_total_opened > std.constants.U256_MAX - total_amount) {
+            return error.SpecOverflow;
+        }
+        let stream_id: u256 = next_stream_id;
+        next_stream_id = stream_id + 1;
+        stream_exists[stream_id] = true;
+        stream_open[stream_id] = true;
+        stream_sender[stream_id] = sender;
+        stream_recipient[stream_id] = recipient;
+        stream_rate[stream_id] = rate_per_second;
+        stream_start[stream_id] = starts_at;
+        stream_end[stream_id] = ends_at;
+        stream_closed_at[stream_id] = 0;
+        stream_deposit[stream_id] = total_amount;
+        stream_claimed[stream_id] = 0;
+        stream_reclaimed[stream_id] = 0;
+        total_escrowed = total_escrowed + total_amount;
+        spec_total_opened = spec_total_opened + total_amount;
+
+        assert(stream_exists[stream_id], "opened stream must exist");
+        assert(stream_open[stream_id], "opened stream must be active");
+        assert(stream_claimed[stream_id] == 0, "opened stream claimed must be zero");
+        assert(stream_reclaimed[stream_id] == 0, "opened stream reclaimed must be zero");
+        assert(stream_deposit[stream_id] == total_amount, "opened stream deposit mismatch");
+        assertLedgerInvariant();
+
+        log StreamOpened(stream_id, sender, recipient, total_amount, rate_per_second, starts_at, ends_at);
+        return stream_id;
+    }
+
+    pub fn closeStream(stream_id: u256, close_timestamp: u256) -> !u256 | Unauthorized | StreamNotFound | StreamNotOpen | InvalidSchedule | InvalidAmount {
+        if (!onlyAdapter()) {
+            return error.Unauthorized;
+        }
+        if (!stream_exists[stream_id]) {
+            return error.StreamNotFound;
+        }
+        if (!stream_open[stream_id]) {
+            return error.StreamNotOpen;
+        }
+        let start_ts: u256 = stream_start[stream_id];
+        let end_ts: u256 = stream_end[stream_id];
+        if (end_ts < start_ts) {
+            return error.InvalidSchedule;
+        }
+        var final_close_ts: u256 = close_timestamp;
+        if (final_close_ts < start_ts) {
+            final_close_ts = start_ts;
+        }
+        if (final_close_ts > end_ts) {
+            final_close_ts = end_ts;
+        }
+        stream_closed_at[stream_id] = final_close_ts;
+        stream_open[stream_id] = false;
+        let final_accrued: u256 = accruedAt(stream_id, final_close_ts);
+        let deposit: u256 = stream_deposit[stream_id];
+        if (final_accrued > deposit) {
+            return error.InvalidAmount;
+        }
+        assert(!stream_open[stream_id], "closed stream must be inactive");
+        assert(stream_closed_at[stream_id] >= stream_start[stream_id], "close timestamp below start");
+        assert(stream_closed_at[stream_id] <= stream_end[stream_id], "close timestamp above end");
+        assert(final_accrued <= deposit, "accrued must be deposit-capped");
+        assertLedgerInvariant();
+        log StreamClosed(stream_id, final_close_ts, final_accrued);
+        return final_accrued;
+    }
+
+    pub fn claimableNow(stream_id: u256, now_ts: u256) -> !u256 | StreamNotFound {
+        if (!stream_exists[stream_id]) {
+            return error.StreamNotFound;
+        }
+        let accrued: u256 = accruedAt(stream_id, now_ts);
+        let claimed: u256 = stream_claimed[stream_id];
+        if (accrued <= claimed) {
+            return 0;
+        }
+        return accrued - claimed;
+    }
+
+    pub fn claim(stream_id: u256, recipient: address, now_ts: u256)
+        -> !u256 | Unauthorized | InvalidAddress | StreamNotFound | NotStreamRecipient | NothingToClaim | EscrowUnderflow | SpecOverflow
+    {
+        if (!onlyAdapter()) {
+            return error.Unauthorized;
+        }
+        if (recipient == std.constants.ZERO_ADDRESS) {
+            return error.InvalidAddress;
+        }
+        if (!stream_exists[stream_id]) {
+            return error.StreamNotFound;
+        }
+        if (stream_recipient[stream_id] != recipient) {
+            return error.NotStreamRecipient;
+        }
+        let accrued: u256 = accruedAt(stream_id, now_ts);
+        let claimed_before: u256 = stream_claimed[stream_id];
+        let reclaimed_before: u256 = stream_reclaimed[stream_id];
+        let deposit: u256 = stream_deposit[stream_id];
+        if (accrued <= claimed_before) {
+            return error.NothingToClaim;
+        }
+        if (@addWithOverflow(accrued, reclaimed_before).overflow) {
+            return error.SpecOverflow;
+        }
+        if (@addWithOverflow(accrued, reclaimed_before).value > deposit) {
+            return error.NothingToClaim;
+        }
+        let payout: u256 = accrued - claimed_before;
+        if (total_escrowed < payout) {
+            return error.EscrowUnderflow;
+        }
+        if (spec_total_claimed > std.constants.U256_MAX - payout) {
+            return error.SpecOverflow;
+        }
+        stream_claimed[stream_id] = accrued;
+        total_escrowed = total_escrowed - payout;
+        spec_total_claimed = spec_total_claimed + payout;
+
+        assert(!@addWithOverflow(stream_claimed[stream_id], stream_reclaimed[stream_id]).overflow, "stream spent overflow");
+        assert(@addWithOverflow(stream_claimed[stream_id], stream_reclaimed[stream_id]).value <= stream_deposit[stream_id], "stream spent exceeds deposit");
+        assertLedgerInvariant();
+
+        log StreamClaimed(stream_id, recipient, payout, accrued);
+        return payout;
+    }
+
+    pub fn refundableNow(stream_id: u256, now_ts: u256) -> !u256 | StreamNotFound | StreamStillOpen {
+        if (!stream_exists[stream_id]) {
+            return error.StreamNotFound;
+        }
+        if (stream_open[stream_id]) {
+            return error.StreamStillOpen;
+        }
+        let accrued: u256 = accruedAt(stream_id, now_ts);
+        let deposit: u256 = stream_deposit[stream_id];
+        var refundable_total: u256 = 0;
+        if (deposit > accrued) {
+            refundable_total = deposit - accrued;
+        }
+        let reclaimed_before: u256 = stream_reclaimed[stream_id];
+        if (refundable_total <= reclaimed_before) {
+            return 0;
+        }
+        return refundable_total - reclaimed_before;
+    }
+
+    pub fn reclaim(stream_id: u256, sender: address, now_ts: u256)
+        -> !u256 | Unauthorized | InvalidAddress | StreamNotFound | StreamStillOpen | NotStreamSender | NothingToReclaim | EscrowUnderflow | SpecOverflow
+    {
+        if (!onlyAdapter()) {
+            return error.Unauthorized;
+        }
+        if (sender == std.constants.ZERO_ADDRESS) {
+            return error.InvalidAddress;
+        }
+        if (!stream_exists[stream_id]) {
+            return error.StreamNotFound;
+        }
+        if (stream_open[stream_id]) {
+            return error.StreamStillOpen;
+        }
+        if (stream_sender[stream_id] != sender) {
+            return error.NotStreamSender;
+        }
+        let accrued: u256 = accruedAt(stream_id, now_ts);
+        let deposit: u256 = stream_deposit[stream_id];
+        var refundable_total: u256 = 0;
+        if (deposit > accrued) {
+            refundable_total = deposit - accrued;
+        }
+        let reclaimed_before: u256 = stream_reclaimed[stream_id];
+        if (refundable_total <= reclaimed_before) {
+            return error.NothingToReclaim;
+        }
+        let claimed_before: u256 = stream_claimed[stream_id];
+        if (@addWithOverflow(claimed_before, refundable_total).overflow) {
+            return error.SpecOverflow;
+        }
+        if (@addWithOverflow(claimed_before, refundable_total).value > deposit) {
+            return error.NothingToReclaim;
+        }
+        let refund: u256 = refundable_total - reclaimed_before;
+        if (total_escrowed < refund) {
+            return error.EscrowUnderflow;
+        }
+        if (spec_total_reclaimed > std.constants.U256_MAX - refund) {
+            return error.SpecOverflow;
+        }
+        stream_reclaimed[stream_id] = refundable_total;
+        total_escrowed = total_escrowed - refund;
+        spec_total_reclaimed = spec_total_reclaimed + refund;
+
+        assert(!@addWithOverflow(stream_claimed[stream_id], stream_reclaimed[stream_id]).overflow, "stream spent overflow");
+        assert(@addWithOverflow(stream_claimed[stream_id], stream_reclaimed[stream_id]).value <= stream_deposit[stream_id], "stream spent exceeds deposit");
+        assertLedgerInvariant();
+
+        log StreamReclaimed(stream_id, sender, refund, refundable_total);
+        return refund;
+    }
+}

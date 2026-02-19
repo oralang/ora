@@ -1,0 +1,38 @@
+// ============================================================================
+// Regression: NonZeroAddress Requires Dedup
+// ============================================================================
+// Focus:
+// 1) Avoid duplicate runtime checks when parameter refinement already enforces
+//    non-zero and user also writes equivalent requires(... != ZERO_ADDRESS)
+// 2) Keep precondition facts for SMT via ora.assume
+//
+// Inspect with:
+//   ./zig-out/bin/ora emit --emit-mlir=ora --no-verify ora-example/smt/verification/nonzero_requires_dedup.ora
+//
+// Expected in @initRedundant:
+// - ora.refinement_guard for each NonZeroAddress arg
+// - ora.assume for each redundant requires clause
+// - no cf.assert for those redundant requires clauses
+//
+// Expected in @initAddressRequires:
+// - cf.assert preconditions remain (no refinement dedup)
+// ============================================================================
+
+contract NonZeroRequiresDedup {
+    pub fn initRedundant(token: NonZeroAddress, adapter: NonZeroAddress)
+        requires(token != std.constants.ZERO_ADDRESS)
+        requires(adapter != std.constants.ZERO_ADDRESS)
+    {
+    }
+
+    pub fn initNonZeroOnly(token: NonZeroAddress, adapter: NonZeroAddress) {
+        assert(token != std.constants.ZERO_ADDRESS, "token must be non-zero");
+        assert(adapter != std.constants.ZERO_ADDRESS, "adapter must be non-zero");
+    }
+
+    pub fn initAddressRequires(token: address, adapter: address)
+        requires(token != std.constants.ZERO_ADDRESS)
+        requires(adapter != std.constants.ZERO_ADDRESS)
+    {
+    }
+}

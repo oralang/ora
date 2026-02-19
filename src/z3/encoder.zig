@@ -2475,21 +2475,30 @@ pub const Encoder = struct {
     }
 
     fn findFunctionReturnOp(self: *Encoder, func_op: mlir.MlirOperation) ?mlir.MlirOperation {
-        var out = mlir.MlirOperation{ .ptr = null };
-        self.findReturnInOperation(func_op, &out);
-        if (mlir.oraOperationIsNull(out)) return null;
-        return out;
+        var state = ReturnSearchState{};
+        self.findUniqueReturnInOperation(func_op, &state);
+        if (state.multiple or mlir.oraOperationIsNull(state.first)) return null;
+        return state.first;
     }
 
-    fn findReturnInOperation(self: *Encoder, op: mlir.MlirOperation, out: *mlir.MlirOperation) void {
-        if (!mlir.oraOperationIsNull(out.*)) return;
+    const ReturnSearchState = struct {
+        first: mlir.MlirOperation = .{ .ptr = null },
+        multiple: bool = false,
+    };
+
+    fn findUniqueReturnInOperation(self: *Encoder, op: mlir.MlirOperation, state: *ReturnSearchState) void {
+        if (state.multiple) return;
 
         const name_ref = mlir.oraOperationGetName(op);
         defer @import("mlir_c_api").freeStringRef(name_ref);
         if (name_ref.data != null and name_ref.length > 0) {
             const op_name = name_ref.data[0..name_ref.length];
             if (std.mem.eql(u8, op_name, "ora.return") or std.mem.eql(u8, op_name, "func.return")) {
-                out.* = op;
+                if (mlir.oraOperationIsNull(state.first)) {
+                    state.first = op;
+                } else {
+                    state.multiple = true;
+                }
                 return;
             }
         }
@@ -2502,8 +2511,8 @@ pub const Encoder = struct {
             while (!mlir.oraBlockIsNull(block)) {
                 var nested = mlir.oraBlockGetFirstOperation(block);
                 while (!mlir.oraOperationIsNull(nested)) {
-                    self.findReturnInOperation(nested, out);
-                    if (!mlir.oraOperationIsNull(out.*)) return;
+                    self.findUniqueReturnInOperation(nested, state);
+                    if (state.multiple) return;
                     nested = mlir.oraOperationGetNextInBlock(nested);
                 }
                 block = mlir.oraBlockGetNextInRegion(block);

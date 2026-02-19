@@ -1,0 +1,44 @@
+contract PredicateProbe {
+    pub fn cmp_eq(a: u256, b: u256)
+        requires(a == b)
+        requires(a > 10)
+    {
+        let ok: bool = a == b;
+        assert(ok, "cmp_eq");
+    }
+
+    pub fn cmp_ne(a: u256, b: u256)
+        requires(a != b)
+    {
+        let ok: bool = a != b;
+        assert(ok, "cmp_ne");
+    }
+
+    pub fn cmp_lt(a: u256, b: u256)
+        requires(a < b)
+    {
+        let ok: bool = a < b;
+        assert(ok, "cmp_lt");
+    }
+
+    pub fn cmp_le(a: u256, b: u256)
+        requires(a <= b)
+    {
+        let ok: bool = a <= b;
+        assert(ok, "cmp_le");
+    }
+
+    pub fn cmp_gt(a: u256, b: u256)
+        requires(a > b)
+    {
+        let ok: bool = a > b;
+        assert(ok, "cmp_gt");
+    }
+
+    pub fn cmp_ge(a: u256, b: u256)
+        requires(a >= b)
+    {
+        let ok: bool = a >= b;
+        assert(ok, "cmp_ge");
+    }
+}

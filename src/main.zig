@@ -491,7 +491,7 @@ fn printUsage() !void {
     try stdout.print("\nAnalysis Options:\n", .{});
     try stdout.print("  --analyze-state        - Analyze storage reads/writes per function\n", .{});
     try stdout.print("  --verify               - Run Z3 verification on MLIR annotations (default)\n", .{});
-    try stdout.print("  --verify=basic|full    - Verification mode (basic annotations, or full assertions)\n", .{});
+    try stdout.print("  --verify=basic|full    - Verification mode (default: full)\n", .{});
     try stdout.print("  --no-verify            - Disable Z3 verification (emit mode only)\n", .{});
     try stdout.print("  --verify-calls         - Enable call reasoning in Z3 encoder (default)\n", .{});
     try stdout.print("  --no-verify-calls      - Disable call reasoning (treat calls as unknown)\n", .{});

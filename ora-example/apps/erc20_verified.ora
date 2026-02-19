@@ -1,110 +1,139 @@
-// ERC20 Token with Formal Verification
-// Testing FV features on a real contract
-
 contract VerifiedToken {
-    // Storage
-    storage totalSupply: u256;
-    storage balances: map<address, u256>;
-    storage allowances: map<address, map<address, u256>>;
-    
-    // Contract invariants (specification-only)
-    invariant totalSupplyPositive(totalSupply >= 0);
-    
-    // Ghost variable to track sum of all balances
-    ghost storage sumOfBalances: u256;
-    
-    // Initialize with supply (call once at deployment)
-    pub fn initialize(initialSupply: u256) -> bool
-        requires(initialSupply > 0)
-        ensures(totalSupply == initialSupply)
-        ensures(balances[std.msg.sender()] == initialSupply)
+    storage var owner: address;
+    storage var initialized: bool = false;
+    storage var totalSupply: u256 = 0;
+    storage var balances: map<address, u256>;
+    storage var allowances: map<address, map<address, u256>>;
+
+    // Ghost supply ledger: tokens are created only in mint().
+    ghost storage spec_total_minted: u256 = 0;
+
+    log Transfer(from: address, to: address, amount: u256);
+    log Approval(owner: address, spender: address, amount: u256);
+
+    pub fn initialize(admin: NonZeroAddress)
+        requires(!initialized)
+        requires(admin != std.constants.ZERO_ADDRESS)
+        ensures(initialized)
+        ensures(owner == admin)
+        ensures(totalSupply == 0)
+        ensures(spec_total_minted == 0)
+        ensures(forall a: address where true => balances[a] == old(balances[a]))
     {
-        var deployer: address = std.msg.sender();
-        totalSupply = initialSupply;
-        balances[deployer] = initialSupply;
-        return true;
+        owner = admin;
+        initialized = true;
+        totalSupply = 0;
+        spec_total_minted = 0;
     }
-    
-    // Get total supply
+
     pub fn getTotalSupply() -> u256 {
         return totalSupply;
     }
-    
-    // Get balance of an account
+
     pub fn balanceOf(account: address) -> u256 {
         return balances[account];
     }
-    
-    // Transfer tokens from sender to recipient
-    pub fn transfer(recipient: NonZeroAddress, amount: u256) -> bool
+
+    pub fn allowance(owner_addr: address, spender: address) -> u256 {
+        return allowances[owner_addr][spender];
+    }
+
+    // Only mint can increase totalSupply/spec_total_minted.
+    pub fn mint(to: NonZeroAddress, amount: MinValue<u256, 1>)
+        requires(initialized)
+        requires(std.msg.sender() == owner)
+        requires(to != std.constants.ZERO_ADDRESS)
         requires(amount > 0)
+        requires(totalSupply == spec_total_minted)
+        requires(totalSupply <= std.constants.U256_MAX - amount)
+        requires(balances[to] <= std.constants.U256_MAX - amount)
+        ensures(totalSupply == old(totalSupply) + amount)
+        ensures(spec_total_minted == old(spec_total_minted) + amount)
+        ensures(totalSupply == spec_total_minted)
+        ensures(balances[to] == old(balances[to]) + amount)
+        ensures(forall a: address where a != to => balances[a] == old(balances[a]))
+    {
+        let supply_before: u256 = totalSupply;
+        let recipient_before: u256 = balances[to];
+        let minted_before: u256 = spec_total_minted;
+
+        totalSupply = supply_before + amount;
+        balances[to] = recipient_before + amount;
+        spec_total_minted = minted_before + amount;
+
+        assert(totalSupply == spec_total_minted, "supply ledger mismatch");
+        log Transfer(std.constants.ZERO_ADDRESS, to, amount);
+    }
+
+    pub fn transfer(recipient: NonZeroAddress, amount: MinValue<u256, 1>)
+        requires(initialized)
         requires(recipient != std.constants.ZERO_ADDRESS)
+        requires(amount > 0)
         requires(recipient != std.msg.sender())
-        requires(balances[std.msg.sender()] >= amount)
+        requires(totalSupply == spec_total_minted)
+        requires(balances[std.msg.sender()] == amount)
         requires(balances[recipient] <= std.constants.U256_MAX - amount)
-        ensures(
-            balances[std.msg.sender()] == old(balances[std.msg.sender()]) - amount &&
-            balances[recipient] == old(balances[recipient]) + amount
-        )
+        ensures(totalSupply == old(totalSupply))
+        ensures(spec_total_minted == old(spec_total_minted))
+        ensures(totalSupply == spec_total_minted)
+        ensures(balances[std.msg.sender()] == old(balances[std.msg.sender()]) - amount)
+        ensures(balances[recipient] == old(balances[recipient]) + amount)
+        ensures(forall a: address where a != std.msg.sender() && a != recipient => balances[a] == old(balances[a]))
     {
-        var sender: address = std.msg.sender();
-        var sender_balance: u256 = balances[sender];
-        
-        // Perform transfer
-        balances[sender] = sender_balance - amount;
-        var recipient_balance: u256 = balances[recipient];
-        balances[recipient] = recipient_balance + amount;
-        
-        return true;
+        let sender: address = std.msg.sender();
+        let sender_before: u256 = balances[sender];
+        let recipient_before: u256 = balances[recipient];
+
+        balances[sender] = sender_before - amount;
+        balances[recipient] = recipient_before + amount;
+
+        assert(totalSupply == spec_total_minted, "supply ledger mismatch");
+        log Transfer(sender, recipient, amount);
     }
-    
-    // Approve spender to spend tokens
-    pub fn approve(spender: address, amount: u256) -> bool
+
+    pub fn approve(spender: NonZeroAddress, amount: u256)
+        requires(initialized)
         requires(spender != std.constants.ZERO_ADDRESS)
+        requires(totalSupply == spec_total_minted)
         ensures(allowances[std.msg.sender()][spender] == amount)
+        ensures(totalSupply == old(totalSupply))
+        ensures(spec_total_minted == old(spec_total_minted))
     {
-        var owner: address = std.msg.sender();
-        allowances[owner][spender] = amount;
-        return true;
+        let owner_addr: address = std.msg.sender();
+        allowances[owner_addr][spender] = amount;
+
+        assert(totalSupply == spec_total_minted, "supply ledger mismatch");
+        log Approval(owner_addr, spender, amount);
     }
-    
-    // Get allowance
-    pub fn allowance(owner: address, spender: address) -> u256 {
-        return allowances[owner][spender];
-    }
-    
-    // Transfer from one address to another using allowance
-    pub fn transferFrom(sender: NonZeroAddress, recipient: NonZeroAddress, amount: u256) -> bool
-        requires(amount > 0)
+
+    pub fn transferFrom(sender: address, recipient: NonZeroAddress, amount: MinValue<u256, 1>)
+        requires(initialized)
+        requires(sender != std.constants.ZERO_ADDRESS)
         requires(recipient != std.constants.ZERO_ADDRESS)
+        requires(amount > 0)
         requires(sender != recipient)
+        requires(totalSupply == spec_total_minted)
         requires(allowances[sender][std.msg.sender()] >= amount)
         requires(balances[sender] >= amount)
         requires(balances[recipient] <= std.constants.U256_MAX - amount)
-        ensures(
-            balances[sender] == old(balances[sender]) - amount &&
-            balances[recipient] == old(balances[recipient]) + amount &&
-            allowances[sender][std.msg.sender()] == old(allowances[sender][std.msg.sender()]) - amount
-        )
+        ensures(totalSupply == old(totalSupply))
+        ensures(spec_total_minted == old(spec_total_minted))
+        ensures(totalSupply == spec_total_minted)
+        ensures(allowances[sender][std.msg.sender()] == old(allowances[sender][std.msg.sender()]) - amount)
+        ensures(balances[sender] == old(balances[sender]) - amount)
+        ensures(balances[recipient] == old(balances[recipient]) + amount)
+        ensures(forall a: address where a != sender && a != recipient => balances[a] == old(balances[a]))
     {
-        var spender: address = std.msg.sender();
-        
-        var current_allowance: u256 = allowances[sender][spender];
-        var sender_balance: u256 = balances[sender];
-        
-        // Update allowance
+        let spender: address = std.msg.sender();
+        let current_allowance: u256 = allowances[sender][spender];
+        let sender_before: u256 = balances[sender];
+        let recipient_before: u256 = balances[recipient];
+
         allowances[sender][spender] = current_allowance - amount;
-        
-        // Perform transfer
-        balances[sender] = sender_balance - amount;
-        var recipient_balance: u256 = balances[recipient];
-        balances[recipient] = recipient_balance + amount;
-        
-        return true;
-    }
-    
-    // Ghost function to calculate total supply (specification-only)
-    ghost fn calculateTotalSupply() -> u256 {
-        return sumOfBalances;
+        balances[sender] = sender_before - amount;
+        balances[recipient] = recipient_before + amount;
+
+        assert(totalSupply == spec_total_minted, "supply ledger mismatch");
+        log Transfer(sender, recipient, amount);
     }
 }

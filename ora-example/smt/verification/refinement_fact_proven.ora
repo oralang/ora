@@ -1,0 +1,21 @@
+// ============================================================================
+// Regression: Refinement Facts Reach SMT
+// ============================================================================
+// Focus:
+// SMT should know NonZeroAddress implies addr != ZERO_ADDRESS.
+//
+// This case derives NonZeroAddress from a trusted builtin (`std.msg.sender`) so
+// we isolate fact propagation without public-entry guard-violation noise.
+//
+// Run with:
+//   ./zig-out/bin/ora build --verify=full --verify-stats --emit-smt-report ora-example/smt/verification/refinement_fact_proven.ora
+//
+// Expected: verification succeeds.
+// ============================================================================
+
+contract RefinementFactProven {
+    pub fn fromBuiltinSender() {
+        let caller: NonZeroAddress = std.msg.sender();
+        assert(caller != std.constants.ZERO_ADDRESS, "refinement fact must hold");
+    }
+}

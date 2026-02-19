@@ -40,6 +40,66 @@ fn clearBlockTerminator(block: c.MlirBlock) void {
     }
 }
 
+fn negateConditionForPathAssume(
+    self: *const StatementLowerer,
+    block: c.MlirBlock,
+    condition: c.MlirValue,
+    loc: c.MlirLocation,
+) c.MlirValue {
+    // Build !condition as (condition XOR true) for i1 values.
+    const true_const_op = self.ora_dialect.createArithConstantBool(true, loc);
+    h.appendOp(block, true_const_op);
+    const true_val = h.getResult(true_const_op, 0);
+    const not_op = c.oraArithXorIOpCreate(self.ctx, loc, condition, true_val);
+    h.appendOp(block, not_op);
+    return h.getResult(not_op, 0);
+}
+
+fn appendCompilerPathAssume(
+    self: *const StatementLowerer,
+    block: c.MlirBlock,
+    condition: c.MlirValue,
+    loc: c.MlirLocation,
+) void {
+    const op = self.ora_dialect.createAssume(condition, loc);
+    c.oraOperationSetAttributeByName(op, h.strRef("ora.assume_origin"), h.stringAttr(self.ctx, "path"));
+    verification.addVerificationAttributesToOp(self, op, "assume", "path_assumption");
+    h.appendOp(block, op);
+}
+
+fn lowerIfConditionInBlock(
+    self: *const StatementLowerer,
+    block: c.MlirBlock,
+    if_stmt: *const lib.ast.Statements.IfNode,
+) c.MlirValue {
+    var expr_lowerer = ExpressionLowerer.init(
+        self.ctx,
+        block,
+        self.type_mapper,
+        self.expr_lowerer.param_map,
+        self.expr_lowerer.storage_map,
+        self.expr_lowerer.local_var_map,
+        self.expr_lowerer.symbol_table,
+        self.expr_lowerer.builtin_registry,
+        self.expr_lowerer.error_handler,
+        self.expr_lowerer.locations,
+        self.ora_dialect,
+    );
+    expr_lowerer.refinement_base_cache = self.expr_lowerer.refinement_base_cache;
+    expr_lowerer.refinement_guard_cache = self.expr_lowerer.refinement_guard_cache;
+    expr_lowerer.current_function_return_type = self.current_function_return_type;
+    expr_lowerer.current_function_return_type_info = self.current_function_return_type_info;
+    expr_lowerer.in_try_block = self.in_try_block;
+
+    const cond_raw = expr_lowerer.lowerExpression(&if_stmt.condition);
+    const bool_ty = h.boolType(self.ctx);
+    const cond_ty = c.oraValueGetType(cond_raw);
+    return if (c.oraTypeEqual(cond_ty, bool_ty))
+        cond_raw
+    else
+        expr_lowerer.convertToType(cond_raw, bool_ty, if_stmt.span);
+}
+
 /// Lower if statements using ora.if with then/else regions
 /// Returns an optional new "current block" when partial returns create a continue block
 /// that subsequent statements should be emitted to.
@@ -230,6 +290,17 @@ pub fn lowerIf(self: *const StatementLowerer, if_stmt: *const lib.ast.Statements
                 h.appendOp(else_block, br);
             }
 
+            // Assumptions are block-local in the verifier, so attach the
+            // surviving branch condition to the continue block.
+            if (then_returns and !else_returns) {
+                const continue_condition = lowerIfConditionInBlock(self, continue_block, if_stmt);
+                const negated = negateConditionForPathAssume(self, continue_block, continue_condition, loc);
+                appendCompilerPathAssume(self, continue_block, negated, loc);
+            } else if (else_returns and !then_returns) {
+                const continue_condition = lowerIfConditionInBlock(self, continue_block, if_stmt);
+                appendCompilerPathAssume(self, continue_block, continue_condition, loc);
+            }
+
             return continue_block;
         }
 
@@ -266,6 +337,17 @@ pub fn lowerIf(self: *const StatementLowerer, if_stmt: *const lib.ast.Statements
         if (!helpers.blockEndsWithTerminator(&else_lowerer, else_tail)) {
             const br = self.ora_dialect.createCfBr(continue_block, loc);
             h.appendOp(else_tail, br);
+        }
+
+        // Assumptions are block-local in the verifier, so attach the
+        // surviving branch condition to the continue block.
+        if (then_returns and !else_returns) {
+            const continue_condition = lowerIfConditionInBlock(self, continue_block, if_stmt);
+            const negated = negateConditionForPathAssume(self, continue_block, continue_condition, loc);
+            appendCompilerPathAssume(self, continue_block, negated, loc);
+        } else if (else_returns and !then_returns) {
+            const continue_condition = lowerIfConditionInBlock(self, continue_block, if_stmt);
+            appendCompilerPathAssume(self, continue_block, continue_condition, loc);
         }
 
         return continue_block;
