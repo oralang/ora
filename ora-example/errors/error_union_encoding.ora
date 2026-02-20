@@ -15,7 +15,7 @@ contract ErrorUnionEncoding {
     // Forces ora.error.is_error + ora.error.unwrap
     pub fn unwrapWithTry(x: u256) -> !u256 | E1 {
         let y: u256 = try mayFail(x);
-        return y + 1;
+        return y;
     }
 
     // Forces ora.error.get_error

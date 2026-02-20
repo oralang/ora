@@ -54,7 +54,14 @@ contract ERC20Token {
         fee_rate: BasisPoints<u256>,
         burn_rate_bps: BasisPoints<u256>,
         minimum_transfer: MinValue<u256, 1>
-    ) {
+    )
+        requires(std.transaction.sender != std.constants.ZERO_ADDRESS)
+        requires(initial_supply >= 1)
+        requires(token_decimals <= 18)
+        requires(fee_rate <= 10000)
+        requires(burn_rate_bps <= 10000)
+        requires(minimum_transfer >= 1)
+    {
         // Refined types ensure:
         // - initial_supply >= 1 (prevents zero supply)
         // - token_decimals in [0, 18] (standard range)
@@ -79,7 +86,10 @@ contract ERC20Token {
     pub fn transfer(
         to: NonZeroAddress,
         amount: MinValue<u256, 1>
-    ) -> !u256 | InsufficientBalance | TransferToZeroAddress | AmountBelowMinimum {
+    ) -> !u256 | InsufficientBalance | TransferToZeroAddress | AmountBelowMinimum
+        requires(to != std.constants.ZERO_ADDRESS)
+        requires(amount >= 1)
+    {
         // Refined types ensure:
         // - to != 0 (NonZeroAddress)
         // - amount >= 1 (MinValue)
@@ -102,10 +112,20 @@ contract ERC20Token {
             const required_value: u256 = total_required;
             return InsufficientBalance(sender_balance, required_value);
         }
-        
-        // Execute transfer with fees
-        executeTransfer(std.transaction.sender, to, amount);
-        
+
+        assert(sender_balance >= total_required, "sender balance checked");
+
+        const recipient_balance = getBalance(to);
+        if (recipient_balance > std.constants.U256_MAX - total_required) {
+            const required_value: u256 = total_required;
+            return InsufficientBalance(sender_balance, required_value);
+        }
+
+        assert(recipient_balance <= std.constants.U256_MAX - total_required, "recipient overflow checked");
+
+        setBalance(std.transaction.sender, sender_balance - total_required);
+        setBalance(to, recipient_balance + total_required);
+
         // Return remaining balance
         return sender_balance - total_required;
     }
@@ -115,7 +135,11 @@ contract ERC20Token {
         from: NonZeroAddress,
         to: NonZeroAddress,
         amount: MinValue<u256, 1>
-    ) -> !bool | InsufficientBalance | TransferToZeroAddress | TransferFromZeroAddress | AmountBelowMinimum {
+    ) -> !bool | InsufficientBalance | TransferToZeroAddress | TransferFromZeroAddress | AmountBelowMinimum
+        requires(from != std.constants.ZERO_ADDRESS)
+        requires(to != std.constants.ZERO_ADDRESS)
+        requires(amount >= 1)
+    {
         // All parameters are refined types - compile-time and runtime validated
         
         if (amount < min_transfer) {
@@ -131,8 +155,19 @@ contract ERC20Token {
             const required_value: u256 = total_required;
             return InsufficientBalance(from_balance, required_value);
         }
-        
-        executeTransfer(from, to, amount);
+
+        assert(from_balance >= total_required, "source balance checked");
+
+        const recipient_balance = getBalance(to);
+        if (recipient_balance > std.constants.U256_MAX - total_required) {
+            const required_value: u256 = total_required;
+            return InsufficientBalance(from_balance, required_value);
+        }
+
+        assert(recipient_balance <= std.constants.U256_MAX - total_required, "recipient overflow checked");
+
+        setBalance(from, from_balance - total_required);
+        setBalance(to, recipient_balance + total_required);
         return true;
     }
     
@@ -140,28 +175,43 @@ contract ERC20Token {
     pub fn mint(
         to: NonZeroAddress,
         amount: MinValue<u256, 1>
-    ) -> !u256 | ExceedsSupplyCap | Unauthorized {
+    ) -> !u256 | ExceedsSupplyCap | Unauthorized
+        requires(owner != std.constants.ZERO_ADDRESS)
+        requires(to != std.constants.ZERO_ADDRESS)
+        requires(amount >= 1)
+    {
         // Only owner can mint
         if (std.transaction.sender != owner) {
             return Unauthorized(std.transaction.sender, owner);
         }
         
-        // Check supply cap - refined type ensures total_supply <= cap
+        // Check arithmetic and supply cap before computing new total
+        if (total_supply > std.constants.U256_MAX - amount) {
+            return ExceedsSupplyCap(total_supply, 1_000_000_000);
+        }
+
         const new_supply = total_supply + amount;
         
         // MaxValue refinement ensures this check is type-safe
         if (new_supply > 1_000_000_000) {
             return ExceedsSupplyCap(new_supply, 1_000_000_000);
         }
-        
+
+        const recipient_balance = getBalance(to);
+        if (recipient_balance > std.constants.U256_MAX - amount) {
+            return ExceedsSupplyCap(recipient_balance, 1_000_000_000);
+        }
+
         total_supply = new_supply; // Type system ensures new_supply <= cap
-        setBalance(to, getBalance(to) + amount);
+        setBalance(to, recipient_balance + amount);
         
         return total_supply;
     }
     
     /// Burn tokens (reduces total supply)
-    pub fn burn(amount: MinValue<u256, 1>) -> !u256 | InsufficientBalance {
+    pub fn burn(amount: MinValue<u256, 1>) -> !u256 | InsufficientBalance
+        requires(amount >= 1)
+    {
         const sender_balance = getBalance(std.transaction.sender);
         
         if (sender_balance < amount) {
@@ -171,6 +221,18 @@ contract ERC20Token {
         
         // Calculate burn amount (may include burn rate)
         const actual_burn = calculateBurnAmount(amount);
+
+        if (actual_burn > amount) {
+            return InsufficientBalance(sender_balance, actual_burn);
+        }
+
+        if (sender_balance < actual_burn) {
+            return InsufficientBalance(sender_balance, actual_burn);
+        }
+
+        if (total_supply < actual_burn) {
+            return InsufficientBalance(total_supply, actual_burn);
+        }
         
         setBalance(std.transaction.sender, sender_balance - actual_burn);
         total_supply = total_supply - actual_burn; // Type-safe subtraction
@@ -185,11 +247,13 @@ contract ERC20Token {
     /// Calculate total required amount including fees
     /// Uses refined type arithmetic: BasisPoints operations preserve type safety
     fn calculateTotalRequired(amount: MinValue<u256, 1>) -> u256 {
+        requires(amount >= 1)
         return amount;
     }
     
     /// Calculate burn amount with burn rate
     fn calculateBurnAmount(amount: MinValue<u256, 1>) -> u256 {
+        requires(amount >= 1)
         // If burn_rate > 0, apply it; otherwise burn full amount
         const burn_rate_value: u256 = burn_rate;
         if (burn_rate_value > 10000) {
@@ -221,7 +285,9 @@ contract ERC20Token {
     // ============================================================================
     
     /// Update transfer fee rate (only owner)
-    pub fn setTransferFeeRate(new_rate: BasisPoints<u256>) -> !bool | Unauthorized {
+    pub fn setTransferFeeRate(new_rate: BasisPoints<u256>) -> !bool | Unauthorized
+        requires(new_rate <= 10000)
+    {
         if (std.transaction.sender != owner) {
             return Unauthorized(std.transaction.sender, owner);
         }
@@ -232,7 +298,9 @@ contract ERC20Token {
     }
     
     /// Update burn rate (only owner)
-    pub fn setBurnRate(new_rate: BasisPoints<u256>) -> !bool | Unauthorized {
+    pub fn setBurnRate(new_rate: BasisPoints<u256>) -> !bool | Unauthorized
+        requires(new_rate <= 10000)
+    {
         if (std.transaction.sender != owner) {
             return Unauthorized(std.transaction.sender, owner);
         }
@@ -242,7 +310,9 @@ contract ERC20Token {
     }
     
     /// Update minimum transfer amount (only owner)
-    pub fn setMinTransfer(new_min: MinValue<u256, 1>) -> !bool | Unauthorized {
+    pub fn setMinTransfer(new_min: MinValue<u256, 1>) -> !bool | Unauthorized
+        requires(new_min >= 1)
+    {
         if (std.transaction.sender != owner) {
             return Unauthorized(std.transaction.sender, owner);
         }
@@ -293,9 +363,4 @@ contract ERC20Token {
         balances[addr] = amount;
     }
     
-    fn executeTransfer(from: address, to: address, amount: u256) {
-        // Refined types ensure amount >= 1, so this is safe
-        setBalance(from, getBalance(from) - amount);
-        setBalance(to, getBalance(to) + amount);
-    }
 }

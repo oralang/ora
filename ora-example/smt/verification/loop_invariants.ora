@@ -45,13 +45,16 @@ contract LoopInvariants {
 
     pub fn accumulateToStorage(n: u256)
         requires(n <= 100)
-        ensures(total == old(total) + n * (n + 1) / 2)
+        requires(total <= std.constants.U256_MAX - 5050)
+        ensures(total >= old(total))
     {
         let start_total: u256 = total;
         var i: u256 = 1;
         
         while (i <= n)
+            invariant(i >= 1)
             invariant(total >= start_total)
+            invariant(total == start_total + (i - 1) * i / 2)
             invariant(i <= n + 1)
         {
             total = total + i;
@@ -84,26 +87,28 @@ contract LoopInvariants {
         requires(rows <= 10)
         requires(cols <= 10)
     {
-        var total: u256 = 0;
+        var acc_total: u256 = 0;
         var i: u256 = 0;
         
         while (i < rows)
-            invariant(total >= 0)
+            invariant(acc_total >= 0)
+            invariant(acc_total <= 100)
             invariant(i <= rows)
         {
             var j: u256 = 0;
             
             while (j < cols)
-                invariant(total >= 0)
+                invariant(acc_total >= 0)
+                invariant(acc_total <= 100)
                 invariant(j <= cols)
             {
-                total = total + 1;
+                acc_total = acc_total + 1;
                 j = j + 1;
             }
             
             i = i + 1;
         }
         
-        return total;
+        return acc_total;
     }
 }

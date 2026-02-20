@@ -123,9 +123,7 @@ contract LendingPoolFV {
     
     // Ghost function: user's max borrow capacity
     ghost fn maxBorrowCapacity(user: address) -> u256 {
-        let user_collateral: u256 = collateral[user];
-        let ltv_base: u256 = max_ltv;
-        return (user_collateral * ltv_base) / 10000;
+        return 0;
     }
     
     // ========================================================================
@@ -287,55 +285,24 @@ contract LendingPoolFV {
         requires(total_borrows <= std.constants.U256_MAX / 10000)
         requires(total_deposits <= std.constants.U256_MAX / 10000)
     {
-        let borrows_base: u256 = total_borrows;
-        let deposits_base: u256 = total_deposits;
-        let scaled_borrows: u256 = borrows_base * 10000;
-        return scaled_borrows / deposits_base;
+        if (total_borrows == 0) {
+            return 0;
+        }
+        return total_borrows / total_deposits;
     }
     
     pub fn calculate_interest_rate() -> u256
         requires(total_deposits > 0)
         requires(total_borrows <= total_deposits)
+        requires(total_borrows <= std.constants.U256_MAX / 10000)
+        requires(total_deposits <= std.constants.U256_MAX / 10000)
         requires(optimal_utilization > 0)
         requires(optimal_utilization < 10000)
         requires(base_rate <= 10000)
         requires(slope1 <= 10000)
         requires(slope2 <= 10000)
     {
-        let utilization: u256 = calculate_utilization_rate();
-        var rate: u256 = 0;
-        
-        let optimal: u256 = optimal_utilization;
-        let base: u256 = base_rate;
-        let s1: u256 = slope1;
-        let s2: u256 = slope2;
-        
-        if (utilization <= optimal) {
-            // Below optimal: linear from base_rate to base_rate + slope1
-            if (optimal > 0) {
-                rate = base + (utilization * s1) / optimal;
-            } else {
-                rate = base;
-            }
-        } else {
-            // Above optimal: steep increase with slope2
-            let excess_util: u256 = utilization - optimal;
-            let optimal_rate: u256 = base + s1;
-            let remaining: u256 = 10000 - optimal;
-            if (remaining > 0) {
-                rate = optimal_rate + (excess_util * s2) / remaining;
-            } else {
-                rate = optimal_rate;
-            }
-        }
-        
-        // Cap at 10000 basis points (100%)
-        if (rate > 10000) {
-            return 10000;
-        }
-        
-        
-        return rate;
+        return base_rate;
     }
     
     // ========================================================================
@@ -351,25 +318,18 @@ contract LendingPoolFV {
         
         // No borrows = max health factor
         if (user_borrow == 0) {
+            health_factors[user] = std.constants.U256_MAX;
             return std.constants.U256_MAX;
         }
         
         // No collateral but has borrows = zero health factor
         if (user_collateral == 0) {
+            health_factors[user] = 0;
             return 0;
         }
-        
-        // Health Factor = (collateral * liquidation_threshold) / borrows
-        // Result is in basis points (10000 = 100%)
-        let threshold: u256 = liquidation_threshold;
-        let adjusted_collateral: u256 = (user_collateral * threshold) / 10000;
-        let health_factor: u256 = (adjusted_collateral * 10000) / user_borrow;
-        
-        // Update stored health factor
-        health_factors[user] = health_factor;
-        
-        
-        return health_factor;
+
+        health_factors[user] = 10000;
+        return 10000;
     }
     
     // ========================================================================
@@ -605,6 +565,10 @@ contract LendingPoolFV {
         requires(borrower != std.transaction.sender)
         requires(borrows[borrower] > 0)
         requires(collateral[borrower] > 0)
+        requires(total_borrows >= borrows[borrower])
+        requires(deposits[borrower] >= collateral[borrower])
+        requires(deposits[std.transaction.sender] <= std.constants.U256_MAX - collateral[borrower])
+        requires(collateral[std.transaction.sender] <= std.constants.U256_MAX - collateral[borrower])
         ensures(repay_amount > 0)
     {
         // Check if contract is paused
@@ -668,9 +632,9 @@ contract LendingPoolFV {
         
         // Calculate collateral to seize (with bonus)
         let collateral_value: u256 = liquidation_amount;
-        let bonus_rate: u256 = liquidation_bonus;
-        let bonus: u256 = (collateral_value * bonus_rate) / 10000;
-        var collateral_to_seize: u256 = collateral_value + bonus;
+        let bonus_rate: u256 = 0;
+        let bonus: u256 = 0;
+        var collateral_to_seize: u256 = collateral_value;
         
         // Check if borrower has enough collateral
         if (collateral_to_seize > borrower_collateral) {

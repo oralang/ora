@@ -16,8 +16,12 @@ contract GuardShowcase {
         let owner: NonZeroAddress = addr;
     }
 
-    pub fn runtimeNonZero(addr: NonZeroAddress) {
+    pub fn runtimeNonZero(addr: address) -> bool {
+        if (addr == std.constants.ZERO_ADDRESS) {
+            return false;
+        }
         let owner: NonZeroAddress = addr;
+        return true;
     }
 
     // MinValue
@@ -27,8 +31,12 @@ contract GuardShowcase {
         let v: MinValue<u256, 10> = value;
     }
 
-    pub fn runtimeMin(value: MinValue<u256, 10>) {
+    pub fn runtimeMin(value: u256) -> bool {
+        if (value < 10) {
+            return false;
+        }
         let v: MinValue<u256, 10> = value;
+        return true;
     }
 
     // MaxValue
@@ -38,8 +46,12 @@ contract GuardShowcase {
         let v: MaxValue<u256, 100> = value;
     }
 
-    pub fn runtimeMax(value: MaxValue<u256, 100>) {
+    pub fn runtimeMax(value: u256) -> bool {
+        if (value > 100) {
+            return false;
+        }
         let v: MaxValue<u256, 100> = value;
+        return true;
     }
 
     // InRange
@@ -50,8 +62,12 @@ contract GuardShowcase {
         let v: InRange<u256, 0, 100> = value;
     }
 
-    pub fn runtimeInRange(value: InRange<u256, 0, 100>) {
+    pub fn runtimeInRange(value: u256) -> bool {
+        if (value > 100) {
+            return false;
+        }
         let v: InRange<u256, 0, 100> = value;
+        return true;
     }
 
     // Exact division
@@ -62,8 +78,16 @@ contract GuardShowcase {
         let q: u256 = dividend / divisor;
     }
 
-    pub fn runtimeExact(dividend: Exact<u256>, divisor: u256) {
-        let q: u256 = dividend / divisor;
+    pub fn runtimeExact(dividend: u256, divisor: u256) -> bool {
+        if (divisor == 0) {
+            return false;
+        }
+        if (dividend % divisor != 0) {
+            return false;
+        }
+        let exact_dividend: Exact<u256> = dividend;
+        let q: u256 = exact_dividend / divisor;
+        return true;
     }
 
     // Scaled (type-level only, no guards expected)
@@ -75,7 +99,13 @@ contract GuardShowcase {
         let c: Scaled<u256, 18> = a + b;
     }
 
-    pub fn scaledMul(a: Scaled<u256, 18>, b: Scaled<u256, 6>) {
+    pub fn scaledMul(a: Scaled<u256, 18>, b: Scaled<u256, 6>) -> bool {
+        if (a != 0) {
+            if (b > std.constants.U256_MAX / a) {
+                return false;
+            }
+        }
         let c: Scaled<u256, 24> = a * b;
+        return true;
     }
 }

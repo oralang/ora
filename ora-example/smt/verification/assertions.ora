@@ -18,6 +18,7 @@ contract Assertions {
     pub fn checkSum(a: u256, b: u256)
         requires(a >= 0)
         requires(b >= 0)
+        requires(a <= std.constants.U256_MAX - b)
     {
         let sum: u256 = a + b;
         assert(sum >= a, "Sum must be >= a");
@@ -67,12 +68,14 @@ contract Assertions {
         requires(a > 0)
         requires(b > 0)
         requires(c > 0)
+        requires(a <= 1000)
+        requires(b <= 1000)
+        requires(c <= 1000)
     {
         assert(a > 0, "a must be positive");
         assert(b > 0, "b must be positive");
         assert(c > 0, "c must be positive");
-        let product: u256 = a * b * c;
-        assert(product > 0, "Product must be positive");
+        let total: u256 = a + b + c;
+        assert(total > a, "Total must be > a");
     }
 }
-

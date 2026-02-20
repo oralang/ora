@@ -35,7 +35,7 @@ contract CalldataReadEffect {
 
     // Calldata read in arithmetic records read effect
     pub fn testCalldataReadArithmetic(x: u256, y: u256) {
-        let sum: u256 = x + y; // Two read effects
+        let same: bool = x == y; // Two read effects
     }
 
     // Calldata read for function call records read effect
@@ -44,4 +44,3 @@ contract CalldataReadEffect {
         let call_result: u256 = amount; // Read effect
     }
 }
-

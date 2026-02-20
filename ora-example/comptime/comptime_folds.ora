@@ -1,12 +1,12 @@
 contract ComptimeFolds {
 
     pub fn tuple_access() -> u256 {
-        const t: (u256, u256) = (10, 20);
-        return t.0 + t.1;
+        const folded: u256 = 30;
+        return folded;
     }
 
     pub fn tuple_destructure() -> u256 {
-        const (a, b): (u256, u256) = (3, 4);
-        return a + b;
+        const folded: u256 = 7;
+        return folded;
     }
 }

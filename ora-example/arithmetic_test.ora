@@ -6,7 +6,9 @@ contract ArithmeticTest {
         counter = 0;
     }
 
-    pub fn increment() {
+    pub fn increment()
+        requires(counter < std.constants.U256_MAX)
+    {
         counter = counter + 1;
     }
 
@@ -14,23 +16,34 @@ contract ArithmeticTest {
         return counter;
     }
 
-    pub fn multiply(a: u256, b: u256) -> u256 {
-        return a * b;
+    pub fn multiply(a: u256, b: u256) -> u256
+        requires(a <= std.constants.U128_MAX)
+        requires(b <= std.constants.U128_MAX)
+    {
+        return a *% b;
     }
 
-    pub fn add(a: u256, b: u256) -> u256 {
+    pub fn add(a: u256, b: u256) -> u256
+        requires(a <= std.constants.U256_MAX - b)
+    {
         return a + b;
     }
 
-    pub fn subtract(a: u256, b: u256) -> u256 {
+    pub fn subtract(a: u256, b: u256) -> u256
+        requires(a >= b)
+    {
         return a - b;
     }
 
-    pub fn divide(a: u256, b: u256) -> u256 {
+    pub fn divide(a: u256, b: u256) -> u256
+        requires(b != 0)
+    {
         return a / b;
     }
 
-    pub fn modulo(a: u256, b: u256) -> u256 {
+    pub fn modulo(a: u256, b: u256) -> u256
+        requires(b != 0)
+    {
         return a % b;
     }
 }

@@ -2,11 +2,11 @@ contract NoReturnTest {
     storage var counter: u256;
     
     pub fn increment() {
-        counter = counter + 1;
+        counter = counter +% 1;
     }
     
     pub fn add(a: u256, b: u256) {
-        counter = a + b;
+        counter = a +% b;
     }
 
     pub fn getCounter() -> u256 {

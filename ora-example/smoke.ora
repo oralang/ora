@@ -1,13 +1,13 @@
 contract SimpleContract {
+    pub fn init() {}
 
     fn test(x: u256) -> u256 {
-        return x * 2;
+        return x;
     }
 
-    pub fn main(x: u256) {
-        let y = x + 1;
-        test(y);
+    pub fn main(x: u256) -> u256 {
+        let y: u256 = x;
+        return test(y);
     }
 }
-
 

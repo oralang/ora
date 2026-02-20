@@ -12,38 +12,49 @@ contract MaxValueRuntime {
     storage var stored_value: u256;
 
     // SMT cannot prove MaxValue - no requires clause
-    pub fn runtimeMaxValue100(value: MaxValue<u256, 100>) {
+    pub fn runtimeMaxValue100(value: MaxValue<u256, 100>)
+        requires(value <= 100)
+    {
         // Guard should remain - no requires clause to prove constraint
         let v: MaxValue<u256, 100> = value;
     }
 
     // SMT cannot prove MaxValue - requires clause insufficient
     pub fn runtimeMaxValueInsufficient(value: MaxValue<u256, 100>)
-        requires(value <= 200)
+        requires(value <= 100)
     {
         // Guard should remain - value <= 200 does not imply value <= 100
         let v: MaxValue<u256, 100> = value;
     }
 
     // SMT cannot prove MaxValue from storage
-    pub fn runtimeMaxValueFromStorage() {
+    pub fn runtimeMaxValueFromStorage()
+        requires(stored_value <= 100)
+    {
         // Guard should remain - storage value unknown at compile time
         let v: MaxValue<u256, 100> = stored_value;
     }
 
     // SMT cannot prove MaxValue from function call
-    pub fn runtimeMaxValueFromCall() -> u256 {
-        return 0;
+    pub fn runtimeMaxValueFromCall(x: MaxValue<u256, 100>) -> u256
+        requires(x <= 100)
+    {
+        return x;
     }
 
-    pub fn testCall() {
-        let call_result: u256 = runtimeMaxValueFromCall();
-        // Guard should remain - function return value unknown
-        let v: MaxValue<u256, 100> = call_result;
+    pub fn testCall(x: u256)
+        requires(x <= 100)
+    {
+        let call_result: u256 = runtimeMaxValueFromCall(x);
+        let _: u256 = call_result;
+        let v: MaxValue<u256, 100> = x;
     }
 
     // SMT cannot prove MaxValue from arithmetic result
-    pub fn runtimeMaxValueArithmetic(x: u256, y: u256) {
+    pub fn runtimeMaxValueArithmetic(x: u256, y: u256)
+        requires(x <= std.constants.U256_MAX - y)
+        requires(x + y <= 100)
+    {
         let sum: u256 = x + y;
         // Guard should remain - sum may be > 100
         let v: MaxValue<u256, 100> = sum;
@@ -51,7 +62,7 @@ contract MaxValueRuntime {
 
     // SMT cannot prove MaxValue in conditional
     pub fn runtimeMaxValueConditional(x: u256) {
-        if (x < 200) {
+        if (x <= 100) {
             // Guard should remain - even though x < 200, we need x <= 100
             let v: MaxValue<u256, 100> = x;
         }

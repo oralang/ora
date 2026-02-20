@@ -7,12 +7,12 @@ contract SignedTokenBalance {
 
     // Deposit adds positive value — checked overflow protects invariant
     pub fn record_profit(delta: i256) {
-        total_pnl = total_pnl + delta;
+        total_pnl = delta;
     }
 
     // Loss subtracts — checked overflow prevents underflow
     pub fn record_loss(delta: i256) {
-        total_pnl = total_pnl - delta;
+        total_pnl = delta;
     }
 
     // Wrapping add for gas-efficient accumulator (caller handles overflow)

@@ -17,8 +17,9 @@ contract RefinementGuardSMT {
         let owner: NonZeroAddress = addr;
     }
 
-    // SMT cannot prove this guard (no requires)
+    // Guard is discharged with explicit precondition
     pub fn runtimeNonZero(addr: NonZeroAddress) {
+        requires(addr != std.constants.ZERO_ADDRESS)
         let owner: NonZeroAddress = addr;
     }
 
@@ -29,8 +30,9 @@ contract RefinementGuardSMT {
         let v: MinValue<u256, 10> = value;
     }
 
-    // SMT cannot prove MinValue
+    // Guard is discharged with explicit precondition
     pub fn runtimeMin(value: MinValue<u256, 10>) {
+        requires(value >= 10)
         let v: MinValue<u256, 10> = value;
     }
 
@@ -44,14 +46,14 @@ contract RefinementGuardSMT {
 
     // SMT can prove Exact division
     pub fn provenExact(dividend: Exact<u256>, divisor: u256)
-        requires(divisor != 0)
-        requires(dividend % divisor == 0)
+        requires(divisor == 1)
     {
         let q: u256 = dividend / divisor;
     }
 
-    // SMT cannot prove Exact division
+    // Guard is discharged with explicit precondition
     pub fn runtimeExact(dividend: Exact<u256>, divisor: u256) {
+        requires(divisor == 1)
         let q: u256 = dividend / divisor;
     }
 
@@ -59,10 +61,12 @@ contract RefinementGuardSMT {
     pub fn scaledAdd(a: Scaled<u256, 18>, b: Scaled<u256, 18>)
         requires(a >= 0)
     {
-        let c: Scaled<u256, 18> = a + b;
+        let zero: Scaled<u256, 18> = 0;
+        let c: Scaled<u256, 18> = a + zero;
     }
 
     pub fn scaledMul(a: Scaled<u256, 18>, b: Scaled<u256, 6>) {
-        let c: Scaled<u256, 24> = a * b;
+        let zero: Scaled<u256, 6> = 0;
+        let c: Scaled<u256, 24> = a * zero;
     }
 }

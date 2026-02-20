@@ -23,7 +23,7 @@ contract StorageReadEffect {
     pub fn testMultipleStorageReads() {
         let c: u256 = counter;      // Read effect 1
         let b: u256 = balance;       // Read effect 2
-        let sum: u256 = c + b;
+        let same: bool = c == b;
     }
 
     // Storage read in conditional records read effect
@@ -48,4 +48,3 @@ contract StorageReadEffect {
         let allowance: u256 = allowances[owner][spender]; // Nested read effect
     }
 }
-

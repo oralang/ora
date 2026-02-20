@@ -1,5 +1,7 @@
 contract Test {
-    pub fn test(b: u256) -> u256 {
+    pub fn test(b: u256) -> u256
+        requires(b < std.constants.U256_MAX)
+    {
         var counter: u256 = 0;
         counter = counter + 1 + b;
         var c: u256 = 2 * 80;

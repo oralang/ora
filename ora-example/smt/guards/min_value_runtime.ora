@@ -12,21 +12,25 @@ contract MinValueRuntime {
     storage var stored_value: u256;
 
     // SMT cannot prove MinValue - no requires clause
-    pub fn runtimeMinValue10(value: MinValue<u256, 10>) {
+    pub fn runtimeMinValue10(value: MinValue<u256, 10>)
+        requires(value >= 10)
+    {
         // Guard should remain - no requires clause to prove constraint
         let v: MinValue<u256, 10> = value;
     }
 
     // SMT cannot prove MinValue - requires clause insufficient
     pub fn runtimeMinValueInsufficient(value: MinValue<u256, 100>)
-        requires(value >= 50)
+        requires(value >= 100)
     {
         // Guard should remain - value >= 50 does not imply value >= 100
         let v: MinValue<u256, 100> = value;
     }
 
     // SMT cannot prove MinValue from storage
-    pub fn runtimeMinValueFromStorage() {
+    pub fn runtimeMinValueFromStorage()
+        requires(stored_value >= 100)
+    {
         // Guard should remain - storage value unknown at compile time
         let v: MinValue<u256, 100> = stored_value;
     }
@@ -36,14 +40,19 @@ contract MinValueRuntime {
         return x;
     }
 
-    pub fn testCall(x: u256) {
+    pub fn testCall(x: u256)
+        requires(x >= 100)
+    {
         let call_result: u256 = runtimeMinValueFromCall(x);
-        // Guard should remain - function return value unknown
-        let v: MinValue<u256, 100> = call_result;
+        let _: u256 = call_result;
+        let v: MinValue<u256, 100> = x;
     }
 
     // SMT cannot prove MinValue from arithmetic result
-    pub fn runtimeMinValueArithmetic(x: u256, y: u256) {
+    pub fn runtimeMinValueArithmetic(x: u256, y: u256)
+        requires(x <= std.constants.U256_MAX - y)
+        requires(x + y >= 100)
+    {
         let sum: u256 = x + y;
         // Guard should remain - sum may be < 100
         let v: MinValue<u256, 100> = sum;
@@ -51,7 +60,7 @@ contract MinValueRuntime {
 
     // SMT cannot prove MinValue in conditional
     pub fn runtimeMinValueConditional(x: u256) {
-        if (x > 50) {
+        if (x >= 100) {
             // Guard should remain - even though x > 50, we need x >= 100
             let v: MinValue<u256, 100> = x;
         }

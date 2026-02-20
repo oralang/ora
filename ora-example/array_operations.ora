@@ -7,11 +7,15 @@ contract ArrayOperations {
         numbers[2] = 30;
     }
 
-    pub fn getNumber(index: u256) -> u256 {
+    pub fn getNumber(index: u256) -> u256
+        requires(index < 5)
+    {
         return numbers[index];
     }
 
-    pub fn setNumber(index: u256, value: u256) {
+    pub fn setNumber(index: u256, value: u256)
+        requires(index < 5)
+    {
         numbers[index] = value;
     }
 
@@ -28,7 +32,9 @@ contract ArrayOperations {
         return res;
     }
 
-    pub fn computedIndex(base: u256) -> u256 {
+    pub fn computedIndex(base: u256) -> u256
+        requires(base < 3)
+    {
         let arr: [u256; 4] = [1, 2, 3, 4];
         var idx: u256 = base + 1;
         return arr[idx];
@@ -56,7 +62,7 @@ contract ArrayOperations {
         arr[0] = 10;
         arr[1] = 20;
         arr[2] = 30;
-        return arr[0] + arr[1];
+        return arr[0] +% arr[1];
     }
 
     pub fn complexComputation() -> u256 {
@@ -74,15 +80,15 @@ contract ArrayOperations {
         dest[0] = source[0];
         dest[1] = source[1];
         dest[2] = source[2];
-        return dest[0] + dest[1] + dest[2];
+        return dest[0] +% dest[1] +% dest[2];
     }
 
     pub fn copyAndTransform() -> u256 {
         let source: [u256; 3] = [10, 20, 30];
         let dest: [u256; 3] = [0, 0, 0];
-        dest[0] = source[0] * 2;
-        dest[1] = source[1] * 2;
-        dest[2] = source[2] * 2;
+        dest[0] = source[0] *% 2;
+        dest[1] = source[1] *% 2;
+        dest[2] = source[2] *% 2;
         return dest[1];
     }
 
@@ -102,7 +108,7 @@ contract ArrayOperations {
         dest[0] = source[0];
         dest[1] = source[1];
         dest[2] = source[2];
-        return dest[0] + dest[1] + dest[2];
+        return dest[0] +% dest[1] +% dest[2];
     }
 
     pub fn constantFolding() -> u256 {

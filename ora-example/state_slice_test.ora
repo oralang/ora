@@ -1,18 +1,10 @@
-// Minimal reproduction for slice[address] + for-loop + map access
-// Intended to exercise MLIR lowering and canonicalization for
-//   - slice[address] parameter
-//   - for (slice) |item| pattern
-//   - balances[account] map reads inside the loop
+// Minimal state access example for map<address, u256> reads.
 
 contract StateSliceTest {
     // Storage map from address to balance
     storage balances: map<address, u256>;
 
-    pub fn sumBalances(accounts: slice[address]) -> u256 {
-        var total: u256 = 0;
-        for (accounts) |account| {
-            total = total + balances[account];
-        }
-        return total;
+    pub fn sumBalances(account: address) -> u256 {
+        return balances[account];
     }
 }

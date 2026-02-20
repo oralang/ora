@@ -3,23 +3,41 @@
 // ==========================================
 // End-to-end-safe signed arithmetic using i256 values.
 contract SignedBasicOps {
-    pub fn add(a: i256, b: i256) -> i256 {
+    pub fn add(a: i256, b: i256) -> i256
+        requires(a >= -1000000)
+        requires(a <= 1000000)
+        requires(b >= -1000000)
+        requires(b <= 1000000)
+    {
         return a + b;
     }
 
-    pub fn sub(a: i256, b: i256) -> i256 {
+    pub fn sub(a: i256, b: i256) -> i256
+        requires(a >= -1000000)
+        requires(a <= 1000000)
+        requires(b >= -1000000)
+        requires(b <= 1000000)
+    {
         return a - b;
     }
 
-    pub fn div(a: i256, b: i256) -> i256 {
+    pub fn div(a: i256, b: i256) -> i256
+        requires(b != 0)
+        requires(!(a == std.constants.I256_MIN && b == -1))
+    {
         return a / b;
     }
 
-    pub fn rem(a: i256, b: i256) -> i256 {
+    pub fn rem(a: i256, b: i256) -> i256
+        requires(b != 0)
+        requires(!(a == std.constants.I256_MIN && b == -1))
+    {
         return a % b;
     }
 
-    pub fn negate(a: i256) -> i256 {
+    pub fn negate(a: i256) -> i256
+        requires(a != std.constants.I256_MIN)
+    {
         return -a;
     }
 }

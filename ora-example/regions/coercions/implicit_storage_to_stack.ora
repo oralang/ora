@@ -16,7 +16,7 @@ contract ImplicitStorageToStack {
 
     // Implicit storage -> stack in arithmetic
     pub fn testImplicitStorageInArithmetic() {
-        let sum: u256 = counter + balance; // Implicit: storage -> stack
+        let same: bool = counter == balance; // Implicit: storage -> stack
     }
 
     // Implicit storage -> stack in comparison
@@ -40,7 +40,6 @@ contract ImplicitStorageToStack {
     pub fn testMultipleImplicitStorage() {
         let c: u256 = counter; // Implicit
         let b: u256 = balance;  // Implicit
-        let total: u256 = c + b;
+        let same: bool = c == b;
     }
 }
-

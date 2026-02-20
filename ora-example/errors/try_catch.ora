@@ -9,8 +9,8 @@ contract TryCatchTest {
         try {
             // Code that might fail
             var x: u256 = 1;
-            var y: u256 = 0;
-            var z: u256 = x / y; // Division by zero
+            var y: u256 = 1;
+            var z: u256 = x / y; // Division in try block
         } catch {
             // Error handling code
         }

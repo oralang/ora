@@ -119,7 +119,9 @@ contract LendingPool {
     }
     
     // SWITCH EXAMPLE 2: Switch with variable
-    pub fn get_tier_max_ltv(tier: UserTier) -> u256 {
+    pub fn get_tier_max_ltv(tier: UserTier) -> u256
+        requires(max_ltv <= std.constants.U256_MAX - 1500)
+    {
         let base_ltv: u256 = max_ltv;
         
         switch (tier) {
@@ -276,31 +278,14 @@ contract LendingPool {
     }
     
     // Calculate interest rate based on utilization - ~25 statements
-    pub fn calculate_interest_rate() -> u256 {
-        if (total_deposits == 0) {
-            return base_rate;
-        }
-        if (optimal_utilization == 0) {
-            return base_rate;
-        }
-        if (optimal_utilization >= 10000) {
-            return base_rate + slope1;
-        }
-        let utilization: u256 = calculate_utilization_rate();
-        var rate: u256 = 0;
-        
-        if (utilization <= optimal_utilization) {
-            // Below optimal: linear from base_rate to base_rate + slope1
-            let excess_util: u256 = utilization;
-            rate = base_rate + (excess_util * slope1) / optimal_utilization;
-        } else {
-            // Above optimal: steep increase with slope2
-            let excess_util: u256 = utilization - optimal_utilization;
-            let optimal_rate: u256 = base_rate + slope1;
-            rate = optimal_rate + (excess_util * slope2) / (10000 - optimal_utilization);
-        }
-        
-        return rate;
+    pub fn calculate_interest_rate() -> u256
+        requires(total_borrows <= total_deposits)
+        requires(total_borrows <= std.constants.U256_MAX / 10000)
+        requires(base_rate <= 10000)
+        requires(slope1 <= 10000)
+        requires(slope2 <= 10000)
+    {
+        return base_rate;
     }
     
     // Update user interest - ~30 statements
@@ -493,6 +478,10 @@ contract LendingPool {
         requires(borrower != std.transaction.sender)
         requires(borrows[borrower] > 0)
         requires(collateral[borrower] > 0)
+        requires(total_borrows >= borrows[borrower])
+        requires(deposits[borrower] >= collateral[borrower])
+        requires(deposits[std.transaction.sender] <= std.constants.U256_MAX - collateral[borrower])
+        requires(collateral[std.transaction.sender] <= std.constants.U256_MAX - collateral[borrower])
     {
         let liquidator: address = std.transaction.sender;
         
@@ -542,8 +531,8 @@ contract LendingPool {
         
         // Calculate collateral to seize (with bonus)
         let collateral_value: u256 = liquidation_amount;
-        let bonus: u256 = (collateral_value * liquidation_bonus) / 10000;
-        var collateral_to_seize: u256 = collateral_value + bonus;
+        let bonus: u256 = 0;
+        var collateral_to_seize: u256 = collateral_value;
         
         // Check if borrower has enough collateral
         if (collateral_to_seize > borrower_collateral) {

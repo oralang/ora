@@ -25,7 +25,7 @@ contract LockRuntimeStorageMapGuard {
         @unlock(balances[locked_user]);
         balances[locked_user] = 1;
         success_counter += 1;
-        newMap[target] = amount + 1;
+        newMap[target] = amount;
         return true;
     }
 

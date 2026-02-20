@@ -21,7 +21,10 @@ contract GhostVariables {
     // Regular function using ghost variable in ensures
     pub fn deposit(amount: u256)
         requires(amount > 0)
-        requires(balance + amount <= max_balance)
+        requires(balance <= max_balance)
+        requires(amount <= max_balance - balance)
+        requires(sumOfBalances <= std.constants.U256_MAX - amount)
+        requires(totalDeposits <= std.constants.U256_MAX - amount)
         ensures(balance == old(balance) + amount)
         ensures(sumOfBalances == old(sumOfBalances) + amount)
         ensures(totalDeposits == old(totalDeposits) + amount)
@@ -35,6 +38,7 @@ contract GhostVariables {
     pub fn withdraw(amount: u256)
         requires(amount > 0)
         requires(amount <= balance)
+        requires(totalWithdrawals <= std.constants.U256_MAX - amount)
         ensures(balance == old(balance) - amount)
         ensures(totalWithdrawals == old(totalWithdrawals) + amount)
     {
@@ -66,6 +70,8 @@ contract GhostVariables {
     pub fn updateMultipleGhosts(deposit: u256, withdrawal: u256)
         requires(deposit >= 0)
         requires(withdrawal >= 0)
+        requires(deposit <= std.constants.U256_MAX - totalDeposits)
+        requires(withdrawal <= std.constants.U256_MAX - totalWithdrawals)
         ensures(totalDeposits == old(totalDeposits) + deposit)
         ensures(totalWithdrawals == old(totalWithdrawals) + withdrawal)
     {
@@ -75,6 +81,7 @@ contract GhostVariables {
 
     // Ghost variable in arithmetic
     pub fn calculateNetFlow() -> u256
+        requires(totalWithdrawals <= totalDeposits)
         ensures(calculateNetFlow() == totalDeposits - totalWithdrawals)
     {
         return totalDeposits - totalWithdrawals;
@@ -93,4 +100,3 @@ contract GhostVariablesMemory {
         let _: u256 = temp;
     }
 }
-

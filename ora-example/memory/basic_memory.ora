@@ -53,7 +53,9 @@ contract MemoryDeclarationTest {
     }
 
     // Side-effecting version that keeps array lowering by using a runtime index
-    pub fn memory_declarations_side_effects_runtime_index(idx: u256) {
+    pub fn memory_declarations_side_effects_runtime_index(idx: u256)
+        requires(idx < 5)
+    {
         let x: u256 = 10;
         let y: u256 = 20;
         let sum: u256 = x + y;

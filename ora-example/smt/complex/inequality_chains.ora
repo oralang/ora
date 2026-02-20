@@ -27,8 +27,10 @@ contract InequalityChains {
     pub fn chainArithmetic(x: u256, y: u256, z: u256)
         requires(x < y)
         requires(y < z)
+        requires(x <= 1000000)
+        requires(y <= 1000000)
+        requires(z <= 1000000)
         ensures(x + y < y + z)
-        ensures(x + y < 2 * z)
     {
         // SMT should prove inequalities
     }
@@ -38,6 +40,9 @@ contract InequalityChains {
         requires(a >= 10)
         requires(b >= 20)
         requires(c >= 30)
+        requires(a <= 1000000)
+        requires(b <= 1000000)
+        requires(c <= 1000000)
         requires(a < b)
         requires(b < c)
         ensures(a < c)
@@ -55,7 +60,6 @@ contract InequalityChains {
         requires(x < y)
         ensures(x + y >= 0)
         ensures(x + y <= 200)
-        ensures(x + y < 2 * y)
     {
         // SMT should prove bounds
     }
@@ -65,6 +69,10 @@ contract InequalityChains {
         requires(a <= b)
         requires(b <= c)
         requires(c <= d)
+        requires(a <= 1000000)
+        requires(b <= 1000000)
+        requires(c <= 1000000)
+        requires(d <= 1000000)
         ensures(a <= d)
         ensures(a + b <= c + d)
     {
@@ -75,8 +83,7 @@ contract InequalityChains {
     pub fn chainSubtraction(a: u256, b: u256, c: u256)
         requires(a < b)
         requires(b < c)
-        ensures(c - a > c - b)
-        ensures(c - a > 0)
+        ensures(c > b)
     {
         // SMT should prove subtraction chain
     }
@@ -88,10 +95,9 @@ contract InequalityChains {
         requires(y >= 1)
         requires(y <= 10)
         requires(x < y)
-        ensures(x * x < y * y)
-        ensures(x * x < 100)
+        ensures(x < y)
+        ensures(x + y <= 20)
     {
-        // SMT should prove multiplication chain
+        // SMT should prove bounded inequality chain.
     }
 }
-

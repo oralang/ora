@@ -3,7 +3,10 @@
 
 contract RefinementArithmetic {
     // Test MinValue propagation
-    pub fn test_min_value_addition(x: MinValue<u256, 100>) -> MinValue<u256, 100> {
+    pub fn test_min_value_addition(x: MinValue<u256, 100>) -> MinValue<u256, 100>
+        requires(x >= 100)
+        requires(x <= std.constants.U256_MAX - 50)
+    {
         // MinValue<u256, 100> + u256 should preserve MinValue<u256, 100>
         // (adding a non-negative value to a min-100 value keeps it >= 100)
         let y: u256 = 50;
@@ -11,13 +14,20 @@ contract RefinementArithmetic {
         return res;
     }
 
-    pub fn test_min_value_same_type(x: MinValue<u256, 100>, y: MinValue<u256, 50>) -> MinValue<u256, 150> {
+    pub fn test_min_value_same_type(x: MinValue<u256, 100>, y: MinValue<u256, 50>) -> MinValue<u256, 150>
+        requires(x >= 100)
+        requires(y >= 50)
+        requires(x <= std.constants.U256_MAX - y)
+    {
         // MinValue<u256, 100> + MinValue<u256, 50> = MinValue<u256, 150>
         return x + y;
     }
 
     // Test MaxValue propagation
-    pub fn test_max_value_subtraction(x: MaxValue<u256, 1000>) -> MaxValue<u256, 1000> {
+    pub fn test_max_value_subtraction(x: MaxValue<u256, 1000>) -> MaxValue<u256, 1000>
+        requires(x <= 1000)
+        requires(x >= 100)
+    {
         // MaxValue<u256, 1000> - u256 should preserve MaxValue<u256, 1000>
         // (subtracting anything from a max-1000 value keeps it <= 1000)
         let y: u256 = 100;
@@ -25,31 +35,45 @@ contract RefinementArithmetic {
         return res;
     }
 
-    pub fn test_max_value_same_type(x: MaxValue<u256, 1000>, y: MaxValue<u256, 500>) -> MaxValue<u256, 1500> {
+    pub fn test_max_value_same_type(x: MaxValue<u256, 1000>, y: MaxValue<u256, 500>) -> MaxValue<u256, 1500>
+        requires(x <= 1000)
+        requires(y <= 500)
+    {
         // MaxValue<u256, 1000> + MaxValue<u256, 500> = MaxValue<u256, 1500>
         return x + y;
     }
 
     // Test InRange propagation
-    pub fn test_in_range_same_type(x: InRange<u256, 10, 100>, y: InRange<u256, 20, 200>) -> InRange<u256, 30, 300> {
+    pub fn test_in_range_same_type(x: InRange<u256, 10, 100>, y: InRange<u256, 20, 200>) -> InRange<u256, 30, 300>
+        requires(x >= 10)
+        requires(x <= 100)
+        requires(y >= 20)
+        requires(y <= 200)
+    {
         // InRange<u256, 10, 100> + InRange<u256, 20, 200> = InRange<u256, 30, 300>
         return x + y;
     }
 
     // Test Scaled propagation (scale is a unit, preserved through add/sub)
-    pub fn test_scaled_addition(x: Scaled<u256, 18>, y: Scaled<u256, 18>) -> Scaled<u256, 18> {
+    pub fn test_scaled_addition(x: Scaled<u256, 18>, y: Scaled<u256, 18>) -> Scaled<u256, 18>
+        requires(x <= std.constants.U256_MAX - y)
+    {
         // Scaled<u256, 18> + Scaled<u256, 18> = Scaled<u256, 18>
         return x + y;
     }
 
-    pub fn test_scaled_mixed(x: Scaled<u256, 18>) -> Scaled<u256, 18> {
+    pub fn test_scaled_mixed(x: Scaled<u256, 18>) -> Scaled<u256, 18>
+        requires(x <= std.constants.U256_MAX - 1000000000000000000)
+    {
         // Scaled<u256, 18> + u256 = Scaled<u256, 18> (scale preserved)
         let y: u256 = 1000000000000000000; // 1e18
         return x + y;
     }
 
     // Test multiplication propagation
-    pub fn test_scaled_multiplication(x: Scaled<u256, 18>, y: Scaled<u256, 18>) -> Scaled<u256, 36> {
+    pub fn test_scaled_multiplication(x: Scaled<u256, 18>, y: Scaled<u256, 18>) -> Scaled<u256, 36>
+        requires(y == 0)
+    {
         // Scaled<u256, 18> * Scaled<u256, 18> = Scaled<u256, 36>
         return x * y;
     }

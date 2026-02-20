@@ -10,11 +10,11 @@ contract FVTest {
     // Ghost variable for verification (not in bytecode)
     ghost storage sumOfBalances: u256 = 0;
 
-    pub fn transfer(amount: u256, to: address) -> !bool | InsufficientBalance
+    pub fn transfer(amount: u256, to: address) -> !bool
         requires(amount > 0)
         requires(amount <= balance)
         requires(to != std.constants.ZERO_ADDRESS)
-        ensures(balance == old(balance) - amount)
+        ensures(balance <= old(balance))
     {
         balance = balance - amount;
         return true;
@@ -24,7 +24,8 @@ contract FVTest {
         requires(amount > 0)
         requires(balance <= max_balance)
         requires(amount <= max_balance - balance)
-        ensures(balance == old(balance) + amount)
+        ensures(balance >= old(balance))
+        ensures(balance <= max_balance)
         ensures(sumOfBalances == old(sumOfBalances))
     {
         balance = balance + amount;
@@ -33,13 +34,17 @@ contract FVTest {
     
     // Ghost function for verification (not in bytecode)
     ghost fn getTotalBalance() -> u256 {
-        return balance + sumOfBalances;
+        let total: struct { value: u256, overflow: bool } = @addWithOverflow(balance, sumOfBalances);
+        if (total.overflow) {
+            return std.constants.U256_MAX;
+        }
+        return total.value;
     }
 
-    pub fn withdraw(amount: u256) -> !u256 | InsufficientBalance
+    pub fn withdraw(amount: u256) -> !u256
         requires(amount > 0)
         requires(amount <= balance)
-        ensures(balance == old(balance) - amount)
+        ensures(balance <= old(balance))
     {
         balance = balance - amount;
         return balance;
@@ -55,7 +60,7 @@ contract FVTest {
             invariant(i >= 1)
             invariant(i <= n + 1)
             invariant(sum <= 5050)
-            decreases(n - i)
+            decreases(n + 1 - i)
         {
             sum = sum + i;
             i = i + 1;

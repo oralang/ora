@@ -25,9 +25,10 @@ contract NonZeroRequiresDedup {
     {
     }
 
-    pub fn initNonZeroOnly(token: NonZeroAddress, adapter: NonZeroAddress) {
-        assert(token != std.constants.ZERO_ADDRESS, "token must be non-zero");
-        assert(adapter != std.constants.ZERO_ADDRESS, "adapter must be non-zero");
+    pub fn initNonZeroOnly(token: NonZeroAddress, adapter: NonZeroAddress)
+        requires(token != std.constants.ZERO_ADDRESS)
+        requires(adapter != std.constants.ZERO_ADDRESS)
+    {
     }
 
     pub fn initAddressRequires(token: address, adapter: address)

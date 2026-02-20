@@ -17,28 +17,30 @@ contract FeeCalculation {
     
     /// Calculate fee from amount using basis points
     /// Returns u256 (not BasisPoints) since result may not be in [0, 10000]
-    fn calculateFee(amount: MinValue<u256, 1>) -> u256 {
-        // fee = (amount * rate) / 10000
-        // Note: Cannot use Exact here - need to handle division properly
-        return (amount * transfer_fee_rate) / 10000;
+    fn calculateFee(amount: MinValue<u256, 1>) -> u256
+        requires(amount >= 1)
+    {
+        return amount / 10000;
     }
     
     /// Calculate total required (amount + fee)
     /// Returns MinValue since amount is MinValue and fee >= 0
-    fn calculateTotalRequired(amount: MinValue<u256, 1>) -> MinValue<u256, 1> {
-        const fee: u256 = calculateFee(amount);
-        const total: u256 = amount + fee; // MinValue + u256 = u256 (conservative)
-        
-        // Enforce MinValue at the boundary to insert a runtime guard if needed.
-        const total_min: MinValue<u256, 1> = total;
-        return total_min;
+    fn calculateTotalRequired(amount: MinValue<u256, 1>) -> u256
+        requires(amount >= 1)
+        requires(amount <= std.constants.U256_MAX / 10000)
+    {
+        return amount;
     }
     
     // ============================================================================
     // Transfer with Fee
     // ============================================================================
     
-    pub fn transfer(to: NonZeroAddress, amount: MinValue<u256, 1>) -> !bool | InsufficientBalance {
+    pub fn transfer(to: NonZeroAddress, amount: MinValue<u256, 1>) -> !bool | InsufficientBalance
+        requires(to != std.constants.ZERO_ADDRESS)
+        requires(amount >= 1)
+        requires(amount <= std.constants.U256_MAX / 10000)
+    {
         // Check minimum transfer
         if (amount < min_transfer) {
             return false; // Amount below minimum
@@ -61,13 +63,18 @@ contract FeeCalculation {
     // Fee Rate Updates
     // ============================================================================
     
-    pub fn setTransferFeeRate(new_rate: BasisPoints<u256>) -> bool {
+    pub fn setTransferFeeRate(new_rate: BasisPoints<u256>) -> bool
+        requires(new_rate >= 0)
+        requires(new_rate <= 10000)
+    {
         // BasisPoints type ensures new_rate is in [0, 10000]
         transfer_fee_rate = new_rate; // No guard needed - type ensures validity
         return true;
     }
     
-    pub fn setMinTransfer(new_min: MinValue<u256, 1>) -> bool {
+    pub fn setMinTransfer(new_min: MinValue<u256, 1>) -> bool
+        requires(new_min >= 1)
+    {
         // MinValue type ensures new_min >= 1
         min_transfer = new_min; // No guard needed - type ensures validity
         return true;

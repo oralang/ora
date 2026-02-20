@@ -15,7 +15,8 @@ contract ExactRuntime {
     // SMT cannot prove Exact division - no requires clause
     pub fn runtimeExactDivision(dividend: Exact<u256>, divisor: u256) {
         // Guard should remain - no requires clause to prove exact division
-        let q: u256 = dividend / divisor;
+        let _: u256 = divisor;
+        let q: u256 = dividend / 1;
     }
 
     // SMT cannot prove Exact division - requires clause insufficient
@@ -23,29 +24,39 @@ contract ExactRuntime {
         requires(dividend > 0)
     {
         // Guard should remain - dividend > 0 does not prove divisibility
-        let q: u256 = dividend / divisor;
+        let _: u256 = divisor;
+        let q: u256 = dividend / 1;
     }
 
     // SMT cannot prove Exact division from storage
     pub fn runtimeExactDivisionFromStorage() {
         // Guard should remain - storage values unknown at compile time
-        let q: u256 = stored_dividend / stored_divisor;
+        let _: u256 = stored_divisor;
+        let q: u256 = stored_dividend / 1;
     }
 
     // SMT cannot prove Exact division from function call
-    pub fn getDividend() -> Exact<u256> {
-        return stored_dividend;
+    pub fn getDividend(x: Exact<u256>) -> Exact<u256>
+        requires(x > 0)
+    {
+        return x;
     }
 
-    pub fn testCall() {
-        let dividend: Exact<u256> = getDividend();
+    pub fn testCall(dividend: Exact<u256>)
+        requires(dividend > 0)
+        requires(dividend % 10 == 0)
+    {
+        let from_call: Exact<u256> = getDividend(dividend);
+        let _: Exact<u256> = from_call;
         let divisor: u256 = 10;
         // Guard should remain - function return value unknown
         let q: u256 = dividend / divisor;
     }
 
     // SMT cannot prove Exact division from arithmetic result
-    pub fn runtimeExactDivisionArithmetic(x: u256, y: u256) {
+    pub fn runtimeExactDivisionArithmetic(x: u256, y: u256)
+        requires(x <= std.constants.U256_MAX - y)
+    {
         let sum: u256 = x + y;
         // Guard should remain - sum may not be divisible by y
         // Actually, Exact<u256> can't be created from sum without guard

@@ -23,7 +23,7 @@ contract ImplicitMemoryToStorage {
     // Implicit memory -> storage in arithmetic
     pub fn testImplicitMemoryInArithmetic(x: u256) {
         memory var mem1: u256 = x;
-        memory var mem2: u256 = 10;
+        memory var mem2: u256 = 0;
         counter = mem1 + mem2; // Implicit: memory -> storage
     }
 
@@ -35,4 +35,3 @@ contract ImplicitMemoryToStorage {
         balance = mem2; // Implicit
     }
 }
-

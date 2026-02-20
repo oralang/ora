@@ -1,6 +1,8 @@
 contract TestReturnInIf {
     // Test ora.return inside if statement
-    pub fn testReturnInIf(x: u256) -> u256 {
+    pub fn testReturnInIf(x: u256) -> u256
+        requires(x < std.constants.U256_MAX)
+    {
         if (x == 0) {
             return 100;
         } else {
@@ -8,4 +10,3 @@ contract TestReturnInIf {
         }
     }
 }
-

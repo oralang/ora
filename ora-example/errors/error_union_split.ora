@@ -11,6 +11,9 @@ contract ErrorUnionSplit {
         if (x == 0) {
             return E2(42);
         }
+        if (x > std.constants.U256_MAX - 1) {
+            return E2(42);
+        }
         return x + 1;
     }
 
@@ -28,6 +31,9 @@ contract ErrorUnionSplit {
     // Forces ora.error.is_error + ora.error.unwrap on payload union
     pub fn unwrapPayload(x: u256) -> !u256 | E2 {
         let y: u256 = try mayFailPayload(x);
+        if (y > std.constants.U256_MAX - 2) {
+            return E2(42);
+        }
         return y + 2;
     }
 

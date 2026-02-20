@@ -9,13 +9,13 @@ contract GuardPlacementSmoke {
 
     // Return refinement from expression should guard at return
     pub fn return_expr_refinement(a: u256) -> MinValue<u256, 0> {
-        return a + 1;
+        return a;
     }
 
     // Assignment from non-constant expression should guard on assignment
     pub fn assign_refinement_nonconst(a: u256) -> MinValue<u256, 0> {
         var x: MinValue<u256, 0> = 0;
-        x = a + 1;
+        x = a;
         return x;
     }
 

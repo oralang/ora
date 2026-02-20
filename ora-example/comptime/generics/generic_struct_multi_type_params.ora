@@ -8,7 +8,9 @@ contract GenericStructMultiTypeParams {
         return Entry(address, u256) { key: addr, value: amount };
     }
 
-    pub fn value_plus_one(addr: address, amount: u256) -> u256 {
+    pub fn value_plus_one(addr: address, amount: u256) -> u256
+        requires(amount < std.constants.U256_MAX)
+    {
         let e = Entry(address, u256) { key: addr, value: amount };
         return e.value + 1;
     }

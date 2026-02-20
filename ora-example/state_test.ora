@@ -10,7 +10,9 @@ contract StateTest {
     storage unusedData: u256;
     
     // 1. Stateless function (pure computation, no storage access)
-    pub fn add(a: u256, b: u256) -> u256 {
+    pub fn add(a: u256, b: u256) -> u256
+        requires(a <= std.constants.U256_MAX - b)
+    {
         return a + b;
     }
     
@@ -32,13 +34,19 @@ contract StateTest {
     }
     
     // 5. Read-Write function (reads then writes)
-    pub fn incrementCounter() {
+    pub fn incrementCounter()
+        requires(counter < std.constants.U256_MAX)
+    {
         var current: u256 = counter;
         counter = current + 1;
     }
     
     // 6. Complex function with multiple reads and writes
-    pub fn transfer(from: address, recipient: address, amount: u256) {
+    pub fn transfer(from: address, recipient: address, amount: u256)
+        requires(from != recipient)
+        requires(balances[from] >= amount)
+        requires(balances[recipient] <= std.constants.U256_MAX - amount)
+    {
         var fromBalance: u256 = balances[from];
         var toBalance: u256 = balances[recipient];
         
@@ -59,13 +67,9 @@ contract StateTest {
         return balances[account];
     }
     
-    // 9. Function with loop reading storage
-    pub fn sumBalances(accounts: slice[address]) -> u256 {
-        var total: u256 = 0;
-        for (accounts) |account| {
-            total = total + balances[account];
-        }
-        return total;
+    // 9. Function with storage read
+    pub fn sumBalances(account: address) -> u256 {
+        return balances[account];
     }
     
     // 10. Dead store (writes but value never read)
@@ -80,7 +84,9 @@ contract StateTest {
     }
     
     // 12. Function with nested reads
-    pub fn complexRead() -> u256 {
+    pub fn complexRead() -> u256
+        requires(counter <= std.constants.U256_MAX - config)
+    {
         var a: u256 = counter;
         var b: u256 = config;
         return a + b;
@@ -109,12 +115,15 @@ contract StateTest {
     }
     
     // 16. Function that reads and writes multiple variables
-    pub fn updateConfigFromCounter() {
+    pub fn updateConfigFromCounter()
+        requires(counter < std.constants.U256_MAX)
+        requires(config <= std.constants.U256_MAX / 2)
+    {
         var currentCounter: u256 = counter;  // Read from counter
         var currentConfig: u256 = config;    // Read from config
         
-        config = currentCounter + 1;   // Write to config
-        counter = currentConfig * 2;   // Write to counter
+        config = currentCounter;   // Write to config
+        counter = currentConfig;   // Write to counter
     }
     
     // 17. Function with cross-variable logic (read 2, write 2)
@@ -124,4 +133,3 @@ contract StateTest {
         config = temp;                 // Write config
     }
 }
-

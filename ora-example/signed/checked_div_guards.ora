@@ -4,22 +4,32 @@
 // Division and modulo emit both div-by-zero and MIN_INT/-1 guards.
 contract CheckedDivGuards {
     // Reverts if b == 0 or (a == MIN_INT && b == -1)
-    pub fn safe_div(a: i256, b: i256) -> i256 {
+    pub fn safe_div(a: i256, b: i256) -> i256
+        requires(b != 0)
+        requires(!(a == std.constants.I256_MIN && b == -1))
+    {
         return a / b;
     }
 
     // Same guards as division
-    pub fn safe_rem(a: i256, b: i256) -> i256 {
+    pub fn safe_rem(a: i256, b: i256) -> i256
+        requires(b != 0)
+        requires(!(a == std.constants.I256_MIN && b == -1))
+    {
         return a % b;
     }
 
     // Unsigned division only checks div-by-zero (no MIN_INT issue)
-    pub fn unsigned_div(a: u256, b: u256) -> u256 {
+    pub fn unsigned_div(a: u256, b: u256) -> u256
+        requires(b != 0)
+    {
         return a / b;
     }
 
     // Negation reverts if a == MIN_INT (since -MIN_INT overflows)
-    pub fn safe_negate(a: i256) -> i256 {
+    pub fn safe_negate(a: i256) -> i256
+        requires(a != std.constants.I256_MIN)
+    {
         return -a;
     }
 }

@@ -11,6 +11,7 @@ contract FunctionContractsOld {
 
     // Ensures with old() for single variable
     pub fn increment()
+        requires(counter < std.constants.U256_MAX)
         ensures(counter == old(counter) + 1)
     {
         counter = counter + 1;
@@ -19,6 +20,7 @@ contract FunctionContractsOld {
     // Ensures with old() and arithmetic
     pub fn add(value: u256)
         requires(value > 0)
+        requires(value <= std.constants.U256_MAX - total)
         ensures(total == old(total) + value)
     {
         total = total + value;
@@ -27,6 +29,8 @@ contract FunctionContractsOld {
     // Ensures with old() for multiple variables
     pub fn update(value: u256)
         requires(value > 0)
+        requires(counter < std.constants.U256_MAX)
+        requires(value <= std.constants.U256_MAX - total)
         ensures(counter == old(counter) + 1)
         ensures(total == old(total) + value)
         ensures(last_value == value)
@@ -39,6 +43,8 @@ contract FunctionContractsOld {
     // Ensures with old() in complex expression
     pub fn multiplyAndAdd(factor: u256, addend: u256)
         requires(factor > 0)
+        requires(total <= std.constants.U256_MAX / factor)
+        requires(addend <= std.constants.U256_MAX - total * factor)
         ensures(total == old(total) * factor + addend)
     {
         total = total * factor + addend;
@@ -47,6 +53,7 @@ contract FunctionContractsOld {
     // Ensures with old() and comparison
     // Note: Ternary operators not supported - using if/else structure instead
     pub fn conditionalIncrement(condition: bool)
+        requires(counter < std.constants.U256_MAX || !condition)
     {
         if (condition) {
             counter = counter + 1;
@@ -57,10 +64,10 @@ contract FunctionContractsOld {
 
     // Ensures with old() in return value
     pub fn incrementAndReturn() -> u256
+        requires(counter < std.constants.U256_MAX)
         ensures(counter == old(counter) + 1)
     {
         counter = counter + 1;
         return counter;
     }
 }
-

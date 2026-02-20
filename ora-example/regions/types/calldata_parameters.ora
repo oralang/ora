@@ -8,7 +8,7 @@ contract CalldataParameters {
     storage var storage_x: u256;
 
     // Function parameters are calldata region
-    pub fn testCalldataParams(x: u256, flag: bool, addr: address, name: string, data: bytes) {
+    pub fn testCalldataParams(x: u256, flag: bool, addr: address) {
         // All parameters are calldata region (read-only)
         
         // Can read from calldata
@@ -17,7 +17,6 @@ contract CalldataParameters {
         let stack_addr: address = addr; // Calldata -> Stack
         
         // Can copy calldata to other regions
-        memory var mem_x: u256 = x; // Calldata -> Memory
         storage_x = x; // Calldata -> Storage (via stack)
     }
 
@@ -28,7 +27,9 @@ contract CalldataParameters {
     }
 
     // Calldata in arithmetic
-    pub fn testCalldataArithmetic(x: u256, y: u256) {
+    pub fn testCalldataArithmetic(x: u256, y: u256)
+        requires(x <= std.constants.U256_MAX - y)
+    {
         let sum: u256 = x + y; // Calldata reads
     }
 

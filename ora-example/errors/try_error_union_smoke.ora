@@ -10,12 +10,18 @@ contract TryErrorUnionSmoke {
         if (x == 0) {
             return E1;
         }
+        if (x == std.constants.U256_MAX) {
+            return E1;
+        }
         return x + 1;
     }
 
     // Try expression: unwraps or propagates error
     pub fn unwrapWithTry(x: u256) -> !u256 | E1 {
         let y: u256 = try mayFail(x);
+        if (y == std.constants.U256_MAX) {
+            return E1;
+        }
         return y + 1;
     }
 

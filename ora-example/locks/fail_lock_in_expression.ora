@@ -1,0 +1,10 @@
+// Expected failure: @lock is statement-only and cannot be used in expression position.
+
+contract FailLockInExpression {
+    storage var balances: map<address, u256>;
+
+    pub fn bad(user: address) -> u256 {
+        let tmp = @lock(balances[user]);
+        return tmp;
+    }
+}

@@ -17,6 +17,8 @@ contract RefinementDispatcherE2E {
         fee: BasisPoints<u256>
     )
         requires(initial_owner != std.constants.ZERO_ADDRESS)
+        requires(cap <= 1_000_000)
+        requires(fee <= 10000)
     {
         owner = initial_owner;
         limit = cap;
@@ -24,7 +26,10 @@ contract RefinementDispatcherE2E {
     }
 
     // deposit with refinement guard
-    pub fn deposit(amount: MinValue<u256, 1>) -> u256 {
+    pub fn deposit(amount: MinValue<u256, 1>) -> u256
+        requires(amount >= 1)
+        requires(balances[std.msg.sender] <= std.constants.U256_MAX - amount)
+    {
         const sender: address = std.msg.sender;
         const prev: u256 = balances[sender];
         const next: u256 = prev + amount;
@@ -40,7 +45,9 @@ contract RefinementDispatcherE2E {
     }
 
     // update limit
-    pub fn setLimit(new_limit: MaxValue<u256, 1_000_000>) {
+    pub fn setLimit(new_limit: MaxValue<u256, 1_000_000>)
+        requires(new_limit <= 1_000_000)
+    {
         limit = new_limit;
     }
 

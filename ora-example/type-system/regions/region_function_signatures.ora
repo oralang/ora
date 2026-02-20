@@ -12,7 +12,7 @@ contract RegionFunctionSignatures {
         // x: u256 @calldata
         // y: bool @calldata
         // addr: address @calldata
-        let sum: u256 = x + 10;
+        let sum: u256 = x +% 10;
     }
 
     // Function return types are stack region
@@ -39,4 +39,3 @@ contract RegionFunctionSignatures {
         let stack_val: u256 = mem_val; // Memory -> Stack
     }
 }
-

@@ -15,7 +15,7 @@ contract TypeAnnotations {
 
     // Function parameters require explicit types
     pub fn testFunctionParams(x: u256, y: bool, addr: address) {
-        let sum: u256 = x + 10;
+        let same_value: u256 = x;
     }
 
     // Function return types require explicit types
@@ -37,4 +37,3 @@ contract TypeAnnotations {
     tstore var temp_counter: u256;
     tstore var temp_flag: bool;
 }
-

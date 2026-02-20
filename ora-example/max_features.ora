@@ -140,7 +140,7 @@ contract FeatureMaximizer {
 
     pub fn compute(a: u256, b: u256) -> u256 {
         // Simple computation
-        var res: u256 = a + b;
+        var res: u256 = a +% b;
         return res;
     }
 
@@ -151,4 +151,3 @@ contract FeatureMaximizer {
         return 0;
     }
 }
-

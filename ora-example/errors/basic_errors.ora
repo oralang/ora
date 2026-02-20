@@ -87,7 +87,7 @@ contract ErrorHandlingTest {
     }
     
     // Function with custom error handling logic
-    pub fn batch_transfer(recipients: slice[address], amounts: slice[u256]) -> u256 {
+    pub fn batch_transfer(recipients: [address; 5], amounts: [u256; 5]) -> u256 {
         var success_count: u256 = 0;
         var failed_count: u256 = 0;
         

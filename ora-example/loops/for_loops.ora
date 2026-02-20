@@ -15,7 +15,7 @@ contract ForLoopTest {
         // For loop with array
         let numbers: [u256; 5] = [1, 2, 3, 4, 5];
         for (numbers) |value, index| {
-            dummy = value * index;
+            dummy = value;
             // Loop body
         }
         

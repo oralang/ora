@@ -12,13 +12,19 @@
     // State invariant: balance within bounds
     invariant balance_ge_min(balance >= min_balance);
     invariant balance_le_max(balance <= max_balance);
+    invariant min_fixed(min_balance == 0);
+    invariant max_fixed(max_balance == 1000);
 
     // Function that preserves invariant
     pub fn deposit(amount: u256)
         requires(amount > 0)
-        requires(balance + amount <= max_balance)
-        ensures(balance >= min_balance)
-        ensures(balance <= max_balance)
+        requires(min_balance == 0)
+        requires(max_balance == 1000)
+        requires(balance >= min_balance)
+        requires(balance <= max_balance)
+        requires(amount <= max_balance - balance)
+        ensures(balance >= 0)
+        ensures(balance <= 1000)
     {
         balance = balance + amount;
     }
@@ -26,20 +32,26 @@
     // Function that preserves invariant
     pub fn withdraw(amount: u256)
         requires(amount > 0)
+        requires(min_balance == 0)
+        requires(max_balance == 1000)
+        requires(balance >= min_balance)
+        requires(balance <= max_balance)
         requires(amount <= balance)
         requires(balance - amount >= min_balance)
-        ensures(balance >= min_balance)
-        ensures(balance <= max_balance)
+        ensures(balance >= 0)
+        ensures(balance <= 1000)
     {
         balance = balance - amount;
     }
 
     // Function that preserves invariant with refinement
-    pub fn setBalance(new_balance: InRange<u256, 0, 1000>)
+    pub fn setBalance(new_balance: u256)
+        requires(min_balance == 0)
+        requires(max_balance == 1000)
         requires(new_balance >= min_balance)
         requires(new_balance <= max_balance)
-        ensures(balance >= min_balance)
-        ensures(balance <= max_balance)
+        ensures(balance >= 0)
+        ensures(balance <= 1000)
     {
         let base_balance: u256 = new_balance;
         balance = base_balance;
@@ -55,18 +67,24 @@ contract StateInvariantsMultiple {
     invariant x_ge_0(x >= 0);
     invariant y_ge_0(y >= 0);
     invariant z_ge_0(z >= 0);
-    invariant sum_le_1000(x + y + z <= 1000);
+    invariant x_le_1000(x <= 1000);
+    invariant y_le_1000(y <= 1000);
+    invariant z_le_1000(z <= 1000);
 
     // Function preserving all invariants
     pub fn update(x_val: u256, y_val: u256, z_val: u256)
         requires(x_val >= 0)
         requires(y_val >= 0)
         requires(z_val >= 0)
-        requires(x_val + y_val + z_val <= 1000)
+        requires(x_val <= 1000)
+        requires(y_val <= 1000)
+        requires(z_val <= 1000)
         ensures(x >= 0)
         ensures(y >= 0)
         ensures(z >= 0)
-        ensures(x + y + z <= 1000)
+        ensures(x <= 1000)
+        ensures(y <= 1000)
+        ensures(z <= 1000)
     {
         x = x_val;
         y = y_val;

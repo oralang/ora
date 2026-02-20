@@ -40,7 +40,10 @@ contract ERC20Token {
     
     // Transfer tokens from sender to recipient
     // Uses refinement types to ensure non-negative amounts and non-zero recipient
-    pub fn transfer(recipient: NonZeroAddress, amount: MinValue<u256, 0>) -> !bool {
+    pub fn transfer(recipient: NonZeroAddress, amount: MinValue<u256, 0>) -> !bool
+        requires(recipient != std.constants.ZERO_ADDRESS)
+        requires(balances[recipient] <= std.constants.U256_MAX - amount)
+    {
         // recipient: @calldata (function parameter, NonZeroAddress - guaranteed non-zero at compile time)
         // amount: @calldata (function parameter with refinement type)
         
@@ -69,7 +72,9 @@ contract ERC20Token {
     }
     
     // Approve spender to spend tokens
-    pub fn approve(spender: NonZeroAddress, amount: MinValue<u256, 0>) -> !bool {
+    pub fn approve(spender: NonZeroAddress, amount: MinValue<u256, 0>) -> !bool
+        requires(spender != std.constants.ZERO_ADDRESS)
+    {
         // spender: @calldata (function parameter, NonZeroAddress - guaranteed non-zero at compile time)
         // amount: @calldata (function parameter with refinement type)
         
@@ -90,7 +95,11 @@ contract ERC20Token {
     }
     
     // Transfer from one address to another using allowance
-    pub fn transferFrom(sender: address, recipient: NonZeroAddress, amount: MinValue<u256, 0>) -> !bool {
+    pub fn transferFrom(sender: address, recipient: NonZeroAddress, amount: MinValue<u256, 0>) -> !bool
+        requires(sender != std.constants.ZERO_ADDRESS)
+        requires(recipient != std.constants.ZERO_ADDRESS)
+        requires(balances[recipient] <= std.constants.U256_MAX - amount)
+    {
         // sender: @calldata (function parameter, can be any address including zero)
         // recipient: @calldata (function parameter, NonZeroAddress - guaranteed non-zero at compile time)
         // amount: @calldata (function parameter with refinement type)
@@ -128,4 +137,3 @@ contract ERC20Token {
     }
     
 }
-

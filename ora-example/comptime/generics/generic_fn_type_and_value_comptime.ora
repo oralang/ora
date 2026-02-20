@@ -1,5 +1,7 @@
 contract GenericFnTypeAndValueComptime {
-    fn add_with_bias(comptime T: type, comptime bias: T, x: T) -> T {
+    fn add_with_bias(comptime T: type, comptime bias: T, x: T) -> T
+        requires(x <= std.constants.U256_MAX - bias)
+    {
         return x + bias;
     }
 

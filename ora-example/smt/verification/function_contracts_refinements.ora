@@ -11,6 +11,8 @@ contract FunctionContractsRefinements {
     // Requires with refinement type parameter
     pub fn depositRefined(amount: MinValue<u256, 1>)
         requires(amount >= 1)
+        requires(balance <= max_balance)
+        requires(amount <= max_balance - balance)
         ensures(balance >= old(balance))
     {
         let base_amount: u256 = amount;

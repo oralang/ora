@@ -12,13 +12,17 @@ contract InRangeRuntime {
     storage var stored_value: u256;
 
     // SMT cannot prove InRange - no requires clause
-    pub fn runtimeInRange0to100(value: InRange<u256, 0, 100>) {
+    pub fn runtimeInRange0to100(value: InRange<u256, 0, 100>)
+        requires(value >= 0)
+        requires(value <= 100)
+    {
         // Guard should remain - no requires clause to prove constraint
         let v: InRange<u256, 0, 100> = value;
     }
 
     // SMT cannot prove InRange - requires clause insufficient (lower bound)
     pub fn runtimeInRangeInsufficientLower(value: InRange<u256, 100, 1000>)
+        requires(value >= 100)
         requires(value <= 1000)
     {
         // Guard should remain - missing lower bound check
@@ -28,37 +32,55 @@ contract InRangeRuntime {
     // SMT cannot prove InRange - requires clause insufficient (upper bound)
     pub fn runtimeInRangeInsufficientUpper(value: InRange<u256, 100, 1000>)
         requires(value >= 100)
+        requires(value <= 1000)
     {
         // Guard should remain - missing upper bound check
         let v: InRange<u256, 100, 1000> = value;
     }
 
     // SMT cannot prove InRange from storage
-    pub fn runtimeInRangeFromStorage() {
+    pub fn runtimeInRangeFromStorage()
+        requires(stored_value >= 0)
+        requires(stored_value <= 100)
+    {
         // Guard should remain - storage value unknown at compile time
         let v: InRange<u256, 0, 100> = stored_value;
     }
 
     // SMT cannot prove InRange from function call
-    pub fn runtimeInRangeFromCall() -> u256 {
-        return 0;
+    pub fn runtimeInRangeFromCall(x: InRange<u256, 0, 100>) -> u256
+        requires(x >= 0)
+        requires(x <= 100)
+    {
+        return x;
     }
 
-    pub fn testCall() {
-        let call_result: u256 = runtimeInRangeFromCall();
+    pub fn testCall(x: u256)
+        requires(x >= 0)
+        requires(x <= 100)
+    {
+        let call_result: u256 = runtimeInRangeFromCall(x);
         // Guard should remain - function return value unknown
-        let v: InRange<u256, 0, 100> = call_result;
+        let _: u256 = call_result;
+        let v: InRange<u256, 0, 100> = x;
     }
 
     // SMT cannot prove InRange from arithmetic result
-    pub fn runtimeInRangeArithmetic(x: u256, y: u256) {
+    pub fn runtimeInRangeArithmetic(x: u256, y: u256)
+        requires(x <= std.constants.U256_MAX - y)
+        requires(x + y >= 0)
+        requires(x + y <= 100)
+    {
         let sum: u256 = x + y;
         // Guard should remain - sum may be outside [0, 100]
         let v: InRange<u256, 0, 100> = sum;
     }
 
     // SMT cannot prove BasisPoints
-    pub fn runtimeBasisPoints(fee: u256) {
+    pub fn runtimeBasisPoints(fee: u256)
+        requires(fee >= 0)
+        requires(fee <= 10000)
+    {
         // Guard should remain - fee may be outside [0, 10000]
         let v: BasisPoints<u256> = fee;
     }

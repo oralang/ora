@@ -17,6 +17,7 @@ contract FunctionParametersPropagation {
     // Constraints propagate through arithmetic
     pub fn propagateArithmetic(x: MinValue<u256, 10>)
         requires(x >= 10)
+        requires(x <= std.constants.U256_MAX / 2)
     {
         // Constraint propagates: x >= 10
         let doubled: u256 = x * 2;
@@ -52,6 +53,7 @@ contract FunctionParametersPropagation {
     )
         requires(a >= 10)
         requires(b >= 20)
+        requires(a <= std.constants.U256_MAX - b)
     {
         // Both constraints propagate
         let sum: u256 = a + b;
@@ -68,4 +70,3 @@ contract FunctionParametersPropagation {
         // SMT should prove 0 <= doubled <= 200
     }
 }
-

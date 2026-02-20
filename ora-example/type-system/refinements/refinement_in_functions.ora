@@ -23,8 +23,14 @@ contract RefinementInFunctions {
         limit: MaxValue<u256, 1000>,
         rate: InRange<u256, 0, 100>,
         addr: NonZeroAddress
-    ) {
-        let sum: u256 = amount + rate;
+    )
+        requires(amount >= 100)
+        requires(limit <= 1000)
+        requires(rate >= 0)
+        requires(rate <= 100)
+        requires(addr != std.constants.ZERO_ADDRESS)
+    {
+        let sum: u256 = amount +% rate;
     }
 
     // Refinement in return with parameter
@@ -43,10 +49,11 @@ contract RefinementInFunctions {
 
     // Refinement in error union return
     // Note: Testing refinement types in error unions - using base type for error union
-    pub fn testRefinementErrorUnion(amount: MinValue<u256, 100>) -> !u256 | InvalidAmount {
+    pub fn testRefinementErrorUnion(amount: MinValue<u256, 100>) -> !u256 | InvalidAmount
+        requires(amount >= 100)
+    {
         // Convert refinement to base type for error union
         let base_amount: u256 = amount;
         return base_amount;
     }
 }
-

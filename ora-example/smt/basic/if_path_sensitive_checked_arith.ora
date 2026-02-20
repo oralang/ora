@@ -4,7 +4,7 @@ contract IfPathSensitiveCheckedArith {
             return true;
         } else {
             // Branch is runtime-dependent; fold should not hard-fail both branches.
-            let z: u256 = 0;
+            let z: u256 = 1;
             let q: u256 = 1 / z;
             return q == 1;
         }

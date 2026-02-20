@@ -1,5 +1,8 @@
 contract ComptimeParamProbe {
-    fn align_up(comptime alignment: u256, value: u256) -> u256 {
+    fn align_up(comptime alignment: u256, value: u256) -> u256
+        requires(alignment > 0)
+        requires(value <= std.constants.U256_MAX - (alignment - 1))
+    {
         const mask: u256 = alignment - 1;
         return (value + mask) - ((value + mask) % alignment);
     }

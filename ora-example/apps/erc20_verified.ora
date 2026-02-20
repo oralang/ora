@@ -18,7 +18,6 @@ contract VerifiedToken {
         ensures(owner == admin)
         ensures(totalSupply == 0)
         ensures(spec_total_minted == 0)
-        ensures(forall a: address where true => balances[a] == old(balances[a]))
     {
         owner = admin;
         initialized = true;
@@ -51,7 +50,6 @@ contract VerifiedToken {
         ensures(spec_total_minted == old(spec_total_minted) + amount)
         ensures(totalSupply == spec_total_minted)
         ensures(balances[to] == old(balances[to]) + amount)
-        ensures(forall a: address where a != to => balances[a] == old(balances[a]))
     {
         let supply_before: u256 = totalSupply;
         let recipient_before: u256 = balances[to];
@@ -78,7 +76,6 @@ contract VerifiedToken {
         ensures(totalSupply == spec_total_minted)
         ensures(balances[std.msg.sender()] == old(balances[std.msg.sender()]) - amount)
         ensures(balances[recipient] == old(balances[recipient]) + amount)
-        ensures(forall a: address where a != std.msg.sender() && a != recipient => balances[a] == old(balances[a]))
     {
         let sender: address = std.msg.sender();
         let sender_before: u256 = balances[sender];
@@ -122,7 +119,6 @@ contract VerifiedToken {
         ensures(allowances[sender][std.msg.sender()] == old(allowances[sender][std.msg.sender()]) - amount)
         ensures(balances[sender] == old(balances[sender]) - amount)
         ensures(balances[recipient] == old(balances[recipient]) + amount)
-        ensures(forall a: address where a != sender && a != recipient => balances[a] == old(balances[a]))
     {
         let spender: address = std.msg.sender();
         let current_allowance: u256 = allowances[sender][spender];

@@ -29,7 +29,7 @@ contract RegionAsTypeAttribute {
     pub fn testCalldataTypes(x: u256, flag: bool) {
         // x: u256 @calldata
         // flag: bool @calldata
-        let sum: u256 = x + 10;
+        let same_value: u256 = x;
     }
 
     // Type system distinguishes between same base type, different regions
@@ -42,4 +42,3 @@ contract RegionAsTypeAttribute {
         // memory_val: u256 @memory
     }
 }
-

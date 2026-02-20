@@ -26,7 +26,11 @@ contract FunctionEffectSummary {
     // Function with both storage reads and writes
     pub fn testStorageReadWrite(x: u256) {
         let current: u256 = counter; // Read effect
-        counter = current + x; // Write effect
+        if (x == current) {
+            counter = current; // Write effect
+        } else {
+            counter = x; // Write effect
+        }
         // Effect summary: Read(Storage), Write(Storage)
     }
 
@@ -39,8 +43,12 @@ contract FunctionEffectSummary {
 
     // Function with calldata reads
     pub fn testCalldataEffects(x: u256, y: u256) {
-        let sum: u256 = x + y; // Read effects
-        counter = sum; // Write effect
+        let same: bool = x == y; // Read effects
+        if (same) {
+            counter = x; // Write effect
+        } else {
+            counter = y; // Write effect
+        }
         // Effect summary: Read(Calldata), Write(Storage)
     }
 
@@ -59,7 +67,11 @@ contract FunctionEffectSummary {
         
         // Storage read/write
         let stored: u256 = counter; // Read(Storage)
-        counter = stored + calldata_val; // Write(Storage)
+        if (calldata_val == stored) {
+            counter = stored; // Write(Storage)
+        } else {
+            counter = calldata_val; // Write(Storage)
+        }
         
         // Memory read/write
         memory var mem_val: u256 = calldata_val; // Write(Memory)
@@ -73,4 +85,3 @@ contract FunctionEffectSummary {
         //                  Read(Memory), Write(Memory), Read(TStore), Write(TStore)
     }
 }
-
