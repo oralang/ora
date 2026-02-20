@@ -1,0 +1,15 @@
+// ============================================================================
+// Expected failure:
+// Checked arithmetic inside a private generic helper must still fail when a
+// reachable public path does not constrain overflow.
+// ============================================================================
+
+contract FailPrivateGenericCheckedArith {
+    fn add(comptime T: type, a: T, b: T) -> T {
+        return a + b;
+    }
+
+    pub fn uncheckedAdd(a: u256, b: u256) -> u256 {
+        return add(u256, a, b);
+    }
+}

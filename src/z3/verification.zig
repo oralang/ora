@@ -115,6 +115,8 @@ pub const VerificationPass = struct {
 
     /// Current function being processed (for MLIR extraction)
     current_function_name: ?[]const u8 = null,
+    /// Whether the current function should produce top-level verification queries.
+    current_function_verify_enabled: bool = true,
 
     /// Encoded annotations collected from MLIR
     encoded_annotations: ManagedArrayList(EncodedAnnotation),
@@ -473,16 +475,26 @@ pub const VerificationPass = struct {
                 else
                     op_name_ref.data[0..op_name_ref.length];
                 const prev_function = self.current_function_name;
+                const prev_verify_enabled = self.current_function_verify_enabled;
                 if (std.mem.eql(u8, op_name, "func.func")) {
                     if (try self.getFunctionNameFromOp(current_op)) |fn_name| {
                         self.current_function_name = fn_name;
+                        self.current_function_verify_enabled = self.shouldVerifyFunctionOp(current_op);
+                        if (self.filter_function_name) |target_fn| {
+                            if (std.mem.eql(u8, fn_name, target_fn)) {
+                                self.current_function_verify_enabled = true;
+                            }
+                        }
                         self.encoder.resetFunctionState();
                     }
                 }
 
                 try self.processMLIROperation(current_op);
 
-                if (std.mem.eql(u8, op_name, "scf.if")) {
+                if (std.mem.eql(u8, op_name, "func.func") and !self.current_function_verify_enabled) {
+                    // Skip traversing function bodies that are not externally reachable
+                    // entrypoints (e.g. private/internal helpers).
+                } else if (std.mem.eql(u8, op_name, "scf.if")) {
                     try self.walkScfIfRegions(current_op);
                 } else {
                     // walk nested regions (for functions, loops, etc.)
@@ -495,6 +507,7 @@ pub const VerificationPass = struct {
 
                 if (std.mem.eql(u8, op_name, "func.func")) {
                     self.current_function_name = prev_function;
+                    self.current_function_verify_enabled = prev_verify_enabled;
                 }
 
                 current_op = mlir.oraOperationGetNextInBlock(current_op);
@@ -773,6 +786,13 @@ pub const VerificationPass = struct {
         else
             op_name_ref.data[0..op_name_ref.length];
 
+        if (!std.mem.eql(u8, op_name, "func.func") and
+            self.current_function_name != null and
+            !self.current_function_verify_enabled)
+        {
+            return;
+        }
+
         if (self.filter_function_name) |target_fn| {
             const current = self.current_function_name orelse return;
             if (!std.mem.eql(u8, current, target_fn)) return;
@@ -910,6 +930,17 @@ pub const VerificationPass = struct {
         const dup = try self.allocator.dupe(u8, value_slice);
         try self.guard_id_storage.append(dup);
         return dup;
+    }
+
+    fn shouldVerifyFunctionOp(_: *VerificationPass, op: mlir.MlirOperation) bool {
+        const visibility_attr = mlir.oraOperationGetAttributeByName(op, mlir.oraStringRefCreate("ora.visibility", 14));
+        if (mlir.oraAttributeIsNull(visibility_attr)) return true;
+        const visibility_ref = mlir.oraStringAttrGetValue(visibility_attr);
+        if (visibility_ref.data == null or visibility_ref.length == 0) return true;
+        const visibility = visibility_ref.data[0..visibility_ref.length];
+        return std.mem.eql(u8, visibility, "pub") or
+            std.mem.eql(u8, visibility, "public") or
+            std.mem.eql(u8, visibility, "external");
     }
 
     fn recordEncodedAnnotation(
@@ -1051,6 +1082,14 @@ pub const VerificationPass = struct {
                 .guard_id = null,
             });
         }
+
+        // Avoid cross-annotation reuse of cached expression ASTs whose defining
+        // side-constraints were already consumed by takeConstraints() above.
+        // This is especially important for old(...) encodings in postconditions:
+        // each annotation query must re-materialize the old/current linkage.
+        self.encoder.value_map.clearRetainingCapacity();
+        self.encoder.value_map_old.clearRetainingCapacity();
+
         return annotation_index;
     }
 
@@ -2489,6 +2528,11 @@ pub const VerificationPass = struct {
             for (vr.errors.items) |err| {
                 if (!first_error) try writer.writeByte(',');
                 first_error = false;
+                const matched_query_idx = findQueryIndexForError(err, queries, runs);
+                const classification = if (matched_query_idx) |qidx|
+                    classifyQueryFailure(queries[qidx], runs[qidx])
+                else
+                    FailureClassification{};
                 try writer.writeByte('{');
                 try writer.writeAll("\"type\":");
                 try writeJsonStringEscaped(writer, @tagName(err.error_type));
@@ -2498,6 +2542,42 @@ pub const VerificationPass = struct {
                 try writeJsonStringEscaped(writer, err.file);
                 try writer.print(",\"line\":{d}", .{err.line});
                 try writer.print(",\"column\":{d}", .{err.column});
+                try writer.writeAll(",\"query_id\":");
+                if (matched_query_idx) |qidx| {
+                    try writer.print("{d}", .{qidx + 1});
+                } else {
+                    try writer.writeAll("null");
+                }
+                try writer.writeAll(",\"subtype\":");
+                if (classification.subtype) |subtype| {
+                    try writeJsonStringEscaped(writer, subtype);
+                } else {
+                    try writer.writeAll("null");
+                }
+                try writer.writeAll(",\"confidence\":");
+                if (classification.confidence) |confidence| {
+                    try writeJsonStringEscaped(writer, confidence);
+                } else {
+                    try writer.writeAll("null");
+                }
+                try writer.writeAll(",\"evidence\":");
+                if (classification.evidence) |evidence| {
+                    try writeJsonStringEscaped(writer, evidence);
+                } else {
+                    try writer.writeAll("null");
+                }
+                try writer.writeAll(",\"narrowing_bits\":");
+                if (classification.narrowing_bits) |bits| {
+                    try writer.print("{d}", .{bits});
+                } else {
+                    try writer.writeAll("null");
+                }
+                try writer.writeAll(",\"refinement_kind\":");
+                if (classification.refinement_kind) |refinement_kind| {
+                    try writeJsonStringEscaped(writer, refinement_kind);
+                } else {
+                    try writer.writeAll("null");
+                }
                 try writer.writeAll(",\"counterexample\":");
                 if (err.counterexample) |ce| {
                     try writeCounterexampleJson(writer, ce);
@@ -2516,11 +2596,46 @@ pub const VerificationPass = struct {
             for (vr.diagnostics.items) |diag| {
                 if (!first_diag) try writer.writeByte(',');
                 first_diag = false;
+                const diag_query_idx = findQueryIndexForDiagnostic(diag, queries, runs);
+                const classification = if (diag_query_idx) |qidx|
+                    classifyQueryFailure(queries[qidx], runs[qidx])
+                else
+                    classifyGuardId(diag.guard_id, true);
                 try writer.writeByte('{');
                 try writer.writeAll("\"guard_id\":");
                 try writeJsonStringEscaped(writer, diag.guard_id);
                 try writer.writeAll(",\"function_name\":");
                 try writeJsonStringEscaped(writer, diag.function_name);
+                try writer.writeAll(",\"query_id\":");
+                if (diag_query_idx) |qidx| {
+                    try writer.print("{d}", .{qidx + 1});
+                } else {
+                    try writer.writeAll("null");
+                }
+                try writer.writeAll(",\"subtype\":");
+                if (classification.subtype) |subtype| {
+                    try writeJsonStringEscaped(writer, subtype);
+                } else {
+                    try writer.writeAll("null");
+                }
+                try writer.writeAll(",\"confidence\":");
+                if (classification.confidence) |confidence| {
+                    try writeJsonStringEscaped(writer, confidence);
+                } else {
+                    try writer.writeAll("null");
+                }
+                try writer.writeAll(",\"evidence\":");
+                if (classification.evidence) |evidence| {
+                    try writeJsonStringEscaped(writer, evidence);
+                } else {
+                    try writer.writeAll("null");
+                }
+                try writer.writeAll(",\"refinement_kind\":");
+                if (classification.refinement_kind) |refinement_kind| {
+                    try writeJsonStringEscaped(writer, refinement_kind);
+                } else {
+                    try writer.writeAll("null");
+                }
                 try writer.writeAll(",\"counterexample\":");
                 try writeCounterexampleJson(writer, diag.counterexample);
                 try writer.writeByte('}');
@@ -2534,6 +2649,7 @@ pub const VerificationPass = struct {
         for (queries, runs, 0..) |query, run, idx| {
             if (!first_query) try writer.writeByte(',');
             first_query = false;
+            const classification = classifyQueryFailure(query, run);
             try writer.writeByte('{');
             try writer.print("\"id\":{d}", .{idx + 1});
             try writer.writeAll(",\"kind\":");
@@ -2560,6 +2676,36 @@ pub const VerificationPass = struct {
             try writer.writeAll(",\"obligation_kind\":");
             if (query.obligation_kind) |kind| {
                 try writeJsonStringEscaped(writer, obligationKindLabel(kind));
+            } else {
+                try writer.writeAll("null");
+            }
+            try writer.writeAll(",\"subtype\":");
+            if (classification.subtype) |subtype| {
+                try writeJsonStringEscaped(writer, subtype);
+            } else {
+                try writer.writeAll("null");
+            }
+            try writer.writeAll(",\"confidence\":");
+            if (classification.confidence) |confidence| {
+                try writeJsonStringEscaped(writer, confidence);
+            } else {
+                try writer.writeAll("null");
+            }
+            try writer.writeAll(",\"evidence\":");
+            if (classification.evidence) |evidence| {
+                try writeJsonStringEscaped(writer, evidence);
+            } else {
+                try writer.writeAll("null");
+            }
+            try writer.writeAll(",\"narrowing_bits\":");
+            if (classification.narrowing_bits) |bits| {
+                try writer.print("{d}", .{bits});
+            } else {
+                try writer.writeAll("null");
+            }
+            try writer.writeAll(",\"refinement_kind\":");
+            if (classification.refinement_kind) |refinement_kind| {
+                try writeJsonStringEscaped(writer, refinement_kind);
             } else {
                 try writer.writeAll("null");
             }
@@ -3109,6 +3255,206 @@ fn queryStatusLabel(status: z3.Z3_lbool) []const u8 {
         z3.Z3_L_FALSE => "UNSAT",
         else => "UNKNOWN",
     };
+}
+
+const FailureClassification = struct {
+    subtype: ?[]const u8 = null,
+    confidence: ?[]const u8 = null,
+    evidence: ?[]const u8 = null,
+    narrowing_bits: ?u32 = null,
+    refinement_kind: ?[]const u8 = null,
+};
+
+fn filePathsLikelyMatch(a: []const u8, b: []const u8) bool {
+    if (a.len == 0 or b.len == 0) return true;
+    if (std.mem.eql(u8, a, b)) return true;
+    return std.mem.indexOf(u8, a, b) != null or std.mem.indexOf(u8, b, a) != null;
+}
+
+fn parseGuardRefinementKind(guard_id: []const u8) ?[]const u8 {
+    const last_colon = std.mem.lastIndexOfScalar(u8, guard_id, ':') orelse return null;
+    if (last_colon == 0) return null;
+    const before_last = guard_id[0..last_colon];
+    const prev_colon = std.mem.lastIndexOfScalar(u8, before_last, ':') orelse return null;
+    if (prev_colon + 1 >= last_colon) return null;
+    return before_last[prev_colon + 1 ..];
+}
+
+fn classifyGuardId(guard_id: []const u8, violatable: bool) FailureClassification {
+    const kind = parseGuardRefinementKind(guard_id);
+    var classification = FailureClassification{
+        .confidence = "high",
+        .evidence = guard_id,
+        .refinement_kind = kind,
+    };
+
+    if (violatable) {
+        classification.subtype = if (kind) |k|
+            if (std.mem.eql(u8, k, "non_zero_address"))
+                "GuardViolation.NonZeroAddress"
+            else if (std.mem.eql(u8, k, "min_value"))
+                "GuardViolation.MinValue"
+            else
+                "GuardViolation"
+        else
+            "GuardViolation";
+    } else {
+        classification.subtype = if (kind) |k|
+            if (std.mem.eql(u8, k, "non_zero_address"))
+                "GuardUnsatisfiable.NonZeroAddress"
+            else if (std.mem.eql(u8, k, "min_value"))
+                "GuardUnsatisfiable.MinValue"
+            else
+                "GuardUnsatisfiable"
+        else
+            "GuardUnsatisfiable";
+    }
+
+    return classification;
+}
+
+fn inferNarrowingBitsFromSmtlib(smtlib: []const u8) ?u32 {
+    const marker = "(_ extract ";
+    const start = std.mem.indexOf(u8, smtlib, marker) orelse return null;
+    const digits_start = start + marker.len;
+    if (digits_start >= smtlib.len) return null;
+
+    var end = digits_start;
+    while (end < smtlib.len and std.ascii.isDigit(smtlib[end])) : (end += 1) {}
+    if (end == digits_start) return null;
+
+    const high = std.fmt.parseInt(u32, smtlib[digits_start..end], 10) catch return null;
+    return high + 1;
+}
+
+fn classifyArithmeticPatternFromSmtlib(smtlib: []const u8) FailureClassification {
+    if (std.mem.indexOf(u8, smtlib, "(_ zero_extend ") != null and
+        std.mem.indexOf(u8, smtlib, "(_ extract ") != null)
+    {
+        return .{
+            .subtype = "NarrowingOverflow",
+            .confidence = "high",
+            .evidence = "pattern: zero_extend + extract narrowing check",
+            .narrowing_bits = inferNarrowingBitsFromSmtlib(smtlib),
+        };
+    }
+
+    if (std.mem.indexOf(u8, smtlib, "(bvadd") != null and
+        std.mem.indexOf(u8, smtlib, "(bvult") != null)
+    {
+        return .{
+            .subtype = "AdditionOverflow",
+            .confidence = "high",
+            .evidence = "pattern: bvadd + bvult overflow guard",
+        };
+    }
+
+    if (std.mem.indexOf(u8, smtlib, "(not (xor (bvult") != null and
+        std.mem.indexOf(u8, smtlib, "(bvadd") == null and
+        std.mem.indexOf(u8, smtlib, "(_ zero_extend ") == null)
+    {
+        return .{
+            .subtype = "SubtractionUnderflow",
+            .confidence = "medium",
+            .evidence = "pattern: negated unsigned less-than subtraction guard",
+        };
+    }
+
+    if (std.mem.indexOf(u8, smtlib, "(bvmul") != null and
+        (std.mem.indexOf(u8, smtlib, "(bvudiv") != null or std.mem.indexOf(u8, smtlib, "(bvsdiv") != null))
+    {
+        return .{
+            .subtype = "MultiplicationOverflow",
+            .confidence = "medium",
+            .evidence = "pattern: multiply/divide overflow witness",
+        };
+    }
+
+    return .{};
+}
+
+fn classifyQueryFailure(query: PreparedQuery, run: ReportQueryRun) FailureClassification {
+    return switch (query.kind) {
+        .Base => if (run.status == z3.Z3_L_FALSE)
+            .{
+                .subtype = "InconsistentAssumptions",
+                .confidence = "high",
+                .evidence = "base query is UNSAT",
+            }
+        else
+            .{},
+        .GuardSatisfy => if (run.status == z3.Z3_L_FALSE and query.guard_id != null)
+            classifyGuardId(query.guard_id.?, false)
+        else
+            .{},
+        .GuardViolate => if (run.status == z3.Z3_L_TRUE and query.guard_id != null)
+            classifyGuardId(query.guard_id.?, true)
+        else
+            .{},
+        .Obligation, .LoopInvariantStep, .LoopInvariantPost => blk: {
+            if (run.status != z3.Z3_L_TRUE) break :blk .{};
+            const arithmetic = classifyArithmeticPatternFromSmtlib(query.smtlib_z);
+            if (arithmetic.subtype != null) break :blk arithmetic;
+            break :blk .{
+                .subtype = switch (query.obligation_kind orelse .ContractInvariant) {
+                    .Ensures => "PostconditionViolation",
+                    .LoopInvariant => "LoopInvariantViolation",
+                    .ContractInvariant => "ContractInvariantViolation",
+                    else => "ObligationViolation",
+                },
+                .confidence = "low",
+                .evidence = "no arithmetic pattern matched",
+            };
+        },
+    };
+}
+
+fn queryMatchesError(err: errors.VerificationError, query: PreparedQuery, run: ReportQueryRun) bool {
+    if (err.line != query.line or err.column != query.column) return false;
+    if (!filePathsLikelyMatch(err.file, query.file)) return false;
+
+    return switch (err.error_type) {
+        .PreconditionViolation => query.kind == .Base and run.status == z3.Z3_L_FALSE,
+        .RefinementViolation => query.kind == .GuardSatisfy and run.status == z3.Z3_L_FALSE,
+        .InvariantViolation, .PostconditionViolation, .ArithmeticOverflow, .ArithmeticUnderflow, .DivisionByZero => (query.kind == .Obligation or query.kind == .LoopInvariantStep or query.kind == .LoopInvariantPost) and run.status == z3.Z3_L_TRUE,
+        else => false,
+    };
+}
+
+fn findQueryIndexForError(
+    err: errors.VerificationError,
+    queries: []const PreparedQuery,
+    runs: []const ReportQueryRun,
+) ?usize {
+    var best: ?usize = null;
+    for (queries, runs, 0..) |query, run, idx| {
+        if (!queryMatchesError(err, query, run)) continue;
+        if (best == null) {
+            best = idx;
+            continue;
+        }
+        // Prefer exact file match when multiple queries share the same line.
+        const current_best = best.?;
+        if (std.mem.eql(u8, err.file, query.file) and !std.mem.eql(u8, err.file, queries[current_best].file)) {
+            best = idx;
+        }
+    }
+    return best;
+}
+
+fn findQueryIndexForDiagnostic(
+    diag: errors.Diagnostic,
+    queries: []const PreparedQuery,
+    runs: []const ReportQueryRun,
+) ?usize {
+    for (queries, runs, 0..) |query, run, idx| {
+        if (query.kind != .GuardViolate or run.status != z3.Z3_L_TRUE) continue;
+        if (query.guard_id == null) continue;
+        if (!std.mem.eql(u8, query.guard_id.?, diag.guard_id)) continue;
+        if (!std.mem.eql(u8, query.function_name, diag.function_name)) continue;
+        return idx;
+    }
+    return null;
 }
 
 fn writeJsonStringEscaped(writer: anytype, value: []const u8) !void {

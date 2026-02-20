@@ -46,6 +46,8 @@ const MlirOptions = struct {
     mlir_print_op_on_diagnostic: bool = false,
     fail_on_verification_diagnostics: bool = false,
     cpp_lowering_stub: bool = false,
+    persist_ora_mlir: bool = false,
+    persist_sir_mlir: bool = false,
     metrics: *Metrics = undefined,
 
     fn getOptimizationLevel(self: MlirOptions) OptimizationLevel {
@@ -287,16 +289,24 @@ pub fn main() !void {
         .mlir_print_op_on_diagnostic = mlir_print_op_on_diagnostic,
         .fail_on_verification_diagnostics = false,
         .cpp_lowering_stub = cpp_lowering_stub,
+        .persist_ora_mlir = false,
+        .persist_sir_mlir = false,
         .metrics = &metrics,
     };
 
     if (command_kind == .Build) {
-        try runBuildArtifacts(allocator, file_path, output_dir, mlir_options);
+        const build_result = runBuildArtifacts(allocator, file_path, output_dir, mlir_options);
+
         var stderr_buffer_build: [1024]u8 = undefined;
         var stderr_writer_build = std.fs.File.stderr().writer(&stderr_buffer_build);
         const stderr_build = &stderr_writer_build.interface;
         try metrics.report(stderr_build);
         try stderr_build.flush();
+
+        build_result catch |err| switch (err) {
+            error.VerificationFailed => std.process.exit(1),
+            else => return err,
+        };
         return;
     }
 
@@ -396,11 +406,14 @@ fn runBuildArtifacts(
     defer allocator.free(sir_dir);
     const verify_dir = try std.fs.path.join(allocator, &[_][]const u8{ artifact_root, "verify" });
     defer allocator.free(verify_dir);
+    const mlir_dir = try std.fs.path.join(allocator, &[_][]const u8{ artifact_root, "mlir" });
+    defer allocator.free(mlir_dir);
 
     try std.fs.cwd().makePath(abi_dir);
     try std.fs.cwd().makePath(bin_dir);
     try std.fs.cwd().makePath(sir_dir);
     try std.fs.cwd().makePath(verify_dir);
+    try std.fs.cwd().makePath(mlir_dir);
 
     // ABI bundle
     try runAbiEmit(allocator, file_path, abi_dir, true, true, true);
@@ -415,7 +428,13 @@ fn runBuildArtifacts(
     build_mlir_options.verify_z3 = true;
     build_mlir_options.emit_smt_report = true;
     build_mlir_options.fail_on_verification_diagnostics = true;
-    try runMlirEmitAdvanced(allocator, file_path, build_mlir_options);
+    build_mlir_options.persist_ora_mlir = true;
+    build_mlir_options.persist_sir_mlir = true;
+    var verification_failed = false;
+    runMlirEmitAdvanced(allocator, file_path, build_mlir_options) catch |err| switch (err) {
+        error.VerificationFailed => verification_failed = true,
+        else => return err,
+    };
 
     // Reorganize generated outputs under stable subfolders.
     const sir_file = try std.fmt.allocPrint(allocator, "{s}.sir", .{stem});
@@ -434,8 +453,20 @@ fn runBuildArtifacts(
     defer allocator.free(smt_json_file);
     try moveArtifactFile(allocator, artifact_root, smt_json_file, verify_dir);
 
+    const ora_mlir_file = try std.fmt.allocPrint(allocator, "{s}.ora.mlir", .{stem});
+    defer allocator.free(ora_mlir_file);
+    try moveArtifactFile(allocator, artifact_root, ora_mlir_file, mlir_dir);
+
+    const sir_mlir_file = try std.fmt.allocPrint(allocator, "{s}.sir.mlir", .{stem});
+    defer allocator.free(sir_mlir_file);
+    try moveArtifactFile(allocator, artifact_root, sir_mlir_file, mlir_dir);
+
     try stdout.print("Artifacts saved to {s}\n", .{artifact_root});
     try stdout.flush();
+
+    if (verification_failed) {
+        return error.VerificationFailed;
+    }
 }
 
 // ============================================================================
@@ -454,7 +485,7 @@ fn printUsage() !void {
     try stdout.print("       ora -v | --version\n", .{});
     try stdout.print("\nCompilation Control:\n", .{});
     try stdout.print("  (default), build       - Full compile + artifact bundle + SMT gate\n", .{});
-    try stdout.print("                           Outputs: bytecode, ABI, SIR text, SMT report\n", .{});
+    try stdout.print("                           Outputs: bytecode, ABI, Ora/SIR MLIR, SIR text, SMT report\n", .{});
     try stdout.print("  emit                   - Debug emission mode (use --emit-*)\n", .{});
     try stdout.print("  --emit-tokens          - Stop after lexical analysis (emit tokens)\n", .{});
     try stdout.print("  --emit-ast             - Stop after parsing (emit AST)\n", .{});
@@ -1915,6 +1946,7 @@ fn generateMlirOutput(allocator: std.mem.Allocator, ast_nodes: []lib.AstNode, fi
     }
 
     var verification_result_opt: ?@import("z3/errors.zig").VerificationResult = null;
+    var verification_failed = false;
     defer {
         if (verification_result_opt) |*vr| {
             vr.deinit();
@@ -1957,7 +1989,7 @@ fn generateMlirOutput(allocator: std.mem.Allocator, ast_nodes: []lib.AstNode, fi
             if (mlir_options.fail_on_verification_diagnostics) {
                 try stdout.print("❌ Z3 verification failed: {d} refinement guard(s) are violable.\n", .{verification_result.diagnostics.items.len});
                 try stdout.flush();
-                std.process.exit(1);
+                verification_failed = true;
             }
         }
 
@@ -1979,7 +2011,7 @@ fn generateMlirOutput(allocator: std.mem.Allocator, ast_nodes: []lib.AstNode, fi
                 }
             }
             try stdout.flush();
-            std.process.exit(1);
+            verification_failed = true;
         }
 
         verification_result_opt = verification_result;
@@ -2044,12 +2076,7 @@ fn generateMlirOutput(allocator: std.mem.Allocator, ast_nodes: []lib.AstNode, fi
     }
 
     // output Ora MLIR (after canonicalization, before conversion)
-    if (mlir_options.emit_mlir) {
-        try stdout.print("//===----------------------------------------------------------------------===//\n", .{});
-        try stdout.print("// Ora MLIR (before conversion)\n", .{});
-        try stdout.print("//===----------------------------------------------------------------------===//\n\n", .{});
-        try stdout.flush();
-
+    if (mlir_options.emit_mlir or mlir_options.persist_ora_mlir) {
         const module_op_ora = c.oraModuleGetOperation(final_module);
         const mlir_str_ora = c.oraOperationPrintToString(module_op_ora);
         defer if (mlir_str_ora.data != null) {
@@ -2059,9 +2086,34 @@ fn generateMlirOutput(allocator: std.mem.Allocator, ast_nodes: []lib.AstNode, fi
 
         if (mlir_str_ora.data != null and mlir_str_ora.length > 0) {
             const mlir_content_ora = mlir_str_ora.data[0..mlir_str_ora.length];
-            try stdout.print("{s}\n", .{mlir_content_ora});
+
+            if (mlir_options.persist_ora_mlir) {
+                if (mlir_options.output_dir) |output_dir| {
+                    std.fs.cwd().makeDir(output_dir) catch |err| switch (err) {
+                        error.PathAlreadyExists => {},
+                        else => return err,
+                    };
+
+                    const basename = std.fs.path.stem(file_path);
+                    const filename = try std.mem.concat(allocator, u8, &[_][]const u8{ basename, ".ora.mlir" });
+                    defer allocator.free(filename);
+                    const output_file = try std.fs.path.join(allocator, &[_][]const u8{ output_dir, filename });
+                    defer allocator.free(output_file);
+
+                    var mlir_file = try std.fs.cwd().createFile(output_file, .{});
+                    defer mlir_file.close();
+                    try mlir_file.writeAll(mlir_content_ora);
+                }
+            }
+
+            if (mlir_options.emit_mlir) {
+                try stdout.print("//===----------------------------------------------------------------------===//\n", .{});
+                try stdout.print("// Ora MLIR (before conversion)\n", .{});
+                try stdout.print("//===----------------------------------------------------------------------===//\n\n", .{});
+                try stdout.print("{s}\n", .{mlir_content_ora});
+                try stdout.flush();
+            }
         }
-        try stdout.flush();
     }
 
     // convert Ora to SIR if emitting SIR MLIR
@@ -2103,11 +2155,12 @@ fn generateMlirOutput(allocator: std.mem.Allocator, ast_nodes: []lib.AstNode, fi
         try stdout.print("[main] Ora->SIR: success\n", .{});
     }
 
-    const emit_sir_mlir_output = mlir_options.emit_mlir_sir and !mlir_options.emit_sir_text and !mlir_options.emit_bytecode;
+    const explicit_sir_mlir_output = mlir_options.emit_mlir_sir and !mlir_options.emit_sir_text and !mlir_options.emit_bytecode;
+    const emit_sir_mlir_output = explicit_sir_mlir_output or mlir_options.persist_sir_mlir;
 
     // output SIR MLIR after conversion
     if (emit_sir_mlir_output) {
-        if (!quiet_mlir_output) {
+        if (explicit_sir_mlir_output and !quiet_mlir_output) {
             try stdout.print("//===----------------------------------------------------------------------===//\n", .{});
             try stdout.print("// SIR MLIR (after conversion)\n", .{});
             try stdout.print("//===----------------------------------------------------------------------===//\n\n", .{});
@@ -2128,8 +2181,8 @@ fn generateMlirOutput(allocator: std.mem.Allocator, ast_nodes: []lib.AstNode, fi
 
         const mlir_content_sir = mlir_str_sir.data[0..mlir_str_sir.length];
 
-        // determine output destination
-        if (mlir_options.output_dir) |output_dir| {
+        if (mlir_options.persist_sir_mlir and mlir_options.output_dir != null) {
+            const output_dir = mlir_options.output_dir.?;
             // save to file
             std.fs.cwd().makeDir(output_dir) catch |err| switch (err) {
                 error.PathAlreadyExists => {},
@@ -2137,8 +2190,7 @@ fn generateMlirOutput(allocator: std.mem.Allocator, ast_nodes: []lib.AstNode, fi
             };
 
             const basename = std.fs.path.stem(file_path);
-            const extension = ".mlir";
-            const filename = try std.mem.concat(allocator, u8, &[_][]const u8{ basename, extension });
+            const filename = try std.mem.concat(allocator, u8, &[_][]const u8{ basename, ".sir.mlir" });
             defer allocator.free(filename);
             const output_file = try std.fs.path.join(allocator, &[_][]const u8{ output_dir, filename });
             defer allocator.free(output_file);
@@ -2146,10 +2198,30 @@ fn generateMlirOutput(allocator: std.mem.Allocator, ast_nodes: []lib.AstNode, fi
             var mlir_file = try std.fs.cwd().createFile(output_file, .{});
             defer mlir_file.close();
             try mlir_file.writeAll(mlir_content_sir);
-            try stdout.print("SIR MLIR saved to {s}\n", .{output_file});
-        } else {
-            // print to stdout
-            try stdout.print("{s}", .{mlir_content_sir});
+        }
+
+        // determine explicit output destination for `ora emit --emit-mlir=sir`
+        if (explicit_sir_mlir_output) {
+            if (mlir_options.output_dir) |output_dir| {
+                std.fs.cwd().makeDir(output_dir) catch |err| switch (err) {
+                    error.PathAlreadyExists => {},
+                    else => return err,
+                };
+
+                const basename = std.fs.path.stem(file_path);
+                const filename = try std.mem.concat(allocator, u8, &[_][]const u8{ basename, ".mlir" });
+                defer allocator.free(filename);
+                const output_file = try std.fs.path.join(allocator, &[_][]const u8{ output_dir, filename });
+                defer allocator.free(output_file);
+
+                var mlir_file = try std.fs.cwd().createFile(output_file, .{});
+                defer mlir_file.close();
+                try mlir_file.writeAll(mlir_content_sir);
+                try stdout.print("SIR MLIR saved to {s}\n", .{output_file});
+            } else {
+                // print to stdout
+                try stdout.print("{s}", .{mlir_content_sir});
+            }
         }
     }
 
@@ -2229,6 +2301,10 @@ fn generateMlirOutput(allocator: std.mem.Allocator, ast_nodes: []lib.AstNode, fi
     }
 
     try stdout.flush();
+
+    if (verification_failed) {
+        return error.VerificationFailed;
+    }
 }
 
 test "simple test" {

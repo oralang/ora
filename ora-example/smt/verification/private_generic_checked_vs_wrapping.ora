@@ -1,0 +1,34 @@
+// ============================================================================
+// Regression: private generic checked arithmetic should be verified through
+// reachable public entrypoints, not as standalone unconstrained helpers.
+// ============================================================================
+
+contract PrivateGenericCheckedVsWrapping {
+    fn add(comptime T: type, a: T, b: T) -> T {
+        return a + b;
+    }
+
+    fn sub(comptime T: type, a: T, b: T) -> T {
+        return a - b;
+    }
+
+    fn addWrap(comptime T: type, a: T, b: T) -> T {
+        return a +% b;
+    }
+
+    pub fn safeAdd(a: u256, b: u256) -> u256
+        requires(a <= std.constants.U256_MAX - b)
+    {
+        return add(u256, a, b);
+    }
+
+    pub fn safeSub(a: u256, b: u256) -> u256
+        requires(a >= b)
+    {
+        return sub(u256, a, b);
+    }
+
+    pub fn wrappingAdd(a: u256, b: u256) -> u256 {
+        return addWrap(u256, a, b);
+    }
+}

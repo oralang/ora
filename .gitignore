@@ -34,7 +34,7 @@ docs/
 !website/docs/
 
 tmp/
-
+artifacts/
 .zig-cache/
 .zig-cache-global
 zig-out/

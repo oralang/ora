@@ -413,6 +413,12 @@ pub const Encoder = struct {
     /// Get or create a global storage symbol for "old" values
     fn getOrCreateOldGlobal(self: *Encoder, name: []const u8, sort: z3.Z3_sort) EncodeError!z3.Z3_ast {
         if (self.global_old_map.get(name)) |existing| {
+            // Re-assert old(x) == entry(x) on every access so each annotation
+            // query that mentions old(...) carries the linkage constraint,
+            // even if the old symbol was materialized by an earlier assertion.
+            const entry_symbol_existing = try self.getOrCreateGlobalEntry(name, sort);
+            const eq_existing = z3.Z3_mk_eq(self.context.ctx, existing, entry_symbol_existing);
+            self.addConstraint(eq_existing);
             return existing;
         }
 
@@ -1728,6 +1734,11 @@ pub const Encoder = struct {
                             const global_key = try self.allocator.dupe(u8, global_name);
                             try self.global_map.put(global_key, stored);
                         }
+                    } else {
+                        // Nested map write (e.g., root[a][b] = v) may target a map_get
+                        // result. Rebuild and thread the root global map update so later
+                        // reads observe the inner write.
+                        try self.tryUpdateNestedGlobalMapStore(map_operand, stored, mode, op_id);
                     }
                 }
                 const num_results = mlir.oraOperationGetNumResults(mlir_op);
@@ -2895,6 +2906,102 @@ pub const Encoder = struct {
         }
 
         return null;
+    }
+
+    const MapGetAncestor = struct {
+        parent_map: mlir.MlirValue,
+        key: mlir.MlirValue,
+    };
+
+    fn isTransparentMapSourceOp(op_name: []const u8) bool {
+        return std.mem.eql(u8, op_name, "ora.refinement_to_base") or
+            std.mem.eql(u8, op_name, "ora.base_to_refinement") or
+            std.mem.eql(u8, op_name, "arith.bitcast") or
+            std.mem.eql(u8, op_name, "arith.extui") or
+            std.mem.eql(u8, op_name, "arith.extsi") or
+            std.mem.eql(u8, op_name, "arith.trunci") or
+            std.mem.eql(u8, op_name, "arith.index_cast") or
+            std.mem.eql(u8, op_name, "arith.index_castui") or
+            std.mem.eql(u8, op_name, "arith.index_castsi") or
+            std.mem.eql(u8, op_name, "builtin.unrealized_conversion_cast") or
+            std.mem.eql(u8, op_name, "tensor.cast");
+    }
+
+    fn tryUpdateNestedGlobalMapStore(
+        self: *Encoder,
+        map_operand: mlir.MlirValue,
+        stored_value: z3.Z3_ast,
+        mode: EncodeMode,
+        op_id: u64,
+    ) EncodeError!void {
+        // Collect map_get chain from leaf map operand to root map value.
+        var chain = std.ArrayList(MapGetAncestor){};
+        defer chain.deinit(self.allocator);
+
+        var root_candidate = map_operand;
+        while (mlir.oraValueIsAOpResult(root_candidate)) {
+            const owner = mlir.oraOpResultGetOwner(root_candidate);
+            if (mlir.oraOperationIsNull(owner)) break;
+
+            const name_ref = mlir.oraOperationGetName(owner);
+            defer @import("mlir_c_api").freeStringRef(name_ref);
+            const op_name = if (name_ref.data == null or name_ref.length == 0)
+                ""
+            else
+                name_ref.data[0..name_ref.length];
+
+            if (std.mem.eql(u8, op_name, "ora.map_get")) {
+                const num_operands = mlir.oraOperationGetNumOperands(owner);
+                if (num_operands < 2) break;
+                const parent_map = mlir.oraOperationGetOperand(owner, 0);
+                const key = mlir.oraOperationGetOperand(owner, 1);
+                try chain.append(self.allocator, .{ .parent_map = parent_map, .key = key });
+                root_candidate = parent_map;
+                continue;
+            }
+
+            if (isTransparentMapSourceOp(op_name)) {
+                const num_operands = mlir.oraOperationGetNumOperands(owner);
+                if (num_operands < 1) break;
+                root_candidate = mlir.oraOperationGetOperand(owner, 0);
+                continue;
+            }
+
+            break;
+        }
+
+        if (chain.items.len == 0) return;
+        const global_name = self.resolveGlobalNameFromMapOperand(root_candidate) orelse return;
+
+        // Rebuild parent stores from leaf -> root:
+        // updated_leaf, then store into each parent map_get site.
+        var updated = stored_value;
+        for (chain.items, 0..) |ancestor, depth| {
+            const parent_map_ast = try self.encodeValueWithMode(ancestor.parent_map, mode);
+            const parent_sort = z3.Z3_get_sort(self.context.ctx, parent_map_ast);
+            if (!self.isArraySort(parent_sort)) return;
+
+            const key_sort = z3.Z3_get_array_sort_domain(self.context.ctx, parent_sort);
+            const value_sort = z3.Z3_get_array_sort_range(self.context.ctx, parent_sort);
+            const raw_key = try self.encodeValueWithMode(ancestor.key, mode);
+            const parent_key = self.coerceAstToSort(raw_key, key_sort);
+            const parent_value = self.coerceAstToSort(updated, value_sort);
+
+            updated = self.encodeStore(parent_map_ast, parent_key, parent_value);
+            self.addArrayStoreFrameConstraint(
+                parent_map_ast,
+                parent_key,
+                updated,
+                op_id +% @as(u64, @intCast(depth + 1)),
+            ) catch {};
+        }
+
+        if (self.global_map.getPtr(global_name)) |existing| {
+            existing.* = updated;
+        } else {
+            const global_key = try self.allocator.dupe(u8, global_name);
+            try self.global_map.put(global_key, updated);
+        }
     }
 
     fn extractIfYield(

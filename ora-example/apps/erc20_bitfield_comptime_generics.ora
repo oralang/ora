@@ -124,7 +124,7 @@ contract ERC20BitfieldComptimeGenerics {
         balances[to] = add(u256, book.recipient_before, book.amount);
 
         let meta: AccountFlags = account_flags[sender];
-        meta.nonce = meta.nonce + 1;
+        meta.nonce = meta.nonce +% 1;
         account_flags[sender] = meta;
 
         log Transfer(sender, to, amount);
