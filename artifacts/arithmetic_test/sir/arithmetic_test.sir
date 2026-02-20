@@ -1,0 +1,468 @@
+fn init:
+    entry {
+        v0 = codesize
+        v1 = init_end_offset
+        v2 = lt v0 v1
+        v3 = sub v0 v1
+        v4 = iszero v2
+        => v4 ? @bb0 : @bb1
+    }
+    bb0 {
+        v5 = malloc v3
+        codecopy v5 v1 v3
+        icall @__ora_user_init
+        v6 = runtime_start_offset
+        v7 = runtime_length
+        v8 = malloc v7
+        codecopy v8 v6 v7
+        return v8 v7
+    }
+    bb1 {
+        zero = const 0x0
+        
+        revert zero zero
+    }
+
+fn __ora_user_init:
+    entry {
+        c0 = const 0x0
+        
+        slot_counter = const 0x0
+        
+        sstore slot_counter c0
+        iret
+    }
+
+fn increment:
+    entry {
+        v0 = large_const 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF
+        
+        c1 = const 0x1
+        
+        slot_counter = const 0x0
+        v1 = sload slot_counter
+        
+        
+        
+        v2 = lt v1 v0
+        v3 = iszero v2
+        v4 = iszero v3
+        => v4 ? @bb1 : @bb0
+    }
+    bb0 {
+        invalid
+    }
+    bb1 {
+        v5 = sload slot_counter
+        
+        
+        
+        v6 = add v5 c1
+        
+        
+        
+        v7 = gt v6 v5
+        v8 = eq v6 v5
+        v9 = or v7 v8
+        v10 = iszero v9
+        v11 = iszero v10
+        => v11 ? @bb3 : @bb2
+    }
+    bb2 {
+        invalid
+    }
+    bb3 {
+        
+        sstore slot_counter v6
+        iret
+    }
+
+fn getCounter:
+    entry -> v2 v1 {
+        slot_counter = const 0x0
+        v0 = sload slot_counter
+        
+        
+        v1 = const 0x20
+        v2 = malloc v1
+        mstore256 v2 v0
+        
+        iret
+    }
+
+fn multiply:
+    entry v0 v1 {
+        c1 = const 0x1
+        c0 = const 0x0
+        
+        v2 = large_const 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF
+        
+        
+        
+        v3 = lt v0 v2
+        v4 = eq v0 v2
+        v5 = or v3 v4
+        v6 = iszero v5
+        v7 = iszero v6
+        => v7 ? @bb1 : @bb0
+    }
+    bb0 {
+        invalid
+    }
+    bb1 {
+        
+        
+        v8 = lt v1 v2
+        v9 = eq v1 v2
+        v10 = or v8 v9
+        v11 = iszero v10
+        v12 = iszero v11
+        => v12 ? @bb3 : @bb2
+    }
+    bb2 {
+        invalid
+    }
+    bb3 {
+        
+        
+        v13 = mul v0 v1
+        
+        v14 = const 0x1
+        
+        
+        v15 = eq v1 c0
+        v16 = xor v15 v14
+        
+        
+        v17 = div v13 v1
+        
+        
+        
+        v18 = eq v17 v0
+        v19 = xor v18 v14
+        v20 = and v19 v16
+        v21 = xor v20 c1
+        v22 = iszero v21
+        v23 = iszero v22
+        => v23 ? @bb5 : @bb4
+    }
+    bb4 {
+        invalid
+    }
+    bb5 -> v25 v24 {
+        
+        v24 = const 0x20
+        v25 = malloc v24
+        mstore256 v25 v13
+        
+        iret
+    }
+
+fn add:
+    entry v0 v1 {
+        v2 = large_const 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF
+        
+        
+        
+        v3 = sub v2 v1
+        
+        
+        
+        v4 = lt v1 v2
+        v5 = eq v1 v2
+        v6 = or v4 v5
+        v7 = iszero v6
+        v8 = iszero v7
+        => v8 ? @bb1 : @bb0
+    }
+    bb0 {
+        invalid
+    }
+    bb1 {
+        
+        
+        v9 = lt v0 v3
+        v10 = eq v0 v3
+        v11 = or v9 v10
+        v12 = iszero v11
+        v13 = iszero v12
+        => v13 ? @bb3 : @bb2
+    }
+    bb2 {
+        invalid
+    }
+    bb3 {
+        
+        
+        v14 = add v0 v1
+        
+        
+        
+        v15 = gt v14 v0
+        v16 = eq v14 v0
+        v17 = or v15 v16
+        v18 = iszero v17
+        v19 = iszero v18
+        => v19 ? @bb5 : @bb4
+    }
+    bb4 {
+        invalid
+    }
+    bb5 -> v21 v20 {
+        
+        v20 = const 0x20
+        v21 = malloc v20
+        mstore256 v21 v14
+        
+        iret
+    }
+
+fn subtract:
+    entry v0 v1 {
+        
+        
+        v2 = gt v0 v1
+        v3 = eq v0 v1
+        v4 = or v2 v3
+        v5 = iszero v4
+        v6 = iszero v5
+        => v6 ? @bb1 : @bb0
+    }
+    bb0 {
+        invalid
+    }
+    bb1 {
+        
+        
+        v7 = sub v0 v1
+        
+        
+        
+        v8 = gt v0 v1
+        v9 = eq v0 v1
+        v10 = or v8 v9
+        v11 = iszero v10
+        v12 = iszero v11
+        => v12 ? @bb3 : @bb2
+    }
+    bb2 {
+        invalid
+    }
+    bb3 -> v14 v13 {
+        
+        v13 = const 0x20
+        v14 = malloc v13
+        mstore256 v14 v7
+        
+        iret
+    }
+
+fn divide:
+    entry v0 v1 {
+        c0 = const 0x0
+        
+        v2 = const 0x1
+        
+        
+        v3 = eq v1 c0
+        v4 = xor v3 v2
+        v5 = iszero v4
+        v6 = iszero v5
+        => v6 ? @bb1 : @bb0
+    }
+    bb0 {
+        invalid
+    }
+    bb1 {
+        
+        
+        v7 = div v0 v1
+        
+        v8 = const 0x1
+        
+        
+        v9 = eq v1 c0
+        v10 = xor v9 v8
+        v11 = iszero v10
+        v12 = iszero v11
+        => v12 ? @bb3 : @bb2
+    }
+    bb2 {
+        invalid
+    }
+    bb3 -> v14 v13 {
+        
+        v13 = const 0x20
+        v14 = malloc v13
+        mstore256 v14 v7
+        
+        iret
+    }
+
+fn modulo:
+    entry v0 v1 {
+        c0 = const 0x0
+        
+        v2 = const 0x1
+        
+        
+        v3 = eq v1 c0
+        v4 = xor v3 v2
+        v5 = iszero v4
+        v6 = iszero v5
+        => v6 ? @bb1 : @bb0
+    }
+    bb0 {
+        invalid
+    }
+    bb1 {
+        
+        
+        v7 = mod v0 v1
+        
+        v8 = const 0x1
+        
+        
+        v9 = eq v1 c0
+        v10 = xor v9 v8
+        v11 = iszero v10
+        v12 = iszero v11
+        => v12 ? @bb3 : @bb2
+    }
+    bb2 {
+        invalid
+    }
+    bb3 -> v14 v13 {
+        
+        v13 = const 0x20
+        v14 = malloc v13
+        mstore256 v14 v7
+        
+        iret
+    }
+
+fn main:
+    main_entry {
+        zero = const 0x0
+        selector_offset = const 0x4
+        word_size = const 0x20
+        min_cdsize_1arg = const 0x23
+        arg1_offset = const 0x24
+        min_cdsize_2args = const 0x43
+        arg2_offset = const 0x44
+        min_cdsize_3args = const 0x63
+        selector_shift = const 0xE0
+        
+        v0 = codesize
+        mstore256 word_size v0
+        cv = callvalue
+        cv_nonzero = iszero cv
+        => cv_nonzero ? @load_selector : @revert_error
+    }
+    load_selector {
+        
+        
+        selector_word = calldataload zero
+        selector = shr selector_shift selector_word
+        switch selector {
+        0xD09DE08A => @increment_
+        0x8ADA066E => @getCounter_
+        0x165C4A16 => @multiply_
+        0x771602F7 => @add_
+        0x3EF5E445 => @subtract_
+        0xF88E9FBF => @divide_
+        0xBAAF073D => @modulo_
+        default => @revert_error
+    }
+    }
+    revert_error {
+        
+        
+        revert zero zero
+    }
+    increment_ {
+        icall @increment
+        v1 = const 0x0
+        
+        return v1 v1
+    }
+    getCounter_ {
+        v2 v3 = icall @getCounter
+        
+        return v2 v3
+    }
+    multiply_ {
+        cdsize_multiply = calldatasize
+        
+        valid_multiply = lt min_cdsize_2args cdsize_multiply
+        => valid_multiply ? @multiply_exec : @revert_error
+    }
+    multiply_exec {
+        
+        a_multiply = calldataload selector_offset
+        
+        b_multiply = calldataload arg1_offset
+        v4 v5 = icall @multiply a_multiply b_multiply
+        
+        return v4 v5
+    }
+    add_ {
+        cdsize_add = calldatasize
+        
+        valid_add = lt min_cdsize_2args cdsize_add
+        => valid_add ? @add_exec : @revert_error
+    }
+    add_exec {
+        
+        a_add = calldataload selector_offset
+        
+        b_add = calldataload arg1_offset
+        v6 v7 = icall @add a_add b_add
+        
+        return v6 v7
+    }
+    subtract_ {
+        cdsize_subtract = calldatasize
+        
+        valid_subtract = lt min_cdsize_2args cdsize_subtract
+        => valid_subtract ? @subtract_exec : @revert_error
+    }
+    subtract_exec {
+        
+        a_subtract = calldataload selector_offset
+        
+        b_subtract = calldataload arg1_offset
+        v8 v9 = icall @subtract a_subtract b_subtract
+        
+        return v8 v9
+    }
+    divide_ {
+        cdsize_divide = calldatasize
+        
+        valid_divide = lt min_cdsize_2args cdsize_divide
+        => valid_divide ? @divide_exec : @revert_error
+    }
+    divide_exec {
+        
+        a_divide = calldataload selector_offset
+        
+        b_divide = calldataload arg1_offset
+        v10 v11 = icall @divide a_divide b_divide
+        
+        return v10 v11
+    }
+    modulo_ {
+        cdsize_modulo = calldatasize
+        
+        valid_modulo = lt min_cdsize_2args cdsize_modulo
+        => valid_modulo ? @modulo_exec : @revert_error
+    }
+    modulo_exec {
+        
+        a_modulo = calldataload selector_offset
+        
+        b_modulo = calldataload arg1_offset
+        v12 v13 = icall @modulo a_modulo b_modulo
+        
+        return v12 v13
+    }

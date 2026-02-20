@@ -1,0 +1,238 @@
+{
+  "schemaVersion": "ora-abi-0.1",
+  "contract": {
+    "name": "ArithmeticTest",
+    "build": {
+      "compiler": "ora",
+      "version": "0.1.0"
+    }
+  },
+  "wireProfiles": [
+    {
+      "id": "evm-default",
+      "kind": "evm",
+      "encoding": "abi-v2"
+    }
+  ],
+  "types": {
+    "t:a8641784e95bffb781fe30f3fb5babe64544df155548e269012da86f0996f7e9": {
+      "typeId": "t:a8641784e95bffb781fe30f3fb5babe64544df155548e269012da86f0996f7e9",
+      "kind": "primitive",
+      "name": "u256",
+      "wire": {
+        "evm-default": {
+          "type": "uint256"
+        }
+      }
+    }
+  },
+  "callables": [
+    {
+      "id": "c:init()",
+      "kind": "function",
+      "name": "init",
+      "signature": "init()",
+      "wire": {
+        "evm-default": {
+          "selector": "0xe1c7392a"
+        }
+      },
+      "inputs": [],
+      "outputs": [],
+      "meta": {
+        "effects": [
+          {
+            "kind": "writes",
+            "path": "counter"
+          }
+        ]
+      }
+    },
+    {
+      "id": "c:increment()",
+      "kind": "function",
+      "name": "increment",
+      "signature": "increment()",
+      "wire": {
+        "evm-default": {
+          "selector": "0xd09de08a"
+        }
+      },
+      "inputs": [],
+      "outputs": [],
+      "meta": {
+        "effects": [
+          {
+            "kind": "reads",
+            "path": "counter"
+          },
+          {
+            "kind": "writes",
+            "path": "counter"
+          }
+        ]
+      }
+    },
+    {
+      "id": "c:getCounter()",
+      "kind": "function",
+      "name": "getCounter",
+      "signature": "getCounter()",
+      "wire": {
+        "evm-default": {
+          "selector": "0x8ada066e"
+        }
+      },
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "",
+          "typeId": "t:a8641784e95bffb781fe30f3fb5babe64544df155548e269012da86f0996f7e9"
+        }
+      ],
+      "meta": {
+        "effects": [
+          {
+            "kind": "reads",
+            "path": "counter"
+          }
+        ]
+      }
+    },
+    {
+      "id": "c:multiply(uint256,uint256)",
+      "kind": "function",
+      "name": "multiply",
+      "signature": "multiply(uint256,uint256)",
+      "wire": {
+        "evm-default": {
+          "selector": "0x165c4a16"
+        }
+      },
+      "inputs": [
+        {
+          "name": "a",
+          "typeId": "t:a8641784e95bffb781fe30f3fb5babe64544df155548e269012da86f0996f7e9"
+        },
+        {
+          "name": "b",
+          "typeId": "t:a8641784e95bffb781fe30f3fb5babe64544df155548e269012da86f0996f7e9"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "",
+          "typeId": "t:a8641784e95bffb781fe30f3fb5babe64544df155548e269012da86f0996f7e9"
+        }
+      ]
+    },
+    {
+      "id": "c:add(uint256,uint256)",
+      "kind": "function",
+      "name": "add",
+      "signature": "add(uint256,uint256)",
+      "wire": {
+        "evm-default": {
+          "selector": "0x771602f7"
+        }
+      },
+      "inputs": [
+        {
+          "name": "a",
+          "typeId": "t:a8641784e95bffb781fe30f3fb5babe64544df155548e269012da86f0996f7e9"
+        },
+        {
+          "name": "b",
+          "typeId": "t:a8641784e95bffb781fe30f3fb5babe64544df155548e269012da86f0996f7e9"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "",
+          "typeId": "t:a8641784e95bffb781fe30f3fb5babe64544df155548e269012da86f0996f7e9"
+        }
+      ]
+    },
+    {
+      "id": "c:subtract(uint256,uint256)",
+      "kind": "function",
+      "name": "subtract",
+      "signature": "subtract(uint256,uint256)",
+      "wire": {
+        "evm-default": {
+          "selector": "0x3ef5e445"
+        }
+      },
+      "inputs": [
+        {
+          "name": "a",
+          "typeId": "t:a8641784e95bffb781fe30f3fb5babe64544df155548e269012da86f0996f7e9"
+        },
+        {
+          "name": "b",
+          "typeId": "t:a8641784e95bffb781fe30f3fb5babe64544df155548e269012da86f0996f7e9"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "",
+          "typeId": "t:a8641784e95bffb781fe30f3fb5babe64544df155548e269012da86f0996f7e9"
+        }
+      ]
+    },
+    {
+      "id": "c:divide(uint256,uint256)",
+      "kind": "function",
+      "name": "divide",
+      "signature": "divide(uint256,uint256)",
+      "wire": {
+        "evm-default": {
+          "selector": "0xf88e9fbf"
+        }
+      },
+      "inputs": [
+        {
+          "name": "a",
+          "typeId": "t:a8641784e95bffb781fe30f3fb5babe64544df155548e269012da86f0996f7e9"
+        },
+        {
+          "name": "b",
+          "typeId": "t:a8641784e95bffb781fe30f3fb5babe64544df155548e269012da86f0996f7e9"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "",
+          "typeId": "t:a8641784e95bffb781fe30f3fb5babe64544df155548e269012da86f0996f7e9"
+        }
+      ]
+    },
+    {
+      "id": "c:modulo(uint256,uint256)",
+      "kind": "function",
+      "name": "modulo",
+      "signature": "modulo(uint256,uint256)",
+      "wire": {
+        "evm-default": {
+          "selector": "0xbaaf073d"
+        }
+      },
+      "inputs": [
+        {
+          "name": "a",
+          "typeId": "t:a8641784e95bffb781fe30f3fb5babe64544df155548e269012da86f0996f7e9"
+        },
+        {
+          "name": "b",
+          "typeId": "t:a8641784e95bffb781fe30f3fb5babe64544df155548e269012da86f0996f7e9"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "",
+          "typeId": "t:a8641784e95bffb781fe30f3fb5babe64544df155548e269012da86f0996f7e9"
+        }
+      ]
+    }
+  ]
+}

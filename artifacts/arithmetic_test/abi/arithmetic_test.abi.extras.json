@@ -1,0 +1,104 @@
+{
+  "schemaVersion": "ora-abi-extras-0.1",
+  "baseSchemaVersion": "ora-abi-0.1",
+  "contract": {
+    "name": "ArithmeticTest"
+  },
+  "types": {
+    "t:a8641784e95bffb781fe30f3fb5babe64544df155548e269012da86f0996f7e9": {
+      "ui": {
+        "widget": "number"
+      }
+    }
+  },
+  "callables": {
+    "c:init()": {
+      "ui": {
+        "group": "Write",
+        "dangerLevel": "normal"
+      }
+    },
+    "c:increment()": {
+      "ui": {
+        "group": "Write",
+        "dangerLevel": "normal"
+      }
+    },
+    "c:getCounter()": {
+      "ui": {
+        "group": "Read",
+        "dangerLevel": "info"
+      }
+    },
+    "c:multiply(uint256,uint256)": {
+      "ui": {
+        "group": "Read",
+        "dangerLevel": "info",
+        "forms": {
+          "a": {
+            "widget": "number"
+          },
+          "b": {
+            "widget": "number"
+          }
+        }
+      }
+    },
+    "c:add(uint256,uint256)": {
+      "ui": {
+        "group": "Read",
+        "dangerLevel": "info",
+        "forms": {
+          "a": {
+            "widget": "number"
+          },
+          "b": {
+            "widget": "number"
+          }
+        }
+      }
+    },
+    "c:subtract(uint256,uint256)": {
+      "ui": {
+        "group": "Read",
+        "dangerLevel": "info",
+        "forms": {
+          "a": {
+            "widget": "number"
+          },
+          "b": {
+            "widget": "number"
+          }
+        }
+      }
+    },
+    "c:divide(uint256,uint256)": {
+      "ui": {
+        "group": "Read",
+        "dangerLevel": "info",
+        "forms": {
+          "a": {
+            "widget": "number"
+          },
+          "b": {
+            "widget": "number"
+          }
+        }
+      }
+    },
+    "c:modulo(uint256,uint256)": {
+      "ui": {
+        "group": "Read",
+        "dangerLevel": "info",
+        "forms": {
+          "a": {
+            "widget": "number"
+          },
+          "b": {
+            "widget": "number"
+          }
+        }
+      }
+    }
+  }
+}

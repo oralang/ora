@@ -1,0 +1,133 @@
+[
+  {
+    "type": "function",
+    "name": "init",
+    "inputs": [],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "increment",
+    "inputs": [],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "getCounter",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "result",
+        "type": "uint256"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "multiply",
+    "inputs": [
+      {
+        "name": "a",
+        "type": "uint256"
+      },
+      {
+        "name": "b",
+        "type": "uint256"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "result",
+        "type": "uint256"
+      }
+    ],
+    "stateMutability": "pure"
+  },
+  {
+    "type": "function",
+    "name": "add",
+    "inputs": [
+      {
+        "name": "a",
+        "type": "uint256"
+      },
+      {
+        "name": "b",
+        "type": "uint256"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "result",
+        "type": "uint256"
+      }
+    ],
+    "stateMutability": "pure"
+  },
+  {
+    "type": "function",
+    "name": "subtract",
+    "inputs": [
+      {
+        "name": "a",
+        "type": "uint256"
+      },
+      {
+        "name": "b",
+        "type": "uint256"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "result",
+        "type": "uint256"
+      }
+    ],
+    "stateMutability": "pure"
+  },
+  {
+    "type": "function",
+    "name": "divide",
+    "inputs": [
+      {
+        "name": "a",
+        "type": "uint256"
+      },
+      {
+        "name": "b",
+        "type": "uint256"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "result",
+        "type": "uint256"
+      }
+    ],
+    "stateMutability": "pure"
+  },
+  {
+    "type": "function",
+    "name": "modulo",
+    "inputs": [
+      {
+        "name": "a",
+        "type": "uint256"
+      },
+      {
+        "name": "b",
+        "type": "uint256"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "result",
+        "type": "uint256"
+      }
+    ],
+    "stateMutability": "pure"
+  }
+]
