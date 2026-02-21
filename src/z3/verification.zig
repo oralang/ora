@@ -889,13 +889,43 @@ pub const VerificationPass = struct {
 
         _ = try self.encoder.encodeOperation(op);
 
-        // State observation should not leak ad-hoc constraints/obligations into
-        // subsequent annotation queries.
         const leaked_constraints = try self.encoder.takeConstraints(self.allocator);
         defer if (leaked_constraints.len > 0) self.allocator.free(leaked_constraints);
         const leaked_obligations = try self.encoder.takeObligations(self.allocator);
         defer if (leaked_obligations.len > 0) self.allocator.free(leaked_obligations);
 
+        // Preserve obligations discovered while observing stateful ops (notably
+        // call summaries) so public entrypoints with no explicit requires/asserts
+        // still prove checked arithmetic safety in reachable callees.
+        if (leaked_obligations.len > 0) {
+            const function_name = self.current_function_name orelse "unknown";
+            const loc = try self.getLocationInfo(op);
+            const path_constraints = try self.captureActivePathConstraints();
+            defer if (path_constraints.len > 0) self.allocator.free(path_constraints);
+
+            for (leaked_obligations) |obligation| {
+                try self.encoded_annotations.append(.{
+                    .function_name = function_name,
+                    .kind = .ContractInvariant,
+                    .condition = obligation,
+                    .extra_constraints = try self.cloneConstraintSlice(leaked_constraints),
+                    .path_constraints = try self.cloneConstraintSlice(path_constraints),
+                    .old_condition = null,
+                    .old_extra_constraints = &[_]z3.Z3_ast{},
+                    .loop_step_condition = null,
+                    .loop_step_extra_constraints = &[_]z3.Z3_ast{},
+                    .loop_exit_condition = null,
+                    .loop_exit_extra_constraints = &[_]z3.Z3_ast{},
+                    .file = loc.file,
+                    .line = loc.line,
+                    .column = loc.column,
+                    .guard_id = null,
+                });
+            }
+        }
+
+        // State observation should not leak ad-hoc constraints into subsequent
+        // annotation queries.
         // Encoding state ops can cache intermediate value encodings (e.g.,
         // ora.struct_init) whose defining constraints were just discarded.
         // Clear expression caches so later annotation encoding re-materializes
