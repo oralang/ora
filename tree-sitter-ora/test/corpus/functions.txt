@@ -1,0 +1,72 @@
+================================================================================
+Top-level function with return
+================================================================================
+
+fn id(x: u256) -> u256 {
+    return x;
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (function_declaration
+    (identifier)
+    (parameter_list
+      (parameter
+        (identifier)
+        (type
+          (plain_type
+            (primitive_type)))))
+    (return_type
+      (type
+        (plain_type
+          (primitive_type))))
+    (block
+      (return_statement
+        (primary_expression
+          (identifier))))))
+
+================================================================================
+Function with requires and ensures clauses
+================================================================================
+
+fn safe(x: u256) -> u256
+    requires(x >= 1)
+    ensures(x >= 1)
+{
+    return x;
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (function_declaration
+    (identifier)
+    (parameter_list
+      (parameter
+        (identifier)
+        (type
+          (plain_type
+            (primitive_type)))))
+    (return_type
+      (type
+        (plain_type
+          (primitive_type))))
+    (requires_clause
+      (binary_expression
+        (primary_expression
+          (identifier))
+        (primary_expression
+          (literal
+            (number_literal)))))
+    (ensures_clause
+      (binary_expression
+        (primary_expression
+          (identifier))
+        (primary_expression
+          (literal
+            (number_literal)))))
+    (block
+      (return_statement
+        (primary_expression
+          (identifier))))))

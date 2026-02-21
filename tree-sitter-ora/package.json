@@ -1,0 +1,34 @@
+{
+  "name": "tree-sitter-ora",
+  "version": "0.1.0",
+  "description": "A tree-sitter parser for Ora",
+  "license": "MIT",
+  "repository": "https://github.com/oralang/Ora",
+  "keywords": [
+    "incremental",
+    "parsing",
+    "tree-sitter",
+    "ora"
+  ],
+  "files": [
+    "grammar.js",
+    "tree-sitter.json",
+    "queries/*",
+    "src/**",
+    "test/**"
+  ],
+  "scripts": {
+    "generate": "node ./scripts/tree-sitter-cli.js generate",
+    "test": "node ./scripts/tree-sitter-cli.js test",
+    "parse:smoke": "node ./scripts/tree-sitter-cli.js parse ../ora-example/smoke.ora",
+    "playground": "node ./scripts/tree-sitter-cli.js playground"
+  },
+  "devDependencies": {
+    "tree-sitter-cli": "^0.25.3"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "tree-sitter-cli"
+    ]
+  }
+}
