@@ -1,2 +1,6 @@
 ora-example/smoke.ora
 ora-example/apps/counter.ora
+ora-example/comptime/comptime_param_probe.ora
+ora-example/apps/erc20_bitfield_comptime_generics.ora
+ora-example/switch/switch_labeled.ora
+ora-example/smt/verification/assume_havoc.ora

@@ -27,6 +27,49 @@ fn id(x: u256) -> u256 {
           (identifier))))))
 
 ================================================================================
+Function with comptime parameters
+================================================================================
+
+fn add(comptime T: type, comptime bias: T, x: T) -> T {
+    return x + bias;
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (function_declaration
+    (identifier)
+    (parameter_list
+      (parameter
+        (parameter_modifier)
+        (identifier)
+        (type
+          (plain_type
+            (identifier))))
+      (parameter
+        (parameter_modifier)
+        (identifier)
+        (type
+          (plain_type
+            (identifier))))
+      (parameter
+        (identifier)
+        (type
+          (plain_type
+            (identifier)))))
+    (return_type
+      (type
+        (plain_type
+          (identifier))))
+    (block
+      (return_statement
+        (binary_expression
+          (primary_expression
+            (identifier))
+          (primary_expression
+            (identifier)))))))
+
+================================================================================
 Function with requires and ensures clauses
 ================================================================================
 

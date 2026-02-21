@@ -1,0 +1,296 @@
+================================================================================
+Region declarations without var kind
+================================================================================
+
+contract Regions {
+    storage balances: map<address, u256>;
+    storage owner: address;
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (contract_declaration
+    (identifier)
+    (contract_member
+      (variable_declaration
+        (memory_region)
+        (identifier)
+        (type
+          (plain_type
+            (map_type
+              (type
+                (plain_type
+                  (primitive_type)))
+              (type
+                (plain_type
+                  (primitive_type))))))))
+    (contract_member
+      (variable_declaration
+        (memory_region)
+        (identifier)
+        (type
+          (plain_type
+            (primitive_type)))))))
+
+================================================================================
+Intrinsics plus assume and havoc
+================================================================================
+
+contract Intrinsics {
+    pub fn run(x: u256) -> u256 {
+        let o = @addWithOverflow(x, 1);
+        havoc x;
+        assume(x >= 0);
+        return o.value;
+    }
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (contract_declaration
+    (identifier)
+    (contract_member
+      (function_declaration
+        (identifier)
+        (parameter_list
+          (parameter
+            (identifier)
+            (type
+              (plain_type
+                (primitive_type)))))
+        (return_type
+          (type
+            (plain_type
+              (primitive_type))))
+        (block
+          (variable_declaration
+            (variable_kind)
+            (identifier)
+            (primary_expression
+              (intrinsic_expression
+                (identifier)
+                (expression_list
+                  (primary_expression
+                    (identifier))
+                  (primary_expression
+                    (literal
+                      (number_literal)))))))
+          (havoc_statement
+            (lvalue
+              (identifier)))
+          (assume_statement
+            (binary_expression
+              (primary_expression
+                (identifier))
+              (primary_expression
+                (literal
+                  (number_literal)))))
+          (return_statement
+            (postfix_expression
+              (primary_expression
+                (identifier))
+              (postfix_operator
+                (identifier)))))))))
+
+================================================================================
+Comptime while with invariants and decreases
+================================================================================
+
+contract ComptimeLoops {
+    pub fn run(n: u256) -> u256 {
+        var i: u256 = 0;
+        comptime while (i < n)
+            invariant(i <= n)
+            decreases(n - i)
+        {
+            i = i + 1;
+        }
+        return i;
+    }
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (contract_declaration
+    (identifier)
+    (contract_member
+      (function_declaration
+        (identifier)
+        (parameter_list
+          (parameter
+            (identifier)
+            (type
+              (plain_type
+                (primitive_type)))))
+        (return_type
+          (type
+            (plain_type
+              (primitive_type))))
+        (block
+          (variable_declaration
+            (variable_kind)
+            (identifier)
+            (type
+              (plain_type
+                (primitive_type)))
+            (primary_expression
+              (literal
+                (number_literal))))
+          (comptime_statement
+            (while_statement
+              (binary_expression
+                (primary_expression
+                  (identifier))
+                (primary_expression
+                  (identifier)))
+              (invariant_clause
+                (binary_expression
+                  (primary_expression
+                    (identifier))
+                  (primary_expression
+                    (identifier))))
+              (decreases_clause
+                (binary_expression
+                  (primary_expression
+                    (identifier))
+                  (primary_expression
+                    (identifier))))
+              (block
+                (assignment_statement
+                  (lvalue
+                    (identifier))
+                  (binary_expression
+                    (primary_expression
+                      (identifier))
+                    (primary_expression
+                      (literal
+                        (number_literal))))))))
+          (return_statement
+            (primary_expression
+              (identifier))))))))
+
+================================================================================
+Generic struct and tuple pattern declarations
+================================================================================
+
+contract GenericTuple {
+    struct Pair(comptime T: type) {
+        first: T;
+        second: T;
+    }
+
+    pub fn make(a: u256, b: u256) -> Pair(u256) {
+        let t: (u256, u256) = (a, b);
+        let (x, y): (u256, u256) = t;
+        return Pair(u256) { .first = x, .second = y };
+    }
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (contract_declaration
+    (identifier)
+    (contract_member
+      (struct_declaration
+        (identifier)
+        (generic_parameter_clause
+          (parameter_list
+            (parameter
+              (parameter_modifier)
+              (identifier)
+              (type
+                (plain_type
+                  (identifier))))))
+        (struct_field
+          (identifier)
+          (type
+            (plain_type
+              (identifier))))
+        (struct_field
+          (identifier)
+          (type
+            (plain_type
+              (identifier))))))
+    (contract_member
+      (function_declaration
+        (identifier)
+        (parameter_list
+          (parameter
+            (identifier)
+            (type
+              (plain_type
+                (primitive_type))))
+          (parameter
+            (identifier)
+            (type
+              (plain_type
+                (primitive_type)))))
+        (return_type
+          (type
+            (plain_type
+              (generic_type
+                (identifier)
+                (type_argument_list_paren
+                  (type_argument
+                    (type
+                      (plain_type
+                        (primitive_type)))))))))
+        (block
+          (variable_declaration
+            (variable_kind)
+            (identifier)
+            (type
+              (plain_type
+                (tuple_type
+                  (type
+                    (plain_type
+                      (primitive_type)))
+                  (type
+                    (plain_type
+                      (primitive_type))))))
+            (primary_expression
+              (tuple_expression
+                (primary_expression
+                  (identifier))
+                (primary_expression
+                  (identifier)))))
+          (tuple_variable_declaration
+            (variable_kind)
+            (tuple_pattern
+              (identifier)
+              (identifier))
+            (type
+              (plain_type
+                (tuple_type
+                  (type
+                    (plain_type
+                      (primitive_type)))
+                  (type
+                    (plain_type
+                      (primitive_type))))))
+            (primary_expression
+              (identifier)))
+          (return_statement
+            (primary_expression
+              (struct_literal
+                (generic_type
+                  (identifier)
+                  (type_argument_list_paren
+                    (type_argument
+                      (type
+                        (plain_type
+                          (primitive_type))))))
+                (struct_literal_fields
+                  (struct_literal_field_list
+                    (struct_literal_field
+                      (identifier)
+                      (primary_expression
+                        (identifier)))
+                    (struct_literal_field
+                      (identifier)
+                      (primary_expression
+                        (identifier)))))))))))))
