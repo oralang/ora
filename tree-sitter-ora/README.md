@@ -45,9 +45,9 @@ From repo root:
 Add parser config:
 
 ```lua
-local parser_config = require("nvim-treesitter.parsers").get_parser_configs()
+local parsers = require("nvim-treesitter.parsers")
 
-parser_config.ora = {
+parsers.ora = {
   install_info = {
     url = "/Users/logic/Ora/Ora/tree-sitter-ora",
     files = { "src/parser.c" },
@@ -59,15 +59,36 @@ parser_config.ora = {
 
 vim.filetype.add({ extension = { ora = "ora" } })
 
-require("nvim-treesitter.configs").setup({
-  highlight = { enable = true },
-})
+require("nvim-treesitter").setup({})
+require("nvim-treesitter").install({ "ora" })
 ```
 
 Then run in Neovim:
 
 ```vim
 :TSInstall ora
+```
+
+## Highlight coverage
+
+`queries/highlights.scm` includes captures for:
+
+- Core language: contracts, structs, enums, errors, functions, operators.
+- Regions: `storage`, `memory`, `tstore`, `calldata` with dedicated variable captures.
+- Formal verification: `requires`, `ensures`, `invariant`, `decreases`, quantifiers.
+- Comptime: comptime keyword, comptime parameters, and comptime functions.
+- Builtins: `std.*` namespaces (`constants`, `msg`, `transaction`, `block`) and intrinsic calls (`@addWithOverflow`, `@lock`, etc.).
+- Ghost and verification constructs.
+
+Useful custom links in Neovim:
+
+```lua
+vim.api.nvim_set_hl(0, "@function.comptime.ora", { bold = true })
+vim.api.nvim_set_hl(0, "@module.builtin.ora", { italic = true })
+vim.api.nvim_set_hl(0, "@function.builtin.ora", { bold = true })
+vim.api.nvim_set_hl(0, "@constant.builtin.ora", { bold = true })
+vim.api.nvim_set_hl(0, "@keyword.fv.ora", { italic = true })
+vim.api.nvim_set_hl(0, "@keyword.ghost.ora", { italic = true })
 ```
 
 ## Project layout
