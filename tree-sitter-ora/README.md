@@ -91,6 +91,36 @@ vim.api.nvim_set_hl(0, "@keyword.fv.ora", { italic = true })
 vim.api.nvim_set_hl(0, "@keyword.ghost.ora", { italic = true })
 ```
 
+## Shareable Neovim Highlight File
+
+Full example file:
+
+- `examples/nvim/ora_highlights.lua`
+
+Usage from your `init.lua`:
+
+```lua
+local ora_hl = dofile("/absolute/path/to/tree-sitter-ora/examples/nvim/ora_highlights.lua")
+ora_hl.autocmd()
+```
+
+Optional palette override:
+
+```lua
+local ora_hl = dofile("/absolute/path/to/tree-sitter-ora/examples/nvim/ora_highlights.lua")
+ora_hl.autocmd({
+  palette = {
+    red = "#ff6b6b",
+    cyan = "#63e6be",
+  },
+})
+```
+
+Notes:
+
+- By default, highlights are scoped to `.ora` captures only (`@capture.ora`).
+- Pass `{ global = true }` to also set non-language-scoped captures (affects other filetypes).
+
 ## Project layout
 
 - `grammar.js`: grammar definition
