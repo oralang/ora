@@ -1,0 +1,38 @@
+{
+  "$schema": "https://tree-sitter.github.io/tree-sitter/assets/schemas/config.schema.json",
+  "grammars": [
+    {
+      "name": "ora",
+      "camelcase": "Ora",
+      "title": "Ora",
+      "scope": "source.ora",
+      "file-types": [
+        "ora"
+      ],
+      "injection-regex": "^ora$",
+      "class-name": "TreeSitterOra"
+    }
+  ],
+  "metadata": {
+    "version": "0.1.0",
+    "license": "MIT",
+    "description": "A tree-sitter parser for Ora",
+    "authors": [
+      {
+        "name": "Ora Contributors"
+      }
+    ],
+    "links": {
+      "repository": "https://github.com/oralang/Ora"
+    }
+  },
+  "bindings": {
+    "c": true,
+    "go": false,
+    "node": true,
+    "python": false,
+    "rust": true,
+    "swift": false,
+    "zig": false
+  }
+}

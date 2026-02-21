@@ -1,0 +1,57 @@
+================================================================================
+Simple contract with function
+================================================================================
+
+contract Simple {
+    pub fn set() {}
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (contract_declaration
+    (identifier)
+    (contract_member
+      (function_declaration
+        (identifier)
+        (block)))))
+
+================================================================================
+Storage variable and compound assignment
+================================================================================
+
+contract Counter {
+    storage var counter: u256 = 0;
+
+    fn bump() {
+        counter += 1;
+    }
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (contract_declaration
+    (identifier)
+    (contract_member
+      (variable_declaration
+        (memory_region)
+        (variable_kind)
+        (identifier)
+        (type
+          (plain_type
+            (primitive_type)))
+        (primary_expression
+          (literal
+            (number_literal)))))
+    (contract_member
+      (function_declaration
+        (identifier)
+        (block
+          (compound_assignment_statement
+            (lvalue
+              (identifier))
+            (compound_operator)
+            (primary_expression
+              (literal
+                (number_literal)))))))))
