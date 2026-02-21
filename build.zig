@@ -648,6 +648,7 @@ fn buildMlirLibrariesImpl(step: *std.Build.Step, options: std.Build.Step.MakeOpt
         "-B",
         build_dir,
         "-DCMAKE_BUILD_TYPE=Release",
+        "-DCMAKE_POSITION_INDEPENDENT_CODE=ON",
         "-DLLVM_ENABLE_PROJECTS=mlir",
         "-DLLVM_TARGETS_TO_BUILD=Native",
         "-DLLVM_INCLUDE_TESTS=OFF",
@@ -669,12 +670,15 @@ fn buildMlirLibrariesImpl(step: *std.Build.Step, options: std.Build.Step.MakeOpt
         "-DLLVM_BUILD_LLVM_DYLIB=OFF",
         "-DLLVM_LINK_LLVM_DYLIB=OFF",
         "-DLLVM_BUILD_TOOLS=ON", // needed for tblgen
+        "-DLLVM_TOOL_LTO_BUILD=OFF",
+        "-DLLVM_TOOL_LLVM_LTO_BUILD=OFF",
+        "-DLLVM_TOOL_LLVM_LTO2_BUILD=OFF",
         "-DMLIR_BUILD_MLIR_C_DYLIB=ON",
         b.fmt("-DCMAKE_INSTALL_PREFIX={s}", .{install_prefix}),
     });
 
     if (builtin.os.tag == .linux) {
-        try cmake_args.append("-DCMAKE_CXX_FLAGS=-stdlib=libc++ -lc++abi");
+        try cmake_args.append("-DCMAKE_CXX_FLAGS=-stdlib=libc++");
         try cmake_args.append("-DCMAKE_EXE_LINKER_FLAGS=-stdlib=libc++ -lc++abi");
         try cmake_args.append("-DCMAKE_SHARED_LINKER_FLAGS=-stdlib=libc++ -lc++abi");
         try cmake_args.append("-DCMAKE_MODULE_LINKER_FLAGS=-stdlib=libc++ -lc++abi");
@@ -829,7 +833,10 @@ fn buildOraDialectLibraryImpl(step: *std.Build.Step, options: std.Build.Step.Mak
     });
 
     if (builtin.os.tag == .linux) {
-        try cmake_args.append("-DCMAKE_CXX_FLAGS=-stdlib=libc++ -lc++abi");
+        try cmake_args.append("-DCMAKE_CXX_FLAGS=-stdlib=libc++");
+        try cmake_args.append("-DCMAKE_EXE_LINKER_FLAGS=-stdlib=libc++ -lc++abi");
+        try cmake_args.append("-DCMAKE_SHARED_LINKER_FLAGS=-stdlib=libc++ -lc++abi");
+        try cmake_args.append("-DCMAKE_MODULE_LINKER_FLAGS=-stdlib=libc++ -lc++abi");
         try cmake_args.append("-DCMAKE_CXX_COMPILER=clang++");
         try cmake_args.append("-DCMAKE_C_COMPILER=clang");
     } else if (builtin.os.tag == .macos) {
@@ -952,7 +959,10 @@ fn buildSIRDialectLibraryImpl(step: *std.Build.Step, options: std.Build.Step.Mak
     });
 
     if (builtin.os.tag == .linux) {
-        try cmake_args.append("-DCMAKE_CXX_FLAGS=-stdlib=libc++ -lc++abi");
+        try cmake_args.append("-DCMAKE_CXX_FLAGS=-stdlib=libc++");
+        try cmake_args.append("-DCMAKE_EXE_LINKER_FLAGS=-stdlib=libc++ -lc++abi");
+        try cmake_args.append("-DCMAKE_SHARED_LINKER_FLAGS=-stdlib=libc++ -lc++abi");
+        try cmake_args.append("-DCMAKE_MODULE_LINKER_FLAGS=-stdlib=libc++ -lc++abi");
         try cmake_args.append("-DCMAKE_CXX_COMPILER=clang++");
         try cmake_args.append("-DCMAKE_C_COMPILER=clang");
     } else if (builtin.os.tag == .macos) {
@@ -1333,7 +1343,10 @@ fn buildZ3LibrariesImpl(step: *std.Build.Step, options: std.Build.Step.MakeOptio
     });
 
     if (builtin.os.tag == .linux) {
-        try cmake_args.append("-DCMAKE_CXX_FLAGS=-stdlib=libc++ -lc++abi");
+        try cmake_args.append("-DCMAKE_CXX_FLAGS=-stdlib=libc++");
+        try cmake_args.append("-DCMAKE_EXE_LINKER_FLAGS=-stdlib=libc++ -lc++abi");
+        try cmake_args.append("-DCMAKE_SHARED_LINKER_FLAGS=-stdlib=libc++ -lc++abi");
+        try cmake_args.append("-DCMAKE_MODULE_LINKER_FLAGS=-stdlib=libc++ -lc++abi");
         try cmake_args.append("-DCMAKE_CXX_COMPILER=clang++");
         try cmake_args.append("-DCMAKE_C_COMPILER=clang");
     } else if (builtin.os.tag == .macos) {
