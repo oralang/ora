@@ -7,6 +7,7 @@ const sidebars: SidebarsConfig = {
     'intro',
     'getting-started',
     'language-basics',
+    'imports',
     'examples',
     'code-formatter',
     'standard-library',
