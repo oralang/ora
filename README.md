@@ -71,6 +71,12 @@ zig build test
 
 ## Using the compiler
 
+Scaffold a new project:
+```bash
+./zig-out/bin/ora init my-project
+cd my-project
+```
+
 Run the compiler directly:
 ```bash
 ./zig-out/bin/ora <file.ora>

@@ -153,6 +153,14 @@ The import resolver enforces:
 
 ## Project configuration with `ora.toml`
 
+Scaffold a new project with `ora init`:
+
+```bash
+ora init my-project
+```
+
+This generates an `ora.toml`, `contracts/main.ora`, and a `README.md`.
+
 Multi-file projects use `ora.toml` for target and path configuration:
 
 ```toml
