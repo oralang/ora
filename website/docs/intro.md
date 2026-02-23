@@ -44,6 +44,7 @@ We document research work in-progress as first-class artifacts:
 
 - [Getting Started](./getting-started) to build the compiler and run your first file.
 - [Language Basics](./language-basics) for core syntax and types.
+- [Imports and Modules](./imports) for multi-file projects and `ora.toml`.
 - [Examples](./examples) for working patterns and caveats.
 - [Compiler Field Guide](./compiler/field-guide) for contributors and new compiler engineers.
 - [Research](./research) for the academic lens: formal verification, type system

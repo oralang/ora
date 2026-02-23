@@ -90,6 +90,7 @@ fn lowerIfConditionInBlock(
     expr_lowerer.current_function_return_type = self.current_function_return_type;
     expr_lowerer.current_function_return_type_info = self.current_function_return_type_info;
     expr_lowerer.in_try_block = self.in_try_block;
+    expr_lowerer.module_exports = self.expr_lowerer.module_exports;
 
     const cond_raw = expr_lowerer.lowerExpression(&if_stmt.condition);
     const bool_ty = h.boolType(self.ctx);
@@ -434,6 +435,7 @@ pub fn lowerIfWithFollowingReturn(self: *const StatementLowerer, if_stmt: *const
         else_expr_lowerer.refinement_base_cache = self.expr_lowerer.refinement_base_cache;
         else_expr_lowerer.refinement_guard_cache = self.expr_lowerer.refinement_guard_cache;
         else_expr_lowerer.current_function_return_type = self.current_function_return_type;
+        else_expr_lowerer.module_exports = self.expr_lowerer.module_exports;
         else_lowerer.expr_lowerer = &else_expr_lowerer;
 
         if (following_return.value) |value_expr| {
@@ -591,6 +593,7 @@ fn lowerBlockBodyWithYield(
     expr_lowerer.current_function_return_type = self.current_function_return_type;
     expr_lowerer.current_function_return_type_info = self.current_function_return_type_info;
     expr_lowerer.in_try_block = self.in_try_block;
+    expr_lowerer.module_exports = self.expr_lowerer.module_exports;
     temp_lowerer.expr_lowerer = &expr_lowerer;
 
     // track if we've added a terminator to this block
@@ -844,6 +847,7 @@ pub fn lowerWhile(self: *const StatementLowerer, while_stmt: *const lib.ast.Stat
     before_expr_lowerer.current_function_return_type = self.current_function_return_type;
     before_expr_lowerer.current_function_return_type_info = self.current_function_return_type_info;
     before_expr_lowerer.in_try_block = self.in_try_block;
+    before_expr_lowerer.module_exports = self.expr_lowerer.module_exports;
 
     const condition_raw = before_expr_lowerer.lowerExpression(&while_stmt.condition);
     const condition_type = c.oraValueGetType(condition_raw);
@@ -885,6 +889,7 @@ pub fn lowerWhile(self: *const StatementLowerer, while_stmt: *const lib.ast.Stat
     body_expr_lowerer.current_function_return_type = self.current_function_return_type;
     body_expr_lowerer.current_function_return_type_info = self.current_function_return_type_info;
     body_expr_lowerer.in_try_block = self.in_try_block;
+    body_expr_lowerer.module_exports = self.expr_lowerer.module_exports;
 
     // lower loop invariants if present
     for (while_stmt.invariants) |*invariant| {
@@ -1102,6 +1107,7 @@ fn lowerRangeSimpleForLoop(
     body_expr_lowerer.current_function_return_type = self.current_function_return_type;
     body_expr_lowerer.current_function_return_type_info = self.current_function_return_type_info;
     body_expr_lowerer.in_try_block = self.in_try_block;
+    body_expr_lowerer.module_exports = self.expr_lowerer.module_exports;
 
     const induction_i256 = body_expr_lowerer.convertIndexToIntegerType(induction_var, span);
 
@@ -1199,6 +1205,7 @@ fn lowerRangeIndexedForLoop(
     body_expr_lowerer.current_function_return_type = self.current_function_return_type;
     body_expr_lowerer.current_function_return_type_info = self.current_function_return_type_info;
     body_expr_lowerer.in_try_block = self.in_try_block;
+    body_expr_lowerer.module_exports = self.expr_lowerer.module_exports;
 
     const index_var = c.oraBlockGetArgument(op_body_block, 0);
     const index_i256 = body_expr_lowerer.convertIndexToIntegerType(index_var, span);
@@ -1329,6 +1336,7 @@ fn lowerSimpleForLoop(
     body_expr_lowerer.current_function_return_type = self.current_function_return_type;
     body_expr_lowerer.current_function_return_type_info = self.current_function_return_type_info;
     body_expr_lowerer.in_try_block = self.in_try_block;
+    body_expr_lowerer.module_exports = self.expr_lowerer.module_exports;
     const induction_i256 = body_expr_lowerer.convertIndexToIntegerType(induction_var, span);
 
     // bind the loop variable:
@@ -1489,6 +1497,7 @@ fn lowerIndexedForLoop(
     body_expr_lowerer.current_function_return_type = self.current_function_return_type;
     body_expr_lowerer.current_function_return_type_info = self.current_function_return_type_info;
     body_expr_lowerer.in_try_block = self.in_try_block;
+    body_expr_lowerer.module_exports = self.expr_lowerer.module_exports;
 
     // get the induction variable (index)
     const index_var = c.oraBlockGetArgument(op_body_block, 0);
@@ -1790,6 +1799,7 @@ pub fn lowerSwitch(self: *const StatementLowerer, switch_stmt: *const lib.ast.St
         case_expr_lowerer.current_function_return_type = self.current_function_return_type;
         case_expr_lowerer.current_function_return_type_info = self.current_function_return_type_info;
         case_expr_lowerer.in_try_block = self.in_try_block;
+        case_expr_lowerer.module_exports = self.expr_lowerer.module_exports;
         const switch_ctx = LabelContext{
             .label = "",
             .label_type = .Switch,
@@ -2128,6 +2138,7 @@ pub fn lowerSwitch(self: *const StatementLowerer, switch_stmt: *const lib.ast.St
             default_expr_lowerer.current_function_return_type = self.current_function_return_type;
             default_expr_lowerer.current_function_return_type_info = self.current_function_return_type_info;
             default_expr_lowerer.in_try_block = self.in_try_block;
+            default_expr_lowerer.module_exports = self.expr_lowerer.module_exports;
             var has_terminator = false;
             var default_block_lowerer = self.*;
             default_block_lowerer.block = default_block_mlir;
@@ -2184,6 +2195,7 @@ pub fn lowerSwitch(self: *const StatementLowerer, switch_stmt: *const lib.ast.St
             default_expr_lowerer.current_function_return_type = self.current_function_return_type;
             default_expr_lowerer.current_function_return_type_info = self.current_function_return_type_info;
             default_expr_lowerer.in_try_block = self.in_try_block;
+            default_expr_lowerer.module_exports = self.expr_lowerer.module_exports;
             var has_terminator = false;
             var default_block_lowerer = self.*;
             default_block_lowerer.block = default_block_mlir;
@@ -2419,6 +2431,7 @@ pub fn lowerSwitchCases(self: *const StatementLowerer, cases: []const lib.ast.Ex
                 expr_lowerer.current_function_return_type = self.current_function_return_type;
                 expr_lowerer.current_function_return_type_info = self.current_function_return_type_info;
                 expr_lowerer.in_try_block = self.in_try_block;
+                expr_lowerer.module_exports = self.expr_lowerer.module_exports;
                 var has_terminator = false;
                 for (default_block.statements) |stmt| {
                     if (has_terminator) break;
@@ -2530,6 +2543,7 @@ pub fn lowerSwitchCases(self: *const StatementLowerer, cases: []const lib.ast.Ex
             case_expr_lowerer.current_function_return_type = self.current_function_return_type;
             case_expr_lowerer.current_function_return_type_info = self.current_function_return_type_info;
             case_expr_lowerer.in_try_block = self.in_try_block;
+            case_expr_lowerer.module_exports = self.expr_lowerer.module_exports;
             const case_value = case_expr_lowerer.lowerLiteral(&lit.value);
             const cmp_op = c.oraArithCmpIOpCreate(self.ctx, loc, 0, condition, case_value); // 0 = eq
             h.appendOp(target_block, cmp_op);
@@ -2543,6 +2557,7 @@ pub fn lowerSwitchCases(self: *const StatementLowerer, cases: []const lib.ast.Ex
             case_expr_lowerer.current_function_return_type = self.current_function_return_type;
             case_expr_lowerer.current_function_return_type_info = self.current_function_return_type_info;
             case_expr_lowerer.in_try_block = self.in_try_block;
+            case_expr_lowerer.module_exports = self.expr_lowerer.module_exports;
             const start_val = case_expr_lowerer.lowerExpression(range.start);
             const end_val = case_expr_lowerer.lowerExpression(range.end);
 
@@ -2653,6 +2668,7 @@ pub fn lowerSwitchCases(self: *const StatementLowerer, cases: []const lib.ast.Ex
             case_expr_lowerer.current_function_return_type = self.current_function_return_type;
             case_expr_lowerer.current_function_return_type_info = self.current_function_return_type_info;
             case_expr_lowerer.in_try_block = self.in_try_block;
+            case_expr_lowerer.module_exports = self.expr_lowerer.module_exports;
             _ = case_expr_lowerer.lowerExpression(expr);
             // add appropriate yield - scf.if always uses scf.yield (even for labeled switches)
             if (result_type) |ret_type| {
@@ -2681,6 +2697,7 @@ pub fn lowerSwitchCases(self: *const StatementLowerer, cases: []const lib.ast.Ex
                 expr_lowerer.current_function_return_type = self.current_function_return_type;
                 expr_lowerer.current_function_return_type_info = self.current_function_return_type_info;
                 expr_lowerer.in_try_block = self.in_try_block;
+                expr_lowerer.module_exports = self.expr_lowerer.module_exports;
                 var has_terminator = false;
                 for (block.statements) |stmt| {
                     if (has_terminator) break;
@@ -2776,6 +2793,7 @@ pub fn lowerSwitchCases(self: *const StatementLowerer, cases: []const lib.ast.Ex
                 expr_lowerer.current_function_return_type = self.current_function_return_type;
                 expr_lowerer.current_function_return_type_info = self.current_function_return_type_info;
                 expr_lowerer.in_try_block = self.in_try_block;
+                expr_lowerer.module_exports = self.expr_lowerer.module_exports;
                 var has_terminator = false;
                 for (labeled.block.statements) |stmt| {
                     if (has_terminator) break;

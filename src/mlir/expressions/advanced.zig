@@ -299,6 +299,7 @@ pub fn lowerSwitchExpression(
         case_expr_lowerer.current_function_return_type = self.current_function_return_type;
         case_expr_lowerer.current_function_return_type_info = self.current_function_return_type_info;
         case_expr_lowerer.in_try_block = self.in_try_block;
+        case_expr_lowerer.module_exports = self.module_exports;
 
         switch (case.pattern) {
             .Literal => |lit| {
@@ -487,6 +488,7 @@ pub fn lowerSwitchExpression(
         default_expr_lowerer.current_function_return_type = self.current_function_return_type;
         default_expr_lowerer.current_function_return_type_info = self.current_function_return_type_info;
         default_expr_lowerer.in_try_block = self.in_try_block;
+        default_expr_lowerer.module_exports = self.module_exports;
 
         var default_has_return = false;
         for (default_block.statements) |stmt| {

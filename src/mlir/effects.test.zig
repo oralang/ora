@@ -724,3 +724,102 @@ test "mlir infers forward callee param types and inserts arg conversion" {
     try testing.expect(std.mem.containsAtLeast(u8, mlir_text, 1, "ora.refinement_to_base"));
     try testing.expect(!std.mem.containsAtLeast(u8, mlir_text, 1, "func.func @sink(%arg0: !ora.non_zero_address"));
 }
+
+test "mlir keeps top-level constants visible in contract functions" {
+    const allocator = testing.allocator;
+    const source =
+        \\contract Main {
+        \\    pub fn run() -> u256 {
+        \\        if (FEATURE_ON) {
+        \\            return BASE_FEE;
+        \\        }
+        \\        return 0;
+        \\    }
+        \\}
+    ;
+
+    var lex = lib.lexer.Lexer.init(allocator, source);
+    defer lex.deinit();
+    const tokens = try lex.scanTokens();
+    defer allocator.free(tokens);
+
+    var arena = lib.ast_arena.AstArena.init(allocator);
+    defer arena.deinit();
+    var parser_instance = lib.parser.Parser.init(tokens, &arena);
+    const nodes = try parser_instance.parse();
+    defer arena.allocator().free(nodes);
+
+    const span = lib.ast.SourceSpan{
+        .file_id = 0,
+        .line = 1,
+        .column = 1,
+        .length = 1,
+        .byte_offset = 0,
+        .lexeme = null,
+    };
+
+    const feature_value = try arena.createNode(lib.ast.Expressions.ExprNode);
+    feature_value.* = .{ .Literal = .{ .Bool = .{
+        .value = true,
+        .type_info = lib.ast.Types.CommonTypes.bool_type(),
+        .span = span,
+    } } };
+    const feature_const = lib.AstNode{ .Constant = .{
+        .name = try arena.createString("FEATURE_ON"),
+        .typ = lib.ast.Types.CommonTypes.bool_type(),
+        .value = feature_value,
+        .visibility = .Private,
+        .span = span,
+    } };
+
+    const base_fee_value = try arena.createNode(lib.ast.Expressions.ExprNode);
+    base_fee_value.* = .{ .Literal = .{ .Integer = .{
+        .value = try arena.createString("7"),
+        .type_info = lib.ast.Types.CommonTypes.u256_type(),
+        .span = span,
+    } } };
+    const base_fee_const = lib.AstNode{ .Constant = .{
+        .name = try arena.createString("BASE_FEE"),
+        .typ = lib.ast.Types.CommonTypes.u256_type(),
+        .value = base_fee_value,
+        .visibility = .Private,
+        .span = span,
+    } };
+
+    const merged_nodes = try allocator.alloc(lib.AstNode, nodes.len + 2);
+    defer allocator.free(merged_nodes);
+    merged_nodes[0] = feature_const;
+    merged_nodes[1] = base_fee_const;
+    @memcpy(merged_nodes[2..], nodes);
+
+    var sem = try lib.semantics.analyze(allocator, merged_nodes);
+    defer allocator.free(sem.diagnostics);
+    defer sem.symbols.deinit();
+
+    var type_resolver = TypeResolver.init(allocator, arena.allocator(), &sem.symbols);
+    defer type_resolver.deinit();
+    try type_resolver.resolveTypes(merged_nodes);
+
+    var mlir_arena = std.heap.ArenaAllocator.init(allocator);
+    defer mlir_arena.deinit();
+    const mlir_allocator = mlir_arena.allocator();
+
+    const h = mlir.createContext(mlir_allocator);
+    defer mlir.destroyContext(h);
+
+    var lowering = try mlir.lower.lowerFunctionsToModuleWithSemanticTable(h.ctx, merged_nodes, mlir_allocator, &sem.symbols, "top_level_constants.ora");
+    defer lowering.deinit(mlir_allocator);
+    defer c.oraModuleDestroy(lowering.module);
+    try testing.expect(lowering.success);
+
+    const module_op = c.oraModuleGetOperation(lowering.module);
+    const mlir_text_ref = c.oraOperationPrintToString(module_op);
+    defer @import("mlir_c_api").freeStringRef(mlir_text_ref);
+    const mlir_text = if (mlir_text_ref.data != null and mlir_text_ref.length > 0)
+        mlir_text_ref.data[0..mlir_text_ref.length]
+    else
+        "";
+
+    try testing.expect(std.mem.containsAtLeast(u8, mlir_text, 1, "func.func @run"));
+    try testing.expect(!std.mem.containsAtLeast(u8, mlir_text, 1, "ora.error_placeholder"));
+}

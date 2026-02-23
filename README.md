@@ -20,6 +20,7 @@ Ora is designed for teams that want compiler visibility and formal reasoning wit
 | **Control flow** | **Switch** (expressions and statements; cases, ranges, `default`); loops with **termination** (e.g. `decreases`, invariants); **labels**, `break`/`continue` to labels. |
 | **Bit-level** | **Bitfields** with packed fields, optional `@at`/`@bits` layout. |
 | **Errors** | **Error unions** and errors-as-values (`!T`), `try`/`catch`-style handling. |
+| **Imports** | Namespace-qualified imports (`const math = @import("./math.ora")`); dot-qualified access (`math.add()`); relative and package specifiers; `ora.toml` project configuration. |
 | **Verification** | **SMT** (Z3); `requires`/`ensures`/`invariant`/`assume`; path-sensitive reasoning; refinement guards. |
 | **Memory** | Explicit regions: `storage`, `memory`, `transient`, `stack`. |
 
@@ -63,9 +64,10 @@ zig build test
 
 ## Documentation
 
-- **Language & specs:** [website/docs](website/docs) — structs, refinement types, generics, comptime, ABI, formal verification.
+- **Language & specs:** [website/docs](website/docs) — structs, refinement types, generics, comptime, imports, ABI, formal verification.
+- **Imports & config:** [docs/ora-cli-imports-config-reference.md](docs/ora-cli-imports-config-reference.md) — full CLI, import system, and `ora.toml` reference.
 - **Generics (style guide):** [website/docs/generics.md](website/docs/generics.md) — `comptime T: type`, generic functions/structs, monomorphization.
-- **Examples:** [ora-example](ora-example) — apps, comptime, and [ora-example/comptime/generics](ora-example/comptime/generics) for generic examples.
+- **Examples:** [ora-example](ora-example) — apps, comptime, and [examples/imports_simple](examples/imports_simple) for import examples.
 
 ## Using the compiler
 
@@ -88,6 +90,49 @@ See available commands and flags:
 ```bash
 ./zig-out/bin/ora
 ```
+
+## Imports and multi-file projects
+
+Ora supports namespace-qualified imports for splitting code across files.
+
+```ora
+const math = @import("./math.ora");
+
+contract Calculator {
+    pub fn run() -> u256 {
+        return math.add(40, 2);
+    }
+}
+```
+
+Imported members are always accessed through the alias (`math.add`); they are never injected into local scope. This prevents shadowing bugs and keeps module boundaries explicit.
+
+Import specifiers:
+- **Relative:** `./math.ora`, `../lib/utils.ora` (`.ora` extension required)
+- **Package:** `acme/math` (resolved via `include_paths` in `ora.toml`)
+
+The resolver enforces:
+- unique aliases per file (duplicate alias → different module is an error),
+- cycle detection,
+- deterministic dependency ordering.
+
+### `ora.toml`
+
+Multi-target projects use `ora.toml` for configuration:
+
+```toml
+schema_version = "0.1"
+
+[compiler]
+output_dir = "./artifacts"
+
+[[targets]]
+name = "Main"
+root = "contracts/main.ora"
+include_paths = ["contracts", "lib"]
+```
+
+See [`docs/ora-cli-imports-config-reference.md`](docs/ora-cli-imports-config-reference.md) for the full CLI, import system, and config schema reference.
 
 ## Common workflows
 

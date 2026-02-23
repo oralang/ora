@@ -701,7 +701,8 @@ pub const VerificationPass = struct {
         }
 
         const condition_value = mlir.oraOperationGetOperand(if_op, 0);
-        const condition = try self.encoder.encodeValue(condition_value);
+        const raw_condition = try self.encoder.encodeValue(condition_value);
+        const condition = self.encoder.coerceBoolean(raw_condition);
         const leaked_constraints = try self.encoder.takeConstraints(self.allocator);
         defer if (leaked_constraints.len > 0) self.allocator.free(leaked_constraints);
         const leaked_obligations = try self.encoder.takeObligations(self.allocator);
@@ -738,7 +739,7 @@ pub const VerificationPass = struct {
             try self.restoreEncoderBranchState(&base_state);
             const saved_len = self.active_path_assumptions.items.len;
             defer self.active_path_assumptions.shrinkRetainingCapacity(saved_len);
-            const not_condition = z3.Z3_mk_not(self.context.ctx, condition);
+            const not_condition = self.encoder.encodeNot(condition);
             try self.active_path_assumptions.append(.{
                 .condition = not_condition,
                 .extra_constraints = &[_]z3.Z3_ast{},

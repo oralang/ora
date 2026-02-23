@@ -186,7 +186,7 @@ pub const SymbolTable = struct {
     functions: std.StringHashMap(FunctionSymbol),
     types: std.StringHashMap([]TypeSymbol),
     // store constant declarations for lazy value creation
-    constants: std.StringHashMap(*const lib.ast.ConstantNode),
+    constants: std.StringHashMap(lib.ast.ConstantNode),
     // function effect summaries from semantic analysis
     function_effects: std.StringHashMap(FunctionEffect),
     // Storage roots that are ever @lock'd per function (for runtime guard emission)
@@ -209,7 +209,7 @@ pub const SymbolTable = struct {
             .current_scope = 0,
             .functions = std.StringHashMap(FunctionSymbol).init(allocator),
             .types = std.StringHashMap([]TypeSymbol).init(allocator),
-            .constants = std.StringHashMap(*const lib.ast.ConstantNode).init(allocator),
+            .constants = std.StringHashMap(lib.ast.ConstantNode).init(allocator),
             .function_effects = std.StringHashMap(FunctionEffect).init(allocator),
             .function_locked_storage_roots = std.StringHashMap(std.StringHashMap(void)).init(allocator),
             .contract_locked_storage_roots = std.StringHashMap(void).init(allocator),
@@ -361,12 +361,15 @@ pub const SymbolTable = struct {
 
     /// Register a constant declaration for lazy value creation
     pub fn registerConstantDecl(self: *SymbolTable, name: []const u8, const_decl: *const lib.ast.ConstantNode) !void {
-        try self.constants.put(name, const_decl);
+        try self.constants.put(name, const_decl.*);
     }
 
     /// Look up a constant declaration
     pub fn lookupConstantDecl(self: *const SymbolTable, name: []const u8) ?*const lib.ast.ConstantNode {
-        return self.constants.get(name);
+        if (self.constants.getPtr(name)) |constant| {
+            return constant;
+        }
+        return null;
     }
 
     /// Add a function symbol to the global function table
@@ -815,7 +818,7 @@ pub fn lowerFunctionsToModuleWithSemanticTable(ctx: c.MlirContext, nodes: []lib.
     // use source-of-truth parameter types during argument conversion.
     try preRegisterFunctionSignaturesFromAst(nodes, &symbol_table, &type_mapper, ctx);
 
-    const decl_lowerer = DeclarationLowerer.withErrorHandlerAndDialectAndSymbolTable(ctx, &type_mapper, locations, &error_handler, &ora_dialect, &symbol_table, &builtin_registry);
+    const decl_lowerer = DeclarationLowerer.withErrorHandlerAndDialectAndSymbolTable(ctx, &type_mapper, locations, &error_handler, &ora_dialect, &symbol_table, &builtin_registry).withModuleExports(semantic_table.module_exports);
 
     var global_storage_map = StorageMap.init(allocator);
     defer global_storage_map.deinit();
@@ -885,11 +888,20 @@ pub fn lowerFunctionsToModuleWithSemanticTable(ctx: c.MlirContext, nodes: []lib.
             .VariableDecl => |var_decl| {
                 appendModuleVarDecl(&decl_lowerer, &var_decl, &global_storage_map, body);
             },
-            .Import => |import_decl| {
-                const import_op = decl_lowerer.lowerImport(&import_decl);
-                c.oraBlockAppendOwnedOperation(body, import_op);
+            .Import => {
+                // Imports are compile-time only and should not materialize as runtime MLIR ops.
             },
             .Constant => |const_decl| {
+                // Register constant declarations for identifier lowering even if
+                // the optional ora.const metadata op cannot be emitted.
+                symbol_table.registerConstantDecl(const_decl.name, &const_decl) catch {
+                    log.debug("ERROR: Failed to register constant declaration: {s}\n", .{const_decl.name});
+                };
+                const const_type = type_mapper.toMlirType(const_decl.typ);
+                symbol_table.addConstant(const_decl.name, const_type, null, null) catch {
+                    log.debug("ERROR: Failed to add constant to symbol table: {s}\n", .{const_decl.name});
+                };
+
                 const const_op = decl_lowerer.lowerConstDecl(&const_decl);
                 if (!c.oraOperationIsNull(const_op)) {
                     c.oraBlockAppendOwnedOperation(body, const_op);
@@ -904,11 +916,7 @@ pub fn lowerFunctionsToModuleWithSemanticTable(ctx: c.MlirContext, nodes: []lib.
                 c.oraBlockAppendOwnedOperation(body, error_op);
             },
             .Module => |module_node| {
-                // lower module imports
-                for (module_node.imports) |import_decl| {
-                    const import_op = decl_lowerer.lowerImport(&import_decl);
-                    c.oraBlockAppendOwnedOperation(body, import_op);
-                }
+                // Module imports are compile-time only; skip lowering.
 
                 // lower module declarations
                 for (module_node.declarations) |decl| {
@@ -928,11 +936,20 @@ pub fn lowerFunctionsToModuleWithSemanticTable(ctx: c.MlirContext, nodes: []lib.
                         .VariableDecl => |var_decl| {
                             appendModuleVarDecl(&decl_lowerer, &var_decl, &global_storage_map, body);
                         },
-                        .Import => |import_decl| {
-                            const import_op = decl_lowerer.lowerImport(&import_decl);
-                            c.oraBlockAppendOwnedOperation(body, import_op);
+                        .Import => {
+                            // Imports are compile-time only; skip lowering.
                         },
                         .Constant => |const_decl| {
+                            // Register constant declarations for identifier
+                            // lowering independently from ora.const emission.
+                            symbol_table.registerConstantDecl(const_decl.name, &const_decl) catch {
+                                log.debug("ERROR: Failed to register constant declaration: {s}\n", .{const_decl.name});
+                            };
+                            const const_type = type_mapper.toMlirType(const_decl.typ);
+                            symbol_table.addConstant(const_decl.name, const_type, null, null) catch {
+                                log.debug("ERROR: Failed to add constant to symbol table: {s}\n", .{const_decl.name});
+                            };
+
                             const const_op = decl_lowerer.lowerConstDecl(&const_decl);
                             if (!c.oraOperationIsNull(const_op)) {
                                 c.oraBlockAppendOwnedOperation(body, const_op);
@@ -1041,7 +1058,13 @@ pub fn lowerFunctionsToModuleWithSemanticTable(ctx: c.MlirContext, nodes: []lib.
 
 /// Main entry point for lowering Ora AST nodes to MLIR module with comprehensive error handling
 /// This function orchestrates the modular lowering components and provides robust error reporting
-pub fn lowerFunctionsToModuleWithErrors(ctx: c.MlirContext, nodes: []lib.AstNode, allocator: std.mem.Allocator, source_filename: ?[]const u8) !LoweringResult {
+pub fn lowerFunctionsToModuleWithErrorsAndModuleExports(
+    ctx: c.MlirContext,
+    nodes: []lib.AstNode,
+    allocator: std.mem.Allocator,
+    source_filename: ?[]const u8,
+    module_exports: ?*const lib.semantics.state.ModuleExportMap,
+) !LoweringResult {
     const location_tracker = if (source_filename) |fname|
         LocationTracker.initWithFilename(ctx, fname)
     else
@@ -1091,7 +1114,7 @@ pub fn lowerFunctionsToModuleWithErrors(ctx: c.MlirContext, nodes: []lib.AstNode
     // convert arguments against callee parameter types.
     try preRegisterFunctionSignaturesFromAst(nodes, &symbol_table, &type_mapper, ctx);
 
-    const decl_lowerer = DeclarationLowerer.withErrorHandlerAndDialectAndSymbolTable(ctx, &type_mapper, locations, &error_handler, &ora_dialect, &symbol_table, &builtin_registry);
+    const decl_lowerer = DeclarationLowerer.withErrorHandlerAndDialectAndSymbolTable(ctx, &type_mapper, locations, &error_handler, &ora_dialect, &symbol_table, &builtin_registry).withModuleExports(module_exports);
 
     var global_storage_map = StorageMap.init(allocator);
     defer global_storage_map.deinit();
@@ -1382,17 +1405,8 @@ pub fn lowerFunctionsToModuleWithErrors(ctx: c.MlirContext, nodes: []lib.AstNode
                     },
                 }
             },
-            .Import => |import_decl| {
-                const import_valid = error_handler.validateAstNode(import_decl, import_decl.span) catch {
-                    try error_handler.reportError(.MalformedAst, import_decl.span, "import declaration validation failed", "check import structure");
-                    continue;
-                };
-                if (import_valid) {
-                    const import_op = decl_lowerer.lowerImport(&import_decl);
-                    if (error_handler.validateMlirOperation(import_op, import_decl.span) catch false) {
-                        c.oraBlockAppendOwnedOperation(body, import_op);
-                    }
-                }
+            .Import => {
+                // Imports are compile-time only and already resolved before lowering.
             },
             .Constant => |const_decl| {
                 const const_valid = error_handler.validateAstNode(const_decl, const_decl.span) catch {
@@ -1400,19 +1414,19 @@ pub fn lowerFunctionsToModuleWithErrors(ctx: c.MlirContext, nodes: []lib.AstNode
                     continue;
                 };
                 if (const_valid) {
+                    // Register constant declarations for expression lowering
+                    // even when ora.const op validation fails.
+                    symbol_table.registerConstantDecl(const_decl.name, &const_decl) catch {
+                        log.debug("ERROR: Failed to register constant declaration: {s}\n", .{const_decl.name});
+                    };
+                    const const_type = type_mapper.toMlirType(const_decl.typ);
+                    symbol_table.addConstant(const_decl.name, const_type, null, null) catch {
+                        log.debug("ERROR: Failed to add constant to symbol table: {s}\n", .{const_decl.name});
+                    };
+
                     const const_op = decl_lowerer.lowerConstDecl(&const_decl);
                     if (error_handler.validateMlirOperation(const_op, const_decl.span) catch false) {
                         c.oraBlockAppendOwnedOperation(body, const_op);
-
-                        // register constant declaration for lazy value creation
-                        symbol_table.registerConstantDecl(const_decl.name, &const_decl) catch {
-                            log.debug("ERROR: Failed to register constant declaration: {s}\n", .{const_decl.name});
-                        };
-                        // add constant to symbol table with null value - will be created lazily when referenced
-                        const const_type = type_mapper.toMlirType(const_decl.typ);
-                        symbol_table.addConstant(const_decl.name, const_type, null, null) catch {
-                            log.debug("ERROR: Failed to add constant to symbol table: {s}\n", .{const_decl.name});
-                        };
                     }
                 }
             },
@@ -1458,19 +1472,7 @@ pub fn lowerFunctionsToModuleWithErrors(ctx: c.MlirContext, nodes: []lib.AstNode
                     continue;
                 }
 
-                // process module imports first
-                for (module_node.imports) |import| {
-                    const import_valid = error_handler.validateAstNode(import, import.span) catch {
-                        try error_handler.reportError(.MalformedAst, import.span, "import validation failed", "check import structure");
-                        continue;
-                    };
-                    if (import_valid) {
-                        const import_op = decl_lowerer.lowerImport(&import);
-                        if (error_handler.validateMlirOperation(import_op, import.span) catch false) {
-                            c.oraBlockAppendOwnedOperation(body, import_op);
-                        }
-                    }
-                }
+                // Module imports are compile-time only; skip lowering.
 
                 // process module declarations recursively
                 for (module_node.declarations) |decl| {
@@ -1522,13 +1524,20 @@ pub fn lowerFunctionsToModuleWithErrors(ctx: c.MlirContext, nodes: []lib.AstNode
                                 c.oraBlockAppendOwnedOperation(body, enum_op);
                             }
                         },
-                        .Import => |import_decl| {
-                            const import_op = decl_lowerer.lowerImport(&import_decl);
-                            if (error_handler.validateMlirOperation(import_op, import_decl.span) catch false) {
-                                c.oraBlockAppendOwnedOperation(body, import_op);
-                            }
+                        .Import => {
+                            // Imports are compile-time only; skip lowering.
                         },
                         .Constant => |const_decl| {
+                            // Register constant declarations for expression
+                            // lowering independently from ora.const emission.
+                            symbol_table.registerConstantDecl(const_decl.name, &const_decl) catch {
+                                log.debug("ERROR: Failed to register constant declaration: {s}\n", .{const_decl.name});
+                            };
+                            const const_type = type_mapper.toMlirType(const_decl.typ);
+                            symbol_table.addConstant(const_decl.name, const_type, null, null) catch {
+                                log.debug("ERROR: Failed to add constant to symbol table: {s}\n", .{const_decl.name});
+                            };
+
                             const const_op = decl_lowerer.lowerConstDecl(&const_decl);
                             if (error_handler.validateMlirOperation(const_op, const_decl.span) catch false) {
                                 c.oraBlockAppendOwnedOperation(body, const_op);
@@ -1762,6 +1771,15 @@ pub fn lowerFunctionsToModuleWithErrors(ctx: c.MlirContext, nodes: []lib.AstNode
     return result;
 }
 
+pub fn lowerFunctionsToModuleWithErrors(
+    ctx: c.MlirContext,
+    nodes: []lib.AstNode,
+    allocator: std.mem.Allocator,
+    source_filename: ?[]const u8,
+) !LoweringResult {
+    return lowerFunctionsToModuleWithErrorsAndModuleExports(ctx, nodes, allocator, source_filename, null);
+}
+
 /// Main entry point with pass management support
 pub fn lowerFunctionsToModuleWithPasses(ctx: c.MlirContext, nodes: []lib.AstNode, allocator: std.mem.Allocator, pass_config: ?PassPipelineConfig, source_filename: ?[]const u8) !LoweringResult {
     // first, perform the basic lowering
@@ -1867,7 +1885,7 @@ pub fn lowerFunctionsToModule(ctx: c.MlirContext, nodes: []lib.AstNode) c.MlirMo
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena.deinit();
 
-    const result = lowerFunctionsToModuleWithErrors(ctx, nodes, arena.allocator()) catch |err| {
+    const result = lowerFunctionsToModuleWithErrors(ctx, nodes, arena.allocator(), null) catch |err| {
         log.debug("Error during MLIR lowering: {s}\n", .{@errorName(err)});
         // return empty module on error
         const loc = c.oraLocationUnknownGet(ctx);

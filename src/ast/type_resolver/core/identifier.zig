@@ -153,11 +153,14 @@ pub fn resolveIdentifierType(
         // note: This handles the "std" part of field accesses like std.constants.ZERO_ADDRESS
         // the full path resolution happens in synthFieldAccess
         if (self.builtin_registry) |_| {
-            // check if "std" is a known namespace in the builtin registry
-            // we can't resolve the full path here, but we can check if it's a known namespace
-            // the actual resolution will happen in synthFieldAccess when we have the full path
             if (std.mem.eql(u8, id.name, "std")) {
-                // "std" is a builtin namespace - mark as unknown for now, will be resolved in field access
+                id.type_info = TypeInfo.unknown();
+                return;
+            }
+        }
+        // Module alias — mark as unknown; synthFieldAccess resolves the member.
+        if (self.module_exports) |me| {
+            if (me.isModuleAlias(id.name)) {
                 id.type_info = TypeInfo.unknown();
                 return;
             }

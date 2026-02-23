@@ -147,6 +147,15 @@ pub fn processNormalCall(
             return createDirectFunctionCall(self, ident.name, args.items, call.span, call.type_info);
         },
         .FieldAccess => |field_access| {
+            // Module-qualified call: alias.fn(args) → direct function call
+            if (field_access.target.* == .Identifier) {
+                if (self.module_exports) |me| {
+                    const alias_name = field_access.target.Identifier.name;
+                    if (me.lookupExport(alias_name, field_access.field) != null) {
+                        return createDirectFunctionCall(self, field_access.field, args.items, call.span, call.type_info);
+                    }
+                }
+            }
             // Intercept bitfield utility methods: .zero() and .sanitize()
             if (self.symbol_table) |st| {
                 if (lowerBitfieldMethod(self, st, field_access, args.items, call.span)) |result| {

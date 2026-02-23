@@ -178,10 +178,13 @@ pub const EnumVariant = struct {
 pub const ImportNode = struct {
     path: []const u8,
     alias: ?[]const u8,
+    is_comptime: bool = false,
     span: SourceSpan,
 
-    // current implementation supports basic import patterns
-    // see ora-example/imports/basic_imports.ora for supported syntax
+    // Supports:
+    // - @import("path");
+    // - const alias = @import("path");
+    // - comptime const alias = @import("path");
 };
 
 pub const LogDeclNode = struct {

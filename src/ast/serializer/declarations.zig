@@ -613,6 +613,7 @@ pub fn serializeImport(serializer: *AstSerializer, import: *const ast.ImportNode
     try helpers.writeField(serializer, writer, "type", "Import", indent + 1, true);
     try helpers.writeField(serializer, writer, "name", import.alias orelse import.path, indent + 1, false);
     try helpers.writeField(serializer, writer, "path", import.path, indent + 1, false);
+    try helpers.writeBoolField(serializer, writer, "is_comptime", import.is_comptime, indent + 1);
 
     if (serializer.options.include_spans) {
         try helpers.writeSpanField(serializer, writer, &import.span, indent + 1);

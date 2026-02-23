@@ -10,6 +10,7 @@ const log = @import("log");
 const StatementLowerer = @import("statement_lowerer.zig").StatementLowerer;
 const LoweringError = StatementLowerer.LoweringError;
 const helpers = @import("helpers.zig");
+const dedup = @import("../refinement_guard_helpers.zig");
 
 /// Lower return statements using ora.return with proper value handling
 pub fn lowerReturn(self: *const StatementLowerer, ret: *const lib.ast.Statements.ReturnNode) LoweringError!void {
@@ -155,48 +156,63 @@ fn getExpressionSpan(expr: *const lib.ast.Expressions.ExprNode) lib.ast.SourceSp
 
 /// Lower ensures clauses before a return statement
 pub fn lowerEnsuresBeforeReturn(self: *const StatementLowerer, block: c.MlirBlock, span: lib.ast.SourceSpan, return_value: ?c.MlirValue) LoweringError!void {
-    _ = span; // Unused parameter
+    _ = span;
+    const function_name_for_dedup = self.expr_lowerer.current_function_name orelse resolveCurrentFunctionNameFromBlock(block);
+
+    const return_refinement: ?lib.ast.Types.OraType = if (self.current_function_return_type_info) |ti|
+        if (ti.ora_type) |ot| switch (ot) {
+            .min_value, .max_value, .in_range, .non_zero_address => ot,
+            else => null,
+        } else null
+    else
+        null;
 
     for (self.ensures_clauses, 0..) |clause, i| {
         var ensures_expr_lowerer = self.expr_lowerer.*;
         ensures_expr_lowerer.block = block;
         ensures_expr_lowerer.postcondition_return_value = return_value;
 
-        // lower the ensures expression
         const condition_value = ensures_expr_lowerer.lowerExpression(clause);
 
-        // create an assertion operation with comprehensive verification attributes
-        // get the clause's span by switching on the expression type
         const clause_span = getExpressionSpan(clause);
         const clause_loc = self.fileLoc(clause_span);
         const final_condition = gateEnsuresForErrorUnion(self, block, condition_value, return_value, clause_loc);
-        // collect verification attributes
+
+        // If the postcondition is already guaranteed by the return type refinement,
+        // keep it for SMT reasoning but avoid emitting a duplicate runtime check.
+        if (return_refinement) |ret_ref| {
+            if (dedup.isEnsuresCoveredByReturnRefinement(
+                clause,
+                ret_ref,
+                function_name_for_dedup,
+                self.param_map,
+            )) {
+                appendEnsuresAssume(self, block, final_condition, clause_loc, i);
+                continue;
+            }
+        }
+
         var attributes = std.ArrayList(c.MlirNamedAttribute){};
         defer attributes.deinit(self.allocator);
 
-        // add required 'msg' attribute first (cf.assert requires this)
         const msg_text = try std.fmt.allocPrint(self.allocator, "Postcondition {d} failed", .{i});
         defer self.allocator.free(msg_text);
         const msg_attr = h.stringAttr(self.ctx, msg_text);
         const msg_id = h.identifier(self.ctx, "msg");
         try attributes.append(self.allocator, c.oraNamedAttributeGet(msg_id, msg_attr));
 
-        // add ora.ensures attribute to mark this as a postcondition
         const ensures_attr = h.boolAttr(self.ctx, 1);
         const ensures_id = h.identifier(self.ctx, "ora.ensures");
         attributes.append(self.allocator, c.oraNamedAttributeGet(ensures_id, ensures_attr)) catch {};
 
-        // add verification context attribute
         const context_attr = c.oraStringAttrCreate(self.ctx, h.strRef("function_postcondition"));
         const context_id = h.identifier(self.ctx, "ora.verification_context");
         attributes.append(self.allocator, c.oraNamedAttributeGet(context_id, context_attr)) catch {};
 
-        // add verification marker for formal verification tools
         const verification_attr = h.boolAttr(self.ctx, 1);
         const verification_id = h.identifier(self.ctx, "ora.verification");
         attributes.append(self.allocator, c.oraNamedAttributeGet(verification_id, verification_attr)) catch {};
 
-        // add postcondition index for multiple ensures clauses
         const index_attr = c.oraIntegerAttrCreateI64FromType(c.oraIntegerTypeCreate(self.ctx, 32), @intCast(i));
         const index_id = h.identifier(self.ctx, "ora.postcondition_index");
         attributes.append(self.allocator, c.oraNamedAttributeGet(index_id, index_attr)) catch {};
@@ -204,6 +220,59 @@ pub fn lowerEnsuresBeforeReturn(self: *const StatementLowerer, block: c.MlirBloc
         const assert_op = self.ora_dialect.createCfAssertWithAttrs(final_condition, attributes.items, clause_loc);
         h.appendOp(block, assert_op);
     }
+}
+
+fn resolveCurrentFunctionNameFromBlock(block: c.MlirBlock) ?[]const u8 {
+    var current_block = block;
+    while (!c.mlirBlockIsNull(current_block)) {
+        const parent_op = c.mlirBlockGetParentOperation(current_block);
+        if (c.oraOperationIsNull(parent_op)) return null;
+
+        const parent_name_ref = c.oraOperationGetName(parent_op);
+        if (parent_name_ref.data != null and std.mem.eql(u8, parent_name_ref.data[0..parent_name_ref.length], "func.func")) {
+            const sym_name_attr = c.oraOperationGetAttributeByName(parent_op, h.strRef("sym_name"));
+            if (c.oraAttributeIsNull(sym_name_attr)) return null;
+            const sym_name_ref = c.oraStringAttrGetValue(sym_name_attr);
+            if (sym_name_ref.data == null or sym_name_ref.length == 0) return null;
+            return sym_name_ref.data[0..sym_name_ref.length];
+        }
+
+        current_block = c.mlirOperationGetBlock(parent_op);
+    }
+    return null;
+}
+
+fn appendEnsuresAssume(
+    self: *const StatementLowerer,
+    block: c.MlirBlock,
+    condition_value: c.MlirValue,
+    clause_loc: c.MlirLocation,
+    index: usize,
+) void {
+    const assume_op = self.ora_dialect.createAssume(condition_value, clause_loc);
+    c.oraOperationSetAttributeByName(
+        assume_op,
+        h.strRef("ora.assume_origin"),
+        c.oraStringAttrCreate(self.ctx, h.strRef("user")),
+    );
+    c.oraOperationSetAttributeByName(assume_op, h.strRef("ora.verification"), h.boolAttr(self.ctx, 1));
+    c.oraOperationSetAttributeByName(assume_op, h.strRef("ora.formal"), h.boolAttr(self.ctx, 1));
+    c.oraOperationSetAttributeByName(
+        assume_op,
+        h.strRef("ora.verification_type"),
+        c.oraStringAttrCreate(self.ctx, h.strRef("assume")),
+    );
+    c.oraOperationSetAttributeByName(
+        assume_op,
+        h.strRef("ora.verification_context"),
+        c.oraStringAttrCreate(self.ctx, h.strRef("function_postcondition")),
+    );
+    c.oraOperationSetAttributeByName(
+        assume_op,
+        h.strRef("ora.postcondition_index"),
+        c.oraIntegerAttrCreateI64FromType(c.oraIntegerTypeCreate(self.ctx, 32), @intCast(index)),
+    );
+    h.appendOp(block, assume_op);
 }
 
 /// For error-union returns, enforce ensures only on the success path:

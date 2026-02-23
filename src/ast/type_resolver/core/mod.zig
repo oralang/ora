@@ -376,6 +376,8 @@ pub const CoreResolver = struct {
     function_registry: ?*std.StringHashMap(*anyopaque) = null,
     // builtin registry for resolving std.* constants and functions
     builtin_registry: ?*const semantics.builtins.BuiltinRegistry = null,
+    // module export map for resolving import-qualified access (e.g. math.add)
+    module_exports: ?*const state.ModuleExportMap = null,
     // Comptime environment (Zig-style comptime system)
     comptime_env: comptime_eval.CtEnv,
     // Comptime constant pool (persists across evaluations)
@@ -405,6 +407,7 @@ pub const CoreResolver = struct {
             .utils = utils_sys,
             .refinement_system = refinement_sys,
             .builtin_registry = &symbol_table.builtin_registry,
+            .module_exports = symbol_table.module_exports,
             .comptime_env = comptime_eval.CtEnv.init(allocator, comptime_eval.EvalConfig.default),
             .comptime_pool = comptime_eval.ConstPool.init(allocator),
             .locked_slots = SlotSet.init(allocator),

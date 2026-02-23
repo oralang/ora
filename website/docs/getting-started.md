@@ -90,9 +90,27 @@ Parse and inspect:
 
 See [Code Formatter](./code-formatter.md) for details.
 
+## Multi-file projects
+
+Ora supports namespace-qualified imports for splitting code across files:
+
+```ora
+const math = @import("./math.ora");
+
+contract Calculator {
+    pub fn run() -> u256 {
+        return math.add(40, 2);
+    }
+}
+```
+
+See [Imports and Modules](./imports) for the full import system, including
+package imports, `ora.toml` configuration, and resolution rules.
+
 ## Exploring the repo
 
 - `ora-example/` contains runnable samples.
+- `examples/imports_simple/` contains multi-file import examples.
 - `tests/fixtures/` contains parser and semantics fixtures.
 - `GRAMMAR.bnf` and `GRAMMAR.ebnf` describe the current grammar.
 - [Sensei-IR (SIR)](./specifications/sensei-ir.md) describes the backend IR.

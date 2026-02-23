@@ -11,6 +11,7 @@ const lexer = ora_root.lexer;
 const parser = ora_root.parser;
 const ast = ora_root.ast;
 const ast_arena = ora_root.ast_arena;
+const diagnostics = ora_root.parser.diagnostics;
 
 // ============================================================================
 // Function Declaration Tests
@@ -322,9 +323,12 @@ test "declarations: enum with underlying type" {
 // Import Declaration Tests
 // ============================================================================
 
-test "declarations: import statement" {
+test "declarations: bare import statement is rejected" {
     const allocator = testing.allocator;
     const source = "@import(\"std\");";
+    const prev_diag = diagnostics.enable_stderr_diagnostics;
+    diagnostics.enable_stderr_diagnostics = false;
+    defer diagnostics.enable_stderr_diagnostics = prev_diag;
 
     var lex = lexer.Lexer.init(allocator, source);
     defer lex.deinit();
@@ -335,14 +339,7 @@ test "declarations: import statement" {
     defer arena.deinit();
     var parser_instance = parser.Parser.init(tokens, &arena);
 
-    const nodes = try parser_instance.parse();
-    defer arena.allocator().free(nodes);
-
-    try testing.expect(nodes.len == 1);
-    try testing.expect(nodes[0] == .Import);
-    if (nodes[0] == .Import) {
-        try testing.expect(std.mem.eql(u8, "std", nodes[0].Import.path));
-    }
+    try testing.expectError(error.UnexpectedToken, parser_instance.parse());
 }
 
 test "declarations: const import with alias" {
@@ -364,10 +361,39 @@ test "declarations: const import with alias" {
     try testing.expect(nodes.len == 1);
     try testing.expect(nodes[0] == .Import);
     if (nodes[0] == .Import) {
+        try testing.expect(!nodes[0].Import.is_comptime);
         try testing.expect(nodes[0].Import.alias != null);
         if (nodes[0].Import.alias) |alias| {
             try testing.expect(std.mem.eql(u8, "std", alias));
         }
+    }
+}
+
+test "declarations: comptime const import with alias" {
+    const allocator = testing.allocator;
+    const source = "comptime const math = @import(\"comptime/math\");";
+
+    var lex = lexer.Lexer.init(allocator, source);
+    defer lex.deinit();
+    const tokens = try lex.scanTokens();
+    defer allocator.free(tokens);
+
+    var arena = ast_arena.AstArena.init(allocator);
+    defer arena.deinit();
+    var parser_instance = parser.Parser.init(tokens, &arena);
+
+    const nodes = try parser_instance.parse();
+    defer arena.allocator().free(nodes);
+
+    try testing.expect(nodes.len == 1);
+    try testing.expect(nodes[0] == .Import);
+    if (nodes[0] == .Import) {
+        try testing.expect(nodes[0].Import.is_comptime);
+        try testing.expect(nodes[0].Import.alias != null);
+        if (nodes[0].Import.alias) |alias| {
+            try testing.expect(std.mem.eql(u8, "math", alias));
+        }
+        try testing.expect(std.mem.eql(u8, "comptime/math", nodes[0].Import.path));
     }
 }
 

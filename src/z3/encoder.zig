@@ -952,17 +952,17 @@ pub const Encoder = struct {
 
     /// Encode boolean NOT
     pub fn encodeNot(self: *Encoder, arg: z3.Z3_ast) z3.Z3_ast {
-        return z3.Z3_mk_not(self.context.ctx, arg);
+        return z3.Z3_mk_not(self.context.ctx, self.coerceToBool(arg));
     }
 
     /// Encode implication (A => B)
     pub fn encodeImplies(self: *Encoder, antecedent: z3.Z3_ast, consequent: z3.Z3_ast) z3.Z3_ast {
-        return z3.Z3_mk_implies(self.context.ctx, antecedent, consequent);
+        return z3.Z3_mk_implies(self.context.ctx, self.coerceToBool(antecedent), self.coerceToBool(consequent));
     }
 
     /// Encode if-then-else (ite)
     pub fn encodeIte(self: *Encoder, condition: z3.Z3_ast, then_expr: z3.Z3_ast, else_expr: z3.Z3_ast) z3.Z3_ast {
-        return z3.Z3_mk_ite(self.context.ctx, condition, then_expr, else_expr);
+        return z3.Z3_mk_ite(self.context.ctx, self.coerceToBool(condition), then_expr, else_expr);
     }
 
     //===----------------------------------------------------------------------===//
@@ -3077,6 +3077,10 @@ pub const Encoder = struct {
             return z3.Z3_mk_not(self.context.ctx, z3.Z3_mk_eq(self.context.ctx, ast, zero));
         }
         return ast;
+    }
+
+    pub fn coerceBoolean(self: *Encoder, ast: z3.Z3_ast) z3.Z3_ast {
+        return self.coerceToBool(ast);
     }
 
     fn quantifiedVarSortFromTypeString(self: *Encoder, type_name: []const u8) z3.Z3_sort {

@@ -15,8 +15,8 @@ top_level_declaration ::= contract_declaration
                         | error_declaration
                         | ghost_declaration
 
-import_declaration ::= "@" "import" "(" string_literal ")" ";"
-                     | "const" identifier "=" "@" "import" "(" string_literal ")" ";"
+import_declaration ::= "const" identifier "=" "@" "import" "(" string_literal ")" ";"
+                     | "comptime" "const" identifier "=" "@" "import" "(" string_literal ")" ";"
 
 contract_declaration ::= "contract" identifier "{" contract_member* "}"
 

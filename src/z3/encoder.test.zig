@@ -131,6 +131,21 @@ test "encodeConstantOp uses bool sort for i1" {
     try testing.expectEqual(@as(u32, z3.Z3_BOOL_SORT), @as(u32, @intCast(sort_kind)));
 }
 
+test "encodeNot coerces bitvector condition to bool" {
+    var z3_ctx = try Context.init(testing.allocator);
+    defer z3_ctx.deinit();
+
+    var encoder = Encoder.init(&z3_ctx, testing.allocator);
+    defer encoder.deinit();
+
+    const bv256 = encoder.mkBitVectorSort(256);
+    const cond = try encoder.mkVariable("cond_bv", bv256);
+    const not_cond = encoder.encodeNot(cond);
+    const not_sort = z3.Z3_get_sort(z3_ctx.ctx, not_cond);
+    const not_kind = z3.Z3_get_sort_kind(z3_ctx.ctx, not_sort);
+    try testing.expectEqual(@as(u32, z3.Z3_BOOL_SORT), @as(u32, @intCast(not_kind)));
+}
+
 test "encodeSLoad returns global value with correct sort" {
     var z3_ctx = try Context.init(testing.allocator);
     defer z3_ctx.deinit();

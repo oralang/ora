@@ -1019,6 +1019,40 @@ fn synthCall(
         }
     }
 
+    // Module-qualified call: alias.fn(args)
+    if (call.callee.* == .FieldAccess) {
+        const fa = &call.callee.FieldAccess;
+        if (fa.target.* == .Identifier) {
+            if (self.module_exports) |me| {
+                const base = fa.target.Identifier.name;
+                if (me.isModuleAlias(base)) {
+                    if (me.lookupExport(base, fa.field)) |_| {
+                        if (self.function_registry) |registry| {
+                            const reg_map = @as(*std.StringHashMap(*FunctionNode), @ptrCast(@alignCast(registry)));
+                            if (reg_map.get(fa.field)) |function| {
+                                try checkComptimeParams(self, function, call);
+                                if (function.is_generic) {
+                                    if (self.symbol_table.findEnclosingContractName(self.current_scope) == null) {
+                                        return TypeResolutionError.TopLevelGenericInstantiationNotSupported;
+                                    }
+                                    const ret_info = resolveGenericReturnType(function, call);
+                                    call.type_info = ret_info;
+                                    return Typed.init(ret_info, combined_eff, self.allocator);
+                                }
+                                if (function.return_type_info) |ret_info| {
+                                    call.type_info = ret_info;
+                                    return Typed.init(ret_info, combined_eff, self.allocator);
+                                }
+                            }
+                        }
+                    }
+                    call.type_info = TypeInfo.unknown();
+                    return Typed.init(TypeInfo.unknown(), combined_eff, self.allocator);
+                }
+            }
+        }
+    }
+
     // if callee is an identifier, look up the function
     if (call.callee.* == .Identifier) {
         const func_name = call.callee.Identifier.name;
@@ -1272,6 +1306,35 @@ fn synthFieldAccess(
                 // this allows std.transaction.sender to be used without parentheses
                 fa.type_info = TypeInfo.fromOraType(builtin_info.return_type);
                 return Typed.init(fa.type_info, Effect.pure(), self.allocator);
+            }
+        }
+    }
+
+    // Module-qualified access: alias.member (mirrors the std.* pattern above)
+    if (self.module_exports) |me| {
+        if (fa.target.* == .Identifier) {
+            const base = fa.target.Identifier.name;
+            if (me.isModuleAlias(base)) {
+                if (me.lookupExport(base, fa.field)) |kind| {
+                    const result_type = switch (kind) {
+                        .Function => blk: {
+                            if (self.function_registry) |registry| {
+                                const reg_map = @as(*std.StringHashMap(*FunctionNode), @ptrCast(@alignCast(registry)));
+                                if (reg_map.get(fa.field)) |function| {
+                                    break :blk if (function.return_type_info) |rti| rti else TypeInfo.unknown();
+                                }
+                            }
+                            break :blk TypeInfo.unknown();
+                        },
+                        .Contract, .StructDecl, .EnumDecl, .BitfieldDecl => TypeInfo.unknown(),
+                        .Constant, .Variable => TypeInfo.unknown(),
+                        .LogDecl, .ErrorDecl => TypeInfo.unknown(),
+                    };
+                    fa.type_info = result_type;
+                    return Typed.init(result_type, Effect.pure(), self.allocator);
+                }
+                fa.type_info = TypeInfo.unknown();
+                return Typed.init(TypeInfo.unknown(), Effect.pure(), self.allocator);
             }
         }
     }

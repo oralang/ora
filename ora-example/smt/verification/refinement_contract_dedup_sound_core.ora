@@ -1,0 +1,57 @@
+// ============================================================================
+// Regression: Refinement Contract Dedup (Sound Core)
+// ============================================================================
+// Focus:
+// 1) Dedup only safe atomic clauses to ora.assume.
+// 2) Keep complex/call-based clauses as runtime cf.assert.
+//
+// Inspect with:
+//   ./zig-out/bin/ora emit --emit-mlir=ora --no-verify ora-example/smt/verification/refinement_contract_dedup_sound_core.ora
+//
+// Expected:
+// - requiresCovered: requires(amount > 0) -> ora.assume (covered by MinValue<u256, 1>)
+// - requiresUncovered: requires(amount > 10) -> cf.assert
+// - requiresCallNotDedup: requires(identityU256(amount) > 0) -> cf.assert
+// - ensuresIdentitySelfCall: ensures(self-call > 0) -> ora.assume
+// - ensuresOtherCallNotDedup: ensures(other call > 0) -> cf.assert
+// ============================================================================
+
+contract RefinementContractDedupSoundCore {
+    fn identityU256(x: u256) -> u256 {
+        return x;
+    }
+
+    fn plusOne(x: u256) -> u256 {
+        return x + 1;
+    }
+
+    pub fn requiresCovered(amount: MinValue<u256, 1>)
+        requires(amount > 0)
+    {
+        let _: u256 = amount;
+    }
+
+    pub fn requiresUncovered(amount: MinValue<u256, 1>)
+        requires(amount > 10)
+    {
+        let _: u256 = amount;
+    }
+
+    pub fn requiresCallNotDedup(amount: MinValue<u256, 1>)
+        requires(identityU256(amount) > 0)
+    {
+        let _: u256 = amount;
+    }
+
+    pub fn ensuresIdentitySelfCall(amount: MinValue<u256, 1>) -> MinValue<u256, 1>
+        ensures(ensuresIdentitySelfCall(amount) > 0)
+    {
+        return amount;
+    }
+
+    pub fn ensuresOtherCallNotDedup(amount: MinValue<u256, 1>) -> MinValue<u256, 1>
+        ensures(plusOne(amount) > 0)
+    {
+        return amount;
+    }
+}

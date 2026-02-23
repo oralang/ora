@@ -100,27 +100,37 @@ pub const Parser = struct {
         // sync parser state with sub-parsers
         self.syncSubParsers();
 
-        // handle imports (@import("path"))
+        // top-level bare @import("...") is intentionally disallowed in v1.
+        // Require: const alias = @import("...");
         if (self.check(.At)) {
             _ = self.advance(); // consume '@'
             if (self.check(.Import)) {
-                const result = try self.getDeclParser().parseImport();
+                try self.errorAtCurrent("Bare @import is not allowed; use 'const name = @import(\"...\");'");
+                return error.UnexpectedToken;
+            } else {
+                self.errorAtCurrent("Unknown @ directive at top-level") catch {};
+                return error.UnexpectedToken;
+            }
+        }
+
+        // handle comptime const imports (comptime const math = @import("comptime/math"))
+        if (self.check(.Comptime)) {
+            const comptime_token = self.advance(); // consume 'comptime'
+            if (self.check(.Const)) {
+                _ = self.advance(); // consume 'const'
+                const result = try self.getDeclParser().parseConstImport(true, comptime_token);
                 self.updateFromSubParser(self.decl_parser.base.current);
                 return result;
             } else {
-                self.errorAtCurrent("Unknown @ directive at top-level; only @import is supported") catch {};
-                // attempt to recover: skip to next semicolon or newline-like boundary
-                while (!self.isAtEnd() and !self.check(.Semicolon) and !self.check(.RightBrace)) {
-                    _ = self.advance();
-                }
-                _ = self.match(.Semicolon);
+                try self.errorAtCurrent("Expected 'const' after 'comptime' for import declaration");
+                return error.UnexpectedToken;
             }
         }
 
         // handle const imports (const std = @import("std"))
         if (self.check(.Const)) {
-            _ = self.advance(); // consume 'const'
-            const result = try self.getDeclParser().parseConstImport();
+            const const_token = self.advance(); // consume 'const'
+            const result = try self.getDeclParser().parseConstImport(false, const_token);
             self.updateFromSubParser(self.decl_parser.base.current);
             return result;
         }

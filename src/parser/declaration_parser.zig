@@ -44,29 +44,10 @@ pub const DeclarationParser = struct {
         };
     }
 
-    /// Parse import statement (@import("path"))
-    pub fn parseImport(self: *DeclarationParser) !ast.AstNode {
-        const import_token = self.base.previous(); // The '@' token
-        _ = try self.base.consume(.Import, "Expected 'import' after '@'");
-        _ = try self.base.consume(.LeftParen, "Expected '(' after 'import'");
-
-        const path_token = try self.base.consume(.StringLiteral, "Expected string path");
-
-        _ = try self.base.consume(.RightParen, "Expected ')' after import path");
-        _ = try self.base.consume(.Semicolon, "Expected ';' after @import(...) statement");
-
-        return ast.AstNode{
-            .Import = ast.ImportNode{
-                .alias = null, // No alias in @import syntax
-                .path = path_token.lexeme,
-                .span = self.base.spanFromToken(import_token),
-            },
-        };
-    }
-
-    /// Parse const import statement (const std = @import("std"))
-    pub fn parseConstImport(self: *DeclarationParser) !ast.AstNode {
-        const const_token = self.base.previous(); // The 'const' token
+    /// Parse const import statement:
+    /// - const std = @import("std");
+    /// - comptime const math = @import("comptime/math");
+    pub fn parseConstImport(self: *DeclarationParser, is_comptime: bool, span_token: Token) !ast.AstNode {
         const name_token = try self.base.consume(.Identifier, "Expected namespace name");
         _ = try self.base.consume(.Equal, "Expected '=' after namespace name");
 
@@ -83,7 +64,8 @@ pub const DeclarationParser = struct {
             .Import = ast.ImportNode{
                 .alias = name_token.lexeme, // Use the const name as alias
                 .path = path_token.lexeme,
-                .span = self.base.spanFromToken(const_token),
+                .is_comptime = is_comptime,
+                .span = self.base.spanFromToken(span_token),
             },
         };
     }
@@ -91,17 +73,18 @@ pub const DeclarationParser = struct {
     /// Parse top-level import declaration - unified entry point
     pub fn parseImportDeclaration(self: *DeclarationParser) !ast.AstNode {
         // handle different import patterns:
-        // 1. @import("path") - direct import
-        // 2. const name = @import("path") - aliased import
+        // 1. const name = @import("path") - aliased import
+        // 2. comptime const name = @import("path") - comptime-only import
 
-        if (self.base.check(.At)) {
-            _ = self.base.advance(); // consume '@'
-            return self.parseImport();
+        if (self.base.check(.Comptime)) {
+            const comptime_token = self.base.advance(); // consume 'comptime'
+            _ = try self.base.consume(.Const, "Expected 'const' after 'comptime' in import declaration");
+            return self.parseConstImport(true, comptime_token);
         } else if (self.base.check(.Const)) {
-            _ = self.base.advance(); // consume 'const'
-            return self.parseConstImport();
+            const const_token = self.base.advance(); // consume 'const'
+            return self.parseConstImport(false, const_token);
         } else {
-            try self.base.errorAtCurrent("Expected '@' or 'const' for import declaration");
+            try self.base.errorAtCurrent("Expected 'const' or 'comptime const' for import declaration");
             return error.UnexpectedToken;
         }
     }

@@ -222,7 +222,10 @@ pub fn lowerContract(self: *const DeclarationLowerer, contract: *const lib.Contr
         // contract-scoped tables
         st.log_signatures.clearRetainingCapacity();
         st.error_ids.clearRetainingCapacity();
-        st.constants.clearRetainingCapacity();
+        // Keep module-level/top-level constants from source modules.
+        // visible inside contract functions. Clearing this map here breaks constant
+        // lookup during expression lowering and can surface as invalid MLIR args.
+        // Left strict per-contract constant isolation to a later importer/lowering v2.
         refreshContractLockedRoots(st, contract) catch {
             log.err("Failed to collect @lock roots for contract {s}\n", .{contract.name});
         };

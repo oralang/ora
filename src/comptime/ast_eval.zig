@@ -57,24 +57,15 @@ pub const AstEvalResult = union(enum) {
     }
 
     pub fn getInteger(self: AstEvalResult) ?u256 {
-        if (self == .value) {
-            if (self.value == .integer) return self.value.integer;
-        }
-        return null;
+        return if (self == .value and self.value == .integer) self.value.integer else null;
     }
 
     pub fn getBoolean(self: AstEvalResult) ?bool {
-        if (self == .value) {
-            if (self.value == .boolean) return self.value.boolean;
-        }
-        return null;
+        return if (self == .value and self.value == .boolean) self.value.boolean else null;
     }
 
     pub fn getAddress(self: AstEvalResult) ?u160 {
-        if (self == .value) {
-            if (self.value == .address) return self.value.address;
-        }
-        return null;
+        return if (self == .value and self.value == .address) self.value.address else null;
     }
 
     pub fn kindName(self: AstEvalResult) []const u8 {
@@ -1069,14 +1060,14 @@ fn wrapIntegerToResolvedTypeWidth(value_int: u256, expr_type: ast_type_info.Type
 
 fn resolvedIntegerBitWidth(expr_type: ast_type_info.TypeInfo) ?u32 {
     if (expr_type.category != .Integer) return null;
-    const ot = expr_type.ora_type orelse return null;
-    const base = unwrapIntegerBaseType(ot);
+    const otype = expr_type.ora_type orelse return null;
+    const base = unwrapIntegerBaseType(otype);
     if (!base.isInteger()) return null;
     return base.bitWidth();
 }
 
-fn unwrapIntegerBaseType(ot: ast_type_info.OraType) ast_type_info.OraType {
-    var current = ot;
+fn unwrapIntegerBaseType(otype: ast_type_info.OraType) ast_type_info.OraType {
+    var current = otype;
     while (true) {
         switch (current) {
             .min_value => |mv| current = mv.base.*,

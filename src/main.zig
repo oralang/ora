@@ -15,6 +15,8 @@ const std = @import("std");
 const lib = @import("ora_lib");
 const build_options = @import("build_options");
 const cli_args = @import("cli/args.zig");
+const project_config = @import("config/mod.zig");
+const import_program = @import("imports/program_loader.zig");
 const log = @import("log");
 const Metrics = @import("metrics.zig").Metrics;
 const ManagedArrayList = std.array_list.Managed;
@@ -86,6 +88,49 @@ const Subcommand = enum {
     Fmt,
 };
 
+const InitTemplates = struct {
+    const ora_toml =
+        \\schema_version = "0.1"
+        \\
+        \\[compiler]
+        \\output_dir = "./artifacts"
+        \\init_args = ["initial_counter=0"]
+        \\
+        \\[[targets]]
+        \\name = "Main"
+        \\kind = "contract"
+        \\root = "contracts/main.ora"
+    ;
+
+    const main_contract =
+        \\contract Main {
+        \\    storage var counter: u256 = 0;
+        \\
+        \\    pub fn init(initial_counter: u256) {
+        \\        counter = initial_counter;
+        \\    }
+        \\
+        \\    pub fn set(next: u256) {
+        \\        counter = next;
+        \\    }
+        \\
+        \\    pub fn run() -> u256 {
+        \\        return counter;
+        \\    }
+        \\}
+    ;
+
+    const readme_md =
+        \\# Ora Project
+        \\
+        \\This project was created with `ora init`.
+        \\
+        \\## Commands
+        \\- `ora build`
+        \\- `ora emit --emit-typed-ast contracts/main.ora`
+    ;
+};
+
 fn hasEmitFlags(parsed: cli_args.CliOptions) bool {
     return parsed.emit_tokens or
         parsed.emit_ast or
@@ -98,6 +143,55 @@ fn hasEmitFlags(parsed: cli_args.CliOptions) bool {
         parsed.emit_abi or
         parsed.emit_abi_solidity or
         parsed.emit_abi_extras;
+}
+
+fn initProjectLayout(target_dir: []const u8) !void {
+    var exists = true;
+    std.fs.cwd().access(target_dir, .{}) catch |err| switch (err) {
+        error.FileNotFound => exists = false,
+        else => return err,
+    };
+
+    if (!exists) {
+        try std.fs.cwd().makePath(target_dir);
+    }
+
+    var root_dir = std.fs.cwd().openDir(target_dir, .{ .iterate = true }) catch |err| switch (err) {
+        error.NotDir => return error.InitTargetIsFile,
+        else => return err,
+    };
+    defer root_dir.close();
+
+    var iter = root_dir.iterate();
+    if ((try iter.next()) != null) {
+        return error.InitTargetNotEmpty;
+    }
+
+    try root_dir.makePath("contracts");
+    try root_dir.writeFile(.{
+        .sub_path = "ora.toml",
+        .data = InitTemplates.ora_toml,
+    });
+    try root_dir.writeFile(.{
+        .sub_path = "contracts/main.ora",
+        .data = InitTemplates.main_contract,
+    });
+    try root_dir.writeFile(.{
+        .sub_path = "README.md",
+        .data = InitTemplates.readme_md,
+    });
+}
+
+fn runInitCommand(target_dir: []const u8) !void {
+    var stdout_buffer: [1024]u8 = undefined;
+    var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
+    const stdout = &stdout_writer.interface;
+
+    try initProjectLayout(target_dir);
+
+    try stdout.print("Initialized Ora project in {s}\n", .{target_dir});
+    try stdout.print("Next step: cd {s} && ora build\n", .{target_dir});
+    try stdout.flush();
 }
 
 // ============================================================================
@@ -115,6 +209,27 @@ pub fn main() !void {
 
     if (args.len < 2) {
         try printUsage();
+        return;
+    }
+
+    if (args.len >= 2 and std.mem.eql(u8, args[1], "init")) {
+        if (args.len > 3) {
+            std.debug.print("error: init accepts at most one optional <path>\n", .{});
+            try printUsage();
+            std.process.exit(2);
+        }
+        const target_dir = if (args.len == 3) args[2] else ".";
+        runInitCommand(target_dir) catch |err| switch (err) {
+            error.InitTargetNotEmpty => {
+                std.debug.print("error: init target '{s}' is not empty\n", .{target_dir});
+                std.process.exit(2);
+            },
+            error.InitTargetIsFile => {
+                std.debug.print("error: init target '{s}' is a file, expected directory\n", .{target_dir});
+                std.process.exit(2);
+            },
+            else => return err,
+        };
         return;
     }
 
@@ -209,20 +324,6 @@ pub fn main() !void {
         return;
     }
 
-    // require input file
-    if (input_file == null) {
-        try printUsage();
-        return;
-    }
-
-    const file_path = input_file.?;
-
-    // handle state analysis (also a special analysis mode)
-    if (analyze_state) {
-        try runStateAnalysis(allocator, file_path);
-        return;
-    }
-
     const emit_flags_requested = hasEmitFlags(parsed);
     const command_kind: CommandKind = switch (subcommand) {
         .Fmt => .Fmt,
@@ -230,6 +331,16 @@ pub fn main() !void {
         .Emit => .Emit,
         .None => if (emit_flags_requested) .Emit else .Build,
     };
+
+    // handle state analysis (also a special analysis mode)
+    if (analyze_state) {
+        if (input_file == null) {
+            std.debug.print("error: --analyze-state requires <file.ora>\n", .{});
+            std.process.exit(2);
+        }
+        try runStateAnalysis(allocator, input_file.?);
+        return;
+    }
 
     if (command_kind == .Build and emit_flags_requested) {
         std.debug.print("error: build mode does not accept --emit-* flags. Use 'ora emit ...' for debug outputs.\n", .{});
@@ -295,7 +406,122 @@ pub fn main() !void {
     };
 
     if (command_kind == .Build) {
-        const build_result = runBuildArtifacts(allocator, file_path, output_dir, mlir_options);
+        var matched_include_roots: ?[]const []const u8 = null;
+        defer if (matched_include_roots) |include_roots| {
+            freeResolvedIncludeRoots(allocator, include_roots);
+        };
+        var matched_init_args: ?[]project_config.InitArg = null;
+        defer if (matched_init_args) |init_args| {
+            freeCombinedInitArgs(allocator, init_args);
+        };
+        var matched_output_dir: ?[]u8 = null;
+        defer if (matched_output_dir) |out_dir| {
+            allocator.free(out_dir);
+        };
+
+        var build_resolver_options: import_program.ResolverOptions = .{};
+        var build_output_dir: ?[]const u8 = output_dir;
+        if (input_file) |build_file_path| {
+            const start_dir = std.fs.path.dirname(build_file_path) orelse ".";
+            const loaded_opt = project_config.loadDiscoveredFromStartDir(allocator, start_dir) catch |err| {
+                std.debug.print("error: failed to load ora.toml: {s}\n", .{@errorName(err)});
+                std.process.exit(2);
+            };
+
+            if (loaded_opt) |loaded_value| {
+                var loaded = loaded_value;
+                defer loaded.deinit(allocator);
+
+                matched_init_args = try combineInitArgSlices(allocator, loaded.config.compiler_init_args, &.{});
+
+                const target_idx_opt = project_config.findMatchingTargetIndex(allocator, &loaded, build_file_path) catch |err| {
+                    std.debug.print("error: failed to match target in ora.toml: {s}\n", .{@errorName(err)});
+                    std.process.exit(2);
+                };
+
+                if (target_idx_opt) |target_idx| {
+                    const target = loaded.config.targets[target_idx];
+                    if (matched_init_args) |init_args| {
+                        freeCombinedInitArgs(allocator, init_args);
+                        matched_init_args = null;
+                    }
+                    if (target.kind == .contract) {
+                        matched_init_args = try combineInitArgSlices(allocator, loaded.config.compiler_init_args, target.init_args);
+                    } else {
+                        matched_init_args = try allocator.alloc(project_config.InitArg, 0);
+                    }
+                    matched_include_roots = resolveIncludeRootsForTarget(allocator, loaded.config_dir, target.include_paths) catch |err| {
+                        std.debug.print("error: failed to resolve include_paths for target '{s}': {s}\n", .{ target.name, @errorName(err) });
+                        std.process.exit(2);
+                    };
+                    build_resolver_options.include_roots = matched_include_roots.?;
+
+                    if (build_output_dir == null) {
+                        if (target.output_dir) |target_out| {
+                            matched_output_dir = project_config.resolvePathFromConfigDir(allocator, loaded.config_dir, target_out) catch |err| {
+                                std.debug.print("error: failed to resolve target output_dir for '{s}': {s}\n", .{ target.name, @errorName(err) });
+                                std.process.exit(2);
+                            };
+                        } else {
+                            const base_output = if (loaded.config.compiler_output_dir) |compiler_out|
+                                project_config.resolvePathFromConfigDir(allocator, loaded.config_dir, compiler_out) catch |err| {
+                                    std.debug.print("error: failed to resolve compiler.output_dir: {s}\n", .{@errorName(err)});
+                                    std.process.exit(2);
+                                }
+                            else
+                                project_config.resolvePathFromConfigDir(allocator, loaded.config_dir, "artifacts") catch |err| {
+                                    std.debug.print("error: failed to resolve default project output_dir: {s}\n", .{@errorName(err)});
+                                    std.process.exit(2);
+                                };
+                            defer allocator.free(base_output);
+
+                            if (loaded.config.targets.len > 1) {
+                                matched_output_dir = std.fs.path.join(allocator, &.{ base_output, target.name }) catch {
+                                    std.debug.print("error: failed to allocate target output path\n", .{});
+                                    std.process.exit(2);
+                                };
+                            } else {
+                                matched_output_dir = allocator.dupe(u8, base_output) catch {
+                                    std.debug.print("error: failed to allocate target output path\n", .{});
+                                    std.process.exit(2);
+                                };
+                            }
+                        }
+                        build_output_dir = matched_output_dir.?;
+                    }
+                } else if (build_output_dir == null) {
+                    const base_output = if (loaded.config.compiler_output_dir) |compiler_out|
+                        project_config.resolvePathFromConfigDir(allocator, loaded.config_dir, compiler_out) catch |err| {
+                            std.debug.print("error: failed to resolve compiler.output_dir: {s}\n", .{@errorName(err)});
+                            std.process.exit(2);
+                        }
+                    else
+                        project_config.resolvePathFromConfigDir(allocator, loaded.config_dir, "artifacts") catch |err| {
+                            std.debug.print("error: failed to resolve default project output_dir: {s}\n", .{@errorName(err)});
+                            std.process.exit(2);
+                        };
+                    defer allocator.free(base_output);
+
+                    matched_output_dir = std.fs.path.join(allocator, &.{ base_output, std.fs.path.stem(build_file_path) }) catch {
+                        std.debug.print("error: failed to allocate default project output path\n", .{});
+                        std.process.exit(2);
+                    };
+                    build_output_dir = matched_output_dir.?;
+                }
+            }
+        }
+
+        const build_result = if (input_file) |build_file_path|
+            runBuildArtifacts(
+                allocator,
+                build_file_path,
+                build_output_dir,
+                mlir_options,
+                build_resolver_options,
+                if (matched_init_args) |init_args| init_args else @as([]const project_config.InitArg, &.{}),
+            )
+        else
+            runBuildFromDiscoveredConfig(allocator, output_dir, mlir_options);
 
         var stderr_buffer_build: [1024]u8 = undefined;
         var stderr_writer_build = std.fs.File.stderr().writer(&stderr_buffer_build);
@@ -310,6 +536,13 @@ pub fn main() !void {
         return;
     }
 
+    if (input_file == null) {
+        try printUsage();
+        return;
+    }
+
+    const file_path = input_file.?;
+
     // handle CFG generation (uses MLIR's built-in view-op-graph pass)
     if (emit_cfg) {
         try runCFGGeneration(allocator, file_path, mlir_options);
@@ -320,7 +553,7 @@ pub fn main() !void {
     // stop at the earliest stage specified
 
     if (emit_abi or emit_abi_solidity or emit_abi_extras) {
-        try runAbiEmit(allocator, file_path, output_dir, emit_abi, emit_abi_solidity, emit_abi_extras);
+        try runAbiEmit(allocator, file_path, output_dir, emit_abi, emit_abi_solidity, emit_abi_extras, .{});
         const only_abi = !(emit_tokens or emit_ast or emit_typed_ast or emit_mlir or emit_mlir_sir or emit_sir_text or emit_bytecode or emit_cfg);
         if (only_abi) return;
     }
@@ -337,10 +570,10 @@ pub fn main() !void {
         try runParser(allocator, file_path, format, emit_typed_ast, &metrics);
     } else if (emit_mlir) {
         // run full MLIR pipeline (Ora MLIR)
-        try runMlirEmitAdvanced(allocator, file_path, mlir_options);
+        try runMlirEmitAdvanced(allocator, file_path, mlir_options, .{});
     } else {
         // default: emit MLIR
-        try runMlirEmitAdvanced(allocator, file_path, mlir_options);
+        try runMlirEmitAdvanced(allocator, file_path, mlir_options, .{});
     }
 
     // print metrics report (no-op when --metrics is not passed)
@@ -369,6 +602,8 @@ fn runBuildArtifacts(
     file_path: []const u8,
     output_dir: ?[]const u8,
     base_options: MlirOptions,
+    resolver_options: import_program.ResolverOptions,
+    configured_init_args: []const project_config.InitArg,
 ) !void {
     var stdout_buffer: [1024]u8 = undefined;
     var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
@@ -415,8 +650,10 @@ fn runBuildArtifacts(
     try std.fs.cwd().makePath(verify_dir);
     try std.fs.cwd().makePath(mlir_dir);
 
+    try validateConfiguredInitArgs(allocator, file_path, resolver_options, configured_init_args);
+
     // ABI bundle
-    try runAbiEmit(allocator, file_path, abi_dir, true, true, true);
+    try runAbiEmit(allocator, file_path, abi_dir, true, true, true, resolver_options);
 
     // SIR + bytecode + SMT report (verification is mandatory for build mode).
     var build_mlir_options = base_options;
@@ -431,7 +668,7 @@ fn runBuildArtifacts(
     build_mlir_options.persist_ora_mlir = true;
     build_mlir_options.persist_sir_mlir = true;
     var verification_failed = false;
-    runMlirEmitAdvanced(allocator, file_path, build_mlir_options) catch |err| switch (err) {
+    runMlirEmitAdvanced(allocator, file_path, build_mlir_options, resolver_options) catch |err| switch (err) {
         error.VerificationFailed => verification_failed = true,
         else => return err,
     };
@@ -469,6 +706,288 @@ fn runBuildArtifacts(
     }
 }
 
+fn freeResolvedIncludeRoots(allocator: std.mem.Allocator, include_roots: []const []const u8) void {
+    for (include_roots) |include_root| {
+        allocator.free(include_root);
+    }
+    allocator.free(include_roots);
+}
+
+fn resolveIncludeRootsForTarget(
+    allocator: std.mem.Allocator,
+    config_dir: []const u8,
+    include_paths: []const []const u8,
+) ![]const []const u8 {
+    const include_roots = try allocator.alloc([]const u8, include_paths.len);
+    errdefer freeResolvedIncludeRoots(allocator, include_roots);
+
+    for (include_paths, 0..) |include_path, idx| {
+        include_roots[idx] = try project_config.resolvePathFromConfigDir(allocator, config_dir, include_path);
+    }
+
+    return include_roots;
+}
+
+fn combineInitArgSlices(
+    allocator: std.mem.Allocator,
+    compiler_init_args: []const project_config.InitArg,
+    target_init_args: []const project_config.InitArg,
+) ![]project_config.InitArg {
+    var combined = std.ArrayList(project_config.InitArg){};
+    defer {
+        for (combined.items) |arg| {
+            allocator.free(arg.name);
+            allocator.free(arg.value);
+        }
+        combined.deinit(allocator);
+    }
+
+    for (compiler_init_args) |arg| {
+        try combined.append(allocator, .{
+            .name = try allocator.dupe(u8, arg.name),
+            .value = try allocator.dupe(u8, arg.value),
+        });
+    }
+
+    for (target_init_args) |arg| {
+        var replaced = false;
+        for (combined.items) |*existing| {
+            if (!std.mem.eql(u8, existing.name, arg.name)) continue;
+            allocator.free(existing.value);
+            existing.value = try allocator.dupe(u8, arg.value);
+            replaced = true;
+            break;
+        }
+        if (!replaced) {
+            try combined.append(allocator, .{
+                .name = try allocator.dupe(u8, arg.name),
+                .value = try allocator.dupe(u8, arg.value),
+            });
+        }
+    }
+
+    return try combined.toOwnedSlice(allocator);
+}
+
+fn freeCombinedInitArgs(allocator: std.mem.Allocator, init_args: []project_config.InitArg) void {
+    for (init_args) |arg| {
+        allocator.free(arg.name);
+        allocator.free(arg.value);
+    }
+    allocator.free(init_args);
+}
+
+fn isHexDigit(ch: u8) bool {
+    return (ch >= '0' and ch <= '9') or
+        (ch >= 'a' and ch <= 'f') or
+        (ch >= 'A' and ch <= 'F');
+}
+
+fn isValidAddressValue(value: []const u8) bool {
+    if (value.len != 42) return false;
+    if (!(value[0] == '0' and value[1] == 'x')) return false;
+    for (value[2..]) |ch| {
+        if (!isHexDigit(ch)) return false;
+    }
+    return true;
+}
+
+fn findInitParamByName(parameters: []const lib.ast.ParameterNode, name: []const u8) ?*const lib.ast.ParameterNode {
+    for (parameters) |*param| {
+        if (std.mem.eql(u8, param.name, name)) return param;
+    }
+    return null;
+}
+
+fn validateInitArgValue(type_info: lib.ast.Types.TypeInfo, raw_value: []const u8) !void {
+    const value = std.mem.trim(u8, raw_value, " \t\r\n");
+    if (value.len == 0) return error.InvalidInitArgValue;
+
+    if (type_info.ora_type) |ora_type| {
+        if (ora_type == .bool) {
+            if (!std.mem.eql(u8, value, "true") and !std.mem.eql(u8, value, "false")) {
+                return error.InvalidInitArgValue;
+            }
+            return;
+        }
+        if (ora_type.isInteger()) {
+            if (ora_type.isSignedInteger()) {
+                _ = std.fmt.parseInt(i256, value, 0) catch return error.InvalidInitArgValue;
+            } else {
+                _ = std.fmt.parseInt(u256, value, 0) catch return error.InvalidInitArgValue;
+            }
+            return;
+        }
+        switch (ora_type) {
+            .address, .non_zero_address => {
+                if (!isValidAddressValue(value)) {
+                    return error.InvalidInitArgValue;
+                }
+                return;
+            },
+            .string => return,
+            else => return error.UnsupportedInitArgType,
+        }
+    }
+
+    switch (type_info.category) {
+        .Bool => {
+            if (!std.mem.eql(u8, value, "true") and !std.mem.eql(u8, value, "false")) {
+                return error.InvalidInitArgValue;
+            }
+        },
+        .Integer => {
+            _ = std.fmt.parseInt(u256, value, 0) catch return error.InvalidInitArgValue;
+        },
+        .Address => {
+            if (!isValidAddressValue(value)) {
+                return error.InvalidInitArgValue;
+            }
+        },
+        .String => {},
+        else => return error.UnsupportedInitArgType,
+    }
+}
+
+fn validateConfiguredInitArgs(
+    allocator: std.mem.Allocator,
+    file_path: []const u8,
+    resolver_options: import_program.ResolverOptions,
+    configured_init_args: []const project_config.InitArg,
+) !void {
+    if (configured_init_args.len == 0) return;
+
+    var program = try loadProgramWithImportsRaw(allocator, file_path, resolver_options);
+    defer program.deinit();
+
+    var init_fn: ?*const lib.FunctionNode = null;
+    var init_contract_name: []const u8 = "<unknown>";
+
+    for (program.nodes) |*node| {
+        if (node.* != .Contract) continue;
+        const contract = &node.Contract;
+        for (contract.body) |*member| {
+            if (member.* != .Function) continue;
+            const func = &member.Function;
+            if (!std.mem.eql(u8, func.name, "init")) continue;
+            if (init_fn != null) {
+                std.log.warn("Configured init_args for '{s}' but multiple contracts define init().", .{file_path});
+                return error.AmbiguousInitArgsTarget;
+            }
+            init_fn = func;
+            init_contract_name = contract.name;
+        }
+    }
+
+    if (init_fn == null) {
+        std.log.warn("Configured init_args for '{s}' but no init() function exists in the entry contract.", .{file_path});
+        return error.InitArgsRequireInitFunction;
+    }
+
+    var seen_names = std.StringHashMap(void).init(allocator);
+    defer seen_names.deinit();
+
+    for (configured_init_args) |arg| {
+        if (seen_names.contains(arg.name)) {
+            std.log.warn("Duplicate init arg '{s}' in build configuration.", .{arg.name});
+            return error.DuplicateInitArg;
+        }
+        try seen_names.put(arg.name, {});
+
+        const param = findInitParamByName(init_fn.?.parameters, arg.name) orelse {
+            std.log.warn("Configured init arg '{s}' is not a parameter of {s}.init().", .{ arg.name, init_contract_name });
+            return error.UnknownInitArg;
+        };
+        if (param.is_comptime) {
+            std.log.warn("Configured init arg '{s}' targets comptime parameter, which is not supported.", .{arg.name});
+            return error.UnsupportedInitArgParameter;
+        }
+        validateInitArgValue(param.type_info, arg.value) catch |err| {
+            std.log.warn("Invalid value for init arg '{s}' in {s}.init(): {s}", .{
+                arg.name,
+                init_contract_name,
+                @errorName(err),
+            });
+            return err;
+        };
+    }
+}
+
+fn runBuildFromDiscoveredConfig(
+    allocator: std.mem.Allocator,
+    cli_output_dir: ?[]const u8,
+    base_options: MlirOptions,
+) !void {
+    var stdout_buffer: [1024]u8 = undefined;
+    var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
+    const stdout = &stdout_writer.interface;
+
+    const loaded_opt = project_config.loadDiscovered(allocator) catch |err| {
+        try stdout.print("error: failed to load ora.toml: {s}\n", .{@errorName(err)});
+        try stdout.flush();
+        std.process.exit(2);
+    };
+    if (loaded_opt == null) {
+        try stdout.print("error: build mode without <file.ora> requires ora.toml with [[targets]]\n", .{});
+        try stdout.flush();
+        std.process.exit(2);
+    }
+
+    var loaded = loaded_opt.?;
+    defer loaded.deinit(allocator);
+
+    const base_output = blk: {
+        if (cli_output_dir) |out| {
+            break :blk try allocator.dupe(u8, out);
+        }
+        if (loaded.config.compiler_output_dir) |out| {
+            break :blk try project_config.resolvePathFromConfigDir(allocator, loaded.config_dir, out);
+        }
+        break :blk try project_config.resolvePathFromConfigDir(allocator, loaded.config_dir, "artifacts");
+    };
+    defer allocator.free(base_output);
+
+    const use_target_subdirs = loaded.config.targets.len > 1;
+
+    for (loaded.config.targets) |target| {
+        const root_path = try project_config.resolvePathFromConfigDir(allocator, loaded.config_dir, target.root);
+        defer allocator.free(root_path);
+
+        const include_roots = try resolveIncludeRootsForTarget(allocator, loaded.config_dir, target.include_paths);
+        defer freeResolvedIncludeRoots(allocator, include_roots);
+        const target_init_args = if (target.kind == .contract)
+            try combineInitArgSlices(allocator, loaded.config.compiler_init_args, target.init_args)
+        else
+            try allocator.alloc(project_config.InitArg, 0);
+        defer freeCombinedInitArgs(allocator, target_init_args);
+
+        const target_output = blk: {
+            if (target.output_dir) |out| {
+                break :blk try project_config.resolvePathFromConfigDir(allocator, loaded.config_dir, out);
+            }
+            if (use_target_subdirs) {
+                break :blk try std.fs.path.join(allocator, &.{ base_output, target.name });
+            }
+            break :blk try allocator.dupe(u8, base_output);
+        };
+        defer allocator.free(target_output);
+
+        try stdout.print("Building target '{s}' from {s}\n", .{ target.name, root_path });
+        try stdout.flush();
+
+        try runBuildArtifacts(
+            allocator,
+            root_path,
+            target_output,
+            base_options,
+            .{
+                .include_roots = include_roots,
+            },
+            target_init_args,
+        );
+    }
+}
+
 // ============================================================================
 // SECTION 2: Usage & Help Text
 // ============================================================================
@@ -479,14 +998,19 @@ fn printUsage() !void {
     const stdout = &stdout_writer.interface;
     try stdout.print("Ora Compiler v0.1 - Asuka\n", .{});
     try stdout.print("Usage: ora <file.ora>\n", .{});
+    try stdout.print("       ora build [options]\n", .{});
     try stdout.print("       ora build [options] <file.ora>\n", .{});
     try stdout.print("       ora emit [emit-options] <file.ora>\n", .{});
     try stdout.print("       ora fmt [fmt-options] <file.ora>\n", .{});
+    try stdout.print("       ora init [path]\n", .{});
     try stdout.print("       ora -v | --version\n", .{});
     try stdout.print("\nCompilation Control:\n", .{});
     try stdout.print("  (default), build       - Full compile + artifact bundle + SMT gate\n", .{});
+    try stdout.print("                           If <file.ora> is omitted, builds all [[targets]] from ora.toml\n", .{});
     try stdout.print("                           Outputs: bytecode, ABI, Ora/SIR MLIR, SIR text, SMT report\n", .{});
+    try stdout.print("                           Reads ora.toml [compiler].init_args and [[targets]].init_args\n", .{});
     try stdout.print("  emit                   - Debug emission mode (use --emit-*)\n", .{});
+    try stdout.print("  init [path]            - Scaffold a new Ora project directory\n", .{});
     try stdout.print("  --emit-tokens          - Stop after lexical analysis (emit tokens)\n", .{});
     try stdout.print("  --emit-ast             - Stop after parsing (emit AST)\n", .{});
     try stdout.print("  --emit-ast=json|tree   - Emit AST in JSON or tree format\n", .{});
@@ -745,6 +1269,22 @@ fn runLexer(allocator: std.mem.Allocator, file_path: []const u8, m: *Metrics) !v
 // SECTION 5: Parser & Compilation Workflows
 // ============================================================================
 
+fn loadProgramWithImportsRaw(
+    allocator: std.mem.Allocator,
+    entry_file_path: []const u8,
+    resolver_options: import_program.ResolverOptions,
+) !import_program.ParsedProgram {
+    return import_program.loadProgramWithImportsRawWithResolverOptions(allocator, entry_file_path, resolver_options);
+}
+
+fn loadProgramWithImportsTyped(
+    allocator: std.mem.Allocator,
+    entry_file_path: []const u8,
+    resolver_options: import_program.ResolverOptions,
+) !import_program.ParsedProgram {
+    return import_program.loadProgramWithImportsTypedWithResolverOptions(allocator, entry_file_path, resolver_options);
+}
+
 /// Run parser on file and display AST
 fn runParser(allocator: std.mem.Allocator, file_path: []const u8, format: []const u8, include_types: bool, m: *Metrics) !void {
     var stdout_buffer: [1024]u8 = undefined;
@@ -757,48 +1297,20 @@ fn runParser(allocator: std.mem.Allocator, file_path: []const u8, format: []cons
         std.process.exit(2);
     }
 
-    // read source file
-    m.begin("read source");
-    const source = std.fs.cwd().readFileAlloc(allocator, file_path, 1024 * 1024) catch |err| {
-        try stdout.print("error: cannot read file '{s}': {s}\n", .{ file_path, @errorName(err) });
-        try stdout.flush();
-        std.process.exit(1);
-    };
-    m.end();
-    defer allocator.free(source);
-
     if (std.mem.eql(u8, format, "tree")) {
         try stdout.print("Parsing {s}\n", .{file_path});
         try stdout.print("==================================================\n", .{});
     }
 
-    // run lexer
-    m.begin("lexing");
-    var lexer = lib.Lexer.init(allocator, source);
-    defer lexer.deinit();
-
-    const tokens = lexer.scanTokens() catch |err| {
-        try stdout.print("Lexer error: {s}\n", .{@errorName(err)});
-        try stdout.flush();
-        std.process.exit(1);
-    };
-    m.end();
-    defer allocator.free(tokens);
-
-    if (std.mem.eql(u8, format, "tree")) {
-        try stdout.print("Lexed {d} tokens\n", .{tokens.len});
-    }
-
-    // run parser - use parseWithArena to keep arena alive for AST printing
-    m.begin("parsing + type resolution");
-    var parse_result = lib.parser.parseWithArena(allocator, tokens) catch |err| {
+    m.begin("parsing + imports + type resolution");
+    var program = loadProgramWithImportsTyped(allocator, file_path, .{}) catch |err| {
         try stdout.print("Parser error: {s}\n", .{@errorName(err)});
         try stdout.flush();
         std.process.exit(1);
     };
     m.end();
-    defer parse_result.arena.deinit(); // Keep arena alive until after printing
-    const ast_nodes = parse_result.nodes;
+    defer program.deinit();
+    const ast_nodes = program.nodes;
 
     if (std.mem.eql(u8, format, "json")) {
         var serializer = lib.AstSerializer.init(allocator, .{
@@ -859,38 +1371,16 @@ fn runStateAnalysis(allocator: std.mem.Allocator, file_path: []const u8) !void {
     var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
     const stdout = &stdout_writer.interface;
 
-    // read source file
-    const source = std.fs.cwd().readFileAlloc(allocator, file_path, 1024 * 1024) catch |err| {
-        try stdout.print("error: cannot read file '{s}': {s}\n", .{ file_path, @errorName(err) });
-        try stdout.flush();
-        std.process.exit(1);
-    };
-    defer allocator.free(source);
-
     try stdout.print("Analyzing state changes for {s}\n", .{file_path});
     try stdout.print("==================================================\n", .{});
 
-    // run lexer
-    var lexer = lib.Lexer.init(allocator, source);
-    defer lexer.deinit();
-
-    const tokens = lexer.scanTokens() catch |err| {
-        try stdout.print("Lexer error: {s}\n", .{@errorName(err)});
-        try stdout.flush();
-        std.process.exit(1);
-    };
-    defer allocator.free(tokens);
-
-    // run parser
-    var arena = lib.ast_arena.AstArena.init(allocator);
-    defer arena.deinit();
-    var parser = lib.Parser.init(tokens, &arena);
-    parser.setFileId(1);
-    const ast_nodes = parser.parse() catch |err| {
+    var program = loadProgramWithImportsRaw(allocator, file_path, .{}) catch |err| {
         try stdout.print("Parser error: {s}\n", .{@errorName(err)});
         try stdout.flush();
         std.process.exit(1);
     };
+    defer program.deinit();
+    const ast_nodes = program.nodes;
 
     // analyze each contract
     for (ast_nodes) |*node| {
@@ -993,30 +1483,12 @@ fn runCFGGeneration(allocator: std.mem.Allocator, file_path: []const u8, mlir_op
     var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
     const stdout = &stdout_writer.interface;
 
-    // read source file
-    const source = std.fs.cwd().readFileAlloc(allocator, file_path, 1024 * 1024) catch |err| {
-        try stdout.print("error: cannot read file '{s}': {s}\n", .{ file_path, @errorName(err) });
-        try stdout.flush();
-        std.process.exit(1);
-    };
-    defer allocator.free(source);
-
-    // parse to AST
-    var lexer = lib.Lexer.init(allocator, source);
-    defer lexer.deinit();
-    const tokens = lexer.scanTokens() catch |err| {
-        try stdout.print("Lexer error: {s}\n", .{@errorName(err)});
-        return;
-    };
-    defer allocator.free(tokens);
-
-    const parse_result = lib.parser.parseWithArena(allocator, tokens) catch |err| {
+    var program = loadProgramWithImportsTyped(allocator, file_path, .{}) catch |err| {
         try stdout.print("Parser error: {s}\n", .{@errorName(err)});
         return;
     };
-    const ast_nodes = parse_result.nodes;
-    var ast_arena = parse_result.arena;
-    defer ast_arena.deinit();
+    defer program.deinit();
+    const ast_nodes = program.nodes;
 
     // generate MLIR
     var mlir_arena = std.heap.ArenaAllocator.init(allocator);
@@ -1027,7 +1499,13 @@ fn runCFGGeneration(allocator: std.mem.Allocator, file_path: []const u8, mlir_op
     defer mlir.destroyContext(h);
 
     const source_filename = std.fs.path.basename(file_path);
-    var lowering_result = try mlir.lower.lowerFunctionsToModuleWithErrors(h.ctx, ast_nodes, mlir_allocator, source_filename);
+    var lowering_result = try mlir.lower.lowerFunctionsToModuleWithErrorsAndModuleExports(
+        h.ctx,
+        ast_nodes,
+        mlir_allocator,
+        source_filename,
+        program.module_exports,
+    );
     defer lowering_result.deinit(mlir_allocator);
 
     if (!lowering_result.success) {
@@ -1098,35 +1576,18 @@ fn runAbiEmit(
     emit_abi: bool,
     emit_abi_solidity: bool,
     emit_abi_extras: bool,
+    resolver_options: import_program.ResolverOptions,
 ) !void {
     var stdout_buffer: [1024]u8 = undefined;
     var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
     const stdout = &stdout_writer.interface;
 
-    // read source file
-    const source = std.fs.cwd().readFileAlloc(allocator, file_path, 1024 * 1024) catch |err| {
-        try stdout.print("error: cannot read file '{s}': {s}\n", .{ file_path, @errorName(err) });
-        try stdout.flush();
-        std.process.exit(1);
-    };
-    defer allocator.free(source);
-
-    // parse to AST
-    var lexer = lib.Lexer.init(allocator, source);
-    defer lexer.deinit();
-    const tokens = lexer.scanTokens() catch |err| {
-        try stdout.print("Lexer error: {s}\n", .{@errorName(err)});
-        return;
-    };
-    defer allocator.free(tokens);
-
-    const parse_result = lib.parser.parseWithArena(allocator, tokens) catch |err| {
+    var program = loadProgramWithImportsTyped(allocator, file_path, resolver_options) catch |err| {
         try stdout.print("Parser error: {s}\n", .{@errorName(err)});
         return;
     };
-    const ast_nodes = parse_result.nodes;
-    var ast_arena = parse_result.arena;
-    defer ast_arena.deinit();
+    defer program.deinit();
+    const ast_nodes = program.nodes;
 
     var generator = try lib.abi.AbiGenerator.init(allocator);
     defer generator.deinit();
@@ -1259,45 +1720,26 @@ fn writeSmtReportArtifacts(
 // ============================================================================
 
 /// Advanced MLIR emission with full pass pipeline support
-fn runMlirEmitAdvanced(allocator: std.mem.Allocator, file_path: []const u8, mlir_options: MlirOptions) !void {
+fn runMlirEmitAdvanced(
+    allocator: std.mem.Allocator,
+    file_path: []const u8,
+    mlir_options: MlirOptions,
+    resolver_options: import_program.ResolverOptions,
+) !void {
     var stdout_buffer: [1024]u8 = undefined;
     var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
     const stdout = &stdout_writer.interface;
     const m = mlir_options.metrics;
 
-    // read source file
-    m.begin("read source");
-    const source = std.fs.cwd().readFileAlloc(allocator, file_path, 1024 * 1024) catch |err| {
-        try stdout.print("error: cannot read file '{s}': {s}\n", .{ file_path, @errorName(err) });
-        try stdout.flush();
-        std.process.exit(1);
-    };
-    m.end();
-    defer allocator.free(source);
-
-    // front half: lex + parse (ensures we have a valid AST before MLIR)
-    m.begin("lexing");
-    var lexer = lib.Lexer.init(allocator, source);
-    defer lexer.deinit();
-
-    const tokens = lexer.scanTokens() catch |err| {
-        try stdout.print("Lexer error: {s}\n", .{@errorName(err)});
-        try stdout.flush();
-        std.process.exit(1);
-    };
-    m.end();
-    defer allocator.free(tokens);
-
-    m.begin("parsing + type resolution");
-    const parse_result = lib.parser.parseWithArena(allocator, tokens) catch |err| {
+    m.begin("parsing + imports + type resolution");
+    var program = loadProgramWithImportsTyped(allocator, file_path, resolver_options) catch |err| {
         try stdout.print("Parser error: {s}\n", .{@errorName(err)});
         try stdout.flush();
         std.process.exit(1);
     };
     m.end();
-    const ast_nodes = parse_result.nodes;
-    var ast_arena = parse_result.arena;
-    defer ast_arena.deinit();
+    defer program.deinit();
+    const ast_nodes = program.nodes;
 
     // run state analysis automatically during compilation
     // skip state analysis output when emitting MLIR to keep output clean
@@ -1308,7 +1750,7 @@ fn runMlirEmitAdvanced(allocator: std.mem.Allocator, file_path: []const u8, mlir
     }
 
     // generate MLIR with advanced options
-    try generateMlirOutput(allocator, ast_nodes, file_path, mlir_options);
+    try generateMlirOutput(allocator, ast_nodes, file_path, mlir_options, program.module_exports);
     try stdout.flush();
 }
 
@@ -1766,7 +2208,13 @@ fn printMlirOperationStatistics(stdout: anytype, stats: MlirOpStatistics) !void 
 }
 
 /// Generate MLIR output with comprehensive options
-fn generateMlirOutput(allocator: std.mem.Allocator, ast_nodes: []lib.AstNode, file_path: []const u8, mlir_options: MlirOptions) !void {
+fn generateMlirOutput(
+    allocator: std.mem.Allocator,
+    ast_nodes: []lib.AstNode,
+    file_path: []const u8,
+    mlir_options: MlirOptions,
+    module_exports: ?*const lib.semantics.state.ModuleExportMap,
+) !void {
     var stdout_buffer: [1024]u8 = undefined;
     var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
     const stdout = &stdout_writer.interface;
@@ -1836,7 +2284,13 @@ fn generateMlirOutput(allocator: std.mem.Allocator, ast_nodes: []lib.AstNode, fi
         m.begin("mlir lowering");
         const lower = @import("mlir/lower.zig");
         const source_filename = std.fs.path.basename(file_path);
-        var lowering_result = try lower.lowerFunctionsToModuleWithErrors(h.ctx, ast_nodes, mlir_allocator, source_filename);
+        var lowering_result = try lower.lowerFunctionsToModuleWithErrorsAndModuleExports(
+            h.ctx,
+            ast_nodes,
+            mlir_allocator,
+            source_filename,
+            module_exports,
+        );
         m.end();
         defer lowering_result.deinit(mlir_allocator);
 
@@ -2305,6 +2759,142 @@ fn generateMlirOutput(allocator: std.mem.Allocator, ast_nodes: []lib.AstNode, fi
     if (verification_failed) {
         return error.VerificationFailed;
     }
+}
+
+test "build config init_args: validates init parameters" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.writeFile(.{
+        .sub_path = "Main.ora",
+        .data =
+        \\contract Main {
+        \\    pub fn init(seed: u256, enabled: bool) {
+        \\        let x: u256 = seed;
+        \\        if (enabled) {
+        \\            let y: u256 = x;
+        \\        }
+        \\    }
+        \\
+        \\    pub fn run() -> u256 {
+        \\        return 1;
+        \\    }
+        \\}
+        ,
+    });
+
+    const entry_path = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}/Main.ora", .{tmp.sub_path});
+    defer allocator.free(entry_path);
+
+    const init_args = [_]project_config.InitArg{
+        .{ .name = "seed", .value = "10" },
+        .{ .name = "enabled", .value = "true" },
+    };
+
+    try validateConfiguredInitArgs(allocator, entry_path, .{}, init_args[0..]);
+}
+
+test "build config init_args: unknown init arg errors" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.writeFile(.{
+        .sub_path = "Main.ora",
+        .data =
+        \\contract Main {
+        \\    pub fn init(seed: u256) {
+        \\        let x: u256 = seed;
+        \\        if (x > 0) {
+        \\            let y: u256 = x;
+        \\        }
+        \\    }
+        \\}
+        ,
+    });
+
+    const entry_path = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}/Main.ora", .{tmp.sub_path});
+    defer allocator.free(entry_path);
+
+    const init_args = [_]project_config.InitArg{
+        .{ .name = "missing", .value = "10" },
+    };
+
+    try std.testing.expectError(error.UnknownInitArg, validateConfiguredInitArgs(allocator, entry_path, .{}, init_args[0..]));
+}
+
+test "build config init_args: missing init function errors" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.writeFile(.{
+        .sub_path = "Main.ora",
+        .data =
+        \\contract Main {
+        \\    pub fn run() -> u256 {
+        \\        return 1;
+        \\    }
+        \\}
+        ,
+    });
+
+    const entry_path = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}/Main.ora", .{tmp.sub_path});
+    defer allocator.free(entry_path);
+
+    const init_args = [_]project_config.InitArg{
+        .{ .name = "seed", .value = "10" },
+    };
+
+    try std.testing.expectError(error.InitArgsRequireInitFunction, validateConfiguredInitArgs(allocator, entry_path, .{}, init_args[0..]));
+}
+
+test "init command: scaffolds new project layout" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const target_path = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}/demo", .{tmp.sub_path});
+    defer allocator.free(target_path);
+
+    try initProjectLayout(target_path);
+
+    const toml_path = try std.fmt.allocPrint(allocator, "{s}/ora.toml", .{target_path});
+    defer allocator.free(toml_path);
+    const contract_path = try std.fmt.allocPrint(allocator, "{s}/contracts/main.ora", .{target_path});
+    defer allocator.free(contract_path);
+    const readme_path = try std.fmt.allocPrint(allocator, "{s}/README.md", .{target_path});
+    defer allocator.free(readme_path);
+
+    const toml = try std.fs.cwd().readFileAlloc(allocator, toml_path, 64 * 1024);
+    defer allocator.free(toml);
+    const contract = try std.fs.cwd().readFileAlloc(allocator, contract_path, 64 * 1024);
+    defer allocator.free(contract);
+    const readme = try std.fs.cwd().readFileAlloc(allocator, readme_path, 64 * 1024);
+    defer allocator.free(readme);
+
+    try std.testing.expect(std.mem.indexOf(u8, toml, "[[targets]]") != null);
+    try std.testing.expect(std.mem.indexOf(u8, toml, "init_args") != null);
+    try std.testing.expect(std.mem.indexOf(u8, contract, "contract Main") != null);
+    try std.testing.expect(std.mem.indexOf(u8, readme, "ora build") != null);
+}
+
+test "init command: rejects non-empty target directory" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.makePath("occupied");
+    try tmp.dir.writeFile(.{
+        .sub_path = "occupied/existing.txt",
+        .data = "keep",
+    });
+
+    const target_path = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}/occupied", .{tmp.sub_path});
+    defer allocator.free(target_path);
+
+    try std.testing.expectError(error.InitTargetNotEmpty, initProjectLayout(target_path));
 }
 
 test "simple test" {
