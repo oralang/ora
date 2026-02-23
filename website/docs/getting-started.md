@@ -50,6 +50,18 @@ zig build test
 ./zig-out/bin/ora emit-mlir ora-example/smoke.ora
 ```
 
+## Start a new project
+
+```bash
+# Scaffold a project in a new directory
+./zig-out/bin/ora init my-project
+cd my-project
+```
+
+This generates an `ora.toml`, `contracts/main.ora`, and a `README.md`. You can
+also run `ora init` in an existing empty directory or `ora init .` for the
+current directory.
+
 ## Try your first contract
 
 ```ora
@@ -66,10 +78,10 @@ contract SimpleStorage {
 }
 ```
 
-Parse and inspect:
+Build it:
 
 ```bash
-./zig-out/bin/ora parse simple_test.ora
+./zig-out/bin/ora build contracts/main.ora
 ```
 
 ## Formatting
