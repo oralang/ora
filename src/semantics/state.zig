@@ -41,6 +41,7 @@ pub const Symbol = struct {
     span: ast.SourceSpan,
     mutable: bool = false,
     region: ?ast.statements.MemoryRegion = null,
+    is_comptime: bool = false,
     typ_owned: bool = false,
     /// True if this symbol's type was derived from control flow analysis
     /// (e.g., inside `if (x == 0)`, x is flow-refined to have value 0).
@@ -105,6 +106,41 @@ pub const Scope = struct {
     }
 };
 
+pub const ExportKind = enum {
+    Function,
+    Constant,
+    Contract,
+    StructDecl,
+    EnumDecl,
+    BitfieldDecl,
+    LogDecl,
+    ErrorDecl,
+    Variable,
+};
+
+pub const ModuleExportMap = struct {
+    entries: std.StringHashMap(std.StringHashMap(ExportKind)),
+
+    pub fn init(allocator: std.mem.Allocator) ModuleExportMap {
+        return .{ .entries = std.StringHashMap(std.StringHashMap(ExportKind)).init(allocator) };
+    }
+
+    pub fn deinit(self: *ModuleExportMap) void {
+        var it = self.entries.iterator();
+        while (it.next()) |entry| entry.value_ptr.deinit();
+        self.entries.deinit();
+    }
+
+    pub fn isModuleAlias(self: *const ModuleExportMap, name: []const u8) bool {
+        return self.entries.contains(name);
+    }
+
+    pub fn lookupExport(self: *const ModuleExportMap, alias: []const u8, member: []const u8) ?ExportKind {
+        if (self.entries.get(alias)) |exports| return exports.get(member);
+        return null;
+    }
+};
+
 pub const SymbolTable = struct {
     allocator: std.mem.Allocator,
     root: *Scope, // Heap-allocated to avoid dangling pointers when table is copied
@@ -126,6 +162,7 @@ pub const SymbolTable = struct {
     struct_fields: std.StringHashMap([]const ast.StructField), // struct name → fields
     bitfield_fields: std.StringHashMap([]const ast.BitfieldField), // bitfield name → fields
     builtin_registry: builtins.BuiltinRegistry, // Built-in stdlib functions/constants
+    module_exports: ?*const ModuleExportMap = null, // set by program loader for import resolution
 
     pub fn init(allocator: std.mem.Allocator) SymbolTable {
         // Allocate root scope on heap to avoid dangling pointers when table is copied/returned

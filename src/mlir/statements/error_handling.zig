@@ -54,6 +54,7 @@ fn lowerBlockBodyWithYield(
     expr_lowerer.current_function_return_type = self.current_function_return_type;
     expr_lowerer.current_function_return_type_info = self.current_function_return_type_info;
     expr_lowerer.in_try_block = self.in_try_block;
+    expr_lowerer.module_exports = self.expr_lowerer.module_exports;
     temp_lowerer.expr_lowerer = &expr_lowerer;
 
     var has_terminator = false;

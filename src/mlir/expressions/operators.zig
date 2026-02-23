@@ -419,6 +419,7 @@ fn lowerLogicalAnd(
     then_lowerer.current_function_return_type = self.current_function_return_type;
     then_lowerer.current_function_return_type_info = self.current_function_return_type_info;
     then_lowerer.in_try_block = self.in_try_block;
+    then_lowerer.module_exports = self.module_exports;
     const rhs_val_raw = then_lowerer.lowerExpression(bin.rhs);
 
     const rhs_type = c.oraValueGetType(rhs_val_raw);
@@ -438,6 +439,7 @@ fn lowerLogicalAnd(
     else_lowerer.current_function_return_type = self.current_function_return_type;
     else_lowerer.current_function_return_type_info = self.current_function_return_type_info;
     else_lowerer.in_try_block = self.in_try_block;
+    else_lowerer.module_exports = self.module_exports;
     const false_val = else_lowerer.createBoolConstant(false, bin.span);
     const else_yield_op = self.ora_dialect.createScfYieldWithValues(&[_]c.MlirValue{false_val}, self.fileLoc(bin.span));
     h.appendOp(else_block, else_yield_op);
@@ -474,6 +476,7 @@ fn lowerLogicalOr(
     then_lowerer.current_function_return_type = self.current_function_return_type;
     then_lowerer.current_function_return_type_info = self.current_function_return_type_info;
     then_lowerer.in_try_block = self.in_try_block;
+    then_lowerer.module_exports = self.module_exports;
     const true_val = then_lowerer.createBoolConstant(true, bin.span);
 
     const then_yield_op = self.ora_dialect.createScfYieldWithValues(&[_]c.MlirValue{true_val}, self.fileLoc(bin.span));
@@ -485,6 +488,7 @@ fn lowerLogicalOr(
     else_lowerer.current_function_return_type = self.current_function_return_type;
     else_lowerer.current_function_return_type_info = self.current_function_return_type_info;
     else_lowerer.in_try_block = self.in_try_block;
+    else_lowerer.module_exports = self.module_exports;
     const rhs_val_raw = else_lowerer.lowerExpression(bin.rhs);
 
     const rhs_type = c.oraValueGetType(rhs_val_raw);

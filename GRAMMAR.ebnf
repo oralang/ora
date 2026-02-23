@@ -25,8 +25,8 @@ TopLevelDeclaration =
 # ==========================================
 
 ImportDeclaration =
-    "@" "import" "(" StringLiteral ")" ";"
-  | "const" Identifier "=" "@" "import" "(" StringLiteral ")" ";" ;
+    "const" Identifier "=" "@" "import" "(" StringLiteral ")" ";"
+  | "comptime" "const" Identifier "=" "@" "import" "(" StringLiteral ")" ";" ;
 
 # ==========================================
 # CONTRACT DECLARATIONS

@@ -1283,9 +1283,15 @@ pub const Formatter = struct {
 
     fn formatImport(self: *Formatter, import: *const lib.ast.ImportNode) FormatError!void {
         if (import.alias) |alias| {
+            if (import.is_comptime) {
+                try self.writer.write("comptime ");
+            }
             try self.writer.write("const ");
             try self.writer.write(alias);
             try self.writer.write(" = ");
+        } else if (import.is_comptime) {
+            // Defensive formatting for malformed ASTs where a comptime import has no alias.
+            try self.writer.write("comptime ");
         }
         try self.writer.write("@import(");
         try self.writer.write("\"");

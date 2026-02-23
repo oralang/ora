@@ -100,7 +100,12 @@ pub fn collectSymbols(allocator: std.mem.Allocator, nodes: []const ast.AstNode) 
         },
         .Import => |im| {
             const name = im.alias orelse im.path; // simplistic; refine later
-            const sym = state.Symbol{ .name = name, .kind = .Module, .span = im.span };
+            const sym = state.Symbol{
+                .name = name,
+                .kind = .Module,
+                .span = im.span,
+                .is_comptime = im.is_comptime,
+            };
             if (try table.declare(table.root, sym)) |_| try diags.append(allocator, im.span);
         },
         else => {},

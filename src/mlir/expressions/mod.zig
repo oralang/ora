@@ -53,6 +53,7 @@ pub const ExpressionLowerer = struct {
     local_var_map: ?*const LocalVarMap,
     symbol_table: ?*const SymbolTable,
     builtin_registry: ?*const builtins.BuiltinRegistry,
+    module_exports: ?*const lib.semantics.state.ModuleExportMap = null,
     error_handler: ?*ErrorHandler,
     locations: LocationTracker,
     ora_dialect: *OraDialect,

@@ -16,6 +16,9 @@ contract TupleBasics {
 
     pub fn tuple_runtime(x: u256, y: u256) -> u256 {
         let t: (u256, u256) = (x, y);
-        return t.0;
+        if(t.0 > 10) {
+            return t.0
+        }
+        return t.1;
     }
 }

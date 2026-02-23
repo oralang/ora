@@ -62,8 +62,19 @@ module.exports = grammar({
     ),
 
     import_declaration: ($) => choice(
-      seq("@", "import", "(", field("path", $.string_literal), ")", ";"),
       seq(
+        "const",
+        field("name", $.identifier),
+        "=",
+        "@",
+        "import",
+        "(",
+        field("path", $.string_literal),
+        ")",
+        ";",
+      ),
+      seq(
+        "comptime",
         "const",
         field("name", $.identifier),
         "=",

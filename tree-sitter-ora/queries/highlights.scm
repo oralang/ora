@@ -177,6 +177,7 @@
   "catch"
   "assert"
   "const"
+  "comptime"
   "let"
   "var"
   "immutable"

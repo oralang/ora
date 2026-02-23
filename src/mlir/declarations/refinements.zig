@@ -38,6 +38,7 @@ pub fn insertRefinementGuard(
     );
     expr_lowerer.refinement_base_cache = refinement_base_cache;
     expr_lowerer.refinement_guard_cache = refinement_guard_cache;
+    expr_lowerer.module_exports = self.module_exports;
     var stmt_lowerer = StatementLowerer.init(
         self.ctx,
         block,

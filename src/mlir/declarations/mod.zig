@@ -22,6 +22,7 @@ pub const DeclarationLowerer = struct {
     ora_dialect: *@import("../dialect.zig").OraDialect,
     symbol_table: ?*@import("../lower.zig").SymbolTable = null,
     builtin_registry: ?*const lib.semantics.builtins.BuiltinRegistry = null,
+    module_exports: ?*const lib.semantics.state.ModuleExportMap = null,
 
     pub fn init(ctx: c.MlirContext, type_mapper: *const TypeMapper, locations: LocationTracker, ora_dialect: *@import("../dialect.zig").OraDialect) DeclarationLowerer {
         return .{
@@ -63,6 +64,12 @@ pub const DeclarationLowerer = struct {
             .symbol_table = symbol_table,
             .builtin_registry = builtin_registry,
         };
+    }
+
+    pub fn withModuleExports(self: DeclarationLowerer, me: ?*const lib.semantics.state.ModuleExportMap) DeclarationLowerer {
+        var copy = self;
+        copy.module_exports = me;
+        return copy;
     }
 
     // re-export all lowering functions from submodules

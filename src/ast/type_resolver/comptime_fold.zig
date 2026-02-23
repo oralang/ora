@@ -1511,6 +1511,14 @@ fn collectCallTargetsExprVal(expr: ast.Expressions.ExprNode, live: *std.StringHa
                 // Skip self-calls — a recursive fn calling itself doesn't keep it live
                 const is_self = if (exclude) |ex| std.mem.eql(u8, name, ex) else false;
                 if (!is_self) live.put(name, {}) catch @panic("failed to record live call target");
+            } else if (call.callee.* == .FieldAccess) {
+                // Keep qualified calls (e.g. alias.fn(...)) alive for v1 importer.
+                // This is intentionally conservative and records the field symbol
+                // name to avoid incorrectly DCE'ing injected private helpers.
+                const name = call.callee.FieldAccess.field;
+                const is_self = if (exclude) |ex| std.mem.eql(u8, name, ex) else false;
+                if (!is_self) live.put(name, {}) catch @panic("failed to record live qualified call target");
+                collectCallTargetsExprVal(call.callee.FieldAccess.target.*, live, exclude);
             }
             for (call.arguments) |arg| collectCallTargetsExprVal(arg.*, live, exclude);
         },

@@ -294,6 +294,15 @@ pub fn build(b: *std.Build) void {
     const cli_args_tests = b.addTest(.{ .root_module = cli_args_test_mod });
     test_step.dependOn(&b.addRunArtifact(cli_args_tests).step);
 
+    // project config tests
+    const project_config_test_mod = b.createModule(.{
+        .root_source_file = b.path("src/config/mod.test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const project_config_tests = b.addTest(.{ .root_module = project_config_test_mod });
+    test_step.dependOn(&b.addRunArtifact(project_config_tests).step);
+
     // ABI tests
     const abi_test_mod = b.createModule(.{
         .root_source_file = b.path("src/abi.test.zig"),
@@ -393,6 +402,26 @@ pub fn build(b: *std.Build) void {
     type_parser_test_mod.addImport("ora_root", lib_mod);
     const type_parser_tests = b.addTest(.{ .root_module = type_parser_test_mod });
     test_step.dependOn(&b.addRunArtifact(type_parser_tests).step);
+
+    // import resolver tests
+    const import_resolver_test_mod = b.createModule(.{
+        .root_source_file = b.path("src/imports/mod.test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    import_resolver_test_mod.addImport("ora_lib", lib_mod);
+    const import_resolver_tests = b.addTest(.{ .root_module = import_resolver_test_mod });
+    test_step.dependOn(&b.addRunArtifact(import_resolver_tests).step);
+
+    // import program loader tests
+    const import_program_loader_test_mod = b.createModule(.{
+        .root_source_file = b.path("src/imports/program_loader.test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    import_program_loader_test_mod.addImport("ora_lib", lib_mod);
+    const import_program_loader_tests = b.addTest(.{ .root_module = import_program_loader_test_mod });
+    test_step.dependOn(&b.addRunArtifact(import_program_loader_tests).step);
 
     // z3 encoder tests (requires MLIR + Z3)
     const z3_encoder_test_mod = b.createModule(.{

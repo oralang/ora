@@ -19,6 +19,7 @@ const helpers = @import("helpers.zig");
 const refinements = @import("refinements.zig");
 const expr_helpers = @import("../expressions/helpers.zig");
 const return_stmt = @import("../statements/return.zig");
+const dedup = @import("../refinement_guard_helpers.zig");
 const log = @import("log");
 const crypto = std.crypto;
 const SymbolTable = @import("../lower.zig").SymbolTable;
@@ -496,13 +497,13 @@ pub fn lowerFunction(self: *const DeclarationLowerer, func: *const lib.FunctionN
     defer refinement_base_cache.deinit();
     var refinement_guard_cache = std.AutoHashMap(u128, void).init(std.heap.page_allocator);
     defer refinement_guard_cache.deinit();
-    var non_zero_param_names = std.StringHashMap(void).init(std.heap.page_allocator);
-    defer non_zero_param_names.deinit();
+    var param_refinements = std.StringHashMap(lib.ast.Types.OraType).init(std.heap.page_allocator);
+    defer param_refinements.deinit();
     for (func.parameters) |param| {
         if (param.type_info.ora_type) |ot| {
             switch (ot) {
-                .non_zero_address => {
-                    non_zero_param_names.put(param.name, {}) catch {};
+                .min_value, .max_value, .in_range, .non_zero_address => {
+                    param_refinements.put(param.name, ot) catch {};
                 },
                 else => {},
             }
@@ -544,7 +545,7 @@ pub fn lowerFunction(self: *const DeclarationLowerer, func: *const lib.FunctionN
             contract_storage_map,
             local_var_map orelse &local_vars,
             &refinement_base_cache,
-            &non_zero_param_names,
+            &param_refinements,
         ) catch |err| {
             log.err("lowering requires clauses: {s}\n", .{@errorName(err)});
         };
@@ -635,6 +636,7 @@ fn lowerFunctionBody(self: *const DeclarationLowerer, func: *const lib.FunctionN
     // create a statement lowerer for this function
     const const_local_var_map = if (local_var_map) |lvm| @as(*const LocalVarMap, lvm) else null;
     var expr_lowerer = ExpressionLowerer.init(self.ctx, block, self.type_mapper, param_map, storage_map, const_local_var_map, self.symbol_table, self.builtin_registry, self.error_handler, self.locations, self.ora_dialect);
+    expr_lowerer.module_exports = self.module_exports;
     expr_lowerer.refinement_base_cache = refinement_base_cache;
     expr_lowerer.prefer_refinement_base_cache = true;
     expr_lowerer.refinement_guard_cache = refinement_guard_cache;
@@ -672,79 +674,7 @@ fn lowerFunctionBody(self: *const DeclarationLowerer, func: *const lib.FunctionN
     }
 }
 
-fn isZeroAddressHexString(value: []const u8) bool {
-    var hex = value;
-    if (std.mem.startsWith(u8, hex, "0x") or std.mem.startsWith(u8, hex, "0X")) {
-        hex = hex[2..];
-    }
-    if (hex.len != 40) return false;
-    for (hex) |ch| {
-        if (ch != '0') return false;
-    }
-    return true;
-}
-
-fn isStdConstantsZeroAddress(expr: *const lib.ast.Expressions.ExprNode) bool {
-    switch (expr.*) {
-        .FieldAccess => |fa| {
-            if (!std.mem.eql(u8, fa.field, "ZERO_ADDRESS")) return false;
-            switch (fa.target.*) {
-                .FieldAccess => |constants_fa| {
-                    if (!std.mem.eql(u8, constants_fa.field, "constants")) return false;
-                    switch (constants_fa.target.*) {
-                        .Identifier => |base_id| return std.mem.eql(u8, base_id.name, "std"),
-                        else => return false,
-                    }
-                },
-                else => return false,
-            }
-        },
-        .Cast => |cast| return isStdConstantsZeroAddress(cast.operand),
-        else => return false,
-    }
-}
-
-fn isZeroAddressExpr(expr: *const lib.ast.Expressions.ExprNode) bool {
-    if (isStdConstantsZeroAddress(expr)) return true;
-    switch (expr.*) {
-        .Literal => |lit| switch (lit) {
-            .Address => |addr| return isZeroAddressHexString(addr.value),
-            .Hex => |hex| return isZeroAddressHexString(hex.value),
-            .Integer => |int_lit| return std.mem.eql(u8, int_lit.value, "0"),
-            else => return false,
-        },
-        .Cast => |cast| return isZeroAddressExpr(cast.operand),
-        else => return false,
-    }
-}
-
-fn identifierNameForPrecondition(expr: *const lib.ast.Expressions.ExprNode) ?[]const u8 {
-    switch (expr.*) {
-        .Identifier => |id| return id.name,
-        .Cast => |cast| return identifierNameForPrecondition(cast.operand),
-        else => return null,
-    }
-}
-
-fn isRedundantNonZeroRequiresClause(
-    clause: *const lib.ast.Expressions.ExprNode,
-    non_zero_param_names: *const std.StringHashMap(void),
-) bool {
-    switch (clause.*) {
-        .Binary => |bin| {
-            if (bin.operator != .BangEqual) return false;
-
-            if (identifierNameForPrecondition(bin.lhs)) |name| {
-                if (non_zero_param_names.contains(name) and isZeroAddressExpr(bin.rhs)) return true;
-            }
-            if (identifierNameForPrecondition(bin.rhs)) |name| {
-                if (non_zero_param_names.contains(name) and isZeroAddressExpr(bin.lhs)) return true;
-            }
-            return false;
-        },
-        else => return false,
-    }
-}
+const isRequiresCoveredByRefinement = dedup.isRequiresCoveredByRefinement;
 
 fn appendRequiresAssume(
     self: *const DeclarationLowerer,
@@ -788,10 +718,11 @@ fn lowerRequiresClauses(
     storage_map: ?*const StorageMap,
     local_var_map: ?*LocalVarMap,
     refinement_base_cache: *std.AutoHashMap(usize, c.MlirValue),
-    non_zero_param_names: *const std.StringHashMap(void),
+    param_refinements: *const std.StringHashMap(lib.ast.Types.OraType),
 ) LoweringError!void {
     const const_local_var_map = if (local_var_map) |lvm| @as(*const LocalVarMap, lvm) else null;
     var expr_lowerer = ExpressionLowerer.init(self.ctx, block, self.type_mapper, param_map, storage_map, const_local_var_map, self.symbol_table, self.builtin_registry, self.error_handler, self.locations, self.ora_dialect);
+    expr_lowerer.module_exports = self.module_exports;
     expr_lowerer.refinement_base_cache = refinement_base_cache;
     expr_lowerer.prefer_refinement_base_cache = true;
     if (param_map.base_args.count() > 0) {
@@ -812,7 +743,7 @@ fn lowerRequiresClauses(
 
         // If the precondition is already guaranteed by a parameter refinement type,
         // keep it for SMT reasoning but avoid emitting a duplicate runtime check.
-        if (isRedundantNonZeroRequiresClause(clause, non_zero_param_names)) {
+        if (isRequiresCoveredByRefinement(clause, param_refinements)) {
             appendRequiresAssume(self, block, condition_value, clause_loc, i);
             continue;
         }
@@ -862,6 +793,7 @@ fn lowerRequiresClauses(
 fn lowerEnsuresClauses(self: *const DeclarationLowerer, ensures_clauses: []*lib.ast.Expressions.ExprNode, block: c.MlirBlock, param_map: *const ParamMap, storage_map: ?*const StorageMap, local_var_map: ?*LocalVarMap) LoweringError!void {
     const const_local_var_map = if (local_var_map) |lvm| @as(*const LocalVarMap, lvm) else null;
     var expr_lowerer = ExpressionLowerer.init(self.ctx, block, self.type_mapper, param_map, storage_map, const_local_var_map, self.symbol_table, self.builtin_registry, self.error_handler, self.locations, self.ora_dialect);
+    expr_lowerer.module_exports = self.module_exports;
     expr_lowerer.prefer_refinement_base_cache = true;
 
     for (ensures_clauses, 0..) |clause, i| {
