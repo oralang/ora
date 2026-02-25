@@ -1026,7 +1026,10 @@ fn synthCall(
             if (self.module_exports) |me| {
                 const base = fa.target.Identifier.name;
                 if (me.isModuleAlias(base)) {
-                    if (me.lookupExport(base, fa.field)) |_| {
+                    if (me.lookupExport(base, fa.field)) |kind| {
+                        if (kind != .Function) {
+                            return TypeResolutionError.TypeMismatch;
+                        }
                         if (self.function_registry) |registry| {
                             const reg_map = @as(*std.StringHashMap(*FunctionNode), @ptrCast(@alignCast(registry)));
                             if (reg_map.get(fa.field)) |function| {
@@ -1315,9 +1318,10 @@ fn synthFieldAccess(
         if (fa.target.* == .Identifier) {
             const base = fa.target.Identifier.name;
             if (me.isModuleAlias(base)) {
-                if (me.lookupExport(base, fa.field)) |kind| {
-                    const result_type = switch (kind) {
+                if (me.lookupExportInfo(base, fa.field)) |export_info| {
+                    const result_type = switch (export_info.kind) {
                         .Function => blk: {
+                            if (export_info.type_info) |ti| break :blk ti;
                             if (self.function_registry) |registry| {
                                 const reg_map = @as(*std.StringHashMap(*FunctionNode), @ptrCast(@alignCast(registry)));
                                 if (reg_map.get(fa.field)) |function| {
@@ -1326,8 +1330,32 @@ fn synthFieldAccess(
                             }
                             break :blk TypeInfo.unknown();
                         },
-                        .Contract, .StructDecl, .EnumDecl, .BitfieldDecl => TypeInfo.unknown(),
-                        .Constant, .Variable => TypeInfo.unknown(),
+                        .Constant, .Variable => blk: {
+                            if (export_info.type_info) |ti| break :blk ti;
+
+                            // Fallback: resolved constant types are written back to symbols.
+                            const root_scope: ?*const Scope = @as(?*const Scope, @ptrCast(self.symbol_table.root));
+                            if (SymbolTable.findUp(root_scope, fa.field)) |sym| {
+                                if (sym.typ) |ti| break :blk ti;
+                            }
+                            break :blk TypeInfo.unknown();
+                        },
+                        .StructDecl => if (export_info.type_info) |ti|
+                            ti
+                        else
+                            TypeInfo.fromOraType(.{ .struct_type = fa.field }),
+                        .BitfieldDecl => if (export_info.type_info) |ti|
+                            ti
+                        else
+                            TypeInfo.fromOraType(.{ .bitfield_type = fa.field }),
+                        .EnumDecl => if (export_info.type_info) |ti|
+                            ti
+                        else
+                            TypeInfo.fromOraType(.{ .enum_type = fa.field }),
+                        .Contract => if (export_info.type_info) |ti|
+                            ti
+                        else
+                            TypeInfo.fromOraType(.{ .contract_type = fa.field }),
                         .LogDecl, .ErrorDecl => TypeInfo.unknown(),
                     };
                     fa.type_info = result_type;

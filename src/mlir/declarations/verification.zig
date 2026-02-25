@@ -66,13 +66,15 @@ pub fn lowerQuantifiedExpression(self: *const DeclarationLowerer, quantified: *c
     // lower the condition if present
     if (quantified.condition) |condition| {
         const const_local_var_map = if (local_var_map) |lvm| @as(*const LocalVarMap, lvm) else null;
-        const expr_lowerer = ExpressionLowerer.init(self.ctx, condition_block, self.type_mapper, param_map, storage_map, const_local_var_map, self.symbol_table, self.builtin_registry, self.error_handler, self.locations, self.ora_dialect);
+        var expr_lowerer = ExpressionLowerer.init(self.ctx, condition_block, self.type_mapper, param_map, storage_map, const_local_var_map, self.symbol_table, self.builtin_registry, self.error_handler, self.locations, self.ora_dialect);
+        expr_lowerer.module_exports = self.module_exports;
         _ = expr_lowerer.lowerExpression(condition);
     }
 
     // lower the body expression
     const const_local_var_map = if (local_var_map) |lvm| @as(*const LocalVarMap, lvm) else null;
-    const expr_lowerer = ExpressionLowerer.init(self.ctx, body_block, self.type_mapper, param_map, storage_map, const_local_var_map, self.symbol_table, self.builtin_registry, self.error_handler, self.locations, self.ora_dialect);
+    var expr_lowerer = ExpressionLowerer.init(self.ctx, body_block, self.type_mapper, param_map, storage_map, const_local_var_map, self.symbol_table, self.builtin_registry, self.error_handler, self.locations, self.ora_dialect);
+    expr_lowerer.module_exports = self.module_exports;
     _ = expr_lowerer.lowerExpression(quantified.body);
 
     h.appendOp(block, quantified_op);

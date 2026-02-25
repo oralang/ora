@@ -5,6 +5,7 @@ const import_resolver = @import("mod.zig");
 pub const ResolverOptions = import_resolver.ResolverOptions;
 
 pub const ExportKind = lib.semantics.state.ExportKind;
+pub const ExportInfo = lib.semantics.state.ExportInfo;
 pub const ModuleExportMap = lib.semantics.state.ModuleExportMap;
 
 pub const ParsedProgram = struct {
@@ -26,19 +27,26 @@ pub const ParsedProgram = struct {
 };
 
 const ParsedModuleState = struct {
+    allocator: std.mem.Allocator,
     nodes: []lib.AstNode = &.{},
-    exports: std.StringHashMap(ExportKind),
+    exports: std.StringHashMap(ExportInfo),
     alias_targets: std.StringHashMap([]const u8),
 
     fn init(allocator: std.mem.Allocator) ParsedModuleState {
         return .{
+            .allocator = allocator,
             .nodes = &.{},
-            .exports = std.StringHashMap(ExportKind).init(allocator),
+            .exports = std.StringHashMap(ExportInfo).init(allocator),
             .alias_targets = std.StringHashMap([]const u8).init(allocator),
         };
     }
 
     fn deinit(self: *ParsedModuleState) void {
+        var alias_it = self.alias_targets.iterator();
+        while (alias_it.next()) |entry| {
+            self.allocator.free(entry.key_ptr.*);
+            self.allocator.free(entry.value_ptr.*);
+        }
         self.exports.deinit();
         self.alias_targets.deinit();
     }
@@ -429,7 +437,14 @@ pub fn loadProgramWithImportsRawWithResolverOptions(
                 }
                 continue;
             }
-            try module_states[i].alias_targets.put(resolved_import.alias, resolved_import.target_canonical_id);
+
+            // Own alias->target strings in module state instead of borrowing
+            // graph memory; keeps this robust under future scope/refactor changes.
+            const alias_copy = try allocator.dupe(u8, resolved_import.alias);
+            errdefer allocator.free(alias_copy);
+            const target_copy = try allocator.dupe(u8, resolved_import.target_canonical_id);
+            errdefer allocator.free(target_copy);
+            try module_states[i].alias_targets.put(alias_copy, target_copy);
         }
 
         const source = std.fs.cwd().readFileAlloc(arena_allocator, module.resolved_path, 1024 * 1024) catch |err| {
@@ -452,16 +467,36 @@ pub fn loadProgramWithImportsRawWithResolverOptions(
         }
 
         for (nodes) |node| switch (node) {
-            .Function => |f| try module_states[i].exports.put(f.name, .Function),
-            .Constant => |c| try module_states[i].exports.put(c.name, .Constant),
-            .StructDecl => |s| try module_states[i].exports.put(s.name, .StructDecl),
-            .BitfieldDecl => |b| try module_states[i].exports.put(b.name, .BitfieldDecl),
+            .Function => |f| try module_states[i].exports.put(f.name, .{
+                .kind = .Function,
+                .type_info = f.return_type_info,
+            }),
+            .Constant => |c| try module_states[i].exports.put(c.name, .{
+                .kind = .Constant,
+                .type_info = c.typ,
+            }),
+            .StructDecl => |s| try module_states[i].exports.put(s.name, .{
+                .kind = .StructDecl,
+                .type_info = lib.ast.Types.TypeInfo.explicit(
+                    .Struct,
+                    .{ .struct_type = s.name },
+                    s.span,
+                ),
+            }),
+            .BitfieldDecl => |b| try module_states[i].exports.put(b.name, .{
+                .kind = .BitfieldDecl,
+                .type_info = lib.ast.Types.TypeInfo.explicit(
+                    .Bitfield,
+                    .{ .bitfield_type = b.name },
+                    b.span,
+                ),
+            }),
             // Left this to v2 of importer:
-            // .Contract => |c| try module_states[i].exports.put(c.name, .Contract),
-            // .EnumDecl => |e| try module_states[i].exports.put(e.name, .EnumDecl),
-            // .LogDecl => |l| try module_states[i].exports.put(l.name, .LogDecl),
-            // .ErrorDecl => |e| try module_states[i].exports.put(e.name, .ErrorDecl),
-            // .VariableDecl => |v| try module_states[i].exports.put(v.name, .Variable),
+            // .Contract => |c| try module_states[i].exports.put(c.name, .{ .kind = .Contract }),
+            // .EnumDecl => |e| try module_states[i].exports.put(e.name, .{ .kind = .EnumDecl }),
+            // .LogDecl => |l| try module_states[i].exports.put(l.name, .{ .kind = .LogDecl }),
+            // .ErrorDecl => |e| try module_states[i].exports.put(e.name, .{ .kind = .ErrorDecl }),
+            // .VariableDecl => |v| try module_states[i].exports.put(v.name, .{ .kind = .Variable }),
             else => {},
         };
     }
@@ -502,9 +537,8 @@ pub fn loadProgramWithImportsRawWithResolverOptions(
         }
     }
 
-    // Build the ModuleExportMap: alias -> { member -> ExportKind }.
-    // Use the stable function allocator for hash-map internals, not the local
-    // arena allocator (the arena value is moved on return).
+    // Build the ModuleExportMap: alias -> { member -> ExportInfo }.
+    // Own all map key strings with the same allocator used by the map.
     var mod_exports = try allocator.create(ModuleExportMap);
     errdefer allocator.destroy(mod_exports);
     mod_exports.* = ModuleExportMap.init(allocator);
@@ -519,10 +553,25 @@ pub fn loadProgramWithImportsRawWithResolverOptions(
 
             if (mod_exports.entries.contains(alias)) continue;
 
-            const alias_copy = try arena_allocator.dupe(u8, alias);
-            var export_copy = std.StringHashMap(ExportKind).init(allocator);
+            const alias_copy = try allocator.dupe(u8, alias);
+            errdefer allocator.free(alias_copy);
+
+            var export_copy = std.StringHashMap(ExportInfo).init(allocator);
+            errdefer {
+                var export_copy_it = export_copy.iterator();
+                while (export_copy_it.next()) |export_entry| {
+                    allocator.free(export_entry.key_ptr.*);
+                }
+                export_copy.deinit();
+            }
+
             var src_it = module_states[target_idx].exports.iterator();
-            while (src_it.next()) |ex| try export_copy.put(ex.key_ptr.*, ex.value_ptr.*);
+            while (src_it.next()) |ex| {
+                const member_copy = try allocator.dupe(u8, ex.key_ptr.*);
+                errdefer allocator.free(member_copy);
+                try export_copy.put(member_copy, ex.value_ptr.*);
+            }
+
             try mod_exports.entries.put(alias_copy, export_copy);
         }
     }

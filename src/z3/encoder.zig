@@ -1760,7 +1760,10 @@ pub const Encoder = struct {
         }
 
         // ---- ora.assert: encode condition as a verification obligation ----
-        // Handles checked-arithmetic overflow assertions, runtime guards, etc.
+        // Handles checked-arithmetic overflow assertions and runtime guards.
+        //
+        // Note: cf.assert is handled in verification extraction where tagged
+        // requires/ensures are interpreted with their dedicated semantics.
         if (std.mem.eql(u8, op_name, "ora.assert")) {
             if (operands.len >= 1) {
                 const condition = self.coerceToBool(operands[0]);
@@ -2622,6 +2625,10 @@ pub const Encoder = struct {
             try summary_encoder.bindValue(arg_value, operands[i]);
         }
 
+        var callee_requires = std.ArrayList(z3.Z3_ast){};
+        defer callee_requires.deinit(self.allocator);
+        try summary_encoder.collectRequiresForSummary(func_op, &callee_requires);
+
         const return_op = self.findFunctionReturnOp(func_op) orelse return null;
         const ret_operands = mlir.oraOperationGetNumOperands(return_op);
         if (result_index >= ret_operands) return null;
@@ -2635,7 +2642,7 @@ pub const Encoder = struct {
 
         const extra_obligations = try summary_encoder.takeObligations(self.allocator);
         defer if (extra_obligations.len > 0) self.allocator.free(extra_obligations);
-        for (extra_obligations) |obl| self.addObligation(obl);
+        self.addSummaryObligations(extra_obligations, callee_requires.items);
 
         return encoded;
     }
@@ -2684,6 +2691,10 @@ pub const Encoder = struct {
             try summary_encoder.bindValue(arg_value, operands[i]);
         }
 
+        var callee_requires = std.ArrayList(z3.Z3_ast){};
+        defer callee_requires.deinit(self.allocator);
+        try summary_encoder.collectRequiresForSummary(func_op, &callee_requires);
+
         // Materialize stateful effects from the callee body so summary state
         // reflects sstore/map_store updates before we snapshot post-state.
         summary_encoder.encodeStateEffectsInOperation(func_op);
@@ -2707,7 +2718,7 @@ pub const Encoder = struct {
 
         const extra_obligations = try summary_encoder.takeObligations(self.allocator);
         defer if (extra_obligations.len > 0) self.allocator.free(extra_obligations);
-        for (extra_obligations) |obl| self.addObligation(obl);
+        self.addSummaryObligations(extra_obligations, callee_requires.items);
 
         for (slots) |*slot| {
             if (summary_encoder.global_map.get(slot.name)) |post| {
@@ -2718,6 +2729,68 @@ pub const Encoder = struct {
         return any_result or slots.len > 0;
     }
 
+    fn collectRequiresForSummary(
+        self: *Encoder,
+        op: mlir.MlirOperation,
+        out: *std.ArrayList(z3.Z3_ast),
+    ) EncodeError!void {
+        const name_ref = mlir.oraOperationGetName(op);
+        defer @import("mlir_c_api").freeStringRef(name_ref);
+        if (name_ref.data != null and name_ref.length > 0) {
+            const op_name = name_ref.data[0..name_ref.length];
+            if (std.mem.eql(u8, op_name, "cf.assert")) {
+                const requires_attr = mlir.oraOperationGetAttributeByName(op, mlir.oraStringRefCreate("ora.requires", 12));
+                if (!mlir.oraAttributeIsNull(requires_attr) and mlir.oraOperationGetNumOperands(op) >= 1) {
+                    const condition_value = mlir.oraOperationGetOperand(op, 0);
+                    const encoded = self.encodeValue(condition_value) catch null;
+                    if (encoded) |cond| {
+                        try out.append(self.allocator, self.coerceToBool(cond));
+                    }
+                }
+            } else if (std.mem.eql(u8, op_name, "ora.requires")) {
+                if (mlir.oraOperationGetNumOperands(op) >= 1) {
+                    const condition_value = mlir.oraOperationGetOperand(op, 0);
+                    const encoded = self.encodeValue(condition_value) catch null;
+                    if (encoded) |cond| {
+                        try out.append(self.allocator, self.coerceToBool(cond));
+                    }
+                }
+            }
+        }
+
+        const num_regions: usize = @intCast(mlir.oraOperationGetNumRegions(op));
+        for (0..num_regions) |region_idx| {
+            const region = mlir.oraOperationGetRegion(op, region_idx);
+            if (mlir.oraRegionIsNull(region)) continue;
+            var block = mlir.oraRegionGetFirstBlock(region);
+            while (!mlir.oraBlockIsNull(block)) {
+                var nested = mlir.oraBlockGetFirstOperation(block);
+                while (!mlir.oraOperationIsNull(nested)) {
+                    try self.collectRequiresForSummary(nested, out);
+                    nested = mlir.oraOperationGetNextInBlock(nested);
+                }
+                block = mlir.oraBlockGetNextInRegion(block);
+            }
+        }
+    }
+
+    fn addSummaryObligations(
+        self: *Encoder,
+        obligations: []const z3.Z3_ast,
+        requires: []const z3.Z3_ast,
+    ) void {
+        if (obligations.len == 0) return;
+        if (requires.len == 0) {
+            for (obligations) |obl| self.addObligation(obl);
+            return;
+        }
+
+        const precondition_guard = self.encodeAnd(requires);
+        for (obligations) |obl| {
+            self.addObligation(self.encodeImplies(precondition_guard, obl));
+        }
+    }
+
     fn encodeStateEffectsInOperation(self: *Encoder, op: mlir.MlirOperation) void {
         const name_ref = mlir.oraOperationGetName(op);
         defer @import("mlir_c_api").freeStringRef(name_ref);
@@ -2726,7 +2799,8 @@ pub const Encoder = struct {
             if (std.mem.eql(u8, op_name, "ora.sstore") or
                 std.mem.eql(u8, op_name, "ora.map_store") or
                 std.mem.eql(u8, op_name, "func.call") or
-                std.mem.eql(u8, op_name, "call"))
+                std.mem.eql(u8, op_name, "call") or
+                std.mem.eql(u8, op_name, "ora.assert"))
             {
                 _ = self.encodeOperation(op) catch {};
             }
