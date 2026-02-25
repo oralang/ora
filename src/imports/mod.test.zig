@@ -117,6 +117,35 @@ test "imports: relative specifier must include .ora extension" {
     );
 }
 
+test "imports: relative import cannot escape workspace root" {
+    const allocator = testing.allocator;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.makePath("project/contracts");
+    try tmp.dir.makePath("outside");
+
+    try tmp.dir.writeFile(.{
+        .sub_path = "outside/secret.ora",
+        .data = "contract Secret { }",
+    });
+    try tmp.dir.writeFile(.{
+        .sub_path = "project/contracts/entry.ora",
+        .data = "const secret = @import(\"../../outside/secret.ora\");",
+    });
+
+    const entry_path = try pathFromTmpAlloc(allocator, tmp, "project/contracts/entry.ora");
+    defer allocator.free(entry_path);
+    const workspace_root = try pathFromTmpAlloc(allocator, tmp, "project");
+    defer allocator.free(workspace_root);
+
+    const roots = [_][]const u8{workspace_root};
+    try testing.expectError(
+        error.RelativeImportOutsideAllowedRoots,
+        imports.validateNormalImportsWithOptions(allocator, entry_path, .{ .workspace_roots = roots[0..] }),
+    );
+}
+
 test "imports: package style resolves from workspace roots" {
     const allocator = testing.allocator;
     var tmp = testing.tmpDir(.{});

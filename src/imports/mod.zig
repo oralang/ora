@@ -24,6 +24,7 @@ pub const ImportValidationError = error{
     ImportAliasRequired,
     DuplicateImportAlias,
     RelativeImportMustIncludeOraExtension,
+    RelativeImportOutsideAllowedRoots,
     InvalidImportSpecifier,
     PackageRootConflict,
     ParseFailed,
@@ -279,7 +280,6 @@ const Resolver = struct {
         };
 
         const canonical_id = std.fmt.allocPrint(self.allocator, "file:{s}", .{resolved_path}) catch {
-            self.allocator.free(resolved_path);
             return ImportValidationError.OutOfMemory;
         };
 
@@ -325,6 +325,7 @@ const Resolver = struct {
         }
 
         try self.states.put(record.canonical_id, .visiting);
+        errdefer _ = self.states.remove(record.canonical_id);
         try self.stack.append(self.allocator, record.canonical_id);
         defer _ = self.stack.pop();
 
@@ -407,6 +408,16 @@ const Resolver = struct {
             std.log.warn("Import target not found: '{s}' in module '{s}' ({s})", .{ specifier, importer.resolved_path, @errorName(err) });
             return ImportValidationError.ImportTargetNotFound;
         };
+        errdefer self.allocator.free(resolved_path);
+
+        if (!try self.isAllowedRelativePath(resolved_path)) {
+            std.log.warn("Relative import escapes allowed roots: '{s}' resolved to '{s}' from '{s}'", .{
+                specifier,
+                resolved_path,
+                importer.resolved_path,
+            });
+            return ImportValidationError.RelativeImportOutsideAllowedRoots;
+        }
 
         const canonical_id = std.fmt.allocPrint(self.allocator, "file:{s}", .{resolved_path}) catch {
             self.allocator.free(resolved_path);
@@ -418,6 +429,42 @@ const Resolver = struct {
             .canonical_id = canonical_id,
             .resolved_path = resolved_path,
         };
+    }
+
+    fn isPathWithinRoot(path: []const u8, root: []const u8) bool {
+        if (!std.mem.startsWith(u8, path, root)) return false;
+        if (path.len == root.len) return true;
+        if (root.len == 0) return false;
+        if (root[root.len - 1] == std.fs.path.sep) return true;
+        return path[root.len] == std.fs.path.sep;
+    }
+
+    fn isAllowedRelativePath(self: *Resolver, resolved_path: []const u8) ImportValidationError!bool {
+        if (self.options.workspace_roots.len == 0 and self.options.include_roots.len == 0) {
+            const cwd_root = std.fs.cwd().realpathAlloc(self.allocator, ".") catch {
+                return ImportValidationError.OutOfMemory;
+            };
+            defer self.allocator.free(cwd_root);
+            return isPathWithinRoot(resolved_path, cwd_root);
+        }
+
+        for (self.options.workspace_roots) |root| {
+            const real_root = std.fs.cwd().realpathAlloc(self.allocator, root) catch {
+                continue;
+            };
+            defer self.allocator.free(real_root);
+            if (isPathWithinRoot(resolved_path, real_root)) return true;
+        }
+
+        for (self.options.include_roots) |root| {
+            const real_root = std.fs.cwd().realpathAlloc(self.allocator, root) catch {
+                continue;
+            };
+            defer self.allocator.free(real_root);
+            if (isPathWithinRoot(resolved_path, real_root)) return true;
+        }
+
+        return false;
     }
 
     fn parsePackageSpecifier(specifier: []const u8) ImportValidationError!PackageSpecifier {

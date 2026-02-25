@@ -118,16 +118,37 @@ pub const ExportKind = enum {
     Variable,
 };
 
+pub const ExportInfo = struct {
+    kind: ExportKind,
+    /// Optional static type info for exported members.
+    /// - constants/variables: declaration type (if known at loader time)
+    /// - struct/bitfield/enum/contract: corresponding named type
+    /// - functions: declared return type (if present)
+    type_info: ?TypeInfo = null,
+};
+
 pub const ModuleExportMap = struct {
-    entries: std.StringHashMap(std.StringHashMap(ExportKind)),
+    allocator: std.mem.Allocator,
+    entries: std.StringHashMap(std.StringHashMap(ExportInfo)),
 
     pub fn init(allocator: std.mem.Allocator) ModuleExportMap {
-        return .{ .entries = std.StringHashMap(std.StringHashMap(ExportKind)).init(allocator) };
+        return .{
+            .allocator = allocator,
+            .entries = std.StringHashMap(std.StringHashMap(ExportInfo)).init(allocator),
+        };
     }
 
     pub fn deinit(self: *ModuleExportMap) void {
         var it = self.entries.iterator();
-        while (it.next()) |entry| entry.value_ptr.deinit();
+        while (it.next()) |entry| {
+            self.allocator.free(entry.key_ptr.*);
+
+            var export_it = entry.value_ptr.iterator();
+            while (export_it.next()) |export_entry| {
+                self.allocator.free(export_entry.key_ptr.*);
+            }
+            entry.value_ptr.deinit();
+        }
         self.entries.deinit();
     }
 
@@ -136,7 +157,19 @@ pub const ModuleExportMap = struct {
     }
 
     pub fn lookupExport(self: *const ModuleExportMap, alias: []const u8, member: []const u8) ?ExportKind {
+        if (self.entries.get(alias)) |exports| {
+            if (exports.get(member)) |info| return info.kind;
+        }
+        return null;
+    }
+
+    pub fn lookupExportInfo(self: *const ModuleExportMap, alias: []const u8, member: []const u8) ?ExportInfo {
         if (self.entries.get(alias)) |exports| return exports.get(member);
+        return null;
+    }
+
+    pub fn lookupExportType(self: *const ModuleExportMap, alias: []const u8, member: []const u8) ?TypeInfo {
+        if (self.lookupExportInfo(alias, member)) |info| return info.type_info;
         return null;
     }
 };

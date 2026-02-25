@@ -827,3 +827,355 @@ test "program loader: imported library allows pub fn, struct, and bitfield expor
     try testing.expectEqual(loader.ExportKind.StructDecl, me.lookupExport("util", "Point").?);
     try testing.expectEqual(loader.ExportKind.BitfieldDecl, me.lookupExport("util", "Flags").?);
 }
+
+test "program loader: typed load rejects calling non-function module export" {
+    const allocator = testing.allocator;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.writeFile(.{
+        .sub_path = "util.ora",
+        .data =
+        \\struct Point {
+        \\    x: u256;
+        \\    y: u256;
+        \\}
+        ,
+    });
+
+    try tmp.dir.writeFile(.{
+        .sub_path = "entry.ora",
+        .data =
+        \\const util = @import("./util.ora");
+        \\
+        \\contract BadCall {
+        \\    pub fn run() -> u256 {
+        \\        return util.Point();
+        \\    }
+        \\}
+        ,
+    });
+
+    const entry_path = try pathFromTmpAlloc(allocator, tmp, "entry.ora");
+    defer allocator.free(entry_path);
+
+    try testing.expectError(error.TypeMismatch, loader.loadProgramWithImportsTyped(allocator, entry_path));
+}
+
+test "program loader: module export map carries exported type info" {
+    const allocator = testing.allocator;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.writeFile(.{
+        .sub_path = "util.ora",
+        .data =
+        \\struct Point {
+        \\    x: u256;
+        \\    y: u256;
+        \\}
+        \\
+        \\bitfield Flags : u256 {
+        \\    enabled: bool;
+        \\}
+        \\
+        \\pub fn add(a: u256, b: u256) -> u256 {
+        \\    return a + b;
+        \\}
+        ,
+    });
+
+    try tmp.dir.writeFile(.{
+        .sub_path = "entry.ora",
+        .data =
+        \\const util = @import("./util.ora");
+        \\
+        \\contract ExportTypes {
+        \\    pub fn run() -> u256 {
+        \\        return util.add(1, 2);
+        \\    }
+        \\}
+        ,
+    });
+
+    const entry_path = try pathFromTmpAlloc(allocator, tmp, "entry.ora");
+    defer allocator.free(entry_path);
+
+    var program = try loader.loadProgramWithImportsRaw(allocator, entry_path);
+    defer program.deinit();
+
+    const me = program.module_exports.?;
+
+    const add_ty = me.lookupExportType("util", "add").?;
+    try testing.expectEqual(lib.ast.Types.TypeCategory.Integer, add_ty.category);
+    try testing.expect(add_ty.ora_type != null);
+    try testing.expect(add_ty.ora_type.? == .u256);
+
+    const point_ty = me.lookupExportType("util", "Point").?;
+    try testing.expectEqual(lib.ast.Types.TypeCategory.Struct, point_ty.category);
+    try testing.expect(point_ty.ora_type != null);
+    try testing.expect(point_ty.ora_type.? == .struct_type);
+    try testing.expectEqualStrings("Point", point_ty.ora_type.?.struct_type);
+
+    const flags_ty = me.lookupExportType("util", "Flags").?;
+    try testing.expectEqual(lib.ast.Types.TypeCategory.Bitfield, flags_ty.category);
+    try testing.expect(flags_ty.ora_type != null);
+    try testing.expect(flags_ty.ora_type.? == .bitfield_type);
+    try testing.expectEqualStrings("Flags", flags_ty.ora_type.?.bitfield_type);
+}
+
+test "program loader: typed load infers imported type declaration for qualified access" {
+    const allocator = testing.allocator;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.writeFile(.{
+        .sub_path = "util.ora",
+        .data =
+        \\struct Point {
+        \\    x: u256;
+        \\    y: u256;
+        \\}
+        ,
+    });
+
+    try tmp.dir.writeFile(.{
+        .sub_path = "entry.ora",
+        .data =
+        \\const util = @import("./util.ora");
+        \\
+        \\contract ImportedTypeInference {
+        \\    pub fn run() -> u256 {
+        \\        var p = util.Point;
+        \\        return 0;
+        \\    }
+        \\}
+        ,
+    });
+
+    const entry_path = try pathFromTmpAlloc(allocator, tmp, "entry.ora");
+    defer allocator.free(entry_path);
+
+    var program = try loader.loadProgramWithImportsTyped(allocator, entry_path);
+    defer program.deinit();
+
+    var saw_inferred_struct = false;
+    for (program.nodes) |node| {
+        if (node != .Contract or !std.mem.eql(u8, node.Contract.name, "ImportedTypeInference")) continue;
+        for (node.Contract.body) |member| {
+            if (member != .Function or !std.mem.eql(u8, member.Function.name, "run")) continue;
+            if (member.Function.body.statements.len == 0) continue;
+            const first_stmt = member.Function.body.statements[0];
+            if (first_stmt != .VariableDecl) continue;
+
+            const var_decl = first_stmt.VariableDecl;
+            try testing.expectEqual(lib.ast.Types.TypeCategory.Struct, var_decl.type_info.category);
+            try testing.expect(var_decl.type_info.ora_type != null);
+            try testing.expect(var_decl.type_info.ora_type.? == .struct_type);
+            try testing.expectEqualStrings("Point", var_decl.type_info.ora_type.?.struct_type);
+            saw_inferred_struct = true;
+        }
+    }
+
+    try testing.expect(saw_inferred_struct);
+}
+
+test "program loader: typed load supports transitive imports (A -> B -> C)" {
+    const allocator = testing.allocator;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.writeFile(.{
+        .sub_path = "c.ora",
+        .data =
+        \\pub fn fC() -> u256 {
+        \\    return 1;
+        \\}
+        ,
+    });
+
+    try tmp.dir.writeFile(.{
+        .sub_path = "b.ora",
+        .data =
+        \\const lib_c = @import("./c.ora");
+        \\
+        \\pub fn fB() -> u256 {
+        \\    return lib_c.fC();
+        \\}
+        ,
+    });
+
+    try tmp.dir.writeFile(.{
+        .sub_path = "a.ora",
+        .data =
+        \\const lib_b = @import("./b.ora");
+        \\
+        \\pub fn fA() -> u256 {
+        \\    return lib_b.fB();
+        \\}
+        ,
+    });
+
+    try tmp.dir.writeFile(.{
+        .sub_path = "entry.ora",
+        .data =
+        \\const lib_a = @import("./a.ora");
+        \\
+        \\contract TransitiveImports {
+        \\    pub fn run() -> u256 {
+        \\        return lib_a.fA();
+        \\    }
+        \\}
+        ,
+    });
+
+    const entry_path = try pathFromTmpAlloc(allocator, tmp, "entry.ora");
+    defer allocator.free(entry_path);
+
+    var program = try loader.loadProgramWithImportsTyped(allocator, entry_path);
+    defer program.deinit();
+
+    const me = program.module_exports.?;
+    try testing.expectEqual(loader.ExportKind.Function, me.lookupExport("lib_a", "fA").?);
+    try testing.expectEqual(loader.ExportKind.Function, me.lookupExport("lib_b", "fB").?);
+    try testing.expectEqual(loader.ExportKind.Function, me.lookupExport("lib_c", "fC").?);
+}
+
+test "program loader: cycle detection surfaces as loader error" {
+    const allocator = testing.allocator;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.writeFile(.{
+        .sub_path = "entry.ora",
+        .data = "const a = @import(\"./a.ora\");",
+    });
+    try tmp.dir.writeFile(.{
+        .sub_path = "a.ora",
+        .data = "const b = @import(\"./b.ora\");",
+    });
+    try tmp.dir.writeFile(.{
+        .sub_path = "b.ora",
+        .data = "const a = @import(\"./a.ora\");",
+    });
+
+    const entry_path = try pathFromTmpAlloc(allocator, tmp, "entry.ora");
+    defer allocator.free(entry_path);
+
+    try testing.expectError(error.ImportCycleDetected, loader.loadProgramWithImportsRaw(allocator, entry_path));
+}
+
+test "program loader: allows multiple aliases to the same module target" {
+    const allocator = testing.allocator;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.writeFile(.{
+        .sub_path = "math.ora",
+        .data =
+        \\pub fn add(a: u256, b: u256) -> u256 {
+        \\    return a + b;
+        \\}
+        ,
+    });
+
+    try tmp.dir.writeFile(.{
+        .sub_path = "entry.ora",
+        .data =
+        \\const m1 = @import("./math.ora");
+        \\const m2 = @import("./math.ora");
+        \\
+        \\contract MultiAliasSameTarget {
+        \\    pub fn run() -> u256 {
+        \\        return m1.add(1, 2) + m2.add(3, 4);
+        \\    }
+        \\}
+        ,
+    });
+
+    const entry_path = try pathFromTmpAlloc(allocator, tmp, "entry.ora");
+    defer allocator.free(entry_path);
+
+    var program = try loader.loadProgramWithImportsTyped(allocator, entry_path);
+    defer program.deinit();
+
+    const me = program.module_exports.?;
+    try testing.expectEqual(loader.ExportKind.Function, me.lookupExport("m1", "add").?);
+    try testing.expectEqual(loader.ExportKind.Function, me.lookupExport("m2", "add").?);
+}
+
+test "program loader: module export map supports constant export metadata" {
+    const allocator = testing.allocator;
+
+    var me = loader.ModuleExportMap.init(allocator);
+    defer me.deinit();
+
+    const alias = try allocator.dupe(u8, "math");
+    var exports = std.StringHashMap(loader.ExportInfo).init(allocator);
+    const member = try allocator.dupe(u8, "FEE_BPS");
+    try exports.put(member, .{
+        .kind = .Constant,
+        .type_info = lib.ast.Types.TypeInfo.fromOraType(.{ .u256 = {} }),
+    });
+    try me.entries.put(alias, exports);
+
+    try testing.expectEqual(loader.ExportKind.Constant, me.lookupExport("math", "FEE_BPS").?);
+    const type_info = me.lookupExportType("math", "FEE_BPS").?;
+    try testing.expectEqual(lib.ast.Types.TypeCategory.Integer, type_info.category);
+    try testing.expect(type_info.ora_type != null);
+    try testing.expect(type_info.ora_type.? == .u256);
+}
+
+test "program loader: include_roots resolves transitive package imports with .ora auto-append" {
+    const allocator = testing.allocator;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.makePath("deps/acme");
+    try tmp.dir.writeFile(.{
+        .sub_path = "deps/acme/util.ora",
+        .data =
+        \\pub fn one() -> u256 {
+        \\    return 1;
+        \\}
+        ,
+    });
+    try tmp.dir.writeFile(.{
+        .sub_path = "deps/acme/math.ora",
+        .data =
+        \\const util_pkg = @import("acme/util");
+        \\
+        \\pub fn addOne(x: u256) -> u256 {
+        \\    return x + util_pkg.one();
+        \\}
+        ,
+    });
+
+    try tmp.dir.writeFile(.{
+        .sub_path = "entry.ora",
+        .data =
+        \\const math_pkg = @import("acme/math");
+        \\
+        \\contract IncludeRootsTransitive {
+        \\    pub fn run() -> u256 {
+        \\        return math_pkg.addOne(41);
+        \\    }
+        \\}
+        ,
+    });
+
+    const entry_path = try pathFromTmpAlloc(allocator, tmp, "entry.ora");
+    defer allocator.free(entry_path);
+    const deps_root = try pathFromTmpAlloc(allocator, tmp, "deps");
+    defer allocator.free(deps_root);
+
+    const include_roots = [_][]const u8{deps_root};
+    var program = try loader.loadProgramWithImportsRawWithResolverOptions(allocator, entry_path, .{
+        .include_roots = include_roots[0..],
+    });
+    defer program.deinit();
+
+    const me = program.module_exports.?;
+    try testing.expectEqual(loader.ExportKind.Function, me.lookupExport("math_pkg", "addOne").?);
+    try testing.expectEqual(loader.ExportKind.Function, me.lookupExport("util_pkg", "one").?);
+}
