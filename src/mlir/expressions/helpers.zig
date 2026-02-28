@@ -92,6 +92,9 @@ pub fn createArithmeticOp(ctx: c.MlirContext, block: c.MlirBlock, type_mapper: *
     var rhs_converted = rhs_unwrapped;
     if (!c.oraTypeEqual(lhs_type, rhs_type)) {
         rhs_converted = type_mapper.createConversionOp(block, rhs_unwrapped, lhs_type, span);
+        if (c.oraValueIsNull(rhs_converted)) {
+            return createErrorPlaceholder(ctx, block, locations, span, "failed arithmetic operand type conversion");
+        }
     }
 
     const loc = locations.createLocation(span);
@@ -201,12 +204,12 @@ pub fn predicateStringToInt(predicate: []const u8) i64 {
     if (std.mem.eql(u8, predicate, "ule")) return 7;
     if (std.mem.eql(u8, predicate, "ugt")) return 8;
     if (std.mem.eql(u8, predicate, "uge")) return 9;
-    log.warn("Unknown predicate '{s}', defaulting to 'eq' (0)\n", .{predicate});
-    return 0;
+    std.debug.panic("Unknown comparison predicate in MLIR lowering: {s}", .{predicate});
 }
 
 /// Get common type for binary operations
 pub fn getCommonType(ctx: c.MlirContext, lhs_ty: c.MlirType, rhs_ty: c.MlirType) c.MlirType {
+    _ = ctx;
     if (c.oraTypeEqual(lhs_ty, rhs_ty)) {
         return lhs_ty;
     }
@@ -221,7 +224,7 @@ pub fn getCommonType(ctx: c.MlirContext, lhs_ty: c.MlirType, rhs_ty: c.MlirType)
         return if (lhs_width >= rhs_width) lhs_ty else rhs_ty;
     }
 
-    return c.oraIntegerTypeCreate(ctx, constants.DEFAULT_INTEGER_BITS);
+    std.debug.panic("No common MLIR type for binary operation operands", .{});
 }
 
 /// Create boolean constant

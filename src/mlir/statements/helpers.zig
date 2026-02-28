@@ -365,6 +365,9 @@ pub fn convertValueToType(
 
     // try TypeMapper conversion first
     const converted = self.expr_lowerer.convertToType(value, target_type, span);
+    if (c.oraValueIsNull(converted)) {
+        return converted;
+    }
     const converted_type = c.oraValueGetType(converted);
 
     // check if conversion succeeded
@@ -394,7 +397,16 @@ pub fn convertValueToType(
         }
     }
 
-    // return converted value (may fail verification, but best effort)
+    if (self.expr_lowerer.error_handler) |handler| {
+        handler.reportError(
+            .TypeMismatch,
+            span,
+            "Failed to convert value to target MLIR type during statement lowering",
+            "Add an explicit supported conversion or align source and target types.",
+        ) catch {};
+    } else {
+        log.err("Failed to convert value to target MLIR type during statement lowering\n", .{});
+    }
     return converted;
 }
 
@@ -913,8 +925,17 @@ pub fn createDefaultValueForType(self: *const StatementLowerer, mlir_type: c.Mli
         if (convert_op.ptr != null) {
             return h.getResult(convert_op, 0);
         }
-        // fallback if conversion failed
-        return base_value;
+        if (self.expr_lowerer.error_handler) |handler| {
+            handler.reportError(
+                .MlirOperationFailed,
+                null,
+                "Failed to create default refinement value during statement lowering",
+                "Ensure ora.base_to_refinement is available for this refinement type.",
+            ) catch {};
+        } else {
+            log.err("Failed to create default refinement value during statement lowering\n", .{});
+        }
+        return StatementLowerer.LoweringError.MlirOperationFailed;
     }
 
     // check if it's an integer type
@@ -925,11 +946,17 @@ pub fn createDefaultValueForType(self: *const StatementLowerer, mlir_type: c.Mli
         return h.getResult(const_op, 0);
     }
 
-    // for other types, create a zero constant (simplified)
-    const zero_type = c.oraIntegerTypeCreate(self.ctx, constants.DEFAULT_INTEGER_BITS);
-    const const_op = self.ora_dialect.createArithConstant(0, zero_type, loc);
-    h.appendOp(self.block, const_op);
-    return h.getResult(const_op, 0);
+    if (self.expr_lowerer.error_handler) |handler| {
+        handler.reportError(
+            .TypeMismatch,
+            null,
+            "Cannot synthesize a default value for non-integer statement result type",
+            "Add explicit lowering for this MLIR type instead of using an integer fallback.",
+        ) catch {};
+    } else {
+        log.err("Cannot synthesize a default value for non-integer statement result type\n", .{});
+    }
+    return StatementLowerer.LoweringError.TypeMismatch;
 }
 
 /// Get the return type from an if statement's return statements

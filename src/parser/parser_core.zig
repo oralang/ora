@@ -29,9 +29,25 @@ const TypeParser = @import("type_parser.zig").TypeParser;
 const DeclarationParser = @import("declaration_parser.zig").DeclarationParser;
 const common = @import("common.zig");
 const log = @import("log");
+const semantics_core = @import("../semantics/core.zig");
 
 /// Parser errors with detailed diagnostics (alias common.ParserError for consistency)
 pub const ParserError = common.ParserError;
+
+fn analyzePhase1ForParser(allocator: Allocator, nodes: []const AstNode) ParserError!semantics_core.SemanticsResult {
+    return semantics_core.analyzePhase1(allocator, nodes) catch |err| {
+        if (!builtin.is_test) {
+            log.err("Semantic analysis phase 1 failed: {s}\n", .{@errorName(err)});
+            if (err == error.MissingParameterType) {
+                log.help("all function parameters must have an explicit or resolved type before lowering\n", .{});
+            }
+        }
+        return switch (err) {
+            error.OutOfMemory => ParserError.OutOfMemory,
+            else => ParserError.TypeResolutionFailed,
+        };
+    };
+}
 
 /// Main parser for Ora language
 pub const Parser = struct {
@@ -289,8 +305,7 @@ pub fn parseWithArena(allocator: Allocator, tokens: []const Token) ParserError!s
 
     // collect symbols (errors, functions, structs, etc.) into symbol table before type resolution
     // use analyzePhase1 which creates contract scopes and function scopes properly
-    const semantics_core = @import("../semantics/core.zig");
-    var semantics_result = try semantics_core.analyzePhase1(allocator, nodes);
+    var semantics_result = try analyzePhase1ForParser(allocator, nodes);
     defer allocator.free(semantics_result.diagnostics);
     defer semantics_result.symbols.deinit();
     ensureLogSignatures(&semantics_result.symbols, nodes) catch |err| {
@@ -349,8 +364,7 @@ pub fn parse(allocator: Allocator, tokens: []const Token) ParserError![]AstNode 
 
     // collect symbols (errors, functions, structs, etc.) into symbol table before type resolution
     // use analyzePhase1 which creates contract scopes and function scopes properly
-    const semantics_core = @import("../semantics/core.zig");
-    var semantics_result = try semantics_core.analyzePhase1(allocator, nodes);
+    var semantics_result = try analyzePhase1ForParser(allocator, nodes);
     defer allocator.free(semantics_result.diagnostics);
     defer semantics_result.symbols.deinit();
     ensureLogSignatures(&semantics_result.symbols, nodes) catch |err| {

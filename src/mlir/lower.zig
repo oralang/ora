@@ -522,6 +522,50 @@ pub const LoweringResult = struct {
     }
 };
 
+fn finalizeLoweringResult(
+    module: c.MlirModule,
+    error_handler: *ErrorHandler,
+    allocator: std.mem.Allocator,
+) !LoweringResult {
+    const handler_errors = error_handler.getErrors();
+    const handler_warnings = error_handler.getWarnings();
+
+    var errors = try allocator.alloc(LoweringError, handler_errors.len);
+    for (handler_errors, 0..) |e, i| {
+        const msg_copy = try allocator.dupe(u8, e.message);
+        const sugg_copy: ?[]const u8 = if (e.suggestion) |s|
+            try allocator.dupe(u8, s)
+        else
+            null;
+
+        errors[i] = LoweringError{
+            .error_type = e.error_type,
+            .span = e.span,
+            .message = msg_copy,
+            .suggestion = sugg_copy,
+            .context = e.context,
+        };
+    }
+
+    var warnings = try allocator.alloc(LoweringWarning, handler_warnings.len);
+    for (handler_warnings, 0..) |w, i| {
+        const msg_copy = try allocator.dupe(u8, w.message);
+        warnings[i] = LoweringWarning{
+            .warning_type = w.warning_type,
+            .span = w.span,
+            .message = msg_copy,
+        };
+    }
+
+    return LoweringResult{
+        .module = module,
+        .errors = errors,
+        .warnings = warnings,
+        .success = handler_errors.len == 0,
+        .pass_result = null,
+    };
+}
+
 /// Convert semantic analysis symbol table to MLIR symbol table
 /// Note: Type registration (enums, structs) is now handled in the MLIR lowering phase
 /// This function only handles variable and function symbols from semantic analysis
@@ -817,6 +861,10 @@ pub fn lowerFunctionsToModuleWithSemanticTable(ctx: c.MlirContext, nodes: []lib.
     // pre-register function signatures directly from AST so forward calls
     // use source-of-truth parameter types during argument conversion.
     try preRegisterFunctionSignaturesFromAst(nodes, &symbol_table, &type_mapper, ctx);
+    if (error_handler.hasErrors()) {
+        // Type mapping/signature registration already failed; do not continue lowering.
+        return finalizeLoweringResult(module, &error_handler, allocator);
+    }
 
     const decl_lowerer = DeclarationLowerer.withErrorHandlerAndDialectAndSymbolTable(ctx, &type_mapper, locations, &error_handler, &ora_dialect, &symbol_table, &builtin_registry).withModuleExports(semantic_table.module_exports);
 
@@ -872,6 +920,7 @@ pub fn lowerFunctionsToModuleWithSemanticTable(ctx: c.MlirContext, nodes: []lib.
     // process all declarations (enums, structs, functions, contracts)
     // note: Type declarations are already registered from semantic analysis
     for (nodes) |node| {
+        if (error_handler.hasErrors()) break;
         switch (node) {
             .Function => |func| {
                 if (func.is_generic or func.is_comptime_only) continue;
@@ -920,6 +969,7 @@ pub fn lowerFunctionsToModuleWithSemanticTable(ctx: c.MlirContext, nodes: []lib.
 
                 // lower module declarations
                 for (module_node.declarations) |decl| {
+                    if (error_handler.hasErrors()) break;
                     switch (decl) {
                         .Function => |func| {
                             if (func.is_generic or func.is_comptime_only) continue;
@@ -971,8 +1021,21 @@ pub fn lowerFunctionsToModuleWithSemanticTable(ctx: c.MlirContext, nodes: []lib.
                             const try_op = decl_lowerer.lowerTryBlock(&try_block);
                             c.oraBlockAppendOwnedOperation(body, try_op);
                         },
-                        .Expression, .Statement => {
-                            // expressions/statements are not lowered in this path
+                        .Expression => |expr| {
+                            try error_handler.reportError(
+                                .UnsupportedFeature,
+                                error_handling.getSpanFromExpression(expr),
+                                "Top-level expressions inside semantic-table module lowering are not supported",
+                                "Move expressions into function bodies before MLIR lowering.",
+                            );
+                        },
+                        .Statement => |stmt| {
+                            try error_handler.reportError(
+                                .UnsupportedFeature,
+                                error_handling.getSpanFromStatement(stmt),
+                                "Top-level statements inside semantic-table module lowering are not supported",
+                                "Move statements into function bodies before MLIR lowering.",
+                            );
                         },
                         .EnumDecl, .StructDecl, .BitfieldDecl => {
                             // skip enum/struct/bitfield declarations - already processed
@@ -981,8 +1044,13 @@ pub fn lowerFunctionsToModuleWithSemanticTable(ctx: c.MlirContext, nodes: []lib.
                             // skip contract invariants - specification-only, don't generate code
                         },
                         .Module => |nested_module| {
-                            const placeholder_op = decl_lowerer.createModulePlaceholder(&nested_module);
-                            c.oraBlockAppendOwnedOperation(body, placeholder_op);
+                            try error_handler.reportError(
+                                .UnsupportedFeature,
+                                nested_module.span,
+                                "Nested module declarations are not supported in semantic-table MLIR lowering",
+                                "Flatten nested modules before lowering.",
+                            );
+                            continue;
                         },
                     }
                 }
@@ -995,8 +1063,21 @@ pub fn lowerFunctionsToModuleWithSemanticTable(ctx: c.MlirContext, nodes: []lib.
                 const try_op = decl_lowerer.lowerTryBlock(&try_block);
                 c.oraBlockAppendOwnedOperation(body, try_op);
             },
-            .Expression, .Statement => {
-                // top-level expressions/statements are not lowered in this path
+            .Expression => |expr| {
+                try error_handler.reportError(
+                    .UnsupportedFeature,
+                    error_handling.getSpanFromExpression(expr),
+                    "Top-level expressions are not supported in semantic-table MLIR lowering",
+                    "Move expressions into function bodies before MLIR lowering.",
+                );
+            },
+            .Statement => |stmt| {
+                try error_handler.reportError(
+                    .UnsupportedFeature,
+                    error_handling.getSpanFromStatement(stmt),
+                    "Top-level statements are not supported in semantic-table MLIR lowering",
+                    "Move statements into function bodies before MLIR lowering.",
+                );
             },
             .EnumDecl, .StructDecl, .BitfieldDecl => {
                 // skip enum/struct/bitfield declarations - already processed
@@ -1008,52 +1089,15 @@ pub fn lowerFunctionsToModuleWithSemanticTable(ctx: c.MlirContext, nodes: []lib.
     }
 
     // Emit anonymous struct declarations (tuples/anonymous structs) discovered during lowering.
-    var anon_iter = type_mapper.iterAnonymousStructs();
-    while (anon_iter.next()) |entry| {
-        const op = decl_lowerer.lowerAnonymousStruct(entry.key_ptr.*, entry.value_ptr.*);
-        c.oraBlockAppendOwnedOperation(body, op);
+    if (!error_handler.hasErrors()) {
+        var anon_iter = type_mapper.iterAnonymousStructs();
+        while (anon_iter.next()) |entry| {
+            const op = decl_lowerer.lowerAnonymousStruct(entry.key_ptr.*, entry.value_ptr.*);
+            c.oraBlockAppendOwnedOperation(body, op);
+        }
     }
 
-    // deep-copy errors and warnings out of the error handler before it is deinitialized.
-    const handler_errors = error_handler.getErrors();
-    const handler_warnings = error_handler.getWarnings();
-
-    var errors = try allocator.alloc(LoweringError, handler_errors.len);
-    for (handler_errors, 0..) |e, i| {
-        const msg_copy = try allocator.dupe(u8, e.message);
-        const sugg_copy: ?[]const u8 = if (e.suggestion) |s|
-            try allocator.dupe(u8, s)
-        else
-            null;
-
-        errors[i] = LoweringError{
-            .error_type = e.error_type,
-            .span = e.span,
-            .message = msg_copy,
-            .suggestion = sugg_copy,
-            .context = e.context,
-        };
-    }
-
-    var warnings = try allocator.alloc(LoweringWarning, handler_warnings.len);
-    for (handler_warnings, 0..) |w, i| {
-        const msg_copy = try allocator.dupe(u8, w.message);
-        warnings[i] = LoweringWarning{
-            .warning_type = w.warning_type,
-            .span = w.span,
-            .message = msg_copy,
-        };
-    }
-
-    const result = LoweringResult{
-        .module = module,
-        .errors = errors,
-        .warnings = warnings,
-        .success = handler_errors.len == 0,
-        .pass_result = null,
-    };
-
-    return result;
+    return finalizeLoweringResult(module, &error_handler, allocator);
 }
 
 /// Main entry point for lowering Ora AST nodes to MLIR module with comprehensive error handling
@@ -1113,6 +1157,9 @@ pub fn lowerFunctionsToModuleWithErrorsAndModuleExports(
     // Pre-register function signatures directly from AST so forward calls can
     // convert arguments against callee parameter types.
     try preRegisterFunctionSignaturesFromAst(nodes, &symbol_table, &type_mapper, ctx);
+    if (error_handler.hasErrors()) {
+        return finalizeLoweringResult(module, &error_handler, allocator);
+    }
 
     const decl_lowerer = DeclarationLowerer.withErrorHandlerAndDialectAndSymbolTable(ctx, &type_mapper, locations, &error_handler, &ora_dialect, &symbol_table, &builtin_registry).withModuleExports(module_exports);
 
@@ -1121,6 +1168,7 @@ pub fn lowerFunctionsToModuleWithErrorsAndModuleExports(
 
     // first pass: Process all type declarations (enums, structs) to register them in symbol table
     for (nodes) |node| {
+        if (error_handler.hasErrors()) break;
         switch (node) {
             .EnumDecl => |enum_decl| {
                 const enum_valid = error_handler.validateAstNode(enum_decl, enum_decl.span) catch {
@@ -1284,6 +1332,7 @@ pub fn lowerFunctionsToModuleWithErrorsAndModuleExports(
 
     // second pass: Process all other declarations (functions, contracts, etc.)
     for (nodes) |node| {
+        if (error_handler.hasErrors()) break;
         switch (node) {
             .Function => |func| {
                 if (func.is_generic or func.is_comptime_only) continue;
@@ -1476,6 +1525,7 @@ pub fn lowerFunctionsToModuleWithErrorsAndModuleExports(
 
                 // process module declarations recursively
                 for (module_node.declarations) |decl| {
+                    if (error_handler.hasErrors()) break;
                     // recursively process module declarations
                     // this creates a proper module structure in MLIR
                     // note: We can't call lowerModule on individual declarations
@@ -1500,13 +1550,13 @@ pub fn lowerFunctionsToModuleWithErrorsAndModuleExports(
                             }
                         },
                         .VariableDecl => |var_decl| {
-                            // handle variable declarations within module with graceful degradation
-                            try error_handler.reportGracefulDegradation("variable declarations within modules", "global variable declarations", var_decl.span);
-                            // create a placeholder operation to allow compilation to continue
-                            const placeholder_op = decl_lowerer.createVariablePlaceholder(&var_decl);
-                            if (error_handler.validateMlirOperation(placeholder_op, var_decl.span) catch false) {
-                                c.oraBlockAppendOwnedOperation(body, placeholder_op);
-                            }
+                            try error_handler.reportError(
+                                .UnsupportedFeature,
+                                var_decl.span,
+                                "Variable declarations inside module declarations are not supported in MLIR lowering",
+                                "Move the variable declaration to contract/module top-level supported by the parser/lowerer.",
+                            );
+                            continue;
                         },
                         .StructDecl => |struct_decl| {
                             if (struct_decl.is_generic) continue;
@@ -1560,13 +1610,13 @@ pub fn lowerFunctionsToModuleWithErrorsAndModuleExports(
                             continue;
                         },
                         .Module => |nested_module| {
-                            // recursively handle nested modules with graceful degradation
-                            try error_handler.reportGracefulDegradation("nested modules", "flat module structure", nested_module.span);
-                            // create a placeholder operation to allow compilation to continue
-                            const placeholder_op = decl_lowerer.createModulePlaceholder(&nested_module);
-                            if (error_handler.validateMlirOperation(placeholder_op, nested_module.span) catch false) {
-                                c.oraBlockAppendOwnedOperation(body, placeholder_op);
-                            }
+                            try error_handler.reportError(
+                                .UnsupportedFeature,
+                                nested_module.span,
+                                "Nested module declarations are not supported in MLIR lowering",
+                                "Flatten module declarations before MLIR lowering.",
+                            );
+                            continue;
                         },
                         .Block => |block| {
                             const block_op = decl_lowerer.lowerBlock(&block);
@@ -1575,28 +1625,22 @@ pub fn lowerFunctionsToModuleWithErrorsAndModuleExports(
                             }
                         },
                         .Expression => |expr| {
-                            // handle expressions within module with graceful degradation
-                            try error_handler.reportGracefulDegradation("expressions within modules", "expression capture operations", error_handling.getSpanFromExpression(expr));
-                            // create a placeholder operation to allow compilation to continue
-                            var expr_lowerer = ExpressionLowerer.init(ctx, body, &type_mapper, null, null, null, &symbol_table, &builtin_registry, &error_handler, locations, &ora_dialect);
-                            expr_lowerer.module_exports = module_exports;
-                            const expr_value = expr_lowerer.lowerExpression(expr);
-                            const expr_op = expr_lowerer.createExpressionCapture(expr_value, error_handling.getSpanFromExpression(expr));
-                            if (error_handler.validateMlirOperation(expr_op, error_handling.getSpanFromExpression(expr)) catch false) {
-                                c.oraBlockAppendOwnedOperation(body, expr_op);
-                            }
+                            try error_handler.reportError(
+                                .UnsupportedFeature,
+                                error_handling.getSpanFromExpression(expr),
+                                "Top-level expressions inside module declarations are not supported in MLIR lowering",
+                                "Wrap expressions in supported declarations or statements.",
+                            );
+                            continue;
                         },
                         .Statement => |stmt| {
-                            // handle statements within modules with graceful degradation
-                            try error_handler.reportGracefulDegradation("statements within modules", "statement lowering operations", error_handling.getSpanFromStatement(stmt));
-                            // create a placeholder operation to allow compilation to continue
-                            var expr_lowerer = ExpressionLowerer.init(ctx, body, &type_mapper, null, null, null, &symbol_table, &builtin_registry, &error_handler, locations, &ora_dialect);
-                            expr_lowerer.module_exports = module_exports;
-                            const stmt_lowerer = StatementLowerer.init(ctx, body, &type_mapper, &expr_lowerer, null, null, null, locations, &symbol_table, &builtin_registry, std.heap.page_allocator, null, null, null, &ora_dialect, &[_]*lib.ast.Expressions.ExprNode{});
-                            _ = stmt_lowerer.lowerStatement(stmt) catch {
-                                try error_handler.reportError(.MlirOperationFailed, error_handling.getSpanFromStatement(stmt), "failed to lower top-level statement", "check statement structure and dependencies");
-                                continue;
-                            };
+                            try error_handler.reportError(
+                                .UnsupportedFeature,
+                                error_handling.getSpanFromStatement(stmt),
+                                "Top-level statements inside module declarations are not supported in MLIR lowering",
+                                "Move statements into function bodies before MLIR lowering.",
+                            );
+                            continue;
                         },
                         .TryBlock => |try_block| {
                             const try_block_op = decl_lowerer.lowerTryBlock(&try_block);
@@ -1732,47 +1776,7 @@ pub fn lowerFunctionsToModuleWithErrorsAndModuleExports(
         c.oraBlockAppendOwnedOperation(body, op);
     }
 
-    // deep-copy errors and warnings out of the error handler before it is deinitialized.
-    const handler_errors = error_handler.getErrors();
-    const handler_warnings = error_handler.getWarnings();
-
-    var errors = try allocator.alloc(LoweringError, handler_errors.len);
-    for (handler_errors, 0..) |e, i| {
-        const msg_copy = try allocator.dupe(u8, e.message);
-        const sugg_copy: ?[]const u8 = if (e.suggestion) |s|
-            try allocator.dupe(u8, s)
-        else
-            null;
-
-        errors[i] = LoweringError{
-            .error_type = e.error_type,
-            .span = e.span,
-            .message = msg_copy,
-            .suggestion = sugg_copy,
-            .context = e.context,
-        };
-    }
-
-    var warnings = try allocator.alloc(LoweringWarning, handler_warnings.len);
-    for (handler_warnings, 0..) |w, i| {
-        const msg_copy = try allocator.dupe(u8, w.message);
-        warnings[i] = LoweringWarning{
-            .warning_type = w.warning_type,
-            .span = w.span,
-            .message = msg_copy,
-        };
-    }
-
-    // create and return the lowering result
-    const result = LoweringResult{
-        .module = module,
-        .errors = errors,
-        .warnings = warnings,
-        .success = !error_handler.hasErrors(),
-        .pass_result = null,
-    };
-
-    return result;
+    return finalizeLoweringResult(module, &error_handler, allocator);
 }
 
 pub fn lowerFunctionsToModuleWithErrors(

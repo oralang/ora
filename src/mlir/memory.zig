@@ -21,7 +21,6 @@ const c = @import("mlir_c_api").c;
 const lib = @import("ora_lib");
 const constants = @import("lower.zig");
 const h = @import("helpers.zig"); // Import helpers
-const log = @import("log");
 
 // Storage variable mapping for contract storage
 pub const StorageMap = struct {
@@ -121,9 +120,7 @@ pub const MemoryManager = struct {
             },
             .Calldata => {
                 // calldata is read-only and cannot be allocated
-                log.err("Calldata variables cannot be allocated\n", .{});
-                const error_ty = c.oraIntegerTypeCreate(self.ctx, 32);
-                return c.oraErrorOpCreate(self.ctx, loc, error_ty);
+                @panic("Calldata variables cannot be allocated");
             },
             .Stack => {
                 // stack variables use regular memref.alloca
@@ -137,10 +134,7 @@ pub const MemoryManager = struct {
         switch (storage_type) {
             .Storage => {
                 // storage uses ora.sstore - address should be variable name
-                log.err("Use createStorageStore for storage variables\n", .{});
-                // create a placeholder error operation
-                const error_ty = c.oraIntegerTypeCreate(self.ctx, 32);
-                return c.oraErrorOpCreate(self.ctx, loc, error_ty);
+                @panic("Use createStorageStore for storage variables");
             },
             .Memory => {
                 // memory uses memref.store with memory space 0
@@ -150,16 +144,11 @@ pub const MemoryManager = struct {
             },
             .TStore => {
                 // transient storage uses ora.tstore
-                log.err("Use createTStoreStore for transient storage variables\n", .{});
-                // create a placeholder error operation
-                const error_ty = c.oraIntegerTypeCreate(self.ctx, 32);
-                return c.oraErrorOpCreate(self.ctx, loc, error_ty);
+                @panic("Use createTStoreStore for transient storage variables");
             },
             .Calldata => {
                 // calldata is read-only
-                log.err("Cannot store to calldata\n", .{});
-                const error_ty = c.oraIntegerTypeCreate(self.ctx, 32);
-                return c.oraErrorOpCreate(self.ctx, loc, error_ty);
+                @panic("Cannot store to calldata");
             },
             .Stack => {
                 // stack uses regular memref.store
@@ -174,9 +163,7 @@ pub const MemoryManager = struct {
         switch (storage_type) {
             .Storage => {
                 // storage uses ora.sload - address should be variable name
-                log.err("Use createStorageLoad for storage variables\n", .{});
-                // create a placeholder error operation
-                return c.oraErrorOpCreate(self.ctx, loc, result_type);
+                @panic("Use createStorageLoad for storage variables");
             },
             .Memory => {
                 // memory uses memref.load with memory space 0
@@ -186,14 +173,11 @@ pub const MemoryManager = struct {
             },
             .TStore => {
                 // transient storage uses ora.tload
-                log.err("Use createTStoreLoad for transient storage variables\n", .{});
-                // create a placeholder error operation
-                return c.oraErrorOpCreate(self.ctx, loc, result_type);
+                @panic("Use createTStoreLoad for transient storage variables");
             },
             .Calldata => {
                 // calldata should not use load ops in lowering
-                log.err("Calldata loads should use SSA values\n", .{});
-                return c.oraErrorOpCreate(self.ctx, loc, result_type);
+                @panic("Calldata loads should use SSA values");
             },
             .Stack => {
                 // stack uses regular memref.load
@@ -246,21 +230,17 @@ pub const MemoryManager = struct {
 
     /// Create memref type with appropriate memory space
     fn createMemRefType(self: *const MemoryManager, element_type: c.MlirType, storage_type: lib.ast.Statements.MemoryRegion) c.MlirType {
-        _ = self; // Context not used in this simplified implementation
-        _ = storage_type; // Storage type not used in this simplified implementation
-        // for now, create a simple memref type
-        // in the future, this could handle dynamic shapes and strides
-        // note: This is a simplified implementation - actual memref type creation
-        // would require more complex MLIR API calls
-        return element_type;
+        _ = self;
+        _ = element_type;
+        _ = storage_type;
+        @panic("MemoryManager.createMemRefType is not implemented");
     }
 
     /// Get element type from memref type
     fn getMemRefElementType(self: *const MemoryManager, memref_type: c.MlirType) c.MlirType {
-        _ = self; // Context not used in this simplified implementation
-        // for now, return the type as-is
-        // in the future, this would extract the element type from the memref
-        return memref_type;
+        _ = self;
+        _ = memref_type;
+        @panic("MemoryManager.getMemRefElementType is not implemented");
     }
 
     /// Create load operation for different storage types
@@ -284,17 +264,12 @@ pub const MemoryManager = struct {
                 return self.ora_dialect.createTLoad(var_name, result_ty, loc);
             },
             .Calldata => {
-                log.err("Calldata should not use createLoadOperation\n", .{});
-                const error_ty = c.oraIntegerTypeCreate(self.ctx, 32);
-                return c.oraErrorOpCreate(self.ctx, loc, error_ty);
+                @panic("Calldata should not use createLoadOperation");
             },
             .Stack => {
                 // for stack variables, we return the value directly from our local variable map
                 // this is handled differently in the identifier lowering
-                log.err("Stack variables should not use createLoadOperation\n", .{});
-                // create a placeholder error operation
-                const error_ty = c.oraIntegerTypeCreate(self.ctx, 32);
-                return c.oraErrorOpCreate(self.ctx, loc, error_ty);
+                @panic("Stack variables should not use createLoadOperation");
             },
         }
     }
@@ -316,17 +291,12 @@ pub const MemoryManager = struct {
                 return self.ora_dialect.createTStore(value, var_name, loc);
             },
             .Calldata => {
-                log.err("Cannot store to calldata\n", .{});
-                const error_ty = c.oraIntegerTypeCreate(self.ctx, 32);
-                return c.oraErrorOpCreate(self.ctx, loc, error_ty);
+                @panic("Cannot store to calldata");
             },
             .Stack => {
                 // for stack variables, we store the value directly in our local variable map
                 // this is handled differently in the assignment lowering
-                log.err("Stack variables should not use createStoreOperation\n", .{});
-                // create a placeholder error operation
-                const error_ty = c.oraIntegerTypeCreate(self.ctx, 32);
-                return c.oraErrorOpCreate(self.ctx, loc, error_ty);
+                @panic("Stack variables should not use createStoreOperation");
             },
         }
     }

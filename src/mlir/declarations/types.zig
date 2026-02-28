@@ -6,7 +6,6 @@ const std = @import("std");
 const c = @import("mlir_c_api").c;
 const lib = @import("ora_lib");
 const h = @import("../helpers.zig");
-const constants = @import("../lower.zig");
 const DeclarationLowerer = @import("mod.zig").DeclarationLowerer;
 const helpers = @import("helpers.zig");
 const log = @import("log");
@@ -203,9 +202,17 @@ pub fn createStructType(self: *const DeclarationLowerer, struct_decl: *const lib
         return struct_type;
     }
 
-    // fallback: should not happen if struct type creation works correctly
-    log.warn("Failed to create struct type '{s}', using i256 fallback\n", .{struct_decl.name});
-    return c.oraIntegerTypeCreate(self.ctx, constants.DEFAULT_INTEGER_BITS);
+    if (self.error_handler) |handler| {
+        handler.reportError(
+            .MlirOperationFailed,
+            struct_decl.span,
+            "Failed to create struct type during MLIR lowering",
+            "Ensure the struct declaration is emitted before its type is used.",
+        ) catch {};
+    }
+
+    log.err("Failed to create struct type '{s}'; returning null type\n", .{struct_decl.name});
+    return c.MlirType{ .ptr = null };
 }
 
 /// Create enum type from enum declaration

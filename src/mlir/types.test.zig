@@ -24,7 +24,6 @@ test "toMlirType reports missing ora type" {
     const unknown = lib.TypeInfo.unknown();
     const ty = mapper.toMlirType(unknown);
 
-    try testing.expect(mlir.oraTypeIsAInteger(ty));
-    try testing.expectEqual(@as(u32, 256), mlir.oraIntegerTypeGetWidth(ty));
+    try testing.expect(mlir.oraTypeIsNull(ty));
     try testing.expect(handler.hasErrors());
 }

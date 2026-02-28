@@ -136,7 +136,7 @@ pub fn collectFunctionSymbols(table: *state.SymbolTable, parent: *state.Scope, f
             const copied_type = try copyOraTypeOwned(table.allocator, ot);
             try param_types.append(table.allocator, copied_type);
         } else {
-            try param_types.append(table.allocator, .u256); // fallback for unknown param types
+            return error.MissingParameterType;
         }
     }
     const params_slice = try table.allocator.alloc(ast.Types.OraType, param_types.items.len);

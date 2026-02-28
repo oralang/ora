@@ -327,24 +327,54 @@ pub fn createDirectFunctionCall(
                     result_types_buf[0] = inferred_ty;
                     result_types = result_types_buf[0..1];
                 } else {
-                    callee_returns_void = true;
+                    if (self.error_handler) |handler| {
+                        handler.reportError(
+                            .TypeMismatch,
+                            span,
+                            "Failed to resolve call result type during function call lowering",
+                            "Ensure function return type is resolved before lowering this call.",
+                        ) catch {};
+                    }
+                    return self.createErrorPlaceholder(span, "unresolved function call result type");
                 }
             }
         }
     }
 
     if (result_types.len == 0 and !callee_returns_void) {
-        const result_ty = c.oraIntegerTypeCreate(self.ctx, constants.DEFAULT_INTEGER_BITS);
-        result_types_buf[0] = result_ty;
-        result_types = result_types_buf[0..1];
+        if (self.error_handler) |handler| {
+            handler.reportError(
+                .TypeMismatch,
+                span,
+                "Function call result type is missing",
+                "Provide a concrete non-void return type for the called function.",
+            ) catch {};
+        }
+        return self.createErrorPlaceholder(span, "missing function call result type");
     }
 
     const op = self.ora_dialect.createFuncCall(function_name, args, result_types, self.fileLoc(span));
     h.appendOp(self.block, op);
 
     if (result_types.len == 0) {
-        // Void calls have no SSA result; return a placeholder if an expression value
-        // is requested. This keeps lowering robust for invalid value contexts.
+        // Valid zero-result call for void/unknown typed call sites (e.g., expression statements).
+        const call_is_void_typed = if (call_type_info) |ti|
+            ti.category == .Void or ti.category == .Unknown
+        else
+            true;
+        if (call_is_void_typed) {
+            return c.MlirValue{ .ptr = null };
+        }
+
+        // Otherwise, a value was expected from a void callee.
+        if (self.error_handler) |handler| {
+            handler.reportError(
+                .TypeMismatch,
+                span,
+                "Void function call used where a value is required",
+                "Use the call as a statement or change the callee to return a value.",
+            ) catch {};
+        }
         return self.createErrorPlaceholder(span, "void function call has no value");
     }
 
@@ -546,9 +576,21 @@ fn lowerOverflowBuiltin(
     // Build anonymous struct type with fields "0": T, "1": bool
     const val_ora = lib.ast.type_info.OraType.u256;
     const bool_ora = lib.ast.type_info.OraType.bool;
-    const val_ptr = std.heap.page_allocator.create(lib.ast.type_info.OraType) catch return value;
+    const val_ptr = std.heap.page_allocator.create(lib.ast.type_info.OraType) catch {
+        return self.reportLoweringError(
+            call.span,
+            "Failed to allocate overflow tuple value type",
+            "Out of memory while lowering overflow builtin result tuple.",
+        );
+    };
     val_ptr.* = val_ora;
-    const bool_ptr = std.heap.page_allocator.create(lib.ast.type_info.OraType) catch return value;
+    const bool_ptr = std.heap.page_allocator.create(lib.ast.type_info.OraType) catch {
+        return self.reportLoweringError(
+            call.span,
+            "Failed to allocate overflow tuple flag type",
+            "Out of memory while lowering overflow builtin result tuple.",
+        );
+    };
     bool_ptr.* = bool_ora;
     const fields = [_]lib.ast.type_info.AnonymousStructFieldType{
         .{ .name = "value", .typ = val_ptr },
@@ -563,7 +605,11 @@ fn lowerOverflowBuiltin(
         h.appendOp(self.block, init_op);
         return h.getResult(init_op, 0);
     }
-    return value;
+    return self.reportLoweringError(
+        call.span,
+        "Failed to construct overflow builtin tuple result",
+        "Ensure anonymous struct type lowering is available for overflow builtins.",
+    );
 }
 
 /// Handle bitfield utility methods: T.zero() and val.sanitize()

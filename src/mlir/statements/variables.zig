@@ -424,6 +424,9 @@ pub fn lowerMemoryVariableDecl(self: *const StatementLowerer, var_decl: *const l
                 self.type_mapper.createConversionOp(self.block, init_value, element_type, var_decl.span)
             else
                 init_value;
+            if (c.oraValueIsNull(store_value)) {
+                return LoweringError.TypeMismatch;
+            }
 
             const store_op = self.memory_manager.createStoreOp(store_value, alloca_result, var_decl.region, loc);
             h.appendOp(self.block, store_op);

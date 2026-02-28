@@ -246,6 +246,23 @@ pub const TypeMapper = struct {
         self.error_handler = error_handler;
     }
 
+    fn failTypeMapping(
+        self: *const TypeMapper,
+        span: ?lib.ast.SourceSpan,
+        message: []const u8,
+        suggestion: ?[]const u8,
+    ) c.MlirType {
+        if (self.error_handler) |handler| {
+            handler.reportError(.InternalError, span, message, suggestion) catch {};
+            return c.MlirType{ .ptr = null };
+        }
+
+        if (suggestion) |hint| {
+            std.debug.panic("MLIR type mapping failed: {s}. {s}", .{ message, hint });
+        }
+        std.debug.panic("MLIR type mapping failed: {s}", .{message});
+    }
+
     /// Convert any Ora type to its corresponding MLIR type
     /// Supports all primitive types (u8-u256, i8-i256, bool, address, string, bytes, void)
     pub fn toMlirType(self: *const TypeMapper, ora_type: anytype) c.MlirType {
@@ -263,17 +280,11 @@ pub const TypeMapper = struct {
             null;
 
         const ora_ty = ora_ty_opt orelse {
-            if (self.error_handler) |handler| {
-                handler.reportError(
-                    .InternalError,
-                    span_opt,
-                    "Missing Ora type during MLIR lowering",
-                    "Ensure type resolution runs before MLIR lowering.",
-                ) catch {};
-            } else {
-                log.debug("[toMlirType] ERROR: ora_type is null - Ora is strongly typed, this should not happen!\n", .{});
-            }
-            return c.oraIntegerTypeCreate(self.ctx, constants.DEFAULT_INTEGER_BITS);
+            return self.failTypeMapping(
+                span_opt,
+                "Missing Ora type during MLIR lowering",
+                "Ensure type resolution runs before MLIR lowering.",
+            );
         };
 
         // don't print refinement types with {any} as it tries to dereference base pointers
@@ -376,6 +387,25 @@ pub const TypeMapper = struct {
         };
 
         // log result type info
+        if (c.oraTypeIsNull(result)) {
+            if (self.error_handler) |handler| {
+                if (handler.hasErrors()) return result;
+            }
+            return self.failTypeMapping(
+                span_opt,
+                "Type mapping returned a null MLIR type",
+                "A type mapping path returned null without reporting an error.",
+            );
+        }
+
+        if (c.oraTypeIsANone(result) and ora_ty != .void) {
+            return self.failTypeMapping(
+                span_opt,
+                "Non-void Ora type mapped to MLIR none type",
+                "Unsupported type mapping must fail instead of degrading to none.",
+            );
+        }
+
         if (c.oraTypeIsAInteger(result)) {
             const width = c.oraIntegerTypeGetWidth(result);
             log.debug("[toMlirType] Result: i{d}\n", .{width});
@@ -434,9 +464,23 @@ pub const TypeMapper = struct {
             if (st.lookupType(struct_name)) |type_sym| {
                 if (type_sym.type_kind == .Enum) {
                     // this is actually an enum, return its underlying type
+                    if (c.oraTypeIsNull(type_sym.mlir_type)) {
+                        return self.failTypeMapping(
+                            null,
+                            "Struct lookup resolved to enum with null MLIR type",
+                            "Ensure enum type registration succeeds before use.",
+                        );
+                    }
                     return type_sym.mlir_type;
                 } else if (type_sym.type_kind == .Struct) {
                     // return the MLIR type that was created during struct registration
+                    if (c.oraTypeIsNull(type_sym.mlir_type)) {
+                        return self.failTypeMapping(
+                            null,
+                            "Struct type is registered without an MLIR type",
+                            "Ensure struct declaration lowering succeeds before type usage.",
+                        );
+                    }
                     return type_sym.mlir_type;
                 }
             }
@@ -453,6 +497,13 @@ pub const TypeMapper = struct {
                 for (type_symbols) |type_sym| {
                     if (type_sym.type_kind == .Struct and std.mem.eql(u8, type_sym.name, struct_name)) {
                         // return the MLIR type that was created during struct registration
+                        if (c.oraTypeIsNull(type_sym.mlir_type)) {
+                            return self.failTypeMapping(
+                                null,
+                                "Struct type lookup returned a null MLIR type",
+                                "Fix struct type registration instead of inferring a fallback.",
+                            );
+                        }
                         return type_sym.mlir_type;
                     }
                 }
@@ -468,10 +519,12 @@ pub const TypeMapper = struct {
             return struct_type;
         }
 
-        // last resort: return none type so downstream lowering fails explicitly instead of
-        // silently treating an unknown struct as a machine integer.
-        log.err("Struct type '{s}' not found in symbol table and failed to create; returning none type.\n", .{struct_name});
-        return c.oraNoneTypeCreate(self.ctx);
+        log.err("Struct type '{s}' not found in symbol table and failed to create.\n", .{struct_name});
+        return self.failTypeMapping(
+            null,
+            "Struct type resolution failed during MLIR lowering",
+            "Ensure struct declarations are registered before use.",
+        );
     }
 
     /// Convert enum type to appropriate integer representation based on underlying type
@@ -485,6 +538,13 @@ pub const TypeMapper = struct {
                 if (type_sym.type_kind == .Enum) {
                     // return the stored mlir_type which was created using the underlying type
                     // (e.g., enum Status : u8 -> i8, enum ErrorCode : string -> i256)
+                    if (c.oraTypeIsNull(type_sym.mlir_type)) {
+                        return self.failTypeMapping(
+                            null,
+                            "Enum type is registered without an MLIR type",
+                            "Ensure enum declaration lowering succeeds before type usage.",
+                        );
+                    }
                     return type_sym.mlir_type;
                 }
             }
@@ -504,31 +564,30 @@ pub const TypeMapper = struct {
                         return type_sym.mlir_type;
                     }
 
-                    if (type_sym.variants) |variants| {
-                        // choose smallest integer type that can hold all variants
-                        const variant_count = variants.len;
-                        if (variant_count <= 256) {
-                            return c.oraIntegerTypeCreate(self.ctx, 8); // u8
-                        } else if (variant_count <= 65536) {
-                            return c.oraIntegerTypeCreate(self.ctx, 16); // u16
-                        } else {
-                            return c.oraIntegerTypeCreate(self.ctx, 32); // u32
-                        }
-                    }
+                    return self.failTypeMapping(
+                        null,
+                        "Enum type lookup returned a null MLIR type",
+                        "Fix enum type registration instead of inferring a fallback width.",
+                    );
                 }
             }
         }
 
-        // default to i32 for enum representation if not found in symbol table
-        return c.oraIntegerTypeCreate(self.ctx, 32);
+        return self.failTypeMapping(
+            null,
+            "Enum type not found during MLIR lowering",
+            "Ensure enum declarations are available in the symbol table before lowering.",
+        );
     }
 
     /// Convert contract type
     pub fn mapContractType(self: *const TypeMapper, contract_info: anytype) c.MlirType {
         _ = contract_info; // Contract information
-        // for now, use i256 as placeholder for contract type
-        // in the future, this could be a proper MLIR pointer type or custom type
-        return c.oraIntegerTypeCreate(self.ctx, constants.DEFAULT_INTEGER_BITS);
+        return self.failTypeMapping(
+            null,
+            "Contract type mapping is not implemented",
+            "Implement contract type lowering before compiling contract-typed values.",
+        );
     }
 
     /// Convert array type `[T; N]` to `memref<NxT, space>`
@@ -581,24 +640,37 @@ pub const TypeMapper = struct {
     /// In EVM, tuples are used for multiple return values and temporary groupings
     pub fn mapTupleType(self: *const TypeMapper, tuple_info: anytype) c.MlirType {
         if (tuple_info.len == 0) {
-            return c.oraNoneTypeCreate(self.ctx);
+            return self.failTypeMapping(
+                null,
+                "Zero-element tuple type is not supported in MLIR lowering",
+                "Use an explicit void/unit representation instead of an empty tuple.",
+            );
         }
 
         const fields = self.inference_ctx.allocator.alloc(lib.ast.type_info.AnonymousStructFieldType, tuple_info.len) catch {
-            log.err("Failed to allocate tuple field types; returning none type\n", .{});
-            return c.oraNoneTypeCreate(self.ctx);
+            return self.failTypeMapping(
+                null,
+                "Failed to allocate tuple field types",
+                "Out of memory while constructing tuple type metadata.",
+            );
         };
 
         var i: usize = 0;
         while (i < tuple_info.len) : (i += 1) {
             // Tuple fields use numeric names ("0", "1", ...) to align with t.0 syntax.
             const field_name = std.fmt.allocPrint(self.inference_ctx.allocator, "{d}", .{i}) catch {
-                log.err("Failed to allocate tuple field name; returning none type\n", .{});
-                return c.oraNoneTypeCreate(self.ctx);
+                return self.failTypeMapping(
+                    null,
+                    "Failed to allocate tuple field name",
+                    "Out of memory while constructing tuple type metadata.",
+                );
             };
             const elem_ptr = self.inference_ctx.allocator.create(lib.ast.type_info.OraType) catch {
-                log.err("Failed to allocate tuple field type; returning none type\n", .{});
-                return c.oraNoneTypeCreate(self.ctx);
+                return self.failTypeMapping(
+                    null,
+                    "Failed to allocate tuple field type",
+                    "Out of memory while constructing tuple type metadata.",
+                );
             };
             elem_ptr.* = tuple_info[i];
             fields[i] = .{ .name = field_name, .typ = elem_ptr };
@@ -610,9 +682,11 @@ pub const TypeMapper = struct {
     /// Convert function type
     pub fn mapFunctionType(self: *const TypeMapper, function_info: lib.ast.type_info.FunctionType) c.MlirType {
         _ = function_info; // Parameter and return type information
-        // for now, use i256 as placeholder for function type
-        // in the future, this could be a proper MLIR function type
-        return c.oraIntegerTypeCreate(self.ctx, constants.DEFAULT_INTEGER_BITS);
+        return self.failTypeMapping(
+            null,
+            "Function type mapping is not implemented",
+            "Implement first-class function type lowering before using function-typed values.",
+        );
     }
 
     /// Convert error union type `!T1 | T2` to tagged union representation
@@ -652,9 +726,11 @@ pub const TypeMapper = struct {
             return self.mapErrorUnionType(union_info[0].error_union);
         }
 
-        // for now, use i256 as placeholder for union type
-        // in the future, this could be a proper MLIR union type or custom type
-        return c.oraIntegerTypeCreate(self.ctx, constants.DEFAULT_INTEGER_BITS);
+        return self.failTypeMapping(
+            null,
+            "General union type mapping is not implemented",
+            "Implement union lowering before compiling non-error union types.",
+        );
     }
 
     /// Convert anonymous struct type
@@ -663,23 +739,38 @@ pub const TypeMapper = struct {
         hashOraType(&hasher, .{ .anonymous_struct = fields });
         const hash = hasher.final();
         const name = std.fmt.allocPrint(self.inference_ctx.allocator, "__anon_struct_{x}", .{hash}) catch {
-            log.err("Failed to allocate anonymous struct name; returning none type\n", .{});
-            return c.oraNoneTypeCreate(self.ctx);
+            return self.failTypeMapping(
+                null,
+                "Failed to allocate anonymous struct name",
+                "Out of memory while constructing anonymous struct metadata.",
+            );
         };
         if (!self.anon_structs.contains(name)) {
             const owned_fields = self.copyAnonymousStructFields(fields) catch {
-                log.err("Failed to copy anonymous struct fields; returning none type\n", .{});
-                return c.oraNoneTypeCreate(self.ctx);
+                return self.failTypeMapping(
+                    null,
+                    "Failed to copy anonymous struct fields",
+                    "Out of memory while storing anonymous struct field metadata.",
+                );
             };
-            _ = @constCast(self).anon_structs.put(name, owned_fields) catch {};
+            @constCast(self).anon_structs.put(name, owned_fields) catch {
+                return self.failTypeMapping(
+                    null,
+                    "Failed to cache anonymous struct field metadata",
+                    "Out of memory while recording anonymous struct layout.",
+                );
+            };
         }
         const struct_name_ref = h.strRef(name);
         const struct_type = c.oraStructTypeGet(self.ctx, struct_name_ref);
         if (struct_type.ptr != null) {
             return struct_type;
         }
-        log.err("Anonymous struct type '{s}' could not be created; returning none type.\n", .{name});
-        return c.oraNoneTypeCreate(self.ctx);
+        return self.failTypeMapping(
+            null,
+            "Anonymous struct type could not be created",
+            "Ensure anonymous struct declarations are emitted before use.",
+        );
     }
 
     fn copyAnonymousStructFields(
@@ -703,9 +794,11 @@ pub const TypeMapper = struct {
     /// Convert module type
     pub fn mapModuleType(self: *const TypeMapper, module_info: anytype) c.MlirType {
         _ = module_info; // Module information
-        // for now, use i256 as placeholder for module type
-        // in the future, this could be a proper MLIR module type or custom type
-        return c.oraIntegerTypeCreate(self.ctx, constants.DEFAULT_INTEGER_BITS);
+        return self.failTypeMapping(
+            null,
+            "Module type mapping is not implemented",
+            "Module values are not lowerable as runtime MLIR types.",
+        );
     }
 
     /// Get the bit width for an integer type
@@ -808,36 +901,23 @@ pub const TypeMapper = struct {
     }
 
     /// Create Ora dialect type (foundation for custom dialect types)
-    /// This function will create proper dialect types when TableGen is integrated
-    /// For now, it returns EVM-compatible representations
+    /// This function should create proper dialect types when TableGen is integrated.
+    /// Unsupported requests must fail explicitly.
     pub fn createOraDialectType(self: *const TypeMapper, type_name: []const u8, param_types: []const c.MlirType) c.MlirType {
-        // ora dialect types (future implementation with TableGen):
-        // - !ora.slice<T>         → dynamic array with length
-        // - !ora.map<K, V>        → storage mapping with keccak256
-        // - !ora.enum<name, repr> → named enumeration with integer repr
-        // - !ora.error<T>         → result type with error handling
-        // - !ora.error_union<Ts>  → sum type for multiple error kinds
-        // - !ora.contract<name>   → contract type reference
-        //
-        // current strategy (pre-TableGen):
-        // - All dialect types map to i256 for EVM compatibility
-        // - Type information is preserved in symbol table
-        // - Operations use dialect ops (ora.map_get, ora.sload, etc.)
-        // - Target code generation handles the actual EVM semantics
-        //
-        // integration path:
-        // 1. Define types in OraDialect.td using TableGen
-        // 2. Generate C bindings via mlir-tblgen
-        // 3. Link generated types in dialect.zig
-        // 4. Update this function to call C bindings
-        // 5. Remove i256 fallback
-
-        _ = type_name; // Type name for dialect type creation
-        _ = param_types; // Type parameters for parameterized types
-
-        // return i256 for EVM compatibility until TableGen integration
-        // all type semantics are enforced through operations and target code generation
-        return c.oraIntegerTypeCreate(self.ctx, constants.DEFAULT_INTEGER_BITS);
+        _ = param_types;
+        const msg = std.fmt.allocPrint(self.inference_ctx.allocator, "Ora dialect type '{s}' is not implemented", .{type_name}) catch {
+            return self.failTypeMapping(
+                null,
+                "Ora dialect type is not implemented",
+                "Add a concrete MLIR dialect type implementation.",
+            );
+        };
+        defer self.inference_ctx.allocator.free(msg);
+        return self.failTypeMapping(
+            null,
+            msg,
+            "Add a concrete MLIR dialect type implementation.",
+        );
     }
 
     /// Advanced type conversion with inference support
@@ -928,7 +1008,7 @@ pub const TypeMapper = struct {
     /// Note: This function works with Ora types directly in the Ora dialect.
     /// Conversions between Ora types (e.g., u64 -> u256) are handled here.
     /// Convert between builtin MLIR types (now using iN types everywhere)
-    pub fn createConversionOp(self: *const TypeMapper, block: c.MlirBlock, value: c.MlirValue, target_type: c.MlirType, _: ?lib.ast.SourceSpan) c.MlirValue {
+    pub fn createConversionOp(self: *const TypeMapper, block: c.MlirBlock, value: c.MlirValue, target_type: c.MlirType, span: ?lib.ast.SourceSpan) c.MlirValue {
         const value_type = c.oraValueGetType(value);
         const types_equal = c.oraTypeEqual(value_type, target_type);
 
@@ -963,7 +1043,10 @@ pub const TypeMapper = struct {
             const to_base_op = c.oraRefinementToBaseOpCreate(self.ctx, loc, value, block);
             if (to_base_op.ptr != null) {
                 const base_val = h.getResult(to_base_op, 0);
-                const base_converted = self.createConversionOp(block, base_val, target_ref_base, null);
+                const base_converted = self.createConversionOp(block, base_val, target_ref_base, span);
+                if (c.oraValueIsNull(base_converted)) {
+                    return base_converted;
+                }
                 const to_ref_op = c.oraBaseToRefinementOpCreate(self.ctx, loc, base_converted, target_type, block);
                 if (to_ref_op.ptr != null) {
                     return h.getResult(to_ref_op, 0);
@@ -1039,9 +1122,16 @@ pub const TypeMapper = struct {
             }
         }
 
-        // for non-integer types or if conversion fails, return value as-is
-        // this should not happen with our current type system
-        return value;
+        if (self.error_handler) |handler| {
+            handler.reportError(
+                .TypeMismatch,
+                span,
+                "Unsupported MLIR type conversion in TypeMapper.createConversionOp",
+                "Add an explicit conversion rule before lowering this expression.",
+            ) catch {};
+            return c.MlirValue{ .ptr = null };
+        }
+        std.debug.panic("Unsupported MLIR type conversion in TypeMapper.createConversionOp", .{});
     }
 
     /// Handle type alias resolution

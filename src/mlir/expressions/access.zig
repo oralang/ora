@@ -23,8 +23,11 @@ pub fn lowerIdentifier(
     identifier: *const lib.ast.Expressions.IdentifierExpr,
 ) c.MlirValue {
     if (std.mem.eql(u8, identifier.name, "std")) {
-        log.debug("WARNING: 'std' namespace accessed directly without member - this is a bug\n", .{});
-        return self.createConstant(0, identifier.span);
+        return self.reportLoweringError(
+            identifier.span,
+            "Cannot lower 'std' namespace as a runtime value",
+            "Access a concrete member such as std.constants.ZERO_ADDRESS.",
+        );
     }
 
     if (self.param_map) |pm| {
@@ -68,20 +71,41 @@ pub fn lowerIdentifier(
 
     if (is_storage_variable) {
         const memory_manager = @import("../memory.zig").MemoryManager.init(self.ctx, self.ora_dialect);
-        const var_type = if (identifier.type_info.ora_type) |_| blk: {
-            break :blk self.type_mapper.toMlirType(identifier.type_info);
-        } else if (self.symbol_table) |st| blk: {
-            if (st.lookupSymbol(identifier.name)) |symbol| {
-                break :blk symbol.type;
+        var var_type: ?c.MlirType = null;
+        if (identifier.type_info.ora_type != null) {
+            const mapped_type = self.type_mapper.toMlirType(identifier.type_info);
+            if (c.oraTypeIsNull(mapped_type)) {
+                return self.reportLoweringError(
+                    identifier.span,
+                    "Storage variable type mapping failed during identifier lowering",
+                    "Ensure the storage variable has a resolved Ora type before MLIR lowering.",
+                );
             }
-            break :blk c.oraIntegerTypeCreate(self.ctx, constants.DEFAULT_INTEGER_BITS);
-        } else blk: {
-            break :blk c.oraIntegerTypeCreate(self.ctx, constants.DEFAULT_INTEGER_BITS);
-        };
+            var_type = mapped_type;
+        } else if (self.symbol_table) |st| {
+            if (st.lookupSymbol(identifier.name)) |symbol| {
+                if (c.oraTypeIsNull(symbol.type)) {
+                    return self.reportLoweringError(
+                        identifier.span,
+                        "Storage variable symbol has null MLIR type",
+                        "Ensure storage declarations are lowered before identifier access.",
+                    );
+                }
+                var_type = symbol.type;
+            }
+        }
+
+        if (var_type == null) {
+            return self.reportLoweringError(
+                identifier.span,
+                "Missing storage variable type during identifier lowering",
+                "Type resolution must assign a concrete storage value type.",
+            );
+        }
 
         const result_name = identifier.name;
-        log.debug("[lowerIdentifier] Loading storage variable '{s}' with type {any}\n", .{ identifier.name, var_type });
-        const load_op = memory_manager.createStorageLoadWithName(identifier.name, var_type, self.fileLoc(identifier.span), result_name);
+        log.debug("[lowerIdentifier] Loading storage variable '{s}' with type {any}\n", .{ identifier.name, var_type.? });
+        const load_op = memory_manager.createStorageLoadWithName(identifier.name, var_type.?, self.fileLoc(identifier.span), result_name);
         h.appendOp(self.block, load_op);
         const result = h.getResult(load_op, 0);
         const actual_type = c.oraValueGetType(result);
@@ -167,10 +191,11 @@ pub fn lowerIdentifier(
 
         if (st.lookupType(identifier.name)) |type_symbol| {
             log.debug("[lowerIdentifier] Found type: {s}, type_kind: {any}\n", .{ identifier.name, type_symbol.type_kind });
-            const type_val = c.oraIntegerTypeCreate(self.ctx, constants.DEFAULT_INTEGER_BITS);
-            const const_op = self.ora_dialect.createArithConstant(0, type_val, self.fileLoc(identifier.span));
-            h.appendOp(self.block, const_op);
-            return h.getResult(const_op, 0);
+            return self.reportLoweringError(
+                identifier.span,
+                "Type name used as value during expression lowering",
+                "Use a constructor, function call, or field access instead of a bare type identifier.",
+            );
         }
     }
 
@@ -190,6 +215,14 @@ pub fn lowerIdentifier(
     // if identifier is still undefined, return error placeholder instead of panicking
     // this allows compilation to continue and report errors more gracefully
     log.debug("ERROR: Undefined identifier '{s}' at {d}:{d}\n", .{ identifier.name, identifier.span.line, identifier.span.column });
+    if (self.error_handler) |handler| {
+        handler.reportError(
+            .UndefinedSymbol,
+            identifier.span,
+            "Undefined identifier during MLIR lowering",
+            "Declare the identifier before use.",
+        ) catch {};
+    }
     return self.createErrorPlaceholder(identifier.span, "Undefined identifier");
 }
 
@@ -406,7 +439,13 @@ fn lowerIntegerBoundaryConstant(
 
     // Signed MIN bit pattern: 1 << (bits - 1)
     if (boundary == .min) {
-        const width = ora_type.bitWidth() orelse constants.DEFAULT_INTEGER_BITS;
+        const width = ora_type.bitWidth() orelse {
+            return self.reportLoweringError(
+                span,
+                "Signed integer boundary builtin is missing bit width information",
+                "Ensure builtin integer types carry resolved bit widths before lowering.",
+            );
+        };
         const shift = self.ora_dialect.createArithConstant(@intCast(width - 1), ty, loc);
         h.appendOp(self.block, shift);
         const min_op = c.oraArithShlIOpCreate(self.ctx, loc, one, h.getResult(shift, 0));
@@ -525,6 +564,14 @@ fn createBitfieldFieldExtract(
 
     // Field not found in bitfield, fall back to error placeholder
     log.debug("ERROR: Bitfield field '{s}' not found in type '{s}'\n", .{ field_name, type_sym.name });
+    if (self.error_handler) |handler| {
+        handler.reportError(
+            .UndefinedSymbol,
+            span,
+            "Bitfield field not found during MLIR lowering",
+            "Check the bitfield declaration for this field name.",
+        ) catch {};
+    }
     return self.createErrorPlaceholder(span, "bitfield field not found");
 }
 
@@ -535,35 +582,42 @@ pub fn createStructFieldExtract(
     field_name: []const u8,
     span: lib.ast.SourceSpan,
 ) c.MlirValue {
-    var result_ty = c.oraIntegerTypeCreate(self.ctx, constants.DEFAULT_INTEGER_BITS);
+    var result_ty: ?c.MlirType = null;
+    const struct_val_type = c.oraValueGetType(struct_val);
 
     if (self.symbol_table) |st| {
-        // Check named struct types
-        var type_iter = st.types.iterator();
-        while (type_iter.next()) |entry| {
-            const type_symbols = entry.value_ptr.*;
-            for (type_symbols) |type_sym| {
-                if (type_sym.type_kind == .Struct) {
+        var matched_named_struct = false;
+        search_named: {
+            var type_iter = st.types.iterator();
+            while (type_iter.next()) |entry| {
+                const type_symbols = entry.value_ptr.*;
+                for (type_symbols) |type_sym| {
+                    if (type_sym.type_kind != .Struct) continue;
+                    if (c.oraTypeIsNull(type_sym.mlir_type)) continue;
+                    if (!c.oraTypeEqual(struct_val_type, type_sym.mlir_type)) continue;
+
+                    matched_named_struct = true;
                     if (type_sym.fields) |fields| {
                         for (fields) |field| {
                             if (std.mem.eql(u8, field.name, field_name)) {
                                 result_ty = field.field_type;
-                                break;
+                                break :search_named;
                             }
                         }
                     }
+                    break :search_named;
                 }
             }
         }
-        // Check anonymous structs from type mapper (e.g. overflow builtins, tuples)
-        // Match by struct type to avoid ambiguity when multiple anon structs share field names.
-        const default_ty = c.oraIntegerTypeCreate(self.ctx, constants.DEFAULT_INTEGER_BITS);
-        if (c.oraTypeEqual(result_ty, default_ty)) {
-            const struct_val_type = c.oraValueGetType(struct_val);
+
+        if (result_ty == null and !matched_named_struct) {
+            var matched_anon_struct = false;
             var anon_iter = self.type_mapper.iterAnonymousStructs();
             while (anon_iter.next()) |anon_entry| {
                 const anon_ty = c.oraStructTypeGet(self.ctx, h.strRef(anon_entry.key_ptr.*));
                 if (!c.oraTypeEqual(struct_val_type, anon_ty)) continue;
+
+                matched_anon_struct = true;
                 for (anon_entry.value_ptr.*) |field| {
                     if (std.mem.eql(u8, field.name, field_name)) {
                         const field_type_info = lib.ast.Types.TypeInfo{
@@ -572,16 +626,53 @@ pub fn createStructFieldExtract(
                             .source = .inferred,
                             .span = null,
                         };
-                        result_ty = self.type_mapper.toMlirType(field_type_info);
+                        const mapped = self.type_mapper.toMlirType(field_type_info);
+                        if (c.oraTypeIsNull(mapped)) {
+                            return self.reportLoweringError(
+                                span,
+                                "Anonymous struct field type mapping failed during field access lowering",
+                                "Ensure anonymous struct field types are fully resolved before lowering.",
+                            );
+                        }
+                        result_ty = mapped;
                         break;
                     }
                 }
-                break; // found matching struct, stop
+                break;
             }
+
+            if (result_ty == null and matched_anon_struct) {
+                return self.reportLoweringError(
+                    span,
+                    "Field does not exist on anonymous struct type during MLIR lowering",
+                    "Check the field name against the anonymous struct definition.",
+                );
+            }
+        } else if (result_ty == null and matched_named_struct) {
+            return self.reportLoweringError(
+                span,
+                "Field does not exist on struct type during MLIR lowering",
+                "Check the field name against the struct definition.",
+            );
         }
     }
 
-    const op = self.ora_dialect.createStructFieldExtract(struct_val, field_name, result_ty, self.fileLoc(span));
+    if (result_ty == null) {
+        return self.reportLoweringError(
+            span,
+            "Unable to resolve struct field type during MLIR lowering",
+            "Ensure struct type metadata is registered before field extraction.",
+        );
+    }
+    if (c.oraTypeIsNull(result_ty.?)) {
+        return self.reportLoweringError(
+            span,
+            "Struct field resolved to null MLIR type during lowering",
+            "Ensure the field type has a valid MLIR mapping before code generation.",
+        );
+    }
+
+    const op = self.ora_dialect.createStructFieldExtract(struct_val, field_name, result_ty.?, self.fileLoc(span));
     h.appendOp(self.block, op);
     return h.getResult(op, 0);
 }
@@ -749,7 +840,11 @@ pub fn createArrayIndexLoad(
     const element_type = if (c.oraTypeIsAMemRef(array_type) or c.oraTypeIsAShaped(array_type))
         c.oraShapedTypeGetElementType(array_type)
     else
-        c.oraIntegerTypeCreate(self.ctx, constants.DEFAULT_INTEGER_BITS);
+        return self.reportLoweringError(
+            span,
+            "Array indexing requires a shaped or memref value",
+            "Ensure the indexed expression is lowered to a tensor or memref type.",
+        );
 
     if (c.oraTypeIsAMemRef(array_type)) {
         const load_op = c.oraMemrefLoadOpCreate(
@@ -774,7 +869,11 @@ pub fn createArrayIndexLoad(
         h.appendOp(self.block, extract_op);
         return h.getResult(extract_op, 0);
     } else {
-        return array;
+        return self.reportLoweringError(
+            span,
+            "Array index load received a non-indexable value",
+            "Ensure indexing is only used with array, tensor, or memref values.",
+        );
     }
 }
 
@@ -805,6 +904,13 @@ pub fn createMapIndexLoad(
     var result_ty: c.MlirType = undefined;
     if (result_type) |ty| {
         log.debug("[createMapIndexLoad] Using provided result_type\n", .{});
+        if (c.oraTypeIsNull(ty)) {
+            return self.reportLoweringError(
+                span,
+                "Map index lowering received a null result type",
+                "Ensure the map value type is resolved before lowering indexed access.",
+            );
+        }
         result_ty = ty;
     } else {
         log.debug("[createMapIndexLoad] Extracting value type from map type\n", .{});
@@ -814,8 +920,11 @@ pub fn createMapIndexLoad(
             log.debug("[createMapIndexLoad] Extracted value type from map\n", .{});
             result_ty = extracted_value_type;
         } else {
-            log.debug("WARNING: createMapIndexLoad: Could not extract value type from map, defaulting to i256.\n", .{});
-            result_ty = c.oraIntegerTypeCreate(self.ctx, constants.DEFAULT_INTEGER_BITS);
+            return self.reportLoweringError(
+                span,
+                "Failed to extract map value type for indexed access",
+                "Ensure the target expression is a map<K, V> with a resolved value type.",
+            );
         }
     }
     log.debug("[createMapIndexLoad] Creating ora.map_get with result_type: {any}\n", .{result_ty});
@@ -828,9 +937,11 @@ pub fn createMapIndexLoad(
         if (!c.oraTypeEqual(map_value_type, result_ty)) {
             log.debug("[createMapIndexLoad] ERROR: Map value type {any} doesn't match expected result_type {any}\n", .{ map_value_type, result_ty });
             log.debug("[createMapIndexLoad] This will cause ora.map_get to return the wrong type!\n", .{});
-            log.debug("[createMapIndexLoad] Using map_value_type instead of result_type to avoid type mismatch\n", .{});
-            // use the map's value type instead of the expected result_type to avoid type mismatch
-            result_ty = map_value_type;
+            return self.reportLoweringError(
+                span,
+                "Map index result type mismatch during MLIR lowering",
+                "Align inferred map value type with expected expression type before lowering.",
+            );
         }
     }
 
@@ -844,7 +955,11 @@ pub fn createMapIndexLoad(
     if (!c.oraTypeEqual(actual_result_type, result_ty)) {
         log.debug("[createMapIndexLoad] ERROR: map_get returned {any} but we requested {any}\n", .{ actual_result_type, result_ty });
         log.debug("[createMapIndexLoad] This is a bug - ora.map_get should respect the result_type parameter\n", .{});
-        // for now, return the result as-is - the type system will catch this error later
+        return self.reportLoweringError(
+            span,
+            "ora.map_get returned an unexpected result type",
+            "Check map_get type plumbing and map value type lowering.",
+        );
     }
 
     return result;

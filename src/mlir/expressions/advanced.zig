@@ -139,26 +139,27 @@ pub fn lowerComptime(
                 if (self.error_handler) |handler| {
                     handler.reportError(.InternalError, comptime_expr.span, "comptime evaluation produced non-constant", null) catch {};
                 }
-                const op = self.ora_dialect.createArithConstantWithAttrs(0, ty, &attrs, loc);
-                h.appendOp(self.block, op);
-                return h.getResult(op, 0);
+                return self.createErrorPlaceholder(comptime_expr.span, "comptime evaluation produced non-constant");
             },
             .err => |err| {
                 log.err("comptime evaluation failed: {s}\n", .{@tagName(err.kind)});
                 if (self.error_handler) |handler| {
                     handler.reportError(.InternalError, comptime_expr.span, "comptime evaluation error", null) catch {};
                 }
-                const op = self.ora_dialect.createArithConstantWithAttrs(0, ty, &attrs, loc);
-                h.appendOp(self.block, op);
-                return h.getResult(op, 0);
+                return self.createErrorPlaceholder(comptime_expr.span, "comptime evaluation error");
             },
         }
     }
 
-    // fallback: emit a placeholder constant
-    const op = self.ora_dialect.createArithConstantWithAttrs(0, ty, &attrs, loc);
-    h.appendOp(self.block, op);
-    return h.getResult(op, 0);
+    if (self.error_handler) |handler| {
+        handler.reportError(
+            .InternalError,
+            comptime_expr.span,
+            "Unhandled comptime evaluation result during MLIR lowering",
+            "Fix comptime evaluator result handling instead of emitting a placeholder constant.",
+        ) catch {};
+    }
+    return self.createErrorPlaceholder(comptime_expr.span, "unhandled comptime evaluation result");
 }
 
 fn getExpressionTypeInfo(expr: *const lib.ast.Expressions.ExprNode) ?lib.ast.type_info.TypeInfo {
@@ -1411,10 +1412,17 @@ pub fn createDefaultValueForType(
         h.appendOp(self.block, const_op);
         return h.getResult(const_op, 0);
     }
-    const zero_type = c.oraIntegerTypeCreate(self.ctx, 256);
-    const const_op = self.ora_dialect.createArithConstant(0, zero_type, loc);
-    h.appendOp(self.block, const_op);
-    return h.getResult(const_op, 0);
+    if (self.error_handler) |handler| {
+        handler.reportError(
+            .TypeMismatch,
+            null,
+            "Cannot synthesize expression default value for non-integer MLIR type",
+            "Add explicit default-value lowering for this MLIR type.",
+        ) catch {};
+    } else {
+        log.err("Cannot synthesize expression default value for non-integer MLIR type\n", .{});
+    }
+    return error.TypeMismatch;
 }
 
 /// Create tuple type from element types
@@ -1521,8 +1529,20 @@ pub fn createInitializedStruct(
             defer std.heap.page_allocator.free(derived_fields.fields);
             break :blk self.type_mapper.mapAnonymousStructType(derived_fields.fields);
         }
-        break :blk c.oraIntegerTypeCreate(self.ctx, constants.DEFAULT_INTEGER_BITS);
+        if (self.error_handler) |handler| {
+            handler.reportError(
+                .TypeMismatch,
+                span,
+                "Failed to infer anonymous struct type during MLIR lowering",
+                "Provide explicit type information for anonymous struct fields.",
+            ) catch {};
+        }
+        return self.createErrorPlaceholder(span, "failed to infer anonymous struct type");
     };
+
+    if (c.oraTypeIsNull(struct_ty)) {
+        return self.createErrorPlaceholder(span, "invalid anonymous struct type");
+    }
 
     var field_values = std.ArrayList(c.MlirValue){};
     defer field_values.deinit(std.heap.page_allocator);
@@ -1577,18 +1597,6 @@ fn deriveAnonymousStructFields(
             anon_fields[i] = .{ .name = field.name, .typ = &types[i] };
             continue;
         }
-        if (!type_info.isResolved()) {
-            const fallback: ?lib.ast.type_info.OraType = switch (type_info.category) {
-                .Integer => .{ .u256 = {} },
-                .Bool => .{ .bool = {} },
-                else => null,
-            };
-            if (fallback) |ora_type| {
-                types[i] = ora_type;
-                anon_fields[i] = .{ .name = field.name, .typ = &types[i] };
-                continue;
-            }
-        }
         std.heap.page_allocator.free(types);
         std.heap.page_allocator.free(anon_fields);
         return null;
@@ -1609,18 +1617,6 @@ fn inferTupleTypeInfo(tuple_expr: *const lib.ast.Expressions.TupleExpr) ?lib.ast
         if (elem_ti.ora_type) |elem_ora| {
             tuple_elems[i] = elem_ora;
             continue;
-        }
-
-        if (!elem_ti.isResolved()) {
-            const fallback: ?lib.ast.type_info.OraType = switch (elem_ti.category) {
-                .Integer => .{ .u256 = {} },
-                .Bool => .{ .bool = {} },
-                else => null,
-            };
-            if (fallback) |elem_ora| {
-                tuple_elems[i] = elem_ora;
-                continue;
-            }
         }
 
         std.heap.page_allocator.free(tuple_elems);

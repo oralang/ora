@@ -1289,8 +1289,15 @@ fn lowerSimpleForLoop(
         const len_index = self.expr_lowerer.createLengthAccess(iterable, span);
         upper_bound = len_index;
     } else {
-        // fallback: treat as range upper bound and cast to index
-        upper_bound = self.expr_lowerer.convertIndexToIndexType(iterable, span);
+        if (self.expr_lowerer.error_handler) |handler| {
+            handler.reportError(
+                .TypeMismatch,
+                span,
+                "Unsupported iterable type in for-loop lowering",
+                "Use an integer range bound or a shaped/memref collection in for-loops.",
+            ) catch {};
+        }
+        return LoweringError.TypeMismatch;
     }
 
     // create constants for loop bounds (index-typed)
@@ -1354,10 +1361,15 @@ fn lowerSimpleForLoop(
                 log.warn("Failed to add element variable to map: {s}\n", .{item_name});
             };
         } else {
-            // fallback: expose the index directly
-            lvm.addLocalVar(item_name, induction_i256) catch {
-                log.warn("Failed to add loop variable to map: {s}\n", .{item_name});
-            };
+            if (self.expr_lowerer.error_handler) |handler| {
+                handler.reportError(
+                    .TypeMismatch,
+                    span,
+                    "Unsupported iterable binding type in for-loop lowering",
+                    "Use an integer range bound or a shaped/memref collection in for-loops.",
+                ) catch {};
+            }
+            return LoweringError.TypeMismatch;
         }
     }
 

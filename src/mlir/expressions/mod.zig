@@ -440,6 +440,13 @@ pub const ExpressionLowerer = struct {
             if (to_base_op.ptr != null) {
                 const base_val = h.getResult(to_base_op, 0);
                 const base_converted = self.type_mapper.createConversionOp(self.block, base_val, target_ref_base, span);
+                if (c.oraValueIsNull(base_converted)) {
+                    return self.reportLoweringError(
+                        span,
+                        "Failed to convert refinement value to target base type",
+                        "Add an explicit conversion for this refinement path.",
+                    );
+                }
                 const to_ref_op = c.oraBaseToRefinementOpCreate(self.ctx, loc, base_converted, target_ty, self.block);
                 if (to_ref_op.ptr != null) {
                     return h.getResult(to_ref_op, 0);
@@ -447,7 +454,15 @@ pub const ExpressionLowerer = struct {
             }
         }
 
-        return self.type_mapper.createConversionOp(self.block, value, target_ty, span);
+        const converted = self.type_mapper.createConversionOp(self.block, value, target_ty, span);
+        if (c.oraValueIsNull(converted)) {
+            return self.reportLoweringError(
+                span,
+                "Unsupported value conversion during expression lowering",
+                "Align source and target types or add a dedicated conversion rule.",
+            );
+        }
+        return converted;
     }
 
     /// Check if a value is a zero constant
