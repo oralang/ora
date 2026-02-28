@@ -289,10 +289,16 @@ pub const ExpressionLowerer = struct {
             return h.getResult(op, 0);
         }
 
-        // fallback: return 0
-        const op = self.ora_dialect.createArithConstant(0, ty, self.fileLoc(span));
-        h.appendOp(self.block, op);
-        return h.getResult(op, 0);
+        if (self.error_handler) |handler| {
+            handler.reportError(
+                .TypeMismatch,
+                span,
+                "Unsupported builtin constant in MLIR lowering",
+                "Add a lowering rule for this builtin constant before codegen.",
+            ) catch {};
+            return self.createErrorPlaceholder(span, "unsupported builtin constant");
+        }
+        @panic("Unsupported builtin constant in MLIR lowering");
     }
 
     /// Lower cast expressions

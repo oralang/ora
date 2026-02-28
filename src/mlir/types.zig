@@ -468,9 +468,10 @@ pub const TypeMapper = struct {
             return struct_type;
         }
 
-        // last resort: use i256 as fallback (should not happen if struct is properly declared)
-        log.debug("WARNING: Struct type '{s}' not found in symbol table and failed to create. Using i256 fallback.\n", .{struct_name});
-        return c.oraIntegerTypeCreate(self.ctx, constants.DEFAULT_INTEGER_BITS);
+        // last resort: return none type so downstream lowering fails explicitly instead of
+        // silently treating an unknown struct as a machine integer.
+        log.err("Struct type '{s}' not found in symbol table and failed to create; returning none type.\n", .{struct_name});
+        return c.oraNoneTypeCreate(self.ctx);
     }
 
     /// Convert enum type to appropriate integer representation based on underlying type
@@ -489,24 +490,29 @@ pub const TypeMapper = struct {
             }
         }
 
-        // fallback: If enum not found in symbol table, use variant count for sizing
-        // this should rarely happen as enums should be registered before use
+        // fallback: If direct lookup failed, scan for the requested enum name only.
+        // Never infer from an unrelated enum, which can produce wrong widths.
         if (self.symbol_table) |st| {
             var type_iter = st.types.iterator();
             while (type_iter.next()) |entry| {
                 const type_symbols = entry.value_ptr.*;
                 for (type_symbols) |type_sym| {
-                    if (type_sym.type_kind == .Enum) {
-                        if (type_sym.variants) |variants| {
-                            // choose smallest integer type that can hold all variants
-                            const variant_count = variants.len;
-                            if (variant_count <= 256) {
-                                return c.oraIntegerTypeCreate(self.ctx, 8); // u8
-                            } else if (variant_count <= 65536) {
-                                return c.oraIntegerTypeCreate(self.ctx, 16); // u16
-                            } else {
-                                return c.oraIntegerTypeCreate(self.ctx, 32); // u32
-                            }
+                    if (type_sym.type_kind != .Enum) continue;
+                    if (!std.mem.eql(u8, type_sym.name, enum_name)) continue;
+
+                    if (!c.oraTypeIsNull(type_sym.mlir_type)) {
+                        return type_sym.mlir_type;
+                    }
+
+                    if (type_sym.variants) |variants| {
+                        // choose smallest integer type that can hold all variants
+                        const variant_count = variants.len;
+                        if (variant_count <= 256) {
+                            return c.oraIntegerTypeCreate(self.ctx, 8); // u8
+                        } else if (variant_count <= 65536) {
+                            return c.oraIntegerTypeCreate(self.ctx, 16); // u16
+                        } else {
+                            return c.oraIntegerTypeCreate(self.ctx, 32); // u32
                         }
                     }
                 }
@@ -579,20 +585,20 @@ pub const TypeMapper = struct {
         }
 
         const fields = self.inference_ctx.allocator.alloc(lib.ast.type_info.AnonymousStructFieldType, tuple_info.len) catch {
-            log.warn("Failed to allocate tuple field types; using i256 fallback\n", .{});
-            return c.oraIntegerTypeCreate(self.ctx, constants.DEFAULT_INTEGER_BITS);
+            log.err("Failed to allocate tuple field types; returning none type\n", .{});
+            return c.oraNoneTypeCreate(self.ctx);
         };
 
         var i: usize = 0;
         while (i < tuple_info.len) : (i += 1) {
             // Tuple fields use numeric names ("0", "1", ...) to align with t.0 syntax.
             const field_name = std.fmt.allocPrint(self.inference_ctx.allocator, "{d}", .{i}) catch {
-                log.warn("Failed to allocate tuple field name; using i256 fallback\n", .{});
-                return c.oraIntegerTypeCreate(self.ctx, constants.DEFAULT_INTEGER_BITS);
+                log.err("Failed to allocate tuple field name; returning none type\n", .{});
+                return c.oraNoneTypeCreate(self.ctx);
             };
             const elem_ptr = self.inference_ctx.allocator.create(lib.ast.type_info.OraType) catch {
-                log.warn("Failed to allocate tuple field type; using i256 fallback\n", .{});
-                return c.oraIntegerTypeCreate(self.ctx, constants.DEFAULT_INTEGER_BITS);
+                log.err("Failed to allocate tuple field type; returning none type\n", .{});
+                return c.oraNoneTypeCreate(self.ctx);
             };
             elem_ptr.* = tuple_info[i];
             fields[i] = .{ .name = field_name, .typ = elem_ptr };
@@ -657,13 +663,13 @@ pub const TypeMapper = struct {
         hashOraType(&hasher, .{ .anonymous_struct = fields });
         const hash = hasher.final();
         const name = std.fmt.allocPrint(self.inference_ctx.allocator, "__anon_struct_{x}", .{hash}) catch {
-            log.warn("Failed to allocate anonymous struct name; using i256 fallback\n", .{});
-            return c.oraIntegerTypeCreate(self.ctx, constants.DEFAULT_INTEGER_BITS);
+            log.err("Failed to allocate anonymous struct name; returning none type\n", .{});
+            return c.oraNoneTypeCreate(self.ctx);
         };
         if (!self.anon_structs.contains(name)) {
             const owned_fields = self.copyAnonymousStructFields(fields) catch {
-                log.warn("Failed to copy anonymous struct fields; using i256 fallback\n", .{});
-                return c.oraIntegerTypeCreate(self.ctx, constants.DEFAULT_INTEGER_BITS);
+                log.err("Failed to copy anonymous struct fields; returning none type\n", .{});
+                return c.oraNoneTypeCreate(self.ctx);
             };
             _ = @constCast(self).anon_structs.put(name, owned_fields) catch {};
         }
@@ -672,8 +678,8 @@ pub const TypeMapper = struct {
         if (struct_type.ptr != null) {
             return struct_type;
         }
-        log.debug("WARNING: Anonymous struct type '{s}' could not be created. Using i256 fallback.\n", .{name});
-        return c.oraIntegerTypeCreate(self.ctx, constants.DEFAULT_INTEGER_BITS);
+        log.err("Anonymous struct type '{s}' could not be created; returning none type.\n", .{name});
+        return c.oraNoneTypeCreate(self.ctx);
     }
 
     fn copyAnonymousStructFields(

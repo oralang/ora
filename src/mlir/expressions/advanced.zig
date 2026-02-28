@@ -21,6 +21,19 @@ const comptime_eval = lib.comptime_eval;
 /// ExpressionLowerer type (forward declaration)
 const ExpressionLowerer = @import("mod.zig").ExpressionLowerer;
 
+fn reportSwitchPatternLoweringError(
+    self: *const ExpressionLowerer,
+    span: lib.ast.SourceSpan,
+    message: []const u8,
+    suggestion: ?[]const u8,
+) c.MlirValue {
+    if (self.error_handler) |handler| {
+        handler.reportError(.TypeMismatch, span, message, suggestion) catch {};
+        return self.createErrorPlaceholder(span, message);
+    }
+    @panic(message);
+}
+
 /// Lower cast expressions
 pub fn lowerCast(
     self: *const ExpressionLowerer,
@@ -310,24 +323,65 @@ pub fn lowerSwitchExpression(
                     range_ends.append(std.heap.page_allocator, 0) catch {};
                     case_kinds.append(std.heap.page_allocator, 0) catch {};
                 } else {
-                    case_values.append(std.heap.page_allocator, 0) catch {};
-                    range_starts.append(std.heap.page_allocator, 0) catch {};
-                    range_ends.append(std.heap.page_allocator, 0) catch {};
-                    case_kinds.append(std.heap.page_allocator, 0) catch {};
+                    return reportSwitchPatternLoweringError(
+                        self,
+                        switch_expr.span,
+                        "Switch literal case must be an integer constant",
+                        "Use an integer literal (or enum value) as a switch case pattern.",
+                    );
                 }
             },
             .Range => |range| {
                 _ = case_expr_lowerer.lowerExpression(range.start);
                 _ = case_expr_lowerer.lowerExpression(range.end);
-                const start_val = expr_literals.extractIntegerFromExpr(range.start) orelse 0;
-                const end_val = expr_literals.extractIntegerFromExpr(range.end) orelse 0;
+                const start_val = expr_literals.extractIntegerFromExpr(range.start) orelse {
+                    return reportSwitchPatternLoweringError(
+                        self,
+                        switch_expr.span,
+                        "Switch range start must be an integer constant",
+                        "Use constant integer bounds in switch range patterns.",
+                    );
+                };
+                const end_val = expr_literals.extractIntegerFromExpr(range.end) orelse {
+                    return reportSwitchPatternLoweringError(
+                        self,
+                        switch_expr.span,
+                        "Switch range end must be an integer constant",
+                        "Use constant integer bounds in switch range patterns.",
+                    );
+                };
                 case_values.append(std.heap.page_allocator, 0) catch {};
                 range_starts.append(std.heap.page_allocator, start_val) catch {};
                 range_ends.append(std.heap.page_allocator, end_val) catch {};
                 case_kinds.append(std.heap.page_allocator, 1) catch {};
             },
-            .EnumValue => {
-                case_values.append(std.heap.page_allocator, 0) catch {};
+            .EnumValue => |enum_val| {
+                var case_value: i64 = 0;
+                var resolved = false;
+                if (enum_val.enum_name.len == 0) {
+                    if (self.symbol_table) |st| {
+                        if (st.getErrorId(enum_val.variant_name)) |err_id| {
+                            case_value = @intCast(err_id);
+                            resolved = true;
+                        }
+                    }
+                } else if (self.symbol_table) |st| {
+                    if (st.lookupType(enum_val.enum_name)) |enum_type| {
+                        if (enum_type.getVariantIndex(enum_val.variant_name)) |variant_idx| {
+                            case_value = @intCast(variant_idx);
+                            resolved = true;
+                        }
+                    }
+                }
+                if (!resolved) {
+                    return reportSwitchPatternLoweringError(
+                        self,
+                        switch_expr.span,
+                        "Unable to resolve enum switch case to an integer tag",
+                        "Ensure the enum/value exists and is type-resolved before lowering.",
+                    );
+                }
+                case_values.append(std.heap.page_allocator, case_value) catch {};
                 range_starts.append(std.heap.page_allocator, 0) catch {};
                 range_ends.append(std.heap.page_allocator, 0) catch {};
                 case_kinds.append(std.heap.page_allocator, 0) catch {};
@@ -1727,9 +1781,12 @@ pub fn createSwitchIfChain(
     cases: []lib.ast.Expressions.SwitchCase,
     span: lib.ast.SourceSpan,
 ) c.MlirValue {
-    _ = self;
+    _ = condition;
     _ = cases;
-    _ = span;
-    log.warn("createSwitchIfChain called but not fully implemented - using condition as fallback\n", .{});
-    return condition;
+    return reportSwitchPatternLoweringError(
+        self,
+        span,
+        "createSwitchIfChain is not implemented",
+        "Use switch expression lowering via ora.switch_expr until this path is implemented.",
+    );
 }

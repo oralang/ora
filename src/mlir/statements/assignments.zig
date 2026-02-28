@@ -150,8 +150,14 @@ pub fn lowerIdentifierAssignment(
                         return;
                     }
                 }
-                // default to Stack if parsing fails and not in storage_map
-                break :blk lib.ast.Statements.MemoryRegion.Stack;
+                reportAssignmentError(
+                    self,
+                    ident.span,
+                    .InvalidMemoryRegion,
+                    "Unknown symbol region for assignment target",
+                    "Use one of: stack, memory, storage, tstore, calldata.",
+                );
+                return LoweringError.InvalidMemoryRegion;
             };
 
             switch (region) {

@@ -181,14 +181,8 @@ pub fn lowerIdentifier(
         // this handles cases where a builtin constant is accessed directly
         if (registry.lookup(identifier.name)) |builtin_info| {
             if (!builtin_info.is_call) {
-                // it's a constant - create a constant value
-                const result_type = self.type_mapper.toMlirType(.{
-                    .ora_type = builtin_info.return_type,
-                });
-                // for now, return a zero value - proper builtin constant lowering should be implemented
-                const const_op = self.ora_dialect.createArithConstant(0, result_type, self.fileLoc(identifier.span));
-                h.appendOp(self.block, const_op);
-                return h.getResult(const_op, 0);
+                // it's a constant
+                return lowerBuiltinConstant(self, &builtin_info, identifier.span);
             }
         }
     }
@@ -351,10 +345,6 @@ fn lowerBuiltinConstant(
     builtin_info: *const lib.semantics.builtins.BuiltinInfo,
     span: lib.ast.SourceSpan,
 ) c.MlirValue {
-    const ty = self.type_mapper.toMlirType(.{
-        .ora_type = builtin_info.return_type,
-    });
-
     if (std.mem.eql(u8, builtin_info.full_path, "std.constants.ZERO_ADDRESS")) {
         const i160_ty = c.oraIntegerTypeCreate(self.ctx, 160);
         const const_op = self.ora_dialect.createArithConstant(0, i160_ty, self.fileLoc(span));
@@ -375,9 +365,16 @@ fn lowerBuiltinConstant(
         }
     }
 
-    const op = self.ora_dialect.createArithConstant(0, ty, self.fileLoc(span));
-    h.appendOp(self.block, op);
-    return h.getResult(op, 0);
+    if (self.error_handler) |handler| {
+        handler.reportError(
+            .TypeMismatch,
+            span,
+            "Unsupported builtin constant in MLIR lowering",
+            "Add a lowering rule for this builtin constant before codegen.",
+        ) catch {};
+        return self.createErrorPlaceholder(span, "unsupported builtin constant");
+    }
+    @panic("Unsupported builtin constant in MLIR lowering");
 }
 
 const IntegerBoundary = enum { min, max };

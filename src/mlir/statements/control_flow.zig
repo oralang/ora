@@ -1684,6 +1684,17 @@ fn extractIntegerFromExpr(self: *const StatementLowerer, expr: *const lib.ast.Ex
     };
 }
 
+fn reportSwitchPatternError(
+    self: *const StatementLowerer,
+    span: lib.ast.SourceSpan,
+    message: []const u8,
+    suggestion: ?[]const u8,
+) void {
+    if (self.expr_lowerer.error_handler) |handler| {
+        handler.reportError(.TypeMismatch, span, message, suggestion) catch {};
+    }
+}
+
 /// Lower switch statements using ora.switch operation
 /// Switch statements can produce a value when all cases return.
 pub fn lowerSwitch(self: *const StatementLowerer, switch_stmt: *const lib.ast.Statements.SwitchNode) LoweringError!void {
@@ -1815,17 +1826,36 @@ pub fn lowerSwitch(self: *const StatementLowerer, switch_stmt: *const lib.ast.St
                     range_ends.append(self.allocator, 0) catch {};
                     case_kinds.append(self.allocator, 0) catch {}; // 0 = literal
                 } else {
-                    case_values.append(self.allocator, 0) catch {};
-                    range_starts.append(self.allocator, 0) catch {};
-                    range_ends.append(self.allocator, 0) catch {};
-                    case_kinds.append(self.allocator, 0) catch {};
+                    reportSwitchPatternError(
+                        self,
+                        switch_stmt.span,
+                        "Switch literal case must be an integer constant",
+                        "Use an integer literal (or enum value) as a switch case pattern.",
+                    );
+                    return LoweringError.InvalidSwitch;
                 }
             },
             .Range => |range| {
                 _ = case_expr_lowerer.lowerExpression(range.start);
                 _ = case_expr_lowerer.lowerExpression(range.end);
-                const start_val = extractIntegerFromExpr(self, range.start) orelse 0;
-                const end_val = extractIntegerFromExpr(self, range.end) orelse 0;
+                const start_val = extractIntegerFromExpr(self, range.start) orelse {
+                    reportSwitchPatternError(
+                        self,
+                        switch_stmt.span,
+                        "Switch range start must be an integer constant",
+                        "Use constant integer bounds in switch range patterns.",
+                    );
+                    return LoweringError.InvalidSwitch;
+                };
+                const end_val = extractIntegerFromExpr(self, range.end) orelse {
+                    reportSwitchPatternError(
+                        self,
+                        switch_stmt.span,
+                        "Switch range end must be an integer constant",
+                        "Use constant integer bounds in switch range patterns.",
+                    );
+                    return LoweringError.InvalidSwitch;
+                };
                 case_values.append(self.allocator, 0) catch {};
                 range_starts.append(self.allocator, start_val) catch {};
                 range_ends.append(self.allocator, end_val) catch {};
@@ -1833,18 +1863,30 @@ pub fn lowerSwitch(self: *const StatementLowerer, switch_stmt: *const lib.ast.St
             },
             .EnumValue => |enum_val| {
                 var case_value: i64 = 0;
+                var resolved = false;
                 if (enum_val.enum_name.len == 0) {
                     if (self.symbol_table) |st| {
                         if (st.getErrorId(enum_val.variant_name)) |err_id| {
                             case_value = @intCast(err_id);
+                            resolved = true;
                         }
                     }
                 } else if (self.symbol_table) |st| {
                     if (st.lookupType(enum_val.enum_name)) |enum_type| {
                         if (enum_type.getVariantIndex(enum_val.variant_name)) |variant_idx| {
                             case_value = @intCast(variant_idx);
+                            resolved = true;
                         }
                     }
+                }
+                if (!resolved) {
+                    reportSwitchPatternError(
+                        self,
+                        switch_stmt.span,
+                        "Unable to resolve enum switch case to an integer tag",
+                        "Ensure the enum/value exists and is type-resolved before lowering.",
+                    );
+                    return LoweringError.InvalidSwitch;
                 }
                 case_values.append(self.allocator, case_value) catch {};
                 range_starts.append(self.allocator, 0) catch {};
