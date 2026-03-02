@@ -14,7 +14,7 @@
 // ============================================================================
 
 const std = @import("std");
-const ast = @import("ast.zig");
+const ast = @import("ora_ast");
 const core_impl = @import("semantics/core.zig");
 const ManagedArrayList = std.array_list.Managed;
 

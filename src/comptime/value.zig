@@ -141,7 +141,7 @@ pub const ConstEnum = struct {
 // TypeId ↔ OraType mapping (well-known IDs for primitives)
 // ============================================================================
 
-const OraType = @import("../ast/type_info.zig").OraType;
+const OraType = @import("ora_types").type_info.OraType;
 
 /// Well-known TypeId values for primitive Ora types.
 /// These are stable constants used by the comptime system.

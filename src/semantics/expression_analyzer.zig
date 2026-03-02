@@ -15,7 +15,7 @@
 // ============================================================================
 
 const std = @import("std");
-const ast = @import("../ast.zig");
+const ast = @import("ora_ast");
 const state = @import("state.zig");
 const builtins = @import("../semantics.zig").builtins;
 

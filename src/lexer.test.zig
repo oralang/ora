@@ -6,7 +6,7 @@
 
 const std = @import("std");
 const testing = std.testing;
-const ora_root = @import("root.zig");
+const ora_root = @import("ora_root");
 const lexer = ora_root.lexer;
 
 // ============================================================================

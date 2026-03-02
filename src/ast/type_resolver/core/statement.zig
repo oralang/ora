@@ -5,8 +5,8 @@
 // ============================================================================
 
 const std = @import("std");
-const ast = @import("../../../ast.zig");
-const type_info_mod = @import("../../type_info.zig");
+const ast = @import("ora_ast");
+const type_info_mod = @import("ora_types").type_info;
 const TypeInfo = type_info_mod.TypeInfo;
 const OraType = type_info_mod.OraType;
 const CommonTypes = type_info_mod.CommonTypes;
@@ -459,7 +459,7 @@ fn resolveVariableDecl(
         // if we allocated a type but failed to store it, deallocate it
         if (typ_owned_flag and !type_stored) {
             if (stored_type.ora_type) |*ora_type| {
-                const type_info = @import("../../type_info.zig");
+                const type_info = @import("ora_types").type_info;
                 type_info.deinitOraType(self.allocator, @constCast(ora_type));
             }
         }
@@ -471,7 +471,7 @@ fn resolveVariableDecl(
         if (self.symbol_table.findScopeContainingSafe(scope, var_decl.name)) |found| {
             // found the symbol - update it in the scope where it's actually stored
             const old_symbol = &found.scope.symbols.items[found.idx];
-            const type_info = @import("../../type_info.zig");
+            const type_info = @import("ora_types").type_info;
             // only deallocate if the old type was owned AND has a valid ora_type
             if (old_symbol.typ_owned) {
                 if (old_symbol.typ) |*old_typ| {
@@ -506,7 +506,7 @@ fn resolveVariableDecl(
         // deallocate the copied type since we can't store it
         if (typ_owned_flag) {
             if (stored_type.ora_type) |*ora_type| {
-                const type_info = @import("../../type_info.zig");
+                const type_info = @import("ora_types").type_info;
                 type_info.deinitOraType(self.allocator, @constCast(ora_type));
                 type_stored = true; // Mark as "handled" to prevent errdefer from double-freeing
             }
@@ -518,7 +518,7 @@ fn resolveVariableDecl(
     if (typ_owned_flag and !type_stored) {
         log.debug("[resolveVariableDecl] CRITICAL: Variable '{s}' - copied type was not stored! Deallocating to prevent leak.\n", .{var_decl.name});
         if (stored_type.ora_type) |*ora_type| {
-            const type_info = @import("../../type_info.zig");
+            const type_info = @import("ora_types").type_info;
             type_info.deinitOraType(self.allocator, @constCast(ora_type));
         }
     }

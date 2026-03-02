@@ -20,8 +20,8 @@
 // ============================================================================
 
 const std = @import("std");
-const ast = @import("../ast.zig");
-const lib = @import("../ast/type_info.zig");
+const ast = @import("ora_ast");
+const lib = @import("ora_types").type_info;
 
 /// Information about a built-in function or constant
 pub const BuiltinInfo = struct {

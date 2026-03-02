@@ -10,7 +10,7 @@
 // ============================================================================
 
 const std = @import("std");
-const ast = @import("../../ast.zig");
+const ast = @import("ora_ast");
 const TypeParser = @import("../type_parser.zig").TypeParser;
 const ExpressionParser = @import("../expression_parser.zig").ExpressionParser;
 

@@ -5,13 +5,14 @@
 // ============================================================================
 
 const std = @import("std");
-const ast = @import("../../../ast.zig");
-const TypeInfo = @import("../../type_info.zig").TypeInfo;
-const TypeCategory = @import("../../type_info.zig").TypeCategory;
-const CommonTypes = @import("../../type_info.zig").CommonTypes;
-const OraType = @import("../../type_info.zig").OraType;
-const SourceSpan = @import("../../source_span.zig").SourceSpan;
-const BinaryOp = @import("../../expressions.zig").BinaryOp;
+const builtin = @import("builtin");
+const ast = @import("ora_ast");
+const TypeInfo = @import("ora_types").type_info.TypeInfo;
+const TypeCategory = @import("ora_types").type_info.TypeCategory;
+const CommonTypes = @import("ora_types").type_info.CommonTypes;
+const OraType = @import("ora_types").type_info.OraType;
+const SourceSpan = @import("ora_types").source_span.SourceSpan;
+const BinaryOp = @import("ora_ast").expressions.BinaryOp;
 const state = @import("../../../semantics/state.zig");
 const semantics = @import("../../../semantics.zig");
 const builtins = semantics.builtins;
@@ -25,7 +26,7 @@ const SlotSet = @import("mod.zig").SlotSet;
 const combineEffects = @import("mod.zig").combineEffects;
 const mergeEffects = @import("mod.zig").mergeEffects;
 const takeEffect = @import("mod.zig").takeEffect;
-const MemoryRegion = @import("../../region.zig").MemoryRegion;
+const MemoryRegion = @import("ora_types").region.MemoryRegion;
 const TypeContext = @import("mod.zig").TypeContext;
 const validation = @import("../validation/mod.zig");
 const refinements = @import("../refinements/mod.zig");
@@ -342,14 +343,16 @@ pub fn checkExpr(
     if (!self.validation.isAssignable(typed.ty, expected)) {
         const got_str = formatTypeInfo(typed.ty, self.allocator) catch "unknown";
         const expected_str = formatTypeInfo(expected, self.allocator) catch "unknown";
-        log.err(
-            "[type_resolver] TypeMismatch: got {s}, expected {s}\n",
-            .{ got_str, expected_str },
-        );
-        log.err(
-            "[type_resolver] TypeMismatch details: got category={s} ora_type={any} expected category={s} ora_type={any}\n",
-            .{ @tagName(typed.ty.category), typed.ty.ora_type, @tagName(expected.category), expected.ora_type },
-        );
+        if (!builtin.is_test) {
+            log.err(
+                "[type_resolver] TypeMismatch: got {s}, expected {s}\n",
+                .{ got_str, expected_str },
+            );
+            log.err(
+                "[type_resolver] TypeMismatch details: got category={s} ora_type={any} expected category={s} ora_type={any}\n",
+                .{ @tagName(typed.ty.category), typed.ty.ora_type, @tagName(expected.category), expected.ora_type },
+            );
+        }
         return TypeResolutionError.TypeMismatch;
     }
 

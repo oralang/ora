@@ -5,15 +5,15 @@
 // ============================================================================
 
 const std = @import("std");
-const ast = @import("../../../ast.zig");
-const TypeInfo = @import("../../type_info.zig").TypeInfo;
-const OraType = @import("../../type_info.zig").OraType;
-const SourceSpan = @import("../../source_span.zig").SourceSpan;
+const ast = @import("ora_ast");
+const TypeInfo = @import("ora_types").type_info.TypeInfo;
+const OraType = @import("ora_types").type_info.OraType;
+const SourceSpan = @import("ora_types").source_span.SourceSpan;
 const state = @import("../../../semantics/state.zig");
 const semantics = @import("../../../semantics.zig");
 const SymbolTable = state.SymbolTable;
 const Scope = state.Scope;
-const MemoryRegion = @import("../../statements.zig").MemoryRegion;
+const MemoryRegion = @import("ora_ast").statements.MemoryRegion;
 
 const validation = @import("../validation/mod.zig");
 const utils = @import("../utils/mod.zig");

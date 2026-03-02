@@ -18,7 +18,7 @@ pub const ast_visitor = @import("ast/ast_visitor.zig");
 pub const verification = @import("ast/verification.zig");
 
 // Import serializer
-const ast_serializer = @import("ast/ast_serializer.zig");
+pub const ast_serializer = @import("ast/ast_serializer.zig");
 pub const AstSerializer = ast_serializer.AstSerializer;
 
 // Note: TypeResolver is exported from ast/type_resolver/mod.zig directly

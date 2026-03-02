@@ -4,7 +4,7 @@
 // Phase 1: Extract subtyping rules
 // ============================================================================
 
-const OraType = @import("../../type_info.zig").OraType;
+const OraType = @import("ora_types").type_info.OraType;
 
 /// Check refinement subtyping rules
 /// Returns true if source is a subtype of target (source <: target)

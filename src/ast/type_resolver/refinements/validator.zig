@@ -5,7 +5,7 @@
 // ============================================================================
 
 const std = @import("std");
-const OraType = @import("../../type_info.zig").OraType;
+const OraType = @import("ora_types").type_info.OraType;
 const TypeResolutionError = @import("../mod.zig").TypeResolutionError;
 const RefinementConfig = @import("registry.zig").RefinementConfig;
 

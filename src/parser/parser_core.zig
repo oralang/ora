@@ -13,10 +13,9 @@
 // ============================================================================
 
 const std = @import("std");
-const builtin = @import("builtin");
-const lexer = @import("../lexer.zig");
-const ast = @import("../ast.zig");
-const ast_arena = @import("../ast/ast_arena.zig");
+const lexer = @import("ora_lexer");
+const ast = @import("ora_ast");
+const ast_arena = @import("ora_types").ast_arena;
 
 const Token = lexer.Token;
 const TokenType = lexer.TokenType;
@@ -28,26 +27,15 @@ const StatementParser = @import("statement_parser.zig").StatementParser;
 const TypeParser = @import("type_parser.zig").TypeParser;
 const DeclarationParser = @import("declaration_parser.zig").DeclarationParser;
 const common = @import("common.zig");
-const log = @import("log");
-const semantics_core = @import("../semantics/core.zig");
 
 /// Parser errors with detailed diagnostics (alias common.ParserError for consistency)
 pub const ParserError = common.ParserError;
 
-fn analyzePhase1ForParser(allocator: Allocator, nodes: []const AstNode) ParserError!semantics_core.SemanticsResult {
-    return semantics_core.analyzePhase1(allocator, nodes) catch |err| {
-        if (!builtin.is_test) {
-            log.err("Semantic analysis phase 1 failed: {s}\n", .{@errorName(err)});
-            if (err == error.MissingParameterType) {
-                log.help("all function parameters must have an explicit or resolved type before lowering\n", .{});
-            }
-        }
-        return switch (err) {
-            error.OutOfMemory => ParserError.OutOfMemory,
-            else => ParserError.TypeResolutionFailed,
-        };
-    };
-}
+/// Result of a raw parse: untyped AST nodes and the arena that owns them.
+pub const ParseResult = struct {
+    nodes: []AstNode,
+    arena: ast_arena.AstArena,
+};
 
 /// Main parser for Ora language
 pub const Parser = struct {
@@ -294,147 +282,14 @@ pub const Parser = struct {
     }
 };
 
-/// Convenience function for parsing tokens into AST with type resolution
-/// Returns both the AST nodes and the arena (caller must keep arena alive while using nodes)
-pub fn parseWithArena(allocator: Allocator, tokens: []const Token) ParserError!struct { nodes: []AstNode, arena: ast_arena.AstArena } {
-    var ast_arena_instance = ast_arena.AstArena.init(allocator);
-    // note: arena is NOT deinitialized here - caller must deinit it
-
-    var parser = Parser.init(tokens, &ast_arena_instance);
+/// Parse tokens into an untyped AST without running semantics or type resolution.
+/// Returns the raw AST nodes and the arena that owns them.
+/// This is the entry point for tooling (LSP, formatters) that needs fast, partial parsing.
+pub fn parseRaw(allocator: Allocator, tokens: []const Token) ParserError!ParseResult {
+    var arena = ast_arena.AstArena.init(allocator);
+    errdefer arena.deinit();
+    var parser = Parser.init(tokens, &arena);
     const nodes = try parser.parse();
-
-    // collect symbols (errors, functions, structs, etc.) into symbol table before type resolution
-    // use analyzePhase1 which creates contract scopes and function scopes properly
-    var semantics_result = try analyzePhase1ForParser(allocator, nodes);
-    defer allocator.free(semantics_result.diagnostics);
-    defer semantics_result.symbols.deinit();
-    ensureLogSignatures(&semantics_result.symbols, nodes) catch |err| {
-        if (!builtin.is_test) {
-            log.err("Failed to collect log signatures: {s}\n", .{@errorName(err)});
-        }
-        return ParserError.TypeResolutionFailed;
-    };
-
-    // perform type resolution on the parsed AST
-    const TypeResolver = @import("../ast/type_resolver/mod.zig").TypeResolver;
-    var type_resolver = TypeResolver.init(allocator, ast_arena_instance.allocator(), &semantics_result.symbols);
-    errdefer type_resolver.deinit();
-    type_resolver.resolveTypes(nodes) catch |err| {
-        // type resolution errors (especially TypeMismatch) should stop compilation
-        // these indicate invalid type assignments that cannot be safely compiled
-        if (!builtin.is_test) {
-            const is_user_facing_type_error = err == @import("../ast/type_resolver/mod.zig").TypeResolutionError.ErrorUnionOutsideTry or
-                err == @import("../ast/type_resolver/mod.zig").TypeResolutionError.GenericContractNotSupported or
-                err == @import("../ast/type_resolver/mod.zig").TypeResolutionError.TopLevelGenericInstantiationNotSupported or
-                err == @import("../ast/type_resolver/mod.zig").TypeResolutionError.ComptimeArithmeticError or
-                err == @import("../ast/type_resolver/mod.zig").TypeResolutionError.ComptimeEvaluationError;
-            log.err("Type resolution failed: {s}\n", .{@errorName(err)});
-            if (err == @import("../ast/type_resolver/mod.zig").TypeResolutionError.ErrorUnionOutsideTry) {
-                log.help("use `try` to unwrap error unions or wrap the code in a try/catch block\n", .{});
-            } else if (err == @import("../ast/type_resolver/mod.zig").TypeResolutionError.GenericContractNotSupported) {
-                log.help("generic contracts are parsed but not implemented yet; remove type parameters for now\n", .{});
-            } else if (err == @import("../ast/type_resolver/mod.zig").TypeResolutionError.TopLevelGenericInstantiationNotSupported) {
-                log.help("generic functions/structs currently require a contract scope; move the generic usage inside a contract\n", .{});
-            } else if (err == @import("../ast/type_resolver/mod.zig").TypeResolutionError.ComptimeArithmeticError) {
-                log.help("checked arithmetic in a compile-time-known expression failed; use wrapping operators (e.g. **%) or smaller values\n", .{});
-            } else if (err == @import("../ast/type_resolver/mod.zig").TypeResolutionError.ComptimeEvaluationError) {
-                log.help("explicit/known comptime evaluation failed and cannot fall back to runtime\n", .{});
-            }
-            // best-effort stack trace in debug builds
-            if (!is_user_facing_type_error) {
-                const trace = @errorReturnTrace();
-                if (trace) |t| std.debug.dumpStackTrace(t.*);
-            }
-        }
-        return ParserError.TypeResolutionFailed;
-    };
-    type_resolver.deinit();
-
-    return .{ .nodes = nodes, .arena = ast_arena_instance };
+    return .{ .nodes = nodes, .arena = arena };
 }
 
-/// Convenience function for parsing tokens into AST with type resolution
-/// WARNING: For --emit-ast, use parseWithArena instead to keep arena alive
-pub fn parse(allocator: Allocator, tokens: []const Token) ParserError![]AstNode {
-    var ast_arena_instance = ast_arena.AstArena.init(allocator);
-    defer ast_arena_instance.deinit();
-
-    var parser = Parser.init(tokens, &ast_arena_instance);
-    const nodes = try parser.parse();
-
-    // collect symbols (errors, functions, structs, etc.) into symbol table before type resolution
-    // use analyzePhase1 which creates contract scopes and function scopes properly
-    var semantics_result = try analyzePhase1ForParser(allocator, nodes);
-    defer allocator.free(semantics_result.diagnostics);
-    defer semantics_result.symbols.deinit();
-    ensureLogSignatures(&semantics_result.symbols, nodes) catch |err| {
-        if (!builtin.is_test) {
-            log.err("Failed to collect log signatures: {s}\n", .{@errorName(err)});
-        }
-        return ParserError.TypeResolutionFailed;
-    };
-
-    // perform type resolution on the parsed AST
-    const TypeResolver = @import("../ast/type_resolver/mod.zig").TypeResolver;
-    var type_resolver = TypeResolver.init(allocator, ast_arena_instance.allocator(), &semantics_result.symbols);
-    errdefer type_resolver.deinit();
-    type_resolver.resolveTypes(nodes) catch |err| {
-        // type resolution errors (especially TypeMismatch) should stop compilation
-        // these indicate invalid type assignments that cannot be safely compiled
-        if (!builtin.is_test) {
-            const is_user_facing_type_error = err == @import("../ast/type_resolver/mod.zig").TypeResolutionError.ErrorUnionOutsideTry or
-                err == @import("../ast/type_resolver/mod.zig").TypeResolutionError.GenericContractNotSupported or
-                err == @import("../ast/type_resolver/mod.zig").TypeResolutionError.TopLevelGenericInstantiationNotSupported or
-                err == @import("../ast/type_resolver/mod.zig").TypeResolutionError.ComptimeArithmeticError or
-                err == @import("../ast/type_resolver/mod.zig").TypeResolutionError.ComptimeEvaluationError;
-            log.err("Type resolution failed: {s}\n", .{@errorName(err)});
-            if (err == @import("../ast/type_resolver/mod.zig").TypeResolutionError.ErrorUnionOutsideTry) {
-                log.help("use `try` to unwrap error unions or wrap the code in a try/catch block\n", .{});
-            } else if (err == @import("../ast/type_resolver/mod.zig").TypeResolutionError.GenericContractNotSupported) {
-                log.help("generic contracts are parsed but not implemented yet; remove type parameters for now\n", .{});
-            } else if (err == @import("../ast/type_resolver/mod.zig").TypeResolutionError.TopLevelGenericInstantiationNotSupported) {
-                log.help("generic functions/structs currently require a contract scope; move the generic usage inside a contract\n", .{});
-            } else if (err == @import("../ast/type_resolver/mod.zig").TypeResolutionError.ComptimeArithmeticError) {
-                log.help("checked arithmetic in a compile-time-known expression failed; use wrapping operators (e.g. **%) or smaller values\n", .{});
-            } else if (err == @import("../ast/type_resolver/mod.zig").TypeResolutionError.ComptimeEvaluationError) {
-                log.help("explicit/known comptime evaluation failed and cannot fall back to runtime\n", .{});
-            }
-            // best-effort stack trace in debug builds
-            if (!is_user_facing_type_error) {
-                const trace = @errorReturnTrace();
-                if (trace) |t| std.debug.dumpStackTrace(t.*);
-            }
-        }
-        return ParserError.TypeResolutionFailed;
-    };
-    type_resolver.deinit();
-
-    return nodes;
-}
-
-fn ensureLogSignatures(symbols: *@import("../semantics/state.zig").SymbolTable, nodes: []const AstNode) !void {
-    for (nodes) |node| switch (node) {
-        .LogDecl => |l| {
-            if (symbols.log_signatures.get(l.name) == null) {
-                try symbols.log_signatures.put(l.name, l.fields);
-            }
-        },
-        .Contract => |c| {
-            if (symbols.contract_log_signatures.getPtr(c.name) == null) {
-                const log_map = std.StringHashMap([]const ast.LogField).init(symbols.allocator);
-                try symbols.contract_log_signatures.put(c.name, log_map);
-            }
-            for (c.body) |member| switch (member) {
-                .LogDecl => |l| {
-                    if (symbols.contract_log_signatures.getPtr(c.name)) |log_map| {
-                        if (log_map.get(l.name) == null) {
-                            try log_map.put(l.name, l.fields);
-                        }
-                    }
-                },
-                else => {},
-            };
-        },
-        else => {},
-    };
-}

@@ -16,8 +16,8 @@
 // ============================================================================
 
 const std = @import("std");
-const ast = @import("../ast.zig");
-const TypeInfo = @import("../ast/type_info.zig").TypeInfo;
+const ast = @import("ora_ast");
+const TypeInfo = @import("ora_types").type_info.TypeInfo;
 const builtins = @import("../semantics.zig").builtins;
 const log = @import("log");
 
@@ -227,7 +227,7 @@ pub const SymbolTable = struct {
     }
 
     pub fn deinit(self: *SymbolTable) void {
-        const type_info_mod = @import("../ast/type_info.zig");
+        const type_info_mod = @import("ora_types").type_info;
         // deinit types in root symbols
         for (self.root.symbols.items) |*s| {
             if (s.typ_owned) {
@@ -393,7 +393,7 @@ pub const SymbolTable = struct {
     /// and updates its type. Properly deallocates the old type if it was owned.
     /// NOTE: Only sets typ_owned=true if the symbol is in a function scope, not a block scope
     pub fn updateSymbolType(self: *SymbolTable, scope: ?*Scope, name: []const u8, new_type: TypeInfo, new_typ_owned: bool) !void {
-        const type_info = @import("../ast/type_info.zig");
+        const type_info = @import("ora_types").type_info;
 
         // first check the current scope (in case symbol is in a nested block scope)
         if (scope) |s| {

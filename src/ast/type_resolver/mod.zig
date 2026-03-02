@@ -6,11 +6,11 @@
 
 const std = @import("std");
 // Import AST types - no circular dependency since ast.zig no longer imports us
-const ast = @import("../../ast.zig");
-const SourceSpan = @import("../../ast/source_span.zig").SourceSpan;
-const Statements = @import("../statements.zig");
-const TypeInfo = @import("../type_info.zig").TypeInfo;
-const OraType = @import("../type_info.zig").OraType;
+const ast = @import("ora_ast");
+const SourceSpan = @import("ora_types").source_span.SourceSpan;
+const Statements = @import("ora_ast").statements;
+const TypeInfo = @import("ora_types").type_info.TypeInfo;
+const OraType = @import("ora_types").type_info.OraType;
 const state = @import("../../semantics/state.zig");
 const SymbolTable = state.SymbolTable;
 const Scope = state.Scope;
@@ -1542,7 +1542,7 @@ pub const TypeResolver = struct {
         return false;
     }
 
-    fn derivedCategory(ot: OraType) @import("../type_info.zig").TypeCategory {
+    fn derivedCategory(ot: OraType) @import("ora_types").type_info.TypeCategory {
         var cat = ot.getCategory();
         if (ot == ._union and ot._union.len > 0 and ot._union[0] == .error_union) {
             cat = .ErrorUnion;

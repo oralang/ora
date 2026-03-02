@@ -4,7 +4,7 @@
 // Phase 1: Extract base type logic
 // ============================================================================
 
-const OraType = @import("../../type_info.zig").OraType;
+const OraType = @import("ora_types").type_info.OraType;
 
 /// Extract base type from a refined type
 /// Single source of truth for type extraction

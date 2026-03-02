@@ -59,6 +59,27 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
+    // Standalone pipeline modules with explicit dependency boundaries.
+    // These enable fast builds/tests for frontend-only work without MLIR/Z3.
+    const ora_types_mod = b.createModule(.{
+        .root_source_file = b.path("src/types/root.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
+    const ora_lexer_mod = b.createModule(.{
+        .root_source_file = b.path("src/lexer.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
+    const ora_ast_mod = b.createModule(.{
+        .root_source_file = b.path("src/ast.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    ora_ast_mod.addImport("ora_types", ora_types_mod);
+
     const mlir_c_mod = b.createModule(.{
         .root_source_file = b.path("src/mlir/c.zig"),
         .target = target,
@@ -76,6 +97,9 @@ pub fn build(b: *std.Build) void {
     exe_mod.addImport("log", log_mod);
     lib_mod.addImport("mlir_c_api", mlir_c_mod);
     lib_mod.addImport("log", log_mod);
+    lib_mod.addImport("ora_types", ora_types_mod);
+    lib_mod.addImport("ora_ast", ora_ast_mod);
+    lib_mod.addImport("ora_lexer", ora_lexer_mod);
 
     // now, we will create a static library based on the module we created above.
     // this creates a `std.Build.Step.Compile`, which is the build step responsible
@@ -520,16 +544,77 @@ pub fn build(b: *std.Build) void {
     const type_resolver_logs_tests = b.addTest(.{ .root_module = type_resolver_logs_test_mod });
     test_step.dependOn(&b.addRunArtifact(type_resolver_logs_tests).step);
 
-    // unit tests will be added here as they are created.
-    // example pattern:
-    // const lexer_test_mod = b.createModule(.{
-    //     .root_source_file = b.path("src/lexer.test.zig"),
-    //     .target = target,
-    //     .optimize = optimize,
-    // });
-    // lexer_test_mod.addImport("ora_root", lib_mod);
-    // const lexer_tests = b.addTest(.{ .root_module = lexer_test_mod });
-    // test_step.dependOn(&b.addRunArtifact(lexer_tests).step);
+    // ========================================================================
+    // Boundary enforcement canary
+    // ========================================================================
+    // Compiles parser_core.zig as an isolated module with only the allowed
+    // named module imports, and scans parser sources for forbidden relative
+    // imports into semantics/type-resolver/MLIR/Z3.
+    //
+    //   zig build check-parser-boundary
+    //
+    const parser_canary_mod = b.createModule(.{
+        .root_source_file = b.path("src/parser/parser_core.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    parser_canary_mod.addImport("ora_types", ora_types_mod);
+    parser_canary_mod.addImport("ora_lexer", ora_lexer_mod);
+    parser_canary_mod.addImport("ora_ast", ora_ast_mod);
+    parser_canary_mod.addImport("log", log_mod);
+    // Allowed: ora_types, ora_lexer, ora_ast, log.
+    // NOT provided: semantics, type_resolver, MLIR, Z3.
+    // If a parser file adds a forbidden import, this step fails.
+
+    const parser_canary = b.addObject(.{
+        .name = "parser_boundary_canary",
+        .root_module = parser_canary_mod,
+    });
+    const parser_import_guard = b.allocator.create(std.Build.Step) catch @panic("OOM");
+    parser_import_guard.* = std.Build.Step.init(.{
+        .id = .custom,
+        .name = "parser-import-guard",
+        .owner = b,
+        .makeFn = checkParserImportsImpl,
+    });
+    const check_parser_step = b.step("check-parser-boundary", "Verify parser module has no semantics/MLIR/Z3 imports");
+    check_parser_step.dependOn(&parser_canary.step);
+    check_parser_step.dependOn(parser_import_guard);
+
+    // ========================================================================
+    // Per-module test targets (no MLIR/Z3 required)
+    // ========================================================================
+
+    // zig build test-types
+    const test_types_step = b.step("test-types", "Run ora_types unit tests");
+    const types_test_mod = b.addTest(.{ .root_module = ora_types_mod });
+    test_types_step.dependOn(&b.addRunArtifact(types_test_mod).step);
+
+    // zig build test-lexer
+    const test_lexer_step = b.step("test-lexer", "Run lexer unit tests (no MLIR/Z3)");
+    const lexer_standalone_tests = b.addTest(.{ .root_module = ora_lexer_mod });
+    test_lexer_step.dependOn(&b.addRunArtifact(lexer_standalone_tests).step);
+    test_lexer_step.dependOn(&b.addRunArtifact(lexer_tests).step);
+    test_lexer_step.dependOn(&b.addRunArtifact(error_recovery_tests).step);
+    test_lexer_step.dependOn(&b.addRunArtifact(numbers_tests).step);
+    test_lexer_step.dependOn(&b.addRunArtifact(strings_tests).step);
+    test_lexer_step.dependOn(&b.addRunArtifact(identifiers_tests).step);
+
+    // zig build test-parser
+    const test_parser_step = b.step("test-parser", "Run parser unit tests (no MLIR/Z3)");
+    test_parser_step.dependOn(&b.addRunArtifact(expression_parser_tests).step);
+    test_parser_step.dependOn(&b.addRunArtifact(statement_parser_tests).step);
+    test_parser_step.dependOn(&b.addRunArtifact(parser_core_tests).step);
+    test_parser_step.dependOn(&b.addRunArtifact(declaration_parser_tests).step);
+    test_parser_step.dependOn(&b.addRunArtifact(type_parser_tests).step);
+    test_parser_step.dependOn(&b.addRunArtifact(ast_builder_tests).step);
+    test_parser_step.dependOn(&b.addRunArtifact(ast_expressions_tests).step);
+    test_parser_step.dependOn(&b.addRunArtifact(ast_statements_tests).step);
+    test_parser_step.dependOn(&b.addRunArtifact(type_resolver_logs_tests).step);
+
+    // zig build test-semantics
+    const test_semantics_step = b.step("test-semantics", "Run semantics unit tests (no MLIR/Z3)");
+    test_semantics_step.dependOn(&b.addRunArtifact(locals_binder_tests).step);
 }
 
 /// Create a step that runs the installed lexer test suite with --verbose
@@ -570,6 +655,48 @@ fn runLexerVerbose(step: *std.Build.Step, options: std.Build.Step.MakeOptions) a
             return error.LexerSuiteFailed;
         },
         else => {},
+    }
+}
+
+fn checkParserImportsImpl(step: *std.Build.Step, options: std.Build.Step.MakeOptions) anyerror!void {
+    _ = options;
+    const b = step.owner;
+    const allocator = b.allocator;
+
+    const forbidden = [_]struct {
+        pattern: []const u8,
+        description: []const u8,
+    }{
+        .{ .pattern = "@import(\"../semantics/", .description = "parser core must not import semantics" },
+        .{ .pattern = "@import(\"../ast/type_resolver/", .description = "parser core must not import type resolver" },
+        .{ .pattern = "@import(\"../mlir/", .description = "parser core must not import MLIR" },
+        .{ .pattern = "@import(\"../z3/", .description = "parser core must not import Z3" },
+    };
+
+    var parser_dir = try std.fs.cwd().openDir("src/parser", .{ .iterate = true });
+    defer parser_dir.close();
+
+    var walker = try parser_dir.walk(allocator);
+    defer walker.deinit();
+
+    while (try walker.next()) |entry| {
+        if (entry.kind != .file) continue;
+        if (!std.mem.endsWith(u8, entry.path, ".zig")) continue;
+        if (std.mem.eql(u8, entry.path, "pipeline.zig")) continue;
+
+        const rel_path = try std.fmt.allocPrint(allocator, "src/parser/{s}", .{entry.path});
+        defer allocator.free(rel_path);
+
+        const contents = try std.fs.cwd().readFileAlloc(allocator, rel_path, 4 * 1024 * 1024);
+        defer allocator.free(contents);
+
+        for (forbidden) |rule| {
+            if (std.mem.indexOf(u8, contents, rule.pattern) != null) {
+                std.log.err("Parser boundary violation in {s}: {s}", .{ rel_path, rule.description });
+                std.log.err("  found forbidden import pattern: {s}", .{rule.pattern});
+                return error.ParserBoundaryViolation;
+            }
+        }
     }
 }
 
@@ -1463,7 +1590,6 @@ fn linkZ3Libraries(b: *std.Build, exe: *std.Build.Step.Compile, z3_step: *std.Bu
     exe.addLibraryPath(b.path("vendor/z3-install/lib"));
 
     if (using_system_z3) {
-        std.log.info("Linking against system Z3", .{});
         // add system Z3 paths based on platform
         switch (target.result.os.tag) {
             .macos => {
@@ -1490,7 +1616,7 @@ fn linkZ3Libraries(b: *std.Build, exe: *std.Build.Step.Compile, z3_step: *std.Bu
             },
         }
     } else {
-        std.log.info("Linking against vendored Z3 (or vendor build output)", .{});
+        // vendored Z3 — paths already set above
     }
 
     // link Z3 library

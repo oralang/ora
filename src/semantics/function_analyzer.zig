@@ -13,7 +13,7 @@
 // ============================================================================
 
 const std = @import("std");
-const ast = @import("../ast.zig");
+const ast = @import("ora_ast");
 const state = @import("state.zig");
 const expr = @import("expression_analyzer.zig");
 const locals = @import("locals_binder.zig");
@@ -184,7 +184,7 @@ pub fn collectFunctionSymbols(table: *state.SymbolTable, parent: *state.Scope, f
     if (parent.findInCurrent(f.name)) |idx| {
         var existing = &parent.symbols.items[idx];
         if (existing.typ_owned) {
-            @import("../ast/type_info.zig").deinitTypeInfo(table.allocator, &existing.typ.?);
+            @import("ora_types").type_info.deinitTypeInfo(table.allocator, &existing.typ.?);
         }
         existing.typ = new_ti;
         existing.typ_owned = true;

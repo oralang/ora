@@ -14,8 +14,8 @@
 // ============================================================================
 
 const std = @import("std");
-const ast = @import("../../ast.zig");
-const TypeInfo = @import("../../ast/type_info.zig").TypeInfo;
+const ast = @import("ora_ast");
+const TypeInfo = @import("ora_types").type_info.TypeInfo;
 const common_parsers = @import("../common_parsers.zig");
 const TypeParser = @import("../type_parser.zig").TypeParser;
 const ParserError = @import("../parser_core.zig").ParserError;
@@ -23,7 +23,7 @@ const precedence = @import("precedence.zig");
 
 // Forward declaration - ExpressionParser is defined in expression_parser.zig
 const ExpressionParser = @import("../expression_parser.zig").ExpressionParser;
-const Token = @import("../../lexer.zig").Token;
+const Token = @import("ora_lexer").Token;
 
 /// Parse switch expression (returns a value)
 pub fn parseSwitchExpression(parser: *ExpressionParser) ParserError!ast.Expressions.ExprNode {

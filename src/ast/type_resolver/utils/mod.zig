@@ -5,8 +5,8 @@
 // ============================================================================
 
 const std = @import("std");
-const ast = @import("../../../ast.zig");
-const OraType = @import("../../type_info.zig").OraType;
+const ast = @import("ora_ast");
+const OraType = @import("ora_types").type_info.OraType;
 
 pub const extract = @import("extraction.zig");
 pub const constants = @import("constants.zig");

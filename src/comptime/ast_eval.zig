@@ -19,8 +19,8 @@ const error_mod = @import("error.zig");
 const limits = @import("limits.zig");
 const pool_mod = @import("pool.zig");
 const heap_mod = @import("heap.zig");
-const ast_type_info = @import("../ast/type_info.zig");
-const AstSourceSpan = @import("../ast/source_span.zig").SourceSpan;
+const ast_type_info = @import("ora_types").type_info;
+const AstSourceSpan = @import("ora_types").source_span.SourceSpan;
 const log = @import("log");
 
 const CtValue = value.CtValue;
@@ -97,7 +97,7 @@ pub const IdentifierLookup = struct {
 
 /// Opaque function info returned by FunctionLookup
 pub const ComptimeFnInfo = struct {
-    body: *const @import("../ast/statements.zig").BlockNode,
+    body: *const @import("ora_ast").statements.BlockNode,
     param_names: []const []const u8,
     is_comptime_param: []const bool, // per-parameter comptime flag
 };
@@ -1126,8 +1126,8 @@ fn mapUnaryOp(op: anytype) ?UnaryOp {
 // Statement Evaluation
 // ============================================================================
 
-const ast_statements = @import("../ast/statements.zig");
-const ast_expressions = @import("../ast/expressions.zig");
+const ast_statements = @import("ora_ast").statements;
+const ast_expressions = @import("ora_ast").expressions;
 const StmtNode = ast_statements.StmtNode;
 const BlockNode = ast_statements.BlockNode;
 
@@ -1218,7 +1218,7 @@ pub const StmtEvaluator = struct {
         };
     }
 
-    fn evalExprStmt(self: *StmtEvaluator, expr: *const @import("../ast/expressions.zig").ExprNode) AstStmtResult {
+    fn evalExprStmt(self: *StmtEvaluator, expr: *const @import("ora_ast").expressions.ExprNode) AstStmtResult {
         // Handle assignments specially
         if (expr.* == .Assignment) {
             const assign = &expr.Assignment;

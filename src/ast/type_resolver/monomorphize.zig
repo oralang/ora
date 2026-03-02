@@ -9,8 +9,8 @@
 // ============================================================================
 
 const std = @import("std");
-const ast = @import("../../ast.zig");
-const type_info_mod = @import("../type_info.zig");
+const ast = @import("ora_ast");
+const type_info_mod = @import("ora_types").type_info;
 const TypeInfo = type_info_mod.TypeInfo;
 const OraType = type_info_mod.OraType;
 const comptime_eval = @import("../../comptime/mod.zig");
