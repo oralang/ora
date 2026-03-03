@@ -80,6 +80,13 @@ pub fn build(b: *std.Build) void {
     });
     ora_ast_mod.addImport("ora_types", ora_types_mod);
 
+    const ora_fmt_mod = b.createModule(.{
+        .root_source_file = b.path("src/fmt/mod.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    ora_fmt_mod.addImport("ora_lib", lib_mod);
+
     const mlir_c_mod = b.createModule(.{
         .root_source_file = b.path("src/mlir/c.zig"),
         .target = target,
@@ -120,6 +127,22 @@ pub fn build(b: *std.Build) void {
     const exe = b.addExecutable(.{
         .name = "ora",
         .root_module = exe_mod,
+    });
+
+    // standalone LSP server executable (frontend-only path)
+    const lsp_exe_mod = b.createModule(.{
+        .root_source_file = b.path("src/lsp/main.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    lsp_exe_mod.addImport("ora_root", lib_mod);
+    lsp_exe_mod.addImport("ora_lib", lib_mod);
+    lsp_exe_mod.addImport("ora_fmt", ora_fmt_mod);
+    lsp_exe_mod.addImport("lsp", b.dependency("lsp_kit", .{}).module("lsp"));
+
+    const lsp_exe = b.addExecutable(.{
+        .name = "ora-lsp",
+        .root_module = lsp_exe_mod,
     });
 
     // add MLIR build options as compile-time constants
@@ -163,6 +186,7 @@ pub fn build(b: *std.Build) void {
     // standard location when the user invokes the "install" step (the default
     // step when running `zig build`).
     b.installArtifact(exe);
+    b.installArtifact(lsp_exe);
 
     // this *creates* a Run step in the build graph, to be executed when another
     // step is evaluated that depends on it. The next line below will establish
@@ -186,6 +210,9 @@ pub fn build(b: *std.Build) void {
     // this will evaluate the `run` step rather than the default, which is "install".
     const run_step = b.step("run", "Run the app");
     run_step.dependOn(&run_cmd.step);
+
+    const lsp_build_step = b.step("ora-lsp", "Build the Ora LSP server");
+    lsp_build_step.dependOn(&lsp_exe.step);
 
     // Sensei SIR CLI integration (vendored Rust tool)
     const sensei_root = "vendor/sensei/senseic";
@@ -544,6 +571,107 @@ pub fn build(b: *std.Build) void {
     const type_resolver_logs_tests = b.addTest(.{ .root_module = type_resolver_logs_test_mod });
     test_step.dependOn(&b.addRunArtifact(type_resolver_logs_tests).step);
 
+    // lsp tests - Frontend diagnostics
+    const lsp_frontend_test_mod = b.createModule(.{
+        .root_source_file = b.path("src/lsp/frontend.test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    lsp_frontend_test_mod.addImport("ora_root", lib_mod);
+    const lsp_frontend_tests = b.addTest(.{ .root_module = lsp_frontend_test_mod });
+    test_step.dependOn(&b.addRunArtifact(lsp_frontend_tests).step);
+
+    const lsp_workspace_test_mod = b.createModule(.{
+        .root_source_file = b.path("src/lsp/workspace.test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    lsp_workspace_test_mod.addImport("ora_root", lib_mod);
+    const lsp_workspace_tests = b.addTest(.{ .root_module = lsp_workspace_test_mod });
+    test_step.dependOn(&b.addRunArtifact(lsp_workspace_tests).step);
+
+    const lsp_dependency_graph_test_mod = b.createModule(.{
+        .root_source_file = b.path("src/lsp/dependency_graph.test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    lsp_dependency_graph_test_mod.addImport("ora_root", lib_mod);
+    const lsp_dependency_graph_tests = b.addTest(.{ .root_module = lsp_dependency_graph_test_mod });
+    test_step.dependOn(&b.addRunArtifact(lsp_dependency_graph_tests).step);
+
+    const lsp_semantic_index_test_mod = b.createModule(.{
+        .root_source_file = b.path("src/lsp/semantic_index.test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    lsp_semantic_index_test_mod.addImport("ora_root", lib_mod);
+    const lsp_semantic_index_tests = b.addTest(.{ .root_module = lsp_semantic_index_test_mod });
+    test_step.dependOn(&b.addRunArtifact(lsp_semantic_index_tests).step);
+
+    const lsp_text_edits_test_mod = b.createModule(.{
+        .root_source_file = b.path("src/lsp/text_edits.test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    lsp_text_edits_test_mod.addImport("ora_root", lib_mod);
+    const lsp_text_edits_tests = b.addTest(.{ .root_module = lsp_text_edits_test_mod });
+    test_step.dependOn(&b.addRunArtifact(lsp_text_edits_tests).step);
+
+    const lsp_hover_test_mod = b.createModule(.{
+        .root_source_file = b.path("src/lsp/hover.test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    lsp_hover_test_mod.addImport("ora_root", lib_mod);
+    const lsp_hover_tests = b.addTest(.{ .root_module = lsp_hover_test_mod });
+    test_step.dependOn(&b.addRunArtifact(lsp_hover_tests).step);
+
+    const lsp_definition_test_mod = b.createModule(.{
+        .root_source_file = b.path("src/lsp/definition.test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    lsp_definition_test_mod.addImport("ora_root", lib_mod);
+    const lsp_definition_tests = b.addTest(.{ .root_module = lsp_definition_test_mod });
+    test_step.dependOn(&b.addRunArtifact(lsp_definition_tests).step);
+
+    const lsp_references_test_mod = b.createModule(.{
+        .root_source_file = b.path("src/lsp/references.test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    lsp_references_test_mod.addImport("ora_root", lib_mod);
+    const lsp_references_tests = b.addTest(.{ .root_module = lsp_references_test_mod });
+    test_step.dependOn(&b.addRunArtifact(lsp_references_tests).step);
+
+    const lsp_rename_test_mod = b.createModule(.{
+        .root_source_file = b.path("src/lsp/rename.test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    lsp_rename_test_mod.addImport("ora_root", lib_mod);
+    const lsp_rename_tests = b.addTest(.{ .root_module = lsp_rename_test_mod });
+    test_step.dependOn(&b.addRunArtifact(lsp_rename_tests).step);
+
+    const lsp_completion_test_mod = b.createModule(.{
+        .root_source_file = b.path("src/lsp/completion.test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    lsp_completion_test_mod.addImport("ora_root", lib_mod);
+    const lsp_completion_tests = b.addTest(.{ .root_module = lsp_completion_test_mod });
+    test_step.dependOn(&b.addRunArtifact(lsp_completion_tests).step);
+
+    const lsp_formatting_test_mod = b.createModule(.{
+        .root_source_file = b.path("src/lsp/formatting.test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    lsp_formatting_test_mod.addImport("ora_lib", lib_mod);
+    lsp_formatting_test_mod.addImport("ora_fmt", ora_fmt_mod);
+    const lsp_formatting_tests = b.addTest(.{ .root_module = lsp_formatting_test_mod });
+    test_step.dependOn(&b.addRunArtifact(lsp_formatting_tests).step);
+
     // ========================================================================
     // Boundary enforcement canary
     // ========================================================================
@@ -615,6 +743,20 @@ pub fn build(b: *std.Build) void {
     // zig build test-semantics
     const test_semantics_step = b.step("test-semantics", "Run semantics unit tests (no MLIR/Z3)");
     test_semantics_step.dependOn(&b.addRunArtifact(locals_binder_tests).step);
+
+    // zig build test-lsp
+    const test_lsp_step = b.step("test-lsp", "Run LSP frontend tests (no MLIR/Z3)");
+    test_lsp_step.dependOn(&b.addRunArtifact(lsp_frontend_tests).step);
+    test_lsp_step.dependOn(&b.addRunArtifact(lsp_workspace_tests).step);
+    test_lsp_step.dependOn(&b.addRunArtifact(lsp_dependency_graph_tests).step);
+    test_lsp_step.dependOn(&b.addRunArtifact(lsp_semantic_index_tests).step);
+    test_lsp_step.dependOn(&b.addRunArtifact(lsp_text_edits_tests).step);
+    test_lsp_step.dependOn(&b.addRunArtifact(lsp_hover_tests).step);
+    test_lsp_step.dependOn(&b.addRunArtifact(lsp_definition_tests).step);
+    test_lsp_step.dependOn(&b.addRunArtifact(lsp_references_tests).step);
+    test_lsp_step.dependOn(&b.addRunArtifact(lsp_rename_tests).step);
+    test_lsp_step.dependOn(&b.addRunArtifact(lsp_completion_tests).step);
+    test_lsp_step.dependOn(&b.addRunArtifact(lsp_formatting_tests).step);
 }
 
 /// Create a step that runs the installed lexer test suite with --verbose
