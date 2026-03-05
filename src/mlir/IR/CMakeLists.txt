@@ -9,6 +9,10 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
+# Ensure SIR dialect artifacts are shared so downstream consumers do not
+# manually duplicate the full MLIR/LLVM static dependency closure.
+set(BUILD_SHARED_LIBS ON CACHE BOOL "Build shared libraries" FORCE)
+
 find_package(MLIR REQUIRED CONFIG)
 
 message(STATUS "Using MLIR_DIR: ${MLIR_DIR}")
@@ -87,12 +91,24 @@ mlir_tablegen(SIROps.cpp.inc
 
 add_public_tablegen_target(MLIRSIROpsIncGen)
 
+# MLIR renamed/reshuffled interface libraries across versions.
+# Support both legacy and current exports.
+set(SIR_DIALECT_LINK_LIBS
+  MLIRIR
+  MLIRSupport
+  MLIRSideEffectInterfaces
+)
+if(TARGET MLIRSymbolInterfaces)
+  list(APPEND SIR_DIALECT_LINK_LIBS MLIRSymbolInterfaces)
+elseif(TARGET MLIRFunctionInterfaces)
+  list(APPEND SIR_DIALECT_LINK_LIBS MLIRFunctionInterfaces)
+endif()
+
 # -------------------------------
 # SIR dialect library
 # -------------------------------
 add_mlir_dialect_library(MLIRSIRDialect
   lib/SIRDialect.cpp
-  lib/SIRTypes.cpp
 
   PARTIAL_SOURCES_INTENDED
 
@@ -105,17 +121,13 @@ add_mlir_dialect_library(MLIRSIRDialect
     MLIRSIROpsIncGen
 
   LINK_LIBS
-    MLIRIR
-    MLIRSupport
-    MLIRSideEffectInterfaces
-    MLIRSymbolInterfaces
+    ${SIR_DIALECT_LINK_LIBS}
 )
 
 # Ensure generated TableGen includes exist before compiling sources that
 # transitively include SIRDialect.h -> *.inc.
 set_source_files_properties(
   lib/SIRDialect.cpp
-  lib/SIRTypes.cpp
   PROPERTIES
     OBJECT_DEPENDS
       "${PROJECT_BINARY_DIR}/SIRDialect.h.inc;${PROJECT_BINARY_DIR}/SIRDialect.cpp.inc;${PROJECT_BINARY_DIR}/SIRTypes.h.inc;${PROJECT_BINARY_DIR}/SIRTypes.cpp.inc;${PROJECT_BINARY_DIR}/SIROps.h.inc;${PROJECT_BINARY_DIR}/SIROps.cpp.inc"

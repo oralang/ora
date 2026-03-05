@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+IMAGE="${ORA_IMAGE:-oralang/ora:latest}"
+WORKDIR="${ORA_WORKDIR:-$PWD}"
+CACHE_DIR="${ORA_CACHE_DIR:-$HOME/.cache/ora}"
+
+mkdir -p "$CACHE_DIR"
+
+docker_args=(
+  --rm
+  -u "$(id -u):$(id -g)"
+  -v "$WORKDIR:/work"
+  -w /work
+  -v "$CACHE_DIR:/tmp/.ora-cache"
+)
+
+if [[ -t 0 && -t 1 ]]; then
+  docker_args+=( -it )
+fi
+
+exec docker run "${docker_args[@]}" "$IMAGE" "$@"

@@ -867,8 +867,9 @@ fn buildMlirLibrariesImpl(step: *std.Build.Step, options: std.Build.Step.MakeOpt
     // ensure submodule exists
     const cwd = std.fs.cwd();
     _ = cwd.openDir("vendor/llvm-project", .{ .iterate = false }) catch {
-        std.log.err("Missing submodule: vendor/llvm-project. Add it and pin a commit.", .{});
-        std.log.err("Example: git submodule add https://github.com/llvm/llvm-project.git vendor/llvm-project", .{});
+        std.log.err("Missing LLVM source tree: vendor/llvm-project", .{});
+        std.log.err("Run: ./setup.sh --skip-deps --skip-build", .{});
+        std.log.err("Or manually clone + pin llvm-project into vendor/llvm-project", .{});
         return error.SubmoduleMissing;
     };
 
@@ -947,6 +948,7 @@ fn buildMlirLibrariesImpl(step: *std.Build.Step, options: std.Build.Step.MakeOpt
         build_dir,
         "-DCMAKE_BUILD_TYPE=Release",
         "-DCMAKE_POSITION_INDEPENDENT_CODE=ON",
+        "-DBUILD_SHARED_LIBS=ON",
         "-DLLVM_ENABLE_PROJECTS=mlir",
         "-DLLVM_TARGETS_TO_BUILD=Native",
         "-DLLVM_INCLUDE_TESTS=OFF",
@@ -967,7 +969,10 @@ fn buildMlirLibrariesImpl(step: *std.Build.Step, options: std.Build.Step.MakeOpt
         "-DLLVM_ENABLE_PIC=ON",
         "-DLLVM_BUILD_LLVM_DYLIB=OFF",
         "-DLLVM_LINK_LLVM_DYLIB=OFF",
-        "-DLLVM_BUILD_TOOLS=ON", // needed for tblgen
+        // Keep tablegen utilities but avoid linking the full LLVM/MLIR tool suite.
+        // This significantly lowers peak memory usage in constrained builders.
+        "-DLLVM_BUILD_TOOLS=OFF",
+        "-DMLIR_BUILD_TOOLS=OFF",
         "-DLLVM_TOOL_LTO_BUILD=OFF",
         "-DLLVM_TOOL_LLVM_LTO_BUILD=OFF",
         "-DLLVM_TOOL_LLVM_LTO2_BUILD=OFF",
@@ -1126,6 +1131,7 @@ fn buildOraDialectLibraryImpl(step: *std.Build.Step, options: std.Build.Step.Mak
         "-B",
         build_dir,
         "-DCMAKE_BUILD_TYPE=Release",
+        "-DBUILD_SHARED_LIBS=ON",
         b.fmt("-DMLIR_DIR={s}", .{mlir_dir}),
         b.fmt("-DCMAKE_INSTALL_PREFIX={s}", .{install_prefix}),
     });
@@ -1252,6 +1258,7 @@ fn buildSIRDialectLibraryImpl(step: *std.Build.Step, options: std.Build.Step.Mak
         "-B",
         build_dir,
         "-DCMAKE_BUILD_TYPE=Release",
+        "-DBUILD_SHARED_LIBS=ON",
         b.fmt("-DMLIR_DIR={s}", .{mlir_dir}),
         b.fmt("-DCMAKE_INSTALL_PREFIX={s}", .{install_prefix}),
     });
@@ -1335,7 +1342,10 @@ fn linkMlirLibraries(
     exe.addIncludePath(ora_dialect_include_path);
     exe.addIncludePath(sir_dialect_include_path);
     exe.addLibraryPath(lib_path);
+    exe.addRPath(lib_path);
 
+    // Link only top-level C API/dialect libraries.
+    // Their transitive MLIR/LLVM dependencies are resolved by CMake shared-library linkage.
     exe.linkSystemLibrary("MLIR-C");
     exe.linkSystemLibrary("MLIROraDialectC");
     exe.linkSystemLibrary("MLIRSIRDialect");

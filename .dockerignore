@@ -1,0 +1,24 @@
+# Ignore everything by default; re-include only build inputs.
+**
+
+# Core build files
+!Dockerfile
+!build.zig
+!build.zig.zon
+!setup.sh
+!.gitmodules
+!LICENSE
+!README.md
+
+# Compiler sources
+!src
+!src/**
+
+# Utility scripts shipped with the project
+!scripts
+!scripts/**
+
+# Sensei smoke test fixture used by the build graph
+!tests
+!tests/sensei
+!tests/sensei/sample.sir

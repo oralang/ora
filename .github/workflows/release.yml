@@ -456,10 +456,65 @@ jobs:
           path: release-package/
           retention-days: 30
 
+  publish-docker:
+    name: Publish Docker Image
+    runs-on: ubuntu-latest
+    needs: [create-release, build-binaries]
+    if: needs.create-release.result == 'success' && needs.build-binaries.result == 'success'
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Determine Docker tags
+        id: docker_tags
+        run: |
+          VERSION="${{ needs.create-release.outputs.version }}"
+          IS_NIGHTLY="${{ needs.create-release.outputs.is_nightly }}"
+
+          if [ "$IS_NIGHTLY" = "true" ]; then
+            {
+              echo "tags<<EOF"
+              echo "oralang/ora:${VERSION}"
+              echo "oralang/ora:nightly"
+              echo "EOF"
+            } >> "$GITHUB_OUTPUT"
+          else
+            {
+              echo "tags<<EOF"
+              echo "oralang/ora:${VERSION}"
+              echo "oralang/ora:latest"
+              echo "EOF"
+            } >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.docker_tags.outputs.tags }}
+          provenance: false
+          sbom: false
+
   post-release:
     name: Post-Release Tasks
     runs-on: ubuntu-latest
-    needs: [create-release, build-binaries]
+    needs: [create-release, build-binaries, publish-docker]
     if: always() && needs.create-release.result == 'success'
     
     steps:
@@ -487,6 +542,15 @@ jobs:
           echo "✅ Binaries built for all platforms"
           echo "✅ Checksums generated and uploaded"
           echo "✅ Release assets uploaded"
+          if [ "${{ needs.publish-docker.result }}" = "success" ]; then
+            if [ "$IS_NIGHTLY" = "true" ]; then
+              echo "✅ Docker image published: oralang/ora:nightly and oralang/ora:$VERSION"
+            else
+              echo "✅ Docker image published: oralang/ora:latest and oralang/ora:$VERSION"
+            fi
+          else
+            echo "❌ Docker image publish failed or was skipped"
+          fi
           
           echo "🎯 Next steps:"
           echo "- Test the release binaries"

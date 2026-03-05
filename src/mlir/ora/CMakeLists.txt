@@ -7,6 +7,10 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
+# Ensure Ora dialect artifacts are shared so downstream consumers do not
+# manually duplicate the full MLIR/LLVM static dependency closure.
+set(BUILD_SHARED_LIBS ON CACHE BOOL "Build shared libraries" FORCE)
+
 # Find MLIR
 find_package(MLIR REQUIRED CONFIG)
 
@@ -35,10 +39,11 @@ include_directories(${PROJECT_SOURCE_DIR}/lowering/OraToSIR)
 # Include SIR dialect headers (from installed location)
 # SIR is installed to ${CMAKE_INSTALL_PREFIX}/include/SIR
 # We need to find CMAKE_INSTALL_PREFIX from MLIR_DIR
-get_filename_component(MLIR_ROOT_DIR ${MLIR_DIR} DIRECTORY)
-get_filename_component(MLIR_ROOT_DIR ${MLIR_ROOT_DIR} DIRECTORY)
+get_filename_component(MLIR_INSTALL_PREFIX ${MLIR_DIR} DIRECTORY)
+get_filename_component(MLIR_INSTALL_PREFIX ${MLIR_INSTALL_PREFIX} DIRECTORY)
+get_filename_component(MLIR_INSTALL_PREFIX ${MLIR_INSTALL_PREFIX} DIRECTORY)
 # Check both possible locations
-set(SIR_INCLUDE_DIR1 ${MLIR_ROOT_DIR}/include/SIR)
+set(SIR_INCLUDE_DIR1 ${MLIR_INSTALL_PREFIX}/include/SIR)
 set(SIR_INCLUDE_DIR2 ${CMAKE_CURRENT_SOURCE_DIR}/../IR/include)
 if(EXISTS ${SIR_INCLUDE_DIR1})
   include_directories(${SIR_INCLUDE_DIR1})
@@ -87,6 +92,59 @@ add_public_tablegen_target(MLIROraOpsIncGen)
 # add_dependencies(MLIROraDialect MLIROraDialectIncGen)
 # add_dependencies(MLIROraDialect MLIROraOpsIncGen)
 
+# MLIR renamed/reshuffled interface libraries across versions.
+# Support both legacy and current exports.
+set(ORA_DIALECT_C_LINK_LIBS
+  MLIRIR
+  MLIRSupport
+  MLIRSideEffectInterfaces
+  MLIRPass
+)
+
+set(SIR_DIALECT_LINK "")
+if(TARGET MLIRSIRDialect)
+  set(SIR_DIALECT_LINK MLIRSIRDialect)
+elseif(EXISTS "${MLIR_INSTALL_PREFIX}/lib/libMLIRSIRDialect${CMAKE_SHARED_LIBRARY_SUFFIX}")
+  set(SIR_DIALECT_LINK "${MLIR_INSTALL_PREFIX}/lib/libMLIRSIRDialect${CMAKE_SHARED_LIBRARY_SUFFIX}")
+elseif(EXISTS "${MLIR_INSTALL_PREFIX}/lib/libMLIRSIRDialect${CMAKE_STATIC_LIBRARY_SUFFIX}")
+  set(SIR_DIALECT_LINK "${MLIR_INSTALL_PREFIX}/lib/libMLIRSIRDialect${CMAKE_STATIC_LIBRARY_SUFFIX}")
+endif()
+if(SIR_DIALECT_LINK)
+  list(APPEND ORA_DIALECT_C_LINK_LIBS "${SIR_DIALECT_LINK}")
+else()
+  message(FATAL_ERROR "Could not resolve MLIRSIRDialect library under ${MLIR_INSTALL_PREFIX}/lib")
+endif()
+if(TARGET MLIRSymbolInterfaces)
+  list(APPEND ORA_DIALECT_C_LINK_LIBS MLIRSymbolInterfaces)
+elseif(TARGET MLIRFunctionInterfaces)
+  list(APPEND ORA_DIALECT_C_LINK_LIBS MLIRFunctionInterfaces)
+endif()
+
+# MLIR pass/conversion libs changed names across versions. Link the ones
+# available in the active MLIR package.
+set(ORA_MLIR_OPTIONAL_LIBS
+  MLIRDialectConversion
+  MLIRTransforms
+  MLIRTransformUtils
+  MLIRRewrite
+  MLIRArithDialect
+  MLIRMemRefDialect
+  MLIRControlFlowDialect
+  MLIRFuncDialect
+  MLIRSCFDialect
+  MLIRTensorDialect
+  MLIRLLVMDialect
+  MLIRUBDialect
+  MLIRInferIntRangeCommon
+  MLIRRegisterAllDialects
+  MLIRRegisterAllPasses
+)
+foreach(lib IN LISTS ORA_MLIR_OPTIONAL_LIBS)
+  if(TARGET ${lib})
+    list(APPEND ORA_DIALECT_C_LINK_LIBS ${lib})
+  endif()
+endforeach()
+
 # Define the Ora dialect C API library
 # Note: We include OraDialect.cpp because OraDialectC.cpp needs the full OraDialect implementation
 add_mlir_dialect_library(MLIROraDialectC
@@ -118,15 +176,9 @@ add_mlir_dialect_library(MLIROraDialectC
   MLIROraDialectIncGen
   MLIROraTypesIncGen
   MLIROraOpsIncGen
-  
+
   LINK_LIBS
-  MLIRIR
-  MLIRSupport
-  MLIRSideEffectInterfaces
-  MLIRSymbolInterfaces
-  MLIRPass
-  MLIRDialectConversion
-  MLIRSIRDialect
+  ${ORA_DIALECT_C_LINK_LIBS}
 )
 
 # Install the libraries
