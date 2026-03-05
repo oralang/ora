@@ -29,13 +29,13 @@
 // ============================================================================
 
 const std = @import("std");
-const ast = @import("../ast.zig");
-const ast_arena = @import("ast_arena.zig");
+const ast = @import("ora_ast");
+const ast_arena = @import("ora_types").ast_arena;
 const semantics = @import("../semantics.zig");
-const TypeInfo = @import("type_info.zig").TypeInfo;
-const TypeCategory = @import("type_info.zig").TypeCategory;
-const OraType = @import("type_info.zig").OraType;
-const SourceSpan = @import("source_span.zig").SourceSpan;
+const TypeInfo = @import("ora_types").type_info.TypeInfo;
+const TypeCategory = @import("ora_types").type_info.TypeCategory;
+const OraType = @import("ora_types").type_info.OraType;
+const SourceSpan = @import("ora_types").source_span.SourceSpan;
 
 /// Error types for AST builder operations
 /// These errors are returned when builder operations fail validation or encounter invalid state

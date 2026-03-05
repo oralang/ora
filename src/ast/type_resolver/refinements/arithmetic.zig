@@ -5,12 +5,13 @@
 // ============================================================================
 
 const std = @import("std");
-const ast = @import("../../../ast.zig");
-const TypeInfo = @import("../../type_info.zig").TypeInfo;
-const TypeCategory = @import("../../type_info.zig").TypeCategory;
-const OraType = @import("../../type_info.zig").OraType;
-const SourceSpan = @import("../../source_span.zig").SourceSpan;
-const BinaryOp = @import("../../expressions.zig").BinaryOp;
+const ast = @import("ora_ast");
+const ora_types = @import("ora_types");
+const TypeInfo = ora_types.type_info.TypeInfo;
+const TypeCategory = ora_types.type_info.TypeCategory;
+const OraType = ora_types.type_info.OraType;
+const SourceSpan = ora_types.source_span.SourceSpan;
+const BinaryOp = @import("ora_ast").expressions.BinaryOp;
 const extract = @import("../utils/extraction.zig");
 const TypeResolutionError = @import("../mod.zig").TypeResolutionError;
 const log = @import("log");

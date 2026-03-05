@@ -11,16 +11,17 @@ const std = @import("std");
 const testing = std.testing;
 
 // Export core compiler modules
-pub const lexer = @import("lexer.zig");
+pub const lexer = @import("ora_lexer");
 pub const parser = @import("parser.zig");
-pub const ast = @import("ast.zig");
-pub const ast_visitor = @import("ast/ast_visitor.zig");
-pub const ast_arena = @import("ast/ast_arena.zig");
+pub const ast = @import("ora_ast");
+pub const ast_visitor = @import("ora_ast").ast_visitor;
+pub const ast_arena = @import("ora_types").ast_arena;
 pub const ast_builder = @import("ast/ast_builder.zig");
-pub const ast_serializer = @import("ast/ast_serializer.zig");
+pub const ast_serializer = @import("ora_ast").ast_serializer;
 pub const semantics = @import("semantics.zig");
 pub const state_tracker = @import("analysis/state_tracker.zig");
 pub const abi = @import("abi.zig");
+pub const lsp = @import("lsp/mod.zig");
 
 // Note: MLIR and Z3 are NOT exported from ora_lib because they import ora_lib themselves,
 // which would create circular dependencies. They should be imported directly by main.zig.

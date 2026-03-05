@@ -8,7 +8,7 @@
 // ============================================================================
 
 const std = @import("std");
-const ast = @import("../ast.zig");
+const ast = @import("ora_ast");
 const SourceSpan = ast.SourceSpan;
 const Expressions = ast.Expressions;
 const Statements = ast.Statements;

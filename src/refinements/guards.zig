@@ -17,7 +17,7 @@
 const std = @import("std");
 const c = @import("mlir_c_api").c;
 const h = @import("mlir/helpers.zig");
-const lib = @import("../ast.zig");
+const lib = @import("ora_ast");
 const OraType = lib.Types.OraType;
 const TypeInfo = lib.Types.TypeInfo;
 

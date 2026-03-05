@@ -281,3 +281,84 @@ test "parser_core: incomplete contract" {
 
     // if it didn't error, that's also acceptable (error recovery)
 }
+
+// ============================================================================
+// parseRaw() Tests — verifies the raw parse path returns untyped AST
+// without invoking semantics or type resolution.
+// ============================================================================
+
+test "parseRaw: returns untyped AST nodes and arena" {
+    const allocator = testing.allocator;
+    const source = "contract Foo { fn bar() -> u256 { return 1; } }";
+
+    var lex = lexer.Lexer.init(allocator, source);
+    defer lex.deinit();
+    const tokens = try lex.scanTokens();
+    defer allocator.free(tokens);
+
+    var result = try parser.parseRaw(allocator, tokens);
+    defer result.arena.deinit();
+
+    try testing.expect(result.nodes.len > 0);
+    try testing.expect(result.nodes[0] == .Contract);
+}
+
+test "parseRaw: empty input produces no nodes" {
+    const allocator = testing.allocator;
+    const source = "";
+
+    var lex = lexer.Lexer.init(allocator, source);
+    defer lex.deinit();
+    const tokens = try lex.scanTokens();
+    defer allocator.free(tokens);
+
+    var result = try parser.parseRaw(allocator, tokens);
+    defer result.arena.deinit();
+
+    try testing.expectEqual(@as(usize, 0), result.nodes.len);
+}
+
+test "parseRaw: multiple declarations without type resolution" {
+    const allocator = testing.allocator;
+    const source =
+        \\contract A { fn x() -> u256 { return 0; } }
+        \\contract B { fn y() -> bool { return true; } }
+    ;
+
+    var lex = lexer.Lexer.init(allocator, source);
+    defer lex.deinit();
+    const tokens = try lex.scanTokens();
+    defer allocator.free(tokens);
+
+    var result = try parser.parseRaw(allocator, tokens);
+    defer result.arena.deinit();
+
+    try testing.expectEqual(@as(usize, 2), result.nodes.len);
+    try testing.expect(result.nodes[0] == .Contract);
+    try testing.expect(result.nodes[1] == .Contract);
+}
+
+test "parseRaw: succeeds on semantically invalid program where typed parse fails" {
+    const allocator = testing.allocator;
+    // Syntactically valid: the parser accepts `return true` regardless of the
+    // declared return type. Type resolution would reject this (bool vs u256).
+    const source = "contract Foo { fn bar() -> u256 { return true; } }";
+
+    var lex = lexer.Lexer.init(allocator, source);
+    defer lex.deinit();
+    const tokens = try lex.scanTokens();
+    defer allocator.free(tokens);
+
+    // parseRaw() must succeed — it runs no semantics/type checking.
+    var raw = try parser.parseRaw(allocator, tokens);
+    defer raw.arena.deinit();
+    try testing.expect(raw.nodes.len > 0);
+    try testing.expect(raw.nodes[0] == .Contract);
+
+    // The full pipeline (parse → semantics → type resolution) must reject this.
+    // Wrap in an arena because the type resolver leaks format strings on error paths.
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const typed = parser.parse(arena.allocator(), tokens);
+    try testing.expectError(error.TypeResolutionFailed, typed);
+}

@@ -13,11 +13,11 @@
 // ============================================================================
 
 const std = @import("std");
-const lexer = @import("../lexer.zig");
-const ast = @import("../ast.zig");
+const lexer = @import("ora_lexer");
+const ast = @import("ora_ast");
 const common = @import("common.zig");
 const common_parsers = @import("common_parsers.zig");
-const AstArena = @import("../ast/ast_arena.zig").AstArena;
+const AstArena = @import("ora_types").ast_arena.AstArena;
 
 const Token = lexer.Token;
 const TokenType = lexer.TokenType;

@@ -62,6 +62,67 @@ Run tests:
 zig build test
 ```
 
+## Docker (no local compiler build)
+
+Pull the prebuilt image:
+```bash
+docker pull oralang/ora:latest
+```
+
+Sanity check:
+```bash
+docker run --rm oralang/ora:latest --help
+```
+
+Run Ora against files in your current directory:
+```bash
+docker run --rm -it \
+  -u "$(id -u):$(id -g)" \
+  -v "$PWD:/work" \
+  -w /work \
+  oralang/ora:latest build ora-example/apps/erc20.ora
+```
+
+Install the Docker launcher so `ora` works like a native command:
+```bash
+chmod +x scripts/ora-docker scripts/install-ora-docker.sh
+./scripts/install-ora-docker.sh
+```
+
+Use a specific image tag when needed:
+```bash
+ORA_IMAGE=oralang/ora:v0.1.0 ora build ora-example/apps/erc20.ora
+ORA_IMAGE=oralang/ora:v0.1.0 ora fmt ora-example/apps/erc20.ora
+```
+
+Image contents:
+- `ora` at `/usr/local/bin/ora`
+- `ora-lsp` at `/usr/local/bin/ora-lsp`
+- `sir` at `/usr/local/bin/sir`
+
+### Build image locally
+
+```bash
+docker build -t oralang/ora:local .
+docker run --rm oralang/ora:local --help
+```
+
+### Publish to Docker Hub
+
+```bash
+docker login
+docker buildx build \
+  --platform linux/amd64,linux/arm64 \
+  -t oralang/ora:latest \
+  -t oralang/ora:v0.1.0 \
+  --push .
+```
+
+Or use the helper script:
+```bash
+./scripts/publish-docker.sh oralang/ora v0.1.0
+```
+
 ## Documentation
 
 - **Language & specs:** [website/docs](website/docs) — structs, refinement types, generics, comptime, imports, ABI, formal verification.

@@ -15,5 +15,9 @@ pub const DeclarationParser = @import("declaration_parser.zig").DeclarationParse
 pub const diagnostics = @import("diagnostics.zig");
 
 pub const ParserError = @import("parser_core.zig").ParserError;
-pub const parse = @import("parser_core.zig").parse;
-pub const parseWithArena = @import("parser_core.zig").parseWithArena;
+pub const ParseResult = @import("parser_core.zig").ParseResult;
+pub const parseRaw = @import("parser_core.zig").parseRaw;
+
+const pipeline = @import("pipeline.zig");
+pub const parse = pipeline.parse;
+pub const parseWithArena = pipeline.parseWithArena;

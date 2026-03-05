@@ -144,9 +144,13 @@ jobs:
               echo ""
               echo "## 📦 Download"
               echo ""
-              echo "Choose the appropriate binary for your platform:"
+              echo "### Compiler"
               echo "- **Linux (x86_64)**: \`ora-linux-x86_64\`"
               echo "- **macOS (ARM64)**: \`ora-macos-arm64\`"
+              echo ""
+              echo "### LSP Server"
+              echo "- **Linux (x86_64)**: \`ora-lsp-linux-x86_64\`"
+              echo "- **macOS (ARM64)**: \`ora-lsp-macos-arm64\`"
               echo ""
               echo "---"
               echo ""
@@ -184,9 +188,13 @@ jobs:
               echo ""
               echo "## 📦 Download"
               echo ""
-              echo "Choose the appropriate binary for your platform:"
+              echo "### Compiler"
               echo "- **Linux (x86_64)**: \`ora-linux-x86_64\`"
               echo "- **macOS (ARM64)**: \`ora-macos-arm64\`"
+              echo ""
+              echo "### LSP Server"
+              echo "- **Linux (x86_64)**: \`ora-lsp-linux-x86_64\`"
+              echo "- **macOS (ARM64)**: \`ora-lsp-macos-arm64\`"
               echo ""
               echo "## 🔧 Installation"
               echo ""
@@ -337,24 +345,29 @@ jobs:
             echo "✅ MLIR libraries built"
           fi
 
-      - name: Build release binary
+      - name: Build release binaries
         run: |
           echo "🔨 Building Ora compiler for ${{ matrix.platform }}..."
-          
-          # Build optimized release version
           zig build -Doptimize=ReleaseFast -Dtarget=${{ matrix.target }}
           
-          # Verify the binary was created
           if [ -f "zig-out/bin/ora" ]; then
-            echo "✅ Binary built successfully"
-            ls -la zig-out/bin/
-            
-            # Show binary info
+            echo "✅ Compiler built successfully"
             file zig-out/bin/ora
             du -h zig-out/bin/ora
           else
-            echo "❌ Binary not found"
-            ls -la zig-out/
+            echo "❌ Compiler binary not found"
+            exit 1
+          fi
+          
+          echo "🔨 Building Ora LSP server for ${{ matrix.platform }}..."
+          zig build ora-lsp -Doptimize=ReleaseFast -Dtarget=${{ matrix.target }}
+          
+          if [ -f "zig-out/bin/ora-lsp" ]; then
+            echo "✅ LSP server built successfully"
+            file zig-out/bin/ora-lsp
+            du -h zig-out/bin/ora-lsp
+          else
+            echo "❌ LSP binary not found"
             exit 1
           fi
 
@@ -363,7 +376,6 @@ jobs:
           echo "🧪 Testing binary..."
           
           if [ -f "zig-out/bin/ora" ]; then
-            # Test basic functionality
             chmod +x zig-out/bin/ora
             
             echo "Testing --version..."
@@ -387,69 +399,35 @@ jobs:
         run: |
           echo "📦 Creating binary package..."
           
-          # Create package directory
           mkdir -p release-package
           
-          # Copy binary with platform-specific name
           cp zig-out/bin/ora release-package/ora-${{ matrix.platform }}
+          cp zig-out/bin/ora-lsp release-package/ora-lsp-${{ matrix.platform }}
           
-          # Add documentation
           cp LICENSE release-package/ 2>/dev/null || echo "LICENSE not found"
           cp README.md release-package/ 2>/dev/null || echo "README not found"
           
-          # Create simple README for the package
-          {
-            echo "Ora Compiler - ${{ matrix.platform }}"
-            echo "================================"
-            echo ""
-            echo "This is the Ora compiler binary for ${{ matrix.platform }}."
-            echo ""
-            echo "Usage:"
-            echo "  ./ora-${{ matrix.platform }} [options] <file.ora>"
-            echo ""
-            echo "Options:"
-            echo "  --help     Show help information"
-            echo "  --version  Show version information"
-            echo ""
-            echo "For more information, visit:"
-            echo "https://github.com/${{ github.repository }}"
-          } > release-package/README.txt
-          
           ls -la release-package/
-          echo "Package contents:"
           du -sh release-package/*
 
       - name: Generate checksums
         run: |
-          echo "🔍 Generating checksums..."
           cd release-package
-          
-          # Generate SHA256 checksums
-          shasum -a 256 "ora-${{ matrix.platform }}" > "checksums-${{ matrix.platform }}.txt"
-          
-          echo "📋 Checksums for ${{ matrix.platform }}:"
+          shasum -a 256 "ora-${{ matrix.platform }}" "ora-lsp-${{ matrix.platform }}" > "checksums-${{ matrix.platform }}.txt"
           cat "checksums-${{ matrix.platform }}.txt"
 
-      - name: Upload binary to release
+      - name: Upload binaries to release
         run: |
-          echo "📤 Uploading binary to release..."
-          
           VERSION="${{ needs.create-release.outputs.version }}"
-          echo "Using version: $VERSION"
           
-          # Check if release exists
           if gh release view "$VERSION" >/dev/null 2>&1; then
-            echo "✅ Release $VERSION found"
-            
-            # Upload binary
             gh release upload "$VERSION" \
               "release-package/ora-${{ matrix.platform }}" \
+              "release-package/ora-lsp-${{ matrix.platform }}" \
               --clobber
-            
-            echo "✅ Binary uploaded successfully"
+            echo "✅ Binaries uploaded successfully"
           else
             echo "❌ Release $VERSION not found"
-            echo "Available releases:"
             gh release list --limit 10
             exit 1
           fi
@@ -478,10 +456,65 @@ jobs:
           path: release-package/
           retention-days: 30
 
+  publish-docker:
+    name: Publish Docker Image
+    runs-on: ubuntu-latest
+    needs: [create-release, build-binaries]
+    if: needs.create-release.result == 'success' && needs.build-binaries.result == 'success'
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Determine Docker tags
+        id: docker_tags
+        run: |
+          VERSION="${{ needs.create-release.outputs.version }}"
+          IS_NIGHTLY="${{ needs.create-release.outputs.is_nightly }}"
+
+          if [ "$IS_NIGHTLY" = "true" ]; then
+            {
+              echo "tags<<EOF"
+              echo "oralang/ora:${VERSION}"
+              echo "oralang/ora:nightly"
+              echo "EOF"
+            } >> "$GITHUB_OUTPUT"
+          else
+            {
+              echo "tags<<EOF"
+              echo "oralang/ora:${VERSION}"
+              echo "oralang/ora:latest"
+              echo "EOF"
+            } >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.docker_tags.outputs.tags }}
+          provenance: false
+          sbom: false
+
   post-release:
     name: Post-Release Tasks
     runs-on: ubuntu-latest
-    needs: [create-release, build-binaries]
+    needs: [create-release, build-binaries, publish-docker]
     if: always() && needs.create-release.result == 'success'
     
     steps:
@@ -509,6 +542,15 @@ jobs:
           echo "✅ Binaries built for all platforms"
           echo "✅ Checksums generated and uploaded"
           echo "✅ Release assets uploaded"
+          if [ "${{ needs.publish-docker.result }}" = "success" ]; then
+            if [ "$IS_NIGHTLY" = "true" ]; then
+              echo "✅ Docker image published: oralang/ora:nightly and oralang/ora:$VERSION"
+            else
+              echo "✅ Docker image published: oralang/ora:latest and oralang/ora:$VERSION"
+            fi
+          else
+            echo "❌ Docker image publish failed or was skipped"
+          fi
           
           echo "🎯 Next steps:"
           echo "- Test the release binaries"

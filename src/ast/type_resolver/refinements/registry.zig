@@ -5,9 +5,10 @@
 // ============================================================================
 
 const std = @import("std");
-const OraType = @import("../../type_info.zig").OraType;
-const SourceSpan = @import("../../source_span.zig").SourceSpan;
-const BinaryOp = @import("../../expressions.zig").BinaryOp;
+const ora_types = @import("ora_types");
+const OraType = ora_types.type_info.OraType;
+const SourceSpan = ora_types.source_span.SourceSpan;
+const BinaryOp = @import("ora_ast").expressions.BinaryOp;
 const TypeResolutionError = @import("../mod.zig").TypeResolutionError;
 const Obligation = @import("../core/mod.zig").Obligation;
 

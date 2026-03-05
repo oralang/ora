@@ -13,7 +13,7 @@
 // ============================================================================
 
 const std = @import("std");
-const ast = @import("../../ast.zig");
+const ast = @import("ora_ast");
 const common = @import("../common.zig");
 const common_parsers = @import("../common_parsers.zig");
 const ParserCommon = common.ParserCommon;

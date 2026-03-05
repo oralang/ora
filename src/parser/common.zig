@@ -12,9 +12,9 @@
 // ============================================================================
 
 const std = @import("std");
-const lexer = @import("../lexer.zig");
-const ast = @import("../ast.zig");
-const AstArena = @import("../ast/ast_arena.zig").AstArena;
+const lexer = @import("ora_lexer");
+const ast = @import("ora_ast");
+const AstArena = @import("ora_types").ast_arena.AstArena;
 const diagnostics = @import("diagnostics.zig");
 
 const Token = lexer.Token;

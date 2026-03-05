@@ -5,9 +5,9 @@
 // to avoid code duplication and ensure consistent parsing behavior.
 // ============================================================================
 const std = @import("std");
-const lexer = @import("../lexer.zig");
-const ast = @import("../ast.zig");
-const TypeInfo = @import("../ast/type_info.zig").TypeInfo;
+const lexer = @import("ora_lexer");
+const ast = @import("ora_ast");
+const TypeInfo = @import("ora_types").type_info.TypeInfo;
 const common = @import("common.zig");
 
 const Token = lexer.Token;

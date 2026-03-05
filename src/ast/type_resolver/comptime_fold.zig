@@ -7,11 +7,11 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
-const ast = @import("../../ast.zig");
+const ast = @import("ora_ast");
 const state = @import("../../semantics/state.zig");
 const core = @import("core/mod.zig");
 const stmt_resolver = @import("core/statement.zig");
-const type_info_mod = @import("../type_info.zig");
+const type_info_mod = @import("ora_types").type_info;
 const comptime_eval = @import("../../comptime/mod.zig");
 const mono = @import("monomorphize.zig");
 const log = @import("log");

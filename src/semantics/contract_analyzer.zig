@@ -13,7 +13,7 @@
 // ============================================================================
 
 const std = @import("std");
-const ast = @import("../ast.zig");
+const ast = @import("ora_ast");
 const state = @import("state.zig");
 const fun = @import("function_analyzer.zig");
 

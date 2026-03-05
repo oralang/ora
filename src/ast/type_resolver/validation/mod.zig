@@ -5,8 +5,9 @@
 // ============================================================================
 
 const std = @import("std");
-const TypeInfo = @import("../../type_info.zig").TypeInfo;
-const OraType = @import("../../type_info.zig").OraType;
+const ora_types = @import("ora_types");
+const TypeInfo = ora_types.type_info.TypeInfo;
+const OraType = ora_types.type_info.OraType;
 const refinements = @import("../refinements/mod.zig");
 const utils = @import("../utils/mod.zig");
 

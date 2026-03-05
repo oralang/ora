@@ -12,8 +12,8 @@
 // ============================================================================
 
 const std = @import("std");
-const lexer = @import("../lexer.zig");
-const ast = @import("../ast.zig");
+const lexer = @import("ora_lexer");
+const ast = @import("ora_ast");
 const common = @import("common.zig");
 
 const Token = lexer.Token;
@@ -44,7 +44,7 @@ pub const TypeParser = struct {
     /// Tracks pending '>' from a '>>' token split (for nested map<K, map<K, V>>).
     split_right_angle: u32 = 0,
 
-    pub fn init(tokens: []const Token, arena: *@import("../ast/ast_arena.zig").AstArena) TypeParser {
+    pub fn init(tokens: []const Token, arena: *@import("ora_types").ast_arena.AstArena) TypeParser {
         return TypeParser{
             .base = BaseParser.init(tokens, arena),
         };

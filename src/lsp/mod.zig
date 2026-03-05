@@ -1,0 +1,10 @@
+pub const frontend = @import("frontend.zig");
+pub const workspace = @import("workspace.zig");
+pub const dependency_graph = @import("dependency_graph.zig");
+pub const semantic_index = @import("semantic_index.zig");
+pub const text_edits = @import("text_edits.zig");
+pub const hover = @import("hover.zig");
+pub const definition = @import("definition.zig");
+pub const references = @import("references.zig");
+pub const rename = @import("rename.zig");
+pub const completion = @import("completion.zig");

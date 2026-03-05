@@ -17,9 +17,9 @@
 // ============================================================================
 
 const std = @import("std");
-const ast = @import("../ast.zig");
+const ast = @import("ora_ast");
 const state = @import("state.zig");
-const type_info = @import("../ast/type_info.zig");
+const type_info = @import("ora_types").type_info;
 fn mapBlockScope(table: *state.SymbolTable, block: *const ast.Statements.BlockNode, scope: *state.Scope) !void {
     const key: usize = @intFromPtr(block);
     try table.block_scopes.put(key, scope);
