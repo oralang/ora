@@ -50,6 +50,8 @@ extern "C"
     MLIR_CAPI_EXPORTED void oraContextLoadAllAvailableDialects(MlirContext ctx);
 
     MLIR_CAPI_EXPORTED MlirModule oraModuleCreateEmpty(MlirLocation loc);
+    /// Parse a textual MLIR module. Returns a null module on parse failure.
+    MLIR_CAPI_EXPORTED MlirModule oraModuleCreateParse(MlirContext ctx, MlirStringRef moduleText);
     MLIR_CAPI_EXPORTED MlirOperation oraModuleGetOperation(MlirModule module);
     MLIR_CAPI_EXPORTED MlirBlock oraModuleGetBody(MlirModule module);
     MLIR_CAPI_EXPORTED bool oraModuleIsNull(MlirModule module);
@@ -210,34 +212,15 @@ extern "C"
         MlirValue value,
         MlirStringRef globalName);
 
-    /// Create an ora.if operation using the registered dialect
+    /// Create an ora.conditional_return operation using the registered dialect
     /// Returns null operation if the dialect is not registered or creation fails
-    MLIR_CAPI_EXPORTED MlirOperation oraIfOpCreate(
+    MLIR_CAPI_EXPORTED MlirOperation oraConditionalReturnOpCreate(
         MlirContext ctx,
         MlirLocation loc,
         MlirValue condition);
 
-    MLIR_CAPI_EXPORTED MlirBlock oraIfOpGetThenBlock(MlirOperation ifOp);
-    MLIR_CAPI_EXPORTED MlirBlock oraIfOpGetElseBlock(MlirOperation ifOp);
-
-    /// Create an ora.isolated_if operation using the registered dialect
-    /// Returns null operation if the dialect is not registered or creation fails
-    MLIR_CAPI_EXPORTED MlirOperation oraIsolatedIfOpCreate(
-        MlirContext ctx,
-        MlirLocation loc,
-        MlirValue condition);
-
-    MLIR_CAPI_EXPORTED MlirBlock oraIsolatedIfOpGetThenBlock(MlirOperation ifOp);
-    MLIR_CAPI_EXPORTED MlirBlock oraIsolatedIfOpGetElseBlock(MlirOperation ifOp);
-
-    /// Create an ora.while operation using the registered dialect
-    /// Returns null operation if the dialect is not registered or creation fails
-    MLIR_CAPI_EXPORTED MlirOperation oraWhileOpCreate(
-        MlirContext ctx,
-        MlirLocation loc,
-        MlirValue condition);
-
-    MLIR_CAPI_EXPORTED MlirBlock oraWhileOpGetBodyBlock(MlirOperation whileOp);
+    MLIR_CAPI_EXPORTED MlirBlock oraConditionalReturnOpGetThenBlock(MlirOperation ifOp);
+    MLIR_CAPI_EXPORTED MlirBlock oraConditionalReturnOpGetElseBlock(MlirOperation ifOp);
 
     /// Create an ora.test operation (simple custom printer test)
     /// Returns null operation if the dialect is not registered or creation fails
@@ -661,6 +644,13 @@ extern "C"
 
     /// Create an arith.extui operation
     MLIR_CAPI_EXPORTED MlirOperation oraArithExtUIOpCreate(
+        MlirContext ctx,
+        MlirLocation loc,
+        MlirValue operand,
+        MlirType resultType);
+
+    /// Create an arith.extsi operation
+    MLIR_CAPI_EXPORTED MlirOperation oraArithExtSIOpCreate(
         MlirContext ctx,
         MlirLocation loc,
         MlirValue operand,
@@ -1277,6 +1267,9 @@ extern "C"
     /// Query: integer type width
     MLIR_CAPI_EXPORTED uint32_t oraIntegerTypeGetWidth(MlirType type);
 
+    /// Query: integer type signedness (builtin or Ora integer type)
+    MLIR_CAPI_EXPORTED bool oraIntegerTypeIsSigned(MlirType type);
+
     /// Query: type is null
     MLIR_CAPI_EXPORTED bool oraTypeIsNull(MlirType type);
 
@@ -1440,14 +1433,8 @@ MLIR_CAPI_EXPORTED MlirBlock oraTryStmtOpGetTryBlock(MlirOperation tryStmtOp);
 
 MLIR_CAPI_EXPORTED MlirBlock oraTryStmtOpGetCatchBlock(MlirOperation tryStmtOp);
 
-/// Create an ora.for operation
-MLIR_CAPI_EXPORTED MlirOperation oraForOpCreate(
-        MlirContext ctx,
-        MlirLocation loc,
-        MlirValue collection);
-
-    /// Create an ora.break operation
-    MLIR_CAPI_EXPORTED MlirOperation oraBreakOpCreate(
+/// Create an ora.break operation
+MLIR_CAPI_EXPORTED MlirOperation oraBreakOpCreate(
         MlirContext ctx,
         MlirLocation loc,
         MlirStringRef label,

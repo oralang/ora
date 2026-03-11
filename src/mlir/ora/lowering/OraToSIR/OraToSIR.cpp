@@ -877,11 +877,8 @@ public:
         }
         // Defer ora.return lowering to phase 2 so scf.if results are split first.
         if (enable_control_flow)
-            patterns.add<ConvertWhileOp>(typeConverter, ctx);
-        if (enable_control_flow)
         {
             patterns.add<ConvertIfOp>(typeConverter, ctx);
-            patterns.add<ConvertIsolatedIfOp>(typeConverter, ctx);
             patterns.add<ConvertBreakOp>(typeConverter, ctx);
             patterns.add<ConvertContinueOp>(typeConverter, ctx);
             patterns.add<ConvertSwitchExprOp>(typeConverter, ctx);
@@ -919,7 +916,6 @@ public:
         patterns.add<ora::ConvertUnlockOp>(typeConverter, ctx);
         patterns.add<ora::ConvertTStoreGuardOp>(typeConverter, ctx);
         patterns.add<EraseOpByName>("ora.move", ctx);
-        patterns.add<EraseOpByName>("ora.for", ctx);
 
         ConversionTarget target(*ctx);
         // Mark SIR dialect as legal
@@ -1163,7 +1159,7 @@ public:
             logModuleOps(module, "After Phase2 conversion");
         }
 
-        // Phase 2b: re-run try_stmt/error lowering + scf.if → CFG + ora.if + returns.
+        // Phase 2b: re-run try_stmt/error lowering + scf.if → CFG + ora.conditional_return + returns.
         {
             RewritePatternSet phase2bPatterns(ctx);
             phase2bPatterns.add<ConvertTryStmtOp>(typeConverter, ctx);
@@ -1178,7 +1174,6 @@ public:
             phase2bPatterns.add<ConvertScfIfOp>(typeConverter, ctx,
                                                 /*lowerReturnsInMergeBlock=*/false, PatternBenefit(10));
             phase2bPatterns.add<ConvertIfOp>(typeConverter, ctx);
-            phase2bPatterns.add<ConvertIsolatedIfOp>(typeConverter, ctx);
 
             ConversionTarget phase2bTarget(*ctx);
             phase2bTarget.addLegalDialect<mlir::BuiltinDialect>();
@@ -1288,7 +1283,6 @@ public:
             phase3Patterns.add<ConvertScfForOp>(typeConverter, ctx);
             phase3Patterns.add<ConvertScfWhileOp>(typeConverter, ctx);
             phase3Patterns.add<ConvertIfOp>(typeConverter, ctx);
-            phase3Patterns.add<ConvertIsolatedIfOp>(typeConverter, ctx);
             phase3Patterns.add<ConvertMemRefAllocOp>(typeConverter, ctx);
             phase3Patterns.add<ConvertMemRefLoadOp>(typeConverter, ctx);
             phase3Patterns.add<ConvertMemRefStoreOp>(typeConverter, ctx);

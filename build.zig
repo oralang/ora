@@ -541,6 +541,34 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&b.addRunArtifact(mlir_effects_tests).step);
     test_mlir_step.dependOn(&b.addRunArtifact(mlir_effects_tests).step);
 
+    // MLIR parser/printer round-trip tests
+    const mlir_roundtrip_test_mod = b.createModule(.{
+        .root_source_file = b.path("src/mlir/roundtrip.test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    mlir_roundtrip_test_mod.addImport("ora_lib", lib_mod);
+    mlir_roundtrip_test_mod.addImport("mlir_c_api", mlir_c_mod);
+    mlir_roundtrip_test_mod.addImport("log", log_mod);
+    const mlir_roundtrip_tests = b.addTest(.{ .root_module = mlir_roundtrip_test_mod });
+    linkMlirLibraries(b, mlir_roundtrip_tests, mlir_step, ora_dialect_step, sir_dialect_step, target);
+    test_step.dependOn(&b.addRunArtifact(mlir_roundtrip_tests).step);
+    test_mlir_step.dependOn(&b.addRunArtifact(mlir_roundtrip_tests).step);
+
+    // MLIR verifier-negative tests
+    const mlir_verifiers_test_mod = b.createModule(.{
+        .root_source_file = b.path("src/mlir/verifiers.test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    mlir_verifiers_test_mod.addImport("ora_lib", lib_mod);
+    mlir_verifiers_test_mod.addImport("mlir_c_api", mlir_c_mod);
+    mlir_verifiers_test_mod.addImport("log", log_mod);
+    const mlir_verifiers_tests = b.addTest(.{ .root_module = mlir_verifiers_test_mod });
+    linkMlirLibraries(b, mlir_verifiers_tests, mlir_step, ora_dialect_step, sir_dialect_step, target);
+    test_step.dependOn(&b.addRunArtifact(mlir_verifiers_tests).step);
+    test_mlir_step.dependOn(&b.addRunArtifact(mlir_verifiers_tests).step);
+
     // ast tests - Expressions
     const ast_expressions_test_mod = b.createModule(.{
         .root_source_file = b.path("src/ast/expressions.test.zig"),
@@ -671,6 +699,19 @@ pub fn build(b: *std.Build) void {
     lsp_formatting_test_mod.addImport("ora_fmt", ora_fmt_mod);
     const lsp_formatting_tests = b.addTest(.{ .root_module = lsp_formatting_test_mod });
     test_step.dependOn(&b.addRunArtifact(lsp_formatting_tests).step);
+
+    const compiler_test_mod = b.createModule(.{
+        .root_source_file = b.path("src/compiler/mod.test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    compiler_test_mod.addImport("ora_root", lib_mod);
+    const compiler_tests = b.addTest(.{ .root_module = compiler_test_mod });
+    linkMlirLibraries(b, compiler_tests, mlir_step, ora_dialect_step, sir_dialect_step, target);
+    test_step.dependOn(&b.addRunArtifact(compiler_tests).step);
+
+    const test_compiler_step = b.step("test-compiler", "Run compiler core tests");
+    test_compiler_step.dependOn(&b.addRunArtifact(compiler_tests).step);
 
     // ========================================================================
     // Boundary enforcement canary

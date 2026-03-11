@@ -261,16 +261,16 @@ pub const OraVerification = struct {
         const op_name = self.getOperationName(op);
 
         // check for semantic consistency
-        if (std.mem.eql(u8, op_name, "ora.if")) {
-            // if operation should have exactly one operand (condition) and at least one region
+        if (std.mem.eql(u8, op_name, "ora.conditional_return")) {
+            // conditional_return should have exactly one operand (condition) and two regions
             const num_operands = c.oraOperationGetNumOperands(op);
             const num_regions = c.oraOperationGetNumRegions(op);
 
             if (num_operands != 1) {
-                try self.error_handler.reportError(.MlirOperationFailed, null, "If operation must have exactly one operand (condition)", "ensure if operation has exactly one condition operand");
+                try self.error_handler.reportError(.MlirOperationFailed, null, "Conditional return must have exactly one operand (condition)", "ensure ora.conditional_return has exactly one condition operand");
             }
-            if (num_regions < 1) {
-                try self.error_handler.reportError(.MlirOperationFailed, null, "If operation must have at least one region (then branch)", "ensure if operation has at least one region");
+            if (num_regions != 2) {
+                try self.error_handler.reportError(.MlirOperationFailed, null, "Conditional return must have exactly two regions", "ensure ora.conditional_return has then and else regions");
             }
         }
 

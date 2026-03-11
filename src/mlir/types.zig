@@ -1100,6 +1100,7 @@ pub const TypeMapper = struct {
         } else if (value_is_int and target_is_int) {
             const value_width = c.oraIntegerTypeGetWidth(value_type);
             const target_width = c.oraIntegerTypeGetWidth(target_type);
+            const value_is_signed = c.oraIntegerTypeIsSigned(value_type);
 
             // use unknown location for conversions (span info not available in TypeMapper)
             const loc = c.oraLocationUnknownGet(self.ctx);
@@ -1110,8 +1111,11 @@ pub const TypeMapper = struct {
                 h.appendOp(block, cast_op);
                 return h.getResult(cast_op, 0);
             } else if (value_width < target_width) {
-                // extend - use arith.extui (zero-extend for unsigned semantics)
-                const ext_op = c.oraArithExtUIOpCreate(self.ctx, loc, value, target_type);
+                // extend - dispatch based on signedness of the source integer type
+                const ext_op = if (value_is_signed)
+                    c.oraArithExtSIOpCreate(self.ctx, loc, value, target_type)
+                else
+                    c.oraArithExtUIOpCreate(self.ctx, loc, value, target_type);
                 h.appendOp(block, ext_op);
                 return h.getResult(ext_op, 0);
             } else {

@@ -43,12 +43,113 @@ pub fn lowerCast(
     const target_mlir_type = self.type_mapper.toMlirType(cast.target_type);
 
     switch (cast.cast_type) {
-        .Unsafe, .Safe, .Forced => {
+        .Forced => {
             const op = self.ora_dialect.createArithBitcast(operand, target_mlir_type, self.fileLoc(cast.span));
             h.appendOp(self.block, op);
             return h.getResult(op, 0);
         },
+        .Unsafe => {
+            return self.type_mapper.createConversionOp(self.block, operand, target_mlir_type, cast.span);
+        },
+        .Safe => {
+            insertSafeCastOverflowCheck(self, operand, cast);
+            return self.type_mapper.createConversionOp(self.block, operand, target_mlir_type, cast.span);
+        },
     }
+}
+
+fn insertSafeCastOverflowCheck(
+    self: *const ExpressionLowerer,
+    operand: c.MlirValue,
+    cast: *const lib.ast.Expressions.CastExpr,
+) void {
+    const source_type_info = getExpressionTypeInfo(cast.operand) orelse return;
+    const source_ora_type = source_type_info.ora_type orelse return;
+    const target_ora_type = cast.target_type.ora_type orelse return;
+    const source_width = source_ora_type.bitWidth() orelse return;
+    const target_width = target_ora_type.bitWidth() orelse return;
+
+    if (!source_ora_type.isInteger() or !target_ora_type.isInteger()) return;
+    if (target_width >= source_width) return;
+
+    const operand_uw = expr_helpers.unwrapRefinementValue(
+        self.ctx,
+        self.block,
+        self.locations,
+        self.refinement_base_cache,
+        operand,
+        cast.span,
+    );
+    const loc = self.fileLoc(cast.span);
+    if (!target_ora_type.isSignedInteger()) {
+        // The safe-cast check is driven by the target domain, not the source.
+        // Example: signed i256 -> u8 must prove the value fits in [0, 255],
+        // so the round-trip uses unsigned truncation + zero-extension.
+        const narrow_ty = c.oraIntegerTypeCreate(self.ctx, target_width);
+        const wide_ty = c.oraValueGetType(operand_uw);
+        const trunc_op = c.oraArithTruncIOpCreate(self.ctx, loc, operand_uw, narrow_ty);
+        h.appendOp(self.block, trunc_op);
+        const ext_op = c.oraArithExtUIOpCreate(self.ctx, loc, h.getResult(trunc_op, 0), wide_ty);
+        h.appendOp(self.block, ext_op);
+        const cmp = c.oraArithCmpIOpCreate(
+            self.ctx,
+            loc,
+            expr_helpers.predicateStringToInt("ne"),
+            operand_uw,
+            h.getResult(ext_op, 0),
+        );
+        h.appendOp(self.block, cmp);
+        emitCastOverflowAssert(self, h.getResult(cmp, 0), "safe cast narrowing overflow", cast.span);
+        return;
+    }
+
+    const wide_ty = c.oraValueGetType(operand_uw);
+    const max_u256 = (@as(u256, 1) << @intCast(target_width - 1)) - 1;
+    const min_u256_abs = @as(u256, 1) << @intCast(target_width - 1);
+    var max_buf: [80]u8 = undefined;
+    var min_buf: [80]u8 = undefined;
+    const max_str = std.fmt.bufPrint(&max_buf, "{}", .{max_u256}) catch unreachable;
+    const min_str = std.fmt.bufPrint(&min_buf, "-{}", .{min_u256_abs}) catch unreachable;
+    const max_attr = c.oraIntegerAttrGetFromString(wide_ty, h.strRef(max_str));
+    const max_op = c.oraArithConstantOpCreate(self.ctx, loc, wide_ty, max_attr);
+    h.appendOp(self.block, max_op);
+    const min_attr = c.oraIntegerAttrGetFromString(wide_ty, h.strRef(min_str));
+    const min_op = c.oraArithConstantOpCreate(self.ctx, loc, wide_ty, min_attr);
+    h.appendOp(self.block, min_op);
+    const cmp_gt = c.oraArithCmpIOpCreate(
+        self.ctx,
+        loc,
+        expr_helpers.predicateStringToInt("sgt"),
+        operand_uw,
+        h.getResult(max_op, 0),
+    );
+    h.appendOp(self.block, cmp_gt);
+    const cmp_lt = c.oraArithCmpIOpCreate(
+        self.ctx,
+        loc,
+        expr_helpers.predicateStringToInt("slt"),
+        operand_uw,
+        h.getResult(min_op, 0),
+    );
+    h.appendOp(self.block, cmp_lt);
+    const or_op = c.oraArithOrIOpCreate(self.ctx, loc, h.getResult(cmp_gt, 0), h.getResult(cmp_lt, 0));
+    h.appendOp(self.block, or_op);
+    emitCastOverflowAssert(self, h.getResult(or_op, 0), "safe cast narrowing overflow", cast.span);
+}
+
+fn emitCastOverflowAssert(
+    self: *const ExpressionLowerer,
+    overflow_flag: c.MlirValue,
+    message: []const u8,
+    span: lib.ast.SourceSpan,
+) void {
+    const loc = self.fileLoc(span);
+    const true_op = self.ora_dialect.createArithConstantBool(true, loc);
+    h.appendOp(self.block, true_op);
+    const not_op = c.oraArithXorIOpCreate(self.ctx, loc, overflow_flag, h.getResult(true_op, 0));
+    h.appendOp(self.block, not_op);
+    const assert_op = self.ora_dialect.createAssert(h.getResult(not_op, 0), loc, message);
+    h.appendOp(self.block, assert_op);
 }
 
 /// Lower comptime expressions
@@ -793,13 +894,13 @@ pub fn lowerTry(
         h.appendOp(self.block, is_err_op);
         const is_err_val = h.getResult(is_err_op, 0);
 
-        const if_op = self.ora_dialect.createIf(is_err_val, loc);
+        const if_op = self.ora_dialect.createConditionalReturn(is_err_val, loc);
         h.appendOp(self.block, if_op);
 
-        const then_block = c.oraIfOpGetThenBlock(if_op);
-        const else_block = c.oraIfOpGetElseBlock(if_op);
+        const then_block = c.oraConditionalReturnOpGetThenBlock(if_op);
+        const else_block = c.oraConditionalReturnOpGetElseBlock(if_op);
         if (c.oraBlockIsNull(then_block) or c.oraBlockIsNull(else_block)) {
-            @panic("ora.if missing then/else blocks");
+            @panic("ora.conditional_return missing then/else blocks");
         }
 
         const err_ty = c.oraIntegerTypeCreate(self.ctx, constants.DEFAULT_INTEGER_BITS);

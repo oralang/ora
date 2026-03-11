@@ -5,11 +5,13 @@
 //===----------------------------------------------------------------------===//
 
 #include "mlir/IR/Builders.h"
+#include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/BuiltinTypes.h"
 #include "mlir/IR/DialectImplementation.h"
 #include "mlir/IR/OpImplementation.h"
 #include "mlir/IR/TypeUtilities.h"
 #include "mlir/IR/PatternMatch.h"
+#include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Interfaces/SideEffectInterfaces.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "llvm/ADT/TypeSwitch.h"
@@ -56,6 +58,31 @@ namespace mlir
 {
     namespace ora
     {
+        namespace
+        {
+            static bool nextTokenIsEllipsis(::mlir::OpAsmParser &parser)
+            {
+                const char *ptr = parser.getCurrentLocation().getPointer();
+                return ptr[0] == '.' && ptr[1] == '.' && ptr[2] == '.';
+            }
+
+            static ::mlir::Type getRefinementBaseType(::mlir::Type type)
+            {
+                if (auto minType = llvm::dyn_cast<MinValueType>(type))
+                    return minType.getBaseType();
+                if (auto maxType = llvm::dyn_cast<MaxValueType>(type))
+                    return maxType.getBaseType();
+                if (auto rangeType = llvm::dyn_cast<InRangeType>(type))
+                    return rangeType.getBaseType();
+                if (auto scaledType = llvm::dyn_cast<ScaledType>(type))
+                    return scaledType.getBaseType();
+                if (auto exactType = llvm::dyn_cast<ExactType>(type))
+                    return exactType.getBaseType();
+                if (llvm::isa<NonZeroAddressType>(type))
+                    return AddressType::get(type.getContext());
+                return {};
+            }
+        }
 
         // TupleType: !ora.tuple<type1, type2, ...>
         ::mlir::Type TupleType::parse(::mlir::AsmParser &parser)
@@ -410,39 +437,9 @@ namespace mlir
         void RefinementToBaseOp::build(::mlir::OpBuilder &odsBuilder, ::mlir::OperationState &odsState, ::mlir::Value value)
         {
             Type valueType = value.getType();
-            Type baseType = nullptr;
-
-            // Extract base type from refinement type
-            if (auto minValueType = dyn_cast<MinValueType>(valueType))
-            {
-                baseType = minValueType.getBaseType();
-            }
-            else if (auto maxValueType = dyn_cast<MaxValueType>(valueType))
-            {
-                baseType = maxValueType.getBaseType();
-            }
-            else if (auto inRangeType = dyn_cast<InRangeType>(valueType))
-            {
-                baseType = inRangeType.getBaseType();
-            }
-            else if (auto scaledType = dyn_cast<ScaledType>(valueType))
-            {
-                baseType = scaledType.getBaseType();
-            }
-            else if (auto exactType = dyn_cast<ExactType>(valueType))
-            {
-                baseType = exactType.getBaseType();
-            }
-            else if (isa<NonZeroAddressType>(valueType))
-            {
-                // NonZeroAddress base type is AddressType
-                baseType = AddressType::get(odsBuilder.getContext());
-            }
-            else
-            {
-                // Not a refinement type, use the type as-is
+            Type baseType = getRefinementBaseType(valueType);
+            if (!baseType)
                 baseType = valueType;
-            }
 
             odsState.addOperands(value);
             odsState.addTypes(baseType);
@@ -460,6 +457,373 @@ namespace mlir
 {
     namespace ora
     {
+        namespace
+        {
+            static bool isStaticallyZeroIntegerValue(::mlir::Value value)
+            {
+                if (auto constOp = value.getDefiningOp<arith::ConstantOp>())
+                {
+                    if (auto intAttr = llvm::dyn_cast<mlir::IntegerAttr>(constOp.getValue()))
+                    {
+                        return intAttr.getValue().isZero();
+                    }
+                }
+                return false;
+            }
+
+            static std::optional<mlir::IntegerAttr> getConstantIntegerAttr(::mlir::Value value)
+            {
+                if (auto constOp = value.getDefiningOp<arith::ConstantOp>())
+                {
+                    if (auto intAttr = llvm::dyn_cast<mlir::IntegerAttr>(constOp.getValue()))
+                        return intAttr;
+                }
+                return std::nullopt;
+            }
+
+            static GlobalOp lookupGlobalFor(Operation *op, StringRef globalName)
+            {
+                auto globalAttr = mlir::StringAttr::get(op->getContext(), globalName);
+                if (Operation *symbol = mlir::SymbolTable::lookupNearestSymbolFrom(op, globalAttr))
+                    return llvm::dyn_cast<GlobalOp>(symbol);
+                return nullptr;
+            }
+
+            static StructDeclOp findStructDecl(Operation *op, StringRef structName)
+            {
+                auto structAttr = mlir::StringAttr::get(op->getContext(), structName);
+                if (Operation *symbol = mlir::SymbolTable::lookupNearestSymbolFrom(op, structAttr))
+                    return llvm::dyn_cast<StructDeclOp>(symbol);
+                return nullptr;
+            }
+
+            static mlir::LogicalResult replaceOpWithConstant(
+                PatternRewriter &rewriter,
+                Operation *op,
+                ::mlir::Type resultType,
+                const llvm::APInt &value)
+            {
+                auto valueAttr = mlir::IntegerAttr::get(resultType, value);
+                auto newConst = rewriter.create<arith::ConstantOp>(op->getLoc(), resultType, valueAttr);
+                rewriter.replaceOp(op, newConst.getResult());
+                return success();
+            }
+
+            static ::mlir::LogicalResult getStructFieldInfo(
+                Operation *op,
+                StructType structType,
+                StringRef fieldName,
+                size_t &fieldIndex,
+                ::mlir::Type &fieldType)
+            {
+                auto structDecl = findStructDecl(op, structType.getName());
+                if (!structDecl)
+                    return op->emitError() << "missing ora.struct.decl for struct '" << structType.getName() << "'";
+
+                auto fieldNamesAttr = structDecl->getAttrOfType<ArrayAttr>("ora.field_names");
+                auto fieldTypesAttr = structDecl->getAttrOfType<ArrayAttr>("ora.field_types");
+                if (!fieldNamesAttr || !fieldTypesAttr || fieldNamesAttr.size() != fieldTypesAttr.size())
+                    return op->emitError() << "struct declaration for '" << structType.getName() << "' has malformed field metadata";
+
+                for (size_t i = 0; i < fieldNamesAttr.size(); ++i)
+                {
+                    auto nameAttr = llvm::dyn_cast<StringAttr>(fieldNamesAttr[i]);
+                    auto typeAttr = llvm::dyn_cast<TypeAttr>(fieldTypesAttr[i]);
+                    if (!nameAttr || !typeAttr)
+                        return op->emitError() << "struct declaration for '" << structType.getName() << "' has invalid field metadata";
+                    if (nameAttr.getValue() == fieldName)
+                    {
+                        fieldIndex = i;
+                        fieldType = typeAttr.getValue();
+                        return success();
+                    }
+                }
+
+                return op->emitError() << "unknown field '" << fieldName << "' on struct '" << structType.getName() << "'";
+            }
+        } // namespace
+
+        ::mlir::LogicalResult DivOp::verify()
+        {
+            if (isStaticallyZeroIntegerValue(getRhs()))
+                return emitOpError("divisor must not be a statically known zero constant");
+            return success();
+        }
+
+        ::mlir::LogicalResult RemOp::verify()
+        {
+            if (isStaticallyZeroIntegerValue(getRhs()))
+                return emitOpError("divisor must not be a statically known zero constant");
+            return success();
+        }
+
+        ::mlir::LogicalResult SLoadOp::verify()
+        {
+            auto global = lookupGlobalFor(*this, getGlobalName());
+            if (!global)
+                return emitOpError() << "unknown storage global '" << getGlobalName() << "'";
+
+            if (getResult().getType() != global.getGlobalType())
+            {
+                return emitOpError() << "result type " << getResult().getType()
+                                     << " does not match storage global type " << global.getGlobalType()
+                                     << " for '" << getGlobalName() << "'";
+            }
+
+            return success();
+        }
+
+        ::mlir::LogicalResult SStoreOp::verify()
+        {
+            auto global = lookupGlobalFor(*this, getGlobalName());
+            if (!global)
+                return emitOpError() << "unknown storage global '" << getGlobalName() << "'";
+
+            if (getValue().getType() != global.getGlobalType())
+            {
+                return emitOpError() << "stored value type " << getValue().getType()
+                                     << " does not match storage global type " << global.getGlobalType()
+                                     << " for '" << getGlobalName() << "'";
+            }
+
+            return success();
+        }
+
+        ::mlir::LogicalResult StructInitOp::verify()
+        {
+            auto structType = llvm::dyn_cast<StructType>(getResult().getType());
+            if (!structType)
+                return emitOpError("result type must be !ora.struct<...>");
+
+            auto structDecl = findStructDecl(*this, structType.getName());
+            if (!structDecl)
+                return emitOpError() << "missing ora.struct.decl for struct '" << structType.getName() << "'";
+
+            auto fieldTypesAttr = structDecl->getAttrOfType<ArrayAttr>("ora.field_types");
+            if (!fieldTypesAttr)
+                return emitOpError() << "struct declaration for '" << structType.getName() << "' is missing ora.field_types";
+
+            if (getFieldValues().size() != fieldTypesAttr.size())
+            {
+                return emitOpError() << "expected " << fieldTypesAttr.size()
+                                     << " field values for struct '" << structType.getName()
+                                     << "', got " << getFieldValues().size();
+            }
+
+            for (size_t i = 0; i < fieldTypesAttr.size(); ++i)
+            {
+                auto typeAttr = llvm::dyn_cast<TypeAttr>(fieldTypesAttr[i]);
+                if (!typeAttr)
+                    return emitOpError() << "struct declaration for '" << structType.getName() << "' has invalid field type metadata";
+                if (getFieldValues()[i].getType() != typeAttr.getValue())
+                {
+                    return emitOpError() << "field operand #" << i << " has type " << getFieldValues()[i].getType()
+                                         << " but struct '" << structType.getName() << "' expects " << typeAttr.getValue();
+                }
+            }
+
+            return success();
+        }
+
+        ::mlir::LogicalResult StructFieldExtractOp::verify()
+        {
+            auto structType = llvm::dyn_cast<StructType>(getStructValue().getType());
+            if (!structType)
+                return emitOpError("struct operand must have !ora.struct<...> type");
+
+            size_t fieldIndex = 0;
+            ::mlir::Type fieldType;
+            if (failed(getStructFieldInfo(*this, structType, getFieldName(), fieldIndex, fieldType)))
+                return failure();
+
+            if (getResult().getType() != fieldType)
+            {
+                return emitOpError() << "result type " << getResult().getType()
+                                     << " does not match field '" << getFieldName()
+                                     << "' type " << fieldType;
+            }
+
+            return success();
+        }
+
+        ::mlir::LogicalResult StructFieldUpdateOp::verify()
+        {
+            auto structType = llvm::dyn_cast<StructType>(getStructValue().getType());
+            if (!structType)
+                return emitOpError("struct operand must have !ora.struct<...> type");
+
+            if (getResult().getType() != getStructValue().getType())
+                return emitOpError("result type must match the input struct type");
+
+            size_t fieldIndex = 0;
+            ::mlir::Type fieldType;
+            if (failed(getStructFieldInfo(*this, structType, getFieldName(), fieldIndex, fieldType)))
+                return failure();
+
+            if (getValue().getType() != fieldType)
+            {
+                return emitOpError() << "updated value type " << getValue().getType()
+                                     << " does not match field '" << getFieldName()
+                                     << "' type " << fieldType;
+            }
+
+            return success();
+        }
+
+        ::mlir::LogicalResult MapGetOp::verify()
+        {
+            auto mapType = llvm::dyn_cast<MapType>(getMap().getType());
+            if (!mapType)
+                return emitOpError("map operand must have !ora.map<key, value> type");
+
+            if (getKey().getType() != mapType.getKeyType())
+                return emitOpError() << "key type " << getKey().getType()
+                                     << " does not match map key type " << mapType.getKeyType();
+
+            if (getResult().getType() != mapType.getValueType())
+            {
+                return emitOpError() << "result type " << getResult().getType()
+                                     << " does not match map value type " << mapType.getValueType();
+            }
+
+            return success();
+        }
+
+        ::mlir::LogicalResult MapStoreOp::verify()
+        {
+            auto mapType = llvm::dyn_cast<MapType>(getMap().getType());
+            if (!mapType)
+                return emitOpError("map operand must have !ora.map<key, value> type");
+
+            if (getKey().getType() != mapType.getKeyType())
+                return emitOpError() << "key type " << getKey().getType()
+                                     << " does not match map key type " << mapType.getKeyType();
+
+            if (getValue().getType() != mapType.getValueType())
+            {
+                return emitOpError() << "value type " << getValue().getType()
+                                     << " does not match map value type " << mapType.getValueType();
+            }
+
+            return success();
+        }
+
+        ::mlir::LogicalResult ErrorUnwrapOp::verify()
+        {
+            auto unionType = llvm::dyn_cast<ErrorUnionType>(getValue().getType());
+            if (!unionType)
+                return emitOpError("operand must have !ora.error_union<...> type");
+
+            if (getResult().getType() != unionType.getSuccessType())
+            {
+                return emitOpError() << "result type " << getResult().getType()
+                                     << " does not match error union success type "
+                                     << unionType.getSuccessType();
+            }
+
+            return success();
+        }
+
+        ::mlir::LogicalResult RefinementToBaseOp::verify()
+        {
+            auto expectedBaseType = getRefinementBaseType(getValue().getType());
+            if (!expectedBaseType)
+                return emitOpError("operand must have an Ora refinement type");
+
+            if (getResult().getType() != expectedBaseType)
+            {
+                return emitOpError() << "result type " << getResult().getType()
+                                     << " does not match refinement base type " << expectedBaseType;
+            }
+
+            return success();
+        }
+
+        ::mlir::LogicalResult BaseToRefinementOp::verify()
+        {
+            auto expectedBaseType = getRefinementBaseType(getResult().getType());
+            if (!expectedBaseType)
+                return emitOpError("result type must be an Ora refinement type");
+
+            if (getValue().getType() != expectedBaseType)
+            {
+                return emitOpError() << "operand type " << getValue().getType()
+                                     << " does not match refinement base type " << expectedBaseType;
+            }
+
+            return success();
+        }
+
+        ::mlir::LogicalResult ReturnOp::verify()
+        {
+            auto func = (*this)->getParentOfType<mlir::func::FuncOp>();
+            if (!func)
+                return emitOpError("must be nested inside func.func");
+
+            auto resultTypes = func.getFunctionType().getResults();
+            if (getOperands().size() != resultTypes.size())
+            {
+                return emitOpError() << "expected " << resultTypes.size()
+                                     << " return operands to match function signature, got "
+                                     << getOperands().size();
+            }
+
+            for (size_t i = 0; i < resultTypes.size(); ++i)
+            {
+                if (getOperands()[i].getType() != resultTypes[i])
+                {
+                    return emitOpError() << "return operand #" << i << " has type "
+                                         << getOperands()[i].getType()
+                                         << " but enclosing func.func expects " << resultTypes[i];
+                }
+            }
+
+            return success();
+        }
+
+        ::mlir::LogicalResult IfOp::verify()
+        {
+            auto verifySingleBlockRegion = [&](::mlir::Region &region, llvm::StringRef regionName) -> ::mlir::LogicalResult {
+                if (!region.hasOneBlock())
+                    return emitOpError() << regionName << " region must contain exactly one block";
+                return success();
+            };
+
+            if (failed(verifySingleBlockRegion(getThenRegion(), "then")))
+                return failure();
+            if (failed(verifySingleBlockRegion(getElseRegion(), "else")))
+                return failure();
+
+            auto &thenBlock = getThenRegion().front();
+            if (thenBlock.empty())
+                return emitOpError("then region must not be empty");
+            auto *thenTerminator = thenBlock.getTerminator();
+            if (!thenTerminator)
+                return emitOpError("then region must terminate with func.return or ora.return");
+            if (!llvm::isa<mlir::func::ReturnOp, ora::ReturnOp>(thenTerminator))
+            {
+                return emitOpError() << "then region must terminate with func.return or ora.return, found '"
+                                     << thenTerminator->getName().getStringRef() << "'";
+            }
+
+            auto &elseBlock = getElseRegion().front();
+            if (elseBlock.empty())
+                return emitOpError("else region must not be empty");
+            if (elseBlock.getOperations().size() != 1)
+                return emitOpError("else region must contain only an empty ora.yield terminator");
+            auto *elseTerminator = elseBlock.getTerminator();
+            auto elseYield = llvm::dyn_cast_or_null<ora::YieldOp>(elseTerminator);
+            if (!elseYield)
+            {
+                return emitOpError() << "else region must terminate with ora.yield, found '"
+                                     << (elseTerminator ? elseTerminator->getName().getStringRef() : "<none>") << "'";
+            }
+            if (elseYield.getOperands().size() != 0)
+                return emitOpError("else region ora.yield must not return values");
+
+            return success();
+        }
+
         ::mlir::ParseResult IfOp::parse(::mlir::OpAsmParser &parser, ::mlir::OperationState &result)
         {
             ::mlir::OpAsmParser::UnresolvedOperand condition;
@@ -484,18 +848,12 @@ namespace mlir
             if (parser.parseRegion(*elseRegion))
                 return ::mlir::failure();
 
-            // Parse optional result types
-            ::llvm::SmallVector<::mlir::Type, 1> resultTypes;
-            if (parser.parseOptionalArrowTypeList(resultTypes))
-                return ::mlir::failure();
-            result.addTypes(resultTypes);
-
             // Parse optional attributes
             if (parser.parseOptionalAttrDict(result.attributes))
                 return ::mlir::failure();
 
-            // Resolve condition operand - use Ora BoolType
-            if (parser.resolveOperand(condition, BoolType::get(parser.getContext()), result.operands))
+            // The printer emits the condition as an MLIR i1 value.
+            if (parser.resolveOperand(condition, parser.getBuilder().getI1Type(), result.operands))
                 return ::mlir::failure();
 
             // Add regions
@@ -517,128 +875,8 @@ namespace mlir
             p << " else ";
             p.printRegion(getElseRegion());
 
-            if (!getResults().empty())
-            {
-                p << " -> ";
-                llvm::interleaveComma(getResults().getTypes(), p, [&](::mlir::Type type)
-                                      { p << type; });
-            }
-
             SmallVector<StringRef> elidedAttrs;
             p.printOptionalAttrDict((*this)->getAttrs(), elidedAttrs);
-        }
-
-        ::mlir::ParseResult IsolatedIfOp::parse(::mlir::OpAsmParser &parser, ::mlir::OperationState &result)
-        {
-            ::mlir::OpAsmParser::UnresolvedOperand condition;
-            if (parser.parseOperand(condition))
-                return ::mlir::failure();
-
-            if (parser.parseKeyword("then"))
-                return ::mlir::failure();
-
-            std::unique_ptr<::mlir::Region> thenRegion = std::make_unique<::mlir::Region>();
-            if (parser.parseRegion(*thenRegion))
-                return ::mlir::failure();
-
-            if (parser.parseKeyword("else"))
-                return ::mlir::failure();
-
-            std::unique_ptr<::mlir::Region> elseRegion = std::make_unique<::mlir::Region>();
-            if (parser.parseRegion(*elseRegion))
-                return ::mlir::failure();
-
-            ::llvm::SmallVector<::mlir::Type, 1> resultTypes;
-            if (parser.parseOptionalArrowTypeList(resultTypes))
-                return ::mlir::failure();
-            result.addTypes(resultTypes);
-
-            if (parser.parseOptionalAttrDict(result.attributes))
-                return ::mlir::failure();
-
-            if (parser.resolveOperand(condition, BoolType::get(parser.getContext()), result.operands))
-                return ::mlir::failure();
-
-            result.addRegion(std::move(thenRegion));
-            result.addRegion(std::move(elseRegion));
-
-            return ::mlir::success();
-        }
-
-        void IsolatedIfOp::print(::mlir::OpAsmPrinter &p)
-        {
-            p << " ";
-            p << getCondition();
-            p << " ";
-
-            p << "then ";
-            p.printRegion(getThenRegion());
-
-            p << " else ";
-            p.printRegion(getElseRegion());
-
-            if (!getResults().empty())
-            {
-                p << " -> ";
-                llvm::interleaveComma(getResults().getTypes(), p, [&](::mlir::Type type)
-                                      { p << type; });
-            }
-
-            SmallVector<StringRef> elidedAttrs;
-            p.printOptionalAttrDict((*this)->getAttrs(), elidedAttrs);
-        }
-
-        //===----------------------------------------------------------------------===//
-        // WhileOp Custom Parser/Printer
-        //===----------------------------------------------------------------------===//
-
-        ::mlir::ParseResult WhileOp::parse(::mlir::OpAsmParser &parser, ::mlir::OperationState &result)
-        {
-            // Parse condition operand
-            ::mlir::OpAsmParser::UnresolvedOperand condition;
-            if (parser.parseOperand(condition))
-                return ::mlir::failure();
-
-            // Parse optional attributes
-            if (parser.parseOptionalAttrDict(result.attributes))
-                return ::mlir::failure();
-
-            // Parse type of condition
-            ::mlir::Type conditionType;
-            if (parser.parseColonType(conditionType))
-                return ::mlir::failure();
-
-            // Parse body region
-            std::unique_ptr<::mlir::Region> body = std::make_unique<::mlir::Region>();
-            if (parser.parseRegion(*body))
-                return ::mlir::failure();
-
-            // Resolve condition operand
-            if (parser.resolveOperand(condition, conditionType, result.operands))
-                return ::mlir::failure();
-
-            // Add region
-            result.addRegion(std::move(body));
-
-            return ::mlir::success();
-        }
-
-        void WhileOp::print(::mlir::OpAsmPrinter &p)
-        {
-            // Print condition
-            p << " ";
-            p << getCondition();
-
-            // Print attributes
-            p.printOptionalAttrDict((*this)->getAttrs());
-
-            // Print type
-            p << " : ";
-            p << getCondition().getType();
-
-            // Print body region
-            p << " ";
-            p.printRegion(getBody());
         }
 
         //===----------------------------------------------------------------------===//
@@ -678,7 +916,8 @@ namespace mlir
             p.printRegion(getBody());
 
             // Print attributes
-            p.printOptionalAttrDict((*this)->getAttrs());
+            SmallVector<StringRef> elidedAttrs = {"sym_name"};
+            p.printOptionalAttrDict((*this)->getAttrs(), elidedAttrs);
         }
 
         //===----------------------------------------------------------------------===//
@@ -689,9 +928,10 @@ namespace mlir
         {
             // Parse format: "name" : type (for maps) or "name" = init : type (for scalars)
             // Parse symbol name
-            ::mlir::StringAttr symName;
-            if (parser.parseAttribute(symName, "sym_name", result.attributes))
+            std::string symName;
+            if (parser.parseKeywordOrString(&symName))
                 return ::mlir::failure();
+            result.addAttribute("sym_name", parser.getBuilder().getStringAttr(symName));
 
             // Parse optional = init (maps don't have initializers)
             ::mlir::Attribute init;
@@ -775,37 +1015,37 @@ namespace mlir
             while (succeeded(parser.parseOptionalKeyword("case")))
             {
                 // Try to parse literal value
-                int64_t literalValue;
-                if (succeeded(parser.parseInteger(literalValue)))
+                int64_t caseStart;
+                if (succeeded(parser.parseInteger(caseStart)))
                 {
-                    // Literal case
-                    caseValues.push_back(literalValue);
-                    rangeStarts.push_back(0);
-                    rangeEnds.push_back(0);
-                    caseKinds.push_back(0); // literal
-                }
-                else
-                {
-                    // Try to parse range: start...end
-                    int64_t rangeStart, rangeEnd;
-                    if (succeeded(parser.parseInteger(rangeStart)) &&
-                        succeeded(parser.parseEllipsis()) &&
-                        succeeded(parser.parseInteger(rangeEnd)))
+                    int64_t rangeEnd;
+                    if (nextTokenIsEllipsis(parser))
                     {
-                        // Range case
-                        rangeStarts.push_back(rangeStart);
+                        if (parser.parseEllipsis())
+                            return ::mlir::failure();
+                        if (parser.parseInteger(rangeEnd))
+                            return ::mlir::failure();
+
+                        rangeStarts.push_back(caseStart);
                         rangeEnds.push_back(rangeEnd);
                         caseValues.push_back(0);
                         caseKinds.push_back(1); // range
                     }
                     else
                     {
-                        return ::mlir::failure();
+                        caseValues.push_back(caseStart);
+                        rangeStarts.push_back(0);
+                        rangeEnds.push_back(0);
+                        caseKinds.push_back(0); // literal
                     }
+                }
+                else
+                {
+                    return ::mlir::failure();
                 }
 
                 // Parse =>
-                if (parser.parseArrow())
+                if (parser.parseEqual() || parser.parseGreater())
                     return ::mlir::failure();
 
                 // Parse case region
@@ -820,7 +1060,7 @@ namespace mlir
             // Parse optional else/default case
             if (succeeded(parser.parseOptionalKeyword("else")))
             {
-                if (parser.parseArrow())
+                if (parser.parseEqual() || parser.parseGreater())
                     return ::mlir::failure();
 
                 std::unique_ptr<::mlir::Region> elseRegion = std::make_unique<::mlir::Region>();
@@ -945,7 +1185,7 @@ namespace mlir
                                  i < range_starts_size && i < range_ends_size)
                         {
                             // Range case
-                            p << rangeStartsAttr[i] << "..." << rangeEndsAttr[i];
+                            p << rangeStartsAttr[i] << " ... " << rangeEndsAttr[i];
                         }
                     }
                 }
@@ -999,33 +1239,36 @@ namespace mlir
 
             while (succeeded(parser.parseOptionalKeyword("case")))
             {
-                int64_t literalValue;
-                if (succeeded(parser.parseInteger(literalValue)))
+                int64_t caseStart;
+                if (succeeded(parser.parseInteger(caseStart)))
                 {
-                    caseValues.push_back(literalValue);
-                    rangeStarts.push_back(0);
-                    rangeEnds.push_back(0);
-                    caseKinds.push_back(0);
-                }
-                else
-                {
-                    int64_t rangeStart, rangeEnd;
-                    if (succeeded(parser.parseInteger(rangeStart)) &&
-                        succeeded(parser.parseEllipsis()) &&
-                        succeeded(parser.parseInteger(rangeEnd)))
+                    int64_t rangeEnd;
+                    if (nextTokenIsEllipsis(parser))
                     {
-                        rangeStarts.push_back(rangeStart);
+                        if (parser.parseEllipsis())
+                            return ::mlir::failure();
+                        if (parser.parseInteger(rangeEnd))
+                            return ::mlir::failure();
+
+                        rangeStarts.push_back(caseStart);
                         rangeEnds.push_back(rangeEnd);
                         caseValues.push_back(0);
                         caseKinds.push_back(1);
                     }
                     else
                     {
-                        return ::mlir::failure();
+                        caseValues.push_back(caseStart);
+                        rangeStarts.push_back(0);
+                        rangeEnds.push_back(0);
+                        caseKinds.push_back(0);
                     }
                 }
+                else
+                {
+                    return ::mlir::failure();
+                }
 
-                if (parser.parseArrow())
+                if (parser.parseEqual() || parser.parseGreater())
                     return ::mlir::failure();
 
                 std::unique_ptr<::mlir::Region> caseRegion = std::make_unique<::mlir::Region>();
@@ -1038,7 +1281,7 @@ namespace mlir
 
             if (succeeded(parser.parseOptionalKeyword("else")))
             {
-                if (parser.parseArrow())
+                if (parser.parseEqual() || parser.parseGreater())
                     return ::mlir::failure();
 
                 std::unique_ptr<::mlir::Region> elseRegion = std::make_unique<::mlir::Region>();
@@ -1152,7 +1395,7 @@ namespace mlir
                         else if (kind == 1 && rangeStartsAttr && rangeEndsAttr &&
                                  i < range_starts_size && i < range_ends_size)
                         {
-                            p << rangeStartsAttr[i] << "..." << rangeEndsAttr[i];
+                            p << rangeStartsAttr[i] << " ... " << rangeEndsAttr[i];
                         }
                     }
                 }
@@ -1176,9 +1419,10 @@ namespace mlir
         ::mlir::ParseResult SLoadOp::parse(::mlir::OpAsmParser &parser, ::mlir::OperationState &result)
         {
             // Parse format: "global" : type attr-dict
-            ::mlir::StringAttr globalAttr;
-            if (parser.parseAttribute(globalAttr, "global", result.attributes))
+            std::string globalName;
+            if (parser.parseKeywordOrString(&globalName))
                 return ::mlir::failure();
+            result.addAttribute("global", parser.getBuilder().getStringAttr(globalName));
 
             ::mlir::Type resultType;
             if (parser.parseColonType(resultType))
@@ -1234,31 +1478,17 @@ namespace mlir
 
                 LogicalResult matchAndRewrite(AddOp op, PatternRewriter &rewriter) const override
                 {
-                    auto getConstantValue = [](Value val) -> std::optional<uint64_t>
-                    {
-                        if (auto constOp = val.getDefiningOp<arith::ConstantOp>())
-                        {
-                            auto attr = constOp.getValue();
-                            if (auto intAttr = llvm::dyn_cast<mlir::IntegerAttr>(attr))
-                            {
-                                return intAttr.getValue().getZExtValue();
-                            }
-                        }
-                        return std::nullopt;
-                    };
-
-                    auto lhsVal = getConstantValue(op.getLhs());
-                    auto rhsVal = getConstantValue(op.getRhs());
+                    auto lhsVal = getConstantIntegerAttr(op.getLhs());
+                    auto rhsVal = getConstantIntegerAttr(op.getRhs());
 
                     if (!lhsVal || !rhsVal)
                         return failure();
 
-                    uint64_t result = *lhsVal + *rhsVal;
-                    auto resultType = op.getResult().getType();
-                    auto valueAttr = mlir::IntegerAttr::get(resultType, result);
-                    auto newConst = rewriter.create<arith::ConstantOp>(op.getLoc(), resultType, valueAttr);
-                    rewriter.replaceOp(op, newConst.getResult());
-                    return success();
+                    return replaceOpWithConstant(
+                        rewriter,
+                        op,
+                        op.getResult().getType(),
+                        lhsVal->getValue() + rhsVal->getValue());
                 }
             };
 
@@ -1268,31 +1498,17 @@ namespace mlir
 
                 LogicalResult matchAndRewrite(MulOp op, PatternRewriter &rewriter) const override
                 {
-                    auto getConstantValue = [](Value val) -> std::optional<uint64_t>
-                    {
-                        if (auto constOp = val.getDefiningOp<arith::ConstantOp>())
-                        {
-                            auto attr = constOp.getValue();
-                            if (auto intAttr = llvm::dyn_cast<mlir::IntegerAttr>(attr))
-                            {
-                                return intAttr.getValue().getZExtValue();
-                            }
-                        }
-                        return std::nullopt;
-                    };
-
-                    auto lhsVal = getConstantValue(op.getLhs());
-                    auto rhsVal = getConstantValue(op.getRhs());
+                    auto lhsVal = getConstantIntegerAttr(op.getLhs());
+                    auto rhsVal = getConstantIntegerAttr(op.getRhs());
 
                     if (!lhsVal || !rhsVal)
                         return failure();
 
-                    uint64_t result = *lhsVal * *rhsVal;
-                    auto resultType = op.getResult().getType();
-                    auto valueAttr = mlir::IntegerAttr::get(resultType, result);
-                    auto newConst = rewriter.create<arith::ConstantOp>(op.getLoc(), resultType, valueAttr);
-                    rewriter.replaceOp(op, newConst.getResult());
-                    return success();
+                    return replaceOpWithConstant(
+                        rewriter,
+                        op,
+                        op.getResult().getType(),
+                        lhsVal->getValue() * rhsVal->getValue());
                 }
             };
 
@@ -1302,30 +1518,17 @@ namespace mlir
 
                 LogicalResult matchAndRewrite(SubOp op, PatternRewriter &rewriter) const override
                 {
-                    auto getConstantValue = [](Value val) -> std::optional<uint64_t>
-                    {
-                        if (auto constOp = val.getDefiningOp<arith::ConstantOp>())
-                        {
-                            if (auto intAttr = llvm::dyn_cast<mlir::IntegerAttr>(constOp.getValue()))
-                            {
-                                return intAttr.getValue().getZExtValue();
-                            }
-                        }
-                        return std::nullopt;
-                    };
-
-                    auto lhsVal = getConstantValue(op.getLhs());
-                    auto rhsVal = getConstantValue(op.getRhs());
+                    auto lhsVal = getConstantIntegerAttr(op.getLhs());
+                    auto rhsVal = getConstantIntegerAttr(op.getRhs());
 
                     if (!lhsVal || !rhsVal)
                         return failure();
 
-                    uint64_t result = *lhsVal - *rhsVal;
-                    auto resultType = op.getResult().getType();
-                    auto valueAttr = mlir::IntegerAttr::get(resultType, result);
-                    auto newConst = rewriter.create<arith::ConstantOp>(op.getLoc(), resultType, valueAttr);
-                    rewriter.replaceOp(op, newConst.getResult());
-                    return success();
+                    return replaceOpWithConstant(
+                        rewriter,
+                        op,
+                        op.getResult().getType(),
+                        lhsVal->getValue() - rhsVal->getValue());
                 }
             };
 
@@ -1335,30 +1538,25 @@ namespace mlir
 
                 LogicalResult matchAndRewrite(DivOp op, PatternRewriter &rewriter) const override
                 {
-                    auto getConstantValue = [](Value val) -> std::optional<uint64_t>
-                    {
-                        if (auto constOp = val.getDefiningOp<arith::ConstantOp>())
-                        {
-                            if (auto intAttr = llvm::dyn_cast<mlir::IntegerAttr>(constOp.getValue()))
-                            {
-                                return intAttr.getValue().getZExtValue();
-                            }
-                        }
-                        return std::nullopt;
-                    };
+                    auto lhsVal = getConstantIntegerAttr(op.getLhs());
+                    auto rhsVal = getConstantIntegerAttr(op.getRhs());
 
-                    auto lhsVal = getConstantValue(op.getLhs());
-                    auto rhsVal = getConstantValue(op.getRhs());
-
-                    if (!lhsVal || !rhsVal || *rhsVal == 0)
+                    if (!lhsVal || !rhsVal || rhsVal->getValue().isZero())
                         return failure();
 
-                    uint64_t result = *lhsVal / *rhsVal;
-                    auto resultType = op.getResult().getType();
-                    auto valueAttr = mlir::IntegerAttr::get(resultType, result);
-                    auto newConst = rewriter.create<arith::ConstantOp>(op.getLoc(), resultType, valueAttr);
-                    rewriter.replaceOp(op, newConst.getResult());
-                    return success();
+                    auto resultOraType = llvm::dyn_cast<ora::IntegerType>(op.getResult().getType());
+                    if (!resultOraType)
+                        return failure();
+
+                    llvm::APInt result = resultOraType.getIsSigned()
+                                             ? lhsVal->getValue().sdiv(rhsVal->getValue())
+                                             : lhsVal->getValue().udiv(rhsVal->getValue());
+
+                    return replaceOpWithConstant(
+                        rewriter,
+                        op,
+                        op.getResult().getType(),
+                        result);
                 }
             };
         }

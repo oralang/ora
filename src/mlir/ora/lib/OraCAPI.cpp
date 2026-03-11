@@ -26,6 +26,7 @@
 #include "mlir/IR/Dialect.h"
 #include "mlir/IR/DialectRegistry.h"
 #include "mlir/IR/AsmState.h"
+#include "mlir/Parser/Parser.h"
 #include "mlir/InitAllDialects.h"
 #include "mlir/InitAllPasses.h"
 #include "mlir/Pass/Pass.h"
@@ -174,6 +175,18 @@ extern "C"
     MlirModule oraModuleCreateEmpty(MlirLocation loc)
     {
         return wrap(mlir::ModuleOp::create(unwrap(loc)));
+    }
+
+    MlirModule oraModuleCreateParse(MlirContext ctx, MlirStringRef moduleText)
+    {
+        auto parsed = mlir::parseSourceString<mlir::ModuleOp>(unwrap(moduleText), unwrap(ctx));
+        if (!parsed)
+        {
+            return MlirModule{nullptr};
+        }
+        mlir::ModuleOp module = *parsed;
+        (void)parsed.release();
+        return wrap(module);
     }
 
     MlirOperation oraModuleGetOperation(MlirModule module)
@@ -1145,7 +1158,7 @@ MlirOperation oraSStoreOpCreate(MlirContext ctx, MlirLocation loc, MlirValue val
     }
 }
 
-MlirOperation oraIfOpCreate(MlirContext ctx, MlirLocation loc, MlirValue condition)
+MlirOperation oraConditionalReturnOpCreate(MlirContext ctx, MlirLocation loc, MlirValue condition)
 {
     try
     {
@@ -1187,49 +1200,7 @@ MlirOperation oraIfOpCreate(MlirContext ctx, MlirLocation loc, MlirValue conditi
     }
 }
 
-MlirOperation oraIsolatedIfOpCreate(MlirContext ctx, MlirLocation loc, MlirValue condition)
-{
-    try
-    {
-        MLIRContext *context = unwrap(ctx);
-        Location location = unwrap(loc);
-        Value conditionRef = unwrap(condition);
-
-        // Check if dialect is registered
-        if (!oraDialectIsRegistered(ctx))
-        {
-            return {nullptr};
-        }
-
-        OpBuilder builder(context);
-
-        TypeRange emptyResults;
-        auto ifOp = IsolatedIfOp::create(builder, location, emptyResults, conditionRef);
-
-        auto &thenRegion = ifOp.getThenRegion();
-        auto &elseRegion = ifOp.getElseRegion();
-        if (thenRegion.empty())
-        {
-            thenRegion.push_back(new Block());
-        }
-        if (elseRegion.empty())
-        {
-            elseRegion.push_back(new Block());
-        }
-
-        // Add gas_cost attribute (branch operation has cost = 10)
-        auto gasCostAttr = IntegerAttr::get(::mlir::IntegerType::get(context, 64), 10);
-        ifOp->setAttr("gas_cost", gasCostAttr);
-
-        return wrap(ifOp.getOperation());
-    }
-    catch (...)
-    {
-        return {nullptr};
-    }
-}
-
-MlirBlock oraIfOpGetThenBlock(MlirOperation ifOp)
+MlirBlock oraConditionalReturnOpGetThenBlock(MlirOperation ifOp)
 {
     try
     {
@@ -1258,36 +1229,7 @@ MlirBlock oraIfOpGetThenBlock(MlirOperation ifOp)
     }
 }
 
-MlirBlock oraIsolatedIfOpGetThenBlock(MlirOperation ifOp)
-{
-    try
-    {
-        Operation *operation = unwrap(ifOp);
-        if (!operation)
-        {
-            return {nullptr};
-        }
-
-        auto op = dyn_cast<ora::IsolatedIfOp>(operation);
-        if (!op)
-        {
-            return {nullptr};
-        }
-
-        Region &thenRegion = op.getThenRegion();
-        if (thenRegion.empty())
-        {
-            thenRegion.push_back(new Block());
-        }
-        return wrap(&thenRegion.front());
-    }
-    catch (...)
-    {
-        return {nullptr};
-    }
-}
-
-MlirBlock oraIfOpGetElseBlock(MlirOperation ifOp)
+MlirBlock oraConditionalReturnOpGetElseBlock(MlirOperation ifOp)
 {
     try
     {
@@ -1309,103 +1251,6 @@ MlirBlock oraIfOpGetElseBlock(MlirOperation ifOp)
             elseRegion.push_back(new Block());
         }
         return wrap(&elseRegion.front());
-    }
-    catch (...)
-    {
-        return {nullptr};
-    }
-}
-
-MlirBlock oraIsolatedIfOpGetElseBlock(MlirOperation ifOp)
-{
-    try
-    {
-        Operation *operation = unwrap(ifOp);
-        if (!operation)
-        {
-            return {nullptr};
-        }
-
-        auto op = dyn_cast<ora::IsolatedIfOp>(operation);
-        if (!op)
-        {
-            return {nullptr};
-        }
-
-        Region &elseRegion = op.getElseRegion();
-        if (elseRegion.empty())
-        {
-            elseRegion.push_back(new Block());
-        }
-        return wrap(&elseRegion.front());
-    }
-    catch (...)
-    {
-        return {nullptr};
-    }
-}
-
-MlirOperation oraWhileOpCreate(MlirContext ctx, MlirLocation loc, MlirValue condition)
-{
-    try
-    {
-        MLIRContext *context = unwrap(ctx);
-        Location location = unwrap(loc);
-        Value conditionRef = unwrap(condition);
-
-        // Check if dialect is registered
-        if (!oraDialectIsRegistered(ctx))
-        {
-            return {nullptr};
-        }
-
-        OpBuilder builder(context);
-
-        // Create the while operation with body region
-        auto whileOp = WhileOp::create(builder, location, conditionRef);
-
-        // Ensure body region has a block (WhileOp::create creates empty region)
-        auto &bodyRegion = whileOp.getBody();
-        if (bodyRegion.empty())
-        {
-            bodyRegion.push_back(new Block());
-        }
-
-        // Add gas_cost attribute (loop operation has cost = 10)
-        auto gasCostAttr = IntegerAttr::get(::mlir::IntegerType::get(context, 64), 10);
-        whileOp->setAttr("gas_cost", gasCostAttr);
-
-        return wrap(whileOp.getOperation());
-    }
-    catch (...)
-    {
-        return {nullptr};
-    }
-}
-
-MlirBlock oraWhileOpGetBodyBlock(MlirOperation whileOp)
-{
-    try
-    {
-        Operation *operation = unwrap(whileOp);
-        if (!operation)
-        {
-            return {nullptr};
-        }
-
-        auto op = dyn_cast<ora::WhileOp>(operation);
-        if (!op)
-        {
-            return {nullptr};
-        }
-
-        Region &body = op.getBody();
-        if (body.empty())
-        {
-            body.push_back(new Block());
-        }
-
-        return wrap(&body.front());
     }
     catch (...)
     {
@@ -3054,6 +2899,25 @@ MlirOperation oraArithExtUIOpCreate(MlirContext ctx, MlirLocation loc, MlirValue
 
         OpBuilder builder(context);
         auto op = builder.create<arith::ExtUIOp>(location, resultTy, operandVal);
+        return wrap(op.getOperation());
+    }
+    catch (...)
+    {
+        return {nullptr};
+    }
+}
+
+MlirOperation oraArithExtSIOpCreate(MlirContext ctx, MlirLocation loc, MlirValue operand, MlirType resultType)
+{
+    try
+    {
+        MLIRContext *context = unwrap(ctx);
+        Location location = unwrap(loc);
+        Value operandVal = unwrap(operand);
+        Type resultTy = unwrap(resultType);
+
+        OpBuilder builder(context);
+        auto op = builder.create<arith::ExtSIOp>(location, resultTy, operandVal);
         return wrap(op.getOperation());
     }
     catch (...)
@@ -5309,6 +5173,20 @@ uint32_t oraIntegerTypeGetWidth(MlirType type)
     return 0;
 }
 
+bool oraIntegerTypeIsSigned(MlirType type)
+{
+    Type ty = unwrap(type);
+    if (auto intTy = llvm::dyn_cast<mlir::IntegerType>(ty))
+    {
+        return intTy.isSigned();
+    }
+    if (auto oraIntTy = llvm::dyn_cast<mlir::ora::IntegerType>(ty))
+    {
+        return oraIntTy.getIsSigned();
+    }
+    return false;
+}
+
 bool oraTypeIsNull(MlirType type)
 {
     return unwrap(type) == nullptr;
@@ -6006,38 +5884,6 @@ MlirBlock oraTryStmtOpGetCatchBlock(MlirOperation tryStmtOp)
         }
 
         return wrap(&op.getCatchRegion().front());
-    }
-    catch (...)
-    {
-        return {nullptr};
-    }
-}
-
-MlirOperation oraForOpCreate(MlirContext ctx, MlirLocation loc, MlirValue collection)
-{
-    try
-    {
-        MLIRContext *context = unwrap(ctx);
-        Location location = unwrap(loc);
-        Value coll = unwrap(collection);
-
-        OpBuilder builder(context);
-
-        // Create the for operation
-        auto op = builder.create<ora::ForOp>(location, coll);
-
-        // Ensure the body region has at least one block
-        if (op.getBody().empty())
-        {
-            OpBuilder::InsertionGuard guard(builder);
-            builder.createBlock(&op.getBody());
-        }
-
-        // Add gas cost attribute (for loop has cost per iteration)
-        auto gasCostAttr = builder.getI64IntegerAttr(10);
-        op->setAttr("gas_cost", gasCostAttr);
-
-        return wrap(op.getOperation());
     }
     catch (...)
     {

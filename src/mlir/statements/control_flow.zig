@@ -101,7 +101,8 @@ fn lowerIfConditionInBlock(
         expr_lowerer.convertToType(cond_raw, bool_ty, if_stmt.span);
 }
 
-/// Lower if statements using ora.if with then/else regions
+/// Lower if statements using scf.if for structured control flow.
+/// Custom ora.conditional_return is reserved for early-return regions that cannot terminate with scf.yield.
 /// Returns an optional new "current block" when partial returns create a continue block
 /// that subsequent statements should be emitted to.
 pub fn lowerIf(self: *const StatementLowerer, if_stmt: *const lib.ast.Statements.IfNode) LoweringError!?c.MlirBlock {
@@ -791,7 +792,7 @@ fn lowerBlockBodyWithYield(
     }
 }
 
-/// Lower while loop statements using ora.while
+/// Lower while loop statements using scf.while
 pub fn lowerWhile(self: *const StatementLowerer, while_stmt: *const lib.ast.Statements.WhileNode) LoweringError!void {
     const loc = self.fileLoc(while_stmt.span);
     const bool_ty = h.boolType(self.ctx);
@@ -2393,15 +2394,15 @@ pub fn lowerSwitch(self: *const StatementLowerer, switch_stmt: *const lib.ast.St
             h.appendOp(self.block, load_return_flag);
             const should_return = h.getResult(load_return_flag, 0);
 
-            // use ora.if — then-region can legally contain func.return,
+            // use ora.conditional_return — then-region can legally contain func.return,
             // and it doesn't split the parent block (avoids empty continuation block)
-            const return_if_op = self.ora_dialect.createIf(should_return, loc);
+            const return_if_op = self.ora_dialect.createConditionalReturn(should_return, loc);
             h.appendOp(self.block, return_if_op);
 
-            const return_if_then_block = c.oraIfOpGetThenBlock(return_if_op);
-            const return_if_else_block = c.oraIfOpGetElseBlock(return_if_op);
+            const return_if_then_block = c.oraConditionalReturnOpGetThenBlock(return_if_op);
+            const return_if_else_block = c.oraConditionalReturnOpGetElseBlock(return_if_op);
             if (c.oraBlockIsNull(return_if_then_block) or c.oraBlockIsNull(return_if_else_block)) {
-                @panic("ora.if missing then/else blocks");
+                @panic("ora.conditional_return missing then/else blocks");
             }
 
             if (return_value_memref) |ret_val_memref| {
@@ -2671,7 +2672,7 @@ pub fn lowerSwitchCases(self: *const StatementLowerer, cases: []const lib.ast.Ex
 
     // for labeled switches with returns, use scf.if without result types and ora.return inside
     // for non-labeled switches with returns, use scf.if with result types and scf.yield
-    // note: Regular if statements with returns also use scf.if, not ora.if
+    // note: Regular if statements with returns also use scf.if, not ora.conditional_return
     const if_op = if (is_labeled_switch) blk: {
         log.debug("[lowerSwitchCases] Creating scf.if for labeled switch (no result type, ora.return inside)\n", .{});
         // use scf.if without result type - allows ora.return inside regions
@@ -2691,7 +2692,7 @@ pub fn lowerSwitchCases(self: *const StatementLowerer, cases: []const lib.ast.Ex
         break :blk op;
     };
 
-    // get regions (works for both ora.if and scf.if)
+    // get regions (works for both ora.conditional_return and scf.if)
     // for labeled switches, we already created the regions above
     // for non-labeled switches, we need to get them from the operation
     const then_block = c.oraScfIfOpGetThenBlock(if_op);

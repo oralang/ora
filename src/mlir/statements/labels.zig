@@ -363,15 +363,15 @@ fn lowerLabeledSwitch(self: *const StatementLowerer, labeled_block: *const lib.a
         h.appendOp(self.block, load_return_flag);
         const should_return = h.getResult(load_return_flag, 0);
 
-        // use ora.if — then-region can legally contain func.return,
+        // use ora.conditional_return — then-region can legally contain func.return,
         // and it doesn't split the parent block (avoids empty continuation block)
-        const return_if_op = self.ora_dialect.createIf(should_return, loc);
+        const return_if_op = self.ora_dialect.createConditionalReturn(should_return, loc);
         h.appendOp(self.block, return_if_op);
 
-        const return_if_then_block = c.oraIfOpGetThenBlock(return_if_op);
-        const return_if_else_block = c.oraIfOpGetElseBlock(return_if_op);
+        const return_if_then_block = c.oraConditionalReturnOpGetThenBlock(return_if_op);
+        const return_if_else_block = c.oraConditionalReturnOpGetElseBlock(return_if_op);
         if (c.oraBlockIsNull(return_if_then_block) or c.oraBlockIsNull(return_if_else_block)) {
-            @panic("ora.if missing then/else blocks");
+            @panic("ora.conditional_return missing then/else blocks");
         }
 
         // then block: load return value and return

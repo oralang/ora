@@ -1079,8 +1079,8 @@ pub const OraDialect = struct {
         return op;
     }
 
-    /// Create ora.if operation using C++ API (enables custom assembly formats)
-    pub fn createIf(
+    /// Create ora.conditional_return for early-return regions that cannot use scf.if.
+    pub fn createConditionalReturn(
         self: *OraDialect,
         condition: c.MlirValue,
         loc: c.MlirLocation,
@@ -1089,15 +1089,12 @@ pub const OraDialect = struct {
         if (!self.isRegistered()) {
             @panic("Ora dialect must be registered before creating operations");
         }
-        const op = c.oraIfOpCreate(self.ctx, loc, condition);
+        const op = c.oraConditionalReturnOpCreate(self.ctx, loc, condition);
         if (op.ptr == null) {
-            @panic("Failed to create ora.if operation");
+            @panic("Failed to create ora.conditional_return operation");
         }
         return op;
     }
-
-    // Note: createIsolatedIf removed — unused.
-
     /// Create scf.if operation
     pub fn createScfIf(
         self: *OraDialect,
@@ -1113,26 +1110,9 @@ pub const OraDialect = struct {
         return op;
     }
 
-    /// Create ora.while operation using C++ API (enables custom assembly formats)
-    pub fn createWhile(
-        self: *OraDialect,
-        condition: c.MlirValue,
-        loc: c.MlirLocation,
-    ) c.MlirOperation {
-        // always use C++ API (dialect must be registered)
-        if (!self.isRegistered()) {
-            @panic("Ora dialect must be registered before creating operations");
-        }
-        const op = c.oraWhileOpCreate(self.ctx, loc, condition);
-        if (op.ptr == null) {
-            @panic("Failed to create ora.while operation");
-        }
-        return op;
-    }
-
     // Note: createTest (ora.test) removed — unused test op.
 
-    /// Create scf.while operation (legacy - for compatibility)
+    /// Create scf.while operation. This is the active loop lowering path.
     pub fn createScfWhile(
         self: *OraDialect,
         operands: []const c.MlirValue,
@@ -1494,8 +1474,6 @@ pub const OraDialect = struct {
     //===----------------------------------------------------------------------===//
     // loop Operations
     //===----------------------------------------------------------------------===//
-
-    // Note: ora.for removed — all for-loops use scf.for directly.
 
     /// Create ora.break operation
     pub fn createBreak(

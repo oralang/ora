@@ -22,6 +22,7 @@ pub const semantics = @import("semantics.zig");
 pub const state_tracker = @import("analysis/state_tracker.zig");
 pub const abi = @import("abi.zig");
 pub const lsp = @import("lsp/mod.zig");
+pub const compiler = @import("compiler/mod.zig");
 
 // Note: MLIR and Z3 are NOT exported from ora_lib because they import ora_lib themselves,
 // which would create circular dependencies. They should be imported directly by main.zig.
