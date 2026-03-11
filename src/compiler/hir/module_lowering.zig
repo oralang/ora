@@ -168,14 +168,26 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
 
         pub fn lowerConstant(self: *Lowerer, item_id: ast.ItemId, constant: ast.ConstantItem, parent_block: mlir.MlirBlock) anyerror!void {
             const expr = self.file.expression(constant.value).*;
+            const result_type = if (constant.type_expr) |type_expr| self.lowerTypeExpr(type_expr) else self.lowerExprType(constant.value);
             const op = switch (expr) {
                 .IntegerLiteral => |literal| blk: {
-                    const ty = if (constant.type_expr) |type_expr| self.lowerTypeExpr(type_expr) else self.lowerExprType(constant.value);
                     const parsed = support.parseIntLiteral(literal.text) orelse 0;
-                    break :blk createIntegerConstant(self.context, self.location(literal.range), ty, parsed);
+                    const value_attr = mlir.oraIntegerAttrCreateI64FromType(result_type, parsed);
+                    const created = mlir.oraConstOpCreate(self.context, self.location(constant.range), strRef(constant.name), value_attr, result_type);
+                    if (mlir.oraOperationIsNull(created)) {
+                        break :blk try self.createNamedPlaceholderOp("ora.constant_decl", constant.name, constant.range, result_type);
+                    }
+                    break :blk created;
                 },
-                .BoolLiteral => |literal| createIntegerConstant(self.context, self.location(literal.range), support.boolType(self.context), if (literal.value) 1 else 0),
-                else => try self.createNamedPlaceholderOp("ora.constant_decl", constant.name, constant.range, self.lowerExprType(constant.value)),
+                .BoolLiteral => |literal| blk: {
+                    const value_attr = mlir.oraBoolAttrCreate(self.context, literal.value);
+                    const created = mlir.oraConstOpCreate(self.context, self.location(constant.range), strRef(constant.name), value_attr, result_type);
+                    if (mlir.oraOperationIsNull(created)) {
+                        break :blk try self.createNamedPlaceholderOp("ora.constant_decl", constant.name, constant.range, result_type);
+                    }
+                    break :blk created;
+                },
+                else => try self.createNamedPlaceholderOp("ora.constant_decl", constant.name, constant.range, result_type),
             };
             appendOp(parent_block, op);
             try self.appendItemHandle(item_id, .constant, constant.name, constant.range, op);

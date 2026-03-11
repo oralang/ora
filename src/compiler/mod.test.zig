@@ -1351,6 +1351,32 @@ test "compiler lowers string, bytes, and address literals through real ops" {
     try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "ora.address_const"));
 }
 
+test "compiler lowers top-level const items through ora.const" {
+    const source_text =
+        \\const LIMIT: u256 = 2;
+        \\const READY: bool = true;
+        \\
+        \\pub fn run() -> u256 {
+        \\    if (READY) {
+        \\        return LIMIT;
+        \\    }
+        \\    return 0;
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    const hir_text = try hir_result.renderText(testing.allocator);
+    defer testing.allocator.free(hir_text);
+
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 2, "ora.const"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "LIMIT"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "READY"));
+    try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "ora.constant_decl"));
+}
+
 test "compiler lowers bitfield types as wire integers with metadata attrs" {
     const source_text =
         \\contract Bits {
