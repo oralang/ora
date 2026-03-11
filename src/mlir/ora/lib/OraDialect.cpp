@@ -796,9 +796,13 @@ namespace mlir
 
         ::mlir::LogicalResult IfOp::verify()
         {
+            constexpr llvm::StringLiteral kConditionalReturnContract =
+                "ora.conditional_return is only valid for early-return control flow";
+
             auto verifySingleBlockRegion = [&](::mlir::Region &region, llvm::StringRef regionName) -> ::mlir::LogicalResult {
                 if (!region.hasOneBlock())
-                    return emitOpError() << regionName << " region must contain exactly one block";
+                    return emitOpError() << kConditionalReturnContract << ": " << regionName
+                                         << " region must contain exactly one block";
                 return success();
             };
 
@@ -809,30 +813,35 @@ namespace mlir
 
             auto &thenBlock = getThenRegion().front();
             if (thenBlock.empty())
-                return emitOpError("then region must not be empty");
+                return emitOpError() << kConditionalReturnContract << ": then region must not be empty";
             auto *thenTerminator = thenBlock.getTerminator();
             if (!thenTerminator)
-                return emitOpError("then region must terminate with func.return or ora.return");
+                return emitOpError() << kConditionalReturnContract
+                                     << ": then region must terminate with func.return or ora.return";
             if (!llvm::isa<mlir::func::ReturnOp, ora::ReturnOp>(thenTerminator))
             {
-                return emitOpError() << "then region must terminate with func.return or ora.return, found '"
+                return emitOpError() << kConditionalReturnContract
+                                     << ": then region must terminate with func.return or ora.return, found '"
                                      << thenTerminator->getName().getStringRef() << "'";
             }
 
             auto &elseBlock = getElseRegion().front();
             if (elseBlock.empty())
-                return emitOpError("else region must not be empty");
+                return emitOpError() << kConditionalReturnContract << ": else region must not be empty";
             if (elseBlock.getOperations().size() != 1)
-                return emitOpError("else region must contain only an empty ora.yield terminator");
+                return emitOpError() << kConditionalReturnContract
+                                     << ": else region must contain only an empty ora.yield terminator";
             auto *elseTerminator = elseBlock.getTerminator();
             auto elseYield = llvm::dyn_cast_or_null<ora::YieldOp>(elseTerminator);
             if (!elseYield)
             {
-                return emitOpError() << "else region must terminate with ora.yield, found '"
+                return emitOpError() << kConditionalReturnContract
+                                     << ": else region must terminate with ora.yield, found '"
                                      << (elseTerminator ? elseTerminator->getName().getStringRef() : "<none>") << "'";
             }
             if (elseYield.getOperands().size() != 0)
-                return emitOpError("else region ora.yield must not return values");
+                return emitOpError() << kConditionalReturnContract
+                                     << ": else region ora.yield must not return values";
 
             return success();
         }

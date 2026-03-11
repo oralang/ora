@@ -678,8 +678,9 @@ def Ora_IfOp : Ora_Op<"conditional_return"> {
   let description = [{
     Conditional early return escape hatch for cases that cannot be expressed
     with scf.if because the then-region must terminate the enclosing function.
-    The then-region must terminate with func.return or ora.return. The else-region
-    must terminate with an empty ora.yield.
+    This is not a general-purpose if op: it is reserved for early-return control
+    flow. The then-region must terminate with func.return or ora.return, and the
+    else-region must contain only an empty ora.yield terminator.
     
     Example:
     ```mlir
