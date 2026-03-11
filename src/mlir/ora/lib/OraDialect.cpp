@@ -66,6 +66,19 @@ namespace mlir
                 return ptr[0] == '.' && ptr[1] == '.' && ptr[2] == '.';
             }
 
+            static ::mlir::ParseResult parseFatArrow(::mlir::OpAsmParser &parser)
+            {
+                const char *ptr = parser.getCurrentLocation().getPointer();
+                if (ptr[0] != '=' || ptr[1] != '>')
+                {
+                    parser.emitError(parser.getCurrentLocation(), "expected '=>'");
+                    return ::mlir::failure();
+                }
+                if (parser.parseEqual() || parser.parseGreater())
+                    return ::mlir::failure();
+                return ::mlir::success();
+            }
+
             static ::mlir::Type getRefinementBaseType(::mlir::Type type)
             {
                 if (auto minType = llvm::dyn_cast<MinValueType>(type))
@@ -1045,7 +1058,7 @@ namespace mlir
                 }
 
                 // Parse =>
-                if (parser.parseEqual() || parser.parseGreater())
+                if (failed(parseFatArrow(parser)))
                     return ::mlir::failure();
 
                 // Parse case region
@@ -1060,7 +1073,7 @@ namespace mlir
             // Parse optional else/default case
             if (succeeded(parser.parseOptionalKeyword("else")))
             {
-                if (parser.parseEqual() || parser.parseGreater())
+                if (failed(parseFatArrow(parser)))
                     return ::mlir::failure();
 
                 std::unique_ptr<::mlir::Region> elseRegion = std::make_unique<::mlir::Region>();
@@ -1268,7 +1281,7 @@ namespace mlir
                     return ::mlir::failure();
                 }
 
-                if (parser.parseEqual() || parser.parseGreater())
+                if (failed(parseFatArrow(parser)))
                     return ::mlir::failure();
 
                 std::unique_ptr<::mlir::Region> caseRegion = std::make_unique<::mlir::Region>();
@@ -1281,7 +1294,7 @@ namespace mlir
 
             if (succeeded(parser.parseOptionalKeyword("else")))
             {
-                if (parser.parseEqual() || parser.parseGreater())
+                if (failed(parseFatArrow(parser)))
                     return ::mlir::failure();
 
                 std::unique_ptr<::mlir::Region> elseRegion = std::make_unique<::mlir::Region>();
