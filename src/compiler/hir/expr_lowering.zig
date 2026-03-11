@@ -37,15 +37,69 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                     break :blk appendValueOp(self.block, createIntegerConstant(self.parent.context, self.parent.location(literal.range), boolType(self.parent.context), if (literal.value) 1 else 0));
                 },
                 .StringLiteral => |literal| blk: {
-                    const op = try self.createValuePlaceholder("ora.string_const", literal.text, literal.range, stringType(self.parent.context));
+                    const op = mlir.oraStringConstantOpCreate(
+                        self.parent.context,
+                        self.parent.location(literal.range),
+                        strRef(literal.text),
+                        stringType(self.parent.context),
+                    );
+                    if (mlir.oraOperationIsNull(op)) {
+                        const placeholder = try self.createValuePlaceholder("ora.string_const", literal.text, literal.range, stringType(self.parent.context));
+                        break :blk appendValueOp(self.block, placeholder);
+                    }
+                    mlir.oraOperationSetAttributeByName(
+                        op,
+                        strRef("length"),
+                        mlir.oraIntegerAttrCreateI64FromType(mlir.oraIntegerTypeCreate(self.parent.context, 32), @intCast(literal.text.len)),
+                    );
                     break :blk appendValueOp(self.block, op);
                 },
                 .AddressLiteral => |literal| blk: {
-                    const op = try self.createValuePlaceholder("ora.address_const", literal.text, literal.range, addressType(self.parent.context));
-                    break :blk appendValueOp(self.block, op);
+                    const trimmed = if (std.mem.startsWith(u8, literal.text, "0x")) literal.text[2..] else literal.text;
+                    const i160_type = mlir.oraIntegerTypeCreate(self.parent.context, 160);
+                    const addr_attr = blk2: {
+                        const null_attr = std.mem.zeroes(mlir.MlirAttribute);
+                        const parsed = std.fmt.parseInt(u256, trimmed, 16) catch break :blk2 null_attr;
+                        if (parsed <= std.math.maxInt(i64)) {
+                            break :blk2 mlir.oraIntegerAttrCreateI64FromType(i160_type, @intCast(parsed));
+                        }
+                        var decimal_buf: [80]u8 = undefined;
+                        const decimal_text = std.fmt.bufPrint(&decimal_buf, "{}", .{parsed}) catch break :blk2 null_attr;
+                        break :blk2 mlir.oraIntegerAttrGetFromString(i160_type, strRef(decimal_text));
+                    };
+                    if (mlir.oraAttributeIsNull(addr_attr)) {
+                        const placeholder = try self.createValuePlaceholder("ora.address_const", literal.text, literal.range, addressType(self.parent.context));
+                        break :blk appendValueOp(self.block, placeholder);
+                    }
+                    const int_const = mlir.oraArithConstantOpCreate(self.parent.context, self.parent.location(literal.range), i160_type, addr_attr);
+                    if (mlir.oraOperationIsNull(int_const)) {
+                        const placeholder = try self.createValuePlaceholder("ora.address_const", literal.text, literal.range, addressType(self.parent.context));
+                        break :blk appendValueOp(self.block, placeholder);
+                    }
+                    const i160_value = appendValueOp(self.block, int_const);
+                    const addr_op = mlir.oraI160ToAddrOpCreate(self.parent.context, self.parent.location(literal.range), i160_value);
+                    if (mlir.oraOperationIsNull(addr_op)) {
+                        const placeholder = try self.createValuePlaceholder("ora.address_const", literal.text, literal.range, addressType(self.parent.context));
+                        break :blk appendValueOp(self.block, placeholder);
+                    }
+                    break :blk appendValueOp(self.block, addr_op);
                 },
                 .BytesLiteral => |literal| blk: {
-                    const op = try self.createValuePlaceholder("ora.bytes_const", literal.text, literal.range, bytesType(self.parent.context));
+                    const op = mlir.oraBytesConstantOpCreate(
+                        self.parent.context,
+                        self.parent.location(literal.range),
+                        strRef(literal.text),
+                        bytesType(self.parent.context),
+                    );
+                    if (mlir.oraOperationIsNull(op)) {
+                        const placeholder = try self.createValuePlaceholder("ora.bytes_const", literal.text, literal.range, bytesType(self.parent.context));
+                        break :blk appendValueOp(self.block, placeholder);
+                    }
+                    mlir.oraOperationSetAttributeByName(
+                        op,
+                        strRef("length"),
+                        mlir.oraIntegerAttrCreateI64FromType(mlir.oraIntegerTypeCreate(self.parent.context, 32), @intCast(literal.text.len / 2)),
+                    );
                     break :blk appendValueOp(self.block, op);
                 },
                 .Name => |name| try self.lowerNameExpr(expr_id, name, locals),

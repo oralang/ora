@@ -1326,6 +1326,31 @@ test "compiler lowers struct field mutation through real field update op" {
     try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "\"ora.field_access\""));
 }
 
+test "compiler lowers string, bytes, and address literals through real ops" {
+    const source_text =
+        \\pub fn owner() -> address {
+        \\    let note = "hello";
+        \\    let payload = hex"deadbeef";
+        \\    let who = 0x1234567890abcdef1234567890abcdef12345678;
+        \\    return who;
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    const hir_text = try hir_result.renderText(testing.allocator);
+    defer testing.allocator.free(hir_text);
+
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.string.constant"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.bytes.constant"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.i160.to.addr"));
+    try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "ora.string_const"));
+    try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "ora.bytes_const"));
+    try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "ora.address_const"));
+}
+
 test "compiler lowers bitfield types as wire integers with metadata attrs" {
     const source_text =
         \\contract Bits {
