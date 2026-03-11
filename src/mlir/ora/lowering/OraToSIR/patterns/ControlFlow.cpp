@@ -4063,8 +4063,35 @@ LogicalResult ConvertScfWhileOp::matchAndRewrite(
     for (Type t : resultTypes)
         afterBlock->addArgument(t, loc);
 
-    // Move before-region blocks into the parent region (before afterBlock).
     Region &beforeRegion = op.getBefore();
+    if (!beforeRegion.empty())
+    {
+        Block &entryBlock = beforeRegion.front();
+        if (entryBlock.getNumArguments() != initArgs.size())
+            return rewriter.notifyMatchFailure(op, "before region entry args must match while init args");
+
+        TypeConverter::SignatureConversion entryConversion(entryBlock.getNumArguments());
+        for (auto [index, initArg] : llvm::enumerate(initArgs))
+            entryConversion.addInputs(index, initArg.getType());
+        if (failed(rewriter.convertRegionTypes(&beforeRegion, *tc, &entryConversion)))
+            return rewriter.notifyMatchFailure(op, "failed to convert while before region types");
+    }
+
+    Region &afterRegion = op.getAfter();
+    if (!afterRegion.empty())
+    {
+        Block &entryBlock = afterRegion.front();
+        if (entryBlock.getNumArguments() != resultTypes.size())
+            return rewriter.notifyMatchFailure(op, "after region entry args must match while result types");
+
+        TypeConverter::SignatureConversion entryConversion(entryBlock.getNumArguments());
+        for (auto [index, resultType] : llvm::enumerate(resultTypes))
+            entryConversion.addInputs(index, resultType);
+        if (failed(rewriter.convertRegionTypes(&afterRegion, *tc, &entryConversion)))
+            return rewriter.notifyMatchFailure(op, "failed to convert while after region types");
+    }
+
+    // Move before-region blocks into the parent region (before afterBlock).
     SmallVector<Block *, 4> beforeBlocks;
     for (Block &b : beforeRegion)
         beforeBlocks.push_back(&b);
@@ -4076,7 +4103,6 @@ LogicalResult ConvertScfWhileOp::matchAndRewrite(
     }
 
     // Move body-region blocks into the parent region (before afterBlock).
-    Region &afterRegion = op.getAfter();
     SmallVector<Block *, 4> bodyBlocks;
     for (Block &b : afterRegion)
         bodyBlocks.push_back(&b);
@@ -4085,23 +4111,6 @@ LogicalResult ConvertScfWhileOp::matchAndRewrite(
 
     if (!bodyEntry)
         bodyEntry = rewriter.createBlock(parentRegion, afterBlock->getIterator());
-
-    for (Block *b : beforeBlocks)
-    {
-        for (auto [index, arg] : llvm::enumerate(b->getArguments()))
-        {
-            if (index < initArgs.size())
-                arg.setType(initArgs[index].getType());
-        }
-    }
-    for (Block *b : bodyBlocks)
-    {
-        for (auto [index, arg] : llvm::enumerate(b->getArguments()))
-        {
-            if (index < resultTypes.size())
-                arg.setType(resultTypes[index]);
-        }
-    }
 
     // Branch from parentBlock to beforeEntry (start of condition).
     rewriter.setInsertionPointToEnd(parentBlock);
