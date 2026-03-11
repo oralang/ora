@@ -39,3 +39,5 @@ artifacts/
 .zig-cache-global
 zig-out/
 .zig-global-cache
+
+.claude
