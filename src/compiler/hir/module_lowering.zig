@@ -168,7 +168,11 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
 
         pub fn lowerConstant(self: *Lowerer, item_id: ast.ItemId, constant: ast.ConstantItem, parent_block: mlir.MlirBlock) anyerror!void {
             const expr = self.file.expression(constant.value).*;
-            const result_type = if (constant.type_expr) |type_expr| self.lowerTypeExpr(type_expr) else self.lowerExprType(constant.value);
+            const declared_type = if (constant.type_expr) |type_expr| self.lowerTypeExpr(type_expr) else self.lowerExprType(constant.value);
+            const result_type = if (mlir.oraTypeIsAddressType(declared_type))
+                mlir.oraIntegerTypeCreate(self.context, 160)
+            else
+                declared_type;
             const op = switch (expr) {
                 .IntegerLiteral => |literal| blk: {
                     const parsed = support.parseIntLiteral(literal.text) orelse 0;
@@ -181,6 +185,34 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
                 },
                 .BoolLiteral => |literal| blk: {
                     const value_attr = mlir.oraBoolAttrCreate(self.context, literal.value);
+                    const created = mlir.oraConstOpCreate(self.context, self.location(constant.range), strRef(constant.name), value_attr, result_type);
+                    if (mlir.oraOperationIsNull(created)) {
+                        break :blk try self.createNamedPlaceholderOp("ora.constant_decl", constant.name, constant.range, result_type);
+                    }
+                    break :blk created;
+                },
+                .StringLiteral => |literal| blk: {
+                    const value_attr = mlir.oraStringAttrCreate(self.context, strRef(literal.text));
+                    const created = mlir.oraConstOpCreate(self.context, self.location(constant.range), strRef(constant.name), value_attr, result_type);
+                    if (mlir.oraOperationIsNull(created)) {
+                        break :blk try self.createNamedPlaceholderOp("ora.constant_decl", constant.name, constant.range, result_type);
+                    }
+                    break :blk created;
+                },
+                .BytesLiteral => |literal| blk: {
+                    const value_attr = mlir.oraStringAttrCreate(self.context, strRef(literal.text));
+                    const created = mlir.oraConstOpCreate(self.context, self.location(constant.range), strRef(constant.name), value_attr, result_type);
+                    if (mlir.oraOperationIsNull(created)) {
+                        break :blk try self.createNamedPlaceholderOp("ora.constant_decl", constant.name, constant.range, result_type);
+                    }
+                    break :blk created;
+                },
+                .AddressLiteral => |literal| blk: {
+                    const trimmed = if (std.mem.startsWith(u8, literal.text, "0x")) literal.text[2..] else literal.text;
+                    const value_attr = mlir.oraIntegerAttrGetFromString(result_type, strRef(trimmed));
+                    if (mlir.oraAttributeIsNull(value_attr)) {
+                        break :blk try self.createNamedPlaceholderOp("ora.constant_decl", constant.name, constant.range, result_type);
+                    }
                     const created = mlir.oraConstOpCreate(self.context, self.location(constant.range), strRef(constant.name), value_attr, result_type);
                     if (mlir.oraOperationIsNull(created)) {
                         break :blk try self.createNamedPlaceholderOp("ora.constant_decl", constant.name, constant.range, result_type);
