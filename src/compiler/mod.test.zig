@@ -2118,6 +2118,31 @@ test "compiler lowers simple memref-backed for loops through scf.for" {
     try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "ora.for_placeholder"));
 }
 
+test "compiler threads carried locals through scf.for iter args" {
+    const source_text =
+        \\pub fn sum(values: slice[u256]) -> u256 {
+        \\    let total = 0;
+        \\    for (values) |value, index| {
+        \\        total = total + value + index;
+        \\    }
+        \\    return total;
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    const hir_text = try hir_result.renderText(testing.allocator);
+    defer testing.allocator.free(hir_text);
+
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "scf.for"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "memref.load"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "arith.index_castui"));
+    try testing.expect(std.mem.count(u8, hir_text, "arith.addi") >= 2);
+    try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "ora.for_placeholder"));
+}
+
 test "compiler lowers direct map index load and store through real map ops" {
     const source_text =
         \\contract Maps {

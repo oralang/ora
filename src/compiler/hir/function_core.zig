@@ -509,9 +509,18 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             var carried_locals: LocalIdList = .{};
             var carried_seen = LocalIdSet.init(self.parent.allocator);
             const carried_supported = try collectLoopCarriedLocals(self.parent.allocator, self.parent.file, for_stmt.body, locals, &carried_locals, &carried_seen);
-            if (!carried_supported or carried_locals.items.len != 0) {
+            if (!carried_supported) {
                 try self.appendUnsupportedControlPlaceholder("ora.for_placeholder", for_stmt.range);
                 return false;
+            }
+
+            var init_operands: std.ArrayList(mlir.MlirValue) = .{};
+            for (carried_locals.items) |local_id| {
+                const value = locals.getValue(local_id) orelse {
+                    try self.appendUnsupportedControlPlaceholder("ora.for_placeholder", for_stmt.range);
+                    return false;
+                };
+                try init_operands.append(self.parent.allocator, value);
             }
 
             const index_type = mlir.oraIndexTypeCreate(self.parent.context);
@@ -530,7 +539,16 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             };
             const step = appendValueOp(self.block, createIntegerConstant(self.parent.context, loc, index_type, 1));
 
-            const for_op = mlir.oraScfForOpCreate(self.parent.context, loc, lower_bound, upper_bound, step, null, 0, false);
+            const for_op = mlir.oraScfForOpCreate(
+                self.parent.context,
+                loc,
+                lower_bound,
+                upper_bound,
+                step,
+                if (init_operands.items.len == 0) null else init_operands.items.ptr,
+                init_operands.items.len,
+                false,
+            );
             if (mlir.oraOperationIsNull(for_op)) return error.MlirOperationCreationFailed;
             appendOp(self.block, for_op);
 
@@ -568,6 +586,9 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             var body_lowerer = self.*;
             body_lowerer.block = body_block;
             var body_locals = try self.cloneLocals(locals);
+            for (carried_locals.items, 0..) |local_id, index| {
+                try body_locals.setValue(local_id, mlir.oraBlockGetArgument(body_block, index + 1));
+            }
             try body_lowerer.bindPatternValue(for_stmt.item_pattern, item_value, &body_locals);
             if (for_stmt.index_pattern) |index_pattern| {
                 try body_lowerer.bindPatternValue(index_pattern, index_value, &body_locals);
@@ -575,8 +596,9 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
 
             _ = try body_lowerer.lowerBody(for_stmt.body, &body_locals);
             if (!support.blockEndsWithTerminator(body_block)) {
-                try appendEmptyScfYield(self.parent.context, body_block, loc);
+                try body_lowerer.appendScfYieldFromLocals(body_block, for_stmt.range, &body_locals, carried_locals.items);
             }
+            try FunctionLowerer.writeBackCarriedLocals(locals, carried_locals.items, for_op);
             return false;
         }
 
