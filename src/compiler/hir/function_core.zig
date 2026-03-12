@@ -257,7 +257,24 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
         }
 
         pub fn bindPatternValue(self: *FunctionLowerer, pattern_id: ast.PatternId, value: mlir.MlirValue, locals: *LocalEnv) anyerror!void {
-            try locals.bindPattern(self.parent.file, pattern_id, value);
+            switch (self.parent.file.pattern(pattern_id).*) {
+                .StructDestructure => |destructure| {
+                    for (destructure.fields) |field| {
+                        const result_type = self.parent.lowerSemaType(self.parent.typecheck.pattern_types[field.binding.index()], field.range);
+                        const op = mlir.oraStructFieldExtractOpCreate(
+                            self.parent.context,
+                            self.parent.location(field.range),
+                            value,
+                            strRef(field.name),
+                            result_type,
+                        );
+                        if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
+                        const field_value = appendValueOp(self.block, op);
+                        try self.bindPatternValue(field.binding, field_value, locals);
+                    }
+                },
+                else => try locals.bindPattern(self.parent.file, pattern_id, value),
+            }
         }
 
         pub fn storePattern(self: *FunctionLowerer, pattern_id: ast.PatternId, value: mlir.MlirValue, locals: *LocalEnv) anyerror!void {

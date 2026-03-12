@@ -2160,6 +2160,31 @@ test "compiler lowers array literals through memref allocation and stores" {
     try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "ora.array.create"));
 }
 
+test "compiler lowers destructuring bindings through struct field extracts" {
+    const source_text =
+        \\struct Pair {
+        \\    left: u256;
+        \\    right: u256;
+        \\}
+        \\
+        \\pub fn sum() -> u256 {
+        \\    let pair = Pair { left: 1, right: 2 };
+        \\    let .{ left: a, right: b } = pair;
+        \\    return a + b;
+        \\}
+    ;
+
+    var compilation = try compiler.compileSource(testing.allocator, "destructure-bind.ora", source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    const hir_text = try hir_result.renderText(testing.allocator);
+    defer testing.allocator.free(hir_text);
+
+    try testing.expect(std.mem.count(u8, hir_text, "ora.struct_field_extract") >= 2);
+    try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "\"ora.field_access\""));
+}
+
 test "compiler lowers comptime block expressions through syntax AST path" {
     const source_text =
         \\pub fn run() -> u256 {
