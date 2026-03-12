@@ -123,10 +123,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                     break :blk appendValueOp(self.block, op);
                 },
                 .ArrayLiteral => |array| blk: {
-                    var operands: std.ArrayList(mlir.MlirValue) = .{};
-                    for (array.elements) |element| try operands.append(self.parent.allocator, try self.lowerExpr(element, locals));
-                    const op = try self.createAggregatePlaceholder("ora.array.create", array.range, operands.items, self.parent.lowerExprType(expr_id));
-                    break :blk appendValueOp(self.block, op);
+                    break :blk try @This().lowerArrayLiteral(self, expr_id, array, locals);
                 },
                 .StructLiteral => |struct_literal| blk: {
                     const op = try @This().lowerStructLiteral(self, expr_id, struct_literal, locals);
@@ -488,6 +485,52 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 if (!mlir.oraOperationIsNull(op)) return op;
             }
             return self.createAggregatePlaceholder("ora.field_access", field.range, &.{base}, self.parent.lowerExprType(expr_id));
+        }
+
+        fn lowerArrayLiteral(self: *FunctionLowerer, expr_id: ast.ExprId, array: ast.ArrayLiteralExpr, locals: *LocalEnv) anyerror!mlir.MlirValue {
+            const result_type = self.parent.lowerExprType(expr_id);
+            const alloc = mlir.oraMemrefAllocaOpCreate(
+                self.parent.context,
+                self.parent.location(array.range),
+                result_type,
+            );
+            if (mlir.oraOperationIsNull(alloc)) {
+                var operands: std.ArrayList(mlir.MlirValue) = .{};
+                for (array.elements) |element| try operands.append(self.parent.allocator, try self.lowerExpr(element, locals));
+                const placeholder = try self.createAggregatePlaceholder("ora.array.create", array.range, operands.items, result_type);
+                return appendValueOp(self.block, placeholder);
+            }
+
+            const memref = appendValueOp(self.block, alloc);
+            for (array.elements, 0..) |element, index| {
+                const element_value = try self.lowerExpr(element, locals);
+                const raw_index = appendValueOp(
+                    self.block,
+                    createIntegerConstant(
+                        self.parent.context,
+                        self.parent.location(array.range),
+                        defaultIntegerType(self.parent.context),
+                        @intCast(index),
+                    ),
+                );
+                const index_value = try @This().convertIndexToIndexType(self, raw_index, array.range);
+                const store = mlir.oraMemrefStoreOpCreate(
+                    self.parent.context,
+                    self.parent.location(array.range),
+                    element_value,
+                    memref,
+                    &[_]mlir.MlirValue{index_value},
+                    1,
+                );
+                if (mlir.oraOperationIsNull(store)) {
+                    var operands: std.ArrayList(mlir.MlirValue) = .{};
+                    for (array.elements) |fallback_element| try operands.append(self.parent.allocator, try self.lowerExpr(fallback_element, locals));
+                    const placeholder = try self.createAggregatePlaceholder("ora.array.create", array.range, operands.items, result_type);
+                    return appendValueOp(self.block, placeholder);
+                }
+                appendOp(self.block, store);
+            }
+            return memref;
         }
 
         fn findStructFieldInit(fields: []const ast.StructFieldInit, name: []const u8) ?ast.StructFieldInit {

@@ -2139,6 +2139,27 @@ test "compiler lowers slice index load and store through memref ops" {
     try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "ora.index_access"));
 }
 
+test "compiler lowers array literals through memref allocation and stores" {
+    const source_text =
+        \\pub fn read_first() -> u256 {
+        \\    let items = [1, 2, 3];
+        \\    return items[0];
+        \\}
+    ;
+
+    var compilation = try compiler.compileSource(testing.allocator, "array-literal.ora", source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    const hir_text = try hir_result.renderText(testing.allocator);
+    defer testing.allocator.free(hir_text);
+
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "memref.alloca"));
+    try testing.expect(std.mem.count(u8, hir_text, "memref.store") >= 3);
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "memref.load"));
+    try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "ora.array.create"));
+}
+
 test "compiler lowers comptime block expressions through syntax AST path" {
     const source_text =
         \\pub fn run() -> u256 {
