@@ -969,6 +969,16 @@ namespace mlir
             return success();
         }
 
+        ::mlir::LogicalResult FunctionRefOp::verify()
+        {
+            if (getSymName().empty())
+                return emitOpError("requires non-empty function symbol name");
+            if (!llvm::isa<ora::FunctionType>(getResult().getType()))
+                return emitOpError() << "result must have !ora.function<...> type, got "
+                                     << getResult().getType();
+            return success();
+        }
+
         ::mlir::LogicalResult IfOp::verify()
         {
             constexpr llvm::StringLiteral kConditionalReturnContract =

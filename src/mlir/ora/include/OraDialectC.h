@@ -1432,6 +1432,13 @@ extern "C"
         MlirValue value,
         MlirType resultType);
 
+    /// Create an ora.function_ref operation
+    MLIR_CAPI_EXPORTED MlirOperation oraFunctionRefOpCreate(
+        MlirContext ctx,
+        MlirLocation loc,
+        MlirStringRef name,
+        MlirType resultType);
+
     /// Create an ora.try_catch operation
     MLIR_CAPI_EXPORTED MlirOperation oraTryOpCreate(
         MlirContext ctx,

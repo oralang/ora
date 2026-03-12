@@ -1739,9 +1739,14 @@ test "compiler lowers function-valued bindings without function fallback" {
     defer compilation.deinit();
 
     const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    const hir_text = try hir_result.renderText(testing.allocator);
+    defer testing.allocator.free(hir_text);
+
     for (hir_result.type_fallbacks) |fallback| {
         try testing.expect(fallback.reason != .unsupported_function_sema_type);
     }
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.function_ref"));
+    try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "\"ora.function_ref\""));
 }
 
 test "compiler syntax splits nested generic closing tokens" {

@@ -5775,6 +5775,28 @@ MlirOperation oraErrorGetErrorOpCreate(MlirContext ctx, MlirLocation loc, MlirVa
     }
 }
 
+MlirOperation oraFunctionRefOpCreate(MlirContext ctx, MlirLocation loc, MlirStringRef name, MlirType resultType)
+{
+    try
+    {
+        MLIRContext *context = unwrap(ctx);
+        Location location = unwrap(loc);
+        StringRef nameRef = unwrap(name);
+        Type resultTy = unwrap(resultType);
+
+        OperationState state(location, "ora.function_ref");
+        state.addAttribute("sym_name", StringAttr::get(context, nameRef));
+        state.addTypes(resultTy);
+
+        Operation *op = Operation::create(state);
+        return wrap(op);
+    }
+    catch (...)
+    {
+        return {nullptr};
+    }
+}
+
 MlirOperation oraTryOpCreate(MlirContext ctx, MlirLocation loc, MlirValue tryOperation, MlirType resultType)
 {
     try

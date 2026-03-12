@@ -253,12 +253,19 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                             },
                             .Constant => |constant| return self.lowerExpr(constant.value, locals),
                             .Function => {
-                                const placeholder = try self.createAggregatePlaceholder(
-                                    "ora.function_ref",
-                                    name.range,
-                                    &.{},
-                                    self.parent.lowerExprType(expr_id),
+                                const result_type = self.parent.lowerExprType(expr_id);
+                                const function_name = switch (self.parent.file.item(binding.item).*) {
+                                    .Function => |function| function.name,
+                                    else => "",
+                                };
+                                const op = mlir.oraFunctionRefOpCreate(
+                                    self.parent.context,
+                                    self.parent.location(name.range),
+                                    strRef(function_name),
+                                    result_type,
                                 );
+                                if (!mlir.oraOperationIsNull(op)) return appendValueOp(self.block, op);
+                                const placeholder = try self.createAggregatePlaceholder("ora.function_ref", name.range, &.{}, result_type);
                                 return appendValueOp(self.block, placeholder);
                             },
                             else => {},

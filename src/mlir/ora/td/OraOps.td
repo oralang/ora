@@ -669,6 +669,24 @@ def Ora_EvmBasefeeOp : Ora_PureOp<"evm.basefee"> {
   let assemblyFormat = "attr-dict `:` type($result)";
 }
 
+def Ora_FunctionRefOp : Ora_PureOp<"function_ref"> {
+  let summary = "Reference a function symbol";
+  let description = [{
+    Materializes a first-class reference to an Ora function symbol.
+
+    Example:
+    ```mlir
+    %f = ora.function_ref @helper : !ora.function<(i256) -> (i256)>
+    ```
+  }];
+
+  let arguments = (ins StrAttr:$sym_name);
+  let results = (outs AnyType:$result);
+
+  let assemblyFormat = "$sym_name attr-dict `:` type($result)";
+  let hasVerifier = 1;
+}
+
 //===----------------------------------------------------------------------===//
 // Control Flow Operations
 //===----------------------------------------------------------------------===//
