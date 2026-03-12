@@ -1,6 +1,7 @@
 const std = @import("std");
 const mlir = @import("mlir_c_api").c;
 const ast = @import("../ast/mod.zig");
+const sema = @import("../sema/mod.zig");
 const source = @import("../source/mod.zig");
 const support = @import("support.zig");
 
@@ -193,6 +194,16 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
                 mlir.oraIntegerTypeCreate(self.context, 160)
             else
                 declared_type;
+            if (self.const_eval.values[constant.value.index()]) |value| {
+                if (try @This().constValueAttr(self, value, result_type)) |value_attr| {
+                    const created = mlir.oraConstOpCreate(self.context, self.location(constant.range), strRef(constant.name), value_attr, result_type);
+                    if (!mlir.oraOperationIsNull(created)) {
+                        appendOp(parent_block, created);
+                        try self.appendItemHandle(item_id, .constant, constant.name, constant.range, created);
+                        return;
+                    }
+                }
+            }
             const op = switch (expr) {
                 .IntegerLiteral => |literal| blk: {
                     const parsed = support.parseIntLiteral(literal.text) orelse 0;
@@ -250,6 +261,21 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
             };
             appendOp(parent_block, op);
             try self.appendItemHandle(item_id, .constant, constant.name, constant.range, op);
+        }
+
+        fn constValueAttr(self: *Lowerer, value: sema.ConstValue, result_type: mlir.MlirType) anyerror!?mlir.MlirAttribute {
+            return switch (value) {
+                .integer => |integer| blk: {
+                    if (integer.toInt(i64)) |small| {
+                        break :blk mlir.oraIntegerAttrCreateI64FromType(result_type, small);
+                    } else |_| {}
+
+                    const text = try integer.toString(self.allocator, 10, .lower);
+                    break :blk mlir.oraIntegerAttrGetFromString(result_type, strRef(text));
+                },
+                .boolean => |boolean| mlir.oraBoolAttrCreate(self.context, boolean),
+                .string => |text| mlir.oraStringAttrCreate(self.context, strRef(text)),
+            };
         }
 
         pub fn lowerStructDecl(self: *Lowerer, item_id: ast.ItemId, struct_item: ast.StructItem, parent_block: mlir.MlirBlock) anyerror!void {

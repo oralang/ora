@@ -89,6 +89,7 @@ pub fn lowerModule(
     file: *const ast.AstFile,
     item_index: *const sema.ItemIndexResult,
     resolution: *const sema.NameResolutionResult,
+    const_eval: *const sema.ConstEvalResult,
     typecheck: *const sema.TypeCheckResult,
 ) !LoweringResult {
     var result = LoweringResult{
@@ -118,6 +119,7 @@ pub fn lowerModule(
         .file = file,
         .item_index = item_index,
         .resolution = resolution,
+        .const_eval = const_eval,
         .typecheck = typecheck,
         .module_body = mlir.oraModuleGetBody(result.module.raw_module),
         .items = .{},
@@ -141,6 +143,7 @@ const Lowerer = struct {
     file: *const ast.AstFile,
     item_index: *const sema.ItemIndexResult,
     resolution: *const sema.NameResolutionResult,
+    const_eval: *const sema.ConstEvalResult,
     typecheck: *const sema.TypeCheckResult,
     module_body: mlir.MlirBlock,
     items: std.ArrayList(HirItemHandle),
