@@ -1702,6 +1702,27 @@ test "compiler lowers tuple HIR types without tuple fallback" {
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "!ora.tuple<i256, i1>"));
 }
 
+test "compiler lowers tuple expressions through real tuple ops" {
+    const source_text =
+        \\pub fn pair() -> u256 {
+        \\    let coords = (1, true);
+        \\    return coords[0];
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    const hir_text = try hir_result.renderText(testing.allocator);
+    defer testing.allocator.free(hir_text);
+
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.tuple_create"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.tuple_extract"));
+    try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "\"ora.tuple.create\""));
+    try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "\"ora.index_access\""));
+}
+
 test "compiler syntax splits nested generic closing tokens" {
     const source_text =
         \\struct Types {

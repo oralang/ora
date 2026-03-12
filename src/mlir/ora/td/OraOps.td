@@ -986,6 +986,42 @@ def Ora_StructInitOp : Ora_PureOp<"struct_init"> {
   let hasVerifier = 1;
 }
 
+def Ora_TupleCreateOp : Ora_PureOp<"tuple_create"> {
+  let summary = "Tuple construction";
+  let description = [{
+    Creates a tuple value from element operands.
+
+    Example:
+    ```mlir
+    %pair = ora.tuple_create (%lhs, %rhs) : (i256, i1) -> !ora.tuple<i256, i1>
+    ```
+  }];
+
+  let arguments = (ins Variadic<AnyType>:$elements);
+  let results = (outs AnyType:$result);
+
+  let assemblyFormat = "`(` $elements `)` attr-dict `:` type($elements) `->` type($result)";
+  let hasVerifier = 1;
+}
+
+def Ora_TupleExtractOp : Ora_PureOp<"tuple_extract"> {
+  let summary = "Tuple element extraction";
+  let description = [{
+    Extracts an element from a tuple by constant index.
+
+    Example:
+    ```mlir
+    %lhs = ora.tuple_extract %pair[0] : !ora.tuple<i256, i1> -> i256
+    ```
+  }];
+
+  let arguments = (ins AnyType:$tuple_value, I64Attr:$index);
+  let results = (outs AnyType:$result);
+
+  let assemblyFormat = "$tuple_value `[` $index `]` attr-dict `:` type($tuple_value) `->` type($result)";
+  let hasVerifier = 1;
+}
+
 // Extract field from struct (pure operation)
 def Ora_StructFieldExtractOp : Ora_PureOp<"struct_field_extract"> {
   let summary = "Extract struct field";

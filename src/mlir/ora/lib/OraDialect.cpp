@@ -638,6 +638,57 @@ namespace mlir
             return success();
         }
 
+        ::mlir::LogicalResult TupleCreateOp::verify()
+        {
+            auto tupleType = llvm::dyn_cast<TupleType>(getResult().getType());
+            if (!tupleType)
+                return emitOpError("result type must be !ora.tuple<...>");
+
+            auto elementTypes = tupleType.getElementTypes();
+            if (getElements().size() != elementTypes.size())
+            {
+                return emitOpError() << "expected " << elementTypes.size()
+                                     << " tuple elements, got " << getElements().size();
+            }
+
+            for (size_t i = 0; i < elementTypes.size(); ++i)
+            {
+                if (getElements()[i].getType() != elementTypes[i])
+                {
+                    return emitOpError() << "tuple element #" << i << " has type "
+                                         << getElements()[i].getType() << " but tuple type expects "
+                                         << elementTypes[i];
+                }
+            }
+
+            return success();
+        }
+
+        ::mlir::LogicalResult TupleExtractOp::verify()
+        {
+            auto tupleType = llvm::dyn_cast<TupleType>(getTupleValue().getType());
+            if (!tupleType)
+                return emitOpError("tuple operand must have !ora.tuple<...> type");
+
+            auto elementTypes = tupleType.getElementTypes();
+            auto index = static_cast<size_t>(getIndex());
+            if (index >= elementTypes.size())
+            {
+                return emitOpError() << "tuple index " << getIndex()
+                                     << " is out of bounds for tuple of size "
+                                     << elementTypes.size();
+            }
+
+            if (getResult().getType() != elementTypes[index])
+            {
+                return emitOpError() << "result type " << getResult().getType()
+                                     << " does not match tuple element #" << index
+                                     << " type " << elementTypes[index];
+            }
+
+            return success();
+        }
+
         ::mlir::LogicalResult StructFieldExtractOp::verify()
         {
             auto structType = llvm::dyn_cast<StructType>(getStructValue().getType());

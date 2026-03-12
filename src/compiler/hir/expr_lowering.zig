@@ -1,6 +1,7 @@
 const std = @import("std");
 const mlir = @import("mlir_c_api").c;
 const ast = @import("../ast/mod.zig");
+const const_values = @import("../sema/const_values.zig");
 const source = @import("../source/mod.zig");
 const hir_locals = @import("locals.zig");
 const support = @import("support.zig");
@@ -119,7 +120,18 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 .Tuple => |tuple| blk: {
                     var operands: std.ArrayList(mlir.MlirValue) = .{};
                     for (tuple.elements) |element| try operands.append(self.parent.allocator, try self.lowerExpr(element, locals));
-                    const op = try self.createAggregatePlaceholder("ora.tuple.create", tuple.range, operands.items, self.parent.lowerExprType(expr_id));
+                    const result_type = self.parent.lowerExprType(expr_id);
+                    const op = mlir.oraTupleCreateOpCreate(
+                        self.parent.context,
+                        self.parent.location(tuple.range),
+                        if (operands.items.len == 0) null else operands.items.ptr,
+                        operands.items.len,
+                        result_type,
+                    );
+                    if (mlir.oraOperationIsNull(op)) {
+                        const placeholder = try self.createAggregatePlaceholder("ora.tuple.create", tuple.range, operands.items, result_type);
+                        break :blk appendValueOp(self.block, placeholder);
+                    }
                     break :blk appendValueOp(self.block, op);
                 },
                 .ArrayLiteral => |array| blk: {
@@ -185,6 +197,21 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                         if (!mlir.oraOperationIsNull(op)) break :blk appendValueOp(self.block, op);
                     }
                     const base_type = self.parent.typecheck.exprType(index.base);
+                    if (base_type == .tuple) {
+                        const tuple_index = @This().constTupleIndex(self, index.index) orelse {
+                            const op = try self.createAggregatePlaceholder("ora.index_access", index.range, &.{base, key}, self.parent.lowerExprType(expr_id));
+                            break :blk appendValueOp(self.block, op);
+                        };
+                        const result_type = self.parent.lowerExprType(expr_id);
+                        const op = mlir.oraTupleExtractOpCreate(
+                            self.parent.context,
+                            self.parent.location(index.range),
+                            base,
+                            @intCast(tuple_index),
+                            result_type,
+                        );
+                        if (!mlir.oraOperationIsNull(op)) break :blk appendValueOp(self.block, op);
+                    }
                     if (base_type == .map) {
                         const result_type = self.parent.lowerExprType(expr_id);
                         const op = mlir.oraMapGetOpCreate(self.parent.context, self.parent.location(index.range), base, key, result_type);
@@ -538,6 +565,14 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 if (std.mem.eql(u8, field.name, name)) return field;
             }
             return null;
+        }
+
+        fn constTupleIndex(self: *FunctionLowerer, expr_id: ast.ExprId) ?usize {
+            const value = self.parent.const_eval.values[expr_id.index()] orelse return null;
+            return switch (value) {
+                .integer => |integer| const_values.positiveShiftAmount(integer),
+                else => null,
+            };
         }
 
         pub fn createValuePlaceholder(self: *FunctionLowerer, op_name: []const u8, text: []const u8, range: source.TextRange, result_type: mlir.MlirType) anyerror!mlir.MlirOperation {

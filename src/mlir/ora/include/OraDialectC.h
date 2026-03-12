@@ -980,6 +980,22 @@ extern "C"
         size_t numFieldValues,
         MlirType resultType);
 
+    /// Create an ora.tuple_create operation using the registered dialect
+    MLIR_CAPI_EXPORTED MlirOperation oraTupleCreateOpCreate(
+        MlirContext ctx,
+        MlirLocation loc,
+        const MlirValue *elements,
+        size_t numElements,
+        MlirType resultType);
+
+    /// Create an ora.tuple_extract operation using the registered dialect
+    MLIR_CAPI_EXPORTED MlirOperation oraTupleExtractOpCreate(
+        MlirContext ctx,
+        MlirLocation loc,
+        MlirValue tupleValue,
+        int64_t index,
+        MlirType resultType);
+
     /// Create an ora.destructure operation
     MLIR_CAPI_EXPORTED MlirOperation oraDestructureOpCreate(
         MlirContext ctx,

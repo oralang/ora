@@ -4247,6 +4247,70 @@ MlirOperation oraStructInitOpCreate(MlirContext ctx, MlirLocation loc, const Mli
     }
 }
 
+MlirOperation oraTupleCreateOpCreate(MlirContext ctx, MlirLocation loc, const MlirValue *elements, size_t numElements, MlirType resultType)
+{
+    try
+    {
+        MLIRContext *context = unwrap(ctx);
+        Location location = unwrap(loc);
+        Type resultTypeRef = unwrap(resultType);
+
+        if (!oraDialectIsRegistered(ctx))
+        {
+            return {nullptr};
+        }
+
+        OpBuilder builder(context);
+
+        SmallVector<Value> elementRefs;
+        elementRefs.reserve(numElements);
+        for (size_t i = 0; i < numElements; ++i)
+        {
+            elementRefs.push_back(unwrap(elements[i]));
+        }
+
+        auto tupleCreateOp = builder.create<TupleCreateOp>(location, resultTypeRef, elementRefs);
+
+        auto gasCostAttr = IntegerAttr::get(::mlir::IntegerType::get(context, 64), 3);
+        tupleCreateOp->setAttr("gas_cost", gasCostAttr);
+
+        return wrap(tupleCreateOp.getOperation());
+    }
+    catch (...)
+    {
+        return {nullptr};
+    }
+}
+
+MlirOperation oraTupleExtractOpCreate(MlirContext ctx, MlirLocation loc, MlirValue tupleValue, int64_t index, MlirType resultType)
+{
+    try
+    {
+        MLIRContext *context = unwrap(ctx);
+        Location location = unwrap(loc);
+        Value tupleValueRef = unwrap(tupleValue);
+        Type resultTypeRef = unwrap(resultType);
+
+        if (!oraDialectIsRegistered(ctx))
+        {
+            return {nullptr};
+        }
+
+        OpBuilder builder(context);
+        auto indexAttr = IntegerAttr::get(::mlir::IntegerType::get(context, 64), index);
+        auto tupleExtractOp = builder.create<TupleExtractOp>(location, resultTypeRef, tupleValueRef, indexAttr);
+
+        auto gasCostAttr = IntegerAttr::get(::mlir::IntegerType::get(context, 64), 1);
+        tupleExtractOp->setAttr("gas_cost", gasCostAttr);
+
+        return wrap(tupleExtractOp.getOperation());
+    }
+    catch (...)
+    {
+        return {nullptr};
+    }
+}
+
 //===----------------------------------------------------------------------===//
 // Additional Ora Operations
 //===----------------------------------------------------------------------===//
