@@ -2187,6 +2187,33 @@ test "compiler lowers destructuring bindings through struct field extracts" {
     try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "\"ora.field_access\""));
 }
 
+test "compiler lowers destructuring assignment through struct field extracts" {
+    const source_text =
+        \\struct Pair {
+        \\    left: u256;
+        \\    right: u256;
+        \\}
+        \\
+        \\pub fn sum() -> u256 {
+        \\    let left = 0;
+        \\    let right = 0;
+        \\    .{ left, right } = Pair { left: 4, right: 5 };
+        \\    return left + right;
+        \\}
+    ;
+
+    var compilation = try compiler.compileSource(testing.allocator, "destructure-assign.ora", source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    const hir_text = try hir_result.renderText(testing.allocator);
+    defer testing.allocator.free(hir_text);
+
+    try testing.expect(std.mem.count(u8, hir_text, "ora.struct_field_extract") >= 2);
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "arith.addi"));
+    try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "\"ora.field_access\""));
+}
+
 test "compiler lowers fallback break and continue through real ops" {
     const source_text =
         \\pub fn stop() {

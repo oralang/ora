@@ -309,7 +309,17 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 },
                 .StructDestructure => |destructure| {
                     for (destructure.fields) |field| {
-                        try self.storePattern(field.binding, value, locals);
+                        const result_type = self.parent.lowerSemaType(self.parent.typecheck.pattern_types[field.binding.index()], field.range);
+                        const op = mlir.oraStructFieldExtractOpCreate(
+                            self.parent.context,
+                            self.parent.location(field.range),
+                            value,
+                            strRef(field.name),
+                            result_type,
+                        );
+                        if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
+                        const field_value = appendValueOp(self.block, op);
+                        try self.storePattern(field.binding, field_value, locals);
                     }
                     return;
                 },
