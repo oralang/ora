@@ -2173,6 +2173,29 @@ test "compiler lowers real HIR for loops with break and continue" {
     try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "ora.for_placeholder"));
 }
 
+test "compiler lowers for invariants through ora.invariant" {
+    const source_text =
+        \\pub fn scan(values: slice[u256]) {
+        \\    for (values) |value, index|
+        \\        invariant value >= index;
+        \\    {
+        \\        assert(value >= index, "ordered");
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    const hir_text = try hir_result.renderText(testing.allocator);
+    defer testing.allocator.free(hir_text);
+
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "scf.for"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.invariant"));
+    try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "ora.for_placeholder"));
+}
+
 test "compiler lowers direct map index load and store through real map ops" {
     const source_text =
         \\contract Maps {

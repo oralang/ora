@@ -499,7 +499,6 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
 
             if (!mlir.oraTypeIsAMemRef(iterable_type) or
                 mlir.oraShapedTypeGetRank(iterable_type) != 1 or
-                for_stmt.invariants.len != 0 or
                 bodyMayReturn(self.parent.file, for_stmt.body))
             {
                 try self.appendUnsupportedControlPlaceholder("ora.for_placeholder", for_stmt.range);
@@ -664,6 +663,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 var then_lowerer = body_lowerer;
                 then_lowerer.block = then_block;
                 var then_locals = try self.cloneLocals(&body_locals);
+                try @This().lowerLoopInvariants(&then_lowerer, for_stmt.invariants, &then_locals);
                 _ = try then_lowerer.lowerBody(for_stmt.body, &then_locals);
                 if (!support.blockEndsWithTerminator(then_block)) {
                     try then_lowerer.appendScfYieldFromLocals(then_block, for_stmt.range, &then_locals, carried_locals.items);
@@ -678,6 +678,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                     try FunctionLowerer.writeBackCarriedLocals(&body_locals, carried_locals.items, if_op);
                 }
             } else {
+                try @This().lowerLoopInvariants(&body_lowerer, for_stmt.invariants, &body_locals);
                 _ = try body_lowerer.lowerBody(for_stmt.body, &body_locals);
             }
             if (!support.blockEndsWithTerminator(body_block)) {
@@ -685,6 +686,19 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             }
             try FunctionLowerer.writeBackCarriedLocals(locals, carried_locals.items, for_op);
             return false;
+        }
+
+        fn lowerLoopInvariants(self: *FunctionLowerer, invariants: []const ast.ExprId, locals: *LocalEnv) anyerror!void {
+            for (invariants) |expr_id| {
+                const value = try self.lowerExpr(expr_id, locals);
+                const op = mlir.oraInvariantOpCreate(
+                    self.parent.context,
+                    self.parent.location(support.exprRange(self.parent.file, expr_id)),
+                    value,
+                );
+                if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
+                appendOp(self.block, op);
+            }
         }
 
         fn convertIndexToIndexType(self: *FunctionLowerer, index: mlir.MlirValue, range: source.TextRange) anyerror!mlir.MlirValue {
