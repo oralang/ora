@@ -96,6 +96,16 @@ fn expectRoundTripForSource(source: []const u8, filename: []const u8, expected_o
     try testing.expectEqualStrings(reparsed, reparsed_again);
 }
 
+fn expectRoundTripForMlirText(text: []const u8, expected_ops: []const []const u8) !void {
+    const allocator = testing.allocator;
+    const reparsed = try roundTripMlirText(allocator, text);
+    defer allocator.free(reparsed);
+
+    for (expected_ops) |op_name| {
+        try testing.expect(std.mem.containsAtLeast(u8, reparsed, 1, op_name));
+    }
+}
+
 test "mlir round-trips custom ora.contract ora.global and ora.sload assembly" {
     const source =
         \\contract Vault {
@@ -153,6 +163,32 @@ test "mlir round-trips custom ora.switch_expr assembly" {
 
     try expectRoundTripForSource(source, "roundtrip_switch_expr.ora", &.{
         "ora.switch_expr",
+    });
+}
+
+test "mlir round-trips parsed ora.switch_expr literal assembly" {
+    const text =
+        \\module {
+        \\  func.func @choose(%tag: i256) -> i256 {
+        \\    %0 = ora.switch_expr %tag : i256 -> i256 {
+        \\      case 3 => {
+        \\        %1 = arith.constant 7 : i256
+        \\        ora.yield %1 : i256
+        \\      }
+        \\      else => {
+        \\        %2 = arith.constant 9 : i256
+        \\        ora.yield %2 : i256
+        \\      }
+        \\    }
+        \\    func.return %0 : i256
+        \\  }
+        \\}
+    ;
+
+    try expectRoundTripForMlirText(text, &.{
+        "ora.switch_expr",
+        "case 3 =>",
+        "else =>",
     });
 }
 

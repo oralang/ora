@@ -139,7 +139,17 @@ const ConstEvaluator = struct {
             },
             .Switch => |switch_expr| blk: {
                 const condition = (try self.evalExpr(switch_expr.condition)) orelse {
-                    for (switch_expr.arms) |arm| _ = try self.evalExpr(arm.value);
+                    for (switch_expr.arms) |arm| {
+                        switch (arm.pattern) {
+                            .Expr => |pattern_expr| _ = try self.evalExpr(pattern_expr),
+                            .Range => |range_pattern| {
+                                _ = try self.evalExpr(range_pattern.start);
+                                _ = try self.evalExpr(range_pattern.end);
+                            },
+                            .Else => {},
+                        }
+                        _ = try self.evalExpr(arm.value);
+                    }
                     if (switch_expr.else_expr) |else_expr| _ = try self.evalExpr(else_expr);
                     break :blk null;
                 };

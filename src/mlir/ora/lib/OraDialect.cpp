@@ -95,6 +95,130 @@ namespace mlir
                     return AddressType::get(type.getContext());
                 return {};
             }
+
+            template <typename SwitchLikeOp>
+            static ::mlir::LogicalResult verifySwitchLikeOp(SwitchLikeOp op)
+            {
+                const size_t numCases = op.getCases().size();
+                auto caseValuesAttr = op.getCaseValuesAttr();
+                auto rangeStartsAttr = op.getRangeStartsAttr();
+                auto rangeEndsAttr = op.getRangeEndsAttr();
+                auto caseKindsAttr = op.getCaseKindsAttr();
+                auto defaultIndexAttr = op.getDefaultCaseIndexAttr();
+
+                auto requireSizedAttr = [&](auto attr, llvm::StringRef name) -> ::mlir::LogicalResult
+                {
+                    if (!attr)
+                        return op.emitOpError() << "requires '" << name << "' metadata for all case regions";
+                    if (static_cast<size_t>(attr.size()) != numCases)
+                        return op.emitOpError() << "requires '" << name << "' to have " << numCases
+                                                << " entries, but found " << attr.size();
+                    return ::mlir::success();
+                };
+
+                if (numCases > 0)
+                {
+                    if (::mlir::failed(requireSizedAttr(caseValuesAttr, "case_values")) ||
+                        ::mlir::failed(requireSizedAttr(rangeStartsAttr, "range_starts")) ||
+                        ::mlir::failed(requireSizedAttr(rangeEndsAttr, "range_ends")) ||
+                        ::mlir::failed(requireSizedAttr(caseKindsAttr, "case_kinds")))
+                        return ::mlir::failure();
+                }
+
+                int64_t defaultIndex = -1;
+                if (defaultIndexAttr)
+                {
+                    defaultIndex = defaultIndexAttr.getInt();
+                    if (defaultIndex < 0 || static_cast<size_t>(defaultIndex) >= numCases)
+                        return op.emitOpError() << "requires 'default_case_index' to be in [0, " << numCases
+                                                << "), but found " << defaultIndex;
+                }
+
+                int64_t elseCount = 0;
+                for (size_t i = 0; i < numCases; ++i)
+                {
+                    if (op.getCases()[i].empty())
+                        return op.emitOpError() << "requires case region #" << i << " to contain a block";
+
+                    const int64_t kind = caseKindsAttr[i];
+                    if (kind < 0 || kind > 2)
+                        return op.emitOpError() << "requires case_kinds[" << i << "] to be 0, 1, or 2, but found " << kind;
+
+                    if (kind == 2)
+                    {
+                        ++elseCount;
+                        if (defaultIndex < 0)
+                            return op.emitOpError() << "requires 'default_case_index' when case_kinds[" << i << "] is else";
+                        if (defaultIndex != static_cast<int64_t>(i))
+                            return op.emitOpError() << "requires else case at index " << defaultIndex
+                                                    << ", but case_kinds[" << i << "] is marked as else";
+                    }
+                }
+
+                if (elseCount > 1)
+                    return op.emitOpError() << "requires at most one else case, but found " << elseCount;
+
+                if (defaultIndex >= 0 && caseKindsAttr[defaultIndex] != 2)
+                    return op.emitOpError() << "requires case_kinds[" << defaultIndex << "] to be else (2)";
+
+                return ::mlir::success();
+            }
+
+            template <typename SwitchLikeOp>
+            static void printSwitchLikeCases(::mlir::OpAsmPrinter &p, SwitchLikeOp op)
+            {
+                auto caseValuesAttr = op.getCaseValuesAttr();
+                auto rangeStartsAttr = op.getRangeStartsAttr();
+                auto rangeEndsAttr = op.getRangeEndsAttr();
+                auto caseKindsAttr = op.getCaseKindsAttr();
+                auto defaultIndexAttr = op.getDefaultCaseIndexAttr();
+
+                const size_t case_kinds_size = caseKindsAttr ? static_cast<size_t>(caseKindsAttr.size()) : 0;
+                const size_t case_values_size = caseValuesAttr ? static_cast<size_t>(caseValuesAttr.size()) : 0;
+                const size_t range_starts_size = rangeStartsAttr ? static_cast<size_t>(rangeStartsAttr.size()) : 0;
+                const size_t range_ends_size = rangeEndsAttr ? static_cast<size_t>(rangeEndsAttr.size()) : 0;
+                const int64_t defaultIndex = defaultIndexAttr ? defaultIndexAttr.getInt() : -1;
+
+                for (size_t i = 0; i < op.getCases().size(); ++i)
+                {
+                    p.printNewline();
+                    p << "  ";
+
+                    if (defaultIndex >= 0 && static_cast<size_t>(defaultIndex) == i)
+                    {
+                        p << "else";
+                    }
+                    else
+                    {
+                        p << "case ";
+
+                        if (caseKindsAttr && i < case_kinds_size)
+                        {
+                            int64_t kind = caseKindsAttr[i];
+                            if (kind == 0 && caseValuesAttr && i < case_values_size)
+                            {
+                                p << caseValuesAttr[i];
+                            }
+                            else if (kind == 1 && rangeStartsAttr && rangeEndsAttr &&
+                                     i < range_starts_size && i < range_ends_size)
+                            {
+                                p << rangeStartsAttr[i] << " ... " << rangeEndsAttr[i];
+                            }
+                        }
+                    }
+
+                    p << " => ";
+                    auto &region = op.getCases()[i];
+                    if (region.empty())
+                    {
+                        p << "{}";
+                    }
+                    else
+                    {
+                        p.printRegion(region);
+                    }
+                }
+            }
         }
 
         // TupleType: !ora.tuple<type1, type2, ...>
@@ -936,6 +1060,16 @@ namespace mlir
             return ::mlir::success();
         }
 
+        ::mlir::LogicalResult SwitchOp::verify()
+        {
+            return verifySwitchLikeOp(*this);
+        }
+
+        ::mlir::LogicalResult SwitchExprOp::verify()
+        {
+            return verifySwitchLikeOp(*this);
+        }
+
         void IfOp::print(::mlir::OpAsmPrinter &p)
         {
             p << " ";
@@ -1214,58 +1348,7 @@ namespace mlir
             // Print cases
             p << " {";
 
-            auto caseValuesAttr = getCaseValuesAttr();
-            auto rangeStartsAttr = getRangeStartsAttr();
-            auto rangeEndsAttr = getRangeEndsAttr();
-            auto caseKindsAttr = getCaseKindsAttr();
-            auto defaultIndexAttr = getDefaultCaseIndexAttr();
-
-            const size_t case_kinds_size = caseKindsAttr ? static_cast<size_t>(caseKindsAttr.size()) : 0;
-            const size_t case_values_size = caseValuesAttr ? static_cast<size_t>(caseValuesAttr.size()) : 0;
-            const size_t range_starts_size = rangeStartsAttr ? static_cast<size_t>(rangeStartsAttr.size()) : 0;
-            const size_t range_ends_size = rangeEndsAttr ? static_cast<size_t>(rangeEndsAttr.size()) : 0;
-
-            for (size_t i = 0; i < getCases().size(); ++i)
-            {
-                p.printNewline();
-                p << "  ";
-
-                int64_t defaultIndex = -1;
-                if (defaultIndexAttr)
-                {
-                    defaultIndex = defaultIndexAttr.getInt();
-                }
-
-                if (defaultIndex >= 0 && static_cast<size_t>(defaultIndex) == i)
-                {
-                    // Default/else case
-                    p << "else";
-                }
-                else
-                {
-                    // Regular case
-                    p << "case ";
-
-                    if (caseKindsAttr && i < case_kinds_size)
-                    {
-                        int64_t kind = caseKindsAttr[i];
-                        if (kind == 0 && caseValuesAttr && i < case_values_size)
-                        {
-                            // Literal case
-                            p << caseValuesAttr[i];
-                        }
-                        else if (kind == 1 && rangeStartsAttr && rangeEndsAttr &&
-                                 i < range_starts_size && i < range_ends_size)
-                        {
-                            // Range case
-                            p << rangeStartsAttr[i] << " ... " << rangeEndsAttr[i];
-                        }
-                    }
-                }
-
-                p << " => ";
-                p.printRegion(getCases()[i]);
-            }
+            printSwitchLikeCases(p, *this);
 
             p.printNewline();
             p << "}";
@@ -1428,54 +1511,7 @@ namespace mlir
 
             p << " {";
 
-            auto caseValuesAttr = getCaseValuesAttr();
-            auto rangeStartsAttr = getRangeStartsAttr();
-            auto rangeEndsAttr = getRangeEndsAttr();
-            auto caseKindsAttr = getCaseKindsAttr();
-            auto defaultIndexAttr = getDefaultCaseIndexAttr();
-
-            const size_t case_kinds_size = caseKindsAttr ? static_cast<size_t>(caseKindsAttr.size()) : 0;
-            const size_t case_values_size = caseValuesAttr ? static_cast<size_t>(caseValuesAttr.size()) : 0;
-            const size_t range_starts_size = rangeStartsAttr ? static_cast<size_t>(rangeStartsAttr.size()) : 0;
-            const size_t range_ends_size = rangeEndsAttr ? static_cast<size_t>(rangeEndsAttr.size()) : 0;
-
-            for (size_t i = 0; i < getCases().size(); ++i)
-            {
-                p.printNewline();
-                p << "  ";
-
-                int64_t defaultIndex = -1;
-                if (defaultIndexAttr)
-                {
-                    defaultIndex = defaultIndexAttr.getInt();
-                }
-
-                if (defaultIndex >= 0 && static_cast<size_t>(defaultIndex) == i)
-                {
-                    p << "else";
-                }
-                else
-                {
-                    p << "case ";
-
-                    if (caseKindsAttr && i < case_kinds_size)
-                    {
-                        int64_t kind = caseKindsAttr[i];
-                        if (kind == 0 && caseValuesAttr && i < case_values_size)
-                        {
-                            p << caseValuesAttr[i];
-                        }
-                        else if (kind == 1 && rangeStartsAttr && rangeEndsAttr &&
-                                 i < range_starts_size && i < range_ends_size)
-                        {
-                            p << rangeStartsAttr[i] << " ... " << rangeEndsAttr[i];
-                        }
-                    }
-                }
-
-                p << " => ";
-                p.printRegion(getCases()[i]);
-            }
+            printSwitchLikeCases(p, *this);
 
             p.printNewline();
             p << "}";

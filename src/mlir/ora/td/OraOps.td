@@ -1664,6 +1664,7 @@ def Ora_SwitchOp : Ora_Op<"switch", [RecursiveMemoryEffects]> {
   }];
   
   let hasCustomAssemblyFormat = 1;
+  let hasVerifier = 1;
 }
 
 def Ora_SwitchExprOp : Ora_Op<"switch_expr", [RecursiveMemoryEffects]> {
@@ -1711,6 +1712,7 @@ def Ora_SwitchExprOp : Ora_Op<"switch_expr", [RecursiveMemoryEffects]> {
   }];
   
   let hasCustomAssemblyFormat = 1;
+  let hasVerifier = 1;
 }
 
 #endif // ORA_OPS

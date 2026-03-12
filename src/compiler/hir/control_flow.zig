@@ -23,7 +23,6 @@ const createIntegerConstant = support.createIntegerConstant;
 const defaultIntegerType = support.defaultIntegerType;
 const memRefType = support.memRefType;
 const namedBoolAttr = support.namedBoolAttr;
-const parseIntLiteral = support.parseIntLiteral;
 const bodyContainsStructuredLoopControl = analysis.bodyContainsStructuredLoopControl;
 const bodyContainsSwitchBreak = analysis.bodyContainsSwitchBreak;
 const bodyMayReturn = analysis.bodyMayReturn;
@@ -557,33 +556,10 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
         }
 
         pub fn switchPatternValue(self: *FunctionLowerer, expr_id: ast.ExprId) ?i64 {
-            return switch (self.parent.file.expression(expr_id).*) {
-                .IntegerLiteral => |literal| parseIntLiteral(literal.text),
-                .BoolLiteral => |literal| if (literal.value) 1 else 0,
-                .Group => |group| self.switchPatternValue(group.expr),
-                .Unary => |unary| switch (unary.op) {
-                    .neg => if (self.switchPatternValue(unary.operand)) |value|
-                        std.math.negate(value) catch null
-                    else
-                        null,
-                    else => null,
-                },
-                .Name => |name| blk: {
-                    if (self.parent.resolution.expr_bindings[expr_id.index()]) |binding| {
-                        switch (binding) {
-                            .item => |item_id| {
-                                const item = self.parent.file.item(item_id).*;
-                                if (item == .Constant) break :blk self.switchPatternValue(item.Constant.value);
-                            },
-                            else => {},
-                        }
-                    }
-                    if (self.parent.item_index.lookup(name.name)) |item_id| {
-                        const item = self.parent.file.item(item_id).*;
-                        if (item == .Constant) break :blk self.switchPatternValue(item.Constant.value);
-                    }
-                    break :blk null;
-                },
+            const value = self.parent.const_eval.values[expr_id.index()] orelse return null;
+            return switch (value) {
+                .integer => |integer| integer.toInt(i64) catch null,
+                .boolean => |boolean| if (boolean) 1 else 0,
                 else => null,
             };
         }

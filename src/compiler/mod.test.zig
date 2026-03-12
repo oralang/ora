@@ -3069,6 +3069,28 @@ test "compiler lowers real HIR switch expressions" {
     try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "\"ora.switch_expr\""));
 }
 
+test "compiler lowers switch expressions with computed constant patterns" {
+    const source_text =
+        \\pub fn choose(tag: u256) -> u256 {
+        \\    return switch (tag) {
+        \\        1 + 2 => 7,
+        \\        else => 9,
+        \\    };
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    const hir_text = try hir_result.renderText(testing.allocator);
+    defer testing.allocator.free(hir_text);
+
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "case 3 =>"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.switch_expr"));
+    try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "\"ora.switch_expr\""));
+}
+
 test "compiler lowers real HIR switch regions" {
     const source_text =
         \\pub fn classify(v: u256, fallback: u256) -> u256 {

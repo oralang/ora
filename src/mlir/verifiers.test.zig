@@ -229,3 +229,41 @@ test "mlir verifier rejects ora.base_to_refinement with inconsistent base type" 
 
     try expectModuleVerificationFailure(text);
 }
+
+test "mlir verifier rejects ora.switch_expr with empty case region" {
+    const text =
+        \\module {
+        \\  func.func @choose(%tag: i256) -> i256 {
+        \\    %0 = ora.switch_expr %tag : i256 -> i256 {
+        \\      case 3 => {}
+        \\      else => {
+        \\        %1 = arith.constant 9 : i256
+        \\        ora.yield %1 : i256
+        \\      }
+        \\    }
+        \\    func.return %0 : i256
+        \\  }
+        \\}
+    ;
+
+    try expectModuleVerificationFailure(text);
+}
+
+test "mlir verifier rejects ora.switch_expr with mismatched metadata counts" {
+    const text =
+        \\module {
+        \\  func.func @choose(%tag: i256) -> i256 {
+        \\    %0 = "ora.switch_expr"(%tag) <{case_values = array<i64: 3>, range_starts = array<i64: 0>, range_ends = array<i64: 0>, case_kinds = array<i64: 0>, default_case_index = 1 : i64}> ({
+        \\      %1 = arith.constant 7 : i256
+        \\      ora.yield %1 : i256
+        \\    }, {
+        \\      %2 = arith.constant 9 : i256
+        \\      ora.yield %2 : i256
+        \\    }) : (i256) -> i256
+        \\    func.return %0 : i256
+        \\  }
+        \\}
+    ;
+
+    try expectModuleVerificationFailure(text);
+}
