@@ -2071,6 +2071,31 @@ test "compiler emits tstore guard before guarded storage writes" {
     try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "ora.lock_placeholder"));
 }
 
+test "compiler lowers grouped lock paths through real lock ops" {
+    const source_text =
+        \\contract Vault {
+        \\    storage balances: map<address, u256>;
+        \\
+        \\    pub fn run(user: address) {
+        \\        @lock((balances[user]));
+        \\        @unlock((balances[user]));
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    const hir_text = try hir_result.renderText(testing.allocator);
+    defer testing.allocator.free(hir_text);
+
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.lock"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.unlock"));
+    try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "ora.lock_placeholder"));
+    try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "ora.unlock_placeholder"));
+}
+
 test "compiler lowers direct map index load and store through real map ops" {
     const source_text =
         \\contract Maps {

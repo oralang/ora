@@ -511,8 +511,10 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
 
         fn lockResourceExpr(file: *const ast.AstFile, expr_id: ast.ExprId) ast.ExprId {
             return switch (file.expression(expr_id).*) {
+                .Group => |group| lockResourceExpr(file, group.expr),
                 .Index => |index| switch (file.expression(index.base).*) {
                     .Name => index.index,
+                    .Group => lockResourceExpr(file, index.base),
                     else => expr_id,
                 },
                 else => expr_id,
@@ -526,16 +528,23 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             expr_id: ast.ExprId,
         ) ?[]const u8 {
             return switch (file.expression(expr_id).*) {
+                .Group => |group| buildRuntimeLockKey(allocator, file, resolution, group.expr),
                 .Name => |name| if (isStorageFieldName(file, resolution, expr_id))
                     std.fmt.allocPrint(allocator, "{s}", .{name.name}) catch null
                 else
                     null,
-                .Index => |index| switch (file.expression(index.base).*) {
-                    .Name => |name| if (isStorageFieldName(file, resolution, index.base))
-                        std.fmt.allocPrint(allocator, "{s}[]", .{name.name}) catch null
-                    else
-                        null,
-                    else => null,
+                .Index => |index| blk: {
+                    const base_expr = switch (file.expression(index.base).*) {
+                        .Group => |group| group.expr,
+                        else => index.base,
+                    };
+                    switch (file.expression(base_expr).*) {
+                        .Name => |name| if (isStorageFieldName(file, resolution, base_expr))
+                            break :blk std.fmt.allocPrint(allocator, "{s}[]", .{name.name}) catch null
+                        else
+                            break :blk null,
+                        else => break :blk null,
+                    }
                 },
                 else => null,
             };
