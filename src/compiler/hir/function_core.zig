@@ -234,13 +234,15 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                         try self.appendScfYieldFromLocals(self.block, jump.range, locals, loop_context.carried_locals);
                         return true;
                     }
-                    const op = try self.parent.createPlaceholderOp("ora.break", self.parent.location(jump.range), &.{});
+                    const op = mlir.oraBreakOpCreate(self.parent.context, self.parent.location(jump.range), nullStringRef(), null, 0);
+                    if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
                     appendOp(self.block, op);
                     return false;
                 },
                 .Continue => |jump| {
                     if (self.switch_context != null) {
-                        const op = try self.parent.createPlaceholderOp("ora.continue", self.parent.location(jump.range), &.{});
+                        const op = mlir.oraContinueOpCreate(self.parent.context, self.parent.location(jump.range), nullStringRef());
+                        if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
                         appendOp(self.block, op);
                         return false;
                     }
@@ -248,7 +250,8 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                         try self.appendScfYieldFromLocals(self.block, jump.range, locals, self.loop_context.?.carried_locals);
                         return true;
                     }
-                    const op = try self.parent.createPlaceholderOp("ora.continue", self.parent.location(jump.range), &.{});
+                    const op = mlir.oraContinueOpCreate(self.parent.context, self.parent.location(jump.range), nullStringRef());
+                    if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
                     appendOp(self.block, op);
                     return false;
                 },

@@ -2185,6 +2185,26 @@ test "compiler lowers destructuring bindings through struct field extracts" {
     try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "\"ora.field_access\""));
 }
 
+test "compiler lowers fallback break and continue through real ops" {
+    const source_text =
+        \\pub fn stop() {
+        \\    break;
+        \\    continue;
+        \\}
+    ;
+
+    var compilation = try compiler.compileSource(testing.allocator, "fallback-jumps.ora", source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    const hir_text = try hir_result.renderText(testing.allocator);
+    defer testing.allocator.free(hir_text);
+
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.break"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.continue"));
+    try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "\"ora.continue\""));
+}
+
 test "compiler lowers comptime block expressions through syntax AST path" {
     const source_text =
         \\pub fn run() -> u256 {
