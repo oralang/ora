@@ -2136,6 +2136,7 @@ test "compiler lowers slice index load and store through memref ops" {
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "memref.store"));
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "memref.load"));
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "arith.index_castui"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "memref<?xi256>"));
     try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "ora.index_access"));
 }
 
@@ -2157,6 +2158,7 @@ test "compiler lowers array literals through memref allocation and stores" {
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "memref.alloca"));
     try testing.expect(std.mem.count(u8, hir_text, "memref.store") >= 3);
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "memref.load"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "memref<3xi256>"));
     try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "ora.array.create"));
 }
 

@@ -179,8 +179,8 @@ const Lowerer = struct {
             .Path => |path| self.lowerNamedPathType(path.name),
             .Generic => |generic| lowerGenericType(self, generic),
             .Tuple => self.recordTypeFallback(.unsupported_syntax_type, self.typeExprRange(type_expr_id)),
-            .Array => |array| support.memRefType(self.context, self.lowerTypeExpr(array.element)),
-            .Slice => |slice| support.memRefType(self.context, self.lowerTypeExpr(slice.element)),
+            .Array => |array| support.arrayMemRefType(self.context, self.lowerTypeExpr(array.element), support.parseArrayLen(array.size.text) orelse 0),
+            .Slice => |slice| support.sliceMemRefType(self.context, self.lowerTypeExpr(slice.element)),
             .ErrorUnion => |error_union| mlir.oraErrorUnionTypeGet(self.context, self.lowerTypeExpr(error_union.payload)),
             .Error => self.recordTypeFallback(.syntax_error_type, self.typeExprRange(type_expr_id)),
         };
@@ -198,8 +198,8 @@ const Lowerer = struct {
             .string => support.stringType(self.context),
             .bytes => support.bytesType(self.context),
             .void => mlir.oraNoneTypeCreate(self.context),
-            .array => |array| support.memRefType(self.context, self.lowerSemaType(array.element_type.*, range)),
-            .slice => |slice| support.memRefType(self.context, self.lowerSemaType(slice.element_type.*, range)),
+            .array => |array| support.arrayMemRefType(self.context, self.lowerSemaType(array.element_type.*, range), array.len orelse 0),
+            .slice => |slice| support.sliceMemRefType(self.context, self.lowerSemaType(slice.element_type.*, range)),
             .map => |map| mlir.oraMapTypeGet(
                 self.context,
                 if (map.key_type) |key| self.lowerSemaType(key.*, range) else support.defaultIntegerType(self.context),

@@ -64,8 +64,8 @@ pub fn lowerTypeDescriptor(ctx: mlir.MlirContext, descriptor: sema.Type) mlir.Ml
         .string => stringType(ctx),
         .bytes => bytesType(ctx),
         .void => mlir.oraNoneTypeCreate(ctx),
-        .array => |array| memRefType(ctx, lowerTypeDescriptor(ctx, array.element_type.*)),
-        .slice => |slice| memRefType(ctx, lowerTypeDescriptor(ctx, slice.element_type.*)),
+        .array => |array| arrayMemRefType(ctx, lowerTypeDescriptor(ctx, array.element_type.*), array.len orelse 0),
+        .slice => |slice| sliceMemRefType(ctx, lowerTypeDescriptor(ctx, slice.element_type.*)),
         .map => |map| mlir.oraMapTypeGet(
             ctx,
             if (map.key_type) |key| lowerTypeDescriptor(ctx, key.*) else defaultIntegerType(ctx),
@@ -159,6 +159,16 @@ pub fn memRefType(ctx: mlir.MlirContext, element_type: mlir.MlirType) mlir.MlirT
     return mlir.oraMemRefTypeCreate(ctx, element_type, 0, null, mlir.oraNullAttrCreate(), mlir.oraNullAttrCreate());
 }
 
+pub fn arrayMemRefType(ctx: mlir.MlirContext, element_type: mlir.MlirType, len: u32) mlir.MlirType {
+    const shape: [1]i64 = .{@intCast(len)};
+    return mlir.oraMemRefTypeCreate(ctx, element_type, shape.len, &shape, mlir.oraNullAttrCreate(), mlir.oraNullAttrCreate());
+}
+
+pub fn sliceMemRefType(ctx: mlir.MlirContext, element_type: mlir.MlirType) mlir.MlirType {
+    const shape: [1]i64 = .{mlir.oraShapedTypeDynamicSize()};
+    return mlir.oraMemRefTypeCreate(ctx, element_type, shape.len, &shape, mlir.oraNullAttrCreate(), mlir.oraNullAttrCreate());
+}
+
 pub fn parseSignedIntegerType(name: []const u8) ?struct { bits: u32, signed: bool } {
     if (name.len < 2) return null;
     const signed = switch (name[0]) {
@@ -168,6 +178,10 @@ pub fn parseSignedIntegerType(name: []const u8) ?struct { bits: u32, signed: boo
     };
     const bits = std.fmt.parseInt(u32, name[1..], 10) catch return null;
     return .{ .bits = bits, .signed = signed };
+}
+
+pub fn parseArrayLen(text: []const u8) ?u32 {
+    return std.fmt.parseInt(u32, std.mem.trim(u8, text, " \t\n\r"), 10) catch null;
 }
 
 pub fn parseIntLiteral(text: []const u8) ?i64 {
