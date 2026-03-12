@@ -132,6 +132,26 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
             const loc = self.location(field.range);
             const ty = if (field.type_expr) |type_expr| self.lowerTypeExpr(type_expr) else defaultIntegerType(self.context);
 
+            if (field.binding_kind == .immutable) {
+                const op = if (field.value) |expr_id| blk: {
+                    var function_lowerer = FunctionLowerer.initContractContext(self, parent_block);
+                    const value = try function_lowerer.lowerExpr(expr_id, &function_lowerer.locals);
+                    const created = mlir.oraImmutableOpCreate(self.context, loc, strRef(field.name), value, ty);
+                    if (mlir.oraOperationIsNull(created)) {
+                        break :blk try self.createNamedPlaceholderOp("ora.immutable_decl", field.name, field.range, ty);
+                    }
+                    break :blk created;
+                } else try self.createNamedPlaceholderOp("ora.immutable_decl", field.name, field.range, ty);
+
+                if (field.type_expr) |type_expr| {
+                    try self.attachBitfieldOpMetadata(op, type_expr);
+                }
+
+                appendOp(parent_block, op);
+                try self.appendItemHandle(item_id, .field, field.name, field.range, op);
+                return;
+            }
+
             const op = switch (field.storage_class) {
                 .storage => blk: {
                     const init_attr = zeroInitAttr(ty);

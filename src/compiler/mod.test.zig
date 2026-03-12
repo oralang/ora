@@ -1404,6 +1404,31 @@ test "compiler lowers literal top-level const items through ora.const" {
     try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "ora.constant_decl"));
 }
 
+test "compiler lowers immutable contract fields through ora.immutable" {
+    const source_text =
+        \\contract C {
+        \\    immutable OWNER: address = 0x1234567890abcdef1234567890abcdef12345678;
+        \\
+        \\    pub fn owner() -> address {
+        \\        return OWNER;
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    const hir_text = try hir_result.renderText(testing.allocator);
+    defer testing.allocator.free(hir_text);
+
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.immutable"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "OWNER"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 2, "ora.i160.to.addr"));
+    try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "ora.field_decl"));
+    try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "ora.immutable_decl"));
+}
+
 test "compiler lowers bitfield types as wire integers with metadata attrs" {
     const source_text =
         \\contract Bits {
