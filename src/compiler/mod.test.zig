@@ -1661,7 +1661,7 @@ test "compiler tracks HIR unknown type fallbacks" {
     try testing.expectEqual(module.file_id, hir_result.type_fallbacks[0].location.file_id);
 }
 
-test "compiler tracks unsupported tuple HIR type fallbacks separately" {
+test "compiler lowers tuple locals without tuple fallback" {
     const source_text =
         \\pub fn probe() -> u256 {
         \\    let coords = (1, 2);
@@ -1673,16 +1673,33 @@ test "compiler tracks unsupported tuple HIR type fallbacks separately" {
     defer compilation.deinit();
 
     const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
-    try testing.expect(hir_result.type_fallback_count > 0);
-
-    var saw_tuple_fallback = false;
     for (hir_result.type_fallbacks) |fallback| {
-        if (fallback.reason == .unsupported_tuple_sema_type) {
-            saw_tuple_fallback = true;
-            break;
-        }
+        try testing.expect(fallback.reason != .unsupported_tuple_sema_type);
+        try testing.expect(fallback.reason != .unsupported_syntax_type);
     }
-    try testing.expect(saw_tuple_fallback);
+}
+
+test "compiler lowers tuple HIR types without tuple fallback" {
+    const source_text =
+        \\pub fn pair() -> (u256, bool) {
+        \\    let coords = (1, true);
+        \\    return coords;
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    const hir_text = try hir_result.renderText(testing.allocator);
+    defer testing.allocator.free(hir_text);
+
+    for (hir_result.type_fallbacks) |fallback| {
+        try testing.expect(fallback.reason != .unsupported_tuple_sema_type);
+        try testing.expect(fallback.reason != .unsupported_syntax_type);
+    }
+
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "!ora.tuple<i256, i1>"));
 }
 
 test "compiler syntax splits nested generic closing tokens" {

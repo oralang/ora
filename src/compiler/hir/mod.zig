@@ -178,7 +178,18 @@ const Lowerer = struct {
         return switch (self.file.typeExpr(type_expr_id).*) {
             .Path => |path| self.lowerNamedPathType(path.name),
             .Generic => |generic| lowerGenericType(self, generic),
-            .Tuple => self.recordTypeFallback(.unsupported_syntax_type, self.typeExprRange(type_expr_id)),
+            .Tuple => |tuple| blk: {
+                var element_types: std.ArrayList(mlir.MlirType) = .{};
+                for (tuple.elements) |element| {
+                    element_types.append(self.allocator, self.lowerTypeExpr(element)) catch
+                        break :blk self.recordTypeFallback(.unsupported_syntax_type, self.typeExprRange(type_expr_id));
+                }
+                break :blk mlir.oraTupleTypeGet(
+                    self.context,
+                    element_types.items.len,
+                    if (element_types.items.len == 0) null else element_types.items.ptr,
+                );
+            },
             .Array => |array| support.arrayMemRefType(self.context, self.lowerTypeExpr(array.element), support.parseArrayLen(array.size.text) orelse 0),
             .Slice => |slice| support.sliceMemRefType(self.context, self.lowerTypeExpr(slice.element)),
             .ErrorUnion => |error_union| mlir.oraErrorUnionTypeGet(self.context, self.lowerTypeExpr(error_union.payload)),
@@ -214,7 +225,18 @@ const Lowerer = struct {
             .error_union => |error_union| mlir.oraErrorUnionTypeGet(self.context, self.lowerSemaType(error_union.payload_type.*, range)),
             .unknown => self.recordTypeFallback(.sema_unknown, range),
             .function => self.recordTypeFallback(.unsupported_function_sema_type, range),
-            .tuple => self.recordTypeFallback(.unsupported_tuple_sema_type, range),
+            .tuple => |elements| blk: {
+                var element_types: std.ArrayList(mlir.MlirType) = .{};
+                for (elements) |element| {
+                    element_types.append(self.allocator, self.lowerSemaType(element, range)) catch
+                        break :blk self.recordTypeFallback(.unsupported_tuple_sema_type, range);
+                }
+                break :blk mlir.oraTupleTypeGet(
+                    self.context,
+                    element_types.items.len,
+                    if (element_types.items.len == 0) null else element_types.items.ptr,
+                );
+            },
         };
     }
 

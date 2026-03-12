@@ -505,6 +505,20 @@ void oraBlockAppendOwnedOperation(MlirBlock block, MlirOperation op)
         return wrap(mlir::FunctionType::get(unwrap(ctx), inputs, results));
     }
 
+    MlirType oraTupleTypeGet(
+        MlirContext ctx,
+        size_t numElements,
+        const MlirType *elementTypes)
+    {
+        llvm::SmallVector<mlir::Type, 8> elements;
+        elements.reserve(numElements);
+        for (size_t i = 0; i < numElements; ++i)
+        {
+            elements.push_back(unwrap(elementTypes[i]));
+        }
+        return wrap(mlir::ora::TupleType::get(unwrap(ctx), elements));
+    }
+
     MlirStringRef oraOperationPrintToString(MlirOperation op)
     {
         try

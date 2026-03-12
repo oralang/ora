@@ -107,6 +107,11 @@ extern "C"
         size_t numResults,
         const MlirType *resultTypes);
 
+    MLIR_CAPI_EXPORTED MlirType oraTupleTypeGet(
+        MlirContext ctx,
+        size_t numElements,
+        const MlirType *elementTypes);
+
     /// Returns a newly allocated string; caller must free with oraStringRefFree.
     MLIR_CAPI_EXPORTED MlirStringRef oraOperationPrintToString(MlirOperation op);
 
