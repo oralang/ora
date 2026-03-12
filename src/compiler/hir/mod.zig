@@ -179,8 +179,8 @@ const Lowerer = struct {
             .Path => |path| self.lowerNamedPathType(path.name),
             .Generic => |generic| lowerGenericType(self, generic),
             .Tuple => self.recordTypeFallback(.unsupported_syntax_type, self.typeExprRange(type_expr_id)),
-            .Array => |array| self.lowerTypeExpr(array.element),
-            .Slice => |slice| self.lowerTypeExpr(slice.element),
+            .Array => |array| support.memRefType(self.context, self.lowerTypeExpr(array.element)),
+            .Slice => |slice| support.memRefType(self.context, self.lowerTypeExpr(slice.element)),
             .ErrorUnion => |error_union| mlir.oraErrorUnionTypeGet(self.context, self.lowerTypeExpr(error_union.payload)),
             .Error => self.recordTypeFallback(.syntax_error_type, self.typeExprRange(type_expr_id)),
         };

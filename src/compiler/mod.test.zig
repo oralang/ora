@@ -2118,6 +2118,27 @@ test "compiler rethreads nested map assignment to outer map" {
     try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "ora.index_access"));
 }
 
+test "compiler lowers slice index load and store through memref ops" {
+    const source_text =
+        \\pub fn touch(values: slice[u256]) -> u256 {
+        \\    values[0] = 7;
+        \\    return values[0];
+        \\}
+    ;
+
+    var compilation = try compiler.compileSource(testing.allocator, "slice-index.ora", source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    const hir_text = try hir_result.renderText(testing.allocator);
+    defer testing.allocator.free(hir_text);
+
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "memref.store"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "memref.load"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "arith.index_castui"));
+    try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "ora.index_access"));
+}
+
 test "compiler lowers comptime block expressions through syntax AST path" {
     const source_text =
         \\pub fn run() -> u256 {

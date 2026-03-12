@@ -308,14 +308,29 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                     return;
                 },
                 .Index => |index| {
-                    const map_value = try @This().lowerPatternValue(self, index.base, locals);
-                    const map_type = mlir.oraValueGetType(map_value);
-                    const map_value_type = mlir.oraMapTypeGetValueType(map_type);
+                    const base_value = try @This().lowerPatternValue(self, index.base, locals);
+                    const base_type = mlir.oraValueGetType(base_value);
+                    if (mlir.oraTypeIsAMemRef(base_type)) {
+                        const key_value = try self.lowerExpr(index.index, locals);
+                        const index_value = try @This().convertIndexToIndexType(self, key_value, index.range);
+                        const op = mlir.oraMemrefStoreOpCreate(
+                            self.parent.context,
+                            self.parent.location(index.range),
+                            value,
+                            base_value,
+                            &[_]mlir.MlirValue{index_value},
+                            1,
+                        );
+                        if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
+                        appendOp(self.block, op);
+                        return;
+                    }
+                    const map_value_type = mlir.oraMapTypeGetValueType(base_type);
                     if (map_value_type.ptr != null) {
                         const key_value = try self.lowerExpr(index.index, locals);
-                        try @This().appendMapStore(self, index.range, map_value, key_value, value);
+                        try @This().appendMapStore(self, index.range, base_value, key_value, value);
                         if (self.parent.file.pattern(index.base).* == .Index) {
-                            try self.storePattern(index.base, map_value, locals);
+                            try self.storePattern(index.base, base_value, locals);
                         }
                         return;
                     }
@@ -370,6 +385,20 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 .Index => |index| blk: {
                     const base_value = try @This().lowerPatternValue(self, index.base, locals);
                     const key_value = try self.lowerExpr(index.index, locals);
+                    if (mlir.oraTypeIsAMemRef(mlir.oraValueGetType(base_value))) {
+                        const index_value = try @This().convertIndexToIndexType(self, key_value, index.range);
+                        const result_type = self.parent.lowerSemaType(self.parent.typecheck.pattern_types[pattern_id.index()], index.range);
+                        const op = mlir.oraMemrefLoadOpCreate(
+                            self.parent.context,
+                            self.parent.location(index.range),
+                            base_value,
+                            &[_]mlir.MlirValue{index_value},
+                            1,
+                            result_type,
+                        );
+                        if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
+                        break :blk appendValueOp(self.block, op);
+                    }
                     const result_type = blk2: {
                         const map_value_type = mlir.oraMapTypeGetValueType(mlir.oraValueGetType(base_value));
                         if (map_value_type.ptr != null) break :blk2 map_value_type;
@@ -432,6 +461,22 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 mlir.oraUnlockOpCreateWithKey(self.parent.context, loc, resource, strRef(key));
             if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
             appendOp(self.block, op);
+        }
+
+        fn convertIndexToIndexType(self: *FunctionLowerer, index: mlir.MlirValue, range: source.TextRange) anyerror!mlir.MlirValue {
+            const index_type = mlir.oraIndexTypeCreate(self.parent.context);
+            if (mlir.oraTypeEqual(mlir.oraValueGetType(index), index_type)) {
+                return index;
+            }
+
+            const op = mlir.oraArithIndexCastUIOpCreate(
+                self.parent.context,
+                self.parent.location(range),
+                index,
+                index_type,
+            );
+            if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
+            return appendValueOp(self.block, op);
         }
 
         fn lockResourceExpr(file: *const ast.AstFile, expr_id: ast.ExprId) ast.ExprId {

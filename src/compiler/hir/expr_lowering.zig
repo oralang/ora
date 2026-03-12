@@ -174,6 +174,19 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 .Index => |index| blk: {
                     const base = try self.lowerExpr(index.base, locals);
                     const key = try self.lowerExpr(index.index, locals);
+                    if (mlir.oraTypeIsAMemRef(mlir.oraValueGetType(base))) {
+                        const index_value = try @This().convertIndexToIndexType(self, key, index.range);
+                        const result_type = self.parent.lowerExprType(expr_id);
+                        const op = mlir.oraMemrefLoadOpCreate(
+                            self.parent.context,
+                            self.parent.location(index.range),
+                            base,
+                            &[_]mlir.MlirValue{index_value},
+                            1,
+                            result_type,
+                        );
+                        if (!mlir.oraOperationIsNull(op)) break :blk appendValueOp(self.block, op);
+                    }
                     const base_type = self.parent.typecheck.exprType(index.base);
                     if (base_type == .map) {
                         const result_type = self.parent.lowerExprType(expr_id);
@@ -537,6 +550,22 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
         pub fn typeIsVoid(self: *const FunctionLowerer, ty: mlir.MlirType) bool {
             const none = mlir.oraNoneTypeCreate(self.parent.context);
             return mlir.oraTypeEqual(ty, none);
+        }
+
+        fn convertIndexToIndexType(self: *FunctionLowerer, index: mlir.MlirValue, range: source.TextRange) anyerror!mlir.MlirValue {
+            const index_type = mlir.oraIndexTypeCreate(self.parent.context);
+            if (mlir.oraTypeEqual(mlir.oraValueGetType(index), index_type)) {
+                return index;
+            }
+
+            const op = mlir.oraArithIndexCastUIOpCreate(
+                self.parent.context,
+                self.parent.location(range),
+                index,
+                index_type,
+            );
+            if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
+            return appendValueOp(self.block, op);
         }
     };
 }
