@@ -119,6 +119,25 @@ pub fn blockEndsWithTerminator(block: mlir.MlirBlock) bool {
     return !mlir.oraOperationIsNull(mlir.oraBlockGetTerminator(block));
 }
 
+pub fn clearKnownTerminator(block: mlir.MlirBlock) void {
+    const term = mlir.oraBlockGetTerminator(block);
+    if (mlir.oraOperationIsNull(term)) return;
+
+    const name_ref = mlir.oraOperationGetName(term);
+    if (name_ref.data == null) return;
+    const op_name = name_ref.data[0..name_ref.length];
+
+    const is_terminator = std.mem.eql(u8, op_name, "ora.yield") or
+        std.mem.eql(u8, op_name, "scf.yield") or
+        std.mem.eql(u8, op_name, "ora.return") or
+        std.mem.eql(u8, op_name, "func.return") or
+        std.mem.eql(u8, op_name, "cf.br") or
+        std.mem.eql(u8, op_name, "cf.cond_br");
+    if (is_terminator) {
+        mlir.oraOperationErase(term);
+    }
+}
+
 pub fn createIntegerConstant(ctx: mlir.MlirContext, loc: mlir.MlirLocation, ty: mlir.MlirType, value: i64) mlir.MlirOperation {
     const concrete_type = if (mlir.oraTypeIsAddressType(ty)) defaultIntegerType(ctx) else ty;
     const attr = mlir.oraIntegerAttrCreateI64FromType(concrete_type, value);

@@ -5,6 +5,7 @@ const sema = @import("../sema/mod.zig");
 const source = @import("../source/mod.zig");
 const hir_locals = @import("locals.zig");
 const support = @import("support.zig");
+const analysis = @import("analysis.zig");
 
 const appendEmptyScfYield = support.appendEmptyScfYield;
 const appendEmptyYield = support.appendEmptyYield;
@@ -13,6 +14,7 @@ const appendOraYieldValues = support.appendOraYieldValues;
 const appendScfYieldValues = support.appendScfYieldValues;
 const appendValueOp = support.appendValueOp;
 const boolType = support.boolType;
+const clearKnownTerminator = support.clearKnownTerminator;
 const createIntegerConstant = support.createIntegerConstant;
 const defaultIntegerType = support.defaultIntegerType;
 const namedBoolAttr = support.namedBoolAttr;
@@ -20,6 +22,11 @@ const nullStringRef = support.nullStringRef;
 const strRef = support.strRef;
 const LocalEnv = hir_locals.LocalEnv;
 const LocalId = hir_locals.LocalId;
+const LocalIdList = hir_locals.LocalIdList;
+const LocalIdSet = hir_locals.LocalIdSet;
+const bodyContainsStructuredLoopControl = analysis.bodyContainsStructuredLoopControl;
+const bodyMayReturn = analysis.bodyMayReturn;
+const collectLoopCarriedLocals = analysis.collectLoopCarriedLocals;
 
 pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
     return struct {
@@ -208,16 +215,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 },
                 .If => |if_stmt| return self.lowerIfStmt(if_stmt, locals),
                 .While => |while_stmt| return self.lowerWhileStmt(while_stmt, locals),
-                .For => |for_stmt| {
-                    _ = try self.lowerExpr(for_stmt.iterable, locals);
-                    const op = try self.parent.createPlaceholderOp(
-                        "ora.for_placeholder",
-                        self.parent.location(for_stmt.range),
-                        &.{namedBoolAttr(self.parent.context, "ora.unsupported", true)},
-                    );
-                    appendOp(self.block, op);
-                    return false;
-                },
+                .For => |for_stmt| return @This().lowerForStmt(self, for_stmt, locals),
                 .Switch => |switch_stmt| return self.lowerSwitchStmt(switch_stmt, locals),
                 .Try => |try_stmt| return self.lowerTryStmt(try_stmt, locals),
                 .Break => |jump| {
@@ -491,6 +489,95 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 mlir.oraUnlockOpCreateWithKey(self.parent.context, loc, resource, strRef(key));
             if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
             appendOp(self.block, op);
+        }
+
+        fn lowerForStmt(self: *FunctionLowerer, for_stmt: ast.ForStmt, locals: *LocalEnv) anyerror!bool {
+            const loc = self.parent.location(for_stmt.range);
+            const iterable = try self.lowerExpr(for_stmt.iterable, locals);
+            const iterable_type = mlir.oraValueGetType(iterable);
+
+            if (!mlir.oraTypeIsAMemRef(iterable_type) or
+                mlir.oraShapedTypeGetRank(iterable_type) != 1 or
+                for_stmt.invariants.len != 0 or
+                bodyMayReturn(self.parent.file, for_stmt.body) or
+                bodyContainsStructuredLoopControl(self.parent.file, for_stmt.body))
+            {
+                try self.appendUnsupportedControlPlaceholder("ora.for_placeholder", for_stmt.range);
+                return false;
+            }
+
+            var carried_locals: LocalIdList = .{};
+            var carried_seen = LocalIdSet.init(self.parent.allocator);
+            const carried_supported = try collectLoopCarriedLocals(self.parent.allocator, self.parent.file, for_stmt.body, locals, &carried_locals, &carried_seen);
+            if (!carried_supported or carried_locals.items.len != 0) {
+                try self.appendUnsupportedControlPlaceholder("ora.for_placeholder", for_stmt.range);
+                return false;
+            }
+
+            const index_type = mlir.oraIndexTypeCreate(self.parent.context);
+            const lower_bound = appendValueOp(self.block, createIntegerConstant(self.parent.context, loc, index_type, 0));
+            const upper_bound = if (mlir.oraShapedTypeHasStaticShape(iterable_type)) blk: {
+                const dim_size = mlir.oraShapedTypeGetDimSize(iterable_type, 0);
+                break :blk appendValueOp(self.block, createIntegerConstant(self.parent.context, loc, index_type, @intCast(dim_size)));
+            } else blk: {
+                const dim_index = appendValueOp(self.block, createIntegerConstant(self.parent.context, loc, index_type, 0));
+                const dim_op = mlir.oraMemrefDimOpCreate(self.parent.context, loc, iterable, dim_index);
+                if (mlir.oraOperationIsNull(dim_op)) {
+                    try self.appendUnsupportedControlPlaceholder("ora.for_placeholder", for_stmt.range);
+                    return false;
+                }
+                break :blk appendValueOp(self.block, dim_op);
+            };
+            const step = appendValueOp(self.block, createIntegerConstant(self.parent.context, loc, index_type, 1));
+
+            const for_op = mlir.oraScfForOpCreate(self.parent.context, loc, lower_bound, upper_bound, step, null, 0, false);
+            if (mlir.oraOperationIsNull(for_op)) return error.MlirOperationCreationFailed;
+            appendOp(self.block, for_op);
+
+            const body_block = mlir.oraScfForOpGetBodyBlock(for_op);
+            if (mlir.oraBlockIsNull(body_block)) return error.MlirOperationCreationFailed;
+            clearKnownTerminator(body_block);
+
+            const induction_var = mlir.oraBlockGetArgument(body_block, 0);
+            const index_value_op = mlir.oraArithIndexCastUIOpCreate(
+                self.parent.context,
+                loc,
+                induction_var,
+                defaultIntegerType(self.parent.context),
+            );
+            if (mlir.oraOperationIsNull(index_value_op)) return error.MlirOperationCreationFailed;
+            appendOp(body_block, index_value_op);
+            const index_value = mlir.oraOperationGetResult(index_value_op, 0);
+
+            const item_type = self.parent.lowerSemaType(self.parent.typecheck.pattern_types[for_stmt.item_pattern.index()], for_stmt.range);
+            const item_load = mlir.oraMemrefLoadOpCreate(
+                self.parent.context,
+                loc,
+                iterable,
+                &[_]mlir.MlirValue{induction_var},
+                1,
+                item_type,
+            );
+            if (mlir.oraOperationIsNull(item_load)) {
+                try self.appendUnsupportedControlPlaceholder("ora.for_placeholder", for_stmt.range);
+                return false;
+            }
+            appendOp(body_block, item_load);
+            const item_value = mlir.oraOperationGetResult(item_load, 0);
+
+            var body_lowerer = self.*;
+            body_lowerer.block = body_block;
+            var body_locals = try self.cloneLocals(locals);
+            try body_lowerer.bindPatternValue(for_stmt.item_pattern, item_value, &body_locals);
+            if (for_stmt.index_pattern) |index_pattern| {
+                try body_lowerer.bindPatternValue(index_pattern, index_value, &body_locals);
+            }
+
+            _ = try body_lowerer.lowerBody(for_stmt.body, &body_locals);
+            if (!support.blockEndsWithTerminator(body_block)) {
+                try appendEmptyScfYield(self.parent.context, body_block, loc);
+            }
+            return false;
         }
 
         fn convertIndexToIndexType(self: *FunctionLowerer, index: mlir.MlirValue, range: source.TextRange) anyerror!mlir.MlirValue {
