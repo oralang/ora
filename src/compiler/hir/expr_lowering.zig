@@ -252,6 +252,15 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                                 if (!mlir.oraOperationIsNull(op)) return appendValueOp(self.block, op);
                             },
                             .Constant => |constant| return self.lowerExpr(constant.value, locals),
+                            .Function => {
+                                const placeholder = try self.createAggregatePlaceholder(
+                                    "ora.function_ref",
+                                    name.range,
+                                    &.{},
+                                    self.parent.lowerExprType(expr_id),
+                                );
+                                return appendValueOp(self.block, placeholder);
+                            },
                             else => {},
                         }
                     },

@@ -1723,6 +1723,27 @@ test "compiler lowers tuple expressions through real tuple ops" {
     try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "\"ora.index_access\""));
 }
 
+test "compiler lowers function-valued bindings without function fallback" {
+    const source_text =
+        \\fn helper(value: u256) -> u256 {
+        \\    return value;
+        \\}
+        \\
+        \\pub fn probe() -> u256 {
+        \\    let f = helper;
+        \\    return 1;
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    for (hir_result.type_fallbacks) |fallback| {
+        try testing.expect(fallback.reason != .unsupported_function_sema_type);
+    }
+}
+
 test "compiler syntax splits nested generic closing tokens" {
     const source_text =
         \\struct Types {

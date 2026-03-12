@@ -224,7 +224,27 @@ const Lowerer = struct {
             .named => |named| mlir.oraStructTypeGet(self.context, support.strRef(named.name)),
             .error_union => |error_union| mlir.oraErrorUnionTypeGet(self.context, self.lowerSemaType(error_union.payload_type.*, range)),
             .unknown => self.recordTypeFallback(.sema_unknown, range),
-            .function => self.recordTypeFallback(.unsupported_function_sema_type, range),
+            .function => |function| blk: {
+                var param_types: std.ArrayList(mlir.MlirType) = .{};
+                for (function.param_types) |param_type| {
+                    param_types.append(self.allocator, self.lowerSemaType(param_type, range)) catch
+                        break :blk self.recordTypeFallback(.unsupported_function_sema_type, range);
+                }
+
+                var result_types: std.ArrayList(mlir.MlirType) = .{};
+                for (function.return_types) |return_type| {
+                    result_types.append(self.allocator, self.lowerSemaType(return_type, range)) catch
+                        break :blk self.recordTypeFallback(.unsupported_function_sema_type, range);
+                }
+
+                break :blk mlir.oraFunctionTypeGet(
+                    self.context,
+                    param_types.items.len,
+                    if (param_types.items.len == 0) null else param_types.items.ptr,
+                    result_types.items.len,
+                    if (result_types.items.len == 0) null else result_types.items.ptr,
+                );
+            },
             .tuple => |elements| blk: {
                 var element_types: std.ArrayList(mlir.MlirType) = .{};
                 for (elements) |element| {
