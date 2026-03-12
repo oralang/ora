@@ -209,7 +209,14 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
                 },
                 .AddressLiteral => |literal| blk: {
                     const trimmed = if (std.mem.startsWith(u8, literal.text, "0x")) literal.text[2..] else literal.text;
-                    const value_attr = mlir.oraIntegerAttrGetFromString(result_type, strRef(trimmed));
+                    const parsed = std.fmt.parseInt(u256, trimmed, 16) catch {
+                        break :blk try self.createNamedPlaceholderOp("ora.constant_decl", constant.name, constant.range, result_type);
+                    };
+                    var decimal_buf: [80]u8 = undefined;
+                    const decimal_text = std.fmt.bufPrint(&decimal_buf, "{}", .{parsed}) catch {
+                        break :blk try self.createNamedPlaceholderOp("ora.constant_decl", constant.name, constant.range, result_type);
+                    };
+                    const value_attr = mlir.oraIntegerAttrGetFromString(result_type, strRef(decimal_text));
                     if (mlir.oraAttributeIsNull(value_attr)) {
                         break :blk try self.createNamedPlaceholderOp("ora.constant_decl", constant.name, constant.range, result_type);
                     }
