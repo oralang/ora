@@ -24,7 +24,8 @@ const LocalEnv = hir_locals.LocalEnv;
 const LocalId = hir_locals.LocalId;
 const LocalIdList = hir_locals.LocalIdList;
 const LocalIdSet = hir_locals.LocalIdSet;
-const bodyContainsStructuredLoopControl = analysis.bodyContainsStructuredLoopControl;
+const LoopContext = support.LoopContext;
+const bodyContainsLoopControl = analysis.bodyContainsLoopControl;
 const bodyMayReturn = analysis.bodyMayReturn;
 const collectLoopCarriedLocals = analysis.collectLoopCarriedLocals;
 
@@ -499,12 +500,31 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             if (!mlir.oraTypeIsAMemRef(iterable_type) or
                 mlir.oraShapedTypeGetRank(iterable_type) != 1 or
                 for_stmt.invariants.len != 0 or
-                bodyMayReturn(self.parent.file, for_stmt.body) or
-                bodyContainsStructuredLoopControl(self.parent.file, for_stmt.body))
+                bodyMayReturn(self.parent.file, for_stmt.body))
             {
                 try self.appendUnsupportedControlPlaceholder("ora.for_placeholder", for_stmt.range);
                 return false;
             }
+
+            const has_loop_control = bodyContainsLoopControl(self.parent.file, for_stmt.body);
+            const break_flag = if (has_loop_control) blk: {
+                const break_flag_alloc = mlir.oraMemrefAllocaOpCreate(
+                    self.parent.context,
+                    loc,
+                    support.memRefType(self.parent.context, boolType(self.parent.context)),
+                );
+                if (mlir.oraOperationIsNull(break_flag_alloc)) return error.MlirOperationCreationFailed;
+                const flag = appendValueOp(self.block, break_flag_alloc);
+
+                const break_flag_zero = appendValueOp(
+                    self.block,
+                    createIntegerConstant(self.parent.context, loc, boolType(self.parent.context), 0),
+                );
+                const clear_break = mlir.oraMemrefStoreOpCreate(self.parent.context, loc, break_flag_zero, flag, null, 0);
+                if (mlir.oraOperationIsNull(clear_break)) return error.MlirOperationCreationFailed;
+                appendOp(self.block, clear_break);
+                break :blk flag;
+            } else std.mem.zeroes(mlir.MlirValue);
 
             var carried_locals: LocalIdList = .{};
             var carried_seen = LocalIdSet.init(self.parent.allocator);
@@ -585,6 +605,14 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
 
             var body_lowerer = self.*;
             body_lowerer.block = body_block;
+            var loop_context = LoopContext{
+                .parent = self.loop_context,
+                .break_flag = break_flag,
+                .carried_locals = carried_locals.items,
+            };
+            if (has_loop_control) {
+                body_lowerer.loop_context = &loop_context;
+            }
             var body_locals = try self.cloneLocals(locals);
             for (carried_locals.items, 0..) |local_id, index| {
                 try body_locals.setValue(local_id, mlir.oraBlockGetArgument(body_block, index + 1));
@@ -594,7 +622,64 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 try body_lowerer.bindPatternValue(index_pattern, index_value, &body_locals);
             }
 
-            _ = try body_lowerer.lowerBody(for_stmt.body, &body_locals);
+            if (has_loop_control) {
+                const break_flag_value = appendValueOp(body_block, blk: {
+                    const load = mlir.oraMemrefLoadOpCreate(self.parent.context, loc, break_flag, null, 0, boolType(self.parent.context));
+                    if (mlir.oraOperationIsNull(load)) return error.MlirOperationCreationFailed;
+                    break :blk load;
+                });
+                const break_flag_clear = appendValueOp(
+                    body_block,
+                    createIntegerConstant(self.parent.context, loc, boolType(self.parent.context), 0),
+                );
+                const loop_enabled = body_lowerer.createCompareOp(loc, "eq", break_flag_value, break_flag_clear);
+                if (mlir.oraOperationIsNull(loop_enabled)) return error.MlirOperationCreationFailed;
+                const loop_condition = appendValueOp(body_block, loop_enabled);
+
+                const result_types = if (carried_locals.items.len == 0)
+                    null
+                else
+                    (try self.buildCarriedResultTypes(locals, carried_locals.items)) orelse {
+                        try self.appendUnsupportedControlPlaceholder("ora.for_placeholder", for_stmt.range);
+                        return false;
+                    };
+
+                const if_op = mlir.oraScfIfOpCreate(
+                    self.parent.context,
+                    loc,
+                    loop_condition,
+                    if (result_types) |types| types.items.ptr else null,
+                    if (result_types) |types| types.items.len else 0,
+                    true,
+                );
+                if (mlir.oraOperationIsNull(if_op)) return error.MlirOperationCreationFailed;
+                appendOp(body_block, if_op);
+
+                const then_block = mlir.oraScfIfOpGetThenBlock(if_op);
+                const else_block = mlir.oraScfIfOpGetElseBlock(if_op);
+                if (mlir.oraBlockIsNull(then_block) or mlir.oraBlockIsNull(else_block)) {
+                    return error.MlirOperationCreationFailed;
+                }
+
+                var then_lowerer = body_lowerer;
+                then_lowerer.block = then_block;
+                var then_locals = try self.cloneLocals(&body_locals);
+                _ = try then_lowerer.lowerBody(for_stmt.body, &then_locals);
+                if (!support.blockEndsWithTerminator(then_block)) {
+                    try then_lowerer.appendScfYieldFromLocals(then_block, for_stmt.range, &then_locals, carried_locals.items);
+                }
+
+                var else_locals = try self.cloneLocals(&body_locals);
+                if (!support.blockEndsWithTerminator(else_block)) {
+                    try body_lowerer.appendScfYieldFromLocals(else_block, for_stmt.range, &else_locals, carried_locals.items);
+                }
+
+                if (carried_locals.items.len > 0) {
+                    try FunctionLowerer.writeBackCarriedLocals(&body_locals, carried_locals.items, if_op);
+                }
+            } else {
+                _ = try body_lowerer.lowerBody(for_stmt.body, &body_locals);
+            }
             if (!support.blockEndsWithTerminator(body_block)) {
                 try body_lowerer.appendScfYieldFromLocals(body_block, for_stmt.range, &body_locals, carried_locals.items);
             }
