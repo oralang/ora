@@ -1939,6 +1939,13 @@ test "compiler lowers tuple, array, struct, switch, and error return expressions
     const consteval = try compilation.db.constEval(compilation.root_module_id);
     try testing.expect(consteval.values[value_stmt.value.?.index()] != null);
     try testing.expectEqual(@as(i128, 1), try consteval.values[value_stmt.value.?.index()].?.integer.toInt(i128));
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    const hir_text = try hir_result.renderText(testing.allocator);
+    defer testing.allocator.free(hir_text);
+
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.error.return"));
+    try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "\"ora.error.return\""));
 }
 
 test "compiler lowers grouped struct literal bases" {

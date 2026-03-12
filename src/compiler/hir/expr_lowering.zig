@@ -169,12 +169,17 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                     var args: std.ArrayList(mlir.MlirValue) = .{};
                     for (error_return.args) |arg| try args.append(self.parent.allocator, try self.lowerExpr(arg, locals));
                     const result_type = self.return_type orelse self.parent.lowerExprType(expr_id);
-                    if (args.items.len > 0) {
-                        const op = mlir.oraErrorErrOpCreate(self.parent.context, loc, args.items[0], result_type);
-                        if (!mlir.oraOperationIsNull(op)) break :blk appendValueOp(self.block, op);
-                    }
-                    const op = try self.createAggregatePlaceholder("ora.error.return", error_return.range, args.items, result_type);
-                    break :blk appendValueOp(self.block, op);
+                    const op = mlir.oraErrorReturnOpCreate(
+                        self.parent.context,
+                        loc,
+                        strRef(error_return.name),
+                        if (args.items.len == 0) null else args.items.ptr,
+                        args.items.len,
+                        result_type,
+                    );
+                    if (!mlir.oraOperationIsNull(op)) break :blk appendValueOp(self.block, op);
+                    const placeholder = try self.createAggregatePlaceholder("ora.error.return", error_return.range, args.items, result_type);
+                    break :blk appendValueOp(self.block, placeholder);
                 },
                 .Field => |field| blk: {
                     const op = try @This().lowerFieldExpr(self, expr_id, field, locals);

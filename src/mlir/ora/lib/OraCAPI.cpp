@@ -5715,6 +5715,39 @@ MlirOperation oraErrorErrOpCreate(MlirContext ctx, MlirLocation loc, MlirValue v
     }
 }
 
+MlirOperation oraErrorReturnOpCreate(
+    MlirContext ctx,
+    MlirLocation loc,
+    MlirStringRef name,
+    const MlirValue *operands,
+    size_t numOperands,
+    MlirType resultType)
+{
+    try
+    {
+        MLIRContext *context = unwrap(ctx);
+        Location location = unwrap(loc);
+        StringRef nameRef = unwrap(name);
+        Type resultTy = unwrap(resultType);
+
+        OperationState state(location, "ora.error.return");
+        state.addAttribute("sym_name", StringAttr::get(context, nameRef));
+        if (numOperands > 0)
+        {
+            for (size_t i = 0; i < numOperands; ++i)
+                state.addOperands(unwrap(operands[i]));
+        }
+        state.addTypes(resultTy);
+
+        Operation *op = Operation::create(state);
+        return wrap(op);
+    }
+    catch (...)
+    {
+        return {nullptr};
+    }
+}
+
 MlirOperation oraErrorIsErrorOpCreate(MlirContext ctx, MlirLocation loc, MlirValue value)
 {
     try

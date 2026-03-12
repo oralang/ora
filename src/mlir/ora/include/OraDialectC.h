@@ -1412,6 +1412,15 @@ extern "C"
         MlirValue value,
         MlirType resultType);
 
+    /// Create an ora.error.return operation
+    MLIR_CAPI_EXPORTED MlirOperation oraErrorReturnOpCreate(
+        MlirContext ctx,
+        MlirLocation loc,
+        MlirStringRef name,
+        const MlirValue *operands,
+        size_t numOperands,
+        MlirType resultType);
+
     /// Create an ora.error.is_error operation
     MLIR_CAPI_EXPORTED MlirOperation oraErrorIsErrorOpCreate(
         MlirContext ctx,

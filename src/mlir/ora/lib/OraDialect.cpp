@@ -979,6 +979,13 @@ namespace mlir
             return success();
         }
 
+        ::mlir::LogicalResult ErrorReturnOp::verify()
+        {
+            if (getSymName().empty())
+                return emitOpError("requires non-empty error symbol name");
+            return success();
+        }
+
         ::mlir::LogicalResult IfOp::verify()
         {
             constexpr llvm::StringLiteral kConditionalReturnContract =

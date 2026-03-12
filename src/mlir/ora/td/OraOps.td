@@ -1420,6 +1420,24 @@ def Ora_ErrorDeclOp : Ora_Op<"error.decl"> {
   let traits = [Symbol, MemoryEffects<[MemWrite]>];
 }
 
+def Ora_ErrorReturnOp : Ora_PureOp<"error.return"> {
+  let summary = "Construct a nominal error value";
+  let description = [{
+    Materializes a named error constructor expression with zero or more payload operands.
+
+    Example:
+    ```mlir
+    %err = ora.error.return "Failure"(%code : i256) : !ora.struct<"Failure">
+    ```
+  }];
+
+  let arguments = (ins StrAttr:$sym_name, Variadic<AnyType>:$operands);
+  let results = (outs AnyType:$result);
+
+  let assemblyFormat = "$sym_name (`(` $operands^ `:` type($operands) `)`)? attr-dict `:` type($result)";
+  let hasVerifier = 1;
+}
+
 def Ora_ErrorOkOp : Ora_PureOp<"error.ok"> {
   let summary = "Construct a successful error union value";
   let description = [{
