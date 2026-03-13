@@ -95,7 +95,7 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
             }
 
             var result_types: [1]mlir.MlirType = undefined;
-            const fn_type = mlir.oraFunctionTypeGet(
+            const fn_type = mlir.oraBuiltinFunctionTypeGet(
                 self.context,
                 param_types.items.len,
                 if (param_types.items.len == 0) null else param_types.items.ptr,

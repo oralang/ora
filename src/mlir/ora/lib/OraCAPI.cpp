@@ -493,7 +493,7 @@ void oraBlockAppendOwnedOperation(MlirBlock block, MlirOperation op)
         return oraStringRefCreate(value_copy, value.size());
     }
 
-    MlirType oraFunctionTypeGet(
+    MlirType oraBuiltinFunctionTypeGet(
         MlirContext ctx,
         size_t numInputs,
         const MlirType *inputTypes,

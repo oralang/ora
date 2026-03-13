@@ -101,7 +101,7 @@ extern "C"
     /// Returns a newly allocated string; caller must free with oraStringRefFree.
     MLIR_CAPI_EXPORTED MlirStringRef oraIntegerAttrGetValueString(MlirAttribute attr);
 
-    MLIR_CAPI_EXPORTED MlirType oraFunctionTypeGet(
+    MLIR_CAPI_EXPORTED MlirType oraBuiltinFunctionTypeGet(
         MlirContext ctx,
         size_t numInputs,
         const MlirType *inputTypes,

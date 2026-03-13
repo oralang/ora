@@ -141,9 +141,9 @@ pub fn createFunctionType(self: *const DeclarationLowerer, func: *const lib.Func
     // create function type
     if (func.return_type_info) |ret_info| {
         const result_type = self.type_mapper.toMlirType(ret_info);
-        return c.oraFunctionTypeGet(self.ctx, @intCast(param_types.items.len), if (param_types.items.len > 0) param_types.items.ptr else null, 1, @ptrCast(&result_type));
+        return c.oraBuiltinFunctionTypeGet(self.ctx, @intCast(param_types.items.len), if (param_types.items.len > 0) param_types.items.ptr else null, 1, @ptrCast(&result_type));
     } else {
         // functions with no return type should have 0 result types, not a 'none' type
-        return c.oraFunctionTypeGet(self.ctx, @intCast(param_types.items.len), if (param_types.items.len > 0) param_types.items.ptr else null, 0, null);
+        return c.oraBuiltinFunctionTypeGet(self.ctx, @intCast(param_types.items.len), if (param_types.items.len > 0) param_types.items.ptr else null, 0, null);
     }
 }
