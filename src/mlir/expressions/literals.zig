@@ -367,6 +367,7 @@ pub fn extractIntegerFromLiteral(literal: *const lib.ast.Expressions.LiteralExpr
             const parsed = std.fmt.parseInt(i64, int.value, 0) catch return null;
             break :blk parsed;
         },
+        .Bool => |bool_lit| if (bool_lit.value) 1 else 0,
         else => null,
     };
 }

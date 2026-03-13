@@ -122,6 +122,28 @@ fn appendI64Constant(ctx: c.MlirContext, block: c.MlirBlock, loc: c.MlirLocation
     return c.oraOperationGetResult(op, 0);
 }
 
+fn getSeedConditionAndReturn(func_body: c.MlirBlock) !struct { cond_op: c.MlirOperation, old_ret: c.MlirOperation } {
+    const cond_op = c.oraBlockGetFirstOperation(func_body);
+    try testing.expect(!c.oraOperationIsNull(cond_op));
+
+    const old_ret = c.oraOperationGetNextInBlock(cond_op);
+    try testing.expect(!c.oraOperationIsNull(old_ret));
+
+    return .{ .cond_op = cond_op, .old_ret = old_ret };
+}
+
+fn replaceReturnWithSwitchResult(
+    ctx: c.MlirContext,
+    func_body: c.MlirBlock,
+    old_ret: c.MlirOperation,
+    switch_loc: c.MlirLocation,
+    switch_value: c.MlirValue,
+) void {
+    const ret = c.oraReturnOpCreate(ctx, switch_loc, &[_]c.MlirValue{switch_value}, 1);
+    c.oraBlockInsertOwnedOperationBefore(func_body, ret, old_ret);
+    c.oraOperationErase(old_ret);
+}
+
 fn buildTwoCaseSwitchExprModule(
     ctx: c.MlirContext,
     module: c.MlirModule,
@@ -134,10 +156,12 @@ fn buildTwoCaseSwitchExprModule(
 
     const func_body = c.oraFuncOpGetBodyBlock(func_op);
     try testing.expect(!c.oraBlockIsNull(func_body));
-    clearBlock(func_body);
+    const seed = try getSeedConditionAndReturn(func_body);
 
+    const unknown = c.oraLocationUnknownGet(ctx);
     const i256_ty = c.oraIntegerTypeCreate(ctx, 256);
-    const condition = appendI64Constant(ctx, func_body, switch_loc, i256_ty, 0);
+    c.oraOperationSetLocation(seed.cond_op, switch_loc);
+    const condition = c.oraOperationGetResult(seed.cond_op, 0);
 
     const switch_op = c.oraSwitchExprOpCreateWithCases(
         ctx,
@@ -148,20 +172,30 @@ fn buildTwoCaseSwitchExprModule(
         2,
     );
     try testing.expect(!c.oraOperationIsNull(switch_op));
-    c.oraBlockAppendOwnedOperation(func_body, switch_op);
+    c.oraBlockInsertOwnedOperationBefore(func_body, switch_op, seed.old_ret);
 
     const case0 = c.oraSwitchExprOpGetCaseBlock(switch_op, 0);
     const case1 = c.oraSwitchExprOpGetCaseBlock(switch_op, 1);
     try testing.expect(!c.oraBlockIsNull(case0));
     try testing.expect(!c.oraBlockIsNull(case1));
 
-    const case0_value = appendI64Constant(ctx, case0, case_loc, i256_ty, 1);
-    const case0_yield = c.oraYieldOpCreate(ctx, case_loc, &[_]c.MlirValue{case0_value}, 1);
+    const case0_attr = c.oraIntegerAttrCreateI64FromType(i256_ty, 1);
+    const case0_const = c.oraArithConstantOpCreate(ctx, unknown, i256_ty, case0_attr);
+    c.oraBlockAppendOwnedOperation(case0, case0_const);
+    c.oraOperationSetLocation(case0_const, case_loc);
+    const case0_value = c.oraOperationGetResult(case0_const, 0);
+    const case0_yield = c.oraYieldOpCreate(ctx, unknown, &[_]c.MlirValue{case0_value}, 1);
     c.oraBlockAppendOwnedOperation(case0, case0_yield);
+    c.oraOperationSetLocation(case0_yield, case_loc);
 
-    const case1_value = appendI64Constant(ctx, case1, case_loc, i256_ty, 2);
-    const case1_yield = c.oraYieldOpCreate(ctx, case_loc, &[_]c.MlirValue{case1_value}, 1);
+    const case1_attr = c.oraIntegerAttrCreateI64FromType(i256_ty, 2);
+    const case1_const = c.oraArithConstantOpCreate(ctx, unknown, i256_ty, case1_attr);
+    c.oraBlockAppendOwnedOperation(case1, case1_const);
+    c.oraOperationSetLocation(case1_const, case_loc);
+    const case1_value = c.oraOperationGetResult(case1_const, 0);
+    const case1_yield = c.oraYieldOpCreate(ctx, unknown, &[_]c.MlirValue{case1_value}, 1);
     c.oraBlockAppendOwnedOperation(case1, case1_yield);
+    c.oraOperationSetLocation(case1_yield, case_loc);
 
     const case_values = [_]i64{ 0, 1 };
     const range_starts = [_]i64{ 0, 0 };
@@ -178,8 +212,7 @@ fn buildTwoCaseSwitchExprModule(
     );
 
     const switch_value = c.oraOperationGetResult(switch_op, 0);
-    const ret = c.oraReturnOpCreate(ctx, switch_loc, &[_]c.MlirValue{switch_value}, 1);
-    c.oraBlockAppendOwnedOperation(func_body, ret);
+    replaceReturnWithSwitchResult(ctx, func_body, seed.old_ret, switch_loc, switch_value);
 
     return printOperationOwned(testing.allocator, c.oraModuleGetOperation(module));
 }
@@ -284,6 +317,47 @@ test "mlir round-trips custom single-case ora.switch_expr assembly" {
     try expectRoundTripForSource(source, "roundtrip_switch_expr_single_case.ora", &.{
         "ora.switch_expr",
         "case 0 =>",
+    });
+}
+
+test "mlir round-trips typed local ora.switch_expr assembly" {
+    const source =
+        \\contract SwitchExprs {
+        \\    pub fn choose(tag: u256) -> u256 {
+        \\        let value: u256 = switch (tag) {
+        \\            0 => 1,
+        \\            1 => 2,
+        \\            else => 3,
+        \\        };
+        \\        return value;
+        \\    }
+        \\}
+    ;
+
+    try expectRoundTripForSource(source, "roundtrip_switch_expr_typed_local.ora", &.{
+        "ora.switch_expr",
+        "case 0 =>",
+        "case 1 =>",
+        "else =>",
+    });
+}
+
+test "mlir round-trips boolean ora.switch_expr assembly" {
+    const source =
+        \\contract SwitchExprs {
+        \\    pub fn choose(flag: bool) -> u256 {
+        \\        return switch (flag) {
+        \\            false => 1,
+        \\            true => 2,
+        \\        };
+        \\    }
+        \\}
+    ;
+
+    try expectRoundTripForSource(source, "roundtrip_switch_expr_bool.ora", &.{
+        "ora.switch_expr",
+        "case 0 =>",
+        "case 1 =>",
     });
 }
 
@@ -421,7 +495,7 @@ test "mlir prints builder-created two-case ora.switch_expr with case locs set af
 
     const func_body = c.oraFuncOpGetBodyBlock(func_op);
     try testing.expect(!c.oraBlockIsNull(func_body));
-    clearBlock(func_body);
+    const seed = try getSeedConditionAndReturn(func_body);
 
     const file_ref = c.oraStringRefCreate("builder_switch_expr.ora".ptr, "builder_switch_expr.ora".len);
     const switch_loc = c.oraLocationFileLineColGet(h.ctx, file_ref, 1, 1);
@@ -429,16 +503,12 @@ test "mlir prints builder-created two-case ora.switch_expr with case locs set af
     const case1_loc = c.oraLocationFileLineColGet(h.ctx, file_ref, 3, 3);
     const unknown = c.oraLocationUnknownGet(h.ctx);
     const i256_ty = c.oraIntegerTypeCreate(h.ctx, 256);
-
-    const cond_attr = c.oraIntegerAttrCreateI64FromType(i256_ty, 0);
-    const cond_op = c.oraArithConstantOpCreate(h.ctx, unknown, i256_ty, cond_attr);
-    c.oraOperationSetLocation(cond_op, switch_loc);
-    c.oraBlockAppendOwnedOperation(func_body, cond_op);
-    const condition = c.oraOperationGetResult(cond_op, 0);
+    c.oraOperationSetLocation(seed.cond_op, switch_loc);
+    const condition = c.oraOperationGetResult(seed.cond_op, 0);
 
     const switch_op = c.oraSwitchExprOpCreateWithCases(h.ctx, switch_loc, condition, &[_]c.MlirType{i256_ty}, 1, 2);
     try testing.expect(!c.oraOperationIsNull(switch_op));
-    c.oraBlockAppendOwnedOperation(func_body, switch_op);
+    c.oraBlockInsertOwnedOperationBefore(func_body, switch_op, seed.old_ret);
 
     const case0 = c.oraSwitchExprOpGetCaseBlock(switch_op, 0);
     const case1 = c.oraSwitchExprOpGetCaseBlock(switch_op, 1);
@@ -469,8 +539,7 @@ test "mlir prints builder-created two-case ora.switch_expr with case locs set af
     const case_kinds = [_]i64{ 0, 0 };
     c.oraSwitchOpSetCasePatterns(switch_op, &case_values, &range_starts, &range_ends, &case_kinds, -1, 2);
 
-    const ret = c.oraReturnOpCreate(h.ctx, switch_loc, &[_]c.MlirValue{c.oraOperationGetResult(switch_op, 0)}, 1);
-    c.oraBlockAppendOwnedOperation(func_body, ret);
+    replaceReturnWithSwitchResult(h.ctx, func_body, seed.old_ret, switch_loc, c.oraOperationGetResult(switch_op, 0));
 
     const text = try printOperationOwned(testing.allocator, c.oraModuleGetOperation(module));
     defer testing.allocator.free(text);
