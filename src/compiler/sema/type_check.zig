@@ -586,7 +586,7 @@ const TypeChecker = struct {
     fn binaryResultType(self: *const TypeChecker, op: ast.BinaryOp, lhs_type: Type, rhs_type: Type) Type {
         _ = self;
         return switch (op) {
-            .add, .sub, .mul, .div, .mod => arithmeticResultType(lhs_type, rhs_type),
+            .add, .wrapping_add, .sub, .mul, .div, .mod => arithmeticResultType(lhs_type, rhs_type),
             .bit_and, .bit_or, .bit_xor, .shl, .shr => bitwiseResultType(lhs_type, rhs_type),
             .and_and, .or_or => if (lhs_type.kind() == .bool and rhs_type.kind() == .bool) .{ .bool = {} } else .{ .unknown = {} },
             .eq, .ne => if (typesComparable(lhs_type, rhs_type)) .{ .bool = {} } else .{ .unknown = {} },
@@ -887,6 +887,7 @@ fn unaryOpName(op: ast.UnaryOp) []const u8 {
 fn binaryOpName(op: ast.BinaryOp) []const u8 {
     return switch (op) {
         .add => "+",
+        .wrapping_add => "+%",
         .sub => "-",
         .mul => "*",
         .div => "/",

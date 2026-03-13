@@ -260,6 +260,17 @@ namespace mlir
                 ConversionPatternRewriter &rewriter) const override;
         };
 
+        class ConvertAddWrappingOp : public OpConversionPattern<ora::AddWrappingOp>
+        {
+        public:
+            using OpConversionPattern::OpConversionPattern;
+
+            LogicalResult matchAndRewrite(
+                ora::AddWrappingOp op,
+                typename ora::AddWrappingOp::Adaptor adaptor,
+                ConversionPatternRewriter &rewriter) const override;
+        };
+
         class ConvertArithSubIOp : public OpConversionPattern<mlir::arith::SubIOp>
         {
         public:

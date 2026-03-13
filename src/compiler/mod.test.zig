@@ -2635,6 +2635,24 @@ test "compiler lowers direct map index load and store through real map ops" {
     try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "ora.index_access"));
 }
 
+test "compiler lowers wrapping add through real wrapping op" {
+    const source_text =
+        \\pub fn wrap(a: u256, b: u256) -> u256 {
+        \\    return a +% b;
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    const hir_text = try hir_result.renderText(testing.allocator);
+    defer testing.allocator.free(hir_text);
+
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.add_wrapping"));
+    try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "\"ora.add_wrapping\""));
+}
+
 test "compiler rethreads nested map assignment to outer map" {
     const source_text =
         \\contract Test {

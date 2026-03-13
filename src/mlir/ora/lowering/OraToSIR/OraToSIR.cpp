@@ -805,6 +805,7 @@ public:
         if (enable_arith)
         {
             patterns.add<ConvertArithAddIOp>(typeConverter, ctx);
+            patterns.add<ConvertAddWrappingOp>(typeConverter, ctx);
             patterns.add<ConvertArithSubIOp>(typeConverter, ctx);
             patterns.add<ConvertArithMulIOp>(typeConverter, ctx);
             patterns.add<ConvertArithDivUIOp>(typeConverter, ctx);
@@ -1006,7 +1007,7 @@ public:
                 return true;
             });
 
-        target.addIllegalOp<ora::AddOp, ora::SubOp, ora::MulOp, ora::DivOp, ora::RemOp, ora::MapGetOp, ora::MapStoreOp>();
+        target.addIllegalOp<ora::AddOp, ora::AddWrappingOp, ora::SubOp, ora::MulOp, ora::DivOp, ora::RemOp, ora::MapGetOp, ora::MapStoreOp>();
         target.addIllegalOp<ora::GlobalOp>();
         target.addLegalOp<mlir::UnrealizedConversionCastOp>();
 
@@ -1346,6 +1347,7 @@ public:
             phase4Patterns.add<ConvertArithConstantOp>(typeConverter, ctx);
             phase4Patterns.add<ConvertArithCmpIOp>(typeConverter, ctx);
             phase4Patterns.add<ConvertArithAddIOp>(typeConverter, ctx);
+            phase4Patterns.add<ConvertAddWrappingOp>(typeConverter, ctx);
             phase4Patterns.add<ConvertArithSubIOp>(typeConverter, ctx);
             phase4Patterns.add<ConvertArithMulIOp>(typeConverter, ctx);
             phase4Patterns.add<ConvertArithDivUIOp>(typeConverter, ctx);

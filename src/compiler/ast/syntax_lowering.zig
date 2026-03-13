@@ -1705,6 +1705,7 @@ fn mapAssignmentOp(kind: syntax.TokenKind) ?AssignmentOp {
 fn mapBinaryOp(kind: syntax.TokenKind) ?BinaryOp {
     return switch (kind) {
         .Plus => .add,
+        .PlusPercent => .wrapping_add,
         .Minus => .sub,
         .Star => .mul,
         .Slash => .div,

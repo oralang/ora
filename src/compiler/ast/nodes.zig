@@ -15,6 +15,7 @@ pub const SpecClauseKind = enum { requires, ensures, invariant };
 pub const UnaryOp = enum { neg, not_, try_ };
 pub const BinaryOp = enum {
     add,
+    wrapping_add,
     sub,
     mul,
     div,

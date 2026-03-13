@@ -80,8 +80,9 @@ pub fn unwrapRefinementValue(
     return value;
 }
 
-/// Create arithmetic operation using standard arith dialect ops.
-/// op_name must be a standard arith op name (e.g., "arith.addi", "arith.divui").
+/// Create arithmetic operation using supported arithmetic ops.
+/// op_name may be a standard arith op name (e.g., "arith.addi", "arith.divui")
+/// or an Ora arithmetic op name like "ora.add_wrapping".
 pub fn createArithmeticOp(ctx: c.MlirContext, block: c.MlirBlock, type_mapper: *const TypeMapper, _: *OraDialect, locations: LocationTracker, refinement_base_cache: ?*std.AutoHashMap(usize, c.MlirValue), op_name: []const u8, lhs: c.MlirValue, rhs: c.MlirValue, span: lib.ast.SourceSpan) c.MlirValue {
     const lhs_unwrapped = unwrapRefinementValue(ctx, block, locations, refinement_base_cache, lhs, span);
     const rhs_unwrapped = unwrapRefinementValue(ctx, block, locations, refinement_base_cache, rhs, span);
@@ -101,6 +102,8 @@ pub fn createArithmeticOp(ctx: c.MlirContext, block: c.MlirBlock, type_mapper: *
 
     const op = if (std.mem.eql(u8, op_name, "arith.addi"))
         c.oraArithAddIOpCreate(ctx, loc, lhs_unwrapped, rhs_converted)
+    else if (std.mem.eql(u8, op_name, "ora.add_wrapping"))
+        c.oraAddWrappingOpCreate(ctx, loc, lhs_unwrapped, rhs_converted, lhs_type)
     else if (std.mem.eql(u8, op_name, "arith.subi"))
         c.oraArithSubIOpCreate(ctx, loc, lhs_unwrapped, rhs_converted)
     else if (std.mem.eql(u8, op_name, "arith.muli"))

@@ -1238,6 +1238,21 @@ pub const OraDialect = struct {
         return op;
     }
 
+    /// Create ora.add_wrapping operation
+    pub fn createAddWrapping(
+        self: *OraDialect,
+        lhs: c.MlirValue,
+        rhs: c.MlirValue,
+        result_type: c.MlirType,
+        loc: c.MlirLocation,
+    ) c.MlirOperation {
+        const op = c.oraAddWrappingOpCreate(self.ctx, loc, lhs, rhs, result_type);
+        if (op.ptr == null) {
+            @panic("Failed to create ora.add_wrapping operation");
+        }
+        return op;
+    }
+
     /// Create arith.subi operation
     pub fn createArithSubi(
         self: *OraDialect,

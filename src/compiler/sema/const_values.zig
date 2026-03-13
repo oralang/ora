@@ -33,9 +33,9 @@ pub fn evalUnary(allocator: std.mem.Allocator, op: ast.UnaryOp, value: ?ConstVal
 pub fn evalBinary(allocator: std.mem.Allocator, op: ast.BinaryOp, lhs: ?ConstValue, rhs: ?ConstValue) !?ConstValue {
     if (lhs == null or rhs == null) return null;
     const left = lhs.?;
-    const right = rhs.?;
+   const right = rhs.?;
     return switch (op) {
-        .add => try evalIntInt(allocator, left, right, BigInt.add),
+        .add, .wrapping_add => try evalIntInt(allocator, left, right, BigInt.add),
         .sub => try evalIntInt(allocator, left, right, BigInt.sub),
         .mul => try evalIntInt(allocator, left, right, BigInt.mul),
         .div => try evalIntDiv(allocator, left, right),

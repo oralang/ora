@@ -383,6 +383,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
 
             const op = switch (binary.op) {
                 .add => mlir.oraArithAddIOpCreate(self.parent.context, loc, lhs, rhs),
+                .wrapping_add => mlir.oraAddWrappingOpCreate(self.parent.context, loc, lhs, rhs, self.parent.lowerExprType(expr_id)),
                 .sub => mlir.oraArithSubIOpCreate(self.parent.context, loc, lhs, rhs),
                 .mul => mlir.oraArithMulIOpCreate(self.parent.context, loc, lhs, rhs),
                 .div => mlir.oraArithDivSIOpCreate(self.parent.context, loc, lhs, rhs),

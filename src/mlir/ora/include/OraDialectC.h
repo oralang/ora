@@ -556,6 +556,14 @@ extern "C"
         MlirValue lhs,
         MlirValue rhs);
 
+    /// Create an ora.add_wrapping operation
+    MLIR_CAPI_EXPORTED MlirOperation oraAddWrappingOpCreate(
+        MlirContext ctx,
+        MlirLocation loc,
+        MlirValue lhs,
+        MlirValue rhs,
+        MlirType resultType);
+
     /// Create an arith.subi operation
     MLIR_CAPI_EXPORTED MlirOperation oraArithSubIOpCreate(
         MlirContext ctx,

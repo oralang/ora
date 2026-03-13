@@ -871,6 +871,38 @@ LogicalResult ConvertArithAddIOp::matchAndRewrite(
 }
 
 // -----------------------------------------------------------------------------
+// Convert ora.add_wrapping → sir.add
+// -----------------------------------------------------------------------------
+LogicalResult ConvertAddWrappingOp::matchAndRewrite(
+    ora::AddWrappingOp op,
+    typename ora::AddWrappingOp::Adaptor adaptor,
+    ConversionPatternRewriter &rewriter) const
+{
+    auto loc = op.getLoc();
+    auto u256Type = sir::U256Type::get(op.getContext());
+
+    auto *typeConverter = getTypeConverter();
+    if (!typeConverter)
+    {
+        return rewriter.notifyMatchFailure(op, "missing type converter");
+    }
+    auto resultType = typeConverter->convertType(op.getResult().getType());
+    if (!resultType)
+    {
+        return rewriter.notifyMatchFailure(op, "unable to convert add_wrapping result type");
+    }
+
+    Value lhs = ensureU256(rewriter, loc, adaptor.getLhs());
+    Value rhs = ensureU256(rewriter, loc, adaptor.getRhs());
+    Value result = rewriter.create<sir::AddOp>(loc, u256Type, lhs, rhs).getResult();
+    if (resultType != u256Type)
+        result = rewriter.create<sir::BitcastOp>(loc, resultType, result).getResult();
+
+    rewriter.replaceOp(op, result);
+    return success();
+}
+
+// -----------------------------------------------------------------------------
 // Convert arith.subi → sir.sub
 // -----------------------------------------------------------------------------
 LogicalResult ConvertArithSubIOp::matchAndRewrite(

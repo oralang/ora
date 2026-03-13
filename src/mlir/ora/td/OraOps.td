@@ -428,6 +428,26 @@ def Ora_AddOp : Ora_PureOp<"add", [
   
 }
 
+def Ora_AddWrappingOp : Ora_PureOp<"add_wrapping", [
+    AllTypesMatch<["lhs", "rhs", "result"]>
+  ]> {
+  let summary = "Wrapping add operation";
+  let description = [{
+    Adds two Ora integer values with modular wrapping semantics.
+    Accepts !ora.int<width, signed> types and preserves the type in the result.
+
+    Example:
+    ```mlir
+    %result = ora.add_wrapping %lhs, %rhs : (!ora.int<256, false>, !ora.int<256, false>) -> !ora.int<256, false>
+    ```
+  }];
+
+  let arguments = (ins Ora_IntegerValueType:$lhs, Ora_IntegerValueType:$rhs);
+  let results = (outs Ora_IntegerValueType:$result);
+
+  let assemblyFormat = "$lhs `,` $rhs attr-dict `:` type($lhs) `,` type($rhs) `->` type($result)";
+}
+
 def Ora_SubOp : Ora_PureOp<"sub", [
     AllTypesMatch<["lhs", "rhs", "result"]>,
     DeclareOpInterfaceMethods<OpAsmOpInterface, ["getAsmResultNames"]>

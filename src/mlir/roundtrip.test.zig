@@ -361,6 +361,21 @@ test "mlir round-trips boolean ora.switch_expr assembly" {
     });
 }
 
+test "mlir round-trips ora.add_wrapping assembly" {
+    const text =
+        \\module {
+        \\  func.func @wrap(%a: !ora.int<256, false>, %b: !ora.int<256, false>) -> !ora.int<256, false> {
+        \\    %0 = ora.add_wrapping %a, %b : !ora.int<256, false>, !ora.int<256, false> -> !ora.int<256, false>
+        \\    func.return %0 : !ora.int<256, false>
+        \\  }
+        \\}
+    ;
+
+    try expectRoundTripForMlirText(text, &.{
+        "ora.add_wrapping",
+    });
+}
+
 test "mlir round-trips parsed single-case ora.switch_expr literal assembly" {
     const text =
         \\module {

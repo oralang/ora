@@ -96,7 +96,7 @@ pub fn lowerBinary(
             break :blk pow.value;
         },
         // Wrapping operators lower to raw modular arithmetic (no overflow trap)
-        .WrappingAdd => self.createArithmeticOp("arith.addi", lhs_converted, rhs_converted, result_ty, bin.span),
+        .WrappingAdd => self.createArithmeticOp("ora.add_wrapping", lhs_converted, rhs_converted, result_ty, bin.span),
         .WrappingSub => self.createArithmeticOp("arith.subi", lhs_converted, rhs_converted, result_ty, bin.span),
         .WrappingMul => self.createArithmeticOp("arith.muli", lhs_converted, rhs_converted, result_ty, bin.span),
         .WrappingPow => lowerPowerWrappingOp(self, lhs_converted, rhs_converted, result_ty, bin.span),

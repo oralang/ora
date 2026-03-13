@@ -2656,6 +2656,28 @@ MlirOperation oraArithAddIOpCreate(MlirContext ctx, MlirLocation loc, MlirValue 
     }
 }
 
+MlirOperation oraAddWrappingOpCreate(MlirContext ctx, MlirLocation loc, MlirValue lhs, MlirValue rhs, MlirType resultType)
+{
+    try
+    {
+        MLIRContext *context = unwrap(ctx);
+        Location location = unwrap(loc);
+        Value lhsVal = unwrap(lhs);
+        Value rhsVal = unwrap(rhs);
+        Type resultTy = unwrap(resultType);
+
+        OpBuilder builder(context);
+        auto op = builder.create<ora::AddWrappingOp>(location, resultTy, lhsVal, rhsVal);
+        auto gasCostAttr = builder.getI64IntegerAttr(3);
+        op->setAttr("gas_cost", gasCostAttr);
+        return wrap(op.getOperation());
+    }
+    catch (...)
+    {
+        return {nullptr};
+    }
+}
+
 MlirOperation oraArithSubIOpCreate(MlirContext ctx, MlirLocation loc, MlirValue lhs, MlirValue rhs)
 {
     try
