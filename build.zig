@@ -905,8 +905,16 @@ fn buildMlirLibrariesImpl(step: *std.Build.Step, options: std.Build.Step.MakeOpt
     const b = step.owner;
     const allocator = b.allocator;
 
-    // ensure submodule exists
     const cwd = std.fs.cwd();
+
+    // skip if MLIR C API library is already installed
+    const mlir_c_lib = if (@import("builtin").os.tag == .macos) "vendor/mlir/lib/libMLIR-C.dylib" else "vendor/mlir/lib/libMLIR-C.so";
+    if (cwd.access(mlir_c_lib, .{}) catch null) |_| {
+        std.log.info("MLIR libraries already installed, skipping build (delete vendor/mlir to force rebuild)", .{});
+        return;
+    }
+
+    // ensure submodule exists
     _ = cwd.openDir("vendor/llvm-project", .{ .iterate = false }) catch {
         std.log.err("Missing LLVM source tree: vendor/llvm-project", .{});
         std.log.err("Run: ./setup.sh --skip-deps --skip-build", .{});
@@ -920,26 +928,6 @@ fn buildMlirLibrariesImpl(step: *std.Build.Step, options: std.Build.Step.MakeOpt
         error.PathAlreadyExists => {},
         else => return err,
     };
-
-    // clear CMake cache if it exists to avoid stale SDK paths after system updates
-    const cache_file = try std.fmt.allocPrint(allocator, "{s}/CMakeCache.txt", .{build_dir});
-    defer allocator.free(cache_file);
-    if (cwd.access(cache_file, .{}) catch null) |_| {
-        std.log.info("Clearing stale MLIR CMake cache after macOS/Xcode update", .{});
-        cwd.deleteFile(cache_file) catch |err| {
-            std.log.warn("Could not delete MLIR CMakeCache.txt: {}", .{err});
-        };
-    }
-
-    // also clear CMakeFiles directory which may contain cached package configs
-    const cmake_files_dir = try std.fmt.allocPrint(allocator, "{s}/CMakeFiles", .{build_dir});
-    defer allocator.free(cmake_files_dir);
-    if (cwd.access(cmake_files_dir, .{}) catch null) |_| {
-        std.log.info("Clearing MLIR CMakeFiles directory to remove stale package configs", .{});
-        cwd.deleteTree(cmake_files_dir) catch |err| {
-            std.log.warn("Could not delete MLIR CMakeFiles directory: {}", .{err});
-        };
-    }
 
     const install_prefix = "vendor/mlir";
     cwd.makeDir(install_prefix) catch |err| switch (err) {
@@ -1130,10 +1118,7 @@ fn buildOraDialectLibraryImpl(step: *std.Build.Step, options: std.Build.Step.Mak
     const allocator = b.allocator;
     const cwd = std.fs.cwd();
 
-    // create build directory (clean if it exists to avoid CMake cache conflicts)
     const build_dir = "vendor/ora-dialect-build";
-    // remove existing build directory to avoid CMake cache conflicts
-    cwd.deleteTree(build_dir) catch {};
     cwd.makeDir(build_dir) catch |err| switch (err) {
         error.PathAlreadyExists => {},
         else => return err,
@@ -1257,10 +1242,7 @@ fn buildSIRDialectLibraryImpl(step: *std.Build.Step, options: std.Build.Step.Mak
     const allocator = b.allocator;
     const cwd = std.fs.cwd();
 
-    // create build directory (clean if it exists to avoid CMake cache conflicts)
     const build_dir = "vendor/sir-dialect-build";
-    // remove existing build directory to avoid CMake cache conflicts
-    cwd.deleteTree(build_dir) catch {};
     cwd.makeDir(build_dir) catch |err| switch (err) {
         error.PathAlreadyExists => {},
         else => return err,
@@ -1624,26 +1606,6 @@ fn buildZ3LibrariesImpl(step: *std.Build.Step, options: std.Build.Step.MakeOptio
         error.PathAlreadyExists => {},
         else => return err,
     };
-
-    // clear CMake cache if it exists to avoid stale SDK paths after system updates
-    const cache_file = try std.fmt.allocPrint(allocator, "{s}/CMakeCache.txt", .{build_dir});
-    defer allocator.free(cache_file);
-    if (cwd.access(cache_file, .{}) catch null) |_| {
-        std.log.info("Clearing stale Z3 CMake cache after macOS/Xcode update", .{});
-        cwd.deleteFile(cache_file) catch |err| {
-            std.log.warn("Could not delete Z3 CMakeCache.txt: {}", .{err});
-        };
-    }
-
-    // also clear CMakeFiles directory which may contain cached package configs
-    const cmake_files_dir = try std.fmt.allocPrint(allocator, "{s}/CMakeFiles", .{build_dir});
-    defer allocator.free(cmake_files_dir);
-    if (cwd.access(cmake_files_dir, .{}) catch null) |_| {
-        std.log.info("Clearing Z3 CMakeFiles directory to remove stale package configs", .{});
-        cwd.deleteTree(cmake_files_dir) catch |err| {
-            std.log.warn("Could not delete Z3 CMakeFiles directory: {}", .{err});
-        };
-    }
 
     const install_prefix = "vendor/z3-install";
     cwd.makeDir(install_prefix) catch |err| switch (err) {
