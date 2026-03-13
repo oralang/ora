@@ -2677,6 +2677,24 @@ test "compiler lowers remaining wrapping ops through real wrapping ops" {
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.shr_wrapping"));
 }
 
+test "compiler lowers wrapping power through ora.power" {
+    const source_text =
+        \\pub fn wrap_pow(a: u256, b: u256) -> u256 {
+        \\    return a **% b;
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    const hir_text = try hir_result.renderText(testing.allocator);
+    defer testing.allocator.free(hir_text);
+
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.power"));
+    try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "\"ora.power\""));
+}
+
 test "compiler rethreads nested map assignment to outer map" {
     const source_text =
         \\contract Test {

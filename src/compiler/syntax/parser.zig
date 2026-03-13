@@ -1405,7 +1405,10 @@ const Parser = struct {
             if (precedence < min_precedence or self.atAny(terminators)) break;
 
             const op_token = self.bump();
-            const rhs = try self.parseBinaryExprNode(precedence + 1, terminators);
+            const rhs = try self.parseBinaryExprNode(
+                if (isRightAssociativeBinaryOp(self.tokens.items[op_token.index()].kind)) precedence else precedence + 1,
+                terminators,
+            );
 
             const expr_children = [_]ChildRef{
                 .{ .node = lhs },
@@ -2289,7 +2292,15 @@ fn binaryOpPrecedence(kind: green.TokenKind) ?u8 {
         .LessLess, .GreaterGreater, .LessLessPercent, .GreaterGreaterPercent => 80,
         .Plus, .Minus, .PlusPercent, .MinusPercent => 90,
         .Star, .Slash, .Percent, .StarPercent => 100,
+        .StarStar, .StarStarPercent => 110,
         else => null,
+    };
+}
+
+fn isRightAssociativeBinaryOp(kind: green.TokenKind) bool {
+    return switch (kind) {
+        .StarStar, .StarStarPercent => true,
+        else => false,
     };
 }
 
