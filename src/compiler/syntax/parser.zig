@@ -2275,7 +2275,7 @@ fn childRange(parser: *const Parser, child: ChildRef) source.TextRange {
 
 fn isAssignmentToken(kind: green.TokenKind) bool {
     return switch (kind) {
-        .Equal, .PlusEqual, .MinusEqual, .StarEqual, .SlashEqual, .PercentEqual => true,
+        .Equal, .PlusEqual, .PlusPercentEqual, .MinusEqual, .MinusPercentEqual, .StarEqual, .StarPercentEqual, .StarStarEqual, .SlashEqual, .PercentEqual, .AmpersandEqual, .PipeEqual, .CaretEqual, .LessLessEqual, .GreaterGreaterEqual => true,
         else => false,
     };
 }

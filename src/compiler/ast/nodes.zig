@@ -40,7 +40,7 @@ pub const BinaryOp = enum {
     shr,
     wrapping_shr,
 };
-pub const AssignmentOp = enum { assign, add_assign, sub_assign, mul_assign, div_assign, mod_assign };
+pub const AssignmentOp = enum { assign, add_assign, sub_assign, mul_assign, div_assign, mod_assign, bit_and_assign, bit_or_assign, bit_xor_assign, shl_assign, shr_assign, pow_assign, wrapping_add_assign, wrapping_sub_assign, wrapping_mul_assign };
 pub const Quantifier = enum { forall, exists };
 
 pub const NodeError = struct {

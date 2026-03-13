@@ -254,17 +254,25 @@ pub const TokenType = enum {
     Greater, // >
     GreaterEqual, // >=
     LessLess, // <<
+    LessLessEqual, // <<=
     GreaterGreater, // >>
+    GreaterGreaterEqual, // >>=
     Bang, // !
     Tilde, // ~
     Ampersand, // &
+    AmpersandEqual, // &=
     AmpersandAmpersand, // &&
     Pipe, // |
+    PipeEqual, // |=
     PipePipe, // ||
     Caret, // ^
+    CaretEqual, // ^=
     PlusPercent, // +% (wrapping add)
+    PlusPercentEqual, // +%=
     MinusPercent, // -% (wrapping sub)
+    MinusPercentEqual, // -%=
     StarPercent, // *% (wrapping mul)
+    StarPercentEqual, // *%=
     LessLessPercent, // <<% (wrapping shl)
     GreaterGreaterPercent, // >>% (wrapping shr)
     PlusEqual, // +=
@@ -272,6 +280,7 @@ pub const TokenType = enum {
     StarEqual, // *=
     SlashEqual, // /=
     PercentEqual, // %=
+    StarStarEqual, // **=
     Arrow, // ->
 
     // delimiters
@@ -1142,13 +1151,16 @@ pub const Lexer = struct {
                 }
             },
             '@' => try identifier_scanners.scanAtDirective(self),
-            '^' => try self.addToken(.Caret),
             '~' => try self.addToken(.Tilde),
 
             // operators that might have compound forms
             '+' => {
                 if (self.match('%')) {
-                    try self.addToken(.PlusPercent);
+                    if (self.match('=')) {
+                        try self.addToken(.PlusPercentEqual);
+                    } else {
+                        try self.addToken(.PlusPercent);
+                    }
                 } else if (self.match('=')) {
                     try self.addToken(.PlusEqual);
                 } else {
@@ -1157,7 +1169,11 @@ pub const Lexer = struct {
             },
             '-' => {
                 if (self.match('%')) {
-                    try self.addToken(.MinusPercent);
+                    if (self.match('=')) {
+                        try self.addToken(.MinusPercentEqual);
+                    } else {
+                        try self.addToken(.MinusPercent);
+                    }
                 } else if (self.match('=')) {
                     try self.addToken(.MinusEqual);
                 } else if (self.match('>')) {
@@ -1168,13 +1184,19 @@ pub const Lexer = struct {
             },
             '*' => {
                 if (self.match('*')) {
-                    if (self.match('%')) {
+                    if (self.match('=')) {
+                        try self.addToken(.StarStarEqual);
+                    } else if (self.match('%')) {
                         try self.addToken(.StarStarPercent);
                     } else {
                         try self.addToken(.StarStar);
                     }
                 } else if (self.match('%')) {
-                    try self.addToken(.StarPercent);
+                    if (self.match('=')) {
+                        try self.addToken(.StarPercentEqual);
+                    } else {
+                        try self.addToken(.StarPercent);
+                    }
                 } else if (self.match('=')) {
                     try self.addToken(.StarEqual);
                 } else {
@@ -1226,7 +1248,9 @@ pub const Lexer = struct {
                 if (self.match('=')) {
                     try self.addToken(.LessEqual);
                 } else if (self.match('<')) {
-                    if (self.match('%')) {
+                    if (self.match('=')) {
+                        try self.addToken(.LessLessEqual);
+                    } else if (self.match('%')) {
                         try self.addToken(.LessLessPercent);
                     } else {
                         try self.addToken(.LessLess);
@@ -1239,7 +1263,9 @@ pub const Lexer = struct {
                 if (self.match('=')) {
                     try self.addToken(.GreaterEqual);
                 } else if (self.match('>')) {
-                    if (self.match('%')) {
+                    if (self.match('=')) {
+                        try self.addToken(.GreaterGreaterEqual);
+                    } else if (self.match('%')) {
                         try self.addToken(.GreaterGreaterPercent);
                     } else {
                         try self.addToken(.GreaterGreater);
@@ -1251,6 +1277,8 @@ pub const Lexer = struct {
             '&' => {
                 if (self.match('&')) {
                     try self.addToken(.AmpersandAmpersand);
+                } else if (self.match('=')) {
+                    try self.addToken(.AmpersandEqual);
                 } else {
                     try self.addToken(.Ampersand);
                 }
@@ -1258,8 +1286,17 @@ pub const Lexer = struct {
             '|' => {
                 if (self.match('|')) {
                     try self.addToken(.PipePipe);
+                } else if (self.match('=')) {
+                    try self.addToken(.PipeEqual);
                 } else {
                     try self.addToken(.Pipe);
+                }
+            },
+            '^' => {
+                if (self.match('=')) {
+                    try self.addToken(.CaretEqual);
+                } else {
+                    try self.addToken(.Caret);
                 }
             },
 
@@ -1600,7 +1637,7 @@ pub fn isLiteral(token_type: TokenType) bool {
 
 pub fn isOperator(token_type: TokenType) bool {
     return switch (token_type) {
-        .Plus, .Minus, .Star, .Slash, .Percent, .StarStar, .StarStarPercent, .Equal, .EqualEqual, .BangEqual, .Less, .LessEqual, .Greater, .GreaterEqual, .Bang, .Tilde, .Ampersand, .Pipe, .Caret, .LessLess, .GreaterGreater, .PlusEqual, .MinusEqual, .StarEqual, .SlashEqual, .PercentEqual, .AmpersandAmpersand, .PipePipe, .Arrow, .DotDot, .DotDotDot => true,
+        .Plus, .Minus, .Star, .Slash, .Percent, .StarStar, .StarStarPercent, .Equal, .EqualEqual, .BangEqual, .Less, .LessEqual, .Greater, .GreaterEqual, .Bang, .Tilde, .Ampersand, .AmpersandEqual, .Pipe, .PipeEqual, .Caret, .CaretEqual, .LessLess, .LessLessEqual, .GreaterGreater, .GreaterGreaterEqual, .PlusEqual, .PlusPercentEqual, .MinusEqual, .MinusPercentEqual, .StarEqual, .StarPercentEqual, .StarStarEqual, .SlashEqual, .PercentEqual, .AmpersandAmpersand, .PipePipe, .Arrow, .DotDot, .DotDotDot => true,
         else => false,
     };
 }

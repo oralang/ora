@@ -1695,10 +1695,19 @@ fn mapAssignmentOp(kind: syntax.TokenKind) ?AssignmentOp {
     return switch (kind) {
         .Equal => .assign,
         .PlusEqual => .add_assign,
+        .PlusPercentEqual => .wrapping_add_assign,
         .MinusEqual => .sub_assign,
+        .MinusPercentEqual => .wrapping_sub_assign,
         .StarEqual => .mul_assign,
+        .StarPercentEqual => .wrapping_mul_assign,
+        .StarStarEqual => .pow_assign,
         .SlashEqual => .div_assign,
         .PercentEqual => .mod_assign,
+        .AmpersandEqual => .bit_and_assign,
+        .PipeEqual => .bit_or_assign,
+        .CaretEqual => .bit_xor_assign,
+        .LessLessEqual => .shl_assign,
+        .GreaterGreaterEqual => .shr_assign,
         else => null,
     };
 }

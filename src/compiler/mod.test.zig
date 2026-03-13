@@ -2731,6 +2731,93 @@ test "compiler lowers bitwise not through xor mask" {
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "arith.xori"));
 }
 
+test "compiler lowers bitwise and compound assignment" {
+    const source_text =
+        \\pub fn mask(input: u256, mask: u256) -> u256 {
+        \\    var value = input;
+        \\    value &= mask;
+        \\    return value;
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    const hir_text = try hir_result.renderText(testing.allocator);
+    defer testing.allocator.free(hir_text);
+
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "arith.andi"));
+}
+
+test "compiler lowers bitwise or and xor compound assignment" {
+    const source_text =
+        \\pub fn mix(input: u256, mask: u256, toggles: u256) -> u256 {
+        \\    var value = input;
+        \\    value |= mask;
+        \\    value ^= toggles;
+        \\    return value;
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    const hir_text = try hir_result.renderText(testing.allocator);
+    defer testing.allocator.free(hir_text);
+
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "arith.ori"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "arith.xori"));
+}
+
+test "compiler lowers shift compound assignment" {
+    const source_text =
+        \\pub fn shift_ops(input: u256, amount: u256) -> u256 {
+        \\    var value = input;
+        \\    value <<= amount;
+        \\    value >>= amount;
+        \\    return value;
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    const hir_text = try hir_result.renderText(testing.allocator);
+    defer testing.allocator.free(hir_text);
+
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "arith.shli"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "arith.shrsi"));
+}
+
+test "compiler lowers power and wrapping compound assignment" {
+    const source_text =
+        \\pub fn update_all(input: u256, exp: u256, delta: u256) -> u256 {
+        \\    var value = input;
+        \\    value **= exp;
+        \\    value +%= delta;
+        \\    value -%= delta;
+        \\    value *%= delta;
+        \\    return value;
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    const hir_text = try hir_result.renderText(testing.allocator);
+    defer testing.allocator.free(hir_text);
+
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.power"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.assert"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.add_wrapping"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.sub_wrapping"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.mul_wrapping"));
+}
+
 test "compiler rethreads nested map assignment to outer map" {
     const source_text =
         \\contract Test {
