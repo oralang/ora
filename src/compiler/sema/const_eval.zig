@@ -154,6 +154,20 @@ const ConstEvaluator = struct {
                     break :blk null;
                 };
 
+                // Even when the switch condition is constant, cache every arm pattern
+                // constant so later HIR lowering can build full switch metadata rather
+                // than falling back after the first matched arm.
+                for (switch_expr.arms) |arm| {
+                    switch (arm.pattern) {
+                        .Expr => |pattern_expr| _ = try self.evalExpr(pattern_expr),
+                        .Range => |range_pattern| {
+                            _ = try self.evalExpr(range_pattern.start);
+                            _ = try self.evalExpr(range_pattern.end);
+                        },
+                        .Else => {},
+                    }
+                }
+
                 for (switch_expr.arms) |arm| {
                     if (self.patternMatches(condition, arm.pattern)) {
                         break :blk try self.evalExpr(arm.value);

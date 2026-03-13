@@ -349,25 +349,32 @@ pub fn lowerSwitchExpression(
         if (switch_expr.cases.len > 0) {
             switch (switch_expr.cases[0].body) {
                 .Expression => |expr| {
-                    const expr_type = c.oraValueGetType(self.lowerExpression(expr));
-                    break :blk expr_type;
+                    if (getExprTypeInfo(expr)) |expr_type_info| {
+                        if (expr_type_info.ora_type == null) break :blk h.i256Type(self.ctx);
+                        const expr_type = self.type_mapper.toMlirType(expr_type_info);
+                        if (!c.oraTypeIsNull(expr_type)) break :blk expr_type;
+                    }
                 },
-                .Block, .LabeledBlock => {
-                    break :blk h.i256Type(self.ctx);
-                },
+                .Block, .LabeledBlock => {},
             }
         } else if (switch_expr.default_case) |default_block| {
             if (default_block.statements.len > 0) {
                 switch (default_block.statements[0]) {
                     .Return => |ret| {
                         if (ret.value) |e| {
-                            const expr_type = c.oraValueGetType(self.lowerExpression(&e));
-                            break :blk expr_type;
+                            if (getExprTypeInfo(&e)) |expr_type_info| {
+                                if (expr_type_info.ora_type == null) break :blk h.i256Type(self.ctx);
+                                const expr_type = self.type_mapper.toMlirType(expr_type_info);
+                                if (!c.oraTypeIsNull(expr_type)) break :blk expr_type;
+                            }
                         }
                     },
                     .Expr => |e| {
-                        const expr_type = c.oraValueGetType(self.lowerExpression(&e));
-                        break :blk expr_type;
+                        if (getExprTypeInfo(&e)) |expr_type_info| {
+                            if (expr_type_info.ora_type == null) break :blk h.i256Type(self.ctx);
+                            const expr_type = self.type_mapper.toMlirType(expr_type_info);
+                            if (!c.oraTypeIsNull(expr_type)) break :blk expr_type;
+                        }
                     },
                     else => {},
                 }

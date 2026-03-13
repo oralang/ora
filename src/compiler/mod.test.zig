@@ -7,6 +7,14 @@ fn compileText(source_text: []const u8) !compiler.driver.Compilation {
     return compiler.compileSource(testing.allocator, "test.ora", source_text);
 }
 
+fn renderHirTextForSource(source_text: []const u8) ![]u8 {
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    return hir_result.renderText(testing.allocator);
+}
+
 fn firstChildNodeOfKind(node: compiler.SyntaxNode, kind: compiler.syntax.SyntaxKind) ?compiler.SyntaxNode {
     var it = node.children();
     while (it.next()) |child| {
@@ -1861,6 +1869,341 @@ test "compiler lowers builtin, quantified, and verification expressions" {
     const consteval = try compilation.db.constEval(compilation.root_module_id);
     try testing.expect(consteval.values[quotient_stmt.value.?.index()] != null);
     try testing.expectEqual(@as(i128, 3), try consteval.values[quotient_stmt.value.?.index()].?.integer.toInt(i128));
+}
+
+test "compiler render ladder step 1 struct decl struct literal field extract" {
+    const source_text =
+        \\struct Pair {
+        \\    first: u256;
+        \\    second: u256;
+        \\}
+        \\
+        \\pub fn build() -> u256 {
+        \\    let pair = Pair { first: 1, second: 2 };
+        \\    return pair.first;
+        \\}
+    ;
+
+    const hir_text = try renderHirTextForSource(source_text);
+    defer testing.allocator.free(hir_text);
+
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.struct_instantiate"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.struct_field_extract"));
+}
+
+test "compiler render ladder step 2 add error decl" {
+    const source_text =
+        \\struct Pair {
+        \\    first: u256;
+        \\    second: u256;
+        \\}
+        \\
+        \\error Failure(code: u256);
+        \\
+        \\pub fn build() -> u256 {
+        \\    let pair = Pair { first: 1, second: 2 };
+        \\    return pair.first;
+        \\}
+    ;
+
+    const hir_text = try renderHirTextForSource(source_text);
+    defer testing.allocator.free(hir_text);
+
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.struct.decl"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.error.decl"));
+}
+
+test "compiler render ladder step 3 add array literal" {
+    const source_text =
+        \\struct Pair {
+        \\    first: u256;
+        \\    second: u256;
+        \\}
+        \\
+        \\error Failure(code: u256);
+        \\
+        \\pub fn build() -> u256 {
+        \\    let items = [1, 2, 3];
+        \\    let pair = Pair { first: 1, second: 2 };
+        \\    return pair.first;
+        \\}
+    ;
+
+    const hir_text = try renderHirTextForSource(source_text);
+    defer testing.allocator.free(hir_text);
+
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "memref.alloca"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "memref.store"));
+}
+
+test "compiler render ladder step 4 add array indexing into struct literal" {
+    const source_text =
+        \\struct Pair {
+        \\    first: u256;
+        \\    second: u256;
+        \\}
+        \\
+        \\error Failure(code: u256);
+        \\
+        \\pub fn build() -> u256 {
+        \\    let items = [1, 2, 3];
+        \\    let pair = Pair { first: items[0], second: items[1] };
+        \\    return pair.first;
+        \\}
+    ;
+
+    const hir_text = try renderHirTextForSource(source_text);
+    defer testing.allocator.free(hir_text);
+
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "memref.load"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.struct_instantiate"));
+}
+
+test "compiler render ladder step 5 add tuple from indexed values" {
+    const source_text =
+        \\struct Pair {
+        \\    first: u256;
+        \\    second: u256;
+        \\}
+        \\
+        \\error Failure(code: u256);
+        \\
+        \\pub fn build() -> u256 {
+        \\    let items = [1, 2, 3];
+        \\    let coords = (items[0], items[1]);
+        \\    let pair = Pair { first: items[0], second: items[1] };
+        \\    return pair.first;
+        \\}
+    ;
+
+    const hir_text = try renderHirTextForSource(source_text);
+    defer testing.allocator.free(hir_text);
+
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.tuple_create"));
+}
+
+test "compiler render ladder switch step a single case no else" {
+    const source_text =
+        \\struct Pair {
+        \\    first: u256;
+        \\    second: u256;
+        \\}
+        \\
+        \\error Failure(code: u256);
+        \\
+        \\pub fn build() -> u256 {
+        \\    let items = [1, 2, 3];
+        \\    let coords = (items[0], items[1]);
+        \\    let pair = Pair { first: items[0], second: items[1] };
+        \\    let value = switch (0) {
+        \\        0 => 1,
+        \\    };
+        \\    return value;
+        \\}
+    ;
+
+    const hir_text = try renderHirTextForSource(source_text);
+    defer testing.allocator.free(hir_text);
+
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.switch_expr"));
+    try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "<<UNKNOWN SSA VALUE>>"));
+    try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "<<NULL TYPE>>"));
+}
+
+test "compiler render ladder switch step b single case plus else" {
+    const source_text =
+        \\struct Pair {
+        \\    first: u256;
+        \\    second: u256;
+        \\}
+        \\
+        \\error Failure(code: u256);
+        \\
+        \\pub fn build() -> u256 {
+        \\    let items = [1, 2, 3];
+        \\    let coords = (items[0], items[1]);
+        \\    let pair = Pair { first: items[0], second: items[1] };
+        \\    let value = switch (0) {
+        \\        0 => 1,
+        \\        else => 3,
+        \\    };
+        \\    return value;
+        \\}
+    ;
+
+    const hir_text = try renderHirTextForSource(source_text);
+    defer testing.allocator.free(hir_text);
+
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.switch_expr"));
+    try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "<<UNKNOWN SSA VALUE>>"));
+    try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "<<NULL TYPE>>"));
+}
+
+test "compiler render ladder switch step c two cases plus else" {
+    const source_text =
+        \\struct Pair {
+        \\    first: u256;
+        \\    second: u256;
+        \\}
+        \\
+        \\error Failure(code: u256);
+        \\
+        \\pub fn build() -> u256 {
+        \\    let items = [1, 2, 3];
+        \\    let coords = (items[0], items[1]);
+        \\    let pair = Pair { first: items[0], second: items[1] };
+        \\    let value = switch (0) {
+        \\        0 => 1,
+        \\        1 => 2,
+        \\        else => 3,
+        \\    };
+        \\    return value;
+        \\}
+    ;
+
+    const hir_text = try renderHirTextForSource(source_text);
+    defer testing.allocator.free(hir_text);
+
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.switch_expr"));
+    try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "<<UNKNOWN SSA VALUE>>"));
+    try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "<<NULL TYPE>>"));
+}
+
+test "compiler render ladder switch step d two cases no else" {
+    const source_text =
+        \\struct Pair {
+        \\    first: u256;
+        \\    second: u256;
+        \\}
+        \\
+        \\error Failure(code: u256);
+        \\
+        \\pub fn build() -> u256 {
+        \\    let items = [1, 2, 3];
+        \\    let coords = (items[0], items[1]);
+        \\    let pair = Pair { first: items[0], second: items[1] };
+        \\    let value = switch (0) {
+        \\        0 => 1,
+        \\        1 => 2,
+        \\    };
+        \\    return value;
+        \\}
+    ;
+
+    const hir_text = try renderHirTextForSource(source_text);
+    defer testing.allocator.free(hir_text);
+
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.switch_expr"));
+    try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "<<UNKNOWN SSA VALUE>>"));
+    try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "<<NULL TYPE>>"));
+}
+
+test "compiler renders minimal two-case switch expression" {
+    const source_text =
+        \\pub fn build() -> u256 {
+        \\    let value = switch (0) {
+        \\        0 => 1,
+        \\        1 => 2,
+        \\    };
+        \\    return value;
+        \\}
+    ;
+
+    const hir_text = try renderHirTextForSource(source_text);
+    defer testing.allocator.free(hir_text);
+
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.switch_expr"));
+    try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "<<UNKNOWN SSA VALUE>>"));
+    try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "<<NULL TYPE>>"));
+}
+
+test "compiler render ladder step 6 add boolean switch expression" {
+    const source_text =
+        \\struct Pair {
+        \\    first: u256;
+        \\    second: u256;
+        \\}
+        \\
+        \\error Failure(code: u256);
+        \\
+        \\pub fn build() -> u256 {
+        \\    let items = [1, 2, 3];
+        \\    let coords = (items[0], items[1]);
+        \\    let pair = Pair { first: items[0], second: items[1] };
+        \\    let value = switch (true) {
+        \\        true => 1,
+        \\        false => 2,
+        \\        else => 3,
+        \\    };
+        \\    return value;
+        \\}
+    ;
+
+    const hir_text = try renderHirTextForSource(source_text);
+    defer testing.allocator.free(hir_text);
+
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.switch_expr"));
+    try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "<<UNKNOWN SSA VALUE>>"));
+    try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "<<NULL TYPE>>"));
+}
+
+test "compiler render ladder step 6b add integer switch expression" {
+    const source_text =
+        \\struct Pair {
+        \\    first: u256;
+        \\    second: u256;
+        \\}
+        \\
+        \\error Failure(code: u256);
+        \\
+        \\pub fn build() -> u256 {
+        \\    let items = [1, 2, 3];
+        \\    let coords = (items[0], items[1]);
+        \\    let pair = Pair { first: items[0], second: items[1] };
+        \\    let value = switch (0) {
+        \\        0 => 1,
+        \\        1 => 2,
+        \\        else => 3,
+        \\    };
+        \\    return value;
+        \\}
+    ;
+
+    const hir_text = try renderHirTextForSource(source_text);
+    defer testing.allocator.free(hir_text);
+
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.switch_expr"));
+    try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "<<UNKNOWN SSA VALUE>>"));
+    try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "<<NULL TYPE>>"));
+}
+
+test "compiler render ladder step 7 add error constructor expression" {
+    const source_text =
+        \\struct Pair {
+        \\    first: u256;
+        \\    second: u256;
+        \\}
+        \\
+        \\error Failure(code: u256);
+        \\
+        \\pub fn build() -> u256 {
+        \\    let items = [1, 2, 3];
+        \\    let coords = (items[0], items[1]);
+        \\    let pair = Pair { first: items[0], second: items[1] };
+        \\    let value = switch (true) {
+        \\        true => 1,
+        \\        false => 2,
+        \\        else => 3,
+        \\    };
+        \\    let problem = error.Failure(7);
+        \\    return value;
+        \\}
+    ;
+
+    const hir_text = try renderHirTextForSource(source_text);
+    defer testing.allocator.free(hir_text);
+
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.error.return"));
 }
 
 test "compiler lowers tuple, array, struct, switch, and error return expressions" {

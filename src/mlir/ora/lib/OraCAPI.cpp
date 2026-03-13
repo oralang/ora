@@ -342,6 +342,16 @@ void oraBlockAppendOwnedOperation(MlirBlock block, MlirOperation op)
         return op.ptr == nullptr;
     }
 
+    void oraOperationSetLocation(MlirOperation op, MlirLocation loc)
+    {
+        mlir::Operation *operation = unwrap(op);
+        if (operation == nullptr)
+        {
+            return;
+        }
+        operation->setLoc(unwrap(loc));
+    }
+
     void oraOperationSetAttributeByName(
         MlirOperation op,
         MlirStringRef name,
@@ -2590,6 +2600,7 @@ MlirOperation oraArithConstantOpCreate(MlirContext ctx, MlirLocation loc, MlirTy
 
         OpBuilder builder(context);
         auto op = builder.create<arith::ConstantOp>(location, resultTy, typedAttr);
+        op->setLoc(location);
 
         // attach gas_cost=0 like the Zig-side builder
         auto gasCostAttr = builder.getI64IntegerAttr(0);
@@ -6066,21 +6077,16 @@ MlirOperation oraSwitchOpCreate(MlirContext ctx, MlirLocation loc, MlirValue val
         Value val = unwrap(value);
         Type resultTy = unwrap(resultType);
 
-        OpBuilder builder(context);
+        OperationState state(location, ora::SwitchOp::getOperationName());
+        state.addOperands(val);
+        state.addTypes(resultTy);
+        // Zero cases — no regions to add
 
-        // Create the switch operation
-        // SwitchOp expects TypeRange results, Value value, and unsigned casesCount
-        TypeRange resultTypes = TypeRange(resultTy);
-        auto op = builder.create<ora::SwitchOp>(location, resultTypes, val, /*casesCount=*/0);
+        auto gasCostAttr = IntegerAttr::get(::mlir::IntegerType::get(context, 64), 10);
+        state.addAttribute("gas_cost", gasCostAttr);
 
-        // SwitchOp has VariadicRegion for cases, caller will add cases as needed
-        // No need to ensure a block exists initially
-
-        // Add gas cost attribute (switch has cost per case)
-        auto gasCostAttr = builder.getI64IntegerAttr(10);
-        op->setAttr("gas_cost", gasCostAttr);
-
-        return wrap(op.getOperation());
+        Operation *op = Operation::create(state);
+        return wrap(op);
     }
     catch (...)
     {
@@ -6103,13 +6109,17 @@ MlirOperation oraSwitchOpCreateWithCases(MlirContext ctx, MlirLocation loc, Mlir
             results.push_back(unwrap(resultTypes[i]));
         }
 
-        OpBuilder builder(context);
-        auto op = builder.create<ora::SwitchOp>(location, results, val, static_cast<unsigned>(numCases));
+        OperationState state(location, ora::SwitchOp::getOperationName());
+        state.addOperands(val);
+        state.addTypes(results);
+        for (size_t i = 0; i < numCases; ++i)
+            state.addRegion(std::make_unique<Region>());
 
-        auto gasCostAttr = builder.getI64IntegerAttr(10);
-        op->setAttr("gas_cost", gasCostAttr);
+        auto gasCostAttr = IntegerAttr::get(::mlir::IntegerType::get(context, 64), 10);
+        state.addAttribute("gas_cost", gasCostAttr);
 
-        return wrap(op.getOperation());
+        Operation *op = Operation::create(state);
+        return wrap(op);
     }
     catch (...)
     {
@@ -6161,21 +6171,16 @@ MlirOperation oraSwitchExprOpCreate(MlirContext ctx, MlirLocation loc, MlirValue
         Value val = unwrap(value);
         Type resultTy = unwrap(resultType);
 
-        OpBuilder builder(context);
+        OperationState state(location, ora::SwitchExprOp::getOperationName());
+        state.addOperands(val);
+        state.addTypes(resultTy);
+        // Zero cases — no regions to add
 
-        // Create the switch_expr operation
-        // SwitchExprOp expects TypeRange results, Value value, and unsigned casesCount
-        TypeRange resultTypes = TypeRange(resultTy);
-        auto op = builder.create<ora::SwitchExprOp>(location, resultTypes, val, /*casesCount=*/0);
+        auto gasCostAttr = IntegerAttr::get(::mlir::IntegerType::get(context, 64), 10);
+        state.addAttribute("gas_cost", gasCostAttr);
 
-        // SwitchExprOp has VariadicRegion for cases, caller will add cases as needed
-        // No need to ensure a block exists initially
-
-        // Add gas cost attribute (switch_expr has cost per case)
-        auto gasCostAttr = builder.getI64IntegerAttr(10);
-        op->setAttr("gas_cost", gasCostAttr);
-
-        return wrap(op.getOperation());
+        Operation *op = Operation::create(state);
+        return wrap(op);
     }
     catch (...)
     {
@@ -6198,13 +6203,17 @@ MlirOperation oraSwitchExprOpCreateWithCases(MlirContext ctx, MlirLocation loc, 
             results.push_back(unwrap(resultTypes[i]));
         }
 
-        OpBuilder builder(context);
-        auto op = builder.create<ora::SwitchExprOp>(location, results, val, static_cast<unsigned>(numCases));
+        OperationState state(location, ora::SwitchExprOp::getOperationName());
+        state.addOperands(val);
+        state.addTypes(results);
+        for (size_t i = 0; i < numCases; ++i)
+            state.addRegion(std::make_unique<Region>());
 
-        auto gasCostAttr = builder.getI64IntegerAttr(10);
-        op->setAttr("gas_cost", gasCostAttr);
+        auto gasCostAttr = IntegerAttr::get(::mlir::IntegerType::get(context, 64), 10);
+        state.addAttribute("gas_cost", gasCostAttr);
 
-        return wrap(op.getOperation());
+        Operation *op = Operation::create(state);
+        return wrap(op);
     }
     catch (...)
     {

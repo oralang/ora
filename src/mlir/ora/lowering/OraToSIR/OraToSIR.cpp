@@ -2139,11 +2139,18 @@ namespace mlir
                         llvm::errs().flush();
                     }
                     
-                    // Create a nested pass manager for this function
+                    // Create a nested pass manager for this function.
+                    // Disable canonicalizer constant-CSE here: upstream MLIR
+                    // rehomes uniqued constants with UnknownLoc, which strips
+                    // source locations from Ora MLIR before conversion.
                     OpPassManager funcPM("func.func");
+                    GreedyRewriteConfig config;
+                    config.enableConstantCSE(false);
                     
-                    // Run canonicalization first to fold constants (ora.add, ora.mul, etc.)
-                    funcPM.addPass(mlir::createCanonicalizerPass());
+                    // Run canonicalization first to fold algebraic identities
+                    // and simplify control flow, but keep region-local
+                    // constants anchored to their original source locations.
+                    funcPM.addPass(mlir::createCanonicalizerPass(config));
                     DBG("  Added canonicalize pass");
                     
                     // Run the pass manager on this function
