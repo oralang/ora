@@ -12,7 +12,7 @@ pub const Visibility = enum { public, private };
 pub const BindingKind = enum { let_, var_, constant, immutable };
 pub const StorageClass = enum { none, storage, memory, tstore };
 pub const SpecClauseKind = enum { requires, ensures, invariant };
-pub const UnaryOp = enum { neg, not_, try_ };
+pub const UnaryOp = enum { neg, not_, bit_not, try_ };
 pub const BinaryOp = enum {
     add,
     wrapping_add,

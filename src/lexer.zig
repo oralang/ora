@@ -256,6 +256,7 @@ pub const TokenType = enum {
     LessLess, // <<
     GreaterGreater, // >>
     Bang, // !
+    Tilde, // ~
     Ampersand, // &
     AmpersandAmpersand, // &&
     Pipe, // |
@@ -1142,6 +1143,7 @@ pub const Lexer = struct {
             },
             '@' => try identifier_scanners.scanAtDirective(self),
             '^' => try self.addToken(.Caret),
+            '~' => try self.addToken(.Tilde),
 
             // operators that might have compound forms
             '+' => {
@@ -1598,7 +1600,7 @@ pub fn isLiteral(token_type: TokenType) bool {
 
 pub fn isOperator(token_type: TokenType) bool {
     return switch (token_type) {
-        .Plus, .Minus, .Star, .Slash, .Percent, .StarStar, .StarStarPercent, .Equal, .EqualEqual, .BangEqual, .Less, .LessEqual, .Greater, .GreaterEqual, .Bang, .Ampersand, .Pipe, .Caret, .LessLess, .GreaterGreater, .PlusEqual, .MinusEqual, .StarEqual, .SlashEqual, .PercentEqual, .AmpersandAmpersand, .PipePipe, .Arrow, .DotDot, .DotDotDot => true,
+        .Plus, .Minus, .Star, .Slash, .Percent, .StarStar, .StarStarPercent, .Equal, .EqualEqual, .BangEqual, .Less, .LessEqual, .Greater, .GreaterEqual, .Bang, .Tilde, .Ampersand, .Pipe, .Caret, .LessLess, .GreaterGreater, .PlusEqual, .MinusEqual, .StarEqual, .SlashEqual, .PercentEqual, .AmpersandAmpersand, .PipePipe, .Arrow, .DotDot, .DotDotDot => true,
         else => false,
     };
 }

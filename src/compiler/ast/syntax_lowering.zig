@@ -841,6 +841,7 @@ pub fn mixin(Builder: type) type {
             const op: UnaryOp = switch (op_token.kind()) {
                 .Minus => .neg,
                 .Bang => .not_,
+                .Tilde => .bit_not,
                 .Try => .try_,
                 .Plus => return operand,
                 else => return Lowering.malformedExpr(self, node, "invalid unary operator"),

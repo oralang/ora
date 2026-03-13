@@ -303,6 +303,18 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                     if (mlir.oraOperationIsNull(op)) break :blk operand;
                     break :blk appendValueOp(self.block, op);
                 },
+                .bit_not => blk: {
+                    const operand_ty = mlir.oraValueGetType(operand);
+                    const bit_width: u32 = if (mlir.oraTypeIsAInteger(operand_ty))
+                        @intCast(mlir.oraIntegerTypeGetWidth(operand_ty))
+                    else
+                        256;
+                    const all_ones: i64 = if (bit_width >= 64) -1 else (@as(i64, 1) << @intCast(bit_width)) - 1;
+                    const mask = appendValueOp(self.block, createIntegerConstant(self.parent.context, loc, operand_ty, all_ones));
+                    const op = mlir.oraArithXorIOpCreate(self.parent.context, loc, operand, mask);
+                    if (mlir.oraOperationIsNull(op)) break :blk operand;
+                    break :blk appendValueOp(self.block, op);
+                },
                 .try_ => try @This().lowerTryUnary(self, operand, unary.range),
             };
         }

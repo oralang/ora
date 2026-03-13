@@ -1426,7 +1426,7 @@ const Parser = struct {
         }
 
         return switch (self.current().kind) {
-            .Bang, .Minus, .Plus, .Try => blk: {
+            .Bang, .Tilde, .Minus, .Plus, .Try => blk: {
                 const op_token = self.bump();
                 const operand = try self.parseUnaryExprNode(terminators);
                 const expr_children = [_]ChildRef{

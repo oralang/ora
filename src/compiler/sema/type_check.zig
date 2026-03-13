@@ -579,6 +579,7 @@ const TypeChecker = struct {
         return switch (op) {
             .neg => if (isIntegerType(operand_type)) operand_type else .{ .unknown = {} },
             .not_ => if (operand_type.kind() == .bool) .{ .bool = {} } else .{ .unknown = {} },
+            .bit_not => if (isIntegerType(operand_type)) operand_type else .{ .unknown = {} },
             .try_ => if (operand_type.payloadType()) |payload| payload.* else .{ .unknown = {} },
         };
     }
@@ -880,6 +881,7 @@ fn unaryOpName(op: ast.UnaryOp) []const u8 {
     return switch (op) {
         .neg => "-",
         .not_ => "!",
+        .bit_not => "~",
         .try_ => "try",
     };
 }

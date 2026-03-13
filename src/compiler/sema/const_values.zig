@@ -24,6 +24,10 @@ pub fn evalUnary(allocator: std.mem.Allocator, op: ast.UnaryOp, value: ?ConstVal
                 .boolean => |boolean| .{ .boolean = !boolean },
                 else => null,
             },
+            .bit_not => switch (v) {
+                .integer => |integer| .{ .integer = try bitwiseNotInteger(allocator, integer) },
+                else => null,
+            },
             .try_ => value,
         };
     }
@@ -87,6 +91,15 @@ fn negateInteger(allocator: std.mem.Allocator, value: BigInt) !BigInt {
     var result = try BigInt.init(allocator);
     try BigInt.sub(&result, &zero, &value);
     return result;
+}
+
+fn bitwiseNotInteger(allocator: std.mem.Allocator, value: BigInt) !BigInt {
+    var one = try BigInt.initSet(allocator, 1);
+    defer one.deinit();
+    var plus_one = try BigInt.init(allocator);
+    defer plus_one.deinit();
+    try BigInt.add(&plus_one, &value, &one);
+    return negateInteger(allocator, plus_one);
 }
 
 fn evalIntInt(
