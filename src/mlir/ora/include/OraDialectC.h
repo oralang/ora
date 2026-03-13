@@ -74,6 +74,7 @@ extern "C"
     MLIR_CAPI_EXPORTED size_t oraOperationGetNumRegions(MlirOperation op);
     MLIR_CAPI_EXPORTED MlirStringRef oraOperationGetName(MlirOperation op);
     MLIR_CAPI_EXPORTED bool oraOperationIsNull(MlirOperation op);
+    MLIR_CAPI_EXPORTED void oraOperationSetLocation(MlirOperation op, MlirLocation loc);
     MLIR_CAPI_EXPORTED void oraOperationSetAttributeByName(
         MlirOperation op,
         MlirStringRef name,
