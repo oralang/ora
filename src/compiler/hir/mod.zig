@@ -237,7 +237,7 @@ const Lowerer = struct {
                         break :blk self.recordTypeFallback(.unsupported_function_sema_type, range);
                 }
 
-                break :blk mlir.oraFunctionTypeGet(
+                break :blk mlir.oraOraFunctionTypeGet(
                     self.context,
                     param_types.items.len,
                     if (param_types.items.len == 0) null else param_types.items.ptr,

@@ -107,6 +107,12 @@ extern "C"
         const MlirType *inputTypes,
         size_t numResults,
         const MlirType *resultTypes);
+    MLIR_CAPI_EXPORTED MlirType oraOraFunctionTypeGet(
+        MlirContext ctx,
+        size_t numInputs,
+        const MlirType *inputTypes,
+        size_t numResults,
+        const MlirType *resultTypes);
 
     MLIR_CAPI_EXPORTED MlirType oraTupleTypeGet(
         MlirContext ctx,

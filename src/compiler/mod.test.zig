@@ -1754,6 +1754,7 @@ test "compiler lowers function-valued bindings without function fallback" {
         try testing.expect(fallback.reason != .unsupported_function_sema_type);
     }
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.function_ref"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "!ora.function<"));
     try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "\"ora.function_ref\""));
 }
 

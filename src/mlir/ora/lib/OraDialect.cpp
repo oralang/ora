@@ -973,9 +973,9 @@ namespace mlir
         {
             if (getSymName().empty())
                 return emitOpError("requires non-empty function symbol name");
-            auto resultType = getResult().getType();
-            if (!llvm::isa<ora::FunctionType, mlir::FunctionType>(resultType))
-                return emitOpError() << "result must have function type, got " << resultType;
+            if (!llvm::isa<ora::FunctionType>(getResult().getType()))
+                return emitOpError() << "result must have !ora.function<...> type, got "
+                                     << getResult().getType();
             return success();
         }
 
