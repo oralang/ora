@@ -902,6 +902,46 @@ LogicalResult ConvertAddWrappingOp::matchAndRewrite(
     return success();
 }
 
+LogicalResult ConvertSubWrappingOp::matchAndRewrite(
+    ora::SubWrappingOp op,
+    typename ora::SubWrappingOp::Adaptor adaptor,
+    ConversionPatternRewriter &rewriter) const
+{
+    auto loc = op.getLoc();
+    auto u256Type = sir::U256Type::get(op.getContext());
+    auto *typeConverter = getTypeConverter();
+    if (!typeConverter) return rewriter.notifyMatchFailure(op, "missing type converter");
+    auto resultType = typeConverter->convertType(op.getResult().getType());
+    if (!resultType) return rewriter.notifyMatchFailure(op, "unable to convert sub_wrapping result type");
+    Value lhs = ensureU256(rewriter, loc, adaptor.getLhs());
+    Value rhs = ensureU256(rewriter, loc, adaptor.getRhs());
+    Value result = rewriter.create<sir::SubOp>(loc, u256Type, lhs, rhs).getResult();
+    if (resultType != u256Type)
+        result = rewriter.create<sir::BitcastOp>(loc, resultType, result).getResult();
+    rewriter.replaceOp(op, result);
+    return success();
+}
+
+LogicalResult ConvertMulWrappingOp::matchAndRewrite(
+    ora::MulWrappingOp op,
+    typename ora::MulWrappingOp::Adaptor adaptor,
+    ConversionPatternRewriter &rewriter) const
+{
+    auto loc = op.getLoc();
+    auto u256Type = sir::U256Type::get(op.getContext());
+    auto *typeConverter = getTypeConverter();
+    if (!typeConverter) return rewriter.notifyMatchFailure(op, "missing type converter");
+    auto resultType = typeConverter->convertType(op.getResult().getType());
+    if (!resultType) return rewriter.notifyMatchFailure(op, "unable to convert mul_wrapping result type");
+    Value lhs = ensureU256(rewriter, loc, adaptor.getLhs());
+    Value rhs = ensureU256(rewriter, loc, adaptor.getRhs());
+    Value result = rewriter.create<sir::MulOp>(loc, u256Type, lhs, rhs).getResult();
+    if (resultType != u256Type)
+        result = rewriter.create<sir::BitcastOp>(loc, resultType, result).getResult();
+    rewriter.replaceOp(op, result);
+    return success();
+}
+
 // -----------------------------------------------------------------------------
 // Convert arith.subi → sir.sub
 // -----------------------------------------------------------------------------
@@ -1222,6 +1262,25 @@ LogicalResult ConvertArithShlIOp::matchAndRewrite(
     return success();
 }
 
+LogicalResult ConvertShlWrappingOp::matchAndRewrite(
+    ora::ShlWrappingOp op,
+    typename ora::ShlWrappingOp::Adaptor adaptor,
+    ConversionPatternRewriter &rewriter) const
+{
+    auto loc = op.getLoc();
+    Value shift = ensureU256(rewriter, loc, adaptor.getRhs());
+    Value value = ensureU256(rewriter, loc, adaptor.getLhs());
+    auto u256Type = sir::U256Type::get(op.getContext());
+    auto shifted = rewriter.create<sir::ShlOp>(loc, u256Type, shift, value).getResult();
+    auto *typeConverter = getTypeConverter();
+    if (!typeConverter) return rewriter.notifyMatchFailure(op, "missing type converter");
+    auto resultType = typeConverter->convertType(op.getResult().getType());
+    if (!resultType) return rewriter.notifyMatchFailure(op, "unable to convert shl_wrapping result type");
+    if (resultType == u256Type) rewriter.replaceOp(op, shifted);
+    else rewriter.replaceOp(op, rewriter.create<sir::BitcastOp>(loc, resultType, shifted).getResult());
+    return success();
+}
+
 // -----------------------------------------------------------------------------
 // Convert arith.shrui → sir.shr
 // -----------------------------------------------------------------------------
@@ -1291,6 +1350,28 @@ LogicalResult ConvertArithShrSIOp::matchAndRewrite(
         auto casted = rewriter.create<sir::BitcastOp>(loc, resultType, shifted);
         rewriter.replaceOp(op, casted.getResult());
     }
+    return success();
+}
+
+LogicalResult ConvertShrWrappingOp::matchAndRewrite(
+    ora::ShrWrappingOp op,
+    typename ora::ShrWrappingOp::Adaptor adaptor,
+    ConversionPatternRewriter &rewriter) const
+{
+    auto loc = op.getLoc();
+    Value shift = ensureU256(rewriter, loc, adaptor.getRhs());
+    Value value = ensureU256(rewriter, loc, adaptor.getLhs());
+    auto u256Type = sir::U256Type::get(op.getContext());
+    auto intType = llvm::dyn_cast<ora::IntegerType>(op.getLhs().getType());
+    Value shifted = (intType && intType.getIsSigned())
+        ? rewriter.create<sir::SarOp>(loc, u256Type, shift, value).getResult()
+        : rewriter.create<sir::ShrOp>(loc, u256Type, shift, value).getResult();
+    auto *typeConverter = getTypeConverter();
+    if (!typeConverter) return rewriter.notifyMatchFailure(op, "missing type converter");
+    auto resultType = typeConverter->convertType(op.getResult().getType());
+    if (!resultType) return rewriter.notifyMatchFailure(op, "unable to convert shr_wrapping result type");
+    if (resultType == u256Type) rewriter.replaceOp(op, shifted);
+    else rewriter.replaceOp(op, rewriter.create<sir::BitcastOp>(loc, resultType, shifted).getResult());
     return success();
 }
 

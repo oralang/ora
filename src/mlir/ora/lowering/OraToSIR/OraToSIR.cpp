@@ -806,6 +806,8 @@ public:
         {
             patterns.add<ConvertArithAddIOp>(typeConverter, ctx);
             patterns.add<ConvertAddWrappingOp>(typeConverter, ctx);
+            patterns.add<ConvertSubWrappingOp>(typeConverter, ctx);
+            patterns.add<ConvertMulWrappingOp>(typeConverter, ctx);
             patterns.add<ConvertArithSubIOp>(typeConverter, ctx);
             patterns.add<ConvertArithMulIOp>(typeConverter, ctx);
             patterns.add<ConvertArithDivUIOp>(typeConverter, ctx);
@@ -816,8 +818,10 @@ public:
             patterns.add<ConvertArithOrIOp>(typeConverter, ctx);
             patterns.add<ConvertArithXOrIOp>(typeConverter, ctx);
             patterns.add<ConvertArithShlIOp>(typeConverter, ctx);
+            patterns.add<ConvertShlWrappingOp>(typeConverter, ctx);
             patterns.add<ConvertArithShrUIOp>(typeConverter, ctx);
             patterns.add<ConvertArithShrSIOp>(typeConverter, ctx);
+            patterns.add<ConvertShrWrappingOp>(typeConverter, ctx);
             patterns.add<ConvertArithSelectOp>(typeConverter, ctx);
             patterns.add<ConvertArithExtUIOp>(typeConverter, ctx);
             patterns.add<ConvertArithIndexCastUIOp>(typeConverter, ctx);
@@ -1007,7 +1011,7 @@ public:
                 return true;
             });
 
-        target.addIllegalOp<ora::AddOp, ora::AddWrappingOp, ora::SubOp, ora::MulOp, ora::DivOp, ora::RemOp, ora::MapGetOp, ora::MapStoreOp>();
+        target.addIllegalOp<ora::AddOp, ora::AddWrappingOp, ora::SubWrappingOp, ora::MulWrappingOp, ora::ShlWrappingOp, ora::ShrWrappingOp, ora::SubOp, ora::MulOp, ora::DivOp, ora::RemOp, ora::MapGetOp, ora::MapStoreOp>();
         target.addIllegalOp<ora::GlobalOp>();
         target.addLegalOp<mlir::UnrealizedConversionCastOp>();
 
@@ -1348,6 +1352,8 @@ public:
             phase4Patterns.add<ConvertArithCmpIOp>(typeConverter, ctx);
             phase4Patterns.add<ConvertArithAddIOp>(typeConverter, ctx);
             phase4Patterns.add<ConvertAddWrappingOp>(typeConverter, ctx);
+            phase4Patterns.add<ConvertSubWrappingOp>(typeConverter, ctx);
+            phase4Patterns.add<ConvertMulWrappingOp>(typeConverter, ctx);
             phase4Patterns.add<ConvertArithSubIOp>(typeConverter, ctx);
             phase4Patterns.add<ConvertArithMulIOp>(typeConverter, ctx);
             phase4Patterns.add<ConvertArithDivUIOp>(typeConverter, ctx);
@@ -1358,8 +1364,10 @@ public:
             phase4Patterns.add<ConvertArithOrIOp>(typeConverter, ctx);
             phase4Patterns.add<ConvertArithXOrIOp>(typeConverter, ctx);
             phase4Patterns.add<ConvertArithShlIOp>(typeConverter, ctx);
+            phase4Patterns.add<ConvertShlWrappingOp>(typeConverter, ctx);
             phase4Patterns.add<ConvertArithShrUIOp>(typeConverter, ctx);
             phase4Patterns.add<ConvertArithShrSIOp>(typeConverter, ctx);
+            phase4Patterns.add<ConvertShrWrappingOp>(typeConverter, ctx);
             phase4Patterns.add<ConvertArithSelectOp>(typeConverter, ctx);
             phase4Patterns.add<ConvertArithExtUIOp>(typeConverter, ctx);
             phase4Patterns.add<ConvertArithIndexCastUIOp>(typeConverter, ctx);

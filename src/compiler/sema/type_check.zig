@@ -586,8 +586,8 @@ const TypeChecker = struct {
     fn binaryResultType(self: *const TypeChecker, op: ast.BinaryOp, lhs_type: Type, rhs_type: Type) Type {
         _ = self;
         return switch (op) {
-            .add, .wrapping_add, .sub, .mul, .div, .mod => arithmeticResultType(lhs_type, rhs_type),
-            .bit_and, .bit_or, .bit_xor, .shl, .shr => bitwiseResultType(lhs_type, rhs_type),
+            .add, .wrapping_add, .sub, .wrapping_sub, .mul, .wrapping_mul, .div, .mod, .wrapping_pow => arithmeticResultType(lhs_type, rhs_type),
+            .bit_and, .bit_or, .bit_xor, .shl, .wrapping_shl, .shr, .wrapping_shr => bitwiseResultType(lhs_type, rhs_type),
             .and_and, .or_or => if (lhs_type.kind() == .bool and rhs_type.kind() == .bool) .{ .bool = {} } else .{ .unknown = {} },
             .eq, .ne => if (typesComparable(lhs_type, rhs_type)) .{ .bool = {} } else .{ .unknown = {} },
             .lt, .le, .gt, .ge => if (orderedTypesComparable(lhs_type, rhs_type)) .{ .bool = {} } else .{ .unknown = {} },
@@ -666,7 +666,7 @@ const TypeChecker = struct {
 
     fn hasInvalidConstantShiftAmount(self: *TypeChecker, expr_id: ast.ExprId, op: ast.BinaryOp, lhs_type: Type, rhs_expr_id: ast.ExprId) !bool {
         switch (op) {
-            .shl, .shr => {},
+            .shl, .wrapping_shl, .shr, .wrapping_shr => {},
             else => return false,
         }
         if (lhs_type.kind() != .integer) return false;
@@ -889,9 +889,12 @@ fn binaryOpName(op: ast.BinaryOp) []const u8 {
         .add => "+",
         .wrapping_add => "+%",
         .sub => "-",
+        .wrapping_sub => "-%",
         .mul => "*",
+        .wrapping_mul => "*%",
         .div => "/",
         .mod => "%",
+        .wrapping_pow => "**%",
         .eq => "==",
         .ne => "!=",
         .lt => "<",
@@ -904,7 +907,9 @@ fn binaryOpName(op: ast.BinaryOp) []const u8 {
         .bit_or => "|",
         .bit_xor => "^",
         .shl => "<<",
+        .wrapping_shl => "<<%",
         .shr => ">>",
+        .wrapping_shr => ">>%",
     };
 }
 

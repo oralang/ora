@@ -1707,9 +1707,12 @@ fn mapBinaryOp(kind: syntax.TokenKind) ?BinaryOp {
         .Plus => .add,
         .PlusPercent => .wrapping_add,
         .Minus => .sub,
+        .MinusPercent => .wrapping_sub,
         .Star => .mul,
+        .StarPercent => .wrapping_mul,
         .Slash => .div,
         .Percent => .mod,
+        .StarStarPercent => .wrapping_pow,
         .EqualEqual => .eq,
         .BangEqual => .ne,
         .Less => .lt,
@@ -1722,7 +1725,9 @@ fn mapBinaryOp(kind: syntax.TokenKind) ?BinaryOp {
         .Pipe => .bit_or,
         .Caret => .bit_xor,
         .LessLess => .shl,
+        .LessLessPercent => .wrapping_shl,
         .GreaterGreater => .shr,
+        .GreaterGreaterPercent => .wrapping_shr,
         else => null,
     };
 }

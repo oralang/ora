@@ -2653,6 +2653,30 @@ test "compiler lowers wrapping add through real wrapping op" {
     try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "\"ora.add_wrapping\""));
 }
 
+test "compiler lowers remaining wrapping ops through real wrapping ops" {
+    const source_text =
+        \\pub fn wrap_all(a: u256, b: u256, c: u256) -> u256 {
+        \\    let s1 = a -% b;
+        \\    let s2 = a *% b;
+        \\    let s3 = a <<% c;
+        \\    let s4 = a >>% c;
+        \\    return s1 +% s2 +% s3 +% s4;
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    const hir_text = try hir_result.renderText(testing.allocator);
+    defer testing.allocator.free(hir_text);
+
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.sub_wrapping"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.mul_wrapping"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.shl_wrapping"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.shr_wrapping"));
+}
+
 test "compiler rethreads nested map assignment to outer map" {
     const source_text =
         \\contract Test {

@@ -17,9 +17,12 @@ pub const BinaryOp = enum {
     add,
     wrapping_add,
     sub,
+    wrapping_sub,
     mul,
+    wrapping_mul,
     div,
     mod,
+    wrapping_pow,
     eq,
     ne,
     lt,
@@ -32,7 +35,9 @@ pub const BinaryOp = enum {
     bit_or,
     bit_xor,
     shl,
+    wrapping_shl,
     shr,
+    wrapping_shr,
 };
 pub const AssignmentOp = enum { assign, add_assign, sub_assign, mul_assign, div_assign, mod_assign };
 pub const Quantifier = enum { forall, exists };

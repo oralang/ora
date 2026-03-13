@@ -2678,6 +2678,48 @@ MlirOperation oraAddWrappingOpCreate(MlirContext ctx, MlirLocation loc, MlirValu
     }
 }
 
+MlirOperation oraSubWrappingOpCreate(MlirContext ctx, MlirLocation loc, MlirValue lhs, MlirValue rhs, MlirType resultType)
+{
+    try
+    {
+        MLIRContext *context = unwrap(ctx);
+        Location location = unwrap(loc);
+        Value lhsVal = unwrap(lhs);
+        Value rhsVal = unwrap(rhs);
+        Type resultTy = unwrap(resultType);
+
+        OpBuilder builder(context);
+        auto op = builder.create<ora::SubWrappingOp>(location, resultTy, lhsVal, rhsVal);
+        op->setAttr("gas_cost", builder.getI64IntegerAttr(3));
+        return wrap(op.getOperation());
+    }
+    catch (...)
+    {
+        return {nullptr};
+    }
+}
+
+MlirOperation oraMulWrappingOpCreate(MlirContext ctx, MlirLocation loc, MlirValue lhs, MlirValue rhs, MlirType resultType)
+{
+    try
+    {
+        MLIRContext *context = unwrap(ctx);
+        Location location = unwrap(loc);
+        Value lhsVal = unwrap(lhs);
+        Value rhsVal = unwrap(rhs);
+        Type resultTy = unwrap(resultType);
+
+        OpBuilder builder(context);
+        auto op = builder.create<ora::MulWrappingOp>(location, resultTy, lhsVal, rhsVal);
+        op->setAttr("gas_cost", builder.getI64IntegerAttr(5));
+        return wrap(op.getOperation());
+    }
+    catch (...)
+    {
+        return {nullptr};
+    }
+}
+
 MlirOperation oraArithSubIOpCreate(MlirContext ctx, MlirLocation loc, MlirValue lhs, MlirValue rhs)
 {
     try
@@ -2880,6 +2922,27 @@ MlirOperation oraArithShlIOpCreate(MlirContext ctx, MlirLocation loc, MlirValue 
     }
 }
 
+MlirOperation oraShlWrappingOpCreate(MlirContext ctx, MlirLocation loc, MlirValue lhs, MlirValue rhs, MlirType resultType)
+{
+    try
+    {
+        MLIRContext *context = unwrap(ctx);
+        Location location = unwrap(loc);
+        Value lhsVal = unwrap(lhs);
+        Value rhsVal = unwrap(rhs);
+        Type resultTy = unwrap(resultType);
+
+        OpBuilder builder(context);
+        auto op = builder.create<ora::ShlWrappingOp>(location, resultTy, lhsVal, rhsVal);
+        op->setAttr("gas_cost", builder.getI64IntegerAttr(3));
+        return wrap(op.getOperation());
+    }
+    catch (...)
+    {
+        return {nullptr};
+    }
+}
+
 MlirOperation oraArithShrUIOpCreate(MlirContext ctx, MlirLocation loc, MlirValue lhs, MlirValue rhs)
 {
     try
@@ -2910,6 +2973,27 @@ MlirOperation oraArithShrSIOpCreate(MlirContext ctx, MlirLocation loc, MlirValue
 
         OpBuilder builder(context);
         auto op = builder.create<arith::ShRSIOp>(location, lhsVal, rhsVal);
+        return wrap(op.getOperation());
+    }
+    catch (...)
+    {
+        return {nullptr};
+    }
+}
+
+MlirOperation oraShrWrappingOpCreate(MlirContext ctx, MlirLocation loc, MlirValue lhs, MlirValue rhs, MlirType resultType)
+{
+    try
+    {
+        MLIRContext *context = unwrap(ctx);
+        Location location = unwrap(loc);
+        Value lhsVal = unwrap(lhs);
+        Value rhsVal = unwrap(rhs);
+        Type resultTy = unwrap(resultType);
+
+        OpBuilder builder(context);
+        auto op = builder.create<ora::ShrWrappingOp>(location, resultTy, lhsVal, rhsVal);
+        op->setAttr("gas_cost", builder.getI64IntegerAttr(3));
         return wrap(op.getOperation());
     }
     catch (...)

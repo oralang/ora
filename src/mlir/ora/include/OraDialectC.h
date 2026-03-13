@@ -563,6 +563,18 @@ extern "C"
         MlirValue lhs,
         MlirValue rhs,
         MlirType resultType);
+    MLIR_CAPI_EXPORTED MlirOperation oraSubWrappingOpCreate(
+        MlirContext ctx,
+        MlirLocation loc,
+        MlirValue lhs,
+        MlirValue rhs,
+        MlirType resultType);
+    MLIR_CAPI_EXPORTED MlirOperation oraMulWrappingOpCreate(
+        MlirContext ctx,
+        MlirLocation loc,
+        MlirValue lhs,
+        MlirValue rhs,
+        MlirType resultType);
 
     /// Create an arith.subi operation
     MLIR_CAPI_EXPORTED MlirOperation oraArithSubIOpCreate(
@@ -633,6 +645,12 @@ extern "C"
         MlirLocation loc,
         MlirValue lhs,
         MlirValue rhs);
+    MLIR_CAPI_EXPORTED MlirOperation oraShlWrappingOpCreate(
+        MlirContext ctx,
+        MlirLocation loc,
+        MlirValue lhs,
+        MlirValue rhs,
+        MlirType resultType);
 
     /// Create an arith.shrui operation
     MLIR_CAPI_EXPORTED MlirOperation oraArithShrUIOpCreate(
@@ -647,6 +665,12 @@ extern "C"
         MlirLocation loc,
         MlirValue lhs,
         MlirValue rhs);
+    MLIR_CAPI_EXPORTED MlirOperation oraShrWrappingOpCreate(
+        MlirContext ctx,
+        MlirLocation loc,
+        MlirValue lhs,
+        MlirValue rhs,
+        MlirType resultType);
 
     /// Create an arith.bitcast operation
     MLIR_CAPI_EXPORTED MlirOperation oraArithBitcastOpCreate(

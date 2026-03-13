@@ -448,6 +448,46 @@ def Ora_AddWrappingOp : Ora_PureOp<"add_wrapping", [
   let assemblyFormat = "$lhs `,` $rhs attr-dict `:` type($lhs) `,` type($rhs) `->` type($result)";
 }
 
+def Ora_SubWrappingOp : Ora_PureOp<"sub_wrapping", [
+    AllTypesMatch<["lhs", "rhs", "result"]>
+  ]> {
+  let summary = "Wrapping subtract operation";
+  let description = [{Subtracts two Ora integer values with modular wrapping semantics.}];
+  let arguments = (ins Ora_IntegerValueType:$lhs, Ora_IntegerValueType:$rhs);
+  let results = (outs Ora_IntegerValueType:$result);
+  let assemblyFormat = "$lhs `,` $rhs attr-dict `:` type($lhs) `,` type($rhs) `->` type($result)";
+}
+
+def Ora_MulWrappingOp : Ora_PureOp<"mul_wrapping", [
+    AllTypesMatch<["lhs", "rhs", "result"]>
+  ]> {
+  let summary = "Wrapping multiply operation";
+  let description = [{Multiplies two Ora integer values with modular wrapping semantics.}];
+  let arguments = (ins Ora_IntegerValueType:$lhs, Ora_IntegerValueType:$rhs);
+  let results = (outs Ora_IntegerValueType:$result);
+  let assemblyFormat = "$lhs `,` $rhs attr-dict `:` type($lhs) `,` type($rhs) `->` type($result)";
+}
+
+def Ora_ShlWrappingOp : Ora_PureOp<"shl_wrapping", [
+    AllTypesMatch<["lhs", "rhs", "result"]>
+  ]> {
+  let summary = "Wrapping shift-left operation";
+  let description = [{Shifts an Ora integer left with modular wrapping semantics.}];
+  let arguments = (ins Ora_IntegerValueType:$lhs, Ora_IntegerValueType:$rhs);
+  let results = (outs Ora_IntegerValueType:$result);
+  let assemblyFormat = "$lhs `,` $rhs attr-dict `:` type($lhs) `,` type($rhs) `->` type($result)";
+}
+
+def Ora_ShrWrappingOp : Ora_PureOp<"shr_wrapping", [
+    AllTypesMatch<["lhs", "rhs", "result"]>
+  ]> {
+  let summary = "Wrapping shift-right operation";
+  let description = [{Shifts an Ora integer right with wrapping semantics, preserving signedness from the Ora type.}];
+  let arguments = (ins Ora_IntegerValueType:$lhs, Ora_IntegerValueType:$rhs);
+  let results = (outs Ora_IntegerValueType:$result);
+  let assemblyFormat = "$lhs `,` $rhs attr-dict `:` type($lhs) `,` type($rhs) `->` type($result)";
+}
+
 def Ora_SubOp : Ora_PureOp<"sub", [
     AllTypesMatch<["lhs", "rhs", "result"]>,
     DeclareOpInterfaceMethods<OpAsmOpInterface, ["getAsmResultNames"]>

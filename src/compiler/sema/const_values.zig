@@ -36,10 +36,11 @@ pub fn evalBinary(allocator: std.mem.Allocator, op: ast.BinaryOp, lhs: ?ConstVal
    const right = rhs.?;
     return switch (op) {
         .add, .wrapping_add => try evalIntInt(allocator, left, right, BigInt.add),
-        .sub => try evalIntInt(allocator, left, right, BigInt.sub),
-        .mul => try evalIntInt(allocator, left, right, BigInt.mul),
+        .sub, .wrapping_sub => try evalIntInt(allocator, left, right, BigInt.sub),
+        .mul, .wrapping_mul => try evalIntInt(allocator, left, right, BigInt.mul),
         .div => try evalIntDiv(allocator, left, right),
         .mod => try evalIntMod(allocator, left, right),
+        .wrapping_pow => try evalIntPow(allocator, left, right),
         .eq => .{ .boolean = constEquals(left, right) },
         .ne => .{ .boolean = !constEquals(left, right) },
         .lt => evalCompare(left, right, .lt),
@@ -59,8 +60,8 @@ pub fn evalBinary(allocator: std.mem.Allocator, op: ast.BinaryOp, lhs: ?ConstVal
         .bit_and => try evalIntInt(allocator, left, right, BigInt.bitAnd),
         .bit_or => try evalIntInt(allocator, left, right, BigInt.bitOr),
         .bit_xor => try evalIntInt(allocator, left, right, BigInt.bitXor),
-        .shl => try evalShift(allocator, left, right, true),
-        .shr => try evalShift(allocator, left, right, false),
+        .shl, .wrapping_shl => try evalShift(allocator, left, right, true),
+        .shr, .wrapping_shr => try evalShift(allocator, left, right, false),
     };
 }
 
@@ -149,6 +150,26 @@ fn evalShift(allocator: std.mem.Allocator, lhs: ConstValue, rhs: ConstValue, com
                     try BigInt.shiftLeft(&result, &a, amount);
                 } else {
                     try BigInt.shiftRight(&result, &a, amount);
+                }
+                break :blk .{ .integer = result };
+            },
+            else => null,
+        },
+        else => null,
+    };
+}
+
+fn evalIntPow(allocator: std.mem.Allocator, lhs: ConstValue, rhs: ConstValue) !?ConstValue {
+    return switch (lhs) {
+        .integer => |base| switch (rhs) {
+            .integer => |exp| blk: {
+                const amount = positiveShiftAmount(exp) orelse break :blk null;
+                var result = try BigInt.initSet(allocator, 1);
+                var i: usize = 0;
+                while (i < amount) : (i += 1) {
+                    var next = try BigInt.init(allocator);
+                    try BigInt.mul(&next, &result, &base);
+                    result = next;
                 }
                 break :blk .{ .integer = result };
             },

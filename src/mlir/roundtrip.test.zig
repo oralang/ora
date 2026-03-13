@@ -376,6 +376,29 @@ test "mlir round-trips ora.add_wrapping assembly" {
     });
 }
 
+test "mlir round-trips remaining wrapping arithmetic assembly" {
+    const text =
+        \\module {
+        \\  func.func @wrap(%a: !ora.int<256, false>, %b: !ora.int<256, false>) -> !ora.int<256, false> {
+        \\    %0 = ora.sub_wrapping %a, %b : !ora.int<256, false>, !ora.int<256, false> -> !ora.int<256, false>
+        \\    %1 = ora.mul_wrapping %a, %b : !ora.int<256, false>, !ora.int<256, false> -> !ora.int<256, false>
+        \\    %2 = ora.shl_wrapping %a, %b : !ora.int<256, false>, !ora.int<256, false> -> !ora.int<256, false>
+        \\    %3 = ora.shr_wrapping %a, %b : !ora.int<256, false>, !ora.int<256, false> -> !ora.int<256, false>
+        \\    %4 = ora.power %a, %b : !ora.int<256, false>, !ora.int<256, false> -> !ora.int<256, false>
+        \\    func.return %4 : !ora.int<256, false>
+        \\  }
+        \\}
+    ;
+
+    try expectRoundTripForMlirText(text, &.{
+        "ora.sub_wrapping",
+        "ora.mul_wrapping",
+        "ora.shl_wrapping",
+        "ora.shr_wrapping",
+        "ora.power",
+    });
+}
+
 test "mlir round-trips parsed single-case ora.switch_expr literal assembly" {
     const text =
         \\module {

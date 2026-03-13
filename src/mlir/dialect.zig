@@ -1253,6 +1253,30 @@ pub const OraDialect = struct {
         return op;
     }
 
+    pub fn createSubWrapping(
+        self: *OraDialect,
+        lhs: c.MlirValue,
+        rhs: c.MlirValue,
+        result_type: c.MlirType,
+        loc: c.MlirLocation,
+    ) c.MlirOperation {
+        const op = c.oraSubWrappingOpCreate(self.ctx, loc, lhs, rhs, result_type);
+        if (op.ptr == null) @panic("Failed to create ora.sub_wrapping operation");
+        return op;
+    }
+
+    pub fn createMulWrapping(
+        self: *OraDialect,
+        lhs: c.MlirValue,
+        rhs: c.MlirValue,
+        result_type: c.MlirType,
+        loc: c.MlirLocation,
+    ) c.MlirOperation {
+        const op = c.oraMulWrappingOpCreate(self.ctx, loc, lhs, rhs, result_type);
+        if (op.ptr == null) @panic("Failed to create ora.mul_wrapping operation");
+        return op;
+    }
+
     /// Create arith.subi operation
     pub fn createArithSubi(
         self: *OraDialect,
@@ -1282,6 +1306,30 @@ pub const OraDialect = struct {
         if (op.ptr == null) {
             @panic("Failed to create arith.muli operation");
         }
+        return op;
+    }
+
+    pub fn createShlWrapping(
+        self: *OraDialect,
+        lhs: c.MlirValue,
+        rhs: c.MlirValue,
+        result_type: c.MlirType,
+        loc: c.MlirLocation,
+    ) c.MlirOperation {
+        const op = c.oraShlWrappingOpCreate(self.ctx, loc, lhs, rhs, result_type);
+        if (op.ptr == null) @panic("Failed to create ora.shl_wrapping operation");
+        return op;
+    }
+
+    pub fn createShrWrapping(
+        self: *OraDialect,
+        lhs: c.MlirValue,
+        rhs: c.MlirValue,
+        result_type: c.MlirType,
+        loc: c.MlirLocation,
+    ) c.MlirOperation {
+        const op = c.oraShrWrappingOpCreate(self.ctx, loc, lhs, rhs, result_type);
+        if (op.ptr == null) @panic("Failed to create ora.shr_wrapping operation");
         return op;
     }
 
