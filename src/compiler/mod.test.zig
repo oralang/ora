@@ -2818,6 +2818,33 @@ test "compiler lowers power and wrapping compound assignment" {
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.mul_wrapping"));
 }
 
+test "compiler lowers checked arithmetic compound assignment" {
+    const source_text =
+        \\pub fn update_checked(input: u256, delta: u256, divisor: u256) -> u256 {
+        \\    var value = input;
+        \\    value += delta;
+        \\    value -= delta;
+        \\    value *= delta;
+        \\    value /= divisor;
+        \\    value %= divisor;
+        \\    return value;
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    const hir_text = try hir_result.renderText(testing.allocator);
+    defer testing.allocator.free(hir_text);
+
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "arith.addi"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "arith.subi"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "arith.muli"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "arith.divsi"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "arith.remsi"));
+}
+
 test "compiler rethreads nested map assignment to outer map" {
     const source_text =
         \\contract Test {

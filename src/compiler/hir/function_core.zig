@@ -155,6 +155,13 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 .Assign => |assign| {
                     const value = switch (assign.op) {
                         .assign => try self.lowerExpr(assign.value, locals),
+                        .add_assign => blk: {
+                            const lhs = try @This().lowerPatternValue(self, assign.target, locals);
+                            const rhs = try self.lowerExpr(assign.value, locals);
+                            const op = mlir.oraArithAddIOpCreate(self.parent.context, self.parent.location(assign.range), lhs, rhs);
+                            if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
+                            break :blk appendValueOp(self.block, op);
+                        },
                         .wrapping_add_assign => blk: {
                             const lhs = try @This().lowerPatternValue(self, assign.target, locals);
                             const rhs = try self.lowerExpr(assign.value, locals);
@@ -169,6 +176,13 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                             if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
                             break :blk appendValueOp(self.block, op);
                         },
+                        .sub_assign => blk: {
+                            const lhs = try @This().lowerPatternValue(self, assign.target, locals);
+                            const rhs = try self.lowerExpr(assign.value, locals);
+                            const op = mlir.oraArithSubIOpCreate(self.parent.context, self.parent.location(assign.range), lhs, rhs);
+                            if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
+                            break :blk appendValueOp(self.block, op);
+                        },
                         .wrapping_sub_assign => blk: {
                             const lhs = try @This().lowerPatternValue(self, assign.target, locals);
                             const rhs = try self.lowerExpr(assign.value, locals);
@@ -180,6 +194,13 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                             const lhs = try @This().lowerPatternValue(self, assign.target, locals);
                             const rhs = try self.lowerExpr(assign.value, locals);
                             const op = mlir.oraArithOrIOpCreate(self.parent.context, self.parent.location(assign.range), lhs, rhs);
+                            if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
+                            break :blk appendValueOp(self.block, op);
+                        },
+                        .mul_assign => blk: {
+                            const lhs = try @This().lowerPatternValue(self, assign.target, locals);
+                            const rhs = try self.lowerExpr(assign.value, locals);
+                            const op = mlir.oraArithMulIOpCreate(self.parent.context, self.parent.location(assign.range), lhs, rhs);
                             if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
                             break :blk appendValueOp(self.block, op);
                         },
@@ -216,7 +237,20 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                             const rhs = try self.lowerExpr(assign.value, locals);
                             break :blk try @This().lowerCheckedPower(self, lhs, rhs, mlir.oraValueGetType(lhs), assign.range);
                         },
-                        else => return error.UnsupportedAssignmentOperator,
+                        .div_assign => blk: {
+                            const lhs = try @This().lowerPatternValue(self, assign.target, locals);
+                            const rhs = try self.lowerExpr(assign.value, locals);
+                            const op = mlir.oraArithDivSIOpCreate(self.parent.context, self.parent.location(assign.range), lhs, rhs);
+                            if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
+                            break :blk appendValueOp(self.block, op);
+                        },
+                        .mod_assign => blk: {
+                            const lhs = try @This().lowerPatternValue(self, assign.target, locals);
+                            const rhs = try self.lowerExpr(assign.value, locals);
+                            const op = mlir.oraArithRemSIOpCreate(self.parent.context, self.parent.location(assign.range), lhs, rhs);
+                            if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
+                            break :blk appendValueOp(self.block, op);
+                        },
                     };
                     try self.storePattern(assign.target, value, locals);
                     return false;
