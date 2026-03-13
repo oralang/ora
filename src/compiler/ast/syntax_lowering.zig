@@ -1712,6 +1712,7 @@ fn mapBinaryOp(kind: syntax.TokenKind) ?BinaryOp {
         .StarPercent => .wrapping_mul,
         .Slash => .div,
         .Percent => .mod,
+        .StarStar => .pow,
         .StarStarPercent => .wrapping_pow,
         .EqualEqual => .eq,
         .BangEqual => .ne,

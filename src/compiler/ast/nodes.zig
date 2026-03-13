@@ -22,6 +22,7 @@ pub const BinaryOp = enum {
     wrapping_mul,
     div,
     mod,
+    pow,
     wrapping_pow,
     eq,
     ne,

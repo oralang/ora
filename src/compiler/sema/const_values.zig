@@ -40,7 +40,7 @@ pub fn evalBinary(allocator: std.mem.Allocator, op: ast.BinaryOp, lhs: ?ConstVal
         .mul, .wrapping_mul => try evalIntInt(allocator, left, right, BigInt.mul),
         .div => try evalIntDiv(allocator, left, right),
         .mod => try evalIntMod(allocator, left, right),
-        .wrapping_pow => try evalIntPow(allocator, left, right),
+        .pow, .wrapping_pow => try evalIntPow(allocator, left, right),
         .eq => .{ .boolean = constEquals(left, right) },
         .ne => .{ .boolean = !constEquals(left, right) },
         .lt => evalCompare(left, right, .lt),
