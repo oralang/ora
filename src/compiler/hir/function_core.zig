@@ -17,6 +17,7 @@ const boolType = support.boolType;
 const clearKnownTerminator = support.clearKnownTerminator;
 const createIntegerConstant = support.createIntegerConstant;
 const defaultIntegerType = support.defaultIntegerType;
+const namedStringAttr = support.namedStringAttr;
 const namedBoolAttr = support.namedBoolAttr;
 const nullStringRef = support.nullStringRef;
 const strRef = support.strRef;
@@ -42,6 +43,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 .locals = LocalEnv.init(parent.allocator),
                 .return_type = return_type,
                 .in_try_block = false,
+                .in_ghost_context = function.is_ghost,
             };
 
             for (function.parameters, 0..) |parameter, index| {
@@ -60,6 +62,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 .locals = LocalEnv.init(parent.allocator),
                 .return_type = null,
                 .in_try_block = false,
+                .in_ghost_context = false,
             };
         }
 
@@ -288,6 +291,13 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                     const message = if (assert_stmt.message) |msg| strRef(msg) else nullStringRef();
                     const op = mlir.oraAssertOpCreate(self.parent.context, self.parent.location(assert_stmt.range), condition, message);
                     if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
+                    if (self.in_ghost_context) {
+                        mlir.oraOperationSetAttributeByName(op, strRef("ora.ghost"), namedBoolAttr(self.parent.context, "ora.ghost", true).attribute);
+                        mlir.oraOperationSetAttributeByName(op, strRef("ora.verification"), namedBoolAttr(self.parent.context, "ora.verification", true).attribute);
+                        mlir.oraOperationSetAttributeByName(op, strRef("ora.formal"), namedBoolAttr(self.parent.context, "ora.formal", true).attribute);
+                        mlir.oraOperationSetAttributeByName(op, strRef("ora.verification_type"), namedStringAttr(self.parent.context, "ora.verification_type", "assert").attribute);
+                        mlir.oraOperationSetAttributeByName(op, strRef("ora.verification_context"), namedStringAttr(self.parent.context, "ora.verification_context", "ghost_assertion").attribute);
+                    }
                     appendOp(self.block, op);
                     return false;
                 },

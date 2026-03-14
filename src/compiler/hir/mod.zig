@@ -320,6 +320,7 @@ const FunctionLowerer = struct {
     return_type: ?mlir.MlirType,
     current_return_value: ?mlir.MlirValue = null,
     in_try_block: bool = false,
+    in_ghost_context: bool = false,
     loop_context: ?*const support.LoopContext = null,
     switch_context: ?*const support.SwitchContext = null,
 

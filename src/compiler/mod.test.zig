@@ -4462,6 +4462,37 @@ test "compiler lowers ghost items into ghost AST nodes" {
     try testing.expect(ast_file.statement(ghost_body.statements[0]).* == .VariableDecl);
 }
 
+test "compiler lowers ghost declarations into verification HIR" {
+    const source_text =
+        \\contract Spec {
+        \\    ghost const LIMIT: u256 = 1;
+        \\    ghost storage var hidden: u256;
+        \\    ghost fn helper() -> u256 {
+        \\        assert(true, "fn");
+        \\        return LIMIT;
+        \\    }
+        \\    ghost {
+        \\        assert(hidden == LIMIT, "block");
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    const hir_text = try hir_result.renderText(testing.allocator);
+    defer testing.allocator.free(hir_text);
+
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.ghost = true"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.formal = true"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ghost_function"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ghost_variable"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ghost_constant"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ghost_assertion"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.assert"));
+}
+
 test "compiler lowers real HIR if and try regions" {
     const source_text =
         \\log Ping(value: u256);

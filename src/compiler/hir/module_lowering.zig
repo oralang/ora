@@ -38,7 +38,7 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
                 .Enum => |enum_item| try self.lowerEnumDecl(item_id, enum_item, parent_block),
                 .LogDecl => |log_decl| try self.lowerLogDecl(item_id, log_decl, parent_block),
                 .ErrorDecl => |error_decl| try self.lowerErrorDecl(item_id, error_decl, parent_block),
-                .GhostBlock => {},
+                .GhostBlock => |ghost_block| try @This().lowerGhostBlock(self, ghost_block, parent_block),
                 .Field => |field| try self.lowerField(item_id, field, parent_block),
                 .Constant => |constant| try self.lowerConstant(item_id, constant, parent_block),
                 .Error => {},
@@ -117,6 +117,7 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
                 param_types.items.len,
             );
             if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
+            if (function.is_ghost) @This().attachGhostAttrs(self, op, "ghost_function");
 
             for (function.parameters, 0..) |parameter, index| {
                 try self.attachBitfieldParamMetadata(op, parameter.type_expr, @intCast(index));
@@ -143,6 +144,7 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
                     }
                     break :blk created;
                 } else try self.createNamedPlaceholderOp("ora.immutable_decl", field.name, field.range, ty);
+                if (field.is_ghost) @This().attachGhostAttrs(self, op, "ghost_variable");
 
                 if (field.type_expr) |type_expr| {
                     try self.attachBitfieldOpMetadata(op, type_expr);
@@ -178,6 +180,7 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
                 },
                 .none => try self.createNamedPlaceholderOp("ora.field_decl", field.name, field.range, ty),
             };
+            if (field.is_ghost) @This().attachGhostAttrs(self, op, "ghost_variable");
 
             if (field.type_expr) |type_expr| {
                 try self.attachBitfieldOpMetadata(op, type_expr);
@@ -198,6 +201,7 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
                 if (try @This().constValueAttr(self, value, result_type)) |value_attr| {
                     const created = mlir.oraConstOpCreate(self.context, self.location(constant.range), strRef(constant.name), value_attr, result_type);
                     if (!mlir.oraOperationIsNull(created)) {
+                        if (constant.is_ghost) @This().attachGhostAttrs(self, created, "ghost_constant");
                         appendOp(parent_block, created);
                         try self.appendItemHandle(item_id, .constant, constant.name, constant.range, created);
                         return;
@@ -259,8 +263,16 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
                 },
                 else => try self.createNamedPlaceholderOp("ora.constant_decl", constant.name, constant.range, result_type),
             };
+            if (constant.is_ghost) @This().attachGhostAttrs(self, op, "ghost_constant");
             appendOp(parent_block, op);
             try self.appendItemHandle(item_id, .constant, constant.name, constant.range, op);
+        }
+
+        pub fn lowerGhostBlock(self: *Lowerer, ghost_block: ast.GhostBlockItem, parent_block: mlir.MlirBlock) anyerror!void {
+            var function_lowerer = FunctionLowerer.initContractContext(self, parent_block);
+            function_lowerer.in_ghost_context = true;
+            var locals = try function_lowerer.cloneLocals(&function_lowerer.locals);
+            _ = try function_lowerer.lowerBody(ghost_block.body, &locals);
         }
 
         fn constValueAttr(self: *Lowerer, value: sema.ConstValue, result_type: mlir.MlirType) anyerror!?mlir.MlirAttribute {
@@ -486,6 +498,13 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
                 .location = .{ .file_id = self.file.file_id, .range = range },
                 .raw_operation = op,
             });
+        }
+
+        fn attachGhostAttrs(self: *Lowerer, op: mlir.MlirOperation, context: []const u8) void {
+            mlir.oraOperationSetAttributeByName(op, strRef("ora.ghost"), namedBoolAttr(self.context, "ora.ghost", true).attribute);
+            mlir.oraOperationSetAttributeByName(op, strRef("ora.verification"), namedBoolAttr(self.context, "ora.verification", true).attribute);
+            mlir.oraOperationSetAttributeByName(op, strRef("ora.formal"), namedBoolAttr(self.context, "ora.formal", true).attribute);
+            mlir.oraOperationSetAttributeByName(op, strRef("ora.verification_context"), namedStringAttr(self.context, "ora.verification_context", context).attribute);
         }
 
         fn collectContractLockedStorageRoots(self: *Lowerer, contract: ast.ContractItem) anyerror!std.StringHashMap(void) {
