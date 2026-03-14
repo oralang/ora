@@ -7,6 +7,7 @@ const model = @import("../compiler/sema/model.zig");
 const ConstEvalResult = model.ConstEvalResult;
 const ConstValue = model.ConstValue;
 const CtAggregate = comptime_mod.CtAggregate;
+const CtEnum = comptime_mod.CtEnum;
 const CtEnv = bridge.CtEnv;
 const CtValue = bridge.CtValue;
 const constEquals = bridge.constEquals;
@@ -283,6 +284,10 @@ const ConstEvaluator = struct {
                 break :blk CtValue{ .string_ref = heap_id };
             },
             .BoolLiteral => |literal| CtValue{ .boolean = literal.value },
+            .AddressLiteral => |literal| blk: {
+                const value = self.parseAddressLiteral(literal.text) orelse break :blk null;
+                break :blk CtValue{ .address = value };
+            },
             .BytesLiteral => |literal| blk: {
                 const bytes = try self.decodeHexBytesLiteral(literal.text);
                 const heap_id = try self.env.heap.allocBytes(bytes);
@@ -360,6 +365,12 @@ const ConstEvaluator = struct {
             },
             .Field => |field| blk: {
                 _ = try self.evalExpr(field.base);
+                switch (self.file.expression(field.base).*) {
+                    .Name => |name| {
+                        if (self.lookupNamedEnumVariant(name.name, field.name)) |enum_value| break :blk enum_value;
+                    },
+                    else => {},
+                }
                 const base = (try self.evalExprCtValue(field.base)) orelse break :blk null;
                 break :blk switch (base) {
                     .struct_ref => |heap_id| blk_field: {
@@ -379,6 +390,15 @@ const ConstEvaluator = struct {
                     else => null,
                 };
             },
+            .Binary => |binary| blk: {
+                const lhs = (try self.evalExprCtValue(binary.lhs)) orelse break :blk null;
+                const rhs = (try self.evalExprCtValue(binary.rhs)) orelse break :blk null;
+                break :blk switch (binary.op) {
+                    .eq => CtValue{ .boolean = self.ctValuesEqual(lhs, rhs) },
+                    .ne => CtValue{ .boolean = !self.ctValuesEqual(lhs, rhs) },
+                    else => null,
+                };
+            },
             else => null,
         };
     }
@@ -387,6 +407,52 @@ const ConstEvaluator = struct {
         const item_id = self.lookupNamedItem(type_name) orelse return null;
         if (self.file.item(item_id).* != .Struct) return null;
         return @intCast(item_id.index());
+    }
+
+    fn lookupNamedEnumVariant(self: *ConstEvaluator, enum_name: []const u8, variant_name: []const u8) ?CtValue {
+        const item_id = self.lookupNamedItem(enum_name) orelse return null;
+        const item = self.file.item(item_id).*;
+        if (item != .Enum) return null;
+        for (item.Enum.variants, 0..) |variant, idx| {
+            if (std.mem.eql(u8, variant.name, variant_name)) {
+                return CtValue{ .enum_val = CtEnum{
+                    .type_id = @intCast(item_id.index()),
+                    .variant_id = @intCast(idx),
+                    .payload = null,
+                } };
+            }
+        }
+        return null;
+    }
+
+    fn parseAddressLiteral(self: *ConstEvaluator, text: []const u8) ?u160 {
+        _ = self;
+        if (!std.mem.startsWith(u8, text, "0x")) return null;
+        return std.fmt.parseInt(u160, text[2..], 16) catch null;
+    }
+
+    fn ctValuesEqual(self: *ConstEvaluator, lhs: CtValue, rhs: CtValue) bool {
+        _ = self;
+        return switch (lhs) {
+            .integer => |value| switch (rhs) {
+                .integer => |other| value == other,
+                else => false,
+            },
+            .boolean => |value| switch (rhs) {
+                .boolean => |other| value == other,
+                else => false,
+            },
+            .address => |value| switch (rhs) {
+                .address => |other| value == other,
+                else => false,
+            },
+            .enum_val => |value| switch (rhs) {
+                .enum_val => |other| value.type_id == other.type_id and value.variant_id == other.variant_id and value.payload == other.payload,
+                else => false,
+            },
+            .void_val => rhs == .void_val,
+            else => false,
+        };
     }
 
     fn decodeHexBytesLiteral(self: *ConstEvaluator, text: []const u8) ![]u8 {
