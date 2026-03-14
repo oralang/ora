@@ -286,8 +286,10 @@ pub const TypeCheckResult = struct {
 pub const ConstEvalResult = struct {
     arena: std.heap.ArenaAllocator,
     values: []?ConstValue,
+    diagnostics: diagnostics.DiagnosticList,
 
     pub fn deinit(self: *ConstEvalResult) void {
+        self.diagnostics.deinit();
         self.arena.deinit();
     }
 };

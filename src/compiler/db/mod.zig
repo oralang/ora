@@ -264,6 +264,11 @@ pub const CompilerDb = struct {
         return slot.*.?;
     }
 
+    pub fn constEvalDiagnostics(self: *CompilerDb, module_id: source.ModuleId) !*const diagnostics.DiagnosticList {
+        const result = try self.constEval(module_id);
+        return &result.diagnostics;
+    }
+
     pub fn verificationFacts(self: *CompilerDb, module_id: source.ModuleId, key: sema.VerificationFactsKey) !*const sema.VerificationFactsResult {
         const cache = &self.verification_slots.items[module_id.index()];
         if (cache.lookup(key)) |cached| {

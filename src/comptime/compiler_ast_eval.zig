@@ -2,6 +2,7 @@ const std = @import("std");
 const ast = @import("../compiler/ast/mod.zig");
 const bridge = @import("compiler_const_bridge.zig");
 const comptime_mod = @import("mod.zig");
+const diagnostics = @import("../compiler/diagnostics/mod.zig");
 const stage_mod = @import("stage.zig");
 const model = @import("../compiler/sema/model.zig");
 const source = @import("../compiler/source/mod.zig");
@@ -38,6 +39,7 @@ pub fn constEval(allocator: std.mem.Allocator, file: *const ast.AstFile) !ConstE
     var result = ConstEvalResult{
         .arena = std.heap.ArenaAllocator.init(allocator),
         .values = &[_]?ConstValue{},
+        .diagnostics = diagnostics.DiagnosticList.init(allocator),
     };
     errdefer result.deinit();
 
@@ -56,13 +58,33 @@ pub fn constEval(allocator: std.mem.Allocator, file: *const ast.AstFile) !ConstE
         evaluator.visitItem(item_id);
     }
 
-    if (evaluator.last_error != null) {
-        // The current compiler-facing result shape has no diagnostics channel yet.
-        // Preserve the existing cache contract for now and keep the evaluated values.
+    if (evaluator.last_error) |ct_error| {
+        try appendCtDiagnostic(&result.diagnostics, file.file_id, ct_error);
     }
 
     result.values = values;
     return result;
+}
+
+fn appendCtDiagnostic(
+    list: *diagnostics.DiagnosticList,
+    file_id: source.FileId,
+    ct_error: error_mod.CtError,
+) !void {
+    var buffer: [256]u8 = undefined;
+    const message = if (ct_error.reason) |reason|
+        try std.fmt.bufPrint(&buffer, "{s}: {s}", .{ ct_error.message, reason })
+    else
+        ct_error.message;
+
+    const end = ct_error.span.byte_offset + ct_error.span.length;
+    try list.appendError(message, .{
+        .file_id = file_id,
+        .range = .{
+            .start = ct_error.span.byte_offset,
+            .end = end,
+        },
+    });
 }
 
 const ConstEvaluator = struct {

@@ -4301,6 +4301,36 @@ test "compiler const eval rejects runtime-only statements in called functions" {
     try testing.expectEqual(@as(?compiler.sema.ConstValue, null), consteval.values[ret_stmt.value.?.index()]);
 }
 
+test "compiler surfaces comptime stage diagnostics through db and typecheck" {
+    const source_text =
+        \\log Ping(value: u256);
+        \\
+        \\fn noisy(next: u256) -> u256 {
+        \\    log Ping(next);
+        \\    return next;
+        \\}
+        \\
+        \\pub fn run() -> u256 {
+        \\    return comptime {
+        \\        noisy(7);
+        \\    };
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const consteval_diags = try compilation.db.constEvalDiagnostics(compilation.root_module_id);
+    try testing.expectEqual(@as(usize, 1), consteval_diags.len());
+    try testing.expect(std.mem.containsAtLeast(u8, consteval_diags.items.items[0].message, 1, "runtime-only operation in comptime context"));
+    try testing.expect(std.mem.containsAtLeast(u8, consteval_diags.items.items[0].message, 1, "noisy"));
+
+    const module_typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    const typecheck_diags = &module_typecheck.diagnostics;
+    try testing.expect(typecheck_diags.len() >= 1);
+    try testing.expect(std.mem.containsAtLeast(u8, typecheck_diags.items.items[0].message, 1, "runtime-only operation in comptime context"));
+}
+
 test "compiler lowers ghost items into ghost AST nodes" {
     const source_text =
         \\contract Spec {

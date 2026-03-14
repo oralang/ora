@@ -91,6 +91,12 @@ pub const DiagnosticList = struct {
         try self.append(.Note, message, location);
     }
 
+    pub fn appendList(self: *DiagnosticList, other: *const DiagnosticList) !void {
+        for (other.items.items) |diag| {
+            try self.appendWithCode(diag.severity, diag.code, diag.message, diag.labels);
+        }
+    }
+
     pub fn isEmpty(self: *const DiagnosticList) bool {
         return self.items.items.len == 0;
     }

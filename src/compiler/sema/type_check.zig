@@ -91,6 +91,8 @@ pub fn typeCheck(
         .diagnostics = &result.diagnostics,
     };
 
+    try result.diagnostics.appendList(&const_eval.diagnostics);
+
     for (file.root_items) |item_id| {
         try typechecker.visitItem(item_id);
     }
