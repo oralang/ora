@@ -89,6 +89,24 @@ fn containsEffectSlot(items: []const compiler.sema.EffectSlot, needle: []const u
     return false;
 }
 
+fn containsKeyedEffectSlot(items: []const compiler.sema.EffectSlot, needle: []const u8, region: compiler.sema.Region, key_path: []const compiler.sema.KeySegment) bool {
+    for (items) |item| {
+        if (item.region != region) continue;
+        if (!std.mem.eql(u8, item.name, needle)) continue;
+        const item_path = item.key_path orelse continue;
+        if (item_path.len != key_path.len) continue;
+        var all_match = true;
+        for (item_path, key_path) |lhs, rhs| {
+            if (!std.meta.eql(lhs, rhs)) {
+                all_match = false;
+                break;
+            }
+        }
+        if (all_match) return true;
+    }
+    return false;
+}
+
 fn nthDescendantNodeOfKind(node: compiler.SyntaxNode, kind: compiler.syntax.SyntaxKind, ordinal: usize) ?compiler.SyntaxNode {
     var remaining = ordinal;
     return nthDescendantNodeOfKindInner(node, kind, &remaining);
@@ -1703,6 +1721,46 @@ test "compiler composes callee effects into caller summaries" {
     }
 }
 
+test "compiler tracks keyed map effects by parameter" {
+    const source_text =
+        \\contract Effects {
+        \\    storage balances: map<address, u256>;
+        \\
+        \\    pub fn read_balance(user: address) -> u256 {
+        \\        return balances[user];
+        \\    }
+        \\
+        \\    pub fn write_balance(user: address, value: u256) {
+        \\        balances[user] = value;
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const root_file_id = compilation.db.sources.module(compilation.root_module_id).file_id;
+    const ast_file = try compilation.db.astFile(root_file_id);
+    const typecheck = try compilation.db.typeCheck(compilation.root_module_id, .{ .item = ast_file.root_items[0] });
+    const item_index = try compilation.db.itemIndex(compilation.root_module_id);
+    const read_balance = item_index.lookup("read_balance").?;
+    const write_balance = item_index.lookup("write_balance").?;
+    const user_key = [_]compiler.sema.KeySegment{.{ .parameter = 0 }};
+
+    switch (typecheck.itemEffect(read_balance)) {
+        .reads => |effect| try testing.expect(containsKeyedEffectSlot(effect.slots, "balances", .storage, &user_key)),
+        else => return error.TestUnexpectedResult,
+    }
+
+    switch (typecheck.itemEffect(write_balance)) {
+        .reads_writes => |effect| {
+            try testing.expect(containsKeyedEffectSlot(effect.reads, "balances", .storage, &user_key));
+            try testing.expect(containsKeyedEffectSlot(effect.writes, "balances", .storage, &user_key));
+        },
+        else => return error.TestUnexpectedResult,
+    }
+}
+
 test "compiler rejects direct writes to locked slots" {
     const source_text =
         \\contract Locked {
@@ -1723,6 +1781,72 @@ test "compiler rejects direct writes to locked slots" {
     const typecheck = try compilation.db.typeCheck(compilation.root_module_id, .{ .item = ast_file.root_items[0] });
 
     try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "cannot write locked storage slot 'total'"));
+}
+
+test "compiler rejects keyed writes to the same locked map entry" {
+    const source_text =
+        \\contract Locked {
+        \\    storage balances: map<address, u256>;
+        \\
+        \\    pub fn guarded(user: address, value: u256) {
+        \\        @lock(balances[user]);
+        \\        balances[user] = value;
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const root_file_id = compilation.db.sources.module(compilation.root_module_id).file_id;
+    const ast_file = try compilation.db.astFile(root_file_id);
+    const typecheck = try compilation.db.typeCheck(compilation.root_module_id, .{ .item = ast_file.root_items[0] });
+
+    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "cannot write locked storage slot 'balances'"));
+}
+
+test "compiler allows writes to a different keyed map entry" {
+    const source_text =
+        \\contract Locked {
+        \\    storage balances: map<address, u256>;
+        \\
+        \\    pub fn guarded(user: address, other: address, value: u256) {
+        \\        @lock(balances[user]);
+        \\        balances[other] = value;
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const root_file_id = compilation.db.sources.module(compilation.root_module_id).file_id;
+    const ast_file = try compilation.db.astFile(root_file_id);
+    const typecheck = try compilation.db.typeCheck(compilation.root_module_id, .{ .item = ast_file.root_items[0] });
+
+    try testing.expect(!diagnosticMessagesContain(&typecheck.diagnostics, "cannot write locked storage slot 'balances'"));
+}
+
+test "compiler allows writes to a different constant keyed map entry" {
+    const source_text =
+        \\contract Locked {
+        \\    storage counts: map<u256, u256>;
+        \\
+        \\    pub fn guarded(value: u256) {
+        \\        @lock(counts[1]);
+        \\        counts[2] = value;
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const root_file_id = compilation.db.sources.module(compilation.root_module_id).file_id;
+    const ast_file = try compilation.db.astFile(root_file_id);
+    const typecheck = try compilation.db.typeCheck(compilation.root_module_id, .{ .item = ast_file.root_items[0] });
+
+    try testing.expect(!diagnosticMessagesContain(&typecheck.diagnostics, "cannot write locked storage slot 'counts'"));
 }
 
 test "compiler rejects callee writes to locked slots" {

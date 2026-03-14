@@ -298,6 +298,14 @@ pub const VerificationFact = struct {
 pub const EffectSlot = struct {
     name: []const u8,
     region: Region,
+    key_path: ?[]const KeySegment = null,
+};
+
+pub const KeySegment = union(enum) {
+    parameter: u32,
+    constant: []const u8,
+    self_ref,
+    unknown,
 };
 
 pub const Effect = union(enum) {

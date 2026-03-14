@@ -17,6 +17,7 @@ const LocatedType = model.LocatedType;
 const Region = model.Region;
 const Effect = model.Effect;
 const EffectSlot = model.EffectSlot;
+const KeySegment = model.KeySegment;
 const EffectSummaryState = enum { unvisited, visiting, done };
 const ConstEvalResult = model.ConstEvalResult;
 const ConstValue = model.ConstValue;
@@ -33,6 +34,90 @@ fn declarationRegion(storage_class: ast.StorageClass) Region {
         .memory => .memory,
         .tstore => .transient,
     };
+}
+
+fn keySegmentEql(lhs: KeySegment, rhs: KeySegment) bool {
+    return switch (lhs) {
+        .parameter => |index| rhs == .parameter and rhs.parameter == index,
+        .constant => |value| rhs == .constant and std.mem.eql(u8, rhs.constant, value),
+        .self_ref => rhs == .self_ref,
+        .unknown => rhs == .unknown,
+    };
+}
+
+fn keySegmentMayAlias(lhs: KeySegment, rhs: KeySegment) bool {
+    return switch (lhs) {
+        .unknown, .self_ref => true,
+        .parameter => |lhs_index| switch (rhs) {
+            .parameter => |rhs_index| lhs_index == rhs_index,
+            .unknown, .self_ref, .constant => true,
+        },
+        .constant => |lhs_value| switch (rhs) {
+            .constant => |rhs_value| std.mem.eql(u8, lhs_value, rhs_value),
+            .unknown, .self_ref, .parameter => true,
+        },
+    };
+}
+
+fn keyPathsEql(lhs: ?[]const KeySegment, rhs: ?[]const KeySegment) bool {
+    if (lhs == null and rhs == null) return true;
+    const lhs_path = lhs orelse return false;
+    const rhs_path = rhs orelse return false;
+    if (lhs_path.len != rhs_path.len) return false;
+    for (lhs_path, rhs_path) |lhs_segment, rhs_segment| {
+        if (!keySegmentEql(lhs_segment, rhs_segment)) return false;
+    }
+    return true;
+}
+
+fn keyPathsMayAlias(lhs: ?[]const KeySegment, rhs: ?[]const KeySegment) bool {
+    if (lhs == null or rhs == null) return true;
+    const lhs_path = lhs.?;
+    const rhs_path = rhs.?;
+    if (lhs_path.len != rhs_path.len) return true;
+    for (lhs_path, rhs_path) |lhs_segment, rhs_segment| {
+        if (!keySegmentMayAlias(lhs_segment, rhs_segment)) return false;
+    }
+    return true;
+}
+
+fn effectSlotEql(lhs: EffectSlot, rhs: EffectSlot) bool {
+    return lhs.region == rhs.region and
+        std.mem.eql(u8, lhs.name, rhs.name) and
+        keyPathsEql(lhs.key_path, rhs.key_path);
+}
+
+test "effect slot aliasing distinguishes parameters and constants" {
+    const same_param = EffectSlot{
+        .name = "balances",
+        .region = .storage,
+        .key_path = &[_]KeySegment{.{ .parameter = 0 }},
+    };
+    const other_param = EffectSlot{
+        .name = "balances",
+        .region = .storage,
+        .key_path = &[_]KeySegment{.{ .parameter = 1 }},
+    };
+    const const_one = EffectSlot{
+        .name = "balances",
+        .region = .storage,
+        .key_path = &[_]KeySegment{.{ .constant = "1" }},
+    };
+    const const_two = EffectSlot{
+        .name = "balances",
+        .region = .storage,
+        .key_path = &[_]KeySegment{.{ .constant = "2" }},
+    };
+    const unknown = EffectSlot{
+        .name = "balances",
+        .region = .storage,
+        .key_path = &[_]KeySegment{.{ .unknown = {} }},
+    };
+
+    try std.testing.expect(keyPathsMayAlias(same_param.key_path, same_param.key_path));
+    try std.testing.expect(!keyPathsMayAlias(same_param.key_path, other_param.key_path));
+    try std.testing.expect(!keyPathsMayAlias(const_one.key_path, const_two.key_path));
+    try std.testing.expect(keyPathsMayAlias(unknown.key_path, same_param.key_path));
 }
 
 test "buildEffect preserves external marker across slot summaries" {
@@ -83,6 +168,7 @@ test "unknown locked call diagnostics mention each locked slot" {
         .pattern_types = &.{},
         .expr_types = &.{},
         .effect_states = &.{},
+        .current_function_item = null,
         .diagnostics = &diags,
     };
 
@@ -215,6 +301,7 @@ const TypeChecker = struct {
     effect_states: []EffectSummaryState,
     current_return_type: ?Type = null,
     current_contract: ?ast.ItemId = null,
+    current_function_item: ?ast.ItemId = null,
     diagnostics: *diagnostics.DiagnosticList,
 
     fn visitItem(self: *TypeChecker, item_id: ast.ItemId) anyerror!void {
@@ -228,7 +315,10 @@ const TypeChecker = struct {
             },
             .Function => |function| {
                 const previous_return_type = self.current_return_type;
+                const previous_function_item = self.current_function_item;
                 self.current_return_type = if (function.return_type) |type_expr| try descriptorFromTypeExpr(self.arena, self.file, self.item_index, type_expr) else .{ .void = {} };
+                self.current_function_item = item_id;
+                defer self.current_function_item = previous_function_item;
                 defer self.current_return_type = previous_return_type;
                 for (function.clauses) |clause| try self.visitExpr(clause.expr);
                 try self.visitBody(function.body);
@@ -711,7 +801,10 @@ const TypeChecker = struct {
         return .{ .unknown = {} };
     }
 
-    fn summarizeFunctionEffects(self: *TypeChecker, function: ast.FunctionItem) !Effect {
+    fn summarizeFunctionEffects(self: *TypeChecker, item_id: ast.ItemId, function: ast.FunctionItem) !Effect {
+        const previous_function_item = self.current_function_item;
+        self.current_function_item = item_id;
+        defer self.current_function_item = previous_function_item;
         var state = EffectCollectorState.init();
         try self.collectBodyEffects(function.body, &state);
         return self.effectFromState(state);
@@ -727,7 +820,7 @@ const TypeChecker = struct {
         self.effect_states[item_id.index()] = .visiting;
         errdefer self.effect_states[item_id.index()] = .unvisited;
 
-        self.item_effects[item_id.index()] = try self.summarizeFunctionEffects(function);
+        self.item_effects[item_id.index()] = try self.summarizeFunctionEffects(item_id, function);
         self.effect_states[item_id.index()] = .done;
     }
 
@@ -892,7 +985,10 @@ const TypeChecker = struct {
             .Name => |name| self.lookupNamedFieldSlot(name.name),
             .Group => |group| self.lockSlotForExpr(group.expr),
             .Field => |field| self.lockSlotForExpr(field.base),
-            .Index => |index| self.lockSlotForExpr(index.base),
+            .Index => |index| blk: {
+                const base = self.lockSlotForExpr(index.base) orelse break :blk null;
+                break :blk self.slotWithIndexKey(base, index.index);
+            },
             else => null,
         };
     }
@@ -900,8 +996,7 @@ const TypeChecker = struct {
     fn emitLockedWriteDiagnostics(self: *TypeChecker, range: source.TextRange, writes: []const EffectSlot, locked_slots: []const EffectSlot) !void {
         for (writes) |write_slot| {
             for (locked_slots) |locked_slot| {
-                if (write_slot.region != locked_slot.region) continue;
-                if (!std.mem.eql(u8, write_slot.name, locked_slot.name)) continue;
+                if (!self.effectSlotsMayAlias(write_slot, locked_slot)) continue;
                 try self.emitRangeError(range, "cannot write locked {s} slot '{s}'", .{
                     region_rules.regionDisplayName(write_slot.region),
                     write_slot.name,
@@ -1010,8 +1105,7 @@ const TypeChecker = struct {
         var index: usize = 0;
         while (index < slots.items.len) : (index += 1) {
             const existing = slots.items[index];
-            if (existing.region != slot.region) continue;
-            if (!std.mem.eql(u8, existing.name, slot.name)) continue;
+            if (!effectSlotEql(existing, slot)) continue;
             _ = slots.swapRemove(index);
             return;
         }
@@ -1182,8 +1276,12 @@ const TypeChecker = struct {
             .Builtin => |builtin| for (builtin.args) |arg| try self.collectExprEffects(arg, state),
             .Field => |field| try self.collectExprEffects(field.base, state),
             .Index => |index| {
-                try self.collectExprEffects(index.base, state);
                 try self.collectExprEffects(index.index, state);
+                if (self.lockSlotForExpr(expr_id)) |slot| {
+                    try self.appendUniqueSlot(&state.reads, slot);
+                } else {
+                    try self.collectExprEffects(index.base, state);
+                }
             },
             .Group => |group| try self.collectExprEffects(group.expr, state),
             .Old, .Quantified => {},
@@ -1193,20 +1291,21 @@ const TypeChecker = struct {
     fn collectPatternTargetEffects(self: *TypeChecker, pattern_id: ast.PatternId, op: ast.AssignmentOp, state: *EffectCollectorState) anyerror!void {
         switch (self.file.pattern(pattern_id).*) {
             .Name => {
-                if (self.patternRootFieldSlot(pattern_id)) |slot_name| {
-                    if (op != .assign) try self.appendUniqueSlot(&state.reads, slot_name);
-                    try self.appendUniqueSlot(&state.writes, slot_name);
+                if (self.patternFieldSlot(pattern_id)) |slot| {
+                    if (op != .assign) try self.appendUniqueSlot(&state.reads, slot);
+                    try self.appendUniqueSlot(&state.writes, slot);
                 }
             },
             .Field => |field| {
                 try self.collectPatternTargetEffects(field.base, .add_assign, state);
             },
             .Index => |index| {
-                try self.collectPatternExprReads(index.base, state);
                 try self.collectExprEffects(index.index, state);
-                if (self.patternRootFieldSlot(pattern_id)) |slot| {
+                if (self.patternFieldSlot(pattern_id)) |slot| {
                     try self.appendUniqueSlot(&state.reads, slot);
                     try self.appendUniqueSlot(&state.writes, slot);
+                } else {
+                    try self.collectPatternExprReads(index.base, state);
                 }
             },
             .StructDestructure => {},
@@ -1217,25 +1316,32 @@ const TypeChecker = struct {
     fn collectPatternExprReads(self: *TypeChecker, pattern_id: ast.PatternId, state: *EffectCollectorState) anyerror!void {
         switch (self.file.pattern(pattern_id).*) {
             .Name => {
-                if (self.patternRootFieldSlot(pattern_id)) |slot| {
+                if (self.patternFieldSlot(pattern_id)) |slot| {
                     try self.appendUniqueSlot(&state.reads, slot);
                 }
             },
             .Field => |field| try self.collectPatternExprReads(field.base, state),
             .Index => |index| {
-                try self.collectPatternExprReads(index.base, state);
                 try self.collectExprEffects(index.index, state);
+                if (self.patternFieldSlot(pattern_id)) |slot| {
+                    try self.appendUniqueSlot(&state.reads, slot);
+                } else {
+                    try self.collectPatternExprReads(index.base, state);
+                }
             },
             .StructDestructure => {},
             .Error => {},
         }
     }
 
-    fn patternRootFieldSlot(self: *TypeChecker, pattern_id: ast.PatternId) ?EffectSlot {
+    fn patternFieldSlot(self: *TypeChecker, pattern_id: ast.PatternId) ?EffectSlot {
         return switch (self.file.pattern(pattern_id).*) {
             .Name => |name| self.lookupNamedFieldSlot(name.name),
-            .Field => |field| self.patternRootFieldSlot(field.base),
-            .Index => |index| self.patternRootFieldSlot(index.base),
+            .Field => |field| self.patternFieldSlot(field.base),
+            .Index => |index| blk: {
+                const base = self.patternFieldSlot(index.base) orelse break :blk null;
+                break :blk self.slotWithIndexKey(base, index.index);
+            },
             .StructDestructure => null,
             .Error => null,
         };
@@ -1278,9 +1384,72 @@ const TypeChecker = struct {
 
     fn appendUniqueSlot(self: *TypeChecker, slots: *std.ArrayList(EffectSlot), slot: EffectSlot) !void {
         for (slots.items) |existing| {
-            if (existing.region == slot.region and std.mem.eql(u8, existing.name, slot.name)) return;
+            if (effectSlotEql(existing, slot)) return;
         }
         try slots.append(self.arena, slot);
+    }
+
+    fn slotWithIndexKey(self: *TypeChecker, base: EffectSlot, index_expr: ast.ExprId) ?EffectSlot {
+        const segment = self.keySegmentForExpr(index_expr);
+        const base_len: usize = if (base.key_path) |path| path.len else 0;
+        const path = self.arena.alloc(KeySegment, base_len + 1) catch return null;
+        if (base.key_path) |existing| @memcpy(path[0..existing.len], existing);
+        path[base_len] = segment;
+        var slot = base;
+        slot.key_path = path;
+        return slot;
+    }
+
+    fn keySegmentForExpr(self: *TypeChecker, expr_id: ast.ExprId) KeySegment {
+        return switch (self.file.expression(expr_id).*) {
+            .Group => |group| self.keySegmentForExpr(group.expr),
+            .Name => blk: {
+                if (self.resolution.expr_bindings[expr_id.index()]) |binding| {
+                    switch (binding) {
+                        .pattern => |pattern_id| if (self.parameterIndexForPattern(pattern_id)) |index| {
+                            break :blk .{ .parameter = index };
+                        },
+                        .item => {},
+                    }
+                }
+                break :blk .unknown;
+            },
+            .IntegerLiteral => |literal| .{ .constant = literal.text },
+            .StringLiteral => |literal| .{ .constant = literal.text },
+            .AddressLiteral => |literal| .{ .constant = literal.text },
+            .BytesLiteral => |literal| .{ .constant = literal.text },
+            .BoolLiteral => |literal| .{ .constant = if (literal.value) "true" else "false" },
+            .Field => |field| blk: {
+                const base = self.file.expression(field.base).*;
+                if (base == .Name and std.mem.eql(u8, base.Name.name, "msg") and std.mem.eql(u8, field.name, "sender")) {
+                    break :blk .self_ref;
+                }
+                if (base == .Name and std.mem.eql(u8, base.Name.name, "tx") and std.mem.eql(u8, field.name, "origin")) {
+                    break :blk .self_ref;
+                }
+                break :blk .unknown;
+            },
+            else => .unknown,
+        };
+    }
+
+    fn parameterIndexForPattern(self: *const TypeChecker, pattern_id: ast.PatternId) ?u32 {
+        const function_item = self.current_function_item orelse return null;
+        const function = switch (self.file.item(function_item).*) {
+            .Function => |function| function,
+            else => return null,
+        };
+        for (function.parameters, 0..) |parameter, index| {
+            if (parameter.pattern.index() == pattern_id.index()) return @intCast(index);
+        }
+        return null;
+    }
+
+    fn effectSlotsMayAlias(self: *const TypeChecker, lhs: EffectSlot, rhs: EffectSlot) bool {
+        _ = self;
+        if (lhs.region != rhs.region) return false;
+        if (!std.mem.eql(u8, lhs.name, rhs.name)) return false;
+        return keyPathsMayAlias(lhs.key_path, rhs.key_path);
     }
 
     fn mergeEffect(self: *TypeChecker, state: *EffectCollectorState, effect: Effect) !void {
