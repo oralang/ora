@@ -1604,6 +1604,40 @@ test "compiler lowers bitfield types as wire integers with metadata attrs" {
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "i256"));
 }
 
+test "compiler lowers bitfield field reads and writes through bit ops" {
+    const source_text =
+        \\contract Bits {
+        \\    bitfield Flags: u256 {
+        \\        enabled: u1,
+        \\        signed: i8,
+        \\    }
+        \\
+        \\    storage packed: Flags;
+        \\
+        \\    pub fn update(flag: Flags) -> i8 {
+        \\        packed = flag;
+        \\        packed.enabled = 1;
+        \\        packed.signed = -2;
+        \\        return packed.signed;
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    const hir_text = try hir_result.renderText(testing.allocator);
+    defer testing.allocator.free(hir_text);
+
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "arith.shrui"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "arith.shrsi"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "arith.andi"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "arith.ori"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "arith.shli"));
+    try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "\"ora.field_access\""));
+}
+
 test "compiler resolves named path types to declaration kinds" {
     const source_text =
         \\struct Pair {

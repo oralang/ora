@@ -183,8 +183,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                     break :blk appendValueOp(self.block, placeholder);
                 },
                 .Field => |field| blk: {
-                    const op = try @This().lowerFieldExpr(self, expr_id, field, locals);
-                    break :blk appendValueOp(self.block, op);
+                    break :blk try @This().lowerFieldExpr(self, expr_id, field, locals);
                 },
                 .Index => |index| blk: {
                     const base = try self.lowerExpr(index.base, locals);
@@ -1010,11 +1009,11 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             return op;
         }
 
-        fn lowerFieldExpr(self: *FunctionLowerer, expr_id: ast.ExprId, field: ast.FieldExpr, locals: *LocalEnv) anyerror!mlir.MlirOperation {
+        fn lowerFieldExpr(self: *FunctionLowerer, expr_id: ast.ExprId, field: ast.FieldExpr, locals: *LocalEnv) anyerror!mlir.MlirValue {
             const base_type = self.parent.typecheck.exprType(field.base);
             if (base_type == .enum_) {
                 const enum_name = base_type.name() orelse {
-                    return self.createAggregatePlaceholder("ora.field_access", field.range, &.{}, self.parent.lowerExprType(expr_id));
+                    return appendValueOp(self.block, try self.createAggregatePlaceholder("ora.field_access", field.range, &.{}, self.parent.lowerExprType(expr_id)));
                 };
                 const result_type = self.parent.lowerExprType(expr_id);
                 const op = mlir.oraEnumConstantOpCreate(
@@ -1024,11 +1023,15 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                     strRef(field.name),
                     result_type,
                 );
-                if (!mlir.oraOperationIsNull(op)) return op;
-                return self.createAggregatePlaceholder("ora.field_access", field.range, &.{}, result_type);
+                if (!mlir.oraOperationIsNull(op)) return appendValueOp(self.block, op);
+                return appendValueOp(self.block, try self.createAggregatePlaceholder("ora.field_access", field.range, &.{}, result_type));
             }
 
             const base = try self.lowerExpr(field.base, locals);
+            if (base_type == .bitfield) {
+                const result_type = self.parent.lowerExprType(expr_id);
+                return try self.createBitfieldFieldExtract(base, base_type, field.name, result_type, field.range);
+            }
             if (base_type == .struct_) {
                 const result_type = self.parent.lowerExprType(expr_id);
                 const op = mlir.oraStructFieldExtractOpCreate(
@@ -1038,9 +1041,9 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                     strRef(field.name),
                     result_type,
                 );
-                if (!mlir.oraOperationIsNull(op)) return op;
+                if (!mlir.oraOperationIsNull(op)) return appendValueOp(self.block, op);
             }
-            return self.createAggregatePlaceholder("ora.field_access", field.range, &.{base}, self.parent.lowerExprType(expr_id));
+            return appendValueOp(self.block, try self.createAggregatePlaceholder("ora.field_access", field.range, &.{base}, self.parent.lowerExprType(expr_id)));
         }
 
         fn lowerArrayLiteral(self: *FunctionLowerer, expr_id: ast.ExprId, array: ast.ArrayLiteralExpr, locals: *LocalEnv) anyerror!mlir.MlirValue {

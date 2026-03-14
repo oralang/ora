@@ -142,6 +142,13 @@ pub fn lowerModule(
 }
 
 const Lowerer = struct {
+    pub const ResolvedBitfieldField = struct {
+        field: ast.BitfieldField,
+        offset: u32,
+        width: u32,
+        sign: u8,
+    };
+
     allocator: std.mem.Allocator,
     context: mlir.MlirContext,
     sources: *const source.SourceStore,
@@ -287,6 +294,39 @@ const Lowerer = struct {
         };
     }
 
+    pub fn bitfieldFieldWidth(self: *const Lowerer, type_expr_id: ast.TypeExprId) u32 {
+        return switch (self.file.typeExpr(type_expr_id).*) {
+            .Path => |path| blk: {
+                const trimmed = std.mem.trim(u8, path.name, " \t\n\r");
+                if (std.mem.eql(u8, trimmed, "bool")) break :blk 1;
+                if (std.mem.eql(u8, trimmed, "address")) break :blk 160;
+                if (support.parseSignedIntegerType(trimmed)) |int_info| break :blk int_info.bits;
+                break :blk 256;
+            },
+            else => 256,
+        };
+    }
+
+    pub fn resolveBitfieldField(self: *const Lowerer, bitfield_name: []const u8, field_name: []const u8) ?ResolvedBitfieldField {
+        const bitfield = self.bitfieldItemByName(bitfield_name) orelse return null;
+        var next_offset: u32 = 0;
+        for (bitfield.fields) |field| {
+            const width = field.width orelse self.bitfieldFieldWidth(field.type_expr);
+            const offset = field.offset orelse next_offset;
+            const sign = self.bitfieldFieldSign(field.type_expr);
+            if (std.mem.eql(u8, field.name, field_name)) {
+                return .{
+                    .field = field,
+                    .offset = offset,
+                    .width = width,
+                    .sign = sign,
+                };
+            }
+            next_offset = offset + width;
+        }
+        return null;
+    }
+
     fn recordTypeFallback(self: *Lowerer, reason: TypeFallbackReason, range: source.TextRange) mlir.MlirType {
         self.type_fallbacks.append(self.allocator, .{
             .reason = reason,
@@ -348,6 +388,8 @@ const FunctionLowerer = struct {
     pub const convertValueForFlow = FunctionCore.convertValueForFlow;
     pub const lowerCheckedPower = FunctionCore.lowerCheckedPower;
     pub const lowerPowerWithOverflow = FunctionCore.lowerPowerWithOverflow;
+    pub const createBitfieldFieldExtract = FunctionCore.createBitfieldFieldExtract;
+    pub const createBitfieldFieldUpdate = FunctionCore.createBitfieldFieldUpdate;
     pub const appendUnsupportedControlPlaceholder = FunctionCore.appendUnsupportedControlPlaceholder;
     pub const buildCarriedResultTypes = FunctionCore.buildCarriedResultTypes;
     pub const appendOraYieldFromLocals = FunctionCore.appendOraYieldFromLocals;

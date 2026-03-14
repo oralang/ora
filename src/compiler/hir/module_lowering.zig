@@ -430,15 +430,13 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
         pub fn buildBitfieldLayout(self: *Lowerer, bitfield: ast.BitfieldItem) ![]const u8 {
             var buffer: std.ArrayList(u8) = .{};
             for (bitfield.fields) |field| {
-                const offset = field.offset orelse 0;
-                const width = field.width orelse 0;
-                const sign = self.bitfieldFieldSign(field.type_expr);
-                try buffer.writer(self.allocator).print("{s}:{d}:{d}:{c};", .{ field.name, offset, width, sign });
+                const resolved = self.resolveBitfieldField(bitfield.name, field.name) orelse continue;
+                try buffer.writer(self.allocator).print("{s}:{d}:{d}:{c};", .{ field.name, resolved.offset, resolved.width, resolved.sign });
             }
             return buffer.toOwnedSlice(self.allocator);
         }
 
-        pub fn bitfieldFieldSign(self: *Lowerer, type_expr_id: ast.TypeExprId) u8 {
+        pub fn bitfieldFieldSign(self: *const Lowerer, type_expr_id: ast.TypeExprId) u8 {
             return switch (self.file.typeExpr(type_expr_id).*) {
                 .Path => |path| blk: {
                     const trimmed = std.mem.trim(u8, path.name, " \t\n\r");

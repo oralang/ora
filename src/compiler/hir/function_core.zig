@@ -826,6 +826,12 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                     return;
                 },
                 .Field => |field| {
+                    const base_type = @This().patternType(self, field.base);
+                    if (base_type.kind() == .bitfield) {
+                        const updated_bitfield = try @This().createBitfieldFieldUpdate(self, try @This().lowerPatternValue(self, field.base, locals), base_type, field.name, value, field.range);
+                        try self.storePattern(field.base, updated_bitfield, locals);
+                        return;
+                    }
                     const base_value = try @This().lowerPatternValue(self, field.base, locals);
                     const target_type = self.parent.lowerSemaType(self.parent.typecheck.pattern_types[pattern_id.index()].type, field.range);
                     const converted = try @This().convertValueForFlow(self, value, target_type, field.range);
@@ -896,6 +902,202 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             appendOp(self.block, guard);
         }
 
+        pub fn createBitfieldFieldExtract(
+            self: *FunctionLowerer,
+            base_value: mlir.MlirValue,
+            base_type: sema.Type,
+            field_name: []const u8,
+            result_type: mlir.MlirType,
+            range: source.TextRange,
+        ) anyerror!mlir.MlirValue {
+            const resolved = @This().bitfieldField(self, base_type, field_name) orelse return error.UnknownAssignmentTarget;
+            const loc = self.parent.location(range);
+            const word_type = mlir.oraValueGetType(base_value);
+            const offset = resolved.offset;
+            const width = resolved.width;
+
+            var shifted = base_value;
+            if (offset != 0) {
+                const offset_value = appendValueOp(self.block, createIntegerConstant(self.parent.context, loc, word_type, @intCast(offset)));
+                const shr_op = mlir.oraArithShrUIOpCreate(self.parent.context, loc, base_value, offset_value);
+                if (mlir.oraOperationIsNull(shr_op)) return error.MlirOperationCreationFailed;
+                shifted = appendValueOp(self.block, shr_op);
+            }
+
+            var raw = shifted;
+            if (width < 256) {
+                const mask = try @This().createWideIntegerConstant(self, word_type, @This().bitfieldMask(width), false, range);
+                const and_op = mlir.oraArithAndIOpCreate(self.parent.context, loc, shifted, mask);
+                if (mlir.oraOperationIsNull(and_op)) return error.MlirOperationCreationFailed;
+                raw = appendValueOp(self.block, and_op);
+            }
+
+            const is_signed = resolved.sign == 's';
+            var value_word = raw;
+            if (is_signed and width < 256) {
+                const shift_amount: i64 = @intCast(256 - width);
+                const shift_value = appendValueOp(self.block, createIntegerConstant(self.parent.context, loc, word_type, shift_amount));
+                const shl_op = mlir.oraArithShlIOpCreate(self.parent.context, loc, raw, shift_value);
+                if (mlir.oraOperationIsNull(shl_op)) return error.MlirOperationCreationFailed;
+                const shl_result = appendValueOp(self.block, shl_op);
+                const sar_op = mlir.oraArithShrSIOpCreate(self.parent.context, loc, shl_result, shift_value);
+                if (mlir.oraOperationIsNull(sar_op)) return error.MlirOperationCreationFailed;
+                value_word = appendValueOp(self.block, sar_op);
+            }
+
+            return try @This().convertBitfieldWordToResult(self, value_word, result_type, range);
+        }
+
+        pub fn createBitfieldFieldUpdate(
+            self: *FunctionLowerer,
+            base_value: mlir.MlirValue,
+            base_type: sema.Type,
+            field_name: []const u8,
+            new_value: mlir.MlirValue,
+            range: source.TextRange,
+        ) anyerror!mlir.MlirValue {
+            const resolved = @This().bitfieldField(self, base_type, field_name) orelse return error.UnknownAssignmentTarget;
+            const loc = self.parent.location(range);
+            const word_type = mlir.oraValueGetType(base_value);
+            const offset = resolved.offset;
+            const width = resolved.width;
+            const field_type = self.parent.lowerTypeExpr(resolved.field.type_expr);
+            const is_signed = resolved.sign == 's';
+
+            var field_value = try @This().convertValueForFlow(self, new_value, field_type, range);
+            field_value = try @This().convertBitfieldValueToWord(self, field_value, word_type, is_signed, range);
+
+            const field_mask = @This().bitfieldMask(width);
+            const mask_value = try @This().createWideIntegerConstant(self, word_type, field_mask, false, range);
+            const masked_field_op = mlir.oraArithAndIOpCreate(self.parent.context, loc, field_value, mask_value);
+            if (mlir.oraOperationIsNull(masked_field_op)) return error.MlirOperationCreationFailed;
+            var prepared_field = appendValueOp(self.block, masked_field_op);
+
+            if (offset != 0) {
+                const offset_value = appendValueOp(self.block, createIntegerConstant(self.parent.context, loc, word_type, @intCast(offset)));
+                const shl_op = mlir.oraArithShlIOpCreate(self.parent.context, loc, prepared_field, offset_value);
+                if (mlir.oraOperationIsNull(shl_op)) return error.MlirOperationCreationFailed;
+                prepared_field = appendValueOp(self.block, shl_op);
+            }
+
+            const clear_mask = ~(@as(u256, field_mask) << @intCast(offset));
+            const clear_value = try @This().createWideIntegerConstant(self, word_type, clear_mask, false, range);
+            const cleared_op = mlir.oraArithAndIOpCreate(self.parent.context, loc, base_value, clear_value);
+            if (mlir.oraOperationIsNull(cleared_op)) return error.MlirOperationCreationFailed;
+            const cleared = appendValueOp(self.block, cleared_op);
+
+            const or_op = mlir.oraArithOrIOpCreate(self.parent.context, loc, cleared, prepared_field);
+            if (mlir.oraOperationIsNull(or_op)) return error.MlirOperationCreationFailed;
+            return appendValueOp(self.block, or_op);
+        }
+
+        fn convertBitfieldValueToWord(
+            self: *FunctionLowerer,
+            value: mlir.MlirValue,
+            word_type: mlir.MlirType,
+            is_signed: bool,
+            range: source.TextRange,
+        ) anyerror!mlir.MlirValue {
+            const value_type = mlir.oraValueGetType(value);
+            if (mlir.oraTypeEqual(value_type, word_type)) return value;
+
+            const loc = self.parent.location(range);
+            if (mlir.oraTypeEqual(value_type, boolType(self.parent.context))) {
+                const ext_op = mlir.oraArithExtUIOpCreate(self.parent.context, loc, value, word_type);
+                if (mlir.oraOperationIsNull(ext_op)) return error.MlirOperationCreationFailed;
+                return appendValueOp(self.block, ext_op);
+            }
+            if (!mlir.oraTypeIsAInteger(value_type)) return value;
+
+            const value_width = mlir.oraIntegerTypeGetWidth(value_type);
+            const word_width = mlir.oraIntegerTypeGetWidth(word_type);
+            if (value_width == word_width) {
+                const op = mlir.oraArithBitcastOpCreate(self.parent.context, loc, value, word_type);
+                if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
+                return appendValueOp(self.block, op);
+            }
+            if (value_width < word_width) {
+                const op = if (is_signed)
+                    mlir.oraArithExtSIOpCreate(self.parent.context, loc, value, word_type)
+                else
+                    mlir.oraArithExtUIOpCreate(self.parent.context, loc, value, word_type);
+                if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
+                return appendValueOp(self.block, op);
+            }
+            const op = mlir.oraArithTruncIOpCreate(self.parent.context, loc, value, word_type);
+            if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
+            return appendValueOp(self.block, op);
+        }
+
+        fn createWideIntegerConstant(
+            self: *FunctionLowerer,
+            target_type: mlir.MlirType,
+            value: u256,
+            negative: bool,
+            range: source.TextRange,
+        ) anyerror!mlir.MlirValue {
+            const attr = if (!negative and value <= std.math.maxInt(i64))
+                mlir.oraIntegerAttrCreateI64FromType(target_type, @intCast(value))
+            else blk: {
+                var buf: [80]u8 = undefined;
+                const text = if (negative)
+                    std.fmt.bufPrint(&buf, "-{}", .{value}) catch return error.MlirOperationCreationFailed
+                else
+                    std.fmt.bufPrint(&buf, "{}", .{value}) catch return error.MlirOperationCreationFailed;
+                break :blk mlir.oraIntegerAttrGetFromString(target_type, strRef(text));
+            };
+            const op = mlir.oraArithConstantOpCreate(self.parent.context, self.parent.location(range), target_type, attr);
+            if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
+            return appendValueOp(self.block, op);
+        }
+
+        fn convertBitfieldWordToResult(
+            self: *FunctionLowerer,
+            value: mlir.MlirValue,
+            result_type: mlir.MlirType,
+            range: source.TextRange,
+        ) anyerror!mlir.MlirValue {
+            const value_type = mlir.oraValueGetType(value);
+            if (mlir.oraTypeEqual(value_type, result_type)) return value;
+
+            const loc = self.parent.location(range);
+            if (mlir.oraTypeEqual(result_type, boolType(self.parent.context))) {
+                const zero = appendValueOp(self.block, createIntegerConstant(self.parent.context, loc, value_type, 0));
+                return appendValueOp(self.block, self.createCompareOp(loc, "ne", value, zero));
+            }
+            if (!mlir.oraTypeIsAInteger(result_type)) return value;
+
+            const value_width = mlir.oraIntegerTypeGetWidth(value_type);
+            const result_width = mlir.oraIntegerTypeGetWidth(result_type);
+            if (value_width == result_width) {
+                const op = mlir.oraArithBitcastOpCreate(self.parent.context, loc, value, result_type);
+                if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
+                return appendValueOp(self.block, op);
+            }
+            if (value_width > result_width) {
+                const op = mlir.oraArithTruncIOpCreate(self.parent.context, loc, value, result_type);
+                if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
+                return appendValueOp(self.block, op);
+            }
+            const op = if (mlir.oraIntegerTypeIsSigned(value_type))
+                mlir.oraArithExtSIOpCreate(self.parent.context, loc, value, result_type)
+            else
+                mlir.oraArithExtUIOpCreate(self.parent.context, loc, value, result_type);
+            if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
+            return appendValueOp(self.block, op);
+        }
+
+        fn bitfieldField(self: *FunctionLowerer, base_type: sema.Type, field_name: []const u8) ?Lowerer.ResolvedBitfieldField {
+            if (base_type.kind() != .bitfield) return null;
+            return self.parent.resolveBitfieldField(base_type.name() orelse return null, field_name);
+        }
+
+        fn bitfieldMask(width: u32) u256 {
+            if (width >= 256) return std.math.maxInt(u256);
+            if (width == 0) return 0;
+            return (@as(u256, 1) << @intCast(width)) - 1;
+        }
+
         fn lowerPatternValue(self: *FunctionLowerer, pattern_id: ast.PatternId, locals: *LocalEnv) anyerror!mlir.MlirValue {
             return switch (self.parent.file.pattern(pattern_id).*) {
                 .Name => |name| blk: {
@@ -945,6 +1147,11 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                     break :blk appendValueOp(self.block, op);
                 },
                 .Field => |field| blk: {
+                    const base_type = @This().patternType(self, field.base);
+                    if (base_type.kind() == .bitfield) {
+                        const result_type = self.parent.lowerSemaType(self.parent.typecheck.pattern_types[pattern_id.index()].type, field.range);
+                        break :blk try @This().createBitfieldFieldExtract(self, try @This().lowerPatternValue(self, field.base, locals), base_type, field.name, result_type, field.range);
+                    }
                     const base_value = try @This().lowerPatternValue(self, field.base, locals);
                     const result_type = self.parent.lowerSemaType(self.parent.typecheck.pattern_types[pattern_id.index()].type, field.range);
                     const op = mlir.oraStructFieldExtractOpCreate(
@@ -958,6 +1165,18 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                     break :blk appendValueOp(self.block, op);
                 },
                 else => return error.UnknownAssignmentTarget,
+            };
+        }
+
+        fn patternType(self: *FunctionLowerer, pattern_id: ast.PatternId) sema.Type {
+            return switch (self.parent.file.pattern(pattern_id).*) {
+                .Name => |name| blk: {
+                    if (self.parent.item_index.lookup(name.name)) |item_id| {
+                        break :blk self.parent.typecheck.item_types[item_id.index()];
+                    }
+                    break :blk self.parent.typecheck.pattern_types[pattern_id.index()].type;
+                },
+                else => self.parent.typecheck.pattern_types[pattern_id.index()].type,
             };
         }
 
