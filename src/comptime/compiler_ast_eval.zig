@@ -70,11 +70,13 @@ const ConstEvaluator = struct {
                 if (field.value) |expr_id| {
                     const value = self.evalExpr(expr_id) catch null;
                     self.bindName(field.name, value) catch {};
+                    self.values[expr_id.index()] = value;
                 }
             },
             .Constant => |constant| {
                 const value = self.evalExpr(constant.value) catch null;
                 self.bindName(constant.name, value) catch {};
+                self.values[constant.value.index()] = value;
             },
             .GhostBlock => |ghost_block| self.visitBody(ghost_block.body),
             else => {},
@@ -91,6 +93,7 @@ const ConstEvaluator = struct {
                 .VariableDecl => |decl| {
                     const value = if (decl.value) |expr_id| self.evalExpr(expr_id) catch null else null;
                     self.bindPattern(decl.pattern, value) catch {};
+                    if (decl.value) |expr_id| self.values[expr_id.index()] = value;
                 },
                 .Return => |ret| {
                     if (ret.value) |expr_id| _ = self.evalExpr(expr_id) catch null;
@@ -145,7 +148,17 @@ const ConstEvaluator = struct {
     }
 
     fn evalExpr(self: *ConstEvaluator, expr_id: ast.ExprId) anyerror!?ConstValue {
-        if (self.values[expr_id.index()]) |cached| return cached;
+        return self.evalExprImpl(expr_id, true);
+    }
+
+    fn evalExprUncached(self: *ConstEvaluator, expr_id: ast.ExprId) anyerror!?ConstValue {
+        return self.evalExprImpl(expr_id, false);
+    }
+
+    fn evalExprImpl(self: *ConstEvaluator, expr_id: ast.ExprId, comptime use_cache: bool) anyerror!?ConstValue {
+        if (use_cache) {
+            if (self.values[expr_id.index()]) |cached| return cached;
+        }
 
         const value: ?ConstValue = switch (self.file.expression(expr_id).*) {
             .IntegerLiteral => |literal| try parseIntegerLiteral(self.allocator, literal.text),
@@ -153,40 +166,40 @@ const ConstEvaluator = struct {
             .BoolLiteral => |literal| ConstValue{ .boolean = literal.value },
             .AddressLiteral, .BytesLiteral => null,
             .Tuple => |tuple| blk: {
-                for (tuple.elements) |element| _ = try self.evalExpr(element);
+                for (tuple.elements) |element| _ = try self.evalExprImpl(element, use_cache);
                 break :blk null;
             },
             .ArrayLiteral => |array| blk: {
-                for (array.elements) |element| _ = try self.evalExpr(element);
+                for (array.elements) |element| _ = try self.evalExprImpl(element, use_cache);
                 break :blk null;
             },
             .StructLiteral => |struct_literal| blk: {
-                for (struct_literal.fields) |field| _ = try self.evalExpr(field.value);
+                for (struct_literal.fields) |field| _ = try self.evalExprImpl(field.value, use_cache);
                 break :blk null;
             },
             .Switch => |switch_expr| blk: {
-                const condition = (try self.evalExpr(switch_expr.condition)) orelse {
+                const condition = (try self.evalExprImpl(switch_expr.condition, use_cache)) orelse {
                     for (switch_expr.arms) |arm| {
                         switch (arm.pattern) {
-                            .Expr => |pattern_expr| _ = try self.evalExpr(pattern_expr),
+                            .Expr => |pattern_expr| _ = try self.evalExprImpl(pattern_expr, use_cache),
                             .Range => |range_pattern| {
-                                _ = try self.evalExpr(range_pattern.start);
-                                _ = try self.evalExpr(range_pattern.end);
+                                _ = try self.evalExprImpl(range_pattern.start, use_cache);
+                                _ = try self.evalExprImpl(range_pattern.end, use_cache);
                             },
                             .Else => {},
                         }
-                        _ = try self.evalExpr(arm.value);
+                        _ = try self.evalExprImpl(arm.value, use_cache);
                     }
-                    if (switch_expr.else_expr) |else_expr| _ = try self.evalExpr(else_expr);
+                    if (switch_expr.else_expr) |else_expr| _ = try self.evalExprImpl(else_expr, use_cache);
                     break :blk null;
                 };
 
                 for (switch_expr.arms) |arm| {
                     switch (arm.pattern) {
-                        .Expr => |pattern_expr| _ = try self.evalExpr(pattern_expr),
+                        .Expr => |pattern_expr| _ = try self.evalExprImpl(pattern_expr, use_cache),
                         .Range => |range_pattern| {
-                            _ = try self.evalExpr(range_pattern.start);
-                            _ = try self.evalExpr(range_pattern.end);
+                            _ = try self.evalExprImpl(range_pattern.start, use_cache);
+                            _ = try self.evalExprImpl(range_pattern.end, use_cache);
                         },
                         .Else => {},
                     }
@@ -194,17 +207,17 @@ const ConstEvaluator = struct {
 
                 for (switch_expr.arms) |arm| {
                     if (self.patternMatches(condition, arm.pattern)) {
-                        break :blk try self.evalExpr(arm.value);
+                        break :blk try self.evalExprImpl(arm.value, use_cache);
                     }
                 }
-                if (switch_expr.else_expr) |else_expr| break :blk try self.evalExpr(else_expr);
+                if (switch_expr.else_expr) |else_expr| break :blk try self.evalExprImpl(else_expr, use_cache);
                 break :blk null;
             },
             .Comptime => |comptime_expr| blk: {
                 break :blk try self.evalComptimeBody(comptime_expr.body);
             },
             .ErrorReturn => |error_return| blk: {
-                for (error_return.args) |arg| _ = try self.evalExpr(arg);
+                for (error_return.args) |arg| _ = try self.evalExprImpl(arg, use_cache);
                 break :blk null;
             },
             .Name => |name| blk: {
@@ -212,33 +225,33 @@ const ConstEvaluator = struct {
                 break :blk try ctValueToConstValue(self.allocator, value);
             },
             .Result => null,
-            .Unary => |unary| try evalUnary(self.allocator, unary.op, try self.evalExpr(unary.operand)),
-            .Binary => |binary| try evalBinary(self.allocator, binary.op, try self.evalExpr(binary.lhs), try self.evalExpr(binary.rhs)),
+            .Unary => |unary| try evalUnary(self.allocator, unary.op, try self.evalExprImpl(unary.operand, use_cache)),
+            .Binary => |binary| try evalBinary(self.allocator, binary.op, try self.evalExprImpl(binary.lhs, use_cache), try self.evalExprImpl(binary.rhs, use_cache)),
             .Call => |call| blk: {
-                _ = try self.evalExpr(call.callee);
-                for (call.args) |arg| _ = try self.evalExpr(arg);
+                _ = try self.evalExprImpl(call.callee, use_cache);
+                for (call.args) |arg| _ = try self.evalExprImpl(arg, use_cache);
                 break :blk null;
             },
             .Builtin => |builtin| try self.evalBuiltin(builtin),
             .Field => |field| blk: {
-                _ = try self.evalExpr(field.base);
+                _ = try self.evalExprImpl(field.base, use_cache);
                 break :blk null;
             },
             .Index => |index| blk: {
-                _ = try self.evalExpr(index.base);
-                _ = try self.evalExpr(index.index);
+                _ = try self.evalExprImpl(index.base, use_cache);
+                _ = try self.evalExprImpl(index.index, use_cache);
                 break :blk null;
             },
-            .Group => |group| try self.evalExpr(group.expr),
-            .Old => |old| try self.evalExpr(old.expr),
+            .Group => |group| try self.evalExprImpl(group.expr, use_cache),
+            .Old => |old| try self.evalExprImpl(old.expr, use_cache),
             .Quantified => |quantified| blk: {
-                if (quantified.condition) |condition| _ = try self.evalExpr(condition);
-                _ = try self.evalExpr(quantified.body);
+                if (quantified.condition) |condition| _ = try self.evalExprImpl(condition, use_cache);
+                _ = try self.evalExprImpl(quantified.body, use_cache);
                 break :blk null;
             },
             .Error => null,
         };
-        self.values[expr_id.index()] = value;
+        if (use_cache) self.values[expr_id.index()] = value;
         return value;
     }
 
@@ -331,15 +344,16 @@ const ConstEvaluator = struct {
         for (body.statements) |statement_id| {
             switch (self.file.statement(statement_id).*) {
                 .VariableDecl => |decl| {
-                    const value = if (decl.value) |expr_id| try self.evalExpr(expr_id) else null;
+                    const value = if (decl.value) |expr_id| try self.evalExprUncached(expr_id) else null;
                     try self.bindPattern(decl.pattern, value);
+                    if (decl.value) |expr_id| self.values[expr_id.index()] = value;
                     last_value = null;
                 },
                 .Expr => |expr_stmt| {
-                    last_value = try self.evalExpr(expr_stmt.expr);
+                    last_value = try self.evalExprUncached(expr_stmt.expr);
                 },
                 .Return => |ret| {
-                    return if (ret.value) |ret_value| try self.evalExpr(ret_value) else null;
+                    return if (ret.value) |ret_value| try self.evalExprUncached(ret_value) else null;
                 },
                 .Block => |block_stmt| {
                     last_value = try self.evalComptimeBody(block_stmt.body);
@@ -349,6 +363,12 @@ const ConstEvaluator = struct {
                 },
                 .If => |if_stmt| {
                     last_value = try self.evalComptimeIf(if_stmt);
+                },
+                .While => |while_stmt| {
+                    last_value = try self.evalComptimeWhile(while_stmt);
+                },
+                .For => |for_stmt| {
+                    last_value = try self.evalComptimeFor(for_stmt);
                 },
                 .Switch => |switch_stmt| {
                     last_value = try self.evalComptimeSwitchStmt(switch_stmt);
@@ -366,7 +386,7 @@ const ConstEvaluator = struct {
     }
 
     fn evalComptimeIf(self: *ConstEvaluator, if_stmt: ast.IfStmt) anyerror!?ConstValue {
-        const condition = (try self.evalExpr(if_stmt.condition)) orelse return null;
+        const condition = (try self.evalExprUncached(if_stmt.condition)) orelse return null;
         const take_then = self.constConditionTruthy(condition) orelse return null;
         if (take_then) return try self.evalComptimeBody(if_stmt.then_body);
         if (if_stmt.else_body) |else_body| return try self.evalComptimeBody(else_body);
@@ -374,7 +394,7 @@ const ConstEvaluator = struct {
     }
 
     fn evalComptimeSwitchStmt(self: *ConstEvaluator, switch_stmt: ast.SwitchStmt) anyerror!?ConstValue {
-        const condition = (try self.evalExpr(switch_stmt.condition)) orelse return null;
+        const condition = (try self.evalExprUncached(switch_stmt.condition)) orelse return null;
         for (switch_stmt.arms) |arm| {
             if (self.patternMatches(condition, arm.pattern)) {
                 return try self.evalComptimeBody(arm.body);
@@ -384,8 +404,49 @@ const ConstEvaluator = struct {
         return null;
     }
 
+    fn evalComptimeWhile(self: *ConstEvaluator, while_stmt: ast.WhileStmt) anyerror!?ConstValue {
+        var iterations: u64 = 0;
+        var last_value: ?ConstValue = null;
+        while (true) {
+            iterations += 1;
+            if (iterations > self.env.config.max_loop_iterations) return null;
+
+            const condition = (try self.evalExprUncached(while_stmt.condition)) orelse return null;
+            const should_continue = self.constConditionTruthy(condition) orelse return null;
+            if (!should_continue) break;
+
+            last_value = try self.evalComptimeBody(while_stmt.body);
+        }
+        return last_value;
+    }
+
+    fn evalComptimeFor(self: *ConstEvaluator, for_stmt: ast.ForStmt) anyerror!?ConstValue {
+        const iterable = (try self.evalExprUncached(for_stmt.iterable)) orelse return null;
+        const trip_count = switch (iterable) {
+            .integer => |integer| bridge.positiveShiftAmount(integer) orelse return null,
+            else => return null,
+        };
+
+        var iteration: usize = 0;
+        var last_value: ?ConstValue = null;
+        while (iteration < trip_count) : (iteration += 1) {
+            if (iteration >= self.env.config.max_loop_iterations) return null;
+
+            const item_value = ConstValue{ .integer = try std.math.big.int.Managed.initSet(self.allocator, iteration) };
+            try self.bindPattern(for_stmt.item_pattern, item_value);
+
+            if (for_stmt.index_pattern) |index_pattern| {
+                const index_value = ConstValue{ .integer = try std.math.big.int.Managed.initSet(self.allocator, iteration) };
+                try self.bindPattern(index_pattern, index_value);
+            }
+
+            last_value = try self.evalComptimeBody(for_stmt.body);
+        }
+        return last_value;
+    }
+
     fn evalComptimeAssign(self: *ConstEvaluator, assign: ast.AssignStmt) anyerror!?ConstValue {
-        const rhs = (try self.evalExpr(assign.value)) orelse return null;
+        const rhs = (try self.evalExprUncached(assign.value)) orelse return null;
         switch (self.file.pattern(assign.target).*) {
             .Name => |name| {
                 const value = switch (assign.op) {
@@ -472,4 +533,5 @@ const ConstEvaluator = struct {
             .VariableDecl, .Return, .Expr, .Block, .LabeledBlock => unreachable,
         }
     }
+
 };
