@@ -302,11 +302,19 @@ pub const EffectSlot = struct {
 
 pub const Effect = union(enum) {
     pure,
-    writes: struct { slots: []const EffectSlot },
-    reads: struct { slots: []const EffectSlot },
+    external,
+    writes: struct {
+        slots: []const EffectSlot,
+        has_external: bool = false,
+    },
+    reads: struct {
+        slots: []const EffectSlot,
+        has_external: bool = false,
+    },
     reads_writes: struct {
         reads: []const EffectSlot,
         writes: []const EffectSlot,
+        has_external: bool = false,
     },
 };
 
@@ -478,4 +486,29 @@ test "Effect stub supports read and write slot sets" {
     try std.testing.expectEqual(.transient, write_effect.writes.slots[1].region);
     try std.testing.expectEqualStrings("balances", both_effect.reads_writes.reads[0].name);
     try std.testing.expectEqualStrings("pending", both_effect.reads_writes.writes[1].name);
+}
+
+test "Effect supports external call marker" {
+    const slots = [_]EffectSlot{
+        .{ .name = "total", .region = .storage },
+    };
+    const external_only: Effect = .external;
+    const reads_external: Effect = .{ .reads = .{
+        .slots = &slots,
+        .has_external = true,
+    } };
+    const writes_external: Effect = .{ .writes = .{
+        .slots = &slots,
+        .has_external = true,
+    } };
+    const mixed_external: Effect = .{ .reads_writes = .{
+        .reads = &slots,
+        .writes = &slots,
+        .has_external = true,
+    } };
+
+    try std.testing.expect(external_only == .external);
+    try std.testing.expect(reads_external.reads.has_external);
+    try std.testing.expect(writes_external.writes.has_external);
+    try std.testing.expect(mixed_external.reads_writes.has_external);
 }
