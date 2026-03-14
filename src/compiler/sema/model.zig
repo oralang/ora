@@ -299,6 +299,10 @@ pub const Effect = union(enum) {
     pure,
     writes: struct { slots: []const []const u8 },
     reads: struct { slots: []const []const u8 },
+    reads_writes: struct {
+        reads: []const []const u8,
+        writes: []const []const u8,
+    },
 };
 
 pub const TypeCheckKey = union(enum) {
@@ -362,6 +366,7 @@ pub const TypeCheckResult = struct {
     key: TypeCheckKey,
     item_types: []Type,
     item_regions: []Region,
+    item_effects: []Effect,
     pattern_types: []LocatedType,
     expr_types: []Type,
     body_types: []Type,
@@ -381,6 +386,10 @@ pub const TypeCheckResult = struct {
             .type = self.item_types[id.index()],
             .region = self.item_regions[id.index()],
         };
+    }
+
+    pub fn itemEffect(self: *const TypeCheckResult, id: ast.ItemId) Effect {
+        return self.item_effects[id.index()];
     }
 };
 
@@ -453,7 +462,10 @@ test "Effect stub supports read and write slot sets" {
     const slots = [_][]const u8{ "balances", "pending" };
     const read_effect: Effect = .{ .reads = .{ .slots = &slots } };
     const write_effect: Effect = .{ .writes = .{ .slots = &slots } };
+    const both_effect: Effect = .{ .reads_writes = .{ .reads = &slots, .writes = &slots } };
 
     try std.testing.expectEqualStrings("balances", read_effect.reads.slots[0]);
     try std.testing.expectEqualStrings("pending", write_effect.writes.slots[1]);
+    try std.testing.expectEqualStrings("balances", both_effect.reads_writes.reads[0]);
+    try std.testing.expectEqualStrings("pending", both_effect.reads_writes.writes[1]);
 }

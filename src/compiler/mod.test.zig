@@ -82,6 +82,13 @@ fn countDiagnosticMessages(diags: *const compiler.diagnostics.DiagnosticList, ne
     return count;
 }
 
+fn containsString(items: []const []const u8, needle: []const u8) bool {
+    for (items) |item| {
+        if (std.mem.eql(u8, item, needle)) return true;
+    }
+    return false;
+}
+
 fn nthDescendantNodeOfKind(node: compiler.SyntaxNode, kind: compiler.syntax.SyntaxKind, ordinal: usize) ?compiler.SyntaxNode {
     var remaining = ordinal;
     return nthDescendantNodeOfKindInner(node, kind, &remaining);
@@ -1602,6 +1609,59 @@ test "compiler lowers bitfield types as wire integers with metadata attrs" {
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 2, "ora.bitfield = \"Flags\""));
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.bitfield_layout"));
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "i256"));
+}
+
+test "compiler tracks per-function read and write effects" {
+    const source_text =
+        \\contract Effects {
+        \\    storage total: u256;
+        \\    tstore var pending: u256;
+        \\
+        \\    pub fn read_only() -> u256 {
+        \\        return total;
+        \\    }
+        \\
+        \\    pub fn write_only(value: u256) {
+        \\        total = value;
+        \\    }
+        \\
+        \\    pub fn mixed(value: u256) -> u256 {
+        \\        pending += value;
+        \\        return total;
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const root_file_id = compilation.db.sources.module(compilation.root_module_id).file_id;
+    const ast_file = try compilation.db.astFile(root_file_id);
+    const typecheck = try compilation.db.typeCheck(compilation.root_module_id, .{ .item = ast_file.root_items[0] });
+    const item_index = try compilation.db.itemIndex(compilation.root_module_id);
+
+    const read_only = item_index.lookup("read_only").?;
+    const write_only = item_index.lookup("write_only").?;
+    const mixed = item_index.lookup("mixed").?;
+
+    switch (typecheck.itemEffect(read_only)) {
+        .reads => |effect| try testing.expect(containsString(effect.slots, "total")),
+        else => return error.TestUnexpectedResult,
+    }
+
+    switch (typecheck.itemEffect(write_only)) {
+        .writes => |effect| try testing.expect(containsString(effect.slots, "total")),
+        else => return error.TestUnexpectedResult,
+    }
+
+    switch (typecheck.itemEffect(mixed)) {
+        .reads_writes => |effect| {
+            try testing.expect(containsString(effect.reads, "pending"));
+            try testing.expect(containsString(effect.reads, "total"));
+            try testing.expect(containsString(effect.writes, "pending"));
+        },
+        else => return error.TestUnexpectedResult,
+    }
 }
 
 test "compiler lowers bitfield field reads and writes through bit ops" {

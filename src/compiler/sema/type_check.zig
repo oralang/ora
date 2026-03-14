@@ -15,6 +15,7 @@ const TypeCheckResult = model.TypeCheckResult;
 const Type = model.Type;
 const LocatedType = model.LocatedType;
 const Region = model.Region;
+const Effect = model.Effect;
 const ConstEvalResult = model.ConstEvalResult;
 const ConstValue = model.ConstValue;
 const BigInt = std.math.big.int.Managed;
@@ -46,6 +47,7 @@ pub fn typeCheck(
         .key = key,
         .item_types = &.{},
         .item_regions = &.{},
+        .item_effects = &.{},
         .pattern_types = &.{},
         .expr_types = &.{},
         .body_types = &.{},
@@ -56,11 +58,13 @@ pub fn typeCheck(
     const arena = result.arena.allocator();
     var item_types = try arena.alloc(Type, file.items.len);
     var item_regions = try arena.alloc(Region, file.items.len);
+    const item_effects = try arena.alloc(Effect, file.items.len);
     var pattern_types = try arena.alloc(LocatedType, file.patterns.len);
     const expr_types = try arena.alloc(Type, file.expressions.len);
     var body_types = try arena.alloc(Type, file.bodies.len);
     @memset(item_types, .{ .unknown = {} });
     @memset(item_regions, .none);
+    @memset(item_effects, .pure);
     @memset(pattern_types, LocatedType.unlocated(.{ .unknown = {} }));
     @memset(expr_types, .{ .unknown = {} });
     @memset(body_types, .{ .void = {} });
@@ -108,6 +112,7 @@ pub fn typeCheck(
         .const_eval = const_eval,
         .item_types = item_types,
         .item_regions = item_regions,
+        .item_effects = item_effects,
         .pattern_types = pattern_types,
         .expr_types = expr_types,
         .diagnostics = &result.diagnostics,
@@ -121,6 +126,7 @@ pub fn typeCheck(
 
     result.item_types = item_types;
     result.item_regions = item_regions;
+    result.item_effects = item_effects;
     result.pattern_types = pattern_types;
     result.expr_types = expr_types;
     result.body_types = body_types;
@@ -136,14 +142,19 @@ const TypeChecker = struct {
     const_eval: *const ConstEvalResult,
     item_types: []Type,
     item_regions: []Region,
+    item_effects: []Effect,
     pattern_types: []LocatedType,
     expr_types: []Type,
     current_return_type: ?Type = null,
+    current_contract: ?ast.ItemId = null,
     diagnostics: *diagnostics.DiagnosticList,
 
     fn visitItem(self: *TypeChecker, item_id: ast.ItemId) anyerror!void {
         switch (self.file.item(item_id).*) {
             .Contract => |contract| {
+                const previous_contract = self.current_contract;
+                self.current_contract = item_id;
+                defer self.current_contract = previous_contract;
                 for (contract.invariants) |expr_id| try self.visitExpr(expr_id);
                 for (contract.members) |member_id| try self.visitItem(member_id);
             },
@@ -153,6 +164,7 @@ const TypeChecker = struct {
                 defer self.current_return_type = previous_return_type;
                 for (function.clauses) |clause| try self.visitExpr(clause.expr);
                 try self.visitBody(function.body);
+                self.item_effects[item_id.index()] = try self.summarizeFunctionEffects(function);
             },
             .Field => |field| if (field.value) |expr_id| {
                 try self.visitExpr(expr_id);
@@ -627,6 +639,221 @@ const TypeChecker = struct {
         }
 
         return .{ .unknown = {} };
+    }
+
+    fn summarizeFunctionEffects(self: *TypeChecker, function: ast.FunctionItem) !Effect {
+        var reads: std.ArrayList([]const u8) = .{};
+        var writes: std.ArrayList([]const u8) = .{};
+        try self.collectBodyEffects(function.body, &reads, &writes);
+        return buildEffect(reads.items, writes.items);
+    }
+
+    fn buildEffect(reads: []const []const u8, writes: []const []const u8) Effect {
+        if (reads.len == 0 and writes.len == 0) return .pure;
+        if (reads.len == 0) return .{ .writes = .{ .slots = writes } };
+        if (writes.len == 0) return .{ .reads = .{ .slots = reads } };
+        return .{ .reads_writes = .{ .reads = reads, .writes = writes } };
+    }
+
+    fn collectBodyEffects(self: *TypeChecker, body_id: ast.BodyId, reads: *std.ArrayList([]const u8), writes: *std.ArrayList([]const u8)) anyerror!void {
+        const body = self.file.body(body_id).*;
+        for (body.statements) |statement_id| {
+            try self.collectStmtEffects(statement_id, reads, writes);
+        }
+    }
+
+    fn collectStmtEffects(self: *TypeChecker, statement_id: ast.StmtId, reads: *std.ArrayList([]const u8), writes: *std.ArrayList([]const u8)) anyerror!void {
+        switch (self.file.statement(statement_id).*) {
+            .VariableDecl => |decl| if (decl.value) |expr_id| {
+                try self.collectExprEffects(expr_id, reads, writes);
+            },
+            .Return => |ret| if (ret.value) |expr_id| {
+                try self.collectExprEffects(expr_id, reads, writes);
+            },
+            .If => |if_stmt| {
+                try self.collectExprEffects(if_stmt.condition, reads, writes);
+                try self.collectBodyEffects(if_stmt.then_body, reads, writes);
+                if (if_stmt.else_body) |else_body| try self.collectBodyEffects(else_body, reads, writes);
+            },
+            .While => |while_stmt| {
+                try self.collectExprEffects(while_stmt.condition, reads, writes);
+                for (while_stmt.invariants) |expr_id| try self.collectExprEffects(expr_id, reads, writes);
+                try self.collectBodyEffects(while_stmt.body, reads, writes);
+            },
+            .For => |for_stmt| {
+                try self.collectExprEffects(for_stmt.iterable, reads, writes);
+                for (for_stmt.invariants) |expr_id| try self.collectExprEffects(expr_id, reads, writes);
+                try self.collectBodyEffects(for_stmt.body, reads, writes);
+            },
+            .Switch => |switch_stmt| {
+                try self.collectExprEffects(switch_stmt.condition, reads, writes);
+                for (switch_stmt.arms) |arm| {
+                    switch (arm.pattern) {
+                        .Expr => |expr_id| try self.collectExprEffects(expr_id, reads, writes),
+                        .Range => |range_pattern| {
+                            try self.collectExprEffects(range_pattern.start, reads, writes);
+                            try self.collectExprEffects(range_pattern.end, reads, writes);
+                        },
+                        .Else => {},
+                    }
+                    try self.collectBodyEffects(arm.body, reads, writes);
+                }
+                if (switch_stmt.else_body) |else_body| try self.collectBodyEffects(else_body, reads, writes);
+            },
+            .Try => |try_stmt| {
+                try self.collectBodyEffects(try_stmt.try_body, reads, writes);
+                if (try_stmt.catch_clause) |catch_clause| try self.collectBodyEffects(catch_clause.body, reads, writes);
+            },
+            .Log => |log_stmt| {
+                for (log_stmt.args) |arg| try self.collectExprEffects(arg, reads, writes);
+            },
+            .Lock, .Unlock, .Havoc, .Break, .Continue => {},
+            .Assert => |assert_stmt| try self.collectExprEffects(assert_stmt.condition, reads, writes),
+            .Assume => |assume_stmt| try self.collectExprEffects(assume_stmt.condition, reads, writes),
+            .Assign => |assign| {
+                try self.collectExprEffects(assign.value, reads, writes);
+                try self.collectPatternTargetEffects(assign.target, assign.op, reads, writes);
+            },
+            .Expr => |expr_stmt| try self.collectExprEffects(expr_stmt.expr, reads, writes),
+            .Block => |block| try self.collectBodyEffects(block.body, reads, writes),
+            .LabeledBlock => |block| try self.collectBodyEffects(block.body, reads, writes),
+            .Error => {},
+        }
+    }
+
+    fn collectExprEffects(self: *TypeChecker, expr_id: ast.ExprId, reads: *std.ArrayList([]const u8), writes: *std.ArrayList([]const u8)) anyerror!void {
+        switch (self.file.expression(expr_id).*) {
+            .IntegerLiteral, .StringLiteral, .BoolLiteral, .AddressLiteral, .BytesLiteral, .Result, .Error => {},
+            .Tuple => |tuple| for (tuple.elements) |element| try self.collectExprEffects(element, reads, writes),
+            .ArrayLiteral => |array| for (array.elements) |element| try self.collectExprEffects(element, reads, writes),
+            .StructLiteral => |struct_literal| for (struct_literal.fields) |field| try self.collectExprEffects(field.value, reads, writes),
+            .Switch => |switch_expr| {
+                try self.collectExprEffects(switch_expr.condition, reads, writes);
+                for (switch_expr.arms) |arm| {
+                    switch (arm.pattern) {
+                        .Expr => |pattern_expr| try self.collectExprEffects(pattern_expr, reads, writes),
+                        .Range => |range_pattern| {
+                            try self.collectExprEffects(range_pattern.start, reads, writes);
+                            try self.collectExprEffects(range_pattern.end, reads, writes);
+                        },
+                        .Else => {},
+                    }
+                    try self.collectExprEffects(arm.value, reads, writes);
+                }
+                if (switch_expr.else_expr) |else_expr| try self.collectExprEffects(else_expr, reads, writes);
+            },
+            .Comptime => {},
+            .ErrorReturn => |error_return| for (error_return.args) |arg| try self.collectExprEffects(arg, reads, writes),
+            .Name => {
+                if (self.fieldSlotForBinding(self.resolution.expr_bindings[expr_id.index()])) |slot| {
+                    try self.appendUniqueSlot(reads, slot);
+                }
+            },
+            .Unary => |unary| try self.collectExprEffects(unary.operand, reads, writes),
+            .Binary => |binary| {
+                try self.collectExprEffects(binary.lhs, reads, writes);
+                try self.collectExprEffects(binary.rhs, reads, writes);
+            },
+            .Call => |call| {
+                try self.collectExprEffects(call.callee, reads, writes);
+                for (call.args) |arg| try self.collectExprEffects(arg, reads, writes);
+            },
+            .Builtin => |builtin| for (builtin.args) |arg| try self.collectExprEffects(arg, reads, writes),
+            .Field => |field| try self.collectExprEffects(field.base, reads, writes),
+            .Index => |index| {
+                try self.collectExprEffects(index.base, reads, writes);
+                try self.collectExprEffects(index.index, reads, writes);
+            },
+            .Group => |group| try self.collectExprEffects(group.expr, reads, writes),
+            .Old, .Quantified => {},
+        }
+    }
+
+    fn collectPatternTargetEffects(self: *TypeChecker, pattern_id: ast.PatternId, op: ast.AssignmentOp, reads: *std.ArrayList([]const u8), writes: *std.ArrayList([]const u8)) anyerror!void {
+        switch (self.file.pattern(pattern_id).*) {
+            .Name => {
+                if (self.patternRootFieldSlot(pattern_id)) |slot_name| {
+                    if (op != .assign) try self.appendUniqueSlot(reads, slot_name);
+                    try self.appendUniqueSlot(writes, slot_name);
+                }
+            },
+            .Field => |field| {
+                try self.collectPatternTargetEffects(field.base, .add_assign, reads, writes);
+            },
+            .Index => |index| {
+                try self.collectPatternExprReads(index.base, reads, writes);
+                try self.collectExprEffects(index.index, reads, writes);
+                if (self.patternRootFieldSlot(pattern_id)) |slot| {
+                    try self.appendUniqueSlot(reads, slot);
+                    try self.appendUniqueSlot(writes, slot);
+                }
+            },
+            .StructDestructure => {},
+            .Error => {},
+        }
+    }
+
+    fn collectPatternExprReads(self: *TypeChecker, pattern_id: ast.PatternId, reads: *std.ArrayList([]const u8), writes: *std.ArrayList([]const u8)) anyerror!void {
+        switch (self.file.pattern(pattern_id).*) {
+            .Name => {
+                if (self.patternRootFieldSlot(pattern_id)) |slot| {
+                    try self.appendUniqueSlot(reads, slot);
+                }
+            },
+            .Field => |field| try self.collectPatternExprReads(field.base, reads, writes),
+            .Index => |index| {
+                try self.collectPatternExprReads(index.base, reads, writes);
+                try self.collectExprEffects(index.index, reads, writes);
+            },
+            .StructDestructure => {},
+            .Error => {},
+        }
+    }
+
+    fn patternRootFieldSlot(self: *TypeChecker, pattern_id: ast.PatternId) ?[]const u8 {
+        return switch (self.file.pattern(pattern_id).*) {
+            .Name => |name| self.lookupNamedFieldSlot(name.name),
+            .Field => |field| self.patternRootFieldSlot(field.base),
+            .Index => |index| self.patternRootFieldSlot(index.base),
+            .StructDestructure => null,
+            .Error => null,
+        };
+    }
+
+    fn fieldSlotForBinding(self: *TypeChecker, binding: ?ResolvedBinding) ?[]const u8 {
+        if (binding) |resolved| {
+            return switch (resolved) {
+                .item => |item_id| switch (self.file.item(item_id).*) {
+                    .Field => |field| if (field.storage_class != .none) field.name else null,
+                    else => null,
+                },
+                .pattern => null,
+            };
+        }
+        return null;
+    }
+
+    fn lookupNamedFieldSlot(self: *TypeChecker, name: []const u8) ?[]const u8 {
+        if (self.current_contract) |contract_id| {
+            const contract = self.file.item(contract_id).Contract;
+            for (contract.members) |member_id| {
+                switch (self.file.item(member_id).*) {
+                    .Field => |field| {
+                        if (field.storage_class == .none) continue;
+                        if (std.mem.eql(u8, field.name, name)) return field.name;
+                    },
+                    else => {},
+                }
+            }
+        }
+        return self.fieldSlotForBinding(if (self.item_index.lookup(name)) |item_id| .{ .item = item_id } else null);
+    }
+
+    fn appendUniqueSlot(self: *TypeChecker, slots: *std.ArrayList([]const u8), slot: []const u8) !void {
+        for (slots.items) |existing| {
+            if (std.mem.eql(u8, existing, slot)) return;
+        }
+        try slots.append(self.arena, slot);
     }
 
     fn storeType(self: *TypeChecker, ty: Type) !*const Type {
