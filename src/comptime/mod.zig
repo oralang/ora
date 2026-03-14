@@ -107,6 +107,9 @@ pub const AstStmtResult = ast_eval.AstStmtResult;
 pub const evaluateBlock = ast_eval.evaluateBlock;
 pub const evaluateBlockWithEnv = ast_eval.evaluateBlockWithEnv;
 
+// Refactored compiler AST evaluator (migration path for src/compiler/)
+pub const compiler_ast_eval = @import("compiler_ast_eval.zig");
+
 // Re-export evaluation mode and result from eval.zig
 pub const EvalMode = @import("eval.zig").EvalMode;
 pub const EvalResult = @import("eval.zig").EvalResult;

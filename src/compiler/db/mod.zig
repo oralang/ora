@@ -1,5 +1,6 @@
 const std = @import("std");
 const ast = @import("../ast/mod.zig");
+const comptime_eval = @import("../../comptime/mod.zig").compiler_ast_eval;
 const diagnostics = @import("../diagnostics/mod.zig");
 const hir = @import("../hir/mod.zig");
 const sema = @import("../sema/mod.zig");
@@ -257,7 +258,7 @@ pub const CompilerDb = struct {
             const module = self.sources.module(module_id);
             const ast_file = try self.astFile(module.file_id);
             const result = try self.allocator.create(sema.ConstEvalResult);
-            result.* = try sema.constEval(self.allocator, ast_file);
+            result.* = try comptime_eval.constEval(self.allocator, ast_file);
             slot.* = result;
         }
         return slot.*.?;
