@@ -57,6 +57,7 @@ pub const TypeKind = enum {
     slice,
     map,
     error_union,
+    refinement,
 };
 
 pub const Region = enum {
@@ -102,6 +103,12 @@ pub const ErrorUnionType = struct {
     error_types: []const Type = &.{},
 };
 
+pub const RefinementType = struct {
+    name: []const u8,
+    base_type: *const Type,
+    args: []const ast.TypeArg = &.{},
+};
+
 pub const Type = union(TypeKind) {
     unknown: void,
     void: void,
@@ -121,6 +128,7 @@ pub const Type = union(TypeKind) {
     slice: SliceType,
     map: MapType,
     error_union: ErrorUnionType,
+    refinement: RefinementType,
 
     pub fn kind(self: Type) TypeKind {
         return std.meta.activeTag(self);
@@ -135,6 +143,7 @@ pub const Type = union(TypeKind) {
             .struct_ => |named| named.name,
             .bitfield => |named| named.name,
             .enum_ => |named| named.name,
+            .refinement => |refinement| refinement.name,
             else => null,
         };
     }
@@ -164,6 +173,13 @@ pub const Type = union(TypeKind) {
     pub fn payloadType(self: *const Type) ?*const Type {
         return switch (self.*) {
             .error_union => |error_union| error_union.payload_type,
+            else => null,
+        };
+    }
+
+    pub fn refinementBaseType(self: *const Type) ?*const Type {
+        return switch (self.*) {
+            .refinement => |refinement| refinement.base_type,
             else => null,
         };
     }
@@ -417,6 +433,20 @@ test "LocatedType equality includes region" {
 
     try std.testing.expect(std.meta.eql(lhs, rhs_same));
     try std.testing.expect(!std.meta.eql(lhs, rhs_other_region));
+}
+
+test "refinement type preserves base type" {
+    const base: Type = .{ .integer = .{ .bits = 256, .signed = false, .spelling = "u256" } };
+    const refinement: Type = .{ .refinement = .{
+        .name = "MinValue",
+        .base_type = &base,
+        .args = &.{},
+    } };
+
+    try std.testing.expectEqual(TypeKind.refinement, refinement.kind());
+    try std.testing.expectEqualStrings("MinValue", refinement.name().?);
+    try std.testing.expect(refinement.refinementBaseType() != null);
+    try std.testing.expectEqual(TypeKind.integer, refinement.refinementBaseType().?.kind());
 }
 
 test "Effect stub supports read and write slot sets" {

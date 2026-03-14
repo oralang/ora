@@ -71,6 +71,7 @@ pub fn lowerTypeDescriptor(ctx: mlir.MlirContext, descriptor: sema.Type) mlir.Ml
             if (map.key_type) |key| lowerTypeDescriptor(ctx, key.*) else defaultIntegerType(ctx),
             if (map.value_type) |value| lowerTypeDescriptor(ctx, value.*) else defaultIntegerType(ctx),
         ),
+        .refinement => |refinement| lowerTypeDescriptor(ctx, refinement.base_type.*),
         .struct_ => |named| mlir.oraStructTypeGet(ctx, strRef(named.name)),
         .contract => |named| mlir.oraStructTypeGet(ctx, strRef(named.name)),
         // Bitfields are carried on the wire as the base packed integer plus attrs.

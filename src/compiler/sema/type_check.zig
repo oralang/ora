@@ -970,6 +970,10 @@ fn sameConcreteType(lhs_type: Type, rhs_type: Type) bool {
         .struct_ => |left| std.mem.eql(u8, left.name, rhs_type.struct_.name),
         .bitfield => |left| std.mem.eql(u8, left.name, rhs_type.bitfield.name),
         .enum_ => |left| std.mem.eql(u8, left.name, rhs_type.enum_.name),
+        .refinement => |left| blk: {
+            const right = rhs_type.refinement;
+            break :blk std.mem.eql(u8, left.name, right.name) and sameConcreteType(left.base_type.*, right.base_type.*);
+        },
         else => false,
     };
 }
@@ -1033,6 +1037,7 @@ fn typeDisplayName(ty: Type) []const u8 {
         .slice => "slice",
         .map => "map",
         .error_union => "error union",
+        .refinement => |refinement| refinement.name,
     };
 }
 

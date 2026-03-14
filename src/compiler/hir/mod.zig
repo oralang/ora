@@ -216,6 +216,7 @@ const Lowerer = struct {
                 if (map.key_type) |key| self.lowerSemaType(key.*, range) else support.defaultIntegerType(self.context),
                 if (map.value_type) |value| self.lowerSemaType(value.*, range) else support.defaultIntegerType(self.context),
             ),
+            .refinement => |refinement| self.lowerSemaType(refinement.base_type.*, range),
             .struct_ => |named| mlir.oraStructTypeGet(self.context, support.strRef(named.name)),
             .contract => |named| mlir.oraStructTypeGet(self.context, support.strRef(named.name)),
             // Bitfields are lowered as packed integer wire values with attrs carrying layout metadata.

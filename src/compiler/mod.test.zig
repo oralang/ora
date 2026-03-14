@@ -1187,6 +1187,13 @@ test "compiler lowers structured type expressions" {
     try testing.expectEqualStrings("Failure", ast_file.typeExpr(maybe_type.errors[0]).Path.name);
 
     const typecheck = try compilation.db.typeCheck(compilation.root_module_id, .{ .item = ast_file.root_items[2] });
+    const bounded_param = function.parameters[2];
+    const bounded_located_type = typecheck.pattern_types[bounded_param.pattern.index()];
+    try testing.expectEqual(compiler.sema.TypeKind.refinement, bounded_located_type.kind());
+    try testing.expectEqualStrings("MinValue", bounded_located_type.name().?);
+    try testing.expect(bounded_located_type.type.refinementBaseType() != null);
+    try testing.expectEqual(compiler.sema.TypeKind.integer, bounded_located_type.type.refinementBaseType().?.kind());
+
     const body = ast_file.body(function.body);
     const return_stmt = ast_file.statement(body.statements[0]).Return;
     const return_expr = return_stmt.value.?;

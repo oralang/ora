@@ -78,11 +78,16 @@ pub fn descriptorFromGenericType(allocator: std.mem.Allocator, file: *const ast.
         std.mem.eql(u8, generic.name, "Scaled") or
         std.mem.eql(u8, generic.name, "Exact") or
         std.mem.eql(u8, generic.name, "NonZero") or
+        std.mem.eql(u8, generic.name, "NonZeroAddress") or
         std.mem.eql(u8, generic.name, "BasisPoints"))
     {
         if (generic.args.len > 0) {
             return switch (generic.args[0]) {
-                .Type => |type_expr_id| try descriptorFromTypeExpr(allocator, file, item_index, type_expr_id),
+                .Type => |type_expr_id| .{ .refinement = .{
+                    .name = generic.name,
+                    .base_type = try storeType(allocator, try descriptorFromTypeExpr(allocator, file, item_index, type_expr_id)),
+                    .args = generic.args,
+                } },
                 else => .{ .unknown = {} },
             };
         }
@@ -161,6 +166,10 @@ pub fn typeEql(lhs: Type, rhs: Type) bool {
             const right = rhs.error_union;
             break :blk typeEql(left.payload_type.*, right.payload_type.*) and typeSliceEql(left.error_types, right.error_types);
         },
+        .refinement => |left| blk: {
+            const right = rhs.refinement;
+            break :blk std.mem.eql(u8, left.name, right.name) and typeEql(left.base_type.*, right.base_type.*) and refinementArgSliceEql(left.args, right.args);
+        },
     };
 }
 
@@ -173,6 +182,22 @@ fn typeSliceEql(lhs: []const Type, rhs: []const Type) bool {
     if (lhs.len != rhs.len) return false;
     for (lhs, rhs) |left, right| {
         if (!typeEql(left, right)) return false;
+    }
+    return true;
+}
+
+fn refinementArgSliceEql(lhs: []const ast.TypeArg, rhs: []const ast.TypeArg) bool {
+    if (lhs.len != rhs.len) return false;
+    for (lhs, rhs) |left, right| {
+        switch (left) {
+            .Type => |left_type| {
+                if (right != .Type or left_type != right.Type) return false;
+            },
+            .Integer => |left_integer| {
+                if (right != .Integer) return false;
+                if (!std.mem.eql(u8, left_integer.text, right.Integer.text)) return false;
+            },
+        }
     }
     return true;
 }
