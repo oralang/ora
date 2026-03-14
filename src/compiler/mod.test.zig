@@ -3631,6 +3631,64 @@ test "compiler const eval executes comptime integer for loops" {
     try testing.expectEqual(@as(i128, 6), try consteval.values[ret_stmt.value.?.index()].?.integer.toInt(i128));
 }
 
+test "compiler const eval executes comptime break in while loops" {
+    const source_text =
+        \\pub fn count() -> u256 {
+        \\    return comptime {
+        \\        let value = 0;
+        \\        while (true) {
+        \\            value += 1;
+        \\            if (value == 3) {
+        \\                break;
+        \\            }
+        \\        }
+        \\        value;
+        \\    };
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const module = compilation.db.sources.module(compilation.root_module_id);
+    const ast_file = try compilation.db.astFile(module.file_id);
+    const function = ast_file.item(ast_file.root_items[0]).Function;
+    const body = ast_file.body(function.body);
+    const ret_stmt = ast_file.statement(body.statements[0]).Return;
+
+    const consteval = try compilation.db.constEval(compilation.root_module_id);
+    try testing.expectEqual(@as(i128, 3), try consteval.values[ret_stmt.value.?.index()].?.integer.toInt(i128));
+}
+
+test "compiler const eval executes comptime continue in for loops" {
+    const source_text =
+        \\pub fn sum() -> u256 {
+        \\    return comptime {
+        \\        let total = 0;
+        \\        for (5) |i| {
+        \\            if (i == 2) {
+        \\                continue;
+        \\            }
+        \\            total += i;
+        \\        }
+        \\        total;
+        \\    };
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const module = compilation.db.sources.module(compilation.root_module_id);
+    const ast_file = try compilation.db.astFile(module.file_id);
+    const function = ast_file.item(ast_file.root_items[0]).Function;
+    const body = ast_file.body(function.body);
+    const ret_stmt = ast_file.statement(body.statements[0]).Return;
+
+    const consteval = try compilation.db.constEval(compilation.root_module_id);
+    try testing.expectEqual(@as(i128, 8), try consteval.values[ret_stmt.value.?.index()].?.integer.toInt(i128));
+}
+
 test "compiler lowers ghost items into ghost AST nodes" {
     const source_text =
         \\contract Spec {

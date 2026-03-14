@@ -56,6 +56,12 @@ const ConstEvaluator = struct {
     values: []?ConstValue,
     env: CtEnv,
 
+    const BodyControl = union(enum) {
+        value: ?ConstValue,
+        break_loop,
+        continue_loop,
+    };
+
     fn visitItem(self: *ConstEvaluator, item_id: ast.ItemId) void {
         switch (self.file.item(item_id).*) {
             .Contract => |contract| {
@@ -336,7 +342,14 @@ const ConstEvaluator = struct {
     }
 
     fn evalComptimeBody(self: *ConstEvaluator, body_id: ast.BodyId) anyerror!?ConstValue {
-        self.env.pushScope(false) catch return null;
+        return switch (try self.evalComptimeBodyControl(body_id)) {
+            .value => |value| value,
+            .break_loop, .continue_loop => null,
+        };
+    }
+
+    fn evalComptimeBodyControl(self: *ConstEvaluator, body_id: ast.BodyId) anyerror!BodyControl {
+        self.env.pushScope(false) catch return .{ .value = null };
         defer self.env.popScope();
 
         const body = self.file.body(body_id).*;
@@ -353,16 +366,28 @@ const ConstEvaluator = struct {
                     last_value = try self.evalExprUncached(expr_stmt.expr);
                 },
                 .Return => |ret| {
-                    return if (ret.value) |ret_value| try self.evalExprUncached(ret_value) else null;
+                    return .{ .value = if (ret.value) |ret_value| try self.evalExprUncached(ret_value) else null };
                 },
                 .Block => |block_stmt| {
-                    last_value = try self.evalComptimeBody(block_stmt.body);
+                    switch (try self.evalComptimeBodyControl(block_stmt.body)) {
+                        .value => |value| last_value = value,
+                        .break_loop => return .break_loop,
+                        .continue_loop => return .continue_loop,
+                    }
                 },
                 .LabeledBlock => |labeled| {
-                    last_value = try self.evalComptimeBody(labeled.body);
+                    switch (try self.evalComptimeBodyControl(labeled.body)) {
+                        .value => |value| last_value = value,
+                        .break_loop => return .break_loop,
+                        .continue_loop => return .continue_loop,
+                    }
                 },
                 .If => |if_stmt| {
-                    last_value = try self.evalComptimeIf(if_stmt);
+                    switch (try self.evalComptimeIf(if_stmt)) {
+                        .value => |value| last_value = value,
+                        .break_loop => return .break_loop,
+                        .continue_loop => return .continue_loop,
+                    }
                 },
                 .While => |while_stmt| {
                     last_value = try self.evalComptimeWhile(while_stmt);
@@ -371,37 +396,43 @@ const ConstEvaluator = struct {
                     last_value = try self.evalComptimeFor(for_stmt);
                 },
                 .Switch => |switch_stmt| {
-                    last_value = try self.evalComptimeSwitchStmt(switch_stmt);
+                    switch (try self.evalComptimeSwitchStmt(switch_stmt)) {
+                        .value => |value| last_value = value,
+                        .break_loop => return .break_loop,
+                        .continue_loop => return .continue_loop,
+                    }
                 },
                 .Assign => |assign| {
                     last_value = try self.evalComptimeAssign(assign);
                 },
+                .Break => return .break_loop,
+                .Continue => return .continue_loop,
                 else => {
                     self.visitBodyStatementForComptime(statement_id);
                     last_value = null;
                 },
             }
         }
-        return last_value;
+        return .{ .value = last_value };
     }
 
-    fn evalComptimeIf(self: *ConstEvaluator, if_stmt: ast.IfStmt) anyerror!?ConstValue {
-        const condition = (try self.evalExprUncached(if_stmt.condition)) orelse return null;
-        const take_then = self.constConditionTruthy(condition) orelse return null;
-        if (take_then) return try self.evalComptimeBody(if_stmt.then_body);
-        if (if_stmt.else_body) |else_body| return try self.evalComptimeBody(else_body);
-        return null;
+    fn evalComptimeIf(self: *ConstEvaluator, if_stmt: ast.IfStmt) anyerror!BodyControl {
+        const condition = (try self.evalExprUncached(if_stmt.condition)) orelse return .{ .value = null };
+        const take_then = self.constConditionTruthy(condition) orelse return .{ .value = null };
+        if (take_then) return try self.evalComptimeBodyControl(if_stmt.then_body);
+        if (if_stmt.else_body) |else_body| return try self.evalComptimeBodyControl(else_body);
+        return .{ .value = null };
     }
 
-    fn evalComptimeSwitchStmt(self: *ConstEvaluator, switch_stmt: ast.SwitchStmt) anyerror!?ConstValue {
-        const condition = (try self.evalExprUncached(switch_stmt.condition)) orelse return null;
+    fn evalComptimeSwitchStmt(self: *ConstEvaluator, switch_stmt: ast.SwitchStmt) anyerror!BodyControl {
+        const condition = (try self.evalExprUncached(switch_stmt.condition)) orelse return .{ .value = null };
         for (switch_stmt.arms) |arm| {
             if (self.patternMatches(condition, arm.pattern)) {
-                return try self.evalComptimeBody(arm.body);
+                return try self.evalComptimeBodyControl(arm.body);
             }
         }
-        if (switch_stmt.else_body) |else_body| return try self.evalComptimeBody(else_body);
-        return null;
+        if (switch_stmt.else_body) |else_body| return try self.evalComptimeBodyControl(else_body);
+        return .{ .value = null };
     }
 
     fn evalComptimeWhile(self: *ConstEvaluator, while_stmt: ast.WhileStmt) anyerror!?ConstValue {
@@ -415,7 +446,11 @@ const ConstEvaluator = struct {
             const should_continue = self.constConditionTruthy(condition) orelse return null;
             if (!should_continue) break;
 
-            last_value = try self.evalComptimeBody(while_stmt.body);
+            switch (try self.evalComptimeBodyControl(while_stmt.body)) {
+                .value => |value| last_value = value,
+                .break_loop => break,
+                .continue_loop => continue,
+            }
         }
         return last_value;
     }
@@ -440,7 +475,11 @@ const ConstEvaluator = struct {
                 try self.bindPattern(index_pattern, index_value);
             }
 
-            last_value = try self.evalComptimeBody(for_stmt.body);
+            switch (try self.evalComptimeBodyControl(for_stmt.body)) {
+                .value => |value| last_value = value,
+                .break_loop => break,
+                .continue_loop => continue,
+            }
         }
         return last_value;
     }
