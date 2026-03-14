@@ -1118,7 +1118,10 @@ const TypeChecker = struct {
                     .Function => item_id,
                     else => null,
                 },
-                .pattern => null,
+                .pattern => |pattern_id| if (self.initializerExprForPattern(pattern_id)) |init_expr|
+                    self.calleeFunctionItem(init_expr)
+                else
+                    null,
             } else null,
             .Field => |field| blk: {
                 const base_type = self.expr_types[field.base.index()];
@@ -1139,6 +1142,19 @@ const TypeChecker = struct {
             .Group => |group| self.calleeFunctionItem(group.expr),
             else => null,
         };
+    }
+
+    fn initializerExprForPattern(self: *const TypeChecker, pattern_id: ast.PatternId) ?ast.ExprId {
+        for (self.file.statements) |statement| {
+            switch (statement) {
+                .VariableDecl => |decl| {
+                    if (decl.pattern != pattern_id) continue;
+                    return decl.value;
+                },
+                else => {},
+            }
+        }
+        return null;
     }
 
     fn storeType(self: *TypeChecker, ty: Type) !*const Type {
