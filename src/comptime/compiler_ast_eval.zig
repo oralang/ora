@@ -167,6 +167,12 @@ const ConstEvaluator = struct {
             if (self.values[expr_id.index()]) |cached| return cached;
         }
 
+        if (try self.evalExprCtValue(expr_id)) |ct_value| {
+            const const_value = try ctValueToConstValue(self.allocator, ct_value);
+            if (use_cache) self.values[expr_id.index()] = const_value;
+            return const_value;
+        }
+
         const value: ?ConstValue = switch (self.file.expression(expr_id).*) {
             .IntegerLiteral => |literal| try parseIntegerLiteral(self.allocator, literal.text),
             .StringLiteral => |literal| ConstValue{ .string = literal.text },
@@ -260,6 +266,64 @@ const ConstEvaluator = struct {
         };
         if (use_cache) self.values[expr_id.index()] = value;
         return value;
+    }
+
+    fn evalExprCtValue(self: *ConstEvaluator, expr_id: ast.ExprId) anyerror!?CtValue {
+        return switch (self.file.expression(expr_id).*) {
+            .IntegerLiteral => |literal| blk: {
+                const value = (try parseIntegerLiteral(self.allocator, literal.text)) orelse break :blk null;
+                break :blk try constToCtValue(value);
+            },
+            .BoolLiteral => |literal| CtValue{ .boolean = literal.value },
+            .Name => |name| self.env.lookupValue(name.name),
+            .Group => |group| try self.evalExprCtValue(group.expr),
+            .ArrayLiteral => |array| blk: {
+                const elems = try self.allocator.alloc(CtValue, array.elements.len);
+                for (array.elements, 0..) |element_id, idx| {
+                    _ = try self.evalExpr(element_id);
+                    elems[idx] = (try self.evalExprCtValue(element_id)) orelse break :blk null;
+                }
+                const heap_id = try self.env.heap.allocArray(elems);
+                break :blk CtValue{ .array_ref = heap_id };
+            },
+            .Tuple => |tuple| blk: {
+                const elems = try self.allocator.alloc(CtValue, tuple.elements.len);
+                for (tuple.elements, 0..) |element_id, idx| {
+                    _ = try self.evalExpr(element_id);
+                    elems[idx] = (try self.evalExprCtValue(element_id)) orelse break :blk null;
+                }
+                const heap_id = try self.env.heap.allocTuple(elems);
+                break :blk CtValue{ .tuple_ref = heap_id };
+            },
+            .Index => |index| blk: {
+                _ = try self.evalExpr(index.base);
+                _ = try self.evalExpr(index.index);
+                const base = (try self.evalExprCtValue(index.base)) orelse break :blk null;
+                const index_value = (try self.evalExprCtValue(index.index)) orelse break :blk null;
+                const idx: usize = switch (index_value) {
+                    .integer => |integer| blk_idx: {
+                        if (integer > std.math.maxInt(usize)) break :blk_idx null;
+                        break :blk_idx @as(usize, @intCast(integer));
+                    },
+                    else => null,
+                } orelse break :blk null;
+
+                break :blk switch (base) {
+                    .array_ref => |heap_id| blk_elem: {
+                        const elems = self.env.heap.getArray(heap_id).elems;
+                        if (idx >= elems.len) break :blk_elem null;
+                        break :blk_elem elems[idx];
+                    },
+                    .tuple_ref => |heap_id| blk_elem: {
+                        const elems = self.env.heap.getTuple(heap_id).elems;
+                        if (idx >= elems.len) break :blk_elem null;
+                        break :blk_elem elems[idx];
+                    },
+                    else => null,
+                };
+            },
+            else => null,
+        };
     }
 
     fn patternMatches(self: *ConstEvaluator, condition: ConstValue, pattern: ast.SwitchPattern) bool {
@@ -375,9 +439,17 @@ const ConstEvaluator = struct {
         for (body.statements) |statement_id| {
             switch (self.file.statement(statement_id).*) {
                 .VariableDecl => |decl| {
-                    const value = if (decl.value) |expr_id| try self.evalExprUncached(expr_id) else null;
-                    try self.bindPattern(decl.pattern, value);
-                    if (decl.value) |expr_id| self.values[expr_id.index()] = value;
+                    if (decl.value) |expr_id| {
+                        if (try self.evalExprCtValue(expr_id)) |ct_value| {
+                            try self.bindPatternCtValue(decl.pattern, ct_value);
+                            const persisted = try ctValueToConstValue(self.allocator, ct_value);
+                            self.values[expr_id.index()] = persisted;
+                        } else {
+                            const persisted = try self.evalExprUncached(expr_id);
+                            try self.bindPattern(decl.pattern, persisted);
+                            self.values[expr_id.index()] = persisted;
+                        }
+                    }
                     last_value = null;
                 },
                 .Expr => |expr_stmt| {
