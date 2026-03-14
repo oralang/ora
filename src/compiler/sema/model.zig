@@ -59,6 +59,14 @@ pub const TypeKind = enum {
     error_union,
 };
 
+pub const Region = enum {
+    none,
+    storage,
+    memory,
+    transient,
+    calldata,
+};
+
 pub const NamedType = struct {
     name: []const u8,
 };
@@ -196,6 +204,25 @@ pub const Type = union(TypeKind) {
     }
 };
 
+pub const LocatedType = struct {
+    type: Type,
+    region: Region = .none,
+
+    pub fn unlocated(ty: Type) LocatedType {
+        return .{
+            .type = ty,
+            .region = .none,
+        };
+    }
+
+    pub fn withRegion(ty: Type, region: Region) LocatedType {
+        return .{
+            .type = ty,
+            .region = region,
+        };
+    }
+};
+
 pub const ConstValue = union(enum) {
     integer: BigInt,
     boolean: bool,
@@ -312,3 +339,24 @@ pub const ModuleVerificationFactsResult = struct {
         self.arena.deinit();
     }
 };
+
+test "LocatedType defaults to none region" {
+    const ty = LocatedType.unlocated(.{ .integer = .{ .bits = 256, .signed = false } });
+    try std.testing.expectEqual(Region.none, ty.region);
+    try std.testing.expectEqual(TypeKind.integer, ty.type.kind());
+}
+
+test "LocatedType supports explicit regions" {
+    const located = LocatedType.withRegion(.{ .bool = {} }, .storage);
+    try std.testing.expectEqual(Region.storage, located.region);
+    try std.testing.expectEqual(TypeKind.bool, located.type.kind());
+}
+
+test "LocatedType equality includes region" {
+    const lhs = LocatedType.withRegion(.{ .address = {} }, .memory);
+    const rhs_same = LocatedType.withRegion(.{ .address = {} }, .memory);
+    const rhs_other_region = LocatedType.withRegion(.{ .address = {} }, .storage);
+
+    try std.testing.expect(std.meta.eql(lhs, rhs_same));
+    try std.testing.expect(!std.meta.eql(lhs, rhs_other_region));
+}
