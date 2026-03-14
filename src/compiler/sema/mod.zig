@@ -17,6 +17,7 @@ pub const Region = model.Region;
 pub const Type = model.Type;
 pub const LocatedType = model.LocatedType;
 pub const ConstValue = model.ConstValue;
+pub const Effect = model.Effect;
 pub const VerificationFact = model.VerificationFact;
 pub const TypeCheckKey = model.TypeCheckKey;
 pub const VerificationFactsKey = model.VerificationFactsKey;

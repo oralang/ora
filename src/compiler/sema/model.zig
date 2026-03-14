@@ -279,6 +279,12 @@ pub const VerificationFact = struct {
     range: source.TextRange,
 };
 
+pub const Effect = union(enum) {
+    pure,
+    writes: struct { slots: []const []const u8 },
+    reads: struct { slots: []const []const u8 },
+};
+
 pub const TypeCheckKey = union(enum) {
     item: ast.ItemId,
     body: ast.BodyId,
@@ -411,4 +417,13 @@ test "LocatedType equality includes region" {
 
     try std.testing.expect(std.meta.eql(lhs, rhs_same));
     try std.testing.expect(!std.meta.eql(lhs, rhs_other_region));
+}
+
+test "Effect stub supports read and write slot sets" {
+    const slots = [_][]const u8{ "balances", "pending" };
+    const read_effect: Effect = .{ .reads = .{ .slots = &slots } };
+    const write_effect: Effect = .{ .writes = .{ .slots = &slots } };
+
+    try std.testing.expectEqualStrings("balances", read_effect.reads.slots[0]);
+    try std.testing.expectEqualStrings("pending", write_effect.writes.slots[1]);
 }
