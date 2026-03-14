@@ -347,6 +347,12 @@ const ConstEvaluator = struct {
                 .LabeledBlock => |labeled| {
                     last_value = try self.evalComptimeBody(labeled.body);
                 },
+                .If => |if_stmt| {
+                    last_value = try self.evalComptimeIf(if_stmt);
+                },
+                .Assign => |assign| {
+                    last_value = try self.evalComptimeAssign(assign);
+                },
                 else => {
                     self.visitBodyStatementForComptime(statement_id);
                     last_value = null;
@@ -354,6 +360,56 @@ const ConstEvaluator = struct {
             }
         }
         return last_value;
+    }
+
+    fn evalComptimeIf(self: *ConstEvaluator, if_stmt: ast.IfStmt) anyerror!?ConstValue {
+        const condition = (try self.evalExpr(if_stmt.condition)) orelse return null;
+        const take_then = self.constConditionTruthy(condition) orelse return null;
+        if (take_then) return try self.evalComptimeBody(if_stmt.then_body);
+        if (if_stmt.else_body) |else_body| return try self.evalComptimeBody(else_body);
+        return null;
+    }
+
+    fn evalComptimeAssign(self: *ConstEvaluator, assign: ast.AssignStmt) anyerror!?ConstValue {
+        const rhs = (try self.evalExpr(assign.value)) orelse return null;
+        switch (self.file.pattern(assign.target).*) {
+            .Name => |name| {
+                const value = switch (assign.op) {
+                    .assign => rhs,
+                    .add_assign => (try evalBinary(self.allocator, .add, try self.readBoundName(name.name), rhs)) orelse return null,
+                    .sub_assign => (try evalBinary(self.allocator, .sub, try self.readBoundName(name.name), rhs)) orelse return null,
+                    .mul_assign => (try evalBinary(self.allocator, .mul, try self.readBoundName(name.name), rhs)) orelse return null,
+                    .div_assign => (try evalBinary(self.allocator, .div, try self.readBoundName(name.name), rhs)) orelse return null,
+                    .mod_assign => (try evalBinary(self.allocator, .mod, try self.readBoundName(name.name), rhs)) orelse return null,
+                    .bit_and_assign => (try evalBinary(self.allocator, .bit_and, try self.readBoundName(name.name), rhs)) orelse return null,
+                    .bit_or_assign => (try evalBinary(self.allocator, .bit_or, try self.readBoundName(name.name), rhs)) orelse return null,
+                    .bit_xor_assign => (try evalBinary(self.allocator, .bit_xor, try self.readBoundName(name.name), rhs)) orelse return null,
+                    .shl_assign => (try evalBinary(self.allocator, .shl, try self.readBoundName(name.name), rhs)) orelse return null,
+                    .shr_assign => (try evalBinary(self.allocator, .shr, try self.readBoundName(name.name), rhs)) orelse return null,
+                    .pow_assign => (try evalBinary(self.allocator, .pow, try self.readBoundName(name.name), rhs)) orelse return null,
+                    .wrapping_add_assign => (try evalBinary(self.allocator, .wrapping_add, try self.readBoundName(name.name), rhs)) orelse return null,
+                    .wrapping_sub_assign => (try evalBinary(self.allocator, .wrapping_sub, try self.readBoundName(name.name), rhs)) orelse return null,
+                    .wrapping_mul_assign => (try evalBinary(self.allocator, .wrapping_mul, try self.readBoundName(name.name), rhs)) orelse return null,
+                };
+                try self.bindName(name.name, value);
+                return value;
+            },
+            else => return null,
+        }
+    }
+
+    fn readBoundName(self: *ConstEvaluator, name: []const u8) anyerror!?ConstValue {
+        const value = self.env.lookupValue(name) orelse return null;
+        return try ctValueToConstValue(self.allocator, value);
+    }
+
+    fn constConditionTruthy(self: *ConstEvaluator, value: ConstValue) ?bool {
+        _ = self;
+        return switch (value) {
+            .boolean => |boolean| boolean,
+            .integer => |integer| !integer.eqlZero(),
+            .string => null,
+        };
     }
 
     fn visitBodyStatementForComptime(self: *ConstEvaluator, statement_id: ast.StmtId) void {

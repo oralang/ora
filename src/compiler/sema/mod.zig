@@ -1,5 +1,5 @@
 const model = @import("model.zig");
-const const_eval = @import("const_eval.zig");
+const comptime_eval = @import("../../comptime/mod.zig").compiler_ast_eval;
 const module_graph = @import("module_graph.zig");
 const resolve = @import("resolve.zig");
 const type_check = @import("type_check.zig");
@@ -29,5 +29,5 @@ pub const buildModuleGraph = module_graph.buildModuleGraph;
 pub const buildItemIndex = module_graph.buildItemIndex;
 pub const resolveNames = resolve.resolveNames;
 pub const typeCheck = type_check.typeCheck;
-pub const constEval = const_eval.constEval;
+pub const constEval = comptime_eval.constEval;
 pub const verificationFacts = verification.verificationFacts;
