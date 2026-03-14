@@ -1279,6 +1279,31 @@ test "compiler inserts refinement call conversions in HIR" {
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.base_to_refinement"));
 }
 
+test "compiler cleans refinement guards to cf.assert" {
+    const source_text =
+        \\pub fn guarded(
+        \\    bounded: MinValue<u256, 100>,
+        \\) -> u256 {
+        \\    return bounded;
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    const mutable_hir_result = @constCast(hir_result);
+    var empty_guards = std.StringHashMap(void).init(testing.allocator);
+    defer empty_guards.deinit();
+
+    mutable_hir_result.cleanupRefinementGuards(&empty_guards);
+    const hir_text = try mutable_hir_result.renderText(testing.allocator);
+    defer testing.allocator.free(hir_text);
+
+    try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "ora.refinement_guard"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "cf.assert"));
+}
+
 test "compiler lowers struct and enum declarations through real decl ops" {
     const source_text =
         \\struct Pair {

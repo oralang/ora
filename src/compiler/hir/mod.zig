@@ -10,6 +10,7 @@ const function_core = @import("function_core.zig");
 const hir_locals = @import("locals.zig");
 const module_lowering = @import("module_lowering.zig");
 const support = @import("support.zig");
+const refinement_guards = @import("../../mlir/refinement_guards.zig");
 
 pub const HirSymbolKind = enum {
     contract,
@@ -79,6 +80,10 @@ pub const LoweringResult = struct {
             return allocator.dupe(u8, "");
         }
         return allocator.dupe(u8, text_ref.data[0..text_ref.length]);
+    }
+
+    pub fn cleanupRefinementGuards(self: *LoweringResult, proven_guard_ids: *const std.StringHashMap(void)) void {
+        refinement_guards.cleanupRefinementGuards(self.context, self.module.raw_module, proven_guard_ids);
     }
 };
 
