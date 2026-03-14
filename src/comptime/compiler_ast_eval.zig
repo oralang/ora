@@ -3,6 +3,8 @@ const ast = @import("../compiler/ast/mod.zig");
 const bridge = @import("compiler_const_bridge.zig");
 const comptime_mod = @import("mod.zig");
 const model = @import("../compiler/sema/model.zig");
+const source = @import("../compiler/source/mod.zig");
+const error_mod = @import("error.zig");
 
 const ConstEvalResult = model.ConstEvalResult;
 const ConstValue = model.ConstValue;
@@ -11,6 +13,7 @@ const CtAggregate = comptime_mod.CtAggregate;
 const CtEnum = comptime_mod.CtEnum;
 const CtEnv = bridge.CtEnv;
 const CtValue = bridge.CtValue;
+const SourceSpan = error_mod.SourceSpan;
 const constEquals = bridge.constEquals;
 const ctValueToConstValue = bridge.ctValueToConstValue;
 const constToCtValue = bridge.constToCtValue;
@@ -51,6 +54,11 @@ pub fn constEval(allocator: std.mem.Allocator, file: *const ast.AstFile) !ConstE
         evaluator.visitItem(item_id);
     }
 
+    if (evaluator.last_error != null) {
+        // The current compiler-facing result shape has no diagnostics channel yet.
+        // Preserve the existing cache contract for now and keep the evaluated values.
+    }
+
     result.values = values;
     return result;
 }
@@ -62,6 +70,7 @@ const ConstEvaluator = struct {
     env: CtEnv,
     call_depth: u32 = 0,
     max_call_depth: u32 = 64,
+    last_error: ?error_mod.CtError = null,
 
     const BodyControl = union(enum) {
         value: ?ConstValue,
@@ -723,7 +732,14 @@ const ConstEvaluator = struct {
         };
 
         if (function.parameters.len != call.args.len) return null;
-        if (self.call_depth >= self.max_call_depth) return null;
+        if (self.call_depth >= self.max_call_depth) {
+            self.last_error = error_mod.CtError.init(
+                .recursion_limit,
+                self.sourceSpan(call.range),
+                "comptime recursion depth exceeded",
+            );
+            return null;
+        }
 
         var arg_values = try self.allocator.alloc(CtValue, call.args.len);
         for (call.args, 0..) |arg, idx| {
@@ -752,6 +768,16 @@ const ConstEvaluator = struct {
         }
 
         return try self.evalComptimeBody(function.body);
+    }
+
+    fn sourceSpan(self: *ConstEvaluator, range: source.TextRange) SourceSpan {
+        _ = self;
+        return .{
+            .line = 0,
+            .column = 0,
+            .length = @intCast(range.end - range.start),
+            .byte_offset = @intCast(range.start),
+        };
     }
 
     fn bindName(self: *ConstEvaluator, name: []const u8, value: ?ConstValue) !void {
