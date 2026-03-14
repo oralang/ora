@@ -1796,6 +1796,60 @@ test "compiler rejects writes to locked transient slots" {
     try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "cannot write locked transient slot 'pending'"));
 }
 
+test "compiler composes contract member call effects into caller summaries" {
+    const source_text =
+        \\contract Vault {
+        \\    storage total: u256;
+        \\
+        \\    fn read_total() -> u256 {
+        \\        return total;
+        \\    }
+        \\}
+        \\
+        \\pub fn wrapper(vault: Vault) -> u256 {
+        \\    return vault.read_total();
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const root_file_id = compilation.db.sources.module(compilation.root_module_id).file_id;
+    const ast_file = try compilation.db.astFile(root_file_id);
+    const typecheck = try compilation.db.typeCheck(compilation.root_module_id, .{ .item = ast_file.root_items[1] });
+
+    switch (typecheck.itemEffect(ast_file.root_items[1])) {
+        .reads => |effect| try testing.expect(containsEffectSlot(effect.slots, "total", .storage)),
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+test "compiler rejects locked writes through contract member calls" {
+    const source_text =
+        \\contract Vault {
+        \\    storage total: u256;
+        \\
+        \\    fn write_total(value: u256) {
+        \\        total = value;
+        \\    }
+        \\
+        \\    pub fn guarded(vault: Vault, value: u256) {
+        \\        @lock(total);
+        \\        vault.write_total(value);
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const root_file_id = compilation.db.sources.module(compilation.root_module_id).file_id;
+    const ast_file = try compilation.db.astFile(root_file_id);
+    const typecheck = try compilation.db.typeCheck(compilation.root_module_id, .{ .item = ast_file.root_items[0] });
+
+    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "cannot write locked storage slot 'total'"));
+}
+
 test "compiler lowers bitfield field reads and writes through bit ops" {
     const source_text =
         \\contract Bits {

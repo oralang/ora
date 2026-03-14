@@ -1120,6 +1120,22 @@ const TypeChecker = struct {
                 },
                 .pattern => null,
             } else null,
+            .Field => |field| blk: {
+                const base_type = self.expr_types[field.base.index()];
+                const contract_item_id = self.itemIdForType(base_type) orelse break :blk null;
+                switch (self.file.item(contract_item_id).*) {
+                    .Contract => |contract| {
+                        for (contract.members) |member_id| {
+                            switch (self.file.item(member_id).*) {
+                                .Function => |function| if (std.mem.eql(u8, function.name, field.name)) break :blk member_id,
+                                else => {},
+                            }
+                        }
+                    },
+                    else => {},
+                }
+                break :blk null;
+            },
             .Group => |group| self.calleeFunctionItem(group.expr),
             else => null,
         };
