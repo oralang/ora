@@ -40,10 +40,10 @@ test "buildEffect preserves external marker across slot summaries" {
         .{ .name = "total", .region = .storage },
     };
 
-    try std.testing.expect(TypeChecker.buildEffect(&.{}, &.{}, true, false, false) == .external);
-    try std.testing.expect(TypeChecker.buildEffect(&slots, &.{}, true, false, false).reads.has_external);
-    try std.testing.expect(TypeChecker.buildEffect(&.{}, &slots, true, false, false).writes.has_external);
-    try std.testing.expect(TypeChecker.buildEffect(&slots, &slots, true, false, false).reads_writes.has_external);
+    try std.testing.expect(TypeChecker.buildEffect(&.{}, &.{}, true, false, false, false, false) == .external);
+    try std.testing.expect(TypeChecker.buildEffect(&slots, &.{}, true, false, false, false, false).reads.has_external);
+    try std.testing.expect(TypeChecker.buildEffect(&.{}, &slots, true, false, false, false, false).writes.has_external);
+    try std.testing.expect(TypeChecker.buildEffect(&slots, &slots, true, false, false, false, false).reads_writes.has_external);
 }
 
 test "buildEffect preserves log and havoc markers across slot summaries" {
@@ -51,15 +51,19 @@ test "buildEffect preserves log and havoc markers across slot summaries" {
         .{ .name = "total", .region = .storage },
     };
 
-    try std.testing.expect(TypeChecker.buildEffect(&slots, &.{}, false, true, false).reads.has_log);
-    try std.testing.expect(TypeChecker.buildEffect(&.{}, &slots, false, false, true).writes.has_havoc);
-    const mixed = TypeChecker.buildEffect(&slots, &slots, true, true, true).reads_writes;
+    try std.testing.expect(TypeChecker.buildEffect(&slots, &.{}, false, true, false, false, false).reads.has_log);
+    try std.testing.expect(TypeChecker.buildEffect(&.{}, &slots, false, false, true, false, false).writes.has_havoc);
+    const mixed = TypeChecker.buildEffect(&slots, &slots, true, true, true, true, true).reads_writes;
     try std.testing.expect(mixed.has_external);
     try std.testing.expect(mixed.has_log);
     try std.testing.expect(mixed.has_havoc);
-    const effects_only = TypeChecker.buildEffect(&.{}, &.{}, false, true, true).side_effects;
+    try std.testing.expect(mixed.has_lock);
+    try std.testing.expect(mixed.has_unlock);
+    const effects_only = TypeChecker.buildEffect(&.{}, &.{}, false, true, true, true, true).side_effects;
     try std.testing.expect(effects_only.has_log);
     try std.testing.expect(effects_only.has_havoc);
+    try std.testing.expect(effects_only.has_lock);
+    try std.testing.expect(effects_only.has_unlock);
 }
 
 test "unknown locked call diagnostics mention each locked slot" {
@@ -959,12 +963,36 @@ const TypeChecker = struct {
         };
     }
 
+    fn effectHasLock(self: *TypeChecker, effect: Effect) bool {
+        _ = self;
+        return switch (effect) {
+            .pure, .external => false,
+            .side_effects => |side_effects| side_effects.has_lock,
+            .reads => |read_effect| read_effect.has_lock,
+            .writes => |write_effect| write_effect.has_lock,
+            .reads_writes => |read_write| read_write.has_lock,
+        };
+    }
+
+    fn effectHasUnlock(self: *TypeChecker, effect: Effect) bool {
+        _ = self;
+        return switch (effect) {
+            .pure, .external => false,
+            .side_effects => |side_effects| side_effects.has_unlock,
+            .reads => |read_effect| read_effect.has_unlock,
+            .writes => |write_effect| write_effect.has_unlock,
+            .reads_writes => |read_write| read_write.has_unlock,
+        };
+    }
+
     const EffectCollectorState = struct {
         reads: std.ArrayList(EffectSlot) = .{},
         writes: std.ArrayList(EffectSlot) = .{},
         has_external: bool = false,
         has_log: bool = false,
         has_havoc: bool = false,
+        has_lock: bool = false,
+        has_unlock: bool = false,
 
         fn init() EffectCollectorState {
             return .{};
@@ -989,13 +1017,15 @@ const TypeChecker = struct {
         }
     }
 
-    fn buildEffect(reads: []const EffectSlot, writes: []const EffectSlot, has_external: bool, has_log: bool, has_havoc: bool) Effect {
+    fn buildEffect(reads: []const EffectSlot, writes: []const EffectSlot, has_external: bool, has_log: bool, has_havoc: bool, has_lock: bool, has_unlock: bool) Effect {
         if (reads.len == 0 and writes.len == 0) {
             if (has_external and !has_log and !has_havoc) return .external;
-            if (has_external or has_log or has_havoc) return .{ .side_effects = .{
+            if (has_external or has_log or has_havoc or has_lock or has_unlock) return .{ .side_effects = .{
                 .has_external = has_external,
                 .has_log = has_log,
                 .has_havoc = has_havoc,
+                .has_lock = has_lock,
+                .has_unlock = has_unlock,
             } };
             return .pure;
         }
@@ -1004,12 +1034,16 @@ const TypeChecker = struct {
             .has_external = has_external,
             .has_log = has_log,
             .has_havoc = has_havoc,
+            .has_lock = has_lock,
+            .has_unlock = has_unlock,
         } };
         if (writes.len == 0) return .{ .reads = .{
             .slots = reads,
             .has_external = has_external,
             .has_log = has_log,
             .has_havoc = has_havoc,
+            .has_lock = has_lock,
+            .has_unlock = has_unlock,
         } };
         return .{ .reads_writes = .{
             .reads = reads,
@@ -1017,12 +1051,14 @@ const TypeChecker = struct {
             .has_external = has_external,
             .has_log = has_log,
             .has_havoc = has_havoc,
+            .has_lock = has_lock,
+            .has_unlock = has_unlock,
         } };
     }
 
     fn effectFromState(self: *TypeChecker, state: EffectCollectorState) Effect {
         _ = self;
-        return buildEffect(state.reads.items, state.writes.items, state.has_external, state.has_log, state.has_havoc);
+        return buildEffect(state.reads.items, state.writes.items, state.has_external, state.has_log, state.has_havoc, state.has_lock, state.has_unlock);
     }
 
     fn collectBodyEffects(self: *TypeChecker, body_id: ast.BodyId, state: *EffectCollectorState) anyerror!void {
@@ -1079,7 +1115,9 @@ const TypeChecker = struct {
                 for (log_stmt.args) |arg| try self.collectExprEffects(arg, state);
             },
             .Havoc => state.has_havoc = true,
-            .Lock, .Unlock, .Break, .Continue => {},
+            .Lock => state.has_lock = true,
+            .Unlock => state.has_unlock = true,
+            .Break, .Continue => {},
             .Assert => |assert_stmt| try self.collectExprEffects(assert_stmt.condition, state),
             .Assume => |assume_stmt| try self.collectExprEffects(assume_stmt.condition, state),
             .Assign => |assign| {
@@ -1253,23 +1291,31 @@ const TypeChecker = struct {
                 state.has_external = state.has_external or side_effects.has_external;
                 state.has_log = state.has_log or side_effects.has_log;
                 state.has_havoc = state.has_havoc or side_effects.has_havoc;
+                state.has_lock = state.has_lock or side_effects.has_lock;
+                state.has_unlock = state.has_unlock or side_effects.has_unlock;
             },
             .reads => |read_effect| {
                 state.has_external = state.has_external or read_effect.has_external;
                 state.has_log = state.has_log or read_effect.has_log;
                 state.has_havoc = state.has_havoc or read_effect.has_havoc;
+                state.has_lock = state.has_lock or read_effect.has_lock;
+                state.has_unlock = state.has_unlock or read_effect.has_unlock;
                 for (read_effect.slots) |slot| try self.appendUniqueSlot(&state.reads, slot);
             },
             .writes => |write_effect| {
                 state.has_external = state.has_external or write_effect.has_external;
                 state.has_log = state.has_log or write_effect.has_log;
                 state.has_havoc = state.has_havoc or write_effect.has_havoc;
+                state.has_lock = state.has_lock or write_effect.has_lock;
+                state.has_unlock = state.has_unlock or write_effect.has_unlock;
                 for (write_effect.slots) |slot| try self.appendUniqueSlot(&state.writes, slot);
             },
             .reads_writes => |read_write| {
                 state.has_external = state.has_external or read_write.has_external;
                 state.has_log = state.has_log or read_write.has_log;
                 state.has_havoc = state.has_havoc or read_write.has_havoc;
+                state.has_lock = state.has_lock or read_write.has_lock;
+                state.has_unlock = state.has_unlock or read_write.has_unlock;
                 for (read_write.reads) |slot| try self.appendUniqueSlot(&state.reads, slot);
                 for (read_write.writes) |slot| try self.appendUniqueSlot(&state.writes, slot);
             },

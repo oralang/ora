@@ -307,18 +307,24 @@ pub const Effect = union(enum) {
         has_external: bool = false,
         has_log: bool = false,
         has_havoc: bool = false,
+        has_lock: bool = false,
+        has_unlock: bool = false,
     },
     writes: struct {
         slots: []const EffectSlot,
         has_external: bool = false,
         has_log: bool = false,
         has_havoc: bool = false,
+        has_lock: bool = false,
+        has_unlock: bool = false,
     },
     reads: struct {
         slots: []const EffectSlot,
         has_external: bool = false,
         has_log: bool = false,
         has_havoc: bool = false,
+        has_lock: bool = false,
+        has_unlock: bool = false,
     },
     reads_writes: struct {
         reads: []const EffectSlot,
@@ -326,6 +332,8 @@ pub const Effect = union(enum) {
         has_external: bool = false,
         has_log: bool = false,
         has_havoc: bool = false,
+        has_lock: bool = false,
+        has_unlock: bool = false,
     },
 };
 
@@ -553,8 +561,12 @@ test "Effect supports side-effect-only marker" {
     const effect: Effect = .{ .side_effects = .{
         .has_log = true,
         .has_havoc = true,
+        .has_lock = true,
+        .has_unlock = true,
     } };
 
     try std.testing.expect(effect.side_effects.has_log);
     try std.testing.expect(effect.side_effects.has_havoc);
+    try std.testing.expect(effect.side_effects.has_lock);
+    try std.testing.expect(effect.side_effects.has_unlock);
 }

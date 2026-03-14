@@ -2000,6 +2000,46 @@ test "compiler tracks log and havoc effect kinds" {
     }
 }
 
+test "compiler tracks lock and unlock effect kinds" {
+    const source_text =
+        \\contract Locks {
+        \\    storage total: u256;
+        \\
+        \\    pub fn guarded() {
+        \\        @lock(total);
+        \\        @unlock(total);
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const root_file_id = compilation.db.sources.module(compilation.root_module_id).file_id;
+    const ast_file = try compilation.db.astFile(root_file_id);
+    const typecheck = try compilation.db.typeCheck(compilation.root_module_id, .{ .item = ast_file.root_items[0] });
+    const item_index = try compilation.db.itemIndex(compilation.root_module_id);
+    const guarded = item_index.lookup("guarded").?;
+
+    switch (typecheck.itemEffect(guarded)) {
+        .side_effects => |effect| {
+            try testing.expect(effect.has_lock);
+            try testing.expect(effect.has_unlock);
+        },
+        .reads => |effect| {
+            try testing.expect(effect.has_lock);
+            try testing.expect(effect.has_unlock);
+            try testing.expect(containsEffectSlot(effect.slots, "total", .storage));
+        },
+        .reads_writes => |effect| {
+            try testing.expect(effect.has_lock);
+            try testing.expect(effect.has_unlock);
+            try testing.expect(containsEffectSlot(effect.reads, "total", .storage));
+        },
+        else => return error.TestUnexpectedResult,
+    }
+}
+
 test "compiler lowers bitfield field reads and writes through bit ops" {
     const source_text =
         \\contract Bits {
