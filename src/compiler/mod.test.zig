@@ -4043,6 +4043,101 @@ test "compiler const eval executes comptime continue in for loops" {
     try testing.expectEqual(@as(i128, 8), try consteval.values[ret_stmt.value.?.index()].?.integer.toInt(i128));
 }
 
+test "compiler const eval constructs and indexes comptime slices" {
+    const source_text =
+        \\pub fn get() -> u256 {
+        \\    return comptime {
+        \\        let values = @cast(slice[u256], [7, 8, 9]);
+        \\        values[1];
+        \\    };
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const module = compilation.db.sources.module(compilation.root_module_id);
+    const ast_file = try compilation.db.astFile(module.file_id);
+    const function = ast_file.item(ast_file.root_items[0]).Function;
+    const body = ast_file.body(function.body);
+    const ret_stmt = ast_file.statement(body.statements[0]).Return;
+
+    const consteval = try compilation.db.constEval(compilation.root_module_id);
+    try testing.expectEqual(@as(i128, 8), try consteval.values[ret_stmt.value.?.index()].?.integer.toInt(i128));
+}
+
+test "compiler const eval mutates comptime slices and reads len" {
+    const source_text =
+        \\pub fn get() -> u256 {
+        \\    return comptime {
+        \\        let values = @cast(slice[u256], [7, 8, 9]);
+        \\        values[1] += 4;
+        \\        values.len;
+        \\    };
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const module = compilation.db.sources.module(compilation.root_module_id);
+    const ast_file = try compilation.db.astFile(module.file_id);
+    const function = ast_file.item(ast_file.root_items[0]).Function;
+    const body = ast_file.body(function.body);
+    const ret_stmt = ast_file.statement(body.statements[0]).Return;
+
+    const consteval = try compilation.db.constEval(compilation.root_module_id);
+    try testing.expectEqual(@as(i128, 3), try consteval.values[ret_stmt.value.?.index()].?.integer.toInt(i128));
+}
+
+test "compiler const eval constructs and indexes comptime maps" {
+    const source_text =
+        \\pub fn get() -> bool {
+        \\    return comptime {
+        \\        let table = @cast(map<u256, bool>, [(1, false), (2, true)]);
+        \\        table[2];
+        \\    };
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const module = compilation.db.sources.module(compilation.root_module_id);
+    const ast_file = try compilation.db.astFile(module.file_id);
+    const function = ast_file.item(ast_file.root_items[0]).Function;
+    const body = ast_file.body(function.body);
+    const ret_stmt = ast_file.statement(body.statements[0]).Return;
+
+    const consteval = try compilation.db.constEval(compilation.root_module_id);
+    try testing.expectEqual(true, consteval.values[ret_stmt.value.?.index()].?.boolean);
+}
+
+test "compiler const eval mutates comptime maps and reads len" {
+    const source_text =
+        \\pub fn get() -> u256 {
+        \\    return comptime {
+        \\        let table = @cast(map<u256, u256>, [(1, 7)]);
+        \\        table[1] += 5;
+        \\        table[3] = 9;
+        \\        table.length;
+        \\    };
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const module = compilation.db.sources.module(compilation.root_module_id);
+    const ast_file = try compilation.db.astFile(module.file_id);
+    const function = ast_file.item(ast_file.root_items[0]).Function;
+    const body = ast_file.body(function.body);
+    const ret_stmt = ast_file.statement(body.statements[0]).Return;
+
+    const consteval = try compilation.db.constEval(compilation.root_module_id);
+    try testing.expectEqual(@as(i128, 2), try consteval.values[ret_stmt.value.?.index()].?.integer.toInt(i128));
+}
+
 test "compiler lowers ghost items into ghost AST nodes" {
     const source_text =
         \\contract Spec {

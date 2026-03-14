@@ -22,6 +22,8 @@ pub const CtAggregate = struct {
         bytes: []u8,
         string: []u8,
         array: ArrayData,
+        slice: SliceData,
+        map: MapData,
         tuple: TupleData,
         struct_val: StructData,
     };
@@ -33,6 +35,22 @@ pub const CtAggregate = struct {
 
     pub const TupleData = struct {
         elems: []CtValue,
+    };
+
+    pub const SliceData = struct {
+        elems: []CtValue,
+        elem_type: ?TypeId = null,
+    };
+
+    pub const MapData = struct {
+        entries: []MapEntry,
+        key_type: ?TypeId = null,
+        value_type: ?TypeId = null,
+    };
+
+    pub const MapEntry = struct {
+        key: CtValue,
+        value: CtValue,
     };
 
     pub const StructData = struct {
@@ -51,6 +69,8 @@ pub const CtAggregate = struct {
             .bytes => unreachable, // bytes don't convert to CtValue directly
             .string => unreachable,
             .array => |a| .{ .array_ref = @intCast(@intFromPtr(self) - @intFromPtr(a.elems.ptr)) }, // placeholder
+            .slice => unreachable,
+            .map => unreachable,
             .tuple => unreachable,
             .struct_val => unreachable,
         };
@@ -93,6 +113,8 @@ pub const CtHeap = struct {
             .bytes => |b| self.allocator.free(b),
             .string => |s| self.allocator.free(s),
             .array => |a| self.allocator.free(a.elems),
+            .slice => |s| self.allocator.free(s.elems),
+            .map => |m| self.allocator.free(m.entries),
             .tuple => |t| self.allocator.free(t.elems),
             .struct_val => |s| self.allocator.free(s.fields),
         }
@@ -153,6 +175,24 @@ pub const CtHeap = struct {
         });
     }
 
+    /// Allocate a slice
+    pub fn allocSlice(self: *CtHeap, elems: []const CtValue) !HeapId {
+        const copy = try self.allocator.dupe(CtValue, elems);
+        self.total_bytes += copy.len * @sizeOf(CtValue);
+        return self.alloc(.{
+            .data = .{ .slice = .{ .elems = copy } },
+        });
+    }
+
+    /// Allocate a map
+    pub fn allocMap(self: *CtHeap, entries: []const CtAggregate.MapEntry) !HeapId {
+        const copy = try self.allocator.dupe(CtAggregate.MapEntry, entries);
+        self.total_bytes += copy.len * @sizeOf(CtAggregate.MapEntry);
+        return self.alloc(.{
+            .data = .{ .map = .{ .entries = copy } },
+        });
+    }
+
     /// Allocate a tuple
     pub fn allocTuple(self: *CtHeap, elems: []const CtValue) !HeapId {
         const copy = try self.allocator.dupe(CtValue, elems);
@@ -185,6 +225,14 @@ pub const CtHeap = struct {
 
     pub fn getArray(self: *const CtHeap, id: HeapId) CtAggregate.ArrayData {
         return self.aggregates.items[id].data.array;
+    }
+
+    pub fn getSlice(self: *const CtHeap, id: HeapId) CtAggregate.SliceData {
+        return self.aggregates.items[id].data.slice;
+    }
+
+    pub fn getMap(self: *const CtHeap, id: HeapId) CtAggregate.MapData {
+        return self.aggregates.items[id].data.map;
     }
 
     pub fn getTuple(self: *const CtHeap, id: HeapId) CtAggregate.TupleData {
@@ -222,6 +270,8 @@ pub const CtHeap = struct {
             .bytes => |b| try self.allocBytes(b),
             .string => |s| try self.allocString(s),
             .array => |a| try self.allocArray(a.elems),
+            .slice => |s| try self.allocSlice(s.elems),
+            .map => |m| try self.allocMap(m.entries),
             .tuple => |t| try self.allocTuple(t.elems),
             .struct_val => |s| try self.allocStruct(s.type_id, s.fields),
         };
@@ -240,6 +290,15 @@ pub const CtHeap = struct {
         return unique_id;
     }
 
+    /// Set slice element (handles COW)
+    pub fn setSliceElem(self: *CtHeap, id: HeapId, index: usize, val: CtValue) !HeapId {
+        const unique_id = try self.ensureUnique(id);
+        const slice = &self.aggregates.items[unique_id].data.slice;
+        if (index >= slice.elems.len) return error.IndexOutOfBounds;
+        slice.elems[index] = val;
+        return unique_id;
+    }
+
     /// Set struct field (handles COW)
     pub fn setStructField(self: *CtHeap, id: HeapId, field_id: FieldId, val: CtValue) !HeapId {
         const unique_id = try self.ensureUnique(id);
@@ -251,6 +310,27 @@ pub const CtHeap = struct {
             }
         }
         return error.FieldNotFound;
+    }
+
+    /// Insert or replace a map entry (handles COW)
+    pub fn setMapEntry(self: *CtHeap, id: HeapId, key: CtValue, val: CtValue, eql: *const fn (CtValue, CtValue) bool) !HeapId {
+        const unique_id = try self.ensureUnique(id);
+        const map = &self.aggregates.items[unique_id].data.map;
+        for (map.entries) |*entry| {
+            if (eql(entry.key, key)) {
+                entry.value = val;
+                return unique_id;
+            }
+        }
+
+        const old_entries = map.entries;
+        const grown = try self.allocator.alloc(CtAggregate.MapEntry, old_entries.len + 1);
+        @memcpy(grown[0..old_entries.len], old_entries);
+        grown[old_entries.len] = .{ .key = key, .value = val };
+        self.allocator.free(old_entries);
+        map.entries = grown;
+        self.total_bytes += @sizeOf(CtAggregate.MapEntry);
+        return unique_id;
     }
 
     /// Get number of aggregates

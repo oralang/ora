@@ -6,6 +6,7 @@ const model = @import("../compiler/sema/model.zig");
 
 const ConstEvalResult = model.ConstEvalResult;
 const ConstValue = model.ConstValue;
+const TypeKind = model.TypeKind;
 const CtAggregate = comptime_mod.CtAggregate;
 const CtEnum = comptime_mod.CtEnum;
 const CtEnv = bridge.CtEnv;
@@ -64,6 +65,12 @@ const ConstEvaluator = struct {
         value: ?ConstValue,
         break_loop,
         continue_loop,
+    };
+
+    const ValueConstructionTarget = enum {
+        none,
+        slice,
+        map,
     };
 
     fn visitItem(self: *ConstEvaluator, item_id: ast.ItemId) void {
@@ -331,37 +338,57 @@ const ConstEvaluator = struct {
                 _ = try self.evalExpr(index.index);
                 const base = (try self.evalExprCtValue(index.base)) orelse break :blk null;
                 const index_value = (try self.evalExprCtValue(index.index)) orelse break :blk null;
-                const idx: usize = switch (index_value) {
-                    .integer => |integer| blk_idx: {
-                        if (integer > std.math.maxInt(usize)) break :blk_idx null;
-                        break :blk_idx @as(usize, @intCast(integer));
-                    },
-                    else => null,
-                } orelse break :blk null;
 
                 break :blk switch (base) {
                     .array_ref => |heap_id| blk_elem: {
+                        const idx = self.ctIndexValue(index_value) orelse break :blk_elem null;
                         const elems = self.env.heap.getArray(heap_id).elems;
                         if (idx >= elems.len) break :blk_elem null;
                         break :blk_elem elems[idx];
                     },
+                    .slice_ref => |heap_id| blk_elem: {
+                        const idx = self.ctIndexValue(index_value) orelse break :blk_elem null;
+                        const elems = self.env.heap.getSlice(heap_id).elems;
+                        if (idx >= elems.len) break :blk_elem null;
+                        break :blk_elem elems[idx];
+                    },
                     .tuple_ref => |heap_id| blk_elem: {
+                        const idx = self.ctIndexValue(index_value) orelse break :blk_elem null;
                         const elems = self.env.heap.getTuple(heap_id).elems;
                         if (idx >= elems.len) break :blk_elem null;
                         break :blk_elem elems[idx];
                     },
+                    .map_ref => |heap_id| blk_elem: {
+                        const entries = self.env.heap.getMap(heap_id).entries;
+                        const key = index_value;
+                        for (entries) |entry| {
+                            if (self.ctValuesEqual(entry.key, key)) break :blk_elem entry.value;
+                        }
+                        break :blk_elem null;
+                    },
                     .string_ref => |heap_id| blk_elem: {
+                        const idx = self.ctIndexValue(index_value) orelse break :blk_elem null;
                         const bytes = self.env.heap.getString(heap_id);
                         if (idx >= bytes.len) break :blk_elem null;
                         break :blk_elem CtValue{ .integer = bytes[idx] };
                     },
                     .bytes_ref => |heap_id| blk_elem: {
+                        const idx = self.ctIndexValue(index_value) orelse break :blk_elem null;
                         const bytes = self.env.heap.getBytes(heap_id);
                         if (idx >= bytes.len) break :blk_elem null;
                         break :blk_elem CtValue{ .integer = bytes[idx] };
                     },
                     else => null,
                 };
+            },
+            .Builtin => |builtin| blk: {
+                if (std.mem.eql(u8, builtin.name, "cast") and builtin.type_arg != null and builtin.args.len > 0) {
+                    const target = self.valueConstructionTarget(builtin.type_arg.?);
+                    if (target != .none) {
+                        break :blk try self.evalExprCtValueAs(builtin.args[0], target);
+                    }
+                }
+                break :blk null;
             },
             .Field => |field| blk: {
                 _ = try self.evalExpr(field.base);
@@ -387,6 +414,14 @@ const ConstEvaluator = struct {
                         if (!(std.mem.eql(u8, field.name, "length") or std.mem.eql(u8, field.name, "len"))) break :blk_field null;
                         break :blk_field CtValue{ .integer = @intCast(self.env.heap.getBytes(heap_id).len) };
                     },
+                    .slice_ref => |heap_id| blk_field: {
+                        if (!(std.mem.eql(u8, field.name, "length") or std.mem.eql(u8, field.name, "len"))) break :blk_field null;
+                        break :blk_field CtValue{ .integer = @intCast(self.env.heap.getSlice(heap_id).elems.len) };
+                    },
+                    .map_ref => |heap_id| blk_field: {
+                        if (!(std.mem.eql(u8, field.name, "length") or std.mem.eql(u8, field.name, "len"))) break :blk_field null;
+                        break :blk_field CtValue{ .integer = @intCast(self.env.heap.getMap(heap_id).entries.len) };
+                    },
                     else => null,
                 };
             },
@@ -398,6 +433,67 @@ const ConstEvaluator = struct {
                     .ne => CtValue{ .boolean = !self.ctValuesEqual(lhs, rhs) },
                     else => null,
                 };
+            },
+            else => null,
+        };
+    }
+
+    fn valueConstructionTarget(self: *ConstEvaluator, type_expr_id: ast.TypeExprId) ValueConstructionTarget {
+        return switch (self.file.typeExpr(type_expr_id).*) {
+            .Slice => .slice,
+            .Generic => |generic| if (std.mem.eql(u8, generic.name, "map")) .map else .none,
+            else => .none,
+        };
+    }
+
+    fn evalExprCtValueAs(self: *ConstEvaluator, expr_id: ast.ExprId, target: ValueConstructionTarget) anyerror!?CtValue {
+        return switch (target) {
+            .none => try self.evalExprCtValue(expr_id),
+            .slice => switch (self.file.expression(expr_id).*) {
+                .ArrayLiteral => |array| blk: {
+                    const elems = try self.allocator.alloc(CtValue, array.elements.len);
+                    for (array.elements, 0..) |element_id, idx| {
+                        _ = try self.evalExpr(element_id);
+                        elems[idx] = (try self.evalExprCtValue(element_id)) orelse break :blk null;
+                    }
+                    const heap_id = try self.env.heap.allocSlice(elems);
+                    break :blk CtValue{ .slice_ref = heap_id };
+                },
+                else => try self.evalExprCtValue(expr_id),
+            },
+            .map => switch (self.file.expression(expr_id).*) {
+                .ArrayLiteral, .Tuple => blk: {
+                    const entries = (try self.evalMapEntries(expr_id)) orelse break :blk null;
+                    const heap_id = try self.env.heap.allocMap(entries);
+                    break :blk CtValue{ .map_ref = heap_id };
+                },
+                else => try self.evalExprCtValue(expr_id),
+            },
+        };
+    }
+
+    fn evalMapEntries(self: *ConstEvaluator, expr_id: ast.ExprId) anyerror!?[]CtAggregate.MapEntry {
+        const items: []const ast.ExprId = switch (self.file.expression(expr_id).*) {
+            .ArrayLiteral => |array| array.elements,
+            .Tuple => |tuple| tuple.elements,
+            else => return null,
+        };
+        const entries = try self.allocator.alloc(CtAggregate.MapEntry, items.len);
+        for (items, 0..) |item_expr, idx| {
+            entries[idx] = (try self.evalMapEntry(item_expr)) orelse return null;
+        }
+        return entries;
+    }
+
+    fn evalMapEntry(self: *ConstEvaluator, expr_id: ast.ExprId) anyerror!?CtAggregate.MapEntry {
+        return switch (self.file.expression(expr_id).*) {
+            .Tuple => |tuple| blk: {
+                if (tuple.elements.len != 2) break :blk null;
+                _ = try self.evalExpr(tuple.elements[0]);
+                _ = try self.evalExpr(tuple.elements[1]);
+                const key = (try self.evalExprCtValue(tuple.elements[0])) orelse break :blk null;
+                const value = (try self.evalExprCtValue(tuple.elements[1])) orelse break :blk null;
+                break :blk .{ .key = key, .value = value };
             },
             else => null,
         };
@@ -432,7 +528,6 @@ const ConstEvaluator = struct {
     }
 
     fn ctValuesEqual(self: *ConstEvaluator, lhs: CtValue, rhs: CtValue) bool {
-        _ = self;
         return switch (lhs) {
             .integer => |value| switch (rhs) {
                 .integer => |other| value == other,
@@ -446,6 +541,14 @@ const ConstEvaluator = struct {
                 .address => |other| value == other,
                 else => false,
             },
+            .string_ref => |heap_id| switch (rhs) {
+                .string_ref => |other| std.mem.eql(u8, self.env.heap.getString(heap_id), self.env.heap.getString(other)),
+                else => false,
+            },
+            .bytes_ref => |heap_id| switch (rhs) {
+                .bytes_ref => |other| std.mem.eql(u8, self.env.heap.getBytes(heap_id), self.env.heap.getBytes(other)),
+                else => false,
+            },
             .enum_val => |value| switch (rhs) {
                 .enum_val => |other| value.type_id == other.type_id and value.variant_id == other.variant_id and value.payload == other.payload,
                 else => false,
@@ -453,6 +556,36 @@ const ConstEvaluator = struct {
             .void_val => rhs == .void_val,
             else => false,
         };
+    }
+
+    fn ctIndexValue(self: *ConstEvaluator, value: CtValue) ?usize {
+        _ = self;
+        return switch (value) {
+            .integer => |integer| blk: {
+                if (integer > std.math.maxInt(usize)) break :blk null;
+                break :blk @as(usize, @intCast(integer));
+            },
+            else => null,
+        };
+    }
+
+    fn setMapEntryValue(self: *ConstEvaluator, heap_id: comptime_mod.HeapId, key: CtValue, value: CtValue) !comptime_mod.HeapId {
+        const unique_id = try self.env.heap.ensureUnique(heap_id);
+        const map = &self.env.heap.get(unique_id).data.map;
+        for (map.entries) |*entry| {
+            if (self.ctValuesEqual(entry.key, key)) {
+                entry.value = value;
+                return unique_id;
+            }
+        }
+
+        const old_entries = map.entries;
+        const grown = try self.allocator.alloc(CtAggregate.MapEntry, old_entries.len + 1);
+        @memcpy(grown[0..old_entries.len], old_entries);
+        grown[old_entries.len] = .{ .key = key, .value = value };
+        self.allocator.free(old_entries);
+        map.entries = grown;
+        return unique_id;
     }
 
     fn decodeHexBytesLiteral(self: *ConstEvaluator, text: []const u8) ![]u8 {
@@ -528,6 +661,14 @@ const ConstEvaluator = struct {
         if (builtin.args.len == 0) return null;
 
         if (std.mem.eql(u8, builtin.name, "cast")) {
+            if (builtin.type_arg) |type_arg| {
+                const target = self.valueConstructionTarget(type_arg);
+                if (target != .none) {
+                    if (try self.evalExprCtValueAs(builtin.args[0], target)) |ct_value| {
+                        return try ctValueToConstValue(self.allocator, ct_value);
+                    }
+                }
+            }
             return try self.evalExpr(builtin.args[0]);
         }
 
@@ -764,6 +905,24 @@ const ConstEvaluator = struct {
                     }
                 }
             },
+            .slice_ref => |heap_id| {
+                const elems = self.env.heap.getSlice(heap_id).elems;
+                for (elems, 0..) |elem, iteration| {
+                    if (iteration >= self.env.config.max_loop_iterations) return null;
+
+                    try self.bindPatternCtValue(for_stmt.item_pattern, elem);
+                    if (for_stmt.index_pattern) |index_pattern| {
+                        const index_value = CtValue{ .integer = @intCast(iteration) };
+                        try self.bindPatternCtValue(index_pattern, index_value);
+                    }
+
+                    switch (try self.evalComptimeBodyControl(for_stmt.body)) {
+                        .value => |value| last_value = value,
+                        .break_loop => break,
+                        .continue_loop => continue,
+                    }
+                }
+            },
             .tuple_ref => |heap_id| {
                 const elems = self.env.heap.getTuple(heap_id).elems;
                 for (elems, 0..) |elem, iteration| {
@@ -812,6 +971,13 @@ const ConstEvaluator = struct {
                 const heap_id = try self.env.heap.allocTuple(elems);
                 break :blk CtValue{ .tuple_ref = heap_id };
             },
+            .Builtin => |builtin| blk: {
+                if (std.mem.eql(u8, builtin.name, "cast") and builtin.type_arg != null and builtin.args.len > 0) {
+                    const target = self.valueConstructionTarget(builtin.type_arg.?);
+                    if (target != .none) break :blk try self.evalExprCtValueAs(builtin.args[0], target);
+                }
+                break :blk null;
+            },
             else => blk: {
                 const value = (try self.evalExprUncached(expr_id)) orelse break :blk null;
                 break :blk try constToCtValue(value);
@@ -852,16 +1018,10 @@ const ConstEvaluator = struct {
                 const base_slot = self.env.lookup(base_name) orelse return null;
                 const base_value = self.env.read(base_slot);
                 const index_value = (try self.evalExprCtValue(index.index)) orelse return null;
-                const idx: usize = switch (index_value) {
-                    .integer => |integer| blk: {
-                        if (integer > std.math.maxInt(usize)) break :blk null;
-                        break :blk @as(usize, @intCast(integer));
-                    },
-                    else => null,
-                } orelse return null;
-
+                const maybe_idx = self.ctIndexValue(index_value);
                 const updated = switch (base_value) {
                     .array_ref => |heap_id| blk: {
+                        const idx = maybe_idx orelse break :blk null;
                         const elems = self.env.heap.getArray(heap_id).elems;
                         if (idx >= elems.len) break :blk null;
                         const next_value = switch (assign.op) {
@@ -890,11 +1050,83 @@ const ConstEvaluator = struct {
                         } orelse return null;
                         break :blk CtValue{ .array_ref = try self.env.heap.setArrayElem(heap_id, idx, next_value) };
                     },
+                    .slice_ref => |heap_id| blk: {
+                        const idx = maybe_idx orelse break :blk null;
+                        const elems = self.env.heap.getSlice(heap_id).elems;
+                        if (idx >= elems.len) break :blk null;
+                        const next_value = switch (assign.op) {
+                            .assign => rhs_ct,
+                            else => blk_op: {
+                                const current = (try ctValueToConstValue(self.allocator, elems[idx])) orelse break :blk_op null;
+                                const computed = switch (assign.op) {
+                                    .add_assign => try evalBinary(self.allocator, .add, current, rhs),
+                                    .sub_assign => try evalBinary(self.allocator, .sub, current, rhs),
+                                    .mul_assign => try evalBinary(self.allocator, .mul, current, rhs),
+                                    .div_assign => try evalBinary(self.allocator, .div, current, rhs),
+                                    .mod_assign => try evalBinary(self.allocator, .mod, current, rhs),
+                                    .bit_and_assign => try evalBinary(self.allocator, .bit_and, current, rhs),
+                                    .bit_or_assign => try evalBinary(self.allocator, .bit_or, current, rhs),
+                                    .bit_xor_assign => try evalBinary(self.allocator, .bit_xor, current, rhs),
+                                    .shl_assign => try evalBinary(self.allocator, .shl, current, rhs),
+                                    .shr_assign => try evalBinary(self.allocator, .shr, current, rhs),
+                                    .pow_assign => try evalBinary(self.allocator, .pow, current, rhs),
+                                    .wrapping_add_assign => try evalBinary(self.allocator, .wrapping_add, current, rhs),
+                                    .wrapping_sub_assign => try evalBinary(self.allocator, .wrapping_sub, current, rhs),
+                                    .wrapping_mul_assign => try evalBinary(self.allocator, .wrapping_mul, current, rhs),
+                                    .assign => unreachable,
+                                } orelse break :blk_op null;
+                                break :blk_op (try constToCtValue(computed)) orelse break :blk_op null;
+                            },
+                        } orelse return null;
+                        break :blk CtValue{ .slice_ref = try self.env.heap.setSliceElem(heap_id, idx, next_value) };
+                    },
+                    .map_ref => |heap_id| blk: {
+                        const current: ?ConstValue = blk_current: {
+                            for (self.env.heap.getMap(heap_id).entries) |entry| {
+                                if (self.ctValuesEqual(entry.key, index_value)) {
+                                    break :blk_current try ctValueToConstValue(self.allocator, entry.value);
+                                }
+                            }
+                            break :blk_current null;
+                        };
+                        const next_value = switch (assign.op) {
+                            .assign => rhs_ct,
+                            else => blk_op: {
+                                const current_value = current orelse break :blk_op null;
+                                const computed = switch (assign.op) {
+                                    .add_assign => try evalBinary(self.allocator, .add, current_value, rhs),
+                                    .sub_assign => try evalBinary(self.allocator, .sub, current_value, rhs),
+                                    .mul_assign => try evalBinary(self.allocator, .mul, current_value, rhs),
+                                    .div_assign => try evalBinary(self.allocator, .div, current_value, rhs),
+                                    .mod_assign => try evalBinary(self.allocator, .mod, current_value, rhs),
+                                    .bit_and_assign => try evalBinary(self.allocator, .bit_and, current_value, rhs),
+                                    .bit_or_assign => try evalBinary(self.allocator, .bit_or, current_value, rhs),
+                                    .bit_xor_assign => try evalBinary(self.allocator, .bit_xor, current_value, rhs),
+                                    .shl_assign => try evalBinary(self.allocator, .shl, current_value, rhs),
+                                    .shr_assign => try evalBinary(self.allocator, .shr, current_value, rhs),
+                                    .pow_assign => try evalBinary(self.allocator, .pow, current_value, rhs),
+                                    .wrapping_add_assign => try evalBinary(self.allocator, .wrapping_add, current_value, rhs),
+                                    .wrapping_sub_assign => try evalBinary(self.allocator, .wrapping_sub, current_value, rhs),
+                                    .wrapping_mul_assign => try evalBinary(self.allocator, .wrapping_mul, current_value, rhs),
+                                    .assign => unreachable,
+                                } orelse break :blk_op null;
+                                break :blk_op (try constToCtValue(computed)) orelse break :blk_op null;
+                            },
+                        } orelse return null;
+                        break :blk CtValue{ .map_ref = try self.setMapEntryValue(heap_id, index_value, next_value) };
+                    },
                     else => return null,
                 } orelse return null;
                 self.env.update(base_slot, updated);
                 return try ctValueToConstValue(self.allocator, switch (updated) {
-                    .array_ref => |heap_id| self.env.heap.getArray(heap_id).elems[idx],
+                    .array_ref => |heap_id| self.env.heap.getArray(heap_id).elems[maybe_idx orelse return null],
+                    .slice_ref => |heap_id| self.env.heap.getSlice(heap_id).elems[maybe_idx orelse return null],
+                    .map_ref => |heap_id| blk: {
+                        for (self.env.heap.getMap(heap_id).entries) |entry| {
+                            if (self.ctValuesEqual(entry.key, index_value)) break :blk entry.value;
+                        }
+                        return null;
+                    },
                     else => unreachable,
                 });
             },
