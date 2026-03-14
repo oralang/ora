@@ -3777,6 +3777,119 @@ test "compiler const eval applies indexed compound assignment on arrays" {
     try testing.expectEqual(@as(i128, 12), try consteval.values[ret_stmt.value.?.index()].?.integer.toInt(i128));
 }
 
+test "compiler const eval reads direct struct literal fields" {
+    const source_text =
+        \\struct Pair {
+        \\    first: u256;
+        \\    second: bool;
+        \\}
+        \\
+        \\pub fn get() -> u256 {
+        \\    return comptime {
+        \\        Pair { first: 7, second: false }.first;
+        \\    };
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const module = compilation.db.sources.module(compilation.root_module_id);
+    const ast_file = try compilation.db.astFile(module.file_id);
+    const function = ast_file.item(ast_file.root_items[1]).Function;
+    const body = ast_file.body(function.body);
+    const ret_stmt = ast_file.statement(body.statements[0]).Return;
+
+    const consteval = try compilation.db.constEval(compilation.root_module_id);
+    try testing.expectEqual(@as(i128, 7), try consteval.values[ret_stmt.value.?.index()].?.integer.toInt(i128));
+}
+
+test "compiler const eval reads bound struct fields" {
+    const source_text =
+        \\struct Pair {
+        \\    first: u256;
+        \\    second: bool;
+        \\}
+        \\
+        \\pub fn get() -> bool {
+        \\    return comptime {
+        \\        let pair = Pair { first: 7, second: true };
+        \\        pair.second;
+        \\    };
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const module = compilation.db.sources.module(compilation.root_module_id);
+    const ast_file = try compilation.db.astFile(module.file_id);
+    const function = ast_file.item(ast_file.root_items[1]).Function;
+    const body = ast_file.body(function.body);
+    const ret_stmt = ast_file.statement(body.statements[0]).Return;
+
+    const consteval = try compilation.db.constEval(compilation.root_module_id);
+    try testing.expectEqual(true, consteval.values[ret_stmt.value.?.index()].?.boolean);
+}
+
+test "compiler const eval mutates bound struct fields" {
+    const source_text =
+        \\struct Pair {
+        \\    first: u256;
+        \\    second: bool;
+        \\}
+        \\
+        \\pub fn get() -> bool {
+        \\    return comptime {
+        \\        let pair = Pair { first: 7, second: false };
+        \\        pair.second = true;
+        \\        pair.second;
+        \\    };
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const module = compilation.db.sources.module(compilation.root_module_id);
+    const ast_file = try compilation.db.astFile(module.file_id);
+    const function = ast_file.item(ast_file.root_items[1]).Function;
+    const body = ast_file.body(function.body);
+    const ret_stmt = ast_file.statement(body.statements[0]).Return;
+
+    const consteval = try compilation.db.constEval(compilation.root_module_id);
+    try testing.expectEqual(true, consteval.values[ret_stmt.value.?.index()].?.boolean);
+}
+
+test "compiler const eval applies compound assignment to struct fields" {
+    const source_text =
+        \\struct Pair {
+        \\    first: u256;
+        \\    second: bool;
+        \\}
+        \\
+        \\pub fn get() -> u256 {
+        \\    return comptime {
+        \\        let pair = Pair { first: 7, second: false };
+        \\        pair.first += 5;
+        \\        pair.first;
+        \\    };
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const module = compilation.db.sources.module(compilation.root_module_id);
+    const ast_file = try compilation.db.astFile(module.file_id);
+    const function = ast_file.item(ast_file.root_items[1]).Function;
+    const body = ast_file.body(function.body);
+    const ret_stmt = ast_file.statement(body.statements[0]).Return;
+
+    const consteval = try compilation.db.constEval(compilation.root_module_id);
+    try testing.expectEqual(@as(i128, 12), try consteval.values[ret_stmt.value.?.index()].?.integer.toInt(i128));
+}
+
 test "compiler const eval executes comptime break in while loops" {
     const source_text =
         \\pub fn count() -> u256 {
