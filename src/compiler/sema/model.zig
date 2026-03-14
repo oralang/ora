@@ -303,18 +303,29 @@ pub const EffectSlot = struct {
 pub const Effect = union(enum) {
     pure,
     external,
+    side_effects: struct {
+        has_external: bool = false,
+        has_log: bool = false,
+        has_havoc: bool = false,
+    },
     writes: struct {
         slots: []const EffectSlot,
         has_external: bool = false,
+        has_log: bool = false,
+        has_havoc: bool = false,
     },
     reads: struct {
         slots: []const EffectSlot,
         has_external: bool = false,
+        has_log: bool = false,
+        has_havoc: bool = false,
     },
     reads_writes: struct {
         reads: []const EffectSlot,
         writes: []const EffectSlot,
         has_external: bool = false,
+        has_log: bool = false,
+        has_havoc: bool = false,
     },
 };
 
@@ -511,4 +522,39 @@ test "Effect supports external call marker" {
     try std.testing.expect(reads_external.reads.has_external);
     try std.testing.expect(writes_external.writes.has_external);
     try std.testing.expect(mixed_external.reads_writes.has_external);
+}
+
+test "Effect supports log and havoc markers" {
+    const slots = [_]EffectSlot{
+        .{ .name = "total", .region = .storage },
+    };
+    const reads_log: Effect = .{ .reads = .{
+        .slots = &slots,
+        .has_log = true,
+    } };
+    const writes_havoc: Effect = .{ .writes = .{
+        .slots = &slots,
+        .has_havoc = true,
+    } };
+    const mixed: Effect = .{ .reads_writes = .{
+        .reads = &slots,
+        .writes = &slots,
+        .has_log = true,
+        .has_havoc = true,
+    } };
+
+    try std.testing.expect(reads_log.reads.has_log);
+    try std.testing.expect(writes_havoc.writes.has_havoc);
+    try std.testing.expect(mixed.reads_writes.has_log);
+    try std.testing.expect(mixed.reads_writes.has_havoc);
+}
+
+test "Effect supports side-effect-only marker" {
+    const effect: Effect = .{ .side_effects = .{
+        .has_log = true,
+        .has_havoc = true,
+    } };
+
+    try std.testing.expect(effect.side_effects.has_log);
+    try std.testing.expect(effect.side_effects.has_havoc);
 }

@@ -1937,6 +1937,69 @@ test "compiler composes effects through member-derived function aliases" {
     }
 }
 
+test "compiler tracks log and havoc effect kinds" {
+    const source_text =
+        \\contract Effects {
+        \\    storage total: u256;
+        \\
+        \\    pub fn noisy(value: u256) {
+        \\        log Transfer(value);
+        \\        havoc total;
+        \\    }
+        \\
+        \\    pub fn wrapper(value: u256) {
+        \\        noisy(value);
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const root_file_id = compilation.db.sources.module(compilation.root_module_id).file_id;
+    const ast_file = try compilation.db.astFile(root_file_id);
+    const typecheck = try compilation.db.typeCheck(compilation.root_module_id, .{ .item = ast_file.root_items[0] });
+    const item_index = try compilation.db.itemIndex(compilation.root_module_id);
+    const noisy = item_index.lookup("noisy").?;
+    const wrapper = item_index.lookup("wrapper").?;
+
+    switch (typecheck.itemEffect(noisy)) {
+        .side_effects => |effect| {
+            try testing.expect(effect.has_log);
+            try testing.expect(effect.has_havoc);
+        },
+        .writes => |effect| {
+            try testing.expect(effect.has_log);
+            try testing.expect(effect.has_havoc);
+            try testing.expect(containsEffectSlot(effect.slots, "total", .storage));
+        },
+        .reads_writes => |effect| {
+            try testing.expect(effect.has_log);
+            try testing.expect(effect.has_havoc);
+            try testing.expect(containsEffectSlot(effect.writes, "total", .storage));
+        },
+        else => return error.TestUnexpectedResult,
+    }
+
+    switch (typecheck.itemEffect(wrapper)) {
+        .side_effects => |effect| {
+            try testing.expect(effect.has_log);
+            try testing.expect(effect.has_havoc);
+        },
+        .writes => |effect| {
+            try testing.expect(effect.has_log);
+            try testing.expect(effect.has_havoc);
+            try testing.expect(containsEffectSlot(effect.slots, "total", .storage));
+        },
+        .reads_writes => |effect| {
+            try testing.expect(effect.has_log);
+            try testing.expect(effect.has_havoc);
+            try testing.expect(containsEffectSlot(effect.writes, "total", .storage));
+        },
+        else => return error.TestUnexpectedResult,
+    }
+}
+
 test "compiler lowers bitfield field reads and writes through bit ops" {
     const source_text =
         \\contract Bits {

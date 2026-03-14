@@ -40,10 +40,26 @@ test "buildEffect preserves external marker across slot summaries" {
         .{ .name = "total", .region = .storage },
     };
 
-    try std.testing.expect(TypeChecker.buildEffect(&.{}, &.{}, true) == .external);
-    try std.testing.expect(TypeChecker.buildEffect(&slots, &.{}, true).reads.has_external);
-    try std.testing.expect(TypeChecker.buildEffect(&.{}, &slots, true).writes.has_external);
-    try std.testing.expect(TypeChecker.buildEffect(&slots, &slots, true).reads_writes.has_external);
+    try std.testing.expect(TypeChecker.buildEffect(&.{}, &.{}, true, false, false) == .external);
+    try std.testing.expect(TypeChecker.buildEffect(&slots, &.{}, true, false, false).reads.has_external);
+    try std.testing.expect(TypeChecker.buildEffect(&.{}, &slots, true, false, false).writes.has_external);
+    try std.testing.expect(TypeChecker.buildEffect(&slots, &slots, true, false, false).reads_writes.has_external);
+}
+
+test "buildEffect preserves log and havoc markers across slot summaries" {
+    const slots = [_]EffectSlot{
+        .{ .name = "total", .region = .storage },
+    };
+
+    try std.testing.expect(TypeChecker.buildEffect(&slots, &.{}, false, true, false).reads.has_log);
+    try std.testing.expect(TypeChecker.buildEffect(&.{}, &slots, false, false, true).writes.has_havoc);
+    const mixed = TypeChecker.buildEffect(&slots, &slots, true, true, true).reads_writes;
+    try std.testing.expect(mixed.has_external);
+    try std.testing.expect(mixed.has_log);
+    try std.testing.expect(mixed.has_havoc);
+    const effects_only = TypeChecker.buildEffect(&.{}, &.{}, false, true, true).side_effects;
+    try std.testing.expect(effects_only.has_log);
+    try std.testing.expect(effects_only.has_havoc);
 }
 
 test "unknown locked call diagnostics mention each locked slot" {
@@ -695,8 +711,10 @@ const TypeChecker = struct {
         var reads: std.ArrayList(EffectSlot) = .{};
         var writes: std.ArrayList(EffectSlot) = .{};
         var has_external = false;
-        try self.collectBodyEffects(function.body, &reads, &writes, &has_external);
-        return buildEffect(reads.items, writes.items, has_external);
+        var has_log = false;
+        var has_havoc = false;
+        try self.collectBodyEffects(function.body, &reads, &writes, &has_external, &has_log, &has_havoc);
+        return buildEffect(reads.items, writes.items, has_external, has_log, has_havoc);
     }
 
     fn ensureFunctionEffectSummary(self: *TypeChecker, item_id: ast.ItemId, function: ast.FunctionItem) !void {
@@ -803,7 +821,9 @@ const TypeChecker = struct {
                 var reads: std.ArrayList(EffectSlot) = .{};
                 var writes: std.ArrayList(EffectSlot) = .{};
                 var has_external = false;
-                try self.collectPatternTargetEffects(assign.target, assign.op, &reads, &writes, &has_external);
+                var has_log = false;
+                var has_havoc = false;
+                try self.collectPatternTargetEffects(assign.target, assign.op, &reads, &writes, &has_external, &has_log, &has_havoc);
                 try self.emitLockedWriteDiagnostics(assign.range, writes.items, locked_slots.items);
             },
         }
@@ -907,7 +927,7 @@ const TypeChecker = struct {
     fn effectWrites(self: *TypeChecker, effect: Effect) []const EffectSlot {
         _ = self;
         return switch (effect) {
-            .pure, .external, .reads => &.{},
+            .pure, .external, .side_effects, .reads => &.{},
             .writes => |write_effect| write_effect.slots,
             .reads_writes => |read_write| read_write.writes,
         };
@@ -918,9 +938,32 @@ const TypeChecker = struct {
         return switch (effect) {
             .pure => false,
             .external => true,
+            .side_effects => |side_effects| side_effects.has_external,
             .reads => |read_effect| read_effect.has_external,
             .writes => |write_effect| write_effect.has_external,
             .reads_writes => |read_write| read_write.has_external,
+        };
+    }
+
+    fn effectHasLog(self: *TypeChecker, effect: Effect) bool {
+        _ = self;
+        return switch (effect) {
+            .pure, .external => false,
+            .side_effects => |side_effects| side_effects.has_log,
+            .reads => |read_effect| read_effect.has_log,
+            .writes => |write_effect| write_effect.has_log,
+            .reads_writes => |read_write| read_write.has_log,
+        };
+    }
+
+    fn effectHasHavoc(self: *TypeChecker, effect: Effect) bool {
+        _ = self;
+        return switch (effect) {
+            .pure, .external => false,
+            .side_effects => |side_effects| side_effects.has_havoc,
+            .reads => |read_effect| read_effect.has_havoc,
+            .writes => |write_effect| write_effect.has_havoc,
+            .reads_writes => |read_write| read_write.has_havoc,
         };
     }
 
@@ -942,124 +985,146 @@ const TypeChecker = struct {
         }
     }
 
-    fn buildEffect(reads: []const EffectSlot, writes: []const EffectSlot, has_external: bool) Effect {
-        if (reads.len == 0 and writes.len == 0) return if (has_external) .external else .pure;
-        if (reads.len == 0) return .{ .writes = .{ .slots = writes, .has_external = has_external } };
-        if (writes.len == 0) return .{ .reads = .{ .slots = reads, .has_external = has_external } };
+    fn buildEffect(reads: []const EffectSlot, writes: []const EffectSlot, has_external: bool, has_log: bool, has_havoc: bool) Effect {
+        if (reads.len == 0 and writes.len == 0) {
+            if (has_external and !has_log and !has_havoc) return .external;
+            if (has_external or has_log or has_havoc) return .{ .side_effects = .{
+                .has_external = has_external,
+                .has_log = has_log,
+                .has_havoc = has_havoc,
+            } };
+            return .pure;
+        }
+        if (reads.len == 0) return .{ .writes = .{
+            .slots = writes,
+            .has_external = has_external,
+            .has_log = has_log,
+            .has_havoc = has_havoc,
+        } };
+        if (writes.len == 0) return .{ .reads = .{
+            .slots = reads,
+            .has_external = has_external,
+            .has_log = has_log,
+            .has_havoc = has_havoc,
+        } };
         return .{ .reads_writes = .{
             .reads = reads,
             .writes = writes,
             .has_external = has_external,
+            .has_log = has_log,
+            .has_havoc = has_havoc,
         } };
     }
 
-    fn collectBodyEffects(self: *TypeChecker, body_id: ast.BodyId, reads: *std.ArrayList(EffectSlot), writes: *std.ArrayList(EffectSlot), has_external: *bool) anyerror!void {
+    fn collectBodyEffects(self: *TypeChecker, body_id: ast.BodyId, reads: *std.ArrayList(EffectSlot), writes: *std.ArrayList(EffectSlot), has_external: *bool, has_log: *bool, has_havoc: *bool) anyerror!void {
         const body = self.file.body(body_id).*;
         for (body.statements) |statement_id| {
-            try self.collectStmtEffects(statement_id, reads, writes, has_external);
+            try self.collectStmtEffects(statement_id, reads, writes, has_external, has_log, has_havoc);
         }
     }
 
-    fn collectStmtEffects(self: *TypeChecker, statement_id: ast.StmtId, reads: *std.ArrayList(EffectSlot), writes: *std.ArrayList(EffectSlot), has_external: *bool) anyerror!void {
+    fn collectStmtEffects(self: *TypeChecker, statement_id: ast.StmtId, reads: *std.ArrayList(EffectSlot), writes: *std.ArrayList(EffectSlot), has_external: *bool, has_log: *bool, has_havoc: *bool) anyerror!void {
         switch (self.file.statement(statement_id).*) {
             .VariableDecl => |decl| if (decl.value) |expr_id| {
-                try self.collectExprEffects(expr_id, reads, writes, has_external);
+                try self.collectExprEffects(expr_id, reads, writes, has_external, has_log, has_havoc);
             },
             .Return => |ret| if (ret.value) |expr_id| {
-                try self.collectExprEffects(expr_id, reads, writes, has_external);
+                try self.collectExprEffects(expr_id, reads, writes, has_external, has_log, has_havoc);
             },
             .If => |if_stmt| {
-                try self.collectExprEffects(if_stmt.condition, reads, writes, has_external);
-                try self.collectBodyEffects(if_stmt.then_body, reads, writes, has_external);
-                if (if_stmt.else_body) |else_body| try self.collectBodyEffects(else_body, reads, writes, has_external);
+                try self.collectExprEffects(if_stmt.condition, reads, writes, has_external, has_log, has_havoc);
+                try self.collectBodyEffects(if_stmt.then_body, reads, writes, has_external, has_log, has_havoc);
+                if (if_stmt.else_body) |else_body| try self.collectBodyEffects(else_body, reads, writes, has_external, has_log, has_havoc);
             },
             .While => |while_stmt| {
-                try self.collectExprEffects(while_stmt.condition, reads, writes, has_external);
-                for (while_stmt.invariants) |expr_id| try self.collectExprEffects(expr_id, reads, writes, has_external);
-                try self.collectBodyEffects(while_stmt.body, reads, writes, has_external);
+                try self.collectExprEffects(while_stmt.condition, reads, writes, has_external, has_log, has_havoc);
+                for (while_stmt.invariants) |expr_id| try self.collectExprEffects(expr_id, reads, writes, has_external, has_log, has_havoc);
+                try self.collectBodyEffects(while_stmt.body, reads, writes, has_external, has_log, has_havoc);
             },
             .For => |for_stmt| {
-                try self.collectExprEffects(for_stmt.iterable, reads, writes, has_external);
-                for (for_stmt.invariants) |expr_id| try self.collectExprEffects(expr_id, reads, writes, has_external);
-                try self.collectBodyEffects(for_stmt.body, reads, writes, has_external);
+                try self.collectExprEffects(for_stmt.iterable, reads, writes, has_external, has_log, has_havoc);
+                for (for_stmt.invariants) |expr_id| try self.collectExprEffects(expr_id, reads, writes, has_external, has_log, has_havoc);
+                try self.collectBodyEffects(for_stmt.body, reads, writes, has_external, has_log, has_havoc);
             },
             .Switch => |switch_stmt| {
-                try self.collectExprEffects(switch_stmt.condition, reads, writes, has_external);
+                try self.collectExprEffects(switch_stmt.condition, reads, writes, has_external, has_log, has_havoc);
                 for (switch_stmt.arms) |arm| {
                     switch (arm.pattern) {
-                        .Expr => |expr_id| try self.collectExprEffects(expr_id, reads, writes, has_external),
+                        .Expr => |expr_id| try self.collectExprEffects(expr_id, reads, writes, has_external, has_log, has_havoc),
                         .Range => |range_pattern| {
-                            try self.collectExprEffects(range_pattern.start, reads, writes, has_external);
-                            try self.collectExprEffects(range_pattern.end, reads, writes, has_external);
+                            try self.collectExprEffects(range_pattern.start, reads, writes, has_external, has_log, has_havoc);
+                            try self.collectExprEffects(range_pattern.end, reads, writes, has_external, has_log, has_havoc);
                         },
                         .Else => {},
                     }
-                    try self.collectBodyEffects(arm.body, reads, writes, has_external);
+                    try self.collectBodyEffects(arm.body, reads, writes, has_external, has_log, has_havoc);
                 }
-                if (switch_stmt.else_body) |else_body| try self.collectBodyEffects(else_body, reads, writes, has_external);
+                if (switch_stmt.else_body) |else_body| try self.collectBodyEffects(else_body, reads, writes, has_external, has_log, has_havoc);
             },
             .Try => |try_stmt| {
-                try self.collectBodyEffects(try_stmt.try_body, reads, writes, has_external);
-                if (try_stmt.catch_clause) |catch_clause| try self.collectBodyEffects(catch_clause.body, reads, writes, has_external);
+                try self.collectBodyEffects(try_stmt.try_body, reads, writes, has_external, has_log, has_havoc);
+                if (try_stmt.catch_clause) |catch_clause| try self.collectBodyEffects(catch_clause.body, reads, writes, has_external, has_log, has_havoc);
             },
             .Log => |log_stmt| {
-                for (log_stmt.args) |arg| try self.collectExprEffects(arg, reads, writes, has_external);
+                has_log.* = true;
+                for (log_stmt.args) |arg| try self.collectExprEffects(arg, reads, writes, has_external, has_log, has_havoc);
             },
-            .Lock, .Unlock, .Havoc, .Break, .Continue => {},
-            .Assert => |assert_stmt| try self.collectExprEffects(assert_stmt.condition, reads, writes, has_external),
-            .Assume => |assume_stmt| try self.collectExprEffects(assume_stmt.condition, reads, writes, has_external),
+            .Havoc => has_havoc.* = true,
+            .Lock, .Unlock, .Break, .Continue => {},
+            .Assert => |assert_stmt| try self.collectExprEffects(assert_stmt.condition, reads, writes, has_external, has_log, has_havoc),
+            .Assume => |assume_stmt| try self.collectExprEffects(assume_stmt.condition, reads, writes, has_external, has_log, has_havoc),
             .Assign => |assign| {
-                try self.collectExprEffects(assign.value, reads, writes, has_external);
-                try self.collectPatternTargetEffects(assign.target, assign.op, reads, writes, has_external);
+                try self.collectExprEffects(assign.value, reads, writes, has_external, has_log, has_havoc);
+                try self.collectPatternTargetEffects(assign.target, assign.op, reads, writes, has_external, has_log, has_havoc);
             },
-            .Expr => |expr_stmt| try self.collectExprEffects(expr_stmt.expr, reads, writes, has_external),
-            .Block => |block| try self.collectBodyEffects(block.body, reads, writes, has_external),
-            .LabeledBlock => |block| try self.collectBodyEffects(block.body, reads, writes, has_external),
+            .Expr => |expr_stmt| try self.collectExprEffects(expr_stmt.expr, reads, writes, has_external, has_log, has_havoc),
+            .Block => |block| try self.collectBodyEffects(block.body, reads, writes, has_external, has_log, has_havoc),
+            .LabeledBlock => |block| try self.collectBodyEffects(block.body, reads, writes, has_external, has_log, has_havoc),
             .Error => {},
         }
     }
 
-    fn collectExprEffects(self: *TypeChecker, expr_id: ast.ExprId, reads: *std.ArrayList(EffectSlot), writes: *std.ArrayList(EffectSlot), has_external: *bool) anyerror!void {
+    fn collectExprEffects(self: *TypeChecker, expr_id: ast.ExprId, reads: *std.ArrayList(EffectSlot), writes: *std.ArrayList(EffectSlot), has_external: *bool, has_log: *bool, has_havoc: *bool) anyerror!void {
         switch (self.file.expression(expr_id).*) {
             .IntegerLiteral, .StringLiteral, .BoolLiteral, .AddressLiteral, .BytesLiteral, .Result, .Error => {},
-            .Tuple => |tuple| for (tuple.elements) |element| try self.collectExprEffects(element, reads, writes, has_external),
-            .ArrayLiteral => |array| for (array.elements) |element| try self.collectExprEffects(element, reads, writes, has_external),
-            .StructLiteral => |struct_literal| for (struct_literal.fields) |field| try self.collectExprEffects(field.value, reads, writes, has_external),
+            .Tuple => |tuple| for (tuple.elements) |element| try self.collectExprEffects(element, reads, writes, has_external, has_log, has_havoc),
+            .ArrayLiteral => |array| for (array.elements) |element| try self.collectExprEffects(element, reads, writes, has_external, has_log, has_havoc),
+            .StructLiteral => |struct_literal| for (struct_literal.fields) |field| try self.collectExprEffects(field.value, reads, writes, has_external, has_log, has_havoc),
             .Switch => |switch_expr| {
-                try self.collectExprEffects(switch_expr.condition, reads, writes, has_external);
+                try self.collectExprEffects(switch_expr.condition, reads, writes, has_external, has_log, has_havoc);
                 for (switch_expr.arms) |arm| {
                     switch (arm.pattern) {
-                        .Expr => |pattern_expr| try self.collectExprEffects(pattern_expr, reads, writes, has_external),
+                        .Expr => |pattern_expr| try self.collectExprEffects(pattern_expr, reads, writes, has_external, has_log, has_havoc),
                         .Range => |range_pattern| {
-                            try self.collectExprEffects(range_pattern.start, reads, writes, has_external);
-                            try self.collectExprEffects(range_pattern.end, reads, writes, has_external);
+                            try self.collectExprEffects(range_pattern.start, reads, writes, has_external, has_log, has_havoc);
+                            try self.collectExprEffects(range_pattern.end, reads, writes, has_external, has_log, has_havoc);
                         },
                         .Else => {},
                     }
-                    try self.collectExprEffects(arm.value, reads, writes, has_external);
+                    try self.collectExprEffects(arm.value, reads, writes, has_external, has_log, has_havoc);
                 }
-                if (switch_expr.else_expr) |else_expr| try self.collectExprEffects(else_expr, reads, writes, has_external);
+                if (switch_expr.else_expr) |else_expr| try self.collectExprEffects(else_expr, reads, writes, has_external, has_log, has_havoc);
             },
             .Comptime => {},
-            .ErrorReturn => |error_return| for (error_return.args) |arg| try self.collectExprEffects(arg, reads, writes, has_external),
+            .ErrorReturn => |error_return| for (error_return.args) |arg| try self.collectExprEffects(arg, reads, writes, has_external, has_log, has_havoc),
             .Name => {
                 if (self.fieldSlotForBinding(self.resolution.expr_bindings[expr_id.index()])) |slot| {
                     try self.appendUniqueSlot(reads, slot);
                 }
             },
-            .Unary => |unary| try self.collectExprEffects(unary.operand, reads, writes, has_external),
+            .Unary => |unary| try self.collectExprEffects(unary.operand, reads, writes, has_external, has_log, has_havoc),
             .Binary => |binary| {
-                try self.collectExprEffects(binary.lhs, reads, writes, has_external);
-                try self.collectExprEffects(binary.rhs, reads, writes, has_external);
+                try self.collectExprEffects(binary.lhs, reads, writes, has_external, has_log, has_havoc);
+                try self.collectExprEffects(binary.rhs, reads, writes, has_external, has_log, has_havoc);
             },
             .Call => |call| {
-                try self.collectExprEffects(call.callee, reads, writes, has_external);
-                for (call.args) |arg| try self.collectExprEffects(arg, reads, writes, has_external);
+                try self.collectExprEffects(call.callee, reads, writes, has_external, has_log, has_havoc);
+                for (call.args) |arg| try self.collectExprEffects(arg, reads, writes, has_external, has_log, has_havoc);
                 if (self.calleeFunctionItem(call.callee)) |callee_id| {
                     switch (self.file.item(callee_id).*) {
                         .Function => |function| {
                             try self.ensureFunctionEffectSummary(callee_id, function);
-                            try self.mergeEffect(reads, writes, has_external, self.item_effects[callee_id.index()]);
+                            try self.mergeEffect(reads, writes, has_external, has_log, has_havoc, self.item_effects[callee_id.index()]);
                         },
                         else => {},
                     }
@@ -1067,18 +1132,18 @@ const TypeChecker = struct {
                     has_external.* = true;
                 }
             },
-            .Builtin => |builtin| for (builtin.args) |arg| try self.collectExprEffects(arg, reads, writes, has_external),
-            .Field => |field| try self.collectExprEffects(field.base, reads, writes, has_external),
+            .Builtin => |builtin| for (builtin.args) |arg| try self.collectExprEffects(arg, reads, writes, has_external, has_log, has_havoc),
+            .Field => |field| try self.collectExprEffects(field.base, reads, writes, has_external, has_log, has_havoc),
             .Index => |index| {
-                try self.collectExprEffects(index.base, reads, writes, has_external);
-                try self.collectExprEffects(index.index, reads, writes, has_external);
+                try self.collectExprEffects(index.base, reads, writes, has_external, has_log, has_havoc);
+                try self.collectExprEffects(index.index, reads, writes, has_external, has_log, has_havoc);
             },
-            .Group => |group| try self.collectExprEffects(group.expr, reads, writes, has_external),
+            .Group => |group| try self.collectExprEffects(group.expr, reads, writes, has_external, has_log, has_havoc),
             .Old, .Quantified => {},
         }
     }
 
-    fn collectPatternTargetEffects(self: *TypeChecker, pattern_id: ast.PatternId, op: ast.AssignmentOp, reads: *std.ArrayList(EffectSlot), writes: *std.ArrayList(EffectSlot), has_external: *bool) anyerror!void {
+    fn collectPatternTargetEffects(self: *TypeChecker, pattern_id: ast.PatternId, op: ast.AssignmentOp, reads: *std.ArrayList(EffectSlot), writes: *std.ArrayList(EffectSlot), has_external: *bool, has_log: *bool, has_havoc: *bool) anyerror!void {
         switch (self.file.pattern(pattern_id).*) {
             .Name => {
                 if (self.patternRootFieldSlot(pattern_id)) |slot_name| {
@@ -1087,11 +1152,11 @@ const TypeChecker = struct {
                 }
             },
             .Field => |field| {
-                try self.collectPatternTargetEffects(field.base, .add_assign, reads, writes, has_external);
+                try self.collectPatternTargetEffects(field.base, .add_assign, reads, writes, has_external, has_log, has_havoc);
             },
             .Index => |index| {
-                try self.collectPatternExprReads(index.base, reads, writes, has_external);
-                try self.collectExprEffects(index.index, reads, writes, has_external);
+                try self.collectPatternExprReads(index.base, reads, writes, has_external, has_log, has_havoc);
+                try self.collectExprEffects(index.index, reads, writes, has_external, has_log, has_havoc);
                 if (self.patternRootFieldSlot(pattern_id)) |slot| {
                     try self.appendUniqueSlot(reads, slot);
                     try self.appendUniqueSlot(writes, slot);
@@ -1102,17 +1167,17 @@ const TypeChecker = struct {
         }
     }
 
-    fn collectPatternExprReads(self: *TypeChecker, pattern_id: ast.PatternId, reads: *std.ArrayList(EffectSlot), writes: *std.ArrayList(EffectSlot), has_external: *bool) anyerror!void {
+    fn collectPatternExprReads(self: *TypeChecker, pattern_id: ast.PatternId, reads: *std.ArrayList(EffectSlot), writes: *std.ArrayList(EffectSlot), has_external: *bool, has_log: *bool, has_havoc: *bool) anyerror!void {
         switch (self.file.pattern(pattern_id).*) {
             .Name => {
                 if (self.patternRootFieldSlot(pattern_id)) |slot| {
                     try self.appendUniqueSlot(reads, slot);
                 }
             },
-            .Field => |field| try self.collectPatternExprReads(field.base, reads, writes, has_external),
+            .Field => |field| try self.collectPatternExprReads(field.base, reads, writes, has_external, has_log, has_havoc),
             .Index => |index| {
-                try self.collectPatternExprReads(index.base, reads, writes, has_external);
-                try self.collectExprEffects(index.index, reads, writes, has_external);
+                try self.collectPatternExprReads(index.base, reads, writes, has_external, has_log, has_havoc);
+                try self.collectExprEffects(index.index, reads, writes, has_external, has_log, has_havoc);
             },
             .StructDestructure => {},
             .Error => {},
@@ -1171,20 +1236,31 @@ const TypeChecker = struct {
         try slots.append(self.arena, slot);
     }
 
-    fn mergeEffect(self: *TypeChecker, reads: *std.ArrayList(EffectSlot), writes: *std.ArrayList(EffectSlot), has_external: *bool, effect: Effect) !void {
+    fn mergeEffect(self: *TypeChecker, reads: *std.ArrayList(EffectSlot), writes: *std.ArrayList(EffectSlot), has_external: *bool, has_log: *bool, has_havoc: *bool, effect: Effect) !void {
         switch (effect) {
             .pure => {},
             .external => has_external.* = true,
+            .side_effects => |side_effects| {
+                has_external.* = has_external.* or side_effects.has_external;
+                has_log.* = has_log.* or side_effects.has_log;
+                has_havoc.* = has_havoc.* or side_effects.has_havoc;
+            },
             .reads => |read_effect| {
                 has_external.* = has_external.* or read_effect.has_external;
+                has_log.* = has_log.* or read_effect.has_log;
+                has_havoc.* = has_havoc.* or read_effect.has_havoc;
                 for (read_effect.slots) |slot| try self.appendUniqueSlot(reads, slot);
             },
             .writes => |write_effect| {
                 has_external.* = has_external.* or write_effect.has_external;
+                has_log.* = has_log.* or write_effect.has_log;
+                has_havoc.* = has_havoc.* or write_effect.has_havoc;
                 for (write_effect.slots) |slot| try self.appendUniqueSlot(writes, slot);
             },
             .reads_writes => |read_write| {
                 has_external.* = has_external.* or read_write.has_external;
+                has_log.* = has_log.* or read_write.has_log;
+                has_havoc.* = has_havoc.* or read_write.has_havoc;
                 for (read_write.reads) |slot| try self.appendUniqueSlot(reads, slot);
                 for (read_write.writes) |slot| try self.appendUniqueSlot(writes, slot);
             },
