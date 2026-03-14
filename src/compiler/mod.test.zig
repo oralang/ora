@@ -3442,6 +3442,31 @@ test "compiler const eval preserves integers wider than i128" {
     try testing.expectEqual(@as(usize, 0), type_diags.len());
 }
 
+test "compiler const eval respects exclusive switch range patterns" {
+    const source_text =
+        \\pub fn choose() -> u256 {
+        \\    let value = switch (2) {
+        \\        1..2 => 7,
+        \\        else => 9,
+        \\    };
+        \\    return value;
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const module = compilation.db.sources.module(compilation.root_module_id);
+    const ast_file = try compilation.db.astFile(module.file_id);
+    const function = ast_file.item(ast_file.root_items[0]).Function;
+    const body = ast_file.body(function.body);
+    const value_stmt = ast_file.statement(body.statements[0]).VariableDecl;
+
+    const consteval = try compilation.db.constEval(compilation.root_module_id);
+    try testing.expect(consteval.values[value_stmt.value.?.index()] != null);
+    try testing.expectEqual(@as(i128, 9), try consteval.values[value_stmt.value.?.index()].?.integer.toInt(i128));
+}
+
 test "compiler lowers ghost items into ghost AST nodes" {
     const source_text =
         \\contract Spec {

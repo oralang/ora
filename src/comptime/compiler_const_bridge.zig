@@ -1,9 +1,20 @@
 const std = @import("std");
 const ast = @import("../compiler/ast/mod.zig");
+const comptime_eval = @import("mod.zig");
+const error_mod = @import("error.zig");
 const model = @import("../compiler/sema/model.zig");
 
 const BigInt = std.math.big.int.Managed;
 pub const ConstValue = model.ConstValue;
+const CtEnv = comptime_eval.CtEnv;
+const CtValue = comptime_eval.CtValue;
+const Evaluator = comptime_eval.Evaluator;
+const EvalResult = comptime_eval.EvalResult;
+const EvalMode = comptime_eval.EvalMode;
+const TryEvalPolicy = comptime_eval.TryEvalPolicy;
+const EvalBinaryOp = comptime_eval.BinaryOp;
+const EvalUnaryOp = comptime_eval.UnaryOp;
+const SourceSpan = error_mod.SourceSpan;
 
 pub fn parseIntegerLiteral(allocator: std.mem.Allocator, text: []const u8) !?ConstValue {
     const base: u8 = if (std.mem.startsWith(u8, text, "0x")) 16 else if (std.mem.startsWith(u8, text, "0b")) 2 else 10;
@@ -14,6 +25,9 @@ pub fn parseIntegerLiteral(allocator: std.mem.Allocator, text: []const u8) !?Con
 }
 
 pub fn evalUnary(allocator: std.mem.Allocator, op: ast.UnaryOp, value: ?ConstValue) !?ConstValue {
+    if (value) |v| {
+        if (try tryEvalUnaryWithSharedEngine(allocator, op, v)) |shared| return shared;
+    }
     if (value) |v| {
         return switch (op) {
             .neg => switch (v) {
@@ -38,6 +52,7 @@ pub fn evalBinary(allocator: std.mem.Allocator, op: ast.BinaryOp, lhs: ?ConstVal
     if (lhs == null or rhs == null) return null;
     const left = lhs.?;
     const right = rhs.?;
+    if (try tryEvalBinaryWithSharedEngine(allocator, op, left, right)) |shared| return shared;
     return switch (op) {
         .add, .wrapping_add => try evalIntInt(allocator, left, right, BigInt.add),
         .sub, .wrapping_sub => try evalIntInt(allocator, left, right, BigInt.sub),
@@ -212,7 +227,90 @@ fn evalBoolBool(lhs: ConstValue, rhs: ConstValue, comptime op: fn (bool, bool) b
     };
 }
 
-fn positiveShiftAmount(value: BigInt) ?usize {
+pub fn positiveShiftAmount(value: BigInt) ?usize {
     if (!value.isPositive() and !value.eqlZero()) return null;
     return value.toInt(usize) catch null;
+}
+
+fn tryEvalUnaryWithSharedEngine(allocator: std.mem.Allocator, op: ast.UnaryOp, value: ConstValue) !?ConstValue {
+    const eval_op = switch (op) {
+        .neg => EvalUnaryOp.neg,
+        .not_ => EvalUnaryOp.not,
+        .bit_not => EvalUnaryOp.bnot,
+        .try_ => return value,
+    };
+
+    const operand = try constToCtValue(value) orelse return null;
+    var env = CtEnv.init(allocator, .{});
+    defer env.deinit();
+    var evaluator = Evaluator.init(&env, EvalMode.must_eval, TryEvalPolicy.strict);
+    const result = evaluator.evalUnaryOp(eval_op, operand, zeroSpan());
+    return try evalResultToConstValue(allocator, result);
+}
+
+fn tryEvalBinaryWithSharedEngine(allocator: std.mem.Allocator, op: ast.BinaryOp, lhs: ConstValue, rhs: ConstValue) !?ConstValue {
+    const eval_op = switch (op) {
+        .add => EvalBinaryOp.add,
+        .sub => EvalBinaryOp.sub,
+        .mul => EvalBinaryOp.mul,
+        .pow => EvalBinaryOp.pow,
+        .div => EvalBinaryOp.div,
+        .mod => EvalBinaryOp.mod,
+        .wrapping_add => EvalBinaryOp.wadd,
+        .wrapping_sub => EvalBinaryOp.wsub,
+        .wrapping_mul => EvalBinaryOp.wmul,
+        .wrapping_pow => EvalBinaryOp.wpow,
+        .eq => EvalBinaryOp.eq,
+        .ne => EvalBinaryOp.neq,
+        .lt => EvalBinaryOp.lt,
+        .le => EvalBinaryOp.lte,
+        .gt => EvalBinaryOp.gt,
+        .ge => EvalBinaryOp.gte,
+        .bit_and => EvalBinaryOp.band,
+        .bit_or => EvalBinaryOp.bor,
+        .bit_xor => EvalBinaryOp.bxor,
+        .shl => EvalBinaryOp.shl,
+        .shr => EvalBinaryOp.shr,
+        .wrapping_shl => EvalBinaryOp.wshl,
+        .wrapping_shr => EvalBinaryOp.wshr,
+        .and_and => EvalBinaryOp.land,
+        .or_or => EvalBinaryOp.lor,
+    };
+
+    const left = try constToCtValue(lhs) orelse return null;
+    const right = try constToCtValue(rhs) orelse return null;
+
+    var env = CtEnv.init(allocator, .{});
+    defer env.deinit();
+    var evaluator = Evaluator.init(&env, EvalMode.must_eval, TryEvalPolicy.strict);
+    const result = evaluator.evalBinaryOp(eval_op, left, right, zeroSpan());
+    return try evalResultToConstValue(allocator, result);
+}
+
+fn constToCtValue(value: ConstValue) !?CtValue {
+    return switch (value) {
+        .integer => |integer| blk: {
+            if (!integer.isPositive() and !integer.eqlZero()) break :blk null;
+            const as_u256 = integer.toInt(u256) catch break :blk null;
+            break :blk CtValue{ .integer = as_u256 };
+        },
+        .boolean => |boolean| CtValue{ .boolean = boolean },
+        .string => null,
+    };
+}
+
+fn evalResultToConstValue(allocator: std.mem.Allocator, result: EvalResult) !?ConstValue {
+    return switch (result) {
+        .value => |value| switch (value) {
+            .integer => |integer| .{ .integer = try BigInt.initSet(allocator, integer) },
+            .boolean => |boolean| .{ .boolean = boolean },
+            else => null,
+        },
+        .runtime, .control => null,
+        .err => null,
+    };
+}
+
+fn zeroSpan() SourceSpan {
+    return .{ .line = 0, .column = 0, .length = 0 };
 }

@@ -237,9 +237,12 @@ const ConstEvaluator = struct {
                 const start = (self.evalExpr(range_pattern.start) catch null) orelse break :blk false;
                 const finish = (self.evalExpr(range_pattern.end) catch null) orelse break :blk false;
                 break :blk switch (condition) {
-                    .integer => |integer| switch (start) {
+                    .integer => |current| switch (start) {
                         .integer => |start_integer| switch (finish) {
-                            .integer => |finish_integer| start_integer.order(integer).compare(.lte) and integer.order(finish_integer).compare(.lte),
+                            .integer => |finish_integer| if (range_pattern.inclusive)
+                                current.order(start_integer).compare(.gte) and current.order(finish_integer).compare(.lte)
+                            else
+                                current.order(start_integer).compare(.gte) and current.order(finish_integer).compare(.lt),
                             else => false,
                         },
                         else => false,

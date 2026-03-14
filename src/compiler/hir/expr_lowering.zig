@@ -1,7 +1,7 @@
 const std = @import("std");
 const mlir = @import("mlir_c_api").c;
 const ast = @import("../ast/mod.zig");
-const const_values = @import("../sema/const_values.zig");
+const const_bridge = @import("../../comptime/compiler_const_bridge.zig");
 const source = @import("../source/mod.zig");
 const hir_locals = @import("locals.zig");
 const support = @import("support.zig");
@@ -616,7 +616,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
         fn constTupleIndex(self: *FunctionLowerer, expr_id: ast.ExprId) ?usize {
             const value = self.parent.const_eval.values[expr_id.index()] orelse return null;
             return switch (value) {
-                .integer => |integer| const_values.positiveShiftAmount(integer),
+                .integer => |integer| const_bridge.positiveShiftAmount(integer),
                 else => null,
             };
         }

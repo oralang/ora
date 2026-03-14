@@ -1,9 +1,9 @@
 const std = @import("std");
 const ast = @import("../ast/mod.zig");
+const const_bridge = @import("../../comptime/compiler_const_bridge.zig");
 const diagnostics = @import("../diagnostics/mod.zig");
 const model = @import("model.zig");
 const source = @import("../source/mod.zig");
-const const_values = @import("const_values.zig");
 const descriptors = @import("type_descriptors.zig");
 
 const ItemIndexResult = model.ItemIndexResult;
@@ -655,7 +655,7 @@ const TypeChecker = struct {
     fn constTupleIndex(self: *const TypeChecker, expr_id: ast.ExprId) ?usize {
         const value = self.const_eval.values[expr_id.index()] orelse return null;
         return switch (value) {
-            .integer => |integer| const_values.positiveShiftAmount(integer),
+            .integer => |integer| const_bridge.positiveShiftAmount(integer),
             else => null,
         };
     }
@@ -677,7 +677,7 @@ const TypeChecker = struct {
             .integer => |integer| integer,
             else => return false,
         };
-        const amount_usize = const_values.positiveShiftAmount(amount) orelse {
+        const amount_usize = const_bridge.positiveShiftAmount(amount) orelse {
             const amount_text = try self.integerValueText(amount);
             try self.emitExprError(expr_id, "shift amount {s} out of range for type '{s}'", .{
                 amount_text,
