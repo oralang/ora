@@ -3729,6 +3729,30 @@ test "compiler const eval reads comptime tuple elements by index" {
     try testing.expectEqual(@as(i128, 6), try consteval.values[ret_stmt.value.?.index()].?.integer.toInt(i128));
 }
 
+test "compiler const eval mutates comptime array elements by index" {
+    const source_text =
+        \\pub fn get() -> u256 {
+        \\    return comptime {
+        \\        let values = [7, 8, 9];
+        \\        values[1] = 42;
+        \\        values[1];
+        \\    };
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const module = compilation.db.sources.module(compilation.root_module_id);
+    const ast_file = try compilation.db.astFile(module.file_id);
+    const function = ast_file.item(ast_file.root_items[0]).Function;
+    const body = ast_file.body(function.body);
+    const ret_stmt = ast_file.statement(body.statements[0]).Return;
+
+    const consteval = try compilation.db.constEval(compilation.root_module_id);
+    try testing.expectEqual(@as(i128, 42), try consteval.values[ret_stmt.value.?.index()].?.integer.toInt(i128));
+}
+
 test "compiler const eval executes comptime break in while loops" {
     const source_text =
         \\pub fn count() -> u256 {

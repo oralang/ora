@@ -647,6 +647,7 @@ const ConstEvaluator = struct {
 
     fn evalComptimeAssign(self: *ConstEvaluator, assign: ast.AssignStmt) anyerror!?ConstValue {
         const rhs = (try self.evalExprUncached(assign.value)) orelse return null;
+        const rhs_ct = (try self.evalExprCtValue(assign.value)) orelse (try constToCtValue(rhs)) orelse return null;
         switch (self.file.pattern(assign.target).*) {
             .Name => |name| {
                 const value = switch (assign.op) {
@@ -668,6 +669,30 @@ const ConstEvaluator = struct {
                 };
                 try self.bindName(name.name, value);
                 return value;
+            },
+            .Index => |index| {
+                if (assign.op != .assign) return null;
+                const base_name = switch (self.file.pattern(index.base).*) {
+                    .Name => |name| name.name,
+                    else => return null,
+                };
+                const base_slot = self.env.lookup(base_name) orelse return null;
+                const base_value = self.env.read(base_slot);
+                const index_value = (try self.evalExprCtValue(index.index)) orelse return null;
+                const idx: usize = switch (index_value) {
+                    .integer => |integer| blk: {
+                        if (integer > std.math.maxInt(usize)) break :blk null;
+                        break :blk @as(usize, @intCast(integer));
+                    },
+                    else => null,
+                } orelse return null;
+
+                const updated = switch (base_value) {
+                    .array_ref => |heap_id| CtValue{ .array_ref = try self.env.heap.setArrayElem(heap_id, idx, rhs_ct) },
+                    else => return null,
+                };
+                self.env.update(base_slot, updated);
+                return rhs;
             },
             else => return null,
         }
