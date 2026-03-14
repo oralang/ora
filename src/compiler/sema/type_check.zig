@@ -167,6 +167,7 @@ test "unknown locked call diagnostics mention each locked slot" {
         .item_effects = &.{},
         .pattern_types = &.{},
         .expr_types = &.{},
+        .expr_effects = &.{},
         .effect_states = &.{},
         .current_function_item = null,
         .diagnostics = &diags,
@@ -200,6 +201,7 @@ pub fn typeCheck(
         .item_effects = &.{},
         .pattern_types = &.{},
         .expr_types = &.{},
+        .expr_effects = &.{},
         .body_types = &.{},
         .diagnostics = diagnostics.DiagnosticList.init(allocator),
     };
@@ -211,6 +213,7 @@ pub fn typeCheck(
     const item_effects = try arena.alloc(Effect, file.items.len);
     var pattern_types = try arena.alloc(LocatedType, file.patterns.len);
     const expr_types = try arena.alloc(Type, file.expressions.len);
+    const expr_effects = try arena.alloc(Effect, file.expressions.len);
     var body_types = try arena.alloc(Type, file.bodies.len);
     const effect_states = try arena.alloc(EffectSummaryState, file.items.len);
     @memset(item_types, .{ .unknown = {} });
@@ -218,6 +221,7 @@ pub fn typeCheck(
     @memset(item_effects, .pure);
     @memset(pattern_types, LocatedType.unlocated(.{ .unknown = {} }));
     @memset(expr_types, .{ .unknown = {} });
+    @memset(expr_effects, .pure);
     @memset(body_types, .{ .void = {} });
     @memset(effect_states, .unvisited);
 
@@ -267,6 +271,7 @@ pub fn typeCheck(
         .item_effects = item_effects,
         .pattern_types = pattern_types,
         .expr_types = expr_types,
+        .expr_effects = expr_effects,
         .effect_states = effect_states,
         .diagnostics = &result.diagnostics,
     };
@@ -282,6 +287,7 @@ pub fn typeCheck(
     result.item_effects = item_effects;
     result.pattern_types = pattern_types;
     result.expr_types = expr_types;
+    result.expr_effects = expr_effects;
     result.body_types = body_types;
     return result;
 }
@@ -298,6 +304,7 @@ const TypeChecker = struct {
     item_effects: []Effect,
     pattern_types: []LocatedType,
     expr_types: []Type,
+    expr_effects: []Effect,
     effect_states: []EffectSummaryState,
     current_return_type: ?Type = null,
     current_contract: ?ast.ItemId = null,
@@ -1226,66 +1233,69 @@ const TypeChecker = struct {
     }
 
     fn collectExprEffects(self: *TypeChecker, expr_id: ast.ExprId, state: *EffectCollectorState) anyerror!void {
+        var expr_state = EffectCollectorState.init();
         switch (self.file.expression(expr_id).*) {
             .IntegerLiteral, .StringLiteral, .BoolLiteral, .AddressLiteral, .BytesLiteral, .Result, .Error => {},
-            .Tuple => |tuple| for (tuple.elements) |element| try self.collectExprEffects(element, state),
-            .ArrayLiteral => |array| for (array.elements) |element| try self.collectExprEffects(element, state),
-            .StructLiteral => |struct_literal| for (struct_literal.fields) |field| try self.collectExprEffects(field.value, state),
+            .Tuple => |tuple| for (tuple.elements) |element| try self.collectExprEffects(element, &expr_state),
+            .ArrayLiteral => |array| for (array.elements) |element| try self.collectExprEffects(element, &expr_state),
+            .StructLiteral => |struct_literal| for (struct_literal.fields) |field| try self.collectExprEffects(field.value, &expr_state),
             .Switch => |switch_expr| {
-                try self.collectExprEffects(switch_expr.condition, state);
+                try self.collectExprEffects(switch_expr.condition, &expr_state);
                 for (switch_expr.arms) |arm| {
                     switch (arm.pattern) {
-                        .Expr => |pattern_expr| try self.collectExprEffects(pattern_expr, state),
+                        .Expr => |pattern_expr| try self.collectExprEffects(pattern_expr, &expr_state),
                         .Range => |range_pattern| {
-                            try self.collectExprEffects(range_pattern.start, state);
-                            try self.collectExprEffects(range_pattern.end, state);
+                            try self.collectExprEffects(range_pattern.start, &expr_state);
+                            try self.collectExprEffects(range_pattern.end, &expr_state);
                         },
                         .Else => {},
                     }
-                    try self.collectExprEffects(arm.value, state);
+                    try self.collectExprEffects(arm.value, &expr_state);
                 }
-                if (switch_expr.else_expr) |else_expr| try self.collectExprEffects(else_expr, state);
+                if (switch_expr.else_expr) |else_expr| try self.collectExprEffects(else_expr, &expr_state);
             },
             .Comptime => {},
-            .ErrorReturn => |error_return| for (error_return.args) |arg| try self.collectExprEffects(arg, state),
+            .ErrorReturn => |error_return| for (error_return.args) |arg| try self.collectExprEffects(arg, &expr_state),
             .Name => {
                 if (self.fieldSlotForBinding(self.resolution.expr_bindings[expr_id.index()])) |slot| {
-                    try self.appendUniqueSlot(&state.reads, slot);
+                    try self.appendUniqueSlot(&expr_state.reads, slot);
                 }
             },
-            .Unary => |unary| try self.collectExprEffects(unary.operand, state),
+            .Unary => |unary| try self.collectExprEffects(unary.operand, &expr_state),
             .Binary => |binary| {
-                try self.collectExprEffects(binary.lhs, state);
-                try self.collectExprEffects(binary.rhs, state);
+                try self.collectExprEffects(binary.lhs, &expr_state);
+                try self.collectExprEffects(binary.rhs, &expr_state);
             },
             .Call => |call| {
-                try self.collectExprEffects(call.callee, state);
-                for (call.args) |arg| try self.collectExprEffects(arg, state);
+                try self.collectExprEffects(call.callee, &expr_state);
+                for (call.args) |arg| try self.collectExprEffects(arg, &expr_state);
                 if (self.calleeFunctionItem(call.callee)) |callee_id| {
                     switch (self.file.item(callee_id).*) {
                         .Function => |function| {
                             try self.ensureFunctionEffectSummary(callee_id, function);
-                            try self.mergeEffect(state, self.item_effects[callee_id.index()]);
+                            try self.mergeEffect(&expr_state, self.item_effects[callee_id.index()]);
                         },
                         else => {},
                     }
                 } else if (self.callableType(call.callee).kind() == .function) {
-                    state.has_external = true;
+                    expr_state.has_external = true;
                 }
             },
-            .Builtin => |builtin| for (builtin.args) |arg| try self.collectExprEffects(arg, state),
-            .Field => |field| try self.collectExprEffects(field.base, state),
+            .Builtin => |builtin| for (builtin.args) |arg| try self.collectExprEffects(arg, &expr_state),
+            .Field => |field| try self.collectExprEffects(field.base, &expr_state),
             .Index => |index| {
-                try self.collectExprEffects(index.index, state);
+                try self.collectExprEffects(index.index, &expr_state);
                 if (self.lockSlotForExpr(expr_id)) |slot| {
-                    try self.appendUniqueSlot(&state.reads, slot);
+                    try self.appendUniqueSlot(&expr_state.reads, slot);
                 } else {
-                    try self.collectExprEffects(index.base, state);
+                    try self.collectExprEffects(index.base, &expr_state);
                 }
             },
-            .Group => |group| try self.collectExprEffects(group.expr, state),
+            .Group => |group| try self.collectExprEffects(group.expr, &expr_state),
             .Old, .Quantified => {},
         }
+        self.expr_effects[expr_id.index()] = self.effectFromState(expr_state);
+        try self.mergeEffect(state, self.expr_effects[expr_id.index()]);
     }
 
     fn collectPatternTargetEffects(self: *TypeChecker, pattern_id: ast.PatternId, op: ast.AssignmentOp, state: *EffectCollectorState) anyerror!void {

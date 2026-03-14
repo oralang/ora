@@ -409,6 +409,7 @@ pub const TypeCheckResult = struct {
     item_effects: []Effect,
     pattern_types: []LocatedType,
     expr_types: []Type,
+    expr_effects: []Effect,
     body_types: []Type,
     diagnostics: diagnostics.DiagnosticList,
 
@@ -426,6 +427,10 @@ pub const TypeCheckResult = struct {
             .type = self.item_types[id.index()],
             .region = self.item_regions[id.index()],
         };
+    }
+
+    pub fn exprEffect(self: *const TypeCheckResult, id: ast.ExprId) Effect {
+        return self.expr_effects[id.index()];
     }
 
     pub fn itemEffect(self: *const TypeCheckResult, id: ast.ItemId) Effect {

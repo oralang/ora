@@ -1761,6 +1761,34 @@ test "compiler tracks keyed map effects by parameter" {
     }
 }
 
+test "compiler tracks per-expression keyed index effects" {
+    const source_text =
+        \\contract Effects {
+        \\    storage balances: map<address, u256>;
+        \\
+        \\    pub fn read_balance(user: address) -> u256 {
+        \\        return balances[user];
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const root_file_id = compilation.db.sources.module(compilation.root_module_id).file_id;
+    const ast_file = try compilation.db.astFile(root_file_id);
+    const contract = ast_file.item(ast_file.root_items[0]).Contract;
+    const function = ast_file.item(contract.members[1]).Function;
+    const ret_stmt = ast_file.statement(ast_file.body(function.body).statements[0]).Return;
+    const typecheck = try compilation.db.typeCheck(compilation.root_module_id, .{ .item = ast_file.root_items[0] });
+    const user_key = [_]compiler.sema.KeySegment{.{ .parameter = 0 }};
+
+    switch (typecheck.exprEffect(ret_stmt.value.?)) {
+        .reads => |effect| try testing.expect(containsKeyedEffectSlot(effect.slots, "balances", .storage, &user_key)),
+        else => return error.TestUnexpectedResult,
+    }
+}
+
 test "compiler rejects direct writes to locked slots" {
     const source_text =
         \\contract Locked {
@@ -2000,6 +2028,37 @@ test "compiler composes effects through local function aliases" {
     const wrapper = item_index.lookup("wrapper").?;
 
     switch (typecheck.itemEffect(wrapper)) {
+        .reads => |effect| try testing.expect(containsEffectSlot(effect.slots, "total", .storage)),
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+test "compiler tracks per-expression composed call effects" {
+    const source_text =
+        \\contract Effects {
+        \\    storage total: u256;
+        \\
+        \\    fn read_total() -> u256 {
+        \\        return total;
+        \\    }
+        \\
+        \\    pub fn wrapper() -> u256 {
+        \\        return read_total();
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const root_file_id = compilation.db.sources.module(compilation.root_module_id).file_id;
+    const ast_file = try compilation.db.astFile(root_file_id);
+    const contract = ast_file.item(ast_file.root_items[0]).Contract;
+    const wrapper = ast_file.item(contract.members[2]).Function;
+    const ret_stmt = ast_file.statement(ast_file.body(wrapper.body).statements[0]).Return;
+    const typecheck = try compilation.db.typeCheck(compilation.root_module_id, .{ .item = ast_file.root_items[0] });
+
+    switch (typecheck.exprEffect(ret_stmt.value.?)) {
         .reads => |effect| try testing.expect(containsEffectSlot(effect.slots, "total", .storage)),
         else => return error.TestUnexpectedResult,
     }
